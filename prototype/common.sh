@@ -16,41 +16,38 @@ ANA_GROUP_PERSISTENT_LOSS=5
 NS_ID=1
 
 DEV_PREFIX="dnv.${RANDOM_PREFIX}"
-LVM_EXTENT_SIZE_MB="4M"
-META_REGION_SECTORS=128         # 64KB
-DATA_REGION_SECTORS=8192        # 4MB
-THIN_DATA_BLOCK_SECTORS=8192    # 4MB
+THIN_META_RAID1_META_SECTORS=2048 # 1MB
+THIN_META_RAID1_DATA_SECTORS=2048 # 1MB
+THIN_DATA_RAID1_META_SECTORS=2048 # 1MB
+THIN_META_REGION_SECTORS=2048     # 1MB
+THIN_DATA_REGION_SECTORS=8192     # 4MB
+THIN_DATA_BLOCK_SECTORS=2048    # 1MB
 THIN_LOW_WATER_MARK=10
 DEFAULT_THIN_DEV_ID=0
 DEFAULT_THIN_DEV_ID_32BIT="00000000"
 RAID0_STRIPE_SECTORS=32         # 16KB
 
-VG_PREFIX="dnv.${RANDOM_PREFIX}"
+DEV_TYPE_LD_DEV="0000"
+DEV_TYPE_THIN_META_RAID1_META="1000"
+DEV_TYPE_THIN_META_RAID1_DATA="1001"
+DEV_TYPE_THIN_DATA_RAID1_META="1002"
+DEV_TYPE_THIN_DATA_RAID1_DATA="1003"
+DEV_TYPE_THIN_META_GRP="1100"
+DEV_TYPE_THIN_DATA_GRP="1101"
+DEV_TYPE_THIN_META="1102"
+DEV_TYPE_THIN_DATA="1103"
+DEV_TYPE_THIN_POOL="1104"
+DEV_TYPE_THIN_DEV="1105"
+DEV_TYPE_FORWARD_DEV="1106"
+DEV_TYPE_FINAL_DEV="1200"
 
-DEV_TYPE_LEG_LV="1000"
-DEV_TYPE_LEG_TO_PRIM="1001"
-DEV_TYPE_RAIDMETA="2000"
-DEV_TYPE_RAIDDATA="2001"
-DEV_TYPE_GRP="2002"
-DEV_TYPE_THINMETA="2003"
-DEV_TYPE_THINDATA="2004"
-DEV_TYPE_THINPOOL="2005"
-DEV_TYPE_THINDEV="2006"
-DEV_TYPE_PRIM_TO_SEC="2007"
-DEV_TYPE_PRIM_TO_CNTLR="2008"
-DEV_TYPE_SEC_TO_CNTLR="2109"
-DEV_TYPE_FINAL="3000"
+NQN_TYPE_HOST="0000"
+NQN_TYPE_LD_TO_LEG="1000"
+NQN_TYPE_FORWARD="1100"
+NQN_TYPE_FINAL="1200"
 
-NQN_TYPE_LEG_TO_PRIM_TGT="0000"
-NQN_TYPE_PRIM_TO_SEC_TGT="0001"
-NQN_TYPE_L2_TO_CNTLR_TGT="0002"
-NQN_TYPE_FINAL_TGT="0003"
-NQN_TYPE_HOST="1000"
-
-PRIM_CNTLID_MIN=10000
-PRIM_CNTLID_MAX=19999
-SEC0_CNTLID_MIN=20000
-SEC0_CNTLID_MAX=29999
+DEFAULT_CNTLID_MIN=10000
+DEFAULT_CNTLID_MAX=19999
 
 function format_id()
 {
@@ -360,224 +357,141 @@ function dm_delete()
     fi
 }
 
-function lvm_pv_and_vg_create()
+function get_ld_dev_name()
 {
-    pv_path=$1
-    vg_name=$2
-
-    echo "lvm_pv_and_vg_create: [${pv_path}] [${vg_name}]"
-
-    pvcreate ${pv_path}
-    vgcreate ${vg_name} ${pv_path} --physicalextentsize ${LVM_EXTENT_SIZE_MB}
-}
-
-function lvm_pv_and_vg_delete()
-{
-    pv_path=$1
-    vg_name=$2
-
-    echo "lvm_pv_and_vg_delete: [${pv_path}] [${vg_name}]"
-
-    if vgs ${vg_name} > /dev/null 2>&1; then
-        echo "remove ${vg_name}"
-        vgremove ${vg_name}
-    fi
-
-    if pvs ${pv_path} > /dev/null 2>&1; then
-        echo "wipe ${pv_path}"
-        pvremove ${pv_path}
-    fi
-}
-
-function lvm_lv_create()
-{
-    lv_name=$1
-    lv_size=$2
-    vg_name=$3
-
-    echo "lvm_lv_create: [${lv_name}] [${lv_size}] [${vg_name}]"
-
-    lv_path="/dev/${vg_name}/${lv_name}"
-    lvcreate --name ${lv_name} --size $lv_size --type linear ${vg_name}
-    wait_on_path ${lv_path}
-}
-
-function lvm_lv_delete()
-{
-    lv_name=$1
-    vg_name=$2
-
-    echo "lvm_lv_delete: [${lv_name}] [${vg_name}]"
-
-    lv_path="/dev/${vg_name}/${lv_name}"
-    if lvs "${lv_path}" > /dev/null 2>&1; then
-        echo "remove ${lv_path}"
-        lvremove -f ${lv_path}
-    fi
-}
-
-function get_vg_name()
-{
-    l1_mgr_id=$1
-    echo "${VG_PREFIX}-${l1_mgr_id}"
-}
-function get_leg_lv_name()
-{
-    l1_mgr_id=$1
+    dn_mgr_id=$1
     vd_id=$2
-    leg_id=$3
-    echo "${DEV_PREFIX}-${l1_mgr_id}-${vd_id}-${DEV_TYPE_LEG_LV}-${leg_id}"
+    ld_id=$3
+    echo "${DEV_PREFIX}-${dn_mgr_id}-${vd_id}-${DEV_TYPE_LD_DEV}-${ld_id}"
 }
 
-function get_leg_to_prim_name()
+function get_thin_meta_raid1_meta_name()
 {
-    l1_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    leg_id=$3
-    prim_mgr_id=$4
-    echo "${DEV_PREFIX}-${l1_mgr_id}-${vd_id}-${DEV_TYPE_LEG_TO_PRIM}-${leg_id}-${prim_mgr_id}"
+    ld_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_META_RAID1_META}-${ld_id}"
 }
 
-function get_raidmeta_name()
+function get_thin_meta_raid1_data_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    leg_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_RAIDMETA}-${leg_id}"
+    ld_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_META_RAID1_DATA}-${ld_id}"
 }
 
-function get_raiddata_name()
+function get_thin_data_raid1_meta_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    leg_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_RAIDDATA}-${leg_id}"
+    ld_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_DATA_RAID1_META}-${ld_id}"
 }
 
-function get_grp_name()
+function get_thin_data_raid1_data_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
+    vd_id=$2
+    ld_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_DATA_RAID1_DATA}-${ld_id}"
+}
+
+function get_thin_meta_grp_name()
+{
+    cn_mgr_id=$1
     vd_id=$2
     grp_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_GRP}-${grp_id}"
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_META_GRP}-${grp_id}"
 }
 
-function get_thinmeta_name()
+function get_thin_data_grp_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_THINMETA}-${stripe_id}"
+    grp_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_DATA_GRP}-${grp_id}"
 }
 
-function get_thindata_name()
+function get_thin_meta_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_THINDATA}-${stripe_id}"
+    leg_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_META}-${leg_id}"
 }
 
-function get_thinpool_name()
+function get_thin_data_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_THINPOOL}-${stripe_id}"
+    leg_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_DATA}-${leg_id}"
 }
 
-function get_thinpool_name()
+function get_thin_pool_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_THINPOOL}-${stripe_id}"
+    leg_id=$3
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_POOL}-${leg_id}"
 }
 
-function get_thindev_name()
+function get_thin_dev_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
+    leg_id=$3
     dev_id=$4
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_THINDEV}-${stripe_id}-${dev_id}"
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_THIN_POOL}-${leg_id}-${dev_id}"
 }
 
-function get_prim_to_sec_name()
+function get_forward_dev_name()
 {
-    prim_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
-    stripe_id=$3
+    leg_id=$3
     dev_id=$4
-    sec_mgr_id=$5
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_PRIM_TO_SEC}-${stripe_id}-${dev_id}-${sec_mgr_id}"
-}
-
-function get_prim_to_cntlr_name()
-{
-    prim_mgr_id=$1
-    vd_id=$2
-    stripe_id=$3
-    dev_id=$4
-    cntlr_mgr_id=$5
-    echo "${DEV_PREFIX}-${prim_mgr_id}-${vd_id}-${DEV_TYPE_PRIM_TO_CNTLR}-${stripe_id}-${dev_id}-${cntlr_mgr_id}"
-}
-
-function get_sec_to_cntlr_name()
-{
-    sec_mgr_id=$1
-    vd_id=$2
-    stripe_id=$3
-    dev_id=$4
-    cntlr_mgr_id=$5
-    echo "${DEV_PREFIX}-${sec_mgr_id}-${vd_id}-${DEV_TYPE_SEC_TO_CNTLR}-${stripe_id}-${dev_id}-${cntlr_mgr_id}"
+    forward_cn_mgr_id=$5
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_FORWARD_DEV}-${leg_id}-${dev_id}-${forward_cn_mgr_id}"
 }
 
 function get_final_dev_name()
 {
-    cntlr_mgr_id=$1
+    cn_mgr_id=$1
     vd_id=$2
     dev_id=$3
-    echo "${DEV_PREFIX}-${cntlr_mgr_id}-${vd_id}-${DEV_TYPE_FINAL}-${dev_id}"
-}
-
-function get_leg_to_prim_tgt_nqn()
-{
-    l1_mgr_id=$1
-    vd_id=$2
-    leg_id=$3
-    prim_mgr_id=$4
-    echo "${NQN_PREFIX}:${l1_mgr_id}:${vd_id}:${NQN_TYPE_LEG_TO_PRIM_TGT}:${leg_id}:${prim_mgr_id}"
-}
-
-function get_prim_to_sec_tgt_nqn()
-{
-    prim_mgr_id=$1
-    vd_id=$2
-    stripe_id=$3
-    dev_id=$4
-    sec_mgr_id=$5
-    echo "${NQN_PREFIX}:${prim_mgr_id}:${vd_id}:${NQN_TYPE_PRIM_TO_SEC_TGT}:${stripe_id}:${dev_id}:${sec_mgr_id}"
-}
-
-function get_l2_to_cntlr_tgt_nqn()
-{
-    vd_id=$1
-    stripe_id=$2
-    dev_id=$3
-    cntlr_mgr_id=$4
-    echo "${NQN_PREFIX}:${MPATH_MGR_ID}:${vd_id}:${NQN_TYPE_L2_TO_CNTLR_TGT}:${stripe_id}:${dev_id}:${cntlr_mgr_id}"
-}
-
-function get_final_tgt_nqn()
-{
-    vd_id=$1
-    dev_id=$2
-    echo "${NQN_PREFIX}:${MPATH_MGR_ID}:${vd_id}:${NQN_TYPE_FINAL_TGT}:${dev_id}"
+    echo "${DEV_PREFIX}-${cn_mgr_id}-${vd_id}-${DEV_TYPE_FINAL_DEV}-${dev_id}"
 }
 
 function get_host_nqn()
 {
     host_name=$1
     echo "${NQN_PREFIX}:${NQN_TYPE_HOST}:${host_name}"
+}
+
+function get_ld_to_leg_nqn()
+{
+    dn_mgr_id=$1
+    vd_id=$2
+    ld_id=$3
+    cn_mgr_id=$4
+    echo "${NQN_PREFIX}:${dn_mgr_id}:${vd_id}:${NQN_TYPE_LD_TO_LEG}:${ld_id}:${cn_mgr_id}"
+}
+
+function get_forward_nqn()
+{
+    cn_mgr_id=$1
+    vd_id=$2
+    leg_id=$3
+    dev_id=$4
+    forward_cn_mgr_id=$5
+    echo "${NQN_PREFIX}:${cn_mgr_id}:${vd_id}:${NQN_TYPE_FORWARD}:${leg_id}:${forward_cn_mgr_id}"
+}
+
+function get_final_nqn()
+{
+    vd_id=$1
+    dev_id=$2
+    echo "${NQN_PREFIX}:${MPATH_MGR_ID}:${vd_id}:${NQN_TYPE_FINAL}:${dev_id}"
 }
