@@ -40,7 +40,7 @@ dm_create ${thin_meta_raid1_meta_name_grp0_0} "${table}"
 
 thin_meta_raid1_data_name_grp0_0=$(get_thin_meta_raid1_data_name ${cn_mgr_id} ${vd_id} ${ld_id_grp0_0})
 thin_meta_raid1_data_path_grp0_0="/dev/mapper/${thin_meta_raid1_data_name_grp0_0}"
-table="0 ${THIN_META_RAID1_DATA_SIZE_SECTORS} linear ${ld_path_grp0_0} ${THIN_META_RAID1_DATA_START}"
+table="0 ${THIN_META_RAID1_DATA_SECTORS} linear ${ld_path_grp0_0} ${THIN_META_RAID1_DATA_START}"
 dm_create ${thin_meta_raid1_data_name_grp0_0} "${table}"
 
 thin_data_raid1_meta_name_grp0_0=$(get_thin_data_raid1_meta_name ${cn_mgr_id} ${vd_id} ${ld_id_grp0_0})
@@ -64,7 +64,7 @@ dm_create ${thin_meta_raid1_meta_name_grp0_1} "${table}"
 
 thin_meta_raid1_data_name_grp0_1=$(get_thin_meta_raid1_data_name ${cn_mgr_id} ${vd_id} ${ld_id_grp0_1})
 thin_meta_raid1_data_path_grp0_1="/dev/mapper/${thin_meta_raid1_data_name_grp0_1}"
-table="0 ${THIN_META_RAID1_DATA_SIZE_SECTORS} linear ${ld_path_grp0_1} ${THIN_META_RAID1_DATA_START}"
+table="0 ${THIN_META_RAID1_DATA_SECTORS} linear ${ld_path_grp0_1} ${THIN_META_RAID1_DATA_START}"
 dm_create ${thin_meta_raid1_data_name_grp0_1} "${table}"
 
 thin_data_raid1_meta_name_grp0_1=$(get_thin_data_raid1_meta_name ${cn_mgr_id} ${vd_id} ${ld_id_grp0_1})
@@ -81,24 +81,24 @@ dd if=/dev/zero of=${thin_meta_raid1_meta_path_grp0_0} bs=4k count=1
 dd if=/dev/zero of=${thin_meta_raid1_meta_path_grp0_1} bs=4k count=1
 thin_meta_grp0_name=$(get_thin_meta_grp_name ${cn_mgr_id} ${vd_id} ${grp0_id})
 thin_meta_grp0_path="/dev/mapper/${thin_meta_grp0_name}"
-table="0 ${THIN_META_RAID1_SECTORS} raid radi1 4 0 region_size ${THIN_META_REGION_SECTORS} nosync 2 ${thin_meta_raid1_meta_path_grp0_0} ${thin_meta_raid1_data_path_grp0_0} ${thin_meta_raid1_meta_path_grp0_1} ${thin_meta_raid1_data_path_grp0_1}"
+table="0 ${THIN_META_RAID1_SECTORS} raid raid1 4 0 region_size ${THIN_META_REGION_SECTORS} nosync 2 ${thin_meta_raid1_meta_path_grp0_0} ${thin_meta_raid1_data_path_grp0_0} ${thin_meta_raid1_meta_path_grp0_1} ${thin_meta_raid1_data_path_grp0_1}"
 dm_create ${thin_meta_grp0_name} "${table}"
 
 thin_meta_name=$(get_thin_meta_name ${cn_mgr_id} ${vd_id} ${leg_id})
 thin_meta_path="/dev/mapper/${thin_meta_name}"
-table="0 ${THIN_META_SECTORS} linear ${thin_meta_grp0_path}"
+table="0 ${THIN_META_SECTORS} linear ${thin_meta_grp0_path} 0"
 dm_create ${thin_meta_name} "${table}"
 
 dd if=/dev/zero of=${thin_data_raid1_meta_path_grp0_0} bs=4k count=1
 dd if=/dev/zero of=${thin_data_raid1_meta_path_grp0_1} bs=4k count=1
 thin_data_grp0_name=$(get_thin_data_grp_name ${cn_mgr_id} ${vd_id} ${grp0_id})
 thin_data_grp0_path="/dev/mapper/${thin_data_grp0_name}"
-table="0 ${data_size_sectors} raid radi1 4 0 region_size ${THIN_DATA_REGION_SECTORS} nosync 2 ${thin_data_raid1_meta_path_grp0_0} ${thin_data_raid1_data_path_grp0_0} ${thin_data_raid1_meta_path_grp0_1} ${thin_data_raid1_data_path_grp0_1}"
+table="0 ${data_size_sectors} raid raid1 4 0 region_size ${THIN_DATA_REGION_SECTORS} nosync 2 ${thin_data_raid1_meta_path_grp0_0} ${thin_data_raid1_data_path_grp0_0} ${thin_data_raid1_meta_path_grp0_1} ${thin_data_raid1_data_path_grp0_1}"
 dm_create ${thin_data_grp0_name} "${table}"
 
 thin_data_name=$(get_thin_data_name ${cn_mgr_id} ${vd_id} ${leg_id})
 thin_data_path="/dev/mapper/${thin_data_name}"
-table="0 ${data_size_sectors} linear ${thin_data_grp0_path}"
+table="0 ${data_size_sectors} linear ${thin_data_grp0_path} 0"
 dm_create ${thin_data_name} "${table}"
 
 dd if=/dev/zero of=${thin_meta_path} bs=4k count=1
@@ -129,3 +129,5 @@ for _ in $(seq ${forward_cn_cnt}); do
     forward_host_nqn=$(get_host_nqn ${forward_cn_host_name})
     nvmet_create ${forward_nqn} ${forward_dev_path} ${forward_host_nqn} ${cn_port_num} ${ANA_GROUP_OPTIMIZED} ${DEFAULT_CNTLID_MIN} ${DEFAULT_CNTLID_MAX}
 done
+
+echo "done"

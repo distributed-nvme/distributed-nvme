@@ -83,3 +83,5 @@ dm_delete ${thin_meta_raid1_meta_name_grp0_0}
 
 ld_to_leg_nqn_grp0_0=$(get_ld_to_leg_nqn ${dn_mgr_id_grp0_0} ${vd_id} ${ld_id_grp0_0} ${cn_mgr_id})
 nvme_disconnect ${ld_to_leg_nqn_grp0_0} ${dn_tr_addr_grp0_0} ${dn_tr_svc_id_grp0_0}
+
+echo "done"

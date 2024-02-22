@@ -21,7 +21,7 @@ host_nqn=$(get_host_nqn ${cn_host_name})
 total_sectors=$((leg_cnt*thin_dev_size_mb*1024*2))
 
 table="0 ${total_sectors} raid raid0 1 ${RAID0_STRIPE_SECTORS} ${leg_cnt}"
-for _ in $(seq leg_cnt); do
+for _ in $(seq ${leg_cnt}); do
     leg_id=$(format_id $1)
     owner_cn_mgr_id=$(format_id $2)
     owner_cn_tr_addr=$3

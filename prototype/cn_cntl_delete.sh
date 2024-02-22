@@ -33,3 +33,5 @@ for _ in $(seq ${leg_cnt}); do
         nvme_disconnect ${forward_nqn} ${owner_cn_tr_addr} ${owner_cn_tr_svc_id}
     fi
 done
+
+echo "done"
