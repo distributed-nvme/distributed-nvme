@@ -122,7 +122,7 @@ for _ in $(seq ${forward_cn_cnt}); do
     shift 2
     forward_dev_name=$(get_forward_dev_name ${cn_mgr_id} ${vd_id} ${leg_id} ${DEFAULT_THIN_DEV_ID_32BIT} ${forward_cn_mgr_id})
     forward_dev_path="/dev/mapper/${forward_dev_name}"
-    table = "0 ${thin_dev_size_sectors} linear ${thin_dev_path} 0"
+    table="0 ${thin_dev_size_sectors} linear ${thin_dev_path} 0"
     dm_create ${forward_dev_name} "${table}"
 
     forward_nqn=$(get_forward_nqn ${cn_mgr_id} ${vd_id} ${leg_id} ${DEFAULT_THIN_DEV_ID_32BIT} ${forward_cn_mgr_id})
