@@ -8,3 +8,5 @@ source ${CURR_DIR}/common.sh
 cn_port_num=$1
 
 nvmet_cleanup ${cn_port_num}
+
+echo "done"

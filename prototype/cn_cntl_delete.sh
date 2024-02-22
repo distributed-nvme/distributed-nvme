@@ -17,7 +17,7 @@ shift 6
 host_nqn=$(get_host_nqn ${cn_host_name})
 
 final_nqn=$(get_final_nqn ${vd_id} ${DEFAULT_THIN_DEV_ID_32BIT})
-nvmet_delete ${final_nqn} ${host_nqn} ${cn_port_num}
+nvmet_delete ${final_nqn} ${external_host_nqn} ${cn_port_num}
 
 final_dev_name=$(get_final_dev_name ${cn_mgr_id} ${vd_id} ${DEFAULT_THIN_DEV_ID_32BIT})
 dm_delete ${final_dev_name}
