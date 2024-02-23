@@ -256,8 +256,8 @@ function nvme_connect()
     nvme connect --nqn "${nqn}" --transport "${NVME_TRTYPE}" --traddr "${tr_addr}" --trsvcid "${tr_svc_id}" --hostnqn "${host_nqn}"
 
     dev_uuid=$(uuidgen --md5 --namespace "${UUID_NAMESPACE}" --name "${nqn}")
-    dev_layer2_path=$(nvme_dev_path_from_nqn ${nqn})
-    wait_on_path ${dev_layer2_path}
+    dev_path=$(nvme_dev_path_from_nqn ${nqn})
+    wait_on_path ${dev_path}
 }
 
 function nvme_disconnect()
