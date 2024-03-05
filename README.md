@@ -1,6 +1,4 @@
 # Introduction
-
-# Introduction
 Distributed NVMe is a distributed block storage system like AWS EBS or
 Ceph block device. It can be used as a network storage for the k8s
 persistent volume or openstack cinder driver. Below are key features
