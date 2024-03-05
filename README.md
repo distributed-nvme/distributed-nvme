@@ -34,7 +34,7 @@ becomes a real distributed storage system.
 
 The simplest scenario is the single host case:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="200">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="400">
 
 We have multiple NVMe disks, attach them to the PCIe bus of a linux
 server. Then we can create one or more device mapper devices on top of
@@ -51,7 +51,7 @@ virtual machine or container.
 
 So we can decouple the host and the storage:
 
-![010HostAndTarget](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png" width="400">
 
 The `Target Server` connects to the physical disks, and creates device
 mapper devices to provide features like raid, thin provision and so on. Then
