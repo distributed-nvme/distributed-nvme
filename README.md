@@ -34,7 +34,7 @@ becomes a real distributed storage system.
 
 The simplest scenario is the single host case:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="400">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="200">
 
 We have multiple NVMe disks, attach them to the PCIe bus of a linux
 server. Then we can create one or more device mapper devices on top of
@@ -51,7 +51,7 @@ virtual machine or container.
 
 So we can decouple the host and the storage:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png" width="400">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png" width="200">
 
 The `Target Server` connects to the physical disks, and creates device
 mapper devices to provide features like raid, thin provision and so on. Then
@@ -68,7 +68,7 @@ on top of two physical disk, if the `Target Server` fails, the NVMe-oF
 device won't be accessed. To address this issue, we can split the
 `Target Server` to two layers:
 
-![020CnDnSingle](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/020CnDnSingle.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/020CnDnSingle.png" width="200">
 
 Now the `Target Server` is splited to `Controller Node` and `Disk Node`.
 The `Disk Node` connects to the physical devices, and uses
@@ -96,12 +96,13 @@ One `Disk Node` has multiple `Logical Disks`. One `Controller Node`
 has multple `Controllers`. All of them are connected by the
 NVMe-oF. So they are a many to many relationship.
 
-![030CnDnMany](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/030CnDnMany.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/030CnDnMany.png" width="400">
 
 The `Contgroller Node` is single point of failure. To address this
 issue, for a given virtual disk, we can provide a `Standby Controller`:
 
 ![040ActiveStandby](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png" width="200">
 
 From the `Host` perspective, it connects to the virtual disk from two
 paths. One path connects to the `Active Controller`, another path
