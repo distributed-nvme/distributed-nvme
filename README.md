@@ -34,7 +34,7 @@ becomes a real distributed storage system.
 
 The simplest scenario is the single host case:
 
-![000HostOnly](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png)
+![000HostOnly](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png | width=200)
 
 We have multiple NVMe disks, attach them to the PCIe bus of a linux
 server. Then we can create one or more device mapper devices on top of
