@@ -34,7 +34,7 @@ becomes a real distributed storage system.
 
 The simplest scenario is the single host case:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="200">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/000HostOnly.png" width="300">
 
 We have multiple NVMe disks, attach them to the PCIe bus of a linux
 server. Then we can create one or more device mapper devices on top of
@@ -51,7 +51,7 @@ virtual machine or container.
 
 So we can decouple the host and the storage:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png" width="200">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/010HostAndTarget.png" width="300">
 
 The `Target Server` connects to the physical disks, and creates device
 mapper devices to provide features like raid, thin provision and so on. Then
@@ -68,7 +68,7 @@ on top of two physical disk, if the `Target Server` fails, the NVMe-oF
 device won't be accessed. To address this issue, we can split the
 `Target Server` to two layers:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/020CnDnSingle.png" width="200">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/020CnDnSingle.png" width="300">
 
 Now the `Target Server` is splited to `Controller Node` and `Disk Node`.
 The `Disk Node` connects to the physical devices, and uses
@@ -96,13 +96,12 @@ One `Disk Node` has multiple `Logical Disks`. One `Controller Node`
 has multple `Controllers`. All of them are connected by the
 NVMe-oF. So they are a many to many relationship.
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/030CnDnMany.png" width="400">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/030CnDnMany.png" width="600">
 
 The `Contgroller Node` is single point of failure. To address this
 issue, for a given virtual disk, we can provide a `Standby Controller`:
 
-![040ActiveStandby](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png)
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png" width="200">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png" width="300">
 
 From the `Host` perspective, it connects to the virtual disk from two
 paths. One path connects to the `Active Controller`, another path
@@ -127,7 +126,7 @@ configuration as the `Host`, it can not even satisfy a single
 `Host`. To address this issue, we can add a dispatcher layer between
 the `Host` and the `Controller Node`:
 
-![050ThreeLayers](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/050ThreeLayers.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/050ThreeLayers.png" width="600">
 
 For keeping it simple, let's ignore the `Standby Controler`
 temporary. For a given virtual disk, the `Controller Node` creates a
@@ -150,7 +149,7 @@ dispatch IOs to multiple servers. But we don't really have a third
 layer. We can combine the `Dispatch Node` and the `Controller Node`
 together. Below is a more compact architecture:
 
-![060Compact](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/060Compact.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/060Compact.png" width="600">
 
 ![070CompactAndStandby](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/070CompactAndStandby.png)
 
