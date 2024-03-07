@@ -168,7 +168,7 @@ Then we can add the `Standby Controller` back:
 
 An internal view of a `Leg`:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/090Leg.png" width="300">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/090Leg.png" width="600">
 
 The above `Leg` uses raid1 as an example, we could also change it to raid5/6.
 
@@ -214,27 +214,29 @@ server. These `Disk Node`s should use different NVMe-oF svc_id (which
 means listen on different tcp ports in TCP NVMe-oF).
 
 Below is a view of a single virtual disk:
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/110VirtualDisk.png" width="600">
-
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/110VirtualDisk.png" width="800">
 
 # Operations
 
 Create snapshot
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/120Snapshot.png" width="400">
+
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/120Snapshot.png" width="800">
 
 Extend a `Leg`
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/130Extend.png" width="400">
+
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/130Extend.png" width="800">
 
 Failover
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/140Failover.png" width="400">
 
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/140Failover.png" width="800">
 
 Clone
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/150Clone.png" width="400">
 
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/150Clone.png" width="800">
 
 Move data from one `Logical Disk` to another
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/160Move.png" width="400">
+
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/160Move.png" width="800">
 
 # Performance
 Below is the K IOPS of the single virtual disks. The virtual disks use
@@ -256,4 +258,4 @@ we measure the max IOPS we could get:
 * The fifth is a 8 `Controller`s 32 `Leg`s virtual disk, it is about
   2M IOPS.
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/iops.png" width="800">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/iops.png">
