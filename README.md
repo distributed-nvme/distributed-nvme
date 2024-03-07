@@ -151,24 +151,109 @@ together. Below is a more compact architecture:
 
 <img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/060Compact.png" width="600">
 
-![070CompactAndStandby](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/070CompactAndStandby.png)
+We still aggregate all things to the `Active Controller`. Each
+`Active Controller` connects to mutliple `Logical Disk`s and aggregate
+them to `Leg`s. All `Leg`s in all `Active Controller`s aggregate to a
+raid0 disk, then we export the raid0 disk to the `Host`. As we should
+aggregate all `Leg`s of all `Active Controller`s, each
+`Active Controller` should export all its `Leg`s to other
+`Active Controller`s. So each `Active Controller` should connect the
+`Remove Leg`s from other `Active Controller`s, then aggregate both
+`Leg`s and `Remove Leg`s to a raid0 device and export it over
+NVMe-oF. The `Host` could read/write any `Active Controller`.
 
-![080MoreControllers](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/080MoreControllers.png)
+Then we can add the `Standby Controller` back:
 
-![090Leg](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/090Leg.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/070CompactAndStandby.png" width="600">
 
-![100Cluster](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/100Cluster.png)
+An internal view of a `Leg`:
 
-![110VirtualDisk](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/110VirtualDisk.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/090Leg.png" width="300">
 
-![120Snapshot](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/120Snapshot.png)
+The above `Leg` uses raid1 as an example, we could also change it to raid5/6.
 
-![130Extend](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/130Extend.png)
+When we have multiple `Active Controller`s, their `Leg`s should be "full mesh", each
+`Leg` should be exported to all other `Active Controler`s:
 
-![140Failover](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/140Failover.png)
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/080MoreControllers.png" width="600">
 
-![150Clone](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/150Clone.png)
+We should be careful about a consistency issue of the multiple
+`Active Controller`s architecture. Considering below case:
+1. The `Host` sends a write IO to an `Active Controller`
+2. The `Active Controller` fails, and no response.
+3. The `Host` gets an IO timeout, then retries the IO on another `Active Controller`
+4. The retired IO succeeds.
+5. The `Host` sends more IOs to other `Active Contorller`s.
+6. The failed `Active Controller` comes back, and delived all IOs on it.
+7. The old IOs from the failed `Active Controller` overwrite the new
+   IOs, so the data corrupt.
 
-![160Move](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/160Move.png)
+To avoid such thing, we can rely on the controlplan health check and
+the NVMe-oF keep aliave between the `Active Controller`s. If any of
+them reports an issue, we should fence the failed `Active Controller`.
+But the `Host` shouldn't retry a failed IO on another path too
+fast. To make sure we have enough time to detect the failed
+`Active Controller` and fence it, the NVMe timeout on `Host` should be
+at least 2 times than the NVMe-oF keep aliave timeout between the
+`Active Controller`s. On a linux kernel, the default NVMe timeout is
+10 seconds, the NVMe-oF keep alaive timeout is 5 seconds. So they
+should just work.
 
-![iops](https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/iops.png)
+Below is a view of the Distributed NVMe Cluster dataplane:
+
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/100Cluster.png" width="600">
+
+The cluster has multiple `Controler Node`s and multiple `Disk Node`s.
+Each `Disk Node` connect to a single `Physical Disk` which should be a
+NVMe SSD. The whole customer could provide multiple virtual disks to
+the `Host`s.
+
+The `Disk Node` is still a logical concept here. If a sever has
+multiple NVMe disks, we could have multiple `Disk Node`s on that
+server. These `Disk Node`s should use different NVMe-oF svc_id (which
+means listen on different tcp ports in TCP NVMe-oF).
+
+Below is a view of a single virtual disk:
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/110VirtualDisk.png" width="600">
+
+
+# Operations
+
+Create snapshot
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/120Snapshot.png" width="400">
+
+Extend a `Leg`
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/130Extend.png" width="400">
+
+Failover
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/140Failover.png" width="400">
+
+
+Clone
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/150Clone.png" width="400">
+
+
+Move data from one `Logical Disk` to another
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/160Move.png" width="400">
+
+# Performance
+Below is the K IOPS of the single virtual disks. The virtual disks use
+raid1 for data redundancy. They have different `Active Controller`s
+and differnet `Leg`s. By using more `Active Controller`s and more
+`Leg`s, we can get better performance. When we add the workload
+presure, the IOPS might be high but the latnecy would increase
+too. During the test, we keep the average latency less than 1
+millisecond and  keep the p99 latency less than 2 milliseconds, then
+we measure the max IOPS we could get:
+
+* The left one is the raw PCIe NVMe disk. It is about 140K IOPS.
+* The second is a 1 `Controller` 4 `Leg`s virtaul disk. It is
+  about 400K IOPS
+* The third is a 2 `Controller`s 8 `Leg`s virtual disk, it is
+  about 700K IOPS
+* The fourth is a 4 `Controller`s 16 `Leg`s virtual disk, it is
+  about 1.2M IOPS
+* The fifth is a 8 `Controller`s 32 `Leg`s virtual disk, it is about
+  2M IOPS.
+
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/iops.png" width="800">
