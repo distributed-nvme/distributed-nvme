@@ -101,7 +101,7 @@ NVMe-oF. So they are a many to many relationship.
 The `Contgroller Node` is single point of failure. To address this
 issue, for a given virtual disk, we can provide a `Standby Controller`:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png" width="300">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/040ActiveStandby.png" width="600">
 
 From the `Host` perspective, it connects to the virtual disk from two
 paths. One path connects to the `Active Controller`, another path
