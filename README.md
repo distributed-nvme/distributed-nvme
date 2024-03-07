@@ -199,11 +199,12 @@ at least 2 times than the NVMe-oF keep aliave timeout between the
 10 seconds, the NVMe-oF keep alaive timeout is 5 seconds. So they
 should just work.
 
-Below is a view of the Distributed NVMe Cluster dataplane:
+Below is a view of the Distributed NVMe Cluster:
 
-<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/100Cluster.png" width="600">
+<img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/100Cluster.png" width="800">
 
-The cluster has multiple `Controler Node`s and multiple `Disk Node`s.
+
+The cluster Data Plane has multiple `Controler Node`s and multiple `Disk Node`s.
 Each `Disk Node` connect to a single `Physical Disk` which should be a
 NVMe SSD. The whole customer could provide multiple virtual disks to
 the `Host`s.
@@ -212,6 +213,17 @@ The `Disk Node` is still a logical concept here. If a sever has
 multiple NVMe disks, we could have multiple `Disk Node`s on that
 server. These `Disk Node`s should use different NVMe-oF svc_id (which
 means listen on different tcp ports in TCP NVMe-oF).
+
+The cluster Control Plane is a etcd cluster and multiple `CP Server`s
+(Control Plane Servers). We store all the virtual disks configurations
+to the etcd cluster. All the `CP Server`s are stateless. They have
+multiple responsibles:
+* Accept APIs from users (e.g. Create/Delete/Attach/Detach/Clone
+  disks), store the virtual disks information to the etcd cluster.
+* Read data from etcd and send them to the agents on the
+  `Controller Node`s and `Disk Node`s.
+* Run health check against all `Controller Node`s and `Disk Node`s.
+* Run background tasks like checking the status of online clone.
 
 Below is a view of a single virtual disk:
 <img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/110VirtualDisk.png" width="800">
