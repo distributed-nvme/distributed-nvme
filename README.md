@@ -58,9 +58,9 @@ mapper devices to provide features like raid, thin provision and so on. Then
 the `Target Server` exports the logical disk to a `Host` through the
 NVMe-oF interface. Now if a virtual machine or container is migrated
 from one `Host` to another `Host`, the `Target Server` could export to
-the new `Host`. We can have multple `Hosts` and multiple `Target Servers`.
-Each host could connect to multple `Target Servers` and each
-`Target Server` could serve to multiple `Hosts`.
+the new `Host`. We can have multple `Host`s and multiple `Target Server`s.
+Each host could connect to multple `Target Server`s and each
+`Target Server` could serve to multiple `Host`s.
 
 When a `Host` connect to a NVMe-oF device, all the data of that
 NVMe-oF devcie is on the same `Target Server`. Even we create a raid1
@@ -74,7 +74,7 @@ Now the `Target Server` is splited to `Controller Node` and `Disk Node`.
 The `Disk Node` connects to the physical devices, and uses
 [dm-linear](https://docs.kernel.org/admin-guide/device-mapper/linear.html)
 to split the physical devices, thus one physical device can server
-multple `Hosts`. We create the device mapper logical devices on the
+multple `Host`s. We create the device mapper logical devices on the
 `Controller Node`. E.g. We can create a raid1 on a `Controller Node`,
 the two underling devices are from two different `Disk Node`. If one
 `Disk Node` fails, we can create a `dm-linear` device from another
@@ -82,9 +82,9 @@ the two underling devices are from two different `Disk Node`. If one
 the `Disk Node` is not a single point of failure.
 
 One `Disk Node` split the physical disks to logical disks, provide
-these logical disks to multiple `Controller Nodes`. For a given
+these logical disks to multiple `Controller Node`s. For a given
 virtual disk, the `Controller Node` creates a `Controller` for it, the
-`Controller` connect to the logical disks from multiple `Disk Nodes`,
+`Controller` connect to the logical disks from multiple `Disk Node`s,
 create device mapper devices on the logical disks, then export it to
 the `Host`.
 
@@ -92,8 +92,8 @@ From the `Host`'s perspective, there is a storage controller on the
 `Controller Node`. The `Host` connect to the `Controller`, then use the
 virtual disk on that `Controller`.
 
-One `Disk Node` has multiple `Logical Disks`. One `Controller Node`
-has multple `Controllers`. All of them are connected by the
+One `Disk Node` has multiple `Logical Disk`s. One `Controller Node`
+has multple `Controller`s. All of them are connected by the
 NVMe-oF. So they are a many to many relationship.
 
 <img src="https://github.com/distributed-nvme/distributed-nvme/blob/main/doc/img/030CnDnMany.png" width="600">
@@ -119,7 +119,7 @@ Now the system is distributed and no single point of failure. But the
 `Controller Node` is a performance bottleneck. Assuming we create a
 raid1 on a `Active Controller`. When a `Host` send 1 write IO to
 the `Active Controller`, the `Active Controller` should receive the 1
-IO and dispatch 2 IOs to the two `Virtual Disks` of the raid1
+IO and dispatch 2 IOs to the two `Virtual Disk`s of the raid1
 device. So the IOs on the `Active Controller` is 3 times than the
 `Host`. If the `Controller Node` has the similar hardware
 configuration as the `Host`, it can not even satisfy a single
@@ -132,14 +132,14 @@ For keeping it simple, let's ignore the `Standby Controler`
 temporary. For a given virtual disk, the `Controller Node` creates a
 `Leg`. The `Leg` is similar as the `Controller`, it is aggregated by
 multiple device mapper devices. A virtual disk could have multiple
-`Legs`, they are on the different `Controller Nodes`. These `Legs`
+`Leg`s, they are on the different `Controller Node`s. These `Leg`s
 aggreagte to a raid0 device on the `Dispatcher Node`. Then the
 `Dispatcher Node` provide the raid0 device to the `Host`.
 
 The `Dispatcher Node` works as a stateless load balancer. It receives
 IO requests from the `Host`, then dispatches the IOs to the different
-`Legs`. A single virtual disk could be associated to multiple
-`Dispatch Nodes`. They all export NVMe-oF connections to the `Host`,
+`Leg`s. A single virtual disk could be associated to multiple
+`Dispatch Node`s. They all export NVMe-oF connections to the `Host`,
 and report their ANA group state to Optmize. The `Host` (like a linux
 server) could be configured to send IOs in a round-robin manner to
 them.
