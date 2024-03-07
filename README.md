@@ -242,7 +242,7 @@ Move data from one `Logical Disk` to another
 Below is the K IOPS of the single virtual disks. The virtual disks use
 raid1 for data redundancy. They have different `Active Controller`s
 and differnet `Leg`s. By using more `Active Controller`s and more
-`Leg`s, we can get better performance. When we add the workload
+`Leg`s, we can get better performance. When we increase the workload
 presure, the IOPS might be high but the latnecy would increase
 too. During the test, we keep the average latency less than 1
 millisecond and  keep the p99 latency less than 2 milliseconds, then
