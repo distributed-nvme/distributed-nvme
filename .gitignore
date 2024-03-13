@@ -1,1 +1,5 @@
 *conf.sh
+_out
+*.pb.go
+mockclient.go
+mockutils.go
