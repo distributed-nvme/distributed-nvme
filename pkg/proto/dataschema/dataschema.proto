@@ -1,0 +1,353 @@
+syntax = "proto3";
+
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/dataschema";
+
+package dataschema;
+
+message ClusterConf {
+  uint64 global_counter = 1;
+  string nqn_prefix = 2;
+  string dev_prefix = 3;
+  uint32 thin_block_size = 4;
+  uint32 raid_region_size = 5;
+  uint32 raid_stripe_size = 6;
+}
+
+message NvmeofPort {
+  string tr_type = 1;
+  string adr_fam = 2;
+  string tr_addr = 3;
+  string tr_svc_id = 4;
+}
+
+message ErrInfo {
+  uint32 err_code = 1;
+  string err_msg = 2;
+  uint64 node_id = 3;
+  uint64 timestamp = 4;
+}
+
+message Qos {
+  uint64 rbps = 1;
+  uint64 wbps = 2;
+  uint64 riops = 3;
+  uint64 wiops = 4;
+}
+
+message Location {
+  repeated string pos_list = 1;
+}
+
+message DnCapacity {
+  uint64 total_size = 1;
+  uint64 free_size = 2;
+  Qos total_qos = 3;
+  Qos free_qos = 4;
+}
+
+message CnCapacity {
+  uint32 total_cnt = 1;
+  uint32 free_cnt = 2;
+  Qos total_qos = 3;
+  Qos free_qos = 4;
+}
+
+message DnSummary {
+  uint64 dn_id = 1;
+  NvmeofPort nvmeof_port = 2;
+}
+
+message CnSummary {
+  uint64 cn_id = 1;
+  NvmeofPort nvmeof_port = 2;
+}
+
+message DnConf {
+  string sock_addr = 1;
+  uint32 shard_code = 2;
+  bool online = 3;
+  NvmeofPort nvmeof_port = 4;
+  Location location = 5;
+  string dev_path = 6;
+  DnCapacity dn_capacity = 7;
+}
+
+message DnInfo {
+  ErrInfo err_info = 1;
+}
+
+message CnConf {
+  string sock_addr = 1;
+  uint32 shard_code = 2;
+  bool online = 3;
+  NvmeofPort nvmeof_port = 4;
+  Location location = 5;
+  CnCapacity cn_capacity = 6;
+  uint32 prev_cntlid = 7;
+  repeated uint64 cntlid_bitmap = 8;
+}
+
+message CnInfo {
+  ErrInfo err_info = 1;
+}
+
+message LdConf {
+  uint32 ld_idx = 1;
+  DnSummary dn_summary = 2;
+  uint64 start = 3;
+  uint64 length = 4;
+}
+
+message LdFeInfo {
+  ErrInfo err_info = 3;
+}
+
+message LdBeInfo {
+  ErrInfo err_info = 3;
+}
+
+message LogicalDisk {
+  uint64 ld_id = 1;
+  LdConf ld_conf = 2;
+  LdFeInfo ld_fe_info = 3;
+  LdBeInfo ld_be_info = 4;
+}
+
+enum RedunType {
+  REDUN_RAID1 = 0;
+  REDUN_RAID5_LA = 1;
+  REDUN_RAID5_RA = 2;
+  REDUN_RAID5_LS = 3;
+  REDUN_RAID5_RS = 4;
+  REDUN_RAID6_ZR = 5;
+  REDUN_RAID6_NR = 6;
+  REDUN_RAID6_NC = 7;
+}
+
+enum RedunJournalMode {
+  REDUN_JOURNAL_NONE = 0;
+  REDUN_JOURNAL_WRITEBACK = 1;
+  REDUN_JOURNAL_WRITETHROUGH = 2;
+}
+
+message Redundancy {
+  RedunType redun_type = 1;
+  uint32 region_size = 2;
+  uint32 chunk_size = 3;
+  uint32 daemon_sleep = 4;
+  uint32 min_recovery_rate = 5;
+  uint32 max_recovery_rate = 6;
+  uint32 stripe_cache = 7;
+  RedunJournalMode journal_mode = 8;
+}
+
+message Stripe {
+  uint32 stripe_size = 1;
+}
+
+message ThinPool {
+  uint32 data_block_size = 1;
+  uint32 low_water_mark = 2;
+  bool error_if_no_space = 3;
+}
+
+message ExtendPolicy {
+  uint64 init_grp_size = 1;
+  uint64 max_grp_size = 2;
+}
+
+message ThinInfo {
+  bool fail = 1;
+}
+
+enum ThinPoolStatus {
+  THIN_POOL_STATUS_RW = 0;
+  THIN_POOL_STATUS_RO = 1;
+  THIN_POOL_STATUS_OODS = 2;
+}
+
+message ThinPoolInfo {
+  uint64 transaction_id = 1;
+  uint64 used_meta_blocks = 2;
+  uint64 total_meta_blocks = 3;
+  uint64 used_data_blocks = 4;
+  uint64 total_data_blocks = 5;
+  int32 held_metadata_root = 6;
+  ThinPoolStatus status = 7;
+  bool discard_passdown = 8;
+  bool no_space_queue_or_error = 9;
+  bool needs_check = 10;
+  uint64 metadata_low_atermark = 11;
+}
+
+enum RaidHealthChar {
+  RAID_ALIVE_AND_IN_SYNC = 0;
+  RAID_ALIVE_NOT_IN_SYNC = 3;
+  RAID_DEAD_OR_FAILED = 2;
+}
+
+enum RaidSyncAction {
+  RAID_ACTION_IDLE = 0;
+  RAID_ACTION_FROZEN = 1;
+  RAID_ACTION_RESYNC = 2;
+  RAID_ACTION_RECOVER = 3;
+  RAID_ACTION_CHECK = 4;
+  RAID_ACTION_REPAIR = 5;
+  RAID_ACTION_RESHAP = 6;
+}
+
+enum RaidJournalChar {
+  RAID_JOURNAL_ACTIVE_WRITE_THROUGH = 0;
+  RAID_JOURNAL_ACTIVE_WRITE_BACK = 1;
+  RAID_JOURNAL_DEAD = 2;
+  RAID_JOURNAL_NONE = 3;
+}
+message RaidInfo {
+  repeated RaidHealthChar health_char = 1;
+  uint64 sync_done = 2;
+  uint64 sync_total = 3;
+  RaidSyncAction sync_action = 4;
+  uint64 mismatch_cnt = 5;
+  uint64 data_offset = 6;
+  RaidJournalChar journal_char = 7;
+}
+
+message GrpConf {
+  uint32 grp_idx = 1;
+}
+
+message GrpInfo {
+  ErrInfo err_info = 1;
+}
+
+message Group {
+  uint64 grp_id = 1;
+  GrpConf grp_conf = 2;
+  GrpInfo grp_info = 3;
+  repeated LogicalDisk ld_list = 4;
+}
+
+message LegConf {
+  uint32 leg_idx = 1;
+  CnSummary cn_summary = 2;
+}
+
+message LegInfo {
+  ErrInfo err_info = 1;
+}
+
+message Leg {
+  uint64 leg_id = 1;
+  LegConf leg_conf = 2;
+  LegInfo leg_info = 3;
+  repeated Group grp_list = 4;
+}
+
+message HostConf {
+  string host_nqn = 1;
+}
+
+message HostInfo {
+  ErrInfo err_info = 1;
+}
+
+message Host {
+  HostConf host_conf = 1;
+  HostInfo host_info = 2;
+}
+
+message DevConf {
+  string dev_name = 1;
+  uint32 ori_id = 2;
+}
+
+message DevInfo {
+  ErrInfo err_info = 1;
+  ThinInfo thin_info = 2;
+}
+
+message Device {
+  uint32 dev_id = 1;
+  DevConf dev_conf = 2;
+  DevInfo dev_info = 3;
+  repeated Host host_list = 4;
+}
+
+// {dnv_prefix}/version/dn/{dn_id}
+// {dnv_prefix}/version/cn/{cn_id}
+// {dnv_prefix}/version/da/{da_id}
+message Version {
+  uint64 version = 1;
+}
+
+// {dnv_prefix}/dn/{dn_id}
+message DiskNode {
+  uint64 dn_id = 1;
+  DnConf dn_conf = 2;
+  DnInfo dn_info = 3;
+  repeated uint64 da_id_list = 4;
+}
+
+// {dnv_prefix}/cn/{cn_id}
+message ControllerNode {
+  uint64 cn_id = 1;
+  CnConf cn_conf = 2;
+  CnInfo cn_info = 3;
+  repeated uint64 da_id_list = 4;
+}
+
+// {dnv_prefix}/da/{da_id}
+message DiskArray {
+  uint64 da_id = 1;
+  string da_name = 2;
+  uint32 shard_code = 3;
+  uint64 da_counter = 4;
+  uint32 dev_id_counter = 5;
+  Qos qos = 6;
+  Stripe stripe = 7;
+  ThinPool thin_pool = 8;
+  Redundancy redundancy = 9;
+  ExtendPolicy extend_policy = 10;
+  uint32 dn_loc_level = 11;
+  uint32 cn_loc_level = 12;
+  repeated Device device_list = 13;
+  repeated Leg leg_list = 14;
+  repeated CnSummary standby_list = 15;
+}
+
+// {dnv_prefix}/da_name_to_id/{name}
+message NameToId {
+  uint64 da_id = 1;
+}
+
+// {dnv_prefix}/sock_addr_to_id/{sock_addr}
+message SockAddrToId {
+  uint64 node_id = 1;
+}
+
+// {dnv_prefix}capacity/dn/{free_size@dn_id}
+message DnSearchAttr {
+  DnCapacity dn_capacity = 1;
+  repeated string location = 2;
+}
+
+// {dnv_prefix}/capacity/cn/{free_cnt@cn_id}
+message CnSearchAttr {
+  CnCapacity cn_capacity = 1;
+  repeated string location = 2;
+}
+
+// {dnv_prefix}/list/dn/{shard_code#dn_id}
+message DnSockAddr {
+  string sock_addr = 1;
+}
+
+// {dnv_prefix}/list/cn/{shard_code#cn_id}
+message CnSockAddr {
+  string sock_addr = 1;
+}
+
+// {dnv_prefix}/list/da/{shard_code#da_id}
+message DaName {
+  string da_name = 1;
+}
