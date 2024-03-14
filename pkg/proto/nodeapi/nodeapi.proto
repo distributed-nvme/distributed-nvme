@@ -1,0 +1,387 @@
+syntax = "proto3";
+
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeapi";
+
+package nodeapi;
+
+service DnAgent {
+  rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
+  rpc SyncupSsBe(SyncupSsBeRequest) returns(SyncupSsBeReply) {}
+  rpc SyncupDnStream(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
+  rpc SyncupSsBeStream(stream SyncupSsBeRequest) returns(stream SyncupSsBeReply) {}
+}
+
+service CnAgent {
+  rpc SyncupCn(SyncupCnRequest) returns(SyncupCnReply) {}
+  rpc SyncupSsFe(SyncupSsFeRequest) returns(SyncupSsFeReply) {}
+  rpc SyncupCnStream(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
+  rpc SyncupSsFeStream(stream SyncupSsFeRequest) returns(stream SyncupSsFeReply) {}
+}
+
+message StatusInfo {
+  uint32 status_code = 1;
+  string status_msg = 2;
+  uint64 timestamp = 3;
+}
+
+enum NvmeSeqCh {
+  NVME_SEQ_CH_NOT_SPECIFIED = 0;
+  NVME_SEQ_CH_REQUIRED = 1;
+  NVME_SEQ_CH_NOT_REQUIRED = 2;
+}
+
+message NvmeTReq {
+  NvmeSeqCh seq_ch = 1;
+}
+
+message NvmeListener {
+  string tr_type = 1;
+  string adr_fam = 2;
+  string tr_addr = 3;
+  string tr_svc_id = 4;
+}
+
+message NvmePortConf {
+  uint32 port_id = 1;
+  NvmeListener nvme_listener = 2;
+  NvmeTReq tr_eq = 3;
+}
+
+message SsLdId {
+  uint64 ss_id = 1;
+  uint64 ld_id = 2;
+}
+
+message DnConf {
+  uint64 dn_id = 1;
+  uint64 version = 2;
+  bool partial = 3;
+  string dev_path = 4;
+  repeated SsLdId ss_ld_id_list = 5;
+}
+
+message SyncupDnRequest {
+  string req_id = 1;
+  DnConf dn_conf = 2;
+}
+
+message DnInfo {
+  StatusInfo status_info = 1;
+}
+
+message SyncupDnReply {
+  DnInfo dn_info = 1;
+}
+
+message SsBeConf {
+  uint64 dn_id = 1;
+  uint64 ss_id = 2;
+  uint64 ld_id = 3;
+  uint64 version = 4;
+  bool partial = 5;
+  NvmePortConf nvme_port_conf = 6;
+  uint64 start = 7;
+  uint64 length = 8;
+  repeated uint64 cn_id_list = 9;
+}
+
+message SyncupSsBeRequest {
+  string req_id = 1;
+  SsBeConf ss_be_conf = 2;
+}
+
+message SsBeInfo {
+  StatusInfo status_info = 4;
+}
+
+message SyncupSsBeReply {
+  SsBeInfo ss_be_info = 1;
+}
+
+message SsCntlrId {
+  uint64 ss_id = 1;
+  uint64 cntlr_id = 2;
+}
+
+message CnConf {
+  uint64 cn_id = 1;
+  uint64 version = 2;
+  bool partial = 3;
+  repeated SsCntlrId ss_cntlr_id_list = 4;
+}
+
+message SyncupCnRequest {
+  string req_id = 1;
+  CnConf cn_conf = 2;
+}
+
+message CnInfo {
+  StatusInfo status_info = 1;
+}
+
+message SyncupCnReply {
+  CnInfo cn_info = 1;
+}
+
+message CntlrConf {
+  uint32 nvmet_cntlid = 1;
+  NvmePortConf nvme_port_conf = 2;
+}
+
+message NsConf {
+  uint32 ns_id = 1;
+  uint64 size = 2;
+  uint32 dev_id = 3;
+}
+
+message StripeConf {
+  uint32 stripe_size = 1;
+}
+
+message ThinPoolConf {
+  uint32 data_block_size = 1;
+  uint32 low_water_mark = 2;
+  bool error_if_no_space = 3;
+}
+
+enum RedunType {
+  REDUN_RAID1 = 0;
+  REDUN_RAID5_LA = 1;
+  REDUN_RAID5_RA = 2;
+  REDUN_RAID5_LS = 3;
+  REDUN_RAID5_RS = 4;
+  REDUN_RAID6_ZR = 5;
+  REDUN_RAID6_NR = 6;
+  REDUN_RAID6_NC = 7;
+}
+
+enum RedunJournalMode {
+  REDUN_JOURNAL_NONE = 0;
+  REDUN_JOURNAL_WRITEBACK = 1;
+  REDUN_JOURNAL_WRITETHROUGH = 2;
+}
+
+message RedundancyConf {
+  RedunType redun_type = 1;
+  uint32 region_size = 2;
+  uint32 chunk_size = 3;
+  uint32 daemon_sleep = 4;
+  uint32 min_recovery_rate = 5;
+  uint32 max_recovery_rate = 6;
+  uint32 stripe_cache = 7;
+  RedunJournalMode journal_mode = 8;
+}
+
+message SnapConf {
+  uint64 dev_id = 1;
+  uint64 ori_id = 2;
+}
+
+message LdFeConf {
+  uint64 ld_id = 1;
+  uint64 dn_id = 2;
+  NvmePortConf nvme_port_conf = 3;
+  uint64 ld_size = 4;
+}
+
+message GrpConf {
+  uint64 grp_id = 1;
+  uint32 grp_idx = 2;
+  uint64 grp_size = 3;
+  repeated LdFeConf ld_fe_conf_list = 4;
+}
+
+message LocalLegConf {
+  uint64 leg_id = 1;
+  repeated GrpConf grp_conf_list = 2;
+}
+
+message RemoteLegConf {
+  uint64 leg_id = 1;
+  uint64 dn_id = 2;
+  NvmeListener nvme_listener = 3;
+}
+
+message HostConf {
+  string host_nqn = 1;
+}
+
+message CloneConf {
+  uint32 region_size = 1;
+  uint32 hydration_threshold = 2;
+  uint32 hydration_batch_size = 3;
+}
+
+message MtConf {
+  uint64 mt_id = 1;
+  uint64 old_ld_id = 2;
+  uint64 new_ld_id = 3;
+  CloneConf clone_conf = 4;
+}
+
+message ItConf {
+  uint64 it_id = 1;
+  uint32 dev_id = 2;
+  NvmeListener nvme_listener = 3;
+  uint64 size = 4;
+  CloneConf clone_conf = 5;
+}
+
+message SsFeConf {
+  uint64 cn_id = 1;
+  uint64 ss_id = 2;
+  uint64 cntlr_id = 3;
+  uint64 version = 4;
+  bool partial = 5;
+  CntlrConf cntlr_conf = 6;
+  repeated NsConf ns_conf_list = 7;
+  bool active_cntlr = 8;
+  StripeConf stripe_conf = 9;
+  ThinPoolConf thin_pool_conf = 10;
+  RedundancyConf redundancy_conf = 11;
+  repeated LocalLegConf local_leg_conf_list = 12;
+  repeated RemoteLegConf remote_leg_conf_list = 13;
+  repeated SnapConf snap_conf_list = 14;
+  repeated HostConf host_conf_list = 15;
+  repeated MtConf mt_conf_list = 16;
+  ItConf it_conf = 17;
+}
+
+message SyncupSsFeRequest {
+  string req_id = 1;
+  SsFeConf ss_fe_conf = 2;
+}
+
+message CntlrInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message NsInfo {
+  uint32 ns_id = 1;
+  StatusInfo status_info = 2;
+}
+
+enum ThinPoolStatus {
+  THIN_POOL_STATUS_RW = 0;
+  THIN_POOL_STATUS_RO = 1;
+  THIN_POOL_STATUS_OODS = 2;
+}
+
+message ThinPoolInfo {
+  uint64 transaction_id = 1;
+  uint64 used_meta_blocks = 2;
+  uint64 total_meta_blocks = 3;
+  uint64 used_data_blocks = 4;
+  uint64 total_data_blocks = 5;
+  int32 held_metadata_root = 6;
+  ThinPoolStatus status = 7;
+  bool discard_passdown = 8;
+  bool no_space_queue_or_error = 9;
+  bool needs_check = 10;
+  uint64 metadata_low_atermark = 11;
+}
+
+enum RaidHealthChar {
+  RAID_ALIVE_AND_IN_SYNC = 0;
+  RAID_ALIVE_NOT_IN_SYNC = 3;
+  RAID_DEAD_OR_FAILED = 2;
+}
+
+enum RaidSyncAction {
+  RAID_ACTION_IDLE = 0;
+  RAID_ACTION_FROZEN = 1;
+  RAID_ACTION_RESYNC = 2;
+  RAID_ACTION_RECOVER = 3;
+  RAID_ACTION_CHECK = 4;
+  RAID_ACTION_REPAIR = 5;
+  RAID_ACTION_RESHAP = 6;
+}
+
+enum RaidJournalChar {
+  RAID_JOURNAL_ACTIVE_WRITE_THROUGH = 0;
+  RAID_JOURNAL_ACTIVE_WRITE_BACK = 1;
+  RAID_JOURNAL_DEAD = 2;
+  RAID_JOURNAL_NONE = 3;
+}
+
+message RedundancyInfo {
+  repeated RaidHealthChar health_char = 1;
+  uint64 sync_done = 2;
+  uint64 sync_total = 3;
+  RaidSyncAction sync_action = 4;
+  uint64 mismatch_cnt = 5;
+  uint64 data_offset = 6;
+  RaidJournalChar journal_char = 7;
+}
+
+message LdFeInfo {
+  StatusInfo status_info = 3;
+}
+
+message GrpInfo {
+  uint64 grp_id = 1;
+  StatusInfo status_info = 2;
+  RedundancyInfo redun_info = 3;
+  repeated LdFeInfo ld_fe_info_list = 4;
+}
+
+message LocalLegInfo {
+  uint64 leg_id = 1;
+  StatusInfo status_info = 2;
+  ThinPoolInfo thin_pool_info = 3;
+  repeated GrpInfo grp_info_list = 4;
+}
+
+message RemoteLegInfo {
+  uint64 leg_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message HostInfo {
+  uint64 host_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message SnapInfo {
+  uint32 dev_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message CloneInfo {
+  uint32 metadata_block_size = 1;
+  uint32 used_metadata_blocks = 2;
+  uint32 total_metadata_blocks = 3;
+  uint32 hydrated_regions = 4;
+  uint32 total_regions = 5;
+  uint32 hydrating_regions = 6;
+  string clone_metadata_mode = 7;
+}
+
+message MtInfo {
+  uint64 mt_id = 1;
+  StatusInfo status_info = 2;
+  CloneInfo clone_info = 3;
+}
+
+message ItInfo {
+  uint64 it_id = 1;
+  StatusInfo status_info = 2;
+  CloneInfo clone_info = 3;
+}
+
+message SsFeInfo {
+  StatusInfo status_info = 1;
+  CntlrInfo cntlr_info = 2;
+  repeated NsInfo ns_info_list = 3;
+  repeated LocalLegInfo local_leg_info_list = 4;
+  repeated RemoteLegInfo remote_leg_info_list = 5;
+  repeated SnapInfo snap_info_list = 6;
+  repeated HostInfo host_info_list = 7;
+  repeated MtInfo mt_info_list = 8;
+  repeated ItInfo it_info_list = 9;
+}
+
+message SyncupSsFeReply {
+  SsFeInfo ss_fe_info = 1;
+}

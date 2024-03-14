@@ -13,18 +13,34 @@ message ClusterConf {
   uint32 raid_stripe_size = 6;
 }
 
-message NvmeofPort {
+enum NvmeSeqCh {
+  NVME_SEQ_CH_NOT_SPECIFIED = 0;
+  NVME_SEQ_CH_REQUIRED = 1;
+  NVME_SEQ_CH_NOT_REQUIRED = 2;
+}
+
+message NvmeTReq {
+  NvmeSeqCh seq_ch = 1;
+}
+
+message NvmeListener {
   string tr_type = 1;
   string adr_fam = 2;
   string tr_addr = 3;
   string tr_svc_id = 4;
 }
 
-message ErrInfo {
-  uint32 err_code = 1;
-  string err_msg = 2;
-  uint64 node_id = 3;
-  uint64 timestamp = 4;
+message NvmePortConf {
+  uint32 port_id = 1;
+  NvmeListener nvme_listener = 2;
+  NvmeTReq tr_eq = 3;
+}
+
+message StatusInfo {
+  uint32 status_code = 1;
+  string status_msg = 2;
+  uint64 timestamp = 3;
+  uint64 node_id = 4;
 }
 
 message Qos {
@@ -39,10 +55,12 @@ message Location {
 }
 
 message DnCapacity {
-  uint64 total_size = 1;
-  uint64 free_size = 2;
+  uint32 total_cnt = 1;
+  uint32 free_cnt = 2;
   Qos total_qos = 3;
   Qos free_qos = 4;
+  uint64 total_size = 5;
+  uint64 free_size = 6;
 }
 
 message CnCapacity {
@@ -52,58 +70,53 @@ message CnCapacity {
   Qos free_qos = 4;
 }
 
-message DnSummary {
-  uint64 dn_id = 1;
-  NvmeofPort nvmeof_port = 2;
-}
-
-message CnSummary {
-  uint64 cn_id = 1;
-  NvmeofPort nvmeof_port = 2;
-}
-
 message DnConf {
   string sock_addr = 1;
   uint32 shard_code = 2;
   bool online = 3;
-  NvmeofPort nvmeof_port = 4;
-  Location location = 5;
-  string dev_path = 6;
-  DnCapacity dn_capacity = 7;
+  Location location = 4;
+  string dev_path = 5;
+  DnCapacity dn_capacity = 6;
+  uint32 prev_port_idx = 7;
+  repeated uint64 port_idx_bitmap = 8;
+  uint32 prev_nvmet_cntlid = 9;
+  repeated uint64 cntlid_bitmap = 10;
 }
 
 message DnInfo {
-  ErrInfo err_info = 1;
+  StatusInfo status_info = 1;
 }
 
 message CnConf {
   string sock_addr = 1;
   uint32 shard_code = 2;
   bool online = 3;
-  NvmeofPort nvmeof_port = 4;
-  Location location = 5;
-  CnCapacity cn_capacity = 6;
-  uint32 prev_cntlid = 7;
-  repeated uint64 cntlid_bitmap = 8;
+  Location location = 4;
+  CnCapacity cn_capacity = 5;
+  uint32 prev_port_idx = 6;
+  repeated uint64 port_idx_bitmap = 7;
+  uint32 prev_nvmet_cntlid = 8;
+  repeated uint64 cntlid_bitmap = 9;
 }
 
 message CnInfo {
-  ErrInfo err_info = 1;
+  StatusInfo status_info = 1;
 }
 
 message LdConf {
-  uint32 ld_idx = 1;
-  DnSummary dn_summary = 2;
+  uint64 dn_id = 1;
+  NvmePortConf nvme_port_conf = 2;
   uint64 start = 3;
   uint64 length = 4;
+  uint32 ld_idx = 5;
 }
 
 message LdFeInfo {
-  ErrInfo err_info = 3;
+  StatusInfo status_info = 3;
 }
 
 message LdBeInfo {
-  ErrInfo err_info = 3;
+  StatusInfo status_info = 3;
 }
 
 message LogicalDisk {
@@ -130,7 +143,7 @@ enum RedunJournalMode {
   REDUN_JOURNAL_WRITETHROUGH = 2;
 }
 
-message Redundancy {
+message RedundancyConf {
   RedunType redun_type = 1;
   uint32 region_size = 2;
   uint32 chunk_size = 3;
@@ -141,11 +154,11 @@ message Redundancy {
   RedunJournalMode journal_mode = 8;
 }
 
-message Stripe {
+message StripeConf {
   uint32 stripe_size = 1;
 }
 
-message ThinPool {
+message ThinPoolConf {
   uint32 data_block_size = 1;
   uint32 low_water_mark = 2;
   bool error_if_no_space = 3;
@@ -158,6 +171,22 @@ message ExtendPolicy {
 
 message ThinInfo {
   bool fail = 1;
+}
+
+message CloneConf {
+  uint32 region_size = 1;
+  uint32 hydration_threshold = 2;
+  uint32 hydration_batch_size = 3;
+}
+
+message CloneInfo {
+  uint32 metadata_block_size = 1;
+  uint32 used_metadata_blocks = 2;
+  uint32 total_metadata_blocks = 3;
+  uint32 hydrated_regions = 4;
+  uint32 total_regions = 5;
+  uint32 hydrating_regions = 6;
+  string clone_metadata_mode = 7;
 }
 
 enum ThinPoolStatus {
@@ -202,7 +231,8 @@ enum RaidJournalChar {
   RAID_JOURNAL_DEAD = 2;
   RAID_JOURNAL_NONE = 3;
 }
-message RaidInfo {
+
+message RedundancyInfo {
   repeated RaidHealthChar health_char = 1;
   uint64 sync_done = 2;
   uint64 sync_total = 3;
@@ -214,10 +244,12 @@ message RaidInfo {
 
 message GrpConf {
   uint32 grp_idx = 1;
+  uint64 grp_size = 2;
 }
 
 message GrpInfo {
-  ErrInfo err_info = 1;
+  StatusInfo status_info = 1;
+  RedundancyInfo redun_info = 2;
 }
 
 message Group {
@@ -229,11 +261,18 @@ message Group {
 
 message LegConf {
   uint32 leg_idx = 1;
-  CnSummary cn_summary = 2;
+  uint64 ac_cntlr_id = 2;
+}
+
+message RemoteLegInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
 }
 
 message LegInfo {
-  ErrInfo err_info = 1;
+  StatusInfo status_info = 1;
+  ThinPoolInfo thin_pool_info = 2;
+  repeated RemoteLegInfo remote_leg_info_list = 3;
 }
 
 message Leg {
@@ -248,29 +287,107 @@ message HostConf {
 }
 
 message HostInfo {
-  ErrInfo err_info = 1;
+  StatusInfo status_info = 1;
 }
 
 message Host {
-  HostConf host_conf = 1;
-  HostInfo host_info = 2;
+  uint64 host_id = 1;
+  HostConf host_conf = 2;
+  HostInfo host_info = 3;
 }
 
-message DevConf {
-  string dev_name = 1;
+message SnapConf {
+  string snap_name = 1;
   uint32 ori_id = 2;
 }
 
-message DevInfo {
-  ErrInfo err_info = 1;
-  ThinInfo thin_info = 2;
+message SnapInfo {
+  StatusInfo status_info = 1;
 }
 
-message Device {
+message Snapshot {
   uint32 dev_id = 1;
-  DevConf dev_conf = 2;
-  DevInfo dev_info = 3;
-  repeated Host host_list = 4;
+  SnapConf snap_conf = 2;
+  SnapInfo snap_info = 3;
+}
+
+message NsConf {
+  uint32 ns_id = 1;
+  uint64 size = 2;
+  uint32 dev_id = 3;
+}
+
+message NsInfo {
+  StatusInfo status_info = 1;
+}
+
+message CntlrConf {
+  uint64 cn_id = 1;
+  uint32 nvmet_cntlid = 2;
+  NvmePortConf nvme_port_conf = 3;
+}
+
+message CntlrInfo {
+  StatusInfo status_info = 1;
+  repeated NsInfo ns_info = 2;
+}
+
+message Controller {
+  uint64 cntlr_id = 1;
+  CntlrConf cntlr_conf = 2;
+  CntlrInfo cntlr_info = 3;
+}
+
+message MtConf {
+  uint64 old_ld_id = 1;
+  uint64 new_ld_id = 2;
+  CloneConf clone_conf = 3;
+}
+
+message MtInfo {
+  StatusInfo status_info = 1;
+  CloneInfo clone_info = 2;
+}
+
+message MovingTask {
+  uint64 mt_id = 1;
+  MtConf mt_conf = 2;
+  MtInfo mt_info = 3;
+  LogicalDisk meta_ld = 4;
+}
+
+message ItConf {
+  uint64 prim_cntlr_id = 1;
+  uint32 dev_id = 2;
+  NvmeListener nvme_listener = 3;
+  uint64 size = 4;
+  CloneConf clone_conf = 5;
+}
+
+message ItInfo {
+  StatusInfo status_info = 1;
+  CloneInfo clone_info = 2;
+}
+
+message ImportingTask {
+  uint64 it_id = 1;
+  ItConf it_conf = 2;
+  ItInfo it_info = 3;
+  LogicalDisk meta_ld = 4;
+}
+
+message SsConf {
+  string ss_name = 1;
+  uint32 shard_code = 2;
+  uint64 ss_counter = 3;
+  uint32 dev_id_counter = 4;
+  Qos qos = 5;
+  StripeConf stripe_conf = 6;
+  ThinPoolConf thin_pool_conf = 7;
+  RedundancyConf redundancy_conf = 8;
+  ExtendPolicy extend_policy = 9;
+  uint32 dn_loc_level = 10;
+  uint32 cn_loc_level = 11;
 }
 
 // {dnv_prefix}/version/dn/{dn_id}
@@ -280,12 +397,12 @@ message Version {
   uint64 version = 1;
 }
 
-// {dnv_prefix}/dn/{dn_id}
+// {dnv_prefix}/ss/{ss_id}
 message DiskNode {
   uint64 dn_id = 1;
   DnConf dn_conf = 2;
   DnInfo dn_info = 3;
-  repeated uint64 da_id_list = 4;
+  repeated uint64 ss_id_list = 4;
 }
 
 // {dnv_prefix}/cn/{cn_id}
@@ -293,48 +410,37 @@ message ControllerNode {
   uint64 cn_id = 1;
   CnConf cn_conf = 2;
   CnInfo cn_info = 3;
-  repeated uint64 da_id_list = 4;
+  repeated uint64 ss_id_list = 4;
 }
 
-// {dnv_prefix}/da/{da_id}
-message DiskArray {
-  uint64 da_id = 1;
-  string da_name = 2;
-  uint32 shard_code = 3;
-  uint64 da_counter = 4;
-  uint32 dev_id_counter = 5;
-  Qos qos = 6;
-  Stripe stripe = 7;
-  ThinPool thin_pool = 8;
-  Redundancy redundancy = 9;
-  ExtendPolicy extend_policy = 10;
-  uint32 dn_loc_level = 11;
-  uint32 cn_loc_level = 12;
-  repeated Device device_list = 13;
-  repeated Leg leg_list = 14;
-  repeated CnSummary standby_list = 15;
+// {dnv_prefix}/ss/{ss_id}
+message SubSystem {
+  uint64 ss_id = 1;
+  SsConf ss_conf = 2;
+  repeated NsConf ns_conf = 3;
+  repeated Snapshot snap_list = 4;
+  repeated Leg leg_list = 5;
+  repeated Controller cntlr_list = 6;
+  repeated Host host_list = 7;
+  repeated MovingTask mt_list = 8;
+  repeated ImportingTask it_list = 9;
 }
 
-// {dnv_prefix}/da_name_to_id/{name}
+// {dnv_prefix}/name_to_id/{name}
 message NameToId {
-  uint64 da_id = 1;
+  uint64 res_id = 1;
 }
 
-// {dnv_prefix}/sock_addr_to_id/{sock_addr}
-message SockAddrToId {
-  uint64 node_id = 1;
-}
-
-// {dnv_prefix}capacity/dn/{free_size@dn_id}
+// {dnv_prefix}capacity/dn/{free_cnt@dn_id}
 message DnSearchAttr {
   DnCapacity dn_capacity = 1;
-  repeated string location = 2;
+  Location location = 2;
 }
 
 // {dnv_prefix}/capacity/cn/{free_cnt@cn_id}
 message CnSearchAttr {
   CnCapacity cn_capacity = 1;
-  repeated string location = 2;
+  Location location = 2;
 }
 
 // {dnv_prefix}/list/dn/{shard_code#dn_id}
