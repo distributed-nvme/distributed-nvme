@@ -205,9 +205,8 @@ Below is a view of the Distributed NVMe Cluster:
 
 
 The cluster Data Plane has multiple `Controler Node`s and multiple `Disk Node`s.
-Each `Disk Node` connect to a single `Physical Disk` which should be a
-NVMe SSD. The whole customer could provide multiple virtual disks to
-the `Host`s.
+Each `Disk Node` connects to a single `Physical Disk` (NVMe SSD) The
+whole customer could provide multiple virtual disks to the `Host`s.
 
 The `Disk Node` is still a logical concept here. If a sever has
 multiple NVMe disks, we could have multiple `Disk Node`s on that
