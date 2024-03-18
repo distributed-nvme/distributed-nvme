@@ -6,22 +6,21 @@ package nodeapi;
 
 service DnAgent {
   rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
-  rpc SyncupSsBe(SyncupSsBeRequest) returns(SyncupSsBeReply) {}
+  rpc SyncupSpBe(SyncupSpBeRequest) returns(SyncupSpBeReply) {}
   rpc SyncupDnStream(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
-  rpc SyncupSsBeStream(stream SyncupSsBeRequest) returns(stream SyncupSsBeReply) {}
+  rpc SyncupSpBeStream(stream SyncupSpBeRequest) returns(stream SyncupSpBeReply) {}
 }
 
 service CnAgent {
   rpc SyncupCn(SyncupCnRequest) returns(SyncupCnReply) {}
-  rpc SyncupSsFe(SyncupSsFeRequest) returns(SyncupSsFeReply) {}
+  rpc SyncupSpFe(SyncupSpFeRequest) returns(SyncupSpFeReply) {}
   rpc SyncupCnStream(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
-  rpc SyncupSsFeStream(stream SyncupSsFeRequest) returns(stream SyncupSsFeReply) {}
+  rpc SyncupSpFeStream(stream SyncupSpFeRequest) returns(stream SyncupSpFeReply) {}
 }
 
 message StatusInfo {
   uint32 status_code = 1;
   string status_msg = 2;
-  uint64 timestamp = 3;
 }
 
 enum NvmeSeqCh {
@@ -42,13 +41,13 @@ message NvmeListener {
 }
 
 message NvmePortConf {
-  uint32 port_id = 1;
+  uint32 port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
 }
 
-message SsLdId {
-  uint64 ss_id = 1;
+message SpLdId {
+  uint64 sp_id = 1;
   uint64 ld_id = 2;
 }
 
@@ -57,12 +56,11 @@ message DnConf {
   uint64 version = 2;
   bool partial = 3;
   string dev_path = 4;
-  repeated SsLdId ss_ld_id_list = 5;
+  repeated SpLdId sp_ld_id_list = 5;
 }
 
 message SyncupDnRequest {
-  string req_id = 1;
-  DnConf dn_conf = 2;
+  DnConf dn_conf = 1;
 }
 
 message DnInfo {
@@ -73,33 +71,32 @@ message SyncupDnReply {
   DnInfo dn_info = 1;
 }
 
-message SsBeConf {
+message SpBeConf {
   uint64 dn_id = 1;
-  uint64 ss_id = 2;
+  uint64 sp_id = 2;
   uint64 ld_id = 3;
   uint64 version = 4;
   bool partial = 5;
   NvmePortConf nvme_port_conf = 6;
   uint64 start = 7;
   uint64 length = 8;
-  repeated uint64 cn_id_list = 9;
+  uint64 cn_id = 9;
 }
 
-message SyncupSsBeRequest {
-  string req_id = 1;
-  SsBeConf ss_be_conf = 2;
+message SyncupSpBeRequest {
+  SpBeConf sp_be_conf = 1;
 }
 
-message SsBeInfo {
-  StatusInfo status_info = 4;
+message SpBeInfo {
+  StatusInfo status_info = 1;
 }
 
-message SyncupSsBeReply {
-  SsBeInfo ss_be_info = 1;
+message SyncupSpBeReply {
+  SpBeInfo sp_be_info = 1;
 }
 
-message SsCntlrId {
-  uint64 ss_id = 1;
+message SpCntlrId {
+  uint64 sp_id = 1;
   uint64 cntlr_id = 2;
 }
 
@@ -107,12 +104,11 @@ message CnConf {
   uint64 cn_id = 1;
   uint64 version = 2;
   bool partial = 3;
-  repeated SsCntlrId ss_cntlr_id_list = 4;
+  repeated SpCntlrId sp_cntlr_id_list = 4;
 }
 
 message SyncupCnRequest {
-  string req_id = 1;
-  CnConf cn_conf = 2;
+  CnConf cn_conf = 1;
 }
 
 message CnInfo {
@@ -121,17 +117,6 @@ message CnInfo {
 
 message SyncupCnReply {
   CnInfo cn_info = 1;
-}
-
-message CntlrConf {
-  uint32 nvmet_cntlid = 1;
-  NvmePortConf nvme_port_conf = 2;
-}
-
-message NsConf {
-  uint32 ns_id = 1;
-  uint64 size = 2;
-  uint32 dev_id = 3;
 }
 
 message StripeConf {
@@ -202,10 +187,6 @@ message RemoteLegConf {
   NvmeListener nvme_listener = 3;
 }
 
-message HostConf {
-  string host_nqn = 1;
-}
-
 message CloneConf {
   uint32 region_size = 1;
   uint32 hydration_threshold = 2;
@@ -227,39 +208,53 @@ message ItConf {
   CloneConf clone_conf = 5;
 }
 
-message SsFeConf {
+message Qos {
+  uint64 rbps = 1;
+  uint64 wbps = 2;
+  uint64 riops = 3;
+  uint64 wiops = 4;
+}
+
+message NsConf {
+  uint64 ns_id = 1;
+  uint32 ns_num = 2;
+  uint64 size = 3;
+  uint32 dev_id = 4;
+}
+
+message HostConf {
+  uint64 host_id = 1;
+  string host_nqn = 2;
+}
+
+message SsConf {
+  string nqn = 1;
+  repeated NsConf ns_conf_list = 2;
+  repeated HostConf host_conf_list = 3;
+}
+
+message SpFeConf {
   uint64 cn_id = 1;
-  uint64 ss_id = 2;
+  uint64 sp_id = 2;
   uint64 cntlr_id = 3;
   uint64 version = 4;
   bool partial = 5;
-  CntlrConf cntlr_conf = 6;
-  repeated NsConf ns_conf_list = 7;
-  bool active_cntlr = 8;
-  StripeConf stripe_conf = 9;
-  ThinPoolConf thin_pool_conf = 10;
-  RedundancyConf redundancy_conf = 11;
-  repeated LocalLegConf local_leg_conf_list = 12;
-  repeated RemoteLegConf remote_leg_conf_list = 13;
-  repeated SnapConf snap_conf_list = 14;
-  repeated HostConf host_conf_list = 15;
+  Qos qos = 6;
+  NvmePortConf nvme_port_conf = 7;
+  repeated SsConf ss_conf_list = 8;
+  bool active_cntlr = 9;
+  StripeConf stripe_conf = 10;
+  ThinPoolConf thin_pool_conf = 11;
+  RedundancyConf redundancy_conf = 12;
+  repeated LocalLegConf local_leg_conf_list = 13;
+  repeated RemoteLegConf remote_leg_conf_list = 14;
+  repeated SnapConf snap_conf_list = 15;
   repeated MtConf mt_conf_list = 16;
-  ItConf it_conf = 17;
+  repeated ItConf it_conf_list = 17;
 }
 
-message SyncupSsFeRequest {
-  string req_id = 1;
-  SsFeConf ss_fe_conf = 2;
-}
-
-message CntlrInfo {
-  uint64 cntlr_id = 1;
-  StatusInfo status_info = 2;
-}
-
-message NsInfo {
-  uint32 ns_id = 1;
-  StatusInfo status_info = 2;
+message SyncupSpFeRequest {
+  SpFeConf sp_fe_conf = 1;
 }
 
 enum ThinPoolStatus {
@@ -338,11 +333,6 @@ message RemoteLegInfo {
   StatusInfo status_info = 2;
 }
 
-message HostInfo {
-  uint64 host_id = 1;
-  StatusInfo status_info = 2;
-}
-
 message SnapInfo {
   uint32 dev_id = 1;
   StatusInfo status_info = 2;
@@ -370,18 +360,33 @@ message ItInfo {
   CloneInfo clone_info = 3;
 }
 
-message SsFeInfo {
-  StatusInfo status_info = 1;
-  CntlrInfo cntlr_info = 2;
-  repeated NsInfo ns_info_list = 3;
-  repeated LocalLegInfo local_leg_info_list = 4;
-  repeated RemoteLegInfo remote_leg_info_list = 5;
-  repeated SnapInfo snap_info_list = 6;
-  repeated HostInfo host_info_list = 7;
-  repeated MtInfo mt_info_list = 8;
-  repeated ItInfo it_info_list = 9;
+message HostInfo {
+  uint64 host_id = 1;
+  StatusInfo status_info = 2;
 }
 
-message SyncupSsFeReply {
-  SsFeInfo ss_fe_info = 1;
+message NsInfo {
+  uint64 ns_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message SsInfo {
+  uint64 ss_id = 1;
+  StatusInfo status_info = 2;
+  repeated NsInfo ns_info_list = 3;
+  repeated HostInfo host_info_list = 4;
+}
+
+message SpFeInfo {
+  StatusInfo status_info = 1;
+  repeated SsInfo ss_info_list = 2;
+  repeated LocalLegInfo local_leg_info_list = 3;
+  repeated RemoteLegInfo remote_leg_info_list = 4;
+  repeated SnapInfo snap_info_list = 5;
+  repeated MtInfo mt_info_list = 6;
+  repeated ItInfo it_info_list = 7;
+}
+
+message SyncupSpFeReply {
+  SpFeInfo sp_fe_info = 1;
 }

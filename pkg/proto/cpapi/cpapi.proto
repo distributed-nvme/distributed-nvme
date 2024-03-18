@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi";
+
+package cpapi;
+
+service ControlPlane {
+  rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
+  rpc DeleteDn(DeleteDnRequest) returns(DeleteDnReply) {}
+  rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
+  rpc ListDn(ListDnRequest) returns(ListDnReply) {}
+  rpc GetDn(GetDnRequest) returns(GetDnReply) {}
+
+  // rpc CreateCn(CreateCnRequest) returns(CreateCnReply) {}
+  // rpc DeleteCn(DeleteCnRequest) returns(DeleteCnReply) {}
+  // rpc ModifyCn(ModifyCnRequest) returns(ModifyCnReply) {}
+  // rpc ListCn(ListCnRequest) returns(ListCnReply) {}
+  // rpc GetCn(GetCnRequest) returns(GetCnReply) {}
+
+  // rpc CreateSp(CreateSpRequest) returns(CreateSpReply) {}
+  // rpc DeleteSp(DeleteSpRequest) returns(DeleteSpReply) {}
+  // rpc ModifySp(ModifySpRequest) returns(ModifySpReply) {}
+  // rpc ListSp(ListSpRequest) returns(ListSpReply) {}
+  // rpc GetSp(GetSpRequest) returns(GetSpReply) {}
+
+  // rpc CreateSnap(CreateSnapRequest) returns(CreateSnapReply) {}
+  // rpc DeleteSnap(DeleteSnapRequest) returns(DeleteSnapReply) {}
+  // rpc ModifySnap(ModifySnapRequest) returns(ModifySnapReply) {}
+  // rpc ListSnap(ListSnapRequest) returns(ListSnapReply) {}
+  // rpc GetSnap(GetSnapRequest) returns(GetSnapReply) {}
+
+  // rpc CreateSs(CreateSsRequest) returns(CreateSsReply) {}
+  // rpc DeleteSs(DeleteSsRequest) returns(DeleteSsReply) {}
+  // rpc ModifySs(ModifySsRequest) returns(ModifySsReply) {}
+  // rpc ListSs(ListSsRequest) returns(ListSsReply) {}
+  // rpc GetSs(GetSsRequest) returns(GetSsReply) {}
+
+  // rpc CreateNs(CreateNsRequest) returns(CreateNsReply) {}
+  // rpc DeleteNs(DeleteNsRequest) returns(DeleteNsReply) {}
+  // rpc ModifyNs(ModifyNsRequest) returns(ModifyNsReply) {}
+  // rpc ListNs(ListNsRequest) returns(ListNsReply) {}
+  // rpc GetNs(GetNsRequest) returns(GetNsReply) {}
+
+  // rpc CreateExp(CreateExpRequest) returns(CreateExpReply) {}
+  // rpc DeleteExp(DeleteExpRequest) returns(DeleteExpReply) {}
+  // rpc ModifyExp(ModifyExpRequest) returns(ModifyExpReply) {}
+  // rpc ListExp(ListExpRequest) returns(ListExpReply) {}
+  // rpc GetExp(GetExpRequest) returns(GetExpReply) {}
+
+  // rpc CreateMt(CreateMtRequest) returns(CreateMtReply) {}
+  // rpc CancelMt(CancelMtRequest) returns(CancelMtReply) {}
+  // rpc ModifyMt(ModifyMtRequest) returns(ModifyMtReply) {}
+  // rpc ListMt(ListMtRequest) returns(ListMtReply) {}
+  // rpc GetMt(GetMtRequest) returns(GetMtReply) {}
+
+  // rpc CreateIt(CreateItRequest) returns(CreateItReply) {}
+  // rpc CancelIt(CancelItRequest) returns(CancelItReply) {}
+  // rpc ModifyIt(ModifyItRequest) returns(ModifyItReply) {}
+  // rpc ListIt(ListItRequest) returns(ListItReply) {}
+  // rpc GetIt(GetItRequest) returns(GetItReply) {}
+
+  // rpc CreateLdPh(CreateLdPhRequest) returns(CreateLdPhReply) {}
+  // rpc DeleteLdPh(DeleteLdPhRequest) returns(DeleteLdPhReply) {}
+  // rpc ModifyLdPh(ModifyLdPhRequest) returns(ModifyLdPhReply) {}
+  // rpc ListLdPh(ListLdPhRequest) returns(ListLdPhReply) {}
+  // rpc GetLdPh(GetLdPhRequest) returns(GetLdPhReply) {}
+
+  // rpc CreateCntlrPh(CreateCntlrPhRequest) returns(CreateCntlrPhReply) {}
+  // rpc DeleteCntlrPh(DeleteCntlrPhRequest) returns(DeleteCntlrPhReply) {}
+  // rpc ModifyCntlrPh(ModifyCntlrPhRequest) returns(ModifyCntlrPhReply) {}
+  // rpc ListCntlrPh(ListCntlrPhRequest) returns(ListCntlrPhReply) {}
+  // rpc GetCntlrPh(GetCntlrPhRequest) returns(GetCntlrPhReply) {}
+}
+
+message ReplyInfo {
+  uint32 reply_code = 1;
+  string reply_msg = 2;
+}
+
+message CreateDnRequest {
+  string sock_addr = 1;
+}
+
+message CreateDnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message DeleteDnRequest {
+  string sock_addr = 1;
+}
+
+message DeleteDnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message ModifyDnRequest {
+  string sock_addr = 1;
+}
+
+message ModifyDnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message ListDnRequest {
+  string sock_addr = 1;
+}
+
+message ListDnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message GetDnRequest {
+  string sock_addr = 1;
+}
+
+message GetDnReply {
+  ReplyInfo reply_info = 1;
+}

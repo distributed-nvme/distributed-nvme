@@ -6,11 +6,6 @@ package dataschema;
 
 message ClusterConf {
   uint64 global_counter = 1;
-  string nqn_prefix = 2;
-  string dev_prefix = 3;
-  uint32 thin_block_size = 4;
-  uint32 raid_region_size = 5;
-  uint32 raid_stripe_size = 6;
 }
 
 enum NvmeSeqCh {
@@ -31,7 +26,7 @@ message NvmeListener {
 }
 
 message NvmePortConf {
-  uint32 port_id = 1;
+  uint32 port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
 }
@@ -39,8 +34,6 @@ message NvmePortConf {
 message StatusInfo {
   uint32 status_code = 1;
   string status_msg = 2;
-  uint64 timestamp = 3;
-  uint64 node_id = 4;
 }
 
 message Qos {
@@ -70,6 +63,13 @@ message CnCapacity {
   Qos free_qos = 4;
 }
 
+message NextNumBitmap {
+  uint32 prev_num = 1;
+  uint32 free_cnt = 2;
+  uint64 parent_bitmap = 3;
+  repeated uint64 bitmap = 4;
+}
+
 message DnConf {
   string sock_addr = 1;
   uint32 shard_code = 2;
@@ -77,10 +77,7 @@ message DnConf {
   Location location = 4;
   string dev_path = 5;
   DnCapacity dn_capacity = 6;
-  uint32 prev_port_idx = 7;
-  repeated uint64 port_idx_bitmap = 8;
-  uint32 prev_nvmet_cntlid = 9;
-  repeated uint64 cntlid_bitmap = 10;
+  NextNumBitmap port_next_num_bitmap = 7;
 }
 
 message DnInfo {
@@ -93,10 +90,7 @@ message CnConf {
   bool online = 3;
   Location location = 4;
   CnCapacity cn_capacity = 5;
-  uint32 prev_port_idx = 6;
-  repeated uint64 port_idx_bitmap = 7;
-  uint32 prev_nvmet_cntlid = 8;
-  repeated uint64 cntlid_bitmap = 9;
+  NextNumBitmap port_next_num_bitmap = 6;
 }
 
 message CnInfo {
@@ -282,20 +276,6 @@ message Leg {
   repeated Group grp_list = 4;
 }
 
-message HostConf {
-  string host_nqn = 1;
-}
-
-message HostInfo {
-  StatusInfo status_info = 1;
-}
-
-message Host {
-  uint64 host_id = 1;
-  HostConf host_conf = 2;
-  HostInfo host_info = 3;
-}
-
 message SnapConf {
   string snap_name = 1;
   uint32 ori_id = 2;
@@ -311,25 +291,14 @@ message Snapshot {
   SnapInfo snap_info = 3;
 }
 
-message NsConf {
-  uint32 ns_id = 1;
-  uint64 size = 2;
-  uint32 dev_id = 3;
-}
-
-message NsInfo {
-  StatusInfo status_info = 1;
-}
-
 message CntlrConf {
   uint64 cn_id = 1;
-  uint32 nvmet_cntlid = 2;
+  uint32 cntlr_idx = 2;
   NvmePortConf nvme_port_conf = 3;
 }
 
 message CntlrInfo {
   StatusInfo status_info = 1;
-  repeated NsInfo ns_info = 2;
 }
 
 message Controller {
@@ -376,10 +345,61 @@ message ImportingTask {
   LogicalDisk meta_ld = 4;
 }
 
+message HostConf {
+  string host_nqn = 1;
+}
+
+message HostInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message Host {
+  uint64 host_id = 1;
+  HostConf host_conf = 2;
+  repeated HostInfo host_info_list = 3;
+}
+
+message NsConf {
+  string ns_name = 1;
+  uint32 ns_num = 2;
+  uint64 size = 3;
+  uint32 dev_id = 4;
+}
+
+message NsInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message NameSpace {
+  uint64 ns_id = 1;
+  repeated NsConf ns_conf = 2;
+  repeated NsInfo ns_info_list = 3;
+}
+
 message SsConf {
-  string ss_name = 1;
+  string name = 1;
+  string nqn = 2;
+}
+
+message SsInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
+}
+
+message SubSystem {
+  uint64 ss_id = 1;
+  SsConf ss_conf = 2;
+  repeated SsInfo ss_info_list = 3;
+  repeated NameSpace ns_list = 4;
+  repeated Host host_list = 5;
+}
+
+message SpConf {
+  string sp_name = 1;
   uint32 shard_code = 2;
-  uint64 ss_counter = 3;
+  uint64 sp_counter = 3;
   uint32 dev_id_counter = 4;
   Qos qos = 5;
   StripeConf stripe_conf = 6;
@@ -397,33 +417,29 @@ message Version {
   uint64 version = 1;
 }
 
-// {dnv_prefix}/ss/{ss_id}
+// {dnv_prefix}/dn/{dn_id}
 message DiskNode {
-  uint64 dn_id = 1;
-  DnConf dn_conf = 2;
-  DnInfo dn_info = 3;
-  repeated uint64 ss_id_list = 4;
+  DnConf dn_conf = 1;
+  DnInfo dn_info = 2;
+  repeated uint64 sp_id_list = 3;
 }
 
 // {dnv_prefix}/cn/{cn_id}
 message ControllerNode {
-  uint64 cn_id = 1;
-  CnConf cn_conf = 2;
-  CnInfo cn_info = 3;
-  repeated uint64 ss_id_list = 4;
+  CnConf cn_conf = 1;
+  CnInfo cn_info = 2;
+  repeated uint64 sp_id_list = 3;
 }
 
-// {dnv_prefix}/ss/{ss_id}
-message SubSystem {
-  uint64 ss_id = 1;
-  SsConf ss_conf = 2;
-  repeated NsConf ns_conf = 3;
-  repeated Snapshot snap_list = 4;
-  repeated Leg leg_list = 5;
-  repeated Controller cntlr_list = 6;
-  repeated Host host_list = 7;
-  repeated MovingTask mt_list = 8;
-  repeated ImportingTask it_list = 9;
+// {dnv_prefix}/sp/{sp_id}
+message StoragePool {
+  SpConf sp_conf = 1;
+  repeated SubSystem ss_list = 2;
+  repeated Snapshot snap_list = 3;
+  repeated Leg leg_list = 4;
+  repeated Controller cntlr_list = 5;
+  repeated MovingTask mt_list = 6;
+  repeated ImportingTask it_list = 7;
 }
 
 // {dnv_prefix}/name_to_id/{name}
@@ -457,3 +473,4 @@ message CnSockAddr {
 message DaName {
   string da_name = 1;
 }
+
