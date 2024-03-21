@@ -1,9 +1,12 @@
 package lib
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
+
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 )
 
 type Logger struct {
@@ -43,4 +46,21 @@ func NewLogger(prefix string) *Logger {
 		errorLogger: log.New(os.Stdout, fmt.Sprintf("E | %s ", prefix), flags),
 		fatalLogger: log.New(os.Stdout, fmt.Sprintf("F | %s ", prefix), flags),
 	}
+}
+
+func InterceptorLogger(l *Logger) logging.Logger {
+	return logging.LoggerFunc(func(_ context.Context, lvl logging.Level, msg string, fields ...any) {
+		switch lvl {
+		case logging.LevelDebug:
+			l.Debug(msg, fields...)
+		case logging.LevelInfo:
+			l.Info(msg, fields...)
+		case logging.LevelWarn:
+			l.Warning(msg, fields...)
+		case logging.LevelError:
+			l.Error(msg, fields...)
+		default:
+			panic(fmt.Sprintf("unknown level %v", lvl))
+		}
+	})
 }

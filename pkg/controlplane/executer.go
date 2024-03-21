@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
@@ -64,13 +65,31 @@ func launchCpApiServer(wg *sync.WaitGroup, ctx context.Context) {
 	if err != nil {
 		gLogger.Fatal("Listen err: %v", err)
 	}
+
 	etcdEndpoints := strings.Split(cpArgs.etcdEndpoints, ",")
 	etcdCli, err := clientv3.New(clientv3.Config{Endpoints: etcdEndpoints})
 	if err != nil {
 		gLogger.Fatal("Create etcd client err: %v", err)
 	}
-	cpApi := newCpApiServer(etcdCli)
-	grpcServer := grpc.NewServer()
+
+	opts := []logging.Option{
+		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
+	}
+
+	logger := lib.NewLogger("apiserver")
+
+	cpApi := newCpApiServer(etcdCli, logger)
+
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			logging.UnaryServerInterceptor(lib.InterceptorLogger(logger), opts...),
+			cpApiUnaryInterceptor(logger),
+		),
+		grpc.ChainStreamInterceptor(
+			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
+		),
+	)
+
 	go func() {
 		for {
 			select {
