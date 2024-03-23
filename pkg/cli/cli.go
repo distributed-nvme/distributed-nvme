@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/cpapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
 )
 
 type rootArgsStruct struct {

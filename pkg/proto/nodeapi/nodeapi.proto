@@ -20,8 +20,8 @@ service CnAgent {
 }
 
 message StatusInfo {
-  uint32 status_code = 1;
-  string status_msg = 2;
+  uint32 code = 1;
+  string msg = 2;
 }
 
 enum NvmeSeqCh {

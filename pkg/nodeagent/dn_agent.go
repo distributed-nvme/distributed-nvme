@@ -16,16 +16,16 @@ func (dnAgent *dnAgentServer) GetDevSize(
 		return &pbnd.GetDevSizeReply{
 			ReqId: req.ReqId,
 			StatusInfo: &pbnd.StatusInfo{
-				StatusCode: lib.AgentOsCmdErrCode,
-				StatusMsg: err.Error(),
+				Code: lib.AgentOsCmdErrCode,
+				Msg: err.Error(),
 			},
 		}, nil
 	}
 	return &pbnd.GetDevSizeReply{
 		ReqId: req.ReqId,
 		StatusInfo: &pbnd.StatusInfo{
-			StatusCode: lib.AgentSucceedCode,
-			StatusMsg: lib.AgentSucceedMsg,
+			Code: lib.AgentSucceedCode,
+			Msg: lib.AgentSucceedMsg,
 		},
 		Size: size,
 	}, nil

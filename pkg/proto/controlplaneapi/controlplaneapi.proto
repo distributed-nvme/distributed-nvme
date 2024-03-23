@@ -2,7 +2,7 @@ syntax = "proto3";
 
 option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi";
 
-package cpapi;
+package controlplaneapi;
 
 service ControlPlane {
   rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
@@ -79,6 +79,7 @@ message ReplyInfo {
 
 message CreateDnRequest {
   string sock_addr = 1;
+  string dev_path = 2;
 }
 
 message CreateDnReply {
