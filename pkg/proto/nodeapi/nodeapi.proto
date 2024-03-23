@@ -56,11 +56,13 @@ message DnConf {
   uint64 version = 2;
   bool partial = 3;
   string dev_path = 4;
-  repeated SpLdId sp_ld_id_list = 5;
+  NvmePortConf nvme_port_conf = 5;
+  repeated SpLdId sp_ld_id_list = 6;
 }
 
 message SyncupDnRequest {
-  DnConf dn_conf = 1;
+  string req_id = 1;
+  DnConf dn_conf = 2;
 }
 
 message DnInfo {
@@ -68,7 +70,8 @@ message DnInfo {
 }
 
 message SyncupDnReply {
-  DnInfo dn_info = 1;
+  string req_id = 1;
+  DnInfo dn_info = 2;
 }
 
 message SpBeConf {
@@ -77,14 +80,14 @@ message SpBeConf {
   uint64 ld_id = 3;
   uint64 version = 4;
   bool partial = 5;
-  NvmePortConf nvme_port_conf = 6;
-  uint64 start = 7;
-  uint64 length = 8;
-  uint64 cn_id = 9;
+  uint64 start = 6;
+  uint64 length = 7;
+  uint64 cn_id = 8;
 }
 
 message SyncupSpBeRequest {
-  SpBeConf sp_be_conf = 1;
+  string req_id = 1;
+  SpBeConf sp_be_conf = 2;
 }
 
 message SpBeInfo {
@@ -92,7 +95,8 @@ message SpBeInfo {
 }
 
 message SyncupSpBeReply {
-  SpBeInfo sp_be_info = 1;
+  string req_id = 1;
+  SpBeInfo sp_be_info = 2;
 }
 
 message SpCntlrId {
@@ -108,15 +112,17 @@ message CnConf {
 }
 
 message SyncupCnRequest {
-  CnConf cn_conf = 1;
+  string req_id = 1;
+  CnConf cn_conf = 2;
 }
 
 message CnInfo {
-  StatusInfo status_info = 1;
+  StatusInfo status_info = 2;
 }
 
 message SyncupCnReply {
-  CnInfo cn_info = 1;
+  string req_id = 1;
+  CnInfo cn_info = 2;
 }
 
 message StripeConf {
@@ -254,7 +260,8 @@ message SpFeConf {
 }
 
 message SyncupSpFeRequest {
-  SpFeConf sp_fe_conf = 1;
+  string req_id = 1;
+  SpFeConf sp_fe_conf = 2;
 }
 
 enum ThinPoolStatus {
@@ -388,5 +395,6 @@ message SpFeInfo {
 }
 
 message SyncupSpFeReply {
-  SpFeInfo sp_fe_info = 1;
+  string req_id = 1;
+  SpFeInfo sp_fe_info = 2;
 }

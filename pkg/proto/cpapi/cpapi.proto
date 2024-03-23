@@ -82,7 +82,8 @@ message CreateDnRequest {
 }
 
 message CreateDnReply {
-  ReplyInfo reply_info = 1;
+  string req_id = 1;
+  ReplyInfo reply_info = 2;
 }
 
 message DeleteDnRequest {
@@ -90,7 +91,8 @@ message DeleteDnRequest {
 }
 
 message DeleteDnReply {
-  ReplyInfo reply_info = 1;
+  string req_id = 1;
+  ReplyInfo reply_info = 2;
 }
 
 message ModifyDnRequest {
@@ -98,7 +100,8 @@ message ModifyDnRequest {
 }
 
 message ModifyDnReply {
-  ReplyInfo reply_info = 1;
+  string req_id = 1;
+  ReplyInfo reply_info = 2;
 }
 
 message ListDnRequest {
@@ -106,7 +109,8 @@ message ListDnRequest {
 }
 
 message ListDnReply {
-  ReplyInfo reply_info = 1;
+  string req_id = 1;
+  ReplyInfo reply_info = 2;
 }
 
 message GetDnRequest {
@@ -114,5 +118,6 @@ message GetDnRequest {
 }
 
 message GetDnReply {
-  ReplyInfo reply_info = 1;
+  string req_id = 1;
+  ReplyInfo reply_info = 2;
 }

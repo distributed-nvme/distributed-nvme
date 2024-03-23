@@ -4,8 +4,11 @@ option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/data
 
 package dataschema;
 
-message ClusterConf {
-  uint64 global_counter = 1;
+message QosFields {
+  uint64 rbps = 1;
+  uint64 wbps = 2;
+  uint64 riops = 3;
+  uint64 wiops = 4;
 }
 
 enum NvmeSeqCh {
@@ -29,95 +32,6 @@ message NvmePortConf {
   uint32 port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
-}
-
-message StatusInfo {
-  uint32 status_code = 1;
-  string status_msg = 2;
-}
-
-message Qos {
-  uint64 rbps = 1;
-  uint64 wbps = 2;
-  uint64 riops = 3;
-  uint64 wiops = 4;
-}
-
-message Location {
-  repeated string pos_list = 1;
-}
-
-message DnCapacity {
-  uint32 total_cnt = 1;
-  uint32 free_cnt = 2;
-  Qos total_qos = 3;
-  Qos free_qos = 4;
-  uint64 total_size = 5;
-  uint64 free_size = 6;
-}
-
-message CnCapacity {
-  uint32 total_cnt = 1;
-  uint32 free_cnt = 2;
-  Qos total_qos = 3;
-  Qos free_qos = 4;
-}
-
-message NextNumBitmap {
-  uint32 prev_num = 1;
-  uint32 free_cnt = 2;
-  uint64 parent_bitmap = 3;
-  repeated uint64 bitmap = 4;
-}
-
-message DnConf {
-  string sock_addr = 1;
-  uint32 shard_code = 2;
-  bool online = 3;
-  Location location = 4;
-  string dev_path = 5;
-  DnCapacity dn_capacity = 6;
-  NextNumBitmap port_next_num_bitmap = 7;
-}
-
-message DnInfo {
-  StatusInfo status_info = 1;
-}
-
-message CnConf {
-  string sock_addr = 1;
-  uint32 shard_code = 2;
-  bool online = 3;
-  Location location = 4;
-  CnCapacity cn_capacity = 5;
-  NextNumBitmap port_next_num_bitmap = 6;
-}
-
-message CnInfo {
-  StatusInfo status_info = 1;
-}
-
-message LdConf {
-  uint64 dn_id = 1;
-  NvmePortConf nvme_port_conf = 2;
-  uint64 start = 3;
-  uint64 length = 4;
-  uint32 ld_idx = 5;
-}
-
-message LdFeInfo {
-  StatusInfo status_info = 3;
-}
-
-message LdBeInfo {
-  StatusInfo status_info = 3;
-}
-
-message LogicalDisk {
-  uint64 ld_id = 1;
-  LdConf ld_conf = 2;
-  LdFeInfo ld_fe_info = 3;
-  LdBeInfo ld_be_info = 4;
 }
 
 enum RedunType {
@@ -236,9 +150,124 @@ message RedundancyInfo {
   RaidJournalChar journal_char = 7;
 }
 
+message StatusInfo {
+  uint32 status_code = 1;
+  string status_msg = 2;
+}
+
+message NextBit {
+  uint32 curr_idx = 1;
+  bytes bitmap = 2;
+}
+
+message ExtentConf {
+  bytes max_cont_extent_cnt_per_set = 1;
+  bytes bitmap = 2;
+}
+
+message ClusterConf {
+  string name = 1;
+  uint32 data_extent_size_shift = 2;
+  uint32 data_extent_cnt_shift = 3;
+  uint32 meta_extent_size_shift = 4;
+  uint32 meat_extent_cnt_shift = 5;
+  uint32 extent_ratio = 6;
+  QosFields qos_unit = 7;
+}
+
+message DnGlobalConf {
+  uint64 global_counter = 1;
+  uint32 total_dn_cnt = 2;
+  uint32 full_extent_dn_cnt = 3;
+  uint32 data_extent_cnt_total = 4;
+  uint32 data_extent_cnt_free = 5;
+  uint32 meta_extent_cnt_total = 6;
+  uint32 meta_extent_cnt_free = 7;
+  uint64 qos_total = 8;
+  uint64 qos_free = 9;
+  bytes shard_bucket = 10;
+  NextBit port_next_bit = 11;
+}
+
+message CnGlobalConf {
+  uint64 global_counter = 1;
+  uint32 total_cn_cnt = 2;
+  uint64 qos_total = 3;
+  uint64 qos_free = 4;
+}
+
+message SpGlobalConf {
+  uint64 global_counter = 1;
+  uint32 total_sp_cnt = 2;
+  uint32 total_ss_cnt = 3;
+  bytes shard_bucket = 4;
+}
+
+message DnCapacity {
+  uint32 total_ld_cnt = 1;
+  uint32 free_ld_cnt = 2;
+  uint64 total_qos = 3;
+  uint64 free_qos = 4;
+  uint32 max_cont_extent_cnt = 5;
+}
+
+message CnCapacity {
+  uint32 total_cntlr_cnt = 1;
+  uint32 free_cntlr_cnt = 2;
+  uint64 total_qos = 3;
+  uint64 free_qos = 4;
+}
+
+message DnConf {
+  string sock_addr = 1;
+  bool online = 2;
+  string location = 3;
+  string dev_path = 4;
+  NvmePortConf nvme_port_conf = 5;
+  DnCapacity dn_capacity = 6;
+  ExtentConf extent_conf = 7;
+}
+
+message DnInfo {
+  StatusInfo status_info = 1;
+}
+
+message CnConf {
+  string sock_addr = 1;
+  bool online = 2;
+  string location = 3;
+  CnCapacity cn_capacity = 4;
+  NextBit port_next_bit = 5;
+}
+
+message CnInfo {
+  StatusInfo status_info = 1;
+}
+
+message LdConf {
+  uint64 dn_id = 1;
+  uint32 position = 2;
+  uint32 ld_idx = 3;
+}
+
+message LdFeInfo {
+  StatusInfo status_info = 3;
+}
+
+message LdBeInfo {
+  StatusInfo status_info = 3;
+}
+
+message LogicalDisk {
+  uint64 ld_id = 1;
+  LdConf ld_conf = 2;
+  LdFeInfo ld_fe_info = 3;
+  LdBeInfo ld_be_info = 4;
+}
+
 message GrpConf {
   uint32 grp_idx = 1;
-  uint64 grp_size = 2;
+  uint32 extent_cnt = 2;
 }
 
 message GrpInfo {
@@ -398,16 +427,13 @@ message SubSystem {
 
 message SpConf {
   string sp_name = 1;
-  uint32 shard_code = 2;
-  uint64 sp_counter = 3;
-  uint32 dev_id_counter = 4;
-  Qos qos = 5;
-  StripeConf stripe_conf = 6;
-  ThinPoolConf thin_pool_conf = 7;
-  RedundancyConf redundancy_conf = 8;
-  ExtendPolicy extend_policy = 9;
-  uint32 dn_loc_level = 10;
-  uint32 cn_loc_level = 11;
+  uint64 sp_counter = 2;
+  uint32 dev_id_counter = 3;
+  uint64 qos = 4;
+  StripeConf stripe_conf = 5;
+  ThinPoolConf thin_pool_conf = 6;
+  RedundancyConf redundancy_conf = 7;
+  ExtendPolicy extend_policy = 8;
 }
 
 // {dnv_prefix}/version/dn/{dn_id}
@@ -446,31 +472,3 @@ message StoragePool {
 message NameToId {
   uint64 res_id = 1;
 }
-
-// {dnv_prefix}capacity/dn/{free_cnt@dn_id}
-message DnSearchAttr {
-  DnCapacity dn_capacity = 1;
-  Location location = 2;
-}
-
-// {dnv_prefix}/capacity/cn/{free_cnt@cn_id}
-message CnSearchAttr {
-  CnCapacity cn_capacity = 1;
-  Location location = 2;
-}
-
-// {dnv_prefix}/list/dn/{shard_code#dn_id}
-message DnSockAddr {
-  string sock_addr = 1;
-}
-
-// {dnv_prefix}/list/cn/{shard_code#cn_id}
-message CnSockAddr {
-  string sock_addr = 1;
-}
-
-// {dnv_prefix}/list/da/{shard_code#da_id}
-message DaName {
-  string da_name = 1;
-}
-
