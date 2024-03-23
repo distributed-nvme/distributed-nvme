@@ -15,7 +15,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbCpApi "github.com/distributed-nvme/distributed-nvme/pkg/proto/cpapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/cpapi"
 )
 
 type cpArgsStruct struct {
@@ -29,7 +29,7 @@ type cpArgsStruct struct {
 
 var (
 	cpCmd = &cobra.Command{
-		Use:   "dnv_cp",
+		Use:   "dnv_controlplane",
 		Short: "dnv control plane",
 		Long:  `dnv control plane`,
 		Run:   launchCp,
@@ -43,9 +43,9 @@ func init() {
 		&cpArgs.etcdEndpoints,
 		"etcd-endpoints", "", "localhost:2379", "etcd endpoint list")
 	cpCmd.PersistentFlags().StringVarP(
-		&cpArgs.apiNetwork, "api-network", "", "tcp", "api network")
+		&cpArgs.apiNetwork, "api-network", "", "tcp", "grpc network")
 	cpCmd.PersistentFlags().StringVarP(
-		&cpArgs.apiAddress, "api-address", "", ":9520", "api address")
+		&cpArgs.apiAddress, "api-address", "", ":9520", "grpc address")
 	cpCmd.PersistentFlags().IntVarP(
 		&cpArgs.cnInterval, "cn-interval", "", 5, "cn interval")
 	cpCmd.PersistentFlags().IntVarP(
@@ -72,19 +72,19 @@ func launchCpApiServer(wg *sync.WaitGroup, ctx context.Context) {
 		gLogger.Fatal("Create etcd client err: %v", err)
 	}
 
-	opts := []logging.Option{
-		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
-	}
-
 	logger := lib.NewLogger("apiserver")
 
 	cpApi := newCpApiServer(etcdCli, logger)
 
+	opts := []logging.Option{
+		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
+	}
+
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			logging.UnaryServerInterceptor(lib.InterceptorLogger(logger), opts...),
-			lib.SetReqIdInterceptor,
-			lib.ShowReqReplyInterceptor(logger),
+			setReqIdInterceptor,
+			showReqReplyInterceptor(logger),
 		),
 		grpc.ChainStreamInterceptor(
 			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
@@ -101,7 +101,7 @@ func launchCpApiServer(wg *sync.WaitGroup, ctx context.Context) {
 			}
 		}
 	}()
-	pbCpApi.RegisterControlPlaneServer(grpcServer, cpApi)
+	pbcp.RegisterControlPlaneServer(grpcServer, cpApi)
 	if err := grpcServer.Serve(lis); err != nil {
 		gLogger.Fatal("Serve err: %v", err)
 	}

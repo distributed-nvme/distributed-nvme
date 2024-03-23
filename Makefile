@@ -18,7 +18,8 @@ clean:
 .PHONY: compile
 compile:
 	mkdir -p $(OUT_DIR)/linux_amd64/
-	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnv_cp ./cmd/controlplane
+	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnv_controlplane ./cmd/controlplane
+	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnv_nodeagent ./cmd/nodeagent
 	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnv_cli ./cmd/cli
 
 .PHONY: build

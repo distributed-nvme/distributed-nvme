@@ -9,6 +9,7 @@ service DnAgent {
   rpc SyncupSpBe(SyncupSpBeRequest) returns(SyncupSpBeReply) {}
   rpc SyncupDnStream(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
   rpc SyncupSpBeStream(stream SyncupSpBeRequest) returns(stream SyncupSpBeReply) {}
+  rpc GetDevSize(GetDevSizeRequest) returns(GetDevSizeReply) {}
 }
 
 service CnAgent {
@@ -44,6 +45,17 @@ message NvmePortConf {
   uint32 port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
+}
+
+message GetDevSizeRequest {
+  string req_id = 1;
+  string dev_path = 2;
+}
+
+message GetDevSizeReply {
+  string req_id = 1;
+  StatusInfo status_info = 2;
+  uint64 size = 3;
 }
 
 message SpLdId {
