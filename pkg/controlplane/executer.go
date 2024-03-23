@@ -83,7 +83,8 @@ func launchCpApiServer(wg *sync.WaitGroup, ctx context.Context) {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			logging.UnaryServerInterceptor(lib.InterceptorLogger(logger), opts...),
-			cpApiUnaryInterceptor(logger),
+			lib.SetReqIdInterceptor,
+			lib.ShowReqReplyInterceptor(logger),
 		),
 		grpc.ChainStreamInterceptor(
 			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
