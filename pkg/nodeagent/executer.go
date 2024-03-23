@@ -62,7 +62,7 @@ func launchCnAgent() {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			logging.UnaryServerInterceptor(lib.InterceptorLogger(logger), opts...),
-			showReqReplyInterceptor(logger),
+			lib.UnaryShowReqReplyInterceptor(logger),
 		),
 		grpc.ChainStreamInterceptor(
 			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
@@ -95,7 +95,7 @@ func launchDnAgent() {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			logging.UnaryServerInterceptor(lib.InterceptorLogger(logger), opts...),
-			showReqReplyInterceptor(logger),
+			lib.UnaryShowReqReplyInterceptor(logger),
 		),
 		grpc.ChainStreamInterceptor(
 			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
