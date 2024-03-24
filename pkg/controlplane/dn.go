@@ -15,8 +15,8 @@ func (cpas *cpApiServer) CreateDn(ctx context.Context, req *pbcp.CreateDnRequest
 	client, err := pch.getDnAgentClient(req.SockAddr)
 	if err != nil {
 		return &pbcp.CreateDnReply{
-			ReqId: lib.GetReqId(ctx),
 			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId: lib.GetReqId(ctx),
 				ReplyCode: lib.CpApiAgentConnErrCode,
 				ReplyMsg: err.Error(),
 			},
@@ -29,8 +29,8 @@ func (cpas *cpApiServer) CreateDn(ctx context.Context, req *pbcp.CreateDnRequest
 	getDevSizeReply, err := client.GetDevSize(ctx, getDevSizeRequest)
 	if err != nil {
 		return &pbcp.CreateDnReply{
-			ReqId: lib.GetReqId(ctx),
 			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId: lib.GetReqId(ctx),
 				ReplyCode: lib.CpApiAgentGrpcErrCode,
 				ReplyMsg: err.Error(),
 			},
@@ -38,18 +38,18 @@ func (cpas *cpApiServer) CreateDn(ctx context.Context, req *pbcp.CreateDnRequest
 	}
 	if getDevSizeReply.StatusInfo.Code != lib.AgentSucceedCode {
 		return &pbcp.CreateDnReply{
-			ReqId: lib.GetReqId(ctx),
 			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId: lib.GetReqId(ctx),
 				ReplyCode: lib.CpApiAgentReplyErrCode,
 				ReplyMsg: getDevSizeReply.StatusInfo.Msg,
 			},
 		}, nil
 	}
 	return &pbcp.CreateDnReply{
-		ReqId: lib.GetReqId(ctx),
 		ReplyInfo: &pbcp.ReplyInfo{
+			ReqId: lib.GetReqId(ctx),
 			ReplyCode: lib.CpApiSucceedCode,
-			ReplyMsg: lib.CpApiSuccceedMsg,
+			ReplyMsg: lib.CpApiSucceedMsg,
 		},
 	}, nil
 }

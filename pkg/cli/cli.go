@@ -34,6 +34,7 @@ func init() {
 	rootCmd.PersistentFlags().IntVarP(
 		&rootArgs.cpTimeout, "cp-timeout", "", 30, "control plane timeout")
 	rootCmd.AddCommand(dnCmd)
+	rootCmd.AddCommand(clusterCmd)
 }
 
 func Execute() {

@@ -5,6 +5,12 @@ option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/cont
 package controlplaneapi;
 
 service ControlPlane {
+  rpc CreateCluster(CreateClusterRequest) returns(CreateClusterReply) {}
+  rpc DeleteCluster(DeleteClusterRequest) returns(DeleteClusterReply) {}
+  // rpc ModifyCluster(ModifyClusterRequest) returns(ModifyClusterReply) {}
+  // rpc ListCluster(ListClusterRequest) returns(ListClusterReply) {}
+  rpc GetCluster(GetClusterRequest) returns(GetClusterReply) {}
+
   rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
   rpc DeleteDn(DeleteDnRequest) returns(DeleteDnReply) {}
   rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
@@ -73,8 +79,30 @@ service ControlPlane {
 }
 
 message ReplyInfo {
-  uint32 reply_code = 1;
-  string reply_msg = 2;
+  string req_id = 1;
+  uint32 reply_code = 2;
+  string reply_msg = 3;
+}
+
+message CreateClusterRequest {
+}
+
+message CreateClusterReply {
+  ReplyInfo reply_info = 1;
+}
+
+message DeleteClusterRequest {
+}
+
+message DeleteClusterReply {
+  ReplyInfo reply_info = 1;
+}
+
+message GetClusterRequest {
+}
+
+message GetClusterReply {
+  ReplyInfo reply_info = 1;
 }
 
 message CreateDnRequest {
@@ -83,8 +111,7 @@ message CreateDnRequest {
 }
 
 message CreateDnReply {
-  string req_id = 1;
-  ReplyInfo reply_info = 2;
+  ReplyInfo reply_info = 1;
 }
 
 message DeleteDnRequest {
@@ -92,8 +119,7 @@ message DeleteDnRequest {
 }
 
 message DeleteDnReply {
-  string req_id = 1;
-  ReplyInfo reply_info = 2;
+  ReplyInfo reply_info = 1;
 }
 
 message ModifyDnRequest {
@@ -101,8 +127,7 @@ message ModifyDnRequest {
 }
 
 message ModifyDnReply {
-  string req_id = 1;
-  ReplyInfo reply_info = 2;
+  ReplyInfo reply_info = 1;
 }
 
 message ListDnRequest {
@@ -110,8 +135,7 @@ message ListDnRequest {
 }
 
 message ListDnReply {
-  string req_id = 1;
-  ReplyInfo reply_info = 2;
+  ReplyInfo reply_info = 1;
 }
 
 message GetDnRequest {
@@ -119,6 +143,5 @@ message GetDnRequest {
 }
 
 message GetDnReply {
-  string req_id = 1;
-  ReplyInfo reply_info = 2;
+  ReplyInfo reply_info = 1;
 }

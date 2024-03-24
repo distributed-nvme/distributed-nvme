@@ -4,6 +4,46 @@ option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/data
 
 package dataschema;
 
+message DnSummary {
+  uint32 total_dn_cnt = 1;
+  uint32 total_data_extent_cnt = 2;
+  uint32 free_data_extent_cnt = 3;
+  uint32 total_meta_extent_cnt = 4;
+  uint32 free_meta_extent_cnt = 5;
+  uint64 total_qos = 6;
+  uint64 free_qos = 7;
+  uint32 total_ld_cnt = 8;
+}
+
+message CnSummary {
+  uint32 total_cn_cnt = 1;
+  uint32 total_qos = 2;
+  uint32 free_qos = 3;
+  uint32 total_active_cntlr_cnt = 4;
+  uint32 total_standby_cntlr_cnt = 5;
+}
+
+message SpSummary {
+  uint32 total_sp_cnt = 1;
+  uint32 total_ss_cnt = 2;
+  uint32 total_ns_cnt = 3;
+  uint32 total_active_cntlr_cnt = 4;
+  uint32 total_standby_cntlr_cnt = 5;
+  uint32 total_snap_cnt =6;
+  uint32 total_leg_cnt = 7;
+  uint32 total_grp_cnt = 8;
+  uint32 total_ld_cnt = 9;
+  uint32 total_data_extent_cnt = 10;
+  uint32 total_meta_extent_cnt = 11;
+  uint32 total_mt_cnt = 12;
+  uint32 total_it_cnt = 13;
+}
+
+message Tag {
+  string name = 1;
+  string value = 2;
+}
+
 message QosFields {
   uint64 rbps = 1;
   uint64 wbps = 2;
@@ -163,44 +203,6 @@ message NextBit {
 message ExtentConf {
   bytes max_cont_extent_cnt_per_set = 1;
   bytes bitmap = 2;
-}
-
-message ClusterConf {
-  string name = 1;
-  uint32 data_extent_size_shift = 2;
-  uint32 data_extent_cnt_shift = 3;
-  uint32 meta_extent_size_shift = 4;
-  uint32 meat_extent_cnt_shift = 5;
-  uint32 extent_ratio = 6;
-  QosFields qos_unit = 7;
-}
-
-message DnGlobalConf {
-  uint64 global_counter = 1;
-  uint32 total_dn_cnt = 2;
-  uint32 full_extent_dn_cnt = 3;
-  uint32 data_extent_cnt_total = 4;
-  uint32 data_extent_cnt_free = 5;
-  uint32 meta_extent_cnt_total = 6;
-  uint32 meta_extent_cnt_free = 7;
-  uint64 qos_total = 8;
-  uint64 qos_free = 9;
-  bytes shard_bucket = 10;
-  NextBit port_next_bit = 11;
-}
-
-message CnGlobalConf {
-  uint64 global_counter = 1;
-  uint32 total_cn_cnt = 2;
-  uint64 qos_total = 3;
-  uint64 qos_free = 4;
-}
-
-message SpGlobalConf {
-  uint64 global_counter = 1;
-  uint32 total_sp_cnt = 2;
-  uint32 total_ss_cnt = 3;
-  bytes shard_bucket = 4;
 }
 
 message DnCapacity {
@@ -436,39 +438,91 @@ message SpConf {
   ExtendPolicy extend_policy = 8;
 }
 
-// {dnv_prefix}/version/dn/{dn_id}
-// {dnv_prefix}/version/cn/{cn_id}
-// {dnv_prefix}/version/da/{da_id}
-message Version {
-  uint64 version = 1;
+// /{dnv_prefix}/cluster
+message Cluster {
+  uint32 data_extent_size_shift = 1;
+  uint32 data_extent_cnt_shift = 2;
+  uint32 meta_extent_size_shift = 3;
+  uint32 meta_extent_cnt_shift = 4;
+  uint32 extent_ratio = 5;
+  QosFields qos_unit = 6;
 }
 
-// {dnv_prefix}/dn/{dn_id}
+// /{dnv_prefix}/global_summary
+message GlobalSummary {
+  DnSummary dn_summary = 1;
+  CnSummary cn_summary = 2;
+  SpSummary sp_summary = 3;
+}
+
+// /{dnv_prefix}/dn_global
+message DnGlobal {
+  uint64 global_counter = 1;
+  uint32 full_extent_dn_cnt = 2;
+  repeated uint32 shard_cnt_list = 3;
+  NextBit port_next_bit = 4;
+}
+
+// /{dnv_prefix}/cn_global
+message CnGlobal {
+  uint64 global_counter = 1;
+  repeated uint32 shard_cnt_list = 2;
+}
+
+// /{dnv_prefix}/sp_global
+message SpGlobal {
+  uint64 global_counter = 1;
+  repeated uint32 shard_cnt_list = 2;
+}
+
+// /{dnv_prefix}/dn/{dn_id}
 message DiskNode {
-  DnConf dn_conf = 1;
-  DnInfo dn_info = 2;
-  repeated uint64 sp_id_list = 3;
+  uint64 version = 1;
+  repeated Tag tag_list = 2;
+  DnConf dn_conf = 3;
+  DnInfo dn_info = 4;
+  repeated uint64 sp_id_list = 5;
 }
 
-// {dnv_prefix}/cn/{cn_id}
+// /{dnv_prefix}/cn/{cn_id}
 message ControllerNode {
-  CnConf cn_conf = 1;
-  CnInfo cn_info = 2;
-  repeated uint64 sp_id_list = 3;
+  uint64 version = 1;
+  repeated Tag tag_list = 2;
+  CnConf cn_conf = 3;
+  CnInfo cn_info = 4;
+  repeated uint64 sp_id_list = 5;
 }
 
-// {dnv_prefix}/sp/{sp_id}
+// /{dnv_prefix}/sp/{sp_id}
 message StoragePool {
-  SpConf sp_conf = 1;
-  repeated SubSystem ss_list = 2;
-  repeated Snapshot snap_list = 3;
-  repeated Leg leg_list = 4;
-  repeated Controller cntlr_list = 5;
-  repeated MovingTask mt_list = 6;
-  repeated ImportingTask it_list = 7;
+  uint64 version = 1;
+  repeated Tag tag_list = 2;
+  SpConf sp_conf = 3;
+  repeated SubSystem ss_list = 4;
+  repeated Snapshot snap_list = 5;
+  repeated Leg leg_list = 6;
+  repeated Controller cntlr_list = 7;
+  repeated MovingTask mt_list = 8;
+  repeated ImportingTask it_list = 9;
 }
 
-// {dnv_prefix}/name_to_id/{name}
+// /{dnv_prefix}/name_to_id/{name}
 message NameToId {
   uint64 res_id = 1;
 }
+
+// /{dnv_prefix}/tag_name/{tag_name}
+message TagName {
+  repeated string value_list = 1;
+}
+
+//{dnv_prefix}/tag_value/{tag_name}/{tag_value}
+message TagValue {
+  DnSummary dn_summary = 1;
+  CnSummary cn_summary = 2;
+  SpSummary sp_summary = 3;
+  repeated string dn_id_list = 4;
+  repeated string cn_id_list = 5;
+  repeated string sp_id_list = 6;
+}
+

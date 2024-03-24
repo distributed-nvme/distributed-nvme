@@ -13,13 +13,19 @@ type cpApiServer struct {
 	pbCpApi.UnimplementedControlPlaneServer
 	etcdCli *clientv3.Client
 	logger *lib.Logger
+	kf *lib.KeyFmt
 	agentTimeout time.Duration
 }
 
-func newCpApiServer(etcdCli *clientv3.Client, logger *lib.Logger) *cpApiServer {
+func newCpApiServer(
+	etcdCli *clientv3.Client,
+	logger *lib.Logger,
+	prefix string,
+) *cpApiServer {
 	return &cpApiServer{
 		etcdCli: etcdCli,
 		logger: logger,
-		agentTimeout: time.Duration(lib.DefaultAgentTimeoutSecond)*time.Second,
+		kf: lib.NewKeyFmt(prefix),
+		agentTimeout: time.Duration(lib.AgentTimeoutSecondDefault)*time.Second,
 	}
 }

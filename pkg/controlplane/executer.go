@@ -74,7 +74,7 @@ func launchCpApiServer(wg *sync.WaitGroup, ctx context.Context) {
 
 	logger := lib.NewLogger("apiserver")
 
-	cpApi := newCpApiServer(etcdCli, logger)
+	cpApi := newCpApiServer(etcdCli, logger, lib.PrefixDefault)
 
 	opts := []logging.Option{
 		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),

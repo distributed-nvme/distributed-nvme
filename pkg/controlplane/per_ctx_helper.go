@@ -2,9 +2,11 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
+	"go.etcd.io/etcd/client/v3/concurrency"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeapi"
@@ -18,6 +20,7 @@ type dnAgentClient struct {
 type perCtxHelper struct {
 	ctx context.Context
 	cpas *cpApiServer
+	logger *lib.Logger
 	dacMap map[string]*dnAgentClient
 }
 
@@ -35,14 +38,14 @@ func (pch *perCtxHelper) getDnAgentClient(sockAddr string) (pbnd.DnAgentClient, 
 		grpc.WithBlock(),
 		grpc.WithTimeout(pch.cpas.agentTimeout),
 		grpc.WithChainUnaryInterceptor(
-			logging.UnaryClientInterceptor(lib.InterceptorLogger(pch.cpas.logger), opts...),
+			logging.UnaryClientInterceptor(lib.InterceptorLogger(pch.logger), opts...),
 		),
 		grpc.WithChainStreamInterceptor(
-			logging.StreamClientInterceptor(lib.InterceptorLogger(pch.cpas.logger), opts...),
+			logging.StreamClientInterceptor(lib.InterceptorLogger(pch.logger), opts...),
 		),
 	)
 	if err != nil {
-		pch.cpas.logger.Warning("Get conn err: %s %v", sockAddr, err)
+		pch.logger.Warning("Get conn err: %s %v", sockAddr, err)
 		return nil, err
 	}
 	c := pbnd.NewDnAgentClient(conn)
@@ -52,6 +55,31 @@ func (pch *perCtxHelper) getDnAgentClient(sockAddr string) (pbnd.DnAgentClient, 
 	}
 	pch.dacMap[sockAddr] = dac
 	return dac.c, nil
+}
+
+func (pch *perCtxHelper) runStm(
+	apply func(stm concurrency.STM) error,
+	name string,
+) error {
+	cnt := 0
+	applyWrapper := func(stm concurrency.STM) error {
+		cnt++
+		pch.logger.Info("stm apply: %s %d", name, cnt)
+		err := apply(stm)
+		if err != nil {
+			pch.logger.Warning("stm apply err: %s %v", name, err)
+		}
+		return err
+	}
+	_, err := concurrency.NewSTM(
+		pch.cpas.etcdCli,
+		applyWrapper,
+		concurrency.WithAbortContext(pch.ctx),
+	)
+	if err != nil {
+		pch.logger.Warning("stm create err: %s %v", name, err)
+	}
+	return err
 }
 
 func (pch *perCtxHelper) close() {
@@ -64,6 +92,7 @@ func newPerCtxHelper(ctx context.Context, cpas *cpApiServer) *perCtxHelper {
 	return &perCtxHelper{
 		ctx: ctx,
 		cpas: cpas,
+		logger: lib.NewLogger(fmt.Sprintf("apiserver-%s", lib.GetReqId(ctx))),
 		dacMap: make(map[string]*dnAgentClient),
 	}
 }
