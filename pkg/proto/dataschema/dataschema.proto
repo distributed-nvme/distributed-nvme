@@ -444,7 +444,7 @@ message Cluster {
   uint32 data_extent_cnt_shift = 2;
   uint32 meta_extent_size_shift = 3;
   uint32 meta_extent_cnt_shift = 4;
-  uint32 extent_ratio = 5;
+  uint32 extent_ratio_shift = 5;
   QosFields qos_unit = 6;
 }
 

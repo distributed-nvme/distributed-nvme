@@ -84,6 +84,22 @@ message ReplyInfo {
   string reply_msg = 3;
 }
 
+message QosFields {
+  uint64 rbps = 1;
+  uint64 wbps = 2;
+  uint64 riops = 3;
+  uint64 wiops = 4;
+}
+
+message Cluster {
+  uint32 data_extent_size_shift = 1;
+  uint32 data_extent_cnt_shift = 2;
+  uint32 meta_extent_size_shift = 3;
+  uint32 meta_extent_cnt_shift = 4;
+  uint32 extent_ratio_shift = 5;
+  QosFields qos_unit = 6;
+}
+
 message CreateClusterRequest {
 }
 
@@ -103,6 +119,7 @@ message GetClusterRequest {
 
 message GetClusterReply {
   ReplyInfo reply_info = 1;
+  Cluster cluster = 2;
 }
 
 message CreateDnRequest {

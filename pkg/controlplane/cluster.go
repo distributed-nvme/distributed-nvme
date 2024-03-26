@@ -23,7 +23,7 @@ func (cpas *cpApiServer) CreateCluster(
 		DataExtentCntShift: lib.DataExtentCntShiftDefault,
 		MetaExtentSizeShift: lib.MetaExtentSizeShiftDefault,
 		MetaExtentCntShift: lib.MetaExtentCntShiftDefault,
-		ExtentRatio: lib.ExtentRatioShiftDefault,
+		ExtentRatioShift: lib.ExtentRatioShiftDefault,
 	}
 	clusterEntityKey := cpas.kf.ClusterEntityKey()
 	clusterEntityVal, err := proto.Marshal(cluster)
@@ -39,83 +39,64 @@ func (cpas *cpApiServer) CreateCluster(
 	}
 	clusterEntityValStr := string(clusterEntityVal)
 
-	// globalSummary := &pbds.GlobalSummary{
-	// 	DnSummary: &pbds.DnSummary{},
-	// 	CnSummary: &pbds.CnSummary{},
-	// 	SpSummary: &pbds.SpSummary{},
-	// }
-	// globalSummaryEntityKey := cpas.kf.GlobalSummaryEntityKey()
-	// globalSummaryEntityVal, err := proto.Marshal(globalSummary)
-	// if err != nil {
-	// 	pch.logger.Error("Marshal globalSummary err: %v %v", globalSummary, err)
-	// 	return &pbcp.CreateClusterReply{
-	// 		ReplyInfo: &pbcp.ReplyInfo{
-	// 			ReqId:     lib.GetReqId(ctx),
-	// 			ReplyCode: lib.CpApiInternalErrCode,
-	// 			ReplyMsg:  err.Error(),
-	// 		},
-	// 	}, nil
-	// }
-	// globalSummaryEntityValStr := string(globalSummaryEntityVal)
+	dnGlobal := &pbds.DnGlobal{
+		GlobalCounter: 0,
+		FullExtentDnCnt: 0,
+		ShardCntList: make([]uint32, lib.ShardSize),
+		PortNextBit: &pbds.NextBit{
+			CurrIdx: 0,
+			Bitmap: make([]byte, lib.DnPortSize / 8),
+		},
+	}
+	dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
+	dnGlobalEntityVal, err := proto.Marshal(dnGlobal)
+	if err != nil {
+		pch.logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
+		return &pbcp.CreateClusterReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId:     lib.GetReqId(ctx),
+				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	dnGlobalEntityValStr := string(dnGlobalEntityVal)
 
-	// dnGlobal := &bpds.DnGlobal{
-	// 	GlobalCounter: 0,
-	// 	FullExtentDnCnt: 0,
-	// 	ShardCntList: make([]uint32, lib.ShardSize),
-	// 	PortNextBit: &pbds.NextBit{
-	// 		CurrIdx: 0,
-	// 		Bitmap: make([]byte, lib.DnPortSize / 8),
-	// 	}
-	// }
-	// dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
-	// dnGlobalEntityVal, err := proto.Marshal(dnGlobal)
-	// if err != nil {
-	// 	pch.logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
-	// 	return &pbcp.CreateClusterReply{
-	// 		ReplyInfo: &pbcp.ReplyInfo{
-	// 			ReqId:     lib.GetReqId(ctx),
-	// 			ReplyCode: lib.CpApiInternalErrCode,
-	// 			ReplyMsg:  err.Error(),
-	// 		},
-	// 	}, nil
-	// }
-	// dnGlobalEntityValStr := string(dnGlobalEntityVal)
+	cnGlobal := &pbds.CnGlobal{
+		GlobalCounter: 0,
+		ShardCntList: make([]uint32, lib.ShardSize),
+	}
+	cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
+	cnGlobalEntityVal, err := proto.Marshal(cnGlobal)
+	if err != nil {
+		pch.logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
+		return &pbcp.CreateClusterReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId:     lib.GetReqId(ctx),
+				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	cnGlobalEntityValStr := string(cnGlobalEntityVal)
 
-	// cnGlobal := &pbds.CnGlobal{
-	// 	GlobalCounter: 0,
-	// 	ShardCntList: make([]uint32, lib.ShardSize),
-	// }
-	// cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
-	// cnGlobalEntityVal, err := proto.Marshal(cnGlobal)
-	// if err != nil {
-	// 	pch.logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
-	// 	return &pbcp.CreateClusterReply{
-	// 		ReplyInfo: &pbcp.ReplyInfo{
-	// 			ReqId:     lib.GetReqId(ctx),
-	// 			ReplyCode: lib.CpApiInternalErrCode,
-	// 			ReplyMsg:  err.Error(),
-	// 		},
-	// 	}, nil
-	// }
-	// cnGlobalEntityValStr := string(cnGlobalEntityVal)
-
-	// spGlobal := &pbds.SpGlobal{
-	// 	GlobalCounter: 0,
-	// 	ShardCntList: make([]uint32, lib.ShardSize),
-	// }
-	// spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
-	// spGlobalEntityVal, err := proto.Marshal(spGlobal)
-	// if err != nil {
-	// 	pch.logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
-	// 	return &pbcp.CreateClusterReply{
-	// 		ReplyInfo: &pbcp.ReplyInfo{
-	// 			ReqId:     lib.GetReqId(ctx),
-	// 			ReplyCode: lib.CpApiInternalErrCode,
-	// 			ReplyMsg:  err.Error(),
-	// 		},
-	// 	}, nil
-	// }
-	// spGlobalEntityValStr := string(spGlobalEntityVal)
+	spGlobal := &pbds.SpGlobal{
+		GlobalCounter: 0,
+		ShardCntList: make([]uint32, lib.ShardSize),
+	}
+	spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
+	spGlobalEntityVal, err := proto.Marshal(spGlobal)
+	if err != nil {
+		pch.logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
+		return &pbcp.CreateClusterReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReqId:     lib.GetReqId(ctx),
+				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	spGlobalEntityValStr := string(spGlobalEntityVal)
 
 	apply := func(stm concurrency.STM) error {
 		if val := []byte(stm.Get(clusterEntityKey)); len(val) != 0 {
@@ -125,6 +106,31 @@ func (cpas *cpApiServer) CreateCluster(
 			}
 		}
 		stm.Put(clusterEntityKey, clusterEntityValStr)
+
+		if val := []byte(stm.Get(dnGlobalEntityKey)); len(val) != 0 {
+			return &cpStmError{
+				code: lib.CpApiDupResErrCode,
+				msg:  dnGlobalEntityKey,
+			}
+		}
+		stm.Put(dnGlobalEntityKey, dnGlobalEntityValStr)
+
+		if val := []byte(stm.Get(cnGlobalEntityKey)); len(val) != 0 {
+			return &cpStmError{
+				code: lib.CpApiDupResErrCode,
+				msg:  cnGlobalEntityKey,
+			}
+		}
+		stm.Put(cnGlobalEntityKey, cnGlobalEntityValStr)
+
+		if val := []byte(stm.Get(spGlobalEntityKey)); len(val) != 0 {
+			return &cpStmError{
+				code: lib.CpApiDupResErrCode,
+				msg:  spGlobalEntityKey,
+			}
+		}
+		stm.Put(spGlobalEntityKey, spGlobalEntityValStr)
+
 		return nil
 	}
 
@@ -166,10 +172,22 @@ func (cpas *cpApiServer) DeleteCluster(
 	defer pch.close()
 
 	clusterEntityKey := cpas.kf.ClusterEntityKey()
+	dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
+	cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
+	spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
 
 	apply := func(stm concurrency.STM) error {
 		if len(stm.Get(clusterEntityKey)) > 0 {
 			stm.Del(clusterEntityKey)
+		}
+		if len(stm.Get(dnGlobalEntityKey)) > 0 {
+			stm.Del(dnGlobalEntityKey)
+		}
+		if len(stm.Get(cnGlobalEntityKey)) > 0 {
+			stm.Del(cnGlobalEntityKey)
+		}
+		if len(stm.Get(spGlobalEntityKey)) > 0 {
+			stm.Del(spGlobalEntityKey)
 		}
 		return nil
 	}
@@ -254,6 +272,19 @@ func (cpas *cpApiServer) GetCluster(
 			ReqId:     lib.GetReqId(ctx),
 			ReplyCode: lib.CpApiSucceedCode,
 			ReplyMsg:  lib.CpApiSucceedMsg,
+		},
+		Cluster: &pbcp.Cluster{
+			DataExtentSizeShift: cluster.DataExtentSizeShift,
+			DataExtentCntShift: cluster.DataExtentCntShift,
+			MetaExtentSizeShift: cluster.MetaExtentSizeShift,
+			MetaExtentCntShift: cluster.MetaExtentCntShift,
+			ExtentRatioShift: cluster.ExtentRatioShift,
+			QosUnit: &pbcp.QosFields{
+				Rbps: cluster.QosUnit.Rbps,
+				Wbps: cluster.QosUnit.Wbps,
+				Riops: cluster.QosUnit.Riops,
+				Wiops: cluster.QosUnit.Wiops,
+			},
 		},
 	}, nil
 }
