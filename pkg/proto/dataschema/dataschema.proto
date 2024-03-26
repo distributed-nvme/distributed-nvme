@@ -191,8 +191,9 @@ message RedundancyInfo {
 }
 
 message StatusInfo {
-  uint32 status_code = 1;
-  string status_msg = 2;
+  uint32 code = 1;
+  string msg = 2;
+  uint64 timestamp = 3;
 }
 
 message NextBit {
@@ -201,8 +202,9 @@ message NextBit {
 }
 
 message ExtentConf {
-  bytes max_cont_extent_cnt_per_set = 1;
-  bytes bitmap = 2;
+  uint64 baseAddr = 1;
+  repeated uint32 extent_set_bucket = 2;
+  bytes bitmap = 3;
 }
 
 message DnCapacity {
@@ -210,7 +212,8 @@ message DnCapacity {
   uint32 free_ld_cnt = 2;
   uint64 total_qos = 3;
   uint64 free_qos = 4;
-  uint32 max_cont_extent_cnt = 5;
+  uint32 max_extent_set_size = 5;
+  uint32 total_extent_cnt = 6;
 }
 
 message CnCapacity {
@@ -223,11 +226,10 @@ message CnCapacity {
 message DnConf {
   string sock_addr = 1;
   bool online = 2;
-  string location = 3;
-  string dev_path = 4;
-  NvmePortConf nvme_port_conf = 5;
-  DnCapacity dn_capacity = 6;
-  ExtentConf extent_conf = 7;
+  string dev_path = 3;
+  NvmePortConf nvme_port_conf = 4;
+  DnCapacity dn_capacity = 5;
+  ExtentConf extent_conf = 6;
 }
 
 message DnInfo {
@@ -441,14 +443,13 @@ message SpConf {
 // /{dnv_prefix}/cluster
 message Cluster {
   uint32 data_extent_size_shift = 1;
-  uint32 data_extent_cnt_shift = 2;
+  uint32 data_extent_per_set_shift = 2;
   uint32 meta_extent_size_shift = 3;
-  uint32 meta_extent_cnt_shift = 4;
+  uint32 meta_extent_per_set_shift = 4;
   uint32 extent_ratio_shift = 5;
   QosFields qos_unit = 6;
 }
 
-// /{dnv_prefix}/global_summary
 message GlobalSummary {
   DnSummary dn_summary = 1;
   CnSummary cn_summary = 2;
@@ -458,21 +459,20 @@ message GlobalSummary {
 // /{dnv_prefix}/dn_global
 message DnGlobal {
   uint64 global_counter = 1;
-  uint32 full_extent_dn_cnt = 2;
-  repeated uint32 shard_cnt_list = 3;
-  NextBit port_next_bit = 4;
+  repeated uint32 extent_set_bucket = 2;
+  repeated uint32 shard_bucket = 3;
 }
 
 // /{dnv_prefix}/cn_global
 message CnGlobal {
   uint64 global_counter = 1;
-  repeated uint32 shard_cnt_list = 2;
+  repeated uint32 shard_bucket = 2;
 }
 
 // /{dnv_prefix}/sp_global
 message SpGlobal {
   uint64 global_counter = 1;
-  repeated uint32 shard_cnt_list = 2;
+  repeated uint32 shard_bucket = 2;
 }
 
 // /{dnv_prefix}/dn/{dn_id}

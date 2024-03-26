@@ -5,7 +5,9 @@ const (
 
 	AgentSucceedCode = 0
 	AgentSucceedMsg = "succeed"
-	AgentOsCmdErrCode = 1
+	AgentUninitCode = 1
+	AgentUnreachableCode = 2
+	AgentOsCmdErrCode = 3
 
 	CpApiSucceedCode = 0
 	CpApiSucceedMsg = "succeed"
@@ -21,14 +23,14 @@ const (
 	DataExtentSizeShiftMin = 20
 	DataExtentSizeShiftMax = 40
 	DataExtentSizeShiftDefault = 30
-	DataExtentCntShiftMax = 15
-	DataExtentCntShiftDefault = 9
+	DataExtentPerSetShiftMax = 15
+	DataExtentPerSetShiftDefault = 9
 
 	MetaExtentSizeShiftMin = 12
 	MetaExtentSizeShiftMax = 34
 	MetaExtentSizeShiftDefault = 20
-	MetaExtentCntShiftMax = 13
-	MetaExtentCntShiftDefault = 9
+	MetaExtentPerSetShiftMax = 13
+	MetaExtentPerSetShiftDefault = 9
 
 	ExtentSetCntShiftMax = 7
 

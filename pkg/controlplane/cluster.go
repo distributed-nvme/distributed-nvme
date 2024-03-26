@@ -20,9 +20,9 @@ func (cpas *cpApiServer) CreateCluster(
 
 	cluster := &pbds.Cluster{
 		DataExtentSizeShift: lib.DataExtentSizeShiftDefault,
-		DataExtentCntShift: lib.DataExtentCntShiftDefault,
+		DataExtentPerSetShift: lib.DataExtentPerSetShiftDefault,
 		MetaExtentSizeShift: lib.MetaExtentSizeShiftDefault,
-		MetaExtentCntShift: lib.MetaExtentCntShiftDefault,
+		MetaExtentPerSetShift: lib.MetaExtentPerSetShiftDefault,
 		ExtentRatioShift: lib.ExtentRatioShiftDefault,
 	}
 	clusterEntityKey := cpas.kf.ClusterEntityKey()
@@ -41,12 +41,8 @@ func (cpas *cpApiServer) CreateCluster(
 
 	dnGlobal := &pbds.DnGlobal{
 		GlobalCounter: 0,
-		FullExtentDnCnt: 0,
-		ShardCntList: make([]uint32, lib.ShardSize),
-		PortNextBit: &pbds.NextBit{
-			CurrIdx: 0,
-			Bitmap: make([]byte, lib.DnPortSize / 8),
-		},
+		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
+		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
 	dnGlobalEntityVal, err := proto.Marshal(dnGlobal)
@@ -64,7 +60,7 @@ func (cpas *cpApiServer) CreateCluster(
 
 	cnGlobal := &pbds.CnGlobal{
 		GlobalCounter: 0,
-		ShardCntList: make([]uint32, lib.ShardSize),
+		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
 	cnGlobalEntityVal, err := proto.Marshal(cnGlobal)
@@ -82,7 +78,7 @@ func (cpas *cpApiServer) CreateCluster(
 
 	spGlobal := &pbds.SpGlobal{
 		GlobalCounter: 0,
-		ShardCntList: make([]uint32, lib.ShardSize),
+		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
 	spGlobalEntityVal, err := proto.Marshal(spGlobal)
@@ -275,9 +271,9 @@ func (cpas *cpApiServer) GetCluster(
 		},
 		Cluster: &pbcp.Cluster{
 			DataExtentSizeShift: cluster.DataExtentSizeShift,
-			DataExtentCntShift: cluster.DataExtentCntShift,
+			DataExtentPerSetShift: cluster.DataExtentPerSetShift,
 			MetaExtentSizeShift: cluster.MetaExtentSizeShift,
-			MetaExtentCntShift: cluster.MetaExtentCntShift,
+			MetaExtentPerSetShift: cluster.MetaExtentPerSetShift,
 			ExtentRatioShift: cluster.ExtentRatioShift,
 			QosUnit: &pbcp.QosFields{
 				Rbps: cluster.QosUnit.Rbps,

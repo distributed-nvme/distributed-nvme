@@ -45,6 +45,13 @@ func (cpas *cpApiServer) CreateDn(ctx context.Context, req *pbcp.CreateDnRequest
 			},
 		}, nil
 	}
+
+	cluster, _ := pch.getCluster()
+	metaSize := getDevSizeReply.Size >> cluster.ExtentRatioShift
+	dataSize := getDevSizeReply.Size - metaSize
+	_, _, _, _ = extentInitCalc(metaSize, cluster.MetaExtentSizeShift, cluster.MetaExtentPerSetShift)
+	_, _, _, _ = extentInitCalc(dataSize, cluster.DataExtentSizeShift, cluster.DataExtentPerSetShift)
+
 	return &pbcp.CreateDnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReqId: lib.GetReqId(ctx),

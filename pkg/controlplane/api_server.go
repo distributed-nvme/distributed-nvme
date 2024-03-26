@@ -6,15 +6,18 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbCpApi "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
+	pbds "github.com/distributed-nvme/distributed-nvme/pkg/proto/dataschema"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
 )
 
 type cpApiServer struct {
-	pbCpApi.UnimplementedControlPlaneServer
+	pbcp.UnimplementedControlPlaneServer
 	etcdCli *clientv3.Client
 	logger *lib.Logger
 	kf *lib.KeyFmt
 	agentTimeout time.Duration
+	cluster_init bool
+	cluster pbds.Cluster
 }
 
 func newCpApiServer(
@@ -27,5 +30,6 @@ func newCpApiServer(
 		logger: logger,
 		kf: lib.NewKeyFmt(prefix),
 		agentTimeout: time.Duration(lib.AgentTimeoutSecondDefault)*time.Second,
+		cluster_init: false,
 	}
 }

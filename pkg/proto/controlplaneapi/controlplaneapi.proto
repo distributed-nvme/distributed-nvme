@@ -91,11 +91,34 @@ message QosFields {
   uint64 wiops = 4;
 }
 
+enum NvmeSeqCh {
+  NVME_SEQ_CH_NOT_SPECIFIED = 0;
+  NVME_SEQ_CH_REQUIRED = 1;
+  NVME_SEQ_CH_NOT_REQUIRED = 2;
+}
+
+message NvmeTReq {
+  NvmeSeqCh seq_ch = 1;
+}
+
+message NvmeListener {
+  string tr_type = 1;
+  string adr_fam = 2;
+  string tr_addr = 3;
+  string tr_svc_id = 4;
+}
+
+message NvmePortConf {
+  uint32 port_num = 1;
+  NvmeListener nvme_listener = 2;
+  NvmeTReq tr_eq = 3;
+}
+
 message Cluster {
   uint32 data_extent_size_shift = 1;
-  uint32 data_extent_cnt_shift = 2;
+  uint32 data_extent_per_set_shift = 2;
   uint32 meta_extent_size_shift = 3;
-  uint32 meta_extent_cnt_shift = 4;
+  uint32 meta_extent_per_set_shift = 4;
   uint32 extent_ratio_shift = 5;
   QosFields qos_unit = 6;
 }
@@ -122,9 +145,16 @@ message GetClusterReply {
   Cluster cluster = 2;
 }
 
+message DiskNode {
+  string sock_addr = 1;
+  bool online = 2;
+  string dev_path = 3;
+}
+
 message CreateDnRequest {
   string sock_addr = 1;
   string dev_path = 2;
+  NvmePortConf port_conf = 3;
 }
 
 message CreateDnReply {

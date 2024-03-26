@@ -22,6 +22,7 @@ service CnAgent {
 message StatusInfo {
   uint32 code = 1;
   string msg = 2;
+  uint64 timestamp = 3;
 }
 
 enum NvmeSeqCh {

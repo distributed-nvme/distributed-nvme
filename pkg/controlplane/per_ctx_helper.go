@@ -5,10 +5,12 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	"go.etcd.io/etcd/client/v3/concurrency"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	pbds "github.com/distributed-nvme/distributed-nvme/pkg/proto/dataschema"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeapi"
 )
 
@@ -80,6 +82,25 @@ func (pch *perCtxHelper) runStm(
 		pch.logger.Warning("stm create err: %s %v", name, err)
 	}
 	return err
+}
+
+func (pch *perCtxHelper) getCluster() (*pbds.Cluster,error) {
+	if !pch.cpas.cluster_init {
+		clusterEntityKey := pch.cpas.kf.ClusterEntityKey()
+		resp, err := pch.cpas.etcdCli.Get(pch.ctx, clusterEntityKey)
+		if err != nil {
+			return nil, err
+		}
+		if len(resp.Kvs) != 1 {
+			return nil, fmt.Errorf("Invalid cluster entity cnt: %d", len(resp.Kvs))
+		}
+		err = proto.Unmarshal(resp.Kvs[0].Value, &pch.cpas.cluster)
+		if err != nil {
+			return nil, err
+		}
+		pch.cpas.cluster_init = true
+	}
+	return &pch.cpas.cluster, nil
 }
 
 func (pch *perCtxHelper) close() {
