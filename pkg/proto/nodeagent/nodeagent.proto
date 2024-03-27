@@ -1,22 +1,32 @@
 syntax = "proto3";
 
-option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeapi";
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent";
 
-package nodeapi;
+package nodeagent;
 
-service DnAgent {
+service DiskNodeAgent {
   rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
-  rpc SyncupSpBe(SyncupSpBeRequest) returns(SyncupSpBeReply) {}
+  rpc SyncupSpBe(SyncupSpDnRequest) returns(SyncupSpDnReply) {}
   rpc SyncupDnStream(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
-  rpc SyncupSpBeStream(stream SyncupSpBeRequest) returns(stream SyncupSpBeReply) {}
+  rpc SyncupSpBeStream(stream SyncupSpDnRequest) returns(stream SyncupSpDnReply) {}
   rpc GetDevSize(GetDevSizeRequest) returns(GetDevSizeReply) {}
 }
 
-service CnAgent {
+service ControllerNodeAgent {
   rpc SyncupCn(SyncupCnRequest) returns(SyncupCnReply) {}
-  rpc SyncupSpFe(SyncupSpFeRequest) returns(SyncupSpFeReply) {}
+  rpc SyncupSpFe(SyncupSpCnRequest) returns(SyncupSpCnReply) {}
   rpc SyncupCnStream(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
-  rpc SyncupSpFeStream(stream SyncupSpFeRequest) returns(stream SyncupSpFeReply) {}
+  rpc SyncupSpFeStream(stream SyncupSpCnRequest) returns(stream SyncupSpCnReply) {}
+}
+
+message ReqConf {
+  string req_id = 1;
+}
+
+message ReplyInfo {
+  string req_id = 1;
+  uint32 code = 2;
+  string msg = 3;
 }
 
 message StatusInfo {
@@ -49,12 +59,12 @@ message NvmePortConf {
 }
 
 message GetDevSizeRequest {
-  string req_id = 1;
+  ReqConf req_conf = 1;
   string dev_path = 2;
 }
 
 message GetDevSizeReply {
-  string req_id = 1;
+  ReplyInfo reply_info = 1;
   StatusInfo status_info = 2;
   uint64 size = 3;
 }
@@ -74,7 +84,7 @@ message DnConf {
 }
 
 message SyncupDnRequest {
-  string req_id = 1;
+  ReqConf req_conf = 1;
   DnConf dn_conf = 2;
 }
 
@@ -83,11 +93,11 @@ message DnInfo {
 }
 
 message SyncupDnReply {
-  string req_id = 1;
+  ReplyInfo reply_info = 1;
   DnInfo dn_info = 2;
 }
 
-message SpBeConf {
+message SpDnConf {
   uint64 dn_id = 1;
   uint64 sp_id = 2;
   uint64 ld_id = 3;
@@ -98,18 +108,18 @@ message SpBeConf {
   uint64 cn_id = 8;
 }
 
-message SyncupSpBeRequest {
-  string req_id = 1;
-  SpBeConf sp_be_conf = 2;
+message SyncupSpDnRequest {
+  ReqConf req_conf = 1;
+  SpDnConf sp_dn_conf = 2;
 }
 
-message SpBeInfo {
+message SpDnInfo {
   StatusInfo status_info = 1;
 }
 
-message SyncupSpBeReply {
-  string req_id = 1;
-  SpBeInfo sp_be_info = 2;
+message SyncupSpDnReply {
+  ReplyInfo reply_info = 1;
+  SpDnInfo sp_dn_info = 2;
 }
 
 message SpCntlrId {
@@ -125,7 +135,7 @@ message CnConf {
 }
 
 message SyncupCnRequest {
-  string req_id = 1;
+  ReqConf req_conf = 1;
   CnConf cn_conf = 2;
 }
 
@@ -134,7 +144,7 @@ message CnInfo {
 }
 
 message SyncupCnReply {
-  string req_id = 1;
+  ReplyInfo reply_info = 1;
   CnInfo cn_info = 2;
 }
 
@@ -181,7 +191,7 @@ message SnapConf {
   uint64 ori_id = 2;
 }
 
-message LdFeConf {
+message LdCnConf {
   uint64 ld_id = 1;
   uint64 dn_id = 2;
   NvmePortConf nvme_port_conf = 3;
@@ -192,7 +202,7 @@ message GrpConf {
   uint64 grp_id = 1;
   uint32 grp_idx = 2;
   uint64 grp_size = 3;
-  repeated LdFeConf ld_fe_conf_list = 4;
+  repeated LdCnConf ld_cn_conf_list = 4;
 }
 
 message LocalLegConf {
@@ -252,7 +262,7 @@ message SsConf {
   repeated HostConf host_conf_list = 3;
 }
 
-message SpFeConf {
+message SpCnConf {
   uint64 cn_id = 1;
   uint64 sp_id = 2;
   uint64 cntlr_id = 3;
@@ -272,9 +282,9 @@ message SpFeConf {
   repeated ItConf it_conf_list = 17;
 }
 
-message SyncupSpFeRequest {
-  string req_id = 1;
-  SpFeConf sp_fe_conf = 2;
+message SyncupSpCnRequest {
+  ReqConf req_conf = 1;
+  SpCnConf sp_cn_conf = 2;
 }
 
 enum ThinPoolStatus {
@@ -330,7 +340,7 @@ message RedundancyInfo {
   RaidJournalChar journal_char = 7;
 }
 
-message LdFeInfo {
+message LdCnInfo {
   StatusInfo status_info = 3;
 }
 
@@ -338,7 +348,7 @@ message GrpInfo {
   uint64 grp_id = 1;
   StatusInfo status_info = 2;
   RedundancyInfo redun_info = 3;
-  repeated LdFeInfo ld_fe_info_list = 4;
+  repeated LdCnInfo ld_cn_info_list = 4;
 }
 
 message LocalLegInfo {
@@ -397,7 +407,7 @@ message SsInfo {
   repeated HostInfo host_info_list = 4;
 }
 
-message SpFeInfo {
+message SpCnInfo {
   StatusInfo status_info = 1;
   repeated SsInfo ss_info_list = 2;
   repeated LocalLegInfo local_leg_info_list = 3;
@@ -407,7 +417,7 @@ message SpFeInfo {
   repeated ItInfo it_info_list = 7;
 }
 
-message SyncupSpFeReply {
-  string req_id = 1;
-  SpFeInfo sp_fe_info = 2;
+message SyncupSpCnReply {
+  ReplyInfo reply_info = 1;
+  SpCnInfo sp_cn_info = 2;
 }

@@ -3,7 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 type dnCreateArgsStruct struct {

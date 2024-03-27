@@ -1,22 +1,18 @@
 package lib
 
 const (
-	DefaultEtcdPrefix = "dnv"
+	SchemaPrefixDefault = "dnv"
+	DeviceMapperPrefixDefault = "dnv"
 
-	AgentSucceedCode = 0
-	AgentSucceedMsg = "succeed"
-	AgentUninitCode = 1
-	AgentUnreachableCode = 2
-	AgentOsCmdErrCode = 3
+	RpcSucceedCode = 0
+	RpcSucceedMsg = "succeed"
+	RpcInternalErrCode = 1
+	RpcDupResErrCode = 2
+	RpcUnknownResErrCode = 3
 
-	CpApiSucceedCode = 0
-	CpApiSucceedMsg = "succeed"
-	CpApiInternalErrCode = 1
-	CpApiDupResErrCode = 2
-	CpApiUnknownResErrCode = 3
-	CpApiAgentConnErrCode = 4
-	CpApiAgentGrpcErrCode = 5
-	CpApiAgentReplyErrCode = 6
+	NodeSucceedMsg = "succeed"
+	NodeUninitCode = 1
+	NodeUnreachableCode = 2
 
 	AgentTimeoutSecondDefault = 3
 
@@ -45,8 +41,6 @@ const (
 	StandbyCntlrCntMax = 4
 	StandbyCntlrCntDefault = 1
 
-	DnPortBase = 0
-	DnPortSize = 4096
 	CnPortBase = 0
 	CnPortSize = 4096
 	DnCntlidMin = 10000
@@ -59,5 +53,4 @@ const (
 	StringLengthMax = 256
 	StringLengthMin = 1
 	NqnLengthMax = 223
-	PrefixDefault = "dnv"
 )

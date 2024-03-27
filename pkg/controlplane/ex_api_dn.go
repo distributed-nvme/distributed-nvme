@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeapi"
 )
 

@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	controlplane.Execute()
+	controlplane.ExApiExecute()
 }

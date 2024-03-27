@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/dataschema";
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/schema";
 
-package dataschema;
+package schema;
 
 message DnSummary {
   uint32 total_dn_cnt = 1;
@@ -109,12 +109,6 @@ message StripeConf {
 message ThinPoolConf {
   uint32 data_block_size = 1;
   uint32 low_water_mark = 2;
-  bool error_if_no_space = 3;
-}
-
-message ExtendPolicy {
-  uint64 init_grp_size = 1;
-  uint64 max_grp_size = 2;
 }
 
 message ThinInfo {
@@ -224,7 +218,7 @@ message CnCapacity {
 }
 
 message DnConf {
-  string sock_addr = 1;
+  string grpc_target = 1;
   bool online = 2;
   string dev_path = 3;
   NvmePortConf nvme_port_conf = 4;
@@ -237,11 +231,10 @@ message DnInfo {
 }
 
 message CnConf {
-  string sock_addr = 1;
+  string grpc_target = 1;
   bool online = 2;
-  string location = 3;
-  CnCapacity cn_capacity = 4;
-  NextBit port_next_bit = 5;
+  CnCapacity cn_capacity = 3;
+  NextBit port_next_bit = 4;
 }
 
 message CnInfo {
@@ -254,19 +247,19 @@ message LdConf {
   uint32 ld_idx = 3;
 }
 
-message LdFeInfo {
+message LdDnInfo {
   StatusInfo status_info = 3;
 }
 
-message LdBeInfo {
+message LdCnInfo {
   StatusInfo status_info = 3;
 }
 
 message LogicalDisk {
   uint64 ld_id = 1;
   LdConf ld_conf = 2;
-  LdFeInfo ld_fe_info = 3;
-  LdBeInfo ld_be_info = 4;
+  LdDnInfo ld_dn_info = 3;
+  LdCnInfo ld_cn_info = 4;
 }
 
 message GrpConf {
@@ -315,13 +308,14 @@ message SnapConf {
 }
 
 message SnapInfo {
-  StatusInfo status_info = 1;
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
 }
 
 message Snapshot {
   uint32 dev_id = 1;
   SnapConf snap_conf = 2;
-  SnapInfo snap_info = 3;
+  repeated SnapInfo snap_info = 3;
 }
 
 message CntlrConf {
@@ -412,8 +406,7 @@ message NameSpace {
 }
 
 message SsConf {
-  string name = 1;
-  string nqn = 2;
+  string nqn = 1;
 }
 
 message SsInfo {
@@ -437,7 +430,6 @@ message SpConf {
   StripeConf stripe_conf = 5;
   ThinPoolConf thin_pool_conf = 6;
   RedundancyConf redundancy_conf = 7;
-  ExtendPolicy extend_policy = 8;
 }
 
 // /{dnv_prefix}/cluster
@@ -516,7 +508,7 @@ message TagName {
   repeated string value_list = 1;
 }
 
-//{dnv_prefix}/tag_value/{tag_name}/{tag_value}
+// /{dnv_prefix}/tag_value/{tag_name}/{tag_value}
 message TagValue {
   DnSummary dn_summary = 1;
   CnSummary cn_summary = 2;

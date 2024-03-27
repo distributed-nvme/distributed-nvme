@@ -5,43 +5,8 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
-	"github.com/google/uuid"
 	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 )
-
-type ctxKey string
-
-func (c ctxKey) String() string {
-	return "ctx key " + string(c)
-}
-
-var (
-	ctxKeyReqId = ctxKey("reqId")
-)
-
-func GetReqId(ctx context.Context) string {
-	reqId, ok := ctx.Value(ctxKeyReqId).(string)
-	if ok {
-		return reqId
-	} else {
-		return "???"
-	}
-}
-
-func UnarySetReqIdInterceptor(logger *Logger) grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context,
-		req interface{},
-		info *grpc.UnaryServerInfo,
-		handler grpc.UnaryHandler,
-	)  (interface{}, error) {
-		reqId := uuid.New().String()
-		newCtx := context.WithValue(ctx, ctxKeyReqId, reqId)
-		logger.Info("reqId: %v", reqId)
-		reply, err := handler(newCtx, req)
-		return reply, err
-	}
-}
 
 func UnaryShowReqReplyInterceptor(logger *Logger) grpc.UnaryServerInterceptor {
 	return func(

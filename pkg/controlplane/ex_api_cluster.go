@@ -7,18 +7,18 @@ import (
 	"go.etcd.io/etcd/client/v3/concurrency"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbds "github.com/distributed-nvme/distributed-nvme/pkg/proto/dataschema"
+	pbsch "github.com/distributed-nvme/distributed-nvme/pkg/proto/schema"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
 )
 
-func (cpas *cpApiServer) CreateCluster(
+func (exApi *exApiServer) CreateCluster(
 	ctx context.Context,
 	req *pbcp.CreateClusterRequest,
 ) (*pbcp.CreateClusterReply, error) {
 	pch := newPerCtxHelper(ctx, cpas)
 	defer pch.close()
 
-	cluster := &pbds.Cluster{
+	cluster := &pbsch.Cluster{
 		DataExtentSizeShift: lib.DataExtentSizeShiftDefault,
 		DataExtentPerSetShift: lib.DataExtentPerSetShiftDefault,
 		MetaExtentSizeShift: lib.MetaExtentSizeShiftDefault,
@@ -39,7 +39,7 @@ func (cpas *cpApiServer) CreateCluster(
 	}
 	clusterEntityValStr := string(clusterEntityVal)
 
-	dnGlobal := &pbds.DnGlobal{
+	dnGlobal := &pbsch.DnGlobal{
 		GlobalCounter: 0,
 		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
 		ShardBucket: make([]uint32, lib.ShardSize),
@@ -58,7 +58,7 @@ func (cpas *cpApiServer) CreateCluster(
 	}
 	dnGlobalEntityValStr := string(dnGlobalEntityVal)
 
-	cnGlobal := &pbds.CnGlobal{
+	cnGlobal := &pbsch.CnGlobal{
 		GlobalCounter: 0,
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
@@ -76,7 +76,7 @@ func (cpas *cpApiServer) CreateCluster(
 	}
 	cnGlobalEntityValStr := string(cnGlobalEntityVal)
 
-	spGlobal := &pbds.SpGlobal{
+	spGlobal := &pbsch.SpGlobal{
 		GlobalCounter: 0,
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
@@ -226,7 +226,7 @@ func (cpas *cpApiServer) GetCluster(
 	defer pch.close()
 
 	clusterEntityKey := cpas.kf.ClusterEntityKey()
-	cluster := &pbds.Cluster{}
+	cluster := &pbsch.Cluster{}
 
 	apply := func(stm concurrency.STM) error {
 		val := []byte(stm.Get(clusterEntityKey))

@@ -1,4 +1,4 @@
-package cli
+package cmdlineiface
 
 import (
 	"context"
@@ -10,12 +10,12 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 type rootArgsStruct struct {
-	cpAddr    string
-	cpTimeout int
+	address string
+	timeout int
 }
 
 var (
@@ -30,14 +30,14 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(
-		&rootArgs.cpAddr, "cp-addr", "", "localhost:9520", "control plane socket address")
+		&rootArgs.cpAddr, "address", "", "localhost:9520", "api socket address")
 	rootCmd.PersistentFlags().IntVarP(
-		&rootArgs.cpTimeout, "cp-timeout", "", 30, "control plane timeout")
-	rootCmd.AddCommand(dnCmd)
+		&rootArgs.cpTimeout, "timeout", "", 30, "api timeout")
 	rootCmd.AddCommand(clusterCmd)
+	rootCmd.AddCommand(dnCmd)
 }
 
-func Execute() {
+func CliExecute() {
 	if err := rootCmd.Execute(); err != nil {
 		gLogger.Fatal("Execute err: %v", err)
 	}
@@ -70,10 +70,10 @@ func (cli *client) show(output string) {
 
 func newClient(args *rootArgsStruct) *client {
 	conn, err := grpc.Dial(
-		args.cpAddr,
+		args.address,
 		grpc.WithInsecure(),
 		grpc.WithBlock(),
-		grpc.WithTimeout(time.Duration(args.cpTimeout)*time.Second),
+		grpc.WithTimeout(time.Duration(args.timeout)*time.Second),
 	)
 	if err != nil {
 		gLogger.Fatal("Connection err: %v %v", args, err)
@@ -88,3 +88,4 @@ func newClient(args *rootArgsStruct) *client {
 		cancel: cancel,
 	}
 }
+

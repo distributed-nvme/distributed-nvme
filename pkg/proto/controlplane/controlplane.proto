@@ -1,10 +1,10 @@
 syntax = "proto3";
 
-option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi";
+option go_package = "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane";
 
-package controlplaneapi;
+package controlplane;
 
-service ControlPlane {
+service ExternalApi {
   rpc CreateCluster(CreateClusterRequest) returns(CreateClusterReply) {}
   rpc DeleteCluster(DeleteClusterRequest) returns(DeleteClusterReply) {}
   // rpc ModifyCluster(ModifyClusterRequest) returns(ModifyClusterReply) {}
@@ -13,8 +13,8 @@ service ControlPlane {
 
   rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
   rpc DeleteDn(DeleteDnRequest) returns(DeleteDnReply) {}
-  rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
-  rpc ListDn(ListDnRequest) returns(ListDnReply) {}
+  // rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
+  // rpc ListDn(ListDnRequest) returns(ListDnReply) {}
   rpc GetDn(GetDnRequest) returns(GetDnReply) {}
 
   // rpc CreateCn(CreateCnRequest) returns(CreateCnReply) {}
@@ -78,6 +78,14 @@ service ControlPlane {
   // rpc GetCntlrPh(GetCntlrPhRequest) returns(GetCntlrPhReply) {}
 }
 
+service DiskNodeWorker {
+  rpc GetDnBatch(GetDnBatchRequest) returns(GetDnBatchReply) {}
+}
+
+message ReqConf {
+  string req_id = 1;
+}
+
 message ReplyInfo {
   string req_id = 1;
   uint32 reply_code = 2;
@@ -124,6 +132,7 @@ message Cluster {
 }
 
 message CreateClusterRequest {
+  ReqConf req_conf = 1;
 }
 
 message CreateClusterReply {
@@ -131,6 +140,7 @@ message CreateClusterReply {
 }
 
 message DeleteClusterRequest {
+  ReqConf req_conf = 1;
 }
 
 message DeleteClusterReply {
@@ -138,6 +148,7 @@ message DeleteClusterReply {
 }
 
 message GetClusterRequest {
+  ReqConf req_conf = 1;
 }
 
 message GetClusterReply {
@@ -152,9 +163,10 @@ message DiskNode {
 }
 
 message CreateDnRequest {
-  string sock_addr = 1;
-  string dev_path = 2;
-  NvmePortConf port_conf = 3;
+  ReqConf req_conf = 1;
+  string sock_addr = 2;
+  string dev_path = 3;
+  NvmePortConf port_conf = 4;
 }
 
 message CreateDnReply {
@@ -162,26 +174,11 @@ message CreateDnReply {
 }
 
 message DeleteDnRequest {
-  string sock_addr = 1;
+  ReqConf req_conf = 1;
+  string sock_addr = 2;
 }
 
 message DeleteDnReply {
-  ReplyInfo reply_info = 1;
-}
-
-message ModifyDnRequest {
-  string sock_addr = 1;
-}
-
-message ModifyDnReply {
-  ReplyInfo reply_info = 1;
-}
-
-message ListDnRequest {
-  string sock_addr = 1;
-}
-
-message ListDnReply {
   ReplyInfo reply_info = 1;
 }
 
@@ -190,5 +187,13 @@ message GetDnRequest {
 }
 
 message GetDnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message GetDnBatchRequest {
+  ReqConf req_conf = 1;
+}
+
+message GetDnBatchReply{
   ReplyInfo reply_info = 1;
 }
