@@ -40,7 +40,7 @@ message SpSummary {
 }
 
 message Tag {
-  string name = 1;
+  string key = 1;
   string value = 2;
 }
 
@@ -223,7 +223,8 @@ message DnConf {
   string dev_path = 3;
   NvmePortConf nvme_port_conf = 4;
   DnCapacity dn_capacity = 5;
-  ExtentConf extent_conf = 6;
+  ExtentConf meta_extent_conf = 6;
+  ExtentConf data_extent_conf = 7;
 }
 
 message DnInfo {
@@ -503,12 +504,12 @@ message NameToId {
   uint64 res_id = 1;
 }
 
-// /{dnv_prefix}/tag_name/{tag_name}
-message TagName {
+// /{dnv_prefix}/tag_key/{tag_key}
+message TagKey {
   repeated string value_list = 1;
 }
 
-// /{dnv_prefix}/tag_value/{tag_name}/{tag_value}
+// /{dnv_prefix}/tag_value/{tag_key}/{tag_value}
 message TagValue {
   DnSummary dn_summary = 1;
   CnSummary cn_summary = 2;

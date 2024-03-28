@@ -10,6 +10,7 @@ const (
 	ReplyCodeUnknownRes = 1002
 	ReplyCodeInternalErr = 1003
 	ReplyCodeAgentErr = 1004
+	ReplyCodeInvalidArg = 1005
 
 	StatusCodeSucceed = 0
 	StatusMsgSucceed = "succeed"
@@ -56,6 +57,8 @@ const (
 	StringLengthMax = 256
 	StringLengthMin = 1
 	NqnLengthMax = 223
+	TagCntMax = 16
+	PortNumMax = 65535
 
 	TraceIdKey = "trace_id"
 )
