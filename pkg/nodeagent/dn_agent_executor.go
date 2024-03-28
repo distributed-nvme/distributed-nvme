@@ -5,13 +5,12 @@ import (
 
 	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
 
-type dnAgentArgsStruct {
+type dnAgentArgsStruct struct {
 	grpcNetwork string
 	grpcAddress string
 }
@@ -24,7 +23,7 @@ var (
 		Run: launchDnAgent,
 	}
 	dnAgentArgs = dnAgentArgsStruct{}
-	gLogger = lib.NewLogger("dn_agent")
+	gLogger = lib.NewPrefixLogger("dn_agent")
 )
 
 func init() {
@@ -45,26 +44,18 @@ func launchDnAgent(cmd *cobra.Command, args []string) {
 
 	dnAgent := newDnAgentServer()
 
-	opts := []logging.Option{
-		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
-	}
-
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
-			logging.UnaryServerInterceptor(lib.InterceptorLogger(&gLogger), opts...),
-			lib.UnaryShowReqReplyInterceptor(&gLogger),
-		),
-		grpc.ChainStreamInterceptor(
-			logging.StreamServerInterceptor(lib.InterceptorLogger(&gLogger), opts...),
+			lib.UnaryServerPerCtxHelperInterceptor,
 		),
 	)
 
-	pbnd.RegisterDnAgentServer(grpcServer, dnAgent)
+	pbnd.RegisterDiskNodeAgentServer(grpcServer, dnAgent)
 	if err := grpcServer.Serve(lis); err != nil {
 		gLogger.Fatal("Serve err: %v", err)
 	}
 
-	gLogger.Info("Exit dn agent")
+	gLogger.Info("Exit disk node agent")
 }
 
 func DnAgentExecute() {

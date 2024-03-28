@@ -1,4 +1,4 @@
-package cli
+package cmdlineiface
 
 import (
 	"github.com/spf13/cobra"
@@ -7,7 +7,7 @@ import (
 )
 
 type dnCreateArgsStruct struct {
-	sockAddr    string
+	grpcTarget    string
 }
 
 var (
@@ -24,15 +24,16 @@ var (
 )
 
 func init() {
-	dnCreateCmd.Flags().StringVarP(&dnCreateArgs.sockAddr, "sock-addr", "", "",
-		"dn socket address")
-	dnCreateCmd.MarkFlagRequired("sock-addr")
+	dnCreateCmd.Flags().StringVarP(
+		&dnCreateArgs.grpcTarget, "grpc-target", "", "", "grpc target",
+	)
+	dnCreateCmd.MarkFlagRequired("grpc-target")
 	dnCmd.AddCommand(dnCreateCmd)
 }
 
 func (cli *client) createDn(args *dnCreateArgsStruct) string {
 	req := &pbcp.CreateDnRequest{
-		SockAddr:    args.sockAddr,
+		GrpcTarget:    args.grpcTarget,
 	}
 	reply, err := cli.c.CreateDn(cli.ctx, req)
 	if err != nil {

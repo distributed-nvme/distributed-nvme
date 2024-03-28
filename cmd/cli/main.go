@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/distributed-nvme/distributed-nvme/pkg/cli"
+	"github.com/distributed-nvme/distributed-nvme/pkg/cmdlineiface"
 )
 
 func main() {
-	cli.Execute()
+	cmdlineiface.CliExecute()
 }

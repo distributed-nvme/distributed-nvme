@@ -8,15 +8,14 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 	pbsch "github.com/distributed-nvme/distributed-nvme/pkg/proto/schema"
-	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplaneapi"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 func (exApi *exApiServer) CreateCluster(
 	ctx context.Context,
 	req *pbcp.CreateClusterRequest,
 ) (*pbcp.CreateClusterReply, error) {
-	pch := newPerCtxHelper(ctx, cpas)
-	defer pch.close()
+	pch := lib.GetPerCtxHelper(ctx)
 
 	cluster := &pbsch.Cluster{
 		DataExtentSizeShift: lib.DataExtentSizeShiftDefault,
@@ -25,14 +24,14 @@ func (exApi *exApiServer) CreateCluster(
 		MetaExtentPerSetShift: lib.MetaExtentPerSetShiftDefault,
 		ExtentRatioShift: lib.ExtentRatioShiftDefault,
 	}
-	clusterEntityKey := cpas.kf.ClusterEntityKey()
+	pch.Logger.Debug("cluster: %v", cluster)
+	clusterEntityKey := exApi.kf.ClusterEntityKey()
 	clusterEntityVal, err := proto.Marshal(cluster)
 	if err != nil {
-		pch.logger.Error("Marshal cluster err: %v %v", cluster, err)
+		pch.Logger.Error("Marshal cluster err: %v %v", cluster, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReqId:     lib.GetReqId(ctx),
-				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyCode: lib.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -44,14 +43,14 @@ func (exApi *exApiServer) CreateCluster(
 		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
-	dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
+	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
+	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
 	dnGlobalEntityVal, err := proto.Marshal(dnGlobal)
 	if err != nil {
-		pch.logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
+		pch.Logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReqId:     lib.GetReqId(ctx),
-				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyCode: lib.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -62,14 +61,14 @@ func (exApi *exApiServer) CreateCluster(
 		GlobalCounter: 0,
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
-	cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
+	pch.Logger.Debug("cnGlobal: %v", cnGlobal)
+	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
 	cnGlobalEntityVal, err := proto.Marshal(cnGlobal)
 	if err != nil {
-		pch.logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
+		pch.Logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReqId:     lib.GetReqId(ctx),
-				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyCode: lib.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -80,14 +79,14 @@ func (exApi *exApiServer) CreateCluster(
 		GlobalCounter: 0,
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
-	spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
+	pch.Logger.Debug("spGlobal: %v", spGlobal)
+	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
 	spGlobalEntityVal, err := proto.Marshal(spGlobal)
 	if err != nil {
-		pch.logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
+		pch.Logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReqId:     lib.GetReqId(ctx),
-				ReplyCode: lib.CpApiInternalErrCode,
+				ReplyCode: lib.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -97,7 +96,7 @@ func (exApi *exApiServer) CreateCluster(
 	apply := func(stm concurrency.STM) error {
 		if val := []byte(stm.Get(clusterEntityKey)); len(val) != 0 {
 			return &cpStmError{
-				code: lib.CpApiDupResErrCode,
+				code: lib.ReplyCodeDupRes,
 				msg:  clusterEntityKey,
 			}
 		}
@@ -105,7 +104,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(dnGlobalEntityKey)); len(val) != 0 {
 			return &cpStmError{
-				code: lib.CpApiDupResErrCode,
+				code: lib.ReplyCodeDupRes,
 				msg:  dnGlobalEntityKey,
 			}
 		}
@@ -113,7 +112,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(cnGlobalEntityKey)); len(val) != 0 {
 			return &cpStmError{
-				code: lib.CpApiDupResErrCode,
+				code: lib.ReplyCodeDupRes,
 				msg:  cnGlobalEntityKey,
 			}
 		}
@@ -121,7 +120,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(spGlobalEntityKey)); len(val) != 0 {
 			return &cpStmError{
-				code: lib.CpApiDupResErrCode,
+				code: lib.ReplyCodeDupRes,
 				msg:  spGlobalEntityKey,
 			}
 		}
@@ -130,12 +129,11 @@ func (exApi *exApiServer) CreateCluster(
 		return nil
 	}
 
-	err = pch.runStm(apply, "CreateCluster")
+	err = exApi.sm.runStm(pch, apply)
 	if err != nil {
 		if serr, ok := err.(*cpStmError); ok {
 			return &pbcp.CreateClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
 					ReplyCode: serr.code,
 					ReplyMsg:  serr.msg,
 				},
@@ -143,8 +141,7 @@ func (exApi *exApiServer) CreateCluster(
 		} else {
 			return &pbcp.CreateClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
-					ReplyCode: lib.CpApiInternalErrCode,
+					ReplyCode: lib.ReplyCodeInternalErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
@@ -153,47 +150,48 @@ func (exApi *exApiServer) CreateCluster(
 
 	return &pbcp.CreateClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReqId:     lib.GetReqId(ctx),
-			ReplyCode: lib.CpApiSucceedCode,
-			ReplyMsg:  lib.CpApiSucceedMsg,
+			ReplyCode: lib.ReplyCodeSucceed,
+			ReplyMsg:  lib.ReplyMsgSucceed,
 		},
 	}, nil
 }
 
-func (cpas *cpApiServer) DeleteCluster(
+func (exApi *exApiServer) DeleteCluster(
 	ctx context.Context,
 	req *pbcp.DeleteClusterRequest,
 ) (*pbcp.DeleteClusterReply, error) {
-	pch := newPerCtxHelper(ctx, cpas)
-	defer pch.close()
+	pch := lib.GetPerCtxHelper(ctx)
 
-	clusterEntityKey := cpas.kf.ClusterEntityKey()
-	dnGlobalEntityKey := cpas.kf.DnGlobalEntityKey()
-	cnGlobalEntityKey := cpas.kf.CnGlobalEntityKey()
-	spGlobalEntityKey := cpas.kf.SpGlobalEntityKey()
+	clusterEntityKey := exApi.kf.ClusterEntityKey()
+	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
+	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
+	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
 
 	apply := func(stm concurrency.STM) error {
 		if len(stm.Get(clusterEntityKey)) > 0 {
+			pch.Logger.Debug("Delete %s", clusterEntityKey)
 			stm.Del(clusterEntityKey)
 		}
 		if len(stm.Get(dnGlobalEntityKey)) > 0 {
+			pch.Logger.Debug("Delete %s", dnGlobalEntityKey)
 			stm.Del(dnGlobalEntityKey)
 		}
 		if len(stm.Get(cnGlobalEntityKey)) > 0 {
+			pch.Logger.Debug("Delete %s", cnGlobalEntityKey)
 			stm.Del(cnGlobalEntityKey)
 		}
 		if len(stm.Get(spGlobalEntityKey)) > 0 {
+			pch.Logger.Debug("Delete %s", spGlobalEntityKey)
 			stm.Del(spGlobalEntityKey)
 		}
 		return nil
 	}
 
-	err := pch.runStm(apply, "DeleteCluster")
+	err := exApi.sm.runStm(pch, apply)
 	if err != nil {
 		if serr, ok := err.(*cpStmError); ok {
 			return &pbcp.DeleteClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
 					ReplyCode: serr.code,
 					ReplyMsg:  serr.msg,
 				},
@@ -201,8 +199,7 @@ func (cpas *cpApiServer) DeleteCluster(
 		} else {
 			return &pbcp.DeleteClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
-					ReplyCode: lib.CpApiInternalErrCode,
+					ReplyCode: lib.ReplyCodeAgentErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
@@ -211,41 +208,39 @@ func (cpas *cpApiServer) DeleteCluster(
 
 	return &pbcp.DeleteClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReqId:     lib.GetReqId(ctx),
-			ReplyCode: lib.CpApiSucceedCode,
-			ReplyMsg:  lib.CpApiSucceedMsg,
+			ReplyCode: lib.ReplyCodeSucceed,
+			ReplyMsg:  lib.ReplyMsgSucceed,
 		},
 	}, nil
 }
 
-func (cpas *cpApiServer) GetCluster(
+func (exApi *exApiServer) GetCluster(
 	ctx context.Context,
 	req *pbcp.GetClusterRequest,
 ) (*pbcp.GetClusterReply, error) {
-	pch := newPerCtxHelper(ctx, cpas)
-	defer pch.close()
+	pch := lib.GetPerCtxHelper(ctx)
 
-	clusterEntityKey := cpas.kf.ClusterEntityKey()
+	clusterEntityKey := exApi.kf.ClusterEntityKey()
 	cluster := &pbsch.Cluster{}
 
 	apply := func(stm concurrency.STM) error {
 		val := []byte(stm.Get(clusterEntityKey))
 		if len(val) == 0 {
 			return &cpStmError{
-				lib.CpApiUnknownResErrCode,
+				lib.ReplyCodeUnknownRes,
 				clusterEntityKey,
 			}
 		}
 		err := proto.Unmarshal(val, cluster)
+		pch.Logger.Debug("cluster: %v", cluster)
 		return err
 	}
 
-	err := pch.runStm(apply, "GetCluster")
+	err := exApi.sm.runStm(pch, apply)
 	if err != nil {
 		if serr, ok := err.(*cpStmError); ok {
 			return &pbcp.GetClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
 					ReplyCode: serr.code,
 					ReplyMsg:  serr.msg,
 				},
@@ -253,21 +248,17 @@ func (cpas *cpApiServer) GetCluster(
 		} else {
 			return &pbcp.GetClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReqId:     lib.GetReqId(ctx),
-					ReplyCode: lib.CpApiInternalErrCode,
+					ReplyCode: lib.ReplyCodeInternalErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
 		}
 	}
 
-	pch.logger.Info("cluster: %v", cluster)
-
 	return &pbcp.GetClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReqId:     lib.GetReqId(ctx),
-			ReplyCode: lib.CpApiSucceedCode,
-			ReplyMsg:  lib.CpApiSucceedMsg,
+			ReplyCode: lib.ReplyCodeSucceed,
+			ReplyMsg:  lib.ReplyMsgSucceed,
 		},
 		Cluster: &pbcp.Cluster{
 			DataExtentSizeShift: cluster.DataExtentSizeShift,

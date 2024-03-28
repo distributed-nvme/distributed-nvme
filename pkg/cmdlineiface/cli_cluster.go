@@ -1,4 +1,4 @@
-package cli
+package cmdlineiface
 
 import (
 	"github.com/spf13/cobra"

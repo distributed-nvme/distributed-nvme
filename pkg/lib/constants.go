@@ -4,15 +4,18 @@ const (
 	SchemaPrefixDefault = "dnv"
 	DeviceMapperPrefixDefault = "dnv"
 
-	RpcSucceedCode = 0
-	RpcSucceedMsg = "succeed"
-	RpcInternalErrCode = 1
-	RpcDupResErrCode = 2
-	RpcUnknownResErrCode = 3
+	ReplyCodeSucceed = 0
+	ReplyMsgSucceed = "succeed"
+	ReplyCodeDupRes = 1001
+	ReplyCodeUnknownRes = 1002
+	ReplyCodeInternalErr = 1003
+	ReplyCodeAgentErr = 1004
 
-	NodeSucceedMsg = "succeed"
-	NodeUninitCode = 1
-	NodeUnreachableCode = 2
+	StatusCodeSucceed = 0
+	StatusMsgSucceed = "succeed"
+	StatusCodeUninit = 2001
+	StatusCodeUnreachable = 2002
+	StatusCodeInternalErr = 2003
 
 	AgentTimeoutSecondDefault = 3
 
@@ -53,4 +56,6 @@ const (
 	StringLengthMax = 256
 	StringLengthMin = 1
 	NqnLengthMax = 223
+
+	TraceIdKey = "trace_id"
 )

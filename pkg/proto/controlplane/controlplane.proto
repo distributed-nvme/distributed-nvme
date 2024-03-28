@@ -82,14 +82,9 @@ service DiskNodeWorker {
   rpc GetDnBatch(GetDnBatchRequest) returns(GetDnBatchReply) {}
 }
 
-message ReqConf {
-  string req_id = 1;
-}
-
 message ReplyInfo {
-  string req_id = 1;
-  uint32 reply_code = 2;
-  string reply_msg = 3;
+  uint32 reply_code = 1;
+  string reply_msg = 2;
 }
 
 message QosFields {
@@ -132,7 +127,6 @@ message Cluster {
 }
 
 message CreateClusterRequest {
-  ReqConf req_conf = 1;
 }
 
 message CreateClusterReply {
@@ -140,7 +134,6 @@ message CreateClusterReply {
 }
 
 message DeleteClusterRequest {
-  ReqConf req_conf = 1;
 }
 
 message DeleteClusterReply {
@@ -148,7 +141,6 @@ message DeleteClusterReply {
 }
 
 message GetClusterRequest {
-  ReqConf req_conf = 1;
 }
 
 message GetClusterReply {
@@ -157,16 +149,15 @@ message GetClusterReply {
 }
 
 message DiskNode {
-  string sock_addr = 1;
+  string grpc_target = 1;
   bool online = 2;
   string dev_path = 3;
 }
 
 message CreateDnRequest {
-  ReqConf req_conf = 1;
-  string sock_addr = 2;
-  string dev_path = 3;
-  NvmePortConf port_conf = 4;
+  string grpc_target = 1;
+  string dev_path = 2;
+  NvmePortConf port_conf = 3;
 }
 
 message CreateDnReply {
@@ -174,8 +165,7 @@ message CreateDnReply {
 }
 
 message DeleteDnRequest {
-  ReqConf req_conf = 1;
-  string sock_addr = 2;
+  string grpc_target = 1;
 }
 
 message DeleteDnReply {
@@ -183,7 +173,7 @@ message DeleteDnReply {
 }
 
 message GetDnRequest {
-  string sock_addr = 1;
+  string grpc_target = 1;
 }
 
 message GetDnReply {
@@ -191,7 +181,6 @@ message GetDnReply {
 }
 
 message GetDnBatchRequest {
-  ReqConf req_conf = 1;
 }
 
 message GetDnBatchReply{

@@ -1,18 +1,8 @@
 package controlplane
 
 import (
-	"fmt"
-
 	"github.com/kelindar/bitmap"
 )
-type stmError struct {
-	code uint32
-	msg  string
-}
-
-func (e *stmError) Error() string {
-	return fmt.Sprintf("code: %d msg: %s", e.code, e.msg)
-}
 
 func extentInitCalc(
 	size uint64,

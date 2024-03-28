@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"github.com/google/uuid"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
@@ -25,14 +27,14 @@ var (
 		Long:  `dnv cli`,
 	}
 	rootArgs = &rootArgsStruct{}
-	gLogger = lib.NewLogger("cli")
+	gLogger = lib.NewPrefixLogger("cli")
 )
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(
-		&rootArgs.cpAddr, "address", "", "localhost:9520", "api socket address")
+		&rootArgs.address, "address", "", "localhost:9520", "grpc address")
 	rootCmd.PersistentFlags().IntVarP(
-		&rootArgs.cpTimeout, "timeout", "", 30, "api timeout")
+		&rootArgs.timeout, "timeout", "", 30, "grpc timeout")
 	rootCmd.AddCommand(clusterCmd)
 	rootCmd.AddCommand(dnCmd)
 }
@@ -45,7 +47,7 @@ func CliExecute() {
 
 type client struct {
 	conn   *grpc.ClientConn
-	c      pbcp.ControlPlaneClient
+	c      pbcp.ExternalApiClient
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -78,13 +80,15 @@ func newClient(args *rootArgsStruct) *client {
 	if err != nil {
 		gLogger.Fatal("Connection err: %v %v", args, err)
 	}
-	c := pbcp.NewControlPlaneClient(conn)
+	c := pbcp.NewExternalApiClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(args.cpTimeout)*time.Second)
+		time.Duration(args.timeout)*time.Second)
+	md := metadata.Pairs(lib.TraceIdKey, uuid.New().String())
+	newCtx := metadata.NewOutgoingContext(ctx, md)
 	return &client{
 		conn:   conn,
 		c:      c,
-		ctx:    ctx,
+		ctx:    newCtx,
 		cancel: cancel,
 	}
 }

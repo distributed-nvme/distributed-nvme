@@ -19,16 +19,6 @@ service ControllerNodeAgent {
   rpc SyncupSpFeStream(stream SyncupSpCnRequest) returns(stream SyncupSpCnReply) {}
 }
 
-message ReqConf {
-  string req_id = 1;
-}
-
-message ReplyInfo {
-  string req_id = 1;
-  uint32 code = 2;
-  string msg = 3;
-}
-
 message StatusInfo {
   uint32 code = 1;
   string msg = 2;
@@ -59,14 +49,12 @@ message NvmePortConf {
 }
 
 message GetDevSizeRequest {
-  ReqConf req_conf = 1;
-  string dev_path = 2;
+  string dev_path = 1;
 }
 
 message GetDevSizeReply {
-  ReplyInfo reply_info = 1;
-  StatusInfo status_info = 2;
-  uint64 size = 3;
+  StatusInfo status_info = 1;
+  uint64 size = 2;
 }
 
 message SpLdId {
@@ -84,8 +72,7 @@ message DnConf {
 }
 
 message SyncupDnRequest {
-  ReqConf req_conf = 1;
-  DnConf dn_conf = 2;
+  DnConf dn_conf = 1;
 }
 
 message DnInfo {
@@ -93,8 +80,7 @@ message DnInfo {
 }
 
 message SyncupDnReply {
-  ReplyInfo reply_info = 1;
-  DnInfo dn_info = 2;
+  DnInfo dn_info = 1;
 }
 
 message SpDnConf {
@@ -109,8 +95,7 @@ message SpDnConf {
 }
 
 message SyncupSpDnRequest {
-  ReqConf req_conf = 1;
-  SpDnConf sp_dn_conf = 2;
+  SpDnConf sp_dn_conf = 1;
 }
 
 message SpDnInfo {
@@ -118,8 +103,7 @@ message SpDnInfo {
 }
 
 message SyncupSpDnReply {
-  ReplyInfo reply_info = 1;
-  SpDnInfo sp_dn_info = 2;
+  SpDnInfo sp_dn_info = 1;
 }
 
 message SpCntlrId {
@@ -135,17 +119,15 @@ message CnConf {
 }
 
 message SyncupCnRequest {
-  ReqConf req_conf = 1;
-  CnConf cn_conf = 2;
+  CnConf cn_conf = 1;
 }
 
 message CnInfo {
-  StatusInfo status_info = 2;
+  StatusInfo status_info = 1;
 }
 
 message SyncupCnReply {
-  ReplyInfo reply_info = 1;
-  CnInfo cn_info = 2;
+  CnInfo cn_info = 1;
 }
 
 message StripeConf {
@@ -283,8 +265,7 @@ message SpCnConf {
 }
 
 message SyncupSpCnRequest {
-  ReqConf req_conf = 1;
-  SpCnConf sp_cn_conf = 2;
+  SpCnConf sp_cn_conf = 1;
 }
 
 enum ThinPoolStatus {
@@ -341,7 +322,7 @@ message RedundancyInfo {
 }
 
 message LdCnInfo {
-  StatusInfo status_info = 3;
+  StatusInfo status_info = 1;
 }
 
 message GrpInfo {
@@ -418,6 +399,5 @@ message SpCnInfo {
 }
 
 message SyncupSpCnReply {
-  ReplyInfo reply_info = 1;
-  SpCnInfo sp_cn_info = 2;
+  SpCnInfo sp_cn_info = 1;
 }

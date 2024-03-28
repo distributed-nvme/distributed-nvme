@@ -1,17 +1,12 @@
 package controlplane
 
 import (
-	"context"
+	"time"
 	"net"
-	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"syscall"
 
 	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
@@ -28,12 +23,12 @@ type exApiArgsStruct struct {
 var (
 	exApiCmd = &cobra.Command{
 		Use: "dnv_ex_api",
-		Short: "dnv external api"
+		Short: "dnv external api",
 		Long: `dnv external api`,
 		Run: launchExApi,
 	}
 	exApiArgs = exApiArgsStruct{}
-	gLogger = lib.NewLogger("ex_api")
+	gLogger = lib.NewPrefixLogger("ex_api")
 )
 
 func init() {
@@ -49,7 +44,7 @@ func init() {
 		&exApiArgs.grpcNetwork, "grpc-network", "", "tcp", "grpc network",
 	)
 	exApiCmd.PersistentFlags().StringVarP(
-		&exApiArgs.grpcAddress, "grpc-address", "", ":9520", "grpc address"
+		&exApiArgs.grpcAddress, "grpc-address", "", ":9520", "grpc address",
 	)
 }
 
@@ -60,8 +55,8 @@ func launchExApi(cmd *cobra.Command, args []string) {
 		gLogger.Fatal("Listen err: %v", err)
 	}
 
-	endpoints := strings.Split(cpArgs.etcdEndpoints, ",")
-	dialTimeout := time.Duration(cpArgs.etcdDialTimeout) * time.Second
+	endpoints := strings.Split(exApiArgs.etcdEndpoints, ",")
+	dialTimeout := time.Duration(exApiArgs.etcdDialTimeout) * time.Second
 	etcdCli, err := clientv3.New(clientv3.Config{
 		Endpoints: endpoints,
 		DialTimeout: dialTimeout,
@@ -75,19 +70,18 @@ func launchExApi(cmd *cobra.Command, args []string) {
 		lib.SchemaPrefixDefault,
 	)
 
-	opts := []logging.Option{
-		logging.WithLogOnEvents(logging.StartCall, logging.FinishCall),
-	}
-
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
-			logging.UnaryServerInterceptor(lib.InterceptorLogger(gLogger), opts...),
-			lib.UnaryShowReqReplyInterceptor(gLogger),
-		),
-		grpc.ChainStreamInterceptor(
-			logging.StreamServerInterceptor(lib.InterceptorLogger(logger), opts...),
+			lib.UnaryServerPerCtxHelperInterceptor,
 		),
 	)
+
+	pbcp.RegisterExternalApiServer(grpcServer, exApi)
+	if err := grpcServer.Serve(lis); err != nil {
+		gLogger.Fatal("Serve err: %v", err)
+	}
+
+	gLogger.Info("Exit external api")
 }
 
 func ExApiExecute() {

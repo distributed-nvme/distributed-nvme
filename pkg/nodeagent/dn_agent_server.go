@@ -8,35 +8,35 @@ import (
 )
 
 type dnAgentServer struct {
-	pbnd.UnimplementedDnAgentServer
+	pbnd.UnimplementedDiskNodeAgentServer
+	oc *osCmd
 }
 
-func (dnAgent *dnAgentServer) GteDevSize(
+func (dnAgent *dnAgentServer) GetDevSize(
 	ctx context.Context,
 	req *pbnd.GetDevSizeRequest,
 ) (*pbnd.GetDevSizeReply, error) {
-	pch := newDnAgentPerCtxHelper(ctx, req.ReqConf.ReqId)
-	defer pch.close()
-	size, err := pch.getBlockDevSize(req.DevPath)
+	pch := lib.GetPerCtxHelper(ctx)
+	size, err := dnAgent.oc.getBlockDevSize(pch, req.DevPath)
 	if err != nil {
 		return &pbnd.GetDevSizeReply{
-			ReplyInfo: &pbnd.ReplyInfo{
-				ReqId: req.ReqConf.ReqId,
-				Code: lib.RpcInternalErrCode,
+			StatusInfo: &pbnd.StatusInfo{
+				Code: lib.StatusCodeInternalErr,
 				Msg: err.Error(),
-			}
+			},
 		}, nil
 	}
 	return &pbnd.GetDevSizeReply{
-		ReqId: req.ReqConf.ReqId,
 		StatusInfo: &pbnd.StatusInfo{
-			Code: lib.RpcSucceedCode,
-			Msg: lib.RpcSucceedMsg,
+			Code: lib.StatusCodeSucceed,
+			Msg: lib.StatusMsgSucceed,
 		},
 		Size: size,
 	}, nil
 }
 
 func newDnAgentServer() *dnAgentServer{
-	return &dnAgentServer{}
+	return &dnAgentServer{
+		oc: &osCmd{},
+	}
 }
