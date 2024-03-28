@@ -32,9 +32,11 @@ var (
 
 func init() {
 	rootCmd.PersistentFlags().StringVarP(
-		&rootArgs.address, "address", "", "localhost:9520", "grpc address")
+		&rootArgs.address, "address", "", "localhost:9520", "grpc address",
+	)
 	rootCmd.PersistentFlags().IntVarP(
-		&rootArgs.timeout, "timeout", "", 30, "grpc timeout")
+		&rootArgs.timeout, "timeout", "", 30, "grpc timeout",
+	)
 	rootCmd.AddCommand(clusterCmd)
 	rootCmd.AddCommand(dnCmd)
 }
