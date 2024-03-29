@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -86,30 +85,26 @@ func (kf *keyFmt) spLockPath() string {
 	return fmt.Sprintf("/%s/lock/sp", kf.prefix)
 }
 
-func (kf *keyFmt) shardKeyDecode(prefix, key string) (uint8, string, error) {
+func (kf *keyFmt) shardKeyDecode(prefix, key string) (string, string, error) {
 	if !strings.HasPrefix(key, prefix) {
-		return uint8(0), "", fmt.Errorf("Invalid key: %s", key)
+		return "", "", fmt.Errorf("Invalid key: %s", key)
 	}
 	items := strings.Split(key[len(prefix):], "@")
 	if len(items) != 2 {
-		return uint8(0), "", fmt.Errorf("Invalid key: %s", key)
+		return "", "", fmt.Errorf("Invalid key: %s", key)
 	}
-	leadingNum, err := strconv.ParseUint(items[0], 10, 32)
-	if err != nil {
-		return uint8(0), "", err
-	}
-	return uint8(leadingNum), items[1], nil
+	return items[0], items[1], nil
 }
 
 func (kf *keyFmt) dnShardPrefix() string {
 	return fmt.Sprintf("/%s/dn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) dnShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.dnShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) dnShardKeyEncode(leadingCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.dnShardPrefix(), leadingCode, grpcTarget)
 }
 
-func (kf *keyFmt) dnShardKeyDecode(key string) (uint8, string, error) {
+func (kf *keyFmt) dnShardKeyDecode(key string) (string, string, error) {
 	return kf.shardKeyDecode(kf.dnShardPrefix(), key)
 }
 
@@ -117,11 +112,11 @@ func (kf *keyFmt) cnShardPrefix() string {
 	return fmt.Sprintf("/%s/cn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) cnShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.cnShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) cnShardKeyEncode(leadingCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.cnShardPrefix(), leadingCode, grpcTarget)
 }
 
-func (kf *keyFmt) cnShardKeyDecode(key string) (uint8, string, error) {
+func (kf *keyFmt) cnShardKeyDecode(key string) (string, string, error) {
 	return kf.shardKeyDecode(kf.cnShardPrefix(), key)
 }
 
@@ -129,11 +124,11 @@ func (kf *keyFmt) spShardPrefix() string {
 	return fmt.Sprintf("/%s/sp_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) spShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.spShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) spShardKeyEncode(leadingCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.spShardPrefix(), leadingCode, grpcTarget)
 }
 
-func (kf *keyFmt) spShardKeyDecode(key string) (uint8, string, error) {
+func (kf *keyFmt) spShardKeyDecode(key string) (string, string, error) {
 	return kf.shardKeyDecode(kf.spShardPrefix(), key)
 }
 

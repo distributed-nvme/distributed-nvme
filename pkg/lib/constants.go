@@ -19,6 +19,7 @@ const (
 	StatusCodeInternalErr = 2003
 
 	AgentTimeoutSecondDefault = 3
+	GrantTimeoutDefault = 10
 
 	DataExtentSizeShiftMin = 20
 	DataExtentSizeShiftMax = 40

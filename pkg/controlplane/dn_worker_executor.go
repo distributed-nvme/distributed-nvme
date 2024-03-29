@@ -1,13 +1,18 @@
 package controlplane
 
 import (
-	// "time"
+	"context"
+	"time"
 	// "net"
-	// "strings"
+	"strings"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	// "google.golang.org/grpc"
 	"github.com/spf13/cobra"
-	// clientv3 "go.etcd.io/etcd/client/v3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 	// pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
@@ -52,6 +57,35 @@ func init() {
 
 func launchDnWorker(cmd *cobra.Command, args []string) {
 	gDnWorkerLogger.Info("Launch disk node worker: %v", dnWorkerArgs)
+
+	endpoints := strings.Split(dnWorkerArgs.etcdEndpoints, ",")
+	dialTimeout := time.Duration(dnWorkerArgs.etcdDialTimeout) * time.Second
+	etcdCli, err := clientv3.New(clientv3.Config{
+		Endpoints: endpoints,
+		DialTimeout: dialTimeout,
+	})
+	if err != nil {
+		gDnWorkerLogger.Fatal("Create etcd client err: %v", err)
+	}
+	dnWorker := newDnWorkerServer(
+		etcdCli,
+		lib.SchemaPrefixDefault,
+		dnWorkerArgs.leadingCode,
+		dnWorkerArgs.grpcTarget,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go dnMemberWorker(ctx, &wg, dnWorker)
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
+	<-signalCh
+	gDnWorkerLogger.Info("Cancel all tasks")
+	cancel()
+	gDnWorkerLogger.Info("Wait")
+	wg.Wait()
+	gDnWorkerLogger.Info("Exit")
 }
 
 func DnWorkerExecute() {
