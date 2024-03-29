@@ -28,7 +28,7 @@ var (
 		Run: launchExApi,
 	}
 	exApiArgs = exApiArgsStruct{}
-	gLogger = lib.NewPrefixLogger("ex_api")
+	gExApiLogger = lib.NewPrefixLogger("ex_api")
 )
 
 func init() {
@@ -49,10 +49,10 @@ func init() {
 }
 
 func launchExApi(cmd *cobra.Command, args []string) {
-	gLogger.Info("Launch external api: %v", exApiArgs)
+	gExApiLogger.Info("Launch external api: %v", exApiArgs)
 	lis, err := net.Listen(exApiArgs.grpcNetwork, exApiArgs.grpcAddress)
 	if err != nil {
-		gLogger.Fatal("Listen err: %v", err)
+		gExApiLogger.Fatal("Listen err: %v", err)
 	}
 
 	endpoints := strings.Split(exApiArgs.etcdEndpoints, ",")
@@ -62,7 +62,7 @@ func launchExApi(cmd *cobra.Command, args []string) {
 		DialTimeout: dialTimeout,
 	})
 	if err != nil {
-		gLogger.Fatal("Create etcd client err: %v", err)
+		gExApiLogger.Fatal("Create etcd client err: %v", err)
 	}
 
 	exApi := newExApiServer(
@@ -78,14 +78,14 @@ func launchExApi(cmd *cobra.Command, args []string) {
 
 	pbcp.RegisterExternalApiServer(grpcServer, exApi)
 	if err := grpcServer.Serve(lis); err != nil {
-		gLogger.Fatal("Serve err: %v", err)
+		gExApiLogger.Fatal("Serve err: %v", err)
 	}
 
-	gLogger.Info("Exit external api")
+	gExApiLogger.Info("Exit external api")
 }
 
 func ExApiExecute() {
 	if err := exApiCmd.Execute(); err != nil {
-		gLogger.Info("Cmd execute err: %v", err)
+		gExApiLogger.Fatal("Cmd execute err: %v", err)
 	}
 }

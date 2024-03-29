@@ -23,7 +23,7 @@ var (
 		Run: launchDnAgent,
 	}
 	dnAgentArgs = dnAgentArgsStruct{}
-	gLogger = lib.NewPrefixLogger("dn_agent")
+	gDnAgentLogger = lib.NewPrefixLogger("dn_agent")
 )
 
 func init() {
@@ -36,10 +36,10 @@ func init() {
 }
 
 func launchDnAgent(cmd *cobra.Command, args []string) {
-	gLogger.Info("Launch disk node agent: %v", dnAgentArgs)
+	gDnAgentLogger.Info("Launch disk node agent: %v", dnAgentArgs)
 	lis, err := net.Listen(dnAgentArgs.grpcNetwork, dnAgentArgs.grpcAddress)
 	if err != nil {
-		gLogger.Fatal("Listen err: %v", err)
+		gDnAgentLogger.Fatal("Listen err: %v", err)
 	}
 
 	dnAgent := newDnAgentServer()
@@ -52,14 +52,14 @@ func launchDnAgent(cmd *cobra.Command, args []string) {
 
 	pbnd.RegisterDiskNodeAgentServer(grpcServer, dnAgent)
 	if err := grpcServer.Serve(lis); err != nil {
-		gLogger.Fatal("Serve err: %v", err)
+		gDnAgentLogger.Fatal("Serve err: %v", err)
 	}
 
-	gLogger.Info("Exit disk node agent")
+	gDnAgentLogger.Info("Exit disk node agent")
 }
 
 func DnAgentExecute() {
 	if err := dnAgentCmd.Execute(); err != nil {
-		gLogger.Info("Cmd execute err: %v", err)
+		gDnAgentLogger.Info("Cmd execute err: %v", err)
 	}
 }
