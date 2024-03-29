@@ -25,7 +25,7 @@ func (exApi *exApiServer) CreateCluster(
 		ExtentRatioShift: lib.ExtentRatioShiftDefault,
 	}
 	pch.Logger.Debug("cluster: %v", cluster)
-	clusterEntityKey := exApi.kf.ClusterEntityKey()
+	clusterEntityKey := exApi.kf.clusterEntityKey()
 	clusterEntityVal, err := proto.Marshal(cluster)
 	if err != nil {
 		pch.Logger.Error("Marshal cluster err: %v %v", cluster, err)
@@ -44,7 +44,7 @@ func (exApi *exApiServer) CreateCluster(
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
-	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
+	dnGlobalEntityKey := exApi.kf.dnGlobalEntityKey()
 	dnGlobalEntityVal, err := proto.Marshal(dnGlobal)
 	if err != nil {
 		pch.Logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
@@ -62,7 +62,7 @@ func (exApi *exApiServer) CreateCluster(
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	pch.Logger.Debug("cnGlobal: %v", cnGlobal)
-	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
+	cnGlobalEntityKey := exApi.kf.cnGlobalEntityKey()
 	cnGlobalEntityVal, err := proto.Marshal(cnGlobal)
 	if err != nil {
 		pch.Logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
@@ -80,7 +80,7 @@ func (exApi *exApiServer) CreateCluster(
 		ShardBucket: make([]uint32, lib.ShardSize),
 	}
 	pch.Logger.Debug("spGlobal: %v", spGlobal)
-	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
+	spGlobalEntityKey := exApi.kf.spGlobalEntityKey()
 	spGlobalEntityVal, err := proto.Marshal(spGlobal)
 	if err != nil {
 		pch.Logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
@@ -162,10 +162,10 @@ func (exApi *exApiServer) DeleteCluster(
 ) (*pbcp.DeleteClusterReply, error) {
 	pch := lib.GetPerCtxHelper(ctx)
 
-	clusterEntityKey := exApi.kf.ClusterEntityKey()
-	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
-	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
-	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
+	clusterEntityKey := exApi.kf.clusterEntityKey()
+	dnGlobalEntityKey := exApi.kf.dnGlobalEntityKey()
+	cnGlobalEntityKey := exApi.kf.cnGlobalEntityKey()
+	spGlobalEntityKey := exApi.kf.spGlobalEntityKey()
 
 	apply := func(stm concurrency.STM) error {
 		if len(stm.Get(clusterEntityKey)) > 0 {
@@ -220,7 +220,7 @@ func (exApi *exApiServer) GetCluster(
 ) (*pbcp.GetClusterReply, error) {
 	pch := lib.GetPerCtxHelper(ctx)
 
-	clusterEntityKey := exApi.kf.ClusterEntityKey()
+	clusterEntityKey := exApi.kf.clusterEntityKey()
 	cluster := &pbsch.Cluster{}
 
 	apply := func(stm concurrency.STM) error {

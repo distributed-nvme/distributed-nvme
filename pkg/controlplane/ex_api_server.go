@@ -26,7 +26,7 @@ func (exApi *exApiServer)getCluster(
 	pch *lib.PerCtxHelper,
 ) (*pbsch.Cluster, error) {
 	if !exApi.clusterInit {
-		clusterEntityKey := exApi.kf.ClusterEntityKey()
+		clusterEntityKey := exApi.kf.clusterEntityKey()
 		resp, err := exApi.etcdCli.Get(pch.Ctx, clusterEntityKey)
 		if err != nil {
 			return nil, err

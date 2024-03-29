@@ -10,79 +10,79 @@ type keyFmt struct {
 	prefix string
 }
 
-func (kf *keyFmt) ClusterEntityKey() string {
+func (kf *keyFmt) clusterEntityKey() string {
 	return fmt.Sprintf("/%s/cluster", kf.prefix)
 }
 
-func (kf *keyFmt) GlobalSummaryEntityKey() string {
+func (kf *keyFmt) globalSummaryEntityKey() string {
 	return fmt.Sprintf("/%s/global_summary", kf.prefix)
 }
 
-func (kf *keyFmt) DnGlobalEntityKey() string {
+func (kf *keyFmt) dnGlobalEntityKey() string {
 	return fmt.Sprintf("/%s/dn_global", kf.prefix)
 }
 
-func (kf *keyFmt) CnGlobalEntityKey() string {
+func (kf *keyFmt) cnGlobalEntityKey() string {
 	return fmt.Sprintf("/%s/cn_global", kf.prefix)
 }
 
-func (kf *keyFmt) SpGlobalEntityKey() string {
+func (kf *keyFmt) spGlobalEntityKey() string {
 	return fmt.Sprintf("/%s/sp_global", kf.prefix)
 }
 
-func (kf *keyFmt) DnEntityPrefix() string {
+func (kf *keyFmt) dnEntityPrefix() string {
 	return fmt.Sprintf("/%s/dn/", kf.prefix)
 }
 
-func (kf *keyFmt) DnEntityKey(dnId string) string {
-	return fmt.Sprintf("%s%s", kf.DnEntityPrefix(), dnId)
+func (kf *keyFmt) dnEntityKey(dnId string) string {
+	return fmt.Sprintf("%s%s", kf.dnEntityPrefix(), dnId)
 }
 
-func (kf *keyFmt) CnEntityPrefix() string {
+func (kf *keyFmt) cnEntityPrefix() string {
 	return fmt.Sprintf("/%s/cn/", kf.prefix)
 }
 
-func (kf *keyFmt) CnEntityKey(cnId string) string {
-	return fmt.Sprintf("%s%s", kf.CnEntityPrefix(), cnId)
+func (kf *keyFmt) cnEntityKey(cnId string) string {
+	return fmt.Sprintf("%s%s", kf.cnEntityPrefix(), cnId)
 }
 
-func (kf *keyFmt) SpEntityPrefix() string {
+func (kf *keyFmt) spEntityPrefix() string {
 	return fmt.Sprintf("/%s/sp/", kf.prefix)
 }
 
-func (kf *keyFmt) SpEntityKey(spId string) string {
-	return fmt.Sprintf("%s%s", kf.SpEntityPrefix(), spId)
+func (kf *keyFmt) spEntityKey(spId string) string {
+	return fmt.Sprintf("%s%s", kf.spEntityPrefix(), spId)
 }
 
-func (kf *keyFmt) NameToIdEntityKey(name string) string {
+func (kf *keyFmt) nameToIdEntityKey(name string) string {
 	return fmt.Sprintf("/%s/name_to_id/%s", kf.prefix, name)
 }
 
-func (kf *keyFmt) TagNameEntityPrefix() string {
+func (kf *keyFmt) tagNameEntityPrefix() string {
 	return fmt.Sprintf("/%s/tag_name/", kf.prefix)
 }
 
-func (kf *keyFmt) TagNameEntityKey(tagName string) string {
-	return fmt.Sprintf("%s%s", kf.TagNameEntityPrefix(), tagName)
+func (kf *keyFmt) tagNameEntityKey(tagName string) string {
+	return fmt.Sprintf("%s%s", kf.tagNameEntityPrefix(), tagName)
 }
 
-func (kf *keyFmt) TagValueEntityPrefix(tagName string) string {
+func (kf *keyFmt) tagValueEntityPrefix(tagName string) string {
 	return fmt.Sprintf("/%s/tag_value/%s/", kf.prefix, tagName)
 }
 
-func (kf *keyFmt) TagValueEntityKey(tagName, tagValue string) string {
-	return fmt.Sprintf("%s%s", kf.TagValueEntityPrefix(tagName), tagValue)
+func (kf *keyFmt) tagValueEntityKey(tagName, tagValue string) string {
+	return fmt.Sprintf("%s%s", kf.tagValueEntityPrefix(tagName), tagValue)
 }
 
-func (kf *keyFmt) DnLockPath() string {
+func (kf *keyFmt) dnLockPath() string {
 	return fmt.Sprintf("/%s/lock/dn", kf.prefix)
 }
 
-func (kf *keyFmt) CnLockPath() string {
+func (kf *keyFmt) cnLockPath() string {
 	return fmt.Sprintf("/%s/lock/cn", kf.prefix)
 }
 
-func (kf *keyFmt) SpLockPath() string {
+func (kf *keyFmt) spLockPath() string {
 	return fmt.Sprintf("/%s/lock/sp", kf.prefix)
 }
 
@@ -101,40 +101,40 @@ func (kf *keyFmt) shardKeyDecode(prefix, key string) (uint8, string, error) {
 	return uint8(leadingNum), items[1], nil
 }
 
-func (kf *keyFmt) DnShardPrefix() string {
+func (kf *keyFmt) dnShardPrefix() string {
 	return fmt.Sprintf("/%s/dn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) DnShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.DnShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) dnShardKeyEncode(leadingNum uint8, sockAddr string) string {
+	return fmt.Sprintf("%s%d@%s", kf.dnShardPrefix(), leadingNum, sockAddr)
 }
 
-func (kf *keyFmt) DnShardKeyDecode(key string) (uint8, string, error) {
-	return kf.shardKeyDecode(kf.DnShardPrefix(), key)
+func (kf *keyFmt) dnShardKeyDecode(key string) (uint8, string, error) {
+	return kf.shardKeyDecode(kf.dnShardPrefix(), key)
 }
 
-func (kf *keyFmt) CnShardPrefix() string {
+func (kf *keyFmt) cnShardPrefix() string {
 	return fmt.Sprintf("/%s/cn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) CnShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.CnShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) cnShardKeyEncode(leadingNum uint8, sockAddr string) string {
+	return fmt.Sprintf("%s%d@%s", kf.cnShardPrefix(), leadingNum, sockAddr)
 }
 
-func (kf *keyFmt) CnShardKeyDecode(key string) (uint8, string, error) {
-	return kf.shardKeyDecode(kf.CnShardPrefix(), key)
+func (kf *keyFmt) cnShardKeyDecode(key string) (uint8, string, error) {
+	return kf.shardKeyDecode(kf.cnShardPrefix(), key)
 }
 
-func (kf *keyFmt) SpShardPrefix() string {
+func (kf *keyFmt) spShardPrefix() string {
 	return fmt.Sprintf("/%s/sp_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) SpShardKeyEncode(leadingNum uint8, sockAddr string) string {
-	return fmt.Sprintf("%s%d@%s", kf.SpShardPrefix(), leadingNum, sockAddr)
+func (kf *keyFmt) spShardKeyEncode(leadingNum uint8, sockAddr string) string {
+	return fmt.Sprintf("%s%d@%s", kf.spShardPrefix(), leadingNum, sockAddr)
 }
 
-func (kf *keyFmt) SpShardKeyDecode(key string) (uint8, string, error) {
-	return kf.shardKeyDecode(kf.SpShardPrefix(), key)
+func (kf *keyFmt) spShardKeyDecode(key string) (uint8, string, error) {
+	return kf.shardKeyDecode(kf.spShardPrefix(), key)
 }
 
 func newKeyFmt(prefix string) *keyFmt {

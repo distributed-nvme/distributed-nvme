@@ -18,6 +18,8 @@ type dnWorkerArgsStruct struct {
 	etcdDialTimeout int
 	grpcNetwork string
 	grpcAddress string
+	leadingCode string
+	grpcTarget string
 }
 
 var (
