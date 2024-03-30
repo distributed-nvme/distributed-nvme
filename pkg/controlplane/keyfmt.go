@@ -85,7 +85,7 @@ func (kf *keyFmt) spLockPath() string {
 	return fmt.Sprintf("/%s/lock/sp", kf.prefix)
 }
 
-func (kf *keyFmt) shardKeyDecode(prefix, key string) (string, string, error) {
+func shardKeyDecode(prefix, key string) (string, string, error) {
 	if !strings.HasPrefix(key, prefix) {
 		return "", "", fmt.Errorf("Invalid key: %s", key)
 	}
@@ -105,7 +105,7 @@ func (kf *keyFmt) dnShardKeyEncode(leadingCode string, grpcTarget string) string
 }
 
 func (kf *keyFmt) dnShardKeyDecode(key string) (string, string, error) {
-	return kf.shardKeyDecode(kf.dnShardPrefix(), key)
+	return shardKeyDecode(kf.dnShardPrefix(), key)
 }
 
 func (kf *keyFmt) cnShardPrefix() string {
@@ -117,7 +117,7 @@ func (kf *keyFmt) cnShardKeyEncode(leadingCode string, grpcTarget string) string
 }
 
 func (kf *keyFmt) cnShardKeyDecode(key string) (string, string, error) {
-	return kf.shardKeyDecode(kf.cnShardPrefix(), key)
+	return shardKeyDecode(kf.cnShardPrefix(), key)
 }
 
 func (kf *keyFmt) spShardPrefix() string {
@@ -129,7 +129,7 @@ func (kf *keyFmt) spShardKeyEncode(leadingCode string, grpcTarget string) string
 }
 
 func (kf *keyFmt) spShardKeyDecode(key string) (string, string, error) {
-	return kf.shardKeyDecode(kf.spShardPrefix(), key)
+	return shardKeyDecode(kf.spShardPrefix(), key)
 }
 
 func newKeyFmt(prefix string) *keyFmt {

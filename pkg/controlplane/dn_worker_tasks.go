@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -19,6 +20,11 @@ func dnMemberWorker(
 	defer wg.Done()
 	workerId := uuid.New().String()
 	logger := lib.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
+	pch := &lib.PerCtxHelper{
+		Ctx: ctx,
+		Logger: logger,
+		TraceId: workerId,
+	}
 	key := dnWorker.kf.dnShardKeyEncode(dnWorker.leadingCode, dnWorker.grpcTarget)
 	resp, err := dnWorker.etcdCli.Grant(ctx, dnWorker.grantTimeout)
 	if err != nil {
@@ -36,4 +42,30 @@ func dnMemberWorker(
 	defer func() {
 		dnWorker.etcdCli.Revoke(context.Background(), resp.ID)
 	}()
+
+	dnShardCh := dnWorker.etcdCli.Watch(
+		ctx,
+		dnWorker.kf.dnShardPrefix(),
+		clientv3.WithPrefix(),
+	)
+	shardWorkerList := buildShardWorkerList(
+		pch,
+		dnWorker.kf.dnShardPrefix(),
+		dnWorker.etcdCli,
+	)
+	for {
+		select {
+		case <-dnShardCh:
+			shardWorkerList = buildShardWorkerList(
+				pch,
+				dnWorker.kf.dnShardPrefix(),
+				dnWorker.etcdCli,
+			)
+			logger.Info("%v", shardWorkerList)
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(lib.ShardMemberWaitTime) * time.Second):
+			break
+		}
+	}
 }
