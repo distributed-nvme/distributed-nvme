@@ -7,79 +7,17 @@ package controlplane;
 service ExternalApi {
   rpc CreateCluster(CreateClusterRequest) returns(CreateClusterReply) {}
   rpc DeleteCluster(DeleteClusterRequest) returns(DeleteClusterReply) {}
-  // rpc ModifyCluster(ModifyClusterRequest) returns(ModifyClusterReply) {}
-  // rpc ListCluster(ListClusterRequest) returns(ListClusterReply) {}
   rpc GetCluster(GetClusterRequest) returns(GetClusterReply) {}
 
   rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
   rpc DeleteDn(DeleteDnRequest) returns(DeleteDnReply) {}
-  // rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
-  // rpc ListDn(ListDnRequest) returns(ListDnReply) {}
   rpc GetDn(GetDnRequest) returns(GetDnReply) {}
-
-  // rpc CreateCn(CreateCnRequest) returns(CreateCnReply) {}
-  // rpc DeleteCn(DeleteCnRequest) returns(DeleteCnReply) {}
-  // rpc ModifyCn(ModifyCnRequest) returns(ModifyCnReply) {}
-  // rpc ListCn(ListCnRequest) returns(ListCnReply) {}
-  // rpc GetCn(GetCnRequest) returns(GetCnReply) {}
-
-  // rpc CreateSp(CreateSpRequest) returns(CreateSpReply) {}
-  // rpc DeleteSp(DeleteSpRequest) returns(DeleteSpReply) {}
-  // rpc ModifySp(ModifySpRequest) returns(ModifySpReply) {}
-  // rpc ListSp(ListSpRequest) returns(ListSpReply) {}
-  // rpc GetSp(GetSpRequest) returns(GetSpReply) {}
-
-  // rpc CreateSnap(CreateSnapRequest) returns(CreateSnapReply) {}
-  // rpc DeleteSnap(DeleteSnapRequest) returns(DeleteSnapReply) {}
-  // rpc ModifySnap(ModifySnapRequest) returns(ModifySnapReply) {}
-  // rpc ListSnap(ListSnapRequest) returns(ListSnapReply) {}
-  // rpc GetSnap(GetSnapRequest) returns(GetSnapReply) {}
-
-  // rpc CreateSs(CreateSsRequest) returns(CreateSsReply) {}
-  // rpc DeleteSs(DeleteSsRequest) returns(DeleteSsReply) {}
-  // rpc ModifySs(ModifySsRequest) returns(ModifySsReply) {}
-  // rpc ListSs(ListSsRequest) returns(ListSsReply) {}
-  // rpc GetSs(GetSsRequest) returns(GetSsReply) {}
-
-  // rpc CreateNs(CreateNsRequest) returns(CreateNsReply) {}
-  // rpc DeleteNs(DeleteNsRequest) returns(DeleteNsReply) {}
-  // rpc ModifyNs(ModifyNsRequest) returns(ModifyNsReply) {}
-  // rpc ListNs(ListNsRequest) returns(ListNsReply) {}
-  // rpc GetNs(GetNsRequest) returns(GetNsReply) {}
-
-  // rpc CreateExp(CreateExpRequest) returns(CreateExpReply) {}
-  // rpc DeleteExp(DeleteExpRequest) returns(DeleteExpReply) {}
-  // rpc ModifyExp(ModifyExpRequest) returns(ModifyExpReply) {}
-  // rpc ListExp(ListExpRequest) returns(ListExpReply) {}
-  // rpc GetExp(GetExpRequest) returns(GetExpReply) {}
-
-  // rpc CreateMt(CreateMtRequest) returns(CreateMtReply) {}
-  // rpc CancelMt(CancelMtRequest) returns(CancelMtReply) {}
-  // rpc ModifyMt(ModifyMtRequest) returns(ModifyMtReply) {}
-  // rpc ListMt(ListMtRequest) returns(ListMtReply) {}
-  // rpc GetMt(GetMtRequest) returns(GetMtReply) {}
-
-  // rpc CreateIt(CreateItRequest) returns(CreateItReply) {}
-  // rpc CancelIt(CancelItRequest) returns(CancelItReply) {}
-  // rpc ModifyIt(ModifyItRequest) returns(ModifyItReply) {}
-  // rpc ListIt(ListItRequest) returns(ListItReply) {}
-  // rpc GetIt(GetItRequest) returns(GetItReply) {}
-
-  // rpc CreateLdPh(CreateLdPhRequest) returns(CreateLdPhReply) {}
-  // rpc DeleteLdPh(DeleteLdPhRequest) returns(DeleteLdPhReply) {}
-  // rpc ModifyLdPh(ModifyLdPhRequest) returns(ModifyLdPhReply) {}
-  // rpc ListLdPh(ListLdPhRequest) returns(ListLdPhReply) {}
-  // rpc GetLdPh(GetLdPhRequest) returns(GetLdPhReply) {}
-
-  // rpc CreateCntlrPh(CreateCntlrPhRequest) returns(CreateCntlrPhReply) {}
-  // rpc DeleteCntlrPh(DeleteCntlrPhRequest) returns(DeleteCntlrPhReply) {}
-  // rpc ModifyCntlrPh(ModifyCntlrPhRequest) returns(ModifyCntlrPhReply) {}
-  // rpc ListCntlrPh(ListCntlrPhRequest) returns(ListCntlrPhReply) {}
-  // rpc GetCntlrPh(GetCntlrPhRequest) returns(GetCntlrPhReply) {}
 }
 
 service DiskNodeWorker {
-  rpc GetDnBatch(GetDnBatchRequest) returns(GetDnBatchReply) {}
+  rpc AllocateDn(AllocateDnRequest) returns(AllocateDnReply) {}
+  rpc SummaryDn(SummaryDnRequest) returns(SummaryDnReply) {}
+  rpc FilterDn(FilterDnRequest) returns(FilterDnReply) {}
 }
 
 message ReplyInfo {
@@ -120,6 +58,40 @@ message NvmePortConf {
 message Tag {
   string key = 1;
   string value = 2;
+}
+
+message DnSummary {
+  uint32 total_dn_cnt = 1;
+  uint32 total_data_extent_cnt = 2;
+  uint32 free_data_extent_cnt = 3;
+  uint32 total_meta_extent_cnt = 4;
+  uint32 free_meta_extent_cnt = 5;
+  uint64 total_qos = 6;
+  uint64 free_qos = 7;
+  uint32 total_ld_cnt = 8;
+}
+
+message CnSummary {
+  uint32 total_cn_cnt = 1;
+  uint32 total_qos = 2;
+  uint32 free_qos = 3;
+  uint32 total_cntlr_cnt = 4;
+}
+
+message SpSummary {
+  uint32 total_sp_cnt = 1;
+  uint32 total_ss_cnt = 2;
+  uint32 total_ns_cnt = 3;
+  uint32 total_active_cntlr_cnt = 4;
+  uint32 total_standby_cntlr_cnt = 5;
+  uint32 total_snap_cnt =6;
+  uint32 total_leg_cnt = 7;
+  uint32 total_grp_cnt = 8;
+  uint32 total_ld_cnt = 9;
+  uint32 total_data_extent_cnt = 10;
+  uint32 total_meta_extent_cnt = 11;
+  uint32 total_mt_cnt = 12;
+  uint32 total_it_cnt = 13;
 }
 
 message Cluster {
@@ -186,9 +158,50 @@ message GetDnReply {
   ReplyInfo reply_info = 1;
 }
 
-message GetDnBatchRequest {
+message AllocateDnRequest {
+  repeated Tag include_tag_list = 1;
+  repeated Tag exclude_tag_list = 2;
+  string distinguish_key = 3;
+  uint32 dn_cnt = 4;
+  uint32 extent_per_dn_cnt = 5;
 }
 
-message GetDnBatchReply{
-  ReplyInfo reply_info = 1;
+message AllocateDnItem {
+  uint64 dn_id = 1;
+  string distinguish_value = 2;
+}
+
+message AllocateDnReply {
+  repeated AllocateDnItem allocate_dn_item_list = 1;
+}
+
+message SummaryDnRequest {
+  repeated Tag include_tag_list = 1;
+  repeated Tag exclude_tag_list = 2;
+  string group_by_key = 3;
+}
+
+message SummaryDnItem {
+  string group_by_value = 1;
+  DnSummary dn_summary = 2;
+}
+
+message SummaryDnReply {
+  bool truncated = 1;
+  repeated SummaryDnItem summary_dn_item_list = 2;
+}
+
+message FilterDnRequest {
+  repeated Tag include_tag_list = 1;
+  repeated Tag exclude_tag_list = 2;
+}
+
+message FilterDnItem {
+  uint64 dn_id = 1;
+  repeated Tag tag_list = 2;
+}
+
+message FilterDnReply {
+  bool truncated = 1;
+  repeated FilterDnItem filter_dn_item_list = 2;
 }
