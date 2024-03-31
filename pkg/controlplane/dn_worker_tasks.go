@@ -13,28 +13,24 @@ import (
 )
 
 func dnMemberWorker(
-	ctx context.Context,
+	parentCtx context.Context,
 	wg *sync.WaitGroup,
 	dnWorker *dnWorkerServer,
 ) {
 	defer wg.Done()
 	workerId := uuid.New().String()
 	logger := lib.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
-	pch := &lib.PerCtxHelper{
-		Ctx: ctx,
-		Logger: logger,
-		TraceId: workerId,
-	}
+	pch := lib.NewPerCtxHelper(parentCtx, logger, workerId)
 	key := dnWorker.kf.dnShardKeyEncode(dnWorker.leadingCode, dnWorker.grpcTarget)
-	resp, err := dnWorker.etcdCli.Grant(ctx, dnWorker.grantTimeout)
+	resp, err := dnWorker.etcdCli.Grant(pch.Ctx, dnWorker.grantTimeout)
 	if err != nil {
 		logger.Fatal("Grant err: %v", err)
 	}
-	if _, err := dnWorker.etcdCli.KeepAlive(ctx, resp.ID); err != nil {
+	if _, err := dnWorker.etcdCli.KeepAlive(pch.Ctx, resp.ID); err != nil {
 		dnWorker.etcdCli.Revoke(context.Background(), resp.ID)
 		logger.Fatal("KeepAlive err: %v leaseId=%v", err, resp.ID)
 	}
-	_, err = dnWorker.etcdCli.Put(ctx, key, workerId, clientv3.WithLease(resp.ID))
+	_, err = dnWorker.etcdCli.Put(pch.Ctx, key, workerId, clientv3.WithLease(resp.ID))
 	if err != nil {
 		dnWorker.etcdCli.Revoke(context.Background(), resp.ID)
 		logger.Fatal("Put err: %v leaseId=%v key=%s", err, resp.ID, key)
@@ -43,15 +39,16 @@ func dnMemberWorker(
 		dnWorker.etcdCli.Revoke(context.Background(), resp.ID)
 	}()
 
-	dnShardCh := dnWorker.etcdCli.Watch(
-		ctx,
-		dnWorker.kf.dnShardPrefix(),
-		clientv3.WithPrefix(),
-	)
 	shardWorkerList := buildShardWorkerList(
 		pch,
 		dnWorker.kf.dnShardPrefix(),
 		dnWorker.etcdCli,
+	)
+
+	dnShardCh := dnWorker.etcdCli.Watch(
+		pch.Ctx,
+		dnWorker.kf.dnShardPrefix(),
+		clientv3.WithPrefix(),
 	)
 	for {
 		select {
@@ -62,7 +59,7 @@ func dnMemberWorker(
 				dnWorker.etcdCli,
 			)
 			logger.Info("%v", shardWorkerList)
-		case <-ctx.Done():
+		case <-pch.Ctx.Done():
 			return
 		case <-time.After(time.Duration(lib.ShardMemberWaitTime) * time.Second):
 			break

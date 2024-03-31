@@ -25,6 +25,19 @@ var (
 	ctxKeyPch = ctxKey("PerCtxHelper")
 )
 
+func NewPerCtxHelper(
+	ctx context.Context,
+	logger *PrefixLogger,
+	traceId string,
+) *PerCtxHelper {
+	pch := &PerCtxHelper{}
+	newCtx := context.WithValue(ctx, ctxKeyPch, pch)
+	pch.Ctx = newCtx
+	pch.Logger = logger
+	pch.TraceId = traceId
+	return pch
+}
+
 func buildPerCtxHelper(ctx context.Context, method string) *PerCtxHelper {
 	var logger *PrefixLogger
 	var traceId string
@@ -47,12 +60,7 @@ func buildPerCtxHelper(ctx context.Context, method string) *PerCtxHelper {
 		logger.Info("No traceId in metadata, create a new one")
 	}
 
-	pch := &PerCtxHelper{}
-	newCtx := context.WithValue(ctx, ctxKeyPch, pch)
-	pch.Ctx = newCtx
-	pch.Logger = logger
-	pch.TraceId = traceId
-	return pch
+	return NewPerCtxHelper(ctx, logger, traceId)
 }
 
 func GetPerCtxHelper(ctx context.Context) *PerCtxHelper {
