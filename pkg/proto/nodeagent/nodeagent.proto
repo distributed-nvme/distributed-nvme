@@ -91,7 +91,7 @@ message SpDnConf {
   bool partial = 5;
   uint64 start = 6;
   uint64 length = 7;
-  uint64 cn_id = 8;
+  repeated uint64 cn_id_list = 8;
 }
 
 message SyncupSpDnRequest {

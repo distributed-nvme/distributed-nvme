@@ -8,7 +8,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
-	pbsch "github.com/distributed-nvme/distributed-nvme/pkg/proto/schema"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -19,12 +18,12 @@ type exApiServer struct {
 	sm *stmWrapper
 	agentTimeout time.Duration
 	clusterInit bool
-	cluster pbsch.Cluster
+	cluster pbcp.Cluster
 }
 
 func (exApi *exApiServer)getCluster(
 	pch *lib.PerCtxHelper,
-) (*pbsch.Cluster, error) {
+) (*pbcp.Cluster, error) {
 	if !exApi.clusterInit {
 		clusterEntityKey := exApi.kf.clusterEntityKey()
 		resp, err := exApi.etcdCli.Get(pch.Ctx, clusterEntityKey)

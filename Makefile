@@ -4,13 +4,11 @@ PATH := $(PATH):$(GOPATH)/bin
 
 .PHONY: proto
 proto:
-	protoc --go_out=. --go_opt=paths=source_relative pkg/proto/schema/schema.proto
 	protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pkg/proto/nodeagent/nodeagent.proto
 	protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pkg/proto/controlplane/controlplane.proto
 
 .PHONY: clean
 clean:
-	rm -f pkg/proto/schema/*.go
 	rm -f pkg/proto/nodeagent/*.go
 	rm -f pkg/proto/controlplane/*.go
 	rm -rf $(OUT_DIR)

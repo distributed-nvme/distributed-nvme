@@ -18,19 +18,19 @@ func validDnReq(req *pbcp.CreateDnRequest) error {
 	if err := validStringLength(req.DevPath, "DevPath"); err != nil {
 		return err
 	}
-	if err := validStringLength(req.PortConf.NvmeListener.TrType, "TrType"); err != nil {
+	if err := validStringLength(req.TrType, "TrType"); err != nil {
 		return err
 	}
-	if err := validStringLength(req.PortConf.NvmeListener.AdrFam, "AdrFam"); err != nil {
+	if err := validStringLength(req.AdrFam, "AdrFam"); err != nil {
 		return err
 	}
-	if err := validStringLength(req.PortConf.NvmeListener.TrAddr, "TrAddr"); err != nil {
+	if err := validStringLength(req.TrAddr, "TrAddr"); err != nil {
 		return err
 	}
-	if err := validStringLength(req.PortConf.NvmeListener.TrSvcId, "TrSvcId"); err != nil {
+	if err := validStringLength(req.TrSvcId, "TrSvcId"); err != nil {
 		return err
 	}
-	if req.PortConf.PortNum > lib.PortNumMax {
+	if req.PortNum > lib.PortNumMax {
 		return fmt.Errorf("PortNum larger than %d", lib.PortNumMax)
 	}
 	for _, tag := range req.TagList {
