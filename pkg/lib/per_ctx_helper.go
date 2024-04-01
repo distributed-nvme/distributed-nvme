@@ -11,6 +11,7 @@ import (
 
 type PerCtxHelper struct {
 	Ctx context.Context
+	Cancel context.CancelFunc
 	Logger *PrefixLogger
 	TraceId string
 }
@@ -26,13 +27,15 @@ var (
 )
 
 func NewPerCtxHelper(
-	ctx context.Context,
+	parentCtx context.Context,
 	logger *PrefixLogger,
 	traceId string,
 ) *PerCtxHelper {
 	pch := &PerCtxHelper{}
-	newCtx := context.WithValue(ctx, ctxKeyPch, pch)
-	pch.Ctx = newCtx
+	tmpCtx := context.WithValue(parentCtx, ctxKeyPch, pch)
+	ctx, cancel := context.WithCancel(tmpCtx)
+	pch.Ctx = ctx
+	pch.Cancel = cancel
 	pch.Logger = logger
 	pch.TraceId = traceId
 	return pch

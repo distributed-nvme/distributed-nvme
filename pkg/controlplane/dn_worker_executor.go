@@ -7,7 +7,6 @@ import (
 	"strings"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	// "google.golang.org/grpc"
@@ -86,16 +85,14 @@ func launchDnWorker(cmd *cobra.Command, args []string) {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go dnMemberWorker(ctx, &wg, dnWorker)
+	dnmw := newDnMemberWorker(ctx, dnWorker)
+	dnmw.run()
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	<-signalCh
 	gDnWorkerLogger.Info("Cancel all tasks")
 	cancel()
-	gDnWorkerLogger.Info("Wait")
-	wg.Wait()
+	dnmw.wait()
 	gDnWorkerLogger.Info("Exit")
 }
 

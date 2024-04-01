@@ -18,10 +18,9 @@ type dnWorkerServer struct {
 	kf *keyFmt
 	sm *stmWrapper
 
-	// Shared fields, protected by Mutex
+	// Shared fields
+	initTrigger chan struct{}
 	mu sync.Mutex
-	inited bool
-	initRequired bool
 
 	// dnWorkerMember only fields
 	prioCode string
@@ -43,8 +42,7 @@ func newDnWorkerServer(
 		etcdCli: etcdCli,
 		kf: newKeyFmt(prefix),
 		sm: newStmWrapper(etcdCli),
-		inited: false,
-		initRequired: false,
+		initTrigger: make(chan struct{}),
 		prioCode: prioCode,
 		grpcTarget: grpcTarget,
 		bucket: make([]string, 0),

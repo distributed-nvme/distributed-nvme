@@ -14,26 +14,25 @@ type shardWorker struct {
 	shardList []string
 }
 
-func buildShardWorkerList(
+func getShards(
 	pch *lib.PerCtxHelper,
-	prefix string,
 	etcdCli *clientv3.Client,
-) []*shardWorker {
+	prefix string,
+	selfTarget string,
+) (map[string]bool, int64) {
 	resp, err := etcdCli.Get(pch.Ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
 		pch.Logger.Fatal("Get shard workers failed: %s %v", prefix, err)
 	}
+	var selfShardWorker *shardWorker
 	swList := make([]*shardWorker, 0)
 	for _, ev := range resp.Kvs {
 		pch.Logger.Info("Shard workers: %s %s", ev.Key, ev.Value)
-		prioCode, grpcTarget, err := shardKeyDecode(prefix, string(ev.Key))
-		if err != nil {
-			pch.Logger.Warning(
-				"Ignore invalid key: %s %s %v",
-				prefix,
-				ev.Key,
-				err,
-			)
+		keyStr := string(ev.Key)
+		grpcTarget := keyStr[len(prefix):]
+		prioCode := string(ev.Value)
+		if len(prioCode) != lib.ShardCnt {
+			pch.Logger.Warning("Ignore invalid prioCode: %s %s", grpcTarget, prioCode)
 			continue
 		}
 		sw := &shardWorker{
@@ -41,7 +40,17 @@ func buildShardWorkerList(
 			grpcTarget: grpcTarget,
 			shardList: make([]string, 0),
 		}
+		if sw.grpcTarget == selfTarget {
+			selfShardWorker = sw
+		}
 		swList = append(swList, sw)
 	}
-	return swList
+	if selfShardWorker == nil {
+		pch.Logger.Fatal("selfShardWorker is nil: %v", swList)
+	}
+	shards := make(map[string]bool)
+	for _, shard := range selfShardWorker.shardList {
+		shards[shard] = true
+	}
+	return shards, resp.Header.Revision
 }

@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"fmt"
-	"strings"
 )
 
 type keyFmt struct {
@@ -85,51 +84,28 @@ func (kf *keyFmt) spLockPath() string {
 	return fmt.Sprintf("/%s/lock/sp", kf.prefix)
 }
 
-func shardKeyDecode(prefix, key string) (string, string, error) {
-	if !strings.HasPrefix(key, prefix) {
-		return "", "", fmt.Errorf("Invalid key: %s", key)
-	}
-	items := strings.Split(key[len(prefix):], "@")
-	if len(items) != 2 {
-		return "", "", fmt.Errorf("Invalid key: %s", key)
-	}
-	return items[0], items[1], nil
-}
-
 func (kf *keyFmt) dnShardPrefix() string {
 	return fmt.Sprintf("/%s/dn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) dnShardKeyEncode(prioCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.dnShardPrefix(), prioCode, grpcTarget)
-}
-
-func (kf *keyFmt) dnShardKeyDecode(key string) (string, string, error) {
-	return shardKeyDecode(kf.dnShardPrefix(), key)
+func (kf *keyFmt) dnShardKey(grpcTarget string) string {
+	return fmt.Sprintf("%s%s", kf.dnShardPrefix(), grpcTarget)
 }
 
 func (kf *keyFmt) cnShardPrefix() string {
 	return fmt.Sprintf("/%s/cn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) cnShardKeyEncode(prioCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.cnShardPrefix(), prioCode, grpcTarget)
-}
-
-func (kf *keyFmt) cnShardKeyDecode(key string) (string, string, error) {
-	return shardKeyDecode(kf.cnShardPrefix(), key)
+func (kf *keyFmt) cnShardKey(grpcTarget string) string {
+	return fmt.Sprintf("%s%s", kf.cnShardPrefix(), grpcTarget)
 }
 
 func (kf *keyFmt) spShardPrefix() string {
 	return fmt.Sprintf("/%s/sp_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) spShardKeyEncode(prioCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.spShardPrefix(), prioCode, grpcTarget)
-}
-
-func (kf *keyFmt) spShardKeyDecode(key string) (string, string, error) {
-	return shardKeyDecode(kf.spShardPrefix(), key)
+func (kf *keyFmt) spShardKey(grpcTarget string) string {
+	return fmt.Sprintf("%s%s", kf.spShardPrefix(), grpcTarget)
 }
 
 func newKeyFmt(prefix string) *keyFmt {
