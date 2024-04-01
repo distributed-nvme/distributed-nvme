@@ -54,7 +54,14 @@ const (
 	CnCntlidStart = 20000
 	CnCntlidStep = 2000
 
-	ShardSize = 16
+	ShardCnt = 256
+	ShardHighPrioCode = "7"
+	ShardMediumPrioCode = "5"
+	ShardLowPrioCode = "3"
+	ShardDefaultPrioCode = "5"
+	ShardHighPrioText = "high"
+	ShardMediumPrioText = "medium"
+	ShardLowPrioText = "low"
 
 	StringLengthMax = 256
 	StringLengthMin = 1

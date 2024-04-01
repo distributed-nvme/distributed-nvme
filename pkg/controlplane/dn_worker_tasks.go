@@ -21,7 +21,7 @@ func dnMemberWorker(
 	workerId := uuid.New().String()
 	logger := lib.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
 	pch := lib.NewPerCtxHelper(parentCtx, logger, workerId)
-	key := dnWorker.kf.dnShardKeyEncode(dnWorker.leadingCode, dnWorker.grpcTarget)
+	key := dnWorker.kf.dnShardKeyEncode(dnWorker.prioCode, dnWorker.grpcTarget)
 	resp, err := dnWorker.etcdCli.Grant(pch.Ctx, dnWorker.grantTimeout)
 	if err != nil {
 		logger.Fatal("Grant err: %v", err)

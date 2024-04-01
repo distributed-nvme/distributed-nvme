@@ -23,8 +23,8 @@ type dnWorkerArgsStruct struct {
 	etcdDialTimeout int
 	grpcNetwork string
 	grpcAddress string
-	leadingCode string
 	grpcTarget string
+	prioCodeConf string
 }
 
 var (
@@ -53,10 +53,21 @@ func init() {
 	dnWorkerCmd.PersistentFlags().StringVarP(
 		&dnWorkerArgs.grpcAddress, "grpc-address", "", ":9521", "grpc address",
 	)
+	dnWorkerCmd.PersistentFlags().StringVarP(
+		&dnWorkerArgs.grpcTarget, "grpc-target", "", "", "grpc target",
+	)
+	dnWorkerCmd.PersistentFlags().StringVarP(
+		&dnWorkerArgs.prioCodeConf, "prio-code-conf", "", "", "priority code configuration",
+	)
 }
 
 func launchDnWorker(cmd *cobra.Command, args []string) {
 	gDnWorkerLogger.Info("Launch disk node worker: %v", dnWorkerArgs)
+
+	prioCode, err := initPrioCode(dnWorkerArgs.prioCodeConf)
+	if err != nil {
+		gDnWorkerLogger.Fatal("Init prio code err: %v", err)
+	}
 
 	endpoints := strings.Split(dnWorkerArgs.etcdEndpoints, ",")
 	dialTimeout := time.Duration(dnWorkerArgs.etcdDialTimeout) * time.Second
@@ -70,7 +81,7 @@ func launchDnWorker(cmd *cobra.Command, args []string) {
 	dnWorker := newDnWorkerServer(
 		etcdCli,
 		lib.SchemaPrefixDefault,
-		dnWorkerArgs.leadingCode,
+		prioCode,
 		dnWorkerArgs.grpcTarget,
 	)
 

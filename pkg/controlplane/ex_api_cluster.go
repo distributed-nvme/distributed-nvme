@@ -40,7 +40,7 @@ func (exApi *exApiServer) CreateCluster(
 	dnGlobal := &pbcp.DnGlobal{
 		GlobalCounter: 0,
 		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
-		ShardBucket: make([]uint32, lib.ShardSize),
+		ShardBucket: make([]uint32, lib.ShardCnt),
 	}
 	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
 	dnGlobalEntityKey := exApi.kf.dnGlobalEntityKey()
@@ -58,7 +58,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	cnGlobal := &pbcp.CnGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, lib.ShardSize),
+		ShardBucket: make([]uint32, lib.ShardCnt),
 	}
 	pch.Logger.Debug("cnGlobal: %v", cnGlobal)
 	cnGlobalEntityKey := exApi.kf.cnGlobalEntityKey()
@@ -76,7 +76,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	spGlobal := &pbcp.SpGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, lib.ShardSize),
+		ShardBucket: make([]uint32, lib.ShardCnt),
 	}
 	pch.Logger.Debug("spGlobal: %v", spGlobal)
 	spGlobalEntityKey := exApi.kf.spGlobalEntityKey()

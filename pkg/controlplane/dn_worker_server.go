@@ -24,7 +24,7 @@ type dnWorkerServer struct {
 	initRequired bool
 
 	// dnWorkerMember only fields
-	leadingCode string
+	prioCode string
 	grpcTarget string
 	bucket []string
 	grantTimeout int64
@@ -36,7 +36,7 @@ type dnWorkerServer struct {
 func newDnWorkerServer(
 	etcdCli *clientv3.Client,
 	prefix string,
-	leadingCode string,
+	prioCode string,
 	grpcTarget string,
 ) *dnWorkerServer {
 	return &dnWorkerServer{
@@ -45,7 +45,7 @@ func newDnWorkerServer(
 		sm: newStmWrapper(etcdCli),
 		inited: false,
 		initRequired: false,
-		leadingCode: leadingCode,
+		prioCode: prioCode,
 		grpcTarget: grpcTarget,
 		bucket: make([]string, 0),
 		grantTimeout: lib.GrantTimeoutDefault,

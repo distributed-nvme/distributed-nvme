@@ -100,8 +100,8 @@ func (kf *keyFmt) dnShardPrefix() string {
 	return fmt.Sprintf("/%s/dn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) dnShardKeyEncode(leadingCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.dnShardPrefix(), leadingCode, grpcTarget)
+func (kf *keyFmt) dnShardKeyEncode(prioCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.dnShardPrefix(), prioCode, grpcTarget)
 }
 
 func (kf *keyFmt) dnShardKeyDecode(key string) (string, string, error) {
@@ -112,8 +112,8 @@ func (kf *keyFmt) cnShardPrefix() string {
 	return fmt.Sprintf("/%s/cn_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) cnShardKeyEncode(leadingCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.cnShardPrefix(), leadingCode, grpcTarget)
+func (kf *keyFmt) cnShardKeyEncode(prioCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.cnShardPrefix(), prioCode, grpcTarget)
 }
 
 func (kf *keyFmt) cnShardKeyDecode(key string) (string, string, error) {
@@ -124,8 +124,8 @@ func (kf *keyFmt) spShardPrefix() string {
 	return fmt.Sprintf("/%s/sp_shard/", kf.prefix)
 }
 
-func (kf *keyFmt) spShardKeyEncode(leadingCode string, grpcTarget string) string {
-	return fmt.Sprintf("%s%s@%s", kf.spShardPrefix(), leadingCode, grpcTarget)
+func (kf *keyFmt) spShardKeyEncode(prioCode string, grpcTarget string) string {
+	return fmt.Sprintf("%s%s@%s", kf.spShardPrefix(), prioCode, grpcTarget)
 }
 
 func (kf *keyFmt) spShardKeyDecode(key string) (string, string, error) {

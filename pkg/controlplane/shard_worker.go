@@ -9,7 +9,7 @@ import (
 )
 
 type shardWorker struct {
-	leadingCode string
+	prioCode string
 	grpcTarget string
 	shardList []string
 }
@@ -26,7 +26,7 @@ func buildShardWorkerList(
 	swList := make([]*shardWorker, 0)
 	for _, ev := range resp.Kvs {
 		pch.Logger.Info("Shard workers: %s %s", ev.Key, ev.Value)
-		leadingCode, grpcTarget, err := shardKeyDecode(prefix, string(ev.Key))
+		prioCode, grpcTarget, err := shardKeyDecode(prefix, string(ev.Key))
 		if err != nil {
 			pch.Logger.Warning(
 				"Ignore invalid key: %s %s %v",
@@ -37,7 +37,7 @@ func buildShardWorkerList(
 			continue
 		}
 		sw := &shardWorker{
-			leadingCode: leadingCode,
+			prioCode: prioCode,
 			grpcTarget: grpcTarget,
 			shardList: make([]string, 0),
 		}
