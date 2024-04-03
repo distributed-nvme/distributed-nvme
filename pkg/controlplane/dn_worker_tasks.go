@@ -122,14 +122,14 @@ func (dnmw *dnMemberWorker) asyncRun() {
 			return
 		case <-dnmw.dnWorker.initTrigger:
 			break
-		case <-time.After(time.Duration(lib.ShardMemberWaitTime) * time.Second):
+		case <-time.After(time.Duration(lib.ShardInitWaitTime) * time.Second):
 			break
 		}
 	}
 
 	for {
-		toBeCreated := make(map[string]*dnShardWorker)
-		toBeDeleted := make(map[string]*dnShardWorker)
+		toBeCreated := make([]*dnShardWorker, 0)
+		toBeDeleted := make([]*dnShardWorker, 0)
 		for shardId, _ := range shards {
 			_, ok := shardIdToWorker[shardId]
 			if !ok {
@@ -138,22 +138,22 @@ func (dnmw *dnMemberWorker) asyncRun() {
 					dnmw.dnWorker,
 					shardId,
 				)
-				toBeCreated[shardId] = dnsw
+				toBeCreated = append(toBeCreated, dnsw)
 			}
 		}
 		for shardId, dnsw := range shardIdToWorker {
 			_, ok := shards[shardId]
 			if !ok {
-				toBeDeleted[shardId] = dnsw
+				toBeDeleted = append(toBeDeleted, dnsw)
 			}
 		}
-		for shardId, dnsw := range toBeCreated {
+		for _, dnsw := range toBeCreated {
 			dnsw.run()
-			shardIdToWorker[shardId] = dnsw
+			shardIdToWorker[dnsw.shardId] = dnsw
 		}
-		for _, dnsw := range toBeDeleted {
-			dnsw.cancel()
-			dnsw.wait()
+		delay := 3600 * 24 * 365 * 100
+		if len(toBeDeleted) > 0 {
+			delay = lib.ShardDeleteWaitTime
 		}
 
 		dnShardCh := dnmw.dnWorker.etcdCli.Watch(
@@ -171,6 +171,14 @@ func (dnmw *dnMemberWorker) asyncRun() {
 				dnmw.dnWorker.grpcTarget,
 			)
 			dnmw.pch.Logger.Info("shards: %v", shards)
+		case <-time.After(time.Duration(delay) * time.Second):
+			for _, dnsw := range toBeDeleted {
+				dnsw.cancel()
+			}
+			for _, dnsw := range toBeDeleted {
+				dnsw.wait()
+				delete(shardIdToWorker, dnsw.shardId)
+			}
 		case <-dnmw.pch.Ctx.Done():
 			break
 		}

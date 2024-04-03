@@ -20,7 +20,8 @@ const (
 
 	AgentTimeoutSecondDefault = 3
 	GrantTimeoutDefault = 10
-	ShardMemberWaitTime = 10
+	ShardInitWaitTime = 10
+	ShardDeleteWaitTime = 60
 
 	DataExtentSizeShiftMin = 20
 	DataExtentSizeShiftMax = 40
