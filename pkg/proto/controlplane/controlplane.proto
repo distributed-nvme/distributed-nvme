@@ -193,16 +193,16 @@ message ExtentConf {
 
 message DnCapacity {
   uint32 ld_cnt = 1;
-  uint64 total_qos = 2;
-  uint64 free_qos =3;
+  uint32 total_qos = 2;
+  uint32 free_qos =3;
   uint32 max_extent_set_size = 4;
   uint32 total_extent_cnt = 5;
 }
 
 message CnCapacity {
   uint32 cntlr_cnt = 1;
-  uint64 total_qos = 2;
-  uint64 free_qos = 3;
+  uint32 total_qos = 2;
+  uint32 free_qos = 3;
 }
 
 message DnConf {
@@ -415,7 +415,7 @@ message SpConf {
   string sp_name = 1;
   uint64 sp_counter = 2;
   uint32 dev_id_counter = 3;
-  uint64 qos = 4;
+  uint32 qos = 4;
   StripeConf stripe_conf = 5;
   ThinPoolConf thin_pool_conf = 6;
   RedundancyConf redundancy_conf = 7;
@@ -511,8 +511,8 @@ message DnSummary {
   uint32 free_data_extent_cnt = 3;
   uint32 total_meta_extent_cnt = 4;
   uint32 free_meta_extent_cnt = 5;
-  uint64 total_qos = 6;
-  uint64 free_qos = 7;
+  uint32 total_qos = 6;
+  uint32 free_qos = 7;
   uint32 total_ld_cnt = 8;
 }
 

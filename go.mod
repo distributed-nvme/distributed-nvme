@@ -3,6 +3,7 @@ module github.com/distributed-nvme/distributed-nvme
 go 1.22.1
 
 require (
+	github.com/emirpasic/gods/v2 v2.0.0-alpha
 	github.com/google/uuid v1.6.0
 	github.com/kelindar/bitmap v1.5.2
 	github.com/spf13/cobra v1.8.0
