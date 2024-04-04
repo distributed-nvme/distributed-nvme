@@ -1,4 +1,4 @@
-package controlplane
+package worker
 
 import (
 	"context"
@@ -20,6 +20,7 @@ type dnShardWorker struct {
 }
 
 func (dnsw *dnShardWorker) asyncRun() {
+	dnsw.pch.Logger.Info("asyncRun: %s", dnsw.shardId)
 	for {
 		select {
 		case <-dnsw.pch.Ctx.Done():
@@ -68,7 +69,8 @@ type dnMemberWorker struct {
 
 func (dnmw *dnMemberWorker) asyncRun() {
 	defer dnmw.wg.Done()
-	key := dnmw.dnWorker.kf.dnShardKey(dnmw.dnWorker.grpcTarget)
+	dnmw.pch.Logger.Info("asyncRun")
+	key := dnmw.dnWorker.kf.DnShardKey(dnmw.dnWorker.grpcTarget)
 	resp, err := dnmw.dnWorker.etcdCli.Grant(dnmw.pch.Ctx, dnmw.dnWorker.grantTimeout)
 	if err != nil {
 		dnmw.pch.Logger.Fatal("Grant err: %v", err)
@@ -98,14 +100,14 @@ func (dnmw *dnMemberWorker) asyncRun() {
 	shards, rev = getShards(
 		dnmw.pch,
 		dnmw.dnWorker.etcdCli,
-		dnmw.dnWorker.kf.dnShardPrefix(),
+		dnmw.dnWorker.kf.DnShardPrefix(),
 		dnmw.dnWorker.grpcTarget,
 	)
 
 	for {
 		dnShardCh := dnmw.dnWorker.etcdCli.Watch(
 			dnmw.pch.Ctx,
-			dnmw.dnWorker.kf.dnShardPrefix(),
+			dnmw.dnWorker.kf.DnShardPrefix(),
 			clientv3.WithPrefix(),
 			clientv3.WithRev(rev),
 		)
@@ -114,7 +116,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 			shards, rev = getShards(
 				dnmw.pch,
 				dnmw.dnWorker.etcdCli,
-				dnmw.dnWorker.kf.dnShardPrefix(),
+				dnmw.dnWorker.kf.DnShardPrefix(),
 				dnmw.dnWorker.grpcTarget,
 			)
 			dnmw.pch.Logger.Info("shards: %v", shards)
@@ -158,7 +160,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 
 		dnShardCh := dnmw.dnWorker.etcdCli.Watch(
 			dnmw.pch.Ctx,
-			dnmw.dnWorker.kf.dnShardPrefix(),
+			dnmw.dnWorker.kf.DnShardPrefix(),
 			clientv3.WithPrefix(),
 			clientv3.WithRev(rev),
 		)
@@ -167,7 +169,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 			shards, rev = getShards(
 				dnmw.pch,
 				dnmw.dnWorker.etcdCli,
-				dnmw.dnWorker.kf.dnShardPrefix(),
+				dnmw.dnWorker.kf.DnShardPrefix(),
 				dnmw.dnWorker.grpcTarget,
 			)
 			dnmw.pch.Logger.Info("shards: %v", shards)

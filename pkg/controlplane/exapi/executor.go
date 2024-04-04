@@ -1,4 +1,4 @@
-package controlplane
+package exapi
 
 import (
 	"time"
@@ -22,7 +22,7 @@ type exApiArgsStruct struct {
 
 var (
 	exApiCmd = &cobra.Command{
-		Use: "dnv_ex_api",
+		Use: "dnvapi",
 		Short: "dnv external api",
 		Long: `dnv external api`,
 		Run: launchExApi,
@@ -84,7 +84,7 @@ func launchExApi(cmd *cobra.Command, args []string) {
 	gExApiLogger.Info("Exit external api")
 }
 
-func ExApiExecute() {
+func Execute() {
 	if err := exApiCmd.Execute(); err != nil {
 		gExApiLogger.Fatal("Cmd execute err: %v", err)
 	}

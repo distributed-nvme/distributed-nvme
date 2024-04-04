@@ -1,4 +1,4 @@
-package controlplane
+package exapi
 
 import (
 	"time"
@@ -8,14 +8,16 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 type exApiServer struct {
 	pbcp.UnimplementedExternalApiServer
 	etcdCli *clientv3.Client
-	kf *keyFmt
-	sm *stmWrapper
+	kf *keyfmt.KeyFmt
+	sm *stmwrapper.StmWrapper
 	agentTimeout time.Duration
 	clusterInit bool
 	cluster pbcp.Cluster
@@ -25,7 +27,7 @@ func (exApi *exApiServer)getCluster(
 	pch *lib.PerCtxHelper,
 ) (*pbcp.Cluster, error) {
 	if !exApi.clusterInit {
-		clusterEntityKey := exApi.kf.clusterEntityKey()
+		clusterEntityKey := exApi.kf.ClusterEntityKey()
 		resp, err := exApi.etcdCli.Get(pch.Ctx, clusterEntityKey)
 		if err != nil {
 			return nil, err
@@ -48,8 +50,8 @@ func newExApiServer(
 ) *exApiServer {
 	return &exApiServer{
 		etcdCli: etcdCli,
-		kf: newKeyFmt(prefix),
-		sm: newStmWrapper(etcdCli),
+		kf: keyfmt.NewKeyFmt(prefix),
+		sm: stmwrapper.NewStmWrapper(etcdCli),
 		agentTimeout: time.Duration(lib.AgentTimeoutSecondDefault) * time.Second,
 		clusterInit: false,
 	}

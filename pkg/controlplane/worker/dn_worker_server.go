@@ -1,4 +1,4 @@
-package controlplane
+package worker
 
 import (
 	"time"
@@ -7,6 +7,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -15,8 +17,8 @@ type dnWorkerServer struct {
 
 	// Shared fields, concurrency safe
 	etcdCli *clientv3.Client
-	kf *keyFmt
-	sm *stmWrapper
+	kf *keyfmt.KeyFmt
+	sm *stmwrapper.StmWrapper
 
 	// Shared fields
 	initTrigger chan struct{}
@@ -40,8 +42,8 @@ func newDnWorkerServer(
 ) *dnWorkerServer {
 	return &dnWorkerServer{
 		etcdCli: etcdCli,
-		kf: newKeyFmt(prefix),
-		sm: newStmWrapper(etcdCli),
+		kf: keyfmt.NewKeyFmt(prefix),
+		sm: stmwrapper.NewStmWrapper(etcdCli),
 		initTrigger: make(chan struct{}),
 		prioCode: prioCode,
 		grpcTarget: grpcTarget,

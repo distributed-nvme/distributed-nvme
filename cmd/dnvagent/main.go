@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	nodeagent.DnAgentExecute()
+	nodeagent.Execute()
 }

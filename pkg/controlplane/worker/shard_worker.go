@@ -1,4 +1,4 @@
-package controlplane
+package worker
 
 import (
 	// "crypto/md5"

@@ -1,4 +1,4 @@
-package cmdlineiface
+package cmdlinectl
 
 import (
 	"context"
@@ -22,12 +22,12 @@ type rootArgsStruct struct {
 
 var (
 	rootCmd = &cobra.Command{
-		Use:   "dnv_cli",
-		Short: "dnv cli",
-		Long:  `dnv cli`,
+		Use:   "dnvctl",
+		Short: "dnv commandline tool",
+		Long:  `dnv commandline tool`,
 	}
 	rootArgs = &rootArgsStruct{}
-	gLogger = lib.NewPrefixLogger("cli")
+	gLogger = lib.NewPrefixLogger("dnvctl")
 )
 
 func init() {
@@ -41,7 +41,7 @@ func init() {
 	rootCmd.AddCommand(dnCmd)
 }
 
-func CliExecute() {
+func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		gLogger.Fatal("Execute err: %v", err)
 	}

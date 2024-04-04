@@ -1,4 +1,4 @@
-package controlplane
+package stmwrapper
 
 import (
 	"fmt"
@@ -8,20 +8,20 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
 )
-type cpStmError struct {
-	code uint32
-	msg  string
+type StmError struct {
+	Code uint32
+	Msg  string
 }
 
-func (e *cpStmError) Error() string {
-	return fmt.Sprintf("code: %d msg: %s", e.code, e.msg)
+func (e *StmError) Error() string {
+	return fmt.Sprintf("code: %d msg: %s", e.Code, e.Msg)
 }
 
-type stmWrapper struct {
+type StmWrapper struct {
 	etcdCli *clientv3.Client
 }
 
-func (sm *stmWrapper)runStm(
+func (sm *StmWrapper)RunStm(
 	pch *lib.PerCtxHelper,
 	apply func(stm concurrency.STM) error,
 ) error {
@@ -46,8 +46,8 @@ func (sm *stmWrapper)runStm(
 	return err
 }
 
-func newStmWrapper(etcdCli *clientv3.Client) (*stmWrapper){
-	return &stmWrapper{
+func NewStmWrapper(etcdCli *clientv3.Client) (*StmWrapper){
+	return &StmWrapper{
 		etcdCli: etcdCli,
 	}
 }
