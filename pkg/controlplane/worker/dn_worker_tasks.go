@@ -9,11 +9,13 @@ import (
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 )
 
 type dnShardWorker struct {
-	pch *lib.PerCtxHelper
+	pch *ctxhelper.PerCtxHelper
 	wg sync.WaitGroup
 	dnWorker *dnWorkerServer
 	shardId string
@@ -52,8 +54,8 @@ func newDnShardWorker(
 	shardId string,
 ) *dnShardWorker {
 	workerId := uuid.New().String()
-	logger := lib.NewPrefixLogger(fmt.Sprintf("dnShardWorker|%s ", workerId))
-	pch := lib.NewPerCtxHelper(parentCtx, logger, workerId)
+	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnShardWorker|%s ", workerId))
+	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, workerId)
 	return &dnShardWorker{
 		pch: pch,
 		dnWorker: dnWorker,
@@ -62,7 +64,7 @@ func newDnShardWorker(
 }
 
 type dnMemberWorker struct {
-	pch *lib.PerCtxHelper
+	pch *ctxhelper.PerCtxHelper
 	wg sync.WaitGroup
 	dnWorker *dnWorkerServer
 }
@@ -124,7 +126,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 			return
 		case <-dnmw.dnWorker.initTrigger:
 			break
-		case <-time.After(time.Duration(lib.ShardInitWaitTime) * time.Second):
+		case <-time.After(time.Duration(constants.ShardInitWaitTime) * time.Second):
 			break
 		}
 	}
@@ -155,7 +157,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 		}
 		delay := 3600 * 24 * 365 * 100
 		if len(toBeDeleted) > 0 {
-			delay = lib.ShardDeleteWaitTime
+			delay = constants.ShardDeleteWaitTime
 		}
 
 		dnShardCh := dnmw.dnWorker.etcdCli.Watch(
@@ -212,8 +214,8 @@ func newDnMemberWorker(
 	dnWorker *dnWorkerServer,
 ) *dnMemberWorker {
 	workerId := uuid.New().String()
-	logger := lib.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
-	pch := lib.NewPerCtxHelper(ctx, logger, workerId)
+	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
+	pch := ctxhelper.NewPerCtxHelper(ctx, logger, workerId)
 	return &dnMemberWorker{
 		pch: pch,
 		dnWorker: dnWorker,

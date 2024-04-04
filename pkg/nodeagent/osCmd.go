@@ -6,14 +6,14 @@ import (
 	"strings"
 	"strconv"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
 type osCmd struct {
 }
 
 func (oc *osCmd) runOsCmd(
-	pch *lib.PerCtxHelper,
+	pch *ctxhelper.PerCtxHelper,
 	name string,
 	args []string,
 	stdin string,
@@ -39,7 +39,7 @@ func (oc *osCmd) runOsCmd(
 }
 
 func (oc *osCmd) getBlockDevSize(
-	pch *lib.PerCtxHelper,
+	pch *ctxhelper.PerCtxHelper,
 	devPath string,
 ) (uint64, error) {
 	name := "blockdev"

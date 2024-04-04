@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 )
 
 func initPrioCode(prioCodeConf string) (string, error) {
-	prioCodeList := make([]string, lib.ShardCnt)
+	prioCodeList := make([]string, constants.ShardCnt)
 	prioCodeGroupList := strings.Split(prioCodeConf, ",")
 	for _,  prioCodeGroup := range prioCodeGroupList {
 		if prioCodeGroup == "" {
@@ -21,12 +21,12 @@ func initPrioCode(prioCodeConf string) (string, error) {
 		}
 		var prioCode string
 		switch prioCodeItems[0] {
-		case lib.ShardHighPrioText:
-			prioCode = lib.ShardHighPrioCode
-		case lib.ShardMediumPrioText:
-			prioCode = lib.ShardMediumPrioCode
-		case lib.ShardLowPrioText:
-			prioCode = lib.ShardLowPrioCode
+		case constants.ShardHighPrioText:
+			prioCode = constants.ShardHighPrioCode
+		case constants.ShardMediumPrioText:
+			prioCode = constants.ShardMediumPrioCode
+		case constants.ShardLowPrioText:
+			prioCode = constants.ShardLowPrioCode
 		default:
 			return "", fmt.Errorf("Invalid priority: %v", prioCodeItems[0])
 		}
@@ -51,7 +51,7 @@ func initPrioCode(prioCodeConf string) (string, error) {
 	var s strings.Builder
 	for _, prioCode := range prioCodeList {
 		if prioCode == "" {
-			s.WriteString(lib.ShardDefaultPrioCode)
+			s.WriteString(constants.ShardDefaultPrioCode)
 		} else {
 			s.WriteString(prioCode)
 		}

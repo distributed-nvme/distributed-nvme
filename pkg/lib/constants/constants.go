@@ -1,4 +1,4 @@
-package lib
+package constants
 
 const (
 	SchemaPrefixDefault = "dnv"

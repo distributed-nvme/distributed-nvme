@@ -1,4 +1,4 @@
-package lib
+package ctxhelper
 
 import (
 	"context"
@@ -7,12 +7,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"github.com/google/uuid"
+
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 )
 
 type PerCtxHelper struct {
 	Ctx context.Context
 	Cancel context.CancelFunc
-	Logger *PrefixLogger
+	Logger *prefixlog.PrefixLogger
 	TraceId string
 }
 
@@ -28,7 +31,7 @@ var (
 
 func NewPerCtxHelper(
 	parentCtx context.Context,
-	logger *PrefixLogger,
+	logger *prefixlog.PrefixLogger,
 	traceId string,
 ) *PerCtxHelper {
 	pch := &PerCtxHelper{}
@@ -42,16 +45,16 @@ func NewPerCtxHelper(
 }
 
 func buildPerCtxHelper(ctx context.Context, method string) *PerCtxHelper {
-	var logger *PrefixLogger
+	var logger *prefixlog.PrefixLogger
 	var traceId string
 
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
-		traceIdList, ok := md[TraceIdKey]
+		traceIdList, ok := md[constants.TraceIdKey]
 		if ok && len(traceIdList) > 0 {
 			traceId = traceIdList[0]
 			prefix := fmt.Sprintf("%s|%s ", method, traceId)
-			logger = NewPrefixLogger(prefix)
+			logger = prefixlog.NewPrefixLogger(prefix)
 			logger.Info("Set traceId from metadata")
 		}
 	}
@@ -59,7 +62,7 @@ func buildPerCtxHelper(ctx context.Context, method string) *PerCtxHelper {
 	if logger == nil {
 		traceId = uuid.New().String()
 		prefix := fmt.Sprintf("%s|%s ", method, traceId)
-		logger := NewPrefixLogger(prefix)
+		logger := prefixlog.NewPrefixLogger(prefix)
 		logger.Info("No traceId in metadata, create a new one")
 	}
 
@@ -100,7 +103,7 @@ func UnaryClientPerCtxHelperInterceptor(
 	opts ...grpc.CallOption,
 ) error {
 	pch := GetPerCtxHelper(ctx)
-	md := metadata.Pairs(TraceIdKey, pch.TraceId)
+	md := metadata.Pairs(constants.TraceIdKey, pch.TraceId)
 	newCtx := metadata.NewOutgoingContext(ctx, md)
 	pch.Logger.Info("Client side req: %s %v", method, req)
 	err := invoker(newCtx, method, req, reply, cc, opts...)

@@ -6,7 +6,8 @@ import (
 	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
 
@@ -24,7 +25,7 @@ var (
 		Run: launchAgent,
 	}
 	agentArgs = agentArgsStruct{}
-	gLogger = lib.NewPrefixLogger("agent")
+	gLogger = prefixlog.NewPrefixLogger("agent")
 )
 
 func init() {
@@ -50,7 +51,7 @@ func launchAgent(cmd *cobra.Command, args []string) {
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
-			lib.UnaryServerPerCtxHelperInterceptor,
+			ctxhelper.UnaryServerPerCtxHelperInterceptor,
 		),
 	)
 

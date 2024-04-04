@@ -5,7 +5,8 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 )
 
 type shardWorker struct {
@@ -15,7 +16,7 @@ type shardWorker struct {
 }
 
 func getShards(
-	pch *lib.PerCtxHelper,
+	pch *ctxhelper.PerCtxHelper,
 	etcdCli *clientv3.Client,
 	prefix string,
 	selfTarget string,
@@ -31,7 +32,7 @@ func getShards(
 		keyStr := string(ev.Key)
 		grpcTarget := keyStr[len(prefix):]
 		prioCode := string(ev.Value)
-		if len(prioCode) != lib.ShardCnt {
+		if len(prioCode) != constants.ShardCnt {
 			pch.Logger.Warning("Ignore invalid prioCode: %s %s", grpcTarget, prioCode)
 			continue
 		}

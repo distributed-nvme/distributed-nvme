@@ -9,7 +9,9 @@ import (
 	"github.com/spf13/cobra"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -28,7 +30,7 @@ var (
 		Run: launchExApi,
 	}
 	exApiArgs = exApiArgsStruct{}
-	gExApiLogger = lib.NewPrefixLogger("ex_api")
+	gExApiLogger = prefixlog.NewPrefixLogger("ex_api")
 )
 
 func init() {
@@ -67,12 +69,12 @@ func launchExApi(cmd *cobra.Command, args []string) {
 
 	exApi := newExApiServer(
 		etcdCli,
-		lib.SchemaPrefixDefault,
+		constants.SchemaPrefixDefault,
 	)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
-			lib.UnaryServerPerCtxHelperInterceptor,
+			ctxhelper.UnaryServerPerCtxHelperInterceptor,
 		),
 	)
 

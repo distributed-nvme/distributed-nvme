@@ -6,7 +6,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
@@ -48,8 +48,8 @@ func newDnWorkerServer(
 		prioCode: prioCode,
 		grpcTarget: grpcTarget,
 		bucket: make([]string, 0),
-		grantTimeout: lib.GrantTimeoutDefault,
-		agentTimeout: time.Duration(lib.AgentTimeoutSecondDefault) * time.Second,
+		grantTimeout: constants.GrantTimeoutDefault,
+		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
 		
 	}
 }

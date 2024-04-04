@@ -6,7 +6,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"go.etcd.io/etcd/client/v3/concurrency"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
@@ -15,14 +16,14 @@ func (exApi *exApiServer) CreateCluster(
 	ctx context.Context,
 	req *pbcp.CreateClusterRequest,
 ) (*pbcp.CreateClusterReply, error) {
-	pch := lib.GetPerCtxHelper(ctx)
+	pch := ctxhelper.GetPerCtxHelper(ctx)
 
 	cluster := &pbcp.Cluster{
-		DataExtentSizeShift: lib.DataExtentSizeShiftDefault,
-		DataExtentPerSetShift: lib.DataExtentPerSetShiftDefault,
-		MetaExtentSizeShift: lib.MetaExtentSizeShiftDefault,
-		MetaExtentPerSetShift: lib.MetaExtentPerSetShiftDefault,
-		ExtentRatioShift: lib.ExtentRatioShiftDefault,
+		DataExtentSizeShift: constants.DataExtentSizeShiftDefault,
+		DataExtentPerSetShift: constants.DataExtentPerSetShiftDefault,
+		MetaExtentSizeShift: constants.MetaExtentSizeShiftDefault,
+		MetaExtentPerSetShift: constants.MetaExtentPerSetShiftDefault,
+		ExtentRatioShift: constants.ExtentRatioShiftDefault,
 	}
 	pch.Logger.Debug("cluster: %v", cluster)
 	clusterEntityKey := exApi.kf.ClusterEntityKey()
@@ -31,7 +32,7 @@ func (exApi *exApiServer) CreateCluster(
 		pch.Logger.Error("Marshal cluster err: %v %v", cluster, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInternalErr,
+				ReplyCode: constants.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -41,7 +42,7 @@ func (exApi *exApiServer) CreateCluster(
 	dnGlobal := &pbcp.DnGlobal{
 		GlobalCounter: 0,
 		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
-		ShardBucket: make([]uint32, lib.ShardCnt),
+		ShardBucket: make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
 	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
@@ -50,7 +51,7 @@ func (exApi *exApiServer) CreateCluster(
 		pch.Logger.Error("Marshal dnGlobal err: %v %v", dnGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInternalErr,
+				ReplyCode: constants.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -59,7 +60,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	cnGlobal := &pbcp.CnGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, lib.ShardCnt),
+		ShardBucket: make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("cnGlobal: %v", cnGlobal)
 	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
@@ -68,7 +69,7 @@ func (exApi *exApiServer) CreateCluster(
 		pch.Logger.Error("Marshal cnGlobal err: %v %v", cnGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInternalErr,
+				ReplyCode: constants.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -77,7 +78,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	spGlobal := &pbcp.SpGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, lib.ShardCnt),
+		ShardBucket: make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("spGlobal: %v", spGlobal)
 	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
@@ -86,7 +87,7 @@ func (exApi *exApiServer) CreateCluster(
 		pch.Logger.Error("Marshal spGlobal err: %v %v", spGlobal, err)
 		return &pbcp.CreateClusterReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInternalErr,
+				ReplyCode: constants.ReplyCodeInternalErr,
 				ReplyMsg:  err.Error(),
 			},
 		}, nil
@@ -96,7 +97,7 @@ func (exApi *exApiServer) CreateCluster(
 	apply := func(stm concurrency.STM) error {
 		if val := []byte(stm.Get(clusterEntityKey)); len(val) != 0 {
 			return &stmwrapper.StmError{
-				Code: lib.ReplyCodeDupRes,
+				Code: constants.ReplyCodeDupRes,
 				Msg:  clusterEntityKey,
 			}
 		}
@@ -104,7 +105,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(dnGlobalEntityKey)); len(val) != 0 {
 			return &stmwrapper.StmError{
-				Code: lib.ReplyCodeDupRes,
+				Code: constants.ReplyCodeDupRes,
 				Msg:  dnGlobalEntityKey,
 			}
 		}
@@ -112,7 +113,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(cnGlobalEntityKey)); len(val) != 0 {
 			return &stmwrapper.StmError{
-				Code: lib.ReplyCodeDupRes,
+				Code: constants.ReplyCodeDupRes,
 				Msg:  cnGlobalEntityKey,
 			}
 		}
@@ -120,7 +121,7 @@ func (exApi *exApiServer) CreateCluster(
 
 		if val := []byte(stm.Get(spGlobalEntityKey)); len(val) != 0 {
 			return &stmwrapper.StmError{
-				Code: lib.ReplyCodeDupRes,
+				Code: constants.ReplyCodeDupRes,
 				Msg:  spGlobalEntityKey,
 			}
 		}
@@ -141,7 +142,7 @@ func (exApi *exApiServer) CreateCluster(
 		} else {
 			return &pbcp.CreateClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReplyCode: lib.ReplyCodeInternalErr,
+					ReplyCode: constants.ReplyCodeInternalErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
@@ -150,8 +151,8 @@ func (exApi *exApiServer) CreateCluster(
 
 	return &pbcp.CreateClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReplyCode: lib.ReplyCodeSucceed,
-			ReplyMsg:  lib.ReplyMsgSucceed,
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
 	}, nil
 }
@@ -160,7 +161,7 @@ func (exApi *exApiServer) DeleteCluster(
 	ctx context.Context,
 	req *pbcp.DeleteClusterRequest,
 ) (*pbcp.DeleteClusterReply, error) {
-	pch := lib.GetPerCtxHelper(ctx)
+	pch := ctxhelper.GetPerCtxHelper(ctx)
 
 	clusterEntityKey := exApi.kf.ClusterEntityKey()
 	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
@@ -199,7 +200,7 @@ func (exApi *exApiServer) DeleteCluster(
 		} else {
 			return &pbcp.DeleteClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReplyCode: lib.ReplyCodeAgentErr,
+					ReplyCode: constants.ReplyCodeAgentErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
@@ -208,8 +209,8 @@ func (exApi *exApiServer) DeleteCluster(
 
 	return &pbcp.DeleteClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReplyCode: lib.ReplyCodeSucceed,
-			ReplyMsg:  lib.ReplyMsgSucceed,
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
 	}, nil
 }
@@ -218,7 +219,7 @@ func (exApi *exApiServer) GetCluster(
 	ctx context.Context,
 	req *pbcp.GetClusterRequest,
 ) (*pbcp.GetClusterReply, error) {
-	pch := lib.GetPerCtxHelper(ctx)
+	pch := ctxhelper.GetPerCtxHelper(ctx)
 
 	clusterEntityKey := exApi.kf.ClusterEntityKey()
 	cluster := &pbcp.Cluster{}
@@ -227,7 +228,7 @@ func (exApi *exApiServer) GetCluster(
 		val := []byte(stm.Get(clusterEntityKey))
 		if len(val) == 0 {
 			return &stmwrapper.StmError{
-				lib.ReplyCodeUnknownRes,
+				constants.ReplyCodeUnknownRes,
 				clusterEntityKey,
 			}
 		}
@@ -248,7 +249,7 @@ func (exApi *exApiServer) GetCluster(
 		} else {
 			return &pbcp.GetClusterReply{
 				ReplyInfo: &pbcp.ReplyInfo{
-					ReplyCode: lib.ReplyCodeInternalErr,
+					ReplyCode: constants.ReplyCodeInternalErr,
 					ReplyMsg:  err.Error(),
 				},
 			}, nil
@@ -257,8 +258,8 @@ func (exApi *exApiServer) GetCluster(
 
 	return &pbcp.GetClusterReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReplyCode: lib.ReplyCodeSucceed,
-			ReplyMsg:  lib.ReplyMsgSucceed,
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
 		Cluster: &pbcp.Cluster{
 			DataExtentSizeShift: cluster.DataExtentSizeShift,

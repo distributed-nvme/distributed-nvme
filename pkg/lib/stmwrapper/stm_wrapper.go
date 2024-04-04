@@ -6,7 +6,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 type StmError struct {
 	Code uint32
@@ -22,7 +22,7 @@ type StmWrapper struct {
 }
 
 func (sm *StmWrapper)RunStm(
-	pch *lib.PerCtxHelper,
+	pch *ctxhelper.PerCtxHelper,
 	apply func(stm concurrency.STM) error,
 ) error {
 	cnt := 0

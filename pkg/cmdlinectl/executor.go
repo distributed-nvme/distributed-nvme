@@ -11,7 +11,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -27,7 +28,7 @@ var (
 		Long:  `dnv commandline tool`,
 	}
 	rootArgs = &rootArgsStruct{}
-	gLogger = lib.NewPrefixLogger("dnvctl")
+	gLogger = prefixlog.NewPrefixLogger("dnvctl")
 )
 
 func init() {
@@ -85,7 +86,7 @@ func newClient(args *rootArgsStruct) *client {
 	c := pbcp.NewExternalApiClient(conn)
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(args.timeout)*time.Second)
-	md := metadata.Pairs(lib.TraceIdKey, uuid.New().String())
+	md := metadata.Pairs(constants.TraceIdKey, uuid.New().String())
 	newCtx := metadata.NewOutgoingContext(ctx, md)
 	return &client{
 		conn:   conn,

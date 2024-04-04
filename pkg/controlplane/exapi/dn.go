@@ -6,7 +6,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
@@ -30,8 +31,8 @@ func validDnReq(req *pbcp.CreateDnRequest) error {
 	if err := validStringLength(req.TrSvcId, "TrSvcId"); err != nil {
 		return err
 	}
-	if req.PortNum > lib.PortNumMax {
-		return fmt.Errorf("PortNum larger than %d", lib.PortNumMax)
+	if req.PortNum > constants.PortNumMax {
+		return fmt.Errorf("PortNum larger than %d", constants.PortNumMax)
 	}
 	for _, tag := range req.TagList {
 		if err := validStringLength(tag.Key, "tag Key "+tag.Key); err != nil {
@@ -48,12 +49,12 @@ func (exApi *exApiServer) CreateDn(
 	ctx context.Context,
 	req *pbcp.CreateDnRequest,
 ) (*pbcp.CreateDnReply, error) {
-	pch := lib.GetPerCtxHelper(ctx)
+	pch := ctxhelper.GetPerCtxHelper(ctx)
 
 	if err := validDnReq(req); err != nil {
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInvalidArg,
+				ReplyCode: constants.ReplyCodeInvalidArg,
 				ReplyMsg: err.Error(),
 			},
 		}, nil
@@ -65,13 +66,13 @@ func (exApi *exApiServer) CreateDn(
 		grpc.WithBlock(),
 		grpc.WithTimeout(exApi.agentTimeout),
 		grpc.WithChainUnaryInterceptor(
-			lib.UnaryClientPerCtxHelperInterceptor,
+			ctxhelper.UnaryClientPerCtxHelperInterceptor,
 		),
 	)
 	if err != nil {
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeInternalErr,
+				ReplyCode: constants.ReplyCodeInternalErr,
 				ReplyMsg: err.Error(),
 			},
 		}, nil
@@ -86,15 +87,15 @@ func (exApi *exApiServer) CreateDn(
 	if err != nil {
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeAgentErr,
+				ReplyCode: constants.ReplyCodeAgentErr,
 				ReplyMsg: err.Error(),
 			},
 		}, nil
 	}
-	if getDevSizeReply.StatusInfo.Code != lib.StatusCodeSucceed {
+	if getDevSizeReply.StatusInfo.Code != constants.StatusCodeSucceed {
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
-				ReplyCode: lib.ReplyCodeAgentErr,
+				ReplyCode: constants.ReplyCodeAgentErr,
 				ReplyMsg: fmt.Sprintf(
 					"%d %s",
 					getDevSizeReply.StatusInfo.Code,
@@ -127,8 +128,8 @@ func (exApi *exApiServer) CreateDn(
 
 	return &pbcp.CreateDnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
-			ReplyCode: lib.ReplyCodeSucceed,
-			ReplyMsg: lib.ReplyMsgSucceed,
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg: constants.ReplyMsgSucceed,
 		},
 	}, nil
 }

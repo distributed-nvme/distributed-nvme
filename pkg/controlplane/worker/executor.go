@@ -13,7 +13,8 @@ import (
 	"github.com/spf13/cobra"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	// pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -35,7 +36,7 @@ var (
 		Run: launchWorker,
 	}
 	workerArgs = workerArgsStruct{}
-	gLogger = lib.NewPrefixLogger("worker")
+	gLogger = prefixlog.NewPrefixLogger("worker")
 )
 
 func init() {
@@ -84,7 +85,7 @@ func launchWorker(cmd *cobra.Command, args []string) {
 	}
 	dnWorker := newDnWorkerServer(
 		etcdCli,
-		lib.SchemaPrefixDefault,
+		constants.SchemaPrefixDefault,
 		prioCode,
 		workerArgs.grpcTarget,
 	)

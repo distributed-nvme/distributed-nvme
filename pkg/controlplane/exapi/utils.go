@@ -5,15 +5,15 @@ import (
 
 	"github.com/kelindar/bitmap"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 )
 
 func validStringLength(inpStr, name string) error {
-	if len(inpStr) > lib.StringLengthMax {
-		return fmt.Errorf("%s is longer than %d", name, lib.StringLengthMax)
+	if len(inpStr) > constants.StringLengthMax {
+		return fmt.Errorf("%s is longer than %d", name, constants.StringLengthMax)
 	}
-	if len(inpStr) < lib.StringLengthMin {
-		return fmt.Errorf("%s is shorter than %d", name, lib.StringLengthMin)
+	if len(inpStr) < constants.StringLengthMin {
+		return fmt.Errorf("%s is shorter than %d", name, constants.StringLengthMin)
 	}
 	return nil
 }

@@ -7,7 +7,8 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
@@ -24,7 +25,7 @@ type exApiServer struct {
 }
 
 func (exApi *exApiServer)getCluster(
-	pch *lib.PerCtxHelper,
+	pch *ctxhelper.PerCtxHelper,
 ) (*pbcp.Cluster, error) {
 	if !exApi.clusterInit {
 		clusterEntityKey := exApi.kf.ClusterEntityKey()
@@ -52,7 +53,7 @@ func newExApiServer(
 		etcdCli: etcdCli,
 		kf: keyfmt.NewKeyFmt(prefix),
 		sm: stmwrapper.NewStmWrapper(etcdCli),
-		agentTimeout: time.Duration(lib.AgentTimeoutSecondDefault) * time.Second,
+		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
 		clusterInit: false,
 	}
 }
