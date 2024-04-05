@@ -60,9 +60,39 @@ type memberWorker struct {
 	shardWkrMap  map[string]*shardWorker
 }
 
-func (memberWkr *memberWorker) run() {
-	defer memberWkr.wg.Done()
-	memberWkr.pch.Logger.Info("Run")
+func (mwkr *memberWorker) run() {
+	defer mwkr.wg.Done()
+	mwkr.pch.Logger.Info("Run")
+	memberPrefix := mwkr.coordCtx.worker.getMemberPrefix()
+	key := fmt.Sprintf("%s/%s", memberPrefix, mwkr.grpcTarget)
+	resp, err := mwkr.coordCtx.etcdCli.Grant(
+		mwkr.pch.Ctx,
+		mwkr.grantTimeout,
+	)
+	if err != nil {
+		mwkr.pch.Logger.Fatal("Grant err: %v", err)
+	}
+
+	if _, err := mwkr.coordCtx.etcdCli.KeepAlive(
+		mwkr.pch.Ctx,
+		resp.ID,
+	); err != nil {
+		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
+		mwkr.pch.Logger.Fatal("KeepAlive err: %v leaseId=%v", err, resp.ID)
+	}
+
+	if _, err := mwkr.coordCtx.etcdCli.Put(
+		mwkr.pch.Ctx,
+		key,
+		mwkr.prioCode,
+		clientv3.WithLease(resp.ID),
+	); err != nil {
+		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
+		mwkr.pch.Logger.Fatal("PUt err: %v leaseId=%v key=%s", err, resp.ID, key)
+	}
+	defer func() {
+		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
+	}()
 }
 
 func newMemberWorker(
