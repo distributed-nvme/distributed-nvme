@@ -134,7 +134,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 	for {
 		toBeCreated := make([]*dnShardWorker, 0)
 		toBeDeleted := make([]*dnShardWorker, 0)
-		for shardId, _ := range shards {
+		for shardId := range shards {
 			_, ok := shardIdToWorker[shardId]
 			if !ok {
 				dnsw := newDnShardWorker(
