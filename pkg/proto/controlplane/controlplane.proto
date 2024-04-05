@@ -232,8 +232,9 @@ message CnInfo {
 
 message LdConf {
   uint64 dn_id = 1;
-  uint32 position = 2;
-  uint32 ld_idx = 3;
+  string dn_grpc_target = 2;
+  uint32 position = 3;
+  uint32 ld_idx = 4;
 }
 
 message LdDnInfo {
@@ -309,8 +310,9 @@ message Snapshot {
 
 message CntlrConf {
   uint64 cn_id = 1;
-  uint32 cntlr_idx = 2;
-  NvmePortConf nvme_port_conf = 3;
+  string cn_grpc_target = 2;
+  uint32 cntlr_idx = 3;
+  NvmePortConf nvme_port_conf = 4;
 }
 
 message CntlrInfo {
