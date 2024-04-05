@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 	// "net"
-	"strings"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	// "google.golang.org/grpc"
@@ -19,24 +19,24 @@ import (
 )
 
 type workerArgsStruct struct {
-	role string
-	etcdEndpoints string
+	role            string
+	etcdEndpoints   string
 	etcdDialTimeout int
-	grpcNetwork string
-	grpcAddress string
-	grpcTarget string
-	prioCodeConf string
+	grpcNetwork     string
+	grpcAddress     string
+	grpcTarget      string
+	prioCodeConf    string
 }
 
 var (
 	workerCmd = &cobra.Command{
-		Use: "dnvworker",
+		Use:   "dnvworker",
 		Short: "dnv worker",
-		Long: `dnv worker`,
-		Run: launchWorker,
+		Long:  `dnv worker`,
+		Run:   launchWorker,
 	}
 	workerArgs = workerArgsStruct{}
-	gLogger = prefixlog.NewPrefixLogger("worker")
+	gLogger    = prefixlog.NewPrefixLogger("worker")
 )
 
 func init() {
@@ -77,7 +77,7 @@ func launchWorker(cmd *cobra.Command, args []string) {
 	endpoints := strings.Split(workerArgs.etcdEndpoints, ",")
 	dialTimeout := time.Duration(workerArgs.etcdDialTimeout) * time.Second
 	etcdCli, err := clientv3.New(clientv3.Config{
-		Endpoints: endpoints,
+		Endpoints:   endpoints,
 		DialTimeout: dialTimeout,
 	})
 	if err != nil {

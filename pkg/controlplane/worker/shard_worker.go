@@ -5,14 +5,14 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
 type shardWorker struct {
-	prioCode string
+	prioCode   string
 	grpcTarget string
-	shardList []string
+	shardList  []string
 }
 
 func getShards(
@@ -37,9 +37,9 @@ func getShards(
 			continue
 		}
 		sw := &shardWorker{
-			prioCode: prioCode,
+			prioCode:   prioCode,
 			grpcTarget: grpcTarget,
-			shardList: make([]string, 0),
+			shardList:  make([]string, 0),
 		}
 		if sw.grpcTarget == selfTarget {
 			selfShardWorker = sw

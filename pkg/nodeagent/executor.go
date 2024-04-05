@@ -3,29 +3,29 @@ package nodeagent
 import (
 	"net"
 
-	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
 
 type agentArgsStruct struct {
-	role string
+	role        string
 	grpcNetwork string
 	grpcAddress string
 }
 
 var (
 	agentCmd = &cobra.Command{
-		Use: "dnvagent",
+		Use:   "dnvagent",
 		Short: "dnv dataplane agent",
-		Long: `dnv dataplaine agent`,
-		Run: launchAgent,
+		Long:  `dnv dataplaine agent`,
+		Run:   launchAgent,
 	}
 	agentArgs = agentArgsStruct{}
-	gLogger = prefixlog.NewPrefixLogger("agent")
+	gLogger   = prefixlog.NewPrefixLogger("agent")
 )
 
 func init() {

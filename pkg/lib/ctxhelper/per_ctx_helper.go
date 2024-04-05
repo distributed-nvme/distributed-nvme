@@ -4,18 +4,18 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
-	"github.com/google/uuid"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 )
 
 type PerCtxHelper struct {
-	Ctx context.Context
-	Cancel context.CancelFunc
-	Logger *prefixlog.PrefixLogger
+	Ctx     context.Context
+	Cancel  context.CancelFunc
+	Logger  *prefixlog.PrefixLogger
 	TraceId string
 }
 

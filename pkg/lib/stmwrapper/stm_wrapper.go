@@ -8,6 +8,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
+
 type StmError struct {
 	Code uint32
 	Msg  string
@@ -21,7 +22,7 @@ type StmWrapper struct {
 	etcdCli *clientv3.Client
 }
 
-func (sm *StmWrapper)RunStm(
+func (sm *StmWrapper) RunStm(
 	pch *ctxhelper.PerCtxHelper,
 	apply func(stm concurrency.STM) error,
 ) error {
@@ -46,7 +47,7 @@ func (sm *StmWrapper)RunStm(
 	return err
 }
 
-func NewStmWrapper(etcdCli *clientv3.Client) (*StmWrapper){
+func NewStmWrapper(etcdCli *clientv3.Client) *StmWrapper {
 	return &StmWrapper{
 		etcdCli: etcdCli,
 	}

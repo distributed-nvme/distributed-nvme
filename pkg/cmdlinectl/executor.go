@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
-	"github.com/google/uuid"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
@@ -28,7 +28,7 @@ var (
 		Long:  `dnv commandline tool`,
 	}
 	rootArgs = &rootArgsStruct{}
-	gLogger = prefixlog.NewPrefixLogger("dnvctl")
+	gLogger  = prefixlog.NewPrefixLogger("dnvctl")
 )
 
 func init() {
@@ -95,4 +95,3 @@ func newClient(args *rootArgsStruct) *client {
 		cancel: cancel,
 	}
 }
-

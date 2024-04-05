@@ -15,10 +15,10 @@ import (
 )
 
 type dnShardWorker struct {
-	pch *ctxhelper.PerCtxHelper
-	wg sync.WaitGroup
+	pch      *ctxhelper.PerCtxHelper
+	wg       sync.WaitGroup
 	dnWorker *dnWorkerServer
-	shardId string
+	shardId  string
 }
 
 func (dnsw *dnShardWorker) asyncRun() {
@@ -57,15 +57,15 @@ func newDnShardWorker(
 	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnShardWorker|%s ", workerId))
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, workerId)
 	return &dnShardWorker{
-		pch: pch,
+		pch:      pch,
 		dnWorker: dnWorker,
-		shardId: shardId,
+		shardId:  shardId,
 	}
 }
 
 type dnMemberWorker struct {
-	pch *ctxhelper.PerCtxHelper
-	wg sync.WaitGroup
+	pch      *ctxhelper.PerCtxHelper
+	wg       sync.WaitGroup
 	dnWorker *dnWorkerServer
 }
 
@@ -217,7 +217,7 @@ func newDnMemberWorker(
 	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnMemberWorker|%s ", workerId))
 	pch := ctxhelper.NewPerCtxHelper(ctx, logger, workerId)
 	return &dnMemberWorker{
-		pch: pch,
+		pch:      pch,
 		dnWorker: dnWorker,
 	}
 }

@@ -5,22 +5,22 @@ import (
 )
 
 func qosCompare(x, y uint32) int {
-    if x == 0 && y == 0 {
-        return 0
-    } else if x == 0 {
-        return 1
-    } else if y == 0 {
-        return -1
-    } else {
-        switch {
-        case x > y:
-            return 1
-        case x < y:
-            return -1
-        default:
-            return 0
-        }
-    }
+	if x == 0 && y == 0 {
+		return 0
+	} else if x == 0 {
+		return 1
+	} else if y == 0 {
+		return -1
+	} else {
+		switch {
+		case x > y:
+			return 1
+		case x < y:
+			return -1
+		default:
+			return 0
+		}
+	}
 }
 
 func cntCompare(x, y uint32) int {
@@ -44,7 +44,7 @@ type ResourceTree struct {
 	qosTree *rbt.Tree[uint32, *rbt.Tree[uint32, map[uint64]Resource]]
 }
 
-func (rt *ResourceTree)Put(res Resource) {
+func (rt *ResourceTree) Put(res Resource) {
 	var found bool
 	var cntTree *rbt.Tree[uint32, map[uint64]Resource]
 	var resMap map[uint64]Resource
@@ -68,7 +68,7 @@ func (rt *ResourceTree)Put(res Resource) {
 	resMap[resId] = res
 }
 
-func (rt *ResourceTree)Remove(res Resource) {
+func (rt *ResourceTree) Remove(res Resource) {
 	var found bool
 	var cntTree *rbt.Tree[uint32, map[uint64]Resource]
 	var resMap map[uint64]Resource
@@ -120,7 +120,7 @@ func (rt *ResourceTree) Iterate(apply func(res Resource) bool) {
 	iterate(qosIterator, apply)
 }
 
-func (rt *ResourceTree)IterateAt(qos uint32, apply func(res Resource) bool) {
+func (rt *ResourceTree) IterateAt(qos uint32, apply func(res Resource) bool) {
 	node, found := rt.qosTree.Ceiling(qos)
 	if !found {
 		return

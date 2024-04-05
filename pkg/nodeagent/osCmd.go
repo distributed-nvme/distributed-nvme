@@ -3,8 +3,8 @@ package nodeagent
 import (
 	"bytes"
 	"os/exec"
-	"strings"
 	"strconv"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )

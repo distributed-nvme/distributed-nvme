@@ -1,14 +1,14 @@
 package exapi
 
 import (
-	"time"
 	"fmt"
+	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
@@ -16,15 +16,15 @@ import (
 
 type exApiServer struct {
 	pbcp.UnimplementedExternalApiServer
-	etcdCli *clientv3.Client
-	kf *keyfmt.KeyFmt
-	sm *stmwrapper.StmWrapper
+	etcdCli      *clientv3.Client
+	kf           *keyfmt.KeyFmt
+	sm           *stmwrapper.StmWrapper
 	agentTimeout time.Duration
-	clusterInit bool
-	cluster pbcp.Cluster
+	clusterInit  bool
+	cluster      pbcp.Cluster
 }
 
-func (exApi *exApiServer)getCluster(
+func (exApi *exApiServer) getCluster(
 	pch *ctxhelper.PerCtxHelper,
 ) (*pbcp.Cluster, error) {
 	if !exApi.clusterInit {
@@ -50,10 +50,10 @@ func newExApiServer(
 	prefix string,
 ) *exApiServer {
 	return &exApiServer{
-		etcdCli: etcdCli,
-		kf: keyfmt.NewKeyFmt(prefix),
-		sm: stmwrapper.NewStmWrapper(etcdCli),
+		etcdCli:      etcdCli,
+		kf:           keyfmt.NewKeyFmt(prefix),
+		sm:           stmwrapper.NewStmWrapper(etcdCli),
 		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
-		clusterInit: false,
+		clusterInit:  false,
 	}
 }

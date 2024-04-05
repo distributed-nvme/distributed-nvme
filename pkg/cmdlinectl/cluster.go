@@ -21,21 +21,21 @@ var (
 	}
 
 	clusterCreateCmd = &cobra.Command{
-		Use: "create",
+		Use:  "create",
 		Args: cobra.MaximumNArgs(0),
 		Run:  clusterCreateFunc,
 	}
 	clusterCreateArgs = &clusterCreateArgsStruct{}
 
 	clusterDeleteCmd = &cobra.Command{
-		Use: "delete",
+		Use:  "delete",
 		Args: cobra.MaximumNArgs(0),
 		Run:  clusterDeleteFunc,
 	}
 	clusterDeleteArgs = &clusterDeleteArgsStruct{}
 
 	clusterGetCmd = &cobra.Command{
-		Use: "get",
+		Use:  "get",
 		Args: cobra.MaximumNArgs(0),
 		Run:  clusterGetFunc,
 	}
@@ -49,8 +49,7 @@ func init() {
 }
 
 func (cli *client) createCluster(args *clusterCreateArgsStruct) string {
-	req := &pbcp.CreateClusterRequest{
-	}
+	req := &pbcp.CreateClusterRequest{}
 	reply, err := cli.c.CreateCluster(cli.ctx, req)
 	if err != nil {
 		return err.Error()
@@ -67,8 +66,7 @@ func clusterCreateFunc(cmd *cobra.Command, args []string) {
 }
 
 func (cli *client) deleteCluster(args *clusterDeleteArgsStruct) string {
-	req := &pbcp.DeleteClusterRequest{
-	}
+	req := &pbcp.DeleteClusterRequest{}
 	reply, err := cli.c.DeleteCluster(cli.ctx, req)
 	if err != nil {
 		return err.Error()
@@ -85,8 +83,7 @@ func clusterDeleteFunc(cmd *cobra.Command, args []string) {
 }
 
 func (cli *client) getCluster(args *clusterGetArgsStruct) string {
-	req := &pbcp.GetClusterRequest{
-	}
+	req := &pbcp.GetClusterRequest{}
 	reply, err := cli.c.GetCluster(cli.ctx, req)
 	if err != nil {
 		return err.Error()

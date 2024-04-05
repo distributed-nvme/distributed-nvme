@@ -3,8 +3,8 @@ package exapi
 import (
 	"context"
 
-	"google.golang.org/protobuf/proto"
 	"go.etcd.io/etcd/client/v3/concurrency"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
@@ -19,11 +19,11 @@ func (exApi *exApiServer) CreateCluster(
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 
 	cluster := &pbcp.Cluster{
-		DataExtentSizeShift: constants.DataExtentSizeShiftDefault,
+		DataExtentSizeShift:   constants.DataExtentSizeShiftDefault,
 		DataExtentPerSetShift: constants.DataExtentPerSetShiftDefault,
-		MetaExtentSizeShift: constants.MetaExtentSizeShiftDefault,
+		MetaExtentSizeShift:   constants.MetaExtentSizeShiftDefault,
 		MetaExtentPerSetShift: constants.MetaExtentPerSetShiftDefault,
-		ExtentRatioShift: constants.ExtentRatioShiftDefault,
+		ExtentRatioShift:      constants.ExtentRatioShiftDefault,
 	}
 	pch.Logger.Debug("cluster: %v", cluster)
 	clusterEntityKey := exApi.kf.ClusterEntityKey()
@@ -40,9 +40,9 @@ func (exApi *exApiServer) CreateCluster(
 	clusterEntityValStr := string(clusterEntityVal)
 
 	dnGlobal := &pbcp.DnGlobal{
-		GlobalCounter: 0,
+		GlobalCounter:   0,
 		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
-		ShardBucket: make([]uint32, constants.ShardCnt),
+		ShardBucket:     make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
 	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()
@@ -60,7 +60,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	cnGlobal := &pbcp.CnGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, constants.ShardCnt),
+		ShardBucket:   make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("cnGlobal: %v", cnGlobal)
 	cnGlobalEntityKey := exApi.kf.CnGlobalEntityKey()
@@ -78,7 +78,7 @@ func (exApi *exApiServer) CreateCluster(
 
 	spGlobal := &pbcp.SpGlobal{
 		GlobalCounter: 0,
-		ShardBucket: make([]uint32, constants.ShardCnt),
+		ShardBucket:   make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("spGlobal: %v", spGlobal)
 	spGlobalEntityKey := exApi.kf.SpGlobalEntityKey()
@@ -262,14 +262,14 @@ func (exApi *exApiServer) GetCluster(
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
 		Cluster: &pbcp.Cluster{
-			DataExtentSizeShift: cluster.DataExtentSizeShift,
+			DataExtentSizeShift:   cluster.DataExtentSizeShift,
 			DataExtentPerSetShift: cluster.DataExtentPerSetShift,
-			MetaExtentSizeShift: cluster.MetaExtentSizeShift,
+			MetaExtentSizeShift:   cluster.MetaExtentSizeShift,
 			MetaExtentPerSetShift: cluster.MetaExtentPerSetShift,
-			ExtentRatioShift: cluster.ExtentRatioShift,
+			ExtentRatioShift:      cluster.ExtentRatioShift,
 			QosUnit: &pbcp.QosFields{
-				Rbps: cluster.QosUnit.Rbps,
-				Wbps: cluster.QosUnit.Wbps,
+				Rbps:  cluster.QosUnit.Rbps,
+				Wbps:  cluster.QosUnit.Wbps,
 				Riops: cluster.QosUnit.Riops,
 				Wiops: cluster.QosUnit.Wiops,
 			},

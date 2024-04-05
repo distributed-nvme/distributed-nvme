@@ -55,7 +55,7 @@ func (exApi *exApiServer) CreateDn(
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
 				ReplyCode: constants.ReplyCodeInvalidArg,
-				ReplyMsg: err.Error(),
+				ReplyMsg:  err.Error(),
 			},
 		}, nil
 	}
@@ -73,7 +73,7 @@ func (exApi *exApiServer) CreateDn(
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
 				ReplyCode: constants.ReplyCodeInternalErr,
-				ReplyMsg: err.Error(),
+				ReplyMsg:  err.Error(),
 			},
 		}, nil
 	}
@@ -88,7 +88,7 @@ func (exApi *exApiServer) CreateDn(
 		return &pbcp.CreateDnReply{
 			ReplyInfo: &pbcp.ReplyInfo{
 				ReplyCode: constants.ReplyCodeAgentErr,
-				ReplyMsg: err.Error(),
+				ReplyMsg:  err.Error(),
 			},
 		}, nil
 	}
@@ -119,7 +119,7 @@ func (exApi *exApiServer) CreateDn(
 		cluster.DataExtentPerSetShift,
 	)
 	metaBaseAddr := 0
-	dataBaseAddr := uint32(metaBaseAddr) + uint32(metaExtentCnt) * (1 << cluster.MetaExtentSizeShift)
+	dataBaseAddr := uint32(metaBaseAddr) + uint32(metaExtentCnt)*(1<<cluster.MetaExtentSizeShift)
 	pch.Logger.Info("%v %v %v %v %v %v %v %v",
 		metaBitmap, metaBucket, metaExtentCnt,
 		dataBitmap, dataBucket, dataExtentCnt,
@@ -129,7 +129,7 @@ func (exApi *exApiServer) CreateDn(
 	return &pbcp.CreateDnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
-			ReplyMsg: constants.ReplyMsgSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
 	}, nil
 }

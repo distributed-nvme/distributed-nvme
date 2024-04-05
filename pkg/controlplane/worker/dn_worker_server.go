@@ -1,8 +1,8 @@
 package worker
 
 import (
-	"time"
 	"sync"
+	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
@@ -17,17 +17,17 @@ type dnWorkerServer struct {
 
 	// Shared fields, concurrency safe
 	etcdCli *clientv3.Client
-	kf *keyfmt.KeyFmt
-	sm *stmwrapper.StmWrapper
+	kf      *keyfmt.KeyFmt
+	sm      *stmwrapper.StmWrapper
 
 	// Shared fields
 	initTrigger chan struct{}
-	mu sync.Mutex
+	mu          sync.Mutex
 
 	// dnWorkerMember only fields
-	prioCode string
-	grpcTarget string
-	bucket []string
+	prioCode     string
+	grpcTarget   string
+	bucket       []string
 	grantTimeout int64
 
 	// dnIndividualWorker only fields
@@ -41,15 +41,14 @@ func newDnWorkerServer(
 	grpcTarget string,
 ) *dnWorkerServer {
 	return &dnWorkerServer{
-		etcdCli: etcdCli,
-		kf: keyfmt.NewKeyFmt(prefix),
-		sm: stmwrapper.NewStmWrapper(etcdCli),
-		initTrigger: make(chan struct{}),
-		prioCode: prioCode,
-		grpcTarget: grpcTarget,
-		bucket: make([]string, 0),
+		etcdCli:      etcdCli,
+		kf:           keyfmt.NewKeyFmt(prefix),
+		sm:           stmwrapper.NewStmWrapper(etcdCli),
+		initTrigger:  make(chan struct{}),
+		prioCode:     prioCode,
+		grpcTarget:   grpcTarget,
+		bucket:       make([]string, 0),
 		grantTimeout: constants.GrantTimeoutDefault,
 		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
-		
 	}
 }

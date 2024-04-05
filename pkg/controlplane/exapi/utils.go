@@ -25,7 +25,7 @@ func extentInitCalc(
 	extentCntTotal := size >> extentSizeShift
 	setCntFull := extentCntTotal >> extentPerSetShift
 	setCntPartial := 0
-	extentCntFull := 1 <<  extentPerSetShift
+	extentCntFull := 1 << extentPerSetShift
 	extentCntPartial := extentCntTotal - (setCntFull << extentPerSetShift)
 	if extentCntPartial > 0 {
 		setCntPartial += 1

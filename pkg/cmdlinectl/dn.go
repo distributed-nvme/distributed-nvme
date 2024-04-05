@@ -7,7 +7,7 @@ import (
 )
 
 type dnCreateArgsStruct struct {
-	grpcTarget    string
+	grpcTarget string
 }
 
 var (
@@ -33,7 +33,7 @@ func init() {
 
 func (cli *client) createDn(args *dnCreateArgsStruct) string {
 	req := &pbcp.CreateDnRequest{
-		GrpcTarget:    args.grpcTarget,
+		GrpcTarget: args.grpcTarget,
 	}
 	reply, err := cli.c.CreateDn(cli.ctx, req)
 	if err != nil {

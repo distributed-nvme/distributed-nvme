@@ -23,7 +23,7 @@ type workerI interface {
 
 type coordContext struct {
 	etcdCli *clientv3.Client
-	worker workerI
+	worker  workerI
 }
 
 func newCoordCtx(
@@ -32,32 +32,32 @@ func newCoordCtx(
 ) *coordContext {
 	return &coordContext{
 		etcdCli: etcdCli,
-		worker: worker,
+		worker:  worker,
 	}
 }
 
 type resWorker struct {
 	resWkrId string
-	pch *ctxhelper.PerCtxHelper
-	wg sync.WaitGroup
+	pch      *ctxhelper.PerCtxHelper
+	wg       sync.WaitGroup
 }
 
 type shardWorker1 struct {
 	shardWkrId string
-	pch *ctxhelper.PerCtxHelper
-	wg sync.WaitGroup
-	resWkrMap map[string]*resWorker
+	pch        *ctxhelper.PerCtxHelper
+	wg         sync.WaitGroup
+	resWkrMap  map[string]*resWorker
 }
 
 type memberWorker struct {
-	memberWkrId string
-	pch *ctxhelper.PerCtxHelper
-	wg sync.WaitGroup
-	coordCtx *coordContext
-	grpcTarget string
-	prioCode string
+	memberWkrId  string
+	pch          *ctxhelper.PerCtxHelper
+	wg           sync.WaitGroup
+	coordCtx     *coordContext
+	grpcTarget   string
+	prioCode     string
 	grantTimeout int64
-	shardWkrMap map[string]*shardWorker
+	shardWkrMap  map[string]*shardWorker
 }
 
 func (memberWkr *memberWorker) run() {
@@ -78,13 +78,13 @@ func newMemberWorker(
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, memberWkrId)
 	return &memberWorker{
-		memberWkrId: memberWkrId,
-		pch: pch,
-		coordCtx: coordCtx,
-		grpcTarget: grpcTarget,
-		prioCode: prioCode,
+		memberWkrId:  memberWkrId,
+		pch:          pch,
+		coordCtx:     coordCtx,
+		grpcTarget:   grpcTarget,
+		prioCode:     prioCode,
 		grantTimeout: grantTimeout,
-		shardWkrMap: make(map[string]*shardWorker),
+		shardWkrMap:  make(map[string]*shardWorker),
 	}
 }
 

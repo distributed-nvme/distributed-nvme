@@ -11,7 +11,7 @@ import (
 func initPrioCode(prioCodeConf string) (string, error) {
 	prioCodeList := make([]string, constants.ShardCnt)
 	prioCodeGroupList := strings.Split(prioCodeConf, ",")
-	for _,  prioCodeGroup := range prioCodeGroupList {
+	for _, prioCodeGroup := range prioCodeGroupList {
 		if prioCodeGroup == "" {
 			continue
 		}

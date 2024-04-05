@@ -3,8 +3,8 @@ package nodeagent
 import (
 	"context"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
 
@@ -23,20 +23,20 @@ func (dnAgent *dnAgentServer) GetDevSize(
 		return &pbnd.GetDevSizeReply{
 			StatusInfo: &pbnd.StatusInfo{
 				Code: constants.StatusCodeInternalErr,
-				Msg: err.Error(),
+				Msg:  err.Error(),
 			},
 		}, nil
 	}
 	return &pbnd.GetDevSizeReply{
 		StatusInfo: &pbnd.StatusInfo{
 			Code: constants.StatusCodeSucceed,
-			Msg: constants.StatusMsgSucceed,
+			Msg:  constants.StatusMsgSucceed,
 		},
 		Size: size,
 	}, nil
 }
 
-func newDnAgentServer() *dnAgentServer{
+func newDnAgentServer() *dnAgentServer {
 	return &dnAgentServer{
 		oc: &osCmd{},
 	}

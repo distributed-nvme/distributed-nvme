@@ -1,35 +1,35 @@
 package exapi
 
 import (
-	"time"
 	"net"
 	"strings"
+	"time"
 
-	"google.golang.org/grpc"
 	"github.com/spf13/cobra"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 type exApiArgsStruct struct {
-	etcdEndpoints string
+	etcdEndpoints   string
 	etcdDialTimeout int
-	grpcNetwork string
-	grpcAddress string
+	grpcNetwork     string
+	grpcAddress     string
 }
 
 var (
 	exApiCmd = &cobra.Command{
-		Use: "dnvapi",
+		Use:   "dnvapi",
 		Short: "dnv external api",
-		Long: `dnv external api`,
-		Run: launchExApi,
+		Long:  `dnv external api`,
+		Run:   launchExApi,
 	}
-	exApiArgs = exApiArgsStruct{}
+	exApiArgs    = exApiArgsStruct{}
 	gExApiLogger = prefixlog.NewPrefixLogger("ex_api")
 )
 
@@ -60,7 +60,7 @@ func launchExApi(cmd *cobra.Command, args []string) {
 	endpoints := strings.Split(exApiArgs.etcdEndpoints, ",")
 	dialTimeout := time.Duration(exApiArgs.etcdDialTimeout) * time.Second
 	etcdCli, err := clientv3.New(clientv3.Config{
-		Endpoints: endpoints,
+		Endpoints:   endpoints,
 		DialTimeout: dialTimeout,
 	})
 	if err != nil {
