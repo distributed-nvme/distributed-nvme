@@ -28,7 +28,7 @@ type dnWorkerServer struct {
 	prioCode     string
 	grpcTarget   string
 	bucket       []string
-	grantTimeout int64
+	grantTTL int64
 
 	// dnIndividualWorker only fields
 	agentTimeout time.Duration
@@ -48,7 +48,7 @@ func newDnWorkerServer(
 		prioCode:     prioCode,
 		grpcTarget:   grpcTarget,
 		bucket:       make([]string, 0),
-		grantTimeout: constants.GrantTimeoutDefault,
-		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
+		grantTTL: constants.GrantTTLDefault,
+		agentTimeout: constants.AgentTimeoutDefault,
 	}
 }

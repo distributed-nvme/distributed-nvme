@@ -3,11 +3,13 @@ package worker
 import (
 	"context"
 	"fmt"
+	"time"
 	"sync"
 
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
 
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/mbrhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
@@ -18,6 +20,7 @@ type workerI interface {
 	getEtcdCli() *clientv3.Client
 	getMemberPrefix() string
 	getShardPrefix() string
+	getInitTrigger() <-chan struct{}
 	trackRes(resId string, pch *ctxhelper.PerCtxHelper)
 	addRes(resId string, resBody string) ([]string, error)
 	delRes(resId string)
@@ -44,36 +47,70 @@ type memberWorker struct {
 	grpcTarget   string
 	prioCode     string
 	replica      uint32
-	grantTimeout int64
+	grantTTL int64
 	shardWkrMap  map[string]*shardWorker
 }
 
 func (mwkr *memberWorker) asyncRun() {
 	defer mwkr.wg.Done()
 	mwkr.pch.Logger.Info("Run")
+
+	etcdCli := mwkr.worker.getEtcdCli()
+	memberPrefix := mwkr.worker.getMemberPrefix()
+
 	revokeFun, err := mbrhelper.RegisterMember(
-		mwkr.worker.getEtcdCli(),
+		etcdCli,
 		mwkr.pch,
-		mwkr.worker.getMemberPrefix(),
+		memberPrefix,
 		mwkr.grpcTarget,
 		mwkr.prioCode,
-		mwkr.grantTimeout,
+		mwkr.grantTTL,
 	)
 	if err != nil {
 		mwkr.pch.Logger.Fatal("RegisterMember err: %v", err)
 	}
 	defer revokeFun()
 
-	sms, err := mbrhelper.NewShardMemberSummary(
-		mwkr.worker.getEtcdCli(),
+	var sms *mbrhelper.ShardMemberSummary
+	var shardList []string
+	sms, err = mbrhelper.NewShardMemberSummary(
+		etcdCli,
 		mwkr.pch,
-		mwkr.worker.getMemberPrefix(),
+		memberPrefix,
 		mwkr.replica,
 	)
 	if err != nil {
 		mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 	}
-	mwkr.pch.Logger.Info("sms: %v", sms)
+	shardList = sms.GetShardListByOwner(mwkr.grpcTarget)
+	mwkr.pch.Logger.Info("shardList: %v", shardList)
+
+	for {
+		shardCh := etcdCli.Watch(
+			mwkr.pch.Ctx,
+			memberPrefix,
+			clientv3.WithPrefix(),
+			clientv3.WithRev(sms.GetRevision()),
+		)
+		select {
+		case <-shardCh:
+			sms, err = mbrhelper.NewShardMemberSummary(
+				etcdCli,
+				mwkr.pch,
+				memberPrefix,
+				mwkr.replica,
+			)
+			if err != nil {
+				mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
+			}
+		case <-mwkr.pch.Ctx.Done():
+			return
+		case <-mwkr.worker.getInitTrigger():
+			break
+		case <-time.After(constants.ShardInitWaitTime):
+			break
+		}
+	}
 }
 
 func (mwkr *memberWorker) run() {
@@ -98,7 +135,7 @@ func newMemberWorker(
 	grpcTarget string,
 	prioCode string,
 	replica uint32,
-	grantTimeout int64,
+	grantTTL int64,
 	worker workerI,
 ) *memberWorker {
 	memberWkrId := uuid.New().String()
@@ -112,7 +149,7 @@ func newMemberWorker(
 		grpcTarget:   grpcTarget,
 		prioCode:     prioCode,
 		replica:      replica,
-		grantTimeout: grantTimeout,
+		grantTTL: grantTTL,
 		shardWkrMap:  make(map[string]*shardWorker),
 	}
 }

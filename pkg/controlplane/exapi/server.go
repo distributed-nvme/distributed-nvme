@@ -53,7 +53,7 @@ func newExApiServer(
 		etcdCli:      etcdCli,
 		kf:           keyfmt.NewKeyFmt(prefix),
 		sm:           stmwrapper.NewStmWrapper(etcdCli),
-		agentTimeout: time.Duration(constants.AgentTimeoutSecondDefault) * time.Second,
+		agentTimeout: constants.AgentTimeoutDefault,
 		clusterInit:  false,
 	}
 }

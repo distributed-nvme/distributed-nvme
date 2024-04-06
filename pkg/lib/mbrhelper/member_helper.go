@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
-	"time"
 	"slices"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -20,9 +19,24 @@ type shardMember struct {
 }
 
 type ShardMemberSummary struct {
-	Revision int64
-	ShardToOwners map[string][]string
-	OwnerToShards map[string][]string
+	revision int64
+	shardToOwners map[string][]string
+	ownerToShards map[string][]string
+}
+
+func (sms *ShardMemberSummary) GetRevision() int64 {
+	return sms.revision
+}
+
+func (sms *ShardMemberSummary) GetShardListByOwner(
+	grpcTarget string,
+) []string {
+	var shardList []string
+	shardList, ok := sms.ownerToShards[grpcTarget]
+	if !ok {
+		shardList = make([]string, 0)
+	}
+	return shardList
 }
 
 func NewShardMemberSummary(
@@ -85,9 +99,9 @@ func NewShardMemberSummary(
 		ownerToShards[sm.grpcTarget] = sm.shardList
 	}
 	return &ShardMemberSummary{
-		Revision: resp.Header.Revision,
-		ShardToOwners: shardToOwners,
-		OwnerToShards: ownerToShards,
+		revision: resp.Header.Revision,
+		shardToOwners: shardToOwners,
+		ownerToShards: ownerToShards,
 	}, nil
 }
 
@@ -107,7 +121,7 @@ func RegisterMember(
 	revokeFun := func() {
 		revokeCtx, _ := context.WithTimeout(
 			context.Background(),
-			time.Duration(constants.RollbackTimeout) * time.Second,
+			constants.RollbackTimeout,
 		)
 		etcdCli.Revoke(revokeCtx, resp.ID)
 	}
