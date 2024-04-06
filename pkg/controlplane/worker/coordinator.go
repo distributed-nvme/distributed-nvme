@@ -33,10 +33,46 @@ type resWorker struct {
 }
 
 type shardWorker struct {
-	shardWkrId string
+	shardId string
 	pch        *ctxhelper.PerCtxHelper
 	wg         sync.WaitGroup
-	resWkrMap  map[string]*resWorker
+	worker workerI
+}
+
+func (swkr *shardWorker) asyncRun() {
+	defer swkr.wg.Done()
+	swkr.pch.Logger.Info("Run")
+}
+
+func (swkr *shardWorker) run() {
+	swkr.wg.Add(1)
+	go swkr.asyncRun()
+}
+
+func (swkr *shardWorker) cancel() {
+	swkr.pch.Logger.Info("Cancel")
+	swkr.pch.Cancel()
+}
+
+func (swkr *shardWorker) wait() {
+	swkr.pch.Logger.Info("Waiting")
+	swkr.wg.Wait()
+	swkr.pch.Logger.Info("Exit")
+}
+
+func newShardWorker(
+	parentCtx context.Context,
+	shardId string,
+	worker workerI,
+) *shardWorker {
+	logPrefix := fmt.Sprintf("%s-shard|%s", worker.getName(), shardId)
+	logger := prefixlog.NewPrefixLogger(logPrefix)
+	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, shardId)
+	return &shardWorker{
+		shardId: shardId,
+		pch: pch,
+		worker: worker,
+	}
 }
 
 type memberWorker struct {
@@ -48,7 +84,6 @@ type memberWorker struct {
 	prioCode     string
 	replica      uint32
 	grantTTL int64
-	shardWkrMap  map[string]*shardWorker
 }
 
 func (mwkr *memberWorker) asyncRun() {
@@ -71,8 +106,10 @@ func (mwkr *memberWorker) asyncRun() {
 	}
 	defer revokeFun()
 
+	var shardIdToWorker map[string]*shardWorker
 	var sms *mbrhelper.ShardMemberSummary
-	var shardList []string
+	var shardMap map[string]bool
+
 	sms, err = mbrhelper.NewShardMemberSummary(
 		etcdCli,
 		mwkr.pch,
@@ -82,18 +119,18 @@ func (mwkr *memberWorker) asyncRun() {
 	if err != nil {
 		mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 	}
-	shardList = sms.GetShardListByOwner(mwkr.grpcTarget)
-	mwkr.pch.Logger.Info("shardList: %v", shardList)
+	shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
+	mwkr.pch.Logger.Info("shardMap: %v", shardMap)
 
 	for {
-		shardCh := etcdCli.Watch(
+		memberCh := etcdCli.Watch(
 			mwkr.pch.Ctx,
 			memberPrefix,
 			clientv3.WithPrefix(),
 			clientv3.WithRev(sms.GetRevision()),
 		)
 		select {
-		case <-shardCh:
+		case <-memberCh:
 			sms, err = mbrhelper.NewShardMemberSummary(
 				etcdCli,
 				mwkr.pch,
@@ -103,6 +140,7 @@ func (mwkr *memberWorker) asyncRun() {
 			if err != nil {
 				mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 			}
+			shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
 		case <-mwkr.pch.Ctx.Done():
 			return
 		case <-mwkr.worker.getInitTrigger():
@@ -110,6 +148,71 @@ func (mwkr *memberWorker) asyncRun() {
 		case <-time.After(constants.ShardInitWaitTime):
 			break
 		}
+	}
+
+	for {
+		toBeCreated := make([]*shardWorker, 0)
+		toBeDeleted := make([]*shardWorker, 0)
+		for shardId := range shardMap {
+			_, ok := shardIdToWorker[shardId]
+			if !ok {
+				swkr := newShardWorker(
+					mwkr.pch.Ctx,
+					shardId,
+					mwkr.worker,
+				)
+				toBeCreated = append(toBeCreated, swkr)
+			}
+		}
+		for shardId, swkr := range shardIdToWorker {
+			_, ok := shardMap[shardId]
+			if !ok {
+				toBeDeleted = append(toBeDeleted, swkr)
+			}
+		}
+		for _, swkr := range toBeCreated {
+			swkr.run()
+			shardIdToWorker[swkr.shardId] = swkr
+		}
+		delay := (3600 * 24 * 365 * 100) * time.Second
+		if len(toBeDeleted) > 0 {
+			delay = constants.ShardDeleteWaitTime
+		}
+
+		memberCh := etcdCli.Watch(
+			mwkr.pch.Ctx,
+			memberPrefix,
+			clientv3.WithPrefix(),
+			clientv3.WithRev(sms.GetRevision()),
+		)
+
+		select {
+		case <- memberCh:
+			sms, err = mbrhelper.NewShardMemberSummary(
+				etcdCli,
+				mwkr.pch,
+				memberPrefix,
+				mwkr.replica,
+			)
+			if err != nil {
+				mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
+			}
+			shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
+		case <-time.After(delay):
+			for _, swkr := range toBeDeleted {
+				swkr.cancel()
+			}
+			for _, swkr := range toBeDeleted {
+				swkr.wait()
+				delete(shardIdToWorker, swkr.shardId)
+			}
+		case <-mwkr.pch.Ctx.Done():
+			break
+		}
+	}
+
+	for _, swkr := range shardIdToWorker {
+		swkr.wait()
 	}
 }
 
@@ -131,7 +234,6 @@ func (mwkr *memberWorker) wait() {
 
 func newMemberWorker(
 	parentCtx context.Context,
-	name string,
 	grpcTarget string,
 	prioCode string,
 	replica uint32,
@@ -139,7 +241,7 @@ func newMemberWorker(
 	worker workerI,
 ) *memberWorker {
 	memberWkrId := uuid.New().String()
-	logPrefix := fmt.Sprintf("%s-member|%s ", name, memberWkrId)
+	logPrefix := fmt.Sprintf("%s-member|%s ", worker.getName(), memberWkrId)
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, memberWkrId)
 	return &memberWorker{
@@ -150,6 +252,5 @@ func newMemberWorker(
 		prioCode:     prioCode,
 		replica:      replica,
 		grantTTL: grantTTL,
-		shardWkrMap:  make(map[string]*shardWorker),
 	}
 }

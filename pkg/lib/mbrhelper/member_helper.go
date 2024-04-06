@@ -39,6 +39,17 @@ func (sms *ShardMemberSummary) GetShardListByOwner(
 	return shardList
 }
 
+func (sms *ShardMemberSummary) GetShardMapByOwner(
+	grpcTarget string,
+) map[string]bool {
+	shardMap := make(map[string]bool)
+	shardList := sms.GetShardListByOwner(grpcTarget)
+	for _, shardId := range shardList {
+		shardMap[shardId] = true
+	}
+	return shardMap
+}
+
 func NewShardMemberSummary(
 	etcdCli *clientv3.Client,
 	pch *ctxhelper.PerCtxHelper,
