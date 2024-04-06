@@ -3,8 +3,8 @@ package worker
 import (
 	"context"
 	"fmt"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -34,9 +34,9 @@ type resWorker struct {
 
 type shardWorker struct {
 	shardId string
-	pch        *ctxhelper.PerCtxHelper
-	wg         sync.WaitGroup
-	worker workerI
+	pch     *ctxhelper.PerCtxHelper
+	wg      sync.WaitGroup
+	worker  workerI
 }
 
 func (swkr *shardWorker) asyncRun() {
@@ -70,20 +70,20 @@ func newShardWorker(
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, shardId)
 	return &shardWorker{
 		shardId: shardId,
-		pch: pch,
-		worker: worker,
+		pch:     pch,
+		worker:  worker,
 	}
 }
 
 type memberWorker struct {
-	memberWkrId  string
-	pch          *ctxhelper.PerCtxHelper
-	wg           sync.WaitGroup
-	worker       workerI
-	grpcTarget   string
-	prioCode     string
-	replica      uint32
-	grantTTL int64
+	memberWkrId string
+	pch         *ctxhelper.PerCtxHelper
+	wg          sync.WaitGroup
+	worker      workerI
+	grpcTarget  string
+	prioCode    string
+	replica     uint32
+	grantTTL    int64
 }
 
 func (mwkr *memberWorker) asyncRun() {
@@ -187,7 +187,7 @@ func (mwkr *memberWorker) asyncRun() {
 		)
 
 		select {
-		case <- memberCh:
+		case <-memberCh:
 			sms, err = mbrhelper.NewShardMemberSummary(
 				etcdCli,
 				mwkr.pch,
@@ -245,12 +245,12 @@ func newMemberWorker(
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, memberWkrId)
 	return &memberWorker{
-		memberWkrId:  memberWkrId,
-		pch:          pch,
-		worker:       worker,
-		grpcTarget:   grpcTarget,
-		prioCode:     prioCode,
-		replica:      replica,
-		grantTTL: grantTTL,
+		memberWkrId: memberWkrId,
+		pch:         pch,
+		worker:      worker,
+		grpcTarget:  grpcTarget,
+		prioCode:    prioCode,
+		replica:     replica,
+		grantTTL:    grantTTL,
 	}
 }

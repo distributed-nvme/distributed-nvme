@@ -8,18 +8,18 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 
-	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
 type shardMember struct {
-	prioCode string
+	prioCode   string
 	grpcTarget string
-	shardList []string
+	shardList  []string
 }
 
 type ShardMemberSummary struct {
-	revision int64
+	revision      int64
 	shardToOwners map[string][]string
 	ownerToShards map[string][]string
 }
@@ -71,9 +71,9 @@ func NewShardMemberSummary(
 			continue
 		}
 		sm := &shardMember{
-			prioCode: prioCode,
+			prioCode:   prioCode,
 			grpcTarget: grpcTarget,
-			shardList: make([]string, 0),
+			shardList:  make([]string, 0),
 		}
 		smList = append(smList, sm)
 	}
@@ -110,7 +110,7 @@ func NewShardMemberSummary(
 		ownerToShards[sm.grpcTarget] = sm.shardList
 	}
 	return &ShardMemberSummary{
-		revision: resp.Header.Revision,
+		revision:      resp.Header.Revision,
 		shardToOwners: shardToOwners,
 		ownerToShards: ownerToShards,
 	}, nil

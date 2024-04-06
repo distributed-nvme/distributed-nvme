@@ -25,10 +25,10 @@ type dnWorkerServer struct {
 	mu          sync.Mutex
 
 	// dnWorkerMember only fields
-	prioCode     string
-	grpcTarget   string
-	bucket       []string
-	grantTTL int64
+	prioCode   string
+	grpcTarget string
+	bucket     []string
+	grantTTL   int64
 
 	// dnIndividualWorker only fields
 	agentTimeout time.Duration
@@ -48,7 +48,7 @@ func newDnWorkerServer(
 		prioCode:     prioCode,
 		grpcTarget:   grpcTarget,
 		bucket:       make([]string, 0),
-		grantTTL: constants.GrantTTLDefault,
+		grantTTL:     constants.GrantTTLDefault,
 		agentTimeout: constants.AgentTimeoutDefault,
 	}
 }
