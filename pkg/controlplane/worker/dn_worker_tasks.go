@@ -14,14 +14,14 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 )
 
-type dnShardWorker struct {
+type dnShardWorkerA struct {
 	pch      *ctxhelper.PerCtxHelper
 	wg       sync.WaitGroup
 	dnWorker *dnWorkerServer
 	shardId  string
 }
 
-func (dnsw *dnShardWorker) asyncRun() {
+func (dnsw *dnShardWorkerA) asyncRun() {
 	dnsw.pch.Logger.Info("asyncRun: %s", dnsw.shardId)
 	for {
 		select {
@@ -32,17 +32,17 @@ func (dnsw *dnShardWorker) asyncRun() {
 	}
 }
 
-func (dnsw *dnShardWorker) run() {
+func (dnsw *dnShardWorkerA) run() {
 	defer dnsw.wg.Done()
 	go dnsw.asyncRun()
 }
 
-func (dnsw *dnShardWorker) cancel() {
+func (dnsw *dnShardWorkerA) cancel() {
 	dnsw.pch.Logger.Info("Cancel")
 	dnsw.pch.Cancel()
 }
 
-func (dnsw *dnShardWorker) wait() {
+func (dnsw *dnShardWorkerA) wait() {
 	dnsw.pch.Logger.Info("Waiting")
 	dnsw.wg.Wait()
 	dnsw.pch.Logger.Info("Exit")
@@ -52,11 +52,11 @@ func newDnShardWorker(
 	parentCtx context.Context,
 	dnWorker *dnWorkerServer,
 	shardId string,
-) *dnShardWorker {
+) *dnShardWorkerA {
 	workerId := uuid.New().String()
-	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnShardWorker|%s ", workerId))
+	logger := prefixlog.NewPrefixLogger(fmt.Sprintf("dnShardWorkerA|%s ", workerId))
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, workerId)
-	return &dnShardWorker{
+	return &dnShardWorkerA{
 		pch:      pch,
 		dnWorker: dnWorker,
 		shardId:  shardId,
@@ -96,7 +96,7 @@ func (dnmw *dnMemberWorker) asyncRun() {
 		dnmw.dnWorker.etcdCli.Revoke(context.Background(), resp.ID)
 	}()
 
-	var shardIdToWorker map[string]*dnShardWorker
+	var shardIdToWorker map[string]*dnShardWorkerA
 	var shards map[string]bool
 	var rev int64
 	shards, rev = getShards(
@@ -132,8 +132,8 @@ func (dnmw *dnMemberWorker) asyncRun() {
 	}
 
 	for {
-		toBeCreated := make([]*dnShardWorker, 0)
-		toBeDeleted := make([]*dnShardWorker, 0)
+		toBeCreated := make([]*dnShardWorkerA, 0)
+		toBeDeleted := make([]*dnShardWorkerA, 0)
 		for shardId := range shards {
 			_, ok := shardIdToWorker[shardId]
 			if !ok {

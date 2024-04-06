@@ -9,7 +9,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
-type shardWorker struct {
+type shardWorkerB struct {
 	prioCode   string
 	grpcTarget string
 	shardList  []string
@@ -25,8 +25,8 @@ func getShards(
 	if err != nil {
 		pch.Logger.Fatal("Get shard workers failed: %s %v", prefix, err)
 	}
-	var selfShardWorker *shardWorker
-	swList := make([]*shardWorker, 0)
+	var selfShardWorker *shardWorkerB
+	swList := make([]*shardWorkerB, 0)
 	for _, ev := range resp.Kvs {
 		pch.Logger.Info("Shard workers: %s %s", ev.Key, ev.Value)
 		keyStr := string(ev.Key)
@@ -36,7 +36,7 @@ func getShards(
 			pch.Logger.Warning("Ignore invalid prioCode: %s %s", grpcTarget, prioCode)
 			continue
 		}
-		sw := &shardWorker{
+		sw := &shardWorkerB{
 			prioCode:   prioCode,
 			grpcTarget: grpcTarget,
 			shardList:  make([]string, 0),

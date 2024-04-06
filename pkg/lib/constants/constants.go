@@ -56,13 +56,17 @@ const (
 	CnCntlidStep  = 2000
 
 	ShardCnt             = 256
+	ShardIdFormat        = "%02x"
 	ShardHighPrioCode    = "7"
 	ShardMediumPrioCode  = "5"
 	ShardLowPrioCode     = "3"
 	ShardDefaultPrioCode = "5"
+	ShardIgnorePrioCode  = "0"
 	ShardHighPrioText    = "high"
 	ShardMediumPrioText  = "medium"
 	ShardLowPrioText     = "low"
+
+	RollbackTimeout = 10
 
 	StringLengthMax = 256
 	StringLengthMin = 1

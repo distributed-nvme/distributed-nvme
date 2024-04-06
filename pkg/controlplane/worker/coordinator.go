@@ -9,31 +9,18 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/mbrhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 )
 
 type workerI interface {
 	getName() string
+	getEtcdCli() *clientv3.Client
 	getMemberPrefix() string
 	getShardPrefix() string
 	trackRes(resId string, pch *ctxhelper.PerCtxHelper)
 	addRes(resId string, resBody string) ([]string, error)
 	delRes(resId string)
-}
-
-type coordContext struct {
-	etcdCli *clientv3.Client
-	worker  workerI
-}
-
-func newCoordCtx(
-	etcdCli *clientv3.Client,
-	worker workerI,
-) *coordContext {
-	return &coordContext{
-		etcdCli: etcdCli,
-		worker:  worker,
-	}
 }
 
 type resWorker struct {
@@ -42,7 +29,7 @@ type resWorker struct {
 	wg       sync.WaitGroup
 }
 
-type shardWorker1 struct {
+type shardWorker struct {
 	shardWkrId string
 	pch        *ctxhelper.PerCtxHelper
 	wg         sync.WaitGroup
@@ -53,46 +40,56 @@ type memberWorker struct {
 	memberWkrId  string
 	pch          *ctxhelper.PerCtxHelper
 	wg           sync.WaitGroup
-	coordCtx     *coordContext
+	worker       workerI
 	grpcTarget   string
 	prioCode     string
+	replica      uint32
 	grantTimeout int64
 	shardWkrMap  map[string]*shardWorker
 }
 
-func (mwkr *memberWorker) run() {
+func (mwkr *memberWorker) asyncRun() {
 	defer mwkr.wg.Done()
 	mwkr.pch.Logger.Info("Run")
-	memberPrefix := mwkr.coordCtx.worker.getMemberPrefix()
-	key := fmt.Sprintf("%s/%s", memberPrefix, mwkr.grpcTarget)
-	resp, err := mwkr.coordCtx.etcdCli.Grant(
-		mwkr.pch.Ctx,
+	revokeFun, err := mbrhelper.RegisterMember(
+		mwkr.worker.getEtcdCli(),
+		mwkr.pch,
+		mwkr.worker.getMemberPrefix(),
+		mwkr.grpcTarget,
+		mwkr.prioCode,
 		mwkr.grantTimeout,
 	)
 	if err != nil {
-		mwkr.pch.Logger.Fatal("Grant err: %v", err)
+		mwkr.pch.Logger.Fatal("RegisterMember err: %v", err)
 	}
+	defer revokeFun()
 
-	if _, err := mwkr.coordCtx.etcdCli.KeepAlive(
-		mwkr.pch.Ctx,
-		resp.ID,
-	); err != nil {
-		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
-		mwkr.pch.Logger.Fatal("KeepAlive err: %v leaseId=%v", err, resp.ID)
+	sms, err := mbrhelper.NewShardMemberSummary(
+		mwkr.worker.getEtcdCli(),
+		mwkr.pch,
+		mwkr.worker.getMemberPrefix(),
+		mwkr.replica,
+	)
+	if err != nil {
+		mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 	}
+	mwkr.pch.Logger.Info("sms: %v", sms)
+}
 
-	if _, err := mwkr.coordCtx.etcdCli.Put(
-		mwkr.pch.Ctx,
-		key,
-		mwkr.prioCode,
-		clientv3.WithLease(resp.ID),
-	); err != nil {
-		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
-		mwkr.pch.Logger.Fatal("PUt err: %v leaseId=%v key=%s", err, resp.ID, key)
-	}
-	defer func() {
-		mwkr.coordCtx.etcdCli.Revoke(context.Background(), resp.ID)
-	}()
+func (mwkr *memberWorker) run() {
+	mwkr.wg.Add(1)
+	go mwkr.asyncRun()
+}
+
+func (mwkr *memberWorker) cancel() {
+	mwkr.pch.Logger.Info("Cancel")
+	mwkr.pch.Cancel()
+}
+
+func (mwkr *memberWorker) wait() {
+	mwkr.pch.Logger.Info("Waiting")
+	mwkr.wg.Wait()
+	mwkr.pch.Logger.Info("Exit")
 }
 
 func newMemberWorker(
@@ -100,8 +97,9 @@ func newMemberWorker(
 	name string,
 	grpcTarget string,
 	prioCode string,
+	replica uint32,
 	grantTimeout int64,
-	coordCtx *coordContext,
+	worker workerI,
 ) *memberWorker {
 	memberWkrId := uuid.New().String()
 	logPrefix := fmt.Sprintf("%s-member|%s ", name, memberWkrId)
@@ -110,56 +108,11 @@ func newMemberWorker(
 	return &memberWorker{
 		memberWkrId:  memberWkrId,
 		pch:          pch,
-		coordCtx:     coordCtx,
+		worker:       worker,
 		grpcTarget:   grpcTarget,
 		prioCode:     prioCode,
+		replica:      replica,
 		grantTimeout: grantTimeout,
 		shardWkrMap:  make(map[string]*shardWorker),
 	}
-}
-
-type coordinator struct {
-	memberWkr *memberWorker
-}
-
-func (co *coordinator) run() {
-	co.memberWkr.wg.Add(1)
-	go co.memberWkr.run()
-}
-
-func (co *coordinator) cancel() {
-	co.memberWkr.pch.Logger.Info("Cancel")
-	co.memberWkr.pch.Cancel()
-}
-
-func (co *coordinator) wait() {
-	co.memberWkr.pch.Logger.Info("Waiting")
-	co.memberWkr.wg.Wait()
-	co.memberWkr.pch.Logger.Info("Exit")
-}
-
-func newCoordinator(
-	ctx context.Context,
-	etcdCli *clientv3.Client,
-	grpcTarget string,
-	prioCode string,
-	grantTimeout int64,
-	worker workerI,
-) *coordinator {
-	coordCtx := newCoordCtx(
-		etcdCli,
-		worker,
-	)
-	memberWkr := newMemberWorker(
-		ctx,
-		worker.getName(),
-		grpcTarget,
-		prioCode,
-		grantTimeout,
-		coordCtx,
-	)
-	co := &coordinator{
-		memberWkr: memberWkr,
-	}
-	return co
 }
