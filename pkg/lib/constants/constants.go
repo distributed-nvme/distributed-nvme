@@ -29,6 +29,8 @@ const (
 	// GrantTTL is in second by default
 	GrantTTLDefault = 10
 
+	EtcdPageSize = 100
+
 	DataExtentSizeShiftMin       = 20
 	DataExtentSizeShiftMax       = 40
 	DataExtentSizeShiftDefault   = 30

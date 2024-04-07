@@ -74,12 +74,7 @@ func (cli *client) show(output string) {
 }
 
 func newClient(args *rootArgsStruct) *client {
-	conn, err := grpc.Dial(
-		args.address,
-		grpc.WithInsecure(),
-		grpc.WithBlock(),
-		grpc.WithTimeout(time.Duration(args.timeout)*time.Second),
-	)
+	conn, err := grpc.Dial(args.address)
 	if err != nil {
 		gLogger.Fatal("Connection err: %v %v", args, err)
 	}
