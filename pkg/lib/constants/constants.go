@@ -29,6 +29,8 @@ const (
 	// GrantTTL is in second by default
 	GrantTTLDefault = 10
 
+	ShardWorkerDelayDefault = 1 * time.Second
+
 	EtcdPageSize = 100
 
 	DataExtentSizeShiftMin       = 20

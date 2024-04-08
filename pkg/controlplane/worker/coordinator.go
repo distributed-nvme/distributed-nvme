@@ -88,10 +88,8 @@ type workerI interface {
 	getResPrefix() string
 	getInitTrigger() <-chan struct{}
 	addResRev(resId, resBody string, rev int64) ([]string, error)
-	delResRev(resId string, rev int64)
+	delResRev(resId string, rev int64) error
 	trackRes(resId string, pch *ctxhelper.PerCtxHelper, targetToConn map[string]*grpc.ClientConn)
-	addRes(resId string)
-	delRes(resId string)
 }
 
 type resWorker struct {
@@ -100,8 +98,8 @@ type resWorker struct {
 	wg           sync.WaitGroup
 	worker       workerI
 	resId        string
+	revision     int64
 	targetToConn map[string]*grpc.ClientConn
-	gcCache      *grpcConnCache
 }
 
 func (rwkr *resWorker) asyncRun() {
@@ -123,17 +121,13 @@ func (rwkr *resWorker) wait() {
 	rwkr.pch.Logger.Info("Waiting")
 	rwkr.wg.Wait()
 	rwkr.pch.Logger.Info("Wait done")
-	rwkr.worker.delRes(rwkr.resId)
-	for grpcTarget := range rwkr.targetToConn {
-		rwkr.gcCache.put(grpcTarget)
-	}
 }
 
 func newResWorker(
 	parentCtx context.Context,
 	worker workerI,
-	gcCache *grpcConnCache,
 	resId string,
+	revision int64,
 	targetToConn map[string]*grpc.ClientConn,
 ) *resWorker {
 	resWkrId := uuid.New().String()
@@ -141,29 +135,36 @@ func newResWorker(
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, resWkrId)
 
-	worker.addRes(resId)
-
 	return &resWorker{
 		resWkrId:     resWkrId,
 		pch:          pch,
 		worker:       worker,
 		resId:        resId,
+		revision:     revision,
 		targetToConn: targetToConn,
-		gcCache:      gcCache,
 	}
 }
 
+type bodyAndRev struct {
+	resBody  string
+	revision int64
+}
+
 type shardTask struct {
-	toBeCreated map[string]string
+	toBeCreated map[string]*bodyAndRev
 	toBeDeleted map[string]bool
 	mu          sync.Mutex
 }
 
-func (st *shardTask) deleteAndCreate(resId, resBody string) {
+func (st *shardTask) deleteAndCreate(resId, resBody string, revision int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.toBeDeleted[resId] = true
-	st.toBeCreated[resId] = resBody
+	bAndR := &bodyAndRev{
+		resBody:  resBody,
+		revision: revision,
+	}
+	st.toBeCreated[resId] = bAndR
 }
 
 func (st *shardTask) deleteOnly(resId string) {
@@ -173,19 +174,19 @@ func (st *shardTask) deleteOnly(resId string) {
 	delete(st.toBeCreated, resId)
 }
 
-func (st *shardTask) fetchTasks() (map[string]string, map[string]bool) {
+func (st *shardTask) fetchTasks() (map[string]*bodyAndRev, map[string]bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	toBeCreated := st.toBeCreated
 	toBeDeleted := st.toBeDeleted
-	st.toBeCreated = make(map[string]string)
+	st.toBeCreated = make(map[string]*bodyAndRev)
 	st.toBeDeleted = make(map[string]bool)
 	return toBeCreated, toBeDeleted
 }
 
 func newShardTask() *shardTask {
 	return &shardTask{
-		toBeCreated: make(map[string]string),
+		toBeCreated: make(map[string]*bodyAndRev),
 		toBeDeleted: make(map[string]bool),
 	}
 }
@@ -199,9 +200,9 @@ type shardWorker struct {
 	st      *shardTask
 }
 
-func (swkr *shardWorker) watcher() {
+func (swkr *shardWorker) watch() {
 	defer swkr.wg.Done()
-	prefix := fmt.Sprintf("%s-watcher|%s", swkr.worker.getName(), swkr.shardId)
+	prefix := fmt.Sprintf("%s-watch|%s", swkr.worker.getName(), swkr.shardId)
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
 
@@ -241,7 +242,7 @@ func (swkr *shardWorker) watcher() {
 		key := string(resp1.Kvs[0].Key)
 		resId := key[len(resPrefix):]
 		resBody := string(resp1.Kvs[0].Value)
-		swkr.st.deleteAndCreate(resId, resBody)
+		swkr.st.deleteAndCreate(resId, resBody, revision)
 	}
 
 	for {
@@ -261,31 +262,117 @@ func (swkr *shardWorker) watcher() {
 				resBody := string(ev.Kv.Value)
 				switch ev.Type {
 				case clientv3.EventTypePut:
-					swkr.st.deleteAndCreate(resId, resBody)
+					swkr.st.deleteAndCreate(resId, resBody, revision)
 				case clientv3.EventTypeDelete:
 					swkr.st.deleteOnly(resId)
 				default:
 					pch.Logger.Fatal("Unknow event type: %v", ev.Type)
 				}
 			}
+		case <-pch.Ctx.Done():
+			break
 		}
 	}
 }
 
-func (swkr *shardWorker) handler() {
+func (swkr *shardWorker) process(
+	pch *ctxhelper.PerCtxHelper,
+	resIdToWorker map[string]*resWorker,
+	toBeCreated map[string]*bodyAndRev,
+	toBeDeleted map[string]bool,
+) {
+	creatingList := make([]*resWorker, 0)
+	for resId, bAndR := range toBeCreated {
+		resBody := bAndR.resBody
+		revision := bAndR.revision
+		grpcTargetList, err := swkr.worker.addResRev(resId, resBody, revision)
+		if err != nil {
+			pch.Logger.Warning("addResRev err, resId: %s revision: %d err: %v", resId, revision, err)
+			continue
+		}
+		targetToConn := make(map[string]*grpc.ClientConn)
+		ignore := false
+		for _, grpcTarget := range grpcTargetList {
+			conn, err := swkr.gcCache.get(grpcTarget)
+			if err != nil {
+				pch.Logger.Warning("get grpcTarget err, grpcTarget: %s err: %v", grpcTarget, err)
+				ignore = true
+				break
+			}
+			targetToConn[grpcTarget] = conn
+		}
+		if ignore {
+			continue
+		}
+		rwkr := newResWorker(
+			pch.Ctx,
+			swkr.worker,
+			resId,
+			revision,
+			targetToConn,
+		)
+		creatingList = append(creatingList, rwkr)
+	}
+
+	deletingList := make([]*resWorker, 0)
+	for resId := range toBeDeleted {
+		rwkr, ok := resIdToWorker[resId]
+		if !ok {
+			continue
+		}
+		rwkr.cancel()
+		deletingList = append(deletingList, rwkr)
+	}
+
+	for _, rwkr := range deletingList {
+		rwkr.wait()
+		for grpcTarget := range rwkr.targetToConn {
+			err := swkr.gcCache.put(grpcTarget)
+			if err != nil {
+				pch.Logger.Fatal("grpc conn cache put err, %s %v", grpcTarget, err)
+			}
+		}
+		err := swkr.worker.delResRev(rwkr.resId, rwkr.revision)
+		if err != nil {
+			pch.Logger.Fatal("delResRev err, %s %d %v", rwkr.resId, rwkr.revision, err)
+		}
+	}
+
+	for _, rwkr := range creatingList {
+		rwkr.run()
+	}
+}
+
+func (swkr *shardWorker) handle() {
 	defer swkr.wg.Done()
 
-	prefix := fmt.Sprintf("%s-handler|%s", swkr.worker.getName(), swkr.shardId)
+	prefix := fmt.Sprintf("%s-handle|%s", swkr.worker.getName(), swkr.shardId)
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
 
 	pch.Logger.Info("Handler")
+
+	resIdToWorker := make(map[string]*resWorker)
+	select {
+	case <-time.After(constants.ShardWorkerDelayDefault):
+		toBeCreated, toBeDeleted := swkr.st.fetchTasks()
+		swkr.process(pch, resIdToWorker, toBeCreated, toBeDeleted)
+	case <-pch.Ctx.Done():
+		break
+	}
+
+	for _, rwkr := range resIdToWorker {
+		rwkr.cancel()
+	}
+	for _, rwkr := range resIdToWorker {
+		rwkr.wait()
+	}
 }
 
 func (swkr *shardWorker) run() {
 	swkr.wg.Add(2)
-	go swkr.watcher()
-	go swkr.handler()
+	go swkr.watch()
+	go swkr.handle()
 }
 
 func (swkr *shardWorker) cancel() {
