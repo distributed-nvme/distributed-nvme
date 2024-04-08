@@ -195,8 +195,10 @@ message DnCapacity {
   uint32 ld_cnt = 1;
   uint32 total_qos = 2;
   uint32 free_qos =3;
-  uint32 max_extent_set_size = 4;
-  uint32 total_extent_cnt = 5;
+  uint32 meta_max_extent_set_size = 4;
+  uint32 meta_total_extent_cnt = 5;
+  uint32 data_max_extent_set_size = 6;
+  uint32 data_total_extent_cnt = 7;
 }
 
 message CnCapacity {
@@ -226,8 +228,9 @@ message LdConf {
   uint64 ld_id = 1;
   uint64 dn_id = 2;
   string dn_grpc_target = 3;
-  uint32 position = 4;
-  uint32 ld_idx = 5;
+  uint32 ld_idx = 4;
+  uint64 start = 5;
+  uint64 length = 6;
 }
 
 message LdInfo {
@@ -432,8 +435,7 @@ message DiskNodeConf {
 // /{dnv_prefix}/dn_info/{dn_id}
 message DiskNodeInfo {
   int64 conf_rev = 1;
-  uint64 timestamp = 2;
-  StatusInfo status_info = 3;
+  StatusInfo status_info = 2;
 }
 
 // /{dnv_prefix}/cn_conf/{cn_id}
@@ -445,8 +447,7 @@ message ControllerNodeConf {
 // /{dnv_prefix}/cn_info/{cn_id}
 message ControllerNodeInfo {
   int64 conf_rev = 1;
-  uint64 timestamp = 2;
-  StatusInfo status_info = 3;
+  StatusInfo status_info = 2;
 }
 
 // /{dnv_prefix}/sp_conf/{sp_id}
@@ -464,7 +465,7 @@ message StoragePoolConf {
 // /{dnv_prefix}/sp_info{sp_id}
 message StoragePoolInfo {
   int64 conf_rev = 1;
-  uint64 timestamp = 2;
+  StatusInfo status_info = 2;
   repeated SnapInfo snap_info_list = 3;
   repeated SsInfo ss_info_list = 4;
   repeated LegInfo leg_info_list = 5;
@@ -595,8 +596,7 @@ message GetDnReply {
 }
 
 message ListDnRequest {
-  int64 limit = 1;
-  uint64 prev_dn_id = 2;
+  repeated uint32 shard_id_list = 1;
 }
 
 message ListDnReply {
@@ -617,11 +617,6 @@ message ModifyDnReply {
   ReplyInfo reply_info = 1;
 }
 
-message WorkerInfo {
-  sint64 revision = 1;
-  bytes owned_shards = 2;
-}
-
 message AllocateDnRequest {
   repeated Tag include_tag_list = 1;
   repeated Tag exclude_tag_list = 2;
@@ -630,15 +625,14 @@ message AllocateDnRequest {
   uint32 extent_per_dn_cnt = 5;
 }
 
-message DnAllocationItem {
+message DnAllocItem {
   uint64 dn_id = 1;
   string distinguish_value = 2;
 }
 
 message AllocateDnReply {
   ReplyInfo reply_info = 1;
-  WorkerInfo worker_info = 2;
-  repeated DnAllocationItem dn_allocation_item = 3;
+  repeated DnAllocItem dn_alloc_item = 2;
 }
 
 message SummarizeDnRequest {
@@ -653,20 +647,15 @@ message DnSummaryItem {
   DnSummary dn_summary = 2;
 }
 
-message PerShardDnSummary {
-  uint32 shard_id = 1;
-  repeated DnSummaryItem dn_summary_item_list = 2;
-}
-
 message SummarizeDnReply {
   ReplyInfo reply_info = 1;
-  WorkerInfo worker_info = 2;
-  repeated PerShardDnSummary per_shard_dn_summary_list = 3;
+  repeated DnSummaryItem dn_summary_item_list = 2;
 }
 
 message FilterDnRequest {
   repeated Tag include_tag_list = 1;
   repeated Tag exclude_tag_list = 2;
+  bytes shards = 3;
 }
 
 message DnTagItem {
@@ -674,13 +663,7 @@ message DnTagItem {
   repeated Tag tag_list = 2;
 }
 
-message PerShardDnTag {
-  uint32 shard_id = 1;
-  repeated DnTagItem dn_tag_item_list = 2;
-}
-
 message FilterDnReply {
   ReplyInfo reply_info = 1;
-  WorkerInfo worker_info = 2;
-  repeated PerShardDnTag filter_dn_item_list = 3;
+  repeated DnTagItem dn_tag_item_list = 2;
 }
