@@ -159,23 +159,18 @@ type shardTask struct {
 	mu          sync.Mutex
 }
 
-func (st *shardTask) addToCreate(resId, resBody string) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	st.toBeCreated[resId] = resBody
-}
-
-func (st *shardTask) addToDelete(resId string) {
+func (st *shardTask) deleteAndCreate(resId, resBody string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.toBeDeleted[resId] = true
+	st.toBeCreated[resId] = resBody
 }
 
-func (st *shardTask) addToCreateAndDelete(resId, resBody string) {
+func (st *shardTask) deleteOnly(resId string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	st.toBeCreated[resId] = resBody
 	st.toBeDeleted[resId] = true
+	delete(st.toBeCreated, resId)
 }
 
 func (st *shardTask) fetchTasks() (map[string]string, map[string]bool) {
@@ -201,11 +196,16 @@ type shardWorker struct {
 	wg      sync.WaitGroup
 	worker  workerI
 	gcCache *grpcConnCache
+	st      *shardTask
 }
 
-func (swkr *shardWorker) asyncRun() {
+func (swkr *shardWorker) watcher() {
 	defer swkr.wg.Done()
-	swkr.pch.Logger.Info("Run")
+	prefix := fmt.Sprintf("%s-watcher|%s", swkr.worker.getName(), swkr.shardId)
+	logger := prefixlog.NewPrefixLogger(prefix)
+	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
+
+	pch.Logger.Info("Run")
 
 	var revision int64
 
@@ -214,53 +214,39 @@ func (swkr *shardWorker) asyncRun() {
 	shardPrefix := fmt.Sprintf("%s/%s", resPrefix, swkr.shardId)
 
 	resp, err := etcdCli.Get(
-		swkr.pch.Ctx,
+		pch.Ctx,
 		shardPrefix,
 		clientv3.WithPrefix(),
 		clientv3.WithKeysOnly(),
 	)
 	if err != nil {
-		swkr.pch.Logger.Fatal("Get res id list failed: %s %v", shardPrefix, err)
+		pch.Logger.Fatal("Get res id list failed: %s %v", shardPrefix, err)
 	}
 	revision = resp.Header.Revision
 
-	resIdToWorker := make(map[string]*resWorker)
 	for _, ev := range resp.Kvs {
 		resp1, err := etcdCli.Get(
-			swkr.pch.Ctx,
+			pch.Ctx,
 			string(ev.Key),
 			clientv3.WithRev(revision),
 		)
 		if err != nil {
-			swkr.pch.Logger.Error("Get res value failed: %s %v", ev.Key, err)
+			pch.Logger.Error("Get res value failed: %s %v", ev.Key, err)
 			continue
 		}
 		if len(resp1.Kvs) != 1 {
-			swkr.pch.Logger.Error("Wrong res count: %v", resp1.Kvs)
+			pch.Logger.Error("Wrong res count: %v", resp1.Kvs)
 			continue
 		}
-		swkr.pch.Logger.Info("%v", resIdToWorker)
-		// key := string(resp1.Kvs[0].Key)
-		// resId := key[len(resPrefix):]
-		// resBody := string(resp1.Kvs[0].Value)
-		// rwkr, err := newResWorker(
-		// 	swkr.pch,
-		// 	swkr.worker,
-		// 	swkr.gcCache,
-		// 	resId,
-		// 	resBody,
-		// )
-		// if err != nil {
-		// 	swkr.pch.Logger.Error("Create resWorker err: %s %v", resId, err)
-		// 	continue
-		// }
-		// resIdToWorker[resId] = rwkr
-		// rwkr.run()
+		key := string(resp1.Kvs[0].Key)
+		resId := key[len(resPrefix):]
+		resBody := string(resp1.Kvs[0].Value)
+		swkr.st.deleteAndCreate(resId, resBody)
 	}
 
 	for {
 		shardCh := etcdCli.Watch(
-			swkr.pch.Ctx,
+			pch.Ctx,
 			shardPrefix,
 			clientv3.WithPrefix(),
 			clientv3.WithRev(revision),
@@ -270,20 +256,36 @@ func (swkr *shardWorker) asyncRun() {
 		case wresp := <-shardCh:
 			revision = wresp.Header.Revision
 			for _, ev := range wresp.Events {
-				swkr.pch.Logger.Info("%v", ev)
+				key := string(ev.Kv.Key)
+				resId := key[len(resPrefix):]
+				resBody := string(ev.Kv.Value)
+				switch ev.Type {
+				case clientv3.EventTypePut:
+					swkr.st.deleteAndCreate(resId, resBody)
+				case clientv3.EventTypeDelete:
+					swkr.st.deleteOnly(resId)
+				default:
+					pch.Logger.Fatal("Unknow event type: %v", ev.Type)
+				}
 			}
 		}
 	}
 }
 
-func (swkr *shardWorker) background() {
+func (swkr *shardWorker) handler() {
 	defer swkr.wg.Done()
+
+	prefix := fmt.Sprintf("%s-handler|%s", swkr.worker.getName(), swkr.shardId)
+	logger := prefixlog.NewPrefixLogger(prefix)
+	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
+
+	pch.Logger.Info("Handler")
 }
 
 func (swkr *shardWorker) run() {
 	swkr.wg.Add(2)
-	go swkr.asyncRun()
-	go swkr.background()
+	go swkr.watcher()
+	go swkr.handler()
 }
 
 func (swkr *shardWorker) cancel() {
@@ -303,14 +305,15 @@ func newShardWorker(
 	worker workerI,
 	gcCache *grpcConnCache,
 ) *shardWorker {
-	logPrefix := fmt.Sprintf("%s-shard|%s", worker.getName(), shardId)
-	logger := prefixlog.NewPrefixLogger(logPrefix)
+	prefix := fmt.Sprintf("%s-shard|%s", worker.getName(), shardId)
+	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, shardId)
 	return &shardWorker{
 		shardId: shardId,
 		pch:     pch,
 		worker:  worker,
 		gcCache: gcCache,
+		st:      newShardTask(),
 	}
 }
 
