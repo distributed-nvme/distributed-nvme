@@ -205,7 +205,7 @@ message CnCapacity {
   uint32 free_qos = 3;
 }
 
-message DnConf {
+message DnGeneralConf {
   string grpc_target = 1;
   bool online = 2;
   string dev_path = 3;
@@ -215,63 +215,47 @@ message DnConf {
   ExtentConf data_extent_conf = 7;
 }
 
-message DnInfo {
-  StatusInfo status_info = 1;
-}
-
-message CnConf {
+message CnGeneralConf {
   string grpc_target = 1;
   bool online = 2;
   CnCapacity cn_capacity = 3;
   NextBit port_next_bit = 4;
 }
 
-message CnInfo {
-  StatusInfo status_info = 1;
-}
-
 message LdConf {
-  uint64 dn_id = 1;
-  string dn_grpc_target = 2;
-  uint32 position = 3;
-  uint32 ld_idx = 4;
-}
-
-message LdDnInfo {
-  StatusInfo status_info = 3;
-}
-
-message LdCnInfo {
-  StatusInfo status_info = 3;
-}
-
-message LogicalDisk {
   uint64 ld_id = 1;
-  LdConf ld_conf = 2;
-  LdDnInfo ld_dn_info = 3;
-  LdCnInfo ld_cn_info = 4;
+  uint64 dn_id = 2;
+  string dn_grpc_target = 3;
+  uint32 position = 4;
+  uint32 ld_idx = 5;
+}
+
+message LdInfo {
+  uint64 ld_id = 1;
+  StatusInfo dn_status_info = 2;
+  StatusInfo cn_status_info = 3;
 }
 
 message GrpConf {
-  uint32 grp_idx = 1;
-  uint32 extent_cnt = 2;
+  uint64 grp_id = 1;
+  uint32 grp_idx = 2;
+  uint32 meta_extent_cnt = 3;
+  uint32 data_extent_cnt = 4;
+  repeated LdConf ld_conf_list = 5;
 }
 
 message GrpInfo {
-  StatusInfo status_info = 1;
-  RedundancyInfo redun_info = 2;
-}
-
-message Group {
   uint64 grp_id = 1;
-  GrpConf grp_conf = 2;
-  GrpInfo grp_info = 3;
-  repeated LogicalDisk ld_list = 4;
+  StatusInfo status_info = 2;
+  RedundancyInfo redun_info = 3;
+  repeated LdInfo ld_info_list = 4;
 }
 
 message LegConf {
-  uint32 leg_idx = 1;
-  uint64 ac_cntlr_id = 2;
+  uint64 leg_id = 1;
+  uint32 leg_idx = 2;
+  uint64 ac_cntlr_id = 3;
+  repeated GrpConf grp_conf_list = 4;
 }
 
 message RemoteLegInfo {
@@ -280,140 +264,124 @@ message RemoteLegInfo {
 }
 
 message LegInfo {
-  StatusInfo status_info = 1;
-  ThinPoolInfo thin_pool_info = 2;
-  repeated RemoteLegInfo remote_leg_info_list = 3;
-}
-
-message Leg {
   uint64 leg_id = 1;
-  LegConf leg_conf = 2;
-  LegInfo leg_info = 3;
-  repeated Group grp_list = 4;
+  StatusInfo status_info = 2;
+  ThinPoolInfo thin_pool_info = 3;
+  repeated RemoteLegInfo remote_leg_info_list = 4;
+  repeated GrpInfo grp_info_list = 5;
 }
 
 message SnapConf {
-  string snap_name = 1;
+  uint32 dev_id = 1;
   uint32 ori_id = 2;
+  string snap_name = 3;
+}
+
+message SnapPerCntlrInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
 }
 
 message SnapInfo {
-  uint64 cntlr_id = 1;
-  StatusInfo status_info = 2;
-}
-
-message Snapshot {
   uint32 dev_id = 1;
-  SnapConf snap_conf = 2;
-  repeated SnapInfo snap_info = 3;
+  repeated SnapPerCntlrInfo snap_per_cntlr_info = 2;
 }
 
 message CntlrConf {
-  uint64 cn_id = 1;
-  string cn_grpc_target = 2;
-  uint32 cntlr_idx = 3;
-  NvmePortConf nvme_port_conf = 4;
+  uint64 cntlr_id = 1;
+  uint64 cn_id = 2;
+  string cn_grpc_target = 3;
+  uint32 cntlr_idx = 4;
+  NvmePortConf nvme_port_conf = 5;
 }
 
 message CntlrInfo {
-  StatusInfo status_info = 1;
-}
-
-message Controller {
   uint64 cntlr_id = 1;
-  CntlrConf cntlr_conf = 2;
-  CntlrInfo cntlr_info = 3;
+  StatusInfo status_info = 2;
 }
 
 message MtConf {
-  uint64 old_ld_id = 1;
-  uint64 new_ld_id = 2;
-  CloneConf clone_conf = 3;
+  uint64 mt_id = 1;
+  uint64 old_ld_id = 2;
+  uint64 new_ld_id = 3;
+  CloneConf clone_conf = 4;
+  LdConf meta_ld_conf = 5;
 }
 
 message MtInfo {
-  StatusInfo status_info = 1;
-  CloneInfo clone_info = 2;
-}
-
-message MovingTask {
   uint64 mt_id = 1;
-  MtConf mt_conf = 2;
-  MtInfo mt_info = 3;
-  LogicalDisk meta_ld = 4;
+  StatusInfo status_info = 2;
+  CloneInfo clone_info = 3;
+  LdInfo meta_ld_info = 4;
 }
 
 message ItConf {
-  uint64 prim_cntlr_id = 1;
-  uint32 dev_id = 2;
-  NvmeListener nvme_listener = 3;
-  uint64 size = 4;
-  CloneConf clone_conf = 5;
+  uint64 it_id = 1;
+  uint64 prim_cntlr_id = 2;
+  uint32 dev_id = 3;
+  NvmeListener nvme_listener = 4;
+  uint64 size = 5;
+  CloneConf clone_conf = 6;
+  LdConf meta_ld_conf = 7;
 }
 
 message ItInfo {
-  StatusInfo status_info = 1;
-  CloneInfo clone_info = 2;
-}
-
-message ImportingTask {
   uint64 it_id = 1;
-  ItConf it_conf = 2;
-  ItInfo it_info = 3;
-  LogicalDisk meta_ld = 4;
+  StatusInfo status_info = 2;
+  CloneInfo clone_info = 3;
+  LdInfo meta_ld_info = 4;
 }
 
 message HostConf {
-  string host_nqn = 1;
+  uint64 host_id = 1;
+  string host_nqn = 2;
+}
+
+message HostPerCntlrInfo {
+  uint64 cntlr_id = 1;
+  StatusInfo status_info = 2;
 }
 
 message HostInfo {
-  uint64 cntlr_id = 1;
-  StatusInfo status_info = 2;
-}
-
-message Host {
   uint64 host_id = 1;
-  HostConf host_conf = 2;
-  repeated HostInfo host_info_list = 3;
+  repeated HostPerCntlrInfo host_per_cntlr_info = 2;
 }
 
 message NsConf {
-  string ns_name = 1;
-  uint32 ns_num = 2;
-  uint64 size = 3;
-  uint32 dev_id = 4;
+  uint64 ns_id = 1;
+  string ns_name = 2;
+  uint32 ns_num = 3;
+  uint64 size = 4;
+  uint32 dev_id = 5;
 }
 
-message NsInfo {
+message NsPerCntlrInfo {
   uint64 cntlr_id = 1;
   StatusInfo status_info = 2;
 }
-
-message NameSpace {
+message NsInfo {
   uint64 ns_id = 1;
-  repeated NsConf ns_conf = 2;
-  repeated NsInfo ns_info_list = 3;
+  repeated NsPerCntlrInfo ns_per_cntlr_info = 2;
 }
 
 message SsConf {
-  string nqn = 1;
+  uint64 ss_id = 1;
+  string nqn = 2;
+  repeated NsConf ns_conf = 3;
+  repeated HostConf host_conf = 4;
 }
 
-message SsInfo {
+message SsPerCntlrInfo {
   uint64 cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 
-message SubSystem {
+message SsInfo {
   uint64 ss_id = 1;
-  SsConf ss_conf = 2;
-  repeated SsInfo ss_info_list = 3;
-  repeated NameSpace ns_list = 4;
-  repeated Host host_list = 5;
+  repeated SsPerCntlrInfo ss_per_cntlr_info = 2;
 }
 
-message SpConf {
+message SpGeneralConf {
   string sp_name = 1;
   uint64 sp_counter = 2;
   uint32 dev_id_counter = 3;
@@ -454,35 +422,55 @@ message SpGlobal {
   repeated uint32 shard_bucket = 2;
 }
 
-// /{dnv_prefix}/dn/{dn_id}
-message DiskNode {
-  uint64 version = 1;
-  repeated Tag tag_list = 2;
-  DnConf dn_conf = 3;
-  DnInfo dn_info = 4;
-  repeated uint64 sp_id_list = 5;
+// /{dnv_prefix}/dn_conf/{dn_id}
+message DiskNodeConf {
+  repeated Tag tag_list = 1;
+  DnGeneralConf dn_general_conf = 2;
+  repeated uint64 sp_id_list = 3;
 }
 
-// /{dnv_prefix}/cn/{cn_id}
-message ControllerNode {
-  uint64 version = 1;
-  repeated Tag tag_list = 2;
-  CnConf cn_conf = 3;
-  CnInfo cn_info = 4;
-  repeated uint64 sp_id_list = 5;
+// /{dnv_prefix}/dn_info/{dn_id}
+message DiskNodeInfo {
+  int64 conf_rev = 1;
+  uint64 timestamp = 2;
+  StatusInfo status_info = 3;
 }
 
-// /{dnv_prefix}/sp/{sp_id}
-message StoragePool {
-  uint64 version = 1;
-  repeated Tag tag_list = 2;
-  SpConf sp_conf = 3;
-  repeated SubSystem ss_list = 4;
-  repeated Snapshot snap_list = 5;
-  repeated Leg leg_list = 6;
-  repeated Controller cntlr_list = 7;
-  repeated MovingTask mt_list = 8;
-  repeated ImportingTask it_list = 9;
+// /{dnv_prefix}/cn_conf/{cn_id}
+message ControllerNodeConf {
+  repeated Tag tag_list = 1;
+  CnGeneralConf cn_general_conf = 2;
+}
+
+// /{dnv_prefix}/cn_info/{cn_id}
+message ControllerNodeInfo {
+  int64 conf_rev = 1;
+  uint64 timestamp = 2;
+  StatusInfo status_info = 3;
+}
+
+// /{dnv_prefix}/sp_conf/{sp_id}
+message StoragePoolConf {
+  repeated Tag tag_list = 1;
+  SpGeneralConf sp_general_conf = 2;
+  repeated SnapConf sp_conf = 3;
+  repeated SsConf ss_conf = 4;
+  repeated LegConf leg_conf_list = 5;
+  repeated CntlrConf cntlr_conf_list = 6;
+  repeated MtConf mt_conf_list = 7;
+  repeated ItConf it_conf_list = 8;
+}
+
+// /{dnv_prefix}/sp_info{sp_id}
+message StoragePoolInfo {
+  int64 conf_rev = 1;
+  uint64 timestamp = 2;
+  repeated SnapInfo snap_info_list = 3;
+  repeated SsInfo ss_info_list = 4;
+  repeated LegInfo leg_info_list = 5;
+  repeated CntlrInfo cntlr_info_list = 6;
+  repeated MtInfo mt_info_list = 7;
+  repeated ItInfo it_info_list = 8;
 }
 
 // /{dnv_prefix}/name_to_id/{name}
