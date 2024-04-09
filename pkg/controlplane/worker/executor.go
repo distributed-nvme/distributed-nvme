@@ -26,6 +26,7 @@ type workerArgsStruct struct {
 	grpcAddress     string
 	grpcTarget      string
 	prioCodeConf    string
+	replica         int
 }
 
 var (
@@ -64,6 +65,9 @@ func init() {
 	workerCmd.PersistentFlags().StringVarP(
 		&workerArgs.prioCodeConf, "prio-code-conf", "", "", "priority code configuration",
 	)
+	workerCmd.PersistentFlags().IntVarP(
+		&workerArgs.replica, "replica", "", 0, "replica",
+	)
 }
 
 func launchWorker(cmd *cobra.Command, args []string) {
@@ -83,22 +87,33 @@ func launchWorker(cmd *cobra.Command, args []string) {
 	if err != nil {
 		gLogger.Fatal("Create etcd client err: %v", err)
 	}
-	dnWorker := newDnWorkerServer(
-		etcdCli,
-		constants.SchemaPrefixDefault,
-		prioCode,
-		workerArgs.grpcTarget,
-	)
+	var worker workerI
+	switch workerArgs.role {
+	case "dn":
+		worker = newDnWorkerServer(
+			etcdCli,
+			constants.SchemaPrefixDefault,
+		)
+	default:
+		gLogger.Fatal("Unknown role: %s", workerArgs.role)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	dnmw := newDnMemberWorker(ctx, dnWorker)
-	dnmw.run()
+	mwkr := newMemberWorker(
+		ctx,
+		workerArgs.grpcTarget,
+		prioCode,
+		uint32(workerArgs.replica),
+		constants.GrantTTLDefault,
+		worker,
+	)
+	mwkr.run()
 	signalCh := make(chan os.Signal, 1)
 	signal.Notify(signalCh, os.Interrupt, syscall.SIGTERM)
 	<-signalCh
 	gLogger.Info("Cancel all tasks")
 	cancel()
-	dnmw.wait()
+	mwkr.wait()
 	gLogger.Info("Exit")
 }
 
