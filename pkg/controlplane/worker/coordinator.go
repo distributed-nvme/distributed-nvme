@@ -87,7 +87,7 @@ type workerI interface {
 	getMemberPrefix() string
 	getResPrefix() string
 	getInitTrigger() <-chan struct{}
-	addResRev(resId, resBody string, rev int64) ([]string, error)
+	addResRev(resId string, resBody []byte, rev int64) ([]string, error)
 	delResRev(resId string, rev int64) error
 	trackRes(resId string, pch *ctxhelper.PerCtxHelper, targetToConn map[string]*grpc.ClientConn)
 }
@@ -146,7 +146,7 @@ func newResWorker(
 }
 
 type bodyAndRev struct {
-	resBody  string
+	resBody  []byte
 	revision int64
 }
 
@@ -156,7 +156,7 @@ type shardTask struct {
 	mu          sync.Mutex
 }
 
-func (st *shardTask) deleteAndCreate(resId, resBody string, revision int64) {
+func (st *shardTask) deleteAndCreate(resId string, resBody []byte, revision int64) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.toBeDeleted[resId] = true
@@ -242,7 +242,7 @@ func (swkr *shardWorker) watch() {
 		}
 		key := string(resp1.Kvs[0].Key)
 		resId := key[len(resPrefix):]
-		resBody := string(resp1.Kvs[0].Value)
+		resBody := resp1.Kvs[0].Value
 		swkr.st.deleteAndCreate(resId, resBody, revision)
 	}
 
@@ -260,7 +260,7 @@ func (swkr *shardWorker) watch() {
 			for _, ev := range wresp.Events {
 				key := string(ev.Kv.Key)
 				resId := key[len(resPrefix):]
-				resBody := string(ev.Kv.Value)
+				resBody := ev.Kv.Value
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					swkr.st.deleteAndCreate(resId, resBody, revision)

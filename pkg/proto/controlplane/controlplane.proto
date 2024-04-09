@@ -428,7 +428,7 @@ message SpGlobal {
 // /{dnv_prefix}/dn_conf/{dn_id}
 message DiskNodeConf {
   repeated Tag tag_list = 1;
-  DnGeneralConf dn_general_conf = 2;
+  DnGeneralConf general_conf = 2;
   repeated uint64 sp_id_list = 3;
 }
 
@@ -441,7 +441,7 @@ message DiskNodeInfo {
 // /{dnv_prefix}/cn_conf/{cn_id}
 message ControllerNodeConf {
   repeated Tag tag_list = 1;
-  CnGeneralConf cn_general_conf = 2;
+  CnGeneralConf general_conf = 2;
 }
 
 // /{dnv_prefix}/cn_info/{cn_id}
@@ -453,7 +453,7 @@ message ControllerNodeInfo {
 // /{dnv_prefix}/sp_conf/{sp_id}
 message StoragePoolConf {
   repeated Tag tag_list = 1;
-  SpGeneralConf sp_general_conf = 2;
+  SpGeneralConf general_conf = 2;
   repeated SnapConf sp_conf = 3;
   repeated SsConf ss_conf = 4;
   repeated LegConf leg_conf_list = 5;

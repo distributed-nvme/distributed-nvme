@@ -5,6 +5,7 @@ import (
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
@@ -14,11 +15,12 @@ import (
 
 type dnWorkerServer struct {
 	pbcp.UnimplementedDiskNodeWorkerServer
-	etcdCli *clientv3.Client
-	kf      *keyfmt.KeyFmt
-	sm      *stmwrapper.StmWrapper
-	initTrigger chan struct{}
-	mu          sync.Mutex
+	mu             sync.Mutex
+	etcdCli        *clientv3.Client
+	kf             *keyfmt.KeyFmt
+	sm             *stmwrapper.StmWrapper
+	initTrigger    chan struct{}
+	idAndRevToConf map[string]map[int64]*pbcp.DiskNodeConf
 }
 
 func (dnwkr *dnWorkerServer) getName() string {
@@ -43,16 +45,40 @@ func (dnwkr *dnWorkerServer) getInitTrigger() <-chan struct{} {
 
 func (dnwkr *dnWorkerServer) addResRev(
 	resId string,
-	resBody string,
+	resBody []byte,
 	rev int64,
 ) ([]string, error) {
-	return nil, nil
+	dnConf := &pbcp.DiskNodeConf{}
+	if err := proto.Unmarshal(resBody, dnConf); err != nil {
+		return nil, err
+	}
+	revToConf, ok := dnwkr.idAndRevToConf[resId]
+	if ok {
+		if len(revToConf) > 1 {
+			panic("More than 1 dn rev: " + resId)
+		}
+	} else {
+		revToConf = make(map[int64]*pbcp.DiskNodeConf)
+		dnwkr.idAndRevToConf[resId] = revToConf
+	}
+	revToConf[rev] = dnConf
+	grpcTargetList := make([]string, 0)
+	grpcTargetList = append(grpcTargetList, dnConf.GeneralConf.GrpcTarget)
+	return grpcTargetList, nil
 }
 
 func (dnwkr *dnWorkerServer) delResRev(
 	resId string,
 	rev int64,
 ) error {
+	revToConf, ok := dnwkr.idAndRevToConf[resId]
+	if !ok {
+		panic("Unknown dn id: " + resId)
+	}
+	delete(revToConf, rev)
+	if len(revToConf) == 0 {
+		delete(dnwkr.idAndRevToConf, resId)
+	}
 	return nil
 }
 
@@ -69,9 +95,10 @@ func newDnWorkerServer(
 	prefix string,
 ) *dnWorkerServer {
 	return &dnWorkerServer{
-		etcdCli:      etcdCli,
-		kf:           keyfmt.NewKeyFmt(prefix),
-		sm:           stmwrapper.NewStmWrapper(etcdCli),
-		initTrigger:  make(chan struct{}),
+		etcdCli:        etcdCli,
+		kf:             keyfmt.NewKeyFmt(prefix),
+		sm:             stmwrapper.NewStmWrapper(etcdCli),
+		initTrigger:    make(chan struct{}),
+		idAndRevToConf: make(map[string]map[int64]*pbcp.DiskNodeConf),
 	}
 }
