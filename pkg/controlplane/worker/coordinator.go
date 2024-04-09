@@ -193,6 +193,7 @@ func newShardTask() *shardTask {
 
 type shardWorker struct {
 	shardId string
+	wkrId   string
 	pch     *ctxhelper.PerCtxHelper
 	wg      sync.WaitGroup
 	worker  workerI
@@ -202,9 +203,9 @@ type shardWorker struct {
 
 func (swkr *shardWorker) watch() {
 	defer swkr.wg.Done()
-	prefix := fmt.Sprintf("%s-watch|%s", swkr.worker.getName(), swkr.shardId)
+	prefix := fmt.Sprintf("%s|shard-w|%s|%s", swkr.worker.getName(), swkr.shardId, swkr.wkrId)
 	logger := prefixlog.NewPrefixLogger(prefix)
-	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
+	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 
 	pch.Logger.Info("Run")
 
@@ -346,9 +347,9 @@ func (swkr *shardWorker) process(
 func (swkr *shardWorker) handle() {
 	defer swkr.wg.Done()
 
-	prefix := fmt.Sprintf("%s-handle|%s", swkr.worker.getName(), swkr.shardId)
+	prefix := fmt.Sprintf("%s|shard-h|%s|%s", swkr.worker.getName(), swkr.shardId, swkr.wkrId)
 	logger := prefixlog.NewPrefixLogger(prefix)
-	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.shardId)
+	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 
 	pch.Logger.Info("Handler")
 
@@ -392,11 +393,13 @@ func newShardWorker(
 	worker workerI,
 	gcCache *grpcConnCache,
 ) *shardWorker {
-	prefix := fmt.Sprintf("%s-shard|%s", worker.getName(), shardId)
+	shardWkrId := uuid.New().String()
+	prefix := fmt.Sprintf("%s|shard|%s|%s", worker.getName(), shardId, shardWkrId)
 	logger := prefixlog.NewPrefixLogger(prefix)
-	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, shardId)
+	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, shardWkrId)
 	return &shardWorker{
 		shardId: shardId,
+		wkrId:   shardWkrId,
 		pch:     pch,
 		worker:  worker,
 		gcCache: gcCache,
@@ -573,7 +576,7 @@ func newMemberWorker(
 	worker workerI,
 ) *memberWorker {
 	memberWkrId := uuid.New().String()
-	logPrefix := fmt.Sprintf("%s-member|%s ", worker.getName(), memberWkrId)
+	logPrefix := fmt.Sprintf("%s|member|%s|%s", worker.getName(), grpcTarget, memberWkrId)
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, memberWkrId)
 	return &memberWorker{

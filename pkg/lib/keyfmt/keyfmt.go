@@ -28,28 +28,52 @@ func (kf *KeyFmt) SpGlobalEntityKey() string {
 	return fmt.Sprintf("/%s/sp_global", kf.prefix)
 }
 
-func (kf *KeyFmt) DnEntityPrefix() string {
-	return fmt.Sprintf("/%s/dn/", kf.prefix)
+func (kf *KeyFmt) DnConfEntityPrefix() string {
+	return fmt.Sprintf("/%s/dn_conf", kf.prefix)
 }
 
-func (kf *KeyFmt) DnEntityKey(dnId string) string {
-	return fmt.Sprintf("%s%s", kf.DnEntityPrefix(), dnId)
+func (kf *KeyFmt) DnConfEntityKey(dnId string) string {
+	return fmt.Sprintf("%s/%s", kf.DnConfEntityPrefix(), dnId)
 }
 
-func (kf *KeyFmt) CnEntityPrefix() string {
-	return fmt.Sprintf("/%s/cn/", kf.prefix)
+func (kf *KeyFmt) DnInfoEntityPrefix() string {
+	return fmt.Sprintf("/%s/dn_info", kf.prefix)
 }
 
-func (kf *KeyFmt) CnEntityKey(cnId string) string {
-	return fmt.Sprintf("%s%s", kf.CnEntityPrefix(), cnId)
+func (kf *KeyFmt) DnInfoEntityKey(dnId string) string {
+	return fmt.Sprintf("%s/%s", kf.DnInfoEntityPrefix(), dnId)
 }
 
-func (kf *KeyFmt) SpEntityPrefix() string {
-	return fmt.Sprintf("/%s/sp/", kf.prefix)
+func (kf *KeyFmt) CnConfEntityPrefix() string {
+	return fmt.Sprintf("/%s/cn_conf", kf.prefix)
 }
 
-func (kf *KeyFmt) SpEntityKey(spId string) string {
-	return fmt.Sprintf("%s%s", kf.SpEntityPrefix(), spId)
+func (kf *KeyFmt) CnConfEntityKey(cnId string) string {
+	return fmt.Sprintf("%s/%s", kf.CnConfEntityPrefix(), cnId)
+}
+
+func (kf *KeyFmt) CnInfoEntityPrefix() string {
+	return fmt.Sprintf("/%s/cn_info", kf.prefix)
+}
+
+func (kf *KeyFmt) CnInfoEntityKey(cnId string) string {
+	return fmt.Sprintf("%s/%s", kf.CnInfoEntityPrefix(), cnId)
+}
+
+func (kf *KeyFmt) SpConfEntityPrefix() string {
+	return fmt.Sprintf("/%s/sp_conf", kf.prefix)
+}
+
+func (kf *KeyFmt) SpConfEntityKey(spId string) string {
+	return fmt.Sprintf("%s/%s", kf.SpConfEntityPrefix(), spId)
+}
+
+func (kf *KeyFmt) SpInfoEntityPrefix() string {
+	return fmt.Sprintf("/%s/sp_info", kf.prefix)
+}
+
+func (kf *KeyFmt) SpInfoEntityKey(spId string) string {
+	return fmt.Sprintf("%s/%s", kf.SpInfoEntityPrefix(), spId)
 }
 
 func (kf *KeyFmt) NameToIdEntityKey(name string) string {
@@ -57,19 +81,19 @@ func (kf *KeyFmt) NameToIdEntityKey(name string) string {
 }
 
 func (kf *KeyFmt) TagNameEntityPrefix() string {
-	return fmt.Sprintf("/%s/tag_name/", kf.prefix)
+	return fmt.Sprintf("/%s/tag_name", kf.prefix)
 }
 
 func (kf *KeyFmt) TagNameEntityKey(tagName string) string {
-	return fmt.Sprintf("%s%s", kf.TagNameEntityPrefix(), tagName)
+	return fmt.Sprintf("%s/%s", kf.TagNameEntityPrefix(), tagName)
 }
 
 func (kf *KeyFmt) TagValueEntityPrefix(tagName string) string {
-	return fmt.Sprintf("/%s/tag_value/%s/", kf.prefix, tagName)
+	return fmt.Sprintf("/%s/tag_value/%s", kf.prefix, tagName)
 }
 
 func (kf *KeyFmt) TagValueEntityKey(tagName, tagValue string) string {
-	return fmt.Sprintf("%s%s", kf.TagValueEntityPrefix(tagName), tagValue)
+	return fmt.Sprintf("%s/%s", kf.TagValueEntityPrefix(tagName), tagValue)
 }
 
 func (kf *KeyFmt) DnLockPath() string {
@@ -84,28 +108,16 @@ func (kf *KeyFmt) SpLockPath() string {
 	return fmt.Sprintf("/%s/lock/sp", kf.prefix)
 }
 
-func (kf *KeyFmt) DnShardPrefix() string {
-	return fmt.Sprintf("/%s/dn_shard/", kf.prefix)
+func (kf *KeyFmt) DnMemberPrefix() string {
+	return fmt.Sprintf("/%s/dn_member", kf.prefix)
 }
 
-func (kf *KeyFmt) DnShardKey(grpcTarget string) string {
-	return fmt.Sprintf("%s%s", kf.DnShardPrefix(), grpcTarget)
+func (kf *KeyFmt) CnMemberPrefix() string {
+	return fmt.Sprintf("/%s/cn_member", kf.prefix)
 }
 
-func (kf *KeyFmt) CnShardPrefix() string {
-	return fmt.Sprintf("/%s/cn_shard/", kf.prefix)
-}
-
-func (kf *KeyFmt) CnShardKey(grpcTarget string) string {
-	return fmt.Sprintf("%s%s", kf.CnShardPrefix(), grpcTarget)
-}
-
-func (kf *KeyFmt) SpShardPrefix() string {
-	return fmt.Sprintf("/%s/sp_shard/", kf.prefix)
-}
-
-func (kf *KeyFmt) SpShardKey(grpcTarget string) string {
-	return fmt.Sprintf("%s%s", kf.SpShardPrefix(), grpcTarget)
+func (kf *KeyFmt) SpMemberPrefix() string {
+	return fmt.Sprintf("/%s/sp_member", kf.prefix)
 }
 
 func NewKeyFmt(prefix string) *KeyFmt {
