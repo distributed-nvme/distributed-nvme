@@ -6,17 +6,14 @@ package nodeagent;
 
 service DiskNodeAgent {
   rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
+  rpc CheckDn(CheckDnRequest) returns(CheckDnReply) {}
   rpc SyncupSpBe(SyncupSpDnRequest) returns(SyncupSpDnReply) {}
-  rpc SyncupDnStream(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
-  rpc SyncupSpBeStream(stream SyncupSpDnRequest) returns(stream SyncupSpDnReply) {}
   rpc GetDevSize(GetDevSizeRequest) returns(GetDevSizeReply) {}
 }
 
 service ControllerNodeAgent {
   rpc SyncupCn(SyncupCnRequest) returns(SyncupCnReply) {}
   rpc SyncupSpFe(SyncupSpCnRequest) returns(SyncupSpCnReply) {}
-  rpc SyncupCnStream(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
-  rpc SyncupSpFeStream(stream SyncupSpCnRequest) returns(stream SyncupSpCnReply) {}
 }
 
 message StatusInfo {
@@ -25,14 +22,8 @@ message StatusInfo {
   uint64 timestamp = 3;
 }
 
-enum NvmeSeqCh {
-  NVME_SEQ_CH_NOT_SPECIFIED = 0;
-  NVME_SEQ_CH_REQUIRED = 1;
-  NVME_SEQ_CH_NOT_REQUIRED = 2;
-}
-
 message NvmeTReq {
-  NvmeSeqCh seq_ch = 1;
+  uint32 seq_ch = 1;
 }
 
 message NvmeListener {
@@ -64,8 +55,7 @@ message SpLdId {
 
 message DnConf {
   uint64 dn_id = 1;
-  uint64 version = 2;
-  bool partial = 3;
+  int64 revision = 2;
   string dev_path = 4;
   NvmePortConf nvme_port_conf = 5;
   repeated SpLdId sp_ld_id_list = 6;
@@ -80,6 +70,15 @@ message DnInfo {
 }
 
 message SyncupDnReply {
+  DnInfo dn_info = 1;
+}
+
+message CheckDnRequest {
+  uint64 dn_id = 1;
+  int64 revision = 2;
+}
+
+message CheckDnReply {
   DnInfo dn_info = 1;
 }
 

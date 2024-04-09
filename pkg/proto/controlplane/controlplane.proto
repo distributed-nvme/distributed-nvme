@@ -41,14 +41,8 @@ message QosFields {
   uint64 wiops = 4;
 }
 
-enum NvmeSeqCh {
-  NVME_SEQ_CH_NOT_SPECIFIED = 0;
-  NVME_SEQ_CH_REQUIRED = 1;
-  NVME_SEQ_CH_NOT_REQUIRED = 2;
-}
-
 message NvmeTReq {
-  NvmeSeqCh seq_ch = 1;
+  uint32 seq_ch = 1;
 }
 
 message NvmeListener {
