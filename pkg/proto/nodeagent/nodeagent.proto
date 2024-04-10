@@ -139,32 +139,15 @@ message ThinPoolConf {
   bool error_if_no_space = 3;
 }
 
-enum RedunType {
-  REDUN_RAID1 = 0;
-  REDUN_RAID5_LA = 1;
-  REDUN_RAID5_RA = 2;
-  REDUN_RAID5_LS = 3;
-  REDUN_RAID5_RS = 4;
-  REDUN_RAID6_ZR = 5;
-  REDUN_RAID6_NR = 6;
-  REDUN_RAID6_NC = 7;
-}
-
-enum RedunJournalMode {
-  REDUN_JOURNAL_NONE = 0;
-  REDUN_JOURNAL_WRITEBACK = 1;
-  REDUN_JOURNAL_WRITETHROUGH = 2;
-}
-
 message RedundancyConf {
-  RedunType redun_type = 1;
+  uint32 redun_type = 1;
   uint32 region_size = 2;
   uint32 chunk_size = 3;
   uint32 daemon_sleep = 4;
   uint32 min_recovery_rate = 5;
   uint32 max_recovery_rate = 6;
   uint32 stripe_cache = 7;
-  RedunJournalMode journal_mode = 8;
+  uint32 journal_mode = 8;
 }
 
 message SnapConf {
@@ -267,12 +250,6 @@ message SyncupSpCnRequest {
   SpCnConf sp_cn_conf = 1;
 }
 
-enum ThinPoolStatus {
-  THIN_POOL_STATUS_RW = 0;
-  THIN_POOL_STATUS_RO = 1;
-  THIN_POOL_STATUS_OODS = 2;
-}
-
 message ThinPoolInfo {
   uint64 transaction_id = 1;
   uint64 used_meta_blocks = 2;
@@ -280,44 +257,21 @@ message ThinPoolInfo {
   uint64 used_data_blocks = 4;
   uint64 total_data_blocks = 5;
   int32 held_metadata_root = 6;
-  ThinPoolStatus status = 7;
+  uint32 status = 7;
   bool discard_passdown = 8;
   bool no_space_queue_or_error = 9;
   bool needs_check = 10;
   uint64 metadata_low_atermark = 11;
 }
 
-enum RaidHealthChar {
-  RAID_ALIVE_AND_IN_SYNC = 0;
-  RAID_ALIVE_NOT_IN_SYNC = 3;
-  RAID_DEAD_OR_FAILED = 2;
-}
-
-enum RaidSyncAction {
-  RAID_ACTION_IDLE = 0;
-  RAID_ACTION_FROZEN = 1;
-  RAID_ACTION_RESYNC = 2;
-  RAID_ACTION_RECOVER = 3;
-  RAID_ACTION_CHECK = 4;
-  RAID_ACTION_REPAIR = 5;
-  RAID_ACTION_RESHAP = 6;
-}
-
-enum RaidJournalChar {
-  RAID_JOURNAL_ACTIVE_WRITE_THROUGH = 0;
-  RAID_JOURNAL_ACTIVE_WRITE_BACK = 1;
-  RAID_JOURNAL_DEAD = 2;
-  RAID_JOURNAL_NONE = 3;
-}
-
 message RedundancyInfo {
-  repeated RaidHealthChar health_char = 1;
+  repeated uint32 health_char = 1;
   uint64 sync_done = 2;
   uint64 sync_total = 3;
-  RaidSyncAction sync_action = 4;
+  uint32 sync_action = 4;
   uint64 mismatch_cnt = 5;
   uint64 data_offset = 6;
-  RaidJournalChar journal_char = 7;
+  uint32 journal_char = 7;
 }
 
 message LdCnInfo {
