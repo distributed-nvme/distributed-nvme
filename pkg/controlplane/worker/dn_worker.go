@@ -9,11 +9,16 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
+)
+
+var (
+	dnFastRetryCodeMap = make(map[uint32]bool)
 )
 
 type dnWorkerServer struct {
@@ -112,21 +117,30 @@ func syncup(
 		},
 	}
 
-	interval := 1 * time.Second
+	interval := constants.DnRetryBase
+	fastRetry := false
 	for {
 		reply, err := client.SyncupDn(pch.Ctx, req)
 		if err == nil {
-			if reply.DnInfo.StatusInfo.Code == 0 {
+			if reply.DnInfo.StatusInfo.Code == constants.StatusCodeSucceed {
 				return false
+			}
+			_, ok := dnFastRetryCodeMap[reply.DnInfo.StatusInfo.Code]
+			if ok {
+				fastRetry = true
 			}
 		}
 		select {
 		case <-pch.Ctx.Done():
 			return true
 		case <-time.After(interval):
-			interval *= 2
-			if interval > 32 {
-				interval = 32
+			if fastRetry {
+				interval = constants.DnRetryBase
+			} else {
+				interval *= constants.DnRetryPower
+				if interval > constants.DnRetryMax {
+					interval = constants.DnRetryMax
+				}
 			}
 		}
 	}
@@ -146,12 +160,12 @@ func check(
 		select {
 		case <-pch.Ctx.Done():
 			return true
-		case <-time.After(1):
+		case <-time.After(constants.DnCheckInterval):
 			reply, err := client.CheckDn(pch.Ctx, req)
 			if err != nil {
 				return false
 			}
-			if reply.DnInfo.StatusInfo.Code != 0 {
+			if reply.DnInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 				pch.Logger.Error("dn failed")
 			}
 		}

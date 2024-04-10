@@ -31,6 +31,11 @@ const (
 
 	ShardWorkerDelayDefault = 1 * time.Second
 
+	DnRetryBase = 1 * time.Second
+	DnRetryPower = 2
+	DnRetryMax = 64 * time.Second
+	DnCheckInterval = 1 * time.Second
+
 	EtcdPageSize = 100
 
 	DataExtentSizeShiftMin       = 20
