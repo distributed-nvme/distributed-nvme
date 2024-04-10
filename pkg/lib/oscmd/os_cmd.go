@@ -1,4 +1,4 @@
-package nodeagent
+package oscmd
 
 import (
 	"bytes"
@@ -9,18 +9,18 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
-type osCmd struct {
+type OsCommand struct {
 }
 
-func (oc *osCmd) runOsCmd(
+func (oc *OsCommand) runOsCmd(
 	pch *ctxhelper.PerCtxHelper,
 	name string,
 	args []string,
 	stdin string,
 ) (string, string, error) {
-	pch.Logger.Info("OsCmd name: [%v]", name)
-	pch.Logger.Info("OsCmd args: [%v]", args)
-	pch.Logger.Info("OsCmd stdin: [%v]")
+	pch.Logger.Info("OsCommand name: [%v]", name)
+	pch.Logger.Info("OsCommand args: [%v]", args)
+	pch.Logger.Info("OsCommand stdin: [%v]")
 	cmd := exec.CommandContext(pch.Ctx, name, args...)
 	var stdoutBuilder strings.Builder
 	var stderrBuilder strings.Builder
@@ -32,13 +32,13 @@ func (oc *osCmd) runOsCmd(
 	err := cmd.Run()
 	stdout := stdoutBuilder.String()
 	stderr := stderrBuilder.String()
-	pch.Logger.Info("OsCmd err: %v\n", err)
-	pch.Logger.Info("OsCmd stdout: %v\n", stdout)
-	pch.Logger.Info("OsCmd stderr: %v\n", stderr)
+	pch.Logger.Info("OsCommand err: %v\n", err)
+	pch.Logger.Info("OsCommand stdout: %v\n", stdout)
+	pch.Logger.Info("OsCommand stderr: %v\n", stderr)
 	return stdout, stderr, err
 }
 
-func (oc *osCmd) getBlockDevSize(
+func (oc *OsCommand) GetBlockDevSize(
 	pch *ctxhelper.PerCtxHelper,
 	devPath string,
 ) (uint64, error) {
@@ -50,4 +50,8 @@ func (oc *osCmd) getBlockDevSize(
 	}
 	size, err := strconv.ParseUint(stdout, 10, 64)
 	return size, err
+}
+
+func NewOsCommand() *OsCommand{
+	return &OsCommand{}
 }

@@ -5,12 +5,13 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/oscmd"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
 )
 
 type dnAgentServer struct {
 	pbnd.UnimplementedDiskNodeAgentServer
-	oc *osCmd
+	oc *oscmd.OsCommand
 }
 
 func (dnAgent *dnAgentServer) GetDevSize(
@@ -18,7 +19,7 @@ func (dnAgent *dnAgentServer) GetDevSize(
 	req *pbnd.GetDevSizeRequest,
 ) (*pbnd.GetDevSizeReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
-	size, err := dnAgent.oc.getBlockDevSize(pch, req.DevPath)
+	size, err := dnAgent.oc.GetBlockDevSize(pch, req.DevPath)
 	if err != nil {
 		return &pbnd.GetDevSizeReply{
 			StatusInfo: &pbnd.StatusInfo{
@@ -38,6 +39,6 @@ func (dnAgent *dnAgentServer) GetDevSize(
 
 func newDnAgentServer() *dnAgentServer {
 	return &dnAgentServer{
-		oc: &osCmd{},
+		oc: oscmd.NewOsCommand(),
 	}
 }
