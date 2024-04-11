@@ -55,6 +55,7 @@ func launchAgent(cmd *cobra.Command, args []string) {
 	dnAgent := newDnAgentServer(
 		ctx,
 		constants.LocalDataPathDefault,
+		constants.DnAgentBgInterval,
 	)
 
 	grpcServer := grpc.NewServer(

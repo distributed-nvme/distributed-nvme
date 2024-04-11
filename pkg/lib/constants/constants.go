@@ -38,6 +38,8 @@ const (
 	DnRetryMax      = 64 * time.Second
 	DnCheckInterval = 1 * time.Second
 
+	DnAgentBgInterval = 1 * time.Second
+
 	EtcdPageSize = 100
 
 	DataExtentSizeShiftMin       = 20

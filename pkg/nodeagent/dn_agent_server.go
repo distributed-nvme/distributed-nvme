@@ -82,6 +82,7 @@ type dnAgentServer struct {
 	lData   *localdata.LocalData
 	dnData  *localdata.DnData
 	spLdMap map[string]*spLd
+	bgInterval time.Duration
 }
 
 func (dnAgent *dnAgentServer) GetDevSize(
@@ -343,21 +344,39 @@ func (dnAgent *dnAgentServer) background(
 	select {
 	case <-pch.Ctx.Done():
 		return
-	case <-time.After(1):
+	case <-time.After(dnAgent.bgInterval):
 		keyToSpLd := dnAgent.fetchDeadSpLd(pch)
 		deleted := dnAgent.cleanup(pch, keyToSpLd)
 		dnAgent.updateDeadSpLd(pch, deleted)
 	}
 }
 
+func (dnAgent *dnAgentServer) CheckDn(
+	ctx context.Context,
+	req *pbnd.CheckDnRequest,
+) (*pbnd.CheckDnReply, error) {
+	timestamp := time.Now().UnixMilli()
+	return &pbnd.CheckDnReply{
+		DnInfo: &pbnd.DnInfo{
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeSucceed,
+				Msg:       constants.StatusMsgSucceed,
+				Timestamp: timestamp,
+			},
+		},
+	}, nil
+}
+
 func newDnAgentServer(
 	ctx context.Context,
 	ldataPath string,
+	bgInterval time.Duration,
 ) *dnAgentServer {
 	dnAgent := &dnAgentServer{
 		oc:     oscmd.NewOsCommand(),
 		lData:  localdata.NewLocalData(ldataPath),
 		dnData: nil,
+		bgInterval: bgInterval,
 	}
 	go dnAgent.background(ctx)
 	return dnAgent
