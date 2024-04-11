@@ -21,6 +21,8 @@ const (
 	StatusCodeUninit      = 2001
 	StatusCodeUnreachable = 2002
 	StatusCodeInternalErr = 2003
+	StatusCodeIdMisMatch  = 2004
+	StatusCodeOldRevision = 2005
 
 	AgentTimeoutDefault = 3 * time.Second
 	ShardInitWaitTime   = 10 * time.Second
@@ -88,4 +90,6 @@ const (
 	PortNumMax      = 65535
 
 	TraceIdKey = "trace_id"
+
+	LocalDataPathDefault = "."
 )

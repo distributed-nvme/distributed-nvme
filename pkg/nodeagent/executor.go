@@ -6,6 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
@@ -47,7 +48,9 @@ func launchAgent(cmd *cobra.Command, args []string) {
 		gLogger.Fatal("Listen err: %v", err)
 	}
 
-	dnAgent := newDnAgentServer()
+	dnAgent := newDnAgentServer(
+		constants.LocalDataPathDefault,
+	)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(

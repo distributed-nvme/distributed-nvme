@@ -41,6 +41,11 @@ message QosFields {
   uint64 wiops = 4;
 }
 
+message SpLdId {
+  uint64 sp_id = 1;
+  uint64 ld_id = 2;
+}
+
 message NvmeTReq {
   uint32 seq_ch = 1;
 }
@@ -377,7 +382,7 @@ message SpGlobal {
 message DiskNodeConf {
   repeated Tag tag_list = 1;
   DnGeneralConf general_conf = 2;
-  repeated uint64 sp_id_list = 3;
+  repeated SpLdId sp_ld_id_list = 3;
 }
 
 // /{dnv_prefix}/dn_info/{dn_id}
