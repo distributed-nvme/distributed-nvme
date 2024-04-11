@@ -52,6 +52,18 @@ func (oc *OsCommand) GetBlockDevSize(
 	return size, err
 }
 
-func NewOsCommand() *OsCommand{
+func (oc *OsCommand) CreateNvmetPort(
+	pch *ctxhelper.PerCtxHelper,
+	portNum uint32,
+	trType string,
+	adrFam string,
+	trAddr string,
+	trSvcId string,
+	seqCh uint32,
+) error {
+	return nil
+}
+
+func NewOsCommand() *OsCommand {
 	return &OsCommand{}
 }

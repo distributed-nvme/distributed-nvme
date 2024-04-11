@@ -1,6 +1,7 @@
 package nodeagent
 
 import (
+	"context"
 	"net"
 
 	"github.com/spf13/cobra"
@@ -43,12 +44,16 @@ func init() {
 
 func launchAgent(cmd *cobra.Command, args []string) {
 	gLogger.Info("Launch agent: %v", agentArgs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	lis, err := net.Listen(agentArgs.grpcNetwork, agentArgs.grpcAddress)
 	if err != nil {
 		gLogger.Fatal("Listen err: %v", err)
 	}
 
 	dnAgent := newDnAgentServer(
+		ctx,
 		constants.LocalDataPathDefault,
 	)
 
@@ -63,6 +68,7 @@ func launchAgent(cmd *cobra.Command, args []string) {
 		gLogger.Fatal("Serve err: %v", err)
 	}
 
+	cancel()
 	gLogger.Info("Exit disk node agent")
 }
 

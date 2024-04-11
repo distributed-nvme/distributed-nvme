@@ -16,13 +16,13 @@ const (
 	ReplyCodeAgentErr    = 1004
 	ReplyCodeInvalidArg  = 1005
 
-	StatusCodeSucceed     = 0
-	StatusMsgSucceed      = "succeed"
-	StatusCodeUninit      = 2001
-	StatusCodeUnreachable = 2002
-	StatusCodeInternalErr = 2003
-	StatusCodeIdMisMatch  = 2004
-	StatusCodeOldRevision = 2005
+	StatusCodeSucceed      = 0
+	StatusMsgSucceed       = "succeed"
+	StatusCodeUninit       = 2001
+	StatusCodeUnreachable  = 2002
+	StatusCodeInternalErr  = 2003
+	StatusCodeDataMismatch = 2004
+	StatusCodeOldRevision  = 2005
 
 	AgentTimeoutDefault = 3 * time.Second
 	ShardInitWaitTime   = 10 * time.Second
@@ -33,9 +33,9 @@ const (
 
 	ShardWorkerDelayDefault = 1 * time.Second
 
-	DnRetryBase = 1 * time.Second
-	DnRetryPower = 2
-	DnRetryMax = 64 * time.Second
+	DnRetryBase     = 1 * time.Second
+	DnRetryPower    = 2
+	DnRetryMax      = 64 * time.Second
 	DnCheckInterval = 1 * time.Second
 
 	EtcdPageSize = 100

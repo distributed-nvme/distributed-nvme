@@ -9,44 +9,24 @@ type LocalData struct {
 }
 
 type DnData struct {
-	DnId string
-	Revision int64
-}
-
-type SpLdData struct {
-	DnId string
-	SpId string
-	LdId string
-	Revision int64
+	DnId        string
+	DevPath     string
+	PortNum     uint32
+	Revision    int64
+	LiveSpLdMap map[string]bool
+	DeadSpLdMap map[string]bool
 }
 
 func (lData *LocalData) GetDnData(
 	pch *ctxhelper.PerCtxHelper,
 	dnId string,
 ) (*DnData, error) {
-	return &DnData{
-		DnId: dnId,
-		Revision: 0,
-	}, nil
+	return nil, nil
 }
 
 func (ldata *LocalData) SetDnData(
 	pch *ctxhelper.PerCtxHelper,
 	dnData *DnData,
-) error {
-	return nil
-}
-
-func (lData *LocalData) GetAllSpLdData(
-	pch *ctxhelper.PerCtxHelper,
-	dnId string,
-) ([]*SpLdData, error) {
-	return make([]*SpLdData, 0), nil
-}
-
-func (lData *LocalData) SetSpLdData(
-	pch *ctxhelper.PerCtxHelper,
-	spLdData *SpLdData,
 ) error {
 	return nil
 }
