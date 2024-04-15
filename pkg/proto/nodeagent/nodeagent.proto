@@ -8,6 +8,7 @@ service DiskNodeAgent {
   rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
   rpc CheckDn(CheckDnRequest) returns(CheckDnReply) {}
   rpc SyncupSpLd(SyncupSpLdRequest) returns(SyncupSpLdReply) {}
+  rpc CheckSpLd(CheckSpLdRequest) returns(CheckSpLdReply) {}
   rpc GetDevSize(GetDevSizeRequest) returns(GetDevSizeReply) {}
 }
 
@@ -101,6 +102,17 @@ message SpLdInfo {
 }
 
 message SyncupSpLdReply {
+  SpLdInfo sp_ld_info = 1;
+}
+
+message CheckSpLdRequest {
+  string dn_id = 1;
+  string sp_id = 2;
+  string ld_id = 3;
+  int64 revision = 4;
+}
+
+message CheckSpLdReply {
   SpLdInfo sp_ld_info = 1;
 }
 

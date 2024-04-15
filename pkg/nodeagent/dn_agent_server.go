@@ -361,7 +361,47 @@ func (dnAgent *dnAgentServer) CheckDn(
 	ctx context.Context,
 	req *pbnd.CheckDnRequest,
 ) (*pbnd.CheckDnReply, error) {
+	dnAgent.mu.Lock()
+	defer dnAgent.mu.Unlock()
+
 	timestamp := time.Now().UnixMilli()
+
+	if dnAgent.dnLocal == nil {
+		return &pbnd.CheckDnReply{
+			DnInfo: &pbnd.DnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if dnAgent.dnLocal.DnId != req.DnId {
+		return &pbnd.CheckDnReply{
+			DnInfo: &pbnd.DnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeDataMismatch,
+					Msg:       fmt.Sprintf("DnId: %s", dnAgent.dnLocal.DnId),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if dnAgent.dnLocal.Revision != req.Revision {
+		return &pbnd.CheckDnReply{
+			DnInfo: &pbnd.DnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeDataMismatch,
+					Msg:       fmt.Sprintf("Revision: %s", dnAgent.dnLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
 	return &pbnd.CheckDnReply{
 		DnInfo: &pbnd.DnInfo{
 			StatusInfo: &pbnd.StatusInfo{
@@ -467,6 +507,55 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 			StatusInfo: &pbnd.StatusInfo{
 				Code:      constants.ReplyCodeSucceed,
 				Msg:       constants.ReplyMsgSucceed,
+				Timestamp: timestamp,
+			},
+		},
+	}, nil
+}
+
+func (dnAgent *dnAgentServer) CheckSpLd(
+	ctx context.Context,
+	req *pbnd.CheckSpLdRequest,
+) (*pbnd.CheckSpLdReply, error) {
+	timestamp := time.Now().UnixMilli()
+
+	spLdData := dnAgent.getSpLdData(
+		req.DnId,
+		req.SpId,
+		req.LdId,
+	)
+	if spLdData == nil {
+		return &pbnd.CheckSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	spLdData.mu.Lock()
+	defer spLdData.mu.Unlock()
+
+	if spLdData.spLdLocal.Revision != req.Revision {
+		return &pbnd.CheckSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeDataMismatch,
+					Msg:       fmt.Sprintf("Revision: %s", spLdData.spLdLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	return &pbnd.CheckSpLdReply{
+		SpLdInfo: &pbnd.SpLdInfo{
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeSucceed,
+				Msg:       constants.StatusMsgSucceed,
 				Timestamp: timestamp,
 			},
 		},
