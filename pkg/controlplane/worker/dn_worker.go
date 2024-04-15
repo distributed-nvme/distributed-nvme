@@ -70,8 +70,8 @@ func (dnwkr *dnWorkerServer) addResRev(
 		dnwkr.idAndRevToConf[dnId] = revToConf
 	}
 	revToConf[rev] = dnConf
-	grpcTargetList := make([]string, 0)
-	grpcTargetList = append(grpcTargetList, dnConf.GeneralConf.GrpcTarget)
+	grpcTargetList := make([]string, 1)
+	grpcTargetList[0] = dnConf.GeneralConf.GrpcTarget
 	return grpcTargetList, nil
 }
 
@@ -97,9 +97,16 @@ func syncup(
 	revision int64,
 	dnConf *pbcp.DiskNodeConf,
 ) bool {
+	spLdIdList := make([]*pbnd.SpLdId, len(dnConf.SpLdIdList))
+	for i, spLdId := range dnConf.SpLdIdList {
+		spLdIdList[i] = &pbnd.SpLdId{
+			SpId: idToStr(spLdId.SpId),
+			LdId: idToStr(spLdId.LdId),
+		}
+	}
 	req := &pbnd.SyncupDnRequest{
 		DnConf: &pbnd.DnConf{
-			DnId:     dnId,
+			DnId:     idToStr(dnId),
 			Revision: revision,
 			DevPath:  dnConf.GeneralConf.DevPath,
 			NvmePortConf: &pbnd.NvmePortConf{
@@ -114,6 +121,7 @@ func syncup(
 					SeqCh: dnConf.GeneralConf.NvmePortConf.TrEq.SeqCh,
 				},
 			},
+			SpLdIdList: spLdIdList,
 		},
 	}
 
@@ -153,7 +161,7 @@ func check(
 	revision int64,
 ) bool {
 	req := &pbnd.CheckDnRequest{
-		DnId:     dnId,
+		DnId:     idToStr(dnId),
 		Revision: revision,
 	}
 	for {

@@ -49,12 +49,12 @@ message GetDevSizeReply {
 }
 
 message SpLdId {
-  uint64 sp_id = 1;
-  uint64 ld_id = 2;
+  string sp_id = 1;
+  string ld_id = 2;
 }
 
 message DnConf {
-  uint64 dn_id = 1;
+  string dn_id = 1;
   int64 revision = 2;
   string dev_path = 4;
   NvmePortConf nvme_port_conf = 5;
@@ -74,7 +74,7 @@ message SyncupDnReply {
 }
 
 message CheckDnRequest {
-  uint64 dn_id = 1;
+  string dn_id = 1;
   int64 revision = 2;
 }
 
@@ -83,9 +83,9 @@ message CheckDnReply {
 }
 
 message SpLdConf {
-  uint64 dn_id = 1;
-  uint64 sp_id = 2;
-  uint64 ld_id = 3;
+  string dn_id = 1;
+  string sp_id = 2;
+  string ld_id = 3;
   int64 revision = 4;
   uint64 start = 5;
   uint64 length = 6;
@@ -105,14 +105,13 @@ message SyncupSpLdReply {
 }
 
 message SpCntlrId {
-  uint64 sp_id = 1;
-  uint64 cntlr_id = 2;
+  string sp_id = 1;
+  string cntlr_id = 2;
 }
 
 message CnConf {
-  uint64 cn_id = 1;
-  uint64 version = 2;
-  bool partial = 3;
+  string cn_id = 1;
+  int64 revision = 2;
   repeated SpCntlrId sp_cntlr_id_list = 4;
 }
 

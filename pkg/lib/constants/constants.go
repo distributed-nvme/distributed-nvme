@@ -23,6 +23,7 @@ const (
 	StatusCodeInternalErr  = 2003
 	StatusCodeDataMismatch = 2004
 	StatusCodeOldRevision  = 2005
+	StatusCodeNotFound     = 3001
 
 	AgentTimeoutDefault = 3 * time.Second
 	ShardInitWaitTime   = 10 * time.Second

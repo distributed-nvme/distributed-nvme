@@ -18,10 +18,10 @@ import (
 )
 
 func encodeSpLdId(
-	spId uint64,
-	ldId uint64,
+	spId string,
+	ldId string,
 ) string {
-	return fmt.Sprintf("%016x-%016x", spId, ldId)
+	return fmt.Sprintf("%s-%s", spId, ldId)
 }
 
 func decodeSpLdId(
@@ -34,55 +34,39 @@ func decodeSpLdId(
 	return items[0], items[1], nil
 }
 
-type spLdBasic struct {
-	dnId string
-	spId string
-	ldId string
-}
-
-type spLdDetail struct {
-	start    uint64
-	length   uint64
-	cnIdList []string
-}
-
-type spLd struct {
-	mu       sync.Mutex
-	basic    *spLdBasic
-	detail   *spLdDetail
-	revision int64
+type spLdRuntimeData struct {
+	mu        sync.Mutex
+	devPath   string
+	portNum   uint32
+	spLdLocal *localdata.SpLdLocal
 }
 
 func syncupSpLd(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
+	spLdConf *pbnd.SpLdConf,
 	devPath string,
 	portNum uint32,
-	basic *spLdBasic,
-	detail *spLdDetail,
-	cnIdList []string,
-) (uint32, string) {
-	return 0, "succeeded"
+) error {
+	return nil
 }
 
 func cleanupSpLd(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
-	devPath string,
-	portNum uint32,
-	basic *spLdBasic,
+	spLdLocal *localdata.SpLdLocal,
 ) error {
 	return nil
 }
 
 type dnAgentServer struct {
 	pbnd.UnimplementedDiskNodeAgentServer
-	mu      sync.Mutex
-	oc      *oscmd.OsCommand
-	lData   *localdata.LocalData
-	dnData  *localdata.DnData
-	spLdMap map[string]*spLd
+	mu         sync.Mutex
+	oc         *oscmd.OsCommand
+	local      *localdata.LocalClient
 	bgInterval time.Duration
+	dnLocal    *localdata.DnLocal
+	spLdMap    map[string]*spLdRuntimeData
 }
 
 func (dnAgent *dnAgentServer) GetDevSize(
@@ -120,10 +104,9 @@ func (dnAgent *dnAgentServer) SyncupDn(
 
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 	timestamp := time.Now().UnixMilli()
-	dnId := fmt.Sprintf("%016x", req.DnConf.DnId)
 
-	if dnAgent.dnData == nil {
-		dnData, err := dnAgent.lData.GetDnData(pch, dnId)
+	if dnAgent.dnLocal == nil {
+		dnLocal, err := dnAgent.local.GetDnLocal(pch, req.DnConf.DnId)
 		if err != nil {
 			return &pbnd.SyncupDnReply{
 				DnInfo: &pbnd.DnInfo{
@@ -135,9 +118,9 @@ func (dnAgent *dnAgentServer) SyncupDn(
 				},
 			}, nil
 		}
-		if dnData == nil {
-			dnAgent.dnData = &localdata.DnData{
-				DnId:        dnId,
+		if dnLocal == nil {
+			dnAgent.dnLocal = &localdata.DnLocal{
+				DnId:        req.DnConf.DnId,
 				DevPath:     req.DnConf.DevPath,
 				PortNum:     req.DnConf.NvmePortConf.PortNum,
 				Revision:    req.DnConf.Revision,
@@ -145,52 +128,52 @@ func (dnAgent *dnAgentServer) SyncupDn(
 				DeadSpLdMap: make(map[string]bool),
 			}
 		} else {
-			dnAgent.dnData = dnData
+			dnAgent.dnLocal = dnLocal
 		}
 	}
 
-	if dnId != dnAgent.dnData.DnId {
+	if req.DnConf.DnId != dnAgent.dnLocal.DnId {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
-					Msg:       fmt.Sprintf("DnId: %s", dnAgent.dnData.DnId),
+					Msg:       fmt.Sprintf("DnId: %s", dnAgent.dnLocal.DnId),
 					Timestamp: timestamp,
 				},
 			},
 		}, nil
 	}
 
-	if req.DnConf.DevPath != dnAgent.dnData.DevPath {
+	if req.DnConf.DevPath != dnAgent.dnLocal.DevPath {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
-					Msg:       fmt.Sprintf("DevPath: %s", dnAgent.dnData.DevPath),
+					Msg:       fmt.Sprintf("DevPath: %s", dnAgent.dnLocal.DevPath),
 					Timestamp: timestamp,
 				},
 			},
 		}, nil
 	}
 
-	if req.DnConf.NvmePortConf.PortNum != dnAgent.dnData.PortNum {
+	if req.DnConf.NvmePortConf.PortNum != dnAgent.dnLocal.PortNum {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
-					Msg:       fmt.Sprintf("PortNum: %d", dnAgent.dnData.PortNum),
+					Msg:       fmt.Sprintf("PortNum: %d", dnAgent.dnLocal.PortNum),
 					Timestamp: timestamp,
 				},
 			},
 		}, nil
 	}
 
-	if req.DnConf.Revision < dnAgent.dnData.Revision {
+	if req.DnConf.Revision < dnAgent.dnLocal.Revision {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeOldRevision,
-					Msg:       fmt.Sprintf("Revision: %s", dnAgent.dnData.Revision),
+					Msg:       fmt.Sprintf("Revision: %d", dnAgent.dnLocal.Revision),
 					Timestamp: timestamp,
 				},
 			},
@@ -199,7 +182,7 @@ func (dnAgent *dnAgentServer) SyncupDn(
 
 	if err := dnAgent.oc.CreateNvmetPort(
 		pch,
-		dnAgent.dnData.PortNum,
+		dnAgent.dnLocal.PortNum,
 		req.DnConf.NvmePortConf.NvmeListener.TrType,
 		req.DnConf.NvmePortConf.NvmeListener.AdrFam,
 		req.DnConf.NvmePortConf.NvmeListener.TrAddr,
@@ -223,19 +206,56 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		keyInReq[key] = true
 	}
 
-	for key := range dnAgent.dnData.LiveSpLdMap {
+	for key := range dnAgent.dnLocal.LiveSpLdMap {
 		_, ok := keyInReq[key]
 		if !ok {
-			delete(dnAgent.dnData.LiveSpLdMap, key)
-			dnAgent.dnData.DeadSpLdMap[key] = true
+			delete(dnAgent.dnLocal.LiveSpLdMap, key)
+			dnAgent.dnLocal.DeadSpLdMap[key] = true
 		}
 	}
 
 	for key := range keyInReq {
-		dnAgent.dnData.LiveSpLdMap[key] = true
+		dnAgent.dnLocal.LiveSpLdMap[key] = true
 	}
 
-	if err := dnAgent.lData.SetDnData(pch, dnAgent.dnData); err != nil {
+	keyToLoad := make([]string, 0)
+	for key := range dnAgent.dnLocal.LiveSpLdMap {
+		keyToLoad = append(keyToLoad, key)
+	}
+	for key := range dnAgent.dnLocal.DeadSpLdMap {
+		keyToLoad = append(keyToLoad, key)
+	}
+	for _, key := range keyToLoad {
+		if _, ok := dnAgent.spLdMap[key]; !ok {
+			spId, ldId, err := decodeSpLdId(key)
+			if err != nil {
+				pch.Logger.Fatal("decodeSpLdId err: %s %v", key, err)
+			}
+			spLdLocal, err := dnAgent.local.GetSpLdLocal(
+				pch,
+				dnAgent.dnLocal.DnId,
+				spId,
+				ldId,
+			)
+			if err != nil {
+				pch.Logger.Fatal(
+					"GetSpLdLocal err: %s %s %s %v",
+					dnAgent.dnLocal.DnId,
+					spId,
+					ldId,
+					err,
+				)
+			}
+			spLdData := &spLdRuntimeData{
+				devPath:   dnAgent.dnLocal.DevPath,
+				portNum:   dnAgent.dnLocal.PortNum,
+				spLdLocal: spLdLocal,
+			}
+			dnAgent.spLdMap[key] = spLdData
+		}
+	}
+
+	if err := dnAgent.local.SetDnLocal(pch, dnAgent.dnLocal); err != nil {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
@@ -260,31 +280,19 @@ func (dnAgent *dnAgentServer) SyncupDn(
 
 func (dnAgent *dnAgentServer) fetchDeadSpLd(
 	pch *ctxhelper.PerCtxHelper,
-) map[string]*spLd {
-	keyToSpLd := make(map[string]*spLd)
+) map[string]*spLdRuntimeData {
+	keyToSpLd := make(map[string]*spLdRuntimeData)
 
 	dnAgent.mu.Lock()
 	defer dnAgent.mu.Unlock()
 
-	if dnAgent.dnData != nil {
-		for key := range dnAgent.dnData.DeadSpLdMap {
-			spld, ok := dnAgent.spLdMap[key]
+	if dnAgent.dnLocal != nil {
+		for key := range dnAgent.dnLocal.DeadSpLdMap {
+			spLdData, ok := dnAgent.spLdMap[key]
 			if !ok {
-				spId, ldId, err := decodeSpLdId(key)
-				if err != nil {
-					pch.Logger.Fatal("%v", err)
-				}
-				spld = &spLd{
-					basic: &spLdBasic{
-						dnId: dnAgent.dnData.DnId,
-						spId: spId,
-						ldId: ldId,
-					},
-					revision: 0,
-				}
-				dnAgent.spLdMap[key] = spld
+				pch.Logger.Fatal("Can not find key in spLdMap: %s", key)
 			}
-			keyToSpLd[key] = spld
+			keyToSpLd[key] = spLdData
 		}
 	}
 
@@ -298,33 +306,31 @@ func (dnAgent *dnAgentServer) updateDeadSpLd(
 	dnAgent.mu.Lock()
 	defer dnAgent.mu.Unlock()
 
-	if dnAgent.dnData != nil {
+	if dnAgent.dnLocal != nil {
 		for _, key := range deleted {
-			delete(dnAgent.dnData.DeadSpLdMap, key)
+			delete(dnAgent.dnLocal.DeadSpLdMap, key)
 			delete(dnAgent.spLdMap, key)
 		}
 	}
 
-	if err := dnAgent.lData.SetDnData(pch, dnAgent.dnData); err != nil {
-		pch.Logger.Error("SetDnData err: %v", err)
+	if err := dnAgent.local.SetDnLocal(pch, dnAgent.dnLocal); err != nil {
+		pch.Logger.Error("SetDnLocal err: %v", err)
 	}
 }
 
 func (dnAgent *dnAgentServer) cleanup(
 	pch *ctxhelper.PerCtxHelper,
-	keyToSpLd map[string]*spLd,
+	keyToSpLd map[string]*spLdRuntimeData,
 ) []string {
 	deleted := make([]string, 0)
-	for key, spld := range keyToSpLd {
-		spld.mu.Lock()
+	for key, spLdData := range keyToSpLd {
+		spLdData.mu.Lock()
 		err := cleanupSpLd(
 			pch,
 			dnAgent.oc,
-			dnAgent.dnData.DevPath,
-			dnAgent.dnData.PortNum,
-			spld.basic,
+			spLdData.spLdLocal,
 		)
-		spld.mu.Unlock()
+		spLdData.mu.Unlock()
 		if err != nil {
 			pch.Logger.Error("cleanupSpLd err: %v", err)
 			continue
@@ -367,15 +373,115 @@ func (dnAgent *dnAgentServer) CheckDn(
 	}, nil
 }
 
+func (dnAgent *dnAgentServer) getSpLdData(
+	dnId string,
+	spId string,
+	ldId string,
+) *spLdRuntimeData {
+	key := encodeSpLdId(spId, ldId)
+	dnAgent.mu.Lock()
+	defer dnAgent.mu.Unlock()
+	if spLdData, ok := dnAgent.spLdMap[key]; ok {
+		return spLdData
+	}
+	return nil
+}
+
+func (dnAgent *dnAgentServer) SyncupSpLd(
+	ctx context.Context,
+	req *pbnd.SyncupSpLdRequest,
+) (*pbnd.SyncupSpLdReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+	timestamp := time.Now().UnixMilli()
+	spLdData := dnAgent.getSpLdData(
+		req.SpLdConf.DnId,
+		req.SpLdConf.SpId,
+		req.SpLdConf.LdId,
+	)
+	if spLdData == nil {
+		return &pbnd.SyncupSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code: constants.StatusCodeNotFound,
+					Msg: fmt.Sprintf(
+						"Do not find spLdData: %s %s %s",
+						req.SpLdConf.DnId,
+						req.SpLdConf.SpId,
+						req.SpLdConf.LdId,
+					),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	spLdData.mu.Lock()
+	defer spLdData.mu.Unlock()
+
+	if spLdData.spLdLocal.Revision > req.SpLdConf.Revision {
+		return &pbnd.SyncupSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeOldRevision,
+					Msg:       fmt.Sprintf("Revision: %d", spLdData.spLdLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	spLdData.spLdLocal.Revision = req.SpLdConf.Revision
+
+	if err := dnAgent.local.SetSpLdLocal(pch, spLdData.spLdLocal); err != nil {
+		return &pbnd.SyncupSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if err := syncupSpLd(
+		pch,
+		dnAgent.oc,
+		req.SpLdConf,
+		spLdData.devPath,
+		spLdData.portNum,
+	); err != nil {
+		return &pbnd.SyncupSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	return &pbnd.SyncupSpLdReply{
+		SpLdInfo: &pbnd.SpLdInfo{
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.ReplyCodeSucceed,
+				Msg:       constants.ReplyMsgSucceed,
+				Timestamp: timestamp,
+			},
+		},
+	}, nil
+}
+
 func newDnAgentServer(
 	ctx context.Context,
-	ldataPath string,
+	dataPath string,
 	bgInterval time.Duration,
 ) *dnAgentServer {
 	dnAgent := &dnAgentServer{
-		oc:     oscmd.NewOsCommand(),
-		lData:  localdata.NewLocalData(ldataPath),
-		dnData: nil,
+		oc:         oscmd.NewOsCommand(),
+		local:      localdata.NewLocalClient(dataPath),
+		dnLocal:    nil,
 		bgInterval: bgInterval,
 	}
 	go dnAgent.background(ctx)
