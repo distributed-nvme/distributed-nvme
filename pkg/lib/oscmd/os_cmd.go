@@ -223,6 +223,17 @@ func (oc *OsCommand) CreateNvmetPort(
 	return nil
 }
 
+func (oc *OsCommand) DeleteNvmetPort(
+	pch *ctxhelper.PerCtxHelper,
+	portNum uint32,
+) error {
+	if err := removeAny(nvmetPortPath(portNum)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func NewOsCommand() *OsCommand {
 	return &OsCommand{}
 }
