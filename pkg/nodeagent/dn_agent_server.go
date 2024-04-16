@@ -180,26 +180,6 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		}, nil
 	}
 
-	if err := dnAgent.oc.CreateNvmetPort(
-		pch,
-		dnAgent.dnLocal.PortNum,
-		req.DnConf.NvmePortConf.NvmeListener.TrType,
-		req.DnConf.NvmePortConf.NvmeListener.AdrFam,
-		req.DnConf.NvmePortConf.NvmeListener.TrAddr,
-		req.DnConf.NvmePortConf.NvmeListener.TrSvcId,
-		req.DnConf.NvmePortConf.TrEq.SeqCh,
-	); err != nil {
-		return &pbnd.SyncupDnReply{
-			DnInfo: &pbnd.DnInfo{
-				StatusInfo: &pbnd.StatusInfo{
-					Code:      constants.StatusCodeInternalErr,
-					Msg:       err.Error(),
-					Timestamp: timestamp,
-				},
-			},
-		}, nil
-	}
-
 	keyInReq := make(map[string]bool)
 	for _, spLd := range req.DnConf.SpLdIdList {
 		key := encodeSpLdId(spLd.SpId, spLd.LdId)
@@ -226,7 +206,8 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		keyToLoad = append(keyToLoad, key)
 	}
 	for _, key := range keyToLoad {
-		if _, ok := dnAgent.spLdMap[key]; !ok {
+		var spLdData *spLdRuntimeData
+		if spLdData, ok := dnAgent.spLdMap[key]; !ok {
 			spId, ldId, err := decodeSpLdId(key)
 			if err != nil {
 				pch.Logger.Fatal("decodeSpLdId err: %s %v", key, err)
@@ -246,19 +227,56 @@ func (dnAgent *dnAgentServer) SyncupDn(
 					err,
 				)
 			}
-			if _, ok1 := dnAgent.dnLocal.DeadSpLdMap[key]; ok1 {
-				spLdLocal.Revision = constants.RevisionDeleted
-			}
-			spLdData := &spLdRuntimeData{
+			spLdData = &spLdRuntimeData{
 				devPath:   dnAgent.dnLocal.DevPath,
 				portNum:   dnAgent.dnLocal.PortNum,
 				spLdLocal: spLdLocal,
 			}
 			dnAgent.spLdMap[key] = spLdData
 		}
+		spLdData.mu.Lock()
+		if _, ok := dnAgent.dnLocal.DeadSpLdMap[key]; ok {
+			spLdData.spLdLocal.Revision = constants.RevisionDeleted
+			if err := dnAgent.local.SetSpLdLocal(
+				pch,
+				spLdData.spLdLocal,
+			); err != nil {
+				spLdData.mu.Unlock()
+				return &pbnd.SyncupDnReply{
+					DnInfo: &pbnd.DnInfo{
+						StatusInfo: &pbnd.StatusInfo{
+							Code:      constants.StatusCodeInternalErr,
+							Msg:       err.Error(),
+							Timestamp: timestamp,
+						},
+					},
+				}, nil
+			}
+		}
+		spLdData.mu.Unlock()
 	}
 
 	if err := dnAgent.local.SetDnLocal(pch, dnAgent.dnLocal); err != nil {
+		return &pbnd.SyncupDnReply{
+			DnInfo: &pbnd.DnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if err := dnAgent.oc.CreateNvmetPort(
+		pch,
+		dnAgent.dnLocal.PortNum,
+		req.DnConf.NvmePortConf.NvmeListener.TrType,
+		req.DnConf.NvmePortConf.NvmeListener.AdrFam,
+		req.DnConf.NvmePortConf.NvmeListener.TrAddr,
+		req.DnConf.NvmePortConf.NvmeListener.TrSvcId,
+		req.DnConf.NvmePortConf.TrEq.SeqCh,
+	); err != nil {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
