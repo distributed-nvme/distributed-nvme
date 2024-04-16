@@ -43,6 +43,8 @@ const (
 
 	EtcdPageSize = 100
 
+	RevisionDeleted = -1
+
 	DataExtentSizeShiftMin       = 20
 	DataExtentSizeShiftMax       = 40
 	DataExtentSizeShiftDefault   = 30

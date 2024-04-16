@@ -246,6 +246,9 @@ func (dnAgent *dnAgentServer) SyncupDn(
 					err,
 				)
 			}
+			if _, ok1 := dnAgent.dnLocal.DeadSpLdMap[key]; ok1 {
+				spLdLocal.Revision = constants.RevisionDeleted
+			}
 			spLdData := &spLdRuntimeData{
 				devPath:   dnAgent.dnLocal.DevPath,
 				portNum:   dnAgent.dnLocal.PortNum,
@@ -458,6 +461,18 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 	spLdData.mu.Lock()
 	defer spLdData.mu.Unlock()
 
+	if spLdData.spLdLocal.Revision == constants.RevisionDeleted {
+		return &pbnd.SyncupSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeOldRevision,
+					Msg:       fmt.Sprintf("Revision: %d", spLdData.spLdLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
 	if spLdData.spLdLocal.Revision > req.SpLdConf.Revision {
 		return &pbnd.SyncupSpLdReply{
 			SpLdInfo: &pbnd.SpLdInfo{
@@ -538,6 +553,18 @@ func (dnAgent *dnAgentServer) CheckSpLd(
 
 	spLdData.mu.Lock()
 	defer spLdData.mu.Unlock()
+
+	if spLdData.spLdLocal.Revision == constants.RevisionDeleted {
+		return &pbnd.CheckSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeOldRevision,
+					Msg:       fmt.Sprintf("Revision: %d", spLdData.spLdLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
 
 	if spLdData.spLdLocal.Revision != req.Revision {
 		return &pbnd.CheckSpLdReply{
