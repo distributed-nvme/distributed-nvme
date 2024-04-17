@@ -16,7 +16,12 @@ const (
 	nvmetPath    = "/sys/kernel/config/nvmet"
 	waitInterval = 100 * time.Millisecond
 	waitCnt      = 20
+	dmNotExist   = "Device does not exist"
 )
+
+func byteToSector(inp uint64) uint64 {
+	return inp / 512
+}
 
 func pathExist(path string) (bool, error) {
 	_, err := os.Stat(path)
@@ -232,6 +237,132 @@ func (oc *OsCommand) DeleteNvmetPort(
 	}
 
 	return nil
+}
+
+type DmLinearArg struct {
+	Start   uint64
+	Size    uint64
+	DevPath string
+	Offset  uint64
+}
+
+func (oc *OsCommand) dmStatus(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) (string, error) {
+	name := "dmsetup"
+	args := []string{"status", dmName}
+	stdout, stderr, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		if strings.Contains(stderr, dmNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return stdout, nil
+}
+
+func (oc *OsCommand) dmCreate(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	table string,
+) error {
+	name := "dmsetup"
+	args := []string{"create", dmName}
+	if _, _, err := oc.runOsCmd(pch, name, args, table); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) dmSuspend(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) error {
+	name := "dmsetup"
+	args := []string{"suspend", dmName}
+	_, _, err := oc.runOsCmd(pch, name, args, "")
+	return err
+}
+
+func (oc *OsCommand) dmResume(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) error {
+	name := "dmsetup"
+	args := []string{"resume", dmName}
+	_, _, err := oc.runOsCmd(pch, name, args, "")
+	return err
+}
+
+func (oc *OsCommand) dmLoad(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	table string,
+) error {
+	name := "dmsetup"
+	args := []string{"load", dmName}
+	_, _, err := oc.runOsCmd(pch, name, args, table)
+	return err
+}
+
+func (oc *OsCommand) dmReload(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	table string,
+) error {
+	if err := oc.dmSuspend(pch, dmName); err != nil {
+		return err
+	}
+	if err := oc.dmLoad(pch, dmName, table); err != nil {
+		return err
+	}
+	if err := oc.dmResume(pch, dmName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) DmCreateLinear(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	linearArgs []*DmLinearArg,
+) error {
+	if len(linearArgs) < 1 {
+		pch.Logger.Fatal("Invalid linearArgs: %v", linearArgs)
+	}
+
+	var tableBuilder strings.Builder
+	for _, linearArg := range linearArgs {
+		oneLine := fmt.Sprintf(
+			"%d %d linear %s %d\n",
+			byteToSector(linearArg.Start),
+			byteToSector(linearArg.Size),
+			linearArg.DevPath,
+			byteToSector(linearArg.Offset),
+		)
+		tableBuilder.WriteString(oneLine)
+	}
+	table := tableBuilder.String()
+
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+
+	if status == "" {
+		// If not exist, create new
+		return oc.dmCreate(pch, dmName, table)
+	}
+
+	lines := strings.Split("\n", status)
+	if len(lines) == len(linearArgs) && strings.Contains(status, "linear") {
+		// If exist and same, nothing to do
+		return nil
+	}
+
+	// If exist and not same, reload
+	return oc.dmReload(pch, dmName, table)
 }
 
 func NewOsCommand() *OsCommand {
