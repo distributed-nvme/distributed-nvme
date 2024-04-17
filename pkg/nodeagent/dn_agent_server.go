@@ -268,7 +268,7 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		}, nil
 	}
 
-	if err := dnAgent.oc.CreateNvmetPort(
+	if err := dnAgent.oc.NvmetPortCreate(
 		pch,
 		dnAgent.dnLocal.PortNum,
 		req.DnConf.NvmePortConf.NvmeListener.TrType,

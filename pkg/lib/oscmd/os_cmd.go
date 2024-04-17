@@ -135,20 +135,36 @@ func nvmetPortPath(portNum uint32) string {
 	return fmt.Sprintf("%s/ports/%s", nvmetPath, portNum)
 }
 
-func trTypePath(portNum uint32) string {
+func nvmetTrTypePath(portNum uint32) string {
 	return fmt.Sprintf("%s/addr_trtype", nvmetPortPath(portNum))
 }
 
-func adrFamPath(portNum uint32) string {
+func nvmetAdrFamPath(portNum uint32) string {
 	return fmt.Sprintf("%s/addr_adrfam", nvmetPortPath(portNum))
 }
 
-func trAddrPath(portNum uint32) string {
+func nvmetTrAddrPath(portNum uint32) string {
 	return fmt.Sprintf("%s/addr_traddr", nvmetPortPath(portNum))
 }
 
-func trSvcIdPath(portNum uint32) string {
+func nvmetTrSvcIdPath(portNum uint32) string {
 	return fmt.Sprintf("%s/addr_trsvcid", nvmetPortPath(portNum))
+}
+
+func nvmetSubsysPath(nqn string) string {
+	return fmt.Sprintf("%s/subsystems/%s", nvmetPath, nqn)
+}
+
+func nvmetCntlidMinPath(nqn string) string {
+	return fmt.Sprintf("%s/attr_cntlid_min", nvmetSubsysPath(nqn))
+}
+
+func nvmetCntlidMaxPath(nqn string) string {
+	return fmt.Sprintf("%s/attr_cntlid_max", nvmetSubsysPath(nqn))
+}
+
+func nvmetAllowAnyHostPath(nqn string) string {
+	return fmt.Sprintf("%s/attr_allow_any_host", nvmetSubsysPath(nqn))
 }
 
 type OsCommand struct {
@@ -194,7 +210,7 @@ func (oc *OsCommand) GetBlockDevSize(
 	return size, err
 }
 
-func (oc *OsCommand) CreateNvmetPort(
+func (oc *OsCommand) NvmetPortCreate(
 	pch *ctxhelper.PerCtxHelper,
 	portNum uint32,
 	trType string,
@@ -207,19 +223,19 @@ func (oc *OsCommand) CreateNvmetPort(
 		return err
 	}
 
-	if err := writeFile(trTypePath(portNum), trType); err != nil {
+	if err := writeFile(nvmetTrTypePath(portNum), trType); err != nil {
 		return err
 	}
 
-	if err := writeFile(adrFamPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetAdrFamPath(portNum), trType); err != nil {
 		return err
 	}
 
-	if err := writeFile(trAddrPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetTrAddrPath(portNum), trType); err != nil {
 		return err
 	}
 
-	if err := writeFile(trSvcIdPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetTrSvcIdPath(portNum), trType); err != nil {
 		return err
 	}
 
@@ -228,7 +244,7 @@ func (oc *OsCommand) CreateNvmetPort(
 	return nil
 }
 
-func (oc *OsCommand) DeleteNvmetPort(
+func (oc *OsCommand) NvmetPortDelete(
 	pch *ctxhelper.PerCtxHelper,
 	portNum uint32,
 ) error {
@@ -236,6 +252,31 @@ func (oc *OsCommand) DeleteNvmetPort(
 		return err
 	}
 
+	return nil
+}
+
+func (oc *OsCommand) NvmetSubsysCreate(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+	cntlidMin uint32,
+	cntlidMax uint32,
+	portNum uint32,
+	hostNqnList []string,
+) error {
+	if err := createDir(nvmetSubsysPath(nqn)); err != nil {
+		return err
+	}
+	cntlidMinStr := fmt.Sprintf("%d", cntlidMin)
+	if err := writeFile(nvmetCntlidMinPath(nqn), cntlidMinStr); err != nil {
+		return err
+	}
+	cntlidMaxStr := fmt.Sprintf("%d", cntlidMax)
+	if err := writeFile(nvmetCntlidMaxPath(nqn), cntlidMaxStr); err != nil {
+		return err
+	}
+	if err := writeFile(nvmetAllowAnyHostPath(nqn), "0"); err != nil {
+		return err
+	}
 	return nil
 }
 
