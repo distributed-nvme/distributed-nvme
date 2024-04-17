@@ -17,6 +17,7 @@ const (
 	waitInterval = 100 * time.Millisecond
 	waitCnt      = 20
 	dmNotExist   = "Device does not exist"
+	dmEmpty      = "No devices found"
 )
 
 func byteToSector(inp uint64) uint64 {
@@ -406,7 +407,7 @@ func (oc *OsCommand) DmCreateLinear(
 		return oc.dmCreate(pch, dmName, table)
 	}
 
-	lines := strings.Split("\n", status)
+	lines := strings.Split(status, "\n")
 	if len(lines) == len(linearArgs) && strings.Contains(status, "linear") {
 		// If exist and same, nothing to do
 		return nil
@@ -428,6 +429,31 @@ func (oc *OsCommand) DmRemove(
 		return oc.dmRemove(pch, dmName)
 	}
 	return nil
+}
+
+func (oc *OsCommand) DmGetAll(
+	pch *ctxhelper.PerCtxHelper,
+) (map[string]bool, error) {
+	dmMap := make(map[string]bool)
+	name := "dmsetup"
+	args := []string{"status"}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(stdout, dmEmpty) {
+		return nil, err
+	}
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		items := strings.Split(line, ":")
+		if len(items) < 1 {
+			return nil, fmt.Errorf("Invalid dmstatus: %s", line)
+		}
+		name := items[0]
+		dmMap[name] = true
+	}
+	return dmMap, nil
 }
 
 func NewOsCommand() *OsCommand {
