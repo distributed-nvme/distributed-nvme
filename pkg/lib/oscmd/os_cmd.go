@@ -275,6 +275,16 @@ func (oc *OsCommand) dmCreate(
 	return nil
 }
 
+func (oc *OsCommand) dmRemove(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) error {
+	name := "dmsetup"
+	args := []string{"remove", dmName}
+	_, _, err := oc.runOsCmd(pch, name, args, "")
+	return err
+}
+
 func (oc *OsCommand) dmSuspend(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
@@ -363,6 +373,20 @@ func (oc *OsCommand) DmCreateLinear(
 
 	// If exist and not same, reload
 	return oc.dmReload(pch, dmName, table)
+}
+
+func (oc *OsCommand) DmRemove(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) error {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return oc.dmRemove(pch, dmName)
+	}
+	return nil
 }
 
 func NewOsCommand() *OsCommand {
