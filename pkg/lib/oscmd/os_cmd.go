@@ -168,6 +168,22 @@ func nvmetAllowAnyHostPath(nqn string) string {
 	return fmt.Sprintf("%s/attr_allow_any_host", nvmetSubsysPath(nqn))
 }
 
+func nvmetSubsysHostsPath(nqn string) string {
+	return fmt.Sprintf("%s/allowed_hosts", nvmetSubsysPath(nqn))
+}
+
+func nvmetHostPath(hostNqn string) string {
+	return fmt.Sprintf("%s/hosts/%s", nvmetPath, hostNqn)
+}
+
+func nvmetHostInSubsysPath(nqn, hostNqn string) string {
+	return fmt.Sprintf("%s/%s", nvmetSubsysHostsPath(nqn), hostNqn)
+}
+
+func nvmetSubsysInPortPath(nqn string, portNum uint32) string {
+	return fmt.Sprintf("%s/subsystems/%s", nvmetPortPath(portNum), nqn)
+}
+
 type OsCommand struct {
 }
 
@@ -256,13 +272,42 @@ func (oc *OsCommand) NvmetPortDelete(
 	return nil
 }
 
+type NvmetNsArg struct {
+	NsNum   uint32
+	DevPath string
+}
+
+func (oc *OsCommand) nvmetAddHostToSubsys(nqn, hostNqn string) error {
+	path := nvmetHostPath(hostNqn)
+	// Ignore error because multiple agents may create the same host at the same time.
+	// We are ok if at least one of them succeeds
+	createDir(path)
+	if err := createLink(path, nvmetHostInSubsysPath(nqn, hostNqn)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) nvmetRemoveHostFromSubsys(nqn, hostNqn string) error {
+	return removeAny(nvmetHostInSubsysPath(nqn, hostNqn))
+}
+
+func (oc *OsCommand) nvmetAddSubsysToPort(nqn string, portNum uint32) error {
+	return createLink(nvmetSubsysPath(nqn), nvmetSubsysInPortPath(nqn, portNum))
+}
+
+func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum uint32) error {
+	return removeAny(nvmetSubsysInPortPath(nqn, portNum))
+}
+
 func (oc *OsCommand) NvmetSubsysCreate(
 	pch *ctxhelper.PerCtxHelper,
 	nqn string,
 	cntlidMin uint32,
 	cntlidMax uint32,
 	portNum uint32,
-	hostNqnList []string,
+	hostNqnMap map[string]bool,
+	nsArgs []*NvmetNsArg,
 ) error {
 	if err := createDir(nvmetSubsysPath(nqn)); err != nil {
 		return err
@@ -276,6 +321,47 @@ func (oc *OsCommand) NvmetSubsysCreate(
 		return err
 	}
 	if err := writeFile(nvmetAllowAnyHostPath(nqn), "0"); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(nvmetSubsysHostsPath(nqn))
+	if err != nil {
+		return err
+	}
+	currHostNqnMap := make(map[string]bool)
+	for _, entry := range entries {
+		currHostNqnMap[entry.Name()] = true
+	}
+
+	toBeCreated := make([]string, 0)
+	toBeDeleted := make([]string, 0)
+	for hostNqn := range hostNqnMap {
+		if _, ok := currHostNqnMap[hostNqn]; !ok {
+			toBeCreated = append(toBeCreated, hostNqn)
+		}
+	}
+	for hostNqn := range currHostNqnMap {
+		if _, ok := hostNqnMap[hostNqn]; !ok {
+			toBeDeleted = append(toBeDeleted, hostNqn)
+		}
+	}
+
+	for _, hostNqn := range toBeCreated {
+		if err := oc.nvmetAddHostToSubsys(nqn, hostNqn); err != nil {
+			return err
+		}
+	}
+	if len(toBeDeleted) > 0 {
+		if err := oc.nvmetRemoveSubsysFromPort(nqn, portNum); err != nil {
+			return err
+		}
+		for _, hostNqn := range toBeDeleted {
+			if err := oc.nvmetRemoveHostFromSubsys(nqn, hostNqn); err != nil {
+				return err
+			}
+		}
+	}
+	if err := oc.nvmetAddSubsysToPort(nqn, portNum); err != nil {
 		return err
 	}
 	return nil
