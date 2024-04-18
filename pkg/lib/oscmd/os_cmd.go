@@ -3,6 +3,7 @@ package oscmd
 import (
 	"bytes"
 	"fmt"
+	"github.com/google/uuid"
 	"os"
 	"os/exec"
 	"strconv"
@@ -18,6 +19,10 @@ const (
 	waitCnt      = 20
 	dmNotExist   = "Device does not exist"
 	dmEmpty      = "No devices found"
+)
+
+var (
+	uuidNameSpace = uuid.MustParse("37833e01-35d4-4e5a-b0a1-fff158b9d03b")
 )
 
 func byteToSector(inp uint64) uint64 {
@@ -188,24 +193,28 @@ func nvmetSubsysNsParentPath(nqn string) string {
 	return fmt.Sprintf("%s/namespaces", nvmetSubsysPath(nqn))
 }
 
+func nvmetSubsysNsPath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
 func nvmetSubsysNsDevPath(nqn, nsNum string) string {
-	return fmt.Sprintf("%s/%s/device_path", nvmetSubsysNsParentPath(nqn), nsNum)
+	return fmt.Sprintf("%s/device_path", nvmetSubsysNsPath(nqn, nsNum))
 }
 
 func nvmetSubsysNsNguidPath(nqn, nsNum string) string {
-	return fmt.Sprintf("%s/%s/device_nguid", nvmetSubsysNsParentPath(nqn), nsNum)
+	return fmt.Sprintf("%s/device_nguid", nvmetSubsysNsPath(nqn, nsNum))
 }
 
 func nvmetSubsysNsUuidPath(nqn, nsNum string) string {
-	return fmt.Sprintf("%s/%s/device_uuid", nvmetSubsysNsParentPath(nqn), nsNum)
+	return fmt.Sprintf("%s/device_uuid", nvmetSubsysNsPath(nqn, nsNum))
 }
 
 func nvmetSubsysNsEnablePath(nqn, nsNum string) string {
-	return fmt.Sprintf("%s/%s/enable", nvmetSubsysNsParentPath(nqn), nsNum)
+	return fmt.Sprintf("%s/enable", nvmetSubsysNsPath(nqn, nsNum))
 }
 
 func nvmetSubsysNsAnaGrpIdPath(nqn, nsNum string) string {
-	return fmt.Sprintf("%s/%s/ana_grpid", nvmetSubsysNsParentPath(nqn), nsNum)
+	return fmt.Sprintf("%s/ana_grpid", nvmetSubsysNsPath(nqn, nsNum))
 }
 
 type OsCommand struct {
@@ -325,11 +334,43 @@ func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum string) error
 }
 
 func (oc *OsCommand) nvmetSubsysNsCreate(nqn string, nsArg *NvmetNsArg) error {
+	if err := writeFile(
+		nvmetSubsysNsDevPath(nqn, nsArg.NsNum),
+		nsArg.DevPath,
+	); err != nil {
+		return err
+	}
+	if err := writeFile(
+		nvmetSubsysNsAnaGrpIdPath(nqn, nsArg.NsNum),
+		"1",
+	); err != nil {
+		return err
+	}
+	nsUuid := uuid.NewMD5(uuidNameSpace, []byte("abc")).String()
+	if err := writeFile(
+		nvmetSubsysNsNguidPath(nqn, nsArg.NsNum),
+		nsUuid,
+	); err != nil {
+		return err
+	}
+	if err := writeFile(
+		nvmetSubsysNsUuidPath(nqn, nsArg.NsNum),
+		nsUuid,
+	); err != nil {
+		return err
+	}
+	if err := writeFile(
+		nvmetSubsysNsEnablePath(nqn, nsArg.NsNum),
+		"1",
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (oc *OsCommand) nvmetSubsysNsDelete(nqn string, nsNum string) error {
-	return nil
+	return removeAny(nvmetSubsysNsPath(nqn, nsNum))
 }
 
 func (oc *OsCommand) NvmetSubsysCreate(
