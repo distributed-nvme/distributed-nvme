@@ -483,6 +483,41 @@ func (oc *OsCommand) NvmetSubsysCreate(
 	return nil
 }
 
+func (oc *OsCommand) NvmetSubsysDelete(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+) error {
+	hostEntries, err := os.ReadDir(nvmetSubsysHostsPath(nqn))
+	if err != nil {
+		return err
+	}
+	for _, hostEntry := range hostEntries {
+		if err := oc.nvmetRemoveHostFromSubsys(nqn, hostEntry.Name()); err != nil {
+			return err
+		}
+	}
+
+	nsEntries, err := os.ReadDir(nvmetSubsysNsParentPath(nqn))
+	if err != nil {
+		return err
+	}
+	for _, nsEntity := range nsEntries {
+		if err := oc.nvmetSubsysNsDelete(nqn, nsEntity.Name()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (oc *OsCommand) RemoveSubsysFromPort(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+	portNum string,
+) error {
+	return oc.nvmetRemoveSubsysFromPort(nqn, portNum);
+}
+
 type DmLinearArg struct {
 	Start   uint64
 	Size    uint64
