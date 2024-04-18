@@ -35,7 +35,7 @@ message NvmeListener {
 }
 
 message NvmePortConf {
-  uint32 port_num = 1;
+  string port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
 }

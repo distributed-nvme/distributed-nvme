@@ -110,7 +110,7 @@ func syncup(
 			Revision: revision,
 			DevPath:  dnConf.GeneralConf.DevPath,
 			NvmePortConf: &pbnd.NvmePortConf{
-				PortNum: dnConf.GeneralConf.NvmePortConf.PortNum,
+				PortNum: string(dnConf.GeneralConf.NvmePortConf.PortNum),
 				NvmeListener: &pbnd.NvmeListener{
 					TrType:  dnConf.GeneralConf.NvmePortConf.NvmeListener.TrType,
 					AdrFam:  dnConf.GeneralConf.NvmePortConf.NvmeListener.AdrFam,

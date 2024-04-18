@@ -10,7 +10,7 @@ import (
 type DnLocal struct {
 	DnId        string
 	DevPath     string
-	PortNum     uint32
+	PortNum     string
 	Revision    int64
 	LiveSpLdMap map[string]bool
 	DeadSpLdMap map[string]bool

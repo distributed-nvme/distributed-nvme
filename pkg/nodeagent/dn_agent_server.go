@@ -37,7 +37,7 @@ func decodeSpLdId(
 type spLdRuntimeData struct {
 	mu        sync.Mutex
 	devPath   string
-	portNum   uint32
+	portNum   string
 	spLdLocal *localdata.SpLdLocal
 }
 
@@ -46,7 +46,7 @@ func syncupSpLd(
 	oc *oscmd.OsCommand,
 	spLdConf *pbnd.SpLdConf,
 	devPath string,
-	portNum uint32,
+	portNum string,
 ) error {
 	return nil
 }

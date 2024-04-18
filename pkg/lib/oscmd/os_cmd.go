@@ -132,23 +132,23 @@ func readFile(path string) (string, error) {
 	return string(data), nil
 }
 
-func nvmetPortPath(portNum uint32) string {
+func nvmetPortPath(portNum string) string {
 	return fmt.Sprintf("%s/ports/%s", nvmetPath, portNum)
 }
 
-func nvmetTrTypePath(portNum uint32) string {
+func nvmetTrTypePath(portNum string) string {
 	return fmt.Sprintf("%s/addr_trtype", nvmetPortPath(portNum))
 }
 
-func nvmetAdrFamPath(portNum uint32) string {
+func nvmetAdrFamPath(portNum string) string {
 	return fmt.Sprintf("%s/addr_adrfam", nvmetPortPath(portNum))
 }
 
-func nvmetTrAddrPath(portNum uint32) string {
+func nvmetTrAddrPath(portNum string) string {
 	return fmt.Sprintf("%s/addr_traddr", nvmetPortPath(portNum))
 }
 
-func nvmetTrSvcIdPath(portNum uint32) string {
+func nvmetTrSvcIdPath(portNum string) string {
 	return fmt.Sprintf("%s/addr_trsvcid", nvmetPortPath(portNum))
 }
 
@@ -180,7 +180,7 @@ func nvmetHostInSubsysPath(nqn, hostNqn string) string {
 	return fmt.Sprintf("%s/%s", nvmetSubsysHostsPath(nqn), hostNqn)
 }
 
-func nvmetSubsysInPortPath(nqn string, portNum uint32) string {
+func nvmetSubsysInPortPath(nqn string, portNum string) string {
 	return fmt.Sprintf("%s/subsystems/%s", nvmetPortPath(portNum), nqn)
 }
 
@@ -253,7 +253,7 @@ func (oc *OsCommand) GetBlockDevSize(
 
 func (oc *OsCommand) NvmetPortCreate(
 	pch *ctxhelper.PerCtxHelper,
-	portNum uint32,
+	portNum string,
 	trType string,
 	adrFam string,
 	trAddr string,
@@ -287,7 +287,7 @@ func (oc *OsCommand) NvmetPortCreate(
 
 func (oc *OsCommand) NvmetPortDelete(
 	pch *ctxhelper.PerCtxHelper,
-	portNum uint32,
+	portNum string,
 ) error {
 	if err := removeAny(nvmetPortPath(portNum)); err != nil {
 		return err
@@ -316,11 +316,11 @@ func (oc *OsCommand) nvmetRemoveHostFromSubsys(nqn, hostNqn string) error {
 	return removeAny(nvmetHostInSubsysPath(nqn, hostNqn))
 }
 
-func (oc *OsCommand) nvmetAddSubsysToPort(nqn string, portNum uint32) error {
+func (oc *OsCommand) nvmetAddSubsysToPort(nqn string, portNum string) error {
 	return createLink(nvmetSubsysPath(nqn), nvmetSubsysInPortPath(nqn, portNum))
 }
 
-func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum uint32) error {
+func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum string) error {
 	return removeAny(nvmetSubsysInPortPath(nqn, portNum))
 }
 
@@ -337,7 +337,7 @@ func (oc *OsCommand) NvmetSubsysCreate(
 	nqn string,
 	cntlidMin uint32,
 	cntlidMax uint32,
-	portNum uint32,
+	portNum string,
 	hostNqnMap map[string]bool,
 	nsMap map[string]*NvmetNsArg,
 ) error {
