@@ -184,6 +184,30 @@ func nvmetSubsysInPortPath(nqn string, portNum uint32) string {
 	return fmt.Sprintf("%s/subsystems/%s", nvmetPortPath(portNum), nqn)
 }
 
+func nvmetSubsysNsParentPath(nqn string) string {
+	return fmt.Sprintf("%s/namespaces", nvmetSubsysPath(nqn))
+}
+
+func nvmetSubsysNsDevPath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s/device_path", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
+func nvmetSubsysNsNguidPath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s/device_nguid", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
+func nvmetSubsysNsUuidPath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s/device_uuid", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
+func nvmetSubsysNsEnablePath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s/enable", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
+func nvmetSubsysNsAnaGrpIdPath(nqn, nsNum string) string {
+	return fmt.Sprintf("%s/%s/ana_grpid", nvmetSubsysNsParentPath(nqn), nsNum)
+}
+
 type OsCommand struct {
 }
 
@@ -273,7 +297,7 @@ func (oc *OsCommand) NvmetPortDelete(
 }
 
 type NvmetNsArg struct {
-	NsNum   uint32
+	NsNum   string
 	DevPath string
 }
 
@@ -300,6 +324,14 @@ func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum uint32) error
 	return removeAny(nvmetSubsysInPortPath(nqn, portNum))
 }
 
+func (oc *OsCommand) nvmetSubsysNsCreate(nqn string, nsArg *NvmetNsArg) error {
+	return nil
+}
+
+func (oc *OsCommand) nvmetSubsysNsDelete(nqn string, nsNum string) error {
+	return nil
+}
+
 func (oc *OsCommand) NvmetSubsysCreate(
 	pch *ctxhelper.PerCtxHelper,
 	nqn string,
@@ -307,7 +339,7 @@ func (oc *OsCommand) NvmetSubsysCreate(
 	cntlidMax uint32,
 	portNum uint32,
 	hostNqnMap map[string]bool,
-	nsArgs []*NvmetNsArg,
+	nsMap map[string]*NvmetNsArg,
 ) error {
 	if err := createDir(nvmetSubsysPath(nqn)); err != nil {
 		return err
@@ -324,38 +356,38 @@ func (oc *OsCommand) NvmetSubsysCreate(
 		return err
 	}
 
-	entries, err := os.ReadDir(nvmetSubsysHostsPath(nqn))
+	hostEntries, err := os.ReadDir(nvmetSubsysHostsPath(nqn))
 	if err != nil {
 		return err
 	}
 	currHostNqnMap := make(map[string]bool)
-	for _, entry := range entries {
-		currHostNqnMap[entry.Name()] = true
+	for _, hostEntry := range hostEntries {
+		currHostNqnMap[hostEntry.Name()] = true
 	}
 
-	toBeCreated := make([]string, 0)
-	toBeDeleted := make([]string, 0)
+	hostToBeCreated := make([]string, 0)
+	hostToBeDeleted := make([]string, 0)
 	for hostNqn := range hostNqnMap {
 		if _, ok := currHostNqnMap[hostNqn]; !ok {
-			toBeCreated = append(toBeCreated, hostNqn)
+			hostToBeCreated = append(hostToBeCreated, hostNqn)
 		}
 	}
 	for hostNqn := range currHostNqnMap {
 		if _, ok := hostNqnMap[hostNqn]; !ok {
-			toBeDeleted = append(toBeDeleted, hostNqn)
+			hostToBeDeleted = append(hostToBeDeleted, hostNqn)
 		}
 	}
 
-	for _, hostNqn := range toBeCreated {
+	for _, hostNqn := range hostToBeCreated {
 		if err := oc.nvmetAddHostToSubsys(nqn, hostNqn); err != nil {
 			return err
 		}
 	}
-	if len(toBeDeleted) > 0 {
+	if len(hostToBeDeleted) > 0 {
 		if err := oc.nvmetRemoveSubsysFromPort(nqn, portNum); err != nil {
 			return err
 		}
-		for _, hostNqn := range toBeDeleted {
+		for _, hostNqn := range hostToBeDeleted {
 			if err := oc.nvmetRemoveHostFromSubsys(nqn, hostNqn); err != nil {
 				return err
 			}
@@ -364,6 +396,49 @@ func (oc *OsCommand) NvmetSubsysCreate(
 	if err := oc.nvmetAddSubsysToPort(nqn, portNum); err != nil {
 		return err
 	}
+
+	nsEntries, err := os.ReadDir(nvmetSubsysNsParentPath(nqn))
+	if err != nil {
+		return err
+	}
+	currNsMap := make(map[string]bool)
+	for _, nsEntity := range nsEntries {
+		currNsMap[nsEntity.Name()] = true
+	}
+	nsToBeCreated := make([]*NvmetNsArg, 0)
+	nsToBeDeleted := make([]string, 0)
+	for nsNum := range currNsMap {
+		nsArg, ok := nsMap[nsNum]
+		if !ok {
+			nsToBeDeleted = append(nsToBeDeleted, nsNum)
+		} else {
+			devPath, err := readFile(nvmetSubsysNsDevPath(nqn, nsNum))
+			if err != nil {
+				return err
+			}
+			if devPath != nsArg.DevPath {
+				nsToBeDeleted = append(nsToBeDeleted, nsNum)
+				nsToBeCreated = append(nsToBeCreated, nsArg)
+			}
+		}
+	}
+	for nsNum, nsArg := range nsMap {
+		if _, ok := currNsMap[nsNum]; !ok {
+			nsToBeCreated = append(nsToBeCreated, nsArg)
+		}
+	}
+
+	for _, nsNum := range nsToBeDeleted {
+		if err := oc.nvmetSubsysNsDelete(nqn, nsNum); err != nil {
+			return err
+		}
+	}
+	for _, nsArg := range nsToBeCreated {
+		if err := oc.nvmetSubsysNsCreate(nqn, nsArg); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
