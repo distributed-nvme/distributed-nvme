@@ -12,6 +12,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/localdata"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/namefmt"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/oscmd"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/prefixlog"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
@@ -44,6 +45,7 @@ type spLdRuntimeData struct {
 func syncupSpLd(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
 	spLdConf *pbnd.SpLdConf,
 	devPath string,
 	portNum string,
@@ -54,6 +56,7 @@ func syncupSpLd(
 func cleanupSpLd(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
 	spLdLocal *localdata.SpLdLocal,
 ) error {
 	return nil
@@ -63,6 +66,7 @@ type dnAgentServer struct {
 	pbnd.UnimplementedDiskNodeAgentServer
 	mu         sync.Mutex
 	oc         *oscmd.OsCommand
+	nf         *namefmt.NameFmt
 	local      *localdata.LocalClient
 	bgInterval time.Duration
 	dnLocal    *localdata.DnLocal
@@ -75,7 +79,7 @@ func (dnAgent *dnAgentServer) GetDevSize(
 ) (*pbnd.GetDevSizeReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 	timestamp := time.Now().UnixMilli()
-	size, err := dnAgent.oc.GetBlockDevSize(pch, req.DevPath)
+	size, err := dnAgent.oc.BlkGetSize(pch, req.DevPath)
 	if err != nil {
 		return &pbnd.GetDevSizeReply{
 			StatusInfo: &pbnd.StatusInfo{
@@ -349,6 +353,7 @@ func (dnAgent *dnAgentServer) cleanup(
 		err := cleanupSpLd(
 			pch,
 			dnAgent.oc,
+			dnAgent.nf,
 			spLdData.spLdLocal,
 		)
 		spLdData.mu.Unlock()
@@ -520,6 +525,7 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 	if err := syncupSpLd(
 		pch,
 		dnAgent.oc,
+		dnAgent.nf,
 		req.SpLdConf,
 		spLdData.devPath,
 		spLdData.portNum,
@@ -614,6 +620,10 @@ func newDnAgentServer(
 ) *dnAgentServer {
 	dnAgent := &dnAgentServer{
 		oc:         oscmd.NewOsCommand(),
+		nf:         namefmt.NewNameFmt(
+			constants.DeviceMapperPrefixDefault,
+			constants.NqnPrefixDefault,
+		),
 		local:      localdata.NewLocalClient(dataPath),
 		dnLocal:    nil,
 		bgInterval: bgInterval,

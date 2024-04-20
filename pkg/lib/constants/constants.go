@@ -7,6 +7,7 @@ import (
 const (
 	SchemaPrefixDefault       = "dnv"
 	DeviceMapperPrefixDefault = "dnv"
+	NqnPrefixDefault          = "nqn.2024-01.io.dnv"
 
 	ReplyCodeSucceed     = 0
 	ReplyMsgSucceed      = "succeed"

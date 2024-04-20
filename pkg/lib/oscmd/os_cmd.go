@@ -246,20 +246,6 @@ func (oc *OsCommand) runOsCmd(
 	return stdout, stderr, err
 }
 
-func (oc *OsCommand) GetBlockDevSize(
-	pch *ctxhelper.PerCtxHelper,
-	devPath string,
-) (uint64, error) {
-	name := "blockdev"
-	args := []string{"--getsize64", devPath}
-	stdout, _, err := oc.runOsCmd(pch, name, args, "")
-	if err != nil {
-		return 0, err
-	}
-	size, err := strconv.ParseUint(stdout, 10, 64)
-	return size, err
-}
-
 func (oc *OsCommand) NvmetPortCreate(
 	pch *ctxhelper.PerCtxHelper,
 	portNum string,
@@ -691,6 +677,32 @@ func (oc *OsCommand) DmGetAll(
 		dmMap[name] = true
 	}
 	return dmMap, nil
+}
+
+func (oc *OsCommand) BlkGetSize(
+	pch *ctxhelper.PerCtxHelper,
+	devPath string,
+) (uint64, error) {
+	name := "blockdev"
+	args := []string{"--getsize64", devPath}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return 0, err
+	}
+	size, err := strconv.ParseUint(stdout, 10, 64)
+	return size, err
+}
+
+func (oc *OsCommand) BlkDiscard(
+	pch *ctxhelper.PerCtxHelper,
+	devPath string,
+	offset uint64,
+	length uint64,
+) error {
+	name := "blkdiscard"
+	args := []string{"--offset", string(offset), "--length", string(length)}
+	_, _, err := oc.runOsCmd(pch, name, args, "")
+	return err
 }
 
 func NewOsCommand() *OsCommand {
