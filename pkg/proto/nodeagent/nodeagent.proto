@@ -105,7 +105,7 @@ message SpLdConf {
   uint64 start = 5;
   uint64 length = 6;
   QosConf qos_conf = 7;
-  repeated uint64 cn_id_list = 8;
+  repeated string cn_id_list = 8;
   bool inited = 9;
 }
 

@@ -12,7 +12,7 @@ type NameFmt struct {
 const (
 	devTypeLdDnDm = "0000"
 
-	nqnTypeHost = "0000"
+	nqnTypeHostCn = "0000"
 	nqnTypeLdDnDm = "1000"
 	nqnTypeRemote = "1100"
 )
@@ -32,12 +32,12 @@ func (nf *NameFmt) LdDnDmName(
 	)
 }
 
-func (nf *NameFmt) HostNqn(hostId string) string {
+func (nf *NameFmt) HostNqnCn(cnId string) string {
 	return fmt.Sprintf(
 		"%s:%s:%s",
 		nf.nqnPrefix,
-		nqnTypeHost,
-		hostId,
+		nqnTypeHostCn,
+		cnId,
 	)
 }
 
@@ -56,6 +56,13 @@ func (nf *NameFmt) LdDnDmNqn(
 	)
 }
 
+func (nf *NameFmt) LdDnDmNsNum() string {
+	return "1"
+}
+
+func (nf *NameFmt) DmNameToPath(dmName string) string {
+	return fmt.Sprintf("/dev/mapper/%s", dmName)
+}
 func NewNameFmt(
 	dmPrefix string,
 	nqnPrefix string,

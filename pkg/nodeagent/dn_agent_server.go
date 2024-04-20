@@ -50,6 +50,70 @@ func syncupSpLd(
 	devPath string,
 	portNum string,
 ) error {
+	if !spLdConf.Inited {
+		if err := oc.BlkDiscard(
+			pch,
+			devPath,
+			spLdConf.Start,
+			spLdConf.Length,
+		); err != nil {
+			return err
+		}
+	}
+
+	dmName := nf.LdDnDmName(
+		spLdConf.DnId,
+		spLdConf.SpId,
+		spLdConf.LdId,
+	)
+	dmPath := nf.DmNameToPath(dmName)
+	linearArgs := make([]*oscmd.DmLinearArg, 1)
+	linearArgs[0] = &oscmd.DmLinearArg{
+		Start: spLdConf.Start,
+		Size: spLdConf.Length,
+		DevPath: devPath,
+		Offset: 0,
+	}
+	if err := oc.DmCreateLinear(
+		pch,
+		dmName,
+		linearArgs,
+	); err != nil {
+		return err
+	}
+
+	nqn := nf.LdDnDmNqn(
+		spLdConf.DnId,
+		spLdConf.SpId,
+		spLdConf.LdId,
+	)
+
+	hostNqnMap := make(map[string]bool)
+	for _, cnId := range spLdConf.CnIdList {
+		hostNqn := nf.HostNqnCn(cnId)
+		hostNqnMap[hostNqn] = true
+	}
+
+	nsMap := make(map[string]*oscmd.NvmetNsArg)
+	nsNum := nf.LdDnDmNsNum()
+	nsArg := &oscmd.NvmetNsArg{
+		NsNum: nsNum,
+		DevPath: dmPath,
+	}
+	nsMap[nsNum] = nsArg
+
+	if err := oc.NvmetSubsysCreate(
+		pch,
+		nqn,
+		constants.DnCntlidMin,
+		constants.DnCntlidMax,
+		portNum,
+		hostNqnMap,
+		nsMap,
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
 
