@@ -184,6 +184,7 @@ message LdConf {
   uint32 ld_idx = 4;
   uint64 start = 5;
   uint64 length = 6;
+  bool inited = 7;
 }
 
 message LdInfo {
