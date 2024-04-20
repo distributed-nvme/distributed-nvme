@@ -17,6 +17,9 @@ service ControllerNodeAgent {
   rpc CheckCn(CheckCnRequest) returns(CheckCnReply) {}
   rpc SyncupSpCntlr(SyncupSpCntlrRequest) returns(SyncupSpCntlrReply) {}
   rpc CheckSpCntlr(CheckSpCntlrRequest) returns(CheckSpCntlrReply) {}
+  rpc Suspend(SuspendRequest) returns(SuspendReply) {}
+  rpc Resume(ResumeRequest) returns(ResumeReply) {}
+  rpc TakeSnapshot(TakeSnapshotRequest) returns(TakeSnapshotReply) {}
 }
 
 message StatusInfo {
@@ -197,6 +200,9 @@ message GrpConf {
   uint32 grp_idx = 2;
   uint64 grp_size = 3;
   repeated LdCnConf ld_cn_conf_list = 4;
+  bool inited = 5;
+  uint32 rebuild_idx = 6;
+  repeated uint32 omit_idx_list = 7;
 }
 
 message LocalLegConf {
@@ -395,4 +401,38 @@ message CheckSpCntlrRequest {
 }
 
 message CheckSpCntlrReply {
+}
+
+message SuspendRequest {
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
+  int64 revision = 4;
+}
+
+message SuspendReply {
+  StatusInfo status_info = 1;
+}
+
+message ResumeRequest {
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
+  int64 revision = 4;
+}
+
+message ResumeReply {
+  StatusInfo status_info = 1;
+}
+
+message TakeSnapshotRequest {
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
+  int64 revision = 4;
+  SnapConf snap_conf = 5;
+}
+
+message TakeSnapshotReply {
+  StatusInfo status_info = 1;
 }

@@ -198,6 +198,9 @@ message GrpConf {
   uint32 meta_extent_cnt = 3;
   uint32 data_extent_cnt = 4;
   repeated LdConf ld_conf_list = 5;
+  bool inited = 6;
+  uint32 rebuild_idx = 7;
+  repeated uint32 omit_idx_list = 8;
 }
 
 message GrpInfo {
@@ -407,12 +410,13 @@ message ControllerNodeInfo {
 message StoragePoolConf {
   repeated Tag tag_list = 1;
   SpGeneralConf general_conf = 2;
-  repeated SnapConf sp_conf = 3;
-  repeated SsConf ss_conf = 4;
-  repeated LegConf leg_conf_list = 5;
-  repeated CntlrConf cntlr_conf_list = 6;
-  repeated MtConf mt_conf_list = 7;
-  repeated ItConf it_conf_list = 8;
+  SnapConf new_sp_conf = 3;
+  repeated SnapConf sp_conf = 4;
+  repeated SsConf ss_conf = 5;
+  repeated LegConf leg_conf_list = 6;
+  repeated CntlrConf cntlr_conf_list = 7;
+  repeated MtConf mt_conf_list = 8;
+  repeated ItConf it_conf_list = 9;
 }
 
 // /{dnv_prefix}/sp_info{sp_id}
