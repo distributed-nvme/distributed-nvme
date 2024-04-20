@@ -20,6 +20,8 @@ service ControllerNodeAgent {
   rpc Suspend(SuspendRequest) returns(SuspendReply) {}
   rpc Resume(ResumeRequest) returns(ResumeReply) {}
   rpc TakeSnapshot(TakeSnapshotRequest) returns(TakeSnapshotReply) {}
+  rpc Flush(FlushRequest) returns(FlushReply) {}
+  rpc CleanupFence(CleanupFenceRequest) returns(CleanupFenceReply) {}
 }
 
 message StatusInfo {
@@ -327,6 +329,7 @@ message LocalLegInfo {
 message RemoteLegInfo {
   uint64 leg_id = 1;
   StatusInfo status_info = 2;
+  string fence_id = 3;
 }
 
 message SnapInfo {
@@ -401,6 +404,7 @@ message CheckSpCntlrRequest {
 }
 
 message CheckSpCntlrReply {
+  SpCntlrInfo sp_cntlr_info = 1;
 }
 
 message SuspendRequest {
@@ -434,5 +438,24 @@ message TakeSnapshotRequest {
 }
 
 message TakeSnapshotReply {
+  StatusInfo status_info = 1;
+}
+
+message FlushRequest {
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
+  int64 revision = 4;
+}
+
+message FlushReply {
+  StatusInfo status_info = 1;
+}
+
+message CleanupFenceRequest {
+  repeated string fence_id_list = 1;
+}
+
+message CleanupFenceReply {
   StatusInfo status_info = 1;
 }

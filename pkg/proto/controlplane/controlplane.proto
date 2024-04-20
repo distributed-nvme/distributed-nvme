@@ -217,9 +217,15 @@ message LegConf {
   repeated GrpConf grp_conf_list = 4;
 }
 
+message FenceInfo {
+  string cn_id = 1;
+  string fence_id = 2;
+}
+
 message RemoteLegInfo {
   uint64 cntlr_id = 1;
   StatusInfo status_info = 2;
+  FenceInfo fence_info = 3;
 }
 
 message LegInfo {
