@@ -122,7 +122,42 @@ func cleanupSpLd(
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
 	spLdLocal *localdata.SpLdLocal,
+	portNum string,
 ) error {
+	nqn := nf.LdDnDmNqn(
+		spLdLocal.DnId,
+		spLdLocal.SpId,
+		spLdLocal.LdId,
+	)
+
+	dmName := nf.LdDnDmName(
+		spLdLocal.DnId,
+		spLdLocal.SpId,
+		spLdLocal.LdId,
+	)
+
+	if err := oc.RemoveSubsysFromPort(
+		pch,
+		nqn,
+		portNum,
+	); err != nil {
+		return err
+	}
+
+	if err := oc.NvmetSubsysDelete(
+		pch,
+		nqn,
+	); err != nil {
+		return err
+	}
+
+	if err := oc.DmRemove(
+		pch,
+		dmName,
+	); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -419,6 +454,7 @@ func (dnAgent *dnAgentServer) cleanup(
 			dnAgent.oc,
 			dnAgent.nf,
 			spLdData.spLdLocal,
+			spLdData.portNum,
 		)
 		spLdData.mu.Unlock()
 		if err != nil {
