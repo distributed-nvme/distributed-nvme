@@ -40,6 +40,7 @@ type spLdRuntimeData struct {
 	devPath   string
 	portNum   string
 	spLdLocal *localdata.SpLdLocal
+	spLdConf  *pbnd.SpLdConf
 }
 
 func syncupSpLd(
@@ -641,6 +642,8 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 		}, nil
 	}
 
+	spLdData.spLdConf = req.SpLdConf
+
 	return &pbnd.SyncupSpLdReply{
 		SpLdInfo: &pbnd.SpLdInfo{
 			StatusInfo: &pbnd.StatusInfo{
@@ -695,6 +698,18 @@ func (dnAgent *dnAgentServer) CheckSpLd(
 			SpLdInfo: &pbnd.SpLdInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
+					Msg:       fmt.Sprintf("Revision: %s", spLdData.spLdLocal.Revision),
+					Timestamp: timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if spLdData.spLdConf == nil {
+		return &pbnd.CheckSpLdReply{
+			SpLdInfo: &pbnd.SpLdInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeNoConf,
 					Msg:       fmt.Sprintf("Revision: %s", spLdData.spLdLocal.Revision),
 					Timestamp: timestamp,
 				},

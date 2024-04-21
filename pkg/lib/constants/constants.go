@@ -24,6 +24,7 @@ const (
 	StatusCodeInternalErr  = 2003
 	StatusCodeDataMismatch = 2004
 	StatusCodeOldRevision  = 2005
+	StatusCodeNoConf       = 2006
 	StatusCodeNotFound     = 3001
 
 	AgentTimeoutDefault = 3 * time.Second
