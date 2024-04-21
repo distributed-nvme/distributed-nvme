@@ -501,7 +501,7 @@ func (oc *OsCommand) RemoveSubsysFromPort(
 	nqn string,
 	portNum string,
 ) error {
-	return oc.nvmetRemoveSubsysFromPort(nqn, portNum);
+	return oc.nvmetRemoveSubsysFromPort(nqn, portNum)
 }
 
 type DmLinearArg struct {

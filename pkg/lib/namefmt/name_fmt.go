@@ -5,7 +5,7 @@ import (
 )
 
 type NameFmt struct {
-	dmPrefix string
+	dmPrefix  string
 	nqnPrefix string
 }
 
@@ -68,7 +68,7 @@ func NewNameFmt(
 	nqnPrefix string,
 ) *NameFmt {
 	return &NameFmt{
-		dmPrefix: dmPrefix,
+		dmPrefix:  dmPrefix,
 		nqnPrefix: nqnPrefix,
 	}
 }

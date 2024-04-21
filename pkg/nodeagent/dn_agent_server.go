@@ -69,10 +69,10 @@ func syncupSpLd(
 	dmPath := nf.DmNameToPath(dmName)
 	linearArgs := make([]*oscmd.DmLinearArg, 1)
 	linearArgs[0] = &oscmd.DmLinearArg{
-		Start: spLdConf.Start,
-		Size: spLdConf.Length,
+		Start:   spLdConf.Start,
+		Size:    spLdConf.Length,
 		DevPath: devPath,
-		Offset: 0,
+		Offset:  0,
 	}
 	if err := oc.DmCreateLinear(
 		pch,
@@ -97,7 +97,7 @@ func syncupSpLd(
 	nsMap := make(map[string]*oscmd.NvmetNsArg)
 	nsNum := nf.LdDnDmNsNum()
 	nsArg := &oscmd.NvmetNsArg{
-		NsNum: nsNum,
+		NsNum:   nsNum,
 		DevPath: dmPath,
 	}
 	nsMap[nsNum] = nsArg
@@ -719,8 +719,8 @@ func newDnAgentServer(
 	bgInterval time.Duration,
 ) *dnAgentServer {
 	dnAgent := &dnAgentServer{
-		oc:         oscmd.NewOsCommand(),
-		nf:         namefmt.NewNameFmt(
+		oc: oscmd.NewOsCommand(),
+		nf: namefmt.NewNameFmt(
 			constants.DeviceMapperPrefixDefault,
 			constants.NqnPrefixDefault,
 		),

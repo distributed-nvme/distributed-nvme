@@ -42,9 +42,7 @@ func init() {
 	)
 }
 
-func launchAgent(cmd *cobra.Command, args []string) {
-	gLogger.Info("Launch agent: %v", agentArgs)
-
+func launchDnAgent() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	lis, err := net.Listen(agentArgs.grpcNetwork, agentArgs.grpcAddress)
@@ -71,6 +69,48 @@ func launchAgent(cmd *cobra.Command, args []string) {
 
 	cancel()
 	gLogger.Info("Exit disk node agent")
+}
+
+func launchCnAgent() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	lis, err := net.Listen(agentArgs.grpcNetwork, agentArgs.grpcAddress)
+	if err != nil {
+		gLogger.Fatal("Listen err: %v", err)
+	}
+
+	cnAgent := newCnAgentServer(
+		ctx,
+		constants.LocalDataPathDefault,
+		constants.CnAgentBgInterval,
+	)
+
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			ctxhelper.UnaryServerPerCtxHelperInterceptor,
+		),
+	)
+
+	pbnd.RegisterControllerNodeAgentServer(grpcServer, cnAgent)
+	if err := grpcServer.Serve(lis); err != nil {
+		gLogger.Fatal("Serve err: %v", err)
+	}
+
+	cancel()
+	gLogger.Info("Exit controller node agent")
+}
+
+func launchAgent(cmd *cobra.Command, args []string) {
+	gLogger.Info("Launch agent: %v", agentArgs)
+
+	switch agentArgs.role {
+	case "dn":
+		launchDnAgent()
+	case "cn":
+		launchCnAgent()
+	default:
+		gLogger.Fatal("Unknow role: %s", agentArgs.role)
+	}
 }
 
 func Execute() {
