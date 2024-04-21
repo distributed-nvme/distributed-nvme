@@ -438,8 +438,11 @@ func (dnAgent *dnAgentServer) updateDeadSpLd(
 		}
 	}
 
-	if err := dnAgent.local.SetDnLocal(pch, dnAgent.dnLocal); err != nil {
-		pch.Logger.Error("SetDnLocal err: %v", err)
+	if err := dnAgent.local.SetDnLocal(
+		pch,
+		dnAgent.dnLocal,
+	); err != nil {
+		pch.Logger.Fatal("SetDnLocal err: %v", err)
 	}
 }
 
@@ -611,7 +614,10 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 
 	spLdData.spLdLocal.Revision = req.SpLdConf.Revision
 
-	if err := dnAgent.local.SetSpLdLocal(pch, spLdData.spLdLocal); err != nil {
+	if err := dnAgent.local.SetSpLdLocal(
+		pch,
+		spLdData.spLdLocal,
+	); err != nil {
 		return &pbnd.SyncupSpLdReply{
 			SpLdInfo: &pbnd.SpLdInfo{
 				StatusInfo: &pbnd.StatusInfo{

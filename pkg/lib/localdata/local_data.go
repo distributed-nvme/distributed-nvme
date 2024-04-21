@@ -23,16 +23,38 @@ type SpLdLocal struct {
 	Revision int64
 }
 
+type CnLocal struct {
+	CnId string
+	Revision int64
+	LiveSpCntlrMap map[string]bool
+	DeadSpCntlrMap map[string]bool
+}
+
+type SpCntlrLocal struct {
+	CnId string
+	SpId string
+	CntlrId string
+	Revision int64
+}
+
 func spLdKey(dnId, spId, ldId string) string {
 	return fmt.Sprintf("%s-%s-%s", dnId, spId, ldId)
 }
 
+func spCntlrKey(cnId, spId, cntlrId string) string {
+	return fmt.Sprintf("%s-%s-%s", cnId, spId, cntlrId)
+}
+
 type LocalClient struct {
-	dataPath string
-	dnMu     sync.Mutex
-	dnMap    map[string]*DnLocal
-	spLdMu   sync.Mutex
-	spLdMap  map[string]*SpLdLocal
+	dataPath   string
+	dnMu       sync.Mutex
+	dnMap      map[string]*DnLocal
+	spLdMu     sync.Mutex
+	spLdMap    map[string]*SpLdLocal
+	cnMu       sync.Mutex
+	cnMap      map[string]*CnLocal
+	spCntlrMu  sync.Mutex
+	spCntlrMap map[string]*SpCntlrLocal
 }
 
 func (local *LocalClient) GetDnLocal(
@@ -105,6 +127,79 @@ func (local *LocalClient) DeleteSpLdLocal(
 	local.spLdMu.Lock()
 	defer local.spLdMu.Unlock()
 	delete(local.spLdMap, key)
+	return nil
+}
+
+func (local *LocalClient) GetCnLocal(
+	pch *ctxhelper.PerCtxHelper,
+	cnId string,
+) (*CnLocal, error) {
+	local.cnMu.Lock()
+	defer local.cnMu.Unlock()
+	cnLocal, ok := local.cnMap[cnId]
+	if ok {
+		return cnLocal, nil
+	}
+	return nil, nil
+}
+
+func (local *LocalClient) SetCnLocal(
+	pch *ctxhelper.PerCtxHelper,
+	cnLocal *CnLocal,
+) error {
+	local.cnMu.Lock()
+	defer local.cnMu.Unlock()
+	local.cnMap[cnLocal.CnId] = cnLocal
+	return nil
+}
+
+func (local *LocalClient) DeleteCnLocal(
+	pch *ctxhelper.PerCtxHelper,
+	cnId string,
+) error {
+	local.cnMu.Lock()
+	defer local.cnMu.Unlock()
+	delete(local.cnMap, cnId)
+	return nil
+}
+
+func (local *LocalClient) GetSpCntlrLocal(
+	pch *ctxhelper.PerCtxHelper,
+	cnId string,
+	spId string,
+	cntlrId string,
+) (*SpCntlrLocal, error) {
+	key := spCntlrKey(cnId, spId, cntlrId)
+	local.spCntlrMu.Lock()
+	defer local.spCntlrMu.Unlock()
+	spCntlrLocal, ok := local.spCntlrMap[key]
+	if ok {
+		return spCntlrLocal, nil
+	}
+	return nil, nil
+}
+
+func (local *LocalClient) SetSpCntlrLocal(
+	pch *ctxhelper.PerCtxHelper,
+	spCntlrLocal *SpCntlrLocal,
+) error {
+	key := spCntlrKey(spCntlrLocal.CnId, spCntlrLocal.SpId, spCntlrLocal.CntlrId)
+	local.spCntlrMu.Lock()
+	defer local.spCntlrMu.Unlock()
+	local.spCntlrMap[key] = spCntlrLocal
+	return nil
+}
+
+func (local *LocalClient) DeleteSpCntlrLocal(
+	pch *ctxhelper.PerCtxHelper,
+	cnId string,
+	spId string,
+	cntlrId string,
+) error {
+	key := spCntlrKey(cnId, spId, cntlrId)
+	local.spCntlrMu.Lock()
+	defer local.spCntlrMu.Unlock()
+	delete(local.spCntlrMap, key)
 	return nil
 }
 

@@ -272,9 +272,9 @@ message ActiveCntlrConf {
 }
 
 message SpCntlrConf {
-  uint64 cn_id = 1;
-  uint64 sp_id = 2;
-  uint64 cntlr_id = 3;
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
   int64 revision = 4;
   NvmePortConf nvme_port_conf = 5;
   repeated SsConf ss_conf_list = 6;
