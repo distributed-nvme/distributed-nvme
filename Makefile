@@ -20,6 +20,7 @@ compile:
 	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnvworker ./cmd/dnvworker
 	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnvagent ./cmd/dnvagent
 	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnvctl ./cmd/dnvctl
+	cp ./bin/linux_amd64/nvme $(OUT_DIR)/linux_amd64/nvme
 
 .PHONY: build
 build: proto compile

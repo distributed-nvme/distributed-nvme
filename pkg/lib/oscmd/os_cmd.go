@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -218,6 +219,7 @@ func nvmetSubsysNsAnaGrpIdPath(nqn, nsNum string) string {
 }
 
 type OsCommand struct {
+	exePath string
 }
 
 func (oc *OsCommand) runOsCmd(
@@ -679,6 +681,160 @@ func (oc *OsCommand) DmGetAll(
 	return dmMap, nil
 }
 
+// FIXME: Support more nvme connect parameters
+type NvmeArg struct {
+	Nqn string
+	Transport string
+	TrAddr string
+	TrSvcId string
+	HostNqn string
+}
+
+type nvmePath struct {
+	name string
+	transport string
+	trAddr string
+	trSvcId string
+	status string
+}
+
+type nvmeSubsys struct {
+	nqn string
+	pathList []*nvmePath
+}
+
+func (oc *OsCommand) nvmeGetSubsys(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+) (*nvmeSubsys, error) {
+	name := filepath.Join(oc.exePath, "nvme")
+	args := []string{"list-subsys"}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(stdout, "\n")
+	var subsys *nvmeSubsys
+	for _, line := range lines {
+		if strings.HasPrefix(line, "nvme-subsys") {
+			if subsys != nil {
+				break
+			}
+			if strings.HasSuffix(line, nqn) {
+				subsys = &nvmeSubsys{
+					nqn: nqn,
+					pathList: make([]*nvmePath, 0),
+				}
+			}
+		} else {
+			if subsys != nil {
+				if strings.HasPrefix(line, " +- nvme") {
+					items := strings.Split(line, " ")
+					name := items[2]
+					transport := items[3]
+					status := items[5]
+					addrAndSvcId := strings.Split(items[4], ",")
+					trAddr := strings.Split(addrAndSvcId[0], "=")[1]
+					trSvcId := strings.Split(addrAndSvcId[1], "=")[1]
+					nvPath := &nvmePath{
+						name: name,
+						transport: transport,
+						trAddr: trAddr,
+						trSvcId: trSvcId,
+						status: status,
+					}
+					subsys.pathList = append(subsys.pathList, nvPath)
+				}
+			}
+		}
+	}
+	return subsys, nil
+}
+
+func (oc *OsCommand) nvmeConnectPath(
+	pch *ctxhelper.PerCtxHelper,
+	nvmeArg *NvmeArg,
+) error {
+	name := filepath.Join(oc.exePath, "nvme")
+	args := []string{
+		"connect",
+		"--nqn",
+		nvmeArg.Nqn,
+		"--transpor",
+		nvmeArg.Transport,
+		"--traddr",
+		nvmeArg.TrAddr,
+		"--trsvcid",
+		nvmeArg.TrSvcId,
+		"--hostnqn",
+		nvmeArg.HostNqn,
+	}
+	if _, _, err := oc.runOsCmd(pch, name, args, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) nvmeDisconnectPath(
+	pch *ctxhelper.PerCtxHelper,
+	nvmeName string,
+) error {
+	name := filepath.Join(oc.exePath, "nvme")
+	args := []string{
+		"disconnect",
+		"--device",
+		nvmeName,
+	}
+	if _, _, err := oc.runOsCmd(pch, name, args, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) NvmeConnectPath(
+	pch *ctxhelper.PerCtxHelper,
+	nvmeArg *NvmeArg,
+) error {
+	subsys, err := oc.nvmeGetSubsys(pch, nvmeArg.Nqn)
+	if err != nil {
+		return err
+	}
+	if subsys != nil {
+		for _, nvPath := range subsys.pathList {
+			if nvPath.transport == nvmeArg.Transport &&
+				nvPath.trAddr == nvmeArg.TrAddr &&
+				nvPath.trSvcId == nvmeArg.TrSvcId {
+				// The path exists, nothing to do
+				return nil
+			}
+		}
+	}
+	if err := oc.nvmeConnectPath(pch, nvmeArg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) NvmeDisconnectPath(
+	pch *ctxhelper.PerCtxHelper,
+	nvmeArg *NvmeArg,
+) error {
+	subsys, err := oc.nvmeGetSubsys(pch, nvmeArg.Nqn)
+	if err != nil {
+		return err
+	}
+	if subsys != nil {
+		for _, nvPath := range subsys.pathList {
+			if nvPath.transport == nvmeArg.Transport &&
+				nvPath.trAddr == nvmeArg.TrAddr &&
+				nvPath.trSvcId == nvmeArg.TrSvcId {
+				return oc.nvmeDisconnectPath(pch, nvPath.name)
+			}
+		}
+	}
+	return nil
+}
+
 func (oc *OsCommand) BlkGetSize(
 	pch *ctxhelper.PerCtxHelper,
 	devPath string,
@@ -706,5 +862,11 @@ func (oc *OsCommand) BlkDiscard(
 }
 
 func NewOsCommand() *OsCommand {
-	return &OsCommand{}
+	exe, err := os.Executable()
+	if err != nil {
+		panic(err)
+	}
+	return &OsCommand{
+		exePath: filepath.Dir(exe),
+	}
 }
