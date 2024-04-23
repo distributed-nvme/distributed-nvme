@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
@@ -513,12 +514,40 @@ type DmLinearArg struct {
 	Offset  uint64
 }
 
+type DmRaid1Arg struct {
+	Start      uint64
+	Size       uint64
+	Meta0      string
+	Data0      string
+	Meta1      string
+	Data1      string
+	RegionSize uint32
+	Nosync     bool
+	RebuildIdx uint32
+}
+
 func (oc *OsCommand) dmStatus(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 ) (string, error) {
 	name := "dmsetup"
 	args := []string{"status", dmName}
+	stdout, stderr, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		if strings.Contains(stderr, dmNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return stdout, nil
+}
+
+func (oc *OsCommand) dmTable(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) (string, error) {
+	name := "dmsetup"
+	args := []string{"table", dmName}
 	stdout, stderr, err := oc.runOsCmd(pch, name, args, "")
 	if err != nil {
 		if strings.Contains(stderr, dmNotExist) {
@@ -642,6 +671,96 @@ func (oc *OsCommand) DmCreateLinear(
 	return oc.dmReload(pch, dmName, table)
 }
 
+type majorMinor struct {
+	major uint32
+	minor uint32
+}
+
+func (oc *OsCommand) dmRaidMajorMinor(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) ([]*majorMinor, error) {
+	tableStr, err := oc.dmTable(pch, dmName)
+	if err != nil {
+		return nil, err
+	}
+	if tableStr == "" {
+		return nil, nil
+	}
+	if !strings.Contains(tableStr, "raid raid") {
+		return nil, fmt.Errorf("%s is not a dm raid device", dmName)
+	}
+	mmList := make([]*majorMinor, 0)
+	items := strings.Split(tableStr, " ")
+	for _, item := range items {
+		if !strings.Contains(item, ":") {
+			continue
+		}
+		mmItems := strings.Split(item, ":")
+		if len(mmItems) != 2 {
+			return nil, fmt.Errorf("Invalid major minor number: %s", item)
+		}
+		major, err := strconv.ParseUint(mmItems[0], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid major: %s", mmItems[0])
+		}
+		minor, err := strconv.ParseUint(mmItems[1], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Invlaid minor: %s", mmItems[1])
+		}
+		mm := &majorMinor{
+			major: uint32(major),
+			minor: uint32(minor),
+		}
+		mmList = append(mmList, mm)
+	}
+	return mmList, nil
+}
+
+func (oc *OsCommand) DmCreateRaid1(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	raid1Arg *DmRaid1Arg,
+) error {
+	paramCnt := 3
+	noSync := ""
+	if raid1Arg.Nosync {
+		noSync = "nosync "
+		paramCnt += 1
+	}
+
+	rebuild := ""
+	if raid1Arg.RebuildIdx != constants.RebuildIdxNone {
+		rebuild = fmt.Sprintf("rebuild %d ", raid1Arg.RebuildIdx)
+		paramCnt += 2
+	}
+
+	table := fmt.Sprintf(
+		"%d %d raid raid1 %d 0 region_size %d %s%s2 %s %s %s %s",
+		byteToSector(raid1Arg.Start),
+		byteToSector(raid1Arg.Size),
+		paramCnt,
+		byteToSector(uint64(raid1Arg.RegionSize)),
+		noSync,
+		rebuild,
+		raid1Arg.Meta0,
+		raid1Arg.Data0,
+		raid1Arg.Meta1,
+		raid1Arg.Data1,
+	)
+
+	mmList, err := oc.dmRaidMajorMinor(pch, dmName)
+	if err != nil {
+		return err
+	}
+
+	if mmList == nil {
+		return oc.dmCreate(pch, dmName, table)
+	}
+
+	return nil
+}
+
 func (oc *OsCommand) DmRemove(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
@@ -683,23 +802,23 @@ func (oc *OsCommand) DmGetAll(
 
 // FIXME: Support more nvme connect parameters
 type NvmeArg struct {
-	Nqn string
+	Nqn       string
 	Transport string
-	TrAddr string
-	TrSvcId string
-	HostNqn string
+	TrAddr    string
+	TrSvcId   string
+	HostNqn   string
 }
 
 type nvmePath struct {
-	name string
+	name      string
 	transport string
-	trAddr string
-	trSvcId string
-	status string
+	trAddr    string
+	trSvcId   string
+	status    string
 }
 
 type nvmeSubsys struct {
-	nqn string
+	nqn      string
 	pathList []*nvmePath
 }
 
@@ -722,7 +841,7 @@ func (oc *OsCommand) nvmeGetSubsys(
 			}
 			if strings.HasSuffix(line, nqn) {
 				subsys = &nvmeSubsys{
-					nqn: nqn,
+					nqn:      nqn,
 					pathList: make([]*nvmePath, 0),
 				}
 			}
@@ -737,11 +856,11 @@ func (oc *OsCommand) nvmeGetSubsys(
 					trAddr := strings.Split(addrAndSvcId[0], "=")[1]
 					trSvcId := strings.Split(addrAndSvcId[1], "=")[1]
 					nvPath := &nvmePath{
-						name: name,
+						name:      name,
 						transport: transport,
-						trAddr: trAddr,
-						trSvcId: trSvcId,
-						status: status,
+						trAddr:    trAddr,
+						trSvcId:   trSvcId,
+						status:    status,
 					}
 					subsys.pathList = append(subsys.pathList, nvPath)
 				}
@@ -833,6 +952,49 @@ func (oc *OsCommand) NvmeDisconnectPath(
 		}
 	}
 	return nil
+}
+
+func (oc *OsCommand) fileRealpath(
+	pch *ctxhelper.PerCtxHelper,
+	path string,
+) (string, error) {
+	name := "realpath"
+	args := []string{path}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	return stdout, err
+}
+
+func (oc *OsCommand) blkGetMajorMinor(
+	pch *ctxhelper.PerCtxHelper,
+	devPath string,
+) (uint32, uint32, error) {
+	realPath, err := oc.fileRealpath(pch, devPath)
+	if err != nil {
+		return 0, 0, err
+	}
+	name := "stat"
+	args := []string{
+		"-c",
+		"%t %T",
+		realPath,
+	}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return 0, 0, err
+	}
+	items := strings.Split(stdout, " ")
+	if len(items) != 2 {
+		return 0, 0, fmt.Errorf("Invalid major/minor cnt: %d", len(items))
+	}
+	major, err := strconv.ParseUint(items[0], 16, 32)
+	if err != nil {
+		return 0, 0, err
+	}
+	minor, err := strconv.ParseUint(items[1], 16, 32)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uint32(major), uint32(minor), nil
 }
 
 func (oc *OsCommand) BlkGetSize(

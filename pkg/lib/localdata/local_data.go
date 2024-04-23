@@ -24,16 +24,16 @@ type SpLdLocal struct {
 }
 
 type CnLocal struct {
-	CnId string
-	Revision int64
+	CnId           string
+	Revision       int64
 	LiveSpCntlrMap map[string]bool
 	DeadSpCntlrMap map[string]bool
 }
 
 type SpCntlrLocal struct {
-	CnId string
-	SpId string
-	CntlrId string
+	CnId     string
+	SpId     string
+	CntlrId  string
 	Revision int64
 }
 

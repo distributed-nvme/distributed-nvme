@@ -36,9 +36,9 @@ func decodeSpCntlrId(
 }
 
 type spCntlrRuntimeData struct {
-	mu sync.Mutex
+	mu           sync.Mutex
 	spCntlrLocal *localdata.SpCntlrLocal
-	spCntlrConf *pbnd.SpCntlrConf
+	spCntlrConf  *pbnd.SpCntlrConf
 }
 
 func syncupSpCntlr(
@@ -95,8 +95,8 @@ func (cnAgent *cnAgentServer) SyncupCn(
 		}
 		if cnLocal == nil {
 			cnAgent.cnLocal = &localdata.CnLocal{
-				CnId: req.CnConf.CnId,
-				Revision: req.CnConf.Revision,
+				CnId:           req.CnConf.CnId,
+				Revision:       req.CnConf.Revision,
 				LiveSpCntlrMap: make(map[string]bool),
 				DeadSpCntlrMap: make(map[string]bool),
 			}
@@ -157,7 +157,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 	for _, key := range keyToLoad {
 		var spCntlrData *spCntlrRuntimeData
 		if spCntlrData, ok := cnAgent.spCntlrMap[key]; !ok {
-			spId,cntlrId, err := decodeSpCntlrId(key)
+			spId, cntlrId, err := decodeSpCntlrId(key)
 			if err != nil {
 				pch.Logger.Fatal("ecodeSpCntlrId err: %s %v", key, err)
 			}
@@ -381,7 +381,7 @@ func (cnAgent *cnAgentServer) getSpCntlrData(
 
 func (cnAgent *cnAgentServer) SyncupSpCntlr(
 	ctx context.Context,
-	req  *pbnd.SyncupSpCntlrRequest,
+	req *pbnd.SyncupSpCntlrRequest,
 ) (*pbnd.SyncupSpCntlrReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 	timestamp := time.Now().UnixMilli()
@@ -422,7 +422,7 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 		}, nil
 	}
 
-	if spCntlrData.spCntlrLocal.Revision > req.SpCntlrConf.Revision{
+	if spCntlrData.spCntlrLocal.Revision > req.SpCntlrConf.Revision {
 		return &pbnd.SyncupSpCntlrReply{
 			SpCntlrInfo: &pbnd.SpCntlrInfo{
 				StatusInfo: &pbnd.StatusInfo{
@@ -565,8 +565,8 @@ func newCnAgentServer(
 			constants.DeviceMapperPrefixDefault,
 			constants.NqnPrefixDefault,
 		),
-		local: localdata.NewLocalClient(dataPath),
-		cnLocal: nil,
+		local:      localdata.NewLocalClient(dataPath),
+		cnLocal:    nil,
 		bgInterval: bgInterval,
 	}
 	go cnAgent.background(ctx)
