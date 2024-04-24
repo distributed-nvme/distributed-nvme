@@ -693,6 +693,14 @@ func (oc *OsCommand) dmRaidMajorMinor(
 	mmList := make([]*majorMinor, 0)
 	items := strings.Split(tableStr, " ")
 	for _, item := range items {
+		if item == "-" {
+			mm := &majorMinor{
+				major: constants.DevMajorNone,
+				minor: constants.DevMinorNone,
+			}
+			mmList = append(mmList, mm)
+			continue
+		}
 		if !strings.Contains(item, ":") {
 			continue
 		}
@@ -706,7 +714,7 @@ func (oc *OsCommand) dmRaidMajorMinor(
 		}
 		minor, err := strconv.ParseUint(mmItems[1], 10, 32)
 		if err != nil {
-			return nil, fmt.Errorf("Invlaid minor: %s", mmItems[1])
+			return nil, fmt.Errorf("Invalid minor: %s", mmItems[1])
 		}
 		mm := &majorMinor{
 			major: uint32(major),
@@ -714,7 +722,112 @@ func (oc *OsCommand) dmRaidMajorMinor(
 		}
 		mmList = append(mmList, mm)
 	}
+	if len(mmList) != 4 {
+		return nil, fmt.Errorf("Invalid mm cnt: %d", len(mmList))
+	}
 	return mmList, nil
+}
+
+type DmRaidStatus struct {
+	Start uint64
+	Length uint64
+	RaidType string
+	DevCnt uint32
+	ChList []byte
+	SyncCurr uint64
+	SyncTotal uint64
+	SyncAction string
+	MismatchCnt uint64
+	DataOffset uint64
+	JournalChar byte
+}
+
+func (oc *OsCommand) dmRaidStatus(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) (*DmRaidStatus, error) {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return nil, err
+	}
+	if status == "" {
+		return nil, nil
+	}
+	items := strings.Split(status, " ")
+	if len(items) != 11 {
+		return nil, fmt.Errorf("Raid status item cnt incorrect: %d", len(items))
+	}
+	start, err := strconv.ParseUint(items[0], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	length, err := strconv.ParseUint(items[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	if items[2] != "raid" {
+		return nil, fmt.Errorf("Not raid status: %s", items[2])
+	}
+	if !strings.HasSuffix(items[3], "raid") {
+		return nil, fmt.Errorf("Invalid raid type: %s", items[3])
+	}
+	raidType := items[3]
+	devCnt, err := strconv.ParseUint(items[4], 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	if len(items[5]) != int(devCnt) {
+		return nil, fmt.Errorf("Incorrect health chars cnt: %d", len(items[5]))
+	}
+	chList := make([]byte, devCnt)
+	for i := 0; i < int(devCnt); i++ {
+		ch := items[5][i]
+		if ch != constants.RaidHealthAliveInSync &&
+			ch != constants.RaidHealthAliveOutSync &&
+			ch != constants.RaidHealthDead &&
+			ch != constants.RaidHealthMiss {
+			return nil, fmt.Errorf("Invalid health char: %c", ch)
+		}
+		chList[i] = ch
+	}
+	syncRatioItems := strings.Split(items[6], "/")
+	if len(syncRatioItems) != 2 {
+		return nil, fmt.Errorf("Invalid sync ratio cnt: %d", len(syncRatioItems))
+	}
+	syncCurr, err := strconv.ParseUint(syncRatioItems[0], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	syncTotal, err := strconv.ParseUint(syncRatioItems[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	syncAction := items[7]
+	mismatchCnt, err := strconv.ParseUint(items[8], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	dataOffset, err := strconv.ParseUint(items[9], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	if len(items[10]) != 1 {
+		return nil, fmt.Errorf("Invalid journal char cnt: %d", len(items[10]))
+	}
+	journalChar := items[10][0]
+	return &DmRaidStatus{
+		Start: start,
+		Length: length,
+		RaidType: raidType,
+		DevCnt: uint32(devCnt),
+		ChList: chList,
+		SyncCurr: syncCurr,
+		SyncTotal: syncTotal,
+		SyncAction: syncAction,
+		MismatchCnt: mismatchCnt,
+		DataOffset: dataOffset,
+		JournalChar: journalChar,
+	}, nil
 }
 
 func (oc *OsCommand) DmCreateRaid1(
@@ -756,6 +869,33 @@ func (oc *OsCommand) DmCreateRaid1(
 
 	if mmList == nil {
 		return oc.dmCreate(pch, dmName, table)
+	}
+
+	meta0Major, meta0Minor, err := oc.blkGetMajorMinor(pch, raid1Arg.Meta0)
+	if err != nil {
+		return err
+	}
+	data0Major, data0Minor, err := oc.blkGetMajorMinor(pch, raid1Arg.Data0)
+	if err != nil {
+		return err
+	}
+	meta1Major, meta1Minor, err := oc.blkGetMajorMinor(pch, raid1Arg.Meta1)
+	if err != nil {
+		return err
+	}
+	data1Major, data1Minor, err := oc.blkGetMajorMinor(pch, raid1Arg.Data1)
+	if err != nil {
+		return err
+	}
+	if meta0Major != mmList[0].major ||
+		meta0Minor != mmList[0].minor ||
+		data0Major != mmList[1].major ||
+		data0Minor != mmList[1].minor ||
+		meta1Major != mmList[2].major ||
+		meta1Minor != mmList[2].minor ||
+		data1Major != mmList[3].major ||
+		data1Minor != mmList[3].minor {
+		return oc.dmReload(pch, dmName, table)
 	}
 
 	return nil
@@ -968,6 +1108,9 @@ func (oc *OsCommand) blkGetMajorMinor(
 	pch *ctxhelper.PerCtxHelper,
 	devPath string,
 ) (uint32, uint32, error) {
+	if devPath == "-" {
+		return constants.DevMajorNone, constants.DevMinorNone, nil
+	}
 	realPath, err := oc.fileRealpath(pch, devPath)
 	if err != nil {
 		return 0, 0, err

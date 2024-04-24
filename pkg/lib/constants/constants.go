@@ -101,4 +101,17 @@ const (
 	TraceIdKey = "trace_id"
 
 	LocalDataPathDefault = "."
+
+	RaidDevMiss            = '-'
+	RaidHealthAliveInSync  = 'A'
+	RaidHealthAliveOutSync = 'a'
+	RaidHealthDead         = 'D'
+	RaidHealthMiss         = '-'
+	RaidJournalWriteTh     = 'A'
+	RaidJournalWriteBa     = 'a'
+	RaidJournalDead        = 'D'
+	RaidJournalNone        = '-'
+
+	DevMajorNone = 0
+	DevMinorNone = 0
 )
