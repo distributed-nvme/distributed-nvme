@@ -187,20 +187,20 @@ message RedundancyConf {
 }
 
 message SnapConf {
-  uint64 dev_id = 1;
-  uint64 ori_id = 2;
+  uint32 dev_id = 1;
+  uint32 ori_id = 2;
 }
 
 message LdCnConf {
-  uint64 ld_id = 1;
-  uint64 dn_id = 2;
+  string ld_id = 1;
+  string dn_id = 2;
   NvmePortConf nvme_port_conf = 3;
   uint32 ld_idx = 4;
   uint64 ld_size = 5;
 }
 
 message GrpConf {
-  uint64 grp_id = 1;
+  string grp_id = 1;
   uint32 grp_idx = 2;
   uint64 grp_size = 3;
   repeated LdCnConf ld_cn_conf_list = 4;
@@ -210,13 +210,13 @@ message GrpConf {
 }
 
 message LocalLegConf {
-  uint64 leg_id = 1;
+  string leg_id = 1;
   repeated GrpConf grp_conf_list = 2;
 }
 
 message RemoteLegConf {
-  uint64 leg_id = 1;
-  uint64 cn_id = 2;
+  string leg_id = 1;
+  string cn_id = 2;
   NvmeListener nvme_listener = 3;
 }
 
@@ -227,15 +227,15 @@ message CloneConf {
 }
 
 message MtConf {
-  uint64 mt_id = 1;
-  uint64 old_ld_id = 2;
-  uint64 new_ld_id = 3;
+  string mt_id = 1;
+  string old_ld_id = 2;
+  string new_ld_id = 3;
   CloneConf clone_conf = 4;
   LdCnConf meta_ld_conf = 5;
 }
 
 message ItConf {
-  uint64 it_id = 1;
+  string it_id = 1;
   uint32 dev_id = 2;
   NvmeListener nvme_listener = 3;
   uint64 size = 4;
@@ -244,14 +244,14 @@ message ItConf {
 }
 
 message NsConf {
-  uint64 ns_id = 1;
+  string ns_id = 1;
   string ns_num = 2;
   uint64 size = 3;
   uint32 dev_id = 4;
 }
 
 message HostConf {
-  uint64 host_id = 1;
+  string host_id = 1;
   string host_nqn = 2;
 }
 
