@@ -765,7 +765,7 @@ type DmRaidStatus struct {
 	JournalChar byte
 }
 
-func (oc *OsCommand) DmRaidStatus(
+func (oc *OsCommand) DmGetRaidStatus(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 ) (*DmRaidStatus, error) {
@@ -839,8 +839,8 @@ func (oc *OsCommand) DmRaidStatus(
 	}
 	journalChar := items[10][0]
 	return &DmRaidStatus{
-		Start: start,
-		Size: size,
+		Start: sectorToByte(start),
+		Size: sectorToByte(size),
 		RaidType: raidType,
 		DevCnt: uint32(devCnt),
 		ChList: chList,
@@ -938,20 +938,6 @@ type DmPoolArg struct {
 	ErrorIfNoSpace bool
 }
 
-type DmPoolStatus struct {
-	TransactionId uint64
-	UsedMetaBlocks uint64
-	TotalMetaBlocks uint64
-	UsedDataBlocks uint64
-	TotalDataBlocks uint64
-	HeldMetadataroot int64
-	Mode string
-	DiscardPassdown bool
-	ErrorOrQueue string
-	NeedsCheck bool
-	MetadataLowWatermark uint64
-}
-
 func GenDmPoolTable(poolArg *DmPoolArg) string {
 	paramCnt := 0
 	skipBlockZeroing := ""
@@ -1016,12 +1002,12 @@ func (oc *OsCommand) DmCreatePool(
 
 func (oc *OsCommand) DmPoolMsgCreateThin(
 	pch *ctxhelper.PerCtxHelper,
-	poolName string,
+	dmName string,
 	devId uint32,
 ) error {
 	msg := fmt.Sprintf("create_thin %d", devId)
 	name := "dmsetup"
-	args := []string{"message", poolName, "0", msg}
+	args := []string{"message", dmName, "0", msg}
 	_, stderr, err := oc.runOsCmd(pch, name, args, "")
 	if err != nil {
 		if strings.Contains(stderr, "File exists") {
@@ -1034,13 +1020,13 @@ func (oc *OsCommand) DmPoolMsgCreateThin(
 
 func (oc *OsCommand) DmPoolMsgCreateSnap(
 	pch *ctxhelper.PerCtxHelper,
-	poolName string,
+	dmName string,
 	devId uint32,
 	oriId uint32,
 ) error {
 	msg := fmt.Sprintf("create_snap %d %d", devId, oriId)
 	name := "dmsetup"
-	args := []string{"message", poolName, "0", msg}
+	args := []string{"message", dmName, "0", msg}
 	_, stderr, err := oc.runOsCmd(pch, name, args, "")
 	if err != nil {
 		if strings.Contains(stderr, "File exists") {
@@ -1053,12 +1039,12 @@ func (oc *OsCommand) DmPoolMsgCreateSnap(
 
 func (oc *OsCommand) DmPoolMsgDelete(
 	pch *ctxhelper.PerCtxHelper,
-	poolName string,
+	dmName string,
 	devId uint32,
 ) error {
 	msg := fmt.Sprintf("delete %d", devId)
 	name := "dmsetup"
-	args := []string{"message", poolName, "0", msg}
+	args := []string{"message", dmName, "0", msg}
 	_, stderr, err := oc.runOsCmd(pch, name, args, "")
 	if err != nil {
 		if strings.Contains(stderr, "No data available") {
@@ -1067,6 +1053,121 @@ func (oc *OsCommand) DmPoolMsgDelete(
 		return err
 	}
 	return nil
+}
+
+type DmPoolStatus struct {
+	Start uint64
+	Size uint64
+	TransactionId uint64
+	UsedMetaBlocks uint64
+	TotalMetaBlocks uint64
+	UsedDataBlocks uint64
+	TotalDataBlocks uint64
+	HeldMetadataroot int64
+	Mode string
+	DiscardPassdown bool
+	ErrorOrQueue string
+	NeedsCheck bool
+	MetadataLowWatermark uint64
+}
+
+func (oc *OsCommand) DmGetPoolStatus(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+) (*DmPoolStatus, error) {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return nil, err
+	}
+	if status == "" {
+		return nil, nil
+	}
+	items := strings.Split(status, " ")
+	if len(items) != 12 {
+		return nil, fmt.Errorf("Pool status item cnt incorrect: %d", len(items))
+	}
+	start, err := strconv.ParseUint(items[0], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	size, err := strconv.ParseUint(items[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	if items[2] != "thin-pool" {
+		return nil, fmt.Errorf("Not pool status: %d", items[2])
+	}
+	transactionId, err := strconv.ParseUint(items[3], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	metaBlocksItems := strings.Split(items[4], "/")
+	if len(metaBlocksItems) != 2 {
+		return nil, fmt.Errorf(
+			"Invalid metaBlocksItems cnt: %d",
+			len(metaBlocksItems),
+		)
+	}
+	usedMetaBlocks, err := strconv.ParseUint(metaBlocksItems[0], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	totalMetaBlocks, err := strconv.ParseUint(metaBlocksItems[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	dataBlocksItems := strings.Split(items[5], "/")
+	if len(dataBlocksItems) != 2 {
+		return nil, fmt.Errorf(
+			"Invalid dataBlocksItems cnt: %d",
+			len(dataBlocksItems),
+		)
+	}
+	usedDataBlocks, err := strconv.ParseUint(dataBlocksItems[0], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	totalDataBlocks, err := strconv.ParseUint(dataBlocksItems[1], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	heldMetadataroot := int64(-1)
+	if items[6] != "-" {
+		root, err := strconv.ParseUint(items[6], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		heldMetadataroot = int64(root)
+	}
+	mode := items[7]
+	discardPassdown := true
+	if items[8] == "no_discard_passdown" {
+		discardPassdown = false
+	}
+	errorOrQueue := items[9]
+	needsCheck := false
+	if items[10] != "-" {
+		needsCheck = true
+	}
+	metadataLowWatermark, err := strconv.ParseUint(items[11], 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &DmPoolStatus{
+		Start: sectorToByte(start),
+		Size: sectorToByte(size),
+		TransactionId: transactionId,
+		UsedMetaBlocks: usedMetaBlocks,
+		TotalMetaBlocks: totalMetaBlocks,
+		UsedDataBlocks: usedDataBlocks,
+		TotalDataBlocks: totalDataBlocks,
+		HeldMetadataroot: heldMetadataroot,
+		Mode: mode,
+		DiscardPassdown: discardPassdown,
+		ErrorOrQueue: errorOrQueue,
+		NeedsCheck: needsCheck,
+		MetadataLowWatermark: metadataLowWatermark,
+	}, nil
 }
 
 func (oc *OsCommand) DmRemove(

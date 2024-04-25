@@ -63,6 +63,7 @@ func (nf *NameFmt) LdDnDmNsNum() string {
 func (nf *NameFmt) DmNameToPath(dmName string) string {
 	return fmt.Sprintf("/dev/mapper/%s", dmName)
 }
+
 func NewNameFmt(
 	dmPrefix string,
 	nqnPrefix string,
