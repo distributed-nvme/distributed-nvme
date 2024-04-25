@@ -19,7 +19,7 @@ service ControllerNodeAgent {
   rpc CheckSpCntlr(CheckSpCntlrRequest) returns(CheckSpCntlrReply) {}
   rpc Suspend(SuspendRequest) returns(SuspendReply) {}
   rpc Resume(ResumeRequest) returns(ResumeReply) {}
-  rpc TakeSnapshot(TakeSnapshotRequest) returns(TakeSnapshotReply) {}
+  rpc CreateSnapshot(CreateSnapshotRequest) returns(CreateSnapshotReply) {}
   rpc Flush(FlushRequest) returns(FlushReply) {}
   rpc CleanupFence(CleanupFenceRequest) returns(CleanupFenceReply) {}
 }
@@ -430,7 +430,7 @@ message ResumeReply {
   StatusInfo status_info = 1;
 }
 
-message TakeSnapshotRequest {
+message CreateSnapshotRequest {
   string cn_id = 1;
   string sp_id = 2;
   string cntlr_id = 3;
@@ -438,7 +438,7 @@ message TakeSnapshotRequest {
   SnapConf snap_conf = 5;
 }
 
-message TakeSnapshotReply {
+message CreateSnapshotReply {
   StatusInfo status_info = 1;
 }
 
