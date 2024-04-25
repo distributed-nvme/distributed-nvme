@@ -1014,6 +1014,61 @@ func (oc *OsCommand) DmCreatePool(
 	return nil
 }
 
+func (oc *OsCommand) DmPoolMsgCreateThin(
+	pch *ctxhelper.PerCtxHelper,
+	poolName string,
+	devId uint32,
+) error {
+	msg := fmt.Sprintf("create_thin %d", devId)
+	name := "dmsetup"
+	args := []string{"message", poolName, "0", msg}
+	_, stderr, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		if strings.Contains(stderr, "File exists") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) DmPoolMsgCreateSnap(
+	pch *ctxhelper.PerCtxHelper,
+	poolName string,
+	devId uint32,
+	oriId uint32,
+) error {
+	msg := fmt.Sprintf("create_snap %d %d", devId, oriId)
+	name := "dmsetup"
+	args := []string{"message", poolName, "0", msg}
+	_, stderr, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		if strings.Contains(stderr, "File exists") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (oc *OsCommand) DmPoolMsgDelete(
+	pch *ctxhelper.PerCtxHelper,
+	poolName string,
+	devId uint32,
+) error {
+	msg := fmt.Sprintf("delete %d", devId)
+	name := "dmsetup"
+	args := []string{"message", poolName, "0", msg}
+	_, stderr, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		if strings.Contains(stderr, "No data available") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func (oc *OsCommand) DmRemove(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
