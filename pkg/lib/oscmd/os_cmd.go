@@ -339,7 +339,7 @@ func (oc *OsCommand) nvmetSubsysNsCreate(nqn string, nsArg *NvmetNsArg) error {
 	); err != nil {
 		return err
 	}
-	nsUuid := uuid.NewMD5(uuidNameSpace, []byte("abc")).String()
+	nsUuid := uuid.NewMD5(uuidNameSpace, []byte(nqn)).String()
 	if err := writeFile(
 		nvmetSubsysNsNguidPath(nqn, nsArg.NsNum),
 		nsUuid,
