@@ -31,6 +31,10 @@ func byteToSector(inp uint64) uint64 {
 	return inp / 512
 }
 
+func sectorToByte(inp uint64) uint64 {
+	return inp * 512
+}
+
 func pathExist(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
@@ -581,7 +585,7 @@ func (oc *OsCommand) dmRemove(
 	return err
 }
 
-func (oc *OsCommand) dmSuspend(
+func (oc *OsCommand) DmSuspend(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 ) error {
@@ -591,7 +595,7 @@ func (oc *OsCommand) dmSuspend(
 	return err
 }
 
-func (oc *OsCommand) dmResume(
+func (oc *OsCommand) DmResume(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 ) error {
@@ -601,7 +605,7 @@ func (oc *OsCommand) dmResume(
 	return err
 }
 
-func (oc *OsCommand) dmLoad(
+func (oc *OsCommand) DmLoad(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 	table string,
@@ -617,16 +621,35 @@ func (oc *OsCommand) dmReload(
 	dmName string,
 	table string,
 ) error {
-	if err := oc.dmSuspend(pch, dmName); err != nil {
+	if err := oc.DmSuspend(pch, dmName); err != nil {
 		return err
 	}
-	if err := oc.dmLoad(pch, dmName, table); err != nil {
+	if err := oc.DmLoad(pch, dmName, table); err != nil {
 		return err
 	}
-	if err := oc.dmResume(pch, dmName); err != nil {
+	if err := oc.DmResume(pch, dmName); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (oc *OsCommand) DmLinearChange(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	linearArgs []*DmLinearArg,
+) (bool, error) {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return false, err
+	}
+	if status == "" {
+		return false, nil
+	}
+	lines := strings.Split(status, "\n")
+	if len(lines) == len(linearArgs) && strings.Contains(status, "linear") {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (oc *OsCommand) DmCreateLinear(
@@ -730,7 +753,7 @@ func (oc *OsCommand) dmRaidMajorMinor(
 
 type DmRaidStatus struct {
 	Start uint64
-	Length uint64
+	Size uint64
 	RaidType string
 	DevCnt uint32
 	ChList []byte
@@ -742,7 +765,7 @@ type DmRaidStatus struct {
 	JournalChar byte
 }
 
-func (oc *OsCommand) dmRaidStatus(
+func (oc *OsCommand) DmRaidStatus(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 ) (*DmRaidStatus, error) {
@@ -761,7 +784,7 @@ func (oc *OsCommand) dmRaidStatus(
 	if err != nil {
 		return nil, err
 	}
-	length, err := strconv.ParseUint(items[1], 10, 64)
+	size, err := strconv.ParseUint(items[1], 10, 64)
 	if err != nil {
 		return nil, err
 	}
@@ -817,7 +840,7 @@ func (oc *OsCommand) dmRaidStatus(
 	journalChar := items[10][0]
 	return &DmRaidStatus{
 		Start: start,
-		Length: length,
+		Size: size,
 		RaidType: raidType,
 		DevCnt: uint32(devCnt),
 		ChList: chList,
@@ -898,6 +921,96 @@ func (oc *OsCommand) DmCreateRaid1(
 		return oc.dmReload(pch, dmName, table)
 	}
 
+	return nil
+}
+
+type DmPoolArg struct {
+	Start uint64
+	Size uint64
+	MetaDev string
+	DataDev string
+	DataBlockSize uint64
+	LowWaterMark uint64
+	SkipBlockZeroing bool
+	IgnoreDiscard bool
+	NoDiscardPassdown bool
+	ReadOnly bool
+	ErrorIfNoSpace bool
+}
+
+type DmPoolStatus struct {
+	TransactionId uint64
+	UsedMetaBlocks uint64
+	TotalMetaBlocks uint64
+	UsedDataBlocks uint64
+	TotalDataBlocks uint64
+	HeldMetadataroot int64
+	Mode string
+	DiscardPassdown bool
+	ErrorOrQueue string
+	NeedsCheck bool
+	MetadataLowWatermark uint64
+}
+
+func GenDmPoolTable(poolArg *DmPoolArg) string {
+	paramCnt := 0
+	skipBlockZeroing := ""
+	if poolArg.SkipBlockZeroing {
+		skipBlockZeroing = " skip_block_zeroing"
+		paramCnt += 1
+	}
+	ignoreDiscard := ""
+	if poolArg.IgnoreDiscard {
+		ignoreDiscard = " ignore_discard"
+		paramCnt += 1
+	}
+	noDiscardPassdown := ""
+	if poolArg.NoDiscardPassdown {
+		noDiscardPassdown = " no_discard_passdown"
+		paramCnt += 1
+	}
+	readOnly := ""
+	if poolArg.ReadOnly {
+		readOnly = " read_only"
+		paramCnt += 1
+	}
+	errorIfNoSpace := ""
+	if poolArg.ErrorIfNoSpace {
+		errorIfNoSpace = " error_if_no_space"
+		paramCnt += 1
+	}
+	table := fmt.Sprintf(
+		"%d %d thin-pool %s %s %d %d %d%s%s%s%s%s",
+		byteToSector(poolArg.Start),
+		byteToSector(poolArg.Size),
+		paramCnt,
+		poolArg.MetaDev,
+		poolArg.DataDev,
+		byteToSector(poolArg.DataBlockSize),
+		poolArg.LowWaterMark,
+		paramCnt,
+		skipBlockZeroing,
+		ignoreDiscard,
+		noDiscardPassdown,
+		readOnly,
+		errorIfNoSpace,
+	)
+	return table
+}
+
+func (oc *OsCommand) DmCreatePool(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	poolArg *DmPoolArg,
+) error {
+	table := GenDmPoolTable(poolArg)
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return oc.dmCreate(pch, dmName, table)
+	}
 	return nil
 }
 
