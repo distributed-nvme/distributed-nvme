@@ -20,6 +20,7 @@ service ControllerNodeAgent {
   rpc Suspend(SuspendRequest) returns(SuspendReply) {}
   rpc Resume(ResumeRequest) returns(ResumeReply) {}
   rpc CreateSnapshot(CreateSnapshotRequest) returns(CreateSnapshotReply) {}
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns(DeleteSnapshotReply) {}
   rpc Flush(FlushRequest) returns(FlushReply) {}
   rpc CleanupFence(CleanupFenceRequest) returns(CleanupFenceReply) {}
 }
@@ -439,6 +440,18 @@ message CreateSnapshotRequest {
 }
 
 message CreateSnapshotReply {
+  StatusInfo status_info = 1;
+}
+
+message DeleteSnapshotRequest {
+  string cn_id = 1;
+  string sp_id = 2;
+  string cntlr_id = 3;
+  int64 revision = 4;
+  uint32 dev_id = 5;
+}
+
+message DeleteSnapshotReply {
   StatusInfo status_info = 1;
 }
 

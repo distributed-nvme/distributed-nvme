@@ -417,13 +417,14 @@ message ControllerNodeInfo {
 message StoragePoolConf {
   repeated Tag tag_list = 1;
   SpGeneralConf general_conf = 2;
-  SnapConf new_sp_conf = 3;
-  repeated SnapConf sp_conf = 4;
-  repeated SsConf ss_conf = 5;
-  repeated LegConf leg_conf_list = 6;
-  repeated CntlrConf cntlr_conf_list = 7;
-  repeated MtConf mt_conf_list = 8;
-  repeated ItConf it_conf_list = 9;
+  SnapConf creating_snap_conf = 3;
+  SnapConf deleting_snap_conf = 4;
+  repeated SnapConf snap_conf = 5;
+  repeated SsConf ss_conf = 6;
+  repeated LegConf leg_conf_list = 7;
+  repeated CntlrConf cntlr_conf_list = 8;
+  repeated MtConf mt_conf_list = 9;
+  repeated ItConf it_conf_list = 10;
 }
 
 // /{dnv_prefix}/sp_info{sp_id}
