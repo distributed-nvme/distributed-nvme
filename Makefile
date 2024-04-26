@@ -22,7 +22,15 @@ compile:
 	env GOOS=linux GOARCH=amd64 go build -o $(OUT_DIR)/linux_amd64/dnvctl ./cmd/dnvctl
 	cp ./bin/linux_amd64/nvme $(OUT_DIR)/linux_amd64/nvme
 
+.PHONY: fmt
+fmt:
+	@gofmt -s -w .
+
+.PHONY: check
+check:
+	@test -z $(shell gofmt -l . | tee /dev/stderr) || echo "[WARN] Fix formatting issues with 'make fmt'"
+
 .PHONY: build
-build: proto compile
+build: proto compile check
 
 .DEFAULT_GOAL := build
