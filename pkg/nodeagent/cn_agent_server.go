@@ -74,6 +74,28 @@ func syncupCntlrNvmePort(
 	}
 }
 
+func syncupCntlrLocalLeg(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+) *pbnd.LocalLegInfo {
+	return nil
+}
+
+func syncupCntlrRemoteLeg(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	remoteLegConf *pbnd.RemoteLegConf,
+) *pbnd.RemoteLegInfo {
+	return nil
+}
+
 func syncupActiveCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -81,7 +103,39 @@ func syncupActiveCntlr(
 	spCntlrConf *pbnd.SpCntlrConf,
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 ) *pbnd.ActiveCntlrInfo {
-	return &pbnd.ActiveCntlrInfo{}
+	localLegInfoList := make(
+		[]*pbnd.LocalLegInfo,
+		len(activeCntlrConf.LocalLegConfList),
+	)
+	for i, localLegConf := range activeCntlrConf.LocalLegConfList {
+		localLegInfoList[i] = syncupCntlrLocalLeg(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+		)
+	}
+
+	remoteLegInfoList := make(
+		[]*pbnd.RemoteLegInfo,
+		len(activeCntlrConf.RemoteLegConfList),
+	)
+	for i, remoteLegConf := range activeCntlrConf.RemoteLegConfList {
+		remoteLegInfoList[i] = syncupCntlrRemoteLeg(
+			pch,
+			oc,
+			nf, spCntlrConf,
+			activeCntlrConf,
+			remoteLegConf,
+		)
+	}
+	// FIXME: implement MovingTask and ImportingTask
+	return &pbnd.ActiveCntlrInfo{
+		LocalLegInfoList:  localLegInfoList,
+		RemoteLegInfoList: remoteLegInfoList,
+	}
 }
 
 func syncupCntlrSs(

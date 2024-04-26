@@ -263,11 +263,13 @@ message ActiveCntlrConf {
   StripeConf stripe_conf = 1;
   ThinPoolConf thin_pool_conf = 2;
   RedundancyConf redundancy_conf = 3;
-  repeated LocalLegConf local_leg_conf_list = 4;
-  repeated RemoteLegConf remote_leg_conf_list = 5;
-  repeated SnapConf snap_conf_list = 6;
-  repeated MtConf mt_conf_list = 7;
-  repeated ItConf it_conf_list = 8;
+  SnapConf creating_snap_conf = 4;
+  SnapConf deleting_snap_conf = 5;
+  repeated LocalLegConf local_leg_conf_list = 6;
+  repeated RemoteLegConf remote_leg_conf_list = 7;
+  repeated SnapConf snap_conf_list = 8;
+  repeated MtConf mt_conf_list = 9;
+  repeated ItConf it_conf_list = 10;
 }
 
 message SpCntlrConf {
@@ -327,7 +329,9 @@ message LocalLegInfo {
   uint64 leg_id = 1;
   StatusInfo status_info = 2;
   ThinPoolInfo thin_pool_info = 3;
-  repeated GrpInfo grp_info_list = 4;
+  SnapInfo creating_snap_info = 4;
+  SnapInfo deleting_snap_info = 5;
+  repeated GrpInfo grp_info_list = 6;
 }
 
 message RemoteLegInfo {
@@ -383,11 +387,10 @@ message SsInfo {
 }
 
 message ActiveCntlrInfo {
-  repeated LocalLegInfo local_leg_info_list = 3;
-  repeated RemoteLegInfo remote_leg_info_list = 4;
-  repeated SnapInfo snap_info_list = 5;
-  repeated MtInfo mt_info_list = 6;
-  repeated ItInfo it_info_list = 7;
+  repeated LocalLegInfo local_leg_info_list = 1;
+  repeated RemoteLegInfo remote_leg_info_list = 2;
+  repeated MtInfo mt_info_list = 3;
+  repeated ItInfo it_info_list = 4;
 }
 
 message SpCntlrInfo {
