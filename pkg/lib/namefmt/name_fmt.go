@@ -2,6 +2,12 @@ package namefmt
 
 import (
 	"fmt"
+
+	"github.com/google/uuid"
+)
+
+var (
+	uuidNameSpace = uuid.MustParse("37833e01-35d4-4e5a-b0a1-fff158b9d03b")
 )
 
 type NameFmt struct {
@@ -23,6 +29,7 @@ const (
 	nqnTypeHostCn = "0000"
 	nqnTypeLdDnDm = "1000"
 	nqnTypeRemote = "1100"
+	nqnTypeSubsys = "1200"
 )
 
 func (nf *NameFmt) LdDnDmName(
@@ -64,6 +71,19 @@ func (nf *NameFmt) LdDnDmNqn(
 	)
 }
 
+func (nf *NameFmt) SsNqn(
+	spId string,
+	ssId string,
+) string {
+	return fmt.Sprintf(
+		"%s:%s:%s:%s",
+		nf.nqnPrefix,
+		nqnTypeSubsys,
+		spId,
+		ssId,
+	)
+}
+
 func (nf *NameFmt) RemoteLegNqn(
 	cnId string,
 	spId string,
@@ -81,6 +101,13 @@ func (nf *NameFmt) RemoteLegNqn(
 
 func (nf *NameFmt) LdDnDmNsNum() string {
 	return "1"
+}
+
+func (nf *NameFmt) NsUuid(nqn, nsId string) string {
+	return uuid.NewMD5(
+		uuidNameSpace,
+		[]byte(fmt.Sprintf("%s-%s", nqn, nsId)),
+	).String()
 }
 
 func (nf *NameFmt) LdCnDmName(

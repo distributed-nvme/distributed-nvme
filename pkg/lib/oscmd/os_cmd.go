@@ -3,7 +3,6 @@ package oscmd
 import (
 	"bytes"
 	"fmt"
-	"github.com/google/uuid"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,10 +20,6 @@ const (
 	waitCnt      = 20
 	dmNotExist   = "Device does not exist"
 	dmEmpty      = "No devices found"
-)
-
-var (
-	uuidNameSpace = uuid.MustParse("37833e01-35d4-4e5a-b0a1-fff158b9d03b")
 )
 
 func byteToSector(inp uint64) uint64 {
@@ -301,6 +296,7 @@ func (oc *OsCommand) NvmetPortDelete(
 type NvmetNsArg struct {
 	NsNum   string
 	DevPath string
+	Uuid    string
 }
 
 func (oc *OsCommand) nvmetAddHostToSubsys(nqn, hostNqn string) error {
@@ -339,16 +335,15 @@ func (oc *OsCommand) nvmetSubsysNsCreate(nqn string, nsArg *NvmetNsArg) error {
 	); err != nil {
 		return err
 	}
-	nsUuid := uuid.NewMD5(uuidNameSpace, []byte(nqn)).String()
 	if err := writeFile(
 		nvmetSubsysNsNguidPath(nqn, nsArg.NsNum),
-		nsUuid,
+		nsArg.Uuid,
 	); err != nil {
 		return err
 	}
 	if err := writeFile(
 		nvmetSubsysNsUuidPath(nqn, nsArg.NsNum),
-		nsUuid,
+		nsArg.Uuid,
 	); err != nil {
 		return err
 	}
