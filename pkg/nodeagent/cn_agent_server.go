@@ -48,6 +48,23 @@ func syncupCntlrNvmePort(
 	spCntlrConf *pbnd.SpCntlrConf,
 	nvmePortConf *pbnd.NvmePortConf,
 ) *pbnd.NvmePortInfo {
+	if err := oc.NvmetPortCreate(
+		pch,
+		nvmePortConf.PortNum,
+		nvmePortConf.NvmeListener.TrType,
+		nvmePortConf.NvmeListener.AdrFam,
+		nvmePortConf.NvmeListener.TrAddr,
+		nvmePortConf.NvmeListener.TrSvcId,
+		nvmePortConf.TrEq.SeqCh,
+	); err != nil {
+		return &pbnd.NvmePortInfo{
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+		}
+	}
 	return &pbnd.NvmePortInfo{
 		StatusInfo: &pbnd.StatusInfo{
 			Code:      constants.StatusCodeSucceed,
