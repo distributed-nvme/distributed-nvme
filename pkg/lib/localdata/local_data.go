@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
 
@@ -35,6 +36,7 @@ type SpCntlrLocal struct {
 	SpId     string
 	CntlrId  string
 	Revision int64
+	PortNum  string
 }
 
 func spLdKey(dnId, spId, ldId string) string {
@@ -103,7 +105,12 @@ func (local *LocalClient) GetSpLdLocal(
 	if ok {
 		return spLdLocal, nil
 	}
-	return nil, nil
+	return &SpLdLocal{
+		DnId:     dnId,
+		SpId:     spId,
+		LdId:     ldId,
+		Revision: constants.RevisionUninit,
+	}, nil
 }
 
 func (local *LocalClient) SetSpLdLocal(
@@ -176,7 +183,13 @@ func (local *LocalClient) GetSpCntlrLocal(
 	if ok {
 		return spCntlrLocal, nil
 	}
-	return nil, nil
+	return &SpCntlrLocal{
+		CnId:     cnId,
+		SpId:     spId,
+		CntlrId:  cntlrId,
+		Revision: constants.RevisionUninit,
+		PortNum:  "",
+	}, nil
 }
 
 func (local *LocalClient) SetSpCntlrLocal(

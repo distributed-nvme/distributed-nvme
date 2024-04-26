@@ -46,6 +46,7 @@ const (
 
 	EtcdPageSize = 100
 
+	RevisionUninit  = 0
 	RevisionDeleted = -1
 	RebuildIdxNone  = 0xffffffff
 
