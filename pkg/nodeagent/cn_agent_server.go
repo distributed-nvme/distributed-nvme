@@ -41,13 +41,82 @@ type spCntlrRuntimeData struct {
 	spCntlrConf  *pbnd.SpCntlrConf
 }
 
+func syncupCntlrNvmePort(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	nvmePortConf *pbnd.NvmePortConf,
+) *pbnd.NvmePortInfo {
+	return &pbnd.NvmePortInfo{
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+	}
+}
+
+func syncupActiveCntlr(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+) *pbnd.ActiveCntlrInfo {
+	return &pbnd.ActiveCntlrInfo{}
+}
+
+func syncupCntlrSs(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	ssConf *pbnd.SsConf,
+) *pbnd.SsInfo {
+	return &pbnd.SsInfo{}
+}
+
 func syncupSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
 	spCntlrConf *pbnd.SpCntlrConf,
-) error {
-	return nil
+) *pbnd.SpCntlrInfo {
+	nvmePortInfo := syncupCntlrNvmePort(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		spCntlrConf.NvmePortConf,
+	)
+	activeCntlrInfo := syncupActiveCntlr(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		spCntlrConf.ActiveCntlrConf,
+	)
+	ssInfoList := make([]*pbnd.SsInfo, len(spCntlrConf.SsConfList))
+	for i, ssConf := range spCntlrConf.SsConfList {
+		ssInfoList[i] = syncupCntlrSs(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			ssConf,
+		)
+	}
+	return &pbnd.SpCntlrInfo{
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+		NvmePortInfo:    nvmePortInfo,
+		ActiveCntlrInfo: activeCntlrInfo,
+		SsInfoList:      ssInfoList,
+	}
 }
 
 func cleanupSpCntlr(
@@ -78,7 +147,6 @@ func (cnAgent *cnAgentServer) SyncupCn(
 	defer cnAgent.mu.Unlock()
 
 	pch := ctxhelper.GetPerCtxHelper(ctx)
-	timestamp := time.Now().UnixMilli()
 
 	if cnAgent.cnLocal == nil {
 		cnLocal, err := cnAgent.local.GetCnLocal(pch, req.CnConf.CnId)
@@ -88,7 +156,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 					StatusInfo: &pbnd.StatusInfo{
 						Code:      constants.StatusCodeInternalErr,
 						Msg:       err.Error(),
-						Timestamp: timestamp,
+						Timestamp: pch.Timestamp,
 					},
 				},
 			}, nil
@@ -111,7 +179,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
 					Msg:       fmt.Sprintf("CnId: %s", cnAgent.cnLocal.CnId),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -123,7 +191,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeOldRevision,
 					Msg:       fmt.Sprintf("Revision: %d", cnAgent.cnLocal.Revision),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -194,7 +262,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 						StatusInfo: &pbnd.StatusInfo{
 							Code:      constants.StatusCodeInternalErr,
 							Msg:       err.Error(),
-							Timestamp: timestamp,
+							Timestamp: pch.Timestamp,
 						},
 					},
 				}, nil
@@ -209,7 +277,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeInternalErr,
 					Msg:       err.Error(),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -220,7 +288,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 			StatusInfo: &pbnd.StatusInfo{
 				Code:      constants.StatusCodeSucceed,
 				Msg:       constants.StatusMsgSucceed,
-				Timestamp: timestamp,
+				Timestamp: pch.Timestamp,
 			},
 		},
 	}, nil
@@ -384,7 +452,6 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 	req *pbnd.SyncupSpCntlrRequest,
 ) (*pbnd.SyncupSpCntlrReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
-	timestamp := time.Now().UnixMilli()
 	spCntlrData := cnAgent.getSpCntlrData(
 		req.SpCntlrConf.CnId,
 		req.SpCntlrConf.SpId,
@@ -401,7 +468,7 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 						req.SpCntlrConf.SpId,
 						req.SpCntlrConf.CntlrId,
 					),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -416,7 +483,7 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeOldRevision,
 					Msg:       fmt.Sprintf("Revision: %d", spCntlrData.spCntlrLocal.Revision),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -428,7 +495,7 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeOldRevision,
 					Msg:       fmt.Sprintf("Revision: %d", spCntlrData.spCntlrLocal.Revision),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
@@ -445,39 +512,23 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeInternalErr,
 					Msg:       err.Error(),
-					Timestamp: timestamp,
+					Timestamp: pch.Timestamp,
 				},
 			},
 		}, nil
 	}
 
-	if err := syncupSpCntlr(
+	spCntlrInfo := syncupSpCntlr(
 		pch,
 		cnAgent.oc,
 		cnAgent.nf,
 		req.SpCntlrConf,
-	); err != nil {
-		return &pbnd.SyncupSpCntlrReply{
-			SpCntlrInfo: &pbnd.SpCntlrInfo{
-				StatusInfo: &pbnd.StatusInfo{
-					Code:      constants.StatusCodeInternalErr,
-					Msg:       err.Error(),
-					Timestamp: timestamp,
-				},
-			},
-		}, nil
-	}
+	)
 
 	spCntlrData.spCntlrConf = req.SpCntlrConf
 
 	return &pbnd.SyncupSpCntlrReply{
-		SpCntlrInfo: &pbnd.SpCntlrInfo{
-			StatusInfo: &pbnd.StatusInfo{
-				Code:      constants.ReplyCodeSucceed,
-				Msg:       constants.ReplyMsgSucceed,
-				Timestamp: timestamp,
-			},
-		},
+		SpCntlrInfo: spCntlrInfo,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package ctxhelper
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
@@ -13,10 +14,11 @@ import (
 )
 
 type PerCtxHelper struct {
-	Ctx     context.Context
-	Cancel  context.CancelFunc
-	Logger  *prefixlog.PrefixLogger
-	TraceId string
+	Ctx       context.Context
+	Cancel    context.CancelFunc
+	Logger    *prefixlog.PrefixLogger
+	TraceId   string
+	Timestamp int64
 }
 
 type ctxKey string
@@ -41,6 +43,7 @@ func NewPerCtxHelper(
 	pch.Cancel = cancel
 	pch.Logger = logger
 	pch.TraceId = traceId
+	pch.Timestamp = time.Now().UnixMilli()
 	return pch
 }
 

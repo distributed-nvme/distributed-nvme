@@ -19,8 +19,6 @@ service ControllerNodeAgent {
   rpc CheckSpCntlr(CheckSpCntlrRequest) returns(CheckSpCntlrReply) {}
   rpc Suspend(SuspendRequest) returns(SuspendReply) {}
   rpc Resume(ResumeRequest) returns(ResumeReply) {}
-  rpc CreateSnapshot(CreateSnapshotRequest) returns(CreateSnapshotReply) {}
-  rpc DeleteSnapshot(DeleteSnapshotRequest) returns(DeleteSnapshotReply) {}
   rpc Flush(FlushRequest) returns(FlushReply) {}
   rpc CleanupFence(CleanupFenceRequest) returns(CleanupFenceReply) {}
 }
@@ -310,6 +308,10 @@ message RedundancyInfo {
   uint32 journal_char = 7;
 }
 
+message NvmePortInfo {
+  StatusInfo status_info = 1;
+}
+
 message LdCnInfo {
   StatusInfo status_info = 1;
 }
@@ -390,8 +392,9 @@ message ActiveCntlrInfo {
 
 message SpCntlrInfo {
   StatusInfo status_info = 1;
-  repeated SsInfo ss_info_list = 2;
-  ActiveCntlrInfo active_cntlr_info = 3;
+  NvmePortInfo nvme_port_info = 2;
+  repeated SsInfo ss_info_list = 3;
+  ActiveCntlrInfo active_cntlr_info = 4;
 }
 
 message SyncupSpCntlrReply {
@@ -428,30 +431,6 @@ message ResumeRequest {
 }
 
 message ResumeReply {
-  StatusInfo status_info = 1;
-}
-
-message CreateSnapshotRequest {
-  string cn_id = 1;
-  string sp_id = 2;
-  string cntlr_id = 3;
-  int64 revision = 4;
-  SnapConf snap_conf = 5;
-}
-
-message CreateSnapshotReply {
-  StatusInfo status_info = 1;
-}
-
-message DeleteSnapshotRequest {
-  string cn_id = 1;
-  string sp_id = 2;
-  string cntlr_id = 3;
-  int64 revision = 4;
-  uint32 dev_id = 5;
-}
-
-message DeleteSnapshotReply {
   StatusInfo status_info = 1;
 }
 
