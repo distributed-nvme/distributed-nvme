@@ -501,6 +501,17 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 		}, nil
 	}
 
+	if spCntlrData.spCntlrLocal.Revision == constants.RevisionUninit {
+		spCntlrData.spCntlrLocal.PortNum = req.SpCntlrConf.NvmePortConf.PortNum
+	} else {
+		if spCntlrData.spCntlrLocal.PortNum != req.SpCntlrConf.NvmePortConf.PortNum {
+			pch.Logger.Fatal(
+				"SpCntlr PortNum mismatch: %s %s",
+				spCntlrData.spCntlrLocal.PortNum,
+				req.SpCntlrConf.NvmePortConf.PortNum,
+			)
+		}
+	}
 	spCntlrData.spCntlrLocal.Revision = req.SpCntlrConf.Revision
 
 	if err := cnAgent.local.SetSpCntlrLocal(
