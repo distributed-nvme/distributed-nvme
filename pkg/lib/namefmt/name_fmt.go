@@ -16,14 +16,14 @@ type NameFmt struct {
 }
 
 const (
-	devTypeLdDnDm = "0000"
-	devTypeLdCnDm = "1000"
-	devTypeGrpMetaDm = "1001"
-	devTypeGrpDataDm = "1002"
-	devTypeLegMetaDm = "1003"
-	devTypeLegDataDm = "1004"
-	devTypeLegPoolDm = "1005"
-	devTypeLegThinDm = "1006"
+	devTypeLdDnDm      = "0000"
+	devTypeLdCnDm      = "1000"
+	devTypeGrpMetaDm   = "1001"
+	devTypeGrpDataDm   = "1002"
+	devTypeLegMetaDm   = "1003"
+	devTypeLegDataDm   = "1004"
+	devTypeLegPoolDm   = "1005"
+	devTypeLegThinDm   = "1006"
 	devTypeRaid0ThinDm = "1007"
 
 	nqnTypeHostCn = "0000"

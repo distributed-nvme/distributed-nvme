@@ -747,16 +747,16 @@ func (oc *OsCommand) dmRaidMajorMinor(
 }
 
 type DmRaidStatus struct {
-	Start uint64
-	Size uint64
-	RaidType string
-	DevCnt uint32
-	ChList []byte
-	SyncCurr uint64
-	SyncTotal uint64
-	SyncAction string
+	Start       uint64
+	Size        uint64
+	RaidType    string
+	DevCnt      uint32
+	ChList      []byte
+	SyncCurr    uint64
+	SyncTotal   uint64
+	SyncAction  string
 	MismatchCnt uint64
-	DataOffset uint64
+	DataOffset  uint64
 	JournalChar byte
 }
 
@@ -834,16 +834,16 @@ func (oc *OsCommand) DmGetRaidStatus(
 	}
 	journalChar := items[10][0]
 	return &DmRaidStatus{
-		Start: sectorToByte(start),
-		Size: sectorToByte(size),
-		RaidType: raidType,
-		DevCnt: uint32(devCnt),
-		ChList: chList,
-		SyncCurr: syncCurr,
-		SyncTotal: syncTotal,
-		SyncAction: syncAction,
+		Start:       sectorToByte(start),
+		Size:        sectorToByte(size),
+		RaidType:    raidType,
+		DevCnt:      uint32(devCnt),
+		ChList:      chList,
+		SyncCurr:    syncCurr,
+		SyncTotal:   syncTotal,
+		SyncAction:  syncAction,
 		MismatchCnt: mismatchCnt,
-		DataOffset: dataOffset,
+		DataOffset:  dataOffset,
 		JournalChar: journalChar,
 	}, nil
 }
@@ -920,17 +920,17 @@ func (oc *OsCommand) DmCreateRaid1(
 }
 
 type DmPoolArg struct {
-	Start uint64
-	Size uint64
-	MetaDev string
-	DataDev string
-	DataBlockSize uint64
-	LowWaterMark uint64
-	SkipBlockZeroing bool
-	IgnoreDiscard bool
+	Start             uint64
+	Size              uint64
+	MetaDev           string
+	DataDev           string
+	DataBlockSize     uint64
+	LowWaterMark      uint64
+	SkipBlockZeroing  bool
+	IgnoreDiscard     bool
 	NoDiscardPassdown bool
-	ReadOnly bool
-	ErrorIfNoSpace bool
+	ReadOnly          bool
+	ErrorIfNoSpace    bool
 }
 
 func GenDmPoolTable(poolArg *DmPoolArg) string {
@@ -1051,18 +1051,18 @@ func (oc *OsCommand) DmPoolMsgDelete(
 }
 
 type DmPoolStatus struct {
-	Start uint64
-	Size uint64
-	TransactionId uint64
-	UsedMetaBlocks uint64
-	TotalMetaBlocks uint64
-	UsedDataBlocks uint64
-	TotalDataBlocks uint64
-	HeldMetadataroot int64
-	Mode string
-	DiscardPassdown bool
-	ErrorOrQueue string
-	NeedsCheck bool
+	Start                uint64
+	Size                 uint64
+	TransactionId        uint64
+	UsedMetaBlocks       uint64
+	TotalMetaBlocks      uint64
+	UsedDataBlocks       uint64
+	TotalDataBlocks      uint64
+	HeldMetadataroot     int64
+	Mode                 string
+	DiscardPassdown      bool
+	ErrorOrQueue         string
+	NeedsCheck           bool
 	MetadataLowWatermark uint64
 }
 
@@ -1149,18 +1149,18 @@ func (oc *OsCommand) DmGetPoolStatus(
 		return nil, err
 	}
 	return &DmPoolStatus{
-		Start: sectorToByte(start),
-		Size: sectorToByte(size),
-		TransactionId: transactionId,
-		UsedMetaBlocks: usedMetaBlocks,
-		TotalMetaBlocks: totalMetaBlocks,
-		UsedDataBlocks: usedDataBlocks,
-		TotalDataBlocks: totalDataBlocks,
-		HeldMetadataroot: heldMetadataroot,
-		Mode: mode,
-		DiscardPassdown: discardPassdown,
-		ErrorOrQueue: errorOrQueue,
-		NeedsCheck: needsCheck,
+		Start:                sectorToByte(start),
+		Size:                 sectorToByte(size),
+		TransactionId:        transactionId,
+		UsedMetaBlocks:       usedMetaBlocks,
+		TotalMetaBlocks:      totalMetaBlocks,
+		UsedDataBlocks:       usedDataBlocks,
+		TotalDataBlocks:      totalDataBlocks,
+		HeldMetadataroot:     heldMetadataroot,
+		Mode:                 mode,
+		DiscardPassdown:      discardPassdown,
+		ErrorOrQueue:         errorOrQueue,
+		NeedsCheck:           needsCheck,
 		MetadataLowWatermark: metadataLowWatermark,
 	}, nil
 }
