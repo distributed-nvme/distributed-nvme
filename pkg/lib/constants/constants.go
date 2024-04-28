@@ -48,7 +48,6 @@ const (
 
 	RevisionUninit  = 0
 	RevisionDeleted = -1
-	RebuildIdxNone  = 0xffffffff
 
 	DataExtentSizeShiftMin       = 20
 	DataExtentSizeShiftMax       = 40
@@ -117,4 +116,6 @@ const (
 	DevMinorNone = 0
 
 	RedunTypeRaid1 = 1
+
+	Uint32Max = uint32(0xffffffff)
 )

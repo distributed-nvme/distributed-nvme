@@ -74,6 +74,110 @@ func syncupCntlrNvmePort(
 	}
 }
 
+func syncupCntlrLd(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+	grpConf *pbnd.GrpConf,
+	ldCnConf *pbnd.LdCnConf,
+) *pbnd.LdCnInfo {
+	nvmeArg := &oscmd.NvmeArg{
+		Nqn:       nf.LdDnDmNqn(ldCnConf.DnId, spCntlrConf.SpId, ldCnConf.LdId),
+		Transport: ldCnConf.NvmePortConf.NvmeListener.TrType,
+		TrAddr:    ldCnConf.NvmePortConf.NvmeListener.TrAddr,
+		TrSvcId:   ldCnConf.NvmePortConf.NvmeListener.TrSvcId,
+		HostNqn:   nf.HostNqnCn(spCntlrConf.CnId),
+	}
+	if err := oc.NvmeConnectPath(pch, nvmeArg); err != nil {
+		return &pbnd.LdCnInfo{
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+		}
+	}
+	return &pbnd.LdCnInfo{
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+	}
+}
+
+func syncupCntlrRaid1MetaAndData(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+	grpConf *pbnd.GrpConf,
+) (*pbnd.RedundancyInfo, *pbnd.RedundancyInfo, error) {
+	return nil, nil, nil
+}
+
+func syncupCntlrRaid1OnlyData(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+	grpConf *pbnd.GrpConf,
+) (*pbnd.RedundancyInfo, *pbnd.RedundancyInfo, error) {
+	return nil, nil, nil
+}
+
+func syncupCntlrRaid1(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+	grpConf *pbnd.GrpConf,
+) (*pbnd.RedundancyInfo, *pbnd.RedundancyInfo, error) {
+	ldCnt := len(grpConf.LdCnConfList)
+	if grpConf.MetaSize > 0 {
+		if ldCnt != 8 {
+			pch.Logger.Fatal(
+				"Has meta devs and ld cnt is incorrect: %d",
+				ldCnt,
+			)
+		}
+		return syncupCntlrRaid1MetaAndData(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+			grpConf,
+		)
+	}
+
+	if ldCnt != 4 {
+		pch.Logger.Fatal(
+			"No meta devs and ld cnt is incorrect: %d",
+			ldCnt,
+		)
+	}
+	return syncupCntlrRaid1OnlyData(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		activeCntlrConf,
+		localLegConf,
+		grpConf,
+	)
+}
+
 func syncupCntlrGrp(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -83,7 +187,61 @@ func syncupCntlrGrp(
 	localLegConf *pbnd.LocalLegConf,
 	grpConf *pbnd.GrpConf,
 ) *pbnd.GrpInfo {
-	return nil
+	ldCnInfoList := make([]*pbnd.LdCnInfo, len(grpConf.LdCnConfList))
+	for i, ldCnInfo := range grpConf.LdCnConfList {
+		ldCnInfoList[i] = syncupCntlrLd(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+			grpConf,
+			ldCnInfo,
+		)
+	}
+	var metaRedunInfo *pbnd.RedundancyInfo
+	var dataRedunInfo *pbnd.RedundancyInfo
+	var err error
+	switch activeCntlrConf.RedundancyConf.RedunType {
+	case constants.RedunTypeRaid1:
+		metaRedunInfo, dataRedunInfo, err = syncupCntlrRaid1(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+			grpConf,
+		)
+	default:
+		pch.Logger.Fatal("Unknow RedunType: %d", constants.RedunTypeRaid1)
+	}
+	if err != nil {
+		return &pbnd.GrpInfo{
+			GrpId: grpConf.GrpId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			MetaRedunInfo: metaRedunInfo,
+			DataRedunInfo: dataRedunInfo,
+			LdCnInfoList:  ldCnInfoList,
+		}
+	}
+
+	return &pbnd.GrpInfo{
+		GrpId: grpConf.GrpId,
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+		MetaRedunInfo: metaRedunInfo,
+		DataRedunInfo: dataRedunInfo,
+		LdCnInfoList:  ldCnInfoList,
+	}
 }
 
 func syncupCntlrLocalLeg(
@@ -141,6 +299,7 @@ func syncupCntlrLocalLeg(
 			metaStart += grpConf.MetaSize
 		}
 	}
+	dataSize := dataStart
 
 	metaName := nf.LegMetaDmName(
 		spCntlrConf.CnId,
@@ -175,12 +334,130 @@ func syncupCntlrLocalLeg(
 		}
 	}
 
+	poolName := nf.LegPoolDmName(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+		localLegConf.LegId,
+	)
+	poolArg := &oscmd.DmPoolArg{
+		Start:             0,
+		Size:              dataSize,
+		MetaDev:           nf.DmNameToPath(metaName),
+		DataDev:           nf.DmNameToPath(dataName),
+		DataBlockSize:     activeCntlrConf.ThinPoolConf.DataBlockSize,
+		LowWaterMark:      activeCntlrConf.ThinPoolConf.LowWaterMark,
+		ErrorIfNoSpace:    activeCntlrConf.ThinPoolConf.ErrorIfNoSpace,
+		SkipBlockZeroing:  true,
+		IgnoreDiscard:     false,
+		NoDiscardPassdown: false,
+		ReadOnly:          false,
+	}
+	if err := oc.DmCreatePool(
+		pch,
+		poolName,
+		poolArg,
+		localLegConf.Reload,
+	); err != nil {
+		return &pbnd.LocalLegInfo{
+			LegId: localLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			GrpInfoList: grpInfoList,
+		}
+	}
+
+	if activeCntlrConf.CreatingSnapConf != nil {
+		if activeCntlrConf.CreatingSnapConf.OriId == constants.Uint32Max {
+			if err := oc.DmPoolMsgCreateThin(
+				pch,
+				poolName,
+				activeCntlrConf.CreatingSnapConf.DevId,
+			); err != nil {
+				return &pbnd.LocalLegInfo{
+					LegId: localLegConf.LegId,
+					StatusInfo: &pbnd.StatusInfo{
+						Code:      constants.StatusCodeInternalErr,
+						Msg:       err.Error(),
+						Timestamp: pch.Timestamp,
+					},
+					GrpInfoList: grpInfoList,
+				}
+			}
+		} else {
+			if err := oc.DmPoolMsgCreateSnap(
+				pch,
+				poolName,
+				activeCntlrConf.CreatingSnapConf.DevId,
+				activeCntlrConf.CreatingSnapConf.OriId,
+			); err != nil {
+				return &pbnd.LocalLegInfo{
+					LegId: localLegConf.LegId,
+					StatusInfo: &pbnd.StatusInfo{
+						Code:      constants.StatusCodeInternalErr,
+						Msg:       err.Error(),
+						Timestamp: pch.Timestamp,
+					},
+					GrpInfoList: grpInfoList,
+				}
+			}
+		}
+	}
+
+	if activeCntlrConf.DeletingSnapConf != nil {
+		if err := oc.DmPoolMsgDelete(
+			pch,
+			poolName,
+			activeCntlrConf.DeletingSnapConf.DevId,
+		); err != nil {
+			return &pbnd.LocalLegInfo{
+				LegId: localLegConf.LegId,
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: pch.Timestamp,
+				},
+				GrpInfoList: grpInfoList,
+			}
+		}
+	}
+
+	poolStatus, err := oc.DmGetPoolStatus(
+		pch,
+		poolName,
+	)
+	if err != nil {
+		return &pbnd.LocalLegInfo{
+			LegId: localLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			GrpInfoList: grpInfoList,
+		}
+	}
+
 	return &pbnd.LocalLegInfo{
 		LegId: localLegConf.LegId,
 		StatusInfo: &pbnd.StatusInfo{
 			Code:      constants.StatusCodeSucceed,
 			Msg:       constants.StatusMsgSucceed,
 			Timestamp: pch.Timestamp,
+		},
+		ThinPoolInfo: &pbnd.ThinPoolInfo{
+			TransactionId:        poolStatus.TransactionId,
+			UsedMetaBlocks:       poolStatus.UsedMetaBlocks,
+			TotalMetaBlocks:      poolStatus.TotalMetaBlocks,
+			UsedDataBlocks:       poolStatus.UsedDataBlocks,
+			HeldMetadataRoot:     poolStatus.HeldMetadataRoot,
+			Mode:                 poolStatus.Mode,
+			DiscardPassdown:      poolStatus.DiscardPassdown,
+			ErrorOrQueue:         poolStatus.ErrorOrQueue,
+			NeedsCheck:           poolStatus.NeedsCheck,
+			MetadataLowWatermark: poolStatus.MetadataLowWatermark,
 		},
 		GrpInfoList: grpInfoList,
 	}

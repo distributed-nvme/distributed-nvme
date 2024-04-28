@@ -65,8 +65,8 @@ message NvmePortConf {
 
 message RedundancyConf {
   uint32 redun_type = 1;
-  uint32 region_size = 2;
-  uint32 chunk_size = 3;
+  uint64 region_size = 2;
+  uint64 chunk_size = 3;
   uint32 daemon_sleep = 4;
   uint32 min_recovery_rate = 5;
   uint32 max_recovery_rate = 6;
@@ -75,12 +75,12 @@ message RedundancyConf {
 }
 
 message StripeConf {
-  uint32 stripe_size = 1;
+  uint64 stripe_size = 1;
 }
 
 message ThinPoolConf {
-  uint32 data_block_size = 1;
-  uint32 low_water_mark = 2;
+  uint64 data_block_size = 1;
+  uint64 low_water_mark = 2;
 }
 
 message ThinInfo {
@@ -109,12 +109,12 @@ message ThinPoolInfo {
   uint64 total_meta_blocks = 3;
   uint64 used_data_blocks = 4;
   uint64 total_data_blocks = 5;
-  int32 held_metadata_root = 6;
-  uint32 status = 7;
+  int64 held_metadata_root = 6;
+  string mode = 7;
   bool discard_passdown = 8;
-  bool no_space_queue_or_error = 9;
+  string error_or_queue = 9;
   bool needs_check = 10;
-  uint64 metadata_low_atermark = 11;
+  uint64 metadata_low_watermark = 11;
 }
 
 message RedundancyInfo {
@@ -207,15 +207,17 @@ message GrpConf {
 message GrpInfo {
   uint64 grp_id = 1;
   StatusInfo status_info = 2;
-  RedundancyInfo redun_info = 3;
-  repeated LdInfo ld_info_list = 4;
+  RedundancyInfo meta_redun_info = 3;
+  RedundancyInfo data_redun_info = 4;
+  repeated LdInfo ld_info_list = 5;
 }
 
 message LegConf {
   uint64 leg_id = 1;
   uint32 leg_idx = 2;
   uint64 ac_cntlr_id = 3;
-  repeated GrpConf grp_conf_list = 4;
+  bool reload = 4;
+  repeated GrpConf grp_conf_list = 5;
 }
 
 message FenceInfo {

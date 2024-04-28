@@ -861,7 +861,7 @@ func (oc *OsCommand) DmCreateRaid1(
 	}
 
 	rebuild := ""
-	if raid1Arg.RebuildIdx != constants.RebuildIdxNone {
+	if raid1Arg.RebuildIdx != constants.Uint32Max {
 		rebuild = fmt.Sprintf("rebuild %d ", raid1Arg.RebuildIdx)
 		paramCnt += 2
 	}
@@ -933,7 +933,7 @@ type DmPoolArg struct {
 	ErrorIfNoSpace    bool
 }
 
-func GenDmPoolTable(poolArg *DmPoolArg) string {
+func genDmPoolTable(poolArg *DmPoolArg) string {
 	paramCnt := 0
 	skipBlockZeroing := ""
 	if poolArg.SkipBlockZeroing {
@@ -983,14 +983,18 @@ func (oc *OsCommand) DmCreatePool(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
 	poolArg *DmPoolArg,
+	reload bool,
 ) error {
-	table := GenDmPoolTable(poolArg)
+	table := genDmPoolTable(poolArg)
 	status, err := oc.dmStatus(pch, dmName)
 	if err != nil {
 		return err
 	}
 	if status == "" {
 		return oc.dmCreate(pch, dmName, table)
+	}
+	if reload {
+		return oc.dmReload(pch, dmName, table)
 	}
 	return nil
 }
@@ -1058,7 +1062,7 @@ type DmPoolStatus struct {
 	TotalMetaBlocks      uint64
 	UsedDataBlocks       uint64
 	TotalDataBlocks      uint64
-	HeldMetadataroot     int64
+	HeldMetadataRoot     int64
 	Mode                 string
 	DiscardPassdown      bool
 	ErrorOrQueue         string
@@ -1126,13 +1130,13 @@ func (oc *OsCommand) DmGetPoolStatus(
 	if err != nil {
 		return nil, err
 	}
-	heldMetadataroot := int64(-1)
+	heldMetadataRoot := int64(-1)
 	if items[6] != "-" {
 		root, err := strconv.ParseUint(items[6], 10, 64)
 		if err != nil {
 			return nil, err
 		}
-		heldMetadataroot = int64(root)
+		heldMetadataRoot = int64(root)
 	}
 	mode := items[7]
 	discardPassdown := true
@@ -1156,7 +1160,7 @@ func (oc *OsCommand) DmGetPoolStatus(
 		TotalMetaBlocks:      totalMetaBlocks,
 		UsedDataBlocks:       usedDataBlocks,
 		TotalDataBlocks:      totalDataBlocks,
-		HeldMetadataroot:     heldMetadataroot,
+		HeldMetadataRoot:     heldMetadataRoot,
 		Mode:                 mode,
 		DiscardPassdown:      discardPassdown,
 		ErrorOrQueue:         errorOrQueue,
