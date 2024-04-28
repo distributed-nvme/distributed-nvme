@@ -115,4 +115,6 @@ const (
 
 	DevMajorNone = 0
 	DevMinorNone = 0
+
+	RedunTypeRaid1 = 1
 )

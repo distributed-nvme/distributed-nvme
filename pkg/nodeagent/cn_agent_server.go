@@ -74,6 +74,18 @@ func syncupCntlrNvmePort(
 	}
 }
 
+func syncupCntlrGrp(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+	grpConf *pbnd.GrpConf,
+) *pbnd.GrpInfo {
+	return nil
+}
+
 func syncupCntlrLocalLeg(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -82,7 +94,96 @@ func syncupCntlrLocalLeg(
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 	localLegConf *pbnd.LocalLegConf,
 ) *pbnd.LocalLegInfo {
-	return nil
+	grpInfoList := make(
+		[]*pbnd.GrpInfo,
+		len(localLegConf.GrpConfList),
+	)
+	metaLinearArgs := make([]*oscmd.DmLinearArg, 0)
+	dataLinearArgs := make([]*oscmd.DmLinearArg, 0)
+	metaStart := uint64(0)
+	dataStart := uint64(0)
+	for i, grpConf := range localLegConf.GrpConfList {
+		grpInfoList[i] = syncupCntlrGrp(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+			grpConf,
+		)
+		grpDataName := nf.GrpDataDmName(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			grpConf.GrpId,
+		)
+		dataArg := &oscmd.DmLinearArg{
+			Start:   dataStart,
+			Size:    grpConf.DataSize,
+			DevPath: nf.DmNameToPath(grpDataName),
+			Offset:  0,
+		}
+		dataLinearArgs = append(dataLinearArgs, dataArg)
+		dataStart += grpConf.DataSize
+		if grpConf.MetaSize > 0 {
+			grpMetaName := nf.GrpMetaDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				grpConf.GrpId,
+			)
+			metaArg := &oscmd.DmLinearArg{
+				Start:   metaStart,
+				Size:    grpConf.MetaSize,
+				DevPath: nf.DmNameToPath(grpMetaName),
+				Offset:  0,
+			}
+			metaLinearArgs = append(metaLinearArgs, metaArg)
+			metaStart += grpConf.MetaSize
+		}
+	}
+
+	metaName := nf.LegMetaDmName(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+		localLegConf.LegId,
+	)
+	if err := oc.DmCreateLinear(pch, metaName, metaLinearArgs); err != nil {
+		return &pbnd.LocalLegInfo{
+			LegId: localLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			GrpInfoList: grpInfoList,
+		}
+	}
+	dataName := nf.LegDataDmName(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+		localLegConf.LegId,
+	)
+	if err := oc.DmCreateLinear(pch, dataName, metaLinearArgs); err != nil {
+		return &pbnd.LocalLegInfo{
+			LegId: localLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			GrpInfoList: grpInfoList,
+		}
+	}
+
+	return &pbnd.LocalLegInfo{
+		LegId: localLegConf.LegId,
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+		GrpInfoList: grpInfoList,
+	}
 }
 
 func syncupCntlrRemoteLeg(

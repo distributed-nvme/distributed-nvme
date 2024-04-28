@@ -200,11 +200,12 @@ message LdCnConf {
 message GrpConf {
   string grp_id = 1;
   uint32 grp_idx = 2;
-  uint64 grp_size = 3;
-  repeated LdCnConf ld_cn_conf_list = 4;
-  bool inited = 5;
-  uint32 rebuild_idx = 6;
-  repeated uint32 omit_idx_list = 7;
+  uint64 meta_size = 3;
+  uint64 data_size = 4;
+  repeated LdCnConf ld_cn_conf_list = 5;
+  bool inited = 6;
+  uint32 rebuild_idx = 7;
+  repeated uint32 omit_idx_list = 8;
 }
 
 message LocalLegConf {
@@ -326,7 +327,7 @@ message GrpInfo {
 }
 
 message LocalLegInfo {
-  uint64 leg_id = 1;
+  string leg_id = 1;
   StatusInfo status_info = 2;
   ThinPoolInfo thin_pool_info = 3;
   SnapInfo creating_snap_info = 4;
