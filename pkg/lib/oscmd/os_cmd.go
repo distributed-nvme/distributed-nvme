@@ -520,7 +520,7 @@ type DmRaid1Arg struct {
 	Data0      string
 	Meta1      string
 	Data1      string
-	RegionSize uint32
+	RegionSize uint64
 	Nosync     bool
 	RebuildIdx uint32
 }
@@ -751,7 +751,7 @@ type DmRaidStatus struct {
 	Size        uint64
 	RaidType    string
 	DevCnt      uint32
-	ChList      []byte
+	HealthChars []byte
 	SyncCurr    uint64
 	SyncTotal   uint64
 	SyncAction  string
@@ -797,7 +797,7 @@ func (oc *OsCommand) DmGetRaidStatus(
 	if len(items[5]) != int(devCnt) {
 		return nil, fmt.Errorf("Incorrect health chars cnt: %d", len(items[5]))
 	}
-	chList := make([]byte, devCnt)
+	healthChars := make([]byte, devCnt)
 	for i := 0; i < int(devCnt); i++ {
 		ch := items[5][i]
 		if ch != constants.RaidHealthAliveInSync &&
@@ -806,7 +806,7 @@ func (oc *OsCommand) DmGetRaidStatus(
 			ch != constants.RaidHealthMiss {
 			return nil, fmt.Errorf("Invalid health char: %c", ch)
 		}
-		chList[i] = ch
+		healthChars[i] = ch
 	}
 	syncRatioItems := strings.Split(items[6], "/")
 	if len(syncRatioItems) != 2 {
@@ -838,7 +838,7 @@ func (oc *OsCommand) DmGetRaidStatus(
 		Size:        sectorToByte(size),
 		RaidType:    raidType,
 		DevCnt:      uint32(devCnt),
-		ChList:      chList,
+		HealthChars: healthChars,
 		SyncCurr:    syncCurr,
 		SyncTotal:   syncTotal,
 		SyncAction:  syncAction,
@@ -871,7 +871,7 @@ func (oc *OsCommand) DmCreateRaid1(
 		byteToSector(raid1Arg.Start),
 		byteToSector(raid1Arg.Size),
 		paramCnt,
-		byteToSector(uint64(raid1Arg.RegionSize)),
+		byteToSector(raid1Arg.RegionSize),
 		noSync,
 		rebuild,
 		raid1Arg.Meta0,

@@ -109,7 +109,7 @@ func syncupCntlrLd(
 	}
 }
 
-func syncupCntlrRaid1MetaAndData(
+func syncupCntlrSingleRaid1(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
@@ -117,20 +117,78 @@ func syncupCntlrRaid1MetaAndData(
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 	localLegConf *pbnd.LocalLegConf,
 	grpConf *pbnd.GrpConf,
-) (*pbnd.RedundancyInfo, *pbnd.RedundancyInfo, error) {
-	return nil, nil, nil
-}
-
-func syncupCntlrRaid1OnlyData(
-	pch *ctxhelper.PerCtxHelper,
-	oc *oscmd.OsCommand,
-	nf *namefmt.NameFmt,
-	spCntlrConf *pbnd.SpCntlrConf,
-	activeCntlrConf *pbnd.ActiveCntlrConf,
-	localLegConf *pbnd.LocalLegConf,
-	grpConf *pbnd.GrpConf,
-) (*pbnd.RedundancyInfo, *pbnd.RedundancyInfo, error) {
-	return nil, nil, nil
+	raid1Name string,
+	size uint64,
+	meta0LdConf *pbnd.LdCnConf,
+	data0LdConf *pbnd.LdCnConf,
+	meta1LdConf *pbnd.LdCnConf,
+	data1LdConf *pbnd.LdCnConf,
+) (*pbnd.RedundancyInfo, error) {
+	meta0Nqn := nf.LdDnDmNqn(
+		meta0LdConf.DnId,
+		spCntlrConf.SpId,
+		meta0LdConf.LdId,
+	)
+	meta0Path := nf.NsPath(meta0Nqn, nf.LdDnDmNsNum())
+	data0Nqn := nf.LdDnDmNqn(
+		data0LdConf.DnId,
+		spCntlrConf.SpId,
+		data0LdConf.LdId,
+	)
+	data0Path := nf.NsPath(data0Nqn, nf.LdDnDmNsNum())
+	meta1Nqn := nf.LdDnDmNqn(
+		meta1LdConf.DnId,
+		spCntlrConf.SpId,
+		meta1LdConf.LdId,
+	)
+	meta1Path := nf.NsPath(meta1Nqn, nf.LdDnDmNsNum())
+	data1Nqn := nf.LdDnDmNqn(
+		data1LdConf.DnId,
+		spCntlrConf.SpId,
+		data1LdConf.LdId,
+	)
+	data1Path := nf.NsPath(data1Nqn, nf.LdDnDmNsNum())
+	raid1Arg := &oscmd.DmRaid1Arg{
+		Start:      0,
+		Size:       size,
+		Meta0:      meta0Path,
+		Data0:      data0Path,
+		Meta1:      meta1Path,
+		Data1:      data1Path,
+		RegionSize: activeCntlrConf.RedundancyConf.RegionSize,
+		Nosync:     grpConf.NoSync,
+		RebuildIdx: grpConf.RebuildIdx,
+	}
+	if len(grpConf.OmitIdxList) > 0 {
+		switch grpConf.OmitIdxList[0] {
+		case 0:
+			raid1Arg.Meta0 = "-"
+			raid1Arg.Data0 = "-"
+		case 1:
+			raid1Arg.Meta1 = "-"
+			raid1Arg.Data1 = "-"
+		default:
+			pch.Logger.Fatal(
+				"Invalid omit idx: %d",
+				grpConf.OmitIdxList[0],
+			)
+		}
+	}
+	if err := oc.DmCreateRaid1(pch, raid1Name, raid1Arg); err != nil {
+		return nil, err
+	}
+	dmRaidStatus, err := oc.DmGetRaidStatus(pch, raid1Name)
+	if err != nil {
+		return nil, err
+	}
+	return &pbnd.RedundancyInfo{
+		HealthChars: dmRaidStatus.HealthChars,
+		SyncCurr:    dmRaidStatus.SyncCurr,
+		SyncAction:  dmRaidStatus.SyncAction,
+		MismatchCnt: dmRaidStatus.MismatchCnt,
+		DataOffset:  dmRaidStatus.DataOffset,
+		JournalChar: uint32(dmRaidStatus.JournalChar),
+	}, nil
 }
 
 func syncupCntlrRaid1(
@@ -150,7 +208,8 @@ func syncupCntlrRaid1(
 				ldCnt,
 			)
 		}
-		return syncupCntlrRaid1MetaAndData(
+
+		metaRedunInfo, err := syncupCntlrSingleRaid1(
 			pch,
 			oc,
 			nf,
@@ -158,7 +217,45 @@ func syncupCntlrRaid1(
 			activeCntlrConf,
 			localLegConf,
 			grpConf,
+			nf.GrpMetaDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				grpConf.GrpId,
+			),
+			grpConf.MetaSize,
+			grpConf.LdCnConfList[0],
+			grpConf.LdCnConfList[1],
+			grpConf.LdCnConfList[4],
+			grpConf.LdCnConfList[5],
 		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		dataRedunInfo, err := syncupCntlrSingleRaid1(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			activeCntlrConf,
+			localLegConf,
+			grpConf,
+			nf.GrpDataDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				grpConf.GrpId,
+			),
+			grpConf.DataSize,
+			grpConf.LdCnConfList[2],
+			grpConf.LdCnConfList[3],
+			grpConf.LdCnConfList[6],
+			grpConf.LdCnConfList[7],
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return metaRedunInfo, dataRedunInfo, nil
 	}
 
 	if ldCnt != 4 {
@@ -167,7 +264,7 @@ func syncupCntlrRaid1(
 			ldCnt,
 		)
 	}
-	return syncupCntlrRaid1OnlyData(
+	dataRedunInfo, err := syncupCntlrSingleRaid1(
 		pch,
 		oc,
 		nf,
@@ -175,7 +272,21 @@ func syncupCntlrRaid1(
 		activeCntlrConf,
 		localLegConf,
 		grpConf,
+		nf.GrpDataDmName(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			grpConf.GrpId,
+		),
+		grpConf.DataSize,
+		grpConf.LdCnConfList[0],
+		grpConf.LdCnConfList[1],
+		grpConf.LdCnConfList[2],
+		grpConf.LdCnConfList[3],
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return nil, dataRedunInfo, err
 }
 
 func syncupCntlrGrp(

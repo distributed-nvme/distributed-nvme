@@ -17,8 +17,6 @@ service ControllerNodeAgent {
   rpc CheckCn(CheckCnRequest) returns(CheckCnReply) {}
   rpc SyncupSpCntlr(SyncupSpCntlrRequest) returns(SyncupSpCntlrReply) {}
   rpc CheckSpCntlr(CheckSpCntlrRequest) returns(CheckSpCntlrReply) {}
-  rpc Suspend(SuspendRequest) returns(SuspendReply) {}
-  rpc Resume(ResumeRequest) returns(ResumeReply) {}
   rpc Flush(FlushRequest) returns(FlushReply) {}
   rpc CleanupFence(CleanupFenceRequest) returns(CleanupFenceReply) {}
 }
@@ -203,7 +201,7 @@ message GrpConf {
   uint64 meta_size = 3;
   uint64 data_size = 4;
   repeated LdCnConf ld_cn_conf_list = 5;
-  bool inited = 6;
+  bool no_sync = 6;
   uint32 rebuild_idx = 7;
   repeated uint32 omit_idx_list = 8;
 }
@@ -221,7 +219,7 @@ message RemoteLegConf {
 }
 
 message CloneConf {
-  uint32 region_size = 1;
+  uint64 region_size = 1;
   uint32 hydration_threshold = 2;
   uint32 hydration_batch_size = 3;
 }
@@ -303,10 +301,10 @@ message ThinPoolInfo {
 }
 
 message RedundancyInfo {
-  repeated uint32 health_char = 1;
-  uint64 sync_done = 2;
+  bytes health_chars = 1;
+  uint64 sync_curr = 2;
   uint64 sync_total = 3;
-  uint32 sync_action = 4;
+  string sync_action = 4;
   uint64 mismatch_cnt = 5;
   uint64 data_offset = 6;
   uint32 journal_char = 7;
@@ -414,28 +412,6 @@ message CheckSpCntlrRequest {
 
 message CheckSpCntlrReply {
   SpCntlrInfo sp_cntlr_info = 1;
-}
-
-message SuspendRequest {
-  string cn_id = 1;
-  string sp_id = 2;
-  string cntlr_id = 3;
-  int64 revision = 4;
-}
-
-message SuspendReply {
-  StatusInfo status_info = 1;
-}
-
-message ResumeRequest {
-  string cn_id = 1;
-  string sp_id = 2;
-  string cntlr_id = 3;
-  int64 revision = 4;
-}
-
-message ResumeReply {
-  StatusInfo status_info = 1;
 }
 
 message FlushRequest {

@@ -103,11 +103,16 @@ func (nf *NameFmt) LdDnDmNsNum() string {
 	return "1"
 }
 
-func (nf *NameFmt) NsUuid(nqn, nsId string) string {
+func (nf *NameFmt) NsUuid(nqn, nsNum string) string {
 	return uuid.NewMD5(
 		uuidNameSpace,
-		[]byte(fmt.Sprintf("%s-%s", nqn, nsId)),
+		[]byte(fmt.Sprintf("%s-%s", nqn, nsNum)),
 	).String()
+}
+
+func (nf *NameFmt) NsPath(nqn, nsNum string) string {
+	nsUuid := nf.NsUuid(nqn, nsNum)
+	return fmt.Sprintf("/dev/disk/by-id/nvme-uuid.%s", nsUuid)
 }
 
 func (nf *NameFmt) LdCnDmName(
