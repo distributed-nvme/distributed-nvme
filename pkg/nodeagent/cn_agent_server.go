@@ -582,7 +582,41 @@ func syncupCntlrRemoteLeg(
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 	remoteLegConf *pbnd.RemoteLegConf,
 ) *pbnd.RemoteLegInfo {
-	return nil
+	// FIXME: implement fence
+	fenceId := ""
+
+	nvmeArg := &oscmd.NvmeArg{
+		Nqn: nf.RemoteLegNqn(
+			remoteLegConf.CnId,
+			spCntlrConf.SpId,
+			remoteLegConf.LegId,
+		),
+		Transport: remoteLegConf.NvmeListener.TrType,
+		TrAddr:    remoteLegConf.NvmeListener.TrAddr,
+		TrSvcId:   remoteLegConf.NvmeListener.TrSvcId,
+		HostNqn:   nf.HostNqnCn(spCntlrConf.CnId),
+	}
+
+	if err := oc.NvmeConnectPath(pch, nvmeArg); err != nil {
+		return &pbnd.RemoteLegInfo{
+			LegId: remoteLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			FenceId: fenceId,
+		}
+	}
+	return &pbnd.RemoteLegInfo{
+		LegId: remoteLegConf.LegId,
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
+			Timestamp: pch.Timestamp,
+		},
+		FenceId: fenceId,
+	}
 }
 
 func syncupActiveCntlr(

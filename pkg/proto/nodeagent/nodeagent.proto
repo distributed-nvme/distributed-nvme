@@ -334,7 +334,7 @@ message LocalLegInfo {
 }
 
 message RemoteLegInfo {
-  uint64 leg_id = 1;
+  string leg_id = 1;
   StatusInfo status_info = 2;
   string fence_id = 3;
 }
