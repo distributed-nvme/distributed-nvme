@@ -16,15 +16,17 @@ type NameFmt struct {
 }
 
 const (
-	devTypeLdDnDm      = "0000"
-	devTypeLdCnDm      = "1000"
-	devTypeGrpMetaDm   = "1001"
-	devTypeGrpDataDm   = "1002"
-	devTypeLegMetaDm   = "1003"
-	devTypeLegDataDm   = "1004"
-	devTypeLegPoolDm   = "1005"
-	devTypeLegThinDm   = "1006"
-	devTypeRaid0ThinDm = "1007"
+	devTypeLdDnDm        = "0000"
+	devTypeLdCnDm        = "1000"
+	devTypeGrpMetaDm     = "1001"
+	devTypeGrpDataDm     = "1002"
+	devTypeLegMetaDm     = "1003"
+	devTypeLegDataDm     = "1004"
+	devTypeLegPoolDm     = "1005"
+	devTypeLegThinDm     = "1006"
+	devTypeLegToLocalDm  = "1007"
+	devTypeLegToRemoteDm = "1008"
+	devTypeRaid0Dm       = "1009"
 
 	nqnTypeHostCn = "0000"
 	nqnTypeLdDnDm = "1000"
@@ -103,10 +105,10 @@ func (nf *NameFmt) LdDnDmNsNum() string {
 	return "1"
 }
 
-func (nf *NameFmt) NsUuid(nqn, nsNum string) string {
+func (nf *NameFmt) NsUuid(nqn, nsId string) string {
 	return uuid.NewMD5(
 		uuidNameSpace,
-		[]byte(fmt.Sprintf("%s-%s", nqn, nsNum)),
+		[]byte(fmt.Sprintf("%s-%s", nqn, nsId)),
 	).String()
 }
 
@@ -222,6 +224,40 @@ func (nf *NameFmt) LegThinDmName(
 	)
 }
 
+func (nf *NameFmt) LegToLocalDmName(
+	cnId string,
+	spId string,
+	legId string,
+	thinId uint32,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s-%s-%08d",
+		nf.dmPrefix,
+		devTypeLegToLocalDm,
+		cnId,
+		spId,
+		legId,
+		thinId,
+	)
+}
+
+func (nf *NameFmt) LegToRemoteDmName(
+	cnId string,
+	spId string,
+	legId string,
+	thinId uint32,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s-%s-%08d",
+		nf.dmPrefix,
+		devTypeLegToRemoteDm,
+		cnId,
+		spId,
+		legId,
+		thinId,
+	)
+}
+
 func (nf *NameFmt) Raid0ThinDmName(
 	cnId string,
 	spId string,
@@ -230,7 +266,7 @@ func (nf *NameFmt) Raid0ThinDmName(
 	return fmt.Sprintf(
 		"%s-%s-%s-%s-%08d",
 		nf.dmPrefix,
-		devTypeRaid0ThinDm,
+		devTypeRaid0Dm,
 		cnId,
 		spId,
 		thinId,

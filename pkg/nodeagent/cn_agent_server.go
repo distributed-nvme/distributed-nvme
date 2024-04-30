@@ -355,6 +355,56 @@ func syncupCntlrGrp(
 	}
 }
 
+func syncupCntlrExportToRemote(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	activeCntlrConf *pbnd.ActiveCntlrConf,
+	localLegConf *pbnd.LocalLegConf,
+) error {
+	poolName := nf.LegPoolDmName(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+		localLegConf.LegId,
+	)
+	poolPath := nf.DmNameToPath(poolName)
+	cnt := uint64(len(activeCntlrConf.RemoteLegConfList) + 1)
+	for _, ssConf := range spCntlrConf.SsConfList {
+		for _, nsConf := range ssConf.NsConfList {
+			thinName := nf.LegToRemoteDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				localLegConf.LegId,
+				nsConf.DevId,
+			)
+			if nsConf.Size%cnt > 0 {
+				pch.Logger.Fatal(
+					"Size is not divisible by cnt: %d %d",
+					nsConf.Size,
+					cnt,
+				)
+			}
+			size := nsConf.Size / cnt
+			thinArg := &oscmd.DmThinArg{
+				Start:    0,
+				Size:     size,
+				PoolPath: poolPath,
+				DevId:    nsConf.DevId,
+			}
+			if err := oc.DmCreateThin(
+				pch,
+				thinName,
+				thinArg,
+			); err != nil {
+				return err
+			}
+
+		}
+	}
+	return nil
+}
+
 func syncupCntlrLocalLeg(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -532,6 +582,25 @@ func syncupCntlrLocalLeg(
 				},
 				GrpInfoList: grpInfoList,
 			}
+		}
+	}
+
+	if err := syncupCntlrExportToRemote(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		activeCntlrConf,
+		localLegConf,
+	); err != nil {
+		return &pbnd.LocalLegInfo{
+			LegId: localLegConf.LegId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			GrpInfoList: grpInfoList,
 		}
 	}
 

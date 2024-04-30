@@ -254,9 +254,10 @@ message HostConf {
 }
 
 message SsConf {
-  string nqn = 1;
-  repeated NsConf ns_conf_list = 2;
-  repeated HostConf host_conf_list = 3;
+  string ss_id = 1;
+  string nqn = 2;
+  repeated NsConf ns_conf_list = 3;
+  repeated HostConf host_conf_list = 4;
 }
 
 message ActiveCntlrConf {
@@ -355,31 +356,31 @@ message CloneInfo {
 }
 
 message MtInfo {
-  uint64 mt_id = 1;
+  string mt_id = 1;
   StatusInfo status_info = 2;
   CloneInfo clone_info = 3;
   LdCnInfo meta_ld_info = 4;
 }
 
 message ItInfo {
-  uint64 it_id = 1;
+  string it_id = 1;
   StatusInfo status_info = 2;
   CloneInfo clone_info = 3;
   LdCnInfo meta_ld_info = 4;
 }
 
 message HostInfo {
-  uint64 host_id = 1;
+  string host_id = 1;
   StatusInfo status_info = 2;
 }
 
 message NsInfo {
-  uint64 ns_id = 1;
+  string ns_id = 1;
   StatusInfo status_info = 2;
 }
 
 message SsInfo {
-  uint64 ss_id = 1;
+  string ss_id = 1;
   StatusInfo status_info = 2;
   repeated NsInfo ns_info_list = 3;
   repeated HostInfo host_info_list = 4;

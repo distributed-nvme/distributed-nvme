@@ -1169,6 +1169,35 @@ func (oc *OsCommand) DmGetPoolStatus(
 	}, nil
 }
 
+type DmThinArg struct {
+	Start    uint64
+	Size     uint64
+	PoolPath string
+	DevId    uint32
+}
+
+func (oc *OsCommand) DmCreateThin(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	thinArg *DmThinArg,
+) error {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		table := fmt.Sprintf(
+			"%d %d thin %s %d",
+			thinArg.Start,
+			thinArg.Size,
+			thinArg.PoolPath,
+			thinArg.DevId,
+		)
+		return oc.dmCreate(pch, dmName, table)
+	}
+	return nil
+}
+
 func (oc *OsCommand) DmRemove(
 	pch *ctxhelper.PerCtxHelper,
 	dmName string,
