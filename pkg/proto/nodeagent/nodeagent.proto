@@ -209,7 +209,9 @@ message GrpConf {
 message LocalLegConf {
   string leg_id = 1;
   bool reload = 2;
-  repeated GrpConf grp_conf_list = 3;
+  uint32 cntlid_min = 3;
+  uint32 cntlid_max = 4;
+  repeated GrpConf grp_conf_list = 5;
 }
 
 message RemoteLegConf {

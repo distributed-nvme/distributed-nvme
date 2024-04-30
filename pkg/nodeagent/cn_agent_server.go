@@ -370,14 +370,26 @@ func syncupCntlrExportToRemote(
 	)
 	poolPath := nf.DmNameToPath(poolName)
 	cnt := uint64(len(activeCntlrConf.RemoteLegConfList) + 1)
+	hostNqnMap := make(map[string]bool)
+	for _, remoteLegConf := range activeCntlrConf.RemoteLegConfList {
+		hostNqn := nf.HostNqnCn(remoteLegConf.CnId)
+		hostNqnMap[hostNqn] = true
+	}
 	for _, ssConf := range spCntlrConf.SsConfList {
+		nqn := nf.RemoteLegNqn(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			localLegConf.LegId,
+		)
+		nsMap := make(map[string]*oscmd.NvmetNsArg)
 		for _, nsConf := range ssConf.NsConfList {
-			thinName := nf.LegToRemoteDmName(
+			thinName := nf.LegThinDmName(
 				spCntlrConf.CnId,
 				spCntlrConf.SpId,
 				localLegConf.LegId,
 				nsConf.DevId,
 			)
+			thinPath := nf.DmNameToPath(thinName)
 			if nsConf.Size%cnt > 0 {
 				pch.Logger.Fatal(
 					"Size is not divisible by cnt: %d %d",
@@ -399,7 +411,57 @@ func syncupCntlrExportToRemote(
 			); err != nil {
 				return err
 			}
-
+			linearArgs := make([]*oscmd.DmLinearArg, 1)
+			linearArgs[0] = &oscmd.DmLinearArg{
+				Start:   0,
+				Size:    size,
+				DevPath: thinPath,
+				Offset:  0,
+			}
+			localName := nf.LegToLocalDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				localLegConf.LegId,
+				nsConf.DevId,
+			)
+			if err := oc.DmCreateLinear(
+				pch,
+				localName,
+				linearArgs,
+			); err != nil {
+				return err
+			}
+			remoteName := nf.LegToRemoteDmName(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				localLegConf.LegId,
+				nsConf.DevId,
+			)
+			if err := oc.DmCreateLinear(
+				pch,
+				remoteName,
+				linearArgs,
+			); err != nil {
+				return err
+			}
+			remotePath := nf.DmNameToPath(remoteName)
+			nsUuid := nf.NsUuid(nqn, nsConf.NsId)
+			nsMap[nsConf.NsNum] = &oscmd.NvmetNsArg{
+				NsNum:   nsConf.NsNum,
+				DevPath: remotePath,
+				Uuid:    nsUuid,
+			}
+		}
+		if err := oc.NvmetSubsysCreate(
+			pch,
+			nqn,
+			localLegConf.CntlidMin,
+			localLegConf.CntlidMax,
+			"0",
+			hostNqnMap,
+			nsMap,
+		); err != nil {
+			return err
 		}
 	}
 	return nil
