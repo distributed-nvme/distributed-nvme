@@ -173,8 +173,9 @@ message DnGeneralConf {
 message CnGeneralConf {
   string grpc_target = 1;
   bool online = 2;
-  CnCapacity cn_capacity = 3;
-  NextBit port_next_bit = 4;
+  NvmePortConf nvme_port_conf = 3;
+  CnCapacity cn_capacity = 4;
+  NextBit port_next_bit = 5;
 }
 
 message LdConf {
@@ -335,8 +336,9 @@ message NsInfo {
 message SsConf {
   uint64 ss_id = 1;
   string nqn = 2;
-  repeated NsConf ns_conf = 3;
-  repeated HostConf host_conf = 4;
+  NextBit ns_next_bit = 3;
+  repeated NsConf ns_conf = 4;
+  repeated HostConf host_conf = 5;
 }
 
 message SsPerCntlrInfo {

@@ -26,6 +26,7 @@ type SpLdLocal struct {
 
 type CnLocal struct {
 	CnId           string
+	PortNum        string
 	Revision       int64
 	LiveSpCntlrMap map[string]bool
 	DeadSpCntlrMap map[string]bool

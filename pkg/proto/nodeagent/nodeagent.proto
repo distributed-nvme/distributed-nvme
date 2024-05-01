@@ -137,7 +137,8 @@ message SpCntlrId {
 message CnConf {
   string cn_id = 1;
   int64 revision = 2;
-  repeated SpCntlrId sp_cntlr_id_list = 3;
+  NvmePortConf nvme_port_conf = 3;
+  repeated SpCntlrId sp_cntlr_id_list = 4;
 }
 
 message SyncupCnRequest {

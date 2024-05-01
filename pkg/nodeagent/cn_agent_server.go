@@ -37,6 +37,7 @@ func decodeSpCntlrId(
 
 type spCntlrRuntimeData struct {
 	mu           sync.Mutex
+	portNum      string
 	spCntlrLocal *localdata.SpCntlrLocal
 	spCntlrConf  *pbnd.SpCntlrConf
 }
@@ -889,6 +890,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 		if cnLocal == nil {
 			cnAgent.cnLocal = &localdata.CnLocal{
 				CnId:           req.CnConf.CnId,
+				PortNum:        req.CnConf.NvmePortConf.PortNum,
 				Revision:       req.CnConf.Revision,
 				LiveSpCntlrMap: make(map[string]bool),
 				DeadSpCntlrMap: make(map[string]bool),
@@ -904,6 +906,18 @@ func (cnAgent *cnAgentServer) SyncupCn(
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
 					Msg:       fmt.Sprintf("CnId: %s", cnAgent.cnLocal.CnId),
+					Timestamp: pch.Timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if req.CnConf.NvmePortConf.PortNum != cnAgent.cnLocal.PortNum {
+		return &pbnd.SyncupCnReply{
+			CnInfo: &pbnd.CnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeDataMismatch,
+					Msg:       fmt.Sprintf("PortNum: %s", cnAgent.cnLocal.PortNum),
 					Timestamp: pch.Timestamp,
 				},
 			},
@@ -970,6 +984,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 				)
 			}
 			spCntlrData = &spCntlrRuntimeData{
+				portNum:      cnAgent.cnLocal.PortNum,
 				spCntlrLocal: spCntlrLocal,
 			}
 			cnAgent.spCntlrMap[key] = spCntlrData
@@ -997,6 +1012,26 @@ func (cnAgent *cnAgentServer) SyncupCn(
 	}
 
 	if err := cnAgent.local.SetCnLocal(pch, cnAgent.cnLocal); err != nil {
+		return &pbnd.SyncupCnReply{
+			CnInfo: &pbnd.CnInfo{
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: pch.Timestamp,
+				},
+			},
+		}, nil
+	}
+
+	if err := cnAgent.oc.NvmetPortCreate(
+		pch,
+		cnAgent.cnLocal.PortNum,
+		req.CnConf.NvmePortConf.NvmeListener.TrType,
+		req.CnConf.NvmePortConf.NvmeListener.AdrFam,
+		req.CnConf.NvmePortConf.NvmeListener.TrAddr,
+		req.CnConf.NvmePortConf.NvmeListener.TrSvcId,
+		req.CnConf.NvmePortConf.TrEq.SeqCh,
+	); err != nil {
 		return &pbnd.SyncupCnReply{
 			CnInfo: &pbnd.CnInfo{
 				StatusInfo: &pbnd.StatusInfo{
