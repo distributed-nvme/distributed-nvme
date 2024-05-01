@@ -74,12 +74,12 @@ const (
 	StandbyCntlrCntMax     = 4
 	StandbyCntlrCntDefault = 1
 
-	CnPortBase    = 0
-	CnPortSize    = 4096
-	DnCntlidMin   = 10000
-	DnCntlidMax   = 19999
-	CnCntlidStart = 20000
-	CnCntlidStep  = 2000
+	InternalCntlidMin   = 10000
+	InternalCntlidMax   = 19999
+	ExternalCntlidStart = 20000
+	ExternalCntlidStep  = 2000
+	ExternalPortBase    = 0
+	ExternalPortSize    = 4096
 
 	ShardCnt             = 256
 	ShardIdFormat        = "%02x"

@@ -360,6 +360,7 @@ func syncupCntlrExportToRemote(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 	localLegConf *pbnd.LocalLegConf,
@@ -456,9 +457,9 @@ func syncupCntlrExportToRemote(
 		if err := oc.NvmetSubsysCreate(
 			pch,
 			nqn,
-			localLegConf.CntlidMin,
-			localLegConf.CntlidMax,
-			"0",
+			constants.InternalCntlidMin,
+			constants.InternalCntlidMax,
+			spCntlrData.portNum,
 			hostNqnMap,
 			nsMap,
 		); err != nil {
@@ -472,6 +473,7 @@ func syncupCntlrLocalLeg(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 	localLegConf *pbnd.LocalLegConf,
@@ -652,6 +654,7 @@ func syncupCntlrLocalLeg(
 		pch,
 		oc,
 		nf,
+		spCntlrData,
 		spCntlrConf,
 		activeCntlrConf,
 		localLegConf,
@@ -755,6 +758,7 @@ func syncupActiveCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 	activeCntlrConf *pbnd.ActiveCntlrConf,
 ) *pbnd.ActiveCntlrInfo {
@@ -767,6 +771,7 @@ func syncupActiveCntlr(
 			pch,
 			oc,
 			nf,
+			spCntlrData,
 			spCntlrConf,
 			activeCntlrConf,
 			localLegConf,
@@ -807,6 +812,7 @@ func syncupSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) *pbnd.SpCntlrInfo {
 	nvmePortInfo := syncupCntlrNvmePort(
@@ -820,6 +826,7 @@ func syncupSpCntlr(
 		pch,
 		oc,
 		nf,
+		spCntlrData,
 		spCntlrConf,
 		spCntlrConf.ActiveCntlrConf,
 	)
@@ -1293,6 +1300,7 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 		pch,
 		cnAgent.oc,
 		cnAgent.nf,
+		spCntlrData,
 		req.SpCntlrConf,
 	)
 

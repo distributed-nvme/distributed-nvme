@@ -106,8 +106,8 @@ func syncupSpLd(
 	if err := oc.NvmetSubsysCreate(
 		pch,
 		nqn,
-		constants.DnCntlidMin,
-		constants.DnCntlidMax,
+		constants.InternalCntlidMin,
+		constants.InternalCntlidMax,
 		portNum,
 		hostNqnMap,
 		nsMap,
