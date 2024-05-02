@@ -3,6 +3,7 @@ package nodeagent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -805,7 +806,137 @@ func syncupCntlrSs(
 	spCntlrConf *pbnd.SpCntlrConf,
 	ssConf *pbnd.SsConf,
 ) *pbnd.SsInfo {
-	return &pbnd.SsInfo{}
+	localCnt := len(spCntlrConf.ActiveCntlrConf.LocalLegConfList)
+	remoteCnt := len(spCntlrConf.ActiveCntlrConf.RemoteLegConfList)
+	cnt := localCnt + remoteCnt
+	legIdList := make([]string, cnt)
+	localLegMap := make(map[string]*pbnd.LocalLegConf)
+	remoteLegMap := make(map[string]*pbnd.RemoteLegConf)
+	for i, localLegConf := range spCntlrConf.ActiveCntlrConf.LocalLegConfList {
+		legId := localLegConf.LegId
+		legIdList[i] = legId
+		localLegMap[legId] = localLegConf
+	}
+	for i, remoteLegConf := range spCntlrConf.ActiveCntlrConf.RemoteLegConfList {
+		legId := remoteLegConf.LegId
+		legIdList[i+localCnt] = legId
+		remoteLegMap[legId] = remoteLegConf
+	}
+	slices.Sort(legIdList)
+
+	nqn := nf.SsNqn(
+		spCntlrConf.SpId,
+		ssConf.SsId,
+	)
+	nsInfoList := make([]*pbnd.NsInfo, len(ssConf.NsConfList))
+	nsErr := false
+	nsMap := make(map[string]*oscmd.NvmetNsArg)
+	for i, nsConf := range ssConf.NsConfList {
+		raid0Arg := &oscmd.DmRaid0Arg{
+			Start:     0,
+			Size:      nsConf.Size,
+			ChunkSize: spCntlrConf.ActiveCntlrConf.StripeConf.ChunkSize,
+			DevList:   make([]string, cnt),
+		}
+		for j, legId := range legIdList {
+			if localLegConf, ok := localLegMap[legId]; ok {
+				localName := nf.LegToLocalDmName(
+					spCntlrConf.CnId,
+					spCntlrConf.SpId,
+					localLegConf.LegId,
+					nsConf.DevId,
+				)
+				localPath := nf.DmNameToPath(localName)
+				raid0Arg.DevList[j] = localPath
+			} else if remoteLegConf, ok := remoteLegMap[legId]; ok {
+				remoteNqn := nf.RemoteLegNqn(
+					remoteLegConf.CnId,
+					spCntlrConf.SpId,
+					remoteLegConf.LegId,
+				)
+				remotePath := nf.NsPath(remoteNqn, nsConf.NsNum)
+				raid0Arg.DevList[j] = remotePath
+			}
+		}
+		raid0Name := nf.Raid0ThinDmName(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			nsConf.DevId,
+		)
+		err := oc.DmCreateRaid0(pch, raid0Name, raid0Arg)
+		if err != nil {
+			nsInfoList[i] = &pbnd.NsInfo{
+				NsId: nsConf.NsId,
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: pch.Timestamp,
+				},
+			}
+			nsErr = true
+		} else {
+			nsInfoList[i] = &pbnd.NsInfo{
+				NsId: nsConf.NsId,
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeSucceed,
+					Msg:       constants.StatusMsgSucceed,
+					Timestamp: pch.Timestamp,
+				},
+			}
+		}
+		nsMap[nsConf.NsNum] = &oscmd.NvmetNsArg{
+			NsNum:   nsConf.NsNum,
+			DevPath: nf.DmNameToPath(raid0Name),
+			Uuid:    nf.NsUuid(nqn, nsConf.NsNum),
+		}
+	}
+	if nsErr {
+		return &pbnd.SsInfo{
+			SsId: ssConf.SsId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       "Ns error",
+				Timestamp: pch.Timestamp,
+			},
+			NsInfoList: nsInfoList,
+		}
+	}
+	hostNqnMap := make(map[string]bool)
+	for _, hostConf := range ssConf.HostConfList {
+		hostNqnMap[hostConf.HostNqn] = true
+	}
+	cntlidMin := constants.ExternalCntlidStart +
+		spCntlrConf.CntlrIdx*constants.ExternalCntlidStep
+	cntlidMax := cntlidMin + constants.ExternalCntlidStep
+	err := oc.NvmetSubsysCreate(
+		pch,
+		nqn,
+		cntlidMin,
+		cntlidMax,
+		spCntlrConf.NvmePortConf.PortNum,
+		hostNqnMap,
+		nsMap,
+	)
+	if err != nil {
+		return &pbnd.SsInfo{
+			SsId: ssConf.SsId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       err.Error(),
+				Timestamp: pch.Timestamp,
+			},
+			NsInfoList: nsInfoList,
+		}
+	}
+	return &pbnd.SsInfo{
+		SsId: ssConf.SsId,
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      constants.StatusCodeInternalErr,
+			Msg:       err.Error(),
+			Timestamp: pch.Timestamp,
+		},
+		NsInfoList: nsInfoList,
+	}
 }
 
 func syncupSpCntlr(

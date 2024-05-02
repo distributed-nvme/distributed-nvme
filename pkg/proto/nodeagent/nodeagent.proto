@@ -163,7 +163,7 @@ message CheckCnReply {
 }
 
 message StripeConf {
-  uint64 stripe_size = 1;
+  uint64 chunk_size = 1;
 }
 
 message ThinPoolConf {
@@ -210,9 +210,7 @@ message GrpConf {
 message LocalLegConf {
   string leg_id = 1;
   bool reload = 2;
-  uint32 cntlid_min = 3;
-  uint32 cntlid_max = 4;
-  repeated GrpConf grp_conf_list = 5;
+  repeated GrpConf grp_conf_list = 3;
 }
 
 message RemoteLegConf {
@@ -258,9 +256,8 @@ message HostConf {
 
 message SsConf {
   string ss_id = 1;
-  string nqn = 2;
-  repeated NsConf ns_conf_list = 3;
-  repeated HostConf host_conf_list = 4;
+  repeated NsConf ns_conf_list = 2;
+  repeated HostConf host_conf_list = 3;
 }
 
 message ActiveCntlrConf {
@@ -281,9 +278,10 @@ message SpCntlrConf {
   string sp_id = 2;
   string cntlr_id = 3;
   int64 revision = 4;
-  NvmePortConf nvme_port_conf = 5;
-  repeated SsConf ss_conf_list = 6;
-  ActiveCntlrConf active_cntlr_conf = 7;
+  uint32 cntlr_idx = 5;
+  NvmePortConf nvme_port_conf = 6;
+  repeated SsConf ss_conf_list = 7;
+  ActiveCntlrConf active_cntlr_conf = 8;
 }
 
 message SyncupSpCntlrRequest {
@@ -372,11 +370,6 @@ message ItInfo {
   LdCnInfo meta_ld_info = 4;
 }
 
-message HostInfo {
-  string host_id = 1;
-  StatusInfo status_info = 2;
-}
-
 message NsInfo {
   string ns_id = 1;
   StatusInfo status_info = 2;
@@ -386,7 +379,6 @@ message SsInfo {
   string ss_id = 1;
   StatusInfo status_info = 2;
   repeated NsInfo ns_info_list = 3;
-  repeated HostInfo host_info_list = 4;
 }
 
 message ActiveCntlrInfo {

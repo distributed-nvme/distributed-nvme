@@ -919,6 +919,46 @@ func (oc *OsCommand) DmCreateRaid1(
 	return nil
 }
 
+type DmRaid0Arg struct {
+	Start     uint64
+	Size      uint64
+	ChunkSize uint64
+	DevList   []string
+}
+
+func (oc *OsCommand) DmCreateRaid0(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	raid0Arg *DmRaid0Arg,
+) error {
+	cnt := len(raid0Arg.DevList)
+	var tableBuilder strings.Builder
+	prefix := fmt.Sprintf(
+		"%d %d raid raid0 1 %d %d",
+		byteToSector(raid0Arg.Start),
+		byteToSector(raid0Arg.Size),
+		cnt,
+		byteToSector(raid0Arg.ChunkSize),
+	)
+	tableBuilder.WriteString(prefix)
+	for _, devPath := range raid0Arg.DevList {
+		devStr := fmt.Sprintf(" - %s", devPath)
+		tableBuilder.WriteString(devStr)
+	}
+	table := tableBuilder.String()
+
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+
+	if status == "" {
+		return oc.dmCreate(pch, dmName, table)
+	}
+
+	return nil
+}
+
 type DmPoolArg struct {
 	Start             uint64
 	Size              uint64

@@ -75,7 +75,7 @@ message RedundancyConf {
 }
 
 message StripeConf {
-  uint64 stripe_size = 1;
+  uint64 chunk_size = 1;
 }
 
 message ThinPoolConf {
