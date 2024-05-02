@@ -1,11 +1,11 @@
 package worker
 
 import (
-	"strconv"
 	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
@@ -90,23 +90,89 @@ func (dnwkr *dnWorkerServer) delResRev(
 	return nil
 }
 
-func syncupDn(
+func generateDnStatusInfo(
+	reply *pbnd.SyncupDnReply,
+	repErr error,
+) *pbcp.StatusInfo {
+	if repErr != nil {
+		return &pbcp.StatusInfo{
+			Code:      constants.StatusCodeUnreachable,
+			Msg:       repErr.Error(),
+			Timestamp: time.Now().UnixMilli(),
+		}
+	}
+	return &pbcp.StatusInfo{
+		Code:      reply.DnInfo.StatusInfo.Code,
+		Msg:       reply.DnInfo.StatusInfo.Msg,
+		Timestamp: reply.DnInfo.StatusInfo.Timestamp,
+	}
+}
+
+func (dnwkr *dnWorkerServer) updateDnInfo(
+	pch *ctxhelper.PerCtxHelper,
+	dnId string,
+	revision int64,
+	reply *pbnd.SyncupDnReply,
+	repErr error,
+) {
+	statusInfo := generateDnStatusInfo(reply, repErr)
+	dnInfo := &pbcp.DiskNodeInfo{
+		ConfRev:    revision,
+		StatusInfo: statusInfo,
+	}
+	dnInfoKey := dnwkr.kf.DnInfoEntityKey(dnId)
+	dnInfoVal, err := proto.Marshal(dnInfo)
+	if err != nil {
+		pch.Logger.Fatal("Marshal dnInfo err: %v %v", dnInfo, err)
+	}
+	dnInfoValStr := string(dnInfoVal)
+
+	oldDnInfo := &pbcp.DiskNodeInfo{}
+	apply := func(stm concurrency.STM) error {
+		val := []byte(stm.Get(dnInfoKey))
+		if len(val) > 0 {
+			if err := proto.Unmarshal(val, oldDnInfo); err != nil {
+				pch.Logger.Fatal(
+					"Get oldDnInfo err: %v %v",
+					dnInfoKey,
+					err,
+				)
+			}
+			if oldDnInfo.ConfRev > revision {
+				pch.Logger.Warning(
+					"Ignore old dn ConfRev: %d %d",
+					oldDnInfo.ConfRev,
+					revision,
+				)
+				return nil
+			}
+		}
+		stm.Put(dnInfoKey, dnInfoValStr)
+		return nil
+	}
+
+	if err := dnwkr.sm.RunStm(pch, apply); err != nil {
+		pch.Logger.Error("Update dnInfo err: %s %v", dnId, err)
+	}
+}
+
+func (dnwkr *dnWorkerServer) syncupDn(
 	client pbnd.DiskNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
-	dnId uint64,
+	dnId string,
 	revision int64,
 	dnConf *pbcp.DiskNodeConf,
 ) bool {
 	spLdIdList := make([]*pbnd.SpLdId, len(dnConf.SpLdIdList))
 	for i, spLdId := range dnConf.SpLdIdList {
 		spLdIdList[i] = &pbnd.SpLdId{
-			SpId: idToStr(spLdId.SpId),
-			LdId: idToStr(spLdId.LdId),
+			SpId: spLdId.SpId,
+			LdId: spLdId.LdId,
 		}
 	}
 	req := &pbnd.SyncupDnRequest{
 		DnConf: &pbnd.DnConf{
-			DnId:     idToStr(dnId),
+			DnId:     dnId,
 			Revision: revision,
 			DevPath:  dnConf.GeneralConf.DevPath,
 			NvmePortConf: &pbnd.NvmePortConf{
@@ -129,6 +195,7 @@ func syncupDn(
 	fastRetry := false
 	for {
 		reply, err := client.SyncupDn(pch.Ctx, req)
+		dnwkr.updateDnInfo(pch, dnId, revision, reply, err)
 		if err == nil {
 			if reply.DnInfo.StatusInfo.Code == constants.StatusCodeSucceed {
 				return false
@@ -154,14 +221,14 @@ func syncupDn(
 	}
 }
 
-func checkDn(
+func (dnwkr *dnWorkerServer) checkDn(
 	client pbnd.DiskNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
-	dnId uint64,
+	dnId string,
 	revision int64,
 ) bool {
 	req := &pbnd.CheckDnRequest{
-		DnId:     idToStr(dnId),
+		DnId:     dnId,
 		Revision: revision,
 	}
 	for {
@@ -205,16 +272,12 @@ func (dnwkr *dnWorkerServer) trackRes(
 		pch.Logger.Fatal("Can not find grpcTarget: %s %v", grpcTarget, targetToConn)
 	}
 	client := pbnd.NewDiskNodeAgentClient(conn)
-	dnIdNum, err := strconv.ParseUint(dnId, 16, 64)
-	if err != nil {
-		pch.Logger.Fatal("Invalid dnId: %s", dnId)
-	}
 	for {
 		// FIXME: implement dn error handling
-		if exit := syncupDn(client, pch, dnIdNum, revision, dnConf); exit {
+		if exit := dnwkr.syncupDn(client, pch, dnId, revision, dnConf); exit {
 			return
 		}
-		if exit := checkDn(client, pch, dnIdNum, revision); exit {
+		if exit := dnwkr.checkDn(client, pch, dnId, revision); exit {
 			return
 		}
 	}

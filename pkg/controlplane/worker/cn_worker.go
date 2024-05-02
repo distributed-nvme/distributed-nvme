@@ -1,11 +1,11 @@
 package worker
 
 import (
-	"strconv"
 	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
@@ -90,23 +90,89 @@ func (cnwkr *cnWorkerServer) delResRev(
 	return nil
 }
 
-func syncupCn(
+func generateCnStatusInfo(
+	reply *pbnd.SyncupCnReply,
+	repErr error,
+) *pbcp.StatusInfo {
+	if repErr != nil {
+		return &pbcp.StatusInfo{
+			Code:      constants.StatusCodeUnreachable,
+			Msg:       repErr.Error(),
+			Timestamp: time.Now().UnixMilli(),
+		}
+	}
+	return &pbcp.StatusInfo{
+		Code:      reply.CnInfo.StatusInfo.Code,
+		Msg:       reply.CnInfo.StatusInfo.Msg,
+		Timestamp: reply.CnInfo.StatusInfo.Timestamp,
+	}
+}
+
+func (cnwkr *cnWorkerServer) updateCnInfo(
+	pch *ctxhelper.PerCtxHelper,
+	cnId string,
+	revision int64,
+	reply *pbnd.SyncupCnReply,
+	repErr error,
+) {
+	statusInfo := generateCnStatusInfo(reply, repErr)
+	cnInfo := &pbcp.ControllerNodeInfo{
+		ConfRev:    revision,
+		StatusInfo: statusInfo,
+	}
+	cnInfoKey := cnwkr.kf.CnInfoEntityKey(cnId)
+	cnInfoVal, err := proto.Marshal(cnInfo)
+	if err != nil {
+		pch.Logger.Fatal("Marshal cnInfo err: %v %v", cnInfo, err)
+	}
+	cnInfoValStr := string(cnInfoVal)
+
+	oldCnInfo := &pbcp.ControllerNodeInfo{}
+	apply := func(stm concurrency.STM) error {
+		val := []byte(stm.Get(cnInfoKey))
+		if len(val) > 0 {
+			if err := proto.Unmarshal(val, oldCnInfo); err != nil {
+				pch.Logger.Fatal(
+					"get oldCnInfo err: %v %v",
+					cnInfoKey,
+					err,
+				)
+			}
+			if oldCnInfo.ConfRev > revision {
+				pch.Logger.Warning(
+					"Ignore old cn  ConffRev: %d %d",
+					oldCnInfo.ConfRev,
+					revision,
+				)
+				return nil
+			}
+		}
+		stm.Put(cnInfoKey, cnInfoValStr)
+		return nil
+	}
+
+	if err := cnwkr.sm.RunStm(pch, apply); err != nil {
+		pch.Logger.Error("Update cnInfo err: %s %v", cnId, err)
+	}
+}
+
+func (cnwkr *cnWorkerServer) syncupCn(
 	client pbnd.ControllerNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
-	cnId uint64,
+	cnId string,
 	revision int64,
 	cnConf *pbcp.ControllerNodeConf,
 ) bool {
 	spCntlrIdList := make([]*pbnd.SpCntlrId, len(cnConf.SpCntlrIdList))
 	for i, spCntlrId := range cnConf.SpCntlrIdList {
 		spCntlrIdList[i] = &pbnd.SpCntlrId{
-			SpId:    idToStr(spCntlrId.SpId),
-			CntlrId: idToStr(spCntlrId.CntlrId),
+			SpId:    spCntlrId.SpId,
+			CntlrId: spCntlrId.CntlrId,
 		}
 	}
 	req := &pbnd.SyncupCnRequest{
 		CnConf: &pbnd.CnConf{
-			CnId:     idToStr(cnId),
+			CnId:     cnId,
 			Revision: revision,
 			NvmePortConf: &pbnd.NvmePortConf{
 				PortNum: string(cnConf.GeneralConf.NvmePortConf.PortNum),
@@ -153,14 +219,14 @@ func syncupCn(
 	}
 }
 
-func checkCn(
+func (cnwkr *cnWorkerServer) checkCn(
 	client pbnd.ControllerNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
-	cnId uint64,
+	cnId string,
 	revision int64,
 ) bool {
 	req := &pbnd.CheckCnRequest{
-		CnId:     idToStr(cnId),
+		CnId:     cnId,
 		Revision: revision,
 	}
 	for {
@@ -204,16 +270,12 @@ func (cnwkr *cnWorkerServer) trackRes(
 		pch.Logger.Fatal("Can not find grpcTarget: %s %v", grpcTarget, targetToConn)
 	}
 	client := pbnd.NewControllerNodeAgentClient(conn)
-	cnIdNum, err := strconv.ParseUint(cnId, 16, 64)
-	if err != nil {
-		pch.Logger.Fatal("Invalid cnId: %s", cnId)
-	}
 	for {
 		// FIXME: implement cn error handling
-		if exit := syncupCn(client, pch, cnIdNum, revision, cnConf); exit {
+		if exit := cnwkr.syncupCn(client, pch, cnId, revision, cnConf); exit {
 			return
 		}
-		if exit := checkCn(client, pch, cnIdNum, revision); exit {
+		if exit := cnwkr.checkCn(client, pch, cnId, revision); exit {
 			return
 		}
 	}

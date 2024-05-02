@@ -46,13 +46,13 @@ message QosFields {
 }
 
 message SpLdId {
-  uint64 sp_id = 1;
-  uint64 ld_id = 2;
+  string sp_id = 1;
+  string ld_id = 2;
 }
 
 message SpCntlrId {
-  uint64 sp_id = 1;
-  uint64 cntlr_id = 2;
+  string sp_id = 1;
+  string cntlr_id = 2;
 }
 
 message NvmeTReq {
@@ -139,7 +139,7 @@ message RedundancyInfo {
 message StatusInfo {
   uint32 code = 1;
   string msg = 2;
-  uint64 timestamp = 3;
+  int64 timestamp = 3;
 }
 
 message NextBit {
@@ -188,8 +188,8 @@ message CnGeneralConf {
 }
 
 message LdConf {
-  uint64 ld_id = 1;
-  uint64 dn_id = 2;
+  string ld_id = 1;
+  string dn_id = 2;
   string dn_grpc_target = 3;
   uint32 ld_idx = 4;
   uint64 start = 5;
@@ -198,13 +198,13 @@ message LdConf {
 }
 
 message LdInfo {
-  uint64 ld_id = 1;
+  string ld_id = 1;
   StatusInfo dn_status_info = 2;
   StatusInfo cn_status_info = 3;
 }
 
 message GrpConf {
-  uint64 grp_id = 1;
+  string grp_id = 1;
   uint32 grp_idx = 2;
   uint32 meta_extent_cnt = 3;
   uint32 data_extent_cnt = 4;
@@ -215,7 +215,7 @@ message GrpConf {
 }
 
 message GrpInfo {
-  uint64 grp_id = 1;
+  string grp_id = 1;
   StatusInfo status_info = 2;
   RedundancyInfo meta_redun_info = 3;
   RedundancyInfo data_redun_info = 4;
@@ -223,7 +223,7 @@ message GrpInfo {
 }
 
 message LegConf {
-  uint64 leg_id = 1;
+  string leg_id = 1;
   uint32 leg_idx = 2;
   uint64 ac_cntlr_id = 3;
   bool reload = 4;
@@ -236,13 +236,13 @@ message FenceInfo {
 }
 
 message RemoteLegInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
   FenceInfo fence_info = 3;
 }
 
 message LegInfo {
-  uint64 leg_id = 1;
+  string leg_id = 1;
   StatusInfo status_info = 2;
   ThinPoolInfo thin_pool_info = 3;
   repeated RemoteLegInfo remote_leg_info_list = 4;
@@ -256,7 +256,7 @@ message SnapConf {
 }
 
 message SnapPerCntlrInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 
@@ -266,35 +266,35 @@ message SnapInfo {
 }
 
 message CntlrConf {
-  uint64 cntlr_id = 1;
-  uint64 cn_id = 2;
+  string cntlr_id = 1;
+  string cn_id = 2;
   string cn_grpc_target = 3;
   uint32 cntlr_idx = 4;
   NvmePortConf nvme_port_conf = 5;
 }
 
 message CntlrInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 
 message MtConf {
-  uint64 mt_id = 1;
-  uint64 old_ld_id = 2;
-  uint64 new_ld_id = 3;
+  string mt_id = 1;
+  string old_ld_id = 2;
+  string new_ld_id = 3;
   CloneConf clone_conf = 4;
   LdConf meta_ld_conf = 5;
 }
 
 message MtInfo {
-  uint64 mt_id = 1;
+  string mt_id = 1;
   StatusInfo status_info = 2;
   CloneInfo clone_info = 3;
   LdInfo meta_ld_info = 4;
 }
 
 message ItConf {
-  uint64 it_id = 1;
+  string it_id = 1;
   uint64 prim_cntlr_id = 2;
   uint32 dev_id = 3;
   NvmeListener nvme_listener = 4;
@@ -304,29 +304,29 @@ message ItConf {
 }
 
 message ItInfo {
-  uint64 it_id = 1;
+  string it_id = 1;
   StatusInfo status_info = 2;
   CloneInfo clone_info = 3;
   LdInfo meta_ld_info = 4;
 }
 
 message HostConf {
-  uint64 host_id = 1;
+  string host_id = 1;
   string host_nqn = 2;
 }
 
 message HostPerCntlrInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 
 message HostInfo {
-  uint64 host_id = 1;
+  string host_id = 1;
   repeated HostPerCntlrInfo host_per_cntlr_info = 2;
 }
 
 message NsConf {
-  uint64 ns_id = 1;
+  string ns_id = 1;
   string ns_name = 2;
   uint32 ns_num = 3;
   uint64 size = 4;
@@ -334,16 +334,16 @@ message NsConf {
 }
 
 message NsPerCntlrInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 message NsInfo {
-  uint64 ns_id = 1;
+  string ns_id = 1;
   repeated NsPerCntlrInfo ns_per_cntlr_info = 2;
 }
 
 message SsConf {
-  uint64 ss_id = 1;
+  string ss_id = 1;
   string nqn = 2;
   NextBit ns_next_bit = 3;
   repeated NsConf ns_conf = 4;
@@ -351,12 +351,12 @@ message SsConf {
 }
 
 message SsPerCntlrInfo {
-  uint64 cntlr_id = 1;
+  string cntlr_id = 1;
   StatusInfo status_info = 2;
 }
 
 message SsInfo {
-  uint64 ss_id = 1;
+  string ss_id = 1;
   repeated SsPerCntlrInfo ss_per_cntlr_info = 2;
 }
 
@@ -455,7 +455,7 @@ message StoragePoolInfo {
 
 // /{dnv_prefix}/name_to_id/{name}
 message NameToId {
-  uint64 res_id = 1;
+  string res_id = 1;
 }
 
 // /{dnv_prefix}/tag_key/{tag_key}
@@ -552,11 +552,11 @@ message CreateDnRequest {
 
 message CreateDnReply {
   ReplyInfo reply_info = 1;
-  uint64 dn_id = 2;
+  string dn_id = 2;
 }
 
 message DeleteDnRequest {
-  uint64 dn_id = 1;
+  string dn_id = 1;
 }
 
 message DeleteDnReply {
@@ -566,7 +566,7 @@ message DeleteDnReply {
 message GetDnRequest {
   oneof name {
     string grpc_target = 1;
-    uint64 dn_id = 2;
+    string dn_id = 2;
   }
 }
 
@@ -580,11 +580,11 @@ message ListDnRequest {
 
 message ListDnReply {
   ReplyInfo reply_info = 1;
-  repeated uint64 dn_id_list = 2;
+  repeated string dn_id_list = 2;
 }
 
 message ModifyDnRequest {
-  uint64 dn_id = 1;
+  string dn_id = 1;
   oneof sub_req {
     Tag added_tag = 2;
     Tag removed_tag = 3;
@@ -605,7 +605,7 @@ message AllocateDnRequest {
 }
 
 message DnAllocItem {
-  uint64 dn_id = 1;
+  string dn_id = 1;
   string distinguish_value = 2;
 }
 
@@ -638,7 +638,7 @@ message FilterDnRequest {
 }
 
 message DnTagItem {
-  uint64 dn_id = 1;
+  string dn_id = 1;
   repeated Tag tag_list = 2;
 }
 
@@ -655,7 +655,7 @@ message AllocateCnRequest {
 }
 
 message CnAllocateItem {
-  uint64 cn_id = 1;
+  string cn_id = 1;
   string distinguish_value = 2;
 }
 
