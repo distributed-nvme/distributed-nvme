@@ -27,6 +27,10 @@ service ControllerNodeWorker {
   rpc AllocateCn(AllocateCnRequest) returns(AllocateCnReply) {}
 }
 
+service StoragePoolWorker {
+  rpc SummarizeSp(SummarizeSpRequest) returns(SummarizeSpReply) {}
+}
+
 message Tag {
   string key = 1;
   string value = 2;
@@ -662,4 +666,21 @@ message CnAllocateItem {
 message AllocateCnReply {
   ReplyInfo reply_info = 1;
   repeated CnAllocateItem cn_alloc_item = 2;
+}
+
+message SummarizeSpRequest {
+  repeated Tag include_tag_list = 1;
+  repeated Tag exclude_tag_list = 2;
+  string group_by_key = 3;
+  bytes shards = 4;
+}
+
+message SpSummaryItem {
+  string group_by_value = 1;
+  SpSummary sp_summary = 2;
+}
+
+message SummarizeSpReply {
+  ReplyInfo reply_info = 1;
+  repeated SpSummaryItem sp_summary_item_list = 2;
 }
