@@ -23,6 +23,10 @@ service DiskNodeWorker {
   rpc FilterDn(FilterDnRequest) returns(FilterDnReply) {}
 }
 
+service ControllerNodeWorker {
+  rpc AllocateCn(AllocateCnRequest) returns(AllocateCnReply) {}
+}
+
 message Tag {
   string key = 1;
   string value = 2;
@@ -44,6 +48,11 @@ message QosFields {
 message SpLdId {
   uint64 sp_id = 1;
   uint64 ld_id = 2;
+}
+
+message SpCntlrId {
+  uint64 sp_id = 1;
+  uint64 cntlr_id = 2;
 }
 
 message NvmeTReq {
@@ -409,6 +418,7 @@ message DiskNodeInfo {
 message ControllerNodeConf {
   repeated Tag tag_list = 1;
   CnGeneralConf general_conf = 2;
+  repeated SpCntlrId sp_cntlr_id_list = 3;
 }
 
 // /{dnv_prefix}/cn_info/{cn_id}
@@ -635,4 +645,21 @@ message DnTagItem {
 message FilterDnReply {
   ReplyInfo reply_info = 1;
   repeated DnTagItem dn_tag_item_list = 2;
+}
+
+message AllocateCnRequest {
+  repeated Tag include_tag_list = 1;
+  repeated Tag exclude_tag_list = 2;
+  string distinguish_key = 3;
+  uint32 cn_cnt = 4;
+}
+
+message CnAllocateItem {
+  uint64 cn_id = 1;
+  string distinguish_value = 2;
+}
+
+message AllocateCnReply {
+  ReplyInfo reply_info = 1;
+  repeated CnAllocateItem cn_alloc_item = 2;
 }

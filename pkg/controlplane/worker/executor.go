@@ -94,6 +94,11 @@ func launchWorker(cmd *cobra.Command, args []string) {
 			etcdCli,
 			constants.SchemaPrefixDefault,
 		)
+	case "cn":
+		worker = newCnWorkerServer(
+			etcdCli,
+			constants.SchemaPrefixDefault,
+		)
 	default:
 		gLogger.Fatal("Unknown role: %s", workerArgs.role)
 	}

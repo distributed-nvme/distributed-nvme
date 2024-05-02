@@ -90,7 +90,7 @@ func (dnwkr *dnWorkerServer) delResRev(
 	return nil
 }
 
-func syncup(
+func syncupDn(
 	client pbnd.DiskNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
 	dnId uint64,
@@ -154,7 +154,7 @@ func syncup(
 	}
 }
 
-func check(
+func checkDn(
 	client pbnd.DiskNodeAgentClient,
 	pch *ctxhelper.PerCtxHelper,
 	dnId uint64,
@@ -210,10 +210,11 @@ func (dnwkr *dnWorkerServer) trackRes(
 		pch.Logger.Fatal("Invalid dnId: %s", dnId)
 	}
 	for {
-		if exit := syncup(client, pch, dnIdNum, revision, dnConf); exit {
+		// FIXME: implement dn error handling
+		if exit := syncupDn(client, pch, dnIdNum, revision, dnConf); exit {
 			return
 		}
-		if exit := check(client, pch, dnIdNum, revision); exit {
+		if exit := checkDn(client, pch, dnIdNum, revision); exit {
 			return
 		}
 	}
