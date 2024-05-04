@@ -71,7 +71,7 @@ message NvmeListener {
 }
 
 message NvmePortConf {
-  uint32 port_num = 1;
+  string port_num = 1;
   NvmeListener nvme_listener = 2;
   NvmeTReq tr_eq = 3;
 }
@@ -94,6 +94,7 @@ message StripeConf {
 message ThinPoolConf {
   uint64 data_block_size = 1;
   uint64 low_water_mark = 2;
+  bool error_if_no_space = 3;
 }
 
 message ThinInfo {
@@ -229,7 +230,7 @@ message GrpInfo {
 message LegConf {
   string leg_id = 1;
   uint32 leg_idx = 2;
-  uint64 ac_cntlr_id = 3;
+  string ac_cntlr_id = 3;
   bool reload = 4;
   repeated GrpConf grp_conf_list = 5;
 }

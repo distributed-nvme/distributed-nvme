@@ -268,9 +268,8 @@ message ActiveCntlrConf {
   SnapConf deleting_snap_conf = 5;
   repeated LocalLegConf local_leg_conf_list = 6;
   repeated RemoteLegConf remote_leg_conf_list = 7;
-  repeated SnapConf snap_conf_list = 8;
-  repeated MtConf mt_conf_list = 9;
-  repeated ItConf it_conf_list = 10;
+  repeated MtConf mt_conf_list = 8;
+  repeated ItConf it_conf_list = 9;
 }
 
 message SpCntlrConf {

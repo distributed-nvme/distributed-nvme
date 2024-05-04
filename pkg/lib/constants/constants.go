@@ -46,6 +46,8 @@ const (
 	CnRetryMax      = 64 * time.Second
 	CnCheckInterval = 1 * time.Second
 
+	SpRetryBase = 1 * time.Second
+
 	DnAgentBgInterval = 1 * time.Second
 	CnAgentBgInterval = 1 * time.Second
 
