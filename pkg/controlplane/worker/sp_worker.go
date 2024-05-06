@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -181,26 +182,98 @@ func generateSpAttr(spConf *pbcp.StoragePoolConf) *storagePoolAttr {
 }
 
 type spInfoBuilder struct {
-	ssInfoMap    map[string]*pbnd.SsInfo
-	oldSsInfoMap map[string]*pbnd.SsInfo
-	nsInfoMap    map[string]*pbnd.NsInfo
-	oldNsInfoMap map[string]*pbnd.NsInfo
+	ssStatusInfoMap    map[string]*pbcp.StatusInfo
+	nsStatusInfoMap    map[string]*pbcp.StatusInfo
+	oldSsStatusInfoMap map[string]*pbcp.StatusInfo
+	oldNsStatusInfoMap map[string]*pbcp.StatusInfo
+	allSucceeded       bool
+}
+
+func perCntlrKey(cntlrId, resId string) string {
+	return fmt.Sprintf("%s-%s", cntlrId, resId)
 }
 
 func newSpInfoBuilder(
 	spConf *pbcp.StoragePoolConf,
+	oldSpInfo *pbcp.StoragePoolInfo,
 	ldIdToInfo map[string]*pbnd.SpLdInfo,
 	cntlrIdToInfo map[string]*pbnd.SpCntlrInfo,
 	allSucceeded bool,
 ) *spInfoBuilder {
-	return &spInfoBuilder{}
+	ssStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	nsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	for cntlrId, spCntlrInfo := range cntlrIdToInfo {
+		for _, ssInfo := range spCntlrInfo.SsInfoList {
+			key := perCntlrKey(cntlrId, ssInfo.SsId)
+			ssStatusInfoMap[key] = &pbcp.StatusInfo{
+				Code:      ssInfo.StatusInfo.Code,
+				Msg:       ssInfo.StatusInfo.Msg,
+				Timestamp: ssInfo.StatusInfo.Timestamp,
+			}
+			for _, nsInfo := range ssInfo.NsInfoList {
+				key := perCntlrKey(cntlrId, nsInfo.NsId)
+				nsStatusInfoMap[key] = &pbcp.StatusInfo{
+					Code:      nsInfo.StatusInfo.Code,
+					Msg:       nsInfo.StatusInfo.Msg,
+					Timestamp: nsInfo.StatusInfo.Timestamp,
+				}
+			}
+		}
+	}
+
+	oldSsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldNsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	for _, ssInfo := range oldSpInfo.SsInfoList {
+		for _, ssPerCntlrInfo := range ssInfo.SsPerCntlrInfoList {
+			key := perCntlrKey(ssPerCntlrInfo.CntlrId, ssInfo.SsId)
+			oldSsStatusInfoMap[key] = ssPerCntlrInfo.StatusInfo
+			for _, nsInfo := range ssPerCntlrInfo.NsInfoList {
+				key := perCntlrKey(ssPerCntlrInfo.CntlrId, nsInfo.NsId)
+				oldNsStatusInfoMap[key] = nsInfo.StatusInfo
+			}
+		}
+	}
+	return &spInfoBuilder{
+		ssStatusInfoMap:    ssStatusInfoMap,
+		nsStatusInfoMap:    nsStatusInfoMap,
+		oldSsStatusInfoMap: oldSsStatusInfoMap,
+		oldNsStatusInfoMap: oldNsStatusInfoMap,
+	}
 }
 
-func (builder *spInfoBuilder) getNsStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getNsStatusInfo(
+	cntlrId string,
+	nsId string,
+) *pbcp.StatusInfo {
+	key := perCntlrKey(cntlrId, nsId)
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.nsStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldNsStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getSsStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getSsStatusInfo(
+	cntlrId string,
+	ssId string,
+) *pbcp.StatusInfo {
+	key := perCntlrKey(cntlrId, ssId)
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.ssStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldSsStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
@@ -241,7 +314,18 @@ func (builder *spInfoBuilder) getCntlrStatusInfo() *pbcp.StatusInfo {
 }
 
 func (builder *spInfoBuilder) getSpStatusInfo() *pbcp.StatusInfo {
-	return nil
+	if !builder.allSucceeded {
+		return &pbcp.StatusInfo{
+			Code:      constants.StatusCodeInternalErr,
+			Msg:       "internal error",
+			Timestamp: time.Now().UnixMilli(),
+		}
+	}
+	return &pbcp.StatusInfo{
+		Code:      constants.StatusCodeSucceed,
+		Msg:       constants.StatusMsgSucceed,
+		Timestamp: time.Now().UnixMilli(),
+	}
 }
 
 func (spwkr *spWorkerServer) syncupSpLd(
@@ -417,24 +501,9 @@ func createSpInfo(
 	allSucceeded bool,
 	spAttr *storagePoolAttr,
 ) *pbcp.StoragePoolInfo {
-
-	// spInfo.ConfRev = revision
-	// if allSucceeded {
-	// 	spInfo.StatusInfo = &pbcp.StatusInfo{
-	// 		Code: constants.StatusCodeSucceed,
-	// 		Msg:  constants.StatusMsgSucceed,
-	// 		Timestamp: Timestamp: time.Now().UnixMilli(),
-	// 	}
-	// } else {
-	// 	spInfo.StatusInfo = &pbcp.StatusInfo{
-	// 		Code: constants.StatusCodeInternalErr,
-	// 		Msg:  "internal error",
-	// 		Timestamp: Timestamp: time.Now().UnixMilli(),
-	// 	}
-	// }
-
 	builder := newSpInfoBuilder(
 		spConf,
+		oldSpInfo,
 		ldIdToInfo,
 		cntlrIdToInfo,
 		allSucceeded,
@@ -448,13 +517,19 @@ func createSpInfo(
 			nsInfoList := make([]*pbcp.NsInfo, len(ssConf.NsConfList))
 			for k, nsConf := range ssConf.NsConfList {
 				nsInfoList[k] = &pbcp.NsInfo{
-					NsId:       nsConf.NsId,
-					StatusInfo: builder.getNsStatusInfo(),
+					NsId: nsConf.NsId,
+					StatusInfo: builder.getNsStatusInfo(
+						cntlrConf.CntlrId,
+						nsConf.NsId,
+					),
 				}
 			}
 			ssPerCntlrInfoList[j] = &pbcp.SsPerCntlrInfo{
-				CntlrId:    cntlrConf.CntlrId,
-				StatusInfo: builder.getSsStatusInfo(),
+				CntlrId: cntlrConf.CntlrId,
+				StatusInfo: builder.getSsStatusInfo(
+					cntlrConf.CntlrId,
+					ssConf.SsId,
+				),
 				NsInfoList: nsInfoList,
 			}
 		}
