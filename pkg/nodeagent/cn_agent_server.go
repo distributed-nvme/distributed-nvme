@@ -88,9 +88,9 @@ func syncupCntlrLd(
 ) *pbnd.LdCnInfo {
 	nvmeArg := &oscmd.NvmeArg{
 		Nqn:       nf.LdDnDmNqn(ldCnConf.DnId, spCntlrConf.SpId, ldCnConf.LdId),
-		Transport: ldCnConf.NvmePortConf.NvmeListener.TrType,
-		TrAddr:    ldCnConf.NvmePortConf.NvmeListener.TrAddr,
-		TrSvcId:   ldCnConf.NvmePortConf.NvmeListener.TrSvcId,
+		Transport: ldCnConf.NvmeListener.TrType,
+		TrAddr:    ldCnConf.NvmeListener.TrAddr,
+		TrSvcId:   ldCnConf.NvmeListener.TrSvcId,
 		HostNqn:   nf.HostNqnCn(spCntlrConf.CnId),
 	}
 	if err := oc.NvmeConnectPath(pch, nvmeArg); err != nil {

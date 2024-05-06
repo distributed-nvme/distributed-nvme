@@ -196,10 +196,11 @@ message LdConf {
   string ld_id = 1;
   string dn_id = 2;
   string dn_grpc_target = 3;
-  uint32 ld_idx = 4;
-  uint64 start = 5;
-  uint64 length = 6;
-  bool inited = 7;
+  NvmeListener dn_nvme_listener = 4;
+  uint32 ld_idx = 5;
+  uint64 start = 6;
+  uint64 length = 7;
+  bool inited = 8;
 }
 
 message LdInfo {
@@ -333,36 +334,32 @@ message HostInfo {
 message NsConf {
   string ns_id = 1;
   string ns_name = 2;
-  uint32 ns_num = 3;
+  string ns_num = 3;
   uint64 size = 4;
   uint32 dev_id = 5;
 }
 
-message NsPerCntlrInfo {
-  string cntlr_id = 1;
-  StatusInfo status_info = 2;
-}
 message NsInfo {
   string ns_id = 1;
-  repeated NsPerCntlrInfo ns_per_cntlr_info = 2;
+  StatusInfo status_info = 2;
 }
 
 message SsConf {
   string ss_id = 1;
-  string nqn = 2;
-  NextBit ns_next_bit = 3;
-  repeated NsConf ns_conf = 4;
-  repeated HostConf host_conf = 5;
+  NextBit ns_next_bit = 2;
+  repeated NsConf ns_conf_list = 3;
+  repeated HostConf host_conf_list = 4;
 }
 
 message SsPerCntlrInfo {
   string cntlr_id = 1;
   StatusInfo status_info = 2;
+  repeated NsInfo ns_info_list = 3;
 }
 
 message SsInfo {
   string ss_id = 1;
-  repeated SsPerCntlrInfo ss_per_cntlr_info = 2;
+  repeated SsPerCntlrInfo ss_per_cntlr_info_list = 2;
 }
 
 message SpGeneralConf {
@@ -439,7 +436,7 @@ message StoragePoolConf {
   SnapConf creating_snap_conf = 3;
   SnapConf deleting_snap_conf = 4;
   repeated SnapConf snap_conf = 5;
-  repeated SsConf ss_conf = 6;
+  repeated SsConf ss_conf_list = 6;
   repeated LegConf leg_conf_list = 7;
   repeated CntlrConf cntlr_conf_list = 8;
   repeated MtConf mt_conf_list = 9;
@@ -450,12 +447,11 @@ message StoragePoolConf {
 message StoragePoolInfo {
   int64 conf_rev = 1;
   StatusInfo status_info = 2;
-  repeated SnapInfo snap_info_list = 3;
-  repeated SsInfo ss_info_list = 4;
-  repeated LegInfo leg_info_list = 5;
-  repeated CntlrInfo cntlr_info_list = 6;
-  repeated MtInfo mt_info_list = 7;
-  repeated ItInfo it_info_list = 8;
+  repeated SsInfo ss_info_list = 3;
+  repeated LegInfo leg_info_list = 4;
+  repeated CntlrInfo cntlr_info_list = 5;
+  repeated MtInfo mt_info_list = 6;
+  repeated ItInfo it_info_list = 7;
 }
 
 // /{dnv_prefix}/name_to_id/{name}

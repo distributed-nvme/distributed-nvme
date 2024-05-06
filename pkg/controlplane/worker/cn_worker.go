@@ -140,7 +140,7 @@ func (cnwkr *cnWorkerServer) updateCnInfo(
 			}
 			if oldCnInfo.ConfRev > revision {
 				pch.Logger.Warning(
-					"Ignore old cn  ConffRev: %d %d",
+					"Ignore old cn ConfRev: %d %d",
 					oldCnInfo.ConfRev,
 					revision,
 				)

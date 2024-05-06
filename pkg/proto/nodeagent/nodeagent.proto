@@ -191,7 +191,7 @@ message SnapConf {
 message LdCnConf {
   string ld_id = 1;
   string dn_id = 2;
-  NvmePortConf nvme_port_conf = 3;
+  NvmeListener nvme_listener = 3;
   uint32 ld_idx = 4;
   uint64 ld_size = 5;
 }
@@ -209,8 +209,9 @@ message GrpConf {
 
 message LocalLegConf {
   string leg_id = 1;
-  bool reload = 2;
-  repeated GrpConf grp_conf_list = 3;
+  uint32 leg_idx = 2;
+  bool reload = 3;
+  repeated GrpConf grp_conf_list = 4;
 }
 
 message RemoteLegConf {

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
-	// "go.etcd.io/etcd/client/v3/concurrency"
+	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
@@ -99,26 +99,22 @@ func (spwkr *spWorkerServer) delResRev(
 	return nil
 }
 
-type storagePoolMap struct {
+type storagePoolAttr struct {
 	legIdToConf      map[string]*pbcp.LegConf
 	grpIdToConf      map[string]*pbcp.GrpConf
+	cntlrIdToConf    map[string]*pbcp.CntlrConf
 	ldIdToCnIdList   map[string][]string
-	cntlrIdToLegList map[string][]*pbcp.LegConf
+	creatingSnapConf *pbnd.SnapConf
+	deletingSnapConf *pbnd.SnapConf
+	ssConfList       []*pbnd.SsConf
 }
 
-func generateSpMap(spConf *pbcp.StoragePoolConf) *storagePoolMap {
+func generateSpAttr(spConf *pbcp.StoragePoolConf) *storagePoolAttr {
 	legIdToConf := make(map[string]*pbcp.LegConf)
 	grpIdToConf := make(map[string]*pbcp.GrpConf)
 	ldIdToCnIdList := make(map[string][]string)
-	cntlrIdToLegList := make(map[string][]*pbcp.LegConf)
 	for _, legConf := range spConf.LegConfList {
 		legIdToConf[legConf.LegId] = legConf
-		if _, ok := cntlrIdToLegList[legConf.AcCntlrId]; !ok {
-			cntlrIdToLegList[legConf.AcCntlrId] = make([]*pbcp.LegConf, 0)
-		}
-		legList, _ := cntlrIdToLegList[legConf.AcCntlrId]
-		legList = append(legList, legConf)
-		cntlrIdToLegList[legConf.AcCntlrId] = legList
 		for _, grpConf := range legConf.GrpConfList {
 			grpIdToConf[grpConf.GrpId] = grpConf
 			for _, ldConf := range grpConf.LdConfList {
@@ -128,22 +124,124 @@ func generateSpMap(spConf *pbcp.StoragePoolConf) *storagePoolMap {
 			}
 		}
 	}
-	return &storagePoolMap{
+
+	cntlrIdToConf := make(map[string]*pbcp.CntlrConf)
+	for _, cntlrConf := range spConf.CntlrConfList {
+		cntlrIdToConf[cntlrConf.CntlrId] = cntlrConf
+	}
+
+	var creatingSnapConf *pbnd.SnapConf
+	if spConf.CreatingSnapConf != nil {
+		creatingSnapConf = &pbnd.SnapConf{
+			DevId: spConf.CreatingSnapConf.DevId,
+			OriId: spConf.CreatingSnapConf.OriId,
+		}
+	}
+	var deletingSnapConf *pbnd.SnapConf
+	if spConf.DeletingSnapConf != nil {
+		deletingSnapConf = &pbnd.SnapConf{
+			DevId: spConf.CreatingSnapConf.DevId,
+			OriId: spConf.CreatingSnapConf.OriId,
+		}
+	}
+
+	ssConfList := make([]*pbnd.SsConf, len(spConf.SsConfList))
+	for i, ssConf := range spConf.SsConfList {
+		nsConfList := make([]*pbnd.NsConf, len(ssConf.NsConfList))
+		for j, nsConf := range ssConf.NsConfList {
+			nsConfList[j] = &pbnd.NsConf{
+				NsId:  nsConf.NsId,
+				NsNum: nsConf.NsNum,
+				Size:  nsConf.Size,
+				DevId: nsConf.DevId,
+			}
+		}
+		hostConfList := make([]*pbnd.HostConf, len(ssConf.HostConfList))
+		for j, hostConf := range ssConf.HostConfList {
+			hostConfList[j] = &pbnd.HostConf{
+				HostId:  hostConf.HostId,
+				HostNqn: hostConf.HostNqn,
+			}
+		}
+		ssConfList[i] = &pbnd.SsConf{
+			SsId:         ssConf.SsId,
+			NsConfList:   nsConfList,
+			HostConfList: hostConfList,
+		}
+	}
+	return &storagePoolAttr{
 		legIdToConf:      legIdToConf,
 		grpIdToConf:      grpIdToConf,
+		cntlrIdToConf:    cntlrIdToConf,
 		ldIdToCnIdList:   ldIdToCnIdList,
-		cntlrIdToLegList: cntlrIdToLegList,
+		creatingSnapConf: creatingSnapConf,
+		deletingSnapConf: deletingSnapConf,
+		ssConfList:       ssConfList,
 	}
 }
 
-func (spwkr *spWorkerServer) updateSpInfo(
-	pch *ctxhelper.PerCtxHelper,
-	spId string,
-	revision int64,
-	reply *pbnd.SyncupDnReply,
-	repErr error,
-) {
-	return
+type spInfoBuilder struct {
+	ssInfoMap    map[string]*pbnd.SsInfo
+	oldSsInfoMap map[string]*pbnd.SsInfo
+	nsInfoMap    map[string]*pbnd.NsInfo
+	oldNsInfoMap map[string]*pbnd.NsInfo
+}
+
+func newSpInfoBuilder(
+	spConf *pbcp.StoragePoolConf,
+	ldIdToInfo map[string]*pbnd.SpLdInfo,
+	cntlrIdToInfo map[string]*pbnd.SpCntlrInfo,
+	allSucceeded bool,
+) *spInfoBuilder {
+	return &spInfoBuilder{}
+}
+
+func (builder *spInfoBuilder) getNsStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getSsStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getLdDnStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getLdCnStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getGrpStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getGrpMetaRedunInfo() *pbcp.RedundancyInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getGrpDataRedunInfo() *pbcp.RedundancyInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getRemoteLegStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getLegStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getLegThinPoolInfo() *pbcp.ThinPoolInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getCntlrStatusInfo() *pbcp.StatusInfo {
+	return nil
+}
+
+func (builder *spInfoBuilder) getSpStatusInfo() *pbcp.StatusInfo {
+	return nil
 }
 
 func (spwkr *spWorkerServer) syncupSpLd(
@@ -152,7 +250,7 @@ func (spwkr *spWorkerServer) syncupSpLd(
 	revision int64,
 	conn *grpc.ClientConn,
 	ldConf *pbcp.LdConf,
-	spMap *storagePoolMap,
+	spAttr *storagePoolAttr,
 ) *pbnd.SpLdInfo {
 	req := &pbnd.SyncupSpLdRequest{
 		SpLdConf: &pbnd.SpLdConf{
@@ -162,7 +260,7 @@ func (spwkr *spWorkerServer) syncupSpLd(
 			Revision: revision,
 			Start:    ldConf.Start,
 			Length:   ldConf.Length,
-			CnIdList: spMap.ldIdToCnIdList[ldConf.LdId],
+			CnIdList: spAttr.ldIdToCnIdList[ldConf.LdId],
 			Inited:   ldConf.Inited,
 		},
 	}
@@ -187,25 +285,65 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 	conn *grpc.ClientConn,
 	spConf *pbcp.StoragePoolConf,
 	cntlrConf *pbcp.CntlrConf,
-	spMap *storagePoolMap,
+	spAttr *storagePoolAttr,
 ) *pbnd.SpCntlrInfo {
-	var creatingSnapConf *pbnd.SnapConf
-	if spConf.CreatingSnapConf != nil {
-		creatingSnapConf = &pbnd.SnapConf{
-			DevId: spConf.CreatingSnapConf.DevId,
-			OriId: spConf.CreatingSnapConf.OriId,
-		}
-	}
-	var deletingSnapConf *pbnd.SnapConf
-	if spConf.DeletingSnapConf != nil {
-		deletingSnapConf = &pbnd.SnapConf{
-			DevId: spConf.CreatingSnapConf.DevId,
-			OriId: spConf.CreatingSnapConf.OriId,
-		}
-	}
-	ssConfList := make([]*pbnd.SsConf, 0)
+
 	localLegConfList := make([]*pbnd.LocalLegConf, 0)
 	remoteLegConfList := make([]*pbnd.RemoteLegConf, 0)
+	for _, legConf := range spConf.LegConfList {
+		if legConf.AcCntlrId == cntlrConf.CntlrId {
+			grpConfList := make([]*pbnd.GrpConf, len(legConf.GrpConfList))
+			for i, grpConf := range legConf.GrpConfList {
+				ldCnConfList := make([]*pbnd.LdCnConf, len(grpConf.LdConfList))
+				for j, ldConf := range grpConf.LdConfList {
+					ldCnConfList[j] = &pbnd.LdCnConf{
+						LdId: ldConf.LdId,
+						DnId: ldConf.DnId,
+						NvmeListener: &pbnd.NvmeListener{
+							TrType:  ldConf.DnNvmeListener.TrType,
+							AdrFam:  ldConf.DnNvmeListener.AdrFam,
+							TrAddr:  ldConf.DnNvmeListener.TrAddr,
+							TrSvcId: ldConf.DnNvmeListener.TrSvcId,
+						},
+						LdIdx:  ldConf.LdIdx,
+						LdSize: ldConf.Length,
+					}
+				}
+				grpConfList[i] = &pbnd.GrpConf{
+					GrpId:  grpConf.GrpId,
+					GrpIdx: grpConf.GrpIdx,
+					// FIXME: Get custom extent size
+					MetaSize:     uint64(grpConf.MetaExtentCnt * (1 << constants.MetaExtentSizeShiftDefault)),
+					DataSize:     uint64(grpConf.DataExtentCnt * (1 << constants.DataExtentSizeShiftDefault)),
+					LdCnConfList: ldCnConfList,
+					NoSync:       grpConf.NoSync,
+					RebuildIdx:   grpConf.RebuildIdx,
+					OmitIdxList:  grpConf.OmitIdxList,
+				}
+			}
+			localLegConf := &pbnd.LocalLegConf{
+				LegId:       legConf.LegId,
+				LegIdx:      legConf.LegIdx,
+				Reload:      legConf.Reload,
+				GrpConfList: grpConfList,
+			}
+			localLegConfList = append(localLegConfList, localLegConf)
+		} else {
+			remoteCntlrConf, _ := spAttr.cntlrIdToConf[legConf.AcCntlrId]
+			remoteLegConf := &pbnd.RemoteLegConf{
+				LegId: legConf.LegId,
+				CnId:  remoteCntlrConf.CnId,
+				NvmeListener: &pbnd.NvmeListener{
+					TrType:  remoteCntlrConf.NvmePortConf.NvmeListener.TrType,
+					AdrFam:  remoteCntlrConf.NvmePortConf.NvmeListener.AdrFam,
+					TrAddr:  remoteCntlrConf.NvmePortConf.NvmeListener.TrAddr,
+					TrSvcId: remoteCntlrConf.NvmePortConf.NvmeListener.TrSvcId,
+				},
+			}
+			remoteLegConfList = append(remoteLegConfList, remoteLegConf)
+		}
+	}
+	// FIXME: implement moving task and importing task
 	mtConfList := make([]*pbnd.MtConf, 0)
 	itConfList := make([]*pbnd.ItConf, 0)
 	req := &pbnd.SyncupSpCntlrRequest{
@@ -227,7 +365,7 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 					SeqCh: cntlrConf.NvmePortConf.TrEq.SeqCh,
 				},
 			},
-			SsConfList: ssConfList,
+			SsConfList: spAttr.ssConfList,
 			ActiveCntlrConf: &pbnd.ActiveCntlrConf{
 				StripeConf: &pbnd.StripeConf{
 					ChunkSize: spConf.GeneralConf.StripeConf.ChunkSize,
@@ -247,8 +385,8 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 					StripeCache:     spConf.GeneralConf.RedundancyConf.StripeCache,
 					JournalMode:     spConf.GeneralConf.RedundancyConf.JournalMode,
 				},
-				CreatingSnapConf:  creatingSnapConf,
-				DeletingSnapConf:  deletingSnapConf,
+				CreatingSnapConf:  spAttr.creatingSnapConf,
+				DeletingSnapConf:  spAttr.deletingSnapConf,
 				LocalLegConfList:  localLegConfList,
 				RemoteLegConfList: remoteLegConfList,
 				MtConfList:        mtConfList,
@@ -270,6 +408,121 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 	return reply.SpCntlrInfo
 }
 
+func createSpInfo(
+	revision int64,
+	spConf *pbcp.StoragePoolConf,
+	oldSpInfo *pbcp.StoragePoolInfo,
+	ldIdToInfo map[string]*pbnd.SpLdInfo,
+	cntlrIdToInfo map[string]*pbnd.SpCntlrInfo,
+	allSucceeded bool,
+	spAttr *storagePoolAttr,
+) *pbcp.StoragePoolInfo {
+
+	// spInfo.ConfRev = revision
+	// if allSucceeded {
+	// 	spInfo.StatusInfo = &pbcp.StatusInfo{
+	// 		Code: constants.StatusCodeSucceed,
+	// 		Msg:  constants.StatusMsgSucceed,
+	// 		Timestamp: Timestamp: time.Now().UnixMilli(),
+	// 	}
+	// } else {
+	// 	spInfo.StatusInfo = &pbcp.StatusInfo{
+	// 		Code: constants.StatusCodeInternalErr,
+	// 		Msg:  "internal error",
+	// 		Timestamp: Timestamp: time.Now().UnixMilli(),
+	// 	}
+	// }
+
+	builder := newSpInfoBuilder(
+		spConf,
+		ldIdToInfo,
+		cntlrIdToInfo,
+		allSucceeded,
+	)
+
+	ssInfoList := make([]*pbcp.SsInfo, len(spConf.SsConfList))
+	for i, ssConf := range spConf.SsConfList {
+		// FIXME: use active cntlr only
+		ssPerCntlrInfoList := make([]*pbcp.SsPerCntlrInfo, len(spConf.CntlrConfList))
+		for j, cntlrConf := range spConf.CntlrConfList {
+			nsInfoList := make([]*pbcp.NsInfo, len(ssConf.NsConfList))
+			for k, nsConf := range ssConf.NsConfList {
+				nsInfoList[k] = &pbcp.NsInfo{
+					NsId:       nsConf.NsId,
+					StatusInfo: builder.getNsStatusInfo(),
+				}
+			}
+			ssPerCntlrInfoList[j] = &pbcp.SsPerCntlrInfo{
+				CntlrId:    cntlrConf.CntlrId,
+				StatusInfo: builder.getSsStatusInfo(),
+				NsInfoList: nsInfoList,
+			}
+		}
+		ssInfoList[i] = &pbcp.SsInfo{
+			SsId:               ssConf.SsId,
+			SsPerCntlrInfoList: ssPerCntlrInfoList,
+		}
+	}
+
+	legInfoList := make([]*pbcp.LegInfo, len(spConf.LegConfList))
+	for i, legConf := range spConf.LegConfList {
+		grpInfoList := make([]*pbcp.GrpInfo, len(legConf.GrpConfList))
+		for j, grpConf := range legConf.GrpConfList {
+			ldInfoList := make([]*pbcp.LdInfo, len(grpConf.LdConfList))
+			for k, ldConf := range grpConf.LdConfList {
+				ldInfoList[k] = &pbcp.LdInfo{
+					LdId:         ldConf.LdId,
+					DnStatusInfo: builder.getLdDnStatusInfo(),
+					CnStatusInfo: builder.getLdCnStatusInfo(),
+				}
+			}
+			grpInfoList[j] = &pbcp.GrpInfo{
+				GrpId:         grpConf.GrpId,
+				StatusInfo:    builder.getGrpStatusInfo(),
+				MetaRedunInfo: builder.getGrpMetaRedunInfo(),
+				DataRedunInfo: builder.getGrpDataRedunInfo(),
+				LdInfoList:    ldInfoList,
+			}
+		}
+		remoteLegInfoList := make([]*pbcp.RemoteLegInfo, 0)
+		for _, cntlrConf := range spConf.CntlrConfList {
+			if legConf.AcCntlrId == cntlrConf.CntlrId {
+				continue
+			}
+			// FIXME: get fence info
+			remoteLegInfo := &pbcp.RemoteLegInfo{
+				CntlrId:    cntlrConf.CntlrId,
+				StatusInfo: builder.getRemoteLegStatusInfo(),
+			}
+			remoteLegInfoList = append(remoteLegInfoList, remoteLegInfo)
+		}
+		legInfoList[i] = &pbcp.LegInfo{
+			LegId:             legConf.LegId,
+			StatusInfo:        builder.getLegStatusInfo(),
+			ThinPoolInfo:      builder.getLegThinPoolInfo(),
+			RemoteLegInfoList: remoteLegInfoList,
+			GrpInfoList:       grpInfoList,
+		}
+	}
+
+	cntlrInfoList := make([]*pbcp.CntlrInfo, len(spConf.CntlrConfList))
+	for i, cntlrConf := range spConf.CntlrConfList {
+		cntlrInfoList[i] = &pbcp.CntlrInfo{
+			CntlrId:    cntlrConf.CntlrId,
+			StatusInfo: builder.getCntlrStatusInfo(),
+		}
+	}
+
+	// FIXME: set MtInfo and ItInfo
+	return &pbcp.StoragePoolInfo{
+		ConfRev:       revision,
+		StatusInfo:    builder.getSpStatusInfo(),
+		SsInfoList:    ssInfoList,
+		LegInfoList:   legInfoList,
+		CntlrInfoList: cntlrInfoList,
+	}
+}
+
 func (spwkr *spWorkerServer) updateConfAndInfo(
 	pch *ctxhelper.PerCtxHelper,
 	spId string,
@@ -277,9 +530,83 @@ func (spwkr *spWorkerServer) updateConfAndInfo(
 	spConf *pbcp.StoragePoolConf,
 	ldIdToInfo map[string]*pbnd.SpLdInfo,
 	cntlrIdToInfo map[string]*pbnd.SpCntlrInfo,
+	allSucceeded bool,
 	updateConf bool,
-	spMap *storagePoolMap,
+	spAttr *storagePoolAttr,
 ) bool {
+	spConfKey := spwkr.kf.SpConfEntityKey(spId)
+	spInfoKey := spwkr.kf.SpInfoEntityKey(spId)
+	oldSpConf := &pbcp.StoragePoolConf{}
+	oldSpInfo := &pbcp.StoragePoolInfo{}
+	apply := func(stm concurrency.STM) error {
+		if updateConf {
+			val := []byte(stm.Get(spConfKey))
+			if len(val) <= 0 {
+				pch.Logger.Warning("No spConf: %s", spConfKey)
+				return nil
+			}
+			if err := proto.Unmarshal(val, oldSpConf); err != nil {
+				pch.Logger.Fatal(
+					"Get oldSpConf err: %s %v",
+					spConfKey,
+					err,
+				)
+			}
+			rev := stm.Rev(spConfKey)
+			if rev != revision {
+				pch.Logger.Warning("Revision mismatch: %d %d", rev, revision)
+				return nil
+			}
+			spConfVal, err := proto.Marshal(spConf)
+			if err != nil {
+				pch.Logger.Fatal("Marshal spConf err: %v %v", spConf, err)
+			}
+			spConfValStr := string(spConfVal)
+			stm.Put(spConfKey, spConfValStr)
+		}
+
+		val := []byte(stm.Get(spInfoKey))
+		if len(val) <= 0 {
+			pch.Logger.Warning("NO oldSpInfo: %s", spInfoKey)
+			return nil
+		}
+		if err := proto.Unmarshal(val, oldSpInfo); err != nil {
+			pch.Logger.Fatal(
+				"Get oldSpInfo err: %s %v",
+				spInfoKey,
+				err,
+			)
+		}
+		if oldSpInfo.ConfRev > revision {
+			pch.Logger.Warning(
+				"Ignore old sp ConfRev: %d %d",
+				oldSpInfo.ConfRev,
+				revision,
+			)
+			return nil
+		}
+		spInfo := createSpInfo(
+			revision,
+			spConf,
+			oldSpInfo,
+			ldIdToInfo,
+			cntlrIdToInfo,
+			allSucceeded,
+			spAttr,
+		)
+		spInfoVal, err := proto.Marshal(spInfo)
+		if err != nil {
+			pch.Logger.Fatal("Marshal spInfo err: %v %v", spInfo, err)
+		}
+		spInfoValStr := string(spInfoVal)
+		stm.Put(spInfoKey, spInfoValStr)
+
+		return nil
+	}
+
+	if err := spwkr.sm.RunStm(pch, apply); err != nil {
+		pch.Logger.Error("Update sp err: %s %v", spId, err)
+	}
 	return false
 }
 
@@ -289,7 +616,7 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 	spId string,
 	revision int64,
 	spConf *pbcp.StoragePoolConf,
-	spMap *storagePoolMap,
+	spAttr *storagePoolAttr,
 ) bool {
 	allSucceeded := true
 	updateConf := false
@@ -304,7 +631,7 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 					revision,
 					conn,
 					ldConf,
-					spMap,
+					spAttr,
 				)
 				if spLdInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 					allSucceeded = false
@@ -329,20 +656,20 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 			conn,
 			spConf,
 			cntlrConf,
-			spMap,
+			spAttr,
 		)
 		if spCntlrInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 			allSucceeded = false
 		}
 		for _, localLegInfo := range spCntlrInfo.ActiveCntlrInfo.LocalLegInfoList {
-			legConf := spMap.legIdToConf[localLegInfo.LegId]
+			legConf := spAttr.legIdToConf[localLegInfo.LegId]
 			if legConf.Reload &&
 				localLegInfo.StatusInfo.Code == constants.StatusCodeSucceed {
 				legConf.Reload = false
 				updateConf = true
 			}
 			for _, grpInfo := range localLegInfo.GrpInfoList {
-				grpConf := spMap.grpIdToConf[grpInfo.GrpId]
+				grpConf := spAttr.grpIdToConf[grpInfo.GrpId]
 				if grpConf.NoSync &&
 					grpInfo.StatusInfo.Code == constants.StatusCodeSucceed {
 					grpConf.NoSync = false
@@ -352,6 +679,18 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 		}
 		cntlrIdToInfo[cntlrConf.CntlrId] = spCntlrInfo
 	}
+
+	if allSucceeded {
+		if spConf.CreatingSnapConf != nil {
+			spConf.CreatingSnapConf = nil
+			updateConf = true
+		}
+		if spConf.DeletingSnapConf != nil {
+			spConf.DeletingSnapConf = nil
+			updateConf = true
+		}
+	}
+
 	if ret := spwkr.updateConfAndInfo(
 		pch,
 		spId,
@@ -359,8 +698,9 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 		spConf,
 		ldIdToInfo,
 		cntlrIdToInfo,
+		allSucceeded,
 		updateConf,
-		spMap,
+		spAttr,
 	); !ret {
 		allSucceeded = false
 	}
@@ -373,7 +713,7 @@ func (spwkr *spWorkerServer) syncupSp(
 	spId string,
 	revision int64,
 	spConf *pbcp.StoragePoolConf,
-	spMap *storagePoolMap,
+	spAttr *storagePoolAttr,
 ) bool {
 	interval := constants.SpRetryBase
 	for {
@@ -383,7 +723,7 @@ func (spwkr *spWorkerServer) syncupSp(
 			spId,
 			revision,
 			spConf,
-			spMap,
+			spAttr,
 		); allSucceeded {
 			return false
 		}
@@ -427,7 +767,7 @@ func (spwkr *spWorkerServer) trackRes(
 		break
 	}
 
-	spMap := generateSpMap(spConf)
+	spAttr := generateSpAttr(spConf)
 	for {
 		// FIXME: implement sp error handling
 		if exit := spwkr.syncupSp(
@@ -436,7 +776,7 @@ func (spwkr *spWorkerServer) trackRes(
 			spId,
 			revision,
 			spConf,
-			spMap,
+			spAttr,
 		); exit {
 			return
 		}
