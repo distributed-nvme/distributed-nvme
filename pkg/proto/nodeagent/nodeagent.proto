@@ -317,7 +317,8 @@ message NvmePortInfo {
 }
 
 message LdCnInfo {
-  StatusInfo status_info = 1;
+  string ld_id = 1;
+  StatusInfo status_info = 2;
 }
 
 message GrpInfo {

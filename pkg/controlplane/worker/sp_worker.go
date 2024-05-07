@@ -182,11 +182,29 @@ func generateSpAttr(spConf *pbcp.StoragePoolConf) *storagePoolAttr {
 }
 
 type spInfoBuilder struct {
-	ssStatusInfoMap    map[string]*pbcp.StatusInfo
-	nsStatusInfoMap    map[string]*pbcp.StatusInfo
-	oldSsStatusInfoMap map[string]*pbcp.StatusInfo
-	oldNsStatusInfoMap map[string]*pbcp.StatusInfo
-	allSucceeded       bool
+	ssStatusInfoMap           map[string]*pbcp.StatusInfo
+	oldNsStatusInfoMap        map[string]*pbcp.StatusInfo
+	nsStatusInfoMap           map[string]*pbcp.StatusInfo
+	oldSsStatusInfoMap        map[string]*pbcp.StatusInfo
+	ldDnStatusInfoMap         map[string]*pbcp.StatusInfo
+	oldLdDnStatusInfoMap      map[string]*pbcp.StatusInfo
+	ldCnStatusInfoMap         map[string]*pbcp.StatusInfo
+	oldLdCnStatusInfoMap      map[string]*pbcp.StatusInfo
+	grpStatusInfoMap          map[string]*pbcp.StatusInfo
+	oldGrpStatusInfoMap       map[string]*pbcp.StatusInfo
+	grpMetaRedunInfoMap       map[string]*pbcp.RedundancyInfo
+	oldGrpMetaRedunInfoMap    map[string]*pbcp.RedundancyInfo
+	grpDataRedunInfoMap       map[string]*pbcp.RedundancyInfo
+	oldGrpDataRedunInfoMap    map[string]*pbcp.RedundancyInfo
+	remoteLegStatusInfoMap    map[string]*pbcp.StatusInfo
+	oldRemoteLegStatusInfoMap map[string]*pbcp.StatusInfo
+	legStatusInfoMap          map[string]*pbcp.StatusInfo
+	oldLegStatusInfoMap       map[string]*pbcp.StatusInfo
+	legThinPoolInfoMap        map[string]*pbcp.ThinPoolInfo
+	oldLegThinPoolInfoMap     map[string]*pbcp.ThinPoolInfo
+	cntlrStatusInfoMap        map[string]*pbcp.StatusInfo
+	oldCntlrStatusInfoMap     map[string]*pbcp.StatusInfo
+	allSucceeded              bool
 }
 
 func perCntlrKey(cntlrId, resId string) string {
@@ -201,28 +219,151 @@ func newSpInfoBuilder(
 	allSucceeded bool,
 ) *spInfoBuilder {
 	ssStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldSsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	nsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
-	for cntlrId, spCntlrInfo := range cntlrIdToInfo {
-		for _, ssInfo := range spCntlrInfo.SsInfoList {
-			key := perCntlrKey(cntlrId, ssInfo.SsId)
-			ssStatusInfoMap[key] = &pbcp.StatusInfo{
-				Code:      ssInfo.StatusInfo.Code,
-				Msg:       ssInfo.StatusInfo.Msg,
-				Timestamp: ssInfo.StatusInfo.Timestamp,
-			}
-			for _, nsInfo := range ssInfo.NsInfoList {
-				key := perCntlrKey(cntlrId, nsInfo.NsId)
-				nsStatusInfoMap[key] = &pbcp.StatusInfo{
-					Code:      nsInfo.StatusInfo.Code,
-					Msg:       nsInfo.StatusInfo.Msg,
-					Timestamp: nsInfo.StatusInfo.Timestamp,
-				}
-			}
+	oldNsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	ldDnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldLdDnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	ldCnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldLdCnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	grpStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldGrpStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	grpMetaRedunInfoMap := make(map[string]*pbcp.RedundancyInfo)
+	oldGrpMetaRedunInfoMap := make(map[string]*pbcp.RedundancyInfo)
+	grpDataRedunInfoMap := make(map[string]*pbcp.RedundancyInfo)
+	oldGrpDataRedunInfoMap := make(map[string]*pbcp.RedundancyInfo)
+	remoteLegStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldRemoteLegStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	legStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldLegStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	legThinPoolInfoMap := make(map[string]*pbcp.ThinPoolInfo)
+	oldLegThinPoolInfoMap := make(map[string]*pbcp.ThinPoolInfo)
+	cntlrStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldCntlrStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+
+	for ldId, spLdInfo := range ldIdToInfo {
+		if spLdInfo == nil {
+			continue
+		}
+		ldDnStatusInfoMap[ldId] = &pbcp.StatusInfo{
+			Code:      spLdInfo.StatusInfo.Code,
+			Msg:       spLdInfo.StatusInfo.Msg,
+			Timestamp: spLdInfo.StatusInfo.Timestamp,
 		}
 	}
 
-	oldSsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
-	oldNsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	for cntlrId, spCntlrInfo := range cntlrIdToInfo {
+		if spCntlrInfo == nil {
+			continue
+		}
+		if spCntlrInfo.SsInfoList != nil {
+			for _, ssInfo := range spCntlrInfo.SsInfoList {
+				if ssInfo == nil {
+					continue
+				}
+				for _, nsInfo := range ssInfo.NsInfoList {
+					if nsInfo == nil {
+						continue
+					}
+					key := perCntlrKey(cntlrId, nsInfo.NsId)
+					nsStatusInfoMap[key] = &pbcp.StatusInfo{
+						Code:      nsInfo.StatusInfo.Code,
+						Msg:       nsInfo.StatusInfo.Msg,
+						Timestamp: nsInfo.StatusInfo.Timestamp,
+					}
+				}
+				key := perCntlrKey(cntlrId, ssInfo.SsId)
+				ssStatusInfoMap[key] = &pbcp.StatusInfo{
+					Code:      ssInfo.StatusInfo.Code,
+					Msg:       ssInfo.StatusInfo.Msg,
+					Timestamp: ssInfo.StatusInfo.Timestamp,
+				}
+			}
+		}
+
+		if spCntlrInfo.ActiveCntlrInfo != nil {
+			for _, localLegInfo := range spCntlrInfo.ActiveCntlrInfo.LocalLegInfoList {
+				if localLegInfo == nil {
+					continue
+				}
+				for _, grpInfo := range localLegInfo.GrpInfoList {
+					if grpInfo == nil {
+						continue
+					}
+					for _, ldCnInfo := range grpInfo.LdCnInfoList {
+						if ldCnInfo == nil {
+							continue
+						}
+						ldCnStatusInfoMap[ldCnInfo.LdId] = &pbcp.StatusInfo{
+							Code:      ldCnInfo.StatusInfo.Code,
+							Msg:       ldCnInfo.StatusInfo.Msg,
+							Timestamp: ldCnInfo.StatusInfo.Timestamp,
+						}
+					}
+					grpStatusInfoMap[grpInfo.GrpId] = &pbcp.StatusInfo{
+						Code:      grpInfo.StatusInfo.Code,
+						Msg:       grpInfo.StatusInfo.Msg,
+						Timestamp: grpInfo.StatusInfo.Timestamp,
+					}
+					grpMetaRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
+						HealthChars: grpInfo.MetaRedunInfo.HealthChars,
+						SyncCurr:    grpInfo.MetaRedunInfo.SyncCurr,
+						SyncTotal:   grpInfo.MetaRedunInfo.SyncTotal,
+						SyncAction:  grpInfo.MetaRedunInfo.SyncAction,
+						MismatchCnt: grpInfo.MetaRedunInfo.MismatchCnt,
+						DataOffset:  grpInfo.MetaRedunInfo.DataOffset,
+						JournalChar: grpInfo.MetaRedunInfo.JournalChar,
+					}
+					grpDataRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
+						HealthChars: grpInfo.DataRedunInfo.HealthChars,
+						SyncCurr:    grpInfo.DataRedunInfo.SyncCurr,
+						SyncTotal:   grpInfo.DataRedunInfo.SyncTotal,
+						SyncAction:  grpInfo.DataRedunInfo.SyncAction,
+						MismatchCnt: grpInfo.DataRedunInfo.MismatchCnt,
+						DataOffset:  grpInfo.DataRedunInfo.DataOffset,
+						JournalChar: grpInfo.DataRedunInfo.JournalChar,
+					}
+				}
+				legStatusInfoMap[localLegInfo.LegId] = &pbcp.StatusInfo{
+					Code:      localLegInfo.StatusInfo.Code,
+					Msg:       localLegInfo.StatusInfo.Msg,
+					Timestamp: localLegInfo.StatusInfo.Timestamp,
+				}
+				legThinPoolInfoMap[localLegInfo.LegId] = &pbcp.ThinPoolInfo{
+					TransactionId:        localLegInfo.ThinPoolInfo.TransactionId,
+					UsedMetaBlocks:       localLegInfo.ThinPoolInfo.UsedMetaBlocks,
+					TotalMetaBlocks:      localLegInfo.ThinPoolInfo.TotalMetaBlocks,
+					UsedDataBlocks:       localLegInfo.ThinPoolInfo.UsedDataBlocks,
+					TotalDataBlocks:      localLegInfo.ThinPoolInfo.TotalDataBlocks,
+					HeldMetadataRoot:     localLegInfo.ThinPoolInfo.HeldMetadataRoot,
+					Mode:                 localLegInfo.ThinPoolInfo.Mode,
+					DiscardPassdown:      localLegInfo.ThinPoolInfo.DiscardPassdown,
+					ErrorOrQueue:         localLegInfo.ThinPoolInfo.ErrorOrQueue,
+					NeedsCheck:           localLegInfo.ThinPoolInfo.NeedsCheck,
+					MetadataLowWatermark: localLegInfo.ThinPoolInfo.MetadataLowWatermark,
+				}
+			}
+
+			for _, remoteLegInfo := range spCntlrInfo.ActiveCntlrInfo.RemoteLegInfoList {
+				if remoteLegInfo == nil {
+					continue
+				}
+				key := perCntlrKey(cntlrId, remoteLegInfo.LegId)
+				remoteLegStatusInfoMap[key] = &pbcp.StatusInfo{
+					Code:      remoteLegInfo.StatusInfo.Code,
+					Msg:       remoteLegInfo.StatusInfo.Msg,
+					Timestamp: remoteLegInfo.StatusInfo.Timestamp,
+				}
+			}
+		}
+
+		cntlrStatusInfoMap[cntlrId] = &pbcp.StatusInfo{
+			Code:      spCntlrInfo.StatusInfo.Code,
+			Msg:       spCntlrInfo.StatusInfo.Msg,
+			Timestamp: spCntlrInfo.StatusInfo.Timestamp,
+		}
+	}
+
 	for _, ssInfo := range oldSpInfo.SsInfoList {
 		for _, ssPerCntlrInfo := range ssInfo.SsPerCntlrInfoList {
 			key := perCntlrKey(ssPerCntlrInfo.CntlrId, ssInfo.SsId)
@@ -233,11 +374,53 @@ func newSpInfoBuilder(
 			}
 		}
 	}
+
+	for _, legInfo := range oldSpInfo.LegInfoList {
+		for _, grpInfo := range legInfo.GrpInfoList {
+			for _, ldInfo := range grpInfo.LdInfoList {
+				oldLdDnStatusInfoMap[ldInfo.LdId] = ldInfo.DnStatusInfo
+				oldLdCnStatusInfoMap[ldInfo.LdId] = ldInfo.CnStatusInfo
+			}
+			oldGrpStatusInfoMap[grpInfo.GrpId] = grpInfo.StatusInfo
+			oldGrpMetaRedunInfoMap[grpInfo.GrpId] = grpInfo.MetaRedunInfo
+			oldGrpDataRedunInfoMap[grpInfo.GrpId] = grpInfo.DataRedunInfo
+		}
+		oldLegStatusInfoMap[legInfo.LegId] = legInfo.StatusInfo
+		oldLegThinPoolInfoMap[legInfo.LegId] = legInfo.ThinPoolInfo
+		for _, remoteLegInfo := range legInfo.RemoteLegInfoList {
+			key := perCntlrKey(remoteLegInfo.CntlrId, legInfo.LegId)
+			oldRemoteLegStatusInfoMap[key] = remoteLegInfo.StatusInfo
+		}
+	}
+
+	for _, cntlrInfo := range oldSpInfo.CntlrInfoList {
+		oldCntlrStatusInfoMap[cntlrInfo.CntlrId] = cntlrInfo.StatusInfo
+	}
+
 	return &spInfoBuilder{
-		ssStatusInfoMap:    ssStatusInfoMap,
-		nsStatusInfoMap:    nsStatusInfoMap,
-		oldSsStatusInfoMap: oldSsStatusInfoMap,
-		oldNsStatusInfoMap: oldNsStatusInfoMap,
+		ssStatusInfoMap:           ssStatusInfoMap,
+		oldSsStatusInfoMap:        oldSsStatusInfoMap,
+		nsStatusInfoMap:           nsStatusInfoMap,
+		oldNsStatusInfoMap:        oldNsStatusInfoMap,
+		ldDnStatusInfoMap:         ldDnStatusInfoMap,
+		oldLdDnStatusInfoMap:      oldLdDnStatusInfoMap,
+		ldCnStatusInfoMap:         ldCnStatusInfoMap,
+		oldLdCnStatusInfoMap:      oldLdCnStatusInfoMap,
+		grpStatusInfoMap:          grpStatusInfoMap,
+		oldGrpStatusInfoMap:       oldGrpStatusInfoMap,
+		grpMetaRedunInfoMap:       grpMetaRedunInfoMap,
+		oldGrpMetaRedunInfoMap:    oldGrpMetaRedunInfoMap,
+		grpDataRedunInfoMap:       grpDataRedunInfoMap,
+		oldGrpDataRedunInfoMap:    oldGrpDataRedunInfoMap,
+		remoteLegStatusInfoMap:    remoteLegStatusInfoMap,
+		oldRemoteLegStatusInfoMap: oldRemoteLegStatusInfoMap,
+		legStatusInfoMap:          legStatusInfoMap,
+		oldLegStatusInfoMap:       oldLegStatusInfoMap,
+		legThinPoolInfoMap:        legThinPoolInfoMap,
+		oldLegThinPoolInfoMap:     oldLegThinPoolInfoMap,
+		cntlrStatusInfoMap:        cntlrStatusInfoMap,
+		oldCntlrStatusInfoMap:     oldCntlrStatusInfoMap,
+		allSucceeded:              allSucceeded,
 	}
 }
 
@@ -277,39 +460,149 @@ func (builder *spInfoBuilder) getSsStatusInfo(
 	return nil
 }
 
-func (builder *spInfoBuilder) getLdDnStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getLdDnStatusInfo(
+	ldId string,
+) *pbcp.StatusInfo {
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.ldDnStatusInfoMap[ldId]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldLdDnStatusInfoMap[ldId]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getLdCnStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getLdCnStatusInfo(
+	ldId string,
+) *pbcp.StatusInfo {
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.ldCnStatusInfoMap[ldId]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldLdCnStatusInfoMap[ldId]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getGrpStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getGrpStatusInfo(
+	grpId string,
+) *pbcp.StatusInfo {
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.grpStatusInfoMap[grpId]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldGrpStatusInfoMap[grpId]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getGrpMetaRedunInfo() *pbcp.RedundancyInfo {
+func (builder *spInfoBuilder) getGrpMetaRedunInfo(
+	grpId string,
+) *pbcp.RedundancyInfo {
+	var redunInfo *pbcp.RedundancyInfo
+	var ok bool
+	redunInfo, ok = builder.grpMetaRedunInfoMap[grpId]
+	if ok {
+		return redunInfo
+	}
+	redunInfo, ok = builder.oldGrpMetaRedunInfoMap[grpId]
+	if ok {
+		return redunInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getGrpDataRedunInfo() *pbcp.RedundancyInfo {
+func (builder *spInfoBuilder) getGrpDataRedunInfo(
+	grpId string,
+) *pbcp.RedundancyInfo {
+	var redunInfo *pbcp.RedundancyInfo
+	var ok bool
+	redunInfo, ok = builder.grpDataRedunInfoMap[grpId]
+	if ok {
+		return redunInfo
+	}
+	redunInfo, ok = builder.oldGrpDataRedunInfoMap[grpId]
+	if ok {
+		return redunInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getRemoteLegStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getRemoteLegStatusInfo(
+	cntlrId string,
+	legId string,
+) *pbcp.StatusInfo {
+	key := perCntlrKey(cntlrId, legId)
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.remoteLegStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldRemoteLegStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getLegStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getLegStatusInfo(
+	legId string,
+) *pbcp.StatusInfo {
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.legStatusInfoMap[legId]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldLegStatusInfoMap[legId]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getLegThinPoolInfo() *pbcp.ThinPoolInfo {
+func (builder *spInfoBuilder) getLegThinPoolInfo(
+	legId string,
+) *pbcp.ThinPoolInfo {
+	var thinPoolInfo *pbcp.ThinPoolInfo
+	var ok bool
+	thinPoolInfo, ok = builder.legThinPoolInfoMap[legId]
+	if ok {
+		return thinPoolInfo
+	}
+	thinPoolInfo, ok = builder.oldLegThinPoolInfoMap[legId]
+	if ok {
+		return thinPoolInfo
+	}
 	return nil
 }
 
-func (builder *spInfoBuilder) getCntlrStatusInfo() *pbcp.StatusInfo {
+func (builder *spInfoBuilder) getCntlrStatusInfo(
+	cntlrId string,
+) *pbcp.StatusInfo {
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.legStatusInfoMap[cntlrId]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldLegStatusInfoMap[cntlrId]
+	if ok {
+		return statusInfo
+	}
 	return nil
 }
 
@@ -547,15 +840,15 @@ func createSpInfo(
 			for k, ldConf := range grpConf.LdConfList {
 				ldInfoList[k] = &pbcp.LdInfo{
 					LdId:         ldConf.LdId,
-					DnStatusInfo: builder.getLdDnStatusInfo(),
-					CnStatusInfo: builder.getLdCnStatusInfo(),
+					DnStatusInfo: builder.getLdDnStatusInfo(ldConf.LdId),
+					CnStatusInfo: builder.getLdCnStatusInfo(ldConf.LdId),
 				}
 			}
 			grpInfoList[j] = &pbcp.GrpInfo{
 				GrpId:         grpConf.GrpId,
-				StatusInfo:    builder.getGrpStatusInfo(),
-				MetaRedunInfo: builder.getGrpMetaRedunInfo(),
-				DataRedunInfo: builder.getGrpDataRedunInfo(),
+				StatusInfo:    builder.getGrpStatusInfo(grpConf.GrpId),
+				MetaRedunInfo: builder.getGrpMetaRedunInfo(grpConf.GrpId),
+				DataRedunInfo: builder.getGrpDataRedunInfo(grpConf.GrpId),
 				LdInfoList:    ldInfoList,
 			}
 		}
@@ -566,15 +859,18 @@ func createSpInfo(
 			}
 			// FIXME: get fence info
 			remoteLegInfo := &pbcp.RemoteLegInfo{
-				CntlrId:    cntlrConf.CntlrId,
-				StatusInfo: builder.getRemoteLegStatusInfo(),
+				CntlrId: cntlrConf.CntlrId,
+				StatusInfo: builder.getRemoteLegStatusInfo(
+					cntlrConf.CntlrId,
+					legConf.LegId,
+				),
 			}
 			remoteLegInfoList = append(remoteLegInfoList, remoteLegInfo)
 		}
 		legInfoList[i] = &pbcp.LegInfo{
 			LegId:             legConf.LegId,
-			StatusInfo:        builder.getLegStatusInfo(),
-			ThinPoolInfo:      builder.getLegThinPoolInfo(),
+			StatusInfo:        builder.getLegStatusInfo(legConf.LegId),
+			ThinPoolInfo:      builder.getLegThinPoolInfo(legConf.LegId),
 			RemoteLegInfoList: remoteLegInfoList,
 			GrpInfoList:       grpInfoList,
 		}
@@ -584,7 +880,7 @@ func createSpInfo(
 	for i, cntlrConf := range spConf.CntlrConfList {
 		cntlrInfoList[i] = &pbcp.CntlrInfo{
 			CntlrId:    cntlrConf.CntlrId,
-			StatusInfo: builder.getCntlrStatusInfo(),
+			StatusInfo: builder.getCntlrStatusInfo(cntlrConf.CntlrId),
 		}
 	}
 

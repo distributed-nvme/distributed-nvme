@@ -95,6 +95,7 @@ func syncupCntlrLd(
 	}
 	if err := oc.NvmeConnectPath(pch, nvmeArg); err != nil {
 		return &pbnd.LdCnInfo{
+			LdId: ldCnConf.LdId,
 			StatusInfo: &pbnd.StatusInfo{
 				Code:      constants.StatusCodeInternalErr,
 				Msg:       err.Error(),
@@ -103,6 +104,7 @@ func syncupCntlrLd(
 		}
 	}
 	return &pbnd.LdCnInfo{
+		LdId: ldCnConf.LdId,
 		StatusInfo: &pbnd.StatusInfo{
 			Code:      constants.StatusCodeSucceed,
 			Msg:       constants.StatusMsgSucceed,
