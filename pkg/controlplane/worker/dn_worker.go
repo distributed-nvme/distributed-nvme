@@ -12,6 +12,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/restree"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
@@ -21,14 +22,42 @@ var (
 	dnFastRetryCodeMap = make(map[uint32]bool)
 )
 
+type dnResource struct {
+	dnId   string
+	dnConf *pbcp.DiskNodeConf
+}
+
+func (dnRes *dnResource) GetId() string {
+	return dnRes.dnId
+}
+
+func (dnRes *dnResource) GetQos() uint32 {
+	return dnRes.dnConf.GeneralConf.DnCapacity.FreeQos
+}
+
+func (dnRes *dnResource) GetCnt() uint32 {
+	return dnRes.dnConf.GeneralConf.DnCapacity.LdCnt
+}
+
+func newDnResource(
+	dnId string,
+	dnConf *pbcp.DiskNodeConf,
+) *dnResource {
+	return &dnResource{
+		dnId:   dnId,
+		dnConf: dnConf,
+	}
+}
+
 type dnWorkerServer struct {
 	pbcp.UnimplementedDiskNodeWorkerServer
-	mu             sync.Mutex
-	etcdCli        *clientv3.Client
-	kf             *keyfmt.KeyFmt
-	sm             *stmwrapper.StmWrapper
-	initTrigger    chan struct{}
-	idAndRevToConf map[string]map[int64]*pbcp.DiskNodeConf
+	mu            sync.Mutex
+	etcdCli       *clientv3.Client
+	kf            *keyfmt.KeyFmt
+	sm            *stmwrapper.StmWrapper
+	initTrigger   chan struct{}
+	idAndRevToRes map[string]map[int64]*dnResource
+	dnResTree     *restree.ResourceTree
 }
 
 func (dnwkr *dnWorkerServer) getName() string {
@@ -56,20 +85,28 @@ func (dnwkr *dnWorkerServer) addResRev(
 	resBody []byte,
 	rev int64,
 ) ([]string, error) {
+	dnwkr.mu.Lock()
+	defer dnwkr.mu.Unlock()
+
 	dnConf := &pbcp.DiskNodeConf{}
 	if err := proto.Unmarshal(resBody, dnConf); err != nil {
 		return nil, err
 	}
-	revToConf, ok := dnwkr.idAndRevToConf[dnId]
+	dnRes := newDnResource(dnId, dnConf)
+	revToRes, ok := dnwkr.idAndRevToRes[dnId]
 	if ok {
-		if len(revToConf) > 1 {
+		if len(revToRes) > 1 {
 			panic("More than 1 dn rev: " + dnId)
 		}
+		for _, oldDnRes := range revToRes {
+			dnwkr.dnResTree.Remove(oldDnRes)
+		}
 	} else {
-		revToConf = make(map[int64]*pbcp.DiskNodeConf)
-		dnwkr.idAndRevToConf[dnId] = revToConf
+		revToRes = make(map[int64]*dnResource)
+		dnwkr.idAndRevToRes[dnId] = revToRes
 	}
-	revToConf[rev] = dnConf
+	revToRes[rev] = dnRes
+	dnwkr.dnResTree.Put(dnRes)
 	grpcTargetList := make([]string, 1)
 	grpcTargetList[0] = dnConf.GeneralConf.GrpcTarget
 	return grpcTargetList, nil
@@ -79,13 +116,18 @@ func (dnwkr *dnWorkerServer) delResRev(
 	dnId string,
 	rev int64,
 ) error {
-	revToConf, ok := dnwkr.idAndRevToConf[dnId]
+	dnwkr.mu.Lock()
+	defer dnwkr.mu.Unlock()
+
+	revToRes, ok := dnwkr.idAndRevToRes[dnId]
 	if !ok {
 		panic("Unknown dn id: " + dnId)
 	}
-	delete(revToConf, rev)
-	if len(revToConf) == 0 {
-		delete(dnwkr.idAndRevToConf, dnId)
+	dnRes, _ := revToRes[rev]
+	delete(revToRes, rev)
+	if len(revToRes) == 0 {
+		dnwkr.dnResTree.Remove(dnRes)
+		delete(dnwkr.idAndRevToRes, dnId)
 	}
 	return nil
 }
@@ -252,18 +294,18 @@ func (dnwkr *dnWorkerServer) trackRes(
 	pch *ctxhelper.PerCtxHelper,
 	targetToConn map[string]*grpc.ClientConn,
 ) {
-	revToConf, ok := dnwkr.idAndRevToConf[dnId]
+	revToRes, ok := dnwkr.idAndRevToRes[dnId]
 	if !ok {
 		pch.Logger.Fatal("Can not find dnId: %s", dnId)
 	}
-	if len(revToConf) != 1 {
-		pch.Logger.Fatal("revToConf cnt error: %s %v", dnId, revToConf)
+	if len(revToRes) != 1 {
+		pch.Logger.Fatal("revToRes cnt error: %s %v", dnId, revToRes)
 	}
 	var revision int64
 	var dnConf *pbcp.DiskNodeConf
-	for key, value := range revToConf {
+	for key, value := range revToRes {
 		revision = key
-		dnConf = value
+		dnConf = value.dnConf
 		break
 	}
 	grpcTarget := dnConf.GeneralConf.GrpcTarget
@@ -288,10 +330,11 @@ func newDnWorkerServer(
 	prefix string,
 ) *dnWorkerServer {
 	return &dnWorkerServer{
-		etcdCli:        etcdCli,
-		kf:             keyfmt.NewKeyFmt(prefix),
-		sm:             stmwrapper.NewStmWrapper(etcdCli),
-		initTrigger:    make(chan struct{}),
-		idAndRevToConf: make(map[string]map[int64]*pbcp.DiskNodeConf),
+		etcdCli:       etcdCli,
+		kf:            keyfmt.NewKeyFmt(prefix),
+		sm:            stmwrapper.NewStmWrapper(etcdCli),
+		initTrigger:   make(chan struct{}),
+		idAndRevToRes: make(map[string]map[int64]*dnResource),
+		dnResTree:     restree.NewResourceTree(),
 	}
 }

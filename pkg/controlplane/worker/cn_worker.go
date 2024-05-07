@@ -12,6 +12,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/keyfmt"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/restree"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
 	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 	pbnd "github.com/distributed-nvme/distributed-nvme/pkg/proto/nodeagent"
@@ -21,14 +22,42 @@ var (
 	cnFastRetryCodeMap = make(map[uint32]bool)
 )
 
+type cnResource struct {
+	cnId   string
+	cnConf *pbcp.ControllerNodeConf
+}
+
+func (cnRes *cnResource) GetId() string {
+	return cnRes.cnId
+}
+
+func (cnRes *cnResource) GetQos() uint32 {
+	return cnRes.cnConf.GeneralConf.CnCapacity.FreeQos
+}
+
+func (cnRes *cnResource) GetCnt() uint32 {
+	return cnRes.cnConf.GeneralConf.CnCapacity.CntlrCnt
+}
+
+func newCnResource(
+	cnId string,
+	cnConf *pbcp.ControllerNodeConf,
+) *cnResource {
+	return &cnResource{
+		cnId:   cnId,
+		cnConf: cnConf,
+	}
+}
+
 type cnWorkerServer struct {
 	pbcp.UnimplementedControllerNodeWorkerServer
-	mu             sync.Mutex
-	etcdCli        *clientv3.Client
-	kf             *keyfmt.KeyFmt
-	sm             *stmwrapper.StmWrapper
-	initTrigger    chan struct{}
-	idAndRevToConf map[string]map[int64]*pbcp.ControllerNodeConf
+	mu            sync.Mutex
+	etcdCli       *clientv3.Client
+	kf            *keyfmt.KeyFmt
+	sm            *stmwrapper.StmWrapper
+	initTrigger   chan struct{}
+	idAndRevToRes map[string]map[int64]*cnResource
+	cnResTree     *restree.ResourceTree
 }
 
 func (cnwkr *cnWorkerServer) getName() string {
@@ -56,20 +85,28 @@ func (cnwkr *cnWorkerServer) addResRev(
 	resBody []byte,
 	rev int64,
 ) ([]string, error) {
+	cnwkr.mu.Lock()
+	defer cnwkr.mu.Unlock()
+
 	cnConf := &pbcp.ControllerNodeConf{}
 	if err := proto.Unmarshal(resBody, cnConf); err != nil {
 		return nil, err
 	}
-	revToConf, ok := cnwkr.idAndRevToConf[cnId]
+	cnRes := newCnResource(cnId, cnConf)
+	revToRes, ok := cnwkr.idAndRevToRes[cnId]
 	if ok {
-		if len(revToConf) > 1 {
+		if len(revToRes) > 1 {
 			panic("More than 1 cn rev: " + cnId)
 		}
+		for _, oldCnRes := range revToRes {
+			cnwkr.cnResTree.Remove(oldCnRes)
+		}
 	} else {
-		revToConf = make(map[int64]*pbcp.ControllerNodeConf)
-		cnwkr.idAndRevToConf[cnId] = revToConf
+		revToRes = make(map[int64]*cnResource)
+		cnwkr.idAndRevToRes[cnId] = revToRes
 	}
-	revToConf[rev] = cnConf
+	revToRes[rev] = cnRes
+	cnwkr.cnResTree.Put(cnRes)
 	grpcTargetList := make([]string, 1)
 	grpcTargetList[0] = cnConf.GeneralConf.GrpcTarget
 	return grpcTargetList, nil
@@ -79,13 +116,18 @@ func (cnwkr *cnWorkerServer) delResRev(
 	cnId string,
 	rev int64,
 ) error {
-	revToConf, ok := cnwkr.idAndRevToConf[cnId]
+	cnwkr.mu.Lock()
+	defer cnwkr.mu.Unlock()
+
+	revToRes, ok := cnwkr.idAndRevToRes[cnId]
 	if !ok {
 		panic("Unknown cn id: " + cnId)
 	}
-	delete(revToConf, rev)
-	if len(revToConf) == 0 {
-		delete(cnwkr.idAndRevToConf, cnId)
+	cnRes, _ := revToRes[rev]
+	delete(revToRes, rev)
+	if len(revToRes) == 0 {
+		cnwkr.cnResTree.Remove(cnRes)
+		delete(cnwkr.idAndRevToRes, cnId)
 	}
 	return nil
 }
@@ -250,18 +292,18 @@ func (cnwkr *cnWorkerServer) trackRes(
 	pch *ctxhelper.PerCtxHelper,
 	targetToConn map[string]*grpc.ClientConn,
 ) {
-	revToConf, ok := cnwkr.idAndRevToConf[cnId]
+	revToRes, ok := cnwkr.idAndRevToRes[cnId]
 	if !ok {
 		pch.Logger.Fatal("Can not find cnId: %s", cnId)
 	}
-	if len(revToConf) != 1 {
-		pch.Logger.Fatal("revToConf cnt error: %s %v", cnId, revToConf)
+	if len(revToRes) != 1 {
+		pch.Logger.Fatal("revToRes cnt error: %s %v", cnId, revToRes)
 	}
 	var revision int64
 	var cnConf *pbcp.ControllerNodeConf
-	for key, value := range revToConf {
+	for key, value := range revToRes {
 		revision = key
-		cnConf = value
+		cnConf = value.cnConf
 		break
 	}
 	grpcTarget := cnConf.GeneralConf.GrpcTarget
@@ -286,10 +328,11 @@ func newCnWorkerServer(
 	prefix string,
 ) *cnWorkerServer {
 	return &cnWorkerServer{
-		etcdCli:        etcdCli,
-		kf:             keyfmt.NewKeyFmt(prefix),
-		sm:             stmwrapper.NewStmWrapper(etcdCli),
-		initTrigger:    make(chan struct{}),
-		idAndRevToConf: make(map[string]map[int64]*pbcp.ControllerNodeConf),
+		etcdCli:       etcdCli,
+		kf:            keyfmt.NewKeyFmt(prefix),
+		sm:            stmwrapper.NewStmWrapper(etcdCli),
+		initTrigger:   make(chan struct{}),
+		idAndRevToRes: make(map[string]map[int64]*cnResource),
+		cnResTree:     restree.NewResourceTree(),
 	}
 }

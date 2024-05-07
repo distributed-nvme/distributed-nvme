@@ -288,7 +288,12 @@ func (swkr *shardWorker) process(
 		revision := bAndR.revision
 		grpcTargetList, err := swkr.worker.addResRev(resId, resBody, revision)
 		if err != nil {
-			pch.Logger.Warning("addResRev err, resId: %s revision: %d err: %v", resId, revision, err)
+			pch.Logger.Warning(
+				"addResRev err, resId: %s revision: %d err: %v",
+				resId,
+				revision,
+				err,
+			)
 			continue
 		}
 		targetToConn := make(map[string]*grpc.ClientConn)
@@ -296,7 +301,11 @@ func (swkr *shardWorker) process(
 		for _, grpcTarget := range grpcTargetList {
 			conn, err := swkr.gcCache.get(grpcTarget)
 			if err != nil {
-				pch.Logger.Warning("get grpcTarget err, grpcTarget: %s err: %v", grpcTarget, err)
+				pch.Logger.Warning(
+					"get grpcTarget err, grpcTarget: %s err: %v",
+					grpcTarget,
+					err,
+				)
 				ignore = true
 				break
 			}
@@ -330,12 +339,21 @@ func (swkr *shardWorker) process(
 		for grpcTarget := range rwkr.targetToConn {
 			err := swkr.gcCache.put(grpcTarget)
 			if err != nil {
-				pch.Logger.Fatal("grpc conn cache put err, %s %v", grpcTarget, err)
+				pch.Logger.Fatal(
+					"grpc conn cache put err, %s %v",
+					grpcTarget,
+					err,
+				)
 			}
 		}
 		err := swkr.worker.delResRev(rwkr.resId, rwkr.revision)
 		if err != nil {
-			pch.Logger.Fatal("delResRev err, %s %d %v", rwkr.resId, rwkr.revision, err)
+			pch.Logger.Fatal(
+				"delResRev err, %s %d %v",
+				rwkr.resId,
+				rwkr.revision,
+				err,
+			)
 		}
 	}
 
@@ -347,7 +365,12 @@ func (swkr *shardWorker) process(
 func (swkr *shardWorker) handle() {
 	defer swkr.wg.Done()
 
-	prefix := fmt.Sprintf("%s|shard-h|%s|%s", swkr.worker.getName(), swkr.shardId, swkr.wkrId)
+	prefix := fmt.Sprintf(
+		"%s|shard-h|%s|%s",
+		swkr.worker.getName(),
+		swkr.shardId,
+		swkr.wkrId,
+	)
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 

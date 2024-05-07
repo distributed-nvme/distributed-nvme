@@ -37,28 +37,28 @@ func cntCompare(x, y uint32) int {
 type Resource interface {
 	GetQos() uint32
 	GetCnt() uint32
-	GetId() uint64
+	GetId() string
 }
 
 type ResourceTree struct {
-	qosTree *rbt.Tree[uint32, *rbt.Tree[uint32, map[uint64]Resource]]
+	qosTree *rbt.Tree[uint32, *rbt.Tree[uint32, map[string]Resource]]
 }
 
 func (rt *ResourceTree) Put(res Resource) {
 	var found bool
-	var cntTree *rbt.Tree[uint32, map[uint64]Resource]
-	var resMap map[uint64]Resource
+	var cntTree *rbt.Tree[uint32, map[string]Resource]
+	var resMap map[string]Resource
 	qos := res.GetQos()
 	cnt := res.GetCnt()
 	resId := res.GetId()
 	cntTree, found = rt.qosTree.Get(qos)
 	if !found {
-		cntTree = rbt.NewWith[uint32, map[uint64]Resource](cntCompare)
+		cntTree = rbt.NewWith[uint32, map[string]Resource](cntCompare)
 		rt.qosTree.Put(qos, cntTree)
 	}
 	resMap, found = cntTree.Get(cnt)
 	if !found {
-		resMap = make(map[uint64]Resource)
+		resMap = make(map[string]Resource)
 		cntTree.Put(cnt, resMap)
 	}
 	_, ok := resMap[resId]
@@ -70,8 +70,8 @@ func (rt *ResourceTree) Put(res Resource) {
 
 func (rt *ResourceTree) Remove(res Resource) {
 	var found bool
-	var cntTree *rbt.Tree[uint32, map[uint64]Resource]
-	var resMap map[uint64]Resource
+	var cntTree *rbt.Tree[uint32, map[string]Resource]
+	var resMap map[string]Resource
 	qos := res.GetQos()
 	cnt := res.GetCnt()
 	resId := res.GetId()
@@ -97,7 +97,7 @@ func (rt *ResourceTree) Remove(res Resource) {
 }
 
 func iterate(
-	qosIterator *rbt.Iterator[uint32, *rbt.Tree[uint32, map[uint64]Resource]],
+	qosIterator *rbt.Iterator[uint32, *rbt.Tree[uint32, map[string]Resource]],
 	apply func(res Resource) bool,
 ) {
 	for qosIterator.Next() {
@@ -141,6 +141,6 @@ func (rt *ResourceTree) IterateAt(qos uint32, apply func(res Resource) bool) {
 
 func NewResourceTree() *ResourceTree {
 	return &ResourceTree{
-		qosTree: rbt.NewWith[uint32, *rbt.Tree[uint32, map[uint64]Resource]](qosCompare),
+		qosTree: rbt.NewWith[uint32, *rbt.Tree[uint32, map[string]Resource]](qosCompare),
 	}
 }
