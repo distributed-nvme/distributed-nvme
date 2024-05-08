@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -321,6 +322,64 @@ func (cnwkr *cnWorkerServer) trackRes(
 			return
 		}
 	}
+}
+
+func (cnwkr *cnWorkerServer) AllocateCn(
+	ctx context.Context,
+	req *pbcp.AllocateCnRequest,
+) (*pbcp.AllocateCnReply, error) {
+	cnwkr.mu.Lock()
+	defer cnwkr.mu.Unlock()
+
+	cnItemList := make([]*pbcp.CnAllocateItem, 0)
+	distinguishMap := make(map[string]bool)
+
+	apply := func(res restree.Resource) bool {
+		cnRes := res.(*cnResource)
+		value := ""
+		for _, tag := range cnRes.cnConf.TagList {
+			if tag.Key == req.DistinguishKey {
+				value = tag.Value
+			}
+		}
+
+		// ignore it if no distinguishKey
+		if value == "" {
+			return false
+		}
+
+		// ignore it if we already have the distinguishValue
+		if _, ok := distinguishMap[value]; ok {
+			return false
+		}
+
+		if !cnRes.cnConf.GeneralConf.Online {
+			return false
+		}
+
+		distinguishMap[value] = true
+
+		item := &pbcp.CnAllocateItem{
+			CnId:             cnRes.cnId,
+			DistinguishValue: value,
+		}
+		cnItemList = append(cnItemList, item)
+		if len(cnItemList) < int(req.CnCnt) {
+			return false
+		}
+
+		return true
+	}
+
+	cnwkr.cnResTree.IterateAt(req.Qos, apply)
+
+	return &pbcp.AllocateCnReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+		CnItemList: cnItemList,
+	}, nil
 }
 
 func newCnWorkerServer(

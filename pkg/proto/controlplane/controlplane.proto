@@ -654,6 +654,7 @@ message AllocateCnRequest {
   repeated Tag exclude_tag_list = 2;
   string distinguish_key = 3;
   uint32 cn_cnt = 4;
+  uint32 qos = 5;
 }
 
 message CnAllocateItem {
@@ -663,7 +664,7 @@ message CnAllocateItem {
 
 message AllocateCnReply {
   ReplyInfo reply_info = 1;
-  repeated CnAllocateItem cn_alloc_item = 2;
+  repeated CnAllocateItem cn_item_list = 2;
 }
 
 message SummarizeSpRequest {
