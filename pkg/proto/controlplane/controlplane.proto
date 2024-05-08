@@ -602,7 +602,8 @@ message AllocateDnRequest {
   repeated Tag exclude_tag_list = 2;
   string distinguish_key = 3;
   uint32 dn_cnt = 4;
-  uint32 extent_per_dn_cnt = 5;
+  uint32 data_extent_cnt = 5;
+  uint32 qos = 6;
 }
 
 message DnAllocItem {
@@ -612,7 +613,7 @@ message DnAllocItem {
 
 message AllocateDnReply {
   ReplyInfo reply_info = 1;
-  repeated DnAllocItem dn_alloc_item = 2;
+  repeated DnAllocItem dn_item_list = 2;
 }
 
 message SummarizeDnRequest {

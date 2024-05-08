@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -323,6 +324,68 @@ func (dnwkr *dnWorkerServer) trackRes(
 			return
 		}
 	}
+}
+
+func (dnwkr *dnWorkerServer) AllocateDn(
+	ctx context.Context,
+	req *pbcp.AllocateDnRequest,
+) (*pbcp.AllocateDnReply, error) {
+	dnwkr.mu.Lock()
+	defer dnwkr.mu.Unlock()
+
+	dnItemList := make([]*pbcp.DnAllocItem, 0)
+	distinguishMap := make(map[string]bool)
+
+	apply := func(res restree.Resource) bool {
+		dnRes := res.(*dnResource)
+		value := ""
+		for _, tag := range dnRes.dnConf.TagList {
+			if tag.Key == req.DistinguishKey {
+				value = tag.Value
+			}
+		}
+
+		// ignore it if no distinguishKey
+		if value == "" {
+			return false
+		}
+
+		// ignore it if we already have the distinguishValue
+		if _, ok := distinguishMap[value]; ok {
+			return false
+		}
+
+		if !dnRes.dnConf.GeneralConf.Online {
+			return false
+		}
+
+		if dnRes.dnConf.GeneralConf.DnCapacity.DataMaxExtentSetSize < req.DataExtentCnt {
+			return false
+		}
+
+		distinguishMap[value] = true
+
+		item := &pbcp.DnAllocItem{
+			DnId:             dnRes.dnId,
+			DistinguishValue: value,
+		}
+		dnItemList = append(dnItemList, item)
+		if len(dnItemList) < int(req.DnCnt) {
+			return false
+		}
+
+		return true
+	}
+
+	dnwkr.dnResTree.IterateAt(req.Qos, apply)
+
+	return &pbcp.AllocateDnReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+		DnItemList: dnItemList,
+	}, nil
 }
 
 func newDnWorkerServer(
