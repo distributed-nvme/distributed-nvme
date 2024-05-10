@@ -42,7 +42,7 @@ func extentInitCalc(
 	}
 	bucket := make([]uint32, setCntTotal)
 	for i := 0; uint64(i) < setCntFull; i++ {
-		bucket[i] = 1 << extentCntFull
+		bucket[i] = uint32(extentCntFull)
 	}
 	if extentCntPartial > 0 {
 		bucket[setCntTotal-1] = uint32(extentCntPartial)

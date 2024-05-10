@@ -387,8 +387,7 @@ message Cluster {
 // /{dnv_prefix}/dn_global
 message DnGlobal {
   uint64 global_counter = 1;
-  repeated uint32 extent_set_bucket = 2;
-  repeated uint32 shard_bucket = 3;
+  repeated uint32 shard_bucket = 2;
 }
 
 // /{dnv_prefix}/cn_global
@@ -548,7 +547,8 @@ message CreateDnRequest {
   string adr_fam = 5;
   string tr_addr = 6;
   string tr_svc_id = 7;
-  repeated Tag tag_list = 8;
+  bool online = 8;
+  repeated Tag tag_list = 9;
 }
 
 message CreateDnReply {

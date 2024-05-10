@@ -40,9 +40,8 @@ func (exApi *exApiServer) CreateCluster(
 	clusterEntityValStr := string(clusterEntityVal)
 
 	dnGlobal := &pbcp.DnGlobal{
-		GlobalCounter:   0,
-		ExtentSetBucket: make([]uint32, cluster.DataExtentPerSetShift),
-		ShardBucket:     make([]uint32, constants.ShardCnt),
+		GlobalCounter: 0,
+		ShardBucket:   make([]uint32, constants.ShardCnt),
 	}
 	pch.Logger.Debug("dnGlobal: %v", dnGlobal)
 	dnGlobalEntityKey := exApi.kf.DnGlobalEntityKey()

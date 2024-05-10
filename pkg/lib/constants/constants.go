@@ -88,7 +88,8 @@ const (
 	ExternalPortBase    = 0
 	ExternalPortSize    = 4096
 
-	ShardCnt             = 256
+	ShardShift           = 8
+	ShardCnt             = 1 << ShardShift
 	ShardIdFormat        = "%02x"
 	ShardHighPrioCode    = "7"
 	ShardMediumPrioCode  = "5"
