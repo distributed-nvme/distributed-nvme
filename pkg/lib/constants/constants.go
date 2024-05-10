@@ -16,6 +16,8 @@ const (
 	ReplyCodeInternalErr = 1003
 	ReplyCodeAgentErr    = 1004
 	ReplyCodeInvalidArg  = 1005
+	ReplyCodeNotFound    = 1006
+	ReplyCodeResBusy     = 1007
 
 	StatusCodeSucceed      = 0
 	StatusMsgSucceed       = "succeed"
@@ -90,6 +92,7 @@ const (
 
 	ShardShift           = 8
 	ShardCnt             = 1 << ShardShift
+	ShardMove            = 64 - ShardShift
 	ShardIdFormat        = "%02x"
 	ShardHighPrioCode    = "7"
 	ShardMediumPrioCode  = "5"

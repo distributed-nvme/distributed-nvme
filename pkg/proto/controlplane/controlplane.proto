@@ -12,7 +12,7 @@ service ExternalApi {
   rpc CreateDn(CreateDnRequest) returns(CreateDnReply) {}
   rpc DeleteDn(DeleteDnRequest) returns(DeleteDnReply) {}
   rpc GetDn(GetDnRequest) returns(GetDnReply) {}
-  rpc ListDn(ListDnRequest) returns(ListDnReply) {}
+  // rpc ListDn(ListDnRequest) returns(ListDnReply) {}
   // rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
   // rpc SearchDn(SearchDnRequest) returns(SearchDnReply) {}
 }
@@ -573,6 +573,8 @@ message GetDnRequest {
 
 message GetDnReply {
   ReplyInfo reply_info = 1;
+  DiskNodeConf dn_conf = 2;
+  DiskNodeInfo dn_info = 3;
 }
 
 message ListDnRequest {

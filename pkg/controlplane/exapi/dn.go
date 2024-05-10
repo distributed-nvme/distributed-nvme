@@ -3,6 +3,7 @@ package exapi
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
@@ -244,7 +245,22 @@ func (exApi *exApiServer) CreateDn(
 			panic("Do not find minimal cnt")
 		}
 		dnGlobal.ShardBucket[idx] = dnGlobal.ShardBucket[idx] + 1
-		dnIdNum := (uint64(idx) << (64 - constants.ShardShift)) | counter
+		dnGlobalVal, err := proto.Marshal(dnGlobal)
+		if err != nil {
+			pch.Logger.Error(
+				"dnGlobal marshal err: %s %v",
+				dnGlobal,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		dnGlobalStr := string(dnGlobalVal)
+		stm.Put(dnGlobalKey, dnGlobalStr)
+
+		dnIdNum := (uint64(idx) << (constants.ShardMove)) | counter
 		dnId := fmt.Sprintf("%016x", dnIdNum)
 
 		dnConfKey := exApi.kf.DnConfEntityKey(dnId)
@@ -267,7 +283,7 @@ func (exApi *exApiServer) CreateDn(
 		return nil
 	}
 
-	if err = exApi.sm.RunStm(pch, apply); err != nil {
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
 		if serr, ok := err.(*stmwrapper.StmError); ok {
 			return &pbcp.CreateDnReply{
 				ReplyInfo: &pbcp.ReplyInfo{
@@ -286,6 +302,131 @@ func (exApi *exApiServer) CreateDn(
 	}
 
 	return &pbcp.CreateDnReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+	}, nil
+}
+
+func (exApi *exApiServer) DeleteDn(
+	ctx context.Context,
+	req *pbcp.DeleteDnRequest,
+) (*pbcp.DeleteDnReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	dnId := req.DnId
+	dnIdNum, err := strconv.ParseUint(dnId, 16, 64)
+	if err != nil {
+		return &pbcp.DeleteDnReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReplyCode: constants.ReplyCodeInvalidArg,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	idx := dnIdNum >> constants.ShardMove
+
+	dnConfKey := exApi.kf.DnConfEntityKey(dnId)
+	dnConf := &pbcp.DiskNodeConf{}
+
+	dnInfoKey := exApi.kf.DnInfoEntityKey(dnId)
+
+	dnGlobalKey := exApi.kf.DnGlobalEntityKey()
+	dnGlobal := &pbcp.DnGlobal{}
+
+	apply := func(stm concurrency.STM) error {
+		dnConfVal := []byte(stm.Get(dnConfKey))
+		if len(dnConfVal) == 0 {
+			pch.Logger.Error("No dnConf: %s", dnConfKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				dnConfKey,
+			}
+		}
+		if err := proto.Unmarshal(dnConfVal, dnConf); err != nil {
+			pch.Logger.Error(
+				"dnConf unmarshal err: %s %v",
+				dnConfKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		if len(dnConf.SpLdIdList) > 0 {
+			return &stmwrapper.StmError{
+				constants.ReplyCodeResBusy,
+				fmt.Sprintf("%v", dnConf.SpLdIdList),
+			}
+		}
+		stm.Del(dnConfKey)
+
+		if len(stm.Get(dnInfoKey)) > 0 {
+			stm.Del(dnInfoKey)
+		}
+
+		dnGlobalOldVal := []byte(stm.Get(dnGlobalKey))
+		if len(dnGlobalOldVal) == 0 {
+			pch.Logger.Error("No dnGlobal: %s", dnGlobalKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				dnGlobalKey,
+			}
+		}
+		if err := proto.Unmarshal(dnGlobalOldVal, dnGlobal); err != nil {
+			pch.Logger.Error(
+				"dnGlobal unmarshal err: %s %v",
+				dnGlobalKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		if dnGlobal.ShardBucket[idx] == 0 {
+			panic("ShardBucket underflow")
+		}
+		dnGlobal.ShardBucket[idx] = dnGlobal.ShardBucket[idx] - 1
+		dnGlobalVal, err := proto.Marshal(dnGlobal)
+		if err != nil {
+			pch.Logger.Error(
+				"dnGlobal marshal err: %s %v",
+				dnGlobal,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		dnGlobalStr := string(dnGlobalVal)
+		stm.Put(dnGlobalKey, dnGlobalStr)
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.DeleteDnReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.DeleteDnReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.DeleteDnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
