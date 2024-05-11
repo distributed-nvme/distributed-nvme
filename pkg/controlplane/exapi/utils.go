@@ -45,7 +45,14 @@ func extentInitCalc(
 		bucket[i] = uint32(extentCntFull)
 	}
 	if extentCntPartial > 0 {
-		bucket[setCntTotal-1] = uint32(extentCntPartial)
+		maxContinueExtentCnt := uint64(1)
+		for {
+			if (maxContinueExtentCnt << 1) > extentCntPartial {
+				break
+			}
+			maxContinueExtentCnt = maxContinueExtentCnt << 1
+		}
+		bucket[setCntTotal-1] = uint32(maxContinueExtentCnt)
 	}
 	return bmRaw, bucket, uint32(extentCntTotal)
 }

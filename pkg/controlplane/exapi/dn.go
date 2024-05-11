@@ -211,6 +211,8 @@ func (exApi *exApiServer) CreateDn(
 	dnGlobalKey := exApi.kf.DnGlobalEntityKey()
 	dnGlobal := &pbcp.DnGlobal{}
 
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.GrpcTarget)
+
 	apply := func(stm concurrency.STM) error {
 		val := []byte(stm.Get(dnGlobalKey))
 		if len(val) == 0 {
@@ -248,7 +250,7 @@ func (exApi *exApiServer) CreateDn(
 		dnGlobalVal, err := proto.Marshal(dnGlobal)
 		if err != nil {
 			pch.Logger.Error(
-				"dnGlobal marshal err: %s %v",
+				"dnGlobal marshal err: %v %v",
 				dnGlobal,
 				err,
 			)
@@ -264,7 +266,7 @@ func (exApi *exApiServer) CreateDn(
 		dnId := fmt.Sprintf("%016x", dnIdNum)
 
 		dnConfKey := exApi.kf.DnConfEntityKey(dnId)
-		if val := []byte(stm.Get(dnConfKey)); len(val) != 0 {
+		if val := stm.Get(dnConfKey); len(val) != 0 {
 			return &stmwrapper.StmError{
 				Code: constants.ReplyCodeDupRes,
 				Msg:  dnConfKey,
@@ -279,6 +281,30 @@ func (exApi *exApiServer) CreateDn(
 			}
 		}
 		stm.Put(dnInfoKey, dnInfoStr)
+
+		if val := stm.Get(nameToIdKey); len(val) != 0 {
+			return &stmwrapper.StmError{
+				Code: constants.ReplyCodeDupRes,
+				Msg:  nameToIdKey,
+			}
+		}
+		nameToId := &pbcp.NameToId{
+			ResId: dnId,
+		}
+		nameToIdVal, err := proto.Marshal(nameToId)
+		if err != nil {
+			pch.Logger.Error(
+				"nameToId marshal err: %v %v",
+				nameToId,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		nameToIdStr := string(nameToIdVal)
+		stm.Put(nameToIdKey, nameToIdStr)
 
 		return nil
 	}
@@ -367,6 +393,11 @@ func (exApi *exApiServer) DeleteDn(
 			stm.Del(dnInfoKey)
 		}
 
+		nameToIdKey := exApi.kf.NameToIdEntityKey(dnConf.GeneralConf.GrpcTarget)
+		if len(stm.Get(nameToIdKey)) > 0 {
+			stm.Del(nameToIdKey)
+		}
+
 		dnGlobalOldVal := []byte(stm.Get(dnGlobalKey))
 		if len(dnGlobalOldVal) == 0 {
 			pch.Logger.Error("No dnGlobal: %s", dnGlobalKey)
@@ -431,5 +462,109 @@ func (exApi *exApiServer) DeleteDn(
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+	}, nil
+}
+
+func (exApi *exApiServer) GetDn(
+	ctx context.Context,
+	req *pbcp.GetDnRequest,
+) (*pbcp.GetDnReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	grpcTarget := ""
+	dnId := ""
+
+	switch x := req.Name.(type) {
+	case *pbcp.GetDnRequest_GrpcTarget:
+		grpcTarget = x.GrpcTarget
+	case *pbcp.GetDnRequest_DnId:
+		dnId = x.DnId
+	}
+
+	dnConf := &pbcp.DiskNodeConf{}
+	dnInfo := &pbcp.DiskNodeInfo{}
+
+	apply := func(stm concurrency.STM) error {
+		if dnId == "" {
+			nameToIdKey := exApi.kf.NameToIdEntityKey(grpcTarget)
+			nameToIdVal := []byte(stm.Get(nameToIdKey))
+			if len(nameToIdVal) == 0 {
+				pch.Logger.Error("No nameToId: %s", nameToIdKey)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeNotFound,
+					nameToIdKey,
+				}
+			}
+			nameToId := &pbcp.NameToId{}
+			if err := proto.Unmarshal(nameToIdVal, nameToId); err != nil {
+				pch.Logger.Error(
+					"nameToId unmarshal err: %s %v",
+					nameToIdKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			dnId = nameToId.ResId
+		}
+
+		dnConfKey := exApi.kf.DnConfEntityKey(dnId)
+		dnConfVal := []byte(stm.Get(dnConfKey))
+		if err := proto.Unmarshal(dnConfVal, dnConf); err != nil {
+			pch.Logger.Error(
+				"dnConf unmarshal err: %s %v",
+				dnConfKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		dnInfoKey := exApi.kf.DnInfoEntityKey(dnId)
+		dnInfoVal := []byte(stm.Get(dnInfoKey))
+		if err := proto.Unmarshal(dnInfoVal, dnInfo); err != nil {
+			pch.Logger.Error(
+				"dnInfo unmarshal err: %s %v",
+				dnInfoKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.GetDnReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.GetDnReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.GetDnReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+		DnConf: dnConf,
+		DnInfo: dnInfo,
 	}, nil
 }
