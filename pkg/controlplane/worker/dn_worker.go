@@ -336,8 +336,18 @@ func (dnwkr *dnWorkerServer) AllocateDn(
 	dnItemList := make([]*pbcp.DnAllocItem, 0)
 	distinguishMap := make(map[string]bool)
 
+	excludeMap := make(map[string]bool)
+	for _, dnId := range req.ExcludeIdList {
+		excludeMap[dnId] = true
+	}
+
 	apply := func(res restree.Resource) bool {
 		dnRes := res.(*dnResource)
+
+		if _, ok := excludeMap[dnRes.dnId]; ok {
+			return false
+		}
+
 		value := ""
 		for _, tag := range dnRes.dnConf.TagList {
 			if tag.Key == req.DistinguishKey {

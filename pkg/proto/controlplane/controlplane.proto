@@ -19,6 +19,10 @@ service ExternalApi {
   rpc CreateCn(CreateCnRequest) returns(CreateCnReply) {}
   rpc DeleteCn(DeleteCnRequest) returns(DeleteCnReply) {}
   rpc GetCn(GetCnRequest) returns(GetCnReply) {}
+
+  rpc CreateVol(CreateVolRequest) returns(CreateVolReply) {}
+  rpc DeleteVol(DeleteVolRequest) returns(DeleteVolReply) {}
+  rpc GetVol(GetVolRequest) returns(GetVolReply) {}
 }
 
 service DiskNodeWorker {
@@ -640,6 +644,38 @@ message GetCnReply {
   ControllerNodeInfo cn_info = 3;
 }
 
+message CreateVolRequest {
+  string vol_name = 1;
+  uint32 cntlr_cnt = 2;
+  uint32 leg_cnt = 3;
+  uint64 init_size = 4;
+}
+
+message CreateVolReply {
+  ReplyInfo reply_info = 1;
+  string vol_id = 2;
+}
+
+message DeleteVolRequest {
+  string vol_id = 1;
+}
+
+message DeleteVolReply {
+  ReplyInfo reply_info = 1;
+}
+
+message GetVolRequest {
+  oneof name {
+    string vol_name = 1;
+    string vol_id = 2;
+  }
+}
+
+message GetVolReply {
+  ReplyInfo reply_info = 1;
+  StoragePoolConf spConf = 2;
+  StoragePoolInfo spInfo = 3;
+}
 
 message AllocateDnRequest {
   repeated Tag include_tag_list = 1;
@@ -648,6 +684,7 @@ message AllocateDnRequest {
   uint32 dn_cnt = 4;
   uint32 data_extent_cnt = 5;
   uint32 qos = 6;
+  repeated string exclude_id_list = 7;
 }
 
 message DnAllocItem {
@@ -699,6 +736,7 @@ message AllocateCnRequest {
   string distinguish_key = 3;
   uint32 cn_cnt = 4;
   uint32 qos = 5;
+  repeated string exclude_id_list = 6;
 }
 
 message CnAllocateItem {

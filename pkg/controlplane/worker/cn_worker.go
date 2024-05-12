@@ -334,8 +334,18 @@ func (cnwkr *cnWorkerServer) AllocateCn(
 	cnItemList := make([]*pbcp.CnAllocateItem, 0)
 	distinguishMap := make(map[string]bool)
 
+	excludeMap := make(map[string]bool)
+	for _, cnId := range req.ExcludeIdList {
+		excludeMap[cnId] = true
+	}
+
 	apply := func(res restree.Resource) bool {
 		cnRes := res.(*cnResource)
+
+		if _, ok := excludeMap[cnRes.cnId]; ok {
+			return false
+		}
+
 		value := ""
 		for _, tag := range cnRes.cnConf.TagList {
 			if tag.Key == req.DistinguishKey {
