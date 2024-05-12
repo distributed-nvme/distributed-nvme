@@ -15,6 +15,10 @@ service ExternalApi {
   // rpc ListDn(ListDnRequest) returns(ListDnReply) {}
   // rpc ModifyDn(ModifyDnRequest) returns(ModifyDnReply) {}
   // rpc SearchDn(SearchDnRequest) returns(SearchDnReply) {}
+
+  rpc CreateCn(CreateCnRequest) returns(CreateCnReply) {}
+  rpc DeleteCn(DeleteCnRequest) returns(DeleteCnReply) {}
+  rpc GetCn(GetCnRequest) returns(GetCnReply) {}
 }
 
 service DiskNodeWorker {
@@ -598,6 +602,44 @@ message ModifyDnRequest {
 message ModifyDnReply {
   ReplyInfo reply_info = 1;
 }
+
+message CreateCnRequest {
+  string grpc_target = 1;
+  uint32 port_num = 2;
+  string tr_type = 3;
+  string adr_fam = 4;
+  string tr_addr = 5;
+  string tr_svc_id = 6;
+  bool online = 7;
+  repeated Tag tag_list = 8;
+}
+
+message CreateCnReply {
+  ReplyInfo reply_info = 1;
+  string cn_id = 2;
+}
+
+message DeleteCnRequest {
+  string cn_id = 1;
+}
+
+message DeleteCnReply {
+  ReplyInfo reply_info = 1;
+}
+
+message GetCnRequest {
+  oneof name {
+    string grpc_target = 1;
+    string cn_id = 2;
+  }
+}
+
+message GetCnReply {
+  ReplyInfo reply_info = 1;
+  ControllerNodeConf cn_conf = 2;
+  ControllerNodeInfo cn_info = 3;
+}
+
 
 message AllocateDnRequest {
   repeated Tag include_tag_list = 1;

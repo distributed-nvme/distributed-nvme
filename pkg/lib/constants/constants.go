@@ -129,4 +129,7 @@ const (
 	RedunTypeRaid1 = 1
 
 	Uint32Max = uint32(0xffffffff)
+
+	CnPortCntBit  = 4096
+	CnPortCntByte = CnPortCntBit / 8
 )
