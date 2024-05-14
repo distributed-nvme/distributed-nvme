@@ -1,0 +1,712 @@
+package exapi
+
+import (
+	"context"
+	"fmt"
+	// "strconv"
+
+	"go.etcd.io/etcd/client/v3/concurrency"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/mbrhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/stmwrapper"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
+)
+
+type raid1DnLd struct {
+	dnConf                  *pbcp.DiskNodeConf
+	thinMetaRaid1MetaLdId   string
+	thinMetaRaid1MetaStart  uint64
+	thinMetaRaid1MetaLength uint64
+	thinMetaRaid1DataLdId   string
+	thinMetaRaid1DataStart  uint64
+	thinMetaRaid1DataLength uint64
+	thinDataRaid1MetaLdId   string
+	thinDataRaid1MetaStart  uint64
+	thinDataRaid1MetaLength uint64
+	thinDataRaid1DataLdId   string
+	thinDataRaid1DataStart  uint64
+	thinDataRaid1DataLength uint64
+}
+
+type generalCnCntlr struct {
+	cnConf  *pbcp.ControllerNodeConf
+	cntlrId string
+}
+
+func (exApi *exApiServer) tryToCreateVol(
+	pch *ctxhelper.PerCtxHelper,
+	req *pbcp.CreateVolRequest,
+	metaExtentSize uint64,
+	dataExtentSize uint64,
+	dataExtentCnt uint64,
+	dnValueToId map[string]string,
+	cnValueToId map[string]string,
+) ([]string, []string, error) {
+	legCnt := int(req.CntlrCnt * req.LegPerCntlr)
+	dnCnt := legCnt * 2
+	cnCnt := int(req.CntlrCnt)
+
+	thinMetaRaid1MetaExtentCnt := uint64(1)
+	thinMetaRaid1DataExtentCnt := thinMetaExtentCntCalc(
+		metaExtentSize,
+		dataExtentSize,
+		dataExtentCnt,
+		constants.ThinBlockSizeDefault,
+	)
+	thinDataRaid1MetaExtentCnt := uint64(1)
+	thinDataRaid1DataExtentCnt := dataExtentCnt
+
+	spGlobalKey := exApi.kf.SpGlobalEntityKey()
+	spGlobal := &pbcp.SpGlobal{}
+
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
+
+	dnIdToConf := make(map[string]*raid1DnLd)
+	invalidDnList := make([]string, 0)
+	cnIdToConf := make(map[string]*generalCnCntlr)
+	invalidCnList := make([]string, 0)
+	apply := func(stm concurrency.STM) error {
+		spGlobalValOld := []byte(stm.Get(spGlobalKey))
+		if len(spGlobalValOld) == 0 {
+			pch.Logger.Error("No spGlobal: %s", spGlobalKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				spGlobalKey,
+			}
+		}
+		if err := proto.Unmarshal(spGlobalValOld, spGlobal); err != nil {
+			pch.Logger.Error(
+				"spGlobal unmarshal err: %s %v",
+				spGlobalKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spGlobal.GlobalCounter++
+		counter := spGlobal.GlobalCounter
+		minCnt := constants.Uint32Max
+		idx := -1
+		for i, cnt := range spGlobal.ShardBucket {
+			if cnt < minCnt {
+				minCnt = cnt
+				idx = i
+			}
+		}
+		if idx < 0 {
+			panic("Do not find minimal cnt")
+		}
+		spGlobal.ShardBucket[idx] = spGlobal.ShardBucket[idx] + 1
+		spGlobalVal, err := proto.Marshal(spGlobal)
+		if err != nil {
+			pch.Logger.Error(
+				"spGlobal marshal err: %v %v",
+				spGlobal,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spGlobalStr := string(spGlobalVal)
+		stm.Put(spGlobalKey, spGlobalStr)
+
+		spIdNum := (uint64(idx) << (constants.ShardMove)) | counter
+		spId := fmt.Sprintf("%016x", spIdNum)
+		spCounter := uint64(0)
+
+		for _, dnId := range dnValueToId {
+			if len(dnIdToConf) >= dnCnt {
+				break
+			}
+			dnConfKey := exApi.kf.DnConfEntityKey(dnId)
+			dnConfVal := []byte(stm.Get(dnConfKey))
+			dnConf := &pbcp.DiskNodeConf{}
+			if err := proto.Unmarshal(dnConfVal, dnConf); err != nil {
+				pch.Logger.Error(
+					"dnConf unmarshal err: %s %v",
+					dnConfKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			if !dnConf.GeneralConf.Online {
+				pch.Logger.Warning(
+					"Skip not online dn: %s",
+					dnId,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+
+			dnInfoKey := exApi.kf.DnInfoEntityKey(dnId)
+			dnInfoVal := []byte(stm.Get(dnInfoKey))
+			dnInfo := &pbcp.DiskNodeInfo{}
+			if err := proto.Unmarshal(dnInfoVal, dnInfo); err != nil {
+				pch.Logger.Error(
+					"dnInfo unmarshal err: %s %v",
+					dnInfoKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+
+			if dnInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+				pch.Logger.Warning(
+					"Skip error dn: %s %v",
+					dnId,
+					dnInfo.StatusInfo,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+
+			thinMetaRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			thinMetaRaid1MetaStart, thinMetaRaid1MetaLength, err := allocateLd(
+				dnConf.GeneralConf.MetaExtentConf,
+				thinMetaRaid1MetaExtentCnt,
+			)
+			if err != nil {
+				pch.Logger.Warning(
+					"Allocate thin meta raid1 meta failed: %s %v",
+					dnId,
+					err,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+			dnConf.SpLdIdList = append(
+				dnConf.SpLdIdList,
+				&pbcp.SpLdId{
+					SpId: spId,
+					LdId: thinMetaRaid1MetaLdId,
+				},
+			)
+
+			thinMetaRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			thinMetaRaid1DataStart, thinMetaRaid1DataLength, err := allocateLd(
+				dnConf.GeneralConf.MetaExtentConf,
+				thinMetaRaid1DataExtentCnt,
+			)
+			if err != nil {
+				pch.Logger.Warning(
+					"Allocate thin meta radi1 data failed: %s %v",
+					dnId,
+					err,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+			dnConf.SpLdIdList = append(
+				dnConf.SpLdIdList,
+				&pbcp.SpLdId{
+					SpId: spId,
+					LdId: thinMetaRaid1DataLdId,
+				},
+			)
+
+			thinDataRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			thinDataRaid1MetaStart, thinDataRaid1MetaLength, err := allocateLd(
+				dnConf.GeneralConf.MetaExtentConf,
+				thinDataRaid1MetaExtentCnt,
+			)
+			if err != nil {
+				pch.Logger.Warning(
+					"Allocate thin data raid1 meta failed: %s %v",
+					dnId,
+					err,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+			dnConf.SpLdIdList = append(
+				dnConf.SpLdIdList,
+				&pbcp.SpLdId{
+					SpId: spId,
+					LdId: thinDataRaid1MetaLdId,
+				},
+			)
+
+			thinDataRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			thinDataRaid1DataStart, thinDataRaid1DataLength, err := allocateLd(
+				dnConf.GeneralConf.MetaExtentConf,
+				thinDataRaid1DataExtentCnt,
+			)
+			if err != nil {
+				pch.Logger.Warning(
+					"Allocate thin data raid1 data failed: %s %v",
+					dnId,
+					err,
+				)
+				invalidDnList = append(invalidDnList, dnId)
+				continue
+			}
+			dnConf.SpLdIdList = append(
+				dnConf.SpLdIdList,
+				&pbcp.SpLdId{
+					SpId: spId,
+					LdId: thinDataRaid1DataLdId,
+				},
+			)
+
+			dnIdToConf[dnId] = &raid1DnLd{
+				dnConf:                  dnConf,
+				thinMetaRaid1MetaLdId:   thinMetaRaid1MetaLdId,
+				thinMetaRaid1MetaStart:  thinMetaRaid1MetaStart,
+				thinMetaRaid1MetaLength: thinMetaRaid1MetaLength,
+				thinMetaRaid1DataLdId:   thinMetaRaid1DataLdId,
+				thinMetaRaid1DataStart:  thinMetaRaid1DataStart,
+				thinMetaRaid1DataLength: thinMetaRaid1DataLength,
+				thinDataRaid1MetaLdId:   thinDataRaid1MetaLdId,
+				thinDataRaid1MetaStart:  thinDataRaid1MetaStart,
+				thinDataRaid1MetaLength: thinDataRaid1MetaLength,
+				thinDataRaid1DataLdId:   thinDataRaid1DataLdId,
+				thinDataRaid1DataStart:  thinDataRaid1DataStart,
+				thinDataRaid1DataLength: thinDataRaid1DataLength,
+			}
+
+			dnConfValNew, err := proto.Marshal(dnConf)
+			if err != nil {
+				pch.Logger.Error("Marshal dnConf err: %v %v", dnConf, err)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			dnConfStrNew := string(dnConfValNew)
+			stm.Put(dnConfKey, dnConfStrNew)
+		}
+
+		for _, cnId := range cnValueToId {
+			if len(cnIdToConf) >= cnCnt {
+				break
+			}
+			cnConfKey := exApi.kf.CnConfEntityKey(cnId)
+			cnConfVal := []byte(stm.Get(cnConfKey))
+			cnConf := &pbcp.ControllerNodeConf{}
+			if err := proto.Unmarshal(cnConfVal, cnConf); err != nil {
+				pch.Logger.Error(
+					"cnConf unmarshal err: %s %v",
+					cnConfKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			if !cnConf.GeneralConf.Online {
+				pch.Logger.Warning(
+					"Skip not online cn: %s",
+					cnId,
+				)
+				invalidCnList = append(invalidCnList, cnId)
+				continue
+			}
+
+			cnInfoKey := exApi.kf.CnInfoEntityKey(cnId)
+			cnInfoVal := []byte(stm.Get(cnInfoKey))
+			cnInfo := &pbcp.ControllerNodeInfo{}
+			if err := proto.Unmarshal(cnInfoVal, cnInfo); err != nil {
+				pch.Logger.Error(
+					"cnInfo unmarshal err: %s %v",
+					cnInfoKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+
+			if cnInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+				pch.Logger.Warning(
+					"Skip error cn: %s %v",
+					cnId,
+					cnInfo.StatusInfo,
+				)
+				invalidCnList = append(invalidCnList, cnId)
+				continue
+			}
+			cntlrId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+
+			cnIdToConf[cnId] = &generalCnCntlr{
+				cnConf:  cnConf,
+				cntlrId: cntlrId,
+			}
+
+			cnConf.SpCntlrIdList = append(
+				cnConf.SpCntlrIdList,
+				&pbcp.SpCntlrId{
+					SpId:    spId,
+					CntlrId: cntlrId,
+				},
+			)
+
+			cnConfValNew, err := proto.Marshal(cnConf)
+			if err != nil {
+				pch.Logger.Error("Marshal cnConf err: %v %v", cnConf, err)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			cnConfStrNew := string(cnConfValNew)
+			stm.Put(cnConfKey, cnConfStrNew)
+		}
+
+		if len(dnIdToConf) < dnCnt || len(cnIdToConf) < cnCnt {
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNeedMore,
+				"",
+			}
+		}
+
+		snapConf := &pbcp.SnapConf{
+			DevId:    0,
+			OriId:    constants.Uint32Max,
+			SnapName: "default",
+		}
+		snapConfList := make([]*pbcp.SnapConf, 0)
+		snapConfList[0] = snapConf
+
+		ssConfList := make([]*pbcp.SsConf, 1)
+		ssInfoList := make([]*pbcp.SsInfo, 1)
+		legConfList := make([]*pbcp.LegConf, legCnt)
+		legInfoList := make([]*pbcp.LegInfo, legCnt)
+		cntlrConfList := make([]*pbcp.CntlrConf, req.CntlrCnt)
+		cntlrInfoList := make([]*pbcp.CntlrInfo, req.CntlrCnt)
+
+		spConf := &pbcp.StoragePoolConf{
+			TagList: req.TagList,
+			GeneralConf: &pbcp.SpGeneralConf{
+				SpName:       req.VolName,
+				SpCounter:    0,
+				DevIdCounter: 0,
+				Qos:          0,
+				StripeConf: &pbcp.StripeConf{
+					ChunkSize: constants.Raid0ChunkSizeDefault,
+				},
+				ThinPoolConf: &pbcp.ThinPoolConf{
+					DataBlockSize:  constants.ThinBlockSizeDefault,
+					LowWaterMark:   constants.ThinLowWaterMarkDefault,
+					ErrorIfNoSpace: constants.ThinErrorIfNoSpaceDefault,
+				},
+				RedundancyConf: &pbcp.RedundancyConf{
+					RedunType:  constants.RedunTypeRaid1,
+					RegionSize: constants.RaidDataRegionSizeDefault,
+				},
+				DnAllocateConf: &pbcp.AllocateConf{
+					DistinguishKey: req.DnDistinguishKey,
+				},
+				CnAllocateConf: &pbcp.AllocateConf{
+					DistinguishKey: req.CnDistinguishKey,
+				},
+			},
+			CreatingSnapConf: snapConf,
+			DeletingSnapConf: nil,
+			SnapConfList:     snapConfList,
+			SsConfList:       ssConfList,
+			LegConfList:      legConfList,
+			CntlrConfList:    cntlrConfList,
+			MtConfList:       make([]*pbcp.MtConf, 0),
+			ItConfList:       make([]*pbcp.ItConf, 0),
+		}
+		spConfKey := exApi.kf.SpConfEntityKey(spId)
+		spConfVal, err := proto.Marshal(spConf)
+		if err != nil {
+			pch.Logger.Error("Marshal spConf err: %v %v", spConf, err)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spConfStr := string(spConfVal)
+		stm.Put(spConfKey, spConfStr)
+
+		spInfo := &pbcp.StoragePoolInfo{
+			ConfRev: 0,
+			StatusInfo: &pbcp.StatusInfo{
+				Code:      constants.StatusCodeUninit,
+				Msg:       "uninit",
+				Timestamp: pch.Timestamp,
+			},
+			SsInfoList:    ssInfoList,
+			LegInfoList:   legInfoList,
+			CntlrInfoList: cntlrInfoList,
+			MtInfoList:    make([]*pbcp.MtInfo, 0),
+			ItInfoList:    make([]*pbcp.ItInfo, 0),
+		}
+		spInfoKey := exApi.kf.SpInfoEntityKey(spId)
+		spInfoVal, err := proto.Marshal(spInfo)
+		if err != nil {
+			pch.Logger.Error("Marshal spInfo err: %v %v", spInfo, err)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spInfoStr := string(spInfoVal)
+		stm.Put(spInfoKey, spInfoStr)
+
+		if val := stm.Get(nameToIdKey); len(val) != 0 {
+			return &stmwrapper.StmError{
+				Code: constants.ReplyCodeDupRes,
+				Msg:  nameToIdKey,
+			}
+		}
+		nameToId := &pbcp.NameToId{
+			ResId: req.VolName,
+		}
+		nameToIdVal, err := proto.Marshal(nameToId)
+		if err != nil {
+			pch.Logger.Error(
+				"nameToId marshal err: %v %v",
+				nameToId,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		nameToIdStr := string(nameToIdVal)
+		stm.Put(nameToIdKey, nameToIdStr)
+
+		return nil
+	}
+
+	err := exApi.sm.RunStm(pch, apply)
+	return invalidDnList, invalidCnList, err
+}
+
+func (exApi *exApiServer) CreateVol(
+	ctx context.Context,
+	req *pbcp.CreateVolRequest,
+) (*pbcp.CreateVolReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	legCnt := uint64(req.CntlrCnt * req.LegPerCntlr)
+	dnCnt := legCnt * 2
+	size := (req.InitSize + legCnt - 1) / legCnt
+	metaExtentSize := uint64(1 << constants.MetaExtentSizeShiftDefault)
+	dataExtentSize := uint64(1 << constants.DataExtentSizeShiftDefault)
+	dataExtentCnt := (size + dataExtentSize - 1) / dataExtentSize
+
+	dnExcludeIdList := make([]string, 0)
+	cnExcludeIdList := make([]string, 0)
+
+	for i := 0; i < constants.AllocateRetryCntDefault; i++ {
+		allocateDnReq := &pbcp.AllocateDnRequest{
+			DistinguishKey: req.DnDistinguishKey,
+			DnCnt:          uint32(dnCnt),
+			DataExtentCnt:  uint32(dataExtentCnt),
+			ExcludeIdList:  dnExcludeIdList,
+		}
+		dnwkrTargetList, err := mbrhelper.GetAllMembers(
+			exApi.etcdCli,
+			pch,
+			exApi.kf.DnMemberPrefix(),
+		)
+		if err != nil {
+			return &pbcp.CreateVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+		dnValueToId := make(map[string]string, 0)
+		for _, grpcTarget := range dnwkrTargetList {
+			conn, err := grpc.DialContext(
+				ctx,
+				grpcTarget,
+				grpc.WithInsecure(),
+				grpc.WithBlock(),
+				grpc.WithTimeout(exApi.wkrTimeout),
+				grpc.WithChainUnaryInterceptor(
+					ctxhelper.UnaryClientPerCtxHelperInterceptor,
+				),
+			)
+			if err != nil {
+				return &pbcp.CreateVolReply{
+					ReplyInfo: &pbcp.ReplyInfo{
+						ReplyCode: constants.ReplyCodeInternalErr,
+						ReplyMsg:  err.Error(),
+					},
+				}, nil
+			}
+			defer conn.Close()
+
+			c := pbcp.NewDiskNodeWorkerClient(conn)
+			allocateDnReply, err := c.AllocateDn(ctx, allocateDnReq)
+			if err != nil {
+				return &pbcp.CreateVolReply{
+					ReplyInfo: &pbcp.ReplyInfo{
+						ReplyCode: constants.ReplyCodeInternalErr,
+						ReplyMsg:  err.Error(),
+					},
+				}, nil
+			}
+			for _, item := range allocateDnReply.DnItemList {
+				if _, ok := dnValueToId[item.DistinguishValue]; !ok {
+					dnValueToId[item.DistinguishValue] = item.DnId
+				}
+			}
+		}
+
+		if len(dnValueToId) < int(dnCnt) {
+			return &pbcp.CreateVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeNoCapacity,
+					ReplyMsg: fmt.Sprintf(
+						"required dn: %d, available dn: %d, %v",
+						dnCnt,
+						len(dnValueToId),
+						dnValueToId,
+					),
+				},
+			}, nil
+		}
+
+		allocateCnReq := &pbcp.AllocateCnRequest{
+			DistinguishKey: req.CnDistinguishKey,
+			CnCnt:          req.CntlrCnt,
+			ExcludeIdList:  cnExcludeIdList,
+		}
+		cnwkrTargetList, err := mbrhelper.GetAllMembers(
+			exApi.etcdCli,
+			pch,
+			exApi.kf.CnMemberPrefix(),
+		)
+		if err != nil {
+			return &pbcp.CreateVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+		cnValueToId := make(map[string]string, 0)
+		for _, grpcTarget := range cnwkrTargetList {
+			conn, err := grpc.DialContext(
+				ctx,
+				grpcTarget,
+				grpc.WithInsecure(),
+				grpc.WithBlock(),
+				grpc.WithTimeout(exApi.wkrTimeout),
+				grpc.WithChainUnaryInterceptor(
+					ctxhelper.UnaryClientPerCtxHelperInterceptor,
+				),
+			)
+			if err != nil {
+				return &pbcp.CreateVolReply{
+					ReplyInfo: &pbcp.ReplyInfo{
+						ReplyCode: constants.ReplyCodeInternalErr,
+						ReplyMsg:  err.Error(),
+					},
+				}, nil
+			}
+			defer conn.Close()
+
+			c := pbcp.NewControllerNodeWorkerClient(conn)
+			allocateCnReply, err := c.AllocateCn(ctx, allocateCnReq)
+			if err != nil {
+				return &pbcp.CreateVolReply{
+					ReplyInfo: &pbcp.ReplyInfo{
+						ReplyCode: constants.ReplyCodeInternalErr,
+						ReplyMsg:  err.Error(),
+					},
+				}, nil
+			}
+			for _, item := range allocateCnReply.CnItemList {
+				if _, ok := cnValueToId[item.DistinguishValue]; !ok {
+					cnValueToId[item.DistinguishValue] = item.CnId
+				}
+			}
+		}
+
+		if len(cnValueToId) < int(req.CntlrCnt) {
+			return &pbcp.CreateVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeNoCapacity,
+					ReplyMsg: fmt.Sprintf(
+						"required cn: %d, available cn: %d, %v",
+						req.CntlrCnt,
+						len(cnValueToId),
+						cnValueToId,
+					),
+				},
+			}, nil
+		}
+
+		invalidDnList, invalidCnList, err := exApi.tryToCreateVol(
+			pch,
+			req,
+			metaExtentSize,
+			dataExtentSize,
+			dataExtentCnt,
+			dnValueToId,
+			cnValueToId,
+		)
+		if err != nil {
+			if serr, ok := err.(*stmwrapper.StmError); ok {
+				if serr.Code == constants.ReplyCodeNeedMore {
+					for _, dnId := range invalidDnList {
+						dnExcludeIdList = append(dnExcludeIdList, dnId)
+					}
+					for _, cnId := range invalidCnList {
+						cnExcludeIdList = append(cnExcludeIdList, cnId)
+					}
+					continue
+				} else {
+					return &pbcp.CreateVolReply{
+						ReplyInfo: &pbcp.ReplyInfo{
+							ReplyCode: serr.Code,
+							ReplyMsg:  serr.Msg,
+						},
+					}, nil
+				}
+			} else {
+				return &pbcp.CreateVolReply{
+					ReplyInfo: &pbcp.ReplyInfo{
+						ReplyCode: constants.ReplyCodeInternalErr,
+						ReplyMsg:  err.Error(),
+					},
+				}, nil
+			}
+		} else {
+			return &pbcp.CreateVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeSucceed,
+					ReplyMsg:  constants.ReplyMsgSucceed,
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.CreateVolReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeInternalErr,
+			ReplyMsg:  "Exceed max allocate retry",
+		},
+	}, nil
+}

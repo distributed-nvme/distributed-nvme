@@ -158,3 +158,21 @@ func RegisterMember(
 
 	return revokeFun, nil
 }
+
+func GetAllMembers(
+	etcdCli *clientv3.Client,
+	pch *ctxhelper.PerCtxHelper,
+	prefix string,
+) ([]string, error) {
+	resp, err := etcdCli.Get(pch.Ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+	grpcTargetList := make([]string, 0)
+	for _, ev := range resp.Kvs {
+		keyStr := string(ev.Key)
+		grpcTarget := keyStr[len(prefix):]
+		grpcTargetList = append(grpcTargetList, grpcTarget)
+	}
+	return grpcTargetList, nil
+}

@@ -81,7 +81,7 @@ func (exApi *exApiServer) CreateDn(
 			},
 		}, nil
 	}
-	conn.Close()
+	defer conn.Close()
 
 	c := pbnd.NewDiskNodeAgentClient(conn)
 	getDevSizeRequest := &pbnd.GetDevSizeRequest{

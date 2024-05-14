@@ -18,6 +18,8 @@ const (
 	ReplyCodeInvalidArg  = 1005
 	ReplyCodeNotFound    = 1006
 	ReplyCodeResBusy     = 1007
+	ReplyCodeNoCapacity  = 1008
+	ReplyCodeNeedMore    = 1009
 
 	StatusCodeSucceed      = 0
 	StatusMsgSucceed       = "succeed"
@@ -30,6 +32,7 @@ const (
 	StatusCodeNotFound     = 3001
 
 	AgentTimeoutDefault = 3 * time.Second
+	WkrTimeoutDefault   = 3 * time.Second
 	ShardInitWaitTime   = 10 * time.Second
 	ShardDeleteWaitTime = 60 * time.Second
 	RollbackTimeout     = 10 * time.Second
@@ -75,6 +78,13 @@ const (
 	ExtentRatioShiftMin     = 1
 	ExtentRatioShiftMax     = 10
 	ExtentRatioShiftDefault = 7
+
+	ThinBlockSizeDefault      = 1 * 1024 * 1024
+	ThinLowWaterMarkDefault   = 100
+	ThinErrorIfNoSpaceDefault = false
+	RaidMetaRegionSizeDefault = 1 * 1024 * 1024
+	RaidDataRegionSizeDefault = 64 * 1024 * 1024
+	Raid0ChunkSizeDefault     = 16 * 1024
 
 	LegCntMax              = 64
 	LegCntDefault          = 2
@@ -132,4 +142,6 @@ const (
 
 	CnPortCntBit  = 4096
 	CnPortCntByte = CnPortCntBit / 8
+
+	AllocateRetryCntDefault = 3
 )

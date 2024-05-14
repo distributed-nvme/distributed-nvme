@@ -20,6 +20,7 @@ type exApiServer struct {
 	kf           *keyfmt.KeyFmt
 	sm           *stmwrapper.StmWrapper
 	agentTimeout time.Duration
+	wkrTimeout   time.Duration
 	clusterInit  bool
 	cluster      pbcp.Cluster
 }
@@ -54,6 +55,7 @@ func newExApiServer(
 		kf:           keyfmt.NewKeyFmt(prefix),
 		sm:           stmwrapper.NewStmWrapper(etcdCli),
 		agentTimeout: constants.AgentTimeoutDefault,
+		wkrTimeout:   constants.WkrTimeoutDefault,
 		clusterInit:  false,
 	}
 }

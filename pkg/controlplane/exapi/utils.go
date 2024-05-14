@@ -6,6 +6,7 @@ import (
 	"github.com/kelindar/bitmap"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
+	pbcp "github.com/distributed-nvme/distributed-nvme/pkg/proto/controlplane"
 )
 
 func validStringLength(inpStr, name string) error {
@@ -55,4 +56,30 @@ func extentInitCalc(
 		bucket[setCntTotal-1] = uint32(maxContinueExtentCnt)
 	}
 	return bmRaw, bucket, uint32(extentCntTotal)
+}
+
+func divRoundUp(a, b uint64) uint64 {
+	return (a + b - 1) / b
+}
+
+func thinMetaExtentCntCalc(
+	metaExtentSize uint64,
+	dataExtentSize uint64,
+	dataExtentCnt uint64,
+	thinBlockSize uint64,
+) uint64 {
+	dataSize := dataExtentSize * dataExtentCnt
+	// according to
+	// https://docs.kernel.org/admin-guide/device-mapper/thin-provisioning.html
+	// 48 * $data_dev_size / $data_block_size
+	metaSize := divRoundUp(48*dataSize, thinBlockSize)
+	metaExtentCnt := divRoundUp(metaSize, metaExtentSize)
+	return metaExtentCnt
+}
+
+func allocateLd(
+	extentConf *pbcp.ExtentConf,
+	extentCnt uint64,
+) (uint64, uint64, error) {
+	return 0, 0, nil
 }
