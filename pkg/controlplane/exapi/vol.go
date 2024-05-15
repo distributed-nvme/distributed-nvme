@@ -446,8 +446,282 @@ func (exApi *exApiServer) tryToCreateVol(
 		}
 		legConfList := make([]*pbcp.LegConf, legCnt)
 		legInfoList := make([]*pbcp.LegInfo, legCnt)
+		for i := 0; i < legCnt; i++ {
+			cntlrIdx := uint32(i) % req.CntlrCnt
+			r1DnLd0 := r1DnLdList[2*i]
+			r1DnLd1 := r1DnLdList[2*i+1]
+			legId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			legConf := &pbcp.LegConf{
+				LegId:       legId,
+				LegIdx:      uint32(i),
+				AcCntlrId:   genCnCntlrList[cntlrIdx].cntlrId,
+				Reload:      false,
+				GrpConfList: make([]*pbcp.GrpConf, 1),
+			}
+			grpId := fmt.Sprintf("%016x", spCounter)
+			spCounter++
+			legConf.GrpConfList[0] = &pbcp.GrpConf{
+				GrpId:         grpId,
+				GrpIdx:        uint32(0),
+				MetaExtentCnt: uint32(thinMetaRaid1DataExtentCnt),
+				DataExtentCnt: uint32(thinDataRaid1DataExtentCnt),
+				LdConfList:    make([]*pbcp.LdConf, 8),
+				NoSync:        true,
+				RebuildIdx:    constants.Uint32Max,
+				OmitIdxList:   make([]uint32, 0),
+			}
+
+			legConf.GrpConfList[0].LdConfList[0] = &pbcp.LdConf{
+				LdId:           r1DnLd0.thinMetaRaid1MetaLdId,
+				DnId:           r1DnLd0.dnId,
+				DnGrpcTarget:   r1DnLd0.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd0.thinMetaRaid1MetaStart,
+				Length:         r1DnLd0.thinMetaRaid1MetaLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[1] = &pbcp.LdConf{
+				LdId:           r1DnLd0.thinMetaRaid1DataLdId,
+				DnId:           r1DnLd0.dnId,
+				DnGrpcTarget:   r1DnLd0.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd0.thinMetaRaid1DataStart,
+				Length:         r1DnLd0.thinMetaRaid1DataLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[2] = &pbcp.LdConf{
+				LdId:           r1DnLd0.thinDataRaid1MetaLdId,
+				DnId:           r1DnLd0.dnId,
+				DnGrpcTarget:   r1DnLd0.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd0.thinDataRaid1MetaStart,
+				Length:         r1DnLd0.thinDataRaid1MetaLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[3] = &pbcp.LdConf{
+				LdId:           r1DnLd0.thinDataRaid1DataLdId,
+				DnId:           r1DnLd0.dnId,
+				DnGrpcTarget:   r1DnLd0.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd0.thinDataRaid1DataStart,
+				Length:         r1DnLd0.thinDataRaid1DataLength,
+				Inited:         false,
+			}
+
+			legConf.GrpConfList[0].LdConfList[4] = &pbcp.LdConf{
+				LdId:           r1DnLd1.thinMetaRaid1MetaLdId,
+				DnId:           r1DnLd1.dnId,
+				DnGrpcTarget:   r1DnLd1.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd1.thinMetaRaid1MetaStart,
+				Length:         r1DnLd1.thinMetaRaid1MetaLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[5] = &pbcp.LdConf{
+				LdId:           r1DnLd1.thinMetaRaid1DataLdId,
+				DnId:           r1DnLd1.dnId,
+				DnGrpcTarget:   r1DnLd1.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd1.thinMetaRaid1DataStart,
+				Length:         r1DnLd1.thinMetaRaid1DataLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[6] = &pbcp.LdConf{
+				LdId:           r1DnLd1.thinDataRaid1MetaLdId,
+				DnId:           r1DnLd1.dnId,
+				DnGrpcTarget:   r1DnLd1.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd1.thinDataRaid1MetaStart,
+				Length:         r1DnLd1.thinDataRaid1MetaLength,
+				Inited:         false,
+			}
+			legConf.GrpConfList[0].LdConfList[7] = &pbcp.LdConf{
+				LdId:           r1DnLd1.thinDataRaid1DataLdId,
+				DnId:           r1DnLd1.dnId,
+				DnGrpcTarget:   r1DnLd1.dnConf.GeneralConf.GrpcTarget,
+				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
+				LdIdx:          0,
+				Start:          r1DnLd1.thinDataRaid1DataStart,
+				Length:         r1DnLd1.thinDataRaid1DataLength,
+				Inited:         false,
+			}
+			legConfList[i] = legConf
+
+			legInfo := &pbcp.LegInfo{
+				LegId: legId,
+				StatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				ThinPoolInfo:      &pbcp.ThinPoolInfo{},
+				RemoteLegInfoList: make([]*pbcp.RemoteLegInfo, 0),
+				GrpInfoList:       make([]*pbcp.GrpInfo, 1),
+			}
+			for j, genCnCntlr := range genCnCntlrList {
+				if uint32(j) == cntlrIdx {
+					continue
+				}
+				remoteLegInfo := &pbcp.RemoteLegInfo{
+					CntlrId: genCnCntlr.cntlrId,
+					StatusInfo: &pbcp.StatusInfo{
+						Code:      constants.StatusCodeUninit,
+						Msg:       "uninit",
+						Timestamp: pch.Timestamp,
+					},
+					FenceInfo: &pbcp.FenceInfo{},
+				}
+				legInfo.RemoteLegInfoList = append(
+					legInfo.RemoteLegInfoList,
+					remoteLegInfo,
+				)
+			}
+			legInfo.GrpInfoList[0] = &pbcp.GrpInfo{
+				GrpId: grpId,
+				StatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				MetaRedunInfo: &pbcp.RedundancyInfo{},
+				DataRedunInfo: &pbcp.RedundancyInfo{},
+				LdInfoList:    make([]*pbcp.LdInfo, 8),
+			}
+			legInfo.GrpInfoList[0].LdInfoList[0] = &pbcp.LdInfo{
+				LdId: r1DnLd0.thinMetaRaid1MetaLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[1] = &pbcp.LdInfo{
+				LdId: r1DnLd0.thinMetaRaid1DataLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[2] = &pbcp.LdInfo{
+				LdId: r1DnLd0.thinDataRaid1MetaLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[3] = &pbcp.LdInfo{
+				LdId: r1DnLd0.thinDataRaid1DataLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[4] = &pbcp.LdInfo{
+				LdId: r1DnLd1.thinMetaRaid1MetaLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[5] = &pbcp.LdInfo{
+				LdId: r1DnLd1.thinMetaRaid1DataLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[6] = &pbcp.LdInfo{
+				LdId: r1DnLd1.thinDataRaid1MetaLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfo.GrpInfoList[0].LdInfoList[7] = &pbcp.LdInfo{
+				LdId: r1DnLd1.thinDataRaid1DataLdId,
+				DnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				CnStatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+			legInfoList[i] = legInfo
+		}
+
 		cntlrConfList := make([]*pbcp.CntlrConf, req.CntlrCnt)
 		cntlrInfoList := make([]*pbcp.CntlrInfo, req.CntlrCnt)
+		for i := uint32(0); i < req.CntlrCnt; i++ {
+			genCnCntlr := genCnCntlrList[i]
+			cntlrConfList[i] = &pbcp.CntlrConf{
+				CntlrId:      genCnCntlr.cntlrId,
+				CnId:         genCnCntlr.cnId,
+				CnGrpcTarget: genCnCntlr.cnConf.GeneralConf.GrpcTarget,
+				CntlrIdx:     uint32(i),
+				// FIXME: set nvmeof conf
+			}
+			cntlrInfoList[i] = &pbcp.CntlrInfo{
+				CntlrId: genCnCntlr.cntlrId,
+				StatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+		}
 
 		spConf := &pbcp.StoragePoolConf{
 			TagList: req.TagList,
