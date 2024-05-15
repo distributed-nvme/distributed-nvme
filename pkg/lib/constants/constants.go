@@ -144,4 +144,5 @@ const (
 	CnPortCntByte = CnPortCntBit / 8
 
 	AllocateRetryCntDefault = 3
+	NsBitSizeDefault        = 4096
 )

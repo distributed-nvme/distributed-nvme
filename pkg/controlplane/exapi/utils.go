@@ -83,3 +83,44 @@ func allocateLd(
 ) (uint64, uint64, error) {
 	return 0, 0, nil
 }
+
+func initNextBit(bitSize uint32) *pbcp.NextBit {
+	if bitSize%64 != 0 {
+		panic("Bitmap size not align to 64 bits")
+	}
+	return &pbcp.NextBit{
+		CurrIdx: 0,
+		Bitmap:  make([]byte, bitSize/8),
+	}
+}
+
+func updateNextBit(nextBit *pbcp.NextBit, idx uint32) uint32 {
+	bitSize := uint32(len(nextBit.Bitmap)) * 8
+	bm := bitmap.FromBytes(nextBit.Bitmap)
+	bm.Set(idx)
+	nextIdx := idx + 1
+	nextIdx = nextIdx % bitSize
+	nextBit.CurrIdx = nextIdx
+	return idx
+}
+
+func getAndUpdateNextBit(nextBit *pbcp.NextBit) (uint32, error) {
+	bm := bitmap.FromBytes(nextBit.Bitmap)
+	bitSize := uint32(len(nextBit.Bitmap)) * 8
+	for i := nextBit.CurrIdx; i < bitSize; i++ {
+		if !bm.Contains(i) {
+			return updateNextBit(nextBit, i), nil
+		}
+	}
+	for i := uint32(0); i < nextBit.CurrIdx; i++ {
+		if !bm.Contains(i) {
+			return updateNextBit(nextBit, i), nil
+		}
+	}
+	return uint32(0), fmt.Errorf("No available bit")
+}
+
+func clearNextBit(nextBit *pbcp.NextBit, idx uint32) {
+	bm := bitmap.FromBytes(nextBit.Bitmap)
+	bm.Remove(idx)
+}

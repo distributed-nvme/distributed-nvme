@@ -17,6 +17,7 @@ import (
 )
 
 type raid1DnLd struct {
+	dnId                    string
 	dnConf                  *pbcp.DiskNodeConf
 	thinMetaRaid1MetaLdId   string
 	thinMetaRaid1MetaStart  uint64
@@ -33,6 +34,7 @@ type raid1DnLd struct {
 }
 
 type generalCnCntlr struct {
+	cnId    string
 	cnConf  *pbcp.ControllerNodeConf
 	cntlrId string
 }
@@ -65,9 +67,9 @@ func (exApi *exApiServer) tryToCreateVol(
 
 	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
 
-	dnIdToConf := make(map[string]*raid1DnLd)
+	r1DnLdList := make([]*raid1DnLd, 0)
 	invalidDnList := make([]string, 0)
-	cnIdToConf := make(map[string]*generalCnCntlr)
+	genCnCntlrList := make([]*generalCnCntlr, 0)
 	invalidCnList := make([]string, 0)
 	apply := func(stm concurrency.STM) error {
 		spGlobalValOld := []byte(stm.Get(spGlobalKey))
@@ -123,7 +125,7 @@ func (exApi *exApiServer) tryToCreateVol(
 		spCounter := uint64(0)
 
 		for _, dnId := range dnValueToId {
-			if len(dnIdToConf) >= dnCnt {
+			if len(r1DnLdList) >= dnCnt {
 				break
 			}
 			dnConfKey := exApi.kf.DnConfEntityKey(dnId)
@@ -266,7 +268,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				},
 			)
 
-			dnIdToConf[dnId] = &raid1DnLd{
+			r1DnLd := &raid1DnLd{
+				dnId:                    dnId,
 				dnConf:                  dnConf,
 				thinMetaRaid1MetaLdId:   thinMetaRaid1MetaLdId,
 				thinMetaRaid1MetaStart:  thinMetaRaid1MetaStart,
@@ -281,6 +284,7 @@ func (exApi *exApiServer) tryToCreateVol(
 				thinDataRaid1DataStart:  thinDataRaid1DataStart,
 				thinDataRaid1DataLength: thinDataRaid1DataLength,
 			}
+			r1DnLdList = append(r1DnLdList, r1DnLd)
 
 			dnConfValNew, err := proto.Marshal(dnConf)
 			if err != nil {
@@ -295,7 +299,7 @@ func (exApi *exApiServer) tryToCreateVol(
 		}
 
 		for _, cnId := range cnValueToId {
-			if len(cnIdToConf) >= cnCnt {
+			if len(genCnCntlrList) >= cnCnt {
 				break
 			}
 			cnConfKey := exApi.kf.CnConfEntityKey(cnId)
@@ -348,10 +352,12 @@ func (exApi *exApiServer) tryToCreateVol(
 			cntlrId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
 
-			cnIdToConf[cnId] = &generalCnCntlr{
+			genCnCntlr := &generalCnCntlr{
+				cnId:    cnId,
 				cnConf:  cnConf,
 				cntlrId: cntlrId,
 			}
+			genCnCntlrList = append(genCnCntlrList, genCnCntlr)
 
 			cnConf.SpCntlrIdList = append(
 				cnConf.SpCntlrIdList,
@@ -373,7 +379,8 @@ func (exApi *exApiServer) tryToCreateVol(
 			stm.Put(cnConfKey, cnConfStrNew)
 		}
 
-		if len(dnIdToConf) < dnCnt || len(cnIdToConf) < cnCnt {
+		if len(r1DnLdList) < dnCnt || len(genCnCntlrList) < cnCnt {
+			pch.Logger.Warning("No enough dn and/or cn")
 			return &stmwrapper.StmError{
 				constants.ReplyCodeNeedMore,
 				"",
@@ -388,8 +395,55 @@ func (exApi *exApiServer) tryToCreateVol(
 		snapConfList := make([]*pbcp.SnapConf, 0)
 		snapConfList[0] = snapConf
 
+		ssId := fmt.Sprintf("%016x", spCounter)
+		spCounter++
 		ssConfList := make([]*pbcp.SsConf, 1)
+		ssConf := &pbcp.SsConf{
+			SsId:         ssId,
+			NsNextBit:    initNextBit(constants.NsBitSizeDefault),
+			NsConfList:   make([]*pbcp.NsConf, 1),
+			HostConfList: make([]*pbcp.HostConf, 0),
+		}
+		nsId := fmt.Sprintf("%016x", spCounter)
+		spCounter++
+		nsNum, err := getAndUpdateNextBit(ssConf.NsNextBit)
+		if err != nil {
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		ssConf.NsConfList[0] = &pbcp.NsConf{
+			NsId:   nsId,
+			NsName: "default",
+			NsNum:  string(nsNum),
+			Size:   req.Size,
+			DevId:  0,
+		}
 		ssInfoList := make([]*pbcp.SsInfo, 1)
+		ssInfoList[0] = &pbcp.SsInfo{
+			SsId:               ssId,
+			SsPerCntlrInfoList: make([]*pbcp.SsPerCntlrInfo, req.CntlrCnt),
+		}
+		for i, genCnCntlr := range genCnCntlrList {
+			ssInfoList[0].SsPerCntlrInfoList[i] = &pbcp.SsPerCntlrInfo{
+				CntlrId: genCnCntlr.cntlrId,
+				StatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+				NsInfoList: make([]*pbcp.NsInfo, 1),
+			}
+			ssInfoList[0].SsPerCntlrInfoList[i].NsInfoList[0] = &pbcp.NsInfo{
+				NsId: nsId,
+				StatusInfo: &pbcp.StatusInfo{
+					Code:      constants.StatusCodeUninit,
+					Msg:       "uninit",
+					Timestamp: pch.Timestamp,
+				},
+			}
+		}
 		legConfList := make([]*pbcp.LegConf, legCnt)
 		legInfoList := make([]*pbcp.LegInfo, legCnt)
 		cntlrConfList := make([]*pbcp.CntlrConf, req.CntlrCnt)
@@ -506,7 +560,7 @@ func (exApi *exApiServer) CreateVol(
 
 	legCnt := uint64(req.CntlrCnt * req.LegPerCntlr)
 	dnCnt := legCnt * 2
-	size := (req.InitSize + legCnt - 1) / legCnt
+	size := (req.Size + legCnt - 1) / legCnt
 	metaExtentSize := uint64(1 << constants.MetaExtentSizeShiftDefault)
 	dataExtentSize := uint64(1 << constants.DataExtentSizeShiftDefault)
 	dataExtentCnt := (size + dataExtentSize - 1) / dataExtentSize
@@ -676,6 +730,11 @@ func (exApi *exApiServer) CreateVol(
 					for _, cnId := range invalidCnList {
 						cnExcludeIdList = append(cnExcludeIdList, cnId)
 					}
+					pch.Logger.Warning(
+						"Retry with dnExcludeIdList and cnExcludeIdList: %v %v",
+						dnExcludeIdList,
+						cnExcludeIdList,
+					)
 					continue
 				} else {
 					return &pbcp.CreateVolReply{

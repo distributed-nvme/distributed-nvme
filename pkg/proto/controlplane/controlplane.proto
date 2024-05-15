@@ -648,7 +648,7 @@ message CreateVolRequest {
   string vol_name = 1;
   uint32 cntlr_cnt = 2;
   uint32 leg_per_cntlr = 3;
-  uint64 init_size = 4;
+  uint64 size = 4;
   string dn_distinguish_key = 5;
   string cn_distinguish_key = 6;
   repeated Tag tag_list = 7;
