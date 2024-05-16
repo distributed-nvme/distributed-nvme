@@ -26,7 +26,7 @@ func (exApi *exApiServer) CreateCn(
 			GrpcTarget: req.GrpcTarget,
 			Online:     req.Online,
 			NvmePortConf: &pbcp.NvmePortConf{
-				PortNum: string(req.PortNum),
+				PortNum: constants.CnInternalPortNum,
 				NvmeListener: &pbcp.NvmeListener{
 					TrType:  req.TrType,
 					AdrFam:  req.AdrFam,
@@ -42,10 +42,7 @@ func (exApi *exApiServer) CreateCn(
 				TotalQos: 0,
 				FreeQos:  0,
 			},
-			PortNextBit: &pbcp.NextBit{
-				CurrIdx: 0,
-				Bitmap:  make([]byte, constants.CnPortCntByte),
-			},
+			PortNextBit: initNextBit(constants.ExternalPortSize),
 		},
 		SpCntlrIdList: make([]*pbcp.SpCntlrId, 0),
 	}

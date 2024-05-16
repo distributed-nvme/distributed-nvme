@@ -97,6 +97,8 @@ const (
 	InternalCntlidMax   = 19999
 	ExternalCntlidStart = 20000
 	ExternalCntlidStep  = 2000
+	DnInternalPortNum   = "4097"
+	CnInternalPortNum   = "4098"
 	ExternalPortBase    = 0
 	ExternalPortSize    = 4096
 
@@ -139,9 +141,6 @@ const (
 	RedunTypeRaid1 = 1
 
 	Uint32Max = uint32(0xffffffff)
-
-	CnPortCntBit  = 4096
-	CnPortCntByte = CnPortCntBit / 8
 
 	AllocateRetryCntDefault = 3
 	NsBitSizeDefault        = 4096

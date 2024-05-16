@@ -35,9 +35,6 @@ func validDnReq(req *pbcp.CreateDnRequest) error {
 	if err := validStringLength(req.TrSvcId, "TrSvcId"); err != nil {
 		return err
 	}
-	if req.PortNum > constants.PortNumMax {
-		return fmt.Errorf("PortNum larger than %d", constants.PortNumMax)
-	}
 	for _, tag := range req.TagList {
 		if err := validStringLength(tag.Key, "tag Key "+tag.Key); err != nil {
 			return err
@@ -143,7 +140,7 @@ func (exApi *exApiServer) CreateDn(
 			Online:     req.Online,
 			DevPath:    req.DevPath,
 			NvmePortConf: &pbcp.NvmePortConf{
-				PortNum: string(req.PortNum),
+				PortNum: constants.DnInternalPortNum,
 				NvmeListener: &pbcp.NvmeListener{
 					TrType:  req.TrType,
 					AdrFam:  req.AdrFam,

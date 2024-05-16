@@ -550,13 +550,12 @@ message GetClusterReply {
 message CreateDnRequest {
   string grpc_target = 1;
   string dev_path = 2;
-  uint32 port_num = 3;
-  string tr_type = 4;
-  string adr_fam = 5;
-  string tr_addr = 6;
-  string tr_svc_id = 7;
-  bool online = 8;
-  repeated Tag tag_list = 9;
+  string tr_type = 3;
+  string adr_fam = 4;
+  string tr_addr = 5;
+  string tr_svc_id = 6;
+  bool online = 7;
+  repeated Tag tag_list = 8;
 }
 
 message CreateDnReply {
@@ -609,13 +608,12 @@ message ModifyDnReply {
 
 message CreateCnRequest {
   string grpc_target = 1;
-  uint32 port_num = 2;
-  string tr_type = 3;
-  string adr_fam = 4;
-  string tr_addr = 5;
-  string tr_svc_id = 6;
-  bool online = 7;
-  repeated Tag tag_list = 8;
+  string tr_type = 2;
+  string adr_fam = 3;
+  string tr_addr = 4;
+  string tr_svc_id = 5;
+  bool online = 6;
+  repeated Tag tag_list = 7;
 }
 
 message CreateCnReply {

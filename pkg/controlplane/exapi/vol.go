@@ -3,7 +3,7 @@ package exapi
 import (
 	"context"
 	"fmt"
-	// "strconv"
+	"strconv"
 
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
@@ -37,6 +37,7 @@ type generalCnCntlr struct {
 	cnId    string
 	cnConf  *pbcp.ControllerNodeConf
 	cntlrId string
+	portNum uint32
 }
 
 func (exApi *exApiServer) tryToCreateVol(
@@ -352,10 +353,22 @@ func (exApi *exApiServer) tryToCreateVol(
 			cntlrId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
 
+			portNum, err := getAndUpdateNextBit(cnConf.GeneralConf.PortNextBit)
+			if err != nil {
+				pch.Logger.Error(
+					"get portNum err: %v",
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
 			genCnCntlr := &generalCnCntlr{
 				cnId:    cnId,
 				cnConf:  cnConf,
 				cntlrId: cntlrId,
+				portNum: portNum,
 			}
 			genCnCntlrList = append(genCnCntlrList, genCnCntlr)
 
@@ -706,12 +719,32 @@ func (exApi *exApiServer) tryToCreateVol(
 		cntlrInfoList := make([]*pbcp.CntlrInfo, req.CntlrCnt)
 		for i := uint32(0); i < req.CntlrCnt; i++ {
 			genCnCntlr := genCnCntlrList[i]
+			cnListener := genCnCntlr.cnConf.GeneralConf.NvmePortConf.NvmeListener
+			baseTrSvcId, err := strconv.ParseUint(cnListener.TrSvcId, 10, 32)
+			if err != nil {
+				pch.Logger.Error(
+					"Can not convert trSvcId to num: %s",
+					cnListener.TrSvcId,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
 			cntlrConfList[i] = &pbcp.CntlrConf{
 				CntlrId:      genCnCntlr.cntlrId,
 				CnId:         genCnCntlr.cnId,
 				CnGrpcTarget: genCnCntlr.cnConf.GeneralConf.GrpcTarget,
 				CntlrIdx:     uint32(i),
-				// FIXME: set nvmeof conf
+				NvmePortConf: &pbcp.NvmePortConf{
+					PortNum: string(genCnCntlr.portNum),
+					NvmeListener: &pbcp.NvmeListener{
+						TrType:  cnListener.TrType,
+						AdrFam:  cnListener.AdrFam,
+						TrAddr:  cnListener.TrAddr,
+						TrSvcId: string(uint32(baseTrSvcId) + genCnCntlr.portNum),
+					},
+				},
 			}
 			cntlrInfoList[i] = &pbcp.CntlrInfo{
 				CntlrId: genCnCntlr.cntlrId,
