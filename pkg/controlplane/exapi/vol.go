@@ -1084,3 +1084,213 @@ func (exApi *exApiServer) CreateVol(
 		},
 	}, nil
 }
+
+func (exApi *exApiServer) DeleteVol(
+	ctx context.Context,
+	req *pbcp.DeleteVolRequest,
+) (*pbcp.DeleteVolReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
+	nameToId := &pbcp.NameToId{}
+	spConf := &pbcp.StoragePoolConf{}
+	spGlobalKey := exApi.kf.SpGlobalEntityKey()
+	spGlobal := &pbcp.SpGlobal{}
+
+	apply := func(stm concurrency.STM) error {
+		nameToIdVal := []byte(stm.Get(nameToIdKey))
+		if len(nameToIdVal) == 0 {
+			pch.Logger.Error("No nameToID: %s", nameToIdKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				nameToIdKey,
+			}
+		}
+
+		if err := proto.Unmarshal(nameToIdVal, nameToId); err != nil {
+			pch.Logger.Error(
+				"nameToId unmarshal err: %s %v",
+				nameToIdKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		stm.Del(nameToIdKey)
+
+		spId := nameToId.ResId
+		spIdNum, err := strconv.ParseUint(spId, 16, 64)
+		if err != nil {
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		idx := spIdNum >> constants.ShardMove
+
+		spConfKey := exApi.kf.SpConfEntityKey(spId)
+		spConfVal := []byte(stm.Get(spConfKey))
+		if err := proto.Unmarshal(spConfVal, spConf); err != nil {
+			pch.Logger.Error(
+				"spConf unmarshal err: %s %v",
+				spConfKey,
+				err,
+			)
+		}
+		return &stmwrapper.StmError{
+			constants.ReplyCodeInternalErr,
+			err.Error(),
+		}
+
+		for _, legConf := range spConf.LegConfList {
+			for _, grpConf := range legConf.GrpConfList {
+				for _, ldConf := range grpConf.LdConfList {
+					dnId := ldConf.DnId
+					ldId := ldConf.LdId
+					dnConfKey := exApi.kf.DnConfEntityKey(dnId)
+					dnConfVal := []byte(stm.Get(dnConfKey))
+					dnConf := &pbcp.DiskNodeConf{}
+					if err := proto.Unmarshal(dnConfVal, dnConf); err != nil {
+						pch.Logger.Error(
+							"dnConf unmarshal err: %s %v",
+							dnConfKey,
+							err,
+						)
+					}
+					return &stmwrapper.StmError{
+						constants.ReplyCodeInternalErr,
+						err.Error(),
+					}
+
+					lastIdx := len(dnConf.SpLdIdList) - 1
+					for i, spLdId := range dnConf.SpLdIdList {
+						if spLdId.SpId == spId && spLdId.LdId == ldId {
+							dnConf.SpLdIdList[i] = dnConf.SpLdIdList[lastIdx]
+							dnConf.SpLdIdList = dnConf.SpLdIdList[:lastIdx]
+							break
+						}
+					}
+					dnConfValNew, err := proto.Marshal(dnConf)
+					if err != nil {
+						pch.Logger.Error("Marshal dnConf err: %v %v", dnConf, err)
+						return &stmwrapper.StmError{
+							constants.ReplyCodeInternalErr,
+							err.Error(),
+						}
+					}
+					dnConfStrNew := string(dnConfValNew)
+					stm.Put(dnConfKey, dnConfStrNew)
+				}
+			}
+		}
+
+		for _, cntlrConf := range spConf.CntlrConfList {
+			cnId := cntlrConf.CnId
+			cntlrId := cntlrConf.CntlrId
+			cnConfKey := exApi.kf.CnConfEntityKey(cnId)
+			cnConfVal := []byte(stm.Get(cnConfKey))
+			cnConf := &pbcp.ControllerNodeConf{}
+			if err := proto.Unmarshal(cnConfVal, cnConf); err != nil {
+				pch.Logger.Error(
+					"cnConf unmarshal err: %s %v",
+					cnConfKey,
+					err,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			lastIdx := len(cnConf.SpCntlrIdList) - 1
+			for i, spCntlrId := range cnConf.SpCntlrIdList {
+				if spCntlrId.SpId == spId && spCntlrId.CntlrId == cntlrId {
+					cnConf.SpCntlrIdList[i] = cnConf.SpCntlrIdList[lastIdx]
+					cnConf.SpCntlrIdList = cnConf.SpCntlrIdList[:lastIdx]
+					break
+				}
+			}
+			cnConfValNew, err := proto.Marshal(cnConf)
+			if err != nil {
+				pch.Logger.Error("Marshal cnConf err: %v %v", cnConf, err)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeInternalErr,
+					err.Error(),
+				}
+			}
+			cnConfStrNew := string(cnConfValNew)
+			stm.Put(cnConfKey, cnConfStrNew)
+		}
+
+		spInfoKey := exApi.kf.SpInfoEntityKey(spId)
+		if len(stm.Get(spInfoKey)) > 0 {
+			stm.Del(spInfoKey)
+		}
+
+		spGlobalOldVal := []byte(stm.Get(spGlobalKey))
+		if len(spGlobalOldVal) == 0 {
+			pch.Logger.Error("No spGlobal: %s", spGlobalKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				spGlobalKey,
+			}
+		}
+		if err := proto.Unmarshal(spGlobalOldVal, spGlobal); err != nil {
+			pch.Logger.Error(
+				"spGlobal unmarshal err: %s %v",
+				spGlobalKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		if spGlobal.ShardBucket[idx] == 0 {
+			panic("ShardBucket underflow")
+		}
+		spGlobal.ShardBucket[idx] = spGlobal.ShardBucket[idx] - 1
+		spGlobalVal, err := proto.Marshal(spGlobal)
+		if err != nil {
+			pch.Logger.Error(
+				"spGlobal marshal err: %s %v",
+				spGlobal,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spGlobalStr := string(spGlobalVal)
+		stm.Put(spGlobalKey, spGlobalStr)
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.DeleteVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.DeleteVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.DeleteVolReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+	}, nil
+}

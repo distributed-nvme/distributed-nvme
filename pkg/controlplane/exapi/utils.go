@@ -180,6 +180,14 @@ func allocateLd(
 	return uint64(startBit), nil
 }
 
+func freeLd(
+	extentConf *pbcp.ExtentConf,
+	extentCnt uint64,
+	extentSetSize uint64,
+) error {
+	return nil
+}
+
 func initNextBit(bitSize uint32) *pbcp.NextBit {
 	if bitSize%64 != 0 {
 		panic("Bitmap size not align to 64 bits")

@@ -654,11 +654,10 @@ message CreateVolRequest {
 
 message CreateVolReply {
   ReplyInfo reply_info = 1;
-  string vol_id = 2;
 }
 
 message DeleteVolRequest {
-  string vol_id = 1;
+  string vol_name = 1;
 }
 
 message DeleteVolReply {
@@ -666,10 +665,7 @@ message DeleteVolReply {
 }
 
 message GetVolRequest {
-  oneof name {
-    string vol_name = 1;
-    string vol_id = 2;
-  }
+  string vol_name = 1;
 }
 
 message GetVolReply {
