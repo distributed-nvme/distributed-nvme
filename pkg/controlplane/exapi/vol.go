@@ -179,9 +179,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinMetaRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinMetaRaid1MetaStart, thinMetaRaid1MetaLength, err := allocateLd(
+			thinMetaRaid1MetaStart, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1MetaExtentCnt,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -192,6 +193,7 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
+			thinMetaRaid1MetaLength := thinMetaRaid1MetaExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -202,9 +204,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinMetaRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinMetaRaid1DataStart, thinMetaRaid1DataLength, err := allocateLd(
+			thinMetaRaid1DataStart, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1DataExtentCnt,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -215,6 +218,7 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
+			thinMetaRaid1DataLength := thinMetaRaid1DataExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -225,9 +229,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinDataRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinDataRaid1MetaStart, thinDataRaid1MetaLength, err := allocateLd(
+			thinDataRaid1MetaStart, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1MetaExtentCnt,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -238,6 +243,7 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
+			thinDataRaid1MetaLength := thinDataRaid1MetaExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -248,9 +254,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinDataRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinDataRaid1DataStart, thinDataRaid1DataLength, err := allocateLd(
+			thinDataRaid1DataStart, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1DataExtentCnt,
+				1<<constants.DataExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -261,6 +268,7 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
+			thinDataRaid1DataLength := thinDataRaid1DataExtentCnt * dataExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{

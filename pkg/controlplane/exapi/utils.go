@@ -77,11 +77,107 @@ func thinMetaExtentCntCalc(
 	return metaExtentCnt
 }
 
+type buddyNode struct {
+	start  uint32
+	stop   uint32
+	length uint32
+}
+
+func getMaxCnt(bm *bitmap.Bitmap, start uint32, size uint32) uint32 {
+	nodeQueue := make([]*buddyNode, size)
+	for i := start; i < size; i++ {
+		var length uint32
+		if bm.Contains(start) {
+			length = 1
+		} else {
+			length = 0
+		}
+		node := &buddyNode{
+			start:  i,
+			stop:   i,
+			length: length,
+		}
+		nodeQueue[i] = node
+	}
+	for len(nodeQueue) > 1 {
+		tmpQueue := make([]*buddyNode, 0)
+		for i := 0; i < len(nodeQueue); i += 2 {
+			left := nodeQueue[i]
+			right := nodeQueue[i+1]
+			leftFull := (left.stop-left.start+1 == left.length)
+			rightFull := (right.stop-right.start+1 == right.length)
+			var length uint32
+			if leftFull && rightFull {
+				length = left.length + right.length
+			} else {
+				length = left.length
+				if right.length > length {
+					length = right.length
+				}
+			}
+			node := &buddyNode{
+				start:  left.start,
+				stop:   right.stop,
+				length: length,
+			}
+			tmpQueue = append(tmpQueue, node)
+		}
+		nodeQueue = tmpQueue
+	}
+	return nodeQueue[0].length
+}
+
 func allocateLd(
 	extentConf *pbcp.ExtentConf,
 	extentCnt uint64,
-) (uint64, uint64, error) {
-	return 0, 0, nil
+	extentSetSize uint64,
+) (uint64, error) {
+	extentCntShift := 0
+	for {
+		if (1 << extentCntShift) >= extentCnt {
+			break
+		}
+		extentCntShift++
+	}
+	extentCnt = 1 << extentCntShift
+
+	targetIdx := constants.Uint32Max
+	targetCnt := constants.Uint32Max
+	for idx, cnt := range extentConf.ExtentSetBucket {
+		if uint64(cnt) >= extentCnt && cnt < targetCnt {
+			targetCnt = cnt
+			targetIdx = uint32(idx)
+		}
+	}
+	if targetIdx == constants.Uint32Max {
+		return 0, fmt.Errorf("No enough capacity")
+	}
+	start := uint64(targetIdx) * extentSetSize
+	stop := start + extentSetSize
+	bm := bitmap.FromBytes(extentConf.Bitmap)
+	startBit := constants.Uint32Max
+	for i := start; i < stop-extentCnt; i += extentCnt {
+		allZero := true
+		for j := i; j < extentCnt; j++ {
+			if bm.Contains(uint32(j)) {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			startBit = uint32(i)
+			break
+		}
+	}
+	if startBit == constants.Uint32Max {
+		return 0, fmt.Errorf("No enough capacity")
+	}
+	for i := uint64(startBit); i < extentCnt; i++ {
+		bm.Set(uint32(i))
+	}
+	maxCnt := getMaxCnt(&bm, startBit, uint32(extentSetSize))
+	extentConf.ExtentSetBucket[targetIdx] = maxCnt
+	return uint64(startBit), nil
 }
 
 func initNextBit(bitSize uint32) *pbcp.NextBit {
