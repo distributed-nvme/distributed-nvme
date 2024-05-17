@@ -37,9 +37,8 @@ func extentInitCalc(
 	byteCntTotal := bitCntTotal >> 3
 	bmRaw := make([]byte, byteCntTotal)
 	bm := bitmap.FromBytes(bmRaw)
-	bm.Ones()
 	for i := extentCntTotal; i < bitCntTotal; i++ {
-		bm.Remove(uint32(i))
+		bm.Set(uint32(i))
 	}
 	bucket := make([]uint32, setCntTotal)
 	for i := 0; uint64(i) < setCntFull; i++ {
@@ -182,10 +181,17 @@ func allocateLd(
 
 func freeLd(
 	extentConf *pbcp.ExtentConf,
-	extentCnt uint32,
+	start uint32,
+	cnt uint32,
 	extentSetSize uint32,
-) error {
-	return nil
+) {
+	targetIdx := start / extentSetSize
+	bm := bitmap.FromBytes(extentConf.Bitmap)
+	for i := start; i < cnt; i++ {
+		bm.Remove(i)
+	}
+	maxCnt := getMaxCnt(&bm, start, extentSetSize)
+	extentConf.ExtentSetBucket[targetIdx] = maxCnt
 }
 
 func initNextBit(bitSize uint32) *pbcp.NextBit {

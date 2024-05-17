@@ -182,7 +182,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			thinMetaRaid1MetaStart, thinMetaRaid1MetaExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1MetaExtentCnt,
-				metaExtentSize,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -206,7 +206,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			thinMetaRaid1DataStart, thinMetaRaid1DataExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1DataExtentCnt,
-				metaExtentSize,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -230,7 +230,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			thinDataRaid1MetaStart, thinDataRaid1MetaExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1MetaExtentCnt,
-				metaExtentSize,
+				1<<constants.MetaExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -254,7 +254,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			thinDataRaid1DataStart, thinDataRaid1DataExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1DataExtentCnt,
-				dataExtentSize,
+				1<<constants.DataExtentPerSetShiftDefault,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -1166,6 +1166,23 @@ func (exApi *exApiServer) DeleteVol(
 					return &stmwrapper.StmError{
 						constants.ReplyCodeInternalErr,
 						err.Error(),
+					}
+
+					metaExtentSize := uint32(1 << constants.MetaExtentSizeShiftDefault)
+					if ldConf.ExtentSize == metaExtentSize {
+						freeLd(
+							dnConf.GeneralConf.MetaExtentConf,
+							ldConf.Start,
+							ldConf.Cnt,
+							1<<constants.MetaExtentPerSetShiftDefault,
+						)
+					} else {
+						freeLd(
+							dnConf.GeneralConf.DataExtentConf,
+							ldConf.Start,
+							ldConf.Cnt,
+							1<<constants.DataExtentPerSetShiftDefault,
+						)
 					}
 
 					lastIdx := len(dnConf.SpLdIdList) - 1
