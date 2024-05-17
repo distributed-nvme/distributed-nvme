@@ -1142,10 +1142,10 @@ func (exApi *exApiServer) DeleteVol(
 				spConfKey,
 				err,
 			)
-		}
-		return &stmwrapper.StmError{
-			constants.ReplyCodeInternalErr,
-			err.Error(),
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
 		}
 
 		for _, legConf := range spConf.LegConfList {
@@ -1309,6 +1309,97 @@ func (exApi *exApiServer) DeleteVol(
 	}
 
 	return &pbcp.DeleteVolReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+	}, nil
+}
+
+func (exApi *exApiServer) GetVol(
+	ctx context.Context,
+	req *pbcp.GetVolRequest,
+) (*pbcp.GetVolReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
+	nameToId := &pbcp.NameToId{}
+	spConf := &pbcp.StoragePoolConf{}
+	spInfo := &pbcp.StoragePoolInfo{}
+
+	apply := func(stm concurrency.STM) error {
+		nameToIdVal := []byte(stm.Get(nameToIdKey))
+		if len(nameToIdVal) == 0 {
+			pch.Logger.Error("No nameToID: %s", nameToIdKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				nameToIdKey,
+			}
+		}
+		if err := proto.Unmarshal(nameToIdVal, nameToId); err != nil {
+			pch.Logger.Error(
+				"nameToId unmarshal err: %s %v",
+				nameToIdKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		spId := nameToId.ResId
+
+		spConfKey := exApi.kf.SpConfEntityKey(spId)
+		spConfVal := []byte(stm.Get(spConfKey))
+		if err := proto.Unmarshal(spConfVal, spConf); err != nil {
+			pch.Logger.Error(
+				"spConf unmarshal err: %s %v",
+				spConfKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		spInfoKey := exApi.kf.SpInfoEntityKey(spId)
+		spInfoVal := []byte(stm.Get(spInfoKey))
+		if err := proto.Unmarshal(spInfoVal, spInfo); err != nil {
+			pch.Logger.Error(
+				"spInfo unmarshal err: %s %v",
+				spInfoKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.GetVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.GetVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.GetVolReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
