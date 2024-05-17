@@ -23,6 +23,8 @@ service ExternalApi {
   rpc CreateVol(CreateVolRequest) returns(CreateVolReply) {}
   rpc DeleteVol(DeleteVolRequest) returns(DeleteVolReply) {}
   rpc GetVol(GetVolRequest) returns(GetVolReply) {}
+  rpc ExportVol(ExportVolRequest) returns(ExportVolReply) {}
+  rpc UnexportVol(UnexportVolRequest) returns(UnexportVolReply) {}
 }
 
 service DiskNodeWorker {
@@ -673,6 +675,24 @@ message GetVolReply {
   ReplyInfo reply_info = 1;
   StoragePoolConf spConf = 2;
   StoragePoolInfo spInfo = 3;
+}
+
+message ExportVolRequest {
+  string vol_name = 1;
+  string host_nqn = 2;
+}
+
+message ExportVolReply {
+  ReplyInfo reply_info = 1;
+}
+
+message UnexportVolRequest {
+  string vol_name = 1;
+  string host_nqn = 2;
+}
+
+message UnexportVolReply {
+  ReplyInfo reply_info = 1;
 }
 
 message AllocateDnRequest {

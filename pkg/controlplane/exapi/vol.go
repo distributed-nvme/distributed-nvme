@@ -772,7 +772,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			TagList: req.TagList,
 			GeneralConf: &pbcp.SpGeneralConf{
 				SpName:       req.VolName,
-				SpCounter:    0,
+				SpCounter:    spCounter,
 				DevIdCounter: 0,
 				Qos:          0,
 				StripeConf: &pbcp.StripeConf{
@@ -1400,6 +1400,221 @@ func (exApi *exApiServer) GetVol(
 	}
 
 	return &pbcp.GetVolReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+	}, nil
+}
+
+func (exApi *exApiServer) ExportVol(
+	ctx context.Context,
+	req *pbcp.ExportVolRequest,
+) (*pbcp.ExportVolReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
+	nameToId := &pbcp.NameToId{}
+	spConf := &pbcp.StoragePoolConf{}
+
+	apply := func(stm concurrency.STM) error {
+		nameToIdVal := []byte(stm.Get(nameToIdKey))
+		if len(nameToIdVal) == 0 {
+			pch.Logger.Error("No nameToID: %s", nameToIdKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				nameToIdKey,
+			}
+		}
+		if err := proto.Unmarshal(nameToIdVal, nameToId); err != nil {
+			pch.Logger.Error(
+				"nameToId unmarshal err: %s %v",
+				nameToIdKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		spId := nameToId.ResId
+
+		spConfKey := exApi.kf.SpConfEntityKey(spId)
+		spConfVal := []byte(stm.Get(spConfKey))
+		if err := proto.Unmarshal(spConfVal, spConf); err != nil {
+			pch.Logger.Error(
+				"spConf unmarshal err: %s %v",
+				spConfKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		ssConf := spConf.SsConfList[0]
+		for _, hostConf := range ssConf.HostConfList {
+			if hostConf.HostNqn == req.HostNqn {
+				pch.Logger.Error(
+					"duplicate host nqn: %v",
+					hostConf,
+				)
+				return &stmwrapper.StmError{
+					constants.ReplyCodeDupRes,
+					hostConf.HostNqn,
+				}
+			}
+		}
+		hostId := fmt.Sprintf("%016", spConf.GeneralConf.SpCounter)
+		spConf.GeneralConf.SpCounter++
+		hostConf := &pbcp.HostConf{
+			HostId:  hostId,
+			HostNqn: req.HostNqn,
+		}
+		ssConf.HostConfList = append(ssConf.HostConfList, hostConf)
+		spConfValNew, err := proto.Marshal(spConf)
+		if err != nil {
+			pch.Logger.Error("Marshal spConf err: %v %v", spConf, err)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spConfStrNew := string(spConfValNew)
+		stm.Put(spConfKey, spConfStrNew)
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.ExportVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.ExportVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.ExportVolReply{
+		ReplyInfo: &pbcp.ReplyInfo{
+			ReplyCode: constants.ReplyCodeSucceed,
+			ReplyMsg:  constants.ReplyMsgSucceed,
+		},
+	}, nil
+}
+
+func (exApi *exApiServer) UnexportVol(
+	ctx context.Context,
+	req *pbcp.UnexportVolRequest,
+) (*pbcp.UnexportVolReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
+	nameToId := &pbcp.NameToId{}
+	spConf := &pbcp.StoragePoolConf{}
+
+	apply := func(stm concurrency.STM) error {
+		nameToIdVal := []byte(stm.Get(nameToIdKey))
+		if len(nameToIdVal) == 0 {
+			pch.Logger.Error("No nameToID: %s", nameToIdKey)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				nameToIdKey,
+			}
+		}
+		if err := proto.Unmarshal(nameToIdVal, nameToId); err != nil {
+			pch.Logger.Error(
+				"nameToId unmarshal err: %s %v",
+				nameToIdKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		spId := nameToId.ResId
+
+		spConfKey := exApi.kf.SpConfEntityKey(spId)
+		spConfVal := []byte(stm.Get(spConfKey))
+		if err := proto.Unmarshal(spConfVal, spConf); err != nil {
+			pch.Logger.Error(
+				"spConf unmarshal err: %s %v",
+				spConfKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		ssConf := spConf.SsConfList[0]
+		targetIdx := -1
+		for i, hostConf := range ssConf.HostConfList {
+			if hostConf.HostNqn == req.HostNqn {
+				targetIdx = i
+				break
+			}
+		}
+
+		if targetIdx < 0 {
+			pch.Logger.Error("Can not find host nqn: %s", req.HostNqn)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeNotFound,
+				req.HostNqn,
+			}
+		}
+
+		lastIdx := len(ssConf.HostConfList) - 1
+		ssConf.HostConfList[targetIdx] = ssConf.HostConfList[lastIdx]
+		ssConf.HostConfList = ssConf.HostConfList[:lastIdx]
+
+		spConfValNew, err := proto.Marshal(spConf)
+		if err != nil {
+			pch.Logger.Error("Marshal spConf err: %v %v", spConf, err)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spConfStrNew := string(spConfValNew)
+		stm.Put(spConfKey, spConfStrNew)
+
+		return nil
+	}
+
+	if err := exApi.sm.RunStm(pch, apply); err != nil {
+		if serr, ok := err.(*stmwrapper.StmError); ok {
+			return &pbcp.UnexportVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: serr.Code,
+					ReplyMsg:  serr.Msg,
+				},
+			}, nil
+		} else {
+			return &pbcp.UnexportVolReply{
+				ReplyInfo: &pbcp.ReplyInfo{
+					ReplyCode: constants.ReplyCodeInternalErr,
+					ReplyMsg:  err.Error(),
+				},
+			}, nil
+		}
+	}
+
+	return &pbcp.UnexportVolReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
