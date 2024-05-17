@@ -17,20 +17,20 @@ import (
 )
 
 type raid1DnLd struct {
-	dnId                    string
-	dnConf                  *pbcp.DiskNodeConf
-	thinMetaRaid1MetaLdId   string
-	thinMetaRaid1MetaStart  uint64
-	thinMetaRaid1MetaLength uint64
-	thinMetaRaid1DataLdId   string
-	thinMetaRaid1DataStart  uint64
-	thinMetaRaid1DataLength uint64
-	thinDataRaid1MetaLdId   string
-	thinDataRaid1MetaStart  uint64
-	thinDataRaid1MetaLength uint64
-	thinDataRaid1DataLdId   string
-	thinDataRaid1DataStart  uint64
-	thinDataRaid1DataLength uint64
+	dnId                       string
+	dnConf                     *pbcp.DiskNodeConf
+	thinMetaRaid1MetaLdId      string
+	thinMetaRaid1MetaStart     uint32
+	thinMetaRaid1MetaExtentCnt uint32
+	thinMetaRaid1DataLdId      string
+	thinMetaRaid1DataStart     uint32
+	thinMetaRaid1DataExtentCnt uint32
+	thinDataRaid1MetaLdId      string
+	thinDataRaid1MetaStart     uint32
+	thinDataRaid1MetaExtentCnt uint32
+	thinDataRaid1DataLdId      string
+	thinDataRaid1DataStart     uint32
+	thinDataRaid1DataExtentCnt uint32
 }
 
 type generalCnCntlr struct {
@@ -43,9 +43,9 @@ type generalCnCntlr struct {
 func (exApi *exApiServer) tryToCreateVol(
 	pch *ctxhelper.PerCtxHelper,
 	req *pbcp.CreateVolRequest,
-	metaExtentSize uint64,
-	dataExtentSize uint64,
-	dataExtentCnt uint64,
+	metaExtentSize uint32,
+	dataExtentSize uint32,
+	dataExtentCnt uint32,
 	dnValueToId map[string]string,
 	cnValueToId map[string]string,
 ) ([]string, []string, error) {
@@ -53,14 +53,14 @@ func (exApi *exApiServer) tryToCreateVol(
 	dnCnt := legCnt * 2
 	cnCnt := int(req.CntlrCnt)
 
-	thinMetaRaid1MetaExtentCnt := uint64(1)
+	thinMetaRaid1MetaExtentCnt := uint32(1)
 	thinMetaRaid1DataExtentCnt := thinMetaExtentCntCalc(
 		metaExtentSize,
 		dataExtentSize,
 		dataExtentCnt,
 		constants.ThinBlockSizeDefault,
 	)
-	thinDataRaid1MetaExtentCnt := uint64(1)
+	thinDataRaid1MetaExtentCnt := uint32(1)
 	thinDataRaid1DataExtentCnt := dataExtentCnt
 
 	spGlobalKey := exApi.kf.SpGlobalEntityKey()
@@ -179,10 +179,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinMetaRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinMetaRaid1MetaStart, err := allocateLd(
+			thinMetaRaid1MetaStart, thinMetaRaid1MetaExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1MetaExtentCnt,
-				1<<constants.MetaExtentPerSetShiftDefault,
+				metaExtentSize,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -193,7 +193,6 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
-			thinMetaRaid1MetaLength := thinMetaRaid1MetaExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -204,10 +203,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinMetaRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinMetaRaid1DataStart, err := allocateLd(
+			thinMetaRaid1DataStart, thinMetaRaid1DataExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinMetaRaid1DataExtentCnt,
-				1<<constants.MetaExtentPerSetShiftDefault,
+				metaExtentSize,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -218,7 +217,6 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
-			thinMetaRaid1DataLength := thinMetaRaid1DataExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -229,10 +227,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinDataRaid1MetaLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinDataRaid1MetaStart, err := allocateLd(
+			thinDataRaid1MetaStart, thinDataRaid1MetaExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1MetaExtentCnt,
-				1<<constants.MetaExtentPerSetShiftDefault,
+				metaExtentSize,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -243,7 +241,6 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
-			thinDataRaid1MetaLength := thinDataRaid1MetaExtentCnt * metaExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -254,10 +251,10 @@ func (exApi *exApiServer) tryToCreateVol(
 
 			thinDataRaid1DataLdId := fmt.Sprintf("%016x", spCounter)
 			spCounter++
-			thinDataRaid1DataStart, err := allocateLd(
+			thinDataRaid1DataStart, thinDataRaid1DataExtentCnt, err := allocateLd(
 				dnConf.GeneralConf.MetaExtentConf,
 				thinDataRaid1DataExtentCnt,
-				1<<constants.DataExtentPerSetShiftDefault,
+				dataExtentSize,
 			)
 			if err != nil {
 				pch.Logger.Warning(
@@ -268,7 +265,6 @@ func (exApi *exApiServer) tryToCreateVol(
 				invalidDnList = append(invalidDnList, dnId)
 				continue
 			}
-			thinDataRaid1DataLength := thinDataRaid1DataExtentCnt * dataExtentSize
 			dnConf.SpLdIdList = append(
 				dnConf.SpLdIdList,
 				&pbcp.SpLdId{
@@ -278,20 +274,20 @@ func (exApi *exApiServer) tryToCreateVol(
 			)
 
 			r1DnLd := &raid1DnLd{
-				dnId:                    dnId,
-				dnConf:                  dnConf,
-				thinMetaRaid1MetaLdId:   thinMetaRaid1MetaLdId,
-				thinMetaRaid1MetaStart:  thinMetaRaid1MetaStart,
-				thinMetaRaid1MetaLength: thinMetaRaid1MetaLength,
-				thinMetaRaid1DataLdId:   thinMetaRaid1DataLdId,
-				thinMetaRaid1DataStart:  thinMetaRaid1DataStart,
-				thinMetaRaid1DataLength: thinMetaRaid1DataLength,
-				thinDataRaid1MetaLdId:   thinDataRaid1MetaLdId,
-				thinDataRaid1MetaStart:  thinDataRaid1MetaStart,
-				thinDataRaid1MetaLength: thinDataRaid1MetaLength,
-				thinDataRaid1DataLdId:   thinDataRaid1DataLdId,
-				thinDataRaid1DataStart:  thinDataRaid1DataStart,
-				thinDataRaid1DataLength: thinDataRaid1DataLength,
+				dnId:                       dnId,
+				dnConf:                     dnConf,
+				thinMetaRaid1MetaLdId:      thinMetaRaid1MetaLdId,
+				thinMetaRaid1MetaStart:     thinMetaRaid1MetaStart,
+				thinMetaRaid1MetaExtentCnt: thinMetaRaid1MetaExtentCnt,
+				thinMetaRaid1DataLdId:      thinMetaRaid1DataLdId,
+				thinMetaRaid1DataStart:     thinMetaRaid1DataStart,
+				thinMetaRaid1DataExtentCnt: thinMetaRaid1DataExtentCnt,
+				thinDataRaid1MetaLdId:      thinDataRaid1MetaLdId,
+				thinDataRaid1MetaStart:     thinDataRaid1MetaStart,
+				thinDataRaid1MetaExtentCnt: thinDataRaid1MetaExtentCnt,
+				thinDataRaid1DataLdId:      thinDataRaid1DataLdId,
+				thinDataRaid1DataStart:     thinDataRaid1DataStart,
+				thinDataRaid1DataExtentCnt: thinDataRaid1DataExtentCnt,
 			}
 			r1DnLdList = append(r1DnLdList, r1DnLd)
 
@@ -500,7 +496,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd0.thinMetaRaid1MetaStart,
-				Length:         r1DnLd0.thinMetaRaid1MetaLength,
+				Cnt:            r1DnLd0.thinMetaRaid1MetaExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[1] = &pbcp.LdConf{
@@ -510,7 +507,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd0.thinMetaRaid1DataStart,
-				Length:         r1DnLd0.thinMetaRaid1DataLength,
+				Cnt:            r1DnLd0.thinMetaRaid1DataExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[2] = &pbcp.LdConf{
@@ -520,7 +518,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd0.thinDataRaid1MetaStart,
-				Length:         r1DnLd0.thinDataRaid1MetaLength,
+				Cnt:            r1DnLd0.thinDataRaid1MetaExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[3] = &pbcp.LdConf{
@@ -530,7 +529,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd0.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd0.thinDataRaid1DataStart,
-				Length:         r1DnLd0.thinDataRaid1DataLength,
+				Cnt:            r1DnLd0.thinDataRaid1DataExtentCnt,
+				ExtentSize:     dataExtentSize,
 				Inited:         false,
 			}
 
@@ -541,7 +541,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd1.thinMetaRaid1MetaStart,
-				Length:         r1DnLd1.thinMetaRaid1MetaLength,
+				Cnt:            r1DnLd1.thinMetaRaid1MetaExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[5] = &pbcp.LdConf{
@@ -551,7 +552,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd1.thinMetaRaid1DataStart,
-				Length:         r1DnLd1.thinMetaRaid1DataLength,
+				Cnt:            r1DnLd1.thinMetaRaid1DataExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[6] = &pbcp.LdConf{
@@ -561,7 +563,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd1.thinDataRaid1MetaStart,
-				Length:         r1DnLd1.thinDataRaid1MetaLength,
+				Cnt:            r1DnLd1.thinDataRaid1MetaExtentCnt,
+				ExtentSize:     metaExtentSize,
 				Inited:         false,
 			}
 			legConf.GrpConfList[0].LdConfList[7] = &pbcp.LdConf{
@@ -571,7 +574,8 @@ func (exApi *exApiServer) tryToCreateVol(
 				DnNvmeListener: r1DnLd1.dnConf.GeneralConf.NvmePortConf.NvmeListener,
 				LdIdx:          0,
 				Start:          r1DnLd1.thinDataRaid1DataStart,
-				Length:         r1DnLd1.thinDataRaid1DataLength,
+				Cnt:            r1DnLd1.thinDataRaid1DataExtentCnt,
+				ExtentSize:     dataExtentSize,
 				Inited:         false,
 			}
 			legConfList[i] = legConf
@@ -876,9 +880,9 @@ func (exApi *exApiServer) CreateVol(
 	legCnt := uint64(req.CntlrCnt * req.LegPerCntlr)
 	dnCnt := legCnt * 2
 	size := (req.Size + legCnt - 1) / legCnt
-	metaExtentSize := uint64(1 << constants.MetaExtentSizeShiftDefault)
-	dataExtentSize := uint64(1 << constants.DataExtentSizeShiftDefault)
-	dataExtentCnt := (size + dataExtentSize - 1) / dataExtentSize
+	metaExtentSize := uint32(1 << constants.MetaExtentSizeShiftDefault)
+	dataExtentSize := uint32(1 << constants.DataExtentSizeShiftDefault)
+	dataExtentCnt := uint32(divRoundUp(size, uint64(dataExtentSize)))
 
 	dnExcludeIdList := make([]string, 0)
 	cnExcludeIdList := make([]string, 0)
@@ -887,7 +891,7 @@ func (exApi *exApiServer) CreateVol(
 		allocateDnReq := &pbcp.AllocateDnRequest{
 			DistinguishKey: req.DnDistinguishKey,
 			DnCnt:          uint32(dnCnt),
-			DataExtentCnt:  uint32(dataExtentCnt),
+			DataExtentCnt:  dataExtentCnt,
 			ExcludeIdList:  dnExcludeIdList,
 		}
 		dnwkrTargetList, err := mbrhelper.GetAllMembers(

@@ -63,18 +63,18 @@ func divRoundUp(a, b uint64) uint64 {
 }
 
 func thinMetaExtentCntCalc(
-	metaExtentSize uint64,
-	dataExtentSize uint64,
-	dataExtentCnt uint64,
-	thinBlockSize uint64,
-) uint64 {
-	dataSize := dataExtentSize * dataExtentCnt
+	metaExtentSize uint32,
+	dataExtentSize uint32,
+	dataExtentCnt uint32,
+	thinBlockSize uint32,
+) uint32 {
+	dataSize := uint64(dataExtentSize) * uint64(dataExtentCnt)
 	// according to
 	// https://docs.kernel.org/admin-guide/device-mapper/thin-provisioning.html
 	// 48 * $data_dev_size / $data_block_size
-	metaSize := divRoundUp(48*dataSize, thinBlockSize)
-	metaExtentCnt := divRoundUp(metaSize, metaExtentSize)
-	return metaExtentCnt
+	metaSize := divRoundUp(48*dataSize, uint64(thinBlockSize))
+	metaExtentCnt := divRoundUp(metaSize, uint64(metaExtentSize))
+	return uint32(metaExtentCnt)
 }
 
 type buddyNode struct {
@@ -129,9 +129,9 @@ func getMaxCnt(bm *bitmap.Bitmap, start uint32, size uint32) uint32 {
 
 func allocateLd(
 	extentConf *pbcp.ExtentConf,
-	extentCnt uint64,
-	extentSetSize uint64,
-) (uint64, error) {
+	extentCnt uint32,
+	extentSetSize uint32,
+) (uint32, uint32, error) {
 	extentCntShift := 0
 	for {
 		if (1 << extentCntShift) >= extentCnt {
@@ -144,46 +144,46 @@ func allocateLd(
 	targetIdx := constants.Uint32Max
 	targetCnt := constants.Uint32Max
 	for idx, cnt := range extentConf.ExtentSetBucket {
-		if uint64(cnt) >= extentCnt && cnt < targetCnt {
+		if cnt >= extentCnt && cnt < targetCnt {
 			targetCnt = cnt
 			targetIdx = uint32(idx)
 		}
 	}
 	if targetIdx == constants.Uint32Max {
-		return 0, fmt.Errorf("No enough capacity")
+		return 0, 0, fmt.Errorf("No enough capacity")
 	}
-	start := uint64(targetIdx) * extentSetSize
+	start := targetIdx * extentSetSize
 	stop := start + extentSetSize
 	bm := bitmap.FromBytes(extentConf.Bitmap)
 	startBit := constants.Uint32Max
 	for i := start; i < stop-extentCnt; i += extentCnt {
 		allZero := true
 		for j := i; j < extentCnt; j++ {
-			if bm.Contains(uint32(j)) {
+			if bm.Contains(j) {
 				allZero = false
 				break
 			}
 		}
 		if allZero {
-			startBit = uint32(i)
+			startBit = i
 			break
 		}
 	}
 	if startBit == constants.Uint32Max {
-		return 0, fmt.Errorf("No enough capacity")
+		return 0, 0, fmt.Errorf("No enough capacity")
 	}
-	for i := uint64(startBit); i < extentCnt; i++ {
-		bm.Set(uint32(i))
+	for i := startBit; i < extentCnt; i++ {
+		bm.Set(i)
 	}
-	maxCnt := getMaxCnt(&bm, startBit, uint32(extentSetSize))
+	maxCnt := getMaxCnt(&bm, startBit, extentSetSize)
 	extentConf.ExtentSetBucket[targetIdx] = maxCnt
-	return uint64(startBit), nil
+	return startBit, extentCnt, nil
 }
 
 func freeLd(
 	extentConf *pbcp.ExtentConf,
-	extentCnt uint64,
-	extentSetSize uint64,
+	extentCnt uint32,
+	extentSetSize uint32,
 ) error {
 	return nil
 }

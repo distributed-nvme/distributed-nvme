@@ -206,9 +206,10 @@ message LdConf {
   string dn_grpc_target = 3;
   NvmeListener dn_nvme_listener = 4;
   uint32 ld_idx = 5;
-  uint64 start = 6;
-  uint64 length = 7;
-  bool inited = 8;
+  uint32 start = 6;
+  uint32 cnt = 7;
+  uint32 extent_size = 8;
+  bool inited = 9;
 }
 
 message LdInfo {

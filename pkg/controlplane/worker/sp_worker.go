@@ -629,14 +629,16 @@ func (spwkr *spWorkerServer) syncupSpLd(
 	ldConf *pbcp.LdConf,
 	spAttr *storagePoolAttr,
 ) *pbnd.SpLdInfo {
+	start := uint64(ldConf.ExtentSize) * uint64(ldConf.Start)
+	length := uint64(ldConf.ExtentSize) * uint64(ldConf.Cnt)
 	req := &pbnd.SyncupSpLdRequest{
 		SpLdConf: &pbnd.SpLdConf{
 			DnId:     ldConf.DnId,
 			SpId:     spId,
 			LdId:     ldConf.LdId,
 			Revision: revision,
-			Start:    ldConf.Start,
-			Length:   ldConf.Length,
+			Start:    start,
+			Length:   length,
 			CnIdList: spAttr.ldIdToCnIdList[ldConf.LdId],
 			Inited:   ldConf.Inited,
 		},
@@ -683,7 +685,7 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 							TrSvcId: ldConf.DnNvmeListener.TrSvcId,
 						},
 						LdIdx:  ldConf.LdIdx,
-						LdSize: ldConf.Length,
+						LdSize: uint64(ldConf.ExtentSize) * uint64(ldConf.Cnt),
 					}
 				}
 				grpConfList[i] = &pbnd.GrpConf{
