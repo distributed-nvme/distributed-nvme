@@ -173,6 +173,10 @@ func (cli *client) getDn(args *dnGetArgsStruct) string {
 		req.Name = &pbcp.GetDnRequest_GrpcTarget{
 			GrpcTarget: args.grpcTarget,
 		}
+	} else {
+		req.Name = &pbcp.GetDnRequest_DnId{
+			DnId: args.dnId,
+		}
 	}
 	reply, err := cli.c.GetDn(cli.ctx, req)
 	if err != nil {
