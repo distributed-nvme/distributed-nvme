@@ -92,7 +92,7 @@ func init() {
 	cnDeleteCmd.Flags().StringVarP(
 		&cnDeleteArgs.cnId, "cn-id", "", "", "cn id",
 	)
-	cnCreateCmd.MarkFlagRequired("cn-id")
+	cnDeleteCmd.MarkFlagRequired("cn-id")
 
 	cnCmd.AddCommand(cnDeleteCmd)
 
@@ -104,7 +104,7 @@ func init() {
 		&cnGetArgs.cnId, "cn-id", "", "", "cn id",
 	)
 
-	cnCmd.AddCommand(cnDeleteCmd)
+	cnCmd.AddCommand(cnGetCmd)
 }
 
 func (cli *client) createCn(args *cnCreateArgsStruct) string {

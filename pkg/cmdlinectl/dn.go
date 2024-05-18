@@ -98,7 +98,7 @@ func init() {
 	dnDeleteCmd.Flags().StringVarP(
 		&dnDeleteArgs.dnId, "dn-id", "", "", "dn id",
 	)
-	dnCreateCmd.MarkFlagRequired("dn-id")
+	dnDeleteCmd.MarkFlagRequired("dn-id")
 
 	dnCmd.AddCommand(dnDeleteCmd)
 
@@ -110,7 +110,7 @@ func init() {
 		&dnGetArgs.dnId, "dn-id", "", "", "dn id",
 	)
 
-	dnCmd.AddCommand(dnDeleteCmd)
+	dnCmd.AddCommand(dnGetCmd)
 }
 
 func (cli *client) createDn(args *dnCreateArgsStruct) string {
