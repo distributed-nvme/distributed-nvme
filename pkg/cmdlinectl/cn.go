@@ -60,24 +60,20 @@ func init() {
 	cnCreateCmd.MarkFlagRequired("grpc-target")
 
 	cnCreateCmd.Flags().StringVarP(
-		&cnCreateArgs.trType, "tr-type", "", "", "tr type",
+		&cnCreateArgs.trType, "tr-type", "", "tcp", "tr type",
 	)
-	cnCreateCmd.MarkFlagRequired("tr-type")
 
 	cnCreateCmd.Flags().StringVarP(
-		&cnCreateArgs.adrFam, "adr-fam", "", "", "ard fam",
+		&cnCreateArgs.adrFam, "adr-fam", "", "ipv4", "ard fam",
 	)
-	cnCreateCmd.MarkFlagRequired("adr-fam")
 
 	cnCreateCmd.Flags().StringVarP(
-		&cnCreateArgs.trAddr, "tr-addr", "", "", "tr addr",
+		&cnCreateArgs.trAddr, "tr-addr", "", "127.0.0.1", "tr addr",
 	)
-	cnCreateCmd.MarkFlagRequired("tr-addr")
 
 	cnCreateCmd.Flags().StringVarP(
-		&cnCreateArgs.trSvcId, "tr-svc-id", "", "", "tr svc id",
+		&cnCreateArgs.trSvcId, "tr-svc-id", "", "4430", "tr svc id",
 	)
-	cnCreateCmd.MarkFlagRequired("tr-svc-id")
 
 	cnCreateCmd.Flags().BoolVarP(
 		&cnCreateArgs.online, "online", "", true, "online",

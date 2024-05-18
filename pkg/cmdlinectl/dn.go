@@ -66,24 +66,20 @@ func init() {
 	dnCreateCmd.MarkFlagRequired("dev-path")
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.trType, "tr-type", "", "", "tr type",
+		&dnCreateArgs.trType, "tr-type", "", "tpc", "tr type",
 	)
-	dnCreateCmd.MarkFlagRequired("tr-type")
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.adrFam, "adr-fam", "", "", "ard fam",
+		&dnCreateArgs.adrFam, "adr-fam", "", "ipv4", "ard fam",
 	)
-	dnCreateCmd.MarkFlagRequired("adr-fam")
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.trAddr, "tr-addr", "", "", "tr addr",
+		&dnCreateArgs.trAddr, "tr-addr", "", "127.0.0.1", "tr addr",
 	)
-	dnCreateCmd.MarkFlagRequired("tr-addr")
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.trSvcId, "tr-svc-id", "", "", "tr svc id",
+		&dnCreateArgs.trSvcId, "tr-svc-id", "", "4420", "tr svc id",
 	)
-	dnCreateCmd.MarkFlagRequired("tr-svc-id")
 
 	dnCreateCmd.Flags().BoolVarP(
 		&dnCreateArgs.online, "online", "", true, "online",
