@@ -887,9 +887,19 @@ func (exApi *exApiServer) CreateVol(
 	dnExcludeIdList := make([]string, 0)
 	cnExcludeIdList := make([]string, 0)
 
+	dnDistinguishKey := req.DnDistinguishKey
+	if len(dnDistinguishKey) == 0 {
+		dnDistinguishKey = constants.DefaultTagKey
+	}
+
+	cnDistinguishKey := req.CnDistinguishKey
+	if len(cnDistinguishKey) == 0 {
+		cnDistinguishKey = constants.DefaultTagKey
+	}
+
 	for i := 0; i < constants.AllocateRetryCntDefault; i++ {
 		allocateDnReq := &pbcp.AllocateDnRequest{
-			DistinguishKey: req.DnDistinguishKey,
+			DistinguishKey: dnDistinguishKey,
 			DnCnt:          uint32(dnCnt),
 			DataExtentCnt:  dataExtentCnt,
 			ExcludeIdList:  dnExcludeIdList,
@@ -961,7 +971,7 @@ func (exApi *exApiServer) CreateVol(
 		}
 
 		allocateCnReq := &pbcp.AllocateCnRequest{
-			DistinguishKey: req.CnDistinguishKey,
+			DistinguishKey: cnDistinguishKey,
 			CnCnt:          req.CntlrCnt,
 			ExcludeIdList:  cnExcludeIdList,
 		}

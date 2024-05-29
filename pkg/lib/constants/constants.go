@@ -144,4 +144,6 @@ const (
 
 	AllocateRetryCntDefault = 3
 	NsBitSizeDefault        = 4096
+
+	DefaultTagKey = "GrpcTarget"
 )

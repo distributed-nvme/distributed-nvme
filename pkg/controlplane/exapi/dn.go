@@ -133,8 +133,14 @@ func (exApi *exApiServer) CreateDn(
 	metaBaseAddr := uint64(0)
 	dataBaseAddr := metaBaseAddr + uint64(metaExtentCnt)*(1<<cluster.MetaExtentSizeShift)
 
+	tag := &pbcp.Tag{
+		Key:   constants.DefaultTagKey,
+		Value: req.GrpcTarget,
+	}
+	tagList := append(req.TagList, tag)
+
 	dnConf := &pbcp.DiskNodeConf{
-		TagList: req.TagList,
+		TagList: tagList,
 		GeneralConf: &pbcp.DnGeneralConf{
 			GrpcTarget: req.GrpcTarget,
 			Online:     req.Online,

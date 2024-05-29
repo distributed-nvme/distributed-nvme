@@ -20,8 +20,14 @@ func (exApi *exApiServer) CreateCn(
 ) (*pbcp.CreateCnReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 
+	tag := &pbcp.Tag{
+		Key:   constants.DefaultTagKey,
+		Value: req.GrpcTarget,
+	}
+	tagList := append(req.TagList, tag)
+
 	cnConf := &pbcp.ControllerNodeConf{
-		TagList: req.TagList,
+		TagList: tagList,
 		GeneralConf: &pbcp.CnGeneralConf{
 			GrpcTarget: req.GrpcTarget,
 			Online:     req.Online,
