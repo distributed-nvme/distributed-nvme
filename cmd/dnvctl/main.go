@@ -1,4 +1,4 @@
-package dnvctl
+package main
 
 import (
 	"github.com/distributed-nvme/distributed-nvme/pkg/cmdlinectl"
