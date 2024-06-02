@@ -251,7 +251,7 @@ func (swkr *shardWorker) watch() {
 			pch.Ctx,
 			shardPrefix,
 			clientv3.WithPrefix(),
-			clientv3.WithRev(revision),
+			clientv3.WithRev(revision+1),
 		)
 
 		select {
@@ -271,7 +271,7 @@ func (swkr *shardWorker) watch() {
 				}
 			}
 		case <-pch.Ctx.Done():
-			break
+			return
 		}
 	}
 }
@@ -475,15 +475,16 @@ func (mwkr *memberWorker) asyncRun() {
 	if err != nil {
 		mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 	}
+	mwkr.pch.Logger.Info("First sms: %v", sms)
 	shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
-	mwkr.pch.Logger.Info("shardMap: %v", shardMap)
+	earlyBreak := false
 
 	for {
 		memberCh := etcdCli.Watch(
 			mwkr.pch.Ctx,
 			memberPrefix,
 			clientv3.WithPrefix(),
-			clientv3.WithRev(sms.GetRevision()),
+			clientv3.WithRev(sms.GetRevision()+1),
 		)
 		select {
 		case <-memberCh:
@@ -496,16 +497,28 @@ func (mwkr *memberWorker) asyncRun() {
 			if err != nil {
 				mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 			}
+			mwkr.pch.Logger.Info("Early sms: %v", sms)
 			shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
 		case <-mwkr.pch.Ctx.Done():
+			mwkr.pch.Logger.Info("Early exit")
 			return
 		case <-mwkr.worker.getInitTrigger():
+			mwkr.pch.Logger.Info("getInitTrigger")
+			earlyBreak = true
 			break
 		case <-time.After(constants.ShardInitWaitTime):
+			mwkr.pch.Logger.Info("After %d", constants.ShardInitWaitTime)
+			earlyBreak = true
+			break
+		}
+
+		if earlyBreak {
 			break
 		}
 	}
 
+	mwkr.pch.Logger.Info("Main loop")
+	normalBreak := false
 	for {
 		toBeCreated := make([]*shardWorker, 0)
 		toBeDeleted := make([]*shardWorker, 0)
@@ -540,7 +553,7 @@ func (mwkr *memberWorker) asyncRun() {
 			mwkr.pch.Ctx,
 			memberPrefix,
 			clientv3.WithPrefix(),
-			clientv3.WithRev(sms.GetRevision()),
+			clientv3.WithRev(sms.GetRevision()+1),
 		)
 
 		select {
@@ -554,6 +567,7 @@ func (mwkr *memberWorker) asyncRun() {
 			if err != nil {
 				mwkr.pch.Logger.Fatal("NewShardMemberSummary err: %v", err)
 			}
+			mwkr.pch.Logger.Info("Normal sms: %v", sms)
 			shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
 		case <-time.After(delay):
 			for _, swkr := range toBeDeleted {
@@ -563,7 +577,14 @@ func (mwkr *memberWorker) asyncRun() {
 				swkr.wait()
 				delete(shardIdToWorker, swkr.shardId)
 			}
+			mwkr.pch.Logger.Info("Normal after %d", delay)
 		case <-mwkr.pch.Ctx.Done():
+			mwkr.pch.Logger.Info("Normal break")
+			normalBreak = true
+			break
+		}
+
+		if normalBreak {
 			break
 		}
 	}

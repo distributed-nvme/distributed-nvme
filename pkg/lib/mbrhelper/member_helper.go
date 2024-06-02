@@ -137,13 +137,20 @@ func RegisterMember(
 		etcdCli.Revoke(revokeCtx, resp.ID)
 	}
 
-	if _, err := etcdCli.KeepAlive(
+	ch, err := etcdCli.KeepAlive(
 		pch.Ctx,
 		resp.ID,
-	); err != nil {
+	)
+	if err != nil {
 		revokeFun()
 		return nil, err
 	}
+
+	go func() {
+		for {
+			<-ch
+		}
+	}()
 
 	key := fmt.Sprintf("%s/%s", prefix, grpcTarget)
 	if _, err := etcdCli.Put(
