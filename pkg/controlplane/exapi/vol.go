@@ -877,6 +877,34 @@ func (exApi *exApiServer) CreateVol(
 ) (*pbcp.CreateVolReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 
+	session, err := concurrency.NewSession(exApi.etcdCli,
+		concurrency.WithTTL(constants.AllocLockTTL))
+	if err != nil {
+		pch.Logger.Error("Create session err: %v", err)
+		return &pbcp.CreateVolReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReplyCode: constants.ReplyCodeInternalErr,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	defer session.Close()
+	mutex := concurrency.NewMutex(session, exApi.kf.AllocLockPath())
+	if err = mutex.Lock(ctx); err != nil {
+		pch.Logger.Error("Lock mutex err: %v", err)
+		return &pbcp.CreateVolReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReplyCode: constants.ReplyCodeInternalErr,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	defer func() {
+		if err := mutex.Unlock(ctx); err != nil {
+			pch.Logger.Error("Unlock mutex err: %v", err)
+		}
+	}()
+
 	legCnt := uint64(req.CntlrCnt * req.LegPerCntlr)
 	dnCnt := legCnt * 2
 	size := (req.Size + legCnt - 1) / legCnt
@@ -1104,6 +1132,34 @@ func (exApi *exApiServer) DeleteVol(
 	req *pbcp.DeleteVolRequest,
 ) (*pbcp.DeleteVolReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
+
+	session, err := concurrency.NewSession(exApi.etcdCli,
+		concurrency.WithTTL(constants.AllocLockTTL))
+	if err != nil {
+		pch.Logger.Error("Create session err: %v", err)
+		return &pbcp.DeleteVolReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReplyCode: constants.ReplyCodeInternalErr,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	defer session.Close()
+	mutex := concurrency.NewMutex(session, exApi.kf.AllocLockPath())
+	if err = mutex.Lock(ctx); err != nil {
+		pch.Logger.Error("Lock mutex err: %v", err)
+		return &pbcp.DeleteVolReply{
+			ReplyInfo: &pbcp.ReplyInfo{
+				ReplyCode: constants.ReplyCodeInternalErr,
+				ReplyMsg:  err.Error(),
+			},
+		}, nil
+	}
+	defer func() {
+		if err := mutex.Unlock(ctx); err != nil {
+			pch.Logger.Error("Unlock mutex err: %v", err)
+		}
+	}()
 
 	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
 	nameToId := &pbcp.NameToId{}

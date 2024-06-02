@@ -120,6 +120,10 @@ func (kf *KeyFmt) SpMemberPrefix() string {
 	return fmt.Sprintf("/%s/sp_member", kf.prefix)
 }
 
+func (kf *KeyFmt) AllocLockPath() string {
+	return fmt.Sprintf("/%s/alloc_lock", kf.prefix)
+}
+
 func NewKeyFmt(prefix string) *KeyFmt {
 	return &KeyFmt{
 		prefix: prefix,

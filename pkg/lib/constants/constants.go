@@ -38,6 +38,7 @@ const (
 	RollbackTimeout     = 10 * time.Second
 	// GrantTTL is in second by default
 	GrantTTLDefault = 10
+	AllocLockTTL    = 10
 
 	ShardWorkerDelayDefault = 1 * time.Second
 
