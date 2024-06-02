@@ -15,6 +15,11 @@ ETCD_BIN=$ROOT_DIR/bin/linux_amd64/etcd
 sudo rm -rf $WORK_DIR
 mkdir -p $WORK_DIR
 
+dd if=/dev/zero of=$WORK_DIR/dn0.img bs=1M count=1024
+dd if=/dev/zero of=$WORK_DIR/dn1.img bs=1M count=1024
+sudo losetup /dev/loop240 $WORK_DIR/dn0.img
+sudo losetup /dev/loop241 $WORK_DIR/dn1.img
+
 echo "launch etcd"
 $ETCD_BIN --listen-client-urls "http://localhost:$ETCD_PORT" \
           --advertise-client-urls "http://localhost:$ETCD_PORT" \
@@ -59,3 +64,19 @@ echo "launch api server"
 $BIN_DIR/dnvapi --etcd-endpoints "localhost:$ETCD_PORT" \
                 --grpc-network tcp --grpc-address "127.0.0.1:9520" \
                 > $WORK_DIR/apiserver.log 2>&1 &
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster create)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster delete)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
+verify_rsp_code "${rsp}" "1002"
+
+cleanup
+
+echo "done"

@@ -60,3 +60,23 @@ function cleanup_check() {
     losetup /dev/loop241 > /dev/null 2>&1 && echo "loop241 still exist"
     set -e
 }
+
+function verify_rsp_msg() {
+    rsp=$1
+    target_msg=$2
+    msg=$(echo $rsp | jq -rM '.reply_info.reply_msg')
+    if [ "$msg" != "$target_msg" ]; then
+        echo "Msg mismatch"
+        exit 1;
+    fi
+}
+
+function verify_rsp_code() {
+    rsp=$1
+    target_code=$2
+    code=$(echo $rsp | jq -rM '.reply_info.reply_code')
+    if [ "$code" != "$target_code" ]; then
+        echo "Code mismatch"
+        exit 1;
+    fi
+}
