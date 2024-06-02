@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
@@ -74,7 +75,10 @@ func (cli *client) show(output string) {
 }
 
 func newClient(args *rootArgsStruct) *client {
-	conn, err := grpc.Dial(args.address)
+	conn, err := grpc.Dial(
+		args.address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		gLogger.Fatal("Connection err: %v %v", args, err)
 	}

@@ -266,12 +266,7 @@ func (exApi *exApiServer) GetCluster(
 			MetaExtentSizeShift:   cluster.MetaExtentSizeShift,
 			MetaExtentPerSetShift: cluster.MetaExtentPerSetShift,
 			ExtentRatioShift:      cluster.ExtentRatioShift,
-			QosUnit: &pbcp.QosFields{
-				Rbps:  cluster.QosUnit.Rbps,
-				Wbps:  cluster.QosUnit.Wbps,
-				Riops: cluster.QosUnit.Riops,
-				Wiops: cluster.QosUnit.Wiops,
-			},
+			QosUnit:               cluster.QosUnit,
 		},
 	}, nil
 }
