@@ -65,17 +65,27 @@ $BIN_DIR/dnvapi --etcd-endpoints "localhost:$ETCD_PORT" \
                 --grpc-network tcp --grpc-address "127.0.0.1:9520" \
                 > $WORK_DIR/apiserver.log 2>&1 &
 
+sleep 1
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster create)
 verify_rsp_msg "${rsp}" "succeed"
 
+sleep 1
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
 verify_rsp_msg "${rsp}" "succeed"
+
+sleep 1
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster delete)
 verify_rsp_msg "${rsp}" "succeed"
 
+sleep 1
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
 verify_rsp_code "${rsp}" "1002"
+
+sleep 1
 
 cleanup
 
