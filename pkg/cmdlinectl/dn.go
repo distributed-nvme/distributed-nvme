@@ -70,7 +70,7 @@ func init() {
 	)
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.adrFam, "adr-fam", "", "ipv4", "ard fam",
+		&dnCreateArgs.adrFam, "adr-fam", "", "ipv4", "adr fam",
 	)
 
 	dnCreateCmd.Flags().StringVarP(

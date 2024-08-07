@@ -567,6 +567,7 @@ func (exApi *exApiServer) GetDn(
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+		DnId:   dnId,
 		DnConf: dnConf,
 		DnInfo: dnInfo,
 	}, nil

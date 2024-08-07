@@ -583,8 +583,9 @@ message GetDnRequest {
 
 message GetDnReply {
   ReplyInfo reply_info = 1;
-  DiskNodeConf dn_conf = 2;
-  DiskNodeInfo dn_info = 3;
+  string dn_id = 2;
+  DiskNodeConf dn_conf = 3;
+  DiskNodeInfo dn_info = 4;
 }
 
 message ListDnRequest {
