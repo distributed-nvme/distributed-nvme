@@ -23,6 +23,9 @@ func extentInitCalc(
 	size uint64,
 	extentSizeShift, extentPerSetShift uint32,
 ) ([]byte, []uint32, uint32) {
+	if (size >> extentSizeShift) == 0 {
+		size = 1 << extentSizeShift
+	}
 	extentCntTotal := size >> extentSizeShift
 	setCntFull := extentCntTotal >> extentPerSetShift
 	setCntPartial := 0

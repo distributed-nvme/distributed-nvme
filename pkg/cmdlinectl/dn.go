@@ -110,13 +110,16 @@ func init() {
 }
 
 func (cli *client) createDn(args *dnCreateArgsStruct) string {
-	tags := strings.Split(args.tags, ",")
-	tagList := make([]*pbcp.Tag, len(tags))
-	for i, tag := range tags {
-		kv := strings.Split(tag, ":")
-		tagList[i] = &pbcp.Tag{
-			Key:   kv[0],
-			Value: kv[1],
+	tagList := make([]*pbcp.Tag, 0)
+	if args.tags != "" {
+		tags := strings.Split(args.tags, ",")
+		tagList = make([]*pbcp.Tag, len(tags))
+		for i, tag := range tags {
+			kv := strings.Split(tag, ":")
+			tagList[i] = &pbcp.Tag{
+				Key:   kv[0],
+				Value: kv[1],
+			}
 		}
 	}
 	req := &pbcp.CreateDnRequest{

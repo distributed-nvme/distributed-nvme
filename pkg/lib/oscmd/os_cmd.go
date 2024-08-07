@@ -1487,7 +1487,8 @@ func (oc *OsCommand) BlkGetSize(
 	if err != nil {
 		return 0, err
 	}
-	size, err := strconv.ParseUint(stdout, 10, 64)
+	cmdOut := strings.TrimSuffix(stdout, "\n")
+	size, err := strconv.ParseUint(cmdOut, 10, 64)
 	return size, err
 }
 

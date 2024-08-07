@@ -79,7 +79,9 @@ func (local *LocalClient) SetDnLocal(
 ) error {
 	local.dnMu.Lock()
 	defer local.dnMu.Unlock()
-	local.dnMap[dnLocal.DnId] = dnLocal
+	if dnLocal != nil {
+		local.dnMap[dnLocal.DnId] = dnLocal
+	}
 	return nil
 }
 
@@ -157,7 +159,9 @@ func (local *LocalClient) SetCnLocal(
 ) error {
 	local.cnMu.Lock()
 	defer local.cnMu.Unlock()
-	local.cnMap[cnLocal.CnId] = cnLocal
+	if cnLocal != nil {
+		local.cnMap[cnLocal.CnId] = cnLocal
+	}
 	return nil
 }
 

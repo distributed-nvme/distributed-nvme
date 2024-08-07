@@ -28,15 +28,15 @@ $ETCD_BIN --listen-client-urls "http://localhost:$ETCD_PORT" \
           > $WORK_DIR/etcd0.log 2>&1 &
 
 echo "launch dn agent 0"
-$BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9020" --role dn \
+sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9020" --role dn \
                   > $WORK_DIR/dn_agent_0.log 2>&1 &
 
 echo "launch dn agent 1"
-$BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9021" --role dn \
+sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9021" --role dn \
                   > $WORK_DIR/dn_agent_1.log 2>&1 &
 
 echo "launch cn agent"
-$BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9120" --role cn \
+sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9120" --role cn \
                   > $WORK_DIR/cn_agent.log 2>&1 &
 
 echo "launch dn worker"
@@ -70,22 +70,34 @@ sleep 1
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster create)
 verify_rsp_msg "${rsp}" "succeed"
 
-sleep 1
-
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
 verify_rsp_msg "${rsp}" "succeed"
 
-sleep 1
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn create --grpc-target 127.0.0.1:9020 --dev-path /dev/loop240)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn get --grpc-target 127.0.0.1:9020)
+verify_rsp_msg "${rsp}" "succeed"
+dn_id_0=$(echo $rsp | jq -rM '.dn_id')
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn create --grpc-target 127.0.0.1:9021 --dev-path /dev/loop241)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn get --grpc-target 127.0.0.1:9021)
+verify_rsp_msg "${rsp}" "succeed"
+dn_id_1=$(echo $rsp | jq -rM '.dn_id')
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn delete --dn-id $dn_id_0)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn delete --dn-id $dn_id_1)
+verify_rsp_msg "${rsp}" "succeed"
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster delete)
 verify_rsp_msg "${rsp}" "succeed"
 
-sleep 1
-
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cluster get)
 verify_rsp_code "${rsp}" "1002"
-
-sleep 1
 
 cleanup
 
