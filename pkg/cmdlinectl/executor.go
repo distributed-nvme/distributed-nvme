@@ -42,6 +42,7 @@ func init() {
 	rootCmd.AddCommand(clusterCmd)
 	rootCmd.AddCommand(dnCmd)
 	rootCmd.AddCommand(cnCmd)
+	rootCmd.AddCommand(volCmd)
 }
 
 func Execute() {

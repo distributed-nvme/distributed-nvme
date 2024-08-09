@@ -94,6 +94,15 @@ rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn get --grpc-target 127.0.0.1:91
 verify_rsp_msg "${rsp}" "succeed"
 cn_id=$(echo $rsp | jq -rM '.cn_id')
 
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size 1048576)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol delete --vol-name vol0)
+verify_rsp_msg "${rsp}" "succeed"
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn delete --cn-id $cn_id)
 verify_rsp_msg "${rsp}" "succeed"
 

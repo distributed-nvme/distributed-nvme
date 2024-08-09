@@ -49,6 +49,11 @@ func (exApi *exApiServer) tryToCreateVol(
 	dnValueToId map[string]string,
 	cnValueToId map[string]string,
 ) ([]string, []string, error) {
+	pch.Logger.Debug("metaExtentSize=%v", metaExtentSize)
+	pch.Logger.Debug("dataExtentSize=%v", dataExtentSize)
+	pch.Logger.Debug("dataExtentCnt=%v", dataExtentCnt)
+	pch.Logger.Debug("dnValueToId=%v", dnValueToId)
+	pch.Logger.Debug("cnValueToId=%v", cnValueToId)
 	legCnt := int(req.CntlrCnt * req.LegPerCntlr)
 	dnCnt := legCnt * 2
 	cnCnt := int(req.CntlrCnt)
@@ -877,6 +882,8 @@ func (exApi *exApiServer) CreateVol(
 ) (*pbcp.CreateVolReply, error) {
 	pch := ctxhelper.GetPerCtxHelper(ctx)
 
+	pch.Logger.Debug("CreateVol: %v", req)
+
 	session, err := concurrency.NewSession(exApi.etcdCli,
 		concurrency.WithTTL(constants.AllocLockTTL))
 	if err != nil {
@@ -926,6 +933,7 @@ func (exApi *exApiServer) CreateVol(
 	}
 
 	for i := 0; i < constants.AllocateRetryCntDefault; i++ {
+		pch.Logger.Debug("AllocateRetryCnt: %v", i)
 		allocateDnReq := &pbcp.AllocateDnRequest{
 			DistinguishKey: dnDistinguishKey,
 			DnCnt:          uint32(dnCnt),
@@ -947,6 +955,7 @@ func (exApi *exApiServer) CreateVol(
 		}
 		dnValueToId := make(map[string]string, 0)
 		for _, grpcTarget := range dnwkrTargetList {
+			pch.Logger.Debug("grpcTarget: %v", grpcTarget)
 			conn, err := grpc.DialContext(
 				ctx,
 				grpcTarget,
