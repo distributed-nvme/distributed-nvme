@@ -642,8 +642,9 @@ message GetCnRequest {
 
 message GetCnReply {
   ReplyInfo reply_info = 1;
-  ControllerNodeConf cn_conf = 2;
-  ControllerNodeInfo cn_info = 3;
+  string cn_id = 2;
+  ControllerNodeConf cn_conf = 3;
+  ControllerNodeInfo cn_info = 4;
 }
 
 message CreateVolRequest {

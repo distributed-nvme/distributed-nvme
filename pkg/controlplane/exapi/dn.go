@@ -216,6 +216,8 @@ func (exApi *exApiServer) CreateDn(
 
 	nameToIdKey := exApi.kf.NameToIdEntityKey(req.GrpcTarget)
 
+	dnId := ""
+
 	apply := func(stm concurrency.STM) error {
 		val := []byte(stm.Get(dnGlobalKey))
 		if len(val) == 0 {
@@ -266,7 +268,7 @@ func (exApi *exApiServer) CreateDn(
 		stm.Put(dnGlobalKey, dnGlobalStr)
 
 		dnIdNum := (uint64(idx) << (constants.ShardMove)) | counter
-		dnId := fmt.Sprintf("%016x", dnIdNum)
+		dnId = fmt.Sprintf("%016x", dnIdNum)
 
 		dnConfKey := exApi.kf.DnConfEntityKey(dnId)
 		if val := stm.Get(dnConfKey); len(val) != 0 {
@@ -330,11 +332,16 @@ func (exApi *exApiServer) CreateDn(
 		}
 	}
 
+	if dnId == "" {
+		panic("Empty dnId")
+	}
+
 	return &pbcp.CreateDnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+		DnId: dnId,
 	}, nil
 }
 

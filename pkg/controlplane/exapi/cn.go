@@ -25,6 +25,7 @@ func (exApi *exApiServer) CreateCn(
 		Value: req.GrpcTarget,
 	}
 	tagList := append(req.TagList, tag)
+	cnId := ""
 
 	cnConf := &pbcp.ControllerNodeConf{
 		TagList: tagList,
@@ -139,7 +140,7 @@ func (exApi *exApiServer) CreateCn(
 		stm.Put(cnGlobalKey, cnGlobalStr)
 
 		cnIdNum := (uint64(idx) << (constants.ShardMove)) | counter
-		cnId := fmt.Sprintf("%016x", cnIdNum)
+		cnId = fmt.Sprintf("%016x", cnIdNum)
 
 		cnConfKey := exApi.kf.CnConfEntityKey(cnId)
 		if val := stm.Get(cnConfKey); len(val) != 0 {
@@ -203,11 +204,16 @@ func (exApi *exApiServer) CreateCn(
 		}
 	}
 
+	if cnId == "" {
+		panic("Empty cnId")
+	}
+
 	return &pbcp.CreateCnReply{
 		ReplyInfo: &pbcp.ReplyInfo{
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+		CnId: cnId,
 	}, nil
 }
 
@@ -440,6 +446,7 @@ func (exApi *exApiServer) GetCn(
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+		CnId:   cnId,
 		CnConf: cnConf,
 		CnInfo: cnInfo,
 	}, nil

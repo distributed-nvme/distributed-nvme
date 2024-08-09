@@ -87,6 +87,16 @@ rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn get --grpc-target 127.0.0.1:90
 verify_rsp_msg "${rsp}" "succeed"
 dn_id_1=$(echo $rsp | jq -rM '.dn_id')
 
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn create --grpc-target 127.0.0.1:9120)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn get --grpc-target 127.0.0.1:9120)
+verify_rsp_msg "${rsp}" "succeed"
+cn_id=$(echo $rsp | jq -rM '.cn_id')
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn delete --cn-id $cn_id)
+verify_rsp_msg "${rsp}" "succeed"
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 dn delete --dn-id $dn_id_0)
 verify_rsp_msg "${rsp}" "succeed"
 
