@@ -2,7 +2,7 @@
 
 set -ex
 
-trap 'echo -n $(date)' DEBUG
+trap 'echo $(date)' DEBUG
 
 CURR_DIR=$(readlink -f $(dirname $0))
 source $CURR_DIR/conf.sh
@@ -28,15 +28,15 @@ $ETCD_BIN --listen-client-urls "http://localhost:$ETCD_PORT" \
           > $WORK_DIR/etcd0.log 2>&1 &
 
 echo "launch dn agent 0"
-sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9020" --role dn \
+sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9020" --role dn \
                   > $WORK_DIR/dn_agent_0.log 2>&1 &
 
 echo "launch dn agent 1"
-sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9021" --role dn \
+sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9021" --role dn \
                   > $WORK_DIR/dn_agent_1.log 2>&1 &
 
 echo "launch cn agent"
-sudo $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9120" --role cn \
+sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9120" --role cn \
                   > $WORK_DIR/cn_agent.log 2>&1 &
 
 echo "launch dn worker"

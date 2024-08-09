@@ -29,7 +29,7 @@ function cleanup() {
     echo "stop dnvworker"
     ps -f -C dnvworker > /dev/null && killall dnvworker
     echo "stop dnvagent"
-    ps -f -C dnvagent > /dev/null && killall dnvagent
+    ps -f -C dnvagent > /dev/null && sudo killall dnvagent
     echo "stop etcd"
     ps -f -C etcd > /dev/null && killall etcd
     echo "stop loop devices"
