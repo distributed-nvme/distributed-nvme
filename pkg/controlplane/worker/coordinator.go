@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
@@ -36,7 +37,10 @@ func (gcCache *grpcConnCache) get(
 		item.refCnt++
 		return item.conn, nil
 	}
-	conn, err := grpc.Dial(grpcTarget)
+	conn, err := grpc.Dial(
+		grpcTarget,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -462,9 +466,10 @@ func (mwkr *memberWorker) asyncRun() {
 	}
 	defer revokeFun()
 
-	var shardIdToWorker map[string]*shardWorker
 	var sms *mbrhelper.ShardMemberSummary
 	var shardMap map[string]bool
+
+	shardIdToWorker := make(map[string]*shardWorker)
 
 	sms, err = mbrhelper.NewShardMemberSummary(
 		etcdCli,
