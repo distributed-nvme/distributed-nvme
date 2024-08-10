@@ -152,7 +152,7 @@ func RegisterMember(
 		}
 	}()
 
-	key := fmt.Sprintf("%s/%s", prefix, grpcTarget)
+	key := fmt.Sprintf("%s%s", prefix, grpcTarget)
 	if _, err := etcdCli.Put(
 		pch.Ctx,
 		key,

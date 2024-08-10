@@ -230,7 +230,7 @@ func (oc *OsCommand) runOsCmd(
 ) (string, string, error) {
 	pch.Logger.Info("OsCommand name: [%v]", name)
 	pch.Logger.Info("OsCommand args: [%v]", args)
-	pch.Logger.Info("OsCommand stdin: [%v]")
+	pch.Logger.Info("OsCommand stdin: [%v]", stdin)
 	cmd := exec.CommandContext(pch.Ctx, name, args...)
 	var stdoutBuilder strings.Builder
 	var stderrBuilder strings.Builder
