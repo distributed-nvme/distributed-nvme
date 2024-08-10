@@ -65,7 +65,7 @@ func buildPerCtxHelper(ctx context.Context, method string) *PerCtxHelper {
 	if logger == nil {
 		traceId = uuid.New().String()
 		prefix := fmt.Sprintf("%s|%s ", method, traceId)
-		logger := prefixlog.NewPrefixLogger(prefix)
+		logger = prefixlog.NewPrefixLogger(prefix)
 		logger.Info("No traceId in metadata, create a new one")
 	}
 
@@ -113,7 +113,7 @@ func UnaryClientPerCtxHelperInterceptor(
 	if err != nil {
 		pch.Logger.Error("Client side err: %v", err)
 	} else {
-		pch.Logger.Info("Client sdier reply: %v")
+		pch.Logger.Info("Client side reply: %v", reply)
 	}
 	return err
 }
