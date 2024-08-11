@@ -1,6 +1,8 @@
 package restree
 
 import (
+	"fmt"
+
 	rbt "github.com/emirpasic/gods/v2/trees/redblacktree"
 )
 
@@ -105,9 +107,10 @@ func iterate(
 		cntIterator := cntTree.Iterator()
 		for cntIterator.Next() {
 			resMap := cntIterator.Value()
+			fmt.Printf("resMap: %v\n", resMap)
 			for _, res := range resMap {
-				ret := apply(res)
-				if !ret {
+				stop := apply(res)
+				if stop {
 					return
 				}
 			}
@@ -129,8 +132,8 @@ func (rt *ResourceTree) IterateAt(qos uint32, apply func(res Resource) bool) {
 	for cntIterator.Next() {
 		resMap := cntIterator.Value()
 		for _, res := range resMap {
-			ret := apply(res)
-			if !ret {
+			stop := apply(res)
+			if stop {
 				return
 			}
 		}

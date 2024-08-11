@@ -109,15 +109,15 @@ func (kf *KeyFmt) SpLockPath() string {
 }
 
 func (kf *KeyFmt) DnMemberPrefix() string {
-	return fmt.Sprintf("/%s/dn_member/", kf.prefix)
+	return fmt.Sprintf("/%s/dn_member", kf.prefix)
 }
 
 func (kf *KeyFmt) CnMemberPrefix() string {
-	return fmt.Sprintf("/%s/cn_member/", kf.prefix)
+	return fmt.Sprintf("/%s/cn_member", kf.prefix)
 }
 
 func (kf *KeyFmt) SpMemberPrefix() string {
-	return fmt.Sprintf("/%s/sp_member/", kf.prefix)
+	return fmt.Sprintf("/%s/sp_member", kf.prefix)
 }
 
 func (kf *KeyFmt) AllocLockPath() string {

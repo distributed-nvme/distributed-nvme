@@ -330,6 +330,8 @@ func (dnwkr *dnWorkerServer) AllocateDn(
 	ctx context.Context,
 	req *pbcp.AllocateDnRequest,
 ) (*pbcp.AllocateDnReply, error) {
+	pch := ctxhelper.GetPerCtxHelper(ctx)
+	pch.Logger.Debug("AllocateDn")
 	dnwkr.mu.Lock()
 	defer dnwkr.mu.Unlock()
 
@@ -343,6 +345,7 @@ func (dnwkr *dnWorkerServer) AllocateDn(
 
 	apply := func(res restree.Resource) bool {
 		dnRes := res.(*dnResource)
+		pch.Logger.Debug("dnRes: %v", dnRes)
 
 		if _, ok := excludeMap[dnRes.dnId]; ok {
 			return false
@@ -379,11 +382,16 @@ func (dnwkr *dnWorkerServer) AllocateDn(
 			DnId:             dnRes.dnId,
 			DistinguishValue: value,
 		}
+		pch.Logger.Debug("Add item: %v", item)
 		dnItemList = append(dnItemList, item)
+		pch.Logger.Debug("dnItemList: %v", dnItemList)
+		pch.Logger.Debug("req.DnCnt: %v", req.DnCnt)
 		if len(dnItemList) < int(req.DnCnt) {
+			pch.Logger.Debug("No enough DNs yet")
 			return false
 		}
 
+		pch.Logger.Debug("Get enough DNs")
 		return true
 	}
 

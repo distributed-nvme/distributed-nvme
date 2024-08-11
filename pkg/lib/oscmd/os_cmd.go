@@ -265,15 +265,15 @@ func (oc *OsCommand) NvmetPortCreate(
 		return err
 	}
 
-	if err := writeFile(nvmetAdrFamPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetAdrFamPath(portNum), adrFam); err != nil {
 		return err
 	}
 
-	if err := writeFile(nvmetTrAddrPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetTrAddrPath(portNum), trAddr); err != nil {
 		return err
 	}
 
-	if err := writeFile(nvmetTrSvcIdPath(portNum), trType); err != nil {
+	if err := writeFile(nvmetTrSvcIdPath(portNum), trSvcId); err != nil {
 		return err
 	}
 

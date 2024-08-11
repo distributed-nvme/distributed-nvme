@@ -66,7 +66,7 @@ func init() {
 	dnCreateCmd.MarkFlagRequired("dev-path")
 
 	dnCreateCmd.Flags().StringVarP(
-		&dnCreateArgs.trType, "tr-type", "", "tpc", "tr type",
+		&dnCreateArgs.trType, "tr-type", "", "tcp", "tr type",
 	)
 
 	dnCreateCmd.Flags().StringVarP(

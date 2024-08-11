@@ -28,16 +28,27 @@ $ETCD_BIN --listen-client-urls "http://localhost:$ETCD_PORT" \
           > $WORK_DIR/etcd0.log 2>&1 &
 
 echo "launch dn agent 0"
-sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9020" --role dn \
-                  > $WORK_DIR/dn_agent_0.log 2>&1 &
+sudo --background $BIN_DIR/dnvagent \
+     --grpc-network tcp \
+     --grpc-address "127.0.0.1:9020" \
+     --role dn \
+     > $WORK_DIR/dn_agent_0.log 2>&1 &
+     
+                  
 
 echo "launch dn agent 1"
-sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9021" --role dn \
-                  > $WORK_DIR/dn_agent_1.log 2>&1 &
+sudo --background $BIN_DIR/dnvagent \
+     --grpc-network tcp \
+     --grpc-address "127.0.0.1:9021" \
+     --role dn \
+     > $WORK_DIR/dn_agent_1.log 2>&1 &
 
 echo "launch cn agent"
-sudo --background $BIN_DIR/dnvagent --grpc-network tcp --grpc-address "127.0.0.1:9120" --role cn \
-                  > $WORK_DIR/cn_agent.log 2>&1 &
+sudo --background $BIN_DIR/dnvagent \
+     --grpc-network tcp \
+     --grpc-address "127.0.0.1:9120" \
+     --role cn \
+     > $WORK_DIR/cn_agent.log 2>&1 &
 
 echo "launch dn worker"
 $BIN_DIR/dnvworker --etcd-endpoints "localhost:$ETCD_PORT" \
@@ -93,6 +104,8 @@ verify_rsp_msg "${rsp}" "succeed"
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn get --grpc-target 127.0.0.1:9120)
 verify_rsp_msg "${rsp}" "succeed"
 cn_id=$(echo $rsp | jq -rM '.cn_id')
+
+sleep 20
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size 1048576)
 verify_rsp_msg "${rsp}" "succeed"

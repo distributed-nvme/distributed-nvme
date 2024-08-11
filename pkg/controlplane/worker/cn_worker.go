@@ -237,6 +237,7 @@ func (cnwkr *cnWorkerServer) syncupCn(
 	fastRetry := false
 	for {
 		reply, err := client.SyncupCn(pch.Ctx, req)
+		cnwkr.updateCnInfo(pch, cnId, revision, reply, err)
 		if err == nil {
 			if reply.CnInfo.StatusInfo.Code == constants.StatusCodeSucceed {
 				return false

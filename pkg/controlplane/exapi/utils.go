@@ -87,9 +87,9 @@ type buddyNode struct {
 
 func getMaxCnt(bm *bitmap.Bitmap, start uint32, size uint32) uint32 {
 	nodeQueue := make([]*buddyNode, size)
-	for i := start; i < size; i++ {
+	for i := uint32(0); i < size; i++ {
 		var length uint32
-		if bm.Contains(start) {
+		if bm.Contains(i + start) {
 			length = 1
 		} else {
 			length = 0
@@ -177,7 +177,7 @@ func allocateLd(
 	for i := startBit; i < extentCnt; i++ {
 		bm.Set(i)
 	}
-	maxCnt := getMaxCnt(&bm, startBit, extentSetSize)
+	maxCnt := getMaxCnt(&bm, start, extentSetSize)
 	extentConf.ExtentSetBucket[targetIdx] = maxCnt
 	return startBit, extentCnt, nil
 }

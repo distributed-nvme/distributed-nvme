@@ -64,7 +64,7 @@ func NewShardMemberSummary(
 	for _, ev := range resp.Kvs {
 		pch.Logger.Info("member conf: %s %s", ev.Key, ev.Value)
 		keyStr := string(ev.Key)
-		grpcTarget := keyStr[len(prefix):]
+		grpcTarget := keyStr[len(prefix)+1:]
 		prioCode := string(ev.Value)
 		if len(prioCode) != constants.ShardCnt {
 			pch.Logger.Warning("Ingore invalid prioCode: %s %s", ev.Key, prioCode)
@@ -152,7 +152,7 @@ func RegisterMember(
 		}
 	}()
 
-	key := fmt.Sprintf("%s%s", prefix, grpcTarget)
+	key := fmt.Sprintf("%s/%s", prefix, grpcTarget)
 	if _, err := etcdCli.Put(
 		pch.Ctx,
 		key,
@@ -178,7 +178,7 @@ func GetAllMembers(
 	grpcTargetList := make([]string, 0)
 	for _, ev := range resp.Kvs {
 		keyStr := string(ev.Key)
-		grpcTarget := keyStr[len(prefix):]
+		grpcTarget := keyStr[len(prefix)+1:]
 		grpcTargetList = append(grpcTargetList, grpcTarget)
 	}
 	return grpcTargetList, nil

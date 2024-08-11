@@ -245,9 +245,10 @@ func (swkr *shardWorker) watch() {
 			continue
 		}
 		key := string(resp1.Kvs[0].Key)
-		resId := key[len(resPrefix):]
+		resId := key[len(resPrefix)+1:]
 		resBody := resp1.Kvs[0].Value
 		swkr.st.deleteAndCreate(resId, resBody, revision)
+		pch.Logger.Debug("deleteAndCreate: %v", resId)
 	}
 
 	for {
@@ -268,8 +269,10 @@ func (swkr *shardWorker) watch() {
 				switch ev.Type {
 				case clientv3.EventTypePut:
 					swkr.st.deleteAndCreate(resId, resBody, revision)
+					pch.Logger.Debug("deleteAndCreate: %v", resId)
 				case clientv3.EventTypeDelete:
 					swkr.st.deleteOnly(resId)
+					pch.Logger.Debug("deleteOnly: %v", resId)
 				default:
 					pch.Logger.Fatal("Unknow event type: %v", ev.Type)
 				}
@@ -290,6 +293,7 @@ func (swkr *shardWorker) process(
 	for resId, bAndR := range toBeCreated {
 		resBody := bAndR.resBody
 		revision := bAndR.revision
+		pch.Logger.Debug("addResRev: resId=%v revision=%v", resId, revision)
 		grpcTargetList, err := swkr.worker.addResRev(resId, resBody, revision)
 		if err != nil {
 			pch.Logger.Warning(
@@ -350,6 +354,7 @@ func (swkr *shardWorker) process(
 				)
 			}
 		}
+		pch.Logger.Debug("delResRev: resId=%v revision=%v", rwkr.resId, rwkr.revision)
 		err := swkr.worker.delResRev(rwkr.resId, rwkr.revision)
 		if err != nil {
 			pch.Logger.Fatal(
@@ -378,7 +383,7 @@ func (swkr *shardWorker) handle() {
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 
-	pch.Logger.Info("Handler")
+	pch.Logger.Debug("Handler")
 
 	resIdToWorker := make(map[string]*resWorker)
 	select {
@@ -448,7 +453,7 @@ type memberWorker struct {
 
 func (mwkr *memberWorker) asyncRun() {
 	defer mwkr.wg.Done()
-	mwkr.pch.Logger.Info("Run")
+	mwkr.pch.Logger.Debug("Run")
 
 	etcdCli := mwkr.worker.getEtcdCli()
 	memberPrefix := mwkr.worker.getMemberPrefix()
@@ -482,6 +487,8 @@ func (mwkr *memberWorker) asyncRun() {
 	}
 	mwkr.pch.Logger.Info("First sms: %v", sms)
 	shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
+	mwkr.pch.Logger.Debug("mwkr.grpcTarget: %v", mwkr.grpcTarget)
+	mwkr.pch.Logger.Debug("shardMap: %v", shardMap)
 	earlyBreak := false
 
 	for {
@@ -504,6 +511,7 @@ func (mwkr *memberWorker) asyncRun() {
 			}
 			mwkr.pch.Logger.Info("Early sms: %v", sms)
 			shardMap = sms.GetShardMapByOwner(mwkr.grpcTarget)
+			mwkr.pch.Logger.Debug("shardMap: %v", shardMap)
 		case <-mwkr.pch.Ctx.Done():
 			mwkr.pch.Logger.Info("Early exit")
 			return

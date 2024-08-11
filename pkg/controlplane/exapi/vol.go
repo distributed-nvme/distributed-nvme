@@ -414,7 +414,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			OriId:    constants.Uint32Max,
 			SnapName: "default",
 		}
-		snapConfList := make([]*pbcp.SnapConf, 0)
+		snapConfList := make([]*pbcp.SnapConf, 1)
 		snapConfList[0] = snapConf
 
 		ssId := fmt.Sprintf("%016x", spCounter)
@@ -852,7 +852,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			}
 		}
 		nameToId := &pbcp.NameToId{
-			ResId: req.VolName,
+			ResId: spId,
 		}
 		nameToIdVal, err := proto.Marshal(nameToId)
 		if err != nil {
@@ -967,6 +967,7 @@ func (exApi *exApiServer) CreateVol(
 				),
 			)
 			if err != nil {
+				pch.Logger.Warning("Dial err: %v", err)
 				return &pbcp.CreateVolReply{
 					ReplyInfo: &pbcp.ReplyInfo{
 						ReplyCode: constants.ReplyCodeInternalErr,
@@ -979,6 +980,7 @@ func (exApi *exApiServer) CreateVol(
 			c := pbcp.NewDiskNodeWorkerClient(conn)
 			allocateDnReply, err := c.AllocateDn(ctx, allocateDnReq)
 			if err != nil {
+				pch.Logger.Warning("AllocateDn err: %v", err)
 				return &pbcp.CreateVolReply{
 					ReplyInfo: &pbcp.ReplyInfo{
 						ReplyCode: constants.ReplyCodeInternalErr,
@@ -1237,10 +1239,10 @@ func (exApi *exApiServer) DeleteVol(
 							dnConfKey,
 							err,
 						)
-					}
-					return &stmwrapper.StmError{
-						constants.ReplyCodeInternalErr,
-						err.Error(),
+						return &stmwrapper.StmError{
+							constants.ReplyCodeInternalErr,
+							err.Error(),
+						}
 					}
 
 					metaExtentSize := uint32(1 << constants.MetaExtentSizeShiftDefault)
