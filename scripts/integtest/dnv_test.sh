@@ -105,7 +105,7 @@ rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn get --grpc-target 127.0.0.1:91
 verify_rsp_msg "${rsp}" "succeed"
 cn_id=$(echo $rsp | jq -rM '.cn_id')
 
-sleep 20
+sleep 5
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size 1048576)
 verify_rsp_msg "${rsp}" "succeed"

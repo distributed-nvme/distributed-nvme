@@ -33,7 +33,7 @@ const (
 
 	AgentTimeoutDefault = 3 * time.Second
 	WkrTimeoutDefault   = 3 * time.Second
-	ShardInitWaitTime   = 10 * time.Second
+	ShardInitWaitTime   = 3 * time.Second
 	ShardDeleteWaitTime = 60 * time.Second
 	RollbackTimeout     = 10 * time.Second
 	// GrantTTL is in second by default
