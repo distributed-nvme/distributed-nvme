@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -89,6 +90,8 @@ func (dnwkr *dnWorkerServer) addResRev(
 	dnwkr.mu.Lock()
 	defer dnwkr.mu.Unlock()
 
+	fmt.Printf("idAndRevToRes 111: %v\n", dnwkr.idAndRevToRes)
+
 	dnConf := &pbcp.DiskNodeConf{}
 	if err := proto.Unmarshal(resBody, dnConf); err != nil {
 		return nil, err
@@ -100,6 +103,7 @@ func (dnwkr *dnWorkerServer) addResRev(
 			panic("More than 1 dn rev: " + dnId)
 		}
 		for _, oldDnRes := range revToRes {
+			fmt.Printf("oldDnRes: %v\n", oldDnRes)
 			dnwkr.dnResTree.Remove(oldDnRes)
 		}
 	} else {
@@ -110,6 +114,8 @@ func (dnwkr *dnWorkerServer) addResRev(
 	dnwkr.dnResTree.Put(dnRes)
 	grpcTargetList := make([]string, 1)
 	grpcTargetList[0] = dnConf.GeneralConf.GrpcTarget
+
+	fmt.Printf("idAndRevToRes 222: %v\n", dnwkr.idAndRevToRes)
 	return grpcTargetList, nil
 }
 
@@ -119,6 +125,8 @@ func (dnwkr *dnWorkerServer) delResRev(
 ) error {
 	dnwkr.mu.Lock()
 	defer dnwkr.mu.Unlock()
+
+	fmt.Printf("idAndRevToRes 333: %v\n", dnwkr.idAndRevToRes)
 
 	revToRes, ok := dnwkr.idAndRevToRes[dnId]
 	if !ok {
@@ -130,6 +138,7 @@ func (dnwkr *dnWorkerServer) delResRev(
 		dnwkr.dnResTree.Remove(dnRes)
 		delete(dnwkr.idAndRevToRes, dnId)
 	}
+	fmt.Printf("idAndRevToRes 444: %v\n", dnwkr.idAndRevToRes)
 	return nil
 }
 
@@ -295,6 +304,7 @@ func (dnwkr *dnWorkerServer) trackRes(
 	pch *ctxhelper.PerCtxHelper,
 	targetToConn map[string]*grpc.ClientConn,
 ) {
+	fmt.Printf("idAndRevToRes 555: %v\n", dnwkr.idAndRevToRes)
 	revToRes, ok := dnwkr.idAndRevToRes[dnId]
 	if !ok {
 		pch.Logger.Fatal("Can not find dnId: %s", dnId)

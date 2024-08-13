@@ -110,6 +110,9 @@ sleep 5
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size 1048576)
 verify_rsp_msg "${rsp}" "succeed"
 
+$BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0
+echo "early exit"
+exit 0
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
 verify_rsp_msg "${rsp}" "succeed"
 

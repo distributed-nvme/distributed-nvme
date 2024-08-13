@@ -1102,7 +1102,6 @@ func (cnAgent *cnAgentServer) SyncupCn(
 		keyToLoad = append(keyToLoad, key)
 	}
 	for _, key := range keyToLoad {
-		var spCntlrData *spCntlrRuntimeData
 		if spCntlrData, ok := cnAgent.spCntlrMap[key]; !ok {
 			spId, cntlrId, err := decodeSpCntlrId(key)
 			if err != nil {
@@ -1129,6 +1128,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 			}
 			cnAgent.spCntlrMap[key] = spCntlrData
 		}
+		spCntlrData, _ := cnAgent.spCntlrMap[key]
 		spCntlrData.mu.Lock()
 		if _, ok := cnAgent.cnLocal.DeadSpCntlrMap[key]; ok {
 			spCntlrData.spCntlrLocal.Revision = constants.RevisionDeleted
@@ -1531,6 +1531,7 @@ func newCnAgentServer(
 		local:      localdata.NewLocalClient(dataPath),
 		cnLocal:    nil,
 		bgInterval: bgInterval,
+		spCntlrMap: make(map[string]*spCntlrRuntimeData),
 	}
 	go cnAgent.background(ctx)
 	return cnAgent

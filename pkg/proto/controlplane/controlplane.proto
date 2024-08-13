@@ -675,8 +675,9 @@ message GetVolRequest {
 
 message GetVolReply {
   ReplyInfo reply_info = 1;
-  StoragePoolConf spConf = 2;
-  StoragePoolInfo spInfo = 3;
+  string sp_id = 2;
+  StoragePoolConf sp_conf = 3;
+  StoragePoolInfo sp_info = 4;
 }
 
 message ExportVolRequest {

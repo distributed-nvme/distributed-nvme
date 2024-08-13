@@ -1481,6 +1481,9 @@ func (exApi *exApiServer) GetVol(
 			ReplyCode: constants.ReplyCodeSucceed,
 			ReplyMsg:  constants.ReplyMsgSucceed,
 		},
+		SpId:   nameToId.ResId,
+		SpConf: spConf,
+		SpInfo: spInfo,
 	}, nil
 }
 

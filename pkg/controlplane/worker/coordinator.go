@@ -211,7 +211,7 @@ func (swkr *shardWorker) watch() {
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 
-	pch.Logger.Info("Run")
+	pch.Logger.Info("Watch")
 
 	var revision int64
 
@@ -264,7 +264,7 @@ func (swkr *shardWorker) watch() {
 			revision = wresp.Header.Revision
 			for _, ev := range wresp.Events {
 				key := string(ev.Kv.Key)
-				resId := key[len(resPrefix):]
+				resId := key[len(resPrefix)+1:]
 				resBody := ev.Kv.Value
 				switch ev.Type {
 				case clientv3.EventTypePut:
@@ -290,6 +290,8 @@ func (swkr *shardWorker) process(
 	toBeDeleted map[string]bool,
 ) {
 	creatingList := make([]*resWorker, 0)
+	pch.Logger.Debug("toBeCreated: %v", toBeCreated)
+	pch.Logger.Debug("toBeDeleted: %v", toBeDeleted)
 	for resId, bAndR := range toBeCreated {
 		resBody := bAndR.resBody
 		revision := bAndR.revision
@@ -368,6 +370,7 @@ func (swkr *shardWorker) process(
 
 	for _, rwkr := range creatingList {
 		rwkr.run()
+		resIdToWorker[rwkr.resId] = rwkr
 	}
 }
 
@@ -383,15 +386,18 @@ func (swkr *shardWorker) handle() {
 	logger := prefixlog.NewPrefixLogger(prefix)
 	pch := ctxhelper.NewPerCtxHelper(swkr.pch.Ctx, logger, swkr.wkrId)
 
-	pch.Logger.Debug("Handler")
+	pch.Logger.Debug("Handle")
 
 	resIdToWorker := make(map[string]*resWorker)
-	select {
-	case <-time.After(constants.ShardWorkerDelayDefault):
-		toBeCreated, toBeDeleted := swkr.st.fetchTasks()
-		swkr.process(pch, resIdToWorker, toBeCreated, toBeDeleted)
-	case <-pch.Ctx.Done():
-		break
+	stop := false
+	for !stop {
+		select {
+		case <-time.After(constants.ShardWorkerDelayDefault):
+			toBeCreated, toBeDeleted := swkr.st.fetchTasks()
+			swkr.process(pch, resIdToWorker, toBeCreated, toBeDeleted)
+		case <-pch.Ctx.Done():
+			stop = true
+		}
 	}
 
 	for _, rwkr := range resIdToWorker {

@@ -310,7 +310,6 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		keyToLoad = append(keyToLoad, key)
 	}
 	for _, key := range keyToLoad {
-		var spLdData *spLdRuntimeData
 		if spLdData, ok := dnAgent.spLdMap[key]; !ok {
 			spId, ldId, err := decodeSpLdId(key)
 			if err != nil {
@@ -338,6 +337,7 @@ func (dnAgent *dnAgentServer) SyncupDn(
 			}
 			dnAgent.spLdMap[key] = spLdData
 		}
+		spLdData, _ := dnAgent.spLdMap[key]
 		spLdData.mu.Lock()
 		if _, ok := dnAgent.dnLocal.DeadSpLdMap[key]; ok {
 			spLdData.spLdLocal.Revision = constants.RevisionDeleted
@@ -748,6 +748,7 @@ func newDnAgentServer(
 		local:      localdata.NewLocalClient(dataPath),
 		dnLocal:    nil,
 		bgInterval: bgInterval,
+		spLdMap:    make(map[string]*spLdRuntimeData),
 	}
 	go dnAgent.background(ctx)
 	return dnAgent

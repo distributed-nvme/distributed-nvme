@@ -740,9 +740,10 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 					TrAddr:  cntlrConf.NvmePortConf.NvmeListener.TrAddr,
 					TrSvcId: cntlrConf.NvmePortConf.NvmeListener.TrSvcId,
 				},
-				TrEq: &pbnd.NvmeTReq{
-					SeqCh: cntlrConf.NvmePortConf.TrEq.SeqCh,
-				},
+				// FIXME: implement TrEq
+				// TrEq: &pbnd.NvmeTReq{
+				// 	SeqCh: cntlrConf.NvmePortConf.TrEq.SeqCh,
+				// },
 			},
 			SsConfList: spAttr.ssConfList,
 			ActiveCntlrConf: &pbnd.ActiveCntlrConf{
@@ -1034,19 +1035,21 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 		if spCntlrInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 			allSucceeded = false
 		}
-		for _, localLegInfo := range spCntlrInfo.ActiveCntlrInfo.LocalLegInfoList {
-			legConf := spAttr.legIdToConf[localLegInfo.LegId]
-			if legConf.Reload &&
-				localLegInfo.StatusInfo.Code == constants.StatusCodeSucceed {
-				legConf.Reload = false
-				updateConf = true
-			}
-			for _, grpInfo := range localLegInfo.GrpInfoList {
-				grpConf := spAttr.grpIdToConf[grpInfo.GrpId]
-				if grpConf.NoSync &&
-					grpInfo.StatusInfo.Code == constants.StatusCodeSucceed {
-					grpConf.NoSync = false
+		if spCntlrInfo.ActiveCntlrInfo != nil {
+			for _, localLegInfo := range spCntlrInfo.ActiveCntlrInfo.LocalLegInfoList {
+				legConf := spAttr.legIdToConf[localLegInfo.LegId]
+				if legConf.Reload &&
+					localLegInfo.StatusInfo.Code == constants.StatusCodeSucceed {
+					legConf.Reload = false
 					updateConf = true
+				}
+				for _, grpInfo := range localLegInfo.GrpInfoList {
+					grpConf := spAttr.grpIdToConf[grpInfo.GrpId]
+					if grpConf.NoSync &&
+						grpInfo.StatusInfo.Code == constants.StatusCodeSucceed {
+						grpConf.NoSync = false
+						updateConf = true
+					}
 				}
 			}
 		}

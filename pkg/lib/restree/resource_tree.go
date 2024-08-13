@@ -1,8 +1,6 @@
 package restree
 
 import (
-	"fmt"
-
 	rbt "github.com/emirpasic/gods/v2/trees/redblacktree"
 )
 
@@ -107,7 +105,6 @@ func iterate(
 		cntIterator := cntTree.Iterator()
 		for cntIterator.Next() {
 			resMap := cntIterator.Value()
-			fmt.Printf("resMap: %v\n", resMap)
 			for _, res := range resMap {
 				stop := apply(res)
 				if stop {
