@@ -323,6 +323,11 @@ func (oc *OsCommand) nvmetRemoveSubsysFromPort(nqn string, portNum string) error
 }
 
 func (oc *OsCommand) nvmetSubsysNsCreate(nqn string, nsArg *NvmetNsArg) error {
+	nsPath := nvmetSubsysNsPath(nqn, nsArg.NsNum)
+	if err := createDir(nsPath); err != nil {
+		return err
+	}
+
 	if err := writeFile(
 		nvmetSubsysNsDevPath(nqn, nsArg.NsNum),
 		nsArg.DevPath,
@@ -1499,7 +1504,9 @@ func (oc *OsCommand) BlkDiscard(
 	length uint64,
 ) error {
 	name := "blkdiscard"
-	args := []string{"--offset", string(offset), "--length", string(length)}
+	offsetStr := fmt.Sprintf("%d", offset)
+	lengthStr := fmt.Sprintf("%d", length)
+	args := []string{"--offset", offsetStr, "--length", lengthStr, devPath}
 	_, _, err := oc.runOsCmd(pch, name, args, "")
 	return err
 }
