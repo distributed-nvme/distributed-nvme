@@ -1500,13 +1500,9 @@ func (oc *OsCommand) BlkGetSize(
 func (oc *OsCommand) BlkDiscard(
 	pch *ctxhelper.PerCtxHelper,
 	devPath string,
-	offset uint64,
-	length uint64,
 ) error {
 	name := "blkdiscard"
-	offsetStr := fmt.Sprintf("%d", offset)
-	lengthStr := fmt.Sprintf("%d", length)
-	args := []string{"--offset", offsetStr, "--length", lengthStr, devPath}
+	args := []string{"--force", devPath}
 	_, _, err := oc.runOsCmd(pch, name, args, "")
 	return err
 }

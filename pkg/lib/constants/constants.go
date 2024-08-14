@@ -2,6 +2,8 @@ package constants
 
 import (
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -147,4 +149,8 @@ const (
 	NsBitSizeDefault        = 4096
 
 	DefaultTagKey = "GrpcTarget"
+)
+
+var (
+	NameSpace = uuid.Must(uuid.Parse("37833e01-35d4-4e5a-b0a1-fff158b9d03b"))
 )

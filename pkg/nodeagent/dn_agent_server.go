@@ -51,17 +51,6 @@ func syncupSpLd(
 	devPath string,
 	portNum string,
 ) error {
-	if !spLdConf.Inited {
-		if err := oc.BlkDiscard(
-			pch,
-			devPath,
-			spLdConf.Start,
-			spLdConf.Length,
-		); err != nil {
-			return err
-		}
-	}
-
 	dmName := nf.LdDnDmName(
 		spLdConf.DnId,
 		spLdConf.SpId,
@@ -70,10 +59,10 @@ func syncupSpLd(
 	dmPath := nf.DmNameToPath(dmName)
 	linearArgs := make([]*oscmd.DmLinearArg, 1)
 	linearArgs[0] = &oscmd.DmLinearArg{
-		Start:   spLdConf.Start,
+		Start:   0,
 		Size:    spLdConf.Length,
 		DevPath: devPath,
-		Offset:  0,
+		Offset:  spLdConf.Start,
 	}
 	if err := oc.DmCreateLinear(
 		pch,
@@ -81,6 +70,15 @@ func syncupSpLd(
 		linearArgs,
 	); err != nil {
 		return err
+	}
+
+	if !spLdConf.Inited {
+		if err := oc.BlkDiscard(
+			pch,
+			dmPath,
+		); err != nil {
+			return err
+		}
 	}
 
 	nqn := nf.LdDnDmNqn(
@@ -97,9 +95,11 @@ func syncupSpLd(
 
 	nsMap := make(map[string]*oscmd.NvmetNsArg)
 	nsNum := nf.LdDnDmNsNum()
+	uuidStr := uuid.NewMD5(constants.NameSpace, []byte(nqn)).String()
 	nsArg := &oscmd.NvmetNsArg{
 		NsNum:   nsNum,
 		DevPath: dmPath,
+		Uuid:    uuidStr,
 	}
 	nsMap[nsNum] = nsArg
 
@@ -283,6 +283,7 @@ func (dnAgent *dnAgentServer) SyncupDn(
 			},
 		}, nil
 	}
+	dnAgent.dnLocal.Revision = req.DnConf.Revision
 
 	keyInReq := make(map[string]bool)
 	for _, spLd := range req.DnConf.SpLdIdList {
@@ -525,7 +526,7 @@ func (dnAgent *dnAgentServer) CheckDn(
 			DnInfo: &pbnd.DnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
-					Msg:       fmt.Sprintf("Revision: %s", dnAgent.dnLocal.Revision),
+					Msg:       fmt.Sprintf("Revision: %d", dnAgent.dnLocal.Revision),
 					Timestamp: timestamp,
 				},
 			},
