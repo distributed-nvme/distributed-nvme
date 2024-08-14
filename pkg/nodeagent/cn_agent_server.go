@@ -932,8 +932,8 @@ func syncupCntlrSs(
 	return &pbnd.SsInfo{
 		SsId: ssConf.SsId,
 		StatusInfo: &pbnd.StatusInfo{
-			Code:      constants.StatusCodeInternalErr,
-			Msg:       err.Error(),
+			Code:      constants.StatusCodeSucceed,
+			Msg:       constants.StatusMsgSucceed,
 			Timestamp: pch.Timestamp,
 		},
 		NsInfoList: nsInfoList,

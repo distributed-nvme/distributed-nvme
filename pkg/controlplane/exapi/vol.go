@@ -754,12 +754,12 @@ func (exApi *exApiServer) tryToCreateVol(
 				CnGrpcTarget: genCnCntlr.cnConf.GeneralConf.GrpcTarget,
 				CntlrIdx:     uint32(i),
 				NvmePortConf: &pbcp.NvmePortConf{
-					PortNum: string(genCnCntlr.portNum),
+					PortNum: fmt.Sprintf("%d", genCnCntlr.portNum),
 					NvmeListener: &pbcp.NvmeListener{
 						TrType:  cnListener.TrType,
 						AdrFam:  cnListener.AdrFam,
 						TrAddr:  cnListener.TrAddr,
-						TrSvcId: string(uint32(baseTrSvcId) + genCnCntlr.portNum),
+						TrSvcId: fmt.Sprintf("%d", uint32(baseTrSvcId)+genCnCntlr.portNum),
 					},
 				},
 			}
