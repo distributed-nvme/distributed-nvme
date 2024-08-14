@@ -15,8 +15,8 @@ ETCD_BIN=$ROOT_DIR/bin/linux_amd64/etcd
 sudo rm -rf $WORK_DIR
 mkdir -p $WORK_DIR
 
-dd if=/dev/zero of=$WORK_DIR/dn0.img bs=1M count=1024
-dd if=/dev/zero of=$WORK_DIR/dn1.img bs=1M count=1024
+dd if=/dev/zero of=$WORK_DIR/dn0.img bs=1M count=4096
+dd if=/dev/zero of=$WORK_DIR/dn1.img bs=1M count=4096
 sudo losetup /dev/loop240 $WORK_DIR/dn0.img
 sudo losetup /dev/loop241 $WORK_DIR/dn1.img
 

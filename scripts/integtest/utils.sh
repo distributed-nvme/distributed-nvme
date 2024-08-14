@@ -20,10 +20,63 @@ function retry() {
     done
 }
 
+function cleanup_nvmet_by_flag() {
+    nqn_flag=$1
+    nqn_prefix="nqn.2024-01.io.dnv:$nqn_flag"
+
+    for ss in /sys/kernel/config/nvmet/subsystems/*; do
+        if echo $ss | grep -q $nqn_prefix; then
+
+            # delete ns
+            for ns in $ss/namespaces/*; do
+                if echo $ns | grep -q '[0-9]$'; then
+                    echo "remove ns: $ns"
+                    sudo rmdir $ns
+                fi
+            done
+
+            # delete host
+            for h in $ss/allowed_hosts/*; do
+                if echo $h | grep -q 'allowed_hosts/nqn'; then
+                    echo "remove host: $h"
+                    sudo unlink $h
+                fi
+            done
+
+            # delete ss
+            echo "remove ss: $ss"
+            sudo rmdir $ss
+        fi
+    done
+}
+
+function cleanup_nvmet() {
+    for p in /sys/kernel/config/nvmet/ports/*; do
+        if echo $p | grep -q '[0-9]$'; then
+            for ss in $p/subsystems/*; do
+                if echo $ss | grep -q "nqn"; then
+                    echo "remove $ss from $p"
+                    sudo unlink $ss
+                fi
+            done
+            echo "remove port $p"
+            sudo rmdir $p
+        fi
+    done
+
+    cleanup_nvmet_by_flag "0000"
+    cleanup_nvmet_by_flag "1100"
+    cleanup_nvmet_by_flag "1200"
+    cleanup_nvmet_by_flag "1000"
+}
+
 function cleanup() {
-    set +e
     echo "nvme disconnect-all"
     sudo nvme disconnect-all
+    echo "cleanup nvmet"
+    cleanup_nvmet
+    sudo dmsetup remove_all --deferred
+    set +e
     echo "stop dnvapi"
     ps -f -C dnvapi > /dev/null && killall dnvapi
     echo "stop dnvworker"
@@ -41,6 +94,9 @@ function cleanup() {
 function force_cleanup() {
     set +e
     sudo nvme disconnect-all
+    echo "cleanup nvmet"
+    cleanup_nvmet
+    sudo dmsetup remove_all --deferred
     ps -f -C dnvapi > /dev/null && killall -9 dnvapi
     ps -f -C dnvworker > /dev/null && killall -9 dnvworker
     ps -f -C dnvagent > /dev/null && killall -9 agent
