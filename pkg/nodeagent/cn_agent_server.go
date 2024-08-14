@@ -1074,6 +1074,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 			},
 		}, nil
 	}
+	cnAgent.cnLocal.Revision = req.CnConf.Revision
 
 	keyInReq := make(map[string]bool)
 	for _, spCntlr := range req.CnConf.SpCntlrIdList {
@@ -1313,7 +1314,7 @@ func (cnAgent *cnAgentServer) CheckCn(
 			CnInfo: &pbnd.CnInfo{
 				StatusInfo: &pbnd.StatusInfo{
 					Code:      constants.StatusCodeDataMismatch,
-					Msg:       fmt.Sprintf("Revision: %s", cnAgent.cnLocal.Revision),
+					Msg:       fmt.Sprintf("Revision: %d", cnAgent.cnLocal.Revision),
 					Timestamp: timestamp,
 				},
 			},
