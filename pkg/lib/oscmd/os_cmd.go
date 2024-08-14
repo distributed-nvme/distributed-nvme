@@ -255,7 +255,6 @@ func (oc *OsCommand) NvmetPortCreate(
 	adrFam string,
 	trAddr string,
 	trSvcId string,
-	seqCh uint32,
 ) error {
 	if err := createDir(nvmetPortPath(portNum)); err != nil {
 		return err

@@ -380,7 +380,6 @@ func (dnAgent *dnAgentServer) SyncupDn(
 		req.DnConf.NvmePortConf.NvmeListener.AdrFam,
 		req.DnConf.NvmePortConf.NvmeListener.TrAddr,
 		req.DnConf.NvmePortConf.NvmeListener.TrSvcId,
-		req.DnConf.NvmePortConf.TrEq.SeqCh,
 	); err != nil {
 		return &pbnd.SyncupDnReply{
 			DnInfo: &pbnd.DnInfo{

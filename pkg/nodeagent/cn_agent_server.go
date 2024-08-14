@@ -57,7 +57,6 @@ func syncupCntlrNvmePort(
 		nvmePortConf.NvmeListener.AdrFam,
 		nvmePortConf.NvmeListener.TrAddr,
 		nvmePortConf.NvmeListener.TrSvcId,
-		nvmePortConf.TrEq.SeqCh,
 	); err != nil {
 		return &pbnd.NvmePortInfo{
 			StatusInfo: &pbnd.StatusInfo{
@@ -1170,7 +1169,6 @@ func (cnAgent *cnAgentServer) SyncupCn(
 		req.CnConf.NvmePortConf.NvmeListener.AdrFam,
 		req.CnConf.NvmePortConf.NvmeListener.TrAddr,
 		req.CnConf.NvmePortConf.NvmeListener.TrSvcId,
-		req.CnConf.NvmePortConf.TrEq.SeqCh,
 	); err != nil {
 		return &pbnd.SyncupCnReply{
 			CnInfo: &pbnd.CnInfo{

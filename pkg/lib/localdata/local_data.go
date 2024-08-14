@@ -223,9 +223,10 @@ func (local *LocalClient) DeleteSpCntlrLocal(
 
 func NewLocalClient(dataPath string) *LocalClient {
 	return &LocalClient{
-		dataPath: dataPath,
-		dnMap:    make(map[string]*DnLocal),
-		cnMap:    make(map[string]*CnLocal),
-		spLdMap:  make(map[string]*SpLdLocal),
+		dataPath:   dataPath,
+		dnMap:      make(map[string]*DnLocal),
+		cnMap:      make(map[string]*CnLocal),
+		spLdMap:    make(map[string]*SpLdLocal),
+		spCntlrMap: make(map[string]*SpCntlrLocal),
 	}
 }
