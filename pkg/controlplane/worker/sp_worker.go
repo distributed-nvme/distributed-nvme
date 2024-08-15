@@ -114,21 +114,23 @@ func generateSpAttr(spConf *pbcp.StoragePoolConf) *storagePoolAttr {
 	legIdToConf := make(map[string]*pbcp.LegConf)
 	grpIdToConf := make(map[string]*pbcp.GrpConf)
 	ldIdToCnIdList := make(map[string][]string)
+
+	cntlrIdToConf := make(map[string]*pbcp.CntlrConf)
+	for _, cntlrConf := range spConf.CntlrConfList {
+		cntlrIdToConf[cntlrConf.CntlrId] = cntlrConf
+	}
+
 	for _, legConf := range spConf.LegConfList {
 		legIdToConf[legConf.LegId] = legConf
 		for _, grpConf := range legConf.GrpConfList {
 			grpIdToConf[grpConf.GrpId] = grpConf
 			for _, ldConf := range grpConf.LdConfList {
 				cnIdList := make([]string, 1)
-				cnIdList[0] = legConf.AcCntlrId
+				cntlrConf := cntlrIdToConf[legConf.AcCntlrId]
+				cnIdList[0] = cntlrConf.CnId
 				ldIdToCnIdList[ldConf.LdId] = cnIdList
 			}
 		}
-	}
-
-	cntlrIdToConf := make(map[string]*pbcp.CntlrConf)
-	for _, cntlrConf := range spConf.CntlrConfList {
-		cntlrIdToConf[cntlrConf.CntlrId] = cntlrConf
 	}
 
 	var creatingSnapConf *pbnd.SnapConf
