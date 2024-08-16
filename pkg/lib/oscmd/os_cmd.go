@@ -553,7 +553,7 @@ func (oc *OsCommand) dmTable(
 	args := []string{"table", dmName}
 	stdout, stderr, err := oc.runOsCmd(pch, name, args, "")
 	if err != nil {
-		if strings.Contains(stderr, dmNotExist) {
+		if strings.Contains(stderr, "No such device or address") {
 			return "", nil
 		}
 		return "", err
@@ -1372,6 +1372,7 @@ func (oc *OsCommand) nvmeConnectPath(
 	if _, _, err := oc.runOsCmd(pch, name, args, ""); err != nil {
 		return err
 	}
+
 	return nil
 }
 

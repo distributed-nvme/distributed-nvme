@@ -122,6 +122,7 @@ func syncupCntlrSingleRaid1(
 	grpConf *pbnd.GrpConf,
 	raid1Name string,
 	size uint64,
+	regionSize uint64,
 	meta0LdConf *pbnd.LdCnConf,
 	data0LdConf *pbnd.LdCnConf,
 	meta1LdConf *pbnd.LdCnConf,
@@ -158,7 +159,7 @@ func syncupCntlrSingleRaid1(
 		Data0:      data0Path,
 		Meta1:      meta1Path,
 		Data1:      data1Path,
-		RegionSize: activeCntlrConf.RedundancyConf.RegionSize,
+		RegionSize: regionSize,
 		Nosync:     grpConf.NoSync,
 		RebuildIdx: grpConf.RebuildIdx,
 	}
@@ -226,6 +227,7 @@ func syncupCntlrRaid1(
 				grpConf.GrpId,
 			),
 			grpConf.MetaSize,
+			constants.MetaRegionSizeDefault,
 			grpConf.LdCnConfList[0],
 			grpConf.LdCnConfList[1],
 			grpConf.LdCnConfList[4],
@@ -249,6 +251,7 @@ func syncupCntlrRaid1(
 				grpConf.GrpId,
 			),
 			grpConf.DataSize,
+			activeCntlrConf.RedundancyConf.RegionSize,
 			grpConf.LdCnConfList[2],
 			grpConf.LdCnConfList[3],
 			grpConf.LdCnConfList[6],
@@ -281,6 +284,7 @@ func syncupCntlrRaid1(
 			grpConf.GrpId,
 		),
 		grpConf.DataSize,
+		activeCntlrConf.RedundancyConf.RegionSize,
 		grpConf.LdCnConfList[0],
 		grpConf.LdCnConfList[1],
 		grpConf.LdCnConfList[2],
@@ -314,6 +318,10 @@ func syncupCntlrGrp(
 			ldCnInfo,
 		)
 	}
+
+	// FIXME: Check if the /dev/disk/by-id/nvme-uuid.* are created
+	time.Sleep(1 * time.Second)
+
 	var metaRedunInfo *pbnd.RedundancyInfo
 	var dataRedunInfo *pbnd.RedundancyInfo
 	var err error

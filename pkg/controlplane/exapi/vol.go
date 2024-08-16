@@ -442,6 +442,7 @@ func (exApi *exApiServer) tryToCreateVol(
 			Size:   req.Size,
 			DevId:  0,
 		}
+		ssConfList[0] = ssConf
 		ssInfoList := make([]*pbcp.SsInfo, 1)
 		ssInfoList[0] = &pbcp.SsInfo{
 			SsId:               ssId,

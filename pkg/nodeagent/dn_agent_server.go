@@ -95,11 +95,10 @@ func syncupSpLd(
 
 	nsMap := make(map[string]*oscmd.NvmetNsArg)
 	nsNum := nf.LdDnDmNsNum()
-	uuidStr := uuid.NewMD5(constants.NameSpace, []byte(nqn)).String()
 	nsArg := &oscmd.NvmetNsArg{
 		NsNum:   nsNum,
 		DevPath: dmPath,
-		Uuid:    uuidStr,
+		Uuid:    nf.NsUuid(nqn, nsNum),
 	}
 	nsMap[nsNum] = nsArg
 
