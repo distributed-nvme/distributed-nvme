@@ -790,7 +790,7 @@ func (oc *OsCommand) DmGetRaidStatus(
 	if items[2] != "raid" {
 		return nil, fmt.Errorf("Not raid status: %s", items[2])
 	}
-	if !strings.HasSuffix(items[3], "raid") {
+	if !strings.HasPrefix(items[3], "raid") {
 		return nil, fmt.Errorf("Invalid raid type: %s", items[3])
 	}
 	raidType := items[3]
@@ -833,7 +833,8 @@ func (oc *OsCommand) DmGetRaidStatus(
 	if err != nil {
 		return nil, err
 	}
-	if len(items[10]) != 1 {
+	// Only first character is the journal char, the last one is '\n'
+	if len(items[10]) != 2 {
 		return nil, fmt.Errorf("Invalid journal char cnt: %d", len(items[10]))
 	}
 	journalChar := items[10][0]
