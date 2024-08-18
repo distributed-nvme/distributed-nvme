@@ -558,7 +558,7 @@ func syncupCntlrLocalLeg(
 		spCntlrConf.SpId,
 		localLegConf.LegId,
 	)
-	if err := oc.DmCreateLinear(pch, dataName, metaLinearArgs); err != nil {
+	if err := oc.DmCreateLinear(pch, dataName, dataLinearArgs); err != nil {
 		return &pbnd.LocalLegInfo{
 			LegId: localLegConf.LegId,
 			StatusInfo: &pbnd.StatusInfo{

@@ -70,7 +70,7 @@ const (
 
 	MetaExtentSizeShiftMin       = 12
 	MetaExtentSizeShiftMax       = 34
-	MetaExtentSizeShiftDefault   = 20
+	MetaExtentSizeShiftDefault   = 21
 	MetaExtentPerSetShiftMax     = 13
 	MetaExtentPerSetShiftDefault = 9
 

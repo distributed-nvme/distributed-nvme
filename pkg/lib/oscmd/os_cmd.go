@@ -1009,7 +1009,6 @@ func genDmPoolTable(poolArg *DmPoolArg) string {
 		"%d %d thin-pool %s %s %d %d %d%s%s%s%s%s",
 		byteToSector(poolArg.Start),
 		byteToSector(poolArg.Size),
-		paramCnt,
 		poolArg.MetaDev,
 		poolArg.DataDev,
 		byteToSector(poolArg.DataBlockSize),
