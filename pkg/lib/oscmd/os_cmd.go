@@ -942,8 +942,8 @@ func (oc *OsCommand) DmCreateRaid0(
 		"%d %d raid raid0 1 %d %d",
 		byteToSector(raid0Arg.Start),
 		byteToSector(raid0Arg.Size),
-		cnt,
 		byteToSector(raid0Arg.ChunkSize),
+		cnt,
 	)
 	tableBuilder.WriteString(prefix)
 	for _, devPath := range raid0Arg.DevList {
