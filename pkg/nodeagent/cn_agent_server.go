@@ -955,6 +955,7 @@ func syncupSpCntlr(
 	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) *pbnd.SpCntlrInfo {
+	succeed := true
 	nvmePortInfo := syncupCntlrNvmePort(
 		pch,
 		oc,
@@ -962,6 +963,9 @@ func syncupSpCntlr(
 		spCntlrConf,
 		spCntlrConf.NvmePortConf,
 	)
+	if nvmePortInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+		succeed = false
+	}
 	activeCntlrInfo := syncupActiveCntlr(
 		pch,
 		oc,
@@ -970,6 +974,30 @@ func syncupSpCntlr(
 		spCntlrConf,
 		spCntlrConf.ActiveCntlrConf,
 	)
+	for _, localLegInfo := range activeCntlrInfo.LocalLegInfoList {
+		if localLegInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+			break
+		}
+	}
+	for _, remoteLegInfo := range activeCntlrInfo.RemoteLegInfoList {
+		if remoteLegInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+			break
+		}
+	}
+	for _, mtInfo := range activeCntlrInfo.MtInfoList {
+		if mtInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+			break
+		}
+	}
+	for _, itInfo := range activeCntlrInfo.ItInfoList {
+		if itInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+			break
+		}
+	}
 	ssInfoList := make([]*pbnd.SsInfo, len(spCntlrConf.SsConfList))
 	for i, ssConf := range spCntlrConf.SsConfList {
 		ssInfoList[i] = syncupCntlrSs(
@@ -979,11 +1007,21 @@ func syncupSpCntlr(
 			spCntlrConf,
 			ssConf,
 		)
+		if ssInfoList[i].StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+		}
+	}
+
+	code := constants.StatusCodeSucceed
+	msg := constants.StatusMsgSucceed
+	if !succeed {
+		code = constants.StatusCodeInternalErr
+		msg = "internal error"
 	}
 	return &pbnd.SpCntlrInfo{
 		StatusInfo: &pbnd.StatusInfo{
-			Code:      constants.StatusCodeSucceed,
-			Msg:       constants.StatusMsgSucceed,
+			Code:      code,
+			Msg:       msg,
 			Timestamp: pch.Timestamp,
 		},
 		NvmePortInfo:    nvmePortInfo,

@@ -9,27 +9,27 @@ const (
 	DeviceMapperPrefixDefault = "dnv"
 	NqnPrefixDefault          = "nqn.2024-01.io.dnv"
 
-	ReplyCodeSucceed     = 0
+	ReplyCodeSucceed     = uint32(0)
 	ReplyMsgSucceed      = "succeed"
-	ReplyCodeDupRes      = 1001
-	ReplyCodeUnknownRes  = 1002
-	ReplyCodeInternalErr = 1003
-	ReplyCodeAgentErr    = 1004
-	ReplyCodeInvalidArg  = 1005
-	ReplyCodeNotFound    = 1006
-	ReplyCodeResBusy     = 1007
-	ReplyCodeNoCapacity  = 1008
-	ReplyCodeNeedMore    = 1009
+	ReplyCodeDupRes      = uint32(1001)
+	ReplyCodeUnknownRes  = uint32(1002)
+	ReplyCodeInternalErr = uint32(1003)
+	ReplyCodeAgentErr    = uint32(1004)
+	ReplyCodeInvalidArg  = uint32(1005)
+	ReplyCodeNotFound    = uint32(1006)
+	ReplyCodeResBusy     = uint32(1007)
+	ReplyCodeNoCapacity  = uint32(1008)
+	ReplyCodeNeedMore    = uint32(1009)
 
-	StatusCodeSucceed      = 0
+	StatusCodeSucceed      = uint32(0)
 	StatusMsgSucceed       = "succeed"
-	StatusCodeUninit       = 2001
-	StatusCodeUnreachable  = 2002
-	StatusCodeInternalErr  = 2003
-	StatusCodeDataMismatch = 2004
-	StatusCodeOldRevision  = 2005
-	StatusCodeNoConf       = 2006
-	StatusCodeNotFound     = 3001
+	StatusCodeUninit       = uint32(2001)
+	StatusCodeUnreachable  = uint32(2002)
+	StatusCodeInternalErr  = uint32(2003)
+	StatusCodeDataMismatch = uint32(2004)
+	StatusCodeOldRevision  = uint32(2005)
+	StatusCodeNoConf       = uint32(2006)
+	StatusCodeNotFound     = uint32(3001)
 
 	AgentTimeoutDefault = 3 * time.Second
 	WkrTimeoutDefault   = 3 * time.Second

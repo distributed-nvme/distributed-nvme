@@ -158,9 +158,9 @@ func allocateLd(
 	stop := start + extentSetSize
 	bm := bitmap.FromBytes(extentConf.Bitmap)
 	startBit := constants.Uint32Max
-	for i := start; i < stop-extentCnt; i += extentCnt {
+	for i := start; i <= stop-extentCnt; i += extentCnt {
 		allZero := true
-		for j := i; j < extentCnt; j++ {
+		for j := i; j < i+extentCnt; j++ {
 			if bm.Contains(j) {
 				allZero = false
 				break
@@ -174,7 +174,7 @@ func allocateLd(
 	if startBit == constants.Uint32Max {
 		return 0, 0, fmt.Errorf("No enough capacity")
 	}
-	for i := startBit; i < extentCnt; i++ {
+	for i := startBit; i < startBit+extentCnt; i++ {
 		bm.Set(i)
 	}
 	maxCnt := getMaxCnt(&bm, start, extentSetSize)
