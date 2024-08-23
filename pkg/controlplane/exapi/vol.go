@@ -435,10 +435,12 @@ func (exApi *exApiServer) tryToCreateVol(
 				err.Error(),
 			}
 		}
+		// nsNum should start from 1
+		nsNum += 1
 		ssConf.NsConfList[0] = &pbcp.NsConf{
 			NsId:   nsId,
 			NsName: "default",
-			NsNum:  string(nsNum),
+			NsNum:  fmt.Sprintf("%d", nsNum),
 			Size:   req.Size,
 			DevId:  0,
 		}
@@ -749,6 +751,9 @@ func (exApi *exApiServer) tryToCreateVol(
 					err.Error(),
 				}
 			}
+			// The cnListener.TrSvcId is used for exporting the remoteLeg, so
+			// plus 1 for avoding port conflict
+			baseTrSvcId += 1
 			cntlrConfList[i] = &pbcp.CntlrConf{
 				CntlrId:      genCnCntlr.cntlrId,
 				CnId:         genCnCntlr.cnId,

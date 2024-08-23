@@ -260,20 +260,48 @@ func (oc *OsCommand) NvmetPortCreate(
 		return err
 	}
 
-	if err := writeFile(nvmetTrTypePath(portNum), trType); err != nil {
+	trTypePath := nvmetTrTypePath(portNum)
+	currTrType, err := readFile(trTypePath)
+	if err != nil {
 		return err
 	}
-
-	if err := writeFile(nvmetAdrFamPath(portNum), adrFam); err != nil {
-		return err
+	if currTrType != trType {
+		if err := writeFile(trTypePath, trType); err != nil {
+			return err
+		}
 	}
 
-	if err := writeFile(nvmetTrAddrPath(portNum), trAddr); err != nil {
+	adrFamPath := nvmetAdrFamPath(portNum)
+	currAdrFam, err := readFile(adrFamPath)
+	if err != nil {
 		return err
 	}
+	if currAdrFam != adrFam {
+		if err := writeFile(adrFamPath, adrFam); err != nil {
+			return err
+		}
+	}
 
-	if err := writeFile(nvmetTrSvcIdPath(portNum), trSvcId); err != nil {
+	trAddrPath := nvmetTrAddrPath(portNum)
+	currTrAddr, err := readFile(trAddrPath)
+	if err != nil {
 		return err
+	}
+	if currTrAddr != trAddr {
+		if err := writeFile(trAddrPath, trAddr); err != nil {
+			return err
+		}
+	}
+
+	trSvcIdPath := nvmetTrSvcIdPath(portNum)
+	currTrSvcId, err := readFile(trSvcIdPath)
+	if err != nil {
+		return err
+	}
+	if currTrSvcId != trSvcId {
+		if err := writeFile(trSvcIdPath, trSvcId); err != nil {
+			return err
+		}
 	}
 
 	// FIXME: support addr_treq

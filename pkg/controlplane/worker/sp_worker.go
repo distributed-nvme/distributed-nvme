@@ -307,42 +307,49 @@ func newSpInfoBuilder(
 						Msg:       grpInfo.StatusInfo.Msg,
 						Timestamp: grpInfo.StatusInfo.Timestamp,
 					}
-					grpMetaRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
-						HealthChars: grpInfo.MetaRedunInfo.HealthChars,
-						SyncCurr:    grpInfo.MetaRedunInfo.SyncCurr,
-						SyncTotal:   grpInfo.MetaRedunInfo.SyncTotal,
-						SyncAction:  grpInfo.MetaRedunInfo.SyncAction,
-						MismatchCnt: grpInfo.MetaRedunInfo.MismatchCnt,
-						DataOffset:  grpInfo.MetaRedunInfo.DataOffset,
-						JournalChar: grpInfo.MetaRedunInfo.JournalChar,
+					if grpInfo.MetaRedunInfo != nil {
+						grpMetaRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
+							HealthChars: grpInfo.MetaRedunInfo.HealthChars,
+							SyncCurr:    grpInfo.MetaRedunInfo.SyncCurr,
+							SyncTotal:   grpInfo.MetaRedunInfo.SyncTotal,
+							SyncAction:  grpInfo.MetaRedunInfo.SyncAction,
+							MismatchCnt: grpInfo.MetaRedunInfo.MismatchCnt,
+							DataOffset:  grpInfo.MetaRedunInfo.DataOffset,
+							JournalChar: grpInfo.MetaRedunInfo.JournalChar,
+						}
 					}
-					grpDataRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
-						HealthChars: grpInfo.DataRedunInfo.HealthChars,
-						SyncCurr:    grpInfo.DataRedunInfo.SyncCurr,
-						SyncTotal:   grpInfo.DataRedunInfo.SyncTotal,
-						SyncAction:  grpInfo.DataRedunInfo.SyncAction,
-						MismatchCnt: grpInfo.DataRedunInfo.MismatchCnt,
-						DataOffset:  grpInfo.DataRedunInfo.DataOffset,
-						JournalChar: grpInfo.DataRedunInfo.JournalChar,
+					if grpInfo.DataRedunInfo != nil {
+						grpDataRedunInfoMap[grpInfo.GrpId] = &pbcp.RedundancyInfo{
+							HealthChars: grpInfo.DataRedunInfo.HealthChars,
+							SyncCurr:    grpInfo.DataRedunInfo.SyncCurr,
+							SyncTotal:   grpInfo.DataRedunInfo.SyncTotal,
+							SyncAction:  grpInfo.DataRedunInfo.SyncAction,
+							MismatchCnt: grpInfo.DataRedunInfo.MismatchCnt,
+							DataOffset:  grpInfo.DataRedunInfo.DataOffset,
+							JournalChar: grpInfo.DataRedunInfo.JournalChar,
+						}
 					}
+
 				}
 				legStatusInfoMap[localLegInfo.LegId] = &pbcp.StatusInfo{
 					Code:      localLegInfo.StatusInfo.Code,
 					Msg:       localLegInfo.StatusInfo.Msg,
 					Timestamp: localLegInfo.StatusInfo.Timestamp,
 				}
-				legThinPoolInfoMap[localLegInfo.LegId] = &pbcp.ThinPoolInfo{
-					TransactionId:        localLegInfo.ThinPoolInfo.TransactionId,
-					UsedMetaBlocks:       localLegInfo.ThinPoolInfo.UsedMetaBlocks,
-					TotalMetaBlocks:      localLegInfo.ThinPoolInfo.TotalMetaBlocks,
-					UsedDataBlocks:       localLegInfo.ThinPoolInfo.UsedDataBlocks,
-					TotalDataBlocks:      localLegInfo.ThinPoolInfo.TotalDataBlocks,
-					HeldMetadataRoot:     localLegInfo.ThinPoolInfo.HeldMetadataRoot,
-					Mode:                 localLegInfo.ThinPoolInfo.Mode,
-					DiscardPassdown:      localLegInfo.ThinPoolInfo.DiscardPassdown,
-					ErrorOrQueue:         localLegInfo.ThinPoolInfo.ErrorOrQueue,
-					NeedsCheck:           localLegInfo.ThinPoolInfo.NeedsCheck,
-					MetadataLowWatermark: localLegInfo.ThinPoolInfo.MetadataLowWatermark,
+				if localLegInfo.ThinPoolInfo != nil {
+					legThinPoolInfoMap[localLegInfo.LegId] = &pbcp.ThinPoolInfo{
+						TransactionId:        localLegInfo.ThinPoolInfo.TransactionId,
+						UsedMetaBlocks:       localLegInfo.ThinPoolInfo.UsedMetaBlocks,
+						TotalMetaBlocks:      localLegInfo.ThinPoolInfo.TotalMetaBlocks,
+						UsedDataBlocks:       localLegInfo.ThinPoolInfo.UsedDataBlocks,
+						TotalDataBlocks:      localLegInfo.ThinPoolInfo.TotalDataBlocks,
+						HeldMetadataRoot:     localLegInfo.ThinPoolInfo.HeldMetadataRoot,
+						Mode:                 localLegInfo.ThinPoolInfo.Mode,
+						DiscardPassdown:      localLegInfo.ThinPoolInfo.DiscardPassdown,
+						ErrorOrQueue:         localLegInfo.ThinPoolInfo.ErrorOrQueue,
+						NeedsCheck:           localLegInfo.ThinPoolInfo.NeedsCheck,
+						MetadataLowWatermark: localLegInfo.ThinPoolInfo.MetadataLowWatermark,
+					}
 				}
 			}
 
