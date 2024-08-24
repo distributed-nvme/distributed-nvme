@@ -712,7 +712,8 @@ func (oc *OsCommand) DmCreateLinear(
 	}
 
 	lines := strings.Split(status, "\n")
-	if len(lines) == len(linearArgs) && strings.Contains(status, "linear") {
+	// len(lines) - 1 to remove the last empty line
+	if (len(lines)-1) == len(linearArgs) && strings.Contains(status, "linear") {
 		// If exist and same, nothing to do
 		return nil
 	}
