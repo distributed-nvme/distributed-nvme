@@ -568,7 +568,7 @@ func (oc *OsCommand) dmStatus(
 		}
 		return "", err
 	}
-	return stdout, nil
+	return strings.Trim(stdout, "\n"), nil
 }
 
 func (oc *OsCommand) dmTable(
@@ -584,7 +584,7 @@ func (oc *OsCommand) dmTable(
 		}
 		return "", err
 	}
-	return stdout, nil
+	return strings.Trim(stdout, "\n"), nil
 }
 
 func (oc *OsCommand) dmCreate(
