@@ -117,13 +117,27 @@ func removeAny(path string) error {
 	return nil
 }
 
+func dataEqual(newData, oldData []byte) bool {
+	if bytes.Equal(newData, oldData) {
+		return true
+	}
+	// The oldData may have a ascii 10 at the end
+	if len(oldData) > 0 {
+		oldData = oldData[:len(oldData)-1]
+		if bytes.Equal(newData, oldData) {
+			return true
+		}
+	}
+	return false
+}
+
 func writeFile(path, data string) error {
 	oldData, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	bData := []byte(data)
-	if !bytes.Equal(bData, oldData) {
+	if !dataEqual(bData, oldData) {
 		err := os.WriteFile(path, bData, 0644)
 		return err
 	}
@@ -134,6 +148,12 @@ func readFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
+	}
+	length := len(data)
+	if length > 0 {
+		if data[length-1] == 10 {
+			data = data[:length-1]
+		}
 	}
 	return string(data), nil
 }
@@ -261,47 +281,23 @@ func (oc *OsCommand) NvmetPortCreate(
 	}
 
 	trTypePath := nvmetTrTypePath(portNum)
-	currTrType, err := readFile(trTypePath)
-	if err != nil {
+	if err := writeFile(trTypePath, trType); err != nil {
 		return err
-	}
-	if currTrType != trType {
-		if err := writeFile(trTypePath, trType); err != nil {
-			return err
-		}
 	}
 
 	adrFamPath := nvmetAdrFamPath(portNum)
-	currAdrFam, err := readFile(adrFamPath)
-	if err != nil {
+	if err := writeFile(adrFamPath, adrFam); err != nil {
 		return err
-	}
-	if currAdrFam != adrFam {
-		if err := writeFile(adrFamPath, adrFam); err != nil {
-			return err
-		}
 	}
 
 	trAddrPath := nvmetTrAddrPath(portNum)
-	currTrAddr, err := readFile(trAddrPath)
-	if err != nil {
+	if err := writeFile(trAddrPath, trAddr); err != nil {
 		return err
-	}
-	if currTrAddr != trAddr {
-		if err := writeFile(trAddrPath, trAddr); err != nil {
-			return err
-		}
 	}
 
 	trSvcIdPath := nvmetTrSvcIdPath(portNum)
-	currTrSvcId, err := readFile(trSvcIdPath)
-	if err != nil {
+	if err := writeFile(trSvcIdPath, trSvcId); err != nil {
 		return err
-	}
-	if currTrSvcId != trSvcId {
-		if err := writeFile(trSvcIdPath, trSvcId); err != nil {
-			return err
-		}
 	}
 
 	// FIXME: support addr_treq
@@ -489,11 +485,13 @@ func (oc *OsCommand) NvmetSubsysCreate(
 		}
 	}
 
+	pch.Logger.Debug("nsToBeDeleted: %v", nsToBeDeleted)
 	for _, nsNum := range nsToBeDeleted {
 		if err := oc.nvmetSubsysNsDelete(nqn, nsNum); err != nil {
 			return err
 		}
 	}
+	pch.Logger.Debug("nsToBeCreated: %v", nsToBeCreated)
 	for _, nsArg := range nsToBeCreated {
 		if err := oc.nvmetSubsysNsCreate(nqn, nsArg); err != nil {
 			return err
