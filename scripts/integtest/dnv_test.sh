@@ -110,11 +110,23 @@ sleep 5
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size 1048576)
 verify_rsp_msg "${rsp}" "succeed"
 
-$BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0
-echo "early exit"
-exit 0
-rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
-verify_rsp_msg "${rsp}" "succeed"
+retry_cnt=0
+max_retry=10
+while true; do
+    rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
+    verify_rsp_msg "${rsp}" "succeed"
+    msg=$(echo $rsp | jq -rM '.sp_info.status_info.msg')
+    if [ "$msg" == "succeed" ]; then
+        echo "succeed"
+        break
+    fi
+    if [ $retry_cnt -ge $max_retry ]; then
+        echo "fail"
+        exit 1
+    fi
+    sleep 1
+    ((retry_cnt=retry_cnt+1))
+done
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol delete --vol-name vol0)
 verify_rsp_msg "${rsp}" "succeed"

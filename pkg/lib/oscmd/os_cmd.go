@@ -261,6 +261,8 @@ func (oc *OsCommand) runOsCmd(
 	}
 	err := cmd.Run()
 	stdout := stdoutBuilder.String()
+	stdout = strings.Trim(stdout, "\n")
+	stdout = strings.Trim(stdout, " ")
 	stderr := stderrBuilder.String()
 	pch.Logger.Info("OsCommand err: %v\n", err)
 	pch.Logger.Info("OsCommand stdout: %v\n", stdout)
@@ -568,7 +570,7 @@ func (oc *OsCommand) dmStatus(
 		}
 		return "", err
 	}
-	return strings.Trim(stdout, "\n"), nil
+	return stdout, nil
 }
 
 func (oc *OsCommand) dmTable(
@@ -584,7 +586,7 @@ func (oc *OsCommand) dmTable(
 		}
 		return "", err
 	}
-	return strings.Trim(stdout, "\n"), nil
+	return stdout, nil
 }
 
 func (oc *OsCommand) dmCreate(
@@ -860,8 +862,7 @@ func (oc *OsCommand) DmGetRaidStatus(
 	if err != nil {
 		return nil, err
 	}
-	// Only first character is the journal char, the last one is '\n'
-	if len(items[10]) != 2 {
+	if len(items[10]) != 1 {
 		return nil, fmt.Errorf("Invalid journal char cnt: %d", len(items[10]))
 	}
 	journalChar := items[10][0]
