@@ -290,8 +290,12 @@ func (swkr *shardWorker) process(
 	toBeDeleted map[string]bool,
 ) {
 	creatingList := make([]*resWorker, 0)
-	pch.Logger.Debug("toBeCreated: %v", toBeCreated)
-	pch.Logger.Debug("toBeDeleted: %v", toBeDeleted)
+	if len(toBeCreated) > 0 {
+		pch.Logger.Info("toBeCreated: %v", toBeCreated)
+	}
+	if len(toBeDeleted) > 0 {
+		pch.Logger.Info("toBeDeleted: %v", toBeDeleted)
+	}
 	for resId, bAndR := range toBeCreated {
 		resBody := bAndR.resBody
 		revision := bAndR.revision

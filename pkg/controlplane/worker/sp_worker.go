@@ -987,10 +987,12 @@ func (spwkr *spWorkerServer) updateConfAndInfo(
 		return nil
 	}
 
+	pch.Logger.Debug("spwkr.sm.RunStm")
 	if err := spwkr.sm.RunStm(pch, apply); err != nil {
 		pch.Logger.Error("Update sp err: %s %v", spId, err)
+		return false
 	}
-	return false
+	return true
 }
 
 func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
@@ -1017,6 +1019,7 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 					spAttr,
 				)
 				if spLdInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+					pch.Logger.Debug("syncupSpLd failed")
 					allSucceeded = false
 				}
 				if !ldConf.Inited &&
@@ -1042,6 +1045,7 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 			spAttr,
 		)
 		if spCntlrInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+			pch.Logger.Debug("syncupSpCntlr failed")
 			allSucceeded = false
 		}
 		if spCntlrInfo.ActiveCntlrInfo != nil {
@@ -1076,7 +1080,7 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 		}
 	}
 
-	if ret := spwkr.updateConfAndInfo(
+	if succeed := spwkr.updateConfAndInfo(
 		pch,
 		spId,
 		revision,
@@ -1086,9 +1090,11 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 		allSucceeded,
 		updateConf,
 		spAttr,
-	); !ret {
+	); !succeed {
+		pch.Logger.Debug("updateConfAndInfo failed")
 		allSucceeded = false
 	}
+	pch.Logger.Debug("allSucceeded: %v", allSucceeded)
 	return allSucceeded
 }
 
@@ -1112,6 +1118,7 @@ func (spwkr *spWorkerServer) syncupSp(
 		); allSucceeded {
 			return false
 		}
+		pch.Logger.Debug("Not allSucceeded")
 		select {
 		case <-pch.Ctx.Done():
 			return true
@@ -1129,7 +1136,15 @@ func (spwkr *spWorkerServer) checkSp(
 	spId string,
 	revision int64,
 ) bool {
-	return false
+	interval := constants.SpRetryBase
+	for {
+		select {
+		case <-pch.Ctx.Done():
+			return true
+		case <-time.After(interval):
+			interval = constants.SpRetryBase
+		}
+	}
 }
 
 func (spwkr *spWorkerServer) trackRes(

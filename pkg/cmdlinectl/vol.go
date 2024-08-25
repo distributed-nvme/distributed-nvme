@@ -62,14 +62,14 @@ var (
 	volGetArgs = &volGetArgsStruct{}
 
 	volExportCmd = &cobra.Command{
-		Use:  "get",
+		Use:  "export",
 		Args: cobra.MaximumNArgs(0),
 		Run:  volExportFunc,
 	}
 	volExportArgs = &volExportArgsStruct{}
 
 	volUnexportCmd = &cobra.Command{
-		Use:  "get",
+		Use:  "unexport",
 		Args: cobra.MaximumNArgs(0),
 		Run:  volUnexportFunc,
 	}
