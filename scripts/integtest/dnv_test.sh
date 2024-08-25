@@ -128,6 +128,24 @@ while true; do
     ((retry_cnt=retry_cnt+1))
 done
 
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
+verify_rsp_msg "${rsp}" "succeed"
+
+sp_id=$(echo $rsp | jq -rM '.sp_id')
+ss_id=$(echo $rsp | jq -rM '.sp_conf.ss_conf_list[0].ss_id')
+tr_type=$(echo $rsp | jq -rM '.sp_conf.cntlr_conf_list[0].tr_type')
+adr_fam=$(echo $rsp | jq -rM '.sp_conf.cntlr_conf_list[0].adr_fam')
+tr_addr=$(echo $rsp | jq -rM '.sp_conf.cntlr_conf_list[0].tr_addr')
+tr_svc_id=$(echo $rsp | jq -rM '.sp_conf.cntlr_conf_list[0].tr_svc_id')
+
+nqn="nqn.2024-01.io.dnv:1200:${sp_id}:${ss_id}"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol export --vol-name vol0 --host-nqn $HOST_NQN)
+verify_rsp_msg "${rsp}" "succeed"
+
+rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol unexport --vol-name vol0 --host-nqn $HOST_NQN)
+verify_rsp_msg "${rsp}" "succeed"
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol delete --vol-name vol0)
 verify_rsp_msg "${rsp}" "succeed"
 

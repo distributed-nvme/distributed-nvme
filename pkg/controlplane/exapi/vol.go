@@ -1553,7 +1553,7 @@ func (exApi *exApiServer) ExportVol(
 				}
 			}
 		}
-		hostId := fmt.Sprintf("%016", spConf.GeneralConf.SpCounter)
+		hostId := fmt.Sprintf("%016d", spConf.GeneralConf.SpCounter)
 		spConf.GeneralConf.SpCounter++
 		hostConf := &pbcp.HostConf{
 			HostId:  hostId,
