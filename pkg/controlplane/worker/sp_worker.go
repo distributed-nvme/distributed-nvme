@@ -604,11 +604,11 @@ func (builder *spInfoBuilder) getCntlrStatusInfo(
 ) *pbcp.StatusInfo {
 	var statusInfo *pbcp.StatusInfo
 	var ok bool
-	statusInfo, ok = builder.legStatusInfoMap[cntlrId]
+	statusInfo, ok = builder.cntlrStatusInfoMap[cntlrId]
 	if ok {
 		return statusInfo
 	}
-	statusInfo, ok = builder.oldLegStatusInfoMap[cntlrId]
+	statusInfo, ok = builder.oldCntlrStatusInfoMap[cntlrId]
 	if ok {
 		return statusInfo
 	}
