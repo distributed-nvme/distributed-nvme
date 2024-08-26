@@ -1502,6 +1502,7 @@ func (exApi *exApiServer) ExportVol(
 	nameToIdKey := exApi.kf.NameToIdEntityKey(req.VolName)
 	nameToId := &pbcp.NameToId{}
 	spConf := &pbcp.StoragePoolConf{}
+	spInfo := &pbcp.StoragePoolInfo{}
 
 	apply := func(stm concurrency.STM) error {
 		nameToIdVal := []byte(stm.Get(nameToIdKey))
@@ -1570,6 +1571,46 @@ func (exApi *exApiServer) ExportVol(
 		}
 		spConfStrNew := string(spConfValNew)
 		stm.Put(spConfKey, spConfStrNew)
+
+		spInfoKey := exApi.kf.SpInfoEntityKey(spId)
+		spInfoVal := []byte(stm.Get(spInfoKey))
+		if err := proto.Unmarshal(spInfoVal, spInfo); err != nil {
+			pch.Logger.Error(
+				"spInfo unmarshal err: %s %v",
+				spInfoKey,
+				err,
+			)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+
+		hostInfo := &pbcp.HostInfo{
+			HostId: hostId,
+			StatusInfo: &pbcp.StatusInfo{
+				Code:      constants.StatusCodeUninit,
+				Msg:       "uninit",
+				Timestamp: pch.Timestamp,
+			},
+		}
+		ssInfo := spInfo.SsInfoList[0]
+		for _, ssPerCntlrInfo := range ssInfo.SsPerCntlrInfoList {
+			hostInfoList := ssPerCntlrInfo.HostInfoList
+			hostInfoList = append(hostInfoList, hostInfo)
+			ssPerCntlrInfo.HostInfoList = hostInfoList
+		}
+
+		spInfoValNew, err := proto.Marshal(ssInfo)
+		if err != nil {
+			pch.Logger.Error("Marshal spInfo err: %v %v", spInfo, err)
+			return &stmwrapper.StmError{
+				constants.ReplyCodeInternalErr,
+				err.Error(),
+			}
+		}
+		spInfoStrNew := string(spInfoValNew)
+		stm.Put(spInfoKey, spInfoStrNew)
 
 		return nil
 	}

@@ -926,25 +926,36 @@ func syncupCntlrSs(
 		hostNqnMap,
 		nsMap,
 	)
+	ssCode := constants.StatusCodeSucceed
+	ssMsg := constants.StatusMsgSucceed
+	hostCode := constants.StatusCodeSucceed
+	hostMsg := constants.StatusMsgSucceed
+	hostInfoList := make([]*pbnd.HostInfo, len(ssConf.HostConfList))
 	if err != nil {
-		return &pbnd.SsInfo{
-			SsId: ssConf.SsId,
+		ssCode = constants.StatusCodeInternalErr
+		ssMsg = err.Error()
+		hostCode = constants.StatusCodeInternalErr
+		hostMsg = "Whole ss error"
+	}
+	for i, hostConf := range ssConf.HostConfList {
+		hostInfoList[i] = &pbnd.HostInfo{
+			HostId: hostConf.HostId,
 			StatusInfo: &pbnd.StatusInfo{
-				Code:      constants.StatusCodeInternalErr,
-				Msg:       err.Error(),
+				Code:      hostCode,
+				Msg:       hostMsg,
 				Timestamp: pch.Timestamp,
 			},
-			NsInfoList: nsInfoList,
 		}
 	}
 	return &pbnd.SsInfo{
 		SsId: ssConf.SsId,
 		StatusInfo: &pbnd.StatusInfo{
-			Code:      constants.StatusCodeSucceed,
-			Msg:       constants.StatusMsgSucceed,
+			Code:      ssCode,
+			Msg:       ssMsg,
 			Timestamp: pch.Timestamp,
 		},
-		NsInfoList: nsInfoList,
+		NsInfoList:   nsInfoList,
+		HostInfoList: hostInfoList,
 	}
 }
 

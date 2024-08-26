@@ -185,9 +185,11 @@ func generateSpAttr(spConf *pbcp.StoragePoolConf) *storagePoolAttr {
 
 type spInfoBuilder struct {
 	ssStatusInfoMap           map[string]*pbcp.StatusInfo
-	oldNsStatusInfoMap        map[string]*pbcp.StatusInfo
-	nsStatusInfoMap           map[string]*pbcp.StatusInfo
 	oldSsStatusInfoMap        map[string]*pbcp.StatusInfo
+	nsStatusInfoMap           map[string]*pbcp.StatusInfo
+	oldNsStatusInfoMap        map[string]*pbcp.StatusInfo
+	hostStatusInfoMap         map[string]*pbcp.StatusInfo
+	oldHostStatusInfoMap      map[string]*pbcp.StatusInfo
 	ldDnStatusInfoMap         map[string]*pbcp.StatusInfo
 	oldLdDnStatusInfoMap      map[string]*pbcp.StatusInfo
 	ldCnStatusInfoMap         map[string]*pbcp.StatusInfo
@@ -224,6 +226,8 @@ func newSpInfoBuilder(
 	oldSsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	nsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	oldNsStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	hostStatusInfoMap := make(map[string]*pbcp.StatusInfo)
+	oldHostStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	ldDnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	oldLdDnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
 	ldCnStatusInfoMap := make(map[string]*pbcp.StatusInfo)
@@ -272,6 +276,17 @@ func newSpInfoBuilder(
 						Code:      nsInfo.StatusInfo.Code,
 						Msg:       nsInfo.StatusInfo.Msg,
 						Timestamp: nsInfo.StatusInfo.Timestamp,
+					}
+				}
+				for _, hostInfo := range ssInfo.HostInfoList {
+					if hostInfo == nil {
+						continue
+					}
+					key := perCntlrKey(cntlrId, hostInfo.HostId)
+					hostStatusInfoMap[key] = &pbcp.StatusInfo{
+						Code:      hostInfo.StatusInfo.Code,
+						Msg:       hostInfo.StatusInfo.Msg,
+						Timestamp: hostInfo.StatusInfo.Timestamp,
 					}
 				}
 				key := perCntlrKey(cntlrId, ssInfo.SsId)
@@ -381,6 +396,10 @@ func newSpInfoBuilder(
 				key := perCntlrKey(ssPerCntlrInfo.CntlrId, nsInfo.NsId)
 				oldNsStatusInfoMap[key] = nsInfo.StatusInfo
 			}
+			for _, hostInfo := range ssPerCntlrInfo.HostInfoList {
+				key := perCntlrKey(ssPerCntlrInfo.CntlrId, hostInfo.HostId)
+				oldHostStatusInfoMap[key] = hostInfo.StatusInfo
+			}
 		}
 	}
 
@@ -445,6 +464,24 @@ func (builder *spInfoBuilder) getNsStatusInfo(
 		return statusInfo
 	}
 	statusInfo, ok = builder.oldNsStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
+	return nil
+}
+
+func (builder *spInfoBuilder) getHostStatusInfo(
+	cntlrId string,
+	hostId string,
+) *pbcp.StatusInfo {
+	key := perCntlrKey(cntlrId, hostId)
+	var statusInfo *pbcp.StatusInfo
+	var ok bool
+	statusInfo, ok = builder.hostStatusInfoMap[key]
+	if ok {
+		return statusInfo
+	}
+	statusInfo, ok = builder.oldHostStatusInfoMap[key]
 	if ok {
 		return statusInfo
 	}
@@ -829,13 +866,24 @@ func createSpInfo(
 					),
 				}
 			}
+			hostInfoList := make([]*pbcp.HostInfo, len(ssConf.HostConfList))
+			for k, hostConf := range ssConf.HostConfList {
+				hostInfoList[k] = &pbcp.HostInfo{
+					HostId: hostConf.HostId,
+					StatusInfo: builder.getHostStatusInfo(
+						cntlrConf.CntlrId,
+						hostConf.HostId,
+					),
+				}
+			}
 			ssPerCntlrInfoList[j] = &pbcp.SsPerCntlrInfo{
 				CntlrId: cntlrConf.CntlrId,
 				StatusInfo: builder.getSsStatusInfo(
 					cntlrConf.CntlrId,
 					ssConf.SsId,
 				),
-				NsInfoList: nsInfoList,
+				NsInfoList:   nsInfoList,
+				HostInfoList: hostInfoList,
 			}
 		}
 		ssInfoList[i] = &pbcp.SsInfo{

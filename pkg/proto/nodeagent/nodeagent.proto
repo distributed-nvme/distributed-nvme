@@ -376,10 +376,16 @@ message NsInfo {
   StatusInfo status_info = 2;
 }
 
+message HostInfo {
+  string host_id = 1;
+  StatusInfo status_info = 2;
+}
+
 message SsInfo {
   string ss_id = 1;
   StatusInfo status_info = 2;
   repeated NsInfo ns_info_list = 3;
+  repeated HostInfo host_info_list = 4;
 }
 
 message ActiveCntlrInfo {
