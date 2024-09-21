@@ -1601,7 +1601,7 @@ func (exApi *exApiServer) ExportVol(
 			ssPerCntlrInfo.HostInfoList = hostInfoList
 		}
 
-		spInfoValNew, err := proto.Marshal(ssInfo)
+		spInfoValNew, err := proto.Marshal(spInfo)
 		if err != nil {
 			pch.Logger.Error("Marshal spInfo err: %v %v", spInfo, err)
 			return &stmwrapper.StmError{

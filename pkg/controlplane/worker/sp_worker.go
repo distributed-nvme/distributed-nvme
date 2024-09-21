@@ -998,7 +998,7 @@ func (spwkr *spWorkerServer) updateConfAndInfo(
 
 		val := []byte(stm.Get(spInfoKey))
 		if len(val) <= 0 {
-			pch.Logger.Warning("NO oldSpInfo: %s", spInfoKey)
+			pch.Logger.Warning("No oldSpInfo: %s", spInfoKey)
 			return nil
 		}
 		if err := proto.Unmarshal(val, oldSpInfo); err != nil {
