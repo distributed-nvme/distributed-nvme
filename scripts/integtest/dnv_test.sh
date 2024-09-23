@@ -144,9 +144,27 @@ nqn="nqn.2024-01.io.dnv:1200:${sp_id}:${ss_id}"
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol export --vol-name vol0 --host-nqn $HOST_NQN)
 verify_rsp_msg "${rsp}" "succeed"
 
-# sudo $NVME_BIN connect --nqn "${nqn}" --transport "${tr_type}" --traddr "${tr_addr}" --trsvcid "${tr_svc_id}" --hostnqn "${HOST_NQN}"
+retry_cnt=0
+max_retry=10
+while true; do
+    rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
+    verify_rsp_msg "${rsp}" "succeed"
+    msg=$(echo $rsp | jq -rM '.sp_info.ss_info_list[0].ss_per_cntlr_info_list[0].host_info_list[0].status_info.msg')
+    if [ "$msg" == "succeed" ]; then
+        echo "succeed"
+        break
+    fi
+    if [ $retry_cnt -ge $max_retry ]; then
+        echo "fail"
+        exit 1
+    fi
+    sleep 1
+    ((retry_cnt=retry_cnt+1))
+done
 
-# sudo $NVME_BIN disconnect --nqn "${nqn}"
+sudo $NVME_BIN connect --nqn "${nqn}" --transport "${tr_type}" --traddr "${tr_addr}" --trsvcid "${tr_svc_id}" --hostnqn "${HOST_NQN}"
+
+sudo $NVME_BIN disconnect --nqn "${nqn}"
 
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol unexport --vol-name vol0 --host-nqn $HOST_NQN)
 verify_rsp_msg "${rsp}" "succeed"

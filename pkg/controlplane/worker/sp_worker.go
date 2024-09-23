@@ -430,6 +430,8 @@ func newSpInfoBuilder(
 		oldSsStatusInfoMap:        oldSsStatusInfoMap,
 		nsStatusInfoMap:           nsStatusInfoMap,
 		oldNsStatusInfoMap:        oldNsStatusInfoMap,
+		hostStatusInfoMap:         hostStatusInfoMap,
+		oldHostStatusInfoMap:      oldHostStatusInfoMap,
 		ldDnStatusInfoMap:         ldDnStatusInfoMap,
 		oldLdDnStatusInfoMap:      oldLdDnStatusInfoMap,
 		ldCnStatusInfoMap:         ldCnStatusInfoMap,
