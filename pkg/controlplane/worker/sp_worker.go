@@ -1115,6 +1115,21 @@ func (spwkr *spWorkerServer) syncupAllLdAndCntlr(
 					}
 				}
 			}
+			for _, ssInfo := range spCntlrInfo.SsInfoList {
+				if ssInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+					allSucceeded = false
+				}
+				for _, nsInfo := range ssInfo.NsInfoList {
+					if nsInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+						allSucceeded = false
+					}
+				}
+				for _, hostInfo := range ssInfo.HostInfoList {
+					if hostInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+						allSucceeded = false
+					}
+				}
+			}
 		}
 		cntlrIdToInfo[cntlrConf.CntlrId] = spCntlrInfo
 	}
