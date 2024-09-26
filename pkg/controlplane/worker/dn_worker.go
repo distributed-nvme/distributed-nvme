@@ -285,7 +285,8 @@ func (dnwkr *dnWorkerServer) checkDn(
 				return false
 			}
 			if reply.DnInfo.StatusInfo.Code != constants.StatusCodeSucceed {
-				pch.Logger.Error("dn failed")
+				pch.Logger.Error("dn failed, dnId=%v", dnId)
+				return false
 			}
 		}
 	}
@@ -317,7 +318,6 @@ func (dnwkr *dnWorkerServer) trackRes(
 	}
 	client := pbnd.NewDiskNodeAgentClient(conn)
 	for {
-		// FIXME: implement dn error handling
 		if exit := dnwkr.syncupDn(client, pch, dnId, revision, dnConf); exit {
 			return
 		}

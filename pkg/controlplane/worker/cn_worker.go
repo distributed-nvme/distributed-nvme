@@ -283,7 +283,8 @@ func (cnwkr *cnWorkerServer) checkCn(
 				return false
 			}
 			if reply.CnInfo.StatusInfo.Code != constants.StatusCodeSucceed {
-				pch.Logger.Error("cn failed")
+				pch.Logger.Error("cn failed, cnId=%v", cnId)
+				return false
 			}
 		}
 	}
@@ -315,7 +316,6 @@ func (cnwkr *cnWorkerServer) trackRes(
 	}
 	client := pbnd.NewControllerNodeAgentClient(conn)
 	for {
-		// FIXME: implement cn error handling
 		if exit := cnwkr.syncupCn(client, pch, cnId, revision, cnConf); exit {
 			return
 		}
