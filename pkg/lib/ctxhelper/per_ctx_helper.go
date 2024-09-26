@@ -87,12 +87,12 @@ func UnaryServerPerCtxHelperInterceptor(
 	handler grpc.UnaryHandler,
 ) (interface{}, error) {
 	pch := buildPerCtxHelper(ctx, info.FullMethod)
-	pch.Logger.Info("Server side req: %v", req)
+	pch.Logger.Info("RPC req: %v", req)
 	reply, err := handler(pch.Ctx, req)
 	if err != nil {
-		pch.Logger.Error("Server side err: %v", err)
+		pch.Logger.Error("RPC err: %v", err)
 	} else {
-		pch.Logger.Info("Server side reply: %v", reply)
+		pch.Logger.Info("RPC reply: %v", reply)
 	}
 	return reply, err
 }
@@ -108,12 +108,12 @@ func UnaryClientPerCtxHelperInterceptor(
 	pch := GetPerCtxHelper(ctx)
 	md := metadata.Pairs(constants.TraceIdKey, pch.TraceId)
 	newCtx := metadata.NewOutgoingContext(ctx, md)
-	pch.Logger.Info("Client side req: %s %v", method, req)
+	pch.Logger.Info("RPC req: %s %v", method, req)
 	err := invoker(newCtx, method, req, reply, cc, opts...)
 	if err != nil {
-		pch.Logger.Error("Client side err: %v", err)
+		pch.Logger.Error("RPC err: %v", err)
 	} else {
-		pch.Logger.Info("Client side reply: %v", reply)
+		pch.Logger.Info("RPC reply: %v", reply)
 	}
 	return err
 }
