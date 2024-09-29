@@ -9,7 +9,8 @@ import (
 
 type volCreateArgsStruct struct {
 	volName          string
-	cntlrCnt         uint32
+	activeCntlrCnt   uint32
+	standbyCntlrCnt  uint32
 	legPerCntlr      uint32
 	size             uint64
 	dnDistinguishKey string
@@ -83,7 +84,11 @@ func init() {
 	volCreateCmd.MarkFlagRequired("vol-name")
 
 	volCreateCmd.Flags().Uint32VarP(
-		&volCreateArgs.cntlrCnt, "cntlr-cnt", "", 1, "cntlr cnt",
+		&volCreateArgs.activeCntlrCnt, "active-cntlr-cnt", "", 1, "active cntlr cnt",
+	)
+
+	volCreateCmd.Flags().Uint32VarP(
+		&volCreateArgs.standbyCntlrCnt, "standby-cntlr-cnt", "", 0, "standby cntlr cnt",
 	)
 
 	volCreateCmd.Flags().Uint32VarP(
@@ -163,7 +168,8 @@ func (cli *client) createVol(args *volCreateArgsStruct) string {
 	}
 	req := &pbcp.CreateVolRequest{
 		VolName:          args.volName,
-		CntlrCnt:         args.cntlrCnt,
+		ActiveCntlrCnt:   args.activeCntlrCnt,
+		StandbyCntlrCnt:  args.standbyCntlrCnt,
 		LegPerCntlr:      args.legPerCntlr,
 		Size:             args.size,
 		DnDistinguishKey: args.dnDistinguishKey,
