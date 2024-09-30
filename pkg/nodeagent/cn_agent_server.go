@@ -959,7 +959,7 @@ func syncupCntlrSs(
 	}
 }
 
-func syncupSpCntlr(
+func syncupActiveSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
@@ -1038,6 +1038,42 @@ func syncupSpCntlr(
 		NvmePortInfo:    nvmePortInfo,
 		ActiveCntlrInfo: activeCntlrInfo,
 		SsInfoList:      ssInfoList,
+	}
+}
+
+func syncupStandbySpCntlr(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
+	spCntlrConf *pbnd.SpCntlrConf,
+) *pbnd.SpCntlrInfo {
+	return nil
+}
+
+func syncupSpCntlr(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
+	spCntlrConf *pbnd.SpCntlrConf,
+) *pbnd.SpCntlrInfo {
+	if spCntlrConf.ActiveCntlrConf != nil {
+		return syncupActiveSpCntlr(
+			pch,
+			oc,
+			nf,
+			spCntlrData,
+			spCntlrConf,
+		)
+	} else {
+		return syncupStandbySpCntlr(
+			pch,
+			oc,
+			nf,
+			spCntlrData,
+			spCntlrConf,
+		)
 	}
 }
 
