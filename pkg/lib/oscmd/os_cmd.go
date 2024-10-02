@@ -1001,6 +1001,24 @@ func (oc *OsCommand) DmCreateRaid0(
 	return nil
 }
 
+func (oc *OsCommand) DmCreateError(
+	pch *ctxhelper.PerCtxHelper,
+	dmName string,
+	size uint64,
+) error {
+	status, err := oc.dmStatus(pch, dmName)
+	if err != nil {
+		return err
+	}
+
+	if status == "" {
+		table := fmt.Sprintf("0 %d error", byteToSector(size))
+		return oc.dmCreate(pch, dmName, table)
+	}
+
+	return nil
+}
+
 type DmPoolArg struct {
 	Start             uint64
 	Size              uint64

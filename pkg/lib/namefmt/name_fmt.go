@@ -27,6 +27,7 @@ const (
 	devTypeLegToLocalDm  = "1007"
 	devTypeLegToRemoteDm = "1008"
 	devTypeRaid0Dm       = "1009"
+	devTypeErrorDm       = "1010"
 
 	nqnTypeHostCn = "0000"
 	nqnTypeLdDnDm = "1000"
@@ -270,6 +271,21 @@ func (nf *NameFmt) Raid0ThinDmName(
 		cnId,
 		spId,
 		thinId,
+	)
+}
+
+func (nf *NameFmt) ErrorDmName(
+	cnId string,
+	spId string,
+	devId uint32,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s-%08d",
+		nf.dmPrefix,
+		devTypeErrorDm,
+		cnId,
+		spId,
+		devId,
 	)
 }
 

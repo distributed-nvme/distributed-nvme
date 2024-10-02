@@ -1044,6 +1044,114 @@ func syncupActiveSpCntlr(
 	}
 }
 
+func syncupStandbySs(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	ssConf *pbnd.SsConf,
+) *pbnd.SsInfo {
+	nqn := nf.SsNqn(
+		spCntlrConf.SpId,
+		ssConf.SsId,
+	)
+	nsInfoList := make([]*pbnd.NsInfo, len(ssConf.NsConfList))
+	nsErr := false
+	nsMap := make(map[string]*oscmd.NvmetNsArg)
+	for i, nsConf := range ssConf.NsConfList {
+		errorDmName := nf.ErrorDmName(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			nsConf.DevId,
+		)
+		err := oc.DmCreateError(pch, errorDmName, nsConf.Size)
+		if err != nil {
+			nsInfoList[i] = &pbnd.NsInfo{
+				NsId: nsConf.NsId,
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeInternalErr,
+					Msg:       err.Error(),
+					Timestamp: pch.Timestamp,
+				},
+			}
+			nsErr = true
+		} else {
+			nsInfoList[i] = &pbnd.NsInfo{
+				NsId: nsConf.NsId,
+				StatusInfo: &pbnd.StatusInfo{
+					Code:      constants.StatusCodeSucceed,
+					Msg:       constants.StatusMsgSucceed,
+					Timestamp: pch.Timestamp,
+				},
+			}
+		}
+		nsMap[nsConf.NsNum] = &oscmd.NvmetNsArg{
+			NsNum:   nsConf.NsNum,
+			DevPath: nf.DmNameToPath(errorDmName),
+			Uuid:    nf.NsUuid(nqn, nsConf.NsNum),
+		}
+	}
+	if nsErr {
+		return &pbnd.SsInfo{
+			SsId: ssConf.SsId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      constants.StatusCodeInternalErr,
+				Msg:       "Ns error",
+				Timestamp: pch.Timestamp,
+			},
+			NsInfoList: nsInfoList,
+		}
+	}
+
+	hostNqnMap := make(map[string]bool)
+	for _, hostConf := range ssConf.HostConfList {
+		hostNqnMap[hostConf.HostNqn] = true
+	}
+	cntlidMin := constants.ExternalCntlidStart +
+		spCntlrConf.CntlrIdx*constants.ExternalCntlidStep
+	cntlidMax := cntlidMin + constants.ExternalCntlidStep
+	err := oc.NvmetSubsysCreate(
+		pch,
+		nqn,
+		cntlidMin,
+		cntlidMax,
+		spCntlrConf.NvmePortConf.PortNum,
+		hostNqnMap,
+		nsMap,
+	)
+	ssCode := constants.StatusCodeSucceed
+	ssMsg := constants.StatusMsgSucceed
+	hostCode := constants.StatusCodeSucceed
+	hostMsg := constants.StatusMsgSucceed
+	hostInfoList := make([]*pbnd.HostInfo, len(ssConf.HostConfList))
+	if err != nil {
+		ssCode = constants.StatusCodeInternalErr
+		ssMsg = err.Error()
+		hostCode = constants.StatusCodeInternalErr
+		hostMsg = "Whole ss error"
+	}
+	for i, hostConf := range ssConf.HostConfList {
+		hostInfoList[i] = &pbnd.HostInfo{
+			HostId: hostConf.HostId,
+			StatusInfo: &pbnd.StatusInfo{
+				Code:      hostCode,
+				Msg:       hostMsg,
+				Timestamp: pch.Timestamp,
+			},
+		}
+	}
+	return &pbnd.SsInfo{
+		SsId: ssConf.SsId,
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      ssCode,
+			Msg:       ssMsg,
+			Timestamp: pch.Timestamp,
+		},
+		NsInfoList:   nsInfoList,
+		HostInfoList: hostInfoList,
+	}
+}
+
 func syncupStandbySpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -1051,7 +1159,47 @@ func syncupStandbySpCntlr(
 	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) *pbnd.SpCntlrInfo {
-	return nil
+	succeed := true
+	nvmePortInfo := syncupCntlrNvmePort(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		spCntlrConf.NvmePortConf,
+		constants.AnaGroupInaccessible,
+	)
+	if nvmePortInfo.StatusInfo.Code != constants.StatusCodeSucceed {
+		succeed = false
+	}
+	ssInfoList := make([]*pbnd.SsInfo, len(spCntlrConf.SsConfList))
+	for i, ssConf := range spCntlrConf.SsConfList {
+		ssInfoList[i] = syncupStandbySs(
+			pch,
+			oc,
+			nf,
+			spCntlrConf,
+			ssConf,
+		)
+		if ssInfoList[i].StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+		}
+	}
+
+	code := constants.StatusCodeSucceed
+	msg := constants.StatusMsgSucceed
+	if !succeed {
+		code = constants.StatusCodeInternalErr
+		msg = "internal error"
+	}
+	return &pbnd.SpCntlrInfo{
+		StatusInfo: &pbnd.StatusInfo{
+			Code:      code,
+			Msg:       msg,
+			Timestamp: pch.Timestamp,
+		},
+		NvmePortInfo: nvmePortInfo,
+		SsInfoList:   ssInfoList,
+	}
 }
 
 func syncupSpCntlr(
