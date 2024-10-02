@@ -178,6 +178,10 @@ func nvmetTrSvcIdPath(portNum string) string {
 	return fmt.Sprintf("%s/addr_trsvcid", nvmetPortPath(portNum))
 }
 
+func nvmetPortAnaStatePath(portNum string) string {
+	return fmt.Sprintf("%s/ana_groups/1/ana_state", nvmetPortPath(portNum))
+}
+
 func nvmetSubsysPath(nqn string) string {
 	return fmt.Sprintf("%s/subsystems/%s", nvmetPath, nqn)
 }
@@ -277,6 +281,7 @@ func (oc *OsCommand) NvmetPortCreate(
 	adrFam string,
 	trAddr string,
 	trSvcId string,
+	anaState string,
 ) error {
 	if err := createDir(nvmetPortPath(portNum)); err != nil {
 		return err
@@ -302,6 +307,10 @@ func (oc *OsCommand) NvmetPortCreate(
 		return err
 	}
 
+	anaStatePath := nvmetPortAnaStatePath(portNum)
+	if err := writeFile(anaStatePath, anaState); err != nil {
+		return err
+	}
 	// FIXME: support addr_treq
 
 	return nil

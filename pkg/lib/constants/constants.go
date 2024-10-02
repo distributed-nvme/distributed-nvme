@@ -149,4 +149,10 @@ const (
 	DefaultTagKey = "GrpcTarget"
 
 	MetaRegionSizeDefault = uint64(64 * 1024)
+
+	AnaGroupOptimized      = "optimized"
+	AnaGroupNonOptimized   = "non-optimized"
+	AnaGroupInaccessible   = "inaccessible"
+	AnaGroupChange         = "change"
+	AnaGroupPersistentLoss = "persistent-loss"
 )

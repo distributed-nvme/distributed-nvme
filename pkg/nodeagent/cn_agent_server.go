@@ -49,6 +49,7 @@ func syncupCntlrNvmePort(
 	nf *namefmt.NameFmt,
 	spCntlrConf *pbnd.SpCntlrConf,
 	nvmePortConf *pbnd.NvmePortConf,
+	anaState string,
 ) *pbnd.NvmePortInfo {
 	if err := oc.NvmetPortCreate(
 		pch,
@@ -57,6 +58,7 @@ func syncupCntlrNvmePort(
 		nvmePortConf.NvmeListener.AdrFam,
 		nvmePortConf.NvmeListener.TrAddr,
 		nvmePortConf.NvmeListener.TrSvcId,
+		anaState,
 	); err != nil {
 		return &pbnd.NvmePortInfo{
 			StatusInfo: &pbnd.StatusInfo{
@@ -973,6 +975,7 @@ func syncupActiveSpCntlr(
 		nf,
 		spCntlrConf,
 		spCntlrConf.NvmePortConf,
+		constants.AnaGroupOptimized,
 	)
 	if nvmePortInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 		succeed = false
@@ -1263,6 +1266,7 @@ func (cnAgent *cnAgentServer) SyncupCn(
 		req.CnConf.NvmePortConf.NvmeListener.AdrFam,
 		req.CnConf.NvmePortConf.NvmeListener.TrAddr,
 		req.CnConf.NvmePortConf.NvmeListener.TrSvcId,
+		constants.AnaGroupOptimized,
 	); err != nil {
 		return &pbnd.SyncupCnReply{
 			CnInfo: &pbnd.CnInfo{
