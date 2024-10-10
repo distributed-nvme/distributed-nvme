@@ -770,9 +770,39 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 			remoteLegConfList = append(remoteLegConfList, remoteLegConf)
 		}
 	}
-	// FIXME: implement moving task and importing task
-	mtConfList := make([]*pbnd.MtConf, 0)
-	itConfList := make([]*pbnd.ItConf, 0)
+	var activeCntlrConf *pbnd.ActiveCntlrConf
+	// this is an active cntlr if localLegConfList is not empty
+	if len(localLegConfList) > 0 {
+		// FIXME: implement moving task and importing task
+		mtConfList := make([]*pbnd.MtConf, 0)
+		itConfList := make([]*pbnd.ItConf, 0)
+		activeCntlrConf = &pbnd.ActiveCntlrConf{
+			StripeConf: &pbnd.StripeConf{
+				ChunkSize: spConf.GeneralConf.StripeConf.ChunkSize,
+			},
+			ThinPoolConf: &pbnd.ThinPoolConf{
+				DataBlockSize:  spConf.GeneralConf.ThinPoolConf.DataBlockSize,
+				LowWaterMark:   spConf.GeneralConf.ThinPoolConf.LowWaterMark,
+				ErrorIfNoSpace: spConf.GeneralConf.ThinPoolConf.ErrorIfNoSpace,
+			},
+			RedundancyConf: &pbnd.RedundancyConf{
+				RedunType:       spConf.GeneralConf.RedundancyConf.RedunType,
+				RegionSize:      spConf.GeneralConf.RedundancyConf.RegionSize,
+				ChunkSize:       spConf.GeneralConf.RedundancyConf.ChunkSize,
+				DaemonSleep:     spConf.GeneralConf.RedundancyConf.DaemonSleep,
+				MinRecoveryRate: spConf.GeneralConf.RedundancyConf.MinRecoveryRate,
+				MaxRecoveryRate: spConf.GeneralConf.RedundancyConf.MaxRecoveryRate,
+				StripeCache:     spConf.GeneralConf.RedundancyConf.StripeCache,
+				JournalMode:     spConf.GeneralConf.RedundancyConf.JournalMode,
+			},
+			CreatingSnapConf:  spAttr.creatingSnapConf,
+			DeletingSnapConf:  spAttr.deletingSnapConf,
+			LocalLegConfList:  localLegConfList,
+			RemoteLegConfList: remoteLegConfList,
+			MtConfList:        mtConfList,
+			ItConfList:        itConfList,
+		}
+	}
 	req := &pbnd.SyncupSpCntlrRequest{
 		SpCntlrConf: &pbnd.SpCntlrConf{
 			CnId:     cntlrConf.CnId,
@@ -793,33 +823,8 @@ func (spwkr *spWorkerServer) syncupSpCntlr(
 				// 	SeqCh: cntlrConf.NvmePortConf.TrEq.SeqCh,
 				// },
 			},
-			SsConfList: spAttr.ssConfList,
-			ActiveCntlrConf: &pbnd.ActiveCntlrConf{
-				StripeConf: &pbnd.StripeConf{
-					ChunkSize: spConf.GeneralConf.StripeConf.ChunkSize,
-				},
-				ThinPoolConf: &pbnd.ThinPoolConf{
-					DataBlockSize:  spConf.GeneralConf.ThinPoolConf.DataBlockSize,
-					LowWaterMark:   spConf.GeneralConf.ThinPoolConf.LowWaterMark,
-					ErrorIfNoSpace: spConf.GeneralConf.ThinPoolConf.ErrorIfNoSpace,
-				},
-				RedundancyConf: &pbnd.RedundancyConf{
-					RedunType:       spConf.GeneralConf.RedundancyConf.RedunType,
-					RegionSize:      spConf.GeneralConf.RedundancyConf.RegionSize,
-					ChunkSize:       spConf.GeneralConf.RedundancyConf.ChunkSize,
-					DaemonSleep:     spConf.GeneralConf.RedundancyConf.DaemonSleep,
-					MinRecoveryRate: spConf.GeneralConf.RedundancyConf.MinRecoveryRate,
-					MaxRecoveryRate: spConf.GeneralConf.RedundancyConf.MaxRecoveryRate,
-					StripeCache:     spConf.GeneralConf.RedundancyConf.StripeCache,
-					JournalMode:     spConf.GeneralConf.RedundancyConf.JournalMode,
-				},
-				CreatingSnapConf:  spAttr.creatingSnapConf,
-				DeletingSnapConf:  spAttr.deletingSnapConf,
-				LocalLegConfList:  localLegConfList,
-				RemoteLegConfList: remoteLegConfList,
-				MtConfList:        mtConfList,
-				ItConfList:        itConfList,
-			},
+			SsConfList:      spAttr.ssConfList,
+			ActiveCntlrConf: activeCntlrConf,
 		},
 	}
 	client := pbnd.NewControllerNodeAgentClient(conn)
