@@ -13,6 +13,11 @@ BIN_DIR=$ROOT_DIR/_out/linux_amd64
 ETCD_BIN=$ROOT_DIR/bin/linux_amd64/etcd
 NVME_BIN=$ROOT_DIR/bin/linux_amd64/nvme
 
+if [ "$WORK_DIR" == "" ]; then
+    echo "WORK_DIR is empty"
+    exit 1
+fi
+
 sudo rm -rf $WORK_DIR
 mkdir -p $WORK_DIR
 
@@ -162,7 +167,7 @@ while true; do
     ((retry_cnt=retry_cnt+1))
 done
 
-sudo $NVME_BIN connect --nqn "${nqn}" --transport "${tr_type}" --traddr "${tr_addr}" --trsvcid "${tr_svc_id}" --hostnqn "${HOST_NQN}"
+sudo $NVME_BIN connect --nqn "${nqn}" --transport "${tr_type}" --traddr "${tr_addr}" --trsvcid "${tr_svc_id}" --hostnqn "${HOST_NQN}" --hostid "${HOST_ID}"
 
 sudo $NVME_BIN disconnect --nqn "${nqn}"
 

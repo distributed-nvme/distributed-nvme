@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
 )
@@ -1411,6 +1413,10 @@ func (oc *OsCommand) nvmeConnectPath(
 	nvmeArg *NvmeArg,
 ) error {
 	name := filepath.Join(oc.exePath, "nvme")
+	hostid := uuid.NewMD5(
+		uuid.MustParse("37833e01-35d4-4e5a-b0a1-fff158b9d03b"),
+		[]byte(nvmeArg.HostNqn),
+	).String()
 	args := []string{
 		"connect",
 		"--nqn",
@@ -1423,6 +1429,8 @@ func (oc *OsCommand) nvmeConnectPath(
 		nvmeArg.TrSvcId,
 		"--hostnqn",
 		nvmeArg.HostNqn,
+		"--hostid",
+		hostid,
 	}
 	if _, _, err := oc.runOsCmd(pch, name, args, ""); err != nil {
 		return err
