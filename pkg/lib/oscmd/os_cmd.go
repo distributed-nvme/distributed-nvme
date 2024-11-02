@@ -402,6 +402,10 @@ func (oc *OsCommand) nvmetSubsysNsDelete(nqn string, nsNum string) error {
 	return removeAny(nvmetSubsysNsPath(nqn, nsNum))
 }
 
+func (oc *OsCommand) nvmetSubsysDelete(nqn string) error {
+	return removeAny(nvmetSubsysPath(nqn))
+}
+
 func (oc *OsCommand) NvmetSubsysCreate(
 	pch *ctxhelper.PerCtxHelper,
 	nqn string,
@@ -536,6 +540,10 @@ func (oc *OsCommand) NvmetSubsysDelete(
 		if err := oc.nvmetSubsysNsDelete(nqn, nsEntity.Name()); err != nil {
 			return err
 		}
+	}
+
+	if err := oc.nvmetSubsysDelete(nqn); err != nil {
+		return err
 	}
 
 	return nil
