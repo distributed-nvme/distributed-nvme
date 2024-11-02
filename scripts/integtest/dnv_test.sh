@@ -194,4 +194,12 @@ verify_rsp_code "${rsp}" "1002"
 
 cleanup
 
+sleep 1
+
+force_cleanup
+
+sleep 1
+
+cleanup_check
+
 echo "done"
