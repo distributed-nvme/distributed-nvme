@@ -458,11 +458,28 @@ func (oc *OsCommand) NvmetSubsysCreate(
 		}
 	}
 	if len(hostToBeDeleted) > 0 {
+		// When we want to change the host(s), we should make sure
+		// two things:
+		// (1). Flush IOs to make sure no pending IO to the old host(s).
+		//      We run DmSuspend/DmResume to flush IOs
+		// (2). Disconnect from the old host(s).
+		//      We remove the subsys from port to disconnect from the
+		//      old hosts.
+		for _, nsArg := range nsMap {
+			if err := oc.DmSuspend(pch, nsArg.DevPath); err != nil {
+				return err
+			}
+		}
 		if err := oc.nvmetRemoveSubsysFromPort(nqn, portNum); err != nil {
 			return err
 		}
 		for _, hostNqn := range hostToBeDeleted {
 			if err := oc.nvmetRemoveHostFromSubsys(nqn, hostNqn); err != nil {
+				return err
+			}
+		}
+		for _, nsArg := range nsMap {
+			if err := oc.DmResume(pch, nsArg.DevPath); err != nil {
 				return err
 			}
 		}
