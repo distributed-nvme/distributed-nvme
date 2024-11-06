@@ -1649,11 +1649,18 @@ func (cnAgent *cnAgentServer) SyncupSpCntlr(
 		spCntlrData.spCntlrLocal.PortNum = req.SpCntlrConf.NvmePortConf.PortNum
 	} else {
 		if spCntlrData.spCntlrLocal.PortNum != req.SpCntlrConf.NvmePortConf.PortNum {
-			pch.Logger.Fatal(
-				"SpCntlr PortNum mismatch: %s %s",
-				spCntlrData.spCntlrLocal.PortNum,
-				req.SpCntlrConf.NvmePortConf.PortNum,
-			)
+			return &pbnd.SyncupSpCntlrReply{
+				SpCntlrInfo: &pbnd.SpCntlrInfo{
+					StatusInfo: &pbnd.StatusInfo{
+						Code: constants.StatusCodeDataMismatch,
+						Msg: fmt.Sprintf(
+							"PortNum: %d",
+							spCntlrData.spCntlrLocal.PortNum,
+						),
+						Timestamp: pch.Timestamp,
+					},
+				},
+			}, nil
 		}
 	}
 	spCntlrData.spCntlrLocal.Revision = req.SpCntlrConf.Revision
