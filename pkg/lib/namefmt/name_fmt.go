@@ -87,17 +87,28 @@ func (nf *NameFmt) SsNqn(
 	)
 }
 
+func (nf *NameFmt) RemoteLegNqnPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s:%s:%s:%s:",
+		nf.nqnPrefix,
+		nqnTypeRemote,
+		cnId,
+		spId,
+	)
+}
+
 func (nf *NameFmt) RemoteLegNqn(
 	cnId string,
 	spId string,
 	legId string,
 ) string {
+	prefix := nf.RemoteLegNqnPrefix(cnId, spId)
 	return fmt.Sprintf(
-		"%s:%s:%s:%s:%s",
-		nf.nqnPrefix,
-		nqnTypeRemote,
-		cnId,
-		spId,
+		"%s:%s",
+		prefix,
 		legId,
 	)
 }

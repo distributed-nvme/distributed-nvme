@@ -3,6 +3,7 @@ package oscmd
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -572,6 +573,42 @@ func (oc *OsCommand) RemoveSubsysFromPort(
 	portNum string,
 ) error {
 	return oc.nvmetRemoveSubsysFromPort(nqn, portNum)
+}
+
+func (oc *OsCommand) getNamesByPrefix(
+	pch *ctxhelper.PerCtxHelper,
+	path string,
+	prefix string,
+) ([]string, error) {
+	names := make([]string, 0)
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return names, err
+	}
+	for _, file := range files {
+		name := file.Name()
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, err
+}
+
+func (oc *OsCommand) ListSubsysFromPort(
+	pch *ctxhelper.PerCtxHelper,
+	prefix string,
+	portNum string,
+) ([]string, error) {
+	path := fmt.Sprintf("%s/subsystems", nvmetPortPath(portNum))
+	return oc.getNamesByPrefix(pch, path, prefix)
+}
+
+func (oc *OsCommand) ListSubsys(
+	pch *ctxhelper.PerCtxHelper,
+	prefix string,
+) ([]string, error) {
+	path := fmt.Sprintf("%s/subsystems", nvmetPath)
+	return oc.getNamesByPrefix(pch, path, prefix)
 }
 
 type DmLinearArg struct {

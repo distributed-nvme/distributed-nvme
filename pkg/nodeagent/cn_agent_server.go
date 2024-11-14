@@ -1232,8 +1232,39 @@ func cleanupSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
+	portNum string,
 	spCntlrLocal *localdata.SpCntlrLocal,
 ) error {
+	prefix := nf.RemoteLegNqnPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	portNqnList, err := oc.ListSubsysFromPort(pch, prefix, portNum)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range portNqnList {
+		if err := oc.RemoveSubsysFromPort(
+			pch,
+			nqn,
+			portNum,
+		); err != nil {
+			return err
+		}
+	}
+
+	nqnList, err := oc.ListSubsys(pch, prefix)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range nqnList {
+		if err := oc.NvmetSubsysDelete(
+			pch,
+			nqn,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1492,6 +1523,7 @@ func (cnAgent *cnAgentServer) cleanup(
 			pch,
 			cnAgent.oc,
 			cnAgent.nf,
+			spCntlrData.portNum,
 			spCntlrData.spCntlrLocal,
 		)
 		spCntlrData.mu.Unlock()
