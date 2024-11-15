@@ -1235,25 +1235,27 @@ func cleanupSpCntlr(
 	portNum string,
 	spCntlrLocal *localdata.SpCntlrLocal,
 ) error {
-	prefix := nf.RemoteLegNqnPrefix(
-		spCntlrLocal.CnId,
-		spCntlrLocal.SpId,
-	)
-	portNqnList, err := oc.ListSubsysFromPort(pch, prefix, portNum)
+	nqnPrefix := nf.SsNqnPrefix(spCntlrLocal.SpId)
+
+	nqnInPortList, err := oc.ListSubsysFromPort(pch, nqnPrefix, spCntlrLocal.PortNum)
 	if err != nil {
 		return err
 	}
-	for _, nqn := range portNqnList {
+	for _, nqn := range nqnInPortList {
 		if err := oc.RemoveSubsysFromPort(
 			pch,
 			nqn,
-			portNum,
+			spCntlrLocal.PortNum,
 		); err != nil {
 			return err
 		}
 	}
 
-	nqnList, err := oc.ListSubsys(pch, prefix)
+	if err := oc.NvmetPortDelete(pch, spCntlrLocal.PortNum); err != nil {
+		return err
+	}
+
+	nqnList, err := oc.ListSubsys(pch, nqnPrefix)
 	if err != nil {
 		return err
 	}
@@ -1265,6 +1267,52 @@ func cleanupSpCntlr(
 			return err
 		}
 	}
+
+	raid0NamePrefix := nf.Raid0ThinDmNamePrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	raid0NameList, err := oc.DmGetByPrefix(pch, raid0NamePrefix)
+	if err != nil {
+		return err
+	}
+	for _, raid0Name := range raid0NameList {
+		if err := oc.DmRemove(pch, raid0Name); err != nil {
+			return err
+		}
+	}
+
+	remoteNqnPrefix := nf.RemoteLegNqnPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	remoteNqnInPortList, err := oc.ListSubsysFromPort(pch, remoteNqnPrefix, portNum)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range remoteNqnInPortList {
+		if err := oc.RemoveSubsysFromPort(
+			pch,
+			nqn,
+			portNum,
+		); err != nil {
+			return err
+		}
+	}
+
+	remoteNqnList, err := oc.ListSubsys(pch, remoteNqnPrefix)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range remoteNqnList {
+		if err := oc.NvmetSubsysDelete(
+			pch,
+			nqn,
+		); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

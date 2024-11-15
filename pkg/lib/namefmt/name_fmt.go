@@ -74,15 +74,25 @@ func (nf *NameFmt) LdDnDmNqn(
 	)
 }
 
+func (nf *NameFmt) SsNqnPrefix(
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s:%s:%s",
+		nf.nqnPrefix,
+		nqnTypeSubsys,
+		spId,
+	)
+}
+
 func (nf *NameFmt) SsNqn(
 	spId string,
 	ssId string,
 ) string {
+	prefix := nf.SsNqnPrefix(spId)
 	return fmt.Sprintf(
-		"%s:%s:%s:%s",
-		nf.nqnPrefix,
-		nqnTypeSubsys,
-		spId,
+		"%s:%s",
+		prefix,
 		ssId,
 	)
 }
@@ -270,17 +280,31 @@ func (nf *NameFmt) LegToRemoteDmName(
 	)
 }
 
+func (nf *NameFmt) Raid0ThinDmNamePrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeRaid0Dm,
+		cnId,
+		spId,
+	)
+}
+
 func (nf *NameFmt) Raid0ThinDmName(
 	cnId string,
 	spId string,
 	thinId uint32,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%08d",
-		nf.dmPrefix,
-		devTypeRaid0Dm,
+	prefix := nf.Raid0ThinDmNamePrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%08d",
+		prefix,
 		thinId,
 	)
 }

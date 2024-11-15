@@ -1400,6 +1400,32 @@ func (oc *OsCommand) DmGetAll(
 	return dmMap, nil
 }
 
+func (oc *OsCommand) DmGetByPrefix(
+	pch *ctxhelper.PerCtxHelper,
+	prefix string,
+) ([]string, error) {
+	dmNameList := make([]string, 0)
+	name := "dmsetup"
+	args := []string{"status"}
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return nil, err
+	}
+	if strings.Contains(stdout, dmEmpty) {
+		return nil, err
+	}
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		items := strings.Split(line, ":")
+		if len(items) < 1 {
+			return dmNameList, fmt.Errorf("Invalid dmstatus: %s", line)
+		}
+		name := items[0]
+		dmNameList = append(dmNameList, name)
+	}
+	return dmNameList, nil
+}
+
 // FIXME: Support more nvme connect parameters
 type NvmeArg struct {
 	Nqn       string
