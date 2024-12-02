@@ -477,13 +477,19 @@ func (dnAgent *dnAgentServer) background(
 	logPrefix := fmt.Sprintf("DnCleanUp|%s", traceId)
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, traceId)
-	select {
-	case <-pch.Ctx.Done():
-		return
-	case <-time.After(dnAgent.bgInterval):
-		keyToSpLd := dnAgent.fetchDeadSpLd(pch)
-		deleted := dnAgent.cleanup(pch, keyToSpLd)
-		dnAgent.updateDeadSpLd(pch, deleted)
+	pch.Logger.Info("background check start")
+	for {
+		select {
+		case <-pch.Ctx.Done():
+			pch.Logger.Info("background check exit")
+			return
+		case <-time.After(dnAgent.bgInterval):
+			keyToSpLd := dnAgent.fetchDeadSpLd(pch)
+			pch.Logger.Debug("keyToSpLd: %v", keyToSpLd)
+			deleted := dnAgent.cleanup(pch, keyToSpLd)
+			pch.Logger.Debug("deleted: %v", deleted)
+			dnAgent.updateDeadSpLd(pch, deleted)
+		}
 	}
 }
 
@@ -592,7 +598,7 @@ func (dnAgent *dnAgentServer) SyncupSpLd(
 		return &pbnd.SyncupSpLdReply{
 			SpLdInfo: &pbnd.SpLdInfo{
 				StatusInfo: &pbnd.StatusInfo{
-					Code:      constants.StatusCodeOldRevision,
+					Code:      constants.StatusCodeDeletedRevision,
 					Msg:       fmt.Sprintf("Revision: %d", spLdData.spLdLocal.Revision),
 					Timestamp: timestamp,
 				},

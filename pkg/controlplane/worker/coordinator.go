@@ -40,6 +40,9 @@ func (gcCache *grpcConnCache) get(
 	conn, err := grpc.Dial(
 		grpcTarget,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(
+			ctxhelper.UnaryClientPerCtxHelperInterceptor,
+		),
 	)
 	if err != nil {
 		return nil, err

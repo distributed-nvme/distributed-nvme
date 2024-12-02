@@ -1591,13 +1591,19 @@ func (cnAgent *cnAgentServer) background(
 	logPrefix := fmt.Sprintf("CnCleanUp|%s", traceId)
 	logger := prefixlog.NewPrefixLogger(logPrefix)
 	pch := ctxhelper.NewPerCtxHelper(parentCtx, logger, traceId)
-	select {
-	case <-pch.Ctx.Done():
-		return
-	case <-time.After(cnAgent.bgInterval):
-		keyToSpCntlr := cnAgent.fetchDeadSpCntlr(pch)
-		deleted := cnAgent.cleanup(pch, keyToSpCntlr)
-		cnAgent.updateDeadSpCntlr(pch, deleted)
+	pch.Logger.Info("background check start")
+	for {
+		select {
+		case <-pch.Ctx.Done():
+			pch.Logger.Info("background check exit")
+			return
+		case <-time.After(cnAgent.bgInterval):
+			keyToSpCntlr := cnAgent.fetchDeadSpCntlr(pch)
+			pch.Logger.Debug("keyToSpCntlr: %v", keyToSpCntlr)
+			deleted := cnAgent.cleanup(pch, keyToSpCntlr)
+			pch.Logger.Debug("deleted: %v", deleted)
+			cnAgent.updateDeadSpCntlr(pch, deleted)
+		}
 	}
 }
 
