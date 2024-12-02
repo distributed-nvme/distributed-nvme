@@ -177,6 +177,8 @@ verify_rsp_msg "${rsp}" "succeed"
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol delete --vol-name vol0)
 verify_rsp_msg "${rsp}" "succeed"
 
+vreify_res_no_exist
+
 rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 cn delete --cn-id $cn_id)
 verify_rsp_msg "${rsp}" "succeed"
 

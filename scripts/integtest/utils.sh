@@ -136,3 +136,37 @@ function verify_rsp_code() {
         exit 1;
     fi
 }
+
+function wait_until_res_disappear() {
+    path=$1
+    filter=$2
+    max_retry=10
+    retry_cnt=0
+    while true; do
+        cnt=$(ls $path | grep $filter | wc -l)
+        if [ "$cnt" -eq 0 ]; then
+            return
+        fi
+        if [ $retry_cnt -ge $max_retry ]; then
+            echo "resource(s) not disappear: ${path}"
+            exit 1
+        fi
+        sleep 1
+        ((retry_cnt=retry_cnt+1))
+    done
+}
+
+function vreify_res_no_exist() {
+    filter="dnv"
+
+    # path="/dev/mapper"
+    # wait_until_res_disappear "$path" "$filter"
+
+    path="/sys/kernel/config/nvmet/subsystems"
+    wait_until_res_disappear "$path" "$filter"
+
+    for d in /sys/kernel/config/nvmet/ports/*; do
+        path="$d/subsystems"
+        wait_until_res_disappear "$path" "$filter"
+    done
+}
