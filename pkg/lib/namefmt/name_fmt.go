@@ -102,7 +102,7 @@ func (nf *NameFmt) RemoteLegNqnPrefix(
 	spId string,
 ) string {
 	return fmt.Sprintf(
-		"%s:%s:%s:%s:",
+		"%s:%s:%s:%s",
 		nf.nqnPrefix,
 		nqnTypeRemote,
 		cnId,
