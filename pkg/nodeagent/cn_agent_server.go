@@ -1272,7 +1272,7 @@ func cleanupSpCntlr(
 		spCntlrLocal.CnId,
 		spCntlrLocal.SpId,
 	)
-	raid0NameList, err := oc.DmGetByPrefix(pch, raid0NamePrefix)
+	raid0NameList, err := oc.ListDmByPrefix(pch, raid0NamePrefix)
 	if err != nil {
 		return err
 	}
