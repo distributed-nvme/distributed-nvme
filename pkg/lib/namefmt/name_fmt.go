@@ -154,18 +154,44 @@ func (nf *NameFmt) LdCnDmName(
 	)
 }
 
+func (nf *NameFmt) GrpMetaDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeGrpMetaDm,
+		cnId,
+		spId,
+	)
+}
 func (nf *NameFmt) GrpMetaDmName(
 	cnId string,
 	spId string,
 	grpId string,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s",
-		nf.dmPrefix,
-		devTypeGrpMetaDm,
+	prefix := nf.GrpMetaDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s",
+		prefix,
 		grpId,
+	)
+}
+
+func (nf *NameFmt) GrpDataDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeGrpDataDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -174,13 +200,27 @@ func (nf *NameFmt) GrpDataDmName(
 	spId string,
 	grpId string,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s",
-		nf.dmPrefix,
-		devTypeGrpDataDm,
+	prefix := nf.GrpDataDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s",
+		prefix,
 		grpId,
+	)
+}
+
+func (nf *NameFmt) LegMetaDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegMetaDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -189,13 +229,27 @@ func (nf *NameFmt) LegMetaDmName(
 	spId string,
 	legId string,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s",
-		nf.dmPrefix,
-		devTypeLegMetaDm,
+	prefix := nf.LegMetaDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s",
+		prefix,
 		legId,
+	)
+}
+
+func (nf *NameFmt) LegDataDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegDataDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -204,13 +258,27 @@ func (nf *NameFmt) LegDataDmName(
 	spId string,
 	legId string,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s",
-		nf.dmPrefix,
-		devTypeLegDataDm,
+	prefix := nf.LegDataDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s",
+		prefix,
 		legId,
+	)
+}
+
+func (nf *NameFmt) LegPoolDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegPoolDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -219,13 +287,27 @@ func (nf *NameFmt) LegPoolDmName(
 	spId string,
 	legId string,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s",
-		nf.dmPrefix,
-		devTypeLegPoolDm,
+	prefix := nf.LegPoolDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s",
+		prefix,
 		legId,
+	)
+}
+
+func (nf *NameFmt) LegThinDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegThinDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -235,14 +317,28 @@ func (nf *NameFmt) LegThinDmName(
 	legId string,
 	thinId uint32,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s-%08d",
-		nf.dmPrefix,
-		devTypeLegThinDm,
+	prefix := nf.LegThinDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s-%08d",
+		prefix,
 		legId,
 		thinId,
+	)
+}
+
+func (nf *NameFmt) LegToLocalDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegToLocalDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -252,14 +348,28 @@ func (nf *NameFmt) LegToLocalDmName(
 	legId string,
 	thinId uint32,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s-%08d",
-		nf.dmPrefix,
-		devTypeLegToLocalDm,
+	prefix := nf.LegToLocalDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s-%08d",
+		prefix,
 		legId,
 		thinId,
+	)
+}
+
+func (nf *NameFmt) LegToRemoteDmPrefix(
+	cnId string,
+	spId string,
+) string {
+	return fmt.Sprintf(
+		"%s-%s-%s-%s",
+		nf.dmPrefix,
+		devTypeLegToRemoteDm,
+		cnId,
+		spId,
 	)
 }
 
@@ -269,12 +379,13 @@ func (nf *NameFmt) LegToRemoteDmName(
 	legId string,
 	thinId uint32,
 ) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%s-%08d",
-		nf.dmPrefix,
-		devTypeLegToRemoteDm,
+	prefix := nf.LegToRemoteDmPrefix(
 		cnId,
 		spId,
+	)
+	return fmt.Sprintf(
+		"%s-%s-%08d",
+		prefix,
 		legId,
 		thinId,
 	)

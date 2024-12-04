@@ -600,6 +600,13 @@ func (oc *OsCommand) ListSubsysFromPort(
 	portNum string,
 ) ([]string, error) {
 	path := fmt.Sprintf("%s/subsystems", nvmetPortPath(portNum))
+	exist, err := pathExist(path)
+	if err != nil {
+		return make([]string, 0), err
+	}
+	if !exist {
+		return make([]string, 0), nil
+	}
 	return oc.getNamesByPrefix(pch, path, prefix)
 }
 

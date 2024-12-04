@@ -1228,6 +1228,23 @@ func syncupSpCntlr(
 	}
 }
 
+func removeDmByPrefix(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	prefix string,
+) error {
+	dmNameList, err := oc.ListDmByPrefix(pch, prefix)
+	if err != nil {
+		return err
+	}
+	for _, dmName := range dmNameList {
+		if err := oc.DmRemove(pch, dmName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func cleanupSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -1272,14 +1289,12 @@ func cleanupSpCntlr(
 		spCntlrLocal.CnId,
 		spCntlrLocal.SpId,
 	)
-	raid0NameList, err := oc.ListDmByPrefix(pch, raid0NamePrefix)
-	if err != nil {
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		raid0NamePrefix,
+	); err != nil {
 		return err
-	}
-	for _, raid0Name := range raid0NameList {
-		if err := oc.DmRemove(pch, raid0Name); err != nil {
-			return err
-		}
 	}
 
 	remoteNqnPrefix := nf.RemoteLegNqnPrefix(
@@ -1311,6 +1326,102 @@ func cleanupSpCntlr(
 		); err != nil {
 			return err
 		}
+	}
+
+	legToLocalDmPrefix := nf.LegToLocalDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legToLocalDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	legToRemoteDmPrefix := nf.LegToRemoteDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legToRemoteDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	legThinDmPrefix := nf.LegThinDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legThinDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	legPoolDmPrefix := nf.LegPoolDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legPoolDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	legMetaDmPrefix := nf.LegMetaDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legMetaDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	legDataDmPrefix := nf.LegDataDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		legDataDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	grpMetaDmPrefix := nf.GrpMetaDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		grpMetaDmPrefix,
+	); err != nil {
+		return err
+	}
+
+	grpDataDmPrefix := nf.GrpDataDmPrefix(
+		spCntlrLocal.CnId,
+		spCntlrLocal.SpId,
+	)
+	if err := removeDmByPrefix(
+		pch,
+		oc,
+		grpDataDmPrefix,
+	); err != nil {
+		return err
 	}
 
 	return nil
