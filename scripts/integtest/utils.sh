@@ -159,8 +159,8 @@ function wait_until_res_disappear() {
 function vreify_res_no_exist() {
     filter="dnv"
 
-    # path="/dev/mapper"
-    # wait_until_res_disappear "$path" "$filter"
+    path="/dev/mapper"
+    wait_until_res_disappear "$path" "$filter"
 
     path="/sys/kernel/config/nvmet/subsystems"
     wait_until_res_disappear "$path" "$filter"

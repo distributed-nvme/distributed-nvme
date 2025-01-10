@@ -2,6 +2,7 @@ package namefmt
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -59,19 +60,38 @@ func (nf *NameFmt) HostNqnCn(cnId string) string {
 	)
 }
 
+func (nf *NameFmt) LdDnDmNqnPrefix() string {
+	return fmt.Sprintf(
+		"%s:%s",
+		nf.nqnPrefix,
+		nqnTypeLdDnDm,
+	)
+}
+
 func (nf *NameFmt) LdDnDmNqn(
 	dnId string,
 	spId string,
 	ldId string,
 ) string {
+	prefix := nf.LdDnDmNqnPrefix()
 	return fmt.Sprintf(
-		"%s:%s:%s:%s:%s",
-		nf.nqnPrefix,
-		nqnTypeLdDnDm,
+		"%s:%s:%s:%s",
+		prefix,
 		dnId,
 		spId,
 		ldId,
 	)
+}
+
+func (nf *NameFmt) GetSpIdFromLdDnDmNqn(nqn string) string {
+	prefix := nf.LdDnDmNqnPrefix()
+	if strings.HasPrefix(nqn, prefix) {
+		items := strings.Split(nqn, ":")
+		if len(items) == 5 {
+			return items[3]
+		}
+	}
+	return ""
 }
 
 func (nf *NameFmt) SsNqnPrefix(

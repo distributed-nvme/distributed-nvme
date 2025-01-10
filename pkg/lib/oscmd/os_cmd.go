@@ -15,6 +15,7 @@ import (
 
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/constants"
 	"github.com/distributed-nvme/distributed-nvme/pkg/lib/ctxhelper"
+	"github.com/distributed-nvme/distributed-nvme/pkg/lib/namefmt"
 )
 
 const (
@@ -1532,6 +1533,22 @@ func (oc *OsCommand) nvmeDisconnectPath(
 	return nil
 }
 
+func (oc *OsCommand) nvmeDisconnectNqn(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+) error {
+	name := filepath.Join(oc.exePath, "nvme")
+	args := []string{
+		"disconnect",
+		"--nqn",
+		nqn,
+	}
+	if _, _, err := oc.runOsCmd(pch, name, args, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (oc *OsCommand) NvmeConnectPath(
 	pch *ctxhelper.PerCtxHelper,
 	nvmeArg *NvmeArg,
@@ -1574,6 +1591,42 @@ func (oc *OsCommand) NvmeDisconnectPath(
 		}
 	}
 	return nil
+}
+
+func (oc *OsCommand) NvmeDisconnectNqn(
+	pch *ctxhelper.PerCtxHelper,
+	nqn string,
+) error {
+	return oc.nvmeDisconnectNqn(pch, nqn)
+}
+
+func (oc *OsCommand) NvmeListLdDnDmNqnBySpId(
+	pch *ctxhelper.PerCtxHelper,
+	nf *namefmt.NameFmt,
+	spId string,
+) ([]string, error) {
+	name := filepath.Join(oc.exePath, "nvme")
+	args := []string{"list-subsys"}
+	nqnList := make([]string, 0)
+	stdout, _, err := oc.runOsCmd(pch, name, args, "")
+	if err != nil {
+		return nqnList, err
+	}
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "NQN=") {
+			items := strings.Split(line, "=")
+			if len(items) != 2 {
+				pch.Logger.Warning("Unknow nvme output: %v", line)
+				continue
+			}
+			nqn := items[1]
+			if spId == nf.GetSpIdFromLdDnDmNqn(nqn) {
+				nqnList = append(nqnList, nqn)
+			}
+		}
+	}
+	return nqnList, nil
 }
 
 func (oc *OsCommand) fileRealpath(

@@ -1285,6 +1285,20 @@ func cleanupSpCntlr(
 		}
 	}
 
+	ldDnDmNqnList, err := oc.NvmeListLdDnDmNqnBySpId(
+		pch,
+		nf,
+		spCntlrLocal.SpId,
+	)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range ldDnDmNqnList {
+		if err := oc.NvmeDisconnectNqn(pch, nqn); err != nil {
+			return err
+		}
+	}
+
 	raid0NamePrefix := nf.Raid0ThinDmNamePrefix(
 		spCntlrLocal.CnId,
 		spCntlrLocal.SpId,
