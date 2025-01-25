@@ -869,7 +869,7 @@ func syncupCntlrSs(
 				raid0Arg.DevList[j] = remotePath
 			}
 		}
-		raid0Name := nf.Raid0ThinDmName(
+		raid0Name := nf.NsDmName(
 			spCntlrConf.CnId,
 			spCntlrConf.SpId,
 			nsConf.DevId,
@@ -1059,7 +1059,7 @@ func syncupStandbySs(
 	nsErr := false
 	nsMap := make(map[string]*oscmd.NvmetNsArg)
 	for i, nsConf := range ssConf.NsConfList {
-		errorDmName := nf.ErrorDmName(
+		errorDmName := nf.NsDmName(
 			spCntlrConf.CnId,
 			spCntlrConf.SpId,
 			nsConf.DevId,
@@ -1252,62 +1252,90 @@ func cleanupSpCntlr(
 	portNum string,
 	spCntlrLocal *localdata.SpCntlrLocal,
 ) error {
+	pch.Logger.Info(
+		"cleanupSpCntlr enter: portNum=%v spCntlrLocal=%v",
+		portNum,
+		spCntlrLocal,
+	)
 	nqnPrefix := nf.SsNqnPrefix(spCntlrLocal.SpId)
+	pch.Logger.Info("nqnPrefix: %v", nqnPrefix)
 
 	nqnInPortList, err := oc.ListSubsysFromPort(pch, nqnPrefix, spCntlrLocal.PortNum)
 	if err != nil {
+		pch.Logger.Warning("ListSubsysFromPort err: %v", err)
 		return err
 	}
+	pch.Logger.Info("nqnInPortList: %v", nqnInPortList)
 	for _, nqn := range nqnInPortList {
+		pch.Logger.Info(
+			"RemoveSubsysFromPort: nqn=%v portNum=%v",
+			nqn,
+			spCntlrLocal.PortNum,
+		)
 		if err := oc.RemoveSubsysFromPort(
 			pch,
 			nqn,
 			spCntlrLocal.PortNum,
 		); err != nil {
+			pch.Logger.Warning("RemoveSubsysFromPort err: %v", err)
 			return err
 		}
 	}
 
+	pch.Logger.Info("NvmetPortDelete: PortNum=%v", spCntlrLocal.PortNum)
 	if err := oc.NvmetPortDelete(pch, spCntlrLocal.PortNum); err != nil {
+		pch.Logger.Warning("NvmetPortDelete err: %v", err)
 		return err
 	}
 
+	pch.Logger.Info("ListSubsys: nqnPrefix=%v", nqnPrefix)
 	nqnList, err := oc.ListSubsys(pch, nqnPrefix)
 	if err != nil {
+		pch.Logger.Warning("ListSubsys err: %v", err)
 		return err
 	}
+	pch.Logger.Info("nqnList: %v", nqnList)
 	for _, nqn := range nqnList {
+		pch.Logger.Info("NvmetSubsysDelete: nqn=%v", nqn)
 		if err := oc.NvmetSubsysDelete(
 			pch,
 			nqn,
 		); err != nil {
+			pch.Logger.Warning("NvmetSubsysDelete err: %v", err)
 			return err
 		}
 	}
 
+	pch.Logger.Info("NvmeListLdDnDmNqnBySpId: spId=%v", spCntlrLocal.SpId)
 	ldDnDmNqnList, err := oc.NvmeListLdDnDmNqnBySpId(
 		pch,
 		nf,
 		spCntlrLocal.SpId,
 	)
 	if err != nil {
+		pch.Logger.Info("NvmeListLdDnDmNqnBySpId err: %v", err)
 		return err
 	}
+	pch.Logger.Info("ldDnDmNqnList: %v", ldDnDmNqnList)
 	for _, nqn := range ldDnDmNqnList {
+		pch.Logger.Info("NvmeDisconnectNqn: nqn=%v", nqn)
 		if err := oc.NvmeDisconnectNqn(pch, nqn); err != nil {
+			pch.Logger.Warning("NvmeDisconnectNqn err: %v", err)
 			return err
 		}
 	}
 
-	raid0NamePrefix := nf.Raid0ThinDmNamePrefix(
+	nsDmPrefix := nf.NsDmPrefix(
 		spCntlrLocal.CnId,
 		spCntlrLocal.SpId,
 	)
+	pch.Logger.Info("nsDmPrefix: %v", nsDmPrefix)
 	if err := removeDmByPrefix(
 		pch,
 		oc,
-		raid0NamePrefix,
+		nsDmPrefix,
 	); err != nil {
+		pch.Logger.Warning("removeDmByPrefix err: %v", err)
 		return err
 	}
 
@@ -1438,6 +1466,11 @@ func cleanupSpCntlr(
 		return err
 	}
 
+	pch.Logger.Info(
+		"cleanupSpCntlr exit: portNum=%v spCntlrLocal=%v",
+		portNum,
+		spCntlrLocal,
+	)
 	return nil
 }
 

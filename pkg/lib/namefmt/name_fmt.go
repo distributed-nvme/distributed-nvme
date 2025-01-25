@@ -27,8 +27,7 @@ const (
 	devTypeLegThinDm     = "1006"
 	devTypeLegToLocalDm  = "1007"
 	devTypeLegToRemoteDm = "1008"
-	devTypeRaid0Dm       = "1009"
-	devTypeErrorDm       = "1010"
+	devTypeNsDm          = "1009"
 
 	nqnTypeHostCn = "0000"
 	nqnTypeLdDnDm = "1000"
@@ -411,25 +410,25 @@ func (nf *NameFmt) LegToRemoteDmName(
 	)
 }
 
-func (nf *NameFmt) Raid0ThinDmNamePrefix(
+func (nf *NameFmt) NsDmPrefix(
 	cnId string,
 	spId string,
 ) string {
 	return fmt.Sprintf(
 		"%s-%s-%s-%s",
 		nf.dmPrefix,
-		devTypeRaid0Dm,
+		devTypeNsDm,
 		cnId,
 		spId,
 	)
 }
 
-func (nf *NameFmt) Raid0ThinDmName(
+func (nf *NameFmt) NsDmName(
 	cnId string,
 	spId string,
 	thinId uint32,
 ) string {
-	prefix := nf.Raid0ThinDmNamePrefix(
+	prefix := nf.NsDmPrefix(
 		cnId,
 		spId,
 	)
@@ -437,21 +436,6 @@ func (nf *NameFmt) Raid0ThinDmName(
 		"%s-%08d",
 		prefix,
 		thinId,
-	)
-}
-
-func (nf *NameFmt) ErrorDmName(
-	cnId string,
-	spId string,
-	devId uint32,
-) string {
-	return fmt.Sprintf(
-		"%s-%s-%s-%s-%08d",
-		nf.dmPrefix,
-		devTypeErrorDm,
-		cnId,
-		spId,
-		devId,
 	)
 }
 
