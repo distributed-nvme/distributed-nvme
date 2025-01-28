@@ -156,4 +156,7 @@ const (
 	AnaGroupInaccessible   = "inaccessible"
 	AnaGroupChange         = "change"
 	AnaGroupPersistentLoss = "persistent-loss"
+
+	CmdSoftTimeout = 3 * time.Second
+	CmdHardTimeout = 5 * time.Second
 )

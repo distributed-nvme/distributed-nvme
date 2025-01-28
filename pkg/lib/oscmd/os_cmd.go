@@ -2,6 +2,7 @@ package oscmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -259,7 +260,8 @@ func (oc *OsCommand) runOsCmd(
 	pch.Logger.Info("OsCommand name: [%v]", name)
 	pch.Logger.Info("OsCommand args: [%v]", args)
 	pch.Logger.Info("OsCommand stdin: [%v]", stdin)
-	cmd := exec.CommandContext(pch.Ctx, name, args...)
+	ctx, cancel := context.WithTimeout(pch.Ctx, constants.CmdSoftTimeout)
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stdoutBuilder strings.Builder
 	var stderrBuilder strings.Builder
 	cmd.Stdout = &stdoutBuilder
@@ -267,7 +269,24 @@ func (oc *OsCommand) runOsCmd(
 	if stdin != "" {
 		cmd.Stdin = bytes.NewBufferString(stdin)
 	}
-	err := cmd.Run()
+	var err error
+	c := make(chan struct{})
+	go func() {
+		err = cmd.Run()
+		close(c)
+	}()
+
+	timeout := true
+	select {
+	case <-c:
+		timeout = false
+	case <-time.After(constants.CmdHardTimeout):
+		timeout = true
+	}
+	cancel()
+	if timeout {
+		err = fmt.Errorf("%s hard timeout", name)
+	}
 	stdout := stdoutBuilder.String()
 	stdout = strings.Trim(stdout, "\n")
 	stdout = strings.Trim(stdout, " ")
