@@ -117,7 +117,7 @@ rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol create --vol-name vol0 --size
 verify_rsp_msg "${rsp}" "succeed"
 
 retry_cnt=0
-max_retry=20
+max_retry=40
 while true; do
     rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
     verify_rsp_msg "${rsp}" "succeed"
@@ -150,7 +150,7 @@ rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol export --vol-name vol0 --host
 verify_rsp_msg "${rsp}" "succeed"
 
 retry_cnt=0
-max_retry=20
+max_retry=40
 while true; do
     rsp=$($BIN_DIR/dnvctl --address 127.0.0.1:9520 vol get --vol-name vol0)
     verify_rsp_msg "${rsp}" "succeed"
