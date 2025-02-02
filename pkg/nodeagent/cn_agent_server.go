@@ -308,7 +308,7 @@ func syncupCntlrGrp(
 	grpConf *pbnd.GrpConf,
 ) *pbnd.GrpInfo {
 	ldCnInfoList := make([]*pbnd.LdCnInfo, len(grpConf.LdCnConfList))
-	for i, ldCnInfo := range grpConf.LdCnConfList {
+	for i, ldCnConf := range grpConf.LdCnConfList {
 		ldCnInfoList[i] = syncupCntlrLd(
 			pch,
 			oc,
@@ -317,7 +317,7 @@ func syncupCntlrGrp(
 			activeCntlrConf,
 			localLegConf,
 			grpConf,
-			ldCnInfo,
+			ldCnConf,
 		)
 	}
 
@@ -1077,6 +1077,86 @@ func removeUnusedExportions(
 	return nil
 }
 
+func removeUnusedConnsFromRemoteLeg(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+) error {
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf == nil {
+		return nil
+	}
+	nqnMap := make(map[string]bool)
+	for _, remoteLegConf := range activeCntlrConf.RemoteLegConfList {
+		nqn := nf.RemoteLegNqn(
+			remoteLegConf.CnId,
+			spCntlrConf.SpId,
+			remoteLegConf.LegId,
+		)
+		nqnMap[nqn] = true
+	}
+
+	remoteLegNqnList, err := oc.NvmeListRemoteLegNqnBySpId(
+		pch,
+		nf,
+		spCntlrConf.SpId,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, nqn := range remoteLegNqnList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.NvmeDisconnectNqn(pch, nqn); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func removeUnusedConnsFromDn(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+) error {
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf == nil {
+		return nil
+	}
+	nqnMap := make(map[string]bool)
+	for _, localLegConf := range activeCntlrConf.LocalLegConfList {
+		for _, grpConf := range localLegConf.GrpConfList {
+			for _, ldCnConf := range grpConf.LdCnConfList {
+				nqn := nf.LdDnDmNqn(ldCnConf.DnId, spCntlrConf.SpId, ldCnConf.LdId)
+				nqnMap[nqn] = true
+			}
+		}
+	}
+
+	ldDnDmNqnList, err := oc.NvmeListLdDnDmNqnBySpId(
+		pch,
+		nf,
+		spCntlrConf.SpId,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, nqn := range ldDnDmNqnList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.NvmeDisconnectNqn(pch, nqn); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func syncupActiveSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -1104,6 +1184,26 @@ func syncupActiveSpCntlr(
 		spCntlrData,
 	); err != nil {
 		pch.Logger.Warning("removeUnusedExportions failed: %v", err)
+		succeed = false
+	}
+
+	if err := removeUnusedConnsFromRemoteLeg(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+	); err != nil {
+		pch.Logger.Warning("removeUnusedConnsFromRemoteLeg failed: %v", err)
+		succeed = false
+	}
+
+	if err := removeUnusedConnsFromDn(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+	); err != nil {
+		pch.Logger.Warning("removeUnusedConnsFromDn failed: %v", err)
 		succeed = false
 	}
 
@@ -1444,6 +1544,24 @@ func cleanupSpCntlr(
 		}
 	}
 
+	pch.Logger.Info("NvmeListRemoteLegNqnBySpId: spId=%v", spCntlrLocal.SpId)
+	remoteLegNqnList, err := oc.NvmeListRemoteLegNqnBySpId(
+		pch,
+		nf,
+		spCntlrLocal.SpId,
+	)
+	if err != nil {
+		pch.Logger.Warning("NvmeListRemoteLegNqnBySpId err: %v", err)
+	}
+	pch.Logger.Info("remoteLegNqnList: %v", remoteLegNqnList)
+	for _, nqn := range remoteLegNqnList {
+		pch.Logger.Info("NvmeDisconnectNqn: nqn=%v", nqn)
+		if err := oc.NvmeDisconnectNqn(pch, nqn); err != nil {
+			pch.Logger.Warning("NvmeDisconnectNqn err: %v", err)
+			return err
+		}
+	}
+
 	pch.Logger.Info("NvmeListLdDnDmNqnBySpId: spId=%v", spCntlrLocal.SpId)
 	ldDnDmNqnList, err := oc.NvmeListLdDnDmNqnBySpId(
 		pch,
@@ -1451,7 +1569,7 @@ func cleanupSpCntlr(
 		spCntlrLocal.SpId,
 	)
 	if err != nil {
-		pch.Logger.Info("NvmeListLdDnDmNqnBySpId err: %v", err)
+		pch.Logger.Warning("NvmeListLdDnDmNqnBySpId err: %v", err)
 		return err
 	}
 	pch.Logger.Info("ldDnDmNqnList: %v", ldDnDmNqnList)

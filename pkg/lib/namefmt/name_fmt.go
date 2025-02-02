@@ -116,14 +116,21 @@ func (nf *NameFmt) SsNqn(
 	)
 }
 
+func (nf *NameFmt) RemoteLegNqnRawPrefix() string {
+	return fmt.Sprintf(
+		"%s:%s",
+		nf.nqnPrefix,
+		nqnTypeRemote,
+	)
+}
+
 func (nf *NameFmt) RemoteLegNqnPrefix(
 	cnId string,
 	spId string,
 ) string {
 	return fmt.Sprintf(
-		"%s:%s:%s:%s",
-		nf.nqnPrefix,
-		nqnTypeRemote,
+		"%s:%s:%s",
+		nf.RemoteLegNqnRawPrefix(),
 		cnId,
 		spId,
 	)
@@ -140,6 +147,17 @@ func (nf *NameFmt) RemoteLegNqn(
 		prefix,
 		legId,
 	)
+}
+
+func (nf *NameFmt) GetSpIdFromRemoteLegNqn(nqn string) string {
+	prefix := nf.RemoteLegNqnRawPrefix()
+	if strings.HasPrefix(nqn, prefix) {
+		items := strings.Split(nqn, ":")
+		if len(items) == 5 {
+			return items[3]
+		}
+	}
+	return ""
 }
 
 func (nf *NameFmt) LdDnDmNsNum() string {
