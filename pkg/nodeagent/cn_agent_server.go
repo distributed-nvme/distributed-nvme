@@ -1017,6 +1017,66 @@ func removeUnusedSubsys(
 	return nil
 }
 
+func removeUnusedExportions(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+	spCntlrData *spCntlrRuntimeData,
+) error {
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf == nil {
+		return nil
+	}
+	nqnMap := make(map[string]bool)
+	for _, localLegConf := range activeCntlrConf.LocalLegConfList {
+		nqn := nf.RemoteLegNqn(
+			spCntlrConf.CnId,
+			spCntlrConf.SpId,
+			localLegConf.LegId,
+		)
+		nqnMap[nqn] = true
+	}
+
+	remoteNqnPrefix := nf.RemoteLegNqnPrefix(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+	)
+	portNum := spCntlrData.portNum
+	remoteNqnInPortList, err := oc.ListSubsysFromPort(pch, remoteNqnPrefix, portNum)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range remoteNqnInPortList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.RemoveSubsysFromPort(
+				pch,
+				nqn,
+				portNum,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	remoteNqnList, err := oc.ListSubsys(pch, remoteNqnPrefix)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range remoteNqnList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.NvmetSubsysDelete(
+				pch,
+				nqn,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func syncupActiveSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -1026,8 +1086,24 @@ func syncupActiveSpCntlr(
 ) *pbnd.SpCntlrInfo {
 	succeed := true
 
-	if err := removeUnusedSubsys(pch, oc, nf, spCntlrConf); err != nil {
+	if err := removeUnusedSubsys(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+	); err != nil {
 		pch.Logger.Warning("removeUnusedSubsys failed: %v", err)
+		succeed = false
+	}
+
+	if err := removeUnusedExportions(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+		spCntlrData,
+	); err != nil {
+		pch.Logger.Warning("removeUnusedExportions failed: %v", err)
 		succeed = false
 	}
 
