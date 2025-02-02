@@ -961,6 +961,62 @@ func syncupCntlrSs(
 	}
 }
 
+func removeUnusedSubsys(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+) error {
+	nqnMap := make(map[string]bool)
+	for _, ssConf := range spCntlrConf.SsConfList {
+		nqn := nf.SsNqn(
+			spCntlrConf.SpId,
+			ssConf.SsId,
+		)
+		nqnMap[nqn] = true
+	}
+
+	nqnPrefix := nf.SsNqnPrefix(spCntlrConf.SpId)
+	portNum := spCntlrConf.NvmePortConf.PortNum
+
+	nqnInPortList, err := oc.ListSubsysFromPort(
+		pch,
+		nqnPrefix,
+		portNum,
+	)
+	if err != nil {
+		return err
+	}
+
+	for _, nqn := range nqnInPortList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.RemoveSubsysFromPort(
+				pch,
+				nqn,
+				portNum,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	nqnList, err := oc.ListSubsys(pch, nqnPrefix)
+	if err != nil {
+		return err
+	}
+	for _, nqn := range nqnList {
+		if _, ok := nqnMap[nqn]; !ok {
+			if err := oc.NvmetSubsysDelete(
+				pch,
+				nqn,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func syncupActiveSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -969,6 +1025,12 @@ func syncupActiveSpCntlr(
 	spCntlrConf *pbnd.SpCntlrConf,
 ) *pbnd.SpCntlrInfo {
 	succeed := true
+
+	if err := removeUnusedSubsys(pch, oc, nf, spCntlrConf); err != nil {
+		pch.Logger.Warning("removeUnusedSubsys failed: %v", err)
+		succeed = false
+	}
+
 	nvmePortInfo := syncupCntlrNvmePort(
 		pch,
 		oc,
