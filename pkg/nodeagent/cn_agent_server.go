@@ -1024,18 +1024,17 @@ func removeUnusedExportions(
 	spCntlrConf *pbnd.SpCntlrConf,
 	spCntlrData *spCntlrRuntimeData,
 ) error {
-	activeCntlrConf := spCntlrConf.ActiveCntlrConf
-	if activeCntlrConf == nil {
-		return nil
-	}
 	nqnMap := make(map[string]bool)
-	for _, localLegConf := range activeCntlrConf.LocalLegConfList {
-		nqn := nf.RemoteLegNqn(
-			spCntlrConf.CnId,
-			spCntlrConf.SpId,
-			localLegConf.LegId,
-		)
-		nqnMap[nqn] = true
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf != nil {
+		for _, localLegConf := range activeCntlrConf.LocalLegConfList {
+			nqn := nf.RemoteLegNqn(
+				spCntlrConf.CnId,
+				spCntlrConf.SpId,
+				localLegConf.LegId,
+			)
+			nqnMap[nqn] = true
+		}
 	}
 
 	remoteNqnPrefix := nf.RemoteLegNqnPrefix(
@@ -1083,18 +1082,17 @@ func removeUnusedConnsFromRemoteLeg(
 	nf *namefmt.NameFmt,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) error {
-	activeCntlrConf := spCntlrConf.ActiveCntlrConf
-	if activeCntlrConf == nil {
-		return nil
-	}
 	nqnMap := make(map[string]bool)
-	for _, remoteLegConf := range activeCntlrConf.RemoteLegConfList {
-		nqn := nf.RemoteLegNqn(
-			remoteLegConf.CnId,
-			spCntlrConf.SpId,
-			remoteLegConf.LegId,
-		)
-		nqnMap[nqn] = true
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf != nil {
+		for _, remoteLegConf := range activeCntlrConf.RemoteLegConfList {
+			nqn := nf.RemoteLegNqn(
+				remoteLegConf.CnId,
+				spCntlrConf.SpId,
+				remoteLegConf.LegId,
+			)
+			nqnMap[nqn] = true
+		}
 	}
 
 	remoteLegNqnList, err := oc.NvmeListRemoteLegNqnBySpId(
@@ -1123,16 +1121,15 @@ func removeUnusedConnsFromDn(
 	nf *namefmt.NameFmt,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) error {
-	activeCntlrConf := spCntlrConf.ActiveCntlrConf
-	if activeCntlrConf == nil {
-		return nil
-	}
 	nqnMap := make(map[string]bool)
-	for _, localLegConf := range activeCntlrConf.LocalLegConfList {
-		for _, grpConf := range localLegConf.GrpConfList {
-			for _, ldCnConf := range grpConf.LdCnConfList {
-				nqn := nf.LdDnDmNqn(ldCnConf.DnId, spCntlrConf.SpId, ldCnConf.LdId)
-				nqnMap[nqn] = true
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf != nil {
+		for _, localLegConf := range activeCntlrConf.LocalLegConfList {
+			for _, grpConf := range localLegConf.GrpConfList {
+				for _, ldCnConf := range grpConf.LdCnConfList {
+					nqn := nf.LdDnDmNqn(ldCnConf.DnId, spCntlrConf.SpId, ldCnConf.LdId)
+					nqnMap[nqn] = true
+				}
 			}
 		}
 	}
