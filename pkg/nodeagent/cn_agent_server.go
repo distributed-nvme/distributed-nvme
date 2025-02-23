@@ -1154,6 +1154,49 @@ func removeUnusedConnsFromDn(
 	return nil
 }
 
+func removeUnusedLegToRemoteDm(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrConf *pbnd.SpCntlrConf,
+) error {
+	dmMap := make(map[string]bool)
+	activeCntlrConf := spCntlrConf.ActiveCntlrConf
+	if activeCntlrConf != nil {
+		for _, localLegConf := range activeCntlrConf.LocalLegConfList {
+			for _, ssConf := range spCntlrConf.SsConfList {
+				for _, nsConf := range ssConf.NsConfList {
+					remoteName := nf.LegToRemoteDmName(
+						spCntlrConf.CnId,
+						spCntlrConf.SpId,
+						localLegConf.LegId,
+						nsConf.DevId,
+					)
+					dmMap[remoteName] = true
+				}
+			}
+		}
+	}
+
+	prefix := nf.LegToRemoteDmPrefix(
+		spCntlrConf.CnId,
+		spCntlrConf.SpId,
+	)
+	dmNameList, err := oc.ListDmByPrefix(pch, prefix)
+	if err != nil {
+		return err
+	}
+	for _, dmName := range dmNameList {
+		if _, ok := dmMap[dmName]; !ok {
+			if err := oc.DmRemove(pch, dmName); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func syncupActiveSpCntlr(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
@@ -1201,6 +1244,16 @@ func syncupActiveSpCntlr(
 		spCntlrConf,
 	); err != nil {
 		pch.Logger.Warning("removeUnusedConnsFromDn failed: %v", err)
+		succeed = false
+	}
+
+	if err := removeUnusedLegToRemoteDm(
+		pch,
+		oc,
+		nf,
+		spCntlrConf,
+	); err != nil {
+		pch.Logger.Warning("removeUnusedLegToRemoteDm failed: %v", err)
 		succeed = false
 	}
 
