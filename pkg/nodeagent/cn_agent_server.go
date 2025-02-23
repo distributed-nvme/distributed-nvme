@@ -1275,13 +1275,21 @@ func syncupActiveSpCntlr(
 		spCntlrConf,
 	)
 
+	anaState := constants.AnaGroupOptimized
+	currAnaState, err := oc.GetAnaState(
+		spCntlrConf.NvmePortConf.PortNum,
+	)
+	if err == nil && anaState != currAnaState {
+		anaState = constants.AnaGroupChange
+	}
+
 	nvmePortInfo := syncupCntlrNvmePort(
 		pch,
 		oc,
 		nf,
 		spCntlrConf,
 		spCntlrConf.NvmePortConf,
-		constants.AnaGroupOptimized,
+		anaState,
 	)
 	if nvmePortInfo.StatusInfo.Code != constants.StatusCodeSucceed {
 		succeed = false
@@ -1328,6 +1336,16 @@ func syncupActiveSpCntlr(
 			ssConf,
 		)
 		if ssInfoList[i].StatusInfo.Code != constants.StatusCodeSucceed {
+			succeed = false
+		}
+	}
+
+	if anaState != constants.AnaGroupOptimized {
+		err := oc.SetAnaState(
+			spCntlrConf.NvmePortConf.PortNum,
+			constants.AnaGroupOptimized,
+		)
+		if err != nil {
 			succeed = false
 		}
 	}

@@ -339,6 +339,20 @@ func (oc *OsCommand) NvmetPortCreate(
 	return nil
 }
 
+func (oc *OsCommand) GetAnaState(portNum string) (string, error) {
+	anaStatePath := nvmetPortAnaStatePath(portNum)
+	return readFile(anaStatePath)
+}
+
+func (oc *OsCommand) SetAnaState(portNum, anaState string) error {
+	anaStatePath := nvmetPortAnaStatePath(portNum)
+	if err := writeFile(anaStatePath, anaState); err != nil {
+		return err
+	}
+	return nil
+
+}
+
 func (oc *OsCommand) NvmetPortDelete(
 	pch *ctxhelper.PerCtxHelper,
 	portNum string,
