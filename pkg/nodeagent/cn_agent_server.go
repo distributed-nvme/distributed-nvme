@@ -1197,13 +1197,13 @@ func removeUnusedLegToRemoteDm(
 	return nil
 }
 
-func syncupActiveSpCntlr(
+func removeUnusedResources(
 	pch *ctxhelper.PerCtxHelper,
 	oc *oscmd.OsCommand,
 	nf *namefmt.NameFmt,
 	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
-) *pbnd.SpCntlrInfo {
+) bool {
 	succeed := true
 
 	if err := removeUnusedSubsys(
@@ -1256,6 +1256,24 @@ func syncupActiveSpCntlr(
 		pch.Logger.Warning("removeUnusedLegToRemoteDm failed: %v", err)
 		succeed = false
 	}
+
+	return succeed
+}
+
+func syncupActiveSpCntlr(
+	pch *ctxhelper.PerCtxHelper,
+	oc *oscmd.OsCommand,
+	nf *namefmt.NameFmt,
+	spCntlrData *spCntlrRuntimeData,
+	spCntlrConf *pbnd.SpCntlrConf,
+) *pbnd.SpCntlrInfo {
+	succeed := removeUnusedResources(
+		pch,
+		oc,
+		nf,
+		spCntlrData,
+		spCntlrConf,
+	)
 
 	nvmePortInfo := syncupCntlrNvmePort(
 		pch,
@@ -1447,7 +1465,14 @@ func syncupStandbySpCntlr(
 	spCntlrData *spCntlrRuntimeData,
 	spCntlrConf *pbnd.SpCntlrConf,
 ) *pbnd.SpCntlrInfo {
-	succeed := true
+	succeed := removeUnusedResources(
+		pch,
+		oc,
+		nf,
+		spCntlrData,
+		spCntlrConf,
+	)
+
 	nvmePortInfo := syncupCntlrNvmePort(
 		pch,
 		oc,
