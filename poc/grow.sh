@@ -142,7 +142,7 @@ $(( SEC_TDATA * 2 )) $SEC_TDATA linear /dev/mapper/${sp}-grp${GRP}-thindata 0" \
 # 6.d -- load the new thin-pool table (size = data_sz = 3 * SEC_TDATA).  The
 # pool is still suspended from 6.a, so this is a raw load (no re-suspend).
 #   new table:
-#     0 2998272 thin-pool /dev/mapper/...-thinmeta /dev/mapper/...-thindata 128 0 1 skip_block_zeroing
+#     0 2998272 thin-pool /dev/mapper/...-thinmeta /dev/mapper/...-thindata $POOL_BLOCK_SECTORS 0 1 skip_block_zeroing
 _t "load ${sp}-thinpool" sudo dmsetup load "${sp}-thinpool" \
     --table "0 $data_sz thin-pool /dev/mapper/${sp}-thinmeta /dev/mapper/${sp}-thindata $POOL_BLOCK_SECTORS 0 1 skip_block_zeroing" \
     || _fail "could not load ${sp}-thinpool"

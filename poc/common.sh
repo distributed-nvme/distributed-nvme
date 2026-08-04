@@ -74,9 +74,9 @@ SEC_EXP=4194304          #   2G  - raid0 over leg0+leg1 snap0, and the
                          #         error/delay stack that mirrors its size
 
 DELAY_MS=3600000         # 3600s, applied to read+write+flush
-POOL_BLOCK_SECTORS=128   #  64K thin-pool allocation block
-RAID_REGION_SECTORS=128
-RAID0_CHUNK_SECTORS=128
+POOL_BLOCK_SECTORS=8192   # 4M thin-pool data_block_size (8192 * 512B = 4MiB)
+RAID_REGION_SECTORS=8192  # 4M raid1 region_size      (8192 * 512B = 4MiB)
+RAID0_CHUNK_SECTORS=32    # 16K raid0 chunk_size      (32 * 512B = 16KiB)
 
 LOOP_IMG_SIZE="4G"
 STAS_DISCONNECT_WAIT=60

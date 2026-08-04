@@ -365,6 +365,7 @@ cn1 connects, then re-arms them afterwards. The partition scan fails instantly
 | `failover.sh` | `./failover.sh [force]` | Moves the da from cn0 to cn1. `force` skips steps 3 and 7. Mutually exclusive with `grow.sh`. |
 | `grow.sh` | `./grow.sh` | Extends leg0's thin pool with a third group (`grp2`) while host I/O runs: creates the grp2 VDs on the DNs, disarms/connects/re-arms so cn1 imports them, `create_grp` builds the raid1+slice pair on cn0, then suspends leg0-thinpool and reloads the thinmeta/thindata concats and the pool table from 2-way to 3-way. Grow and failover are never combined. |
 | `host0_io.sh` | `./host0_io.sh start\|stop\|status\|mark <label>\|report` | Continuous verified O_DIRECT I/O on host0. One JSON record per I/O. `mark` drops a timestamped marker. `report` prints a phase-by-phase summary. |
+| `check.sh` | `./check.sh` | Thin-pool block-allocation audit. Dumps each leg's thin-pool metadata with `thin_dump`, derives 8 VD bitmaps (one bit per 4 MiB VD block), reads each marked block on cn0 and confirms it is non-zero. Run after `setup.sh all` + a short `host0_io.sh` run. Exit 0 = all allocated blocks verified written. |
 | `common.sh` | sourced by the above | Part A resource API + Part B infra helpers. |
 
 ---
