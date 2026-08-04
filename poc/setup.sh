@@ -37,8 +37,15 @@ setup_dn() {
     create_pd "$dn" "$ip"
     # Create vds for BOTH cns (symmetric fault-injection stack).
     # vd_id encodes which dn it comes from: vd0 -> dn0, vd1 -> dn1.
-    create_vd "$dn" "$ip" cn0 "$CN0_IP" "${dn#dn}"
-    create_vd "$dn" "$ip" cn1 "$CN1_IP" "${dn#dn}"
+    # leg/grp are explicit params to create_vd so grow.sh can add grp2 to a
+    # running pool; here we loop the base 2x2 grid.
+    local vid="${dn#dn}" leg grp
+    for leg in 0 1; do
+        for grp in 0 1; do
+            create_vd "$dn" "$ip" cn0 "$CN0_IP" "$vid" "$leg" "$grp"
+            create_vd "$dn" "$ip" cn1 "$CN1_IP" "$vid" "$leg" "$grp"
+        done
+    done
 }
 
 # ===================== compute node 0 (active) ===============================
@@ -67,15 +74,25 @@ EOF_CN1
 
     # cn1's namespaces must not be backed by a live 3600s delay while the
     # kernel scans them -- see disarm_vd_delay for the full explanation.
+    # disarm/arm loop the base 2x2 grid; grow.sh disarms only the grp it adds.
     _info "--- disarming DN -delay devices for cn1's namespace scan ---"
-    disarm_vd_delay dn0 "$DN0_IP"
-    disarm_vd_delay dn1 "$DN1_IP"
+    local _leg _grp
+    for _leg in 0 1; do
+        for _grp in 0 1; do
+            disarm_vd_delay dn0 "$DN0_IP" "$_leg" "$_grp"
+            disarm_vd_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+        done
+    done
 
     create_cntlr_standby cn1 "$CN1_IP" da0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
 
     _info "--- re-arming DN -delay devices ---"
-    arm_vd_delay dn0 "$DN0_IP"
-    arm_vd_delay dn1 "$DN1_IP"
+    for _leg in 0 1; do
+        for _grp in 0 1; do
+            arm_vd_delay dn0 "$DN0_IP" "$_leg" "$_grp"
+            arm_vd_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+        done
+    done
 
     create_exp_standby cn1 "$CN1_IP" da0 0 "$HOSTNQN_HOST0" "$HOSTID_HOST0" 256 511
 }
@@ -422,10 +439,18 @@ main() {
             # verify_cn1 deliberately leaves eight readers blocked on the DN
             # delay devices; flush them so nothing is left in D-state.
             _info "--- releasing cn1's blocked readers ---"
-            disarm_vd_delay dn0 "$DN0_IP"
-            disarm_vd_delay dn1 "$DN1_IP"
-            arm_vd_delay dn0 "$DN0_IP"
-            arm_vd_delay dn1 "$DN1_IP"
+            for _leg in 0 1; do
+                for _grp in 0 1; do
+                    disarm_vd_delay dn0 "$DN0_IP" "$_leg" "$_grp"
+                    disarm_vd_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+                done
+            done
+            for _leg in 0 1; do
+                for _grp in 0 1; do
+                    arm_vd_delay dn0 "$DN0_IP" "$_leg" "$_grp"
+                    arm_vd_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+                done
+            done
             ;;
         *)
             echo "Usage: $0 [all|dn0|dn1|cn0|cn1|ref0|host0|verify]" >&2

@@ -134,14 +134,10 @@ nvmet_remove_subsys "$NQN_EXP"
 nvmet_remove_port 1
 nvmet_remove_host "$HOSTNQN_HOST0"
 dnv_remove_all_dm
-# Disconnect any remaining vd connections.
-for leg in 0 1; do
-  for grp in 0 1; do
-    for d in 0 1; do
-      nvme_disc "${NQN_PREFIX}:dn:dn${d}:da0-leg${leg}-grp${grp}-vd${d}-${CN}"
-    done
-  done
-done
+# Disconnect any remaining vd connections (topology-agnostic: catches groups
+# beyond the hardcoded grp0/grp1 base that delete_cntlr_standby's loop above
+# missed, e.g. grp2 added by grow.sh).
+nvme_disconnect_all_dnv_vd
 cleanup_node_common
 _info "remaining dm devices: $(dm_count)"
 slow_summary
@@ -154,9 +150,17 @@ EOF_CN_CLEAN
 teardown_dn() {
     local ip="$1" dn="$2"
     _info "=== tearing down $dn ($ip) ==="
-    # delete_vd removes the dm stack + nvmet subsystems for both cns.
-    delete_vd "$dn" "$ip" cn0 "$CN0_IP" "${dn#dn}" 2>/dev/null || true
-    delete_vd "$dn" "$ip" cn1 "$CN1_IP" "${dn#dn}" 2>/dev/null || true
+    # delete_vd removes the dm stack + nvmet subsystems for both cns, per
+    # (leg,grp).  Loop the base 2x2 grid; the topology-agnostic safety nets in
+    # delete_pd (nvmet_remove_all_dnv_subsys) and dnv_remove_all_dm catch any
+    # stragglers beyond it (e.g. grp2 added by grow.sh).
+    local vid="${dn#dn}" leg grp
+    for leg in 0 1; do
+        for grp in 0 1; do
+            delete_vd "$dn" "$ip" cn0 "$CN0_IP" "$vid" "$leg" "$grp" 2>/dev/null || true
+            delete_vd "$dn" "$ip" cn1 "$CN1_IP" "$vid" "$leg" "$grp" 2>/dev/null || true
+        done
+    done
     delete_pd "$dn" "$ip"
 }
 

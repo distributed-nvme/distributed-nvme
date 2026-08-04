@@ -7,8 +7,8 @@ loop files, dm-raid1, dm-thin-pool, dm-raid0, NVMe-oF/TCP — and then moves it
 from one controller node to another without the host losing a single I/O.
 
 The scripts in this directory (`common.sh`, `setup.sh`, `teardown.sh`,
-`failover.sh`, `host0_io.sh`) are meant to be read alongside this note: they
-are the source of truth, this document is the map.
+`failover.sh`, `grow.sh`, `host0_io.sh`) are meant to be read alongside this
+note: they are the source of truth, this document is the map.
 
 ---
 
@@ -234,22 +234,27 @@ source ./common.sh
 
 create_pd    dn0 192.168.122.48          # loop file on dn0
 create_pd    dn1 192.168.122.70          # loop file on dn1
-create_vd    dn0 ... cn0 ... 0           # dn0's vd0 exported to cn0
-create_vd    dn0 ... cn1 ... 0           # dn0's vd0 exported to cn1
-create_vd    dn1 ... cn0 ... 1           # dn1's vd1 exported to cn0
-create_vd    dn1 ... cn1 ... 1           # dn1's vd1 exported to cn1
+create_vd    dn0 ... cn0 ... 0 0 0       # dn0's vd0 exported to cn0, leg0 grp0
+create_vd    dn0 ... cn1 ... 0 0 0       # dn0's vd0 exported to cn1, leg0 grp0
+create_vd    dn1 ... cn0 ... 1 0 0       # dn1's vd1 exported to cn0, leg0 grp0
+create_vd    dn1 ... cn1 ... 1 0 0       # dn1's vd1 exported to cn1, leg0 grp0
 create_cntlr_active  cn0 ... da0 2 <hnqn> <hid>   # build the stack on cn0
 create_exp_active    cn0 ... da0 0 <hnqn> <hid> 1 255   # export to host
 # ... disarm, connect standby, arm, export standby ...
 ```
+
+`create_vd`/`delete_vd`/`connect_vd`/`disconnect_vd`/`disarm_vd_delay`/
+`arm_vd_delay` take `leg` and `grp` as explicit trailing params (the base
+`setup.sh` loops the 2×2 grid; `grow.sh` passes them directly to add `grp2`
+to a running pool without touching the existing slices).
 
 Full function list:
 
 | function | what it creates / removes |
 | --- | --- |
 | `create_pd` / `delete_pd` | loop file + nvmet port on a DN |
-| `create_vd` / `delete_vd` | VD stack (-real [LVM LV], -err, -delay, -cn [dmsetup]) + nvmet subsys for both CNs |
-| `connect_vd` / `disconnect_vd` | nvme connect/disconnect from a CN to a DN's VD |
+| `create_vd` / `delete_vd` | VD stack (-real [LVM LV], -err, -delay, -cn [dmsetup]) + nvmet subsys for both CNs, per (leg,grp) |
+| `connect_vd` / `disconnect_vd` | nvme connect/disconnect from a CN to a DN's VD, per (leg,grp) |
 | `create_grp` / `delete_grp` | raid1 + thinmeta/thindata slices (connects VDs internally) |
 | `create_leg` / `delete_leg` | concat → thin-pool → snap0 thin device |
 | `create_cntlr_active` / `delete_cntlr_active` | orchestrates create_grp + create_leg for N legs |
@@ -257,7 +262,7 @@ Full function list:
 | `create_snap` / `delete_snap` | create_thin (id 0) or create_snap (derived) across all legs |
 | `create_exp_active` / `delete_exp_active` | raid0 + real + error + delay + exp + nvmet export (ANA optimized) |
 | `create_exp_standby` / `delete_exp_standby` | error + delay + exp stub + nvmet export (ANA inaccessible) |
-| `disarm_vd_delay` / `arm_vd_delay` | DN-side delay disarm/arm for CN namespace scan |
+| `disarm_vd_delay` / `arm_vd_delay` | DN-side delay disarm/arm for CN namespace scan, per (leg,grp) |
 
 ### Part B — Infrastructure helpers (low-level, run ON the remote node)
 
@@ -265,9 +270,17 @@ These are uploaded verbatim to each node via a quoted heredoc (`_emit_common`)
 and called by the Part A functions. They include: `prep_node`, `set_host_identity`,
 `dm_create`, `dm_reload`, `dm_remove`, `dm_defuse_delay`, `dnv_remove_all_dm`,
 `cfg_set`, `nvmet_add_subsys`, `nvmet_port`, `nvmet_link`, `nvmet_referral`,
-`nvmet_remove_*`, `nvme_dev_by_nqn`, `nvme_wait_dev`, `nvme_conn`, `nvme_disc`,
-`ana_set`, `stas_install`, `stas_write_config`, `stas_start`, `stas_stop_restore`,
-`rd_ok`, `rd_eio`, `rd_hang`, `verify_summary`, `_t`, `slow_summary`.
+`nvmet_remove_*`, `nvmet_remove_all_dnv_subsys`, `nvme_dev_by_nqn`, `nvme_wait_dev`,
+`nvme_conn`, `nvme_disc`, `nvme_disconnect_all_dnv_vd`, `ana_set`, `stas_install`,
+`stas_write_config`, `stas_start`, `stas_stop_restore`, `rd_ok`, `rd_eio`, `rd_hang`,
+`verify_summary`, `_t`, `slow_summary`.
+
+`nvmet_remove_all_dnv_subsys` and `nvme_disconnect_all_dnv_vd` are
+topology-agnostic teardown safety nets: they scan `nvmet/subsystems/` and
+`/sys/class/nvme/*/subsysnqn` for `:dn:*` NQNs (the VD subsystem/connections)
+and remove/disconnect each, so `teardown.sh` cleans up groups beyond the
+hardcoded grp0/grp1 base (e.g. grp2 added by `grow.sh`) without the loops
+needing to know the topology.
 
 ---
 
@@ -348,8 +361,9 @@ cn1 connects, then re-arms them afterwards. The partition scan fails instantly
 | script | usage | what it does |
 | --- | --- | --- |
 | `setup.sh` | `./setup.sh [all\|dn0\|dn1\|cn0\|cn1\|ref0\|host0\|verify]` | Builds the whole environment. `verify` reads every dm device and checks behavior (linear/raid/thin read OK, error gives EIO, delay blocks). |
-| `teardown.sh` | `./teardown.sh [all\|defuse\|unexport\|<node>]` | Removes everything. Phase 0 defuses all delays first. Safe on partial/clean systems. |
-| `failover.sh` | `./failover.sh [force]` | Moves the da from cn0 to cn1. `force` skips steps 3 and 7. |
+| `teardown.sh` | `./teardown.sh [all\|defuse\|unexport\|<node>]` | Removes everything. Phase 0 defuses all delays first. Safe on partial/clean systems. Uses topology-agnostic safety nets (`dnv_remove_all_dm`, `nvmet_remove_all_dnv_subsys`, `nvme_disconnect_all_dnv_vd`) so it cleans up groups beyond the base 2×2 grid (e.g. grp2 added by `grow.sh`). |
+| `failover.sh` | `./failover.sh [force]` | Moves the da from cn0 to cn1. `force` skips steps 3 and 7. Mutually exclusive with `grow.sh`. |
+| `grow.sh` | `./grow.sh` | Extends leg0's thin pool with a third group (`grp2`) while host I/O runs: creates the grp2 VDs on the DNs, disarms/connects/re-arms so cn1 imports them, `create_grp` builds the raid1+slice pair on cn0, then suspends leg0-thinpool and reloads the thinmeta/thindata concats and the pool table from 2-way to 3-way. Grow and failover are never combined. |
 | `host0_io.sh` | `./host0_io.sh start\|stop\|status\|mark <label>\|report` | Continuous verified O_DIRECT I/O on host0. One JSON record per I/O. `mark` drops a timestamped marker. `report` prints a phase-by-phase summary. |
 | `common.sh` | sourced by the above | Part A resource API + Part B infra helpers. |
 
