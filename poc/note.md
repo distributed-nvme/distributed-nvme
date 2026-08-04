@@ -22,7 +22,7 @@ comment, or log line uses one of these words, it refers to the definition here.
 | term | meaning |
 | --- | --- |
 | **dn** | **Disk node.** A Linux server that holds physical disks (loop files) and exports virtual-disk slices over NVMe-oF/TCP to the controller nodes. There are two: `dn0`, `dn1`. |
-| **cn** | **Controller node.** A Linux server that imports virtual disks from the DNs, assembles them into a raid1 + thin-pool + raid0 stack, and re-exports the result to the host. There are two: `cn0` (active), `cn1` (standby). |
+| **cn** | **Controller node.** A Linux server that imports virtual disks from the DNs, assembles them into a raid1 + thin-pool + raid0 stack, and re-exports the result to the host. There are two: `cn0` (active), `cn1` (standby). A `cn` hosts one **cntlr** (the virtual controller of a `da`) — see §2.3. |
 | **ref0** | **Referral server.** A bare NVMe-oF discovery service (no storage). Its port carries one *referral* per CN so the host learns the CN addresses from ref0 alone. |
 | **host0** | **The host.** The NVMe initiator. Runs `nvme-stas` (stafd + stacd), never runs `nvme connect`. Discovers CNs via ref0's referrals and aggregates both paths into a single multipath namespace. |
 
@@ -35,7 +35,7 @@ volume.
 | term | full name | meaning | t03 equivalent |
 | --- | --- | --- | --- |
 | **pd** | physical disk | A 4 GB loop file on a DN. Backing store for everything. One per DN. | loop file |
-| **vd** | virtual disk | A 500 MB dm-linear slice carved from the pd, plus a symmetric fault-injection pair (`-real` / `-err` / `-delay`) per CN, exported to one CN via NVMe-oF. Identified by `vd_id` (0 = from dn0, 1 = from dn1). | `ld0` / `ld1` |
+| **vd** | virtual disk | A 500 MB slice carved from the pd, plus a symmetric fault-injection pair (`-real` / `-err` / `-delay`) per CN, exported to one CN via NVMe-oF. The `-real` slice is an LVM LV in `dnv-<dn>-da0-vg` (the loop is the PV); `-err`/`-delay`/`-cn` are plain dmsetup devices stacked on it. Identified by `vd_id` (0 = from dn0, 1 = from dn1). | `ld0` / `ld1` |
 | **grp** | group | One raid1 mirror (two VDs, one from each DN) plus the thin-pool metadata/data slices carved from it. A group is the unit of mirroring; there are two per leg (`grp0`, `grp1`). | `grp0` / `grp1` |
 | **leg** | leg | The raid0 underlying disk. One leg = the concatenation of both groups' thin-pool slices into one thin-pool, plus the default thin device (snap 0). There are two legs per da (`leg0`, `leg1`). | `stripe0` / `stripe1` |
 | **side** | side | One half of a raid1 mirror. A group's raid1 has two sides: `side0` (VD from dn0) and `side1` (VD from dn1). "Side" replaces the ambiguous "leg" used in t03 raid1 comments. | `ld0` / `ld1` (raid1 "leg") |
@@ -47,8 +47,9 @@ volume.
 
 | term | meaning |
 | --- | --- |
-| **active** | The CN currently serving host I/O (ANA `optimized`, exp table → `-real`). |
-| **standby** | The CN ready to take over but not yet serving (ANA `inaccessible`, exp table → `-delay`). |
+| **cntlr** | **Controller** (virtual). The controller of a `da` — the abstraction that owns the raid1 + thin-pool + raid0 stack and the nvmet export. A cntlr runs on a `cn`: a `da` has exactly one **active cntlr** (the one serving host I/O, ANA `optimized`, exp table → `-real`) and may have one or more **standby cntlrs** (ANA `inaccessible`, exp table → `-delay`), each on its own `cn`. `create_cntlr_active`/`create_cntlr_standby` build the active/standby side of a cntlr on a `cn`. |
+| **active** | The cntlr (and the `cn` it runs on) currently serving host I/O (ANA `optimized`, exp table → `-real`). |
+| **standby** | A cntlr ready to take over but not yet serving (ANA `inaccessible`, exp table → `-delay`). Lives on its own `cn`. |
 | **disarm** | Temporarily swap a DN's `-delay-cn` device to an error table so the kernel's partition scan fails fast instead of hanging on the 3600 s delay. |
 | **arm** | Put the real delay table back after the scan is done. |
 | **defuse** | Suspend a dm-delay device and load an error table so parked bios fail fast. Used in teardown phase 0. |
@@ -93,7 +94,7 @@ storage.
 
 ## 4. The storage stack (one CN, active)
 
-This is what `create_da_active` + `create_exp_active` build on cn0.  Every
+This is what `create_cntlr_active` + `create_exp_active` build on cn0.  Every
 line is a device-mapper target or an nvmet export.
 
 ```
@@ -157,7 +158,7 @@ a 1 MB anchor at 512 MB.
 Each VD on a DN has a symmetric fault-injection pair for both CNs:
 
 ```
-  -real  → dm-linear on loop (the actual data)
+  -real  → LVM LV in dnv-<dn>-da0-vg (loop is the PV; the actual data)
   -err-cn0 / -err-cn1  → dm-error (instant EIO)
   -delay-cn0 / -delay-cn1  → dm-delay(3600 s) on -err (read/write hangs)
   -cn0  → dm-linear on -real (cn0 sees real data)
@@ -180,7 +181,7 @@ identical names.
 
 ```
 dnv-<dn>-da0-leg<leg>-grp<grp>-vd<vd>          (base, no -cn suffix)
-    + -real                                     dm-linear on loop
+    + -real                                     LVM LV in dnv-<dn>-da0-vg (PV = loop)
     + -err-cn0, -err-cn1                        dm-error
     + -delay-cn0, -delay-cn1                    dm-delay on -err
     + -cn0, -cn1                                dm-linear (exported to each CN)
@@ -237,8 +238,8 @@ create_vd    dn0 ... cn0 ... 0           # dn0's vd0 exported to cn0
 create_vd    dn0 ... cn1 ... 0           # dn0's vd0 exported to cn1
 create_vd    dn1 ... cn0 ... 1           # dn1's vd1 exported to cn0
 create_vd    dn1 ... cn1 ... 1           # dn1's vd1 exported to cn1
-create_da_active  cn0 ... da0 2 <hnqn> <hid>   # build the stack on cn0
-create_exp_active cn0 ... da0 0 <hnqn> <hid> 1 255   # export to host
+create_cntlr_active  cn0 ... da0 2 <hnqn> <hid>   # build the stack on cn0
+create_exp_active    cn0 ... da0 0 <hnqn> <hid> 1 255   # export to host
 # ... disarm, connect standby, arm, export standby ...
 ```
 
@@ -247,12 +248,12 @@ Full function list:
 | function | what it creates / removes |
 | --- | --- |
 | `create_pd` / `delete_pd` | loop file + nvmet port on a DN |
-| `create_vd` / `delete_vd` | VD stack (-real, -err, -delay, -cn) + nvmet subsys for both CNs |
+| `create_vd` / `delete_vd` | VD stack (-real [LVM LV], -err, -delay, -cn [dmsetup]) + nvmet subsys for both CNs |
 | `connect_vd` / `disconnect_vd` | nvme connect/disconnect from a CN to a DN's VD |
 | `create_grp` / `delete_grp` | raid1 + thinmeta/thindata slices (connects VDs internally) |
 | `create_leg` / `delete_leg` | concat → thin-pool → snap0 thin device |
-| `create_da_active` / `delete_da_active` | orchestrates create_grp + create_leg for N legs |
-| `create_da_standby` / `delete_da_standby` | connects VDs only (no stack) |
+| `create_cntlr_active` / `delete_cntlr_active` | orchestrates create_grp + create_leg for N legs |
+| `create_cntlr_standby` / `delete_cntlr_standby` | connects VDs only (no stack) |
 | `create_snap` / `delete_snap` | create_thin (id 0) or create_snap (derived) across all legs |
 | `create_exp_active` / `delete_exp_active` | raid0 + real + error + delay + exp + nvmet export (ANA optimized) |
 | `create_exp_standby` / `delete_exp_standby` | error + delay + exp stub + nvmet export (ANA inaccessible) |
@@ -282,7 +283,7 @@ I/O. Seven steps:
 | 3 | cn0 | ANA → `inaccessible`. Flushing suspend (in-flight I/O drains to the thin pool). Repoint exp → delay early (frees the raid0). Dismantle the entire stack in reverse order. Removing the thin-pool **commits its metadata** — this is what lets cn1 inherit it. |
 | 4 | dn0 | Swap `-cn0` → delay, `-cn1` → real. cn0 loses data access; cn1 gains it. |
 | 5 | dn1 | Same swap. |
-| 6 | cn1 | `create_da_active` rebuilds the stack (raid1 + thin-pool + snap0). The thin-pool metadata is cn0's committed copy — `create_thin 0` fails (inherited), which is the **snap-0 inheritance invariant**. Build raid0, repoint exp → real, resume. Queued host I/O drains. |
+| 6 | cn1 | `create_cntlr_active` rebuilds the stack (raid1 + thin-pool + snap0). The thin-pool metadata is cn0's committed copy — `create_thin 0` fails (inherited), which is the **snap-0 inheritance invariant**. Build raid0, repoint exp → real, resume. Queued host I/O drains. |
 | 7 | cn0 | Repoint exp → delay (park it). |
 
 **`force` mode** skips steps 3 and 7 — models cn0 dying outright. The
@@ -292,11 +293,12 @@ Everything else (1, 2, 4, 5, 6) runs unchanged.
 ### Why the snap-0 inheritance matters
 
 The thin-pool metadata lives on the raid1's thinmeta slice, which is on the
-VD, which is on the DN's `-real` device (a loop file). When cn0 removes its
-thin-pool (step 3), the pool's destructor flushes the metadata to that slice.
-When cn1 creates its thin-pool (step 6) on the *same* slice (now pointing at
-`-real` after the DN swap), it reads cn0's committed metadata. The mapping
-for thin device 0 — and therefore all the data the host wrote — is preserved.
+VD, which is on the DN's `-real` device (an LVM LV in the loop-backed VG
+`dnv-<dn>-da0-vg`). When cn0 removes its thin-pool (step 3), the pool's
+destructor flushes the metadata to that slice. When cn1 creates its
+thin-pool (step 6) on the *same* slice (now pointing at `-real` after the DN
+swap), it reads cn0's committed metadata. The mapping for thin device 0 —
+and therefore all the data the host wrote — is preserved.
 
 If `create_thin 0` *succeeds* on cn1, it means the metadata was NOT inherited
 (empty pool) and all pre-existing data is lost. The scripts log this as a
@@ -407,3 +409,16 @@ inside cn1's suspended exp device — well under the 30 s NVMe I/O timeout.
 * **O_DIRECT**: `host0_io.sh` uses Python (`os.O_DIRECT` + `preadv`/`pwritev`
   on page-aligned `mmap` buffers) rather than `dd`, because uutils coreutils
   0.8.0's `iflag=direct` is broken on these devices.
+
+* **LVM for `-real`**: the DN-side `-real` device (the one backed directly by
+  the loop) is the *only* LVM-managed object in the whole stack. One VG per DN
+  (`dnv-<dn>-da0-vg`, loop = PV, created in `create_pd`), one LV per
+  `(leg,grp,vd)` slice (`leg<leg>-grp<grp>-vd<vd>-real`, created in `create_vd`
+  via `lvcreate -L ${SEC_PD}s`). Downstream consumers reference it as
+  `/dev/<vg>/<lv>`, never `/dev/mapper/...-real`. Every other dm device in the
+  DN stack (`-err-*`, `-delay-*`, `-cn0`, `-cn1`) and all CN-side dm devices
+  remain plain `dmsetup`. LV allocation offsets are *not* pinned — correctness
+  depends on the LV's name, not its byte offset on the loop, so all invariants
+  (data integrity, snap-0 inheritance, failover) hold regardless of where LVM
+  places the extents. `dnv_remove_all_dm` skips LVM LVs in its dm passes and
+  tears them down in a dedicated `lvremove`/`vgremove`/`pvremove` sweep.

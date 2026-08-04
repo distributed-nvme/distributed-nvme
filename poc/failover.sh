@@ -19,7 +19,7 @@
 #             cn1 pick the pool up.
 #   4./5. dn0/dn1 : swap the per-CN linear devices over -- cn0's now point at
 #             the 3600s delay, cn1's at the real data.
-#   6. cn1  : rebuild the same stack via create_da_active, repoint its exported
+#   6. cn1  : rebuild the same stack via create_cntlr_active, repoint its exported
 #             volume at the fresh raid0 and resume it.  Queued host I/O drains
 #             through.
 #   7. cn0  : repoint its exported volume at its delay device.
@@ -160,7 +160,7 @@ _info "$vp now maps: $(sudo dmsetup table "$vp")"
 # create_exp_active), in reverse creation order. Removing a thin-pool commits
 # its metadata; that commit is what lets cn1 open the same pool in step 6.
 #
-# Inline dmsetup here (not delete_da_active) because the table-swap reload above
+# Inline dmsetup here (not delete_cntlr_active) because the table-swap reload above
 # means the exp is still suspended and partially dismantled; the exact reverse
 # order matters. The names/tables/sizes match common.sh exactly.
 # 3.3.1 exp -real (raid0)
@@ -210,11 +210,13 @@ for leg in 0 1; do
   for grp in 0 1; do
     for vid in 0 1; do
       base="dnv-${DN}-da0-leg${leg}-grp${grp}-vd${vid}"
+      VG="dnv-${DN}-da0-vg"
+      REAL_DEV="/dev/${VG}/leg${leg}-grp${grp}-vd${vid}-real"
       # x.1 cn0 loses access
       dm_reload "${base}-cn0" "0 $SEC_PD linear /dev/mapper/${base}-delay-cn0 0" \
           || _warn "reload failed: ${base}-cn0"
-      # x.2 cn1 gains access
-      dm_reload "${base}-cn1" "0 $SEC_PD linear /dev/mapper/${base}-real 0" \
+      # x.2 cn1 gains access (the -real backing device is now an LVM LV)
+      dm_reload "${base}-cn1" "0 $SEC_PD linear $REAL_DEV 0" \
           || _warn "reload failed: ${base}-cn1"
     done
   done
@@ -227,10 +229,10 @@ EOF_S45
 # ===================== step 6: cn1 builds the stack and goes live ============
 step6_cn1() {
     _info "=== 6. cn1: build the stack, repoint the exported volume, resume ==="
-    # Use create_da_active to rebuild the full grp/leg/thinpool stack on cn1.
+    # Use create_cntlr_active to rebuild the full grp/leg/thinpool stack on cn1.
     # create_snap cn1 da0 0 0 should fail => thin 0 is inherited from cn0's
     # committed metadata.
-    create_da_active cn1 "$CN1_IP" da0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
+    create_cntlr_active cn1 "$CN1_IP" da0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
 
     # create_exp_active builds the raid0+real+error+delay+exp stack. But we need
     # to REPOINT the existing suspended exp device at the new -real, not create
@@ -260,7 +262,7 @@ done
 # exists, so create_thin 0 should fail (inherited).
 for leg in 0 1; do
     sp="dnv-${CN}-da0-leg${leg}"
-    dm_exists "${sp}-thinpool" || _fail "no ${sp}-thinpool -- create_da_active did not run?"
+    dm_exists "${sp}-thinpool" || _fail "no ${sp}-thinpool -- create_cntlr_active did not run?"
     sudo dmsetup message "/dev/mapper/${sp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 \
         && _warn "thin 0 did not exist in ${sp}-thinpool -- pool metadata was not inherited" \
         || _info "thin 0 already present in ${sp}-thinpool (inherited from cn0)"

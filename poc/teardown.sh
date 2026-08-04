@@ -114,7 +114,7 @@ EOF_REF0
 }
 
 # CN teardown uses common.sh delete_* primitives (reverse recipe).
-# delete_exp_* -> delete_da_* -> (delete_leg/delete_grp/disconnect_vd inside)
+# delete_exp_* -> delete_cntlr_* -> (delete_leg/delete_grp/disconnect_vd inside)
 teardown_cn() {
     local ip="$1" cn="$2"
     _info "=== tearing down $cn ($ip) ==="
@@ -122,11 +122,11 @@ teardown_cn() {
     # normal layout).  Both are idempotent and safe on partial systems.
     delete_exp_active  "$cn" "$ip" da0 0  2>/dev/null || true
     delete_exp_standby "$cn" "$ip" da0 0  2>/dev/null || true
-    # delete_da_active removes the grp/leg/thinpool stack; delete_da_standby
+    # delete_cntlr_active removes the grp/leg/thinpool stack; delete_cntlr_standby
     # disconnects the vds.  Run both so the right one cleans up the right
     # resources regardless of which side this cn was on.
-    delete_da_active  "$cn" "$ip" da0 2>/dev/null || true
-    delete_da_standby "$cn" "$ip" da0 2>/dev/null || true
+    delete_cntlr_active  "$cn" "$ip" da0 2>/dev/null || true
+    delete_cntlr_standby "$cn" "$ip" da0 2>/dev/null || true
     # Force-clean any stragglers.
     { _emit_vars; echo "CN='$cn'"; _emit_common; cat <<'EOF_CN_CLEAN'
 # Remove any leftover dm devices and nvmet exports on this cn.

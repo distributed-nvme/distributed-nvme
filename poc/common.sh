@@ -190,6 +190,14 @@ slow_summary() {
 prep_node() {
     sudo modprobe -a dm-mod dm-delay dm-thin-pool dm-raid >/dev/null 2>&1 || true
     sudo modprobe -a nvmet nvmet-tcp nvme-tcp nvme-fabrics >/dev/null 2>&1 || true
+    # lvm2 userland is needed on every node because the DN-side -real devices
+    # are LVM LVs (note.md §6.1); prep_node runs on all 6 nodes, and a fresh VM
+    # may not have lvm2 installed. Mirrors stas_install's dpkg-check pattern.
+    if ! dpkg -s lvm2 >/dev/null 2>&1; then
+        _info "installing lvm2"
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y lvm2 >/dev/null 2>&1 \
+            || _warn "could not install lvm2 (need it for DN-side -real LVs)"
+    fi
     mountpoint -q /sys/kernel/config 2>/dev/null || \
         sudo mount -t configfs none /sys/kernel/config >/dev/null 2>&1 || true
     sudo tee /etc/udev/rules.d/58-dnv-test.rules >/dev/null <<'RULE_EOF'
@@ -227,6 +235,31 @@ dm_size()   { sudo dmsetup table "$1" 2>/dev/null | awk '{s+=$2} END{print s+0}'
 dm_target() { sudo dmsetup table "$1" 2>/dev/null | awk 'NR==1{print $3}'; }
 dnv_list()  { sudo dmsetup ls 2>/dev/null | awk '{print $1}' | grep '^dnv-' || true; }
 dm_count()  { sudo dmsetup ls 2>/dev/null | grep -v 'No devices found' | grep -c . || true; }
+
+# --- lvm (logical volume manager) ------------------------------------------
+# Only the DN-side -real devices (backed by the loop) are LVM-managed; every
+# other dm device in this stack is plain dmsetup. These helpers mirror dm_exists
+# etc. so create_*/delete_* stay no-op-on-match (note.md §13 idempotency rule).
+#
+# CRITICAL: every LVM command runs through _lvm(), which injects a device filter
+# that accepts ONLY /dev/loop* (the PVs) and rejects everything else. Without
+# this, pvs/vgs/lvs do a full block-device scan for PV labels; when that scan
+# reaches a dm-delay (3600s) device created by create_vd itself, the read blocks
+# for an hour and wedges every subsequent LVM call. The filter makes the scan
+# touch only the loop PV, which carries the full VG+LV metadata -- the dm devices
+# (LVs, dm-error, dm-delay, dm-linear) are never probed. Use loop-only devices
+# for PVs; do not use a partition or md device as a PV under this filter.
+_lvm() {
+    local cmd="$1"; shift
+    sudo "$cmd" --config 'devices { filter = ["a|^/dev/loop|", "r|.*|"] }' "$@"
+}
+pv_exists() { _lvm pvs  --noheadings "$1"            >/dev/null 2>&1; }   # <pv_dev>
+vg_exists() { _lvm vgs  --noheadings "$1"            >/dev/null 2>&1; }   # <vg_name>
+lv_exists() { _lvm lvs  --noheadings "/dev/$1/$2"    >/dev/null 2>&1; }   # <vg> <lv>
+# Is a dm node (as listed by dnv_list) backed by LVM? Used by dnv_remove_all_dm
+# to route LVM LVs to lvremove instead of dmsetup remove (which would leave the
+# VG metadata stale). dmsetup info reports the owning VG name for LVM devices.
+lv_is_lvm() { sudo dmsetup info -c --noheadings -o vg_name "$1" 2>/dev/null | grep -q .; }
 
 # dm_create <name> <table>   -- table may be multi-line (concatenated targets)
 dm_create() {
@@ -320,18 +353,37 @@ dnv_defuse_all() {
 # Remove every dnv-* dm device. Order-independent: defuse all delays first,
 # then make repeated passes so stacked devices come off as their holders
 # disappear, escalating to --force only once plain removal stops making progress.
+#
+# LVM LVs (the DN-side -real devices) are SKIPPED in the dm passes: removing an
+# LV via `dmsetup remove` would drop its dm node but leave the VG metadata
+# stale. They are torn down in a dedicated LVM sweep at the end (lvremove ->
+# vgremove -> pvremove), after the dm stack holding them open is gone.
 dnv_remove_all_dm() {
-    local name pass before after mode
+    local name pass before after mode vg
     dnv_defuse_all
+    # Pass 1..N: plain dmsetup devices only. Skip anything LVM-managed.
     mode=normal
     for pass in 1 2 3 4 5 6 7 8; do
         before=$(dnv_list | wc -l)
         [ "$before" -eq 0 ] && break
-        for name in $(dnv_list); do dm_remove "$name" "$mode" >/dev/null 2>&1 || true; done
+        for name in $(dnv_list); do
+            lv_is_lvm "$name" && continue
+            dm_remove "$name" "$mode" >/dev/null 2>&1 || true
+        done
         after=$(dnv_list | wc -l)
         _info "dm pass $pass ($mode): $before -> $after remaining"
         [ "$after" -eq 0 ] && break
         [ "$after" -eq "$before" ] && mode=force
+    done
+    # LVM sweep: remove any surviving dnv-* VGs (lvremove -f clears all their
+    # LVs), then PVs on loop devices. This is the safety net; the happy path
+    # (delete_vd per-slice + delete_pd per-DN) already did this.
+    for vg in $(_lvm vgs --noheadings -o vg_name 2>/dev/null | grep '^dnv-'); do
+        _lvm lvremove -y -f "$vg" >/dev/null 2>&1 && _info "lvremoved all LVs in $vg" || true
+        _lvm vgremove -y "$vg" >/dev/null 2>&1 && _info "vgremoved $vg" || _warn "could not vgremove $vg"
+    done
+    for pv in $(_lvm pvs --noheadings -o pv_name 2>/dev/null | grep '^/dev/loop'); do
+        _lvm pvremove -y "$pv" >/dev/null 2>&1 && _info "pvremoved $pv" || true
     done
     if [ "$(dnv_list | wc -l)" -ne 0 ]; then
         _warn "dm devices still present:"; dnv_list >&2
@@ -806,6 +858,15 @@ if [ -z "$LOOP" ]; then
 fi
 _info "loop device: $LOOP ($IMG, $LOOP_IMG_SIZE)"
 
+# Volume group on the loop device. The DN-side -real devices (one per
+# (leg,grp,vd) slice) are LVM LVs in this VG, not plain dm-linear on the loop.
+# One loop -> one VG -> N LVs mirrors the old "one loop -> N dm-linear slices".
+# Idempotent: pvcreate/vgcreate error if already present, so guard like dm_create.
+VG="dnv-${DN}-da0-vg"
+pv_exists "$LOOP" || { _t "pvcreate $LOOP" _lvm pvcreate "$LOOP" || _fail "pvcreate $LOOP"; }
+vg_exists "$VG"   || { _t "vgcreate $VG" _lvm vgcreate "$VG" "$LOOP" || _fail "vgcreate $VG"; }
+_info "VG: $VG on $LOOP ($LOOP_IMG_SIZE)"
+
 # nvmet port for the DN's vd exports (the DN's own IP).
 case "$DN" in
     dn0) MY_IP="$DN0_IP" ;;
@@ -827,9 +888,18 @@ delete_pd() {   # <dn_name> <dn_ip>
 set -uo pipefail
 dnv_remove_all_dm
 
+# Remove the VG and PV on the loop. dnv_remove_all_dm above already swept
+# strays, but run it here too so delete_pd is self-sufficient when run alone.
+VG="dnv-${DN}-da0-vg"
+vg_exists "$VG" && {
+    _lvm lvremove -y -f "$VG" >/dev/null 2>&1 || true
+    _t "vgremove $VG" _lvm vgremove -y "$VG" >/dev/null 2>&1 && _info "vgremoved $VG" || _warn "could not vgremove $VG"
+}
+
 # Detach the loop device and delete its backing file.
 IMG="/var/tmp/dnv-${DN}-da0.img"
 for LOOP in $(sudo losetup -j "$IMG" 2>/dev/null | awk -F: '{print $1}'); do
+    pv_exists "$LOOP" && _lvm pvremove -y "$LOOP" >/dev/null 2>&1 || true
     _t "losetup -d $LOOP" sudo losetup -d "$LOOP" >/dev/null 2>&1 && _info "detached $LOOP" \
         || _warn "could not detach $LOOP"
 done
@@ -870,24 +940,33 @@ esac
 
 nvmet_port 1 "$MY_IP"
 
-# Re-resolve the loop device from the image (create_pd set it up in a prior call).
-IMG="/var/tmp/dnv-${DN}-da0.img"
-LOOP=$(sudo losetup -j "$IMG" 2>/dev/null | awk -F: 'NR==1{print $1}')
-[ -n "$LOOP" ] || _fail "no loop device for $IMG -- run create_pd first"
+# The DN-side -real devices are LVM LVs in dnv-<dn>-da0-vg (create_pd set up
+# the loop/PV/VG in a prior call). Fail clearly if create_pd wasn't run.
+VG="dnv-${DN}-da0-vg"
+vg_exists "$VG" || _fail "no VG $VG on $DN -- run create_pd first"
 
 # For each (leg, grp) pair, create the full symmetric fault-injection stack.
 # Names (t04):  dnv-<dn>-<da>-leg<leg>-grp<grp>-vd<vd>  (base, no -cn suffix)
-#                + -real, -err-cn0, -err-cn1, -delay-cn0, -delay-cn1
+#                + -real (LVM LV in dnv-<dn>-da0-vg, NOT a dmsetup device),
+#                + -err-cn0, -err-cn1, -delay-cn0, -delay-cn1
 #                + -cn0 (exported to cn0, on -real or -delay-cn0)
 #                + -cn1 (exported to cn1, on -delay-cn1 or -real)
 # NQN:  nqn.2026-07.org.dnv:dn:<dn>:<da>-leg<leg>-grp<grp>-vd<vd>-cn<cn>
-idx=0
+#
+# -real is the ONLY LVM-managed object in the whole stack; everything above it
+# (-err/-delay/-cn) stays plain dmsetup, stacked on the LV path /dev/<vg>/<lv>.
 for leg in 0 1; do
   for grp in 0 1; do
     base="dnv-${DN}-da0-leg${leg}-grp${grp}-vd${VD}"
+    LV="leg${leg}-grp${grp}-vd${VD}-real"
+    REAL_DEV="/dev/${VG}/${LV}"
 
-    # Backing store for this virtual disk slice.
-    dm_create "${base}-real" "0 $SEC_PD linear $LOOP $(( idx * SEC_PD ))"
+    # Backing store for this virtual disk slice: an LVM LV in the loop-backed VG.
+    # Idempotent: lvcreate errors if the LV exists, so guard like dm_create.
+    # Size in sectors (SEC_PD s suffix); SEC_PD=1024000 sectors = 500M = 125 PEs.
+    lv_exists "$VG" "$LV" || \
+        { _t "lvcreate $LV" _lvm lvcreate -y -L "${SEC_PD}s" -n "$LV" "$VG" \
+            || _fail "lvcreate $VG/$LV"; }
 
     # Per-CN fault-injection pair (symmetric: both cn0 and cn1 get -err/-delay).
     for cn in cn0 cn1; do
@@ -899,7 +978,7 @@ for leg in 0 1; do
     # on -delay (standby).  cn0 (active) sees real data; cn1 (standby) sees the
     # 3600s delay so it cannot touch the data until failover.
     if [ "$C" = "0" ]; then
-        dm_create "${base}-cn${C}" "0 $SEC_PD linear /dev/mapper/${base}-real 0"
+        dm_create "${base}-cn${C}" "0 $SEC_PD linear $REAL_DEV 0"
     else
         dm_create "${base}-cn${C}" "0 $SEC_PD linear /dev/mapper/${base}-delay-cn${C} 0"
     fi
@@ -912,8 +991,6 @@ for leg in 0 1; do
     DNV_MODEL="$VD_MODEL" \
         nvmet_add_subsys "$nqn" "/dev/mapper/${base}-cn${C}" "$uuid" "" "$hnqn"
     nvmet_link "$nqn" 1
-
-    idx=$(( idx + 1 ))
   done
 done
 
@@ -943,15 +1020,20 @@ done
 
 # Remove the dm stack for this vd.  dnv_remove_all_dm would nuke everything on
 # the dn; instead, remove just this vd's devices so a coexisting vd is untouched.
+# -real is an LVM LV, not a dmsetup device, so it is removed via lvremove (the
+# dm devices above it go first via dm_remove, releasing the LV's open count).
+VG="dnv-${DN}-da0-vg"
 for leg in 0 1; do
   for grp in 0 1; do
     base="dnv-${DN}-da0-leg${leg}-grp${grp}-vd${VD}"
     for n in "${base}-cn0" "${base}-cn1" \
              "${base}-delay-cn0" "${base}-delay-cn1" \
-             "${base}-err-cn0" "${base}-err-cn1" \
-             "${base}-real"; do
+             "${base}-err-cn0" "${base}-err-cn1"; do
         dm_remove "$n" force >/dev/null 2>&1 || true
     done
+    LV="leg${leg}-grp${grp}-vd${VD}-real"
+    lv_exists "$VG" "$LV" && _lvm lvremove -y "/dev/${VG}/${LV}" >/dev/null 2>&1 \
+        && _info "lvremoved: $VG/$LV" || true
   done
 done
 _info "VD ${DN}->${CN} (vd${VD}) dm devices removed"
@@ -1009,7 +1091,7 @@ create_grp() {   # <cn_name> <cn_ip> <da> <leg> <grp> <hostnqn> <hostid>
     { _emit_vars; echo "CN='$cn'; DA='$da'; LEG='$leg'; GRP='$grp'; HNQN='$hnqn'; HID='$hid'"; _emit_common; cat <<'EOF_GRP'
 set -uo pipefail
 prep_node
-# Host identity is set by create_da_active; re-affirm in case this is called standalone.
+# Host identity is set by create_cntlr_active; re-affirm in case this is called standalone.
 set_host_identity "$HNQN" "$HID"
 
 # Connect the two vds for this (leg,grp): vd0 from dn0, vd1 from dn1.
@@ -1144,10 +1226,10 @@ EOF_DLEG
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- da_active / da_standby (cn-side orchestrators) ------------------------
-create_da_active() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
+# --- cntlr_active / cntlr_standby (cn-side orchestrators) -------------------
+create_cntlr_active() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
     local cn="$1" ip="$2" da="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_da_active $cn $da ($nlegs legs) ==="
+    _info "=== create_cntlr_active $cn $da ($nlegs legs) ==="
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do
         local grp
@@ -1158,9 +1240,9 @@ create_da_active() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
     done
 }
 
-delete_da_active() {   # <cn_name> <cn_ip> <da>
+delete_cntlr_active() {   # <cn_name> <cn_ip> <da>
     local cn="$1" ip="$2" da="$3"
-    _info "=== delete_da_active $cn $da ==="
+    _info "=== delete_cntlr_active $cn $da ==="
     local nlegs="${NLEGS:-2}"
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do
@@ -1172,9 +1254,9 @@ delete_da_active() {   # <cn_name> <cn_ip> <da>
     done
 }
 
-create_da_standby() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
+create_cntlr_standby() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
     local cn="$1" ip="$2" da="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_da_standby $cn $da ($nlegs legs) ==="
+    _info "=== create_cntlr_standby $cn $da ($nlegs legs) ==="
     local leg grp
     for leg in $(seq 0 $(( nlegs - 1 ))); do
         for grp in 0 1; do
@@ -1185,9 +1267,9 @@ create_da_standby() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
     done
 }
 
-delete_da_standby() {   # <cn_name> <cn_ip> <da>
+delete_cntlr_standby() {   # <cn_name> <cn_ip> <da>
     local cn="$1" ip="$2" da="$3"
-    _info "=== delete_da_standby $cn $da ==="
+    _info "=== delete_cntlr_standby $cn $da ==="
     local nlegs="${NLEGS:-2}"
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do

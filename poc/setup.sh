@@ -8,10 +8,10 @@
 #                 ...-vd<N>-cn0  ->  dm-linear on  -real        (works)
 #                 ...-vd<N>-cn1  ->  dm-linear on  -delay-cn1   (stalls 3600s)
 #             so only cn0 can actually reach the data.
-#   cn0     : active.  create_da_active (calls create_grp x4 -> create_leg x2)
+#   cn0     : active.  create_cntlr_active (calls create_grp x4 -> create_leg x2)
 #             -> create_exp_active (raid0 of snap0 thin-devs + nvmet export,
 #             ANA "optimized").
-#   cn1     : standby.  disarm_vd_delay -> create_da_standby (connect_vd x4,
+#   cn1     : standby.  disarm_vd_delay -> create_cntlr_standby (connect_vd x4,
 #             no stack) -> arm_vd_delay -> create_exp_standby (error/delay/exp
 #             stub, ANA "inaccessible").  Same NQN and namespace identity as
 #             cn0 so host0 aggregates both.
@@ -51,7 +51,7 @@ set_host_identity "$MY_HOSTNQN" "$MY_HOSTID"
 EOF_CN0
     } | _ssh "${SSH_USER}@${CN0_IP}" bash -s
 
-    create_da_active cn0 "$CN0_IP" da0 "$NLEGS" "$HOSTNQN_CN0" "$HOSTID_CN0"
+    create_cntlr_active cn0 "$CN0_IP" da0 "$NLEGS" "$HOSTNQN_CN0" "$HOSTID_CN0"
     create_exp_active cn0 "$CN0_IP" da0 0 "$HOSTNQN_HOST0" "$HOSTID_HOST0" 1 255
 }
 
@@ -71,7 +71,7 @@ EOF_CN1
     disarm_vd_delay dn0 "$DN0_IP"
     disarm_vd_delay dn1 "$DN1_IP"
 
-    create_da_standby cn1 "$CN1_IP" da0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
+    create_cntlr_standby cn1 "$CN1_IP" da0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
 
     _info "--- re-arming DN -delay devices ---"
     arm_vd_delay dn0 "$DN0_IP"
@@ -238,8 +238,11 @@ set -uo pipefail
 for leg in 0 1; do
   for grp in 0 1; do
     base="dnv-${DN}-da0-leg${leg}-grp${grp}-vd${VD}"
-    dm_exists "${base}-real" || { _warn "no ${base}-real"; VERIFY_FAIL=$((VERIFY_FAIL+1)); continue; }
-    rd_ok  "/dev/mapper/${base}-real" "${base}-real (dm-linear on loop)"
+    VG="dnv-${DN}-da0-vg"
+    LV="leg${leg}-grp${grp}-vd${VD}-real"
+    REAL_DEV="/dev/${VG}/${LV}"
+    lv_exists "$VG" "$LV" || { _warn "no ${VG}/${LV}"; VERIFY_FAIL=$((VERIFY_FAIL+1)); continue; }
+    rd_ok  "$REAL_DEV" "${base}-real (LVM LV on loop-backed VG)"
     rd_ok  "/dev/mapper/${base}-cn0"  "${base}-cn0 (dm-linear on -real)"
     for cn in cn0 cn1; do
         rd_eio  "/dev/mapper/${base}-err-${cn}" "${base}-err-${cn} (dm-error)"
