@@ -18,9 +18,9 @@ setup.sh all  ->  host0_io.sh start  ->  grow.sh  ->  host0_io.sh report  ->  te
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | `create_vd` params | All mandatory: `<dn> <dn_ip> <cn> <cn_ip> <vd_id> <leg> <grp>` |
-| 2 | Scope of generalization | All six: `create_vd`, `delete_vd`, `connect_vd`, `disconnect_vd`, `disarm_vd_delay`, `arm_vd_delay` |
-| 3 | cn1 connects to grp2 VDs | `connect_vd` for dn0/vd0 + dn1/vd1, wrapped in disarm/arm |
+| 1 | `create_ld` params | All mandatory: `<dn> <dn_ip> <cn> <cn_ip> <ld_id> <leg> <grp>` |
+| 2 | Scope of generalization | All six: `create_ld`, `delete_ld`, `connect_ld`, `disconnect_ld`, `disarm_ld_delay`, `arm_ld_delay` |
+| 3 | cn1 connects to grp2 LDs | `connect_ld` for dn0/ld0 + dn1/ld1, wrapped in disarm/arm |
 | 4 | Pool extension sequence | Suspend pool (noflush) -> `dm_reload` thinmeta concat -> `dm_reload` thindata concat -> raw `dmsetup load` pool -> raw `dmsetup resume` pool |
 | 5 | New sizes | Inline in grow.sh: `meta_sz=$((SEC_TMETA * 3))`, `data_sz=$((SEC_TDATA * 3))` |
 | 6 | Teardown robustness | Dynamic discovery (Option B) via two new Part B helpers (Option i) |
@@ -35,39 +35,39 @@ setup.sh all  ->  host0_io.sh start  ->  grow.sh  ->  host0_io.sh report  ->  te
 Each function drops its `for leg in 0 1; for grp in 0 1` loop and takes `leg`
 and `grp` as explicit params at the end of the signature.
 
-**`create_vd <dn_name> <dn_ip> <cn_name> <cn_ip> <vd_id> <leg> <grp>`**
+**`create_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>`**
 
 Creates one (leg,grp) pair's full symmetric fault-injection stack:
-- LV `-real` in `dnv-<dn>-da0-vg` (the backing store)
+- LV `-real` in `dnv-<dn>-sp0-vg` (the backing store)
 - `-err-cn0`, `-err-cn1` (dm-error)
 - `-delay-cn0`, `-delay-cn1` (dm-delay on -err)
 - `-cn<C>` (dm-linear on -real for cn0, on -delay-cn1 for cn1)
-- nvmet subsystem `nqn...:dn:<dn>:da0-leg<leg>-grp<grp>-vd<vd>-cn<C>`
+- nvmet subsystem `nqn...:dn:<dn>:sp0-leg<leg>-grp<grp>-ld<ld>-cn<C>`
 
-The orchestrator calls it once per (dn, cn, vd, leg, grp) combination.
+The orchestrator calls it once per (dn, cn, ld, leg, grp) combination.
 
-**`delete_vd <dn_name> <dn_ip> <cn_name> <cn_ip> <vd_id> <leg> <grp>`**
+**`delete_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>`**
 
 Removes one (leg,grp) pair's dm stack + both cn nvmet subsystems + LV.
 Note: `cn`/`cn_ip` params are vestigial (the function removes subsystems for
-both cns regardless); kept for signature consistency with `create_vd` and
+both cns regardless); kept for signature consistency with `create_ld` and
 used only in the log message.
 
-**`connect_vd <cn> <cn_ip> <dn> <dn_ip> <vd_id> <hostnqn> <hostid> <leg> <grp>`**
+**`connect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <hostnqn> <hostid> <leg> <grp>`**
 
 Connects one (leg,grp) NQN from this dn. Previously looped 4 NQNs; now one.
 
-**`disconnect_vd <cn> <cn_ip> <dn> <dn_ip> <vd_id> <leg> <grp>`**
+**`disconnect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <leg> <grp>`**
 
 Disconnects one (leg,grp) NQN.
 
-**`disarm_vd_delay <dn> <dn_ip> <leg> <grp>`**
+**`disarm_ld_delay <dn> <dn_ip> <leg> <grp>`**
 
-Disarms the 4 delay devices (`vid 0 1` x `cn cn0 cn1`) for this (leg,grp)
-pair. Still loops `vid`/`cn` internally -- disarming a group means disarming
+Disarms the 4 delay devices (`lid 0 1` x `cn cn0 cn1`) for this (leg,grp)
+pair. Still loops `lid`/`cn` internally -- disarming a group means disarming
 all its delay devices.
 
-**`arm_vd_delay <dn> <dn_ip> <leg> <grp>`**
+**`arm_ld_delay <dn> <dn_ip> <leg> <grp>`**
 
 Re-arms the same 4 delay devices.
 
@@ -80,7 +80,7 @@ Matching the `dnv_remove_all_dm` pattern (scan-and-remove, topology-agnostic):
 Lists `$NVMET/subsystems/`, matches `nqn.2026-07.org.dnv:dn:*` prefix, removes
 each via `nvmet_remove_subsys`. Called by `delete_pd` before `nvmet_remove_port`.
 
-**`nvme_disconnect_all_dnv_vd`**
+**`nvme_disconnect_all_dnv_ld`**
 
 Scans `/sys/class/nvme/*/subsysnqn` for NQNs matching
 `nqn.2026-07.org.dnv:dn:*`, disconnects each via `nvme_disc`. Replaces
@@ -88,28 +88,28 @@ Scans `/sys/class/nvme/*/subsysnqn` for NQNs matching
 
 ### 3.3 `setup.sh` -- update call sites
 
-**`setup_dn`**: loop `for leg in 0 1; for grp in 0 1`, call `create_vd` with
+**`setup_dn`**: loop `for leg in 0 1; for grp in 0 1`, call `create_ld` with
 explicit `leg`/`grp` for both cn0 and cn1.
 
-**`setup_cn1`**: loop `for leg in 0 1; for grp in 0 1` for `disarm_vd_delay`
-and `arm_vd_delay`. `create_cntlr_standby` (which calls `connect_vd`
+**`setup_cn1`**: loop `for leg in 0 1; for grp in 0 1` for `disarm_ld_delay`
+and `arm_ld_delay`. `create_cntlr_standby` (which calls `connect_ld`
 internally) is updated to loop and pass `leg`/`grp`.
 
 **`verify` path**: disarm/arm loop updated similarly.
 
 ### 3.4 `teardown.sh` -- use dynamic discovery
 
-**`teardown_dn`**: loop `for leg in 0 1; for grp in 0 1` for `delete_vd`
+**`teardown_dn`**: loop `for leg in 0 1; for grp in 0 1` for `delete_ld`
 (explicit params). `delete_pd` now also calls `nvmet_remove_all_dnv_subsys`
 internally.
 
-**`teardown_cn`'s inline cleanup**: replace hardcoded VD disconnect loop with
-`nvme_disconnect_all_dnv_vd`.
+**`teardown_cn`'s inline cleanup**: replace hardcoded LD disconnect loop with
+`nvme_disconnect_all_dnv_ld`.
 
 **`delete_cntlr_active`/`delete_cntlr_standby`**: these still hardcode
 `for grp in 1 0` / `for grp in 0 1`. They remain as the "happy path" (they
 handle the 2-group base correctly and are fast). The safety nets
-(`dnv_remove_all_dm` for dm, `nvme_disconnect_all_dnv_vd` for VD connections,
+(`dnv_remove_all_dm` for dm, `nvme_disconnect_all_dnv_ld` for LD connections,
 `nvmet_remove_all_dnv_subsys` for nvmet) catch any stragglers (grp2+).
 
 ### 3.5 `grow.sh` -- new script
@@ -123,24 +123,24 @@ LEG=0
 GRP=2
 
 main() {
-    # Precondition: base stack must exist (dnv-cn0-da0-leg0-thinpool on cn0)
+    # Precondition: base stack must exist (dnv-cn0-sp0-leg0-thinpool on cn0)
 
-    # Step 1: Create grp2 VDs on dn0 and dn1 (full symmetric stack for both cns)
-    create_vd dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$LEG" "$GRP"
-    create_vd dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$LEG" "$GRP"
-    create_vd dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$LEG" "$GRP"
-    create_vd dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$LEG" "$GRP"
+    # Step 1: Create grp2 LDs on dn0 and dn1 (full symmetric stack for both cns)
+    create_ld dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$LEG" "$GRP"
+    create_ld dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$LEG" "$GRP"
+    create_ld dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$LEG" "$GRP"
+    create_ld dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$LEG" "$GRP"
 
-    # Step 2-3: Disarm, cn1 connects to grp2 VDs, arm
-    disarm_vd_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    disarm_vd_delay dn1 "$DN1_IP" "$LEG" "$GRP"
-    connect_vd cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
-    connect_vd cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
-    arm_vd_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    arm_vd_delay dn1 "$DN1_IP" "$LEG" "$GRP"
+    # Step 2-3: Disarm, cn1 connects to grp2 LDs, arm
+    disarm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
+    disarm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
+    arm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
+    arm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
 
-    # Step 4: cn0 aggregates grp2 (create_grp connects VDs + builds raid1 + slices)
-    create_grp cn0 "$CN0_IP" da0 "$LEG" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
+    # Step 4: cn0 aggregates grp2 (create_grp connects LDs + builds raid1 + slices)
+    create_grp cn0 "$CN0_IP" sp0 "$LEG" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
 
     # Step 5: Extend leg0 thin pool
     # Inline SSH block on cn0:
@@ -160,33 +160,33 @@ main "$@"
 
 Current `leg0-thinmeta` (2-way, size = SEC_POOL_META = 32768 = 16M):
 ```
-0 16384 linear /dev/mapper/dnv-cn0-da0-leg0-grp0-thinmeta 0
-16384 16384 linear /dev/mapper/dnv-cn0-da0-leg0-grp1-thinmeta 0
+0 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thinmeta 0
+16384 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thinmeta 0
 ```
 
 New `leg0-thinmeta` (3-way, size = 49152 = 24M):
 ```
-0 16384 linear /dev/mapper/dnv-cn0-da0-leg0-grp0-thinmeta 0
-16384 16384 linear /dev/mapper/dnv-cn0-da0-leg0-grp1-thinmeta 0
-32768 16384 linear /dev/mapper/dnv-cn0-da0-leg0-grp2-thinmeta 0
+0 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thinmeta 0
+16384 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thinmeta 0
+32768 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp2-thinmeta 0
 ```
 
 Current `leg0-thindata` (2-way, size = SEC_POOL_DATA = 1998848 = 976M):
 ```
-0 999424 linear /dev/mapper/dnv-cn0-da0-leg0-grp0-thindata 0
-999424 999424 linear /dev/mapper/dnv-cn0-da0-leg0-grp1-thindata 0
+0 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thindata 0
+999424 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thindata 0
 ```
 
 New `leg0-thindata` (3-way, size = 2998272 = 1464M):
 ```
-0 999424 linear /dev/mapper/dnv-cn0-da0-leg0-grp0-thindata 0
-999424 999424 linear /dev/mapper/dnv-cn0-da0-leg0-grp1-thindata 0
-1998848 999424 linear /dev/mapper/dnv-cn0-da0-leg0-grp2-thindata 0
+0 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thindata 0
+999424 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thindata 0
+1998848 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp2-thindata 0
 ```
 
 New `leg0-thinpool` table (size = 2998272):
 ```
-0 2998272 thin-pool /dev/mapper/dnv-cn0-da0-leg0-thinmeta /dev/mapper/dnv-cn0-da0-leg0-thindata 128 0 1 skip_block_zeroing
+0 2998272 thin-pool /dev/mapper/dnv-cn0-sp0-leg0-thinmeta /dev/mapper/dnv-cn0-sp0-leg0-thindata 128 0 1 skip_block_zeroing
 ```
 
 ### 3.6 `note.md` -- update to reflect grow.sh
@@ -214,6 +214,6 @@ No extra checks in grow.sh. Existing mechanisms suffice:
 - **Stuck commands**: `_t`/`slow_summary` in every SSH block flags anything
   over 3s.
 - **All resources deleted**: `teardown.sh all` with dynamic discovery
-  (`dnv_remove_all_dm` for dm, `nvme_disconnect_all_dnv_vd` for VD
+  (`dnv_remove_all_dm` for dm, `nvme_disconnect_all_dnv_ld` for LD
   connections, `nvmet_remove_all_dnv_subsys` for nvmet) catches grp2
   resources regardless of topology.

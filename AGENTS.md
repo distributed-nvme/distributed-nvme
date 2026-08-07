@@ -45,12 +45,12 @@ failures, and `teardown` leaves `dm=0 nvmet=0 loop=0` on all nodes.
   `host0` (NVMe initiator running `nvme-stas`, never `nvme connect`).
 - **Storage stack** (bottom-up, see `note.md` §4): `pd` (loop) → `vd` (NVMe-oF
   slice + symmetric fault-injection pair `-real`/`-err`/`-delay`/`-cn`) →
-  `grp` (raid1 + thinmeta/thindata) → `leg` (thin-pool + snap0) → `da`
+  `grp` (raid1 + thinmeta/thindata) → `leg` (thin-pool + td0) → `sp`
   (container) → `exp` (raid0 + nvmet export to host). Glossary in `note.md` §2.
-- **Naming is strict**: all dm devices and NQNs follow `dnv-<node>-da0-...`.
+- **Naming is strict**: all dm devices and NQNs follow `dnv-<node>-sp0-...`.
   `failover.sh` inlines `dmsetup` commands that **must produce names identical**
   to `common.sh`'s `create_*`. If you change a name, change it everywhere.
-- **Snap-0 inheritance invariant**: during failover, cn0 removing its
+- **td-0 inheritance invariant**: during failover, cn0 removing its
   thin-pool commits metadata; cn1's `create_thin 0` must **fail** (inherited).
   If it succeeds, all pre-existing data is lost. See `note.md` §8.
 - **disarm/arm dance**: the kernel's `nvme_partition_scan_work` reads sector 0

@@ -376,7 +376,7 @@ failures = []
 for r in range(NR_REGIONS):
     off = r * REGION
     n = os.preadv(src_fd, [buf], off); assert n == REGION
-    src = bytes(buf)                      # snapshot (mmap slice -> bytes)
+    src = bytes(buf)                      # copy (mmap slice -> bytes)
     n = os.preadv(dst_fd, [buf], off); assert n == REGION
     dst = bytes(buf)
     if r in write_regions:
@@ -399,7 +399,7 @@ if failures:
 sys.stdout.write("[OK] 128/128 regions match\n")
 ```
 
-Snapshots each 4 MiB read into `bytes` before the second preadv reuses the
+Copies each 4 MiB read into `bytes` before the second preadv reuses the
 buffer. Full-region compare catches partial overwrites; 128 regions x 4 MiB =
 512 MiB of reads total, trivial.
 

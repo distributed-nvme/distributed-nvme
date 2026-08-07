@@ -9,8 +9,8 @@
 #       as its first arguments and SSHes to that node internally, so the
 #       orchestrator reads like a recipe:
 #           create_pd    dn0 192.168.122.48
-#           create_vd    dn0 192.168.122.48 cn0 192.168.122.125 0 0 0   # vd0 leg0 grp0
-#           create_grp   cn0 192.168.122.125 da0 0 0 <hnqn> <hid>
+#           create_ld    dn0 192.168.122.48 cn0 192.168.122.125 0 0 0   # ld0 leg0 grp0
+#           create_grp   cn0 192.168.122.125 sp0 0 0 <hnqn> <hid>
 #           ...
 #
 #   Part B -- Infrastructure helpers
@@ -23,13 +23,13 @@
 #
 # Terminology (t04):
 #   pd   -- physical disk (loop bdev on a dn)
-#   vd   -- virtual disk, dn->cn via nvmeof
+#   ld   -- logical disk, dn->cn via nvmeof
 #   grp  -- thin-pool underlying group (raid1 slice pair)
 #   leg  -- raid0 underlying disk
-#   side -- raid1 underlying vd
-#   da   -- disk array (container, N legs, thin pools, snaps)
-#   snap -- snapshot id in a da (shared across all legs)
-#   exp  -- exporter (raid0 of snap thin-devs + nvmeof export)
+#   side -- raid1 underlying ld
+#   sp   -- storage pool (container, N legs, thin pools, tds)
+#   td   -- thin device id in a sp (shared across all legs)
+#   exp  -- exporter (raid0 of td thin-devs + nvmeof export)
 #   dn   -- disk node   (linux server with physical disks)
 #   cn   -- controller node (linux server exporting nvmet targets to nvme hosts)
 #
@@ -44,7 +44,7 @@ REF0_IP="192.168.122.78"
 SSH_USER="yupeng"
 
 NQN_PREFIX="nqn.2026-07.org.dnv"
-NQN_EXP="${NQN_PREFIX}:da:da0:snap0:exp0"
+NQN_EXP="${NQN_PREFIX}:sp:sp0:td0:exp0"
 NQN_REF_ANCHOR="${NQN_PREFIX}:ref:ref0-anchor"
 NQN_DISCOVERY="nqn.2014-08.org.nvmexpress.discovery"
 HOSTNQN_CN0="${NQN_PREFIX}:host:cn0"
@@ -57,20 +57,20 @@ HOSTID_HOST0="c0000000-0000-4000-8000-000000000000"
 
 NVME_PORT=4420
 EXP_UUID="cafe0000-0000-4000-8000-000000000023"
-EXP_SERIAL="DNVDA0SNAP0EXP0"
-EXP_MODEL="dnv-da"
-VD_MODEL="dnv-vd"
+EXP_SERIAL="DNVSP0TD0EXP0"
+EXP_MODEL="dnv-sp"
+LD_MODEL="dnv-ld"
 
 # All sizes in 512-byte sectors.
-SEC_PD=1024000           # 500M  - one virtual disk on a dn
+SEC_PD=1024000           # 500M  - one logical disk on a dn
 SEC_RMETA=8192           #   4M  - dm-raid1 metadata side
 SEC_RDATA=1015808        # 496M  - dm-raid1 data side               (500M - 4M)
 SEC_TMETA=16384          #   8M  - thin-pool metadata slice per group
 SEC_TDATA=999424         # 488M  - thin-pool data slice per group   (500M - 4M - 8M)
 SEC_POOL_META=32768      #  16M  - concat of 2 groups' thinmeta
 SEC_POOL_DATA=1998848    # 976M  - concat of 2 groups' thindata
-SEC_SNAP=2097152         #   1G  - dm-thin virtual size (per leg)
-SEC_EXP=4194304          #   2G  - raid0 over leg0+leg1 snap0, and the
+SEC_TD=2097152            #   1G  - dm-thin virtual size (per leg)
+SEC_EXP=4194304          #   2G  - raid0 over leg0+leg1 td0, and the
                          #         error/delay stack that mirrors its size
 
 DELAY_MS=3600000         # 3600s, applied to read+write+flush
@@ -111,7 +111,7 @@ NVME_PORT='$NVME_PORT'
 EXP_UUID='$EXP_UUID'
 EXP_SERIAL='$EXP_SERIAL'
 EXP_MODEL='$EXP_MODEL'
-VD_MODEL='$VD_MODEL'
+LD_MODEL='$LD_MODEL'
 SEC_PD=$SEC_PD
 SEC_RMETA=$SEC_RMETA
 SEC_RDATA=$SEC_RDATA
@@ -119,7 +119,7 @@ SEC_TMETA=$SEC_TMETA
 SEC_TDATA=$SEC_TDATA
 SEC_POOL_META=$SEC_POOL_META
 SEC_POOL_DATA=$SEC_POOL_DATA
-SEC_SNAP=$SEC_SNAP
+SEC_TD=$SEC_TD
 SEC_EXP=$SEC_EXP
 DELAY_MS=$DELAY_MS
 POOL_BLOCK_SECTORS=$POOL_BLOCK_SECTORS
@@ -179,14 +179,14 @@ slow_summary() {
 #    "ignore_device" does NOT work on modern systemd; the DM_UDEV_* flags do.
 #    It must sort after 55-dm.rules (which sets DM_NAME) and before
 #    60-persistent-storage-dm.rules.
-#  * nvme side: cn1's virtual disks are backed by a 3600s dm-delay on the DN,
+#  * nvme side: cn1's logical disks are backed by a 3600s dm-delay on the DN,
 #    so blkid on those namespaces would wedge a udev worker too.  Matching on
 #    the parent controller's subsysnqn/model keeps the rule to our devices.
 #
 # NOTE: the rule alone is not enough for nvme.  The kernel itself runs
 # nvme_partition_scan_work on every new namespace, which reads sector 0 without
 # going through udev.  Setup therefore also disarms the DN delay devices while
-# cn1 connects (see disarm_vd_delay / arm_vd_delay).
+# cn1 connects (see disarm_ld_delay / arm_ld_delay).
 prep_node() {
     sudo modprobe -a dm-mod dm-delay dm-thin-pool dm-raid >/dev/null 2>&1 || true
     sudo modprobe -a nvmet nvmet-tcp nvme-tcp nvme-fabrics >/dev/null 2>&1 || true
@@ -244,7 +244,7 @@ dm_count()  { sudo dmsetup ls 2>/dev/null | grep -v 'No devices found' | grep -c
 # CRITICAL: every LVM command runs through _lvm(), which injects a device filter
 # that accepts ONLY /dev/loop* (the PVs) and rejects everything else. Without
 # this, pvs/vgs/lvs do a full block-device scan for PV labels; when that scan
-# reaches a dm-delay (3600s) device created by create_vd itself, the read blocks
+# reaches a dm-delay (3600s) device created by create_ld itself, the read blocks
 # for an hour and wedges every subsequent LVM call. The filter makes the scan
 # touch only the loop PV, which carries the full VG+LV metadata -- the dm devices
 # (LVs, dm-error, dm-delay, dm-linear) are never probed. Use loop-only devices
@@ -377,7 +377,7 @@ dnv_remove_all_dm() {
     done
     # LVM sweep: remove any surviving dnv-* VGs (lvremove -f clears all their
     # LVs), then PVs on loop devices. This is the safety net; the happy path
-    # (delete_vd per-slice + delete_pd per-DN) already did this.
+    # (delete_ld per-slice + delete_pd per-DN) already did this.
     for vg in $(_lvm vgs --noheadings -o vg_name 2>/dev/null | grep '^dnv-'); do
         _lvm lvremove -y -f "$vg" >/dev/null 2>&1 && _info "lvremoved all LVs in $vg" || true
         _lvm vgremove -y "$vg" >/dev/null 2>&1 && _info "vgremoved $vg" || _warn "could not vgremove $vg"
@@ -544,8 +544,8 @@ nvmet_remove_host() {     # <hostnqn>
         _warn "could not remove nvmet host: $1"
 }
 
-# Remove every dnv VD subsystem on this node. Topology-agnostic safety net for
-# teardown: scans $NVMET/subsystems/ for the dn:<dn>:da0-leg*-grp*-vd*-cn* prefix
+# Remove every dnv LD subsystem on this node. Topology-agnostic safety net for
+# teardown: scans $NVMET/subsystems/ for the dn:<dn>:sp0-leg*-grp*-ld*-cn* prefix
 # (which covers groups beyond the hardcoded grp0/grp1 base, e.g. grp2 added by
 # grow.sh) and routes each to nvmet_remove_subsys. Called by delete_pd before
 # nvmet_remove_port so the port's subsystem links are dropped first.
@@ -613,12 +613,12 @@ nvme_disc() {             # <nqn>
     _info "disconnected: $1"
 }
 
-# Disconnect every dnv VD connection this host holds. Topology-agnostic safety
+# Disconnect every dnv LD connection this host holds. Topology-agnostic safety
 # net for teardown: scans /sys/class/nvme/*/subsysnqn for NQNs matching
 # ${NQN_PREFIX}:dn:* (which covers groups beyond the hardcoded grp0/grp1 base,
 # e.g. grp2 added by grow.sh) and routes each to nvme_disc. Replaces the
 # hardcoded for-leg/for-grp/for-d loop in teardown_cn's inline cleanup.
-nvme_disconnect_all_dnv_vd() {
+nvme_disconnect_all_dnv_ld() {
     local c nqn cnt=0
     for c in /sys/class/nvme/nvme*; do
         [ -r "$c/subsysnqn" ] || continue
@@ -628,7 +628,7 @@ nvme_disconnect_all_dnv_vd() {
             ${NQN_PREFIX}:dn:*) nvme_disc "$nqn"; cnt=$((cnt+1)) ;;
         esac
     done
-    _info "disconnected $cnt dnv vd connection(s) via scan"
+    _info "disconnected $cnt dnv ld connection(s) via scan"
 }
 
 # How many controllers (paths) this host has for a given subsystem NQN.
@@ -861,19 +861,19 @@ EOF_COMMON
 # =========================================================================
 #
 # Naming convention (see plan.md section 3):
-#   DN  dm:   dnv-<dn>-<da>-leg<leg>-grp<grp>-vd<vd>-cn<cn>
+#   DN  dm:   dnv-<dn>-<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
 #             (+ -real, -err-<cn>, -delay-<cn>)
-#   CN  dm:   dnv-<cn>-<da>-leg<leg>-grp<grp>-raid1-side<side>
+#   CN  dm:   dnv-<cn>-<sp>-leg<leg>-grp<grp>-raid1-side<side>
 #             (+ -meta-side<side>, -data-side<side>)
-#   CN pool:  dnv-<cn>-<da>-leg<leg>-thinpool
+#   CN pool:  dnv-<cn>-<sp>-leg<leg>-thinpool
 #             (+ -thinmeta, -thindata, -grp<grp>-thinmeta, -grp<grp>-thindata)
-#   CN exp:   dnv-<cn>-<da>-snap<id>-exp<id>
+#   CN exp:   dnv-<cn>-<sp>-td<id>-exp<id>
 #             (+ -real, -error, -delay)
-#   DN NQN:   nqn.2026-07.org.dnv:dn:<dn>:<da>-leg<leg>-grp<grp>-vd<vd>-cn<cn>
-#   Host NQN: nqn.2026-07.org.dnv:da:<da>:snap<id>:exp<id>
+#   DN NQN:   nqn.2026-07.org.dnv:dn:<dn>:<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
+#   Host NQN: nqn.2026-07.org.dnv:sp:<sp>:td<id>:exp<id>
 #
-# Disk array (da) defaults: da0, 2 legs, 2 grps per leg, 2 vds per grp (one per dn).
-# vd_id encodes which dn it comes from: vd0 -> dn0, vd1 -> dn1.
+# Storage pool (sp) defaults: sp0, 2 legs, 2 grps per leg, 2 lds per grp (one per dn).
+# ld_id encodes which dn it comes from: ld0 -> dn0, ld1 -> dn1.
 
 # --- pd: physical disk (loop bdev on a dn) ----------------------------------
 create_pd() {   # <dn_name> <dn_ip>
@@ -884,7 +884,7 @@ set -uo pipefail
 prep_node
 
 # Backing file + loop device (the physical disk).
-IMG="/var/tmp/dnv-${DN}-da0.img"
+IMG="/var/tmp/dnv-${DN}-sp0.img"
 if [ ! -f "$IMG" ]; then
     _t "truncate $IMG" sudo truncate -s "$LOOP_IMG_SIZE" "$IMG" || _fail "create $IMG"
 fi
@@ -895,15 +895,15 @@ fi
 _info "loop device: $LOOP ($IMG, $LOOP_IMG_SIZE)"
 
 # Volume group on the loop device. The DN-side -real devices (one per
-# (leg,grp,vd) slice) are LVM LVs in this VG, not plain dm-linear on the loop.
+# (leg,grp,ld) slice) are LVM LVs in this VG, not plain dm-linear on the loop.
 # One loop -> one VG -> N LVs mirrors the old "one loop -> N dm-linear slices".
 # Idempotent: pvcreate/vgcreate error if already present, so guard like dm_create.
-VG="dnv-${DN}-da0-vg"
+VG="dnv-${DN}-sp0-vg"
 pv_exists "$LOOP" || { _t "pvcreate $LOOP" _lvm pvcreate "$LOOP" || _fail "pvcreate $LOOP"; }
 vg_exists "$VG"   || { _t "vgcreate $VG" _lvm vgcreate "$VG" "$LOOP" || _fail "vgcreate $VG"; }
 _info "VG: $VG on $LOOP ($LOOP_IMG_SIZE)"
 
-# nvmet port for the DN's vd exports (the DN's own IP).
+# nvmet port for the DN's ld exports (the DN's own IP).
 case "$DN" in
     dn0) MY_IP="$DN0_IP" ;;
     dn1) MY_IP="$DN1_IP" ;;
@@ -926,14 +926,14 @@ dnv_remove_all_dm
 
 # Remove the VG and PV on the loop. dnv_remove_all_dm above already swept
 # strays, but run it here too so delete_pd is self-sufficient when run alone.
-VG="dnv-${DN}-da0-vg"
+VG="dnv-${DN}-sp0-vg"
 vg_exists "$VG" && {
     _lvm lvremove -y -f "$VG" >/dev/null 2>&1 || true
     _t "vgremove $VG" _lvm vgremove -y "$VG" >/dev/null 2>&1 && _info "vgremoved $VG" || _warn "could not vgremove $VG"
 }
 
 # Detach the loop device and delete its backing file.
-IMG="/var/tmp/dnv-${DN}-da0.img"
+IMG="/var/tmp/dnv-${DN}-sp0.img"
 for LOOP in $(sudo losetup -j "$IMG" 2>/dev/null | awk -F: '{print $1}'); do
     pv_exists "$LOOP" && _lvm pvremove -y "$LOOP" >/dev/null 2>&1 || true
     _t "losetup -d $LOOP" sudo losetup -d "$LOOP" >/dev/null 2>&1 && _info "detached $LOOP" \
@@ -943,8 +943,8 @@ sudo rm -f "$IMG" 2>/dev/null || true
 
 # Drop the nvmet port + hosts on this DN.  nvmet_remove_all_dnv_subsys runs
 # first so the port's subsystem links are unlinked before the port goes away;
-# it is the topology-agnostic safety net that catches VD subsystems beyond the
-# hardcoded grp0/grp1 base (e.g. grp2 added by grow.sh) that delete_vd's
+# it is the topology-agnostic safety net that catches LD subsystems beyond the
+# hardcoded grp0/grp1 base (e.g. grp2 added by grow.sh) that delete_ld's
 # explicit per-(leg,grp) loop would otherwise miss.
 nvmet_remove_all_dnv_subsys
 nvmet_remove_port 1
@@ -959,15 +959,15 @@ EOF_DPD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- vd: virtual disk (dn->cn via nvmeof, full symmetric fault-injection) ---
-# One vd_id covers a (dn, cn) pair: vd_id is the dn index (0 or 1), cn is the
-# cn index.  So create_vd dn0 ... cn0 ... 0 0 0  creates vd0 on dn0 exported to
+# --- ld: logical disk (dn->cn via nvmeof, full symmetric fault-injection) ---
+# One ld_id covers a (dn, cn) pair: ld_id is the dn index (0 or 1), cn is the
+# cn index.  So create_ld dn0 ... cn0 ... 0 0 0  creates ld0 on dn0 exported to
 # cn0, for leg 0 grp 0.  leg/grp are explicit params so grow.sh can add grp2 to
 # a running pool without touching the existing (leg,grp) slices.
-create_vd() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <vd_id> <leg> <grp>
-    local dn="$1" ip="$2" cn="$3" cn_ip="$4" vid="$5" leg="$6" grp="$7"
-    _info "=== create_vd $dn -> $cn (vd$vid leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; CN='$cn'; VD='$vid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_VD'
+create_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>
+    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" leg="$6" grp="$7"
+    _info "=== create_ld $dn -> $cn (ld$lid leg$leg grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_LD'
 set -uo pipefail
 prep_node
 
@@ -983,26 +983,26 @@ esac
 
 nvmet_port 1 "$MY_IP"
 
-# The DN-side -real devices are LVM LVs in dnv-<dn>-da0-vg (create_pd set up
+# The DN-side -real devices are LVM LVs in dnv-<dn>-sp0-vg (create_pd set up
 # the loop/PV/VG in a prior call). Fail clearly if create_pd wasn't run.
-VG="dnv-${DN}-da0-vg"
+VG="dnv-${DN}-sp0-vg"
 vg_exists "$VG" || _fail "no VG $VG on $DN -- run create_pd first"
 
 # Create this (leg, grp) pair's full symmetric fault-injection stack.
-# Names (t04):  dnv-<dn>-<da>-leg<leg>-grp<grp>-vd<vd>  (base, no -cn suffix)
-#                + -real (LVM LV in dnv-<dn>-da0-vg, NOT a dmsetup device),
+# Names (t04):  dnv-<dn>-<sp>-leg<leg>-grp<grp>-ld<ld>  (base, no -cn suffix)
+#                + -real (LVM LV in dnv-<dn>-sp0-vg, NOT a dmsetup device),
 #                + -err-cn0, -err-cn1, -delay-cn0, -delay-cn1
 #                + -cn0 (exported to cn0, on -real or -delay-cn0)
 #                + -cn1 (exported to cn1, on -delay-cn1 or -real)
-# NQN:  nqn.2026-07.org.dnv:dn:<dn>:<da>-leg<leg>-grp<grp>-vd<vd>-cn<cn>
+# NQN:  nqn.2026-07.org.dnv:dn:<dn>:<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
 #
 # -real is the ONLY LVM-managed object in the whole stack; everything above it
 # (-err/-delay/-cn) stays plain dmsetup, stacked on the LV path /dev/<vg>/<lv>.
-base="dnv-${DN}-da0-leg${LEG}-grp${GRP}-vd${VD}"
-LV="leg${LEG}-grp${GRP}-vd${VD}-real"
+base="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${LD}"
+LV="leg${LEG}-grp${GRP}-ld${LD}-real"
 REAL_DEV="/dev/${VG}/${LV}"
 
-# Backing store for this virtual disk slice: an LVM LV in the loop-backed VG.
+# Backing store for this logical disk slice: an LVM LV in the loop-backed VG.
 # Idempotent: lvcreate errors if the LV exists, so guard like dm_create.
 # Size in sectors (SEC_PD s suffix); SEC_PD=1024000 sectors = 500M = 125 PEs.
 lv_exists "$VG" "$LV" || \
@@ -1025,117 +1025,117 @@ else
 fi
 
 # nvmet subsystem for this cn, visible only to that cn's hostnqn.
-nqn="${NQN_PREFIX}:dn:${DN}:da0-leg${LEG}-grp${GRP}-vd${VD}-cn${C}"
-# UUID: hex <vd><dn><leg><grp><cn> + "00" tail.
-uuid=$(printf '0%s%s%s%s%s00-0000-4000-8000-000000000000' "$VD" "${DN#dn}" "$LEG" "$GRP" "$C")
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-cn${C}"
+# UUID: hex <ld><dn><leg><grp><cn> + "00" tail.
+uuid=$(printf '0%s%s%s%s%s00-0000-4000-8000-000000000000' "$LD" "${DN#dn}" "$LEG" "$GRP" "$C")
 eval "hnqn=\$HOSTNQN_CN${C}"
-DNV_MODEL="$VD_MODEL" \
+DNV_MODEL="$LD_MODEL" \
     nvmet_add_subsys "$nqn" "/dev/mapper/${base}-cn${C}" "$uuid" "" "$hnqn"
 nvmet_link "$nqn" 1
 
 _info "$(sudo dmsetup ls | wc -l) dm devices, $(ls "$NVMET/subsystems" 2>/dev/null | wc -l) nvmet subsystems"
 slow_summary
-_info "VD ${DN}->${CN} (vd${VD} leg${LEG} grp${GRP}) setup complete"
-EOF_VD
+_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) setup complete"
+EOF_LD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_vd() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <vd_id> <leg> <grp>
+delete_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>
     # cn/cn_ip are vestigial: the function removes subsystems for both cns
-    # regardless. Kept for signature symmetry with create_vd; used only in the
+    # regardless. Kept for signature symmetry with create_ld; used only in the
     # log message.
-    local dn="$1" ip="$2" cn="$3" cn_ip="$4" vid="$5" leg="$6" grp="$7"
-    _info "=== delete_vd $dn -> $cn (vd$vid leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; CN='$cn'; VD='$vid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DVD'
+    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" leg="$6" grp="$7"
+    _info "=== delete_ld $dn -> $cn (ld$lid leg$leg grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DLD'
 set -uo pipefail
 prep_node
 
 # Remove the nvmet subsystems for BOTH cns (symmetric stack).
 for c in 0 1; do
-    nqn="${NQN_PREFIX}:dn:${DN}:da0-leg${LEG}-grp${GRP}-vd${VD}-cn${c}"
+    nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-cn${c}"
     nvmet_remove_subsys "$nqn"
 done
 
-# Remove the dm stack for this vd.  dnv_remove_all_dm would nuke everything on
-# the dn; instead, remove just this vd's devices so a coexisting vd is untouched.
+# Remove the dm stack for this ld.  dnv_remove_all_dm would nuke everything on
+# the dn; instead, remove just this ld's devices so a coexisting ld is untouched.
 # -real is an LVM LV, not a dmsetup device, so it is removed via lvremove (the
 # dm devices above it go first via dm_remove, releasing the LV's open count).
-VG="dnv-${DN}-da0-vg"
-base="dnv-${DN}-da0-leg${LEG}-grp${GRP}-vd${VD}"
+VG="dnv-${DN}-sp0-vg"
+base="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${LD}"
 for n in "${base}-cn0" "${base}-cn1" \
          "${base}-delay-cn0" "${base}-delay-cn1" \
          "${base}-err-cn0" "${base}-err-cn1"; do
     dm_remove "$n" force >/dev/null 2>&1 || true
 done
-LV="leg${LEG}-grp${GRP}-vd${VD}-real"
+LV="leg${LEG}-grp${GRP}-ld${LD}-real"
 lv_exists "$VG" "$LV" && _lvm lvremove -y "/dev/${VG}/${LV}" >/dev/null 2>&1 \
     && _info "lvremoved: $VG/$LV" || true
-_info "VD ${DN}->${CN} (vd${VD} leg${LEG} grp${GRP}) dm devices removed"
+_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) dm devices removed"
 
 nvmet_remove_host "$HOSTNQN_CN0"
 nvmet_remove_host "$HOSTNQN_CN1"
 _info "remaining dm devices: $(dm_count)"
 slow_summary
-_info "VD ${DN}->${CN} (vd${VD} leg${LEG} grp${GRP}) teardown complete"
-EOF_DVD
+_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) teardown complete"
+EOF_DLD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- connect_vd / disconnect_vd (cn-side nvme connect to a dn's vd) ----------
-connect_vd() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <vd_id> <hostnqn> <hostid> <leg> <grp>
-    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" vid="$5" hnqn="$6" hid="$7" leg="$8" grp="$9"
-    _info "=== connect_vd $cn <- $dn (vd$vid leg$leg grp$grp) ==="
-    { _emit_vars; echo "CN='$cn'; DN='$dn'; DN_IP='$dn_ip'; VD='$vid'; HNQN='$hnqn'; HID='$hid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_CV'
+# --- connect_ld / disconnect_ld (cn-side nvme connect to a dn's ld) ----------
+connect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <hostnqn> <hostid> <leg> <grp>
+    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" hnqn="$6" hid="$7" leg="$8" grp="$9"
+    _info "=== connect_ld $cn <- $dn (ld$lid leg$leg grp$grp) ==="
+    { _emit_vars; echo "CN='$cn'; DN='$dn'; DN_IP='$dn_ip'; LD='$lid'; HNQN='$hnqn'; HID='$hid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_CV'
 set -uo pipefail
-nqn="${NQN_PREFIX}:dn:${DN}:da0-leg${LEG}-grp${GRP}-vd${VD}-${CN}"
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-${CN}"
 nvme_conn "$DN_IP" "$nqn" "$HNQN" "$HID"
 slow_summary
-_info "connect_vd ${CN}<-${DN} (vd${VD} leg${LEG} grp${GRP}) complete"
+_info "connect_ld ${CN}<-${DN} (ld${LD} leg${LEG} grp${GRP}) complete"
 EOF_CV
     } | _ssh "${SSH_USER}@${cn_ip}" bash -s
 }
 
-disconnect_vd() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <vd_id> <leg> <grp>
-    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" vid="$5" leg="$6" grp="$7"
-    _info "=== disconnect_vd $cn <- $dn (vd$vid leg$leg grp$grp) ==="
-    { _emit_vars; echo "CN='$cn'; DN='$dn'; VD='$vid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DV'
+disconnect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <leg> <grp>
+    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" leg="$6" grp="$7"
+    _info "=== disconnect_ld $cn <- $dn (ld$lid leg$leg grp$grp) ==="
+    { _emit_vars; echo "CN='$cn'; DN='$dn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DV'
 set -uo pipefail
-nqn="${NQN_PREFIX}:dn:${DN}:da0-leg${LEG}-grp${GRP}-vd${VD}-${CN}"
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-${CN}"
 nvme_disc "$nqn"
 slow_summary
-_info "disconnect_vd ${CN}<-${DN} (vd${VD} leg${LEG} grp${GRP}) complete"
+_info "disconnect_ld ${CN}<-${DN} (ld${LD} leg${LEG} grp${GRP}) complete"
 EOF_DV
     } | _ssh "${SSH_USER}@${cn_ip}" bash -s
 }
 
 # --- grp: raid1 slice pair + thinmeta/thindata (cn-side, leaf) --------------
-# create_grp connects both vds (vd0 from dn0, vd1 from dn1) internally, then
+# create_grp connects both lds (ld0 from dn0, ld1 from dn1) internally, then
 # builds the raid1 mirror + thinmeta/thindata slices.
-create_grp() {   # <cn_name> <cn_ip> <da> <leg> <grp> <hostnqn> <hostid>
-    local cn="$1" ip="$2" da="$3" leg="$4" grp="$5" hnqn="$6" hid="$7"
-    _info "=== create_grp $cn $da leg$leg grp$grp ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; LEG='$leg'; GRP='$grp'; HNQN='$hnqn'; HID='$hid'"; _emit_common; cat <<'EOF_GRP'
+create_grp() {   # <cn_name> <cn_ip> <sp> <leg> <grp> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" leg="$4" grp="$5" hnqn="$6" hid="$7"
+    _info "=== create_grp $cn $sp leg$leg grp$grp ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'; GRP='$grp'; HNQN='$hnqn'; HID='$hid'"; _emit_common; cat <<'EOF_GRP'
 set -uo pipefail
 prep_node
 # Host identity is set by create_cntlr_active; re-affirm in case this is called standalone.
 set_host_identity "$HNQN" "$HID"
 
-# Connect the two vds for this (leg,grp): vd0 from dn0, vd1 from dn1.
-nvme_conn "$DN0_IP" "${NQN_PREFIX}:dn:dn0:${DA}-leg${LEG}-grp${GRP}-vd0-${CN}" "$HNQN" "$HID"
-nvme_conn "$DN1_IP" "${NQN_PREFIX}:dn:dn1:${DA}-leg${LEG}-grp${GRP}-vd1-${CN}" "$HNQN" "$HID"
+# Connect the two lds for this (leg,grp): ld0 from dn0, ld1 from dn1.
+nvme_conn "$DN0_IP" "${NQN_PREFIX}:dn:dn0:${SP}-leg${LEG}-grp${GRP}-ld0-${CN}" "$HNQN" "$HID"
+nvme_conn "$DN1_IP" "${NQN_PREFIX}:dn:dn1:${SP}-leg${LEG}-grp${GRP}-ld1-${CN}" "$HNQN" "$HID"
 
 # Resolve the block devices.
-declare -A VDDEV
+declare -A LDDEV
 for d in 0 1; do
-    nqn="${NQN_PREFIX}:dn:dn${d}:${DA}-leg${LEG}-grp${GRP}-vd${d}-${CN}"
+    nqn="${NQN_PREFIX}:dn:dn${d}:${SP}-leg${LEG}-grp${GRP}-ld${d}-${CN}"
     dev=$(nvme_wait_dev "$nqn") || _fail "no block device for $nqn"
-    VDDEV["$d"]="$dev"
+    LDDEV["$d"]="$dev"
     _info "nvme   : $nqn -> $dev"
 done
 
-p="dnv-${CN}-${DA}-leg${LEG}-grp${GRP}"
-ld0="${VDDEV[0]}"
-ld1="${VDDEV[1]}"
+p="dnv-${CN}-${SP}-leg${LEG}-grp${GRP}"
+ld0="${LDDEV[0]}"
+ld1="${LDDEV[1]}"
 
 # Split each side into a raid1 metadata and data area.
 dm_create "${p}-raid1-meta-side0" "0 $SEC_RMETA linear $ld0 0"
@@ -1159,19 +1159,19 @@ dm_create "${p}-thinmeta" "0 $SEC_TMETA linear /dev/mapper/${p}-raid1 0"
 dm_create "${p}-thindata" "0 $SEC_TDATA linear /dev/mapper/${p}-raid1 $SEC_TMETA"
 
 slow_summary
-_info "GRP ${CN}/${DA}/leg${LEG}/grp${GRP} setup complete"
+_info "GRP ${CN}/${SP}/leg${LEG}/grp${GRP} setup complete"
 EOF_GRP
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_grp() {   # <cn_name> <cn_ip> <da> <leg> <grp>
-    local cn="$1" ip="$2" da="$3" leg="$4" grp="$5"
-    _info "=== delete_grp $cn $da leg$leg grp$grp ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DGRP'
+delete_grp() {   # <cn_name> <cn_ip> <sp> <leg> <grp>
+    local cn="$1" ip="$2" sp="$3" leg="$4" grp="$5"
+    _info "=== delete_grp $cn $sp leg$leg grp$grp ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DGRP'
 set -uo pipefail
-p="dnv-${CN}-${DA}-leg${LEG}-grp${GRP}"
+p="dnv-${CN}-${SP}-leg${LEG}-grp${GRP}"
 # Remove in reverse creation order.  Removing raid1 last drops the open count
-# on the vd nvme namespaces so disconnect_vd can succeed afterwards.
+# on the ld nvme namespaces so disconnect_ld can succeed afterwards.
 dm_remove "${p}-thindata" force  >/dev/null 2>&1 || true
 dm_remove "${p}-thinmeta" force  >/dev/null 2>&1 || true
 dm_remove "${p}-raid1" force     >/dev/null 2>&1 || true
@@ -1180,195 +1180,195 @@ dm_remove "${p}-raid1-meta-side1" force >/dev/null 2>&1 || true
 dm_remove "${p}-raid1-data-side0" force >/dev/null 2>&1 || true
 dm_remove "${p}-raid1-meta-side0" force >/dev/null 2>&1 || true
 
-# Disconnect the two vds.
+# Disconnect the two lds.
 for d in 0 1; do
-    nvme_disc "${NQN_PREFIX}:dn:dn${d}:${DA}-leg${LEG}-grp${GRP}-vd${d}-${CN}"
+    nvme_disc "${NQN_PREFIX}:dn:dn${d}:${SP}-leg${LEG}-grp${GRP}-ld${d}-${CN}"
 done
 
 slow_summary
-_info "GRP ${CN}/${DA}/leg${LEG}/grp${GRP} teardown complete"
+_info "GRP ${CN}/${SP}/leg${LEG}/grp${GRP} teardown complete"
 EOF_DGRP
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- leg: concat grps -> thinpool -> create_snap 0  (cn-side) ---------------
-create_leg() {   # <cn_name> <cn_ip> <da> <leg>
-    local cn="$1" ip="$2" da="$3" leg="$4"
-    _info "=== create_leg $cn $da leg$leg ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; LEG='$leg'"; _emit_common; cat <<'EOF_LEG'
+# --- leg: concat grps -> thinpool -> create_thin 0  (cn-side) --------------
+create_leg() {   # <cn_name> <cn_ip> <sp> <leg>
+    local cn="$1" ip="$2" sp="$3" leg="$4"
+    _info "=== create_leg $cn $sp leg$leg ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'"; _emit_common; cat <<'EOF_LEG'
 set -uo pipefail
-sp="dnv-${CN}-${DA}-leg${LEG}"
+lp="dnv-${CN}-${SP}-leg${LEG}"
 
 # Concatenate both groups' thinmeta and thindata.
-dm_create "${sp}-thinmeta" \
-"0 $SEC_TMETA linear /dev/mapper/${sp}-grp0-thinmeta 0
-$SEC_TMETA $SEC_TMETA linear /dev/mapper/${sp}-grp1-thinmeta 0"
-dm_create "${sp}-thindata" \
-"0 $SEC_TDATA linear /dev/mapper/${sp}-grp0-thindata 0
-$SEC_TDATA $SEC_TDATA linear /dev/mapper/${sp}-grp1-thindata 0"
+dm_create "${lp}-thinmeta" \
+"0 $SEC_TMETA linear /dev/mapper/${lp}-grp0-thinmeta 0
+$SEC_TMETA $SEC_TMETA linear /dev/mapper/${lp}-grp1-thinmeta 0"
+dm_create "${lp}-thindata" \
+"0 $SEC_TDATA linear /dev/mapper/${lp}-grp0-thindata 0
+$SEC_TDATA $SEC_TDATA linear /dev/mapper/${lp}-grp1-thindata 0"
 
 # Thin pool. On a fresh setup the thinmeta starts as all-zeros (the raid1 was
-# just built on fresh vd data). During failover rebuild, the thinmeta carries
+# just built on fresh ld data). During failover rebuild, the thinmeta carries
 # cn0's committed metadata and must NOT be zeroed -- it holds the mapping for
 # thin 0 and therefore the data the host has already written.
-if ! dm_exists "${sp}-thinpool"; then
-    dm_create "${sp}-thinpool" \
-"0 $SEC_POOL_DATA thin-pool /dev/mapper/${sp}-thinmeta /dev/mapper/${sp}-thindata \
+if ! dm_exists "${lp}-thinpool"; then
+    dm_create "${lp}-thinpool" \
+"0 $SEC_POOL_DATA thin-pool /dev/mapper/${lp}-thinmeta /dev/mapper/${lp}-thindata \
 $POOL_BLOCK_SECTORS 0 1 skip_block_zeroing"
-    # Default snap 0 = the live writable origin (create_thin id 0). On a fresh
+    # Default td 0 = the live writable origin (create_thin id 0). On a fresh
     # pool this succeeds; during failover it fails (inherited) -- which is fine.
-    sudo dmsetup message "/dev/mapper/${sp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 \
-        && _info "create_thin 0 succeeded in ${sp}-thinpool (fresh pool)" \
-        || _info "thin 0 already present in ${sp}-thinpool (inherited metadata)"
+    sudo dmsetup message "/dev/mapper/${lp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 \
+        && _info "create_thin 0 succeeded in ${lp}-thinpool (fresh pool)" \
+        || _info "thin 0 already present in ${lp}-thinpool (inherited metadata)"
 else
-    _info "exists : ${sp}-thinpool"
-    sudo dmsetup message "/dev/mapper/${sp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 || true
+    _info "exists : ${lp}-thinpool"
+    sudo dmsetup message "/dev/mapper/${lp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 || true
 fi
 
-# The thin device for snap 0 on this leg.
-dm_create "${sp}-snap0" "0 $SEC_SNAP thin /dev/mapper/${sp}-thinpool 0"
+# The thin device for td 0 on this leg.
+dm_create "${lp}-td0" "0 $SEC_TD thin /dev/mapper/${lp}-thinpool 0"
 
 slow_summary
-_info "LEG ${CN}/${DA}/leg${LEG} setup complete"
+_info "LEG ${CN}/${SP}/leg${LEG} setup complete"
 EOF_LEG
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_leg() {   # <cn_name> <cn_ip> <da> <leg>
-    local cn="$1" ip="$2" da="$3" leg="$4"
-    _info "=== delete_leg $cn $da leg$leg ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; LEG='$leg'"; _emit_common; cat <<'EOF_DLEG'
+delete_leg() {   # <cn_name> <cn_ip> <sp> <leg>
+    local cn="$1" ip="$2" sp="$3" leg="$4"
+    _info "=== delete_leg $cn $sp leg$leg ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'"; _emit_common; cat <<'EOF_DLEG'
 set -uo pipefail
-sp="dnv-${CN}-${DA}-leg${LEG}"
+lp="dnv-${CN}-${SP}-leg${LEG}"
 # Reverse creation order. Removing thinpool commits its metadata (matters for failover).
-dm_remove "${sp}-snap0"    force >/dev/null 2>&1 || true
-dm_remove "${sp}-thinpool" force >/dev/null 2>&1 || true
-dm_remove "${sp}-thindata" force >/dev/null 2>&1 || true
-dm_remove "${sp}-thinmeta" force >/dev/null 2>&1 || true
+dm_remove "${lp}-td0"    force >/dev/null 2>&1 || true
+dm_remove "${lp}-thinpool" force >/dev/null 2>&1 || true
+dm_remove "${lp}-thindata" force >/dev/null 2>&1 || true
+dm_remove "${lp}-thinmeta" force >/dev/null 2>&1 || true
 
 slow_summary
-_info "LEG ${CN}/${DA}/leg${LEG} teardown complete"
+_info "LEG ${CN}/${SP}/leg${LEG} teardown complete"
 EOF_DLEG
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
 # --- cntlr_active / cntlr_standby (cn-side orchestrators) -------------------
-create_cntlr_active() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
-    local cn="$1" ip="$2" da="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_cntlr_active $cn $da ($nlegs legs) ==="
+create_cntlr_active() {   # <cn_name> <cn_ip> <sp> <nlegs> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" nlegs="$4" hnqn="$5" hid="$6"
+    _info "=== create_cntlr_active $cn $sp ($nlegs legs) ==="
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do
         local grp
         for grp in 0 1; do
-            create_grp "$cn" "$ip" "$da" "$leg" "$grp" "$hnqn" "$hid"
+            create_grp "$cn" "$ip" "$sp" "$leg" "$grp" "$hnqn" "$hid"
         done
-        create_leg "$cn" "$ip" "$da" "$leg"
+        create_leg "$cn" "$ip" "$sp" "$leg"
     done
 }
 
-delete_cntlr_active() {   # <cn_name> <cn_ip> <da>
-    local cn="$1" ip="$2" da="$3"
-    _info "=== delete_cntlr_active $cn $da ==="
+delete_cntlr_active() {   # <cn_name> <cn_ip> <sp>
+    local cn="$1" ip="$2" sp="$3"
+    _info "=== delete_cntlr_active $cn $sp ==="
     local nlegs="${NLEGS:-2}"
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do
-        delete_leg "$cn" "$ip" "$da" "$leg"
+        delete_leg "$cn" "$ip" "$sp" "$leg"
         local grp
         for grp in 1 0; do
-            delete_grp "$cn" "$ip" "$da" "$leg" "$grp"
+            delete_grp "$cn" "$ip" "$sp" "$leg" "$grp"
         done
     done
 }
 
-create_cntlr_standby() {   # <cn_name> <cn_ip> <da> <nlegs> <hostnqn> <hostid>
-    local cn="$1" ip="$2" da="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_cntlr_standby $cn $da ($nlegs legs) ==="
+create_cntlr_standby() {   # <cn_name> <cn_ip> <sp> <nlegs> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" nlegs="$4" hnqn="$5" hid="$6"
+    _info "=== create_cntlr_standby $cn $sp ($nlegs legs) ==="
     local leg grp
     for leg in $(seq 0 $(( nlegs - 1 ))); do
         for grp in 0 1; do
-            # vd0 from dn0, vd1 from dn1.
-            connect_vd "$cn" "$ip" dn0 "$DN0_IP" 0 "$hnqn" "$hid" "$leg" "$grp"
-            connect_vd "$cn" "$ip" dn1 "$DN1_IP" 1 "$hnqn" "$hid" "$leg" "$grp"
+            # ld0 from dn0, ld1 from dn1.
+            connect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$hnqn" "$hid" "$leg" "$grp"
+            connect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$hnqn" "$hid" "$leg" "$grp"
         done
     done
 }
 
-delete_cntlr_standby() {   # <cn_name> <cn_ip> <da>
-    local cn="$1" ip="$2" da="$3"
-    _info "=== delete_cntlr_standby $cn $da ==="
+delete_cntlr_standby() {   # <cn_name> <cn_ip> <sp>
+    local cn="$1" ip="$2" sp="$3"
+    _info "=== delete_cntlr_standby $cn $sp ==="
     local nlegs="${NLEGS:-2}"
     local leg
     for leg in $(seq 0 $(( nlegs - 1 ))); do
         local grp
         for grp in 0 1; do
-            disconnect_vd "$cn" "$ip" dn0 "$DN0_IP" 0 "$leg" "$grp"
-            disconnect_vd "$cn" "$ip" dn1 "$DN1_IP" 1 "$leg" "$grp"
+            disconnect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$leg" "$grp"
+            disconnect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$leg" "$grp"
         done
     done
 }
 
-# --- snap: create_thin (id 0) or create_snap (src>0) across ALL leg pools ---
-create_snap() {   # <cn_name> <cn_ip> <da> <new_id> <src_id>
-    local cn="$1" ip="$2" da="$3" new_id="$4" src_id="$5"
-    _info "=== create_snap $cn $da id=$new_id src=$src_id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; NEW_ID='$new_id'; SRC_ID='$src_id'"; _emit_common; cat <<'EOF_SNAP'
+# --- td: create_thin (id 0) or create_snap (src>0) across ALL leg pools ---
+create_td() {   # <cn_name> <cn_ip> <sp> <new_id> <src_id>
+    local cn="$1" ip="$2" sp="$3" new_id="$4" src_id="$5"
+    _info "=== create_td $cn $sp id=$new_id src=$src_id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; NEW_ID='$new_id'; SRC_ID='$src_id'"; _emit_common; cat <<'EOF_TD'
 set -uo pipefail
 for leg in 0 1; do
-    sp="dnv-${CN}-${DA}-leg${leg}-thinpool"
-    dm_exists "$sp" || { _warn "no $sp on this cn"; continue; }
+    lp="dnv-${CN}-${SP}-leg${leg}-thinpool"
+    dm_exists "$lp" || { _warn "no $lp on this cn"; continue; }
     if [ "$SRC_ID" = "0" ] && [ "$NEW_ID" = "0" ]; then
         # create_thin for the default origin.
-        sudo dmsetup message "/dev/mapper/$sp" 0 "create_thin $NEW_ID" >/dev/null 2>&1 \
-            && _info "create_thin $NEW_ID in $sp" \
-            || _info "thin $NEW_ID already present in $sp (inherited)"
+        sudo dmsetup message "/dev/mapper/$lp" 0 "create_thin $NEW_ID" >/dev/null 2>&1 \
+            && _info "create_thin $NEW_ID in $lp" \
+            || _info "thin $NEW_ID already present in $lp (inherited)"
     else
-        sudo dmsetup message "/dev/mapper/$sp" 0 "create_snap $NEW_ID $SRC_ID" >/dev/null 2>&1 \
-            && _info "create_snap $NEW_ID src $SRC_ID in $sp" \
-            || _warn "create_snap $NEW_ID src $SRC_ID failed in $sp"
+        sudo dmsetup message "/dev/mapper/$lp" 0 "create_snap $NEW_ID $SRC_ID" >/dev/null 2>&1 \
+            && _info "create_snap $NEW_ID src $SRC_ID in $lp" \
+            || _warn "create_snap $NEW_ID src $SRC_ID failed in $lp"
     fi
 done
 slow_summary
-_info "SNAP ${CN}/${DA} id=${NEW_ID} complete"
-EOF_SNAP
+_info "TD ${CN}/${SP} id=${NEW_ID} complete"
+EOF_TD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_snap() {   # <cn_name> <cn_ip> <da> <id>
-    local cn="$1" ip="$2" da="$3" id="$4"
-    _info "=== delete_snap $cn $da id=$id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; SNAP_ID='$id'"; _emit_common; cat <<'EOF_DSAP'
+delete_td() {   # <cn_name> <cn_ip> <sp> <id>
+    local cn="$1" ip="$2" sp="$3" id="$4"
+    _info "=== delete_td $cn $sp id=$id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$id'"; _emit_common; cat <<'EOF_DTD'
 set -uo pipefail
 for leg in 0 1; do
-    sp="dnv-${CN}-${DA}-leg${leg}-thinpool"
-    dm_exists "$sp" || continue
-    sudo dmsetup message "/dev/mapper/$sp" 0 "delete $SNAP_ID" >/dev/null 2>&1 \
-        && _info "deleted snap $SNAP_ID in $sp" \
-        || _info "snap $SNAP_ID absent in $sp"
+    lp="dnv-${CN}-${SP}-leg${leg}-thinpool"
+    dm_exists "$lp" || continue
+    sudo dmsetup message "/dev/mapper/$lp" 0 "delete $TD_ID" >/dev/null 2>&1 \
+        && _info "deleted td $TD_ID in $lp" \
+        || _info "td $TD_ID absent in $lp"
 done
 slow_summary
-_info "SNAP ${CN}/${DA} id=${SNAP_ID} delete complete"
-EOF_DSAP
+_info "TD ${CN}/${SP} id=${TD_ID} delete complete"
+EOF_DTD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
 # --- exp_active / exp_standby (cn-side exporter stack + nvmet export) -----
-# exp = raid0 of snap thin-devs (per leg) + nvmeof export to host.
+# exp = raid0 of td thin-devs (per leg) + nvmeof export to host.
 #   active:  -real (raid0) -> exp (linear on -real), ANA optimized
 #   standby: -error -> -delay -> exp (linear on -delay), ANA inaccessible
-create_exp_active() {   # <cn_name> <cn_ip> <da> <snap_id> <host_nqn> <host_id> <cntlid_min> <cntlid_max>
-    local cn="$1" ip="$2" da="$3" snap_id="$4" hnqn="$5" hid="$6" cmin="$7" cmax="$8"
-    _info "=== create_exp_active $cn $da snap$snap_id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; SNAP_ID='$snap_id'; HNQN='$hnqn'; CMIN='$cmin'; CMAX='$cmax'"; _emit_common; cat <<'EOF_EA'
+create_exp_active() {   # <cn_name> <cn_ip> <sp> <td_id> <host_nqn> <host_id> <cntlid_min> <cntlid_max>
+    local cn="$1" ip="$2" sp="$3" td_id="$4" hnqn="$5" hid="$6" cmin="$7" cmax="$8"
+    _info "=== create_exp_active $cn $sp td$td_id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$td_id'; HNQN='$hnqn'; CMIN='$cmin'; CMAX='$cmax'"; _emit_common; cat <<'EOF_EA'
 set -uo pipefail
 prep_node
 
-vp="dnv-${CN}-${DA}-snap${SNAP_ID}-exp0"
+vp="dnv-${CN}-${SP}-td${TD_ID}-exp0"
 
-# raid0 of the per-leg snap thin devices.
+# raid0 of the per-leg td thin devices.
 dm_create "${vp}-real" \
 "0 $SEC_EXP raid raid0 1 $RAID0_CHUNK_SECTORS 2 \
-- /dev/mapper/dnv-${CN}-${DA}-leg0-snap${SNAP_ID} \
-- /dev/mapper/dnv-${CN}-${DA}-leg1-snap${SNAP_ID}"
+- /dev/mapper/dnv-${CN}-${SP}-leg0-td${TD_ID} \
+- /dev/mapper/dnv-${CN}-${SP}-leg1-td${TD_ID}"
 
 # Fault-injection devices, sized like the exp.
 dm_create "${vp}-error" "0 $SEC_EXP error"
@@ -1389,19 +1389,19 @@ nvmet_link "$NQN_EXP" 1
 
 _info "$(sudo dmsetup ls | wc -l) dm devices created"
 slow_summary
-_info "EXP active ${CN}/${DA}/snap${SNAP_ID} setup complete"
+_info "EXP active ${CN}/${SP}/td${TD_ID} setup complete"
 EOF_EA
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-create_exp_standby() {   # <cn_name> <cn_ip> <da> <snap_id> <host_nqn> <host_id> <cntlid_min> <cntlid_max>
-    local cn="$1" ip="$2" da="$3" snap_id="$4" hnqn="$5" hid="$6" cmin="$7" cmax="$8"
-    _info "=== create_exp_standby $cn $da snap$snap_id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; SNAP_ID='$snap_id'; HNQN='$hnqn'; CMIN='$cmin'; CMAX='$cmax'"; _emit_common; cat <<'EOF_ES'
+create_exp_standby() {   # <cn_name> <cn_ip> <sp> <td_id> <host_nqn> <host_id> <cntlid_min> <cntlid_max>
+    local cn="$1" ip="$2" sp="$3" td_id="$4" hnqn="$5" hid="$6" cmin="$7" cmax="$8"
+    _info "=== create_exp_standby $cn $sp td$td_id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$td_id'; HNQN='$hnqn'; CMIN='$cmin'; CMAX='$cmax'"; _emit_common; cat <<'EOF_ES'
 set -uo pipefail
 prep_node
 
-vp="dnv-${CN}-${DA}-snap${SNAP_ID}-exp0"
+vp="dnv-${CN}-${SP}-td${TD_ID}-exp0"
 
 # Standby exporter: error -> delay -> exp stub (ANA inaccessible). Any I/O that
 # reaches it stalls instead of silently succeeding.
@@ -1421,17 +1421,17 @@ nvmet_port 1 "$MY_IP" "inaccessible"
 nvmet_link "$NQN_EXP" 1
 
 slow_summary
-_info "EXP standby ${CN}/${DA}/snap${SNAP_ID} setup complete"
+_info "EXP standby ${CN}/${SP}/td${TD_ID} setup complete"
 EOF_ES
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_exp_active() {   # <cn_name> <cn_ip> <da> <snap_id>
-    local cn="$1" ip="$2" da="$3" snap_id="$4"
-    _info "=== delete_exp_active $cn $da snap$snap_id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; SNAP_ID='$snap_id'"; _emit_common; cat <<'EOF_DEA'
+delete_exp_active() {   # <cn_name> <cn_ip> <sp> <td_id>
+    local cn="$1" ip="$2" sp="$3" td_id="$4"
+    _info "=== delete_exp_active $cn $sp td$td_id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$td_id'"; _emit_common; cat <<'EOF_DEA'
 set -uo pipefail
-vp="dnv-${CN}-${DA}-snap${SNAP_ID}-exp0"
+vp="dnv-${CN}-${SP}-td${TD_ID}-exp0"
 nvmet_remove_subsys "$NQN_EXP"
 nvmet_remove_port 1
 nvmet_remove_host "$HOSTNQN_HOST0"
@@ -1445,17 +1445,17 @@ dm_remove "${vp}-real"   force >/dev/null 2>&1 || true
 cleanup_node_common
 _info "remaining dm devices: $(dm_count)"
 slow_summary
-_info "EXP active ${CN}/${DA}/snap${SNAP_ID} teardown complete"
+_info "EXP active ${CN}/${SP}/td${TD_ID} teardown complete"
 EOF_DEA
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_exp_standby() {   # <cn_name> <cn_ip> <da> <snap_id>
-    local cn="$1" ip="$2" da="$3" snap_id="$4"
-    _info "=== delete_exp_standby $cn $da snap$snap_id ==="
-    { _emit_vars; echo "CN='$cn'; DA='$da'; SNAP_ID='$snap_id'"; _emit_common; cat <<'EOF_DES'
+delete_exp_standby() {   # <cn_name> <cn_ip> <sp> <td_id>
+    local cn="$1" ip="$2" sp="$3" td_id="$4"
+    _info "=== delete_exp_standby $cn $sp td$td_id ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$td_id'"; _emit_common; cat <<'EOF_DES'
 set -uo pipefail
-vp="dnv-${CN}-${DA}-snap${SNAP_ID}-exp0"
+vp="dnv-${CN}-${SP}-td${TD_ID}-exp0"
 nvmet_remove_subsys "$NQN_EXP"
 nvmet_remove_port 1
 nvmet_remove_host "$HOSTNQN_HOST0"
@@ -1468,12 +1468,12 @@ dm_remove "${vp}-error" force >/dev/null 2>&1 || true
 cleanup_node_common
 _info "remaining dm devices: $(dm_count)"
 slow_summary
-_info "EXP standby ${CN}/${DA}/snap${SNAP_ID} teardown complete"
+_info "EXP standby ${CN}/${SP}/td${TD_ID} teardown complete"
 EOF_DES
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- disarm_vd_delay / arm_vd_delay (dn-side delay-cn1 disarm/arm) ---------
+# --- disarm_ld_delay / arm_ld_delay (dn-side delay-cn1 disarm/arm) ---------
 # Why this exists: the kernel runs nvme_partition_scan_work on each namespace it
 # discovers, which reads sector 0 outside udev's control.  If cn1's namespaces
 # are backed by a 3600s dm-delay at connect time, that read never completes: it
@@ -1485,16 +1485,16 @@ EOF_DES
 # and the real delay table is put back afterwards.
 #
 # leg/grp are explicit params: disarming one group means disarming all its delay
-# devices (the vid x cn loop still runs internally).  grow.sh disarms only the
+# devices (the lid x cn loop still runs internally).  grow.sh disarms only the
 # grp2 devices it just created; setup.sh disarms the base groups by looping.
-disarm_vd_delay() {   # <dn_name> <dn_ip> <leg> <grp>
+disarm_ld_delay() {   # <dn_name> <dn_ip> <leg> <grp>
     local dn="$1" ip="$2" leg="$3" grp="$4"
-    _info "=== disarm_vd_delay $dn (leg$leg grp$grp) ==="
+    _info "=== disarm_ld_delay $dn (leg$leg grp$grp) ==="
     { _emit_vars; echo "DN='$dn'; MODE='disarm'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DLY'
 set -uo pipefail
-for vid in 0 1; do
+for lid in 0 1; do
   for cn in cn0 cn1; do
-    d="dnv-${DN}-da0-leg${LEG}-grp${GRP}-vd${vid}-delay-${cn}"
+    d="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-delay-${cn}"
     dm_exists "$d" || continue
     [ "$(dm_target "$d")" = "delay" ] || continue
     dm_reload "$d" "0 $SEC_PD error" >/dev/null
@@ -1506,17 +1506,17 @@ EOF_DLY
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-arm_vd_delay() {   # <dn_name> <dn_ip> <leg> <grp>
+arm_ld_delay() {   # <dn_name> <dn_ip> <leg> <grp>
     local dn="$1" ip="$2" leg="$3" grp="$4"
-    _info "=== arm_vd_delay $dn (leg$leg grp$grp) ==="
+    _info "=== arm_ld_delay $dn (leg$leg grp$grp) ==="
     { _emit_vars; echo "DN='$dn'; MODE='arm'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_ARM'
 set -uo pipefail
-for vid in 0 1; do
+for lid in 0 1; do
   for cn in cn0 cn1; do
-    d="dnv-${DN}-da0-leg${LEG}-grp${GRP}-vd${vid}-delay-${cn}"
+    d="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-delay-${cn}"
     dm_exists "$d" || continue
     [ "$(dm_target "$d")" = "delay" ] && continue
-    dm_reload "$d" "0 $SEC_PD delay /dev/mapper/dnv-${DN}-da0-leg${LEG}-grp${GRP}-vd${vid}-err-${cn} 0 $DELAY_MS" >/dev/null
+    dm_reload "$d" "0 $SEC_PD delay /dev/mapper/dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-err-${cn} 0 $DELAY_MS" >/dev/null
   done
 done
 _info "DN ${DN} leg${LEG} grp${GRP}: -delay devices armed"

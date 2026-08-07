@@ -114,19 +114,19 @@ EOF_REF0
 }
 
 # CN teardown uses common.sh delete_* primitives (reverse recipe).
-# delete_exp_* -> delete_cntlr_* -> (delete_leg/delete_grp/disconnect_vd inside)
+# delete_exp_* -> delete_cntlr_* -> (delete_leg/delete_grp/disconnect_ld inside)
 teardown_cn() {
     local ip="$1" cn="$2"
     _info "=== tearing down $cn ($ip) ==="
     # Try active delete first (cn0's normal layout), then standby delete (cn1's
     # normal layout).  Both are idempotent and safe on partial systems.
-    delete_exp_active  "$cn" "$ip" da0 0  2>/dev/null || true
-    delete_exp_standby "$cn" "$ip" da0 0  2>/dev/null || true
+    delete_exp_active  "$cn" "$ip" sp0 0  2>/dev/null || true
+    delete_exp_standby "$cn" "$ip" sp0 0  2>/dev/null || true
     # delete_cntlr_active removes the grp/leg/thinpool stack; delete_cntlr_standby
-    # disconnects the vds.  Run both so the right one cleans up the right
+    # disconnects the lds.  Run both so the right one cleans up the right
     # resources regardless of which side this cn was on.
-    delete_cntlr_active  "$cn" "$ip" da0 2>/dev/null || true
-    delete_cntlr_standby "$cn" "$ip" da0 2>/dev/null || true
+    delete_cntlr_active  "$cn" "$ip" sp0 2>/dev/null || true
+    delete_cntlr_standby "$cn" "$ip" sp0 2>/dev/null || true
     # Force-clean any stragglers.
     { _emit_vars; echo "CN='$cn'"; _emit_common; cat <<'EOF_CN_CLEAN'
 # Remove any leftover dm devices and nvmet exports on this cn.
@@ -134,10 +134,10 @@ nvmet_remove_subsys "$NQN_EXP"
 nvmet_remove_port 1
 nvmet_remove_host "$HOSTNQN_HOST0"
 dnv_remove_all_dm
-# Disconnect any remaining vd connections (topology-agnostic: catches groups
+# Disconnect any remaining ld connections (topology-agnostic: catches groups
 # beyond the hardcoded grp0/grp1 base that delete_cntlr_standby's loop above
 # missed, e.g. grp2 added by grow.sh).
-nvme_disconnect_all_dnv_vd
+nvme_disconnect_all_dnv_ld
 cleanup_node_common
 _info "remaining dm devices: $(dm_count)"
 slow_summary
@@ -146,19 +146,19 @@ EOF_CN_CLEAN
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# DN teardown uses common.sh's delete_vd (for both cns) + delete_pd.
+# DN teardown uses common.sh's delete_ld (for both cns) + delete_pd.
 teardown_dn() {
     local ip="$1" dn="$2"
     _info "=== tearing down $dn ($ip) ==="
-    # delete_vd removes the dm stack + nvmet subsystems for both cns, per
+    # delete_ld removes the dm stack + nvmet subsystems for both cns, per
     # (leg,grp).  Loop the base 2x2 grid; the topology-agnostic safety nets in
     # delete_pd (nvmet_remove_all_dnv_subsys) and dnv_remove_all_dm catch any
     # stragglers beyond it (e.g. grp2 added by grow.sh).
-    local vid="${dn#dn}" leg grp
+    local lid="${dn#dn}" leg grp
     for leg in 0 1; do
         for grp in 0 1; do
-            delete_vd "$dn" "$ip" cn0 "$CN0_IP" "$vid" "$leg" "$grp" 2>/dev/null || true
-            delete_vd "$dn" "$ip" cn1 "$CN1_IP" "$vid" "$leg" "$grp" 2>/dev/null || true
+            delete_ld "$dn" "$ip" cn0 "$CN0_IP" "$lid" "$leg" "$grp" 2>/dev/null || true
+            delete_ld "$dn" "$ip" cn1 "$CN1_IP" "$lid" "$leg" "$grp" 2>/dev/null || true
         done
     done
     delete_pd "$dn" "$ip"

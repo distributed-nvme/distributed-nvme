@@ -30,7 +30,7 @@ set -uo pipefail
 
 HOST0_IP="192.168.122.193"
 SSH_USER="yupeng"
-NQN_VOL="nqn.2026-07.org.dnv:da:da0:snap0:exp0"
+NQN_VOL="nqn.2026-07.org.dnv:sp:sp0:td0:exp0"
 
 # 1MiB blocks at offsets 0..63MiB, cycling, plus a 1MiB anchor at 512MiB.  The
 # 2G raid0 is thin-provisioned over 2 x 976M, so all of this stays well inside
