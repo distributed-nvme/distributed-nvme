@@ -1,0 +1,957 @@
+syntax = "proto3";
+
+message NvmeTrConf {
+    string tr_type = 1;
+    string adr_fam = 2;
+    string tr_addr = 3;
+    string tr_svc_id = 4;
+}
+
+message QosRatio {
+    int64 bytes_per_iops = 1;
+    int64 bytes_per_bps = 2;
+}
+
+message SpLdId {
+    uint64 sp_id = 1;
+    uint64 ld_id = 2;
+}
+
+message SpCntlrId {
+    uint64 sp_id = 1;
+    uint64 cntlr_id = 2;
+}
+
+enum RedunType {
+    REDUN_TYPE_NONE = 0;
+    REDUN_TYPE_RAID1 = 1;
+    REDUN_TYPE_RAID5_LS = 2;
+    REDUN_TYPE_RAID6_ZR = 3;
+}
+
+message SpConf {
+    repeated string features = 1;
+    RedunType redun_type = 2;
+}
+
+message Group {
+    uint64 grp_id = 1;
+    repeated uint64 ld_id_list = 2;
+}
+
+enum AnaType {
+    ANA_TYPE_AUTO = 0;
+    ANA_TYPE_OPTIMIZED = 1;
+    ANA_TYPE_UNACCESSIBLE = 2;
+}
+
+message Namespace {
+    uint64 ns_id = 1;
+    uint32 ns_idx = 2;
+    uint64 td_id = 3;
+    bool suspended = 4;
+    AnaType ana_type = 5;
+}
+
+enum ResStatus {
+    RES_STATUS_MISSING = 0;
+    RES_STATUS_ERROR = 1;
+    RES_STATUS_OK = 2;
+    
+}
+message ResInfo {
+    string res_name = 1;
+    ResStatus status = 2;
+    string details = 3;
+    uint64 epoch = 4;
+}
+
+message NodeResInfo {
+    uint64 node_id = 1;
+    uint64 revision = 2;
+    repeated ResInfo res_info_list = 3;
+}
+
+// {dnv_prefix} cluster_conf {cluster_name}
+message ClusterConf {
+    QosRatio qos_ratio = 1;
+}
+
+// {dnv_prefix} cluster_desc {cluster_id}
+message ClusterDesc {
+    bytes description = 1;
+}
+
+// {dnv_prefix} dn_global {cluster_id}
+message DnGlobal {
+    uint64 next_id = 1;
+    repeated uint32 shard_bucket = 2;
+}
+
+// {dnv_prefix} cn_global {cluster_id}
+message CnGlobal {
+    uint64 next_id = 1;
+    repeated uint32 shard_bucket = 2;
+}
+
+// {dnv_prefix} sp_global {cluster_id} 
+message SpGlobal {
+    uint64 next_id = 1;
+    repeated uint32 shard_bucket = 2;
+}
+
+// {dnv_prefix} dn_rev {cluster_id} {shard_code} {addr_port}
+message DnRev {
+    uint64 revision = 1;
+}
+
+// {dnv_prefix} cn_rev {cluster_id} {shard_code} {addr_port}
+message CnRev {
+    uint64 revision = 1;
+}
+
+// {dnv_prefix} sp_rev {cluster_id} {shard_code} {sp_name}
+message SpRev {
+    uint64 revision = 1;
+}
+
+// {dnv_prefix} disk_node {cluster_id} {addr_port}
+message DiskNode {
+    uint64 dn_id = 1;
+    uint32 shard_code = 2;
+    bool enabled = 3;
+    bool healthy = 4;
+    NvmeTrConf nvme_tr_conf = 5;
+    repeated SpLdId sp_ld_id_list = 6;
+    uint32 segment_cnt = 7;
+}
+
+// {dnv_prefix} dn_desc {cluster_id} {dn_id}
+message DnDesc {
+    bytes description = 1;
+}
+
+// {dnv_prefix} segment {cluster_id} {dn_id} {segment_idx}
+message DnSegment {
+    uint64 start = 1;
+    uint64 ext_cnt = 2;
+    bytes bitmap = 3;
+}
+
+// {dnv_prefix} controller_node {cluster_id} {addr_port}
+message ControllerNode {
+    uint64 cn_id = 1;
+    uint32 shard_code = 2;
+    bool enabled = 3;
+    bool healthy = 4;
+    NvmeTrConf nvme_tr_conf = 5;
+    repeated SpCntlrId sp_cntlr_id_list = 6;
+    uint64 max_size = 7;
+}
+
+// {dnv_prefix} cn_desc {cluster_id} {cn_id}
+message CnDesc {
+    bytes description = 1;
+}
+
+// {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_space} {addr_port} {segment_idx}
+message DnCapacity {
+    string location = 1;
+}
+
+// {dnv_prefix} cn_capacity {cluster_id} {free_space} {addr_port}
+message CnCapacity {
+    string location = 1;
+}
+
+// {dnv_prefix} cdc {cluster_id} {shard_code} {sp_id} {ss_id}
+message CdcEntry {
+    string nqn = 1;
+    repeated NvmeTrConf nvme_tr_conf_list = 2;
+    repeated string allowed_hosts = 3;
+}
+
+// {dnv_prefix} storage_pool {cluster_id} {sp_name}
+message StoragePool {
+    uint64 sp_id = 1;
+    uint32 shard_code = 2;
+    uint64 next_id = 3;
+    uint32 next_dev_id = 4;
+    SpConf sp_conf = 5;
+    repeated uint64 cntlr_id_list = 6;
+    repeated uint64 leg_id_list = 7;
+    repeated uint64 ld_id_list = 8;
+    repeated string td_name_list = 9;
+    repeated string nqn_list = 10;
+    repeated string clone_name_list = 11;
+    repeated string move_name_list = 12;
+}
+
+// {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
+message Cntlr {
+    string cn_addr_addr = 1;
+    uint32 cntlr_idx = 2;
+    bool enabled = 3;
+}
+
+// {dnv_prefix} leg {cluster_id} {sp_id} {leg_id}
+message Leg {
+    repeated Group meta_grp_list = 1;
+    repeated Group data_grp_list = 2;
+}
+
+// {dnv_prefix} logical_disk {cluster_id} {sp_id} {ld_id}
+message LogicalDisk {
+    string dn_addr_port = 1;
+}
+
+// {dnv_prefix} ld_for_cn {cluster_id} {sp_id} {ld_id}
+message LdForCn {
+    NvmeTrConf nvme_tr_conf = 1;
+    uint64 size = 2;
+}
+
+// {dnv_prefix} ld_to_dn {cluster_id} {sp_id} {ld_id}
+message LdForDn {
+    uint32 segment_idx = 1;
+    bytes bitmap = 2;
+}
+
+// {dnv_prefix} thin_device {cluster_id} {sp_id} {td_name}
+message ThinDevice {
+    uint64 td_id = 1;
+    uint32 dev_id = 2;
+    uint32 ori_id = 3;
+    uint64 size = 4;
+}
+
+// {dnv_prefix} subsystem {cluster_id} {sp_id} {nqn}
+message Subsystem {
+    uint64 ss_id = 1;
+    repeated Namespace ns_list = 2;
+    repeated string allowed_hosts = 3;
+}
+
+// {dnv_prefix} clone {cluster_id} {sp_id} {clone_name}
+message Clone {
+    uint64 clone_id = 1;
+    uint64 meta_ld_id = 2;
+    NvmeTrConf src_tr_conf = 3;
+    uint64 dst_td_id = 4;
+    uint32 factor = 5;
+    bytes bitmap = 6;
+}
+
+// {dnv_prefix} move {cluster_id} {sp_id} {move_name}
+message Move {
+    uint64 move_id = 1;
+    uint64 meta_ld_id = 2;
+    uint64 src_ld_id = 3;
+    uint64 dst_ld_id = 4;
+}
+
+// {dnv_prefix} sp_id_to_name {cluster_id} {sp_id}
+message SpName {
+    string sp_name = 1;
+}
+
+message CreateClusterRequest {
+    string cluster_name = 1;
+    bytes description = 2;
+    QosRatio qos_ratio = 3;
+}
+
+message CreateClusterReply {}
+
+message DeleteClusterRequest {
+    string cluster_name = 1;
+}
+
+message DeleteClusterReply {}
+
+message GetClusterRequest {
+    string cluster_name = 1;
+}
+
+message GetClusterReply {
+    string cluster_name = 1;
+    uint64 cluster_id = 2;
+    bytes description = 3;
+    ClusterConf cluster_conf = 4;
+    DnGlobal dn_global = 5;
+    CnGlobal cn_global = 6;
+    SpGlobal sp_global = 7;
+}
+
+message ListClustersRequest {
+    uint32 count = 1;
+    string page_token = 2;
+}
+
+message ListClustersReply {
+    repeated string cluster_name = 1;
+}
+
+message UpdateClusterDescRequest {
+    string cluster_name = 1;
+    bytes description = 2;
+}
+
+message UpdateClusterDescReply {}
+
+message CreateDiskNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bytes description = 3;
+    NvmeTrConf nvme_tr_conf = 4;
+    string location = 5;
+    bool enabled = 6;
+}
+
+message CreateDiskNodeReply {}
+
+message DeleteDiskNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message DeleteDiskNodeReply {}
+
+message GetDiskNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message GetDiskNodeReply {
+    string addr_port = 1;
+    uint64 dn_id = 2;
+    bytes description = 3;
+    uint64 revision = 4;
+    uint32 shard_code = 5;
+    bool enabled = 6;
+    bool healthy = 7;
+    NvmeTrConf nvme_tr_conf = 8;
+    repeated SpLdId sp_ld_id_list = 9;
+    uint32 segment_cnt = 10;
+    repeated DnSegment dn_segment_list = 11;
+}
+
+message ListDiskNodesRequest {
+    string cluster_name = 1;
+    uint32 count = 2;
+    string page_token = 3;
+}
+
+message ListDiskNodesReply {
+    repeated string addr_port = 1;
+    string page_token = 2;
+}
+
+message UpdateDiskNodeDescRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bytes description = 3;
+}
+
+message UpdateDiskNodeDescReply {}
+
+message UpdateDiskNodeEnabledRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bool enabled = 3;
+}
+
+message UpdateDiskNodeEnabledReply {}
+
+message InspectDiskNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message InspectDiskNodeReply {
+    NodeResInfo node_res_info = 1;
+}
+
+message CreateControllerNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bytes description = 3;
+    NvmeTrConf nvme_tr_conf = 4;
+    string location = 5;
+    bool enabled = 6;
+}
+
+message CreateControllerNodeReply {}
+
+message DeleteControllerNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message DeleteControllerNodeReply {}
+
+message GetControllerNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message GetControllerNodeReply {
+    string addr_port = 1;
+    uint64 cn_id = 2;
+    bytes description = 3;
+    uint64 revision = 4;
+    uint32 shard_code = 5;
+    bool enabled = 6;
+    bool healthy = 7;
+    NvmeTrConf nvme_tr_conf = 8;
+    repeated SpCntlrId sp_cntlr_id_list = 9;
+}
+
+message ListControllerNodesRequest {
+    string cluster_name = 1;
+    uint32 count = 2;
+    string page_token = 3;
+}
+
+message ListControllerNodesReply {
+    repeated string addr_port = 1;
+    string page_token = 2;
+}
+
+message UpdateControllerNodeDescRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bytes description = 3;
+}
+
+message UpdateControllerNodeDescReply {}
+
+message UpdateControllerNodeEnabledRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    bool enabled = 3;
+}
+
+message UpdateControllerNodeEnabledReply {}
+
+message InspectControllerNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
+message InspectControllerNodeReply {
+    NodeResInfo node_res_info = 1;
+}
+
+message CreateStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    bytes description = 3;
+    repeated string features = 4;
+    RedunType redun_type = 5;
+    uint32 cntlr_cnt = 6;
+    uint32 leg_cnt = 7;
+    uint64 init_size = 8;
+}
+
+message CreateStoragePoolReply {}
+
+message DeleteStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message DeleteStoragePoolReply {}
+
+message GetStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message GetStoragePoolReply {
+    string sp_name = 1;
+    uint64 sp_id = 2;
+    bytes description = 3;
+    uint64 revision = 4;
+    uint32 shard_code = 5;
+    uint64 next_id = 6;
+    uint64 next_dev_id = 7;
+    SpConf sp_conf = 8;
+    repeated uint64 cntlr_id_list = 9;
+    repeated Cntlr cntlr_list = 10;
+    repeated uint64 leg_id_list = 11;
+    repeated Leg leg_list = 12;
+    repeated uint64 ld_id_list = 13;
+    repeated LogicalDisk ld_list = 14;
+}
+
+message ListStoragePoolsRequest {
+    string cluster_name = 1;
+    uint32 count = 2;
+    string page_token = 3;
+}
+
+message ListStoragePoolsReply {
+    repeated string sp_name = 1;
+    string page_token = 2;
+}
+
+message UpdateStoragePoolDescRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    bytes description = 3;
+}
+
+message UpdateStoragePoolDescReply {}
+
+message InspectStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message InspectStoragePoolReply {
+    repeated NodeResInfo cntlr_res_info_list = 1;
+    repeated NodeResInfo ld_res_info_list = 2;
+}
+
+message GrowStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    uint64 leg_id = 3;
+    uint64 grp_size = 4;
+}
+
+message GrowStoragePoolReply {}
+
+message FindStoragePoolNameRequest {
+    string cluster_name = 1;
+    uint64 sp_id = 2;
+}
+
+message FindStoragePoolNameReply {
+    string sp_name = 1;
+}
+
+message CreateCntlrRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message CreateCntlrReply {}
+
+message DeleteCntlrRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    uint64 cntlr_id = 3;
+}
+
+message DeleteCntlrReply {}
+
+message UpdateCntlrEnabledRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    uint64 cntlr_id = 3;
+    bool enabled = 4;
+}
+
+message UpdateCntlrEnabledReply {}
+
+message CreateThinDeviceRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string td_name = 3;
+    uint32 ori_name = 4;
+    uint64 size = 5;
+}
+
+message CreateThinDeviceReply {}
+
+message DeleteThinDeviceRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string td_name = 3;
+}
+
+message DeleteThinDeviceReply {}
+
+message ListThinDevicesRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListThinDevicesReply {
+    repeated uint64 td_name_list = 1;
+    repeated ThinDevice td_list = 2;
+}
+
+message CreateSubsystemRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+}
+
+message CreateSubsystemReply {}
+
+message DeleteSubsystemRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+}
+
+message DeleteSubsystemReply {}
+
+message ListSubsystemsRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListSubsystemsReply {
+    repeated string nqn_list = 1;
+    repeated Subsystem ss_list = 2;
+}
+
+message CreateNamespaceRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    uint32 ns_idx = 4;
+    string td_name = 5;
+    bool suspended = 6;
+    AnaType ana_type = 7;
+}
+
+message CreateNamespaceReply {}
+
+message DeleteNamespaceRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    uint32 ns_idx = 4;
+}
+
+message DeleteNamespaceReply {}
+
+message UpdateNamespaceSuspendedRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    uint32 ns_idx = 4;
+    bool suspended = 5;
+}
+
+message UpdateNamespaceSuspendedReply {}
+
+message UpdateNamespaceAnaRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    uint32 ns_idx = 4;
+    AnaType ana_type = 5;
+}
+
+message UpdateNamespaceAnaReply {}
+
+message CreateHostRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    string host_nqn = 4;
+}
+
+message CreateHostReply {}
+
+message DeleteHostRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string nqn = 3;
+    string host_nqn = 4;
+}
+
+message DeleteHostReply {}
+
+message CreateCloneRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string  clone_name = 3;
+    NvmeTrConf src_tr_conf = 4;
+    string dst_td_name = 5;
+    uint32 factor = 6;
+    bytes bitmap = 7;
+}
+
+message CreateCloneReply {}
+
+message DeleteCloneRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string  clone_name = 3;
+}
+
+message DeleteCloneReply {}
+
+message ListClonesRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListClonesReply {
+    repeated string clone_name_list = 1;
+    repeated Clone clone_list = 2;
+}
+
+message CreateMoveRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string move_name = 3;
+    uint64 src_ld_id = 4;
+}
+
+message CreateMoveReply {}
+
+message FinishMoveRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string move_name = 3;
+}
+
+message FinishMoveReply {}
+
+message CancelMoveRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    string move_name = 3;
+}
+
+message CancelMoveReply {}
+
+message ListMovesRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message ListMovesReply {
+    string cluster_name = 1;
+    repeated string move_name_list = 2;
+    repeated Move move_list = 3;
+}
+
+service Gateway {
+    rpc CreateCluster(CreateClusterRequest) returns(CreateClusterReply) {}
+    rpc DeleteCluster(DeleteClusterRequest) returns(DeleteClusterReply) {}
+    rpc GetCluster(GetClusterRequest) returns(GetClusterReply) {}
+    rpc ListClusters(ListClustersRequest) returns(ListClustersReply) {}
+    rpc UpdateClusterDesc(UpdateClusterDescRequest) returns(UpdateClusterDescReply) {}
+
+    rpc CreateDiskNode(CreateDiskNodeRequest) returns(CreateDiskNodeReply) {}
+    rpc DeleteDiskNode(DeleteDiskNodeRequest) returns(DeleteDiskNodeReply) {}
+    rpc GetDiskNode(GetDiskNodeRequest) returns(GetDiskNodeReply) {}
+    rpc ListDiskNodes(ListDiskNodesRequest) returns(ListDiskNodesReply) {}
+    rpc UpdateDiskNodeDesc(UpdateDiskNodeDescRequest) returns(UpdateDiskNodeDescReply) {}
+    rpc UpdateDiskNodeEnabled(UpdateDiskNodeEnabledRequest) returns(UpdateDiskNodeEnabledReply) {}
+    rpc InspectDiskNode(InspectDiskNodeRequest) returns(InspectDiskNodeReply) {}
+
+    rpc CreateControllerNode(CreateControllerNodeRequest) returns(CreateControllerNodeReply) {}
+    rpc DeleteControllerNode(DeleteControllerNodeRequest) returns(DeleteControllerNodeReply) {}
+    rpc GetControllerNode(GetControllerNodeRequest) returns(GetControllerNodeReply) {}
+    rpc ListControllerNodes(ListControllerNodesRequest) returns(ListControllerNodesReply) {}
+    rpc UpdateControllerNodeDesc(UpdateControllerNodeDescRequest) returns(UpdateControllerNodeDescReply) {}
+    rpc UpdateControllerNodeEnabled(UpdateControllerNodeEnabledRequest) returns(UpdateControllerNodeEnabledReply) {}
+    rpc InspectControllerNode(InspectControllerNodeRequest) returns(InspectControllerNodeReply) {}
+
+    rpc CreateStoragePool(CreateStoragePoolRequest) returns(CreateStoragePoolReply) {}
+    rpc DeleteStoragePool(DeleteStoragePoolRequest) returns(DeleteStoragePoolReply) {}
+    rpc GetStoragePool(GetStoragePoolRequest) returns(GetStoragePoolReply) {}
+    rpc ListStoragePools(ListStoragePoolsRequest) returns(ListStoragePoolsReply) {}
+    rpc UpdateStoragePoolDesc(UpdateStoragePoolDescRequest) returns(UpdateStoragePoolDescReply) {}
+    rpc InspectStoragePool(InspectStoragePoolRequest) returns(InspectStoragePoolReply) {}
+    rpc GrowStoragePool(GrowStoragePoolRequest) returns(GrowStoragePoolReply) {}
+    rpc FindStoragePoolName(FindStoragePoolNameRequest) returns(FindStoragePoolNameReply) {}
+
+    rpc CreateCntlr(CreateCntlrRequest) returns(CreateCntlrReply) {}
+    rpc DeleteCntlr(DeleteCntlrRequest) returns(DeleteCntlrReply) {}
+    rpc UpdateCntlrEnabled(UpdateCntlrEnabledRequest) returns(UpdateCntlrEnabledReply) {}
+
+    rpc CreateThinDevice(CreateThinDeviceRequest) returns(CreateThinDeviceReply) {}
+    rpc DeleteThinDevice(DeleteThinDeviceRequest) returns(DeleteThinDeviceReply) {}
+    rpc ListThinDevices(ListThinDevicesRequest) returns(ListThinDevicesReply) {}
+
+    rpc CreateSubsystem(CreateSubsystemRequest) returns(CreateSubsystemReply) {}
+    rpc DeleteSubsystem(DeleteSubsystemRequest) returns(DeleteSubsystemReply) {}
+    rpc ListSubsystems(ListSubsystemsRequest) returns(ListSubsystemsReply) {}
+
+    rpc CreateNamespace(CreateNamespaceRequest) returns(CreateNamespaceReply) {}
+    rpc DeleteNamespace(DeleteNamespaceRequest) returns(DeleteNamespaceReply) {}
+    rpc UpdateNamespaceSuspended(UpdateNamespaceSuspendedRequest) returns(UpdateNamespaceSuspendedReply) {}
+    rpc UpdateNamespaceAna(UpdateNamespaceAnaRequest) returns(UpdateNamespaceAnaReply) {}
+
+    rpc CreateHost(CreateHostRequest) returns(CreateHostReply) {}
+    rpc DeleteHost(DeleteHostRequest) returns(DeleteHostReply) {}
+
+    rpc CreateClone(CreateCloneRequest) returns(CreateCloneReply) {}
+    rpc DeleteClone(DeleteCloneRequest) returns(DeleteCloneReply) {}
+    rpc ListClones(ListClonesRequest) returns(ListClonesReply) {}
+
+    rpc CreateMove(CreateMoveRequest) returns(CreateMoveReply) {}
+    rpc FinishMove(FinishMoveRequest) returns(FinishMoveReply) {}
+    rpc CancelMove(CancelMoveRequest) returns(CancelMoveReply) {}
+    rpc ListMoves(ListMovesRequest) returns(ListMovesReply) {}
+}
+
+message GetDnSizeRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+}
+
+message GetDnSizeReply {
+    uint64 size = 1;
+}
+
+message SyncupDnRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    uint64 revision = 3;
+    repeated SpLdId sp_ld_id_list = 4;
+}
+
+message SyncupDnReply {}
+
+message SyncupSpLdRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    uint64 sp_id = 3;
+    uint64 ld_id = 4;
+    uint64 revision = 5;
+    LdForDn ld_to_dn = 6;
+    repeated uint64 cn_id_list = 8;
+}
+
+message SyncupSpLdReply {}
+
+message GetDnInfoRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+}
+
+message GetDnInfoReply {
+    NodeResInfo node_res_info = 1;
+}
+
+message GetSpLdInfoRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    uint64 sp_id = 3;
+    uint64 ld_id = 4;
+}
+
+message GetSpLdInfoReply {
+    NodeResInfo node_res_info = 1;
+}
+
+message DnHealthCheckRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+}
+
+message DnHealthCheckReply {
+    uint64 revision = 1;
+}
+
+message FenceRequest {
+    uint64 cluster_id = 1;
+    uint64 sp_id = 2;
+    uint64 ld_id = 3;
+    uint64 cn_id = 4;
+    uint64 prev_cn_id = 5;
+}
+
+message FenceReply {
+    bool succeed = 1;
+}
+
+service DiskNodeAgent {
+    rpc GetDnSize(GetDnSizeRequest) returns(GetDnSizeReply) {}
+    rpc SyncupDn(SyncupDnRequest) returns(SyncupDnReply) {}
+    rpc SyncupSpLd(SyncupSpLdRequest) returns(SyncupSpLdReply) {}
+    rpc GetDnInfo(GetDnInfoRequest) returns(GetDnInfoReply) {}
+    rpc GetSpLdInfo(GetSpLdInfoRequest) returns(GetSpLdInfoReply) {}
+    rpc DnHealthCheck(DnHealthCheckRequest) returns(DnHealthCheckReply) {}
+    rpc Fence(FenceRequest) returns(FenceReply) {}
+}
+
+message GetCnSizeRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+}
+
+message GetCnSizeReply {
+    uint64 size = 1;
+}
+
+message SyncupCnRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 revision = 3;
+    repeated SpCntlrId sp_cntlr_id_list = 4;
+    QosRatio qos_ratio = 5;
+}
+
+message SyncupCnReply {}
+
+message SyncupSpCntlrRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 sp_id = 3;
+    uint64 cntlr_id = 4;
+    uint64 revision = 5;
+    SpConf sp_conf = 6;
+    uint32 cntlr_idx = 7;
+    repeated uint64 leg_id_list = 8;
+    repeated Leg leg_list = 9;
+    repeated uint64 ld_id_list = 10;
+    repeated LdForCn ld_for_dn_list = 11;
+    repeated ThinDevice thin_device_list = 12;
+    repeated string nqn_list = 13;
+    repeated Subsystem ss_list = 14;
+    repeated Clone clone_list = 15;
+    repeated Move move_list = 16;
+}
+
+message SyncupSpCntlrReply {}
+
+message GetCnInfoRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+}
+
+message GetCnInfoReply {
+    NodeResInfo ndoe_res_info = 2;
+}
+
+message GetSpCntlrInfoRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 sp_id = 3;
+    uint64 cntlr_id = 4;
+}
+
+message GetSpCntlrInfoReply {
+    NodeResInfo node_res_info = 1;
+}
+
+message CnHealthCheckRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+}
+
+message CnHealthCheckReply {
+    uint64 revision = 1;
+}
+
+service ControllerNodeAgent {
+    rpc GetCnSize(GetCnSizeRequest) returns(GetCnSizeReply) {}
+    rpc SyncupCn(SyncupCnRequest) returns(SyncupCnReply) {}
+    rpc SyncupSpCntlr(SyncupSpCntlrRequest) returns(SyncupSpCntlrReply) {}
+    rpc GetCnInfo(GetCnInfoRequest) returns(GetCnInfoReply) {}
+    rpc GetSpCntlrInfo(GetSpCntlrInfoRequest) returns(GetSpCntlrInfoReply) {}
+    rpc CnHealthCheck(CnHealthCheckRequest) returns(CnHealthCheckReply) {}
+}
