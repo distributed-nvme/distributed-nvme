@@ -9,7 +9,7 @@
 #       as its first arguments and SSHes to that node internally, so the
 #       orchestrator reads like a recipe:
 #           create_pd    dn0 192.168.122.48
-#           create_ld    dn0 192.168.122.48 cn0 192.168.122.125 0 0 0   # ld0 leg0 grp0
+#           create_ld    dn0 192.168.122.48 cn0 192.168.122.125 0 0 0   # ld0 slice0 grp0
 #           create_grp   cn0 192.168.122.125 sp0 0 0 <hnqn> <hid>
 #           ...
 #
@@ -24,11 +24,11 @@
 # Terminology (t04):
 #   pd   -- physical disk (loop bdev on a dn)
 #   ld   -- logical disk, dn->cn via nvmeof
-#   grp  -- thin-pool underlying group (raid1 slice pair)
-#   leg  -- raid0 underlying disk
-#   side -- raid1 underlying ld
-#   sp   -- storage pool (container, N legs, thin pools, tds)
-#   td   -- thin device id in a sp (shared across all legs)
+#   grp  -- thin-pool underlying group (raid1 leg pair)
+#   slice -- raid0 underlying disk
+#   leg  -- raid1 underlying ld
+#   sp   -- storage pool (container, N slices, thin pools, tds)
+#   td   -- thin device id in a sp (shared across all slices)
 #   exp  -- exporter (raid0 of td thin-devs + nvmeof export)
 #   dn   -- disk node   (linux server with physical disks)
 #   cn   -- controller node (linux server exporting nvmet targets to nvme hosts)
@@ -63,14 +63,14 @@ LD_MODEL="dnv-ld"
 
 # All sizes in 512-byte sectors.
 SEC_PD=1024000           # 500M  - one logical disk on a dn
-SEC_RMETA=8192           #   4M  - dm-raid1 metadata side
-SEC_RDATA=1015808        # 496M  - dm-raid1 data side               (500M - 4M)
+SEC_RMETA=8192           #   4M  - dm-raid1 metadata leg
+SEC_RDATA=1015808        # 496M  - dm-raid1 data leg               (500M - 4M)
 SEC_TMETA=16384          #   8M  - thin-pool metadata slice per group
 SEC_TDATA=999424         # 488M  - thin-pool data slice per group   (500M - 4M - 8M)
 SEC_POOL_META=32768      #  16M  - concat of 2 groups' thinmeta
 SEC_POOL_DATA=1998848    # 976M  - concat of 2 groups' thindata
-SEC_TD=2097152            #   1G  - dm-thin virtual size (per leg)
-SEC_EXP=4194304          #   2G  - raid0 over leg0+leg1 td0, and the
+SEC_TD=2097152            #   1G  - dm-thin virtual size (per slice)
+SEC_EXP=4194304          #   2G  - raid0 over slice0+slice1 td0, and the
                          #         error/delay stack that mirrors its size
 
 DELAY_MS=3600000         # 3600s, applied to read+write+flush
@@ -545,7 +545,7 @@ nvmet_remove_host() {     # <hostnqn>
 }
 
 # Remove every dnv LD subsystem on this node. Topology-agnostic safety net for
-# teardown: scans $NVMET/subsystems/ for the dn:<dn>:sp0-leg*-grp*-ld*-cn* prefix
+# teardown: scans $NVMET/subsystems/ for the dn:<dn>:sp0-slice*-grp*-ld*-cn* prefix
 # (which covers groups beyond the hardcoded grp0/grp1 base, e.g. grp2 added by
 # grow.sh) and routes each to nvmet_remove_subsys. Called by delete_pd before
 # nvmet_remove_port so the port's subsystem links are dropped first.
@@ -617,7 +617,7 @@ nvme_disc() {             # <nqn>
 # net for teardown: scans /sys/class/nvme/*/subsysnqn for NQNs matching
 # ${NQN_PREFIX}:dn:* (which covers groups beyond the hardcoded grp0/grp1 base,
 # e.g. grp2 added by grow.sh) and routes each to nvme_disc. Replaces the
-# hardcoded for-leg/for-grp/for-d loop in teardown_cn's inline cleanup.
+# hardcoded for-slice/for-grp/for-d loop in teardown_cn's inline cleanup.
 nvme_disconnect_all_dnv_ld() {
     local c nqn cnt=0
     for c in /sys/class/nvme/nvme*; do
@@ -861,18 +861,18 @@ EOF_COMMON
 # =========================================================================
 #
 # Naming convention (see plan.md section 3):
-#   DN  dm:   dnv-<dn>-<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
+#   DN  dm:   dnv-<dn>-<sp>-slice<slice>-grp<grp>-ld<ld>-cn<cn>
 #             (+ -real, -err-<cn>, -delay-<cn>)
-#   CN  dm:   dnv-<cn>-<sp>-leg<leg>-grp<grp>-raid1-side<side>
-#             (+ -meta-side<side>, -data-side<side>)
-#   CN pool:  dnv-<cn>-<sp>-leg<leg>-thinpool
+#   CN  dm:   dnv-<cn>-<sp>-slice<slice>-grp<grp>-raid1-leg<leg>
+#             (+ -meta-leg<leg>, -data-leg<leg>)
+#   CN pool:  dnv-<cn>-<sp>-slice<slice>-thinpool
 #             (+ -thinmeta, -thindata, -grp<grp>-thinmeta, -grp<grp>-thindata)
 #   CN exp:   dnv-<cn>-<sp>-td<id>-exp<id>
 #             (+ -real, -error, -delay)
-#   DN NQN:   nqn.2026-07.org.dnv:dn:<dn>:<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
+#   DN NQN:   nqn.2026-07.org.dnv:dn:<dn>:<sp>-slice<slice>-grp<grp>-ld<ld>-cn<cn>
 #   Host NQN: nqn.2026-07.org.dnv:sp:<sp>:td<id>:exp<id>
 #
-# Storage pool (sp) defaults: sp0, 2 legs, 2 grps per leg, 2 lds per grp (one per dn).
+# Storage pool (sp) defaults: sp0, 2 slices, 2 grps per slice, 2 lds per grp (one per dn).
 # ld_id encodes which dn it comes from: ld0 -> dn0, ld1 -> dn1.
 
 # --- pd: physical disk (loop bdev on a dn) ----------------------------------
@@ -895,7 +895,7 @@ fi
 _info "loop device: $LOOP ($IMG, $LOOP_IMG_SIZE)"
 
 # Volume group on the loop device. The DN-side -real devices (one per
-# (leg,grp,ld) slice) are LVM LVs in this VG, not plain dm-linear on the loop.
+# (slice,grp,ld) slice) are LVM LVs in this VG, not plain dm-linear on the loop.
 # One loop -> one VG -> N LVs mirrors the old "one loop -> N dm-linear slices".
 # Idempotent: pvcreate/vgcreate error if already present, so guard like dm_create.
 VG="dnv-${DN}-sp0-vg"
@@ -945,7 +945,7 @@ sudo rm -f "$IMG" 2>/dev/null || true
 # first so the port's subsystem links are unlinked before the port goes away;
 # it is the topology-agnostic safety net that catches LD subsystems beyond the
 # hardcoded grp0/grp1 base (e.g. grp2 added by grow.sh) that delete_ld's
-# explicit per-(leg,grp) loop would otherwise miss.
+# explicit per-(slice,grp) loop would otherwise miss.
 nvmet_remove_all_dnv_subsys
 nvmet_remove_port 1
 nvmet_remove_host "$HOSTNQN_CN0"
@@ -962,12 +962,12 @@ EOF_DPD
 # --- ld: logical disk (dn->cn via nvmeof, full symmetric fault-injection) ---
 # One ld_id covers a (dn, cn) pair: ld_id is the dn index (0 or 1), cn is the
 # cn index.  So create_ld dn0 ... cn0 ... 0 0 0  creates ld0 on dn0 exported to
-# cn0, for leg 0 grp 0.  leg/grp are explicit params so grow.sh can add grp2 to
-# a running pool without touching the existing (leg,grp) slices.
-create_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>
-    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" leg="$6" grp="$7"
-    _info "=== create_ld $dn -> $cn (ld$lid leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_LD'
+# cn0, for slice 0 grp 0.  slice/grp are explicit params so grow.sh can add grp2 to
+# a running pool without touching the existing (slice,grp) slices.
+create_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <slice> <grp>
+    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" slice="$6" grp="$7"
+    _info "=== create_ld $dn -> $cn (ld$lid slice$slice grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_LD'
 set -uo pipefail
 prep_node
 
@@ -988,18 +988,18 @@ nvmet_port 1 "$MY_IP"
 VG="dnv-${DN}-sp0-vg"
 vg_exists "$VG" || _fail "no VG $VG on $DN -- run create_pd first"
 
-# Create this (leg, grp) pair's full symmetric fault-injection stack.
-# Names (t04):  dnv-<dn>-<sp>-leg<leg>-grp<grp>-ld<ld>  (base, no -cn suffix)
+# Create this (slice, grp) pair's full symmetric fault-injection stack.
+# Names (t04):  dnv-<dn>-<sp>-slice<slice>-grp<grp>-ld<ld>  (base, no -cn suffix)
 #                + -real (LVM LV in dnv-<dn>-sp0-vg, NOT a dmsetup device),
 #                + -err-cn0, -err-cn1, -delay-cn0, -delay-cn1
 #                + -cn0 (exported to cn0, on -real or -delay-cn0)
 #                + -cn1 (exported to cn1, on -delay-cn1 or -real)
-# NQN:  nqn.2026-07.org.dnv:dn:<dn>:<sp>-leg<leg>-grp<grp>-ld<ld>-cn<cn>
+# NQN:  nqn.2026-07.org.dnv:dn:<dn>:<sp>-slice<slice>-grp<grp>-ld<ld>-cn<cn>
 #
 # -real is the ONLY LVM-managed object in the whole stack; everything above it
 # (-err/-delay/-cn) stays plain dmsetup, stacked on the LV path /dev/<vg>/<lv>.
-base="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${LD}"
-LV="leg${LEG}-grp${GRP}-ld${LD}-real"
+base="dnv-${DN}-sp0-slice${SLICE}-grp${GRP}-ld${LD}"
+LV="slice${SLICE}-grp${GRP}-ld${LD}-real"
 REAL_DEV="/dev/${VG}/${LV}"
 
 # Backing store for this logical disk slice: an LVM LV in the loop-backed VG.
@@ -1025,9 +1025,9 @@ else
 fi
 
 # nvmet subsystem for this cn, visible only to that cn's hostnqn.
-nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-cn${C}"
-# UUID: hex <ld><dn><leg><grp><cn> + "00" tail.
-uuid=$(printf '0%s%s%s%s%s00-0000-4000-8000-000000000000' "$LD" "${DN#dn}" "$LEG" "$GRP" "$C")
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-slice${SLICE}-grp${GRP}-ld${LD}-cn${C}"
+# UUID: hex <ld><dn><slice><grp><cn> + "00" tail.
+uuid=$(printf '0%s%s%s%s%s00-0000-4000-8000-000000000000' "$LD" "${DN#dn}" "$SLICE" "$GRP" "$C")
 eval "hnqn=\$HOSTNQN_CN${C}"
 DNV_MODEL="$LD_MODEL" \
     nvmet_add_subsys "$nqn" "/dev/mapper/${base}-cn${C}" "$uuid" "" "$hnqn"
@@ -1035,24 +1035,24 @@ nvmet_link "$nqn" 1
 
 _info "$(sudo dmsetup ls | wc -l) dm devices, $(ls "$NVMET/subsystems" 2>/dev/null | wc -l) nvmet subsystems"
 slow_summary
-_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) setup complete"
+_info "LD ${DN}->${CN} (ld${LD} slice${SLICE} grp${GRP}) setup complete"
 EOF_LD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>
+delete_ld() {   # <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <slice> <grp>
     # cn/cn_ip are vestigial: the function removes subsystems for both cns
     # regardless. Kept for signature symmetry with create_ld; used only in the
     # log message.
-    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" leg="$6" grp="$7"
-    _info "=== delete_ld $dn -> $cn (ld$lid leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DLD'
+    local dn="$1" ip="$2" cn="$3" cn_ip="$4" lid="$5" slice="$6" grp="$7"
+    _info "=== delete_ld $dn -> $cn (ld$lid slice$slice grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; CN='$cn'; LD='$lid'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_DLD'
 set -uo pipefail
 prep_node
 
 # Remove the nvmet subsystems for BOTH cns (symmetric stack).
 for c in 0 1; do
-    nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-cn${c}"
+    nqn="${NQN_PREFIX}:dn:${DN}:sp0-slice${SLICE}-grp${GRP}-ld${LD}-cn${c}"
     nvmet_remove_subsys "$nqn"
 done
 
@@ -1061,143 +1061,143 @@ done
 # -real is an LVM LV, not a dmsetup device, so it is removed via lvremove (the
 # dm devices above it go first via dm_remove, releasing the LV's open count).
 VG="dnv-${DN}-sp0-vg"
-base="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${LD}"
+base="dnv-${DN}-sp0-slice${SLICE}-grp${GRP}-ld${LD}"
 for n in "${base}-cn0" "${base}-cn1" \
          "${base}-delay-cn0" "${base}-delay-cn1" \
          "${base}-err-cn0" "${base}-err-cn1"; do
     dm_remove "$n" force >/dev/null 2>&1 || true
 done
-LV="leg${LEG}-grp${GRP}-ld${LD}-real"
+LV="slice${SLICE}-grp${GRP}-ld${LD}-real"
 lv_exists "$VG" "$LV" && _lvm lvremove -y "/dev/${VG}/${LV}" >/dev/null 2>&1 \
     && _info "lvremoved: $VG/$LV" || true
-_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) dm devices removed"
+_info "LD ${DN}->${CN} (ld${LD} slice${SLICE} grp${GRP}) dm devices removed"
 
 nvmet_remove_host "$HOSTNQN_CN0"
 nvmet_remove_host "$HOSTNQN_CN1"
 _info "remaining dm devices: $(dm_count)"
 slow_summary
-_info "LD ${DN}->${CN} (ld${LD} leg${LEG} grp${GRP}) teardown complete"
+_info "LD ${DN}->${CN} (ld${LD} slice${SLICE} grp${GRP}) teardown complete"
 EOF_DLD
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
 # --- connect_ld / disconnect_ld (cn-side nvme connect to a dn's ld) ----------
-connect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <hostnqn> <hostid> <leg> <grp>
-    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" hnqn="$6" hid="$7" leg="$8" grp="$9"
-    _info "=== connect_ld $cn <- $dn (ld$lid leg$leg grp$grp) ==="
-    { _emit_vars; echo "CN='$cn'; DN='$dn'; DN_IP='$dn_ip'; LD='$lid'; HNQN='$hnqn'; HID='$hid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_CV'
+connect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <hostnqn> <hostid> <slice> <grp>
+    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" hnqn="$6" hid="$7" slice="$8" grp="$9"
+    _info "=== connect_ld $cn <- $dn (ld$lid slice$slice grp$grp) ==="
+    { _emit_vars; echo "CN='$cn'; DN='$dn'; DN_IP='$dn_ip'; LD='$lid'; HNQN='$hnqn'; HID='$hid'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_CV'
 set -uo pipefail
-nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-${CN}"
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-slice${SLICE}-grp${GRP}-ld${LD}-${CN}"
 nvme_conn "$DN_IP" "$nqn" "$HNQN" "$HID"
 slow_summary
-_info "connect_ld ${CN}<-${DN} (ld${LD} leg${LEG} grp${GRP}) complete"
+_info "connect_ld ${CN}<-${DN} (ld${LD} slice${SLICE} grp${GRP}) complete"
 EOF_CV
     } | _ssh "${SSH_USER}@${cn_ip}" bash -s
 }
 
-disconnect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <leg> <grp>
-    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" leg="$6" grp="$7"
-    _info "=== disconnect_ld $cn <- $dn (ld$lid leg$leg grp$grp) ==="
-    { _emit_vars; echo "CN='$cn'; DN='$dn'; LD='$lid'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DV'
+disconnect_ld() {   # <cn_name> <cn_ip> <dn_name> <dn_ip> <ld_id> <slice> <grp>
+    local cn="$1" cn_ip="$2" dn="$3" dn_ip="$4" lid="$5" slice="$6" grp="$7"
+    _info "=== disconnect_ld $cn <- $dn (ld$lid slice$slice grp$grp) ==="
+    { _emit_vars; echo "CN='$cn'; DN='$dn'; LD='$lid'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_DV'
 set -uo pipefail
-nqn="${NQN_PREFIX}:dn:${DN}:sp0-leg${LEG}-grp${GRP}-ld${LD}-${CN}"
+nqn="${NQN_PREFIX}:dn:${DN}:sp0-slice${SLICE}-grp${GRP}-ld${LD}-${CN}"
 nvme_disc "$nqn"
 slow_summary
-_info "disconnect_ld ${CN}<-${DN} (ld${LD} leg${LEG} grp${GRP}) complete"
+_info "disconnect_ld ${CN}<-${DN} (ld${LD} slice${SLICE} grp${GRP}) complete"
 EOF_DV
     } | _ssh "${SSH_USER}@${cn_ip}" bash -s
 }
 
-# --- grp: raid1 slice pair + thinmeta/thindata (cn-side, leaf) --------------
+# --- grp: raid1 leg pair + thinmeta/thindata (cn-side, leaf) --------------
 # create_grp connects both lds (ld0 from dn0, ld1 from dn1) internally, then
 # builds the raid1 mirror + thinmeta/thindata slices.
-create_grp() {   # <cn_name> <cn_ip> <sp> <leg> <grp> <hostnqn> <hostid>
-    local cn="$1" ip="$2" sp="$3" leg="$4" grp="$5" hnqn="$6" hid="$7"
-    _info "=== create_grp $cn $sp leg$leg grp$grp ==="
-    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'; GRP='$grp'; HNQN='$hnqn'; HID='$hid'"; _emit_common; cat <<'EOF_GRP'
+create_grp() {   # <cn_name> <cn_ip> <sp> <slice> <grp> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" slice="$4" grp="$5" hnqn="$6" hid="$7"
+    _info "=== create_grp $cn $sp slice$slice grp$grp ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; SLICE='$slice'; GRP='$grp'; HNQN='$hnqn'; HID='$hid'"; _emit_common; cat <<'EOF_GRP'
 set -uo pipefail
 prep_node
 # Host identity is set by create_cntlr_active; re-affirm in case this is called standalone.
 set_host_identity "$HNQN" "$HID"
 
-# Connect the two lds for this (leg,grp): ld0 from dn0, ld1 from dn1.
-nvme_conn "$DN0_IP" "${NQN_PREFIX}:dn:dn0:${SP}-leg${LEG}-grp${GRP}-ld0-${CN}" "$HNQN" "$HID"
-nvme_conn "$DN1_IP" "${NQN_PREFIX}:dn:dn1:${SP}-leg${LEG}-grp${GRP}-ld1-${CN}" "$HNQN" "$HID"
+# Connect the two lds for this (slice,grp): ld0 from dn0, ld1 from dn1.
+nvme_conn "$DN0_IP" "${NQN_PREFIX}:dn:dn0:${SP}-slice${SLICE}-grp${GRP}-ld0-${CN}" "$HNQN" "$HID"
+nvme_conn "$DN1_IP" "${NQN_PREFIX}:dn:dn1:${SP}-slice${SLICE}-grp${GRP}-ld1-${CN}" "$HNQN" "$HID"
 
 # Resolve the block devices.
 declare -A LDDEV
 for d in 0 1; do
-    nqn="${NQN_PREFIX}:dn:dn${d}:${SP}-leg${LEG}-grp${GRP}-ld${d}-${CN}"
+    nqn="${NQN_PREFIX}:dn:dn${d}:${SP}-slice${SLICE}-grp${GRP}-ld${d}-${CN}"
     dev=$(nvme_wait_dev "$nqn") || _fail "no block device for $nqn"
     LDDEV["$d"]="$dev"
     _info "nvme   : $nqn -> $dev"
 done
 
-p="dnv-${CN}-${SP}-leg${LEG}-grp${GRP}"
+p="dnv-${CN}-${SP}-slice${SLICE}-grp${GRP}"
 ld0="${LDDEV[0]}"
 ld1="${LDDEV[1]}"
 
-# Split each side into a raid1 metadata and data area.
-dm_create "${p}-raid1-meta-side0" "0 $SEC_RMETA linear $ld0 0"
-dm_create "${p}-raid1-data-side0" "0 $SEC_RDATA linear $ld0 $SEC_RMETA"
-dm_create "${p}-raid1-meta-side1" "0 $SEC_RMETA linear $ld1 0"
-dm_create "${p}-raid1-data-side1" "0 $SEC_RDATA linear $ld1 $SEC_RMETA"
+# Split each leg into a raid1 metadata and data area.
+dm_create "${p}-raid1-meta-leg0" "0 $SEC_RMETA linear $ld0 0"
+dm_create "${p}-raid1-data-leg0" "0 $SEC_RDATA linear $ld0 $SEC_RMETA"
+dm_create "${p}-raid1-meta-leg1" "0 $SEC_RMETA linear $ld1 0"
+dm_create "${p}-raid1-data-leg1" "0 $SEC_RDATA linear $ld1 $SEC_RMETA"
 
-# dm-raid1 across both sides. Metadata areas must be zeroed or dm-raid will
+# dm-raid1 across both legs. Metadata areas must be zeroed or dm-raid will
 # try to interpret a stale superblock.
 if ! dm_exists "${p}-raid1"; then
-    zero_head "/dev/mapper/${p}-raid1-meta-side0" 4
-    zero_head "/dev/mapper/${p}-raid1-meta-side1" 4
+    zero_head "/dev/mapper/${p}-raid1-meta-leg0" 4
+    zero_head "/dev/mapper/${p}-raid1-meta-leg1" 4
 fi
 dm_create "${p}-raid1" \
 "0 $SEC_RDATA raid raid1 4 0 region_size $RAID_REGION_SECTORS nosync 2 \
-/dev/mapper/${p}-raid1-meta-side0 /dev/mapper/${p}-raid1-data-side0 \
-/dev/mapper/${p}-raid1-meta-side1 /dev/mapper/${p}-raid1-data-side1"
+/dev/mapper/${p}-raid1-meta-leg0 /dev/mapper/${p}-raid1-data-leg0 \
+/dev/mapper/${p}-raid1-meta-leg1 /dev/mapper/${p}-raid1-data-leg1"
 
 # Carve the mirror into thin-pool metadata and data slices for this group.
 dm_create "${p}-thinmeta" "0 $SEC_TMETA linear /dev/mapper/${p}-raid1 0"
 dm_create "${p}-thindata" "0 $SEC_TDATA linear /dev/mapper/${p}-raid1 $SEC_TMETA"
 
 slow_summary
-_info "GRP ${CN}/${SP}/leg${LEG}/grp${GRP} setup complete"
+_info "GRP ${CN}/${SP}/slice${SLICE}/grp${GRP} setup complete"
 EOF_GRP
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_grp() {   # <cn_name> <cn_ip> <sp> <leg> <grp>
-    local cn="$1" ip="$2" sp="$3" leg="$4" grp="$5"
-    _info "=== delete_grp $cn $sp leg$leg grp$grp ==="
-    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DGRP'
+delete_grp() {   # <cn_name> <cn_ip> <sp> <slice> <grp>
+    local cn="$1" ip="$2" sp="$3" slice="$4" grp="$5"
+    _info "=== delete_grp $cn $sp slice$slice grp$grp ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_DGRP'
 set -uo pipefail
-p="dnv-${CN}-${SP}-leg${LEG}-grp${GRP}"
+p="dnv-${CN}-${SP}-slice${SLICE}-grp${GRP}"
 # Remove in reverse creation order.  Removing raid1 last drops the open count
 # on the ld nvme namespaces so disconnect_ld can succeed afterwards.
 dm_remove "${p}-thindata" force  >/dev/null 2>&1 || true
 dm_remove "${p}-thinmeta" force  >/dev/null 2>&1 || true
 dm_remove "${p}-raid1" force     >/dev/null 2>&1 || true
-dm_remove "${p}-raid1-data-side1" force >/dev/null 2>&1 || true
-dm_remove "${p}-raid1-meta-side1" force >/dev/null 2>&1 || true
-dm_remove "${p}-raid1-data-side0" force >/dev/null 2>&1 || true
-dm_remove "${p}-raid1-meta-side0" force >/dev/null 2>&1 || true
+dm_remove "${p}-raid1-data-leg1" force >/dev/null 2>&1 || true
+dm_remove "${p}-raid1-meta-leg1" force >/dev/null 2>&1 || true
+dm_remove "${p}-raid1-data-leg0" force >/dev/null 2>&1 || true
+dm_remove "${p}-raid1-meta-leg0" force >/dev/null 2>&1 || true
 
 # Disconnect the two lds.
 for d in 0 1; do
-    nvme_disc "${NQN_PREFIX}:dn:dn${d}:${SP}-leg${LEG}-grp${GRP}-ld${d}-${CN}"
+    nvme_disc "${NQN_PREFIX}:dn:dn${d}:${SP}-slice${SLICE}-grp${GRP}-ld${d}-${CN}"
 done
 
 slow_summary
-_info "GRP ${CN}/${SP}/leg${LEG}/grp${GRP} teardown complete"
+_info "GRP ${CN}/${SP}/slice${SLICE}/grp${GRP} teardown complete"
 EOF_DGRP
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-# --- leg: concat grps -> thinpool -> create_thin 0  (cn-side) --------------
-create_leg() {   # <cn_name> <cn_ip> <sp> <leg>
-    local cn="$1" ip="$2" sp="$3" leg="$4"
-    _info "=== create_leg $cn $sp leg$leg ==="
-    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'"; _emit_common; cat <<'EOF_LEG'
+# --- slice: concat grps -> thinpool -> create_thin 0  (cn-side) --------------
+create_slice() {   # <cn_name> <cn_ip> <sp> <slice>
+    local cn="$1" ip="$2" sp="$3" slice="$4"
+    _info "=== create_slice $cn $sp slice$slice ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; SLICE='$slice'"; _emit_common; cat <<'EOF_SLICE'
 set -uo pipefail
-lp="dnv-${CN}-${SP}-leg${LEG}"
+lp="dnv-${CN}-${SP}-slice${SLICE}"
 
 # Concatenate both groups' thinmeta and thindata.
 dm_create "${lp}-thinmeta" \
@@ -1225,21 +1225,21 @@ else
     sudo dmsetup message "/dev/mapper/${lp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 || true
 fi
 
-# The thin device for td 0 on this leg.
+# The thin device for td 0 on this slice.
 dm_create "${lp}-td0" "0 $SEC_TD thin /dev/mapper/${lp}-thinpool 0"
 
 slow_summary
-_info "LEG ${CN}/${SP}/leg${LEG} setup complete"
-EOF_LEG
+_info "SLICE ${CN}/${SP}/slice${SLICE} setup complete"
+EOF_SLICE
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-delete_leg() {   # <cn_name> <cn_ip> <sp> <leg>
-    local cn="$1" ip="$2" sp="$3" leg="$4"
-    _info "=== delete_leg $cn $sp leg$leg ==="
-    { _emit_vars; echo "CN='$cn'; SP='$sp'; LEG='$leg'"; _emit_common; cat <<'EOF_DLEG'
+delete_slice() {   # <cn_name> <cn_ip> <sp> <slice>
+    local cn="$1" ip="$2" sp="$3" slice="$4"
+    _info "=== delete_slice $cn $sp slice$slice ==="
+    { _emit_vars; echo "CN='$cn'; SP='$sp'; SLICE='$slice'"; _emit_common; cat <<'EOF_DSLICE'
 set -uo pipefail
-lp="dnv-${CN}-${SP}-leg${LEG}"
+lp="dnv-${CN}-${SP}-slice${SLICE}"
 # Reverse creation order. Removing thinpool commits its metadata (matters for failover).
 dm_remove "${lp}-td0"    force >/dev/null 2>&1 || true
 dm_remove "${lp}-thinpool" force >/dev/null 2>&1 || true
@@ -1247,48 +1247,48 @@ dm_remove "${lp}-thindata" force >/dev/null 2>&1 || true
 dm_remove "${lp}-thinmeta" force >/dev/null 2>&1 || true
 
 slow_summary
-_info "LEG ${CN}/${SP}/leg${LEG} teardown complete"
-EOF_DLEG
+_info "SLICE ${CN}/${SP}/slice${SLICE} teardown complete"
+EOF_DSLICE
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
 # --- cntlr_active / cntlr_standby (cn-side orchestrators) -------------------
-create_cntlr_active() {   # <cn_name> <cn_ip> <sp> <nlegs> <hostnqn> <hostid>
-    local cn="$1" ip="$2" sp="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_cntlr_active $cn $sp ($nlegs legs) ==="
-    local leg
-    for leg in $(seq 0 $(( nlegs - 1 ))); do
+create_cntlr_active() {   # <cn_name> <cn_ip> <sp> <nslices> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" nslices="$4" hnqn="$5" hid="$6"
+    _info "=== create_cntlr_active $cn $sp ($nslices slices) ==="
+    local slice
+    for slice in $(seq 0 $(( nslices - 1 ))); do
         local grp
         for grp in 0 1; do
-            create_grp "$cn" "$ip" "$sp" "$leg" "$grp" "$hnqn" "$hid"
+            create_grp "$cn" "$ip" "$sp" "$slice" "$grp" "$hnqn" "$hid"
         done
-        create_leg "$cn" "$ip" "$sp" "$leg"
+        create_slice "$cn" "$ip" "$sp" "$slice"
     done
 }
 
 delete_cntlr_active() {   # <cn_name> <cn_ip> <sp>
     local cn="$1" ip="$2" sp="$3"
     _info "=== delete_cntlr_active $cn $sp ==="
-    local nlegs="${NLEGS:-2}"
-    local leg
-    for leg in $(seq 0 $(( nlegs - 1 ))); do
-        delete_leg "$cn" "$ip" "$sp" "$leg"
+    local nslices="${NSLICES:-2}"
+    local slice
+    for slice in $(seq 0 $(( nslices - 1 ))); do
+        delete_slice "$cn" "$ip" "$sp" "$slice"
         local grp
         for grp in 1 0; do
-            delete_grp "$cn" "$ip" "$sp" "$leg" "$grp"
+            delete_grp "$cn" "$ip" "$sp" "$slice" "$grp"
         done
     done
 }
 
-create_cntlr_standby() {   # <cn_name> <cn_ip> <sp> <nlegs> <hostnqn> <hostid>
-    local cn="$1" ip="$2" sp="$3" nlegs="$4" hnqn="$5" hid="$6"
-    _info "=== create_cntlr_standby $cn $sp ($nlegs legs) ==="
-    local leg grp
-    for leg in $(seq 0 $(( nlegs - 1 ))); do
+create_cntlr_standby() {   # <cn_name> <cn_ip> <sp> <nslices> <hostnqn> <hostid>
+    local cn="$1" ip="$2" sp="$3" nslices="$4" hnqn="$5" hid="$6"
+    _info "=== create_cntlr_standby $cn $sp ($nslices slices) ==="
+    local slice grp
+    for slice in $(seq 0 $(( nslices - 1 ))); do
         for grp in 0 1; do
             # ld0 from dn0, ld1 from dn1.
-            connect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$hnqn" "$hid" "$leg" "$grp"
-            connect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$hnqn" "$hid" "$leg" "$grp"
+            connect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$hnqn" "$hid" "$slice" "$grp"
+            connect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$hnqn" "$hid" "$slice" "$grp"
         done
     done
 }
@@ -1296,25 +1296,25 @@ create_cntlr_standby() {   # <cn_name> <cn_ip> <sp> <nlegs> <hostnqn> <hostid>
 delete_cntlr_standby() {   # <cn_name> <cn_ip> <sp>
     local cn="$1" ip="$2" sp="$3"
     _info "=== delete_cntlr_standby $cn $sp ==="
-    local nlegs="${NLEGS:-2}"
-    local leg
-    for leg in $(seq 0 $(( nlegs - 1 ))); do
+    local nslices="${NSLICES:-2}"
+    local slice
+    for slice in $(seq 0 $(( nslices - 1 ))); do
         local grp
         for grp in 0 1; do
-            disconnect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$leg" "$grp"
-            disconnect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$leg" "$grp"
+            disconnect_ld "$cn" "$ip" dn0 "$DN0_IP" 0 "$slice" "$grp"
+            disconnect_ld "$cn" "$ip" dn1 "$DN1_IP" 1 "$slice" "$grp"
         done
     done
 }
 
-# --- td: create_thin (id 0) or create_snap (src>0) across ALL leg pools ---
+# --- td: create_thin (id 0) or create_snap (src>0) across ALL slice pools ---
 create_td() {   # <cn_name> <cn_ip> <sp> <new_id> <src_id>
     local cn="$1" ip="$2" sp="$3" new_id="$4" src_id="$5"
     _info "=== create_td $cn $sp id=$new_id src=$src_id ==="
     { _emit_vars; echo "CN='$cn'; SP='$sp'; NEW_ID='$new_id'; SRC_ID='$src_id'"; _emit_common; cat <<'EOF_TD'
 set -uo pipefail
-for leg in 0 1; do
-    lp="dnv-${CN}-${SP}-leg${leg}-thinpool"
+for slice in 0 1; do
+    lp="dnv-${CN}-${SP}-slice${slice}-thinpool"
     dm_exists "$lp" || { _warn "no $lp on this cn"; continue; }
     if [ "$SRC_ID" = "0" ] && [ "$NEW_ID" = "0" ]; then
         # create_thin for the default origin.
@@ -1338,8 +1338,8 @@ delete_td() {   # <cn_name> <cn_ip> <sp> <id>
     _info "=== delete_td $cn $sp id=$id ==="
     { _emit_vars; echo "CN='$cn'; SP='$sp'; TD_ID='$id'"; _emit_common; cat <<'EOF_DTD'
 set -uo pipefail
-for leg in 0 1; do
-    lp="dnv-${CN}-${SP}-leg${leg}-thinpool"
+for slice in 0 1; do
+    lp="dnv-${CN}-${SP}-slice${slice}-thinpool"
     dm_exists "$lp" || continue
     sudo dmsetup message "/dev/mapper/$lp" 0 "delete $TD_ID" >/dev/null 2>&1 \
         && _info "deleted td $TD_ID in $lp" \
@@ -1352,7 +1352,7 @@ EOF_DTD
 }
 
 # --- exp_active / exp_standby (cn-side exporter stack + nvmet export) -----
-# exp = raid0 of td thin-devs (per leg) + nvmeof export to host.
+# exp = raid0 of td thin-devs (per slice) + nvmeof export to host.
 #   active:  -real (raid0) -> exp (linear on -real), ANA optimized
 #   standby: -error -> -delay -> exp (linear on -delay), ANA inaccessible
 create_exp_active() {   # <cn_name> <cn_ip> <sp> <td_id> <host_nqn> <host_id> <cntlid_min> <cntlid_max>
@@ -1364,11 +1364,11 @@ prep_node
 
 vp="dnv-${CN}-${SP}-td${TD_ID}-exp0"
 
-# raid0 of the per-leg td thin devices.
+# raid0 of the per-slice td thin devices.
 dm_create "${vp}-real" \
 "0 $SEC_EXP raid raid0 1 $RAID0_CHUNK_SECTORS 2 \
-- /dev/mapper/dnv-${CN}-${SP}-leg0-td${TD_ID} \
-- /dev/mapper/dnv-${CN}-${SP}-leg1-td${TD_ID}"
+- /dev/mapper/dnv-${CN}-${SP}-slice0-td${TD_ID} \
+- /dev/mapper/dnv-${CN}-${SP}-slice1-td${TD_ID}"
 
 # Fault-injection devices, sized like the exp.
 dm_create "${vp}-error" "0 $SEC_EXP error"
@@ -1484,42 +1484,42 @@ EOF_DES
 # So cn1 connects while these devices carry an error table (scan fails instantly)
 # and the real delay table is put back afterwards.
 #
-# leg/grp are explicit params: disarming one group means disarming all its delay
+# slice/grp are explicit params: disarming one group means disarming all its delay
 # devices (the lid x cn loop still runs internally).  grow.sh disarms only the
 # grp2 devices it just created; setup.sh disarms the base groups by looping.
-disarm_ld_delay() {   # <dn_name> <dn_ip> <leg> <grp>
-    local dn="$1" ip="$2" leg="$3" grp="$4"
-    _info "=== disarm_ld_delay $dn (leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; MODE='disarm'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_DLY'
+disarm_ld_delay() {   # <dn_name> <dn_ip> <slice> <grp>
+    local dn="$1" ip="$2" slice="$3" grp="$4"
+    _info "=== disarm_ld_delay $dn (slice$slice grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; MODE='disarm'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_DLY'
 set -uo pipefail
 for lid in 0 1; do
   for cn in cn0 cn1; do
-    d="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-delay-${cn}"
+    d="dnv-${DN}-sp0-slice${SLICE}-grp${GRP}-ld${lid}-delay-${cn}"
     dm_exists "$d" || continue
     [ "$(dm_target "$d")" = "delay" ] || continue
     dm_reload "$d" "0 $SEC_PD error" >/dev/null
   done
 done
-_info "DN ${DN} leg${LEG} grp${GRP}: -delay devices disarmed"
+_info "DN ${DN} slice${SLICE} grp${GRP}: -delay devices disarmed"
 slow_summary
 EOF_DLY
     } | _ssh "${SSH_USER}@${ip}" bash -s
 }
 
-arm_ld_delay() {   # <dn_name> <dn_ip> <leg> <grp>
-    local dn="$1" ip="$2" leg="$3" grp="$4"
-    _info "=== arm_ld_delay $dn (leg$leg grp$grp) ==="
-    { _emit_vars; echo "DN='$dn'; MODE='arm'; LEG='$leg'; GRP='$grp'"; _emit_common; cat <<'EOF_ARM'
+arm_ld_delay() {   # <dn_name> <dn_ip> <slice> <grp>
+    local dn="$1" ip="$2" slice="$3" grp="$4"
+    _info "=== arm_ld_delay $dn (slice$slice grp$grp) ==="
+    { _emit_vars; echo "DN='$dn'; MODE='arm'; SLICE='$slice'; GRP='$grp'"; _emit_common; cat <<'EOF_ARM'
 set -uo pipefail
 for lid in 0 1; do
   for cn in cn0 cn1; do
-    d="dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-delay-${cn}"
+    d="dnv-${DN}-sp0-slice${SLICE}-grp${GRP}-ld${lid}-delay-${cn}"
     dm_exists "$d" || continue
     [ "$(dm_target "$d")" = "delay" ] && continue
-    dm_reload "$d" "0 $SEC_PD delay /dev/mapper/dnv-${DN}-sp0-leg${LEG}-grp${GRP}-ld${lid}-err-${cn} 0 $DELAY_MS" >/dev/null
+    dm_reload "$d" "0 $SEC_PD delay /dev/mapper/dnv-${DN}-sp0-slice${SLICE}-grp${GRP}-ld${lid}-err-${cn} 0 $DELAY_MS" >/dev/null
   done
 done
-_info "DN ${DN} leg${LEG} grp${GRP}: -delay devices armed"
+_info "DN ${DN} slice${SLICE} grp${GRP}: -delay devices armed"
 slow_summary
 EOF_ARM
     } | _ssh "${SSH_USER}@${ip}" bash -s

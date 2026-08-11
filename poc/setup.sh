@@ -2,13 +2,13 @@
 #
 # setup.sh -- build the 6-node distributed-nvme failover test environment (t04).
 #
-#   dn0/dn1 : create_pd (loop file) -> create_ld x4 per dn (leg0/1 x grp0/1,
+#   dn0/dn1 : create_pd (loop file) -> create_ld x4 per dn (slice0/1 x grp0/1,
 #             each for cn0 and cn1).  Each logical disk is exported TWICE, once
 #             per CN, through its own NQN:
 #                 ...-ld<N>-cn0  ->  dm-linear on  -real        (works)
 #                 ...-ld<N>-cn1  ->  dm-linear on  -delay-cn1   (stalls 3600s)
 #             so only cn0 can actually reach the data.
-#   cn0     : active.  create_cntlr_active (calls create_grp x4 -> create_leg x2)
+#   cn0     : active.  create_cntlr_active (calls create_grp x4 -> create_slice x2)
 #             -> create_exp_active (raid0 of td0 thin-devs + nvmet export,
 #             ANA "optimized").
 #   cn1     : standby.  disarm_ld_delay -> create_cntlr_standby (connect_ld x4,
@@ -28,7 +28,7 @@
 set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
-NLEGS=2   # number of legs per storage pool
+NSLICES=2   # number of slices per storage pool
 
 # ===================== data node helpers (dn-side pd/ld) =====================
 setup_dn() {
@@ -37,13 +37,13 @@ setup_dn() {
     create_pd "$dn" "$ip"
     # Create lds for BOTH cns (symmetric fault-injection stack).
     # ld_id encodes which dn it comes from: ld0 -> dn0, ld1 -> dn1.
-    # leg/grp are explicit params to create_ld so grow.sh can add grp2 to a
+    # slice/grp are explicit params to create_ld so grow.sh can add grp2 to a
     # running pool; here we loop the base 2x2 grid.
-    local lid="${dn#dn}" leg grp
-    for leg in 0 1; do
+    local lid="${dn#dn}" slice grp
+    for slice in 0 1; do
         for grp in 0 1; do
-            create_ld "$dn" "$ip" cn0 "$CN0_IP" "$lid" "$leg" "$grp"
-            create_ld "$dn" "$ip" cn1 "$CN1_IP" "$lid" "$leg" "$grp"
+            create_ld "$dn" "$ip" cn0 "$CN0_IP" "$lid" "$slice" "$grp"
+            create_ld "$dn" "$ip" cn1 "$CN1_IP" "$lid" "$slice" "$grp"
         done
     done
 }
@@ -58,7 +58,7 @@ set_host_identity "$MY_HOSTNQN" "$MY_HOSTID"
 EOF_CN0
     } | _ssh "${SSH_USER}@${CN0_IP}" bash -s
 
-    create_cntlr_active cn0 "$CN0_IP" sp0 "$NLEGS" "$HOSTNQN_CN0" "$HOSTID_CN0"
+    create_cntlr_active cn0 "$CN0_IP" sp0 "$NSLICES" "$HOSTNQN_CN0" "$HOSTID_CN0"
     create_exp_active cn0 "$CN0_IP" sp0 0 "$HOSTNQN_HOST0" "$HOSTID_HOST0" 1 255
 }
 
@@ -76,21 +76,21 @@ EOF_CN1
     # kernel scans them -- see disarm_ld_delay for the full explanation.
     # disarm/arm loop the base 2x2 grid; grow.sh disarms only the grp it adds.
     _info "--- disarming DN -delay devices for cn1's namespace scan ---"
-    local _leg _grp
-    for _leg in 0 1; do
+    local _slice _grp
+    for _slice in 0 1; do
         for _grp in 0 1; do
-            disarm_ld_delay dn0 "$DN0_IP" "$_leg" "$_grp"
-            disarm_ld_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+            disarm_ld_delay dn0 "$DN0_IP" "$_slice" "$_grp"
+            disarm_ld_delay dn1 "$DN1_IP" "$_slice" "$_grp"
         done
     done
 
-    create_cntlr_standby cn1 "$CN1_IP" sp0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
+    create_cntlr_standby cn1 "$CN1_IP" sp0 "$NSLICES" "$HOSTNQN_CN1" "$HOSTID_CN1"
 
     _info "--- re-arming DN -delay devices ---"
-    for _leg in 0 1; do
+    for _slice in 0 1; do
         for _grp in 0 1; do
-            arm_ld_delay dn0 "$DN0_IP" "$_leg" "$_grp"
-            arm_ld_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+            arm_ld_delay dn0 "$DN0_IP" "$_slice" "$_grp"
+            arm_ld_delay dn1 "$DN1_IP" "$_slice" "$_grp"
         done
     done
 
@@ -252,11 +252,11 @@ verify_dn() {
     _info "--- verifying DN $dn ---"
     { _emit_vars; echo "DN='$dn'; LD='$lid'"; _emit_common; cat <<'EOF_LDN'
 set -uo pipefail
-for leg in 0 1; do
+for slice in 0 1; do
   for grp in 0 1; do
-    base="dnv-${DN}-sp0-leg${leg}-grp${grp}-ld${LD}"
+    base="dnv-${DN}-sp0-slice${slice}-grp${grp}-ld${LD}"
     VG="dnv-${DN}-sp0-vg"
-    LV="leg${leg}-grp${grp}-ld${LD}-real"
+    LV="slice${slice}-grp${grp}-ld${LD}-real"
     REAL_DEV="/dev/${VG}/${LV}"
     lv_exists "$VG" "$LV" || { _warn "no ${VG}/${LV}"; VERIFY_FAIL=$((VERIFY_FAIL+1)); continue; }
     rd_ok  "$REAL_DEV" "${base}-real (LVM LV on loop-backed VG)"
@@ -281,14 +281,14 @@ verify_cn0() {
     _info "--- verifying CN0 ---"
     { _emit_vars; echo "CN='cn0'"; _emit_common; cat <<'EOF_VCN0'
 set -uo pipefail
-for leg in 0 1; do
-  lp="dnv-${CN}-sp0-leg${leg}"
+for slice in 0 1; do
+  lp="dnv-${CN}-sp0-slice${slice}"
   for grp in 0 1; do
     p="${lp}-grp${grp}"
-    rd_ok "/dev/mapper/${p}-raid1-meta-side0" "${p}-raid1-meta-side0"
-    rd_ok "/dev/mapper/${p}-raid1-data-side0" "${p}-raid1-data-side0"
-    rd_ok "/dev/mapper/${p}-raid1-meta-side1" "${p}-raid1-meta-side1"
-    rd_ok "/dev/mapper/${p}-raid1-data-side1" "${p}-raid1-data-side1"
+    rd_ok "/dev/mapper/${p}-raid1-meta-leg0" "${p}-raid1-meta-leg0"
+    rd_ok "/dev/mapper/${p}-raid1-data-leg0" "${p}-raid1-data-leg0"
+    rd_ok "/dev/mapper/${p}-raid1-meta-leg1" "${p}-raid1-meta-leg1"
+    rd_ok "/dev/mapper/${p}-raid1-data-leg1" "${p}-raid1-data-leg1"
     rd_ok "/dev/mapper/${p}-raid1"            "${p}-raid1"
     _info "raid1 status: $(sudo dmsetup status "${p}-raid1")"
     rd_ok "/dev/mapper/${p}-thinmeta"         "${p}-thinmeta"
@@ -326,10 +326,10 @@ rd_hang "/dev/mapper/${vp}" "${vp}-delay" "${vp} (exported standby volume, via d
 # lives on the DN, so the readers are started here and left running; the caller
 # frees them with a disarm/arm cycle on the DN delay devices right afterwards.
 PIDS=""
-for leg in 0 1; do
+for slice in 0 1; do
   for grp in 0 1; do
     for d in 0 1; do
-      nqn="${NQN_PREFIX}:dn:dn${d}:sp0-leg${leg}-grp${grp}-ld${d}-${CN}"
+      nqn="${NQN_PREFIX}:dn:dn${d}:sp0-slice${slice}-grp${grp}-ld${d}-${CN}"
       dev=$(nvme_dev_by_nqn "$nqn") || { _warn "no device for $nqn"; continue; }
       sudo dd if="$dev" of=/dev/null bs=4096 count=1 status=none >/dev/null 2>&1 &
       PIDS="$PIDS $!:$nqn"
@@ -439,16 +439,16 @@ main() {
             # verify_cn1 deliberately leaves eight readers blocked on the DN
             # delay devices; flush them so nothing is left in D-state.
             _info "--- releasing cn1's blocked readers ---"
-            for _leg in 0 1; do
+            for _slice in 0 1; do
                 for _grp in 0 1; do
-                    disarm_ld_delay dn0 "$DN0_IP" "$_leg" "$_grp"
-                    disarm_ld_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+                    disarm_ld_delay dn0 "$DN0_IP" "$_slice" "$_grp"
+                    disarm_ld_delay dn1 "$DN1_IP" "$_slice" "$_grp"
                 done
             done
-            for _leg in 0 1; do
+            for _slice in 0 1; do
                 for _grp in 0 1; do
-                    arm_ld_delay dn0 "$DN0_IP" "$_leg" "$_grp"
-                    arm_ld_delay dn1 "$DN1_IP" "$_leg" "$_grp"
+                    arm_ld_delay dn0 "$DN0_IP" "$_slice" "$_grp"
+                    arm_ld_delay dn1 "$DN1_IP" "$_slice" "$_grp"
                 done
             done
             ;;

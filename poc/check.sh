@@ -2,7 +2,7 @@
 #
 # check.sh -- thin-pool block-allocation audit.
 #
-# After `setup.sh all` + a short `host0_io.sh` run, dumps each leg's thin-pool
+# After `setup.sh all` + a short `host0_io.sh` run, dumps each slice's thin-pool
 # metadata with `thin_dump`, derives 8 LD bitmaps (one bit per 4 MiB LD block)
 # via ld_bitmap.py, then on cn0 reads each marked block directly from the LDs
 # (O_DIRECT + preadv, consistent with host0_io.sh -- NOT dd) and confirms it
@@ -14,7 +14,7 @@
 #
 # Phases (each wrapped with _t + slow_summary):
 #   1. cn0: suspend each thin-pool, thin_dump the thinmeta, resume.  Capture
-#      XML to /tmp/dnv-check/thin_dump_leg{0,1}.xml.
+#      XML to /tmp/dnv-check/thin_dump_slice{0,1}.xml.
 #   2. local: run ld_bitmap.py to derive the 8 .bit files.
 #   3. cn0: scp the 8 bitmaps over, run a minimal Python verifier that reads
 #      each set block on the 8 -cn0 LD devices and checks non-zero.  Emits one
@@ -44,24 +44,24 @@ slow_summary() { :; }
 
 # ===================== Phase 1: dump thin-pool metadata ======================
 # Precondition: the cn0 thin-pools must exist (i.e. setup.sh all was run).
-# Per leg: minimal direct SSH (no _emit_common heredoc).  Reserving a metadata
+# Per slice: minimal direct SSH (no _emit_common heredoc).  Reserving a metadata
 # snapshot makes the thinmeta readable while the pool is active (thin_dump on a
 # live pool's metadata device fails with EBUSY otherwise); thin_dump reads the
 # metadata-snap of the concat thinmeta; the snap is released afterwards.
 # thin_dump writes its XML to stdout (the only thing there); dmsetup noise is
 # silenced on the remote.  Capture stdout to a mktemp file, validate non-empty,
-# then mv to thin_dump_leg${leg}.xml.
+# then mv to thin_dump_slice${slice}.xml.
 phase1_dump() {
     _info "=== 1. cn0: dump thin-pool metadata ==="
-    local leg thinpool thinmeta tmp rc
-    for leg in 0 1; do
-        thinpool="dnv-cn0-sp0-leg${leg}-thinpool"
+    local slice thinpool thinmeta tmp rc
+    for slice in 0 1; do
+        thinpool="dnv-cn0-sp0-slice${slice}-thinpool"
         if ! _ssh "${SSH_USER}@${CN0_IP}" "sudo dmsetup info '${thinpool}' >/dev/null 2>&1"; then
             _fail "run setup.sh all first (${thinpool} missing on cn0)"
         fi
-        thinmeta="dnv-cn0-sp0-leg${leg}-thinmeta"
+        thinmeta="dnv-cn0-sp0-slice${slice}-thinmeta"
         tmp="$(mktemp -p "${WORK_DIR}")"
-        _t "thin_dump leg${leg}" _ssh "${SSH_USER}@${CN0_IP}" "
+        _t "thin_dump slice${slice}" _ssh "${SSH_USER}@${CN0_IP}" "
             sudo dmsetup message ${thinpool} 0 reserve_metadata_snap 2>/dev/null
             sudo thin_dump --metadata-snap /dev/mapper/${thinmeta}
             rc=\$?
@@ -71,10 +71,10 @@ phase1_dump() {
         rc=$?
         if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
             rm -f "$tmp"
-            _fail "thin_dump for leg${leg} failed or produced empty output (rc=$rc)"
+            _fail "thin_dump for slice${slice} failed or produced empty output (rc=$rc)"
         fi
-        mv "$tmp" "${WORK_DIR}/thin_dump_leg${leg}.xml"
-        _info "leg${leg}: $(wc -c < "${WORK_DIR}/thin_dump_leg${leg}.xml") bytes of thin_dump XML"
+        mv "$tmp" "${WORK_DIR}/thin_dump_slice${slice}.xml"
+        _info "slice${slice}: $(wc -c < "${WORK_DIR}/thin_dump_slice${slice}.xml") bytes of thin_dump XML"
     done
     slow_summary
 }
@@ -130,29 +130,29 @@ BLOCK = 4 * 1024 * 1024          # 4 MiB, matches POOL_BLOCK_SECTORS
 NQN_PREFIX = "nqn.2026-07.org.dnv"
 
 # 8 LDs (one per -real device).  ld0 lives on dn0, ld1 on dn1; for each
-# (leg, grp) pair both ld0 and ld1 get a bitmap (raid1 mirror = same blocks
-# on both sides).  On cn0 each LD is imported as an nvme namespace under the
-# NQN nqn...:dn:<dn>:sp0-leg<leg>-grp<grp>-ld<ld>-cn0; the verifier resolves
+# (slice, grp) pair both ld0 and ld1 get a bitmap (raid1 mirror = same blocks
+# on both legs).  On cn0 each LD is imported as an nvme namespace under the
+# NQN nqn...:dn:<dn>:sp0-slice<slice>-grp<grp>-ld<ld>-cn0; the verifier resolves
 # that namespace through sysfs and reads its 4 MiB blocks (the bitmap offsets
 # are relative to the LD start, which is exactly the namespace offset 0).
 LDS = [
-    "dnv-dn0-sp0-leg0-grp0-ld0",
-    "dnv-dn0-sp0-leg0-grp1-ld0",
-    "dnv-dn0-sp0-leg1-grp0-ld0",
-    "dnv-dn0-sp0-leg1-grp1-ld0",
-    "dnv-dn1-sp0-leg0-grp0-ld1",
-    "dnv-dn1-sp0-leg0-grp1-ld1",
-    "dnv-dn1-sp0-leg1-grp0-ld1",
-    "dnv-dn1-sp0-leg1-grp1-ld1",
+    "dnv-dn0-sp0-slice0-grp0-ld0",
+    "dnv-dn0-sp0-slice0-grp1-ld0",
+    "dnv-dn0-sp0-slice1-grp0-ld0",
+    "dnv-dn0-sp0-slice1-grp1-ld0",
+    "dnv-dn1-sp0-slice0-grp0-ld1",
+    "dnv-dn1-sp0-slice0-grp1-ld1",
+    "dnv-dn1-sp0-slice1-grp0-ld1",
+    "dnv-dn1-sp0-slice1-grp1-ld1",
 ]
 
 NS_RE = re.compile(r"^nvme\d+n\d+$")
 
 def label_to_nqn(label):
-    # dnv-<dn>-sp0-leg<L>-grp<G>-ld<V> -> nqn...:dn:<dn>:sp0-leg<L>-grp<G>-ld<V>-cn0
+    # dnv-<dn>-sp0-slice<L>-grp<G>-ld<V> -> nqn...:dn:<dn>:sp0-slice<L>-grp<G>-ld<V>-cn0
     parts = label.split("-")
     dn = parts[1]
-    rest = "-".join(parts[2:])     # sp0-leg<L>-grp<G>-ld<V>
+    rest = "-".join(parts[2:])     # sp0-slice<L>-grp<G>-ld<V>
     return "%s:dn:%s:%s-cn0" % (NQN_PREFIX, dn, rest)
 
 def find_dev(nqn):

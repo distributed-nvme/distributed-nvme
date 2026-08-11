@@ -5,7 +5,7 @@
 Create `check.sh` + `poc/ld_bitmap.py` under `poc/` that, after `setup.sh all`
 + a short `host0_io.sh` run, audits the thin-pool's allocated data blocks
 against what was physically written to the LDs on cn0. The audit dumps each
-leg's thin-pool metadata with `thin_dump`, derives an 8-LD bitmap (one bit per
+slice's thin-pool metadata with `thin_dump`, derives an 8-LD bitmap (one bit per
 4 MiB LD block), then on cn0 reads each marked 4 MiB block directly from the
 LDs and confirms it is non-zero (i.e. actually written, not thin-pool
 zero-fill for an unallocated region).
@@ -26,14 +26,14 @@ setup.sh all  ->  host0_io.sh start (~10s) -> host0_io.sh stop  ->  ./check.sh
 |---|----------|--------|
 | 1 | Requirement #4 (meta sizes multiples of 4MB) | Audit-only: all `SEC_RMETA`/`SEC_TMETA`/`SEC_POOL_META` (and every other `SEC_*`) are already multiples of 4 MiB; no `SEC_*` edits required |
 | 2 | The three tunables | Change only `RAID_REGION_SECTORS`/`POOL_BLOCK_SECTORS`/`RAID0_CHUNK_SECTORS` in `common.sh` lines 77-79 + add unit-notation comments. Inlined tables in `common.sh`/`failover.sh`/`grow.sh` reference the variable names and pick up the new values via `_emit_vars` automatically |
-| 3 | Number of bitmaps | 8, one per `-real` LD (`dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>-real`): 4 on dn0 (ld0), 4 on dn1 (ld1) |
+| 3 | Number of bitmaps | 8, one per `-real` LD (`dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>-real`): 4 on dn0 (ld0), 4 on dn1 (ld1) |
 | 4 | Tool for "blocks written" | `thin_dump` (not `thin_ls`). Emits full b-tree mapping XML |
-| 5 | Consistent dump | Suspend pool -> `thin_dump` the concat thinmeta -> resume. Per leg. Pool is idle (host0_io stopped) so no in-flight I/O; suspend forces metadata commit |
+| 5 | Consistent dump | Suspend pool -> `thin_dump` the concat thinmeta -> resume. Per slice. Pool is idle (host0_io stopped) so no in-flight I/O; suspend forces metadata commit |
 | 6 | thin-provisioning-tools install | Skipped: `thin_dump` is already on cn0. Call it directly |
 | 7 | Bitmap coverage | Option A: full 125-block LD bitmap (500 MiB / 4 MiB = 125). Bits 0..2 always 0 (raid1-meta + 8 MiB thinmeta), bits 3..124 reflect thindata allocation |
 | 8 | Bitmap file format | Bitstring text, 125 ASCII '0'/'1' chars + trailing `\n` (126 bytes). Bit 0 = leftmost (low offset), bit 124 = rightmost. Human-readable, `diff`-able, matches the repo's plain-text artifact convention |
-| 9 | Bitmap filenames | `dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>.bit` (matches `-real` LV identity) |
-| 10 | XML dump filenames | `thin_dump_leg0.xml`, `thin_dump_leg1.xml` |
+| 9 | Bitmap filenames | `dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>.bit` (matches `-real` LV identity) |
+| 10 | XML dump filenames | `thin_dump_slice0.xml`, `thin_dump_slice1.xml` |
 | 11 | Working dir | `/tmp/dnv-check/` on the orchestrator (and on cn0 for the Phase 3 bitmaps). Cleaned at start of each `check.sh` run |
 | 12 | Step 10 verification | Non-zero check (Option a): for each set bit, read the 4 MiB block, confirm at least one byte is non-zero. Not byte-pattern replay (Option b) — too fragile to host0_io's stripe pattern |
 | 13 | Read mechanism on cn0 | Python `os.O_DIRECT` + `preadv` on a 4 MiB page-aligned `mmap` buffer (NOT `dd`; `dd iflag=direct` is broken per AGENTS.md). Consistent with `host0_io.sh` |
@@ -41,7 +41,7 @@ setup.sh all  ->  host0_io.sh start (~10s) -> host0_io.sh stop  ->  ./check.sh
 | 15 | Verification scope | Set-bits-only: read only blocks the bitmap marks as written. No reverse check on unset bits |
 | 16 | XML parsing | Union of `[data_begin, data_end)` ranges across ALL `<device>` elements (not just dev_id=0). Handles future tds; semantically a data block is "written" if any thin device references it |
 | 17 | Empty-pool handling | Defensive: empty XML / no mappings -> all-zero bitmaps + warning, not a crash |
-| 18 | Block->bit formula | For leg L, allocated pool data block `N`: `grp = N // 122`, `blk = N % 122` (488 MiB / 4 MiB = 122), set bit `3 + blk` on both `ld0` (dn0) and `ld1` (dn1) for that `(leg,grp)` (raid1 mirror = same blocks on both sides) |
+| 18 | Block->bit formula | For slice L, allocated pool data block `N`: `grp = N // 122`, `blk = N % 122` (488 MiB / 4 MiB = 122), set bit `3 + blk` on both `ld0` (dn0) and `ld1` (dn1) for that `(slice,grp)` (raid1 mirror = same blocks on both legs) |
 | 19 | check.sh structure | `source ./common.sh`; no args; precondition check; clean `/tmp/dnv-check/` at start; 3 phases each wrapped with `_t` + `slow_summary` |
 | 20 | Phase 1 SSH style | Option B: minimal direct SSH (no `_emit_common` heredoc). Only suspend/dump/resume; capture thin_dump stdout; silence dmsetup status noise |
 | 21 | Phase 3 SSH style | Minimal heredoc (no `_emit_common`); bake LD device paths + bitmap dir in as Python literals |
@@ -74,7 +74,7 @@ RAID0_CHUNK_SECTORS=32    # 16K raid0 chunk_size      (32 * 512B = 16KiB)
 No `SEC_*` changes. The `_emit_vars` block (lines 125-127) ships these to each
 node; inlined tables in `common.sh:1153` (raid1), `common.sh:1217`
 (thin-pool), `common.sh:1369` (raid0), `failover.sh:276` (cn1 rebuild raid0),
-and `grow.sh:147` (leg0 pool extension) reference the variable names, so they
+and `grow.sh:147` (slice0 pool extension) reference the variable names, so they
 pick up the new values automatically.
 
 Alignment audit (all already multiples of 4 MiB = 8192 sectors):
@@ -100,7 +100,7 @@ Failover safety: `failover.sh` step 6 rebuilds cn1's raid1 by zeroing the 4 MiB
 raid1 metadata areas (`zero_head <dev> 4` zeros 4 MiB = the whole metadata
 device) and re-assembling with `nosync`. The `region_size` change is safe:
 the bitmap structure changes but cn1 zeroes the metadata first and declares
-the array in-sync (both sides were mirrored by cn0 up to the handover).
+the array in-sync (both legs were mirrored by cn0 up to the handover).
 
 ### 3.2 `grow.sh` -- fix stale comment (line 145)
 
@@ -123,7 +123,7 @@ One new row:
 
 | script | usage | what it does |
 |---|---|---|
-| `check.sh` | `./check.sh` | Thin-pool block-allocation audit. Dumps each leg's thin-pool metadata with `thin_dump`, derives 8 LD bitmaps (one bit per 4 MiB LD block), reads each marked block on cn0 and confirms it is non-zero. Run after `setup.sh all` + a short `host0_io.sh` run. Exit 0 = all allocated blocks verified written. |
+| `check.sh` | `./check.sh` | Thin-pool block-allocation audit. Dumps each slice's thin-pool metadata with `thin_dump`, derives 8 LD bitmaps (one bit per 4 MiB LD block), reads each marked block on cn0 and confirms it is non-zero. Run after `setup.sh all` + a short `host0_io.sh` run. Exit 0 = all allocated blocks verified written. |
 
 No other note.md edit: the tuning change does not alter the architecture or
 the §4 size table; §13 mentions `region_size`/`skip_block_zeroing`/`nosync`
@@ -138,18 +138,18 @@ python3 poc/ld_bitmap.py [<work_dir>]
     <work_dir> defaults to /tmp/dnv-check/
 ```
 
-Reads `thin_dump_leg0.xml` + `thin_dump_leg1.xml` from `<work_dir>`, writes 8
+Reads `thin_dump_slice0.xml` + `thin_dump_slice1.xml` from `<work_dir>`, writes 8
 bitstring files to `<work_dir>`:
 
 ```
-dnv-dn0-sp0-leg0-grp0-ld0.bit
-dnv-dn0-sp0-leg0-grp1-ld0.bit
-dnv-dn0-sp0-leg1-grp0-ld0.bit
-dnv-dn0-sp0-leg1-grp1-ld0.bit
-dnv-dn1-sp0-leg0-grp0-ld1.bit
-dnv-dn1-sp0-leg0-grp1-ld1.bit
-dnv-dn1-sp0-leg1-grp0-ld1.bit
-dnv-dn1-sp0-leg1-grp1-ld1.bit
+dnv-dn0-sp0-slice0-grp0-ld0.bit
+dnv-dn0-sp0-slice0-grp1-ld0.bit
+dnv-dn0-sp0-slice1-grp0-ld0.bit
+dnv-dn0-sp0-slice1-grp1-ld0.bit
+dnv-dn1-sp0-slice0-grp0-ld1.bit
+dnv-dn1-sp0-slice0-grp1-ld1.bit
+dnv-dn1-sp0-slice1-grp0-ld1.bit
+dnv-dn1-sp0-slice1-grp1-ld1.bit
 ```
 
 Each file: 125 ASCII '0'/'1' chars + trailing `\n` (126 bytes). Bit 0 =
@@ -159,17 +159,17 @@ leftmost (LD offset `[0,4MiB)` = raid1-meta), bit 124 = rightmost (offset
 Parsing logic:
 
 ```
-for leg in {0,1}:
-    parse thin_dump_leg{leg}.xml
+for slice in {0,1}:
+    parse thin_dump_slice{slice}.xml
     allocated = union of [data_begin, data_end) over all <range_mapping>
                 across all <device> elements  (empty pool -> empty set)
     for N in allocated:
         grp = N // 122          # 488MiB / 4MiB = 122 blocks per grp's thindata
         blk = N % 122
         ld_bit = 3 + blk        # skip raid1-meta (1) + thinmeta (2) = 3 blocks
-        # raid1 mirror: same block on both sides (ld0 on dn0, ld1 on dn1)
-        bitmap[dn0][leg][grp][ld0].set(ld_bit)
-        bitmap[dn1][leg][grp][ld1].set(ld_bit)
+        # raid1 mirror: same block on both legs (ld0 on dn0, ld1 on dn1)
+        bitmap[dn0][slice][grp][ld0].set(ld_bit)
+        bitmap[dn1][slice][grp][ld1].set(ld_bit)
 ```
 
 Empty pool -> all-zero bitmaps + a warning on stderr, exit 0 (not a crash).
@@ -186,18 +186,18 @@ No args. Clean `/tmp/dnv-check/` at start (both orchestrator and cn0).
 
 **Phase 1 -- dump thin-pool metadata (step 8):**
 
-Precondition: `dm_exists dnv-cn0-sp0-leg{0,1}-thinpool` on cn0 via SSH,
+Precondition: `dm_exists dnv-cn0-sp0-slice{0,1}-thinpool` on cn0 via SSH,
 else `_fail "run setup.sh all first"`.
 
-Per leg (0,1): minimal direct SSH (no `_emit_common` heredoc):
+Per slice (0,1): minimal direct SSH (no `_emit_common` heredoc):
 ```
-sudo dmsetup suspend dnv-cn0-sp0-leg${leg}-thinpool 2>/dev/null
-sudo thin_dump /dev/mapper/dnv-cn0-sp0-leg${leg}-thinmeta
-sudo dmsetup resume dnv-cn0-sp0-leg${leg}-thinpool 2>/dev/null
+sudo dmsetup suspend dnv-cn0-sp0-slice${slice}-thinpool 2>/dev/null
+sudo thin_dump /dev/mapper/dnv-cn0-sp0-slice${slice}-thinmeta
+sudo dmsetup resume dnv-cn0-sp0-slice${slice}-thinpool 2>/dev/null
 ```
 Capture `thin_dump` stdout (the only thing on stdout) to a mktemp file,
-validate non-empty, `mv` to `/tmp/dnv-check/thin_dump_leg${leg}.xml`. Wrap
-with `_t "thin_dump leg$leg"`. `slow_summary` at phase end.
+validate non-empty, `mv` to `/tmp/dnv-check/thin_dump_slice${slice}.xml`. Wrap
+with `_t "thin_dump slice$slice"`. `slow_summary` at phase end.
 
 **Phase 2 -- derive 8 LD bitmaps (step 9):**
 
@@ -211,13 +211,13 @@ Run locally on the orchestrator. Produces 8 `.bit` files in `/tmp/dnv-check/`.
 
 `scp` the 8 `.bit` files to cn0 `/tmp/dnv-check/`. Emit a minimal Python
 verifier heredoc on cn0 (no `_emit_common`); bake the 8 LD device paths
-(`/dev/mapper/dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>-cn0`) and the bitmap dir
+(`/dev/mapper/dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>-cn0`) and the bitmap dir
 in as Python literals. Run it, capture JSONL output. Wrap with
 `_t "verify LDs on cn0"`. `slow_summary` at phase end.
 
 Verifier logic (per LD):
 1. Read the 125-char bitstring from `/tmp/dnv-check/dnv-<dn>-...-ld<ld>.bit`.
-2. Open `/dev/mapper/dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>-cn0` with `O_RDWR|O_DIRECT` (or `O_RDONLY`).
+2. Open `/dev/mapper/dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>-cn0` with `O_RDWR|O_DIRECT` (or `O_RDONLY`).
 3. `mmap.mmap(-1, 4*1024*1024)` a 4 MiB page-aligned buffer.
 4. For each set bit B (0..124): `os.preadv(fd, [buf], B * 4MiB)`, check the buffer has at least one non-zero byte.
 5. Emit one JSON line: `{"ld":"dnv-...","set":N,"verified":M,"zero":K,"status":"ok|empty|missing_device|read_error|fail"}`.
@@ -247,7 +247,7 @@ After the verifier runs, `check.sh`:
 
 ## 5. Geometry reference (for the verifier)
 
-Within one LD (`dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>-real`, 500 MiB):
+Within one LD (`dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>-real`, 500 MiB):
 
 ```
 offset  0       4MiB    8MiB    12MiB                 500MiB
@@ -265,25 +265,25 @@ offset  0       4MiB    8MiB    12MiB                 500MiB
 - ...
 - Block 124 = `[496MiB, 500MiB)` = thindata block 121 (last).
 
-Per leg, the thin-pool's 976 MiB thindata concat = grp0-thindata (488 MiB) +
+Per slice, the thin-pool's 976 MiB thindata concat = grp0-thindata (488 MiB) +
 grp1-thindata (488 MiB) = 244 data blocks (IDs 0..243, each 4 MiB):
 - IDs 0..121 -> grp0-thindata -> LD bit `3 + ID`.
 - IDs 122..243 -> grp1-thindata -> LD bit `3 + (ID - 122)`.
 
 Each grp's thindata lives on that grp's raid1, mirrored across ld0 (dn0) and
-ld1 (dn1). So a set bit on the `ld0` bitmap for `(leg,grp)` is also set on the
-`ld1` bitmap for the same `(leg,grp)`.
+ld1 (dn1). So a set bit on the `ld0` bitmap for `(slice,grp)` is also set on the
+`ld1` bitmap for the same `(slice,grp)`.
 
 ## 6. Expected result (10 s of host0_io)
 
 `host0_io.sh` writes 1 MiB at rotating slots 0..63 MiB + a 1 MiB anchor at
-512 MiB. Through the raid0 (chunk=16 KiB, 2 legs), each 1 MiB host write
-stripes across both legs (~512 KiB per leg per write). The 64 MiB rotating
-range stripes to ~32 MiB per leg, fitting entirely within grp0's 488 MiB
-thindata. The anchor at 512 MiB -> one 4 MiB block per leg (thin device block
+512 MiB. Through the raid0 (chunk=16 KiB, 2 slices), each 1 MiB host write
+stripes across both slices (~512 KiB per slice per write). The 64 MiB rotating
+range stripes to ~32 MiB per slice, fitting entirely within grp0's 488 MiB
+thindata. The anchor at 512 MiB -> one 4 MiB block per slice (thin device block
 128 -> pool data block 128 -> grp1, since 128 >= 122).
 
-So per leg, ~9-17 allocated 4 MiB blocks (rotating slots + the anchor), all
+So per slice, ~9-17 allocated 4 MiB blocks (rotating slots + the anchor), all
 in grp0's thindata (IDs 0..121) plus one in grp1 (the anchor at ID 128).
 grp1's LD bitmaps are nearly all-zero except the anchor block. grp0's LD
 bitmaps have ~8-16 set bits.
@@ -297,7 +297,7 @@ non-zero check is valid: it never produces false failures on this write
 pattern.
 
 Expected `check.sh` output: exit 0, ~4 LDs with `ok` (grp0 LDs on dn0+dn1 for
-both legs, each with ~8-16 set blocks), ~4 LDs with `empty` or near-empty
+both slices, each with ~8-16 set blocks), ~4 LDs with `empty` or near-empty
 (grp1 LDs), 0 zero-block mismatches.
 
 ## 7. Execution flow (on the live 6-VM testbed)

@@ -114,7 +114,7 @@ EOF_REF0
 }
 
 # CN teardown uses common.sh delete_* primitives (reverse recipe).
-# delete_exp_* -> delete_cntlr_* -> (delete_leg/delete_grp/disconnect_ld inside)
+# delete_exp_* -> delete_cntlr_* -> (delete_slice/delete_grp/disconnect_ld inside)
 teardown_cn() {
     local ip="$1" cn="$2"
     _info "=== tearing down $cn ($ip) ==="
@@ -122,7 +122,7 @@ teardown_cn() {
     # normal layout).  Both are idempotent and safe on partial systems.
     delete_exp_active  "$cn" "$ip" sp0 0  2>/dev/null || true
     delete_exp_standby "$cn" "$ip" sp0 0  2>/dev/null || true
-    # delete_cntlr_active removes the grp/leg/thinpool stack; delete_cntlr_standby
+    # delete_cntlr_active removes the grp/slice/thinpool stack; delete_cntlr_standby
     # disconnects the lds.  Run both so the right one cleans up the right
     # resources regardless of which side this cn was on.
     delete_cntlr_active  "$cn" "$ip" sp0 2>/dev/null || true
@@ -151,14 +151,14 @@ teardown_dn() {
     local ip="$1" dn="$2"
     _info "=== tearing down $dn ($ip) ==="
     # delete_ld removes the dm stack + nvmet subsystems for both cns, per
-    # (leg,grp).  Loop the base 2x2 grid; the topology-agnostic safety nets in
+    # (slice,grp).  Loop the base 2x2 grid; the topology-agnostic safety nets in
     # delete_pd (nvmet_remove_all_dnv_subsys) and dnv_remove_all_dm catch any
     # stragglers beyond it (e.g. grp2 added by grow.sh).
-    local lid="${dn#dn}" leg grp
-    for leg in 0 1; do
+    local lid="${dn#dn}" slice grp
+    for slice in 0 1; do
         for grp in 0 1; do
-            delete_ld "$dn" "$ip" cn0 "$CN0_IP" "$lid" "$leg" "$grp" 2>/dev/null || true
-            delete_ld "$dn" "$ip" cn1 "$CN1_IP" "$lid" "$leg" "$grp" 2>/dev/null || true
+            delete_ld "$dn" "$ip" cn0 "$CN0_IP" "$lid" "$slice" "$grp" 2>/dev/null || true
+            delete_ld "$dn" "$ip" cn1 "$CN1_IP" "$lid" "$slice" "$grp" 2>/dev/null || true
         done
     done
     delete_pd "$dn" "$ip"

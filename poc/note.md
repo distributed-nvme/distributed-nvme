@@ -36,12 +36,12 @@ volume.
 | --- | --- | --- | --- |
 | **pd** | physical disk | A 4 GB loop file on a DN. Backing store for everything. One per DN. | loop file |
 | **ld** | logical disk | A 500 MB slice carved from the pd, plus a symmetric fault-injection pair (`-real` / `-err` / `-delay`) per CN, exported to one CN via NVMe-oF. The `-real` slice is an LVM LV in `dnv-<dn>-sp0-vg` (the loop is the PV); `-err`/`-delay`/`-cn` are plain dmsetup devices stacked on it. Identified by `ld_id` (0 = from dn0, 1 = from dn1). | `ld0` / `ld1` |
-| **grp** | group | One raid1 mirror (two LDs, one from each DN) plus the thin-pool metadata/data slices carved from it. A group is the unit of mirroring; there are two per leg (`grp0`, `grp1`). | `grp0` / `grp1` |
-| **leg** | leg | The raid0 underlying disk. One leg = the concatenation of both groups' thin-pool slices into one thin-pool, plus the default thin device (td 0). There are two legs per sp (`leg0`, `leg1`). | `stripe0` / `stripe1` |
-| **side** | side | One half of a raid1 mirror. A group's raid1 has two sides: `side0` (LD from dn0) and `side1` (LD from dn1). "Side" replaces the ambiguous "leg" used in t03 raid1 comments. | `ld0` / `ld1` (raid1 "leg") |
-| **sp** | storage pool | The container: N legs × M groups × thin-pool + tds + one raid0 export. `sp0` is the only sp in this POC. A sp is what a host sees as a single NVMe namespace. | `vol0` |
-| **td** | thin device | A thin-device id inside a sp, shared across all legs. `td 0` is the live writable origin (created by `create_thin 0`). Higher ids are derived thin devices (created by `create_snap <new> <src>`). | `thin 23` |
-| **exp** | exporter | The top-level device exported to the host: a raid0 of the per-leg td thin-devs, plus fault-injection (`-real` / `-error` / `-delay`) and an nvmet subsystem. `exp0` is the only exp. | `${vp}` exported volume |
+| **grp** | group | One raid1 mirror (two LDs, one from each DN) plus the thin-pool metadata/data slices carved from it. A group is the unit of mirroring; there are two per slice (`grp0`, `grp1`). | `grp0` / `grp1` |
+| **slice** | slice | The raid0 underlying disk. One slice = the concatenation of both groups' thin-pool metadata and data devices into one thin-pool, plus the default thin device (td 0). There are two slices per sp (`slice0`, `slice1`). | `stripe0` / `stripe1` |
+| **leg** | leg | One half of a raid1 mirror. A group's raid1 has two legs: `leg0` (LD from dn0) and `leg1` (LD from dn1). t03 overloaded "leg" for both raid0 and raid1; this POC splits them into `slice` (raid0) and `leg` (raid1). | `ld0` / `ld1` |
+| **sp** | storage pool | The container: N slices × M groups × thin-pool + tds + one raid0 export. `sp0` is the only sp in this POC. A sp is what a host sees as a single NVMe namespace. | `vol0` |
+| **td** | thin device | A thin-device id inside a sp, shared across all slices. `td 0` is the live writable origin (created by `create_thin 0`). Higher ids are derived thin devices (created by `create_snap <new> <src>`). | `thin 23` |
+| **exp** | exporter | The top-level device exported to the host: a raid0 of the per-slice td thin-devs, plus fault-injection (`-real` / `-error` / `-delay`) and an nvmet subsystem. `exp0` is the only exp. | `${vp}` exported volume |
 
 ### 2.3 Other recurring terms
 
@@ -109,9 +109,9 @@ line is a device-mapper target or an nvmet export.
                             |                         standby path)
                    +--------+--------+
                    |                 |
-             leg0-td0          leg1-td0          (dm-thin, 1 GB each)
+             slice0-td0          slice1-td0          (dm-thin, 1 GB each)
                    |                 |
-             leg0-thinpool      leg1-thinpool        (dm-thin-pool, 976 MB)
+             slice0-thinpool      slice1-thinpool        (dm-thin-pool, 976 MB)
                    |                 |
           +--------+--------+  +-----+-----+
           |                 |  |           |
@@ -119,8 +119,8 @@ line is a device-mapper target or an nvmet export.
           |                 |
      grp0-raid1       grp0-raid1  (dm-raid1, 496 MB)
           |                 |
-     raid1-meta-side0  raid1-data-side0  (dm-linear on ld0)
-     raid1-meta-side1  raid1-data-side1  (dm-linear on ld1)
+     raid1-meta-leg0  raid1-data-leg0  (dm-linear on ld0)
+     raid1-meta-leg1  raid1-data-leg1  (dm-linear on ld1)
           |                 |
          ld0               ld1   (NVMe namespaces imported from dn0, dn1)
 ```
@@ -130,22 +130,22 @@ line is a device-mapper target or an nvmet export.
 1. **pd** (loop file on each DN, 4 GB) → carved into four 500 MB slices
 2. **ld** (500 MB slice + fault-injection pair) → exported via NVMe-oF to a CN
 3. **grp** (two LDs → raid1 → thinmeta/thindata slices) → the mirror unit
-4. **leg** (two grps → concat → thin-pool → td0 thin device) → one stripe of the raid0
-5. **exp** (two legs → raid0 → dm-linear → nvmet export) → what the host sees
+4. **slice** (two grps → concat → thin-pool → td0 thin device) → one stripe of the raid0
+5. **exp** (two slices → raid0 → dm-linear → nvmet export) → what the host sees
 
 **Key sizes** (512 B sectors):
 
 | object | size | note |
 | --- | --- | --- |
 | pd | 4 GB | loop file |
-| ld | 500 MB = 1 024 000 | one slice per (leg, grp) |
-| raid1 metadata | 4 MB = 8 192 | per side |
-| raid1 data | 496 MB = 1 015 808 | per side |
+| ld | 500 MB = 1 024 000 | one LD per (slice, grp) pair |
+| raid1 metadata | 4 MB = 8 192 | per leg |
+| raid1 data | 496 MB = 1 015 808 | per leg |
 | thin-pool metadata | 8 MB = 16 384 | per grp |
 | thin-pool data | 488 MB = 999 424 | per grp |
-| thin-pool (concat) | 976 MB = 1 998 848 | per leg (2 grps) |
-| td0 (thin device) | 1 GB = 2 097 152 | per leg |
-| exp (raid0) | 2 GB = 4 194 304 | 2 legs × 1 GB |
+| thin-pool (concat) | 976 MB = 1 998 848 | per slice (2 grps) |
+| td0 (thin device) | 1 GB = 2 097 152 | per slice |
+| exp (raid0) | 2 GB = 4 194 304 | 2 slices × 1 GB |
 
 The 2 GB raid0 is thin-provisioned over 2 × 976 MB ≈ 1.9 GB, so writes must
 stay under ~1.9 GB. `host0_io.sh` uses the first 64 MB (rotating slots) plus
@@ -180,30 +180,30 @@ identical names.
 ### 6.1 DN-side dm devices
 
 ```
-dnv-<dn>-sp0-leg<leg>-grp<grp>-ld<ld>          (base, no -cn suffix)
+dnv-<dn>-sp0-slice<slice>-grp<grp>-ld<ld>          (base, no -cn suffix)
     + -real                                     LVM LV in dnv-<dn>-sp0-vg (PV = loop)
     + -err-cn0, -err-cn1                        dm-error
     + -delay-cn0, -delay-cn1                    dm-delay on -err
     + -cn0, -cn1                                dm-linear (exported to each CN)
 ```
 
-Example: `dnv-dn0-sp0-leg0-grp0-ld0-cn0` is the device dn0 exports to cn0,
-for leg 0, grp 0, ld 0 (from dn0).
+Example: `dnv-dn0-sp0-slice0-grp0-ld0-cn0` is the device dn0 exports to cn0,
+for slice 0, grp 0, ld 0 (from dn0).
 
 ### 6.2 CN-side dm devices
 
 ```
-dnv-<cn>-sp0-leg<leg>-grp<grp>-raid1-side<side>
-    + -meta-side<side>, -data-side<side>        dm-linear slices of the LD
+dnv-<cn>-sp0-slice<slice>-grp<grp>-raid1-leg<leg>
+    + -meta-leg<leg>, -data-leg<leg>        dm-linear slices of the LD
 
-dnv-<cn>-sp0-leg<leg>-grp<grp>-thinmeta, -thindata   dm-linear on raid1
+dnv-<cn>-sp0-slice<slice>-grp<grp>-thinmeta, -thindata   dm-linear on raid1
 
-dnv-<cn>-sp0-leg<leg>-thinmeta, -thindata      concat of grp0 + grp1
-dnv-<cn>-sp0-leg<leg>-thinpool                  dm-thin-pool
-dnv-<cn>-sp0-leg<leg>-td0                     dm-thin (thin device 0)
+dnv-<cn>-sp0-slice<slice>-thinmeta, -thindata      concat of grp0 + grp1
+dnv-<cn>-sp0-slice<slice>-thinpool                  dm-thin-pool
+dnv-<cn>-sp0-slice<slice>-td0                     dm-thin (thin device 0)
 
 dnv-<cn>-sp0-td0-exp0                         dm-linear (the export)
-    + -real                                     dm-raid0 (2 legs)
+    + -real                                     dm-raid0 (2 slices)
     + -error, -delay                            fault injection
 ```
 
@@ -211,7 +211,7 @@ dnv-<cn>-sp0-td0-exp0                         dm-linear (the export)
 
 | NQN | used by |
 | --- | --- |
-| `nqn.2026-07.org.dnv:dn:<dn>:sp0-leg<leg>-grp<grp>-ld<ld>-cn<cn>` | DN → CN LD export |
+| `nqn.2026-07.org.dnv:dn:<dn>:sp0-slice<slice>-grp<grp>-ld<ld>-cn<cn>` | DN → CN LD export |
 | `nqn.2026-07.org.dnv:sp:sp0:td0:exp0` | CN → host exp export |
 | `nqn.2026-07.org.dnv:ref:ref0-anchor` | ref0 anchor subsystem |
 | `nqn.2026-07.org.dnv:host:cn0` / `:cn1` | CN host identity (for LD connect) |
@@ -234,17 +234,17 @@ source ./common.sh
 
 create_pd    dn0 192.168.122.48          # loop file on dn0
 create_pd    dn1 192.168.122.70          # loop file on dn1
-create_ld    dn0 ... cn0 ... 0 0 0       # dn0's ld0 exported to cn0, leg0 grp0
-create_ld    dn0 ... cn1 ... 0 0 0       # dn0's ld0 exported to cn1, leg0 grp0
-create_ld    dn1 ... cn0 ... 1 0 0       # dn1's ld1 exported to cn0, leg0 grp0
-create_ld    dn1 ... cn1 ... 1 0 0       # dn1's ld1 exported to cn1, leg0 grp0
+create_ld    dn0 ... cn0 ... 0 0 0       # dn0's ld0 exported to cn0, slice0 grp0
+create_ld    dn0 ... cn1 ... 0 0 0       # dn0's ld0 exported to cn1, slice0 grp0
+create_ld    dn1 ... cn0 ... 1 0 0       # dn1's ld1 exported to cn0, slice0 grp0
+create_ld    dn1 ... cn1 ... 1 0 0       # dn1's ld1 exported to cn1, slice0 grp0
 create_cntlr_active  cn0 ... sp0 2 <hnqn> <hid>   # build the stack on cn0
 create_exp_active    cn0 ... sp0 0 <hnqn> <hid> 1 255   # export to host
 # ... disarm, connect standby, arm, export standby ...
 ```
 
 `create_ld`/`delete_ld`/`connect_ld`/`disconnect_ld`/`disarm_ld_delay`/
-`arm_ld_delay` take `leg` and `grp` as explicit trailing params (the base
+`arm_ld_delay` take `slice` and `grp` as explicit trailing params (the base
 `setup.sh` loops the 2×2 grid; `grow.sh` passes them directly to add `grp2`
 to a running pool without touching the existing slices).
 
@@ -253,16 +253,16 @@ Full function list:
 | function | what it creates / removes |
 | --- | --- |
 | `create_pd` / `delete_pd` | loop file + nvmet port on a DN |
-| `create_ld` / `delete_ld` | LD stack (-real [LVM LV], -err, -delay, -cn [dmsetup]) + nvmet subsys for both CNs, per (leg,grp) |
-| `connect_ld` / `disconnect_ld` | nvme connect/disconnect from a CN to a DN's LD, per (leg,grp) |
+| `create_ld` / `delete_ld` | LD stack (-real [LVM LV], -err, -delay, -cn [dmsetup]) + nvmet subsys for both CNs, per (slice,grp) |
+| `connect_ld` / `disconnect_ld` | nvme connect/disconnect from a CN to a DN's LD, per (slice,grp) |
 | `create_grp` / `delete_grp` | raid1 + thinmeta/thindata slices (connects LDs internally) |
-| `create_leg` / `delete_leg` | concat → thin-pool → td0 thin device |
-| `create_cntlr_active` / `delete_cntlr_active` | orchestrates create_grp + create_leg for N legs |
+| `create_slice` / `delete_slice` | concat → thin-pool → td0 thin device |
+| `create_cntlr_active` / `delete_cntlr_active` | orchestrates create_grp + create_slice for N slices |
 | `create_cntlr_standby` / `delete_cntlr_standby` | connects LDs only (no stack) |
-| `create_td` / `delete_td` | create_thin (id 0) or create_snap (derived) across all legs |
+| `create_td` / `delete_td` | create_thin (id 0) or create_snap (derived) across all slices |
 | `create_exp_active` / `delete_exp_active` | raid0 + real + error + delay + exp + nvmet export (ANA optimized) |
 | `create_exp_standby` / `delete_exp_standby` | error + delay + exp stub + nvmet export (ANA inaccessible) |
-| `disarm_ld_delay` / `arm_ld_delay` | DN-side delay disarm/arm for CN namespace scan, per (leg,grp) |
+| `disarm_ld_delay` / `arm_ld_delay` | DN-side delay disarm/arm for CN namespace scan, per (slice,grp) |
 
 ### Part B — Infrastructure helpers (low-level, run ON the remote node)
 
@@ -305,11 +305,11 @@ Everything else (1, 2, 4, 5, 6) runs unchanged.
 
 ### Why the td-0 inheritance matters
 
-The thin-pool metadata lives on the raid1's thinmeta slice, which is on the
+The thin-pool metadata lives on the raid1's thinmeta device, which is on the
 LD, which is on the DN's `-real` device (an LVM LV in the loop-backed VG
 `dnv-<dn>-sp0-vg`). When cn0 removes its thin-pool (step 3), the pool's
-destructor flushes the metadata to that slice. When cn1 creates its
-thin-pool (step 6) on the *same* slice (now pointing at `-real` after the DN
+destructor flushes the metadata to that thinmeta device. When cn1 creates its
+thin-pool (step 6) on the *same* thinmeta device (now pointing at `-real` after the DN
 swap), it reads cn0's committed metadata. The mapping for thin device 0 —
 and therefore all the data the host wrote — is preserved.
 
@@ -363,9 +363,9 @@ cn1 connects, then re-arms them afterwards. The partition scan fails instantly
 | `setup.sh` | `./setup.sh [all\|dn0\|dn1\|cn0\|cn1\|ref0\|host0\|verify]` | Builds the whole environment. `verify` reads every dm device and checks behavior (linear/raid/thin read OK, error gives EIO, delay blocks). |
 | `teardown.sh` | `./teardown.sh [all\|defuse\|unexport\|<node>]` | Removes everything. Phase 0 defuses all delays first. Safe on partial/clean systems. Uses topology-agnostic safety nets (`dnv_remove_all_dm`, `nvmet_remove_all_dnv_subsys`, `nvme_disconnect_all_dnv_ld`) so it cleans up groups beyond the base 2×2 grid (e.g. grp2 added by `grow.sh`). |
 | `failover.sh` | `./failover.sh [force]` | Moves the sp from cn0 to cn1. `force` skips steps 3 and 7. Mutually exclusive with `grow.sh`. |
-| `grow.sh` | `./grow.sh` | Extends leg0's thin pool with a third group (`grp2`) while host I/O runs: creates the grp2 LDs on the DNs, disarms/connects/re-arms so cn1 imports them, `create_grp` builds the raid1+slice pair on cn0, then suspends leg0-thinpool and reloads the thinmeta/thindata concats and the pool table from 2-way to 3-way. Grow and failover are never combined. |
+| `grow.sh` | `./grow.sh` | Extends slice0's thin pool with a third group (`grp2`) while host I/O runs: creates the grp2 LDs on the DNs, disarms/connects/re-arms so cn1 imports them, `create_grp` builds the raid1 leg pair on cn0, then suspends slice0-thinpool and reloads the thinmeta/thindata concats and the pool table from 2-way to 3-way. Grow and failover are never combined. |
 | `host0_io.sh` | `./host0_io.sh start\|stop\|status\|mark <label>\|report` | Continuous verified O_DIRECT I/O on host0. One JSON record per I/O. `mark` drops a timestamped marker. `report` prints a phase-by-phase summary. |
-| `check.sh` | `./check.sh` | Thin-pool block-allocation audit. Dumps each leg's thin-pool metadata with `thin_dump`, derives 8 LD bitmaps (one bit per 4 MiB LD block), reads each marked block on cn0 and confirms it is non-zero. Run after `setup.sh all` + a short `host0_io.sh` run. Exit 0 = all allocated blocks verified written. |
+| `check.sh` | `./check.sh` | Thin-pool block-allocation audit. Dumps each slice's thin-pool metadata with `thin_dump`, derives 8 LD bitmaps (one bit per 4 MiB LD block), reads each marked block on cn0 and confirms it is non-zero. Run after `setup.sh all` + a short `host0_io.sh` run. Exit 0 = all allocated blocks verified written. |
 | `common.sh` | sourced by the above | Part A resource API + Part B infra helpers. |
 
 ---
@@ -407,7 +407,7 @@ inside cn1's suspended exp device — well under the 30 s NVMe I/O timeout.
   expected to fail on cn1.
 
 * **raid1 hand-off**: cn1 *does* zero the 4 MB raid1 metadata areas and
-  re-assembles with `nosync`. Both sides were mirrored by cn0 up to the
+  re-assembles with `nosync`. Both legs were mirrored by cn0 up to the
   handover, so declaring the array in-sync is correct. Only metadata is
   touched; the data area is untouched.
 
@@ -428,7 +428,7 @@ inside cn1's suspended exp device — well under the 30 s NVMe I/O timeout.
 * **LVM for `-real`**: the DN-side `-real` device (the one backed directly by
   the loop) is the *only* LVM-managed object in the whole stack. One VG per DN
   (`dnv-<dn>-sp0-vg`, loop = PV, created in `create_pd`), one LV per
-  `(leg,grp,ld)` slice (`leg<leg>-grp<grp>-ld<ld>-real`, created in `create_ld`
+  `(slice,grp,ld)` combination (`slice<slice>-grp<grp>-ld<ld>-real`, created in `create_ld`
   via `lvcreate -L ${SEC_PD}s`). Downstream consumers reference it as
   `/dev/<vg>/<lv>`, never `/dev/mapper/...-real`. Every other dm device in the
   DN stack (`-err-*`, `-delay-*`, `-cn0`, `-cn1`) and all CN-side dm devices

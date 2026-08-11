@@ -41,7 +41,7 @@ set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
 FORCE=0
-NLEGS=2
+NSLICES=2
 
 # How long to give nvme-stas to drop cn0's path after step 2 removes the
 # referral.  Observed: ~1s.  Nothing downstream depends on it, so this is a
@@ -156,7 +156,7 @@ _t "re-suspend $vp" sudo dmsetup suspend --nolockfs --noflush --noudevsync "$vp"
     || _warn "could not re-suspend $vp"
 _info "$vp now maps: $(sudo dmsetup table "$vp")"
 
-# 3.3 -- delete everything created by setup.sh steps (create_grp, create_leg,
+# 3.3 -- delete everything created by setup.sh steps (create_grp, create_slice,
 # create_exp_active), in reverse creation order. Removing a thin-pool commits
 # its metadata; that commit is what lets cn1 open the same pool in step 6.
 #
@@ -173,27 +173,27 @@ dm_rm() {
 }
 dm_rm "${vp}-real"
 
-# 3.3.2 per leg: td0 -> thinpool -> thindata/thinmeta -> per grp: thindata/thinmeta/raid1/side0/side1
-for leg in 1 0; do
-  lp="dnv-${CN}-sp0-leg${leg}"
-  dm_rm "${lp}-td0"        # create_leg: thin device
-  dm_rm "${lp}-thinpool"     # create_leg: thin pool (commits metadata)
-  dm_rm "${lp}-thindata"     # create_leg: concat thindata
-  dm_rm "${lp}-thinmeta"     # create_leg: concat thinmeta
+# 3.3.2 per slice: td0 -> thinpool -> thindata/thinmeta -> per grp: thindata/thinmeta/raid1/leg0/leg1
+for slice in 1 0; do
+  lp="dnv-${CN}-sp0-slice${slice}"
+  dm_rm "${lp}-td0"        # create_slice: thin device
+  dm_rm "${lp}-thinpool"     # create_slice: thin pool (commits metadata)
+  dm_rm "${lp}-thindata"     # create_slice: concat thindata
+  dm_rm "${lp}-thinmeta"     # create_slice: concat thinmeta
   for grp in 1 0; do
     p="${lp}-grp${grp}"
     dm_rm "${p}-thindata"           # create_grp: thin data slice
     dm_rm "${p}-thinmeta"           # create_grp: thin meta slice
     dm_rm "${p}-raid1"              # create_grp: dm-raid1
-    dm_rm "${p}-raid1-data-side1"   # create_grp: data side1
-    dm_rm "${p}-raid1-meta-side1"
-    dm_rm "${p}-raid1-data-side0"   # create_grp: data side0
-    dm_rm "${p}-raid1-meta-side0"
+    dm_rm "${p}-raid1-data-leg1"   # create_grp: data leg1
+    dm_rm "${p}-raid1-meta-leg1"
+    dm_rm "${p}-raid1-data-leg0"   # create_grp: data leg0
+    dm_rm "${p}-raid1-meta-leg0"
   done
 done
 
-left=$(sudo dmsetup ls 2>/dev/null | awk '{print $1}' | grep "^dnv-${CN}-sp0-leg" | wc -l)
-[ "$left" -eq 0 ] && _ok "cn0 leg stack fully removed" || _warn "$left leg device(s) left on cn0"
+left=$(sudo dmsetup ls 2>/dev/null | awk '{print $1}' | grep "^dnv-${CN}-sp0-slice" | wc -l)
+[ "$left" -eq 0 ] && _ok "cn0 slice stack fully removed" || _warn "$left slice device(s) left on cn0"
 _info "cn0 dm devices left: $(sudo dmsetup ls | awk '{print $1}' | grep ^dnv- | tr '\n' ' ')"
 slow_summary
 EOF_S3
@@ -206,12 +206,12 @@ step45_dn() {
     _info "=== $step. $dn: point -cn0 at the delay, -cn1 at the real data ==="
     { _emit_vars; echo "DN='$dn'"; _emit_common; cat <<'EOF_S45'
 set -uo pipefail
-for leg in 0 1; do
+for slice in 0 1; do
   for grp in 0 1; do
     for lid in 0 1; do
-      base="dnv-${DN}-sp0-leg${leg}-grp${grp}-ld${lid}"
+      base="dnv-${DN}-sp0-slice${slice}-grp${grp}-ld${lid}"
       VG="dnv-${DN}-sp0-vg"
-      REAL_DEV="/dev/${VG}/leg${leg}-grp${grp}-ld${lid}-real"
+      REAL_DEV="/dev/${VG}/slice${slice}-grp${grp}-ld${lid}-real"
       # x.1 cn0 loses access
       dm_reload "${base}-cn0" "0 $SEC_PD linear /dev/mapper/${base}-delay-cn0 0" \
           || _warn "reload failed: ${base}-cn0"
@@ -229,10 +229,10 @@ EOF_S45
 # ===================== step 6: cn1 builds the stack and goes live ============
 step6_cn1() {
     _info "=== 6. cn1: build the stack, repoint the exported volume, resume ==="
-    # Use create_cntlr_active to rebuild the full grp/leg/thinpool stack on cn1.
+    # Use create_cntlr_active to rebuild the full grp/slice/thinpool stack on cn1.
     # create_td cn1 sp0 0 0 should fail => thin 0 is inherited from cn0's
     # committed metadata.
-    create_cntlr_active cn1 "$CN1_IP" sp0 "$NLEGS" "$HOSTNQN_CN1" "$HOSTID_CN1"
+    create_cntlr_active cn1 "$CN1_IP" sp0 "$NSLICES" "$HOSTNQN_CN1" "$HOSTID_CN1"
 
     # create_exp_active builds the raid0+real+error+delay+exp stack. But we need
     # to REPOINT the existing suspended exp device at the new -real, not create
@@ -244,24 +244,24 @@ set -uo pipefail
 # Drop any page-cache entries left over from the period when these namespaces
 # were backed by the DN error/delay devices.
 declare -A LDDEV
-for leg in 0 1; do
+for slice in 0 1; do
   for grp in 0 1; do
     for d in 0 1; do
-      nqn="${NQN_PREFIX}:dn:dn${d}:sp0-leg${leg}-grp${grp}-ld${d}-${CN}"
+      nqn="${NQN_PREFIX}:dn:dn${d}:sp0-slice${slice}-grp${grp}-ld${d}-${CN}"
       dev=$(nvme_dev_by_nqn "$nqn") || _fail "no block device for $nqn"
       sudo blockdev --flushbufs "$dev" >/dev/null 2>&1 || true
-      LDDEV["$leg,$grp,$d"]="$dev"
+      LDDEV["$slice,$grp,$d"]="$dev"
     done
   done
 done
 
-# 6.1 -- create_grp already built raid1+thinmeta+thindata; create_leg already
+# 6.1 -- create_grp already built raid1+thinmeta+thindata; create_slice already
 # built thinpool+td0. The thin-pool metadata is cn0's, committed when cn0
 # removed the pool. It must NOT be zeroed -- it holds the mapping for thin
 # device 0 and therefore the data the host has already written. thin 0 already
 # exists, so create_thin 0 should fail (inherited).
-for leg in 0 1; do
-    lp="dnv-${CN}-sp0-leg${leg}"
+for slice in 0 1; do
+    lp="dnv-${CN}-sp0-slice${slice}"
     dm_exists "${lp}-thinpool" || _fail "no ${lp}-thinpool -- create_cntlr_active did not run?"
     sudo dmsetup message "/dev/mapper/${lp}-thinpool" 0 "create_thin 0" >/dev/null 2>&1 \
         && _warn "thin 0 did not exist in ${lp}-thinpool -- pool metadata was not inherited" \
@@ -270,12 +270,12 @@ done
 
 vp="dnv-${CN}-sp0-td0-exp0"
 
-# 6.2 -- build the exp -real (raid0 of per-leg td0 thin-devs). This matches
+# 6.2 -- build the exp -real (raid0 of per-slice td0 thin-devs). This matches
 # create_exp_active's table exactly.
 dm_create "${vp}-real" \
 "0 $SEC_EXP raid raid0 1 $RAID0_CHUNK_SECTORS 2 \
-- /dev/mapper/dnv-${CN}-sp0-leg0-td0 \
-- /dev/mapper/dnv-${CN}-sp0-leg1-td0"
+- /dev/mapper/dnv-${CN}-sp0-slice0-td0 \
+- /dev/mapper/dnv-${CN}-sp0-slice1-td0"
 
 # 6.3 / 6.4 -- repoint the exported volume at the fresh raid0 and let the
 # queued host I/O through. dm_reload does load + resume; the device is already

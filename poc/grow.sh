@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# grow.sh -- extend leg0's thin pool with a third group (grp2) while host I/O
+# grow.sh -- extend slice0's thin pool with a third group (grp2) while host I/O
 # is running on the exported volume.
 #
 # The extension grows the pool's metadata and data devices from 2 groups to 3,
@@ -21,12 +21,12 @@
 #   4. dn0/dn1 : re-arm the grp2 -delay devices (put the real delay table back).
 #   5. cn0     : create_grp aggregates the two grp2 LDs into a raid1 mirror +
 #                thinmeta/thindata slices (create_grp connects the LDs internally).
-#   6. cn0     : extend leg0's thin pool:
+#   6. cn0     : extend slice0's thin pool:
 #                  a. suspend the pool (noflush) -- queues host I/O.
-#                  b. reload leg0-thinmeta  (3-way concat: grp0 + grp1 + grp2).
-#                  c. reload leg0-thindata  (3-way concat: grp0 + grp1 + grp2).
-#                  d. load  leg0-thinpool  (new table, size = 3 * SEC_TDATA).
-#                  e. resume leg0-thinpool (drains queued host I/O).
+#                  b. reload slice0-thinmeta  (3-way concat: grp0 + grp1 + grp2).
+#                  c. reload slice0-thindata  (3-way concat: grp0 + grp1 + grp2).
+#                  d. load  slice0-thinpool  (new table, size = 3 * SEC_TDATA).
+#                  e. resume slice0-thinpool (drains queued host I/O).
 #
 # Sizes are inlined here per the grow_plan (decision 5): meta_sz = SEC_TMETA*3,
 # data_sz = SEC_TDATA*3.  They must match the concat tables below exactly.
@@ -41,7 +41,7 @@
 set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
-LEG=0
+SLICE=0
 GRP=2
 
 # ===================== step 1: create grp2 LDs on the DNs =====================
@@ -50,42 +50,42 @@ step1_create_lds() {
     # ld_id encodes which dn: ld0 -> dn0, ld1 -> dn1.  Both cns get a symmetric
     # fault-injection stack so failover (if ever run later from this grown state)
     # would find the standby side's -delay-cn1 devices present.
-    create_ld dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$LEG" "$GRP"
-    create_ld dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$LEG" "$GRP"
-    create_ld dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$LEG" "$GRP"
-    create_ld dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$LEG" "$GRP"
+    create_ld dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$SLICE" "$GRP"
+    create_ld dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$SLICE" "$GRP"
+    create_ld dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$SLICE" "$GRP"
+    create_ld dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$SLICE" "$GRP"
 }
 
 # ====== steps 2-4: disarm, cn1 connects to grp2 LDs, re-arm ==================
 step234_connect_cnlds() {
     _info "=== 2. dn0/dn1: disarm grp2 -delay devices for cn1's namespace scan ==="
-    disarm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    disarm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
+    disarm_ld_delay dn0 "$DN0_IP" "$SLICE" "$GRP"
+    disarm_ld_delay dn1 "$DN1_IP" "$SLICE" "$GRP"
 
     _info "=== 3. cn1: connect the grp2 LDs (ld0 from dn0, ld1 from dn1) ==="
-    connect_ld cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
-    connect_ld cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$SLICE" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$SLICE" "$GRP"
 
     _info "=== 4. dn0/dn1: re-arm grp2 -delay devices ==="
-    arm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    arm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
+    arm_ld_delay dn0 "$DN0_IP" "$SLICE" "$GRP"
+    arm_ld_delay dn1 "$DN1_IP" "$SLICE" "$GRP"
 }
 
 # ===================== step 5: cn0 aggregates grp2 =============================
 step5_create_grp() {
-    _info "=== 5. cn0: create_grp for leg$LEG grp$GRP (raid1 + thinmeta/thindata) ==="
+    _info "=== 5. cn0: create_grp for slice$SLICE grp$GRP (raid1 + thinmeta/thindata) ==="
     # create_grp connects both grp2 LDs internally, builds the raid1 mirror and
-    # carves the thinmeta/thindata slices.  Already takes leg/grp explicitly.
-    create_grp cn0 "$CN0_IP" sp0 "$LEG" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
+    # carves the thinmeta/thindata slices.  Already takes slice/grp explicitly.
+    create_grp cn0 "$CN0_IP" sp0 "$SLICE" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
 }
 
-# ===================== step 6: extend leg0 thin pool ==========================
+# ===================== step 6: extend slice0 thin pool ==========================
 step6_extend_pool() {
-    _info "=== 6. cn0: extend leg${LEG}-thinpool with grp$GRP (suspend, reload, resume) ==="
-    { _emit_vars; echo "CN='cn0'; LEG='$LEG'; GRP='$GRP'"; _emit_common; cat <<'EOF_GROW'
+    _info "=== 6. cn0: extend slice${SLICE}-thinpool with grp$GRP (suspend, reload, resume) ==="
+    { _emit_vars; echo "CN='cn0'; SLICE='$SLICE'; GRP='$GRP'"; _emit_common; cat <<'EOF_GROW'
 set -uo pipefail
 
-lp="dnv-${CN}-sp0-leg${LEG}"
+lp="dnv-${CN}-sp0-slice${SLICE}"
 
 # New sizes: 3 groups' worth of metadata and data.  These must match the concat
 # tables below exactly (grow_plan decision 5).  Inlined here, not new SEC_*
@@ -111,7 +111,7 @@ if [ "$(dm_state "${lp}-thinpool")" != "SUSPENDED" ]; then
 fi
 _info "${lp}-thinpool state: $(dm_state "${lp}-thinpool")"
 
-# 6.b -- reload leg0-thinmeta: 3-way concat of grp0 + grp1 + grp2 thinmeta.
+# 6.b -- reload slice0-thinmeta: 3-way concat of grp0 + grp1 + grp2 thinmeta.
 #   old (2-way, size = SEC_POOL_META = 32768):
 #     0      16384 linear .../grp0-thinmeta 0
 #     16384  16384 linear .../grp1-thinmeta 0
@@ -125,7 +125,7 @@ $SEC_TMETA $SEC_TMETA linear /dev/mapper/${lp}-grp1-thinmeta 0
 $(( SEC_TMETA * 2 )) $SEC_TMETA linear /dev/mapper/${lp}-grp${GRP}-thinmeta 0" \
     || _fail "could not reload ${lp}-thinmeta"
 
-# 6.c -- reload leg0-thindata: 3-way concat of grp0 + grp1 + grp2 thindata.
+# 6.c -- reload slice0-thindata: 3-way concat of grp0 + grp1 + grp2 thindata.
 #   old (2-way, size = SEC_POOL_DATA = 1998848):
 #     0       999424 linear .../grp0-thindata 0
 #     999424  999424 linear .../grp1-thindata 0
@@ -151,7 +151,7 @@ _t "load ${lp}-thinpool" sudo dmsetup load "${lp}-thinpool" \
 _t "resume ${lp}-thinpool" sudo dmsetup resume --noudevsync "${lp}-thinpool" \
     || _fail "could not resume ${lp}-thinpool"
 _info "${lp}-thinpool state: $(dm_state "${lp}-thinpool"), table: $(sudo dmsetup table "${lp}-thinpool")"
-_ok "leg${LEG} thin pool extended to $data_sz sectors (3 groups)"
+_ok "slice${SLICE} thin pool extended to $data_sz sectors (3 groups)"
 
 slow_summary
 EOF_GROW
@@ -167,7 +167,7 @@ main() {
     step5_create_grp             || _fail "step 5 (create_grp) failed"
     step6_extend_pool            || _fail "step 6 (extend thin pool) failed"
     t1=$(date +%s%N)
-    _info "grow leg${LEG} +grp${GRP} complete in $(( (t1 - t0) / 1000000 ))ms"
+    _info "grow slice${SLICE} +grp${GRP} complete in $(( (t1 - t0) / 1000000 ))ms"
 }
 
 main "$@"

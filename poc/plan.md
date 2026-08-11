@@ -1,5 +1,12 @@
 # t04 Plan — Distributed Block Storage POC Scripts
 
+> **Historical note:** This is the build plan that produced t04. The names below
+> are t04's (`leg` = raid0 underlying disk; `side` = raid1 mirror half). A later
+> revision renamed them again to avoid the t03-era overload of "leg":
+> **`leg`→`slice`** (raid0 underlying disk) and **`side`→`leg`** (raid1 mirror
+> half). The live scripts (common.sh, setup.sh, ...) and `note.md` use the
+> revised names; this plan is kept as the t04 record.
+
 ## 1. Goal
 Create `common.sh`, `setup.sh`, `teardown.sh`, `failover.sh`, `host0_io.sh`, `servers.txt`
 in `/home/yupeng/Code/distributed-nvme/failover/t04/`, modeled on `../t03/` but with

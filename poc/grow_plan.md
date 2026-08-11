@@ -1,8 +1,8 @@
-# grow.sh Plan — Extend leg0 Thin Pool with grp2
+# grow.sh Plan — Extend slice0 Thin Pool with grp2
 
 ## 1. Goal
 
-Create `grow.sh` under `poc/` that adds a third group (`grp2`) to leg0's thin
+Create `grow.sh` under `poc/` that adds a third group (`grp2`) to slice0's thin
 pool while host I/O is running on the exported volume. The extension grows the
 pool's metadata and data devices from 2 groups to 3, resuming without I/O
 errors or stuck commands. After grow, `teardown.sh all` must still clean up
@@ -18,7 +18,7 @@ setup.sh all  ->  host0_io.sh start  ->  grow.sh  ->  host0_io.sh report  ->  te
 
 | # | Decision | Choice |
 |---|----------|--------|
-| 1 | `create_ld` params | All mandatory: `<dn> <dn_ip> <cn> <cn_ip> <ld_id> <leg> <grp>` |
+| 1 | `create_ld` params | All mandatory: `<dn> <dn_ip> <cn> <cn_ip> <ld_id> <slice> <grp>` |
 | 2 | Scope of generalization | All six: `create_ld`, `delete_ld`, `connect_ld`, `disconnect_ld`, `disarm_ld_delay`, `arm_ld_delay` |
 | 3 | cn1 connects to grp2 LDs | `connect_ld` for dn0/ld0 + dn1/ld1, wrapped in disarm/arm |
 | 4 | Pool extension sequence | Suspend pool (noflush) -> `dm_reload` thinmeta concat -> `dm_reload` thindata concat -> raw `dmsetup load` pool -> raw `dmsetup resume` pool |
@@ -32,42 +32,42 @@ setup.sh all  ->  host0_io.sh start  ->  grow.sh  ->  host0_io.sh report  ->  te
 
 ### 3.1 `common.sh` -- generalize six functions
 
-Each function drops its `for leg in 0 1; for grp in 0 1` loop and takes `leg`
+Each function drops its `for slice in 0 1; for grp in 0 1` loop and takes `slice`
 and `grp` as explicit params at the end of the signature.
 
-**`create_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>`**
+**`create_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <slice> <grp>`**
 
-Creates one (leg,grp) pair's full symmetric fault-injection stack:
+Creates one (slice,grp) pair's full symmetric fault-injection stack:
 - LV `-real` in `dnv-<dn>-sp0-vg` (the backing store)
 - `-err-cn0`, `-err-cn1` (dm-error)
 - `-delay-cn0`, `-delay-cn1` (dm-delay on -err)
 - `-cn<C>` (dm-linear on -real for cn0, on -delay-cn1 for cn1)
-- nvmet subsystem `nqn...:dn:<dn>:sp0-leg<leg>-grp<grp>-ld<ld>-cn<C>`
+- nvmet subsystem `nqn...:dn:<dn>:sp0-slice<slice>-grp<grp>-ld<ld>-cn<C>`
 
-The orchestrator calls it once per (dn, cn, ld, leg, grp) combination.
+The orchestrator calls it once per (dn, cn, ld, slice, grp) combination.
 
-**`delete_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <leg> <grp>`**
+**`delete_ld <dn_name> <dn_ip> <cn_name> <cn_ip> <ld_id> <slice> <grp>`**
 
-Removes one (leg,grp) pair's dm stack + both cn nvmet subsystems + LV.
+Removes one (slice,grp) pair's dm stack + both cn nvmet subsystems + LV.
 Note: `cn`/`cn_ip` params are vestigial (the function removes subsystems for
 both cns regardless); kept for signature consistency with `create_ld` and
 used only in the log message.
 
-**`connect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <hostnqn> <hostid> <leg> <grp>`**
+**`connect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <hostnqn> <hostid> <slice> <grp>`**
 
-Connects one (leg,grp) NQN from this dn. Previously looped 4 NQNs; now one.
+Connects one (slice,grp) NQN from this dn. Previously looped 4 NQNs; now one.
 
-**`disconnect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <leg> <grp>`**
+**`disconnect_ld <cn> <cn_ip> <dn> <dn_ip> <ld_id> <slice> <grp>`**
 
-Disconnects one (leg,grp) NQN.
+Disconnects one (slice,grp) NQN.
 
-**`disarm_ld_delay <dn> <dn_ip> <leg> <grp>`**
+**`disarm_ld_delay <dn> <dn_ip> <slice> <grp>`**
 
-Disarms the 4 delay devices (`lid 0 1` x `cn cn0 cn1`) for this (leg,grp)
+Disarms the 4 delay devices (`lid 0 1` x `cn cn0 cn1`) for this (slice,grp)
 pair. Still loops `lid`/`cn` internally -- disarming a group means disarming
 all its delay devices.
 
-**`arm_ld_delay <dn> <dn_ip> <leg> <grp>`**
+**`arm_ld_delay <dn> <dn_ip> <slice> <grp>`**
 
 Re-arms the same 4 delay devices.
 
@@ -84,22 +84,22 @@ each via `nvmet_remove_subsys`. Called by `delete_pd` before `nvmet_remove_port`
 
 Scans `/sys/class/nvme/*/subsysnqn` for NQNs matching
 `nqn.2026-07.org.dnv:dn:*`, disconnects each via `nvme_disc`. Replaces
-`teardown_cn`'s hardcoded `for leg in 0 1; for grp in 0 1; for d in 0 1` loop.
+`teardown_cn`'s hardcoded `for slice in 0 1; for grp in 0 1; for d in 0 1` loop.
 
 ### 3.3 `setup.sh` -- update call sites
 
-**`setup_dn`**: loop `for leg in 0 1; for grp in 0 1`, call `create_ld` with
-explicit `leg`/`grp` for both cn0 and cn1.
+**`setup_dn`**: loop `for slice in 0 1; for grp in 0 1`, call `create_ld` with
+explicit `slice`/`grp` for both cn0 and cn1.
 
-**`setup_cn1`**: loop `for leg in 0 1; for grp in 0 1` for `disarm_ld_delay`
+**`setup_cn1`**: loop `for slice in 0 1; for grp in 0 1` for `disarm_ld_delay`
 and `arm_ld_delay`. `create_cntlr_standby` (which calls `connect_ld`
-internally) is updated to loop and pass `leg`/`grp`.
+internally) is updated to loop and pass `slice`/`grp`.
 
 **`verify` path**: disarm/arm loop updated similarly.
 
 ### 3.4 `teardown.sh` -- use dynamic discovery
 
-**`teardown_dn`**: loop `for leg in 0 1; for grp in 0 1` for `delete_ld`
+**`teardown_dn`**: loop `for slice in 0 1; for grp in 0 1` for `delete_ld`
 (explicit params). `delete_pd` now also calls `nvmet_remove_all_dnv_subsys`
 internally.
 
@@ -119,74 +119,74 @@ handle the 2-group base correctly and are fast). The safety nets
 set -uo pipefail
 source "$(dirname "$0")/common.sh"
 
-LEG=0
+SLICE=0
 GRP=2
 
 main() {
-    # Precondition: base stack must exist (dnv-cn0-sp0-leg0-thinpool on cn0)
+    # Precondition: base stack must exist (dnv-cn0-sp0-slice0-thinpool on cn0)
 
     # Step 1: Create grp2 LDs on dn0 and dn1 (full symmetric stack for both cns)
-    create_ld dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$LEG" "$GRP"
-    create_ld dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$LEG" "$GRP"
-    create_ld dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$LEG" "$GRP"
-    create_ld dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$LEG" "$GRP"
+    create_ld dn0 "$DN0_IP" cn0 "$CN0_IP" 0 "$SLICE" "$GRP"
+    create_ld dn0 "$DN0_IP" cn1 "$CN1_IP" 0 "$SLICE" "$GRP"
+    create_ld dn1 "$DN1_IP" cn0 "$CN0_IP" 1 "$SLICE" "$GRP"
+    create_ld dn1 "$DN1_IP" cn1 "$CN1_IP" 1 "$SLICE" "$GRP"
 
     # Step 2-3: Disarm, cn1 connects to grp2 LDs, arm
-    disarm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    disarm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
-    connect_ld cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
-    connect_ld cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$LEG" "$GRP"
-    arm_ld_delay dn0 "$DN0_IP" "$LEG" "$GRP"
-    arm_ld_delay dn1 "$DN1_IP" "$LEG" "$GRP"
+    disarm_ld_delay dn0 "$DN0_IP" "$SLICE" "$GRP"
+    disarm_ld_delay dn1 "$DN1_IP" "$SLICE" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn0 "$DN0_IP" 0 "$HOSTNQN_CN1" "$HOSTID_CN1" "$SLICE" "$GRP"
+    connect_ld cn1 "$CN1_IP" dn1 "$DN1_IP" 1 "$HOSTNQN_CN1" "$HOSTID_CN1" "$SLICE" "$GRP"
+    arm_ld_delay dn0 "$DN0_IP" "$SLICE" "$GRP"
+    arm_ld_delay dn1 "$DN1_IP" "$SLICE" "$GRP"
 
     # Step 4: cn0 aggregates grp2 (create_grp connects LDs + builds raid1 + slices)
-    create_grp cn0 "$CN0_IP" sp0 "$LEG" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
+    create_grp cn0 "$CN0_IP" sp0 "$SLICE" "$GRP" "$HOSTNQN_CN0" "$HOSTID_CN0"
 
-    # Step 5: Extend leg0 thin pool
+    # Step 5: Extend slice0 thin pool
     # Inline SSH block on cn0:
     #   meta_sz = SEC_TMETA * 3 = 49152  (24M)
     #   data_sz = SEC_TDATA * 3 = 2998272  (1464M)
     #
-    #   a. dmsetup suspend --nolockfs --noflush leg0-thinpool  (queues host I/O)
-    #   b. dm_reload leg0-thinmeta  (3-way concat: grp0 + grp1 + grp2 thinmeta)
-    #   c. dm_reload leg0-thindata  (3-way concat: grp0 + grp1 + grp2 thindata)
-    #   d. dmsetup load leg0-thinpool  (new table, size = data_sz, no re-suspend)
-    #   e. dmsetup resume leg0-thinpool  (drains queued host I/O)
+    #   a. dmsetup suspend --nolockfs --noflush slice0-thinpool  (queues host I/O)
+    #   b. dm_reload slice0-thinmeta  (3-way concat: grp0 + grp1 + grp2 thinmeta)
+    #   c. dm_reload slice0-thindata  (3-way concat: grp0 + grp1 + grp2 thindata)
+    #   d. dmsetup load slice0-thinpool  (new table, size = data_sz, no re-suspend)
+    #   e. dmsetup resume slice0-thinpool  (drains queued host I/O)
 }
 main "$@"
 ```
 
 #### Exact concat tables
 
-Current `leg0-thinmeta` (2-way, size = SEC_POOL_META = 32768 = 16M):
+Current `slice0-thinmeta` (2-way, size = SEC_POOL_META = 32768 = 16M):
 ```
-0 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thinmeta 0
-16384 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thinmeta 0
-```
-
-New `leg0-thinmeta` (3-way, size = 49152 = 24M):
-```
-0 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thinmeta 0
-16384 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thinmeta 0
-32768 16384 linear /dev/mapper/dnv-cn0-sp0-leg0-grp2-thinmeta 0
+0 16384 linear /dev/mapper/dnv-cn0-sp0-slice0-grp0-thinmeta 0
+16384 16384 linear /dev/mapper/dnv-cn0-sp0-slice0-grp1-thinmeta 0
 ```
 
-Current `leg0-thindata` (2-way, size = SEC_POOL_DATA = 1998848 = 976M):
+New `slice0-thinmeta` (3-way, size = 49152 = 24M):
 ```
-0 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thindata 0
-999424 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thindata 0
-```
-
-New `leg0-thindata` (3-way, size = 2998272 = 1464M):
-```
-0 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp0-thindata 0
-999424 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp1-thindata 0
-1998848 999424 linear /dev/mapper/dnv-cn0-sp0-leg0-grp2-thindata 0
+0 16384 linear /dev/mapper/dnv-cn0-sp0-slice0-grp0-thinmeta 0
+16384 16384 linear /dev/mapper/dnv-cn0-sp0-slice0-grp1-thinmeta 0
+32768 16384 linear /dev/mapper/dnv-cn0-sp0-slice0-grp2-thinmeta 0
 ```
 
-New `leg0-thinpool` table (size = 2998272):
+Current `slice0-thindata` (2-way, size = SEC_POOL_DATA = 1998848 = 976M):
 ```
-0 2998272 thin-pool /dev/mapper/dnv-cn0-sp0-leg0-thinmeta /dev/mapper/dnv-cn0-sp0-leg0-thindata 128 0 1 skip_block_zeroing
+0 999424 linear /dev/mapper/dnv-cn0-sp0-slice0-grp0-thindata 0
+999424 999424 linear /dev/mapper/dnv-cn0-sp0-slice0-grp1-thindata 0
+```
+
+New `slice0-thindata` (3-way, size = 2998272 = 1464M):
+```
+0 999424 linear /dev/mapper/dnv-cn0-sp0-slice0-grp0-thindata 0
+999424 999424 linear /dev/mapper/dnv-cn0-sp0-slice0-grp1-thindata 0
+1998848 999424 linear /dev/mapper/dnv-cn0-sp0-slice0-grp2-thindata 0
+```
+
+New `slice0-thinpool` table (size = 2998272):
+```
+0 2998272 thin-pool /dev/mapper/dnv-cn0-sp0-slice0-thinmeta /dev/mapper/dnv-cn0-sp0-slice0-thindata 128 0 1 skip_block_zeroing
 ```
 
 ### 3.6 `note.md` -- update to reflect grow.sh
@@ -197,9 +197,9 @@ section 7.
 
 ## 4. Not changed
 
-- `create_grp` -- already takes `leg`/`grp` explicitly; works for grp2 as-is.
-- `create_leg` -- keeps hardcoded 2-way concat (grow and failover are never
-  combined; grow.sh extends the pool inline, not via `create_leg`).
+- `create_grp` -- already takes `slice`/`grp` explicitly; works for grp2 as-is.
+- `create_slice` -- keeps hardcoded 2-way concat (grow and failover are never
+  combined; grow.sh extends the pool inline, not via `create_slice`).
 - `create_cntlr_active` -- keeps `for grp in 0 1` (only called by setup.sh
   and failover.sh, never by grow.sh).
 - `failover.sh` -- unchanged. Grow and failover are mutually exclusive.
