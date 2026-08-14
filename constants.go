@@ -10,11 +10,21 @@ const (
 		`4}-[0-9a-fA-F]{12}|discovery|.+)$`
 	MaxNqnLength = 223
 
-	DnExtSize = 1 * 1024 * 1024 * 1024
-	DmBlockSize = 128 * 1024 * 1024
-	DmStripeSizie = 16 * 1024
 	ShardBucketSize = 256
 	ShardCodeFmt = "%02x"
+
+	DefaultDnExtSize = 1 * 1024 * 1024 * 1024
+	DefaultDnBin0Shift = 1
+	DefaultDnBin1Shift = 4
+	DefaultDnBin2Shift = 8
+	DefaultDnBin3Shift = 12
+
+	DefaultAllocDnBatchSize = 16
+	DefaultAllocCnBatchSize = 16
+
+	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
+	DefaultDmRaid0StripeSize = 64 * 1024
+	DefaultDmRaid1RegionSize = 16 * 1024 * 1024
 
 	MaxDescSize = 1024
 	MaxDnCntPerCluster = 1024
@@ -26,35 +36,35 @@ const (
 	MaxTdCntPerSp = 1024
 	MaxSsCntPerSp = 8
 	MaxNsCntPerSs = 8
-	MaxHostCntPerSs = 128
-	MaxLegCntPerSp = 16
+	MaxHostCntPerSs = 16
+	MaxSliceCntPerSp = 16
 	MaxCntlrCntPerSp = 4
-	MaxCloneCntPerSp = 2
-	MaxMoveCntPerSp = 2
-	MaxLdCntPerDn = 4096
+	MaxCloneCntPerSp = 64
+	MaxXferCntPerSp = 4
+	MaxMigrCntPerSp = 4
+	MaxSideCntPerDn = 4096
 	MaxCntlrCntPerCn = 256
+	MaxLegPerGrp = 16
+	MaxSpareLegPerGrp = 4
 
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
 
-	DnBatchSize = 16
-	CnBatchSize = 16
-
-	DnBinLevel0 = 1 * DnExtSize
-	DnBinLevel1 = 16 * DnExtSize
-	DnBinLevel2 = 256 * DnExtSize
-	DnBinLevel3 = 4096 * DnExtSize
-
 	// The cntlr_id is a per host per connection resoruce.
 	// To work in the worst case, we should make sure:
-	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs < CntlrIdStep
+	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs < CnNvmeIdStep
 	// To make sure the re-connection works well, we should dobule the left:
-	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs * 2 < CntlrIdStep
+	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs * 2 < CnNvmeIdStep
 	// We can't satisfy this math requirement, hope the allocation algorithm
 	// could distribute the workload evenly and the typically the
 	// ss_cnt_per_sp and exp_cnt_per_ss should be 1.
-	CntlrIdBase = 10000
-	CntlrIdStep = 8192
+	CnNvmeIdBase = 10000
+	CnNvmeIdStep = 8192
+	MaxCnNvmeIdSet = 4
+
+	DnNvmeIdBase = 10000
+	DnNvmeIdStep = 8192
+	MaxDnNvmeIdSet = 4
 
 	DefaultClusterName = "default"
 	DefaultCnCap =  4 * 1024 * 1024 * 1024 * 1024
@@ -62,10 +72,6 @@ const (
 	DefaultListCnt = 64
 	MaxListCnt = 1024
 
-	RedunMetaSize = 1 * DmBlockSize
-	ThinPoolMetaSize = 1 * DnExtSize
-
 	IdKeyFmt = "%016x"
-	BinIdxFmt = "%1x"
 	FreeSpaceFmt = "%016x"
 )

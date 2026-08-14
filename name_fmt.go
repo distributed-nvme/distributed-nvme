@@ -4,21 +4,21 @@ const (
 	dmKindDnDelay = 0x02
 	dmKindDnLd = 0x03
 
-	dmKindCnPoolMetaSide = 0x10
-	dmKindCnPoolMetaRedunMeta = 0x11
-	dmKindCnPoolMetaRedunData = 0x12
-	dmKindCnPoolMetaRedunFinal = 0x13
-	dmKindCnPoolMetaFinal = 0x14
-	dmKindCnPoolDataSide = 0x15
-	dmKindCnPoolDataRedunMeta = 0x16
-	dmKindCnPoolDataRedunData = 0x17
-	dmKindCnPoolDataRedunFinal = 0x18
-	dmKindCnPoolDataFinal = 0x19
-	dmKindCnPoolFinal = 0x1a
-	dmKindCnThinDev = 0x1b
-	dmKindCnError = 0x1c
-	dmKindCnDelay = 0x1d
-	dmKindCnNsBackend = 0x1e
+	dmKindCnPoolMetaSide = 0x20
+	dmKindCnPoolMetaRedunMeta = 0x21
+	dmKindCnPoolMetaRedunData = 0x22
+	dmKindCnPoolMetaRedunFinal = 0x23
+	dmKindCnPoolMetaFinal = 0x24
+	dmKindCnPoolDataSide = 0x25
+	dmKindCnPoolDataRedunMeta = 0x26
+	dmKindCnPoolDataRedunData = 0x27
+	dmKindCnPoolDataRedunFinal = 0x28
+	dmKindCnPoolDataFinal = 0x29
+	dmKindCnPoolFinal = 0x2a
+	dmKindCnThinDev = 0x2b
+	dmKindCnError = 0x2c
+	dmKindCnDelay = 0x2d
+	dmKindCnNsBackend = 0x2e
 
 	nqnKindHostCn = 0x00
 	nqnKindTargetLdToCn = 0x01

@@ -13,7 +13,7 @@ The key "{dnv_prefix} cluster_conf {cluster_name}" exists in etcd.
 Check the key in the STM.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 * Clustername = DefaultClusterName
@@ -44,7 +44,7 @@ len(ClusterName) > MaxStrSize
 The key "{dnv_prefix} cluster_conf {cluster_name}" doesn't exist in etcd.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 #### FAILED_PRECONDITION
 Found items in etcd which have below key prefix:
@@ -74,7 +74,7 @@ len(ClusterName) > MaxStrSize
 The key "{dnv_prefix} cluster_conf {cluster_name}" doesn't exist in etcd.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -92,7 +92,7 @@ and ClusterId.
 * `base64.StdEncoding.DecodeString` report error against page_token
 
 ### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 * count = DefaultListCnt
@@ -117,7 +117,7 @@ Can't find "{dnv_prefix} cluster_conf {cluster_name}" in etcd.
 
 #### ABORTED
 * Can't find "{dnv_prefix} cluster_desc {cluster_id}" in etcd.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
@@ -156,11 +156,12 @@ cluster, so we never need a range query to count the dns.
 #### ABORTED
 * Can not find "{dnv_prefix} dn_global {cluster_id}" in etcd
 * GetDnSize fails
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
 * Description = bytes("")
+* Location = AddrPort
 
 ### Action
 
@@ -252,7 +253,7 @@ DiskNode.SpLdIdList is not empty. All the lds on the dn must be removed first
 
 #### ABORTED
 * Can not find "{dnv_prefix} dn_global {cluster_id}" in etcd.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -286,7 +287,7 @@ is no desired state left for it.
 
 #### ABORTED
 * Can not find the DnDesc, the DnRev or any DnSegment which should exist.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -309,7 +310,7 @@ GetDiskNodeReply. GetDiskNodeReply.Revision comes from the DnRev.
 Can not find "{dnv_prefix} cluster_conf {cluster_name}" in etcd.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
@@ -337,7 +338,7 @@ Don't use STM in this action.
 
 #### ABORTED
 * Can not find "{dnv_prefix} dn_desc {cluster_id} {dn_id}" in etcd.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
@@ -361,7 +362,7 @@ DnRev, the description is not part of the desired state of the dn agent.
 
 #### ABORTED
 * The DiskNodeAgent.GetDnInfo GRPC fails.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -401,11 +402,12 @@ MaxCnCntPerCluster.
 #### ABORTED
 * Can not find "{dnv_prefix} cn_global {cluster_id}" in etcd.
 * GetCnSize fails.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
 * Description = bytes("")
+* Location = AddrPort
 
 ### Action
 
@@ -452,7 +454,7 @@ removed first (DeleteCntlr, or delete the storage pools).
 
 #### ABORTED
 * Can not find "{dnv_prefix} cn_global {cluster_id}" in etcd.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -528,6 +530,7 @@ NodeResInfo to the caller.
 * len(sp_name) > MaxStrSize, or sp_name doesn't match ValidStrPattern
 * len(description) > MaxDescSize
 * len of any item in features > MaxStrSize
+* len(features) > 0 , support no feature in current version.
 * redun_type is REDUN_TYPE_RAID5_LS or REDUN_TYPE_RAID6_ZR. Both are defined
   in the schema but not supported yet, only REDUN_TYPE_NONE and
   REDUN_TYPE_RAID1 are accepted.
@@ -555,7 +558,7 @@ The key "{dnv_prefix} storage_pool {cluster_id} {sp_name}" exits in etcd.
 #### ABORTED
 * Can not find "{dnv_prefix} sp_global {cluster_id}" in etcd.
 * Can not acquire the storage pool lock before the lock timeout.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
@@ -589,7 +592,7 @@ here.
 
 #### ABORTED
 * Can not acquire the storage pool lock before the lock timeout.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -630,7 +633,7 @@ stops dispatching the sp.
 #### ABORTED
 * Can not find the SpDesc, the SpRev, or any Cntlr/Leg/LogicalDisk key listed
   by the StoragePool.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -672,7 +675,7 @@ Don't use STM in this action.
 
 #### ABORTED
 * Can not find "{dnv_prefix} sp_desc {cluster_id} {sp_id}" in etcd.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 * ClusterName = DefaultClusterName
@@ -695,7 +698,7 @@ SpRev.
 * Can not find "{dnv_prefix} storage_pool {cluster_id} {sp_name}" in etcd.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -735,7 +738,7 @@ clones and the moves before FinishMove/DeleteClone.
 * Any cn hosting a cntlr of the sp has less than grp_size free space.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -754,7 +757,7 @@ ClusterName = DefaultClusterName
 * Can not find "{dnv_prefix} sp_id_to_name {cluster_id} {sp_id}" in etcd.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -784,7 +787,7 @@ carry the sp_id, this API maps it back to the user visible sp_name.
   legs).
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -811,7 +814,7 @@ be deleted, so a possible failover to another cntlr already happened before
 the record disappears.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -844,7 +847,7 @@ tears down the local cntlr stack and disconnects the lds.
 * cntlr_id is not in StoragePool.CntlrIdList.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -905,7 +908,7 @@ prints a warning in that case.
 * The TdId is referenced by any Clone.DstTdId of the sp.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -930,7 +933,7 @@ The cn agent applies it with a `delete DevId` message per leg pool.
 
 #### ABORTED
 * Can not find a ThinDevice key listed in StoragePool.TdNameList.
-* unexpected error
+* UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -958,7 +961,7 @@ The key "{dnv_prefix} subsystem {cluster_id} {sp_id} {nqn}" exits in etcd.
 len(StoragePool.NqnList) is already MaxSsCntPerSp.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -984,7 +987,7 @@ Subsystem.NsList is not empty. The namespaces must be deleted first. The
 AllowedHosts don't block the deletion, they are removed implicitly.
 
 #### ABORTED
-unexpected error
+UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
@@ -1138,7 +1141,7 @@ and query against the etcd from the next one.
 The addr_port is a string like "192.168.0.17:9000". The gateway, dnworker,
 cnworker, spworker invoke the dnagent/cnagent GRPC against the addr_port.
 
-## unexpected error
+## UNEXPECTED_ERROR
 * Error reported by the STM client itself, not the app code error inside the
   STM.
 * The protobuf seralize/deseralize error.
