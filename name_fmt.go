@@ -1,182 +1,489 @@
+package common
+
 const (
-	dmKindDnReal = 0x00
-	dmKindDnError = 0x01
-	dmKindDnDelay = 0x02
-	dmKindDnLd = 0x03
+	dmKindDnError = 0x0
+	dmKindDnLinear = 0x1
+	dmKindDnMigrSrc = 0x2
+	dmKindDnMigrFinal = 0x3
 
-	dmKindCnPoolMetaSide = 0x20
-	dmKindCnPoolMetaRedunMeta = 0x21
-	dmKindCnPoolMetaRedunData = 0x22
-	dmKindCnPoolMetaRedunFinal = 0x23
-	dmKindCnPoolMetaFinal = 0x24
-	dmKindCnPoolDataSide = 0x25
-	dmKindCnPoolDataRedunMeta = 0x26
-	dmKindCnPoolDataRedunData = 0x27
-	dmKindCnPoolDataRedunFinal = 0x28
-	dmKindCnPoolDataFinal = 0x29
-	dmKindCnPoolFinal = 0x2a
-	dmKindCnThinDev = 0x2b
-	dmKindCnError = 0x2c
-	dmKindCnDelay = 0x2d
-	dmKindCnNsBackend = 0x2e
+	dmKindCnPoolMeta = 0x0
+	dmKindCnPoolData = 0x1
+	dmKindCnPoolFinal = 0x2
+	dmKindCnThinDev = 0x3
+	dmKindCnRaid0 = 0x4
+	dmKindCnError = 0x5
+	dmKindCnNsDev = 0x6
+	dmKindCnCloneFinal = 0x7
+	dmKindCnXferFinal = 0x8
 
-	nqnKindHostCn = 0x00
-	nqnKindTargetLdToCn = 0x01
+	nqnKindDnHost = 0x0
+	nqnKindCnHost = 0x1
+	nqnKindSideToCn = 0x2
+	nqnKindMigr = 0x3
 )
 
 type NameFmt struct {
 	dmPrefix  string
 	nqnPrefix string
+	vgPrefix string
+	tmpfsPrefix string
 }
 
-// {dnv_prefix}-{cluster_id}-{dn_id}-{kind}-{sp_id}-{ld_id}
-func (nf *NameFmt) DnRealName(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	ldId int64,
+func (nf *NameFmt) DnVgName(
+	clusterId uint64,
+	dnId uint64,
+) string {
+    return fmt.Sprintf(
+        "%s-%016x-%016x",
+        clusterId,
+		dnId,
+    )
+}
+
+func (nf *NameFmt) DnLvName(
+	spId uint64,
+	sideId uniq64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%02x-%016x-%016x",
-		nf.dmPrefix,
-		clusterId,
-		dnId,
-		dmKindDnReal,
-		spId,
-		ldId,
+		"%016x-%016x",
+		spId, sideId,
 	)
 }
 
-// {dnv_prefix}-{cluster_id}-{dn_id}-{kind}-{sp_id}-{ld_id}
-func (nf *NameFmt) DnErrorName(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	ldId int64,
+func (nf *NameFmt) DnLvPath(
+	clusterId uint64,
+	dnId uint64,
+	spId unit64,
+	sideId unit64,
+) string {
+	vgName := nf.DnVgName(clusterId, dnId)
+	lvName := nf.DnLvName(spId, sideId)
+	return fmt.Sprintf(
+		"/dev/%s/%s",
+		vgName,
+		lvName,
+	)
+}
+
+func (nf *NameFmt) DnTmpfsPath(
+	clusterId uint64,
+	dnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%02x-%016x-%016x",
+		"%s/%016x-%016d",
+		nf.tmpfsPrefix,
+		clusterId,
+		dnId,
+	)
+}
+
+func (nf *NameFmt) DnMigrMetaFile(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
+) string {
+	tmpfsPath = nf.DnTmpfsPath(clusterId, dnId)
+	return fmt.Sprintf(
+		"%s/%016x-%016x",
+		tmpfsPath,
+		spId,
+		migrId,
+	)
+}
+
+func (nf *NameFmt) DnMigrMetaDev(
+	loopStart uint32,
+	loopOffset uint32,
+) stirng {
+	return fmt.Sprint(
+		"/dev/loop%d",
+		loopStart + loopOffset,
+	)
+}
+
+func (nf *NameFmt) DnErrorName(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	sideId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
 		dmKindDnError,
 		spId,
-		ldId,
+		sideid,
 	)
 }
 
-// {dnv_prefix}-{cluster_id}-{dn_id}-{kind}-{sp_id}-{ld_id}
-func (nf *NameFmt) DnDelayName(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	ldId int64,
+func (nf *NameFmt) DnMigrSrcName(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%02x-%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnDelay,
+		dmKindDnMigrSrc,
 		spId,
-		ldId,
+		migrId,
 	)
 }
 
-// {dnv_prefix}-{cluster_id}-{dn_id}-{kind}-{sp_id}-{ld_id}-{cn_id}
-func (nf *NameFmt) DnLdName(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	ldId int64,
-	cnId int64,
+func (nf *NameFmt) DnMigrFinalName(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%02x-%016x-%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnLd,
+		dmKindDnMigrFinal,
 		spId,
-		ldId,
+		migrId,
+	)
+}
+
+func (nf *NameFmt) DnLinearName(
+	clusterId uint64,
+	dnId uint64,
+	spId unit64,
+	sideId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		dnId,
+		dmKindDnLinear,
+		spId,
+		sideid,
+	)
+}
+
+func getShortId(clusterId, nodeId uint64) uint64 {
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%016x%016x", clusterId, nodeId)
+	return h.Sum64() & 0x0000FFFFFFFFFFFF
+}
+
+func (nf *NameFmt)CnMdDevName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	sliceIdx uint32,
+	grpIdx uint32,
+	isMeta bool,
+) string {
+	shortId = getShortId(clusterId, cnId)
+	if isMeta {
+		sliceIdx |= 0x80
+	}
+	return fmt.Sprintf(
+		"%012x%016x%02x%02x",
+		shortId,
+		spId,
+		sliceIdx,
+		grpIdx,
+	)
+}
+
+func (nf *NameFmt)CnMdArrayName(
+	spId uint64,
+	sliceIdx uint32,
+	grpIdx uint32,
+	isMeta bool,
+) string {
+	if isMeta {
+		sliceIdx |= 0x80
+	}
+	return fmt.Sprintf(
+		"%016x-%02x-%02x",
+		spId,
+		sliceIdx,
+		grpIdx,
+	)
+}
+
+func (nf *NameFmt) CnPoolMetaName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	sliceId uint64,
+	grpId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnPoolMeta,
+		spId,
+		sliceId,
+		grpId,
+	)
+}
+
+func (nf *NameFmt) CnPoolDataName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	sliceId uint64,
+	grpId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnPoolData,
+		spId,
+		sliceId,
+		grpId,
+	)
+}
+
+func (nf *NameFmt) CnPoolFinalName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	sliceId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnPoolFinal,
+		spId,
+		sliceId,
+	)
+}
+
+func (nf *NameFmt) CnThinDevName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	tdId uint64,
+	sliceId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnThinDev,
+		spId,
+		tdId,
+		sliceId,
+	)
+}
+
+func (nf *NameFmt) CnRaid0Name(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	tdId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnRaid0,
+		spId,
+		tdId,
+	)
+}
+
+func (nf *NameFmt) CnErrorName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	tdId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnError,
+		spId,
+		tdId,
+	)
+}
+
+func (nf *NameFmt) CnNsDevName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	tdId uint64,
+) string {
+	rreturn fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnNsDev,
+		spId,
+		tdId,
+	)
+}
+
+func (nf *NameFmt) CnTmpfsPath(
+	clusterId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%016x-%016d",
+		nf.tmpfsPrefix,
+		clusterId,
 		cnId,
 	)
 }
 
-// CnPoolMetaSideName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
+func (nf *NameFmt) CnCloneMetaFile(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cloneId uint64,
+) string {
+	tmpfsPath = nf.CnTmpfsPath(clusterId, cnId)
+	return fmt.Sprintf(
+		"%s/%016x-%016x",
+		tmpfsPath,
+		spId,
+		cloneId,
+	)
+}
 
-// CnPoolMetaRedunMetaName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
+func (nf *NameFmt) CnCloneMetaDev(
+	loopStart uint32,
+	loopOffset uint32,
+) stirng {
+	return fmt.Sprint(
+		"/dev/loop%d",
+		loopStart + loopOffset,
+	)
+}
 
-// CnPoolMetaRedunDataName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
+func (nf *NameFmt) CnCloneFinalName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cloneId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnCloneFinal,
+		spId,
+		cloneId,
+	)
+}
 
-// CnPoolMetaRedunFinalName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{grp_id}
+func (nf *NameFmt) CnXferFinaName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	xferId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnXferFinal,
+		spId,
+		xferId,
+	)
+}
 
-// CnPoolMetaFinalName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{leg_id}
+func (nf *NameFmt) DmPath(name string) string {
+	return fmt.Sprintf(
+		"/dev/mapper/%s",
+		name,
+	)
+}
 
-// CnPoolDataSideNameName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
+func (nf *NameFmt) MdPath(name string) string {
+	return fmt.Sprintf(
+		"/dev/md/%s",
+		name,
+	)
+}
 
-// CnPoolDataRedunMetaName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
+func (nf *NameFmt) DnHostNqn(
+	clusterId int64,
+	dnId int64,
+) -> string {
+	return fmt.Sprintf(
+		"%s:%01x:%016x:%016x",
+		nf.nqnPrefix,
+		nqnKindDnHost,
+		clusterId,
+		dnId,
+	)
+}
 
-// CnPoolDataRedunDataName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{ld_id}
-
-// CnPoolDataRedunFinalName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{grp_id}
-
-// CnPoolDataFinalName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{leg_id}
-
-// CnPoolFinalName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{leg_id}
-
-// CnThinDevName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{td_id}
-
-// CnErrorName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}
-
-// CnDelayName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}
-
-// CnNsBackendName
-// {dnv_prefix}-{cluster_id}-{cn_id}-{kind}-{sp_id}-{cntlr_id}-{td_id}
-
-
-func (nf *NameFmt) HostCnNqn(
+func (nf *NameFmt) CnHostNqn(
 	clusterId int64,
 	cnId int64,
 ) -> string {
 	return fmt.Sprintf(
-		"%s:%02x:%016x:%016x",
+		"%s:%01x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindHostCn,
+		nqnKindCnHost,
 		clusterId,
 		cnId,
 	)
 }
 
-func (nf *NameFmt) TargetLdToCnNqn(
+func (nf *NameFmt) SideToCnNqn(
 	clusterId int64,
 	dnId int64,
 	spId int64,
-	ldId int64,
+	sideId int64,
 	cnId int64,
 ) -> string {
 	return fmt.Sprintf(
-		"%s:%02x:%016x:%016x:%016x:%016x:%016x",
+		"%s:%01x:%016x:%016x:%016x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindTargetLdToCn,
+		nqnKindSideToCn,
 		clusterId,
 		dnId,
 		spId,
-		ldId,
+		sideId,
 		cnId,
+	)
+}
+
+func (nf *NameFmt) MigrNqn(
+	clusterId int64,
+	dnId int64,
+	spId int64,
+	migrId int64,
+) -> string {
+	return fmt.Sprintf(
+		"%s:%01x:%016x:%016x:%016x:%016x",
+		nf.nqnPrefix,
+		nqnKindMigr,
+		clusterId,
+		dnId,
+		spId,
+		migrId,
 	)
 }
