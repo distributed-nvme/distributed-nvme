@@ -19,7 +19,7 @@ const (
 	nqnKindDnHost = 0x0
 	nqnKindCnHost = 0x1
 	nqnKindSideToCn = 0x2
-	nqnKindMigr = 0x3
+	nqnKindMigrSrc = 0x3
 )
 
 type NameFmt struct {
@@ -471,7 +471,7 @@ func (nf *NameFmt) SideToCnNqn(
 	)
 }
 
-func (nf *NameFmt) MigrNqn(
+func (nf *NameFmt) MigrSrcNqn(
 	clusterId int64,
 	dnId int64,
 	spId int64,
@@ -480,7 +480,7 @@ func (nf *NameFmt) MigrNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindMigr,
+		nqnKindMigrSrc,
 		clusterId,
 		dnId,
 		spId,

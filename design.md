@@ -5,26 +5,26 @@
 ### Error Code
 
 #### INVALID_ARGUMENT
-* len(ClusterName) > MaxStrSize
-* len(Description) > MaxDescSize
+If any parameter breaks the min/max rules in constants.go
 
 #### ALREADY_EXISTS
-The key "{dnv_prefix} cluster_conf {cluster_name}" exists in etcd.
-Check the key in the STM.
+* The key "{dnv_prefix} cluster_conf {cluster_name}" exists in etcd.
+* The key "{dnv_prefix} dn_global {cluster_id}" exists in etcd.
+* The key "{dnv_prefix} cn_global {cluster_id}" exists in etcd.
+* The key "{dnv_prefix} sp_global {cluster_id}" exists in etcd.
+
+Check the keys in the STM.
 
 #### ABORTED
 UNEXPECTED_ERROR
 
 ### Default Value
-* Clustername = DefaultClusterName
-* Description = bytes("")
-* QosRatio.BytesPerIops = 0
-* QosRatio.BytesPerBps = 0
+If the constants.go has a default value, use it. Or use the protobuf default
+value.
 
 ### Action
 Create Below resoruces in the same STM:
 * ClusterConf
-* ClusterDesc
 * DnGlobal
 * CnGlobal
 * SpGlobal
@@ -38,7 +38,7 @@ All items in the ShardBuckets are 0.
 ### Error Code
 
 #### INVALID_ARGUMENT
-len(ClusterName) > MaxStrSize
+If any parameter breaks the min/max rules in constants.go
 
 #### NOT_FOUND
 The key "{dnv_prefix} cluster_conf {cluster_name}" doesn't exist in etcd.
@@ -53,7 +53,8 @@ Found items in etcd which have below key prefix:
 * "{dnv_prefix} storage_pool {cluster_id}"
 
 ### Default Value
-ClusterName = DefaultClusterName
+If the constants.go has a default value, use it. Or use the protobuf default
+value.
 
 ### Action
 Delete below items from etcd according to the ClusterName and ClusterId:
@@ -68,7 +69,7 @@ Delete below items from etcd according to the ClusterName and ClusterId:
 ### Error Code
 
 #### INVALID_ARGUMENT
-len(ClusterName) > MaxStrSize
+If any parameter breaks the min/max rules in constants.go
 
 #### NOT_FOUND
 The key "{dnv_prefix} cluster_conf {cluster_name}" doesn't exist in etcd.
@@ -77,7 +78,6 @@ The key "{dnv_prefix} cluster_conf {cluster_name}" doesn't exist in etcd.
 UNEXPECTED_ERROR
 
 ### Default Value
-ClusterName = DefaultClusterName
 
 ### Action
 Read data from etcd and fill to the GetClusterReply according to the ClusterName
@@ -88,7 +88,7 @@ and ClusterId.
 ### Error Code
 
 #### INVALID_ARGUMENT
-* count > MaxListCnt
+* If any parameter breaks the min/max rules in constants.go
 * `base64.StdEncoding.DecodeString` report error against page_token
 
 ### ABORTED
@@ -103,28 +103,6 @@ Get keys from the "{dnv_prefix} cluster_conf " prefix, extract the
 {cluster_name}, then return the {cluster_name} list and the new PageToken.
 
 Don't use STM in this action.
-
-## UpdateClusterDesc
-
-### Error Code
-
-#### INVALID_ARGUMENT
-* len(cluster_name) > MaxStrSize
-* len(description) > MaxDescSize
-
-#### NOT_FOUND
-Can't find "{dnv_prefix} cluster_conf {cluster_name}" in etcd.
-
-#### ABORTED
-* Can't find "{dnv_prefix} cluster_desc {cluster_id}" in etcd.
-* UNEXPECTED_ERROR
-
-### Default Value
-* ClusterName = DefaultClusterName
-* Description = bytes("")
-
-### Action
-Update the ClusterDesc.
 
 ## CreateDiskNode
 
@@ -160,7 +138,6 @@ cluster, so we never need a range query to count the dns.
 
 ### Default Value
 * ClusterName = DefaultClusterName
-* Description = bytes("")
 * Location = AddrPort
 
 ### Action
@@ -191,43 +168,14 @@ section in the Appendix). At this moment we don't know the DnId yet, so we set
 GetDnSizeRequest.DnId=0. The dn agent doesn't need the DnId to report the
 device size, the DnId in the request is only for logging.
 
-#### Split the block device to segments
-Given the DnExtSize=1G, MaxExtCntPerSegment=4K, the MaxSegmentSize is 1G*4K=4T.
-Split the device size to 4T segments. Given the MaxSegmentCntPerDn=16, we will
-have up to 16 segments. If the device size is larger than 64T, we will only use
-the first 64T. Except the last segment, all other segmetns are exactly 4T.
-
-We round down the device size to DnExtSize. E.g. if the device size is 1025M, we only use the first 1024M (1G). So the device has only a single segment, and the sigment has a signle extend. We will create a DnSegment with below values:
-* Start=0
-* ExtCnt=1
-* The bitmap has only a single bit, the init value is 0.
-
-If the device size is 9T, we will have 3 segments.
-* segment0: Start=0, ExtCnt=4096, the bitmap has 4096 bits (512 bytes), all
-  bits are 0.
-* segment1: Start=4T (0x40000000000), ExtCnt=4096, the bitmap has 4096 bits,
-  all bits are 0.
-* segment2: Start=8T (0x80000000000), ExtCnt=1024 (the remaining 1T), the
-  bitmap has 1024 bits (128 bytes), all bits are 0.
-
-The DnSegment.Start is the byte offset of the segment on the block device.
-Each bit in the bitmap covers one extend of DnExtSize bytes, bit i covers the
-byte range [Start + i*DnExtSize, Start + (i+1)*DnExtSize). Bit value 0 means
-free, 1 means allocated. See the "bitmap encoding" section in the Appendix.
 
 #### Write the etcd keys
 Create below resources in the same STM:
 * DiskNode "{dnv_prefix} disk_node {cluster_id} {addr_port}":
-  DnId and ShardCode as calculated above, Enabled=CreateDiskNodeRequest.Online,
+  DnId and ShardCode as calculated above, Enabled=CreateDiskNodeRequest.Enabled,
   Healthy=true, NvmeTrConf from the request, SpLdIdList is empty,
-  SegmentCnt=the calculated segment count.
-* DnDesc "{dnv_prefix} dn_desc {cluster_id} {dn_id}"
-* One DnSegment "{dnv_prefix} segment {cluster_id} {dn_id} {segment_idx}" per
-  segment. The segment_idx is formatted with SegmentIdxFmt.
-* One DnCapacity "{dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_space}
-  {addr_port} {segment_idx}" per segment. The free_space of a new segment is
-  ExtCnt*DnExtSize. See the "dn_capacity index" section in the Appendix for
-  the bin_idx calculation. DnCapacity.Location=CreateDiskNodeRequest.Location.
+* DnCapacity "{dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt}
+  {addr_port}". DnCapacity.Location=CreateDiskNodeRequest.Location. Round down the de
 * DnRev "{dnv_prefix} dn_rev {cluster_id} {shard_code} {addr_port}",
   Revision=1. The dnv-dnworker of this shard_code will notice the new key and
   invoke DiskNodeAgent.SyncupDn (see the "revision and sync flow" section in
@@ -248,8 +196,8 @@ Also update the DnGlobal (NextId and ShardBucket) in the same STM.
 * Can not find "{dnv_prefix} disk_node {cluster_id} {addr_port}" in etcd.
 
 #### FAILED_PRECONDITION
-DiskNode.SpLdIdList is not empty. All the lds on the dn must be removed first
-(by deleting/moving the storage pools which own them).
+DiskNode.SidePtrList is not empty. All the sides on the dn must be removed first
+(by deleting/migrating the storage pools which own them).
 
 #### ABORTED
 * Can not find "{dnv_prefix} dn_global {cluster_id}" in etcd.
@@ -260,13 +208,8 @@ ClusterName = DefaultClusterName
 
 ### Action
 In a single STM:
-* Read the DiskNode to get the DnId, ShardCode and SegmentCnt.
-* Read every DnSegment of the dn, calculate each segment's free_space from the
-  bitmap (the free bit count times DnExtSize), then delete the matching
-  DnCapacity key of each segment. We need the free_space to rebuild the
-  DnCapacity key, that is why the segments must be read before deleting.
-* Delete all the DnSegment keys.
-* Delete the DnDesc, the DnRev and the DiskNode.
+* Read the DiskNode to get the DnId, ShardCode.
+* Delete the DnRev and the DiskNode.
 * Decrease 1 from DnGlobal.ShardBucket[ShardCode].
 
 The dnv-dnworker of the shard notices the deleted DnRev key and stops health
@@ -286,15 +229,14 @@ is no desired state left for it.
 * Can not find "{dnv_prefix} disk_node {cluster_id} {addr_port}" in etcd.
 
 #### ABORTED
-* Can not find the DnDesc, the DnRev or any DnSegment which should exist.
+* Can not find the DnRev should exist.
 * UNEXPECTED_ERROR
 
 ### Default Value
 ClusterName = DefaultClusterName
 
 ### Action
-In a single STM read the DiskNode, the DnDesc, the DnRev and all the
-DnSegments (segment_idx from 0 to SegmentCnt-1), fill them into the
+In a single STM read the DiskNode, the DnRev, fill them into the
 GetDiskNodeReply. GetDiskNodeReply.Revision comes from the DnRev.
 
 ## ListDiskNodes
@@ -323,30 +265,11 @@ Get keys from the "{dnv_prefix} disk_node {cluster_id} " prefix, extract the
 
 Don't use STM in this action.
 
-## UpdateDiskNodeDesc
+## UpdateDiskNodeEnabled
 
 ### Error Code
-
-#### INVALID_ARGUMENT
-* len(ClusterName) > MaxStrSize
-* len(addr_port) > MaxStrSize
-* len(description) > MaxDescSize
-
-#### NOT_FOUND
-* Can not find "{dnv_prefix} cluster_conf {cluster_name}" in etcd.
-* Can not find "{dnv_prefix} disk_node {cluster_id} {addr_port}" in etcd.
-
-#### ABORTED
-* Can not find "{dnv_prefix} dn_desc {cluster_id} {dn_id}" in etcd.
-* UNEXPECTED_ERROR
-
 ### Default Value
-* ClusterName = DefaultClusterName
-* Description = bytes("")
-
 ### Action
-Read the DiskNode to get the DnId, then update the DnDesc. Do not bump the
-DnRev, the description is not part of the desired state of the dn agent.
 
 ## InspectDiskNode
 
@@ -369,8 +292,8 @@ ClusterName = DefaultClusterName
 
 ### Action
 Read the DiskNode in an STM to get the DnId. Then, outside the STM, invoke
-DiskNodeAgent.GetDnInfo against the addr_port and return the NodeResInfo to
-the caller. The NodeResInfo carries the live (applied) state of the dn agent,
+DiskNodeAgent.GetDnInfo against the addr_port and return the LiveInfo to
+the caller. The LiveInfo carries the live (applied) state of the dn agent,
 including the last applied revision, so the caller can compare it with the
 desired state in etcd (GetDiskNode).
 
@@ -381,7 +304,6 @@ desired state in etcd (GetDiskNode).
 #### INVALID_ARGUMENT
 * len(ClusterName) > MaxStrSize
 * len(addr_port) > MaxStrSize
-* len(description) > MaxDescSize
 * NvmeTrConf is empty
 * len(NvmeTrConf.TrType) > MaxStrSize
 * len(NvmeTrConf.AdrFam) > MaxStrSize
@@ -406,7 +328,6 @@ MaxCnCntPerCluster.
 
 ### Default Value
 * ClusterName = DefaultClusterName
-* Description = bytes("")
 * Location = AddrPort
 
 ### Action

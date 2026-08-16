@@ -5,14 +5,9 @@ message AgentReply {
     string details = 2;
 }
 
-message RotatedPort {
-    uint32 curr = 1;
-	bytes bitmap = 2;
-}
-
 message NodeSelector {
-    repeated string addr_port_list = 1;
-	bool include = 2;
+    repeated string black_list = 1;
+    repeated string white_list = 2;
 }
 
 message NvmeTrConf {
@@ -22,16 +17,15 @@ message NvmeTrConf {
     string tr_svc_id = 4;
 }
 
-// 0 means no limit
-// positive means apply the limit to the thin pool of each slice
-// negative means apply to both thin pools and legs
 message QosRatio {
-    int64 bytes_per_iops = 1;
-    int64 bytes_per_bps = 2;
+    bool strict = 1;
+    uint64 bytes_per_iops = 2;
+    uint64 bytes_per_bps = 3;
 }
 
 message DmCloneConf {
-    uint64 region_blocks = 1;
+    // region_size_in_byte = region_block_cnt * DmPoolConf.data_block_size
+    uint64 region_block_cnt = 1;
 	uint32 hydration_threshold  = 2;
 	uint32 hydration_batch_size = 3;
 }
@@ -44,8 +38,8 @@ message DmPoolConf {
 message RedundNone {}
 
 message RedundMdRaid1 {
-    uint64 bitmap_chunk_blocks = 1;
-	uint64 data_offset_blocks = 2;
+    // chunk_size_in_byte = bitmap_chunk_block_cnt * DmPoolConf.data_block_size
+    uint64 bitmap_chunk_block_cnt = 1;
 }
 
 message RedundConf {
@@ -89,7 +83,7 @@ message Side {
     uint64 side_id = 1;
     string addr_port = 2;
 	NvmeTrConf nvme_tr_conf = 3;
-	uint32 port_offset_base = 4;
+	uint32 port_offset = 4;
     uint32 nvme_id_set = 5;
 }
 
@@ -173,7 +167,7 @@ message CnGlobal {
     repeated uint32 shard_bucket = 2;
 }
 
-// {dnv_prefix} sp_global {cluster_id} 
+// {dnv_prefix} sp_global {cluster_id}
 message SpGlobal {
     uint64 next_id = 1;
     repeated uint32 shard_bucket = 2;
@@ -201,7 +195,7 @@ message DnConf {
     bool enabled = 3;
     bool healthy = 4;
     NvmeTrConf nvme_tr_conf = 5;
-	RotatedPort rotated_port = 6;
+    bytes port_bitmap = 6;
     repeated SidePointer side_ptr_list = 7;
     uint64 total_ext_cnt = 8;
     uint64 free_ext_cnt = 9;
@@ -214,18 +208,18 @@ message CnConf {
     bool enabled = 3;
     bool healthy = 4;
     NvmeTrConf nvme_tr_conf = 5;
-	RotatedPort rotated_port = 6;
+    bytes port_bitmap = 6;
     repeated CntlrPointer cntlr_ptr_list = 7;
     uint64 total_ext_cnt = 8;
     uint64 free_ext_cnt = 9;
 }
 
-// {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_space} {addr_port} {segment_idx}
+// {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
 message DnCapacity {
     string location = 1;
 }
 
-// {dnv_prefix} cn_capacity {cluster_id} {free_space} {addr_port}
+// {dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
 message CnCapacity {
     string location = 1;
 }
@@ -398,7 +392,6 @@ message GetDiskNodeReply {
     string addr_port = 1;
     DnConf dn_conf = 2;
     DnRev dn_rev = 3;
-    DnDesc dn_desc = 4;
 }
 
 message ListDiskNodesRequest {
@@ -461,7 +454,6 @@ message GetControllerNodeReply {
     string addr_port = 1;
     CnConf cn_conf = 2;
     CnRev cn_rev = 3;
-    CnDesc cn_desc = 4;
 }
 
 message ListControllerNodesRequest {
@@ -528,9 +520,8 @@ message GetStoragePoolReply {
     string sp_name = 1;
     SpConf sp_conf = 2;
     SpRev sp_rev = 3;
-    SpDesc sp_desc = 4;
-    repeated Cntlr cntlr_list = 5;
-    repeated Slice slice_list = 6;
+    repeated Cntlr cntlr_list = 4;
+    repeated Slice slice_list = 5;
 }
 
 message ListStoragePoolsRequest {
@@ -578,6 +569,8 @@ message GrowSliceRequest {
     string sp_name = 2;
     uint64 slice_id = 3;
     uint64 ext_cnt = 4;
+    bool is_meta = 5;
+    NodeSelector dn_selector = 6;
 }
 
 message GrowSliceReply {
@@ -837,7 +830,7 @@ message CreateMigrationRequest {
     string sp_name = 2;
     string migr_name = 3;
     uint64 src_side_id = 4;
-	NodeSelector dn_node_selector = 5;
+	NodeSelector dn_selector = 5;
     DmCloneConf dm_clone_conf = 6;
     bytes bitmap = 7;
 }
@@ -889,7 +882,7 @@ message CreateSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
     string grp_id = 3;
-	NodeSelector dn_node_selector = 4;
+	NodeSelector dn_selector = 4;
 }
 
 message CreateSpareLegReply {
@@ -977,7 +970,7 @@ service Gateway {
     rpc GetStoragePool(GetStoragePoolRequest) returns(GetStoragePoolReply) {}
     rpc ListStoragePools(ListStoragePoolsRequest) returns(ListStoragePoolsReply) {}
 	rpc UpdateStoragePoolNvmeIdSetList(UpdateStoragePoolNvmeIdSetListRequest) returns(UpdateStoragePoolNvmeIdSetListReply) {}
-	rpc UpdateStoragePoolForcAgg(UpdateStoragePoolForcAggRequest) returns(UpdateStoragePoolForcAggReply) {}
+	rpc UpdateStoragePoolForcAgg(UpdateStoragePoolForcAggRequest) returns(UpdateStoragePoolForceAggReply) {}
     rpc FindStoragePoolName(FindStoragePoolNamesRequest) returns(FindStoragePoolNamesReply) {}
 
     rpc GrowSlice(GrowSliceRequest) returns(GrowSliceReply) {}

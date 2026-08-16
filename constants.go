@@ -15,18 +15,39 @@ const (
 	ShardBucketSize = 256
 	ShardCodeFmt    = "%02x"
 
+	MaxDnExtSize = 1024 * 1024 * 1024 * 1024
+	MinDnExtSize = 64 * 1024 * 1024
 	DefaultDnExtSize   = 1 * 1024 * 1024 * 1024
-	DefaultDnBin0Shift = 1
+	DefaultDnBin0Shift = 0
 	DefaultDnBin1Shift = 4
 	DefaultDnBin2Shift = 8
 	DefaultDnBin3Shift = 12
 
+	MinAllocDnBatchSize = 1
+	MaxAllocDnBatchSize = 1024
 	DefaultAllocDnBatchSize = 16
+	MinAllocCnBatchSize = 1
+	MaxAllocCnBatchSize = 1024
 	DefaultAllocCnBatchSize = 16
 
+	MaxDmPoolDataBlockSize = 1 * 1024 * 1024 * 1024
+	MinDmPoolDataBlockSize = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
+	MaxDmPoolLowWaterMarkPct = 90
+	MinDmPoolLowWaterMarkPct = 10
+	DefaultDmPoolLowWaterMarkPct = 50
+	MaxDmRaid0StripeSize = 64 * 1024 * 1024
+	MinDmRaid0StripeSize = 4 * 1024
 	DefaultDmRaid0StripeSize   = 64 * 1024
-	DefaultDmRaid1RegionSize   = 16 * 1024 * 1024
+
+	// Chunk and region have samilar meaning.
+	// It is chunk in md, It is region in dm.
+	MinChunkBlockCnt = 1
+	MaxChunkBlockCnt = 1024
+	DefaultChunkBlockCnt = 128
+	MinRegionBlockCnt = 1
+	MaxRegionBlockCnt = 1024
+	DefaultRegionBlockCnt = 128
 
 	MaxDnCntPerCluster = 1024
 	MaxCnCntPerCluster = 1024
@@ -37,6 +58,8 @@ const (
 	MaxHostCntPerSs    = 8
 	MaxSliceCntPerSp   = 16
 	MaxCntlrCntPerSp   = 4
+	MinCntlrCntPerSp   = 1
+	DefaultCntlrCntPerSp = 2
 	MaxCloneCntPerSp   = 64
 	MaxXferCntPerSp    = 4
 	MaxMigrCntPerSp    = 4
@@ -44,14 +67,8 @@ const (
 	MaxCntlrCntPerCn   = 256
 	MaxLegPerGrp       = 8
 	MaxSpareLegPerGrp  = 2
-	// MaxPortPerDn >= MaxSideCntPerDn * (MaxCntlrCntPerSp + 1)
-	MaxPortPerDn = 8192
-	// MaxPortPerCn >= MaxCntlrCntPerCn
-	MaxPortPerCn     = 4096
-	InitPortPosition = -3
-
-	CmdSoftTimeout = 3
-	CmdHardTimeout = 5
+	DnPortBitmapSize   = 512
+	CnPortBitmapSize   = 512
 
 	// The cntlr_id is a per host per connection resoruce.
 	// To work in the worst case, we should make sure:
@@ -62,16 +79,17 @@ const (
 	// could distribute the workload evenly and the typically the
 	// ss_cnt_per_sp and exp_cnt_per_ss should be 1.
 	CnNvmeIdBase   = 10000
-	CnNvmeIdStep   = 4096
-	MaxCnNvmeIdSet = 8
+	CnNvmeIdStep   = 5000
+	CnNvmeIdSetCnt = 8
 
 	DnNvmeIdBase   = 10000
-	DnNvmeIdStep   = 4096
-	MaxDnNvmeIdSet = 8
+	DnNvmeIdStep   = 5000
+	DnNvmeIdSetCnt = 8
 
 	DefaultClusterName = "default"
 	DefaultCnCap       = 4 * 1024 * 1024 * 1024 * 1024
 	MaxCnCap           = 64 * 1024 * 1024 * 1024 * 1024
+	MinCpCap           = 1024
 	DefaultListCnt     = 64
 	MaxListCnt         = 1024
 
@@ -88,4 +106,10 @@ const (
 
 	IdKeyFmt     = "%016x"
 	FreeSpaceFmt = "%016x"
+
+	CmdSoftTimeout = 3
+	CmdHardTimeout = 5
+
+	OldPirmaryWait = 5
+	SideSwitchWait = 300
 )
