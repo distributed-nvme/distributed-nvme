@@ -1,0 +1,12 @@
+1787034105.386279969 dn0 step1 suspend dnv-lin-cn0
+1787034105.399353610 dn0 step1 done
+1787034105.401887093 dn0 step2 reload dnv-lin-cn1 -> dnv-delay
+1787034105.426488101 dn0 step2 done
+1787034105.428915039 dn0 step3 ns-to-cn1 ana_grpid -> 1 (optimized)
+1787034105.438323707 dn0 step3 done
+1787034105.440883493 dn0 step4 sleep 5
+1787034110.445119490 dn0 step5 reload dnv-lin-cn0 -> dnv-err-cn0
+1787034110.458780856 dn0 step5 done
+1787034110.461320270 dn0 step6 ns-to-cn0 ana_grpid -> 2 (non-optimized)
+1787034110.473474962 dn0 step6 done
+1787034110.478573010 dn0 finished in 5.092538114s

@@ -20,13 +20,18 @@ const (
 	nqnKindCnHost = 0x1
 	nqnKindSideToCn = 0x2
 	nqnKindMigrSrc = 0x3
+
+	migrPvName = "migr-pv"
+	tmpFileName = "tmp-file"
 )
 
 type NameFmt struct {
 	dmPrefix  string
 	nqnPrefix string
-	vgPrefix string
 	tmpfsPrefix string
+	dnVgPrefix string
+	cloneVgPrefix string
+	migrVgPrefix string
 }
 
 func (nf *NameFmt) DnVgName(
@@ -35,6 +40,7 @@ func (nf *NameFmt) DnVgName(
 ) string {
     return fmt.Sprintf(
         "%s-%016x-%016x",
+		nf.dnVgPrefix,
         clusterId,
 		dnId,
     )
@@ -46,7 +52,8 @@ func (nf *NameFmt) DnLvName(
 ) string {
 	return fmt.Sprintf(
 		"%016x-%016x",
-		spId, sideId,
+		spId,
+		sideId,
 	)
 }
 
@@ -65,43 +72,6 @@ func (nf *NameFmt) DnLvPath(
 	)
 }
 
-func (nf *NameFmt) DnTmpfsPath(
-	clusterId uint64,
-	dnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s/%016x-%016d",
-		nf.tmpfsPrefix,
-		clusterId,
-		dnId,
-	)
-}
-
-func (nf *NameFmt) DnMigrMetaFile(
-	clusterId uint64,
-	dnId uint64,
-	spId uint64,
-	migrId uint64,
-) string {
-	tmpfsPath = nf.DnTmpfsPath(clusterId, dnId)
-	return fmt.Sprintf(
-		"%s/%016x-%016x",
-		tmpfsPath,
-		spId,
-		migrId,
-	)
-}
-
-func (nf *NameFmt) DnMigrMetaDev(
-	loopStart uint32,
-	loopOffset uint32,
-) stirng {
-	return fmt.Sprint(
-		"/dev/loop%d",
-		loopStart + loopOffset,
-	)
-}
-
 func (nf *NameFmt) DnErrorName(
 	clusterId uint64,
 	dnId uint64,
@@ -117,6 +87,75 @@ func (nf *NameFmt) DnErrorName(
 		dmKindDnError,
 		spId,
 		sideid,
+	)
+}
+
+func (nf *NameFmt) DnLinearName(
+	clusterId uint64,
+	dnId uint64,
+	spId unit64,
+	sideId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		dnId,
+		dmKindDnLinear,
+		spId,
+		sideid,
+	)
+}
+
+func (nf *NameFmt) DnMigrPvName() string {
+	return nf.migrPvName
+}
+
+func (nf *NameFmt) DnMigrPvPath(
+	clusterId uint64,
+	dnId uint64,
+) string {
+	return fmt.Sprintf(
+		"/dev/%s/%s",
+		nf.DnVgName(clusterId, dnId),
+		nf.DnMigrPvName(),
+	)
+}
+
+func (nf *NameFmt) DnMigrVgName(
+	clusterId uint64,
+	dnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x",
+		nf.migrVgPrefix,
+		clusterId,
+		dnId,
+	)
+}
+
+func (nf *NameFmt) DnMigrMetaName(
+	spId uint64,
+	migrId uint64,
+) stirng {
+	return fmt.Sprintf(
+		"%016x-%016x",
+		spId,
+		migrId,
+	)
+}
+
+func (nf *NameFmt) DnMigrMetaPath(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
+) string {
+	return fmt.Sprintf(
+		"/dev/%s/%s",
+		nf.DnMigrVgName(clusterId, dnId),
+		nf.DnMigrMetaName(spId, migrId),
 	)
 }
 
@@ -151,24 +190,6 @@ func (nf *NameFmt) DnMigrFinalName(
 		dmKindDnMigrFinal,
 		spId,
 		migrId,
-	)
-}
-
-func (nf *NameFmt) DnLinearName(
-	clusterId uint64,
-	dnId uint64,
-	spId unit64,
-	sideId uint64,
-	cnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
-		nf.dmPrefix,
-		clusterId,
-		dnId,
-		dmKindDnLinear,
-		spId,
-		sideid,
 	)
 }
 
@@ -353,28 +374,54 @@ func (nf *NameFmt) CnTmpfsPath(
 	)
 }
 
-func (nf *NameFmt) CnCloneMetaFile(
+func (nf *NameFmt) CnTmpFileName() {
+	return nf.tmpFilename
+}
+
+func (nf *NameFmt) CnTmpFilePath(
 	clusterId uint64,
 	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s",
+		nf.CnTmpfsPath(clusterId, cnId),
+		nf.CnTmpFileName(),
+	)
+}
+
+func (nf *NameFmt) CnCloneVgName(
+	clusterId uint64,
+	cnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x",
+		nf.cloneVgPrefix,
+		clusterId,
+		cnId,
+	)
+}
+
+func (nf *NameFmt) CnCloneMetaName(
 	spId uint64,
 	cloneId uint64,
 ) string {
-	tmpfsPath = nf.CnTmpfsPath(clusterId, cnId)
 	return fmt.Sprintf(
-		"%s/%016x-%016x",
-		tmpfsPath,
+		"%016x-%016x",
 		spId,
 		cloneId,
 	)
 }
 
-func (nf *NameFmt) CnCloneMetaDev(
-	loopStart uint32,
-	loopOffset uint32,
-) stirng {
-	return fmt.Sprint(
-		"/dev/loop%d",
-		loopStart + loopOffset,
+func (nf *NameFmt) CnCloneMetaPath(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cloneId uint64,
+) string {
+	return fmt.Sprintf(
+		"/dev/%s/%s",
+		nf.CnCloneVgName(clusterId, cnId),
+		nf.CnCloneMetaName(spId, cloneId),
 	)
 }
 

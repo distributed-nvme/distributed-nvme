@@ -1,10 +1,6 @@
 package common
 
 const (
-	DnvPrefix = "dnv"
-	DmPrefix  = "dnv"
-	NqnPrefix = "nqn.2024-01.io.dnv"
-
 	ValidStrPattern = `^[a-zA-Z0-9\-_/.:]+$`
 	MaxStrSize      = 64
 	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:` +
@@ -70,21 +66,13 @@ const (
 	DnPortBitmapSize   = 512
 	CnPortBitmapSize   = 512
 
-	// The cntlr_id is a per host per connection resoruce.
-	// To work in the worst case, we should make sure:
-	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs < CnNvmeIdStep
-	// To make sure the re-connection works well, we should dobule the left:
-	// MaxCntlrCntPerCn * MaxSsCntPerSp * MaxHostCntPerSs * 2 < CnNvmeIdStep
-	// We can't satisfy this math requirement, hope the allocation algorithm
-	// could distribute the workload evenly and the typically the
-	// ss_cnt_per_sp and exp_cnt_per_ss should be 1.
-	CnNvmeIdBase   = 10000
-	CnNvmeIdStep   = 5000
-	CnNvmeIdSetCnt = 8
+	CnCntlidSlotBase   = 10000
+	CnCntlidSlotStep   = 5000
+	CnCntlidSlotCnt = 8
 
-	DnNvmeIdBase   = 10000
-	DnNvmeIdStep   = 5000
-	DnNvmeIdSetCnt = 8
+	DnCntlidSlotBase   = 10000
+	DnCntlidSlotStep   = 5000
+	DnCntlidSlotCnt = 8
 
 	DefaultClusterName = "default"
 	DefaultCnCap       = 4 * 1024 * 1024 * 1024 * 1024
@@ -93,16 +81,20 @@ const (
 	DefaultListCnt     = 64
 	MaxListCnt         = 1024
 
-	DefaultDnTmpfsPrefix = "/tmp/dnv-dn-tmpfs"
-	DefaultDnTmpfsSize   = 2 * 1024 * 1024 * 1024
-	DefaultDnLoopStart   = 10000
-	DefaultDnLoopRange   = 1024
-	DefaultCnTmpfsPrefix = "/tmp/dnv-cn-tmpfs"
-	DefaultCnLoopStart   = 20000
-	DefaultCnLoopRange   = 1024
-	InitLoopPosition     = -3
+	DnvPrefix = "dnv"
+	DmPrefix  = "dnv"
+	NqnPrefix = "nqn.2024-01.io.dnv"
 
-	DefaultDnVgPrefix = "dnv-dn-"
+	DefaultTmpfsPrefix = "/tmp/dnv-tmpfs"
+	DefaultCloneVgPrefix = "dnv-clone-vg"
+	DefaultCloneVgSize = 1 * 1024 * 1024 * 1024
+	DefaultCloneVgExtSize = 4 * 1024 * 1024
+
+	DefaultDnVgPrefix = "dnv-dn"
+
+	DefaultMigrVgPrefix = "dnv-migr"
+	DefaultMigrVgSize = 1 * 1024 * 1024 * 1024
+	DefaultMigrVgExtSize = 4 * 1024 * 1024
 
 	IdKeyFmt     = "%016x"
 	FreeSpaceFmt = "%016x"
@@ -110,6 +102,19 @@ const (
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
 
-	OldPirmaryWait = 5
 	SideSwitchWait = 300
+
+	StateDnCustomMax = 4
+	StateDnAgentFailed = 4
+	StateDnResFailed = 5
+	StateDnDiskFailed = 6
+	StateDnMax = 7
+	StateCnCustomMax = 4
+	StateCnAgentFailed = 4
+	StateCnResFailed = 5
+	StateCnMax = 6
+	StateSpCustomMax = 4
+	StateSpAgentFailed = 4
+	StateSpResEvent = 5
+	StateSpMax = 6
 )

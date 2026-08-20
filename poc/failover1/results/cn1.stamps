@@ -1,0 +1,7 @@
+1787034105.387508557 cn1 step1 waiting for nvme0 ana_state=optimized (now: non-optimized)
+1787034105.446547004 cn1 step1 done, ana_state=optimized
+1787034105.448878703 cn1 step2 reload dnv-lin-on-cn1 -> /dev/nvme0n1
+1787034105.525302162 cn1 step2 done
+1787034105.527987466 cn1 step3 ns-path-cn1 ana_grpid -> 1 (optimized)
+1787034105.536050439 cn1 step3 done
+1787034105.541416770 cn1 finished in .166681144s

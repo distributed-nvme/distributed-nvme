@@ -29,10 +29,10 @@ message DmCloneConf {
 	uint32 hydration_threshold  = 2;
 	uint32 hydration_batch_size = 3;
 }
+
 message DmPoolConf {
     uint64 data_block_size = 1;
-    bool error_if_no_space = 2;
-    uint32 low_water_mark_pct = 3;
+    uint32 low_water_mark_pct = 2;
 }
 
 message RedundNone {}
@@ -49,6 +49,7 @@ message RedundConf {
    }
 }
 
+// Just a placeholder
 message BdevFeatureNone {}
 
 message BdevFeature {
@@ -68,6 +69,11 @@ message BdevConf {
 	repeated BdevFeature bdev_feature_list = 4;
 }
 
+message NodeState {
+    uint64 set_epoch = 1;
+    uint64 clear_epoch = 2;
+}
+
 message SidePointer {
     uint64 sp_id = 1;
     uint64 leg_id = 2;
@@ -83,8 +89,7 @@ message Side {
     uint64 side_id = 1;
     string addr_port = 2;
 	NvmeTrConf nvme_tr_conf = 3;
-	uint32 port_offset = 4;
-    uint32 nvme_id_set = 5;
+    uint32 cntlid_slot = 4;
 }
 
 message Leg {
@@ -106,8 +111,31 @@ message Namespace {
     uint64 ns_id = 1;
     uint32 ns_idx = 2;
     uint64 td_id = 3;
-    string dev_uuid = 4;
-    string dev_nguid = 5;
+    uint64 ag_id = 4;
+    string dev_uuid = 5;
+    string dev_nguid = 6;
+    bool suspended = 7;
+}
+
+enum SpLevel {
+    // all dm/md devices are readable/writable
+    SP_LEVEL_READ_WRITE = 0;
+    // all thin device are readonly
+    // all side are readonly
+    // all hydration of clones/migrations are disabled
+    SP_LEVEL_READ_ONLY = 1;
+    // include all things in SP_LEVEL_READ_ONLY
+    // and doesn't create the dm-clone devices for migrations
+    SP_LEVEL_NO_MIGRATION = 2;
+    // include all things in SP_LEVEL_NO_MIGRRATION
+    // and doesn't create the dm-clone devices for clones
+    SP_LEVEL_NO_CLONE = 3;
+    // include all things in SP_LEVEL_NO_CLONE
+    // and doesn't create all dm-thinpool devices
+    SP_LEVEL_NO_THINPOOL = 4;
+    // include all things in SP_LEVEL_NO_THINPOOL
+    // and doesn't create all raid 1/5/6 devices
+    SP_LEVEL_NO_REDUND = 5;
 }
 
 enum ResStatus {
@@ -173,17 +201,17 @@ message SpGlobal {
     repeated uint32 shard_bucket = 2;
 }
 
-// {dnv_prefix} dn_rev {cluster_id} {shard_code} {addr_port}
+// {dnv_prefix} dn_rev {shard_code} {cluster_id} {addr_port}
 message DnRev {
     uint64 revision = 1;
 }
 
-// {dnv_prefix} cn_rev {cluster_id} {shard_code} {addr_port}
+// {dnv_prefix} cn_rev {shard_code} {cluster_id} {addr_port}
 message CnRev {
     uint64 revision = 1;
 }
 
-// {dnv_prefix} sp_rev {cluster_id} {shard_code} {sp_name}
+// {dnv_prefix} sp_rev {shard_code} {cluster_id} {sp_name}
 message SpRev {
     uint64 revision = 1;
 }
@@ -192,26 +220,22 @@ message SpRev {
 message DnConf {
     uint64 dn_id = 1;
     uint32 shard_code = 2;
-    bool enabled = 3;
-    bool healthy = 4;
-    NvmeTrConf nvme_tr_conf = 5;
-    bytes port_bitmap = 6;
-    repeated SidePointer side_ptr_list = 7;
-    uint64 total_ext_cnt = 8;
-    uint64 free_ext_cnt = 9;
+    repeated NodeState state_list = 3;
+    NvmeTrConf nvme_tr_conf = 4;
+    repeated SidePointer side_ptr_list = 5;
+    uint64 total_ext_cnt = 6;
+    uint64 free_ext_cnt = 7;
 }
 
 // {dnv_prefix} cn_conf {cluster_id} {addr_port}
 message CnConf {
     uint64 cn_id = 1;
     uint32 shard_code = 2;
-    bool enabled = 3;
-    bool healthy = 4;
-    NvmeTrConf nvme_tr_conf = 5;
-    bytes port_bitmap = 6;
-    repeated CntlrPointer cntlr_ptr_list = 7;
-    uint64 total_ext_cnt = 8;
-    uint64 free_ext_cnt = 9;
+    repeated NodeState state_list = 3;
+    NvmeTrConf nvme_tr_conf = 4;
+    repeated CntlrPointer cntlr_ptr_list = 5;
+    uint64 total_ext_cnt = 6;
+    uint64 free_ext_cnt = 7;
 }
 
 // {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
@@ -238,26 +262,26 @@ message SpConf {
     uint64 next_id = 3;
     uint32 next_dev_id = 4;
     BdevConf bdev_conf = 5;
-	repeated uint32 nvme_id_set_list = 7;
-	bool force_agg = 8;
-    bool deleting = 9;
-    repeated uint64 cntlr_id_list = 10;
-    repeated uint64 slice_id_list = 11;
-    repeated string td_name_list = 12;
-    repeated string nqn_list = 13;
-    repeated string clone_name_list = 14;
-    repeated string xfer_name_list = 15;
-    repeated string migr_name_list = 16;
+	repeated uint32 cntlid_slot_list = 7;
+	SpLevel sp_level = 8;
+    repeated NodeState state_list = 9;
+    bool deleting = 10;
+    repeated uint64 cntlr_id_list = 11;
+    repeated uint64 slice_id_list = 12;
+    repeated string td_name_list = 13;
+    repeated string nqn_list = 14;
+    repeated string clone_name_list = 15;
+    repeated string xfer_name_list = 16;
+    repeated string migr_name_list = 17;
 }
 
 // {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
 message Cntlr {
     string cn_addr_addr = 1;
 	NvmeTrConf nvme_tr_conf = 2;
-    uint32 port_offset = 3;
-    uint32 nvme_id_set = 4;
-    bool primary = 5;
-	uint32 cntlr_idx = 6;
+    uint32 cntlid_slot = 3;
+    bool primary = 4;
+	uint32 cntlr_idx = 5;
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}
@@ -293,8 +317,7 @@ message Clone {
     uint64 dst_td_id = 5;
     DmCloneConf dm_clone_conf = 6;
     bytes bitmap = 7;
-    uint64 total_cnt = 8;
-    uint64 curr_cnt = 9;
+    bool auto_resume = 8;
 }
 
 // {dnv_prefix} transfer {cluster_id} {sp_id} {xfer_name}
@@ -302,6 +325,8 @@ message Transfer {
     uint64 xfer_id = 1;
     string ori_nqn = 2;
     uint32 ori_ns_idx = 3;
+    repeated string allowed_hosts = 4;
+    bool auto_suspend = 5;
 }
 
 // {dnv_prefix} migration {cluster_id} {sp_id} {migr_name}
@@ -311,8 +336,6 @@ message Migration {
     uint64 dst_side_id = 3;
     DmCloneConf dm_clone_conf = 4;
     bytes bitmap = 5;
-    uint64 total_cnt = 6;
-    uint64 curr_cnt = 7;
 }
 
 // {dnv_prefix} sp_id_to_name {cluster_id} {sp_id}
@@ -377,6 +400,7 @@ message CreateDiskNodeReply {
 message DeleteDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
+    DnRev dn_rev = 3;
 }
 
 message DeleteDiskNodeReply {
@@ -405,14 +429,26 @@ message ListDiskNodesReply {
     string page_token = 2;
 }
 
-message UpdateDiskNodeEnabledRequest {
+message SetDiskNodeStateRequest {
     string cluster_name = 1;
     string addr_port = 2;
-    bool enabled = 3;
+    DnRev dn_rev = 3;
+    uint32 idx = 4;
 }
 
-message UpdateDiskNodeEnabledReply {
-    uint64 dn_id = 1;
+message SetDiskNodeStateReply {
+    uint32 state = 1;
+}
+
+message ClearDiskNodeStateRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    DnRev dn_rev = 3;
+    uint32 idx = 4;
+}
+
+message ClearDiskNodeStateReply {
+    uint32 state = 1;
 }
 
 message InspectDiskNodeRequest {
@@ -439,6 +475,7 @@ message CreateControllerNodeReply {
 message DeleteControllerNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
+    CnRev cn_rev = 3;
 }
 
 message DeleteControllerNodeReply {
@@ -467,14 +504,26 @@ message ListControllerNodesReply {
     string page_token = 2;
 }
 
-message UpdateControllerNodeEnabledRequest {
+message SetControllerNodeStateRequest {
     string cluster_name = 1;
     string addr_port = 2;
-    bool enabled = 3;
+    CnRev cn_rev = 3;
+    uint32 idx = 4;
 }
 
-message UpdateControllerNodeEnabledReply {
-    uint64 cn_id = 1;
+message SetControllerNodeStateReply {
+    uint32 state = 1;
+}
+
+message ClearControllerNodeStateRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    CnRev cn_rev = 3;
+    uint32 idx = 4;
+}
+
+message ClearControllerNodeStateReply {
+    uint32 state = 1;
 }
 
 message InspectControllerNodeRequest {
@@ -490,7 +539,7 @@ message CreateStoragePoolRequest {
     string cluster_name = 1;
     string sp_name = 2;
     BdevConf bdev_conf = 3;
-	repeated uint32 nvme_id_set_list = 4;
+	repeated uint32 cntlid_slot_list = 4;
     uint32 cntlr_cnt = 5;
     uint32 slice_cnt = 6;
     uint64 init_ext_cnt = 7;
@@ -505,6 +554,7 @@ message CreateStoragePoolReply {
 message DeleteStoragePoolRequest {
     string cluster_name = 1;
     string sp_name = 2;
+    SpRev sp_rev = 3;
 }
 
 message DeleteStoragePoolReply {
@@ -535,23 +585,47 @@ message ListStoragePoolsReply {
     string page_token = 2;
 }
 
-message UpdateStoragePoolNvmeIdSetListRequest {
+message UpdateStoragePoolCntlidSlotListRequest {
     string cluster_name = 1;
 	string sp_name = 2;
-	repeated uint32 nvme_id_set_list = 3;
+    SpRev sp_rev = 3;
+	repeated uint32 cntlid_slot_list = 4;
 }
 
-message UpdateStoragePoolNvmeIdSetListReply {
+message UpdateStoragePoolCntlidSlotListReply {
     uint64 sp_id = 1;
 }
 
-message UpdateStoragePoolForcAggRequest {
+message UpdateStoragePoolLevelRequest {
     string cluster_name = 1;
 	string sp_name = 2;
-	bool force_agg = 3;
+    SpRev sp_rev = 3;
+	SpLevel sp_level = 4;
 }
 
-message UpdateStoragePoolForceAggReply {
+message UpdateStoragePoolLevelReply {
+    uint64 sp_id = 1;
+}
+
+message SetStoragePoolStateRequest {
+    string cluster_name = 1;
+	string sp_name = 2;
+    SpRev sp_rev = 3;
+	uint32 state_idx = 4;
+}
+
+message SetStoragePoolStateReply {
+    uint64 sp_id = 1;
+}
+
+message ClearStoragePoolStateRequest {
+    string cluster_name = 1;
+	string sp_name = 2;
+    SpRev sp_rev = 3;
+	uint32 state_idx = 4;
+}
+
+message ClearStoragePoolStateReply {
     uint64 sp_id = 1;
 }
 
@@ -567,10 +641,11 @@ message FindStoragePoolNamesReply {
 message GrowSliceRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    uint64 slice_id = 3;
-    uint64 ext_cnt = 4;
-    bool is_meta = 5;
-    NodeSelector dn_selector = 6;
+    SpRev sp_rev = 3;
+    uint64 slice_id = 4;
+    uint64 ext_cnt = 5;
+    bool is_meta = 6;
+    NodeSelector dn_selector = 7;
 }
 
 message GrowSliceReply {
@@ -581,8 +656,9 @@ message GrowSliceReply {
 message CreateCntlrRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    uint32 nvme_id_set = 3;
-    NodeSelector cn_selector = 4;
+    SpRev sp_rev = 3;
+    uint32 cntlid_slot = 4;
+    NodeSelector cn_selector = 5;
 }
 
 message CreateCntlrReply {
@@ -592,7 +668,8 @@ message CreateCntlrReply {
 message DeleteCntlrRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    uint64 cntlr_id = 3;
+    SpRev sp_rev = 3;
+    uint64 cntlr_id = 4;
 }
 
 message DeleteCntlrReply {
@@ -602,8 +679,9 @@ message DeleteCntlrReply {
 message UpdateCntlrEnabledRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    uint64 cntlr_id = 3;
-    bool enabled = 4;
+    SpRev sp_rev = 3;
+    uint64 cntlr_id = 4;
+    bool enabled = 5;
 }
 
 message UpdateCntlrEnabledReply {
@@ -634,9 +712,10 @@ message InspectSideReply {
 message CreateThinDeviceRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string td_name = 3;
-    uint32 ori_name = 4;
-    uint64 size = 5;
+    SpRev sp_rev = 3;
+    string td_name = 4;
+    uint32 ori_name = 5;
+    uint64 size = 6;
 }
 
 message CreateThinDeviceReply {
@@ -647,7 +726,8 @@ message CreateThinDeviceReply {
 message DeleteThinDeviceRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string td_name = 3;
+    SpRev sp_rev = 3;
+    string td_name = 4;
 }
 
 message DeleteThinDeviceReply {
@@ -666,7 +746,9 @@ message ListThinDevicesReply {
 message CreateSubsystemRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    repeated string allowed_hosts = 5;
 }
 
 message CreateSubsystemReply {
@@ -676,7 +758,8 @@ message CreateSubsystemReply {
 message DeleteSubsystemRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
+    SpRev sp_rev = 3;
+    string nqn = 4;
 }
 
 message DeleteSubsystemReply {
@@ -692,12 +775,25 @@ message ListSubsystemsReply {
     map<string, Subsystem> nqn_to_subsystem = 1;
 }
 
+message UpdateSubsystemHostsRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    repeated string allowed_hosts = 5;
+}
+
+message UpdateSubsystemHostsReply {
+    uint64 ss_id = 1;
+}
+
 message CreateNamespaceRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
-    uint32 ns_idx = 4;
-    string td_name = 5;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    uint32 ns_idx = 5;
+    string td_name = 6;
 }
 
 message CreateNamespaceReply {
@@ -707,42 +803,53 @@ message CreateNamespaceReply {
 message DeleteNamespaceRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
-    uint32 ns_idx = 4;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    uint32 ns_idx = 5;
 }
 
 message DeleteNamespaceReply {
     uint64 ns_id = 1;
 }
 
-message AddHostRequest {
+message UpdateNamespaceDevRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
-    string host_nqn = 4;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    uint32 ns_idx = 5;
+    string td_name = 6;
 }
 
-message AddHostReply {}
+message UpdateNamespaceDevReply {
+    uint64 ns_id = 1;
+}
 
-message RemoveHostRequest {
+message UpdateNamespaceSuspendedRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string nqn = 3;
-    string host_nqn = 4;
+    SpRev sp_rev = 3;
+    string nqn = 4;
+    uint32 ns_idx = 5;
+    bool suspended = 6;
 }
 
-message RemoveHostReply {}
+message UpdateNamespaceSuspendedReply {
+    uint64 ns_id = 1;
+}
 
 message CreateCloneRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string  clone_name = 3;
-    repeated NvmeTrConf src_tr_conf = 4;
-    string src_nqn = 5;
-    uint32 src_ns_idx = 6;
-    string dst_td_name = 7;
-    DmCloneConf dm_clone_conf = 8;
-    bytes bitmap = 9;
+    SpRev sp_rev = 3;
+    string  clone_name = 4;
+    repeated NvmeTrConf src_tr_conf = 5;
+    string src_nqn = 6;
+    uint32 src_ns_idx = 7;
+    string dst_td_name = 8;
+    DmCloneConf dm_clone_conf = 9;
+    bytes bitmap = 10;
+    bool auto_resume = 11;
 }
 
 message CreateCloneReply {
@@ -752,8 +859,9 @@ message CreateCloneReply {
 message DeleteCloneRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string  clone_name = 3;
-    bool force = 4;
+    SpRev sp_rev = 3;
+    string  clone_name = 4;
+    bool force = 5;
 }
 
 message DeleteCloneReply {
@@ -773,8 +881,9 @@ message GetCloneReply {
 message UpdateCloneTrConfRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string  clone_name = 3;
-    repeated NvmeTrConf src_tr_conf = 4;
+    SpRev sp_rev = 3;
+    string  clone_name = 4;
+    repeated NvmeTrConf src_tr_conf = 5;
 }
 
 message UpdateCloneTrConfReply {
@@ -784,8 +893,9 @@ message UpdateCloneTrConfReply {
 message UpdateCloneBitmapRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string  clone_name = 3;
-    bytes bitmap = 4;
+    SpRev sp_rev = 3;
+    string clone_name = 4;
+    bytes bitmap = 5;
 }
 
 message UpdateCloneBitmapReply {
@@ -795,9 +905,12 @@ message UpdateCloneBitmapReply {
 message CreateTransferRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string xfer_name = 3;
-    string ori_nqn = 4;
-    uint32 ori_ns_idx = 5;
+    SpRev sp_rev = 3;
+    string xfer_name = 4;
+    string ori_nqn = 5;
+    uint32 ori_ns_idx = 6;
+    repeated string allowed_hosts = 7;
+    bool auto_suspend = 8;
 }
 
 message CreateTransferReply {
@@ -807,8 +920,9 @@ message CreateTransferReply {
 message DeleteTransferRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string xfer_name = 3;
-    bool force = 4;
+    SpRev sp_rev = 3;
+    string xfer_name = 4;
+    bool force = 5;
 }
 
 message DeleteTransferReply {
@@ -825,14 +939,27 @@ message GetTransferReply {
     Transfer xfer = 1;
 }
 
+message UpdateTransferHostsRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string xfer_name = 4;
+    repeated string allowed_hosts = 5;
+}
+
+message UpdateTransferHostsReply {
+    uint64 xfer_id = 1;
+}
+
 message CreateMigrationRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string migr_name = 3;
-    uint64 src_side_id = 4;
-	NodeSelector dn_selector = 5;
-    DmCloneConf dm_clone_conf = 6;
-    bytes bitmap = 7;
+    SpRev sp_rev = 3;
+    string migr_name = 4;
+    uint64 src_side_id = 5;
+	NodeSelector dn_selector = 6;
+    DmCloneConf dm_clone_conf = 7;
+    bytes bitmap = 8;
 }
 
 message CreateMigrationReply {
@@ -842,8 +969,9 @@ message CreateMigrationReply {
 message FinishMigrationRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string migr_name = 3;
-    bool force = 4;
+    SpRev sp_rev = 3;
+    string migr_name = 4;
+    bool force = 5;
 }
 
 message FinishMigrationReply {
@@ -853,7 +981,8 @@ message FinishMigrationReply {
 message CancelMigrationRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string migr_name = 3;
+    SpRev sp_rev = 3;
+    string migr_name = 4;
 }
 
 message CancelMigrationReply {
@@ -871,7 +1000,11 @@ message GetMigrationReply {
 }
 
 message UpdateMigrationBitmapRequest {
-    bytes bitmap = 1;
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    string migr_name = 4;
+    bytes bitmap = 5;
 }
 
 message UpdateMigrationBitmapReply {
@@ -881,8 +1014,9 @@ message UpdateMigrationBitmapReply {
 message CreateSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string grp_id = 3;
-	NodeSelector dn_selector = 4;
+    SpRev sp_rev = 3;
+    string grp_id = 4;
+	NodeSelector dn_selector = 5;
 }
 
 message CreateSpareLegReply {
@@ -892,7 +1026,8 @@ message CreateSpareLegReply {
 message DeleteSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    string grp_id = 3;
+    SpRev sp_rev = 3;
+    string grp_id = 4;
 }
 
 message DeleteSpareLegReply {
@@ -902,9 +1037,10 @@ message DeleteSpareLegReply {
 message SwitchSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
-    uint64 grp_id = 3;
-    uint64 spare_leg_id = 4;
-    uint64 target_leg_id = 5;
+    SpRev sp_rev = 3;
+    uint64 grp_id = 4;
+    uint64 spare_leg_id = 5;
+    uint64 target_leg_id = 6;
 }
 
 message SwitchSpareLegReply {
@@ -955,22 +1091,26 @@ service Gateway {
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns(DeleteDiskNodeReply) {}
     rpc GetDiskNode(GetDiskNodeRequest) returns(GetDiskNodeReply) {}
     rpc ListDiskNodes(ListDiskNodesRequest) returns(ListDiskNodesReply) {}
-    rpc UpdateDiskNodeEnabled(UpdateDiskNodeEnabledRequest) returns(UpdateDiskNodeEnabledReply) {}
+    rpc SetDiskNodeState(SetDiskNodeStateRequest) returns(SetDiskNodeStateReply) {}
+    rpc ClearDiskNodeState(ClearDiskNodeStateRequest) returns(ClearDiskNodeStateReply) {}
     rpc InspectDiskNode(InspectDiskNodeRequest) returns(InspectDiskNodeReply) {}
 
     rpc CreateControllerNode(CreateControllerNodeRequest) returns(CreateControllerNodeReply) {}
     rpc DeleteControllerNode(DeleteControllerNodeRequest) returns(DeleteControllerNodeReply) {}
     rpc GetControllerNode(GetControllerNodeRequest) returns(GetControllerNodeReply) {}
     rpc ListControllerNodes(ListControllerNodesRequest) returns(ListControllerNodesReply) {}
-    rpc UpdateControllerNodeEnabled(UpdateControllerNodeEnabledRequest) returns(UpdateControllerNodeEnabledReply) {}
+    rpc SetControllerNodeState(SetControllerNodeStateRequest) returns(SetControllerNodeStateReply) {}
+    rpc ClearControllerNodeState(ClearControllerNodeStateRequest) returns(ClearControllerNodeStateReply) {}
     rpc InspectControllerNode(InspectControllerNodeRequest) returns(InspectControllerNodeReply) {}
 
     rpc CreateStoragePool(CreateStoragePoolRequest) returns(CreateStoragePoolReply) {}
     rpc DeleteStoragePool(DeleteStoragePoolRequest) returns(DeleteStoragePoolReply) {}
     rpc GetStoragePool(GetStoragePoolRequest) returns(GetStoragePoolReply) {}
     rpc ListStoragePools(ListStoragePoolsRequest) returns(ListStoragePoolsReply) {}
-	rpc UpdateStoragePoolNvmeIdSetList(UpdateStoragePoolNvmeIdSetListRequest) returns(UpdateStoragePoolNvmeIdSetListReply) {}
-	rpc UpdateStoragePoolForcAgg(UpdateStoragePoolForcAggRequest) returns(UpdateStoragePoolForceAggReply) {}
+	rpc UpdateStoragePoolCntlidSlotList(UpdateStoragePoolCntlidSlotListRequest) returns(UpdateStoragePoolCntlidSlotListReply) {}
+	rpc UpdateStoragePoolLevel(UpdateStoragePoolLevelRequest) returns(UpdateStoragePoolLevelReply) {}
+    rpc SetStoragePoolState(SetStoragePoolStateRequest) returns(SetStoragePoolStateReply) {}
+    rpc ClearStoragePoolState(ClearStoragePoolStateRequest) returns(ClearStoragePoolStateReply) {}
     rpc FindStoragePoolName(FindStoragePoolNamesRequest) returns(FindStoragePoolNamesReply) {}
 
     rpc GrowSlice(GrowSliceRequest) returns(GrowSliceReply) {}
@@ -989,12 +1129,12 @@ service Gateway {
     rpc CreateSubsystem(CreateSubsystemRequest) returns(CreateSubsystemReply) {}
     rpc DeleteSubsystem(DeleteSubsystemRequest) returns(DeleteSubsystemReply) {}
     rpc ListSubsystems(ListSubsystemsRequest) returns(ListSubsystemsReply) {}
+    rpc UpdateSubsystemHosts(UpdateSubsystemHostsRequest) returns(UpdateSubsystemHostsReply) {}
 
     rpc CreateNamespace(CreateNamespaceRequest) returns(CreateNamespaceReply) {}
     rpc DeleteNamespace(DeleteNamespaceRequest) returns(DeleteNamespaceReply) {}
-
-    rpc CreateHost(AddHostRequest) returns(AddHostReply) {}
-    rpc DeleteHost(RemoveHostRequest) returns(RemoveHostReply) {}
+    rpc UpdateNamespaceDev(UpdateNamespaceDevRequest) returns(UpdateNamespaceDevReply) {}
+    rpc UpdatenamespaceSuspended(UpdateNamespaceSuspendedRequest) returns(UpdateNamespaceSuspendedReply) {}
 
     rpc CreateClone(CreateCloneRequest) returns(CreateCloneReply) {}
     rpc DeleteClone(DeleteCloneRequest) returns(DeleteCloneReply) {}
@@ -1005,6 +1145,7 @@ service Gateway {
     rpc CreateTransfer(CreateTransferRequest) returns(CreateTransferReply) {}
     rpc DeleteTransfer(DeleteTransferRequest) returns(DeleteTransferReply) {}
     rpc GetTransfer(GetTransferRequest) returns(GetTransferReply) {}
+    rpc UpdateTransferHosts(UpdateTransferHostsRequest) returns(UpdateTransferHostsReply) {}
 
     rpc CreateMigration(CreateMigrationRequest) returns(CreateMigrationReply) {}
     rpc FinishMigration(FinishMigrationRequest) returns(FinishMigrationReply) {}
