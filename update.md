@@ -287,10 +287,12 @@ the RPC has the highest revision, it should follow below steps:
 # Migration
 The process of starting a migration is similar as a failover. The leg will have
 two sides, one is src_side, another is dst_side. From the cntlr perspective, the
-two sides are nvmeof multipath. We perform below actions when we start a migration.
+two sides are nvmeof multipath. We perform below actions when we start a
+migration.
 
 ## src_side
-1. Move the namespaces to all cntlrs from the optimized/non-optimized ana group to inaccessible ana group.
+1. Move the namespaces to all cntlrs from the optimized/non-optimized ana group
+   to inaccessible ana group.
 2. Suspend the dm-linear devices of all cntlrs
 3. Export the logical volume to the dst_side via nvmeof
 
@@ -299,11 +301,23 @@ two sides are nvmeof multipath. We perform below actions when we start a migrati
    namespaces and set all ana state to inaccessible.
 1. Create the DnMigrMetaName device from the DnMigrVgName volume group.
 2. Connect the src_side via nvmeof, retry until succeeds
-3. Create the dm-clone device
+3. Create the dm-clone device, use the SP thin pool block size as the region
+   size.
 4. Reload the dm-linear device of the primary cntlr, let it be on top of the
    dm-clone device.
 5. Set the subsystem to the primary as optimized, set other subsystems to
    non-optimized.
+
+## bitmap
+After starting the migration, the user can invoke the GetLegBitmap RPC. It
+returns a bitmap, the bit 1 means the corresponding block is not written yet, so
+we can skip that block in the dm-clone via the blkdiscard command. If the bitmap
+is too large, use the start_block and block_cnt parameters to get a part of the
+bitmap at one time. Then the user use the AppendMigrationBitmap RPC to add the
+bitmap(s) to the migration. The dnv-worker will send the bitmap(s) to the dn via
+the SyncupSide RPC. The dnv-worker should set SyncupSideRequest.partial=true to
+send the bitmap(s) incrementally.
+
 
 # transfer and clone
 The source of the clone could be any nvmeof target. If the soruce is a
@@ -341,52 +355,98 @@ example:
 DeleteTransfer: set Namespace.suspended to true.
 DeleteClone: set Namespace.suspended to false.
 
+## bitmap
+The clone could also use bitmap to skip blocks in dm-clone. But it is more
+complex. The src (xfer) and the dst (clone) are raid0 devices and have
+underlying thin pools. Below is a description about how to calculate and use the
+bitmap:
+
+We use slice_cnt to indicate how many underling devices under the raid0. We use
+stripe_size to indicate the stripe size (or chunk size) of the raid0. Each
+underling device of the raid0 has a bitmap to indicate the blocks of this
+underlying device are written. We use block_size to indicate the size of each
+bit in the bitmap. We have below constraints:
+```
+slice_cnt: slice_cnt is an integer and 1 <= slice_cnt <= 16
+stripe_size: i * 4KB, i is an integer and 1 <= i <= 256
+block_size: j * 64KB, j is an integer and 1<= j <= 16384
+block_size = k * stripe_size, k is an integer and k >= 1
+```
+
+E.g. here is a raid0 device: slice_cnt = 4, stripe_size = 16KB, block_size=1MB
+We have below layout:
+```
+4KB 4KB 4KB 4KB
+4KB 4KB 4KB 4KB
+4KB 4KB 4KB 4KB
+4KB 4KB 4KB 4KB
+4KB 4KB 4KB 4KB
+4KB 4KB 4KB 4KB
+...
+4KB 4KB 4KB 4KB
+```
+We wrote to the 1st 4KB, the 3rd 4KB, the 7th 4KB, the 8th KB. There are 4
+bitmaps.
+* In the first bitamp, the fist bit is 1, all other bits are zero.
+* In the second bitmap, all bits are zoro.
+* In the third bitmap, the first and the second bit are 1, all other bits are
+  zero.
+* In the forth bitmap, the second bit is 1, all other bits are zero.
+
+Given two raid0 devices, they are A and B. We know the slice_cnt_A,
+stripe_size_A, block_size_A, slice_cnt_B, stripe_size_B, block_size_B,
+slice_cnt_A bitmaps for A and slice_cnt_B bitmaps for B. Assuming all bitmaps of
+B are zero at first. The bitmaps of A have non-zero bits. We run a userspace
+program to copy data from A to B. We want to avoid copying the zero data. So we
+rely on the slice_cnt_A, stripe_size_A, block_size_A and the bitmaps of A to
+know where we should read from A. And we use the slice_cnt_B, stripe_size_B,
+block_size_B to know where to where we should write to B. The program can only
+read/write against the top raid0 devices, it can't access the underlying
+devices. It is OK to copy some zero data from A to B, we try to minimal the zero
+data we copy. We must copy all written data from A to B. After we copy some data
+to B, the corresponding bit of B's bitamps will be set to 1 automatically. The
+program might be interrupted in the middle of the progress. When we restart the
+program, it should rely on the bitmaps on B to understand the data has been
+copied, and skip to copy all copied data. And we have below additional
+constraints:
+* If stripe_size_A > stripe_size_B, stripe_size_A = stripe_size_B * m, m is an
+  integer and m > 1
+* If stripe_size_A < stripe_size_B, stripe_size_B = stripe_size_A * m, m is an
+  integer and m > 1
+* The program each time only read exactly region_size data, region_size =
+  min(stripe_size_A, stripe_size_B).
+
+We could write a golang function, given below input:
+```
+slice_cnt_A, stripe_size_A, block_size_A, all bitmaps of A
+slice_cnt_B, stripe_size_B, block_size_B, all bitmaps of B
+```
+The golang function output is a bitmap and the region_size. A bit 1 in the
+output bitmap means we have copied the data and don't need to copy it again.
+According to this bitmap and the region_size, the program we mentioned
+previously could read data from A and write data to B. The size of the bitmap
+equal to the smaller dev size of A and B.
+
 # cdc
 
-# NodeState
-A disk node have 7 states, the first 4 are used by users, the other 3:
-* StateDnAgentFailed: set when the dnv-agent doesn't response to the SyncupDn RPC,
-  clear when the dnv-agent starts to response the SyncupDn RPC.
-* StateDnResFailed: set when the SyncupDnReply reports any error nother than disk
-  health check fails, clear when the SyncupDnReply reports no such error.
-* StateDnDiskFailed: set when the SyncupDnReply reports the disk health check
-  fails, clear when the SyncupDnReply reports the disk health check succeeds.
-
-A controller node have 6 states, the first 4 are used by a user, the other 2:
-* StateCnAgentFailed: set when the dnv-agent doesn't response to the SyncupCn
-RPC, clear when the dnv-agent starts to response the SyncupCn RPC.
-* StateCnResFailed: set when the SyncupCnReply reports any error, clear when the
-  SyncupCnReply reports no error.
-
-A storage pool have 6 states, the first 4 are used by a user, the other 2:
-* StateSpAgentFailed: set when the dnv-agent doesn't response to the 
-* StateSpResEvent
-
-The users set/clear the first 4 states via below RPCs:
-* SetDiskNodeState
-* ClearDiskNodeState
-* SetControllerNodeState
-* ClearControllerNodeState
-* SetStoragePoolState
-* ClearStoragePoolState
-
-The dnv-gateway write the states to etcd. The dnv-worker get the other states from the dnv-agent and write the states to etcd.
-
-At first, the set_epoch and the clear_epoch are equal to the disk node / controller node creating time. When a state is set, update the set_epoch to the current time. When a state is clear, update the clear_epoch to the current time. If Node.State.set_epoch > NodeState.clear_epoch, it means a state is set, or it means the state is cleared.
-
-For a disk node, if any of its states is set, we remvoe it here:
+# node flags
+If DiskNode.flags is not zero, the disk node will not be added here:
 ```
 {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
 ```
-If the disk node all states are cleared and it has at lease 1 free_ext_cnt, we
-add it back.
 
-For a controller node, if any of its states is set, we remove it here:
+If ControllerNode.flags is not zero, the controller node will not be added here:
 ```
 {dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
 ```
-If the controller ndoe all states are cleared and it has at least 1
-free_ext_cnt, we add it back.
+
+So if the flags is not zero, the dn or cn won't be allocated for new sp. The user could set or clear the first 16 bits of the flags, so the user could have up to 16 different reasons to disable a cn/dn:
+* SetDiskNodeFlag
+* ClearDiskNodeFlag
+* SetControllerNodeFlag
+* ClearControllerNodeFlag
+
+The upper 16 bits are used by the 
 
 
 
@@ -463,7 +523,10 @@ When the dnv-agent receives a SyncupSideRequest request, it check the curent sid
 
 The "dnv-agent cn" use similar logics for the SyncupCn and the SyncupCntlr RPCs.
 
-All these "Syncup*" RPCs have a `partial` parameter. If partial=true, don't delete any resources doesn't in the request, only add new resources. The dnv-agent only accepts partial=true if the current revision is exactly smaller 1 than the revision in the "Syncup*" RPC, or it will reject the request.
+All these "Syncup*" RPCs have a `partial` parameter. If partial=true, don't delete any resources doesn't in the request, only add new resources. The dnv-agent only accepts partial=true in two cases:
+* the current revision is exactly smaller 1 than the revision in the "Syncup*" RPC
+* the current revision is exactly same as the revision in the "Syncup*" RPC
+In all other cases, the dnv-gent should reject the request.
 
 ## dnv-cdc
 

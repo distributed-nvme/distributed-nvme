@@ -3,6 +3,7 @@ package common
 const (
 	ValidStrPattern = `^[a-zA-Z0-9\-_/.:]+$`
 	MaxStrSize      = 64
+	MaxNoteSize     = 4 * 1024
 	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:` +
 		`(uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{` +
 		`4}-[0-9a-fA-F]{12}|discovery|.+)$`
@@ -104,17 +105,16 @@ const (
 
 	SideSwitchWait = 300
 
-	StateDnCustomMax = 4
-	StateDnAgentFailed = 4
-	StateDnResFailed = 5
-	StateDnDiskFailed = 6
-	StateDnMax = 7
-	StateCnCustomMax = 4
-	StateCnAgentFailed = 4
-	StateCnResFailed = 5
-	StateCnMax = 6
-	StateSpCustomMax = 4
-	StateSpAgentFailed = 4
-	StateSpResEvent = 5
-	StateSpMax = 6
+	MaxCloneThreshold = 8
+	DefaultCloneThreshold = 1
+	MaxCloneBatchSize = 4
+	DefaultCloneBatchSize = 1
+	MaxCloneBmCnt = 16
+	MaxMigrThreshold = 8
+	DefaultMigrTheshold = 1
+	MaxMigrBatchSize = 4
+	DefaultMgirThreshold = 1
+	MaxMigrBmCnt = 4
+
+	MaxCustomFlag = 16
 )
