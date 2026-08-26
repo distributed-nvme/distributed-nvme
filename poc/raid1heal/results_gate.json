@@ -1,0 +1,6 @@
+{
+ "t_recover": 36.0,
+ "sectors_copied": 2065216,
+ "gate_fired": true,
+ "healer": "07:51:42 md md0: active degraded=1  dn0=in_sync dn1=no rdev for slot 1\n07:51:42     round 1/3 PASS: nvmeof: nvme1 live, nvme1n1; probe write ok in 0.029s; probe read ok in 0.028s\n07:51:53     round 2/3 PASS: nvmeof: nvme1 live, nvme1n1; probe write ok in 0.042s; probe read ok in 0.028s\n07:52:03     round 3/3 PASS: nvmeof: nvme1 live, nvme1n1; probe write ok in 0.031s; probe read ok in 0.029s\n07:52:03   dn1: healthy across all 3 rounds\n07:52:03   dn1: events=1 vs peer events_cleared=674 -> bitmap does NOT cover the gap\n07:52:03   dn1: ADD_NEW_DISK slot 1: EINVAL (bitmap no longer covers the gap)\n07:52:03   dn1: new_dev (FULL rebuild)\n07:52:08   dn1: back in 5.58s, md copied 2065009 sectors onto it"
+}
