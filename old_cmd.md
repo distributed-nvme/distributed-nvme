@@ -1,5 +1,5 @@
 
-```
+```go
 
 package main
 
@@ -32,115 +32,8 @@ func main() {
 }
 ```
 
-```
-package main
 
-import (
-	"fmt"
-)
-
-// scrambleMix64 avalanches a uint64 so small inputs look random
-func scrambleMix64(x uint64) uint64 {
-	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-	return x ^ (x >> 31)
-}
-
-// UUIDFromChainedSeeds creates a unique 128-bit string layout using seed1 and seed2
-func UUIDFromUniqId(uniqId uint64) string {
-	const hex = "0123456789abcdef"
-
-	// 1. Generate two independent, pseudo-random uint64 blocks
-	seed1 := scrambleMix64(uniqId)
-	seed2 := scrambleMix64(seed1)
-
-	// 2. Extract 8 bytes from seed1 (First 64 bits)
-	b0 := byte(seed1 >> 56)
-	b1 := byte(seed1 >> 48)
-	b2 := byte(seed1 >> 40)
-	b3 := byte(seed1 >> 32)
-	b4 := byte(seed1 >> 24)
-	b5 := byte(seed1 >> 16)
-	b6 := byte(seed1 >> 8)
-	b7 := byte(seed1)
-
-	// 3. Extract 8 bytes from seed2 (Second 64 bits)
-	b8 := byte(seed2 >> 56)
-	b9 := byte(seed2 >> 48)
-	b10 := byte(seed2 >> 40)
-	b11 := byte(seed2 >> 32)
-	b12 := byte(seed2 >> 24)
-	b13 := byte(seed2 >> 16)
-	b14 := byte(seed2 >> 8)
-	b15 := byte(seed2)
-
-	// 4. Force valid UUIDv4 version ('4') and variant ('8', '9', 'a', or 'b')
-	b6 = (b6 & 0x0f) | 0x40 // High nibble of byte 6 is now 4
-	b8 = (b8 & 0x3f) | 0x80 // High nibble of byte 8 is now 8
-
-	// 5. Explicitly build the 36-byte array layout
-	var buf [36]byte
-
-	// --- Block 1: seed1 ---
-	buf[0] = hex[b0>>4]
-	buf[1] = hex[b0&0x0f]
-	buf[2] = hex[b1>>4]
-	buf[3] = hex[b1&0x0f]
-	buf[4] = hex[b2>>4]
-	buf[5] = hex[b2&0x0f]
-	buf[6] = hex[b3>>4]
-	buf[7] = hex[b3&0x0f]
-
-	buf[8] = '-'
-
-	buf[9] = hex[b4>>4]
-	buf[10] = hex[b4&0x0f]
-	buf[11] = hex[b5>>4]
-	buf[12] = hex[b5&0x0f]
-
-	buf[13] = '-'
-
-	buf[14] = hex[b6>>4] // Always '4'
-	buf[15] = hex[b6&0x0f]
-	buf[16] = hex[b7>>4]
-	buf[17] = hex[b7&0x0f]
-
-	buf[18] = '-'
-
-	// --- Block 2: seed2 ---
-	buf[19] = hex[b8>>4] // Always '8'
-	buf[20] = hex[b8&0x0f]
-	buf[21] = hex[b9>>4]
-	buf[22] = hex[b9&0x0f]
-
-	buf[23] = '-'
-
-	buf[24] = hex[b10>>4]
-	buf[25] = hex[b10&0x0f]
-	buf[26] = hex[b11>>4]
-	buf[27] = hex[b11&0x0f]
-	buf[28] = hex[b12>>4]
-	buf[29] = hex[b12&0x0f]
-	buf[30] = hex[b13>>4]
-	buf[31] = hex[b13&0x0f]
-	buf[32] = hex[b14>>4]
-	buf[33] = hex[b14&0x0f]
-	buf[34] = hex[b15>>4]
-	buf[35] = hex[b15&0x0f]
-
-	return string(buf[:])
-}
-
-func main() {
-	// Small sequential IDs yield wildly distributed, non-repeating UUID strings
-	fmt.Println("Seed 1:", UUIDFromUniqId(1))
-	fmt.Println("Seed 2:", UUIDFromUniqId(2))
-	fmt.Println("Seed 3:", UUIDFromUniqId(3))
-	fmt.Println("Seed 0xebada5168620c5fe:", UUIDFromUniqId(0xebada5168620c5fe))
-
-```
-
-```
+```shell
 sudo mkdir --parents /tmp/dnv-dn-tmpfs
 sudo mount --types tmpfs --options size=2G tmpfs /tmp/dnv-dn-tmpfs
 sudo mkdir /tmp/dnv-dn-tmpfs/ebada5168620c5fe
@@ -239,7 +132,7 @@ sudo pvremove --yes /dev/loop0
 
 ```
 
-```
+```shell
 dd if=/dev/zero of=/tmp/t0.img bs=1M count=1024
 dd if=/dev/zero of=/tmp/t1.img bs=1M count=1024
 

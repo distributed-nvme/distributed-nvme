@@ -3,3 +3,4 @@ _out
 *.pb.go
 mockclient.go
 mockutils.go
+*.drawio.bkp

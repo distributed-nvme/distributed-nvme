@@ -427,29 +427,6 @@ According to this bitmap and the region_size, the program we mentioned
 previously could read data from A and write data to B. The size of the bitmap
 equal to the smaller dev size of A and B.
 
-# cdc
-
-# node flags
-If DiskNode.flags is not zero, the disk node will not be added here:
-```
-{dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
-```
-
-If ControllerNode.flags is not zero, the controller node will not be added here:
-```
-{dnv_prefix} cn_capacity {cluster_id} {free_ext_cnt} {addr_port}
-```
-
-So if the flags is not zero, the dn or cn won't be allocated for new sp. The user could set or clear the first 16 bits of the flags, so the user could have up to 16 different reasons to disable a cn/dn:
-* SetDiskNodeFlag
-* ClearDiskNodeFlag
-* SetControllerNodeFlag
-* ClearControllerNodeFlag
-
-The upper 16 bits are used by the 
-
-
-
 # Components
 All components use [viper](https://github.com/spf13/viper) to provide commpand
 line parameters and configuration file, environment variables configurations.
@@ -529,6 +506,28 @@ All these "Syncup*" RPCs have a `partial` parameter. If partial=true, don't dele
 In all other cases, the dnv-gent should reject the request.
 
 ## dnv-cdc
+
+```shell
+dnv-cdc --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:2379 --range 0,1,2,3,4,5,6,7
+dnv-cdc --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:2379 --range 8,9,a,b,c,d,e,f
+```
+
+Provide nvmeof cdc to hosts.
+The range 0 means listen on below keys:
+```
+{dnv_prefix} cdc {cluster_id} 00
+{dnv_prefix} cdc {cluster_id} 01
+...
+{dnv_prefix} cdc {cluster_id} 0f
+```
+
+The range 1 means listen on below keys:
+```
+{dnv_prefix} cdc {cluster_id} 10
+{dnv_prefix} cdc {cluster_id} 11
+...
+{dnv_prefix} cdc {cluster_id} 1f
+```
 
 ## dnvctl
 dnvctl dn create

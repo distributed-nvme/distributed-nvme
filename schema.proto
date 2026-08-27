@@ -30,7 +30,6 @@ message DmCloneConf {
 
 message DmPoolConf {
     uint64 data_block_size = 1;
-    uint32 low_water_mark_pct = 2;
 }
 
 message RedundNone {}
@@ -67,9 +66,24 @@ message BdevConf {
 	repeated BdevFeature bdev_feature_list = 4;
 }
 
-message NodeState {
-    uint64 set_epoch = 1;
-    uint64 clear_epoch = 2;
+// For all EventThreahold feilds, 0 means using the
+// default value.
+message EventThreshold {
+    // How many seconds to wait before selecting a
+    // new prmary.
+    uint32 primay_unhealthy = 1;
+    // How many seconds to wait before allocating a
+    // new cntlr and delete the old one.
+    uint32 cntlr_unhealthy = 2;
+    // How long time to wait before allocating a
+    // new side when the side is unhealthy.
+    uint32 side_unhealthy = 3;
+    // How long time to wait before allocating a
+    // new side when the leg is unhealthy.
+    uint32 leg_unhealthy = 4;
+    // Thin pool low water mark percentage,
+    // 1 - 99
+    uint32 pool_low_water_mark_pct = 5;
 }
 
 message SidePointer {
@@ -88,12 +102,14 @@ message Side {
     string addr_port = 2;
 	NvmeTrConf nvme_tr_conf = 3;
     uint32 cntlid_slot = 4;
+    uint64 err_epoch = 5;
 }
 
 message Leg {
     uint64 leg_id = 1;
     uint32 leg_idx = 2;
     repeated Side side_list = 3;
+    uint64 err_epoch = 4;
 }
 
 message Group {
@@ -149,10 +165,8 @@ enum ResStatus {
     RES_STATUS_MISSING = 1;
     // ERROR means dn/cn tried to create it but failed
     RES_STATUS_ERROR = 2;
-    // EVENT means a dm or md event happens
-    RES_STATUS_EVENT = 3;
     // OK means OK
-    RES_STATUS_OK = 4;
+    RES_STATUS_OK = 3;
 }
 
 message ResInfo {
@@ -162,10 +176,47 @@ message ResInfo {
     uint64 epoch = 4;
 }
 
-message LiveInfo {
+message DnInfo {
     uint64 revision = 1;
-    uint32 format = 2;
-    repeated ResInfo res_info = 3;
+    ResInfo disk_info = 2;
+    ResInfo vg_info = 3;
+    ResInfo port_info = 4;
+}
+
+message CnInfo {
+    uint64 revision = 1;
+    ResInfo tmpfs_info = 2;
+    ResInfo port_info = 3;
+}
+
+message SideInfo {
+    uint64 revision = 1;
+    ResInfo lv_info = 2;
+    map<uint64, ResInfo> cntlr_id_to_dm_error = 3;
+    map<uint64, ResInfo> cntlr_id_to_dm_linear = 4;
+    map<uint64, ResInfo> cntlr_id_to_nvmeof = 5;
+    ResInfo migr_target = 6;
+    ResInfo migr_dm_clone = 7;
+}
+
+message CntlrInfo {
+    uint64 revision = 1;
+    map<uint64, ResInfo> ss_id_to_subsystem = 2;
+    map<uint64, ResInfo> ns_id_to_namespace = 3;
+    map<uint64, ResInfo> ns_id_to_dm_linear = 4;
+    map<uint64, ResInfo> td_id_to_raid0 = 5;
+    map<uint64, ResInfo> td_id_to_dm_error = 6;
+    map<uint64, ResInfo> slice_id_to_dm_thin = 7;
+    map<uint64, ResInfo> slice_id_to_dm_pool = 8;
+    map<uint64, ResInfo> slice_id_to_meta = 9;
+    map<uint64, ResInfo> slice_id_to_data = 10;
+    map<uint64, ResInfo> grp_id_to_md_raid = 11;
+    map<uint64, ResInfo> leg_id_to_leg = 12;
+    map<uint64, ResInfo> xfer_id_to_dm_linear = 13;
+    map<uint64, ResInfo> xfer_id_to_subsystem = 14;
+    map<uint64, ResInfo> xfer_id_to_namespae = 15;
+    map<uint64, ResInfo> clone_id_to_target = 16;
+    map<uint64, ResInfo> clone_id_to_dm_clone = 17;
 }
 
 message BitmapInfo {
@@ -186,18 +237,12 @@ message AllocConf {
     uint32 cn_batch_size = 2;
 }
 
-enum FootprintType {
-    FP_TYPE_SHA256 = 0;
-    FP_TYPE_SHA512 = 1;
-}
-
 // {dnv_prefix} cluster_conf {cluster_name}
 message ClusterConf {
     QosRatio qos_ratio = 1;
     BdevConf bdev_conf = 2;
     DnBinConf dn_bin_conf = 3;
     AllocConf alloc_conf = 4;
-    FootprintType fp_type = 5;
 }
 
 // {dnv_prefix} dn_global {cluster_id}
@@ -237,8 +282,8 @@ message SpRev {
 message DnConf {
     uint64 dn_id = 1;
     uint32 shard_code = 2;
-    uint32 flags = 3;
-    bytes state_fp = 4;
+    bool disabled = 3;
+    uint64 err_epoch = 4;
     NvmeTrConf nvme_tr_conf = 5;
     repeated SidePointer side_ptr_list = 6;
     uint64 total_ext_cnt = 7;
@@ -254,8 +299,8 @@ message DnNote {
 message CnConf {
     uint64 cn_id = 1;
     uint32 shard_code = 2;
-    uint32 flags = 3;
-    bytes state_fp = 4;
+    bool disabled = 3;
+    uint64 err_epoch = 4;
     NvmeTrConf nvme_tr_conf = 5;
     repeated CntlrPointer cntlr_ptr_list = 6;
     uint64 total_ext_cnt = 7;
@@ -291,17 +336,17 @@ message SpConf {
     uint64 next_id = 3;
     uint32 next_dev_id = 4;
     BdevConf bdev_conf = 5;
+    EventThreshold event_threshold = 6;
 	repeated uint32 cntlid_slot_list = 7;
 	SpLevel sp_level = 8;
-    bytes state_fp = 9;
-    bool deleting = 10;
-    repeated uint64 cntlr_id_list = 11;
-    repeated uint64 slice_id_list = 12;
-    repeated string td_name_list = 13;
-    repeated string nqn_list = 14;
-    repeated string clone_name_list = 15;
-    repeated string xfer_name_list = 16;
-    repeated string migr_name_list = 17;
+    bool deleting = 9;
+    repeated uint64 cntlr_id_list = 10;
+    repeated uint64 slice_id_list = 11;
+    repeated string td_name_list = 12;
+    repeated string nqn_list = 13;
+    repeated string clone_name_list = 14;
+    repeated string xfer_name_list = 15;
+    repeated string migr_name_list = 16;
 }
 
 // {dnv_prefix} sp_conf {cluster_id} {sp_name}
@@ -316,6 +361,7 @@ message Cntlr {
     uint32 cntlid_slot = 3;
     bool primary = 4;
 	uint32 cntlr_idx = 5;
+    uint64 err_epoch = 6;
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}
@@ -517,7 +563,7 @@ message InspectDiskNodeRequest {
 }
 
 message InspectDiskNodeReply {
-    LiveInfo live_info = 1;
+    DnInfo dn_info = 1;
 }
 
 message CreateControllerNodeRequest {
@@ -605,19 +651,20 @@ message InspectControllerNodeRequest {
 }
 
 message InspectControllerNodeReply {
-    LiveInfo live_info = 1;
+    CnInfo cn_info = 1;
 }
 
 message CreateStoragePoolRequest {
     string cluster_name = 1;
     string sp_name = 2;
     BdevConf bdev_conf = 3;
-	repeated uint32 cntlid_slot_list = 4;
-    uint32 cntlr_cnt = 5;
-    uint32 slice_cnt = 6;
-    uint64 init_ext_cnt = 7;
-    NodeSelector cn_selector = 8;
-    NodeSelector dn_selector = 9;
+    AutoThreshold auto_threshold = 4;
+	repeated uint32 cntlid_slot_list = 5;
+    uint32 cntlr_cnt = 6;
+    uint32 slice_cnt = 7;
+    uint64 init_ext_cnt = 8;
+    NodeSelector cn_selector = 9;
+    NodeSelector dn_selector = 10;
 }
 
 message CreateStoragePoolReply {
@@ -758,7 +805,7 @@ message InspectCntlrRequest {
 }
 
 message InspectCntlrReply {
-    LiveInfo live_info = 1;
+    CntlrInfo cntlr_info = 1;
 }
 
 message InspectSideRequest {
@@ -768,7 +815,7 @@ message InspectSideRequest {
 }
 
 message InspectSideReply {
-    LiveInfo live_info = 1;
+    SideInfo side_info = 1;
 }
 
 message CreateThinDeviceRequest {
@@ -1238,7 +1285,7 @@ message SyncupDnRequest {
 
 message SyncupDnReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    DnInfo dn_info = 2;
 }
 
 message SyncupSideRequest {
@@ -1257,7 +1304,7 @@ message SyncupSideRequest {
 
 message SyncupSideReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    SideInfo side_info = 2;
     BitmapInfo bm_info_list = 3;
 }
 
@@ -1282,7 +1329,7 @@ message GetDnInfoRequest {
 
 message GetDnInfoReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    DnInfo dn_info = 2;
 }
 
 message GetSideInfoRequest {
@@ -1293,7 +1340,7 @@ message GetSideInfoRequest {
 
 message GetSideInfoReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    SideInfo side_info = 2;
 }
 
 service DiskNodeAgent {
@@ -1325,7 +1372,7 @@ message SyncupCnRequest {
 
 message SyncupCnReply {
     AgentReply agent_reply =  1;
-    LiveInfo live_info = 2;
+    CnInfo cn_info = 2;
 }
 
 message SyncupCntlrRequest {
@@ -1346,7 +1393,7 @@ message SyncupCntlrRequest {
 
 message SyncupCntlrReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    CntlrInfo cntlr_info = 2;
     repeated BitmapInfo bm_info_list = 3;
 }
 
@@ -1371,7 +1418,7 @@ message GetCnInfoRequest {
 
 message GetCnInfoReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    CnInfo cn_info = 2;
 }
 
 message GetCntlrInfoRequest {
@@ -1383,7 +1430,7 @@ message GetCntlrInfoRequest {
 
 message GetCntlrInfoReply {
     AgentReply agent_reply = 1;
-    LiveInfo live_info = 2;
+    CntlrInfo cntlr_info = 2;
 }
 
 service ControllerNodeAgent {

@@ -116,5 +116,9 @@ const (
 	DefaultMgirThreshold = 1
 	MaxMigrBmCnt = 4
 
-	MaxCustomFlag = 16
+	DefaultPrimaryUnhealthy = 5
+	DefaultCntlrUnhealhty = 600
+	DefaultSideUnhealthy = 600
+	DefaultLegUnhealthy = 1200
+	DefaultPoolLowWatermarkPct = 50
 )
