@@ -1,12 +1,4 @@
-# distributed-nvme (dnv) — Design v001
-
-Status: the current, complete, workable design. The normative sources are exactly
-four files: this document plus `constants.go`, `name_fmt.go` and `schema.proto`.
-Everything an implementer (human or LLM) needs — including every diagram — is
-inlined here; the document does not assume that any other file exists. Fall back to
-the three source files only for protobuf field numbers and the exact constant
-values. Design decisions that are not directly forced by a source file are tagged
-`[D<n>]` and collected in Appendix C.
+# distributed-nvme (dnv) — Design
 
 Conventions:
 
@@ -2059,24 +2051,7 @@ func getShortId(clusterId, nodeId uint64) uint64 {
 }
 ```
 
-## Appendix B — suggested implementation order
-
-1. `pkg/lib`: constants, `NameFmt`, key builders, fnv/shard helpers, STM wrappers,
-   §11.4 bitmap math (pure functions — unit-test first).
-2. etcd schema + `CreateCluster`/node registration + capacity-index maintenance (§5.6);
-   `dnvctl` skeleton.
-3. dn agent: base state, LV trim protocol, sides with dm-error/linear + nvmet, the
-   single port, file local store (§9.1).
-4. cn agent: base state, leg connect + wrapper + health block, md assembly (§11.1.1),
-   pools/thin/raid0/ns-dev, nvmet, file local store.
-5. Workers: registry + HRW, dn/cn sync + health, sp fan-out; failover end-to-end.
-6. Pool/td/ss/ns RPCs end-to-end; GrowSlice (incl. meta ladder); dnv-cdc.
-7. Spare legs + SwitchSpareLeg; automatic reactions (§10.4).
-8. Migration (§11.2) incl. the bitmap fast-path (§9.6); then transfer+clone
-   (§11.3, §11.5).
-9. SpLevel staging, `dnvctl admin` tools, the §11.4 userspace copier.
-
-## Appendix C — recorded design decisions
+## Appendix B — recorded design decisions
 
 * **[D1] Leg wrapper.** A cn-local dm-linear wraps each leg's active side device so a
   migration can swap sides underneath md without md noticing. Kernel nvme multipath
@@ -2094,14 +2069,11 @@ func getShortId(clusterId, nodeId uint64) uint64 {
 * **[D5] Location copy in capacity values.** `DnConf`/`CnConf.location` is
   authoritative; the capacity key's value carries a copy so allocator scans stay
   read-only range scans. The STM that changes `location`-relevant state rewrites both.
-* **[D6] `disabled` is create-time.** `disabled` comes from
-  `CreateDiskNode`/`CreateControllerNode`; flipping it later (rare: draining a node)
-  goes through `dnvctl admin update_etcd` until a dedicated RPC earns its keep.
-* **[D7] Health-block payload.** The §3.6 probe writes magic + writer id + unix
+* **[D6] Health-block payload.** The §3.6 probe writes magic + writer id + unix
   timestamp and reads it back with O_DIRECT; success within the nvme/cmd timeouts =
   healthy. Multiple cntlrs probing the same block concurrently is harmless — the
   content is never interpreted beyond "IO completed".
-* **[D8] Push-bitmap durability.** Every received `Push*Bitmap` chunk is persisted as
+* **[D7] Push-bitmap durability.** Every received `Push*Bitmap` chunk is persisted as
   its own file under `LocalMigrBmPath`/`LocalCloneBmPath` and the applied sets reported
   in `bm_info`/`bm_info_list` are derived from the files, so agent restarts never force
   a re-push and a rebuilt dm-clone can re-apply src bitmaps locally (§9.6, §11.5). The

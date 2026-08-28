@@ -513,6 +513,17 @@ message InspectDiskNodeRequest {
     string addr_port = 2;
 }
 
+message UpdateDiskNodeDisabledRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    DnRev dn_rev = 3;
+    bool disabled = 4;
+}
+
+message UpdateDiskNodeDisabledReply {
+    uint64 dn_id = 1;
+}
+
 message InspectDiskNodeReply {
     DnInfo dn_info = 1;
 }
@@ -559,6 +570,17 @@ message ListControllerNodesRequest {
 message ListControllerNodesReply {
     repeated string addr_port = 1;
     string page_token = 2;
+}
+
+message UpdateControllerNodeDisabledRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+    CnRev cn_rev = 3;
+    bool disabled = 4;
+}
+
+message UpdateControllerNodeDisabledReply {
+    uint64 cn_id = 1;
 }
 
 message InspectControllerNodeRequest {
@@ -1103,12 +1125,14 @@ service Gateway {
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns(DeleteDiskNodeReply) {}
     rpc GetDiskNode(GetDiskNodeRequest) returns(GetDiskNodeReply) {}
     rpc ListDiskNodes(ListDiskNodesRequest) returns(ListDiskNodesReply) {}
+    rpc UpdateDiskNodeDisabled(UpdateDiskNodeDisabledRequest) returns(UpdateDiskNodeDisabledReply) {}
     rpc InspectDiskNode(InspectDiskNodeRequest) returns(InspectDiskNodeReply) {}
 
     rpc CreateControllerNode(CreateControllerNodeRequest) returns(CreateControllerNodeReply) {}
     rpc DeleteControllerNode(DeleteControllerNodeRequest) returns(DeleteControllerNodeReply) {}
     rpc GetControllerNode(GetControllerNodeRequest) returns(GetControllerNodeReply) {}
     rpc ListControllerNodes(ListControllerNodesRequest) returns(ListControllerNodesReply) {}
+    rpc UpdateControllerNodeDisabled(UpdateControllerNodeDisabledRequest) returns(UpdateControllerNodeDisabledReply) {}
     rpc InspectControllerNode(InspectControllerNodeRequest) returns(InspectControllerNodeReply) {}
 
     rpc CreateStoragePool(CreateStoragePoolRequest) returns(CreateStoragePoolReply) {}
