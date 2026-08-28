@@ -20,6 +20,14 @@ const (
 	nqnKindCnHost = 0x1
 	nqnKindSideToCn = 0x2
 	nqnKindMigrSrc = 0x3
+	nqnKindXfer = 0x4
+
+	localStorKindDn = "dn"
+	localStorKindCn = "cn"
+	localStorKindSide = "side"
+	localStorKindCntlr = "cntlr"
+	localStorKindMigrBm = "migr-bm"
+	localStorKindCloneBm = "clone-bm"
 
 	migrPvName = "migr-pv"
 	tmpFileName = "tmp-file"
@@ -32,6 +40,7 @@ type NameFmt struct {
 	dnVgPrefix string
 	cloneVgPrefix string
 	migrVgPrefix string
+	localStorPrefix string
 }
 
 func (nf *NameFmt) DnVgName(
@@ -48,7 +57,7 @@ func (nf *NameFmt) DnVgName(
 
 func (nf *NameFmt) DnLvName(
 	spId uint64,
-	sideId uniq64,
+	sideId uint64,
 ) string {
 	return fmt.Sprintf(
 		"%016x-%016x",
@@ -60,8 +69,8 @@ func (nf *NameFmt) DnLvName(
 func (nf *NameFmt) DnLvPath(
 	clusterId uint64,
 	dnId uint64,
-	spId unit64,
-	sideId unit64,
+	spId uint64,
+	sideId uint64,
 ) string {
 	vgName := nf.DnVgName(clusterId, dnId)
 	lvName := nf.DnLvName(spId, sideId)
@@ -80,31 +89,33 @@ func (nf *NameFmt) DnErrorName(
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
 		dmKindDnError,
 		spId,
-		sideid,
+		sideId,
+		cnId,
 	)
 }
 
 func (nf *NameFmt) DnLinearName(
 	clusterId uint64,
 	dnId uint64,
-	spId unit64,
+	spId uint64,
 	sideId uint64,
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
 		dmKindDnLinear,
 		spId,
-		sideid,
+		sideId,
+		cnId,
 	)
 }
 
@@ -138,7 +149,7 @@ func (nf *NameFmt) DnMigrVgName(
 func (nf *NameFmt) DnMigrMetaName(
 	spId uint64,
 	migrId uint64,
-) stirng {
+) string {
 	return fmt.Sprintf(
 		"%016x-%016x",
 		spId,
@@ -242,17 +253,15 @@ func (nf *NameFmt) CnPoolMetaName(
 	cnId uint64,
 	spId uint64,
 	sliceId uint64,
-	grpId uint64,
 ) string {
-	rreturn fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
 		dmKindCnPoolMeta,
 		spId,
 		sliceId,
-		grpId,
 	)
 }
 
@@ -261,17 +270,15 @@ func (nf *NameFmt) CnPoolDataName(
 	cnId uint64,
 	spId uint64,
 	sliceId uint64,
-	grpId uint64,
 ) string {
 	rreturn fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
 		dmKindCnPoolData,
 		spId,
 		sliceId,
-		grpId,
 	)
 }
 
@@ -367,14 +374,14 @@ func (nf *NameFmt) CnTmpfsPath(
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s/%016x-%016d",
+		"%s/%016x-%016x",
 		nf.tmpfsPrefix,
 		clusterId,
 		cnId,
 	)
 }
 
-func (nf *NameFmt) CnTmpFileName() {
+func (nf *NameFmt) CnTmpFileName() string {
 	return nf.tmpFilename
 }
 
@@ -442,7 +449,7 @@ func (nf *NameFmt) CnCloneFinalName(
 	)
 }
 
-func (nf *NameFmt) CnXferFinaName(
+func (nf *NameFmt) CnXferFinalName(
 	clusterId uint64,
 	cnId uint64,
 	spId uint64,
@@ -474,8 +481,8 @@ func (nf *NameFmt) MdPath(name string) string {
 }
 
 func (nf *NameFmt) DnHostNqn(
-	clusterId int64,
-	dnId int64,
+	clusterId uint64,
+	dnId uint64,
 ) -> string {
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x",
@@ -487,8 +494,8 @@ func (nf *NameFmt) DnHostNqn(
 }
 
 func (nf *NameFmt) CnHostNqn(
-	clusterId int64,
-	cnId int64,
+	clusterId uint64,
+	cnId uint64,
 ) -> string {
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x",
@@ -500,11 +507,11 @@ func (nf *NameFmt) CnHostNqn(
 }
 
 func (nf *NameFmt) SideToCnNqn(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	sideId int64,
-	cnId int64,
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	legId uint64,
+	cnId uint64,
 ) -> string {
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x:%016x:%016x",
@@ -513,16 +520,16 @@ func (nf *NameFmt) SideToCnNqn(
 		clusterId,
 		dnId,
 		spId,
-		sideId,
+		legId,
 		cnId,
 	)
 }
 
 func (nf *NameFmt) MigrSrcNqn(
-	clusterId int64,
-	dnId int64,
-	spId int64,
-	migrId int64,
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
 ) -> string {
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x:%016x",
@@ -532,5 +539,120 @@ func (nf *NameFmt) MigrSrcNqn(
 		dnId,
 		spId,
 		migrId,
+	)
+}
+
+func (nf *NameFmt) XferNqn(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	xferId uint64,
+) -> string {
+	return fmt.Sprintf(
+		"%s:%01x:%016x:%016x:%016x:%016x",
+		nf.nqnPrefix,
+		nqnKindXfer,
+		clusterId,
+		dnId,
+		spId,
+		xferId,
+	)
+}
+
+func (nf *NameFmt) LocalDnPath(
+	clusterId uint64,
+	dnId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindDn,
+		clusterId,
+		dnId,
+	)
+}
+
+func (nf *NameFmt) LocalSidePath(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	sideId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindSide,
+		clusterId,
+		dnId,
+		spId,
+		sideId,
+	)
+}
+
+func (nf *NameFmt) LocalCnPath(
+	clusterId int64,
+	cnId int64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindCn,
+		clusterId,
+		cnId,
+	)
+}
+
+func (nf *NameFmt) LocalCntlrPath(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cntlrId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindCntlr,
+		clusterId,
+		cnId,
+		spId,
+		cntlrId,
+	)
+}
+
+func (nf *NameFmt) LocalMigrBmPath(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	migrId uint64,
+	bmIdx uint32,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x-%02x",
+		nf.localStorPrefix,
+		localStorKindMigrBm,
+		clusterId,
+		dnId,
+		spId,
+		migrId,
+		bmIdx,
+	)
+}
+
+func (nf *NameFmt) LocalCloneBmPath(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cloneId uint64,
+	bmIdx uint32,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x-%02x",
+		nf.localStorPrefix,
+		localStorKindCloneBm,
+		clusterId,
+		cnId,
+		spId,
+		cloneId,
+		bmIdx,
 	)
 }

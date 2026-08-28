@@ -64,8 +64,6 @@ const (
 	MaxCntlrCntPerCn   = 256
 	MaxLegPerGrp       = 8
 	MaxSpareLegPerGrp  = 2
-	DnPortBitmapSize   = 512
-	CnPortBitmapSize   = 512
 
 	CnCntlidSlotBase   = 10000
 	CnCntlidSlotStep   = 5000
@@ -78,7 +76,7 @@ const (
 	DefaultClusterName = "default"
 	DefaultCnCap       = 4 * 1024 * 1024 * 1024 * 1024
 	MaxCnCap           = 64 * 1024 * 1024 * 1024 * 1024
-	MinCpCap           = 1024
+	MinCnCap           = 1024
 	DefaultListCnt     = 64
 	MaxListCnt         = 1024
 
@@ -97,8 +95,12 @@ const (
 	DefaultMigrVgSize = 1 * 1024 * 1024 * 1024
 	DefaultMigrVgExtSize = 4 * 1024 * 1024
 
+	DefaultLocalStorPrefix = "/var/tmp"
+
 	IdKeyFmt     = "%016x"
 	FreeSpaceFmt = "%016x"
+	BinIdxFmt    = "%01x"
+	BmIdxFmt     = "%02x"
 
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
@@ -111,14 +113,15 @@ const (
 	DefaultCloneBatchSize = 1
 	MaxCloneBmCnt = 16
 	MaxMigrThreshold = 8
-	DefaultMigrTheshold = 1
+	DefaultMigrThreshold = 1
 	MaxMigrBatchSize = 4
-	DefaultMgirThreshold = 1
 	MaxMigrBmCnt = 4
 
 	DefaultPrimaryUnhealthy = 5
-	DefaultCntlrUnhealhty = 600
+	DefaultCntlrUnhealthy = 600
 	DefaultSideUnhealthy = 600
 	DefaultLegUnhealthy = 1200
 	DefaultPoolLowWatermarkPct = 50
+
+	DefaultNvmeFastIoFailTmo = 5
 )

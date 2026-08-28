@@ -71,7 +71,7 @@ message BdevConf {
 message EventThreshold {
     // How many seconds to wait before selecting a
     // new prmary.
-    uint32 primay_unhealthy = 1;
+    uint32 primary_unhealthy = 1;
     // How many seconds to wait before allocating a
     // new cntlr and delete the old one.
     uint32 cntlr_unhealthy = 2;
@@ -125,7 +125,6 @@ message Namespace {
     uint64 ns_id = 1;
     uint32 ns_idx = 2;
     uint64 td_id = 3;
-    uint64 ag_id = 4;
     string dev_uuid = 5;
     string dev_nguid = 6;
     bool suspended = 7;
@@ -214,7 +213,7 @@ message CntlrInfo {
     map<uint64, ResInfo> leg_id_to_leg = 12;
     map<uint64, ResInfo> xfer_id_to_dm_linear = 13;
     map<uint64, ResInfo> xfer_id_to_subsystem = 14;
-    map<uint64, ResInfo> xfer_id_to_namespae = 15;
+    map<uint64, ResInfo> xfer_id_to_namespace = 15;
     map<uint64, ResInfo> clone_id_to_target = 16;
     map<uint64, ResInfo> clone_id_to_dm_clone = 17;
 }
@@ -285,14 +284,10 @@ message DnConf {
     bool disabled = 3;
     uint64 err_epoch = 4;
     NvmeTrConf nvme_tr_conf = 5;
-    repeated SidePointer side_ptr_list = 6;
-    uint64 total_ext_cnt = 7;
-    uint64 free_ext_cnt = 8;
-}
-
-// {dnv_prefix} dn_note {cluster_id} {addr_port}
-message DnNote {
-    bytes note = 1;
+    string location = 6;
+    repeated SidePointer side_ptr_list = 7;
+    uint64 total_ext_cnt = 8;
+    uint64 free_ext_cnt = 9;
 }
 
 // {dnv_prefix} cn_conf {cluster_id} {addr_port}
@@ -302,14 +297,10 @@ message CnConf {
     bool disabled = 3;
     uint64 err_epoch = 4;
     NvmeTrConf nvme_tr_conf = 5;
-    repeated CntlrPointer cntlr_ptr_list = 6;
-    uint64 total_ext_cnt = 7;
-    uint64 free_ext_cnt = 8;
-}
-
-// {dnv_prefix} cn_note {cluster_id} {addr_port}
-message CnNote {
-    bytes note = 1;
+    string location = 6;
+    repeated CntlrPointer cntlr_ptr_list = 7;
+    uint64 total_ext_cnt = 8;
+    uint64 free_ext_cnt = 9;
 }
 
 // {dnv_prefix} dn_capacity {cluster_id} {bin_idx} {free_ext_cnt} {addr_port}
@@ -349,18 +340,13 @@ message SpConf {
     repeated string migr_name_list = 16;
 }
 
-// {dnv_prefix} sp_conf {cluster_id} {sp_name}
-message SpNote {
-    bytes note = 1;
-}
-
 // {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
 message Cntlr {
-    string cn_addr_addr = 1;
+    string cn_addr_port = 1;
 	NvmeTrConf nvme_tr_conf = 2;
     uint32 cntlid_slot = 3;
     bool primary = 4;
-	uint32 cntlr_idx = 5;
+    bool disabled = 5;
     uint64 err_epoch = 6;
 }
 
@@ -453,7 +439,7 @@ message DeleteClusterRequest {
 }
 
 message DeleteClusterReply {
-    uint64 cluser_id = 1;
+    uint64 cluster_id = 1;
 }
 
 message GetClusterRequest {
@@ -483,7 +469,7 @@ message CreateDiskNodeRequest {
     string addr_port = 2;
     NvmeTrConf nvme_tr_conf = 3;
     string location = 4;
-    bool enabled = 5;
+    bool disabled = 5;
 }
 
 message CreateDiskNodeReply {
@@ -522,41 +508,6 @@ message ListDiskNodesReply {
     string page_token = 2;
 }
 
-message UpdateDiskNodeNoteRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    DnRev dn_rev = 3;
-    DnNote dn_note = 4;
-}
-
-message UpdateDiskNodeNoteReply {
-    uint64 dn_id = 1;
-}
-
-message SetDiskNodeFlagRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    DnRev dn_rev = 3;
-    uint32 idx = 4;
-}
-
-message SetDiskNodeFlagReply {
-    uint64 dn_id = 1;
-    uint32 flags = 2;
-}
-
-message ClearDiskNodeFlagRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    DnRev dn_rev = 3;
-    uint32 idx = 4;
-}
-
-message ClearDiskNodeFlagReply {
-    uint64 dn_id = 1;
-    uint32 flags = 2;
-}
-
 message InspectDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -571,7 +522,7 @@ message CreateControllerNodeRequest {
     string addr_port = 2;
     NvmeTrConf nvme_tr_conf = 3;
     string location = 4;
-    bool enabled = 5;
+    bool disabled = 5;
 }
 
 message CreateControllerNodeReply {
@@ -610,41 +561,6 @@ message ListControllerNodesReply {
     string page_token = 2;
 }
 
-message UpdateControllerNodeNoteRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    CnRev cn_rev = 3;
-    CnNote cn_note = 4;
-}
-
-message UpdateControllerNodeNoteReply {
-    uint64 cn_id = 1;
-}
-
-message SetControllerNodeFlagRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    CnRev cn_rev = 3;
-    uint32 idx = 4;
-}
-
-message SetControllerNodeFlagReply {
-    uint64 cn_id = 1;
-    uint32 flags = 2;
-}
-
-message ClearControllerNodeFlagRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-    CnRev cn_rev = 3;
-    uint32 idx = 4;
-}
-
-message ClearControllerNodeFlagReply {
-    uint64 cn_id = 1;
-    uint32 flags = 2;
-}
-
 message InspectControllerNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -658,7 +574,7 @@ message CreateStoragePoolRequest {
     string cluster_name = 1;
     string sp_name = 2;
     BdevConf bdev_conf = 3;
-    AutoThreshold auto_threshold = 4;
+    EventThreshold event_threshold = 4;
 	repeated uint32 cntlid_slot_list = 5;
     uint32 cntlr_cnt = 6;
     uint32 slice_cnt = 7;
@@ -724,17 +640,6 @@ message UpdateStoragePoolLevelRequest {
 }
 
 message UpdateStoragePoolLevelReply {
-    uint64 sp_id = 1;
-}
-
-message UpdateStoragePoolNoteRequest {
-    string cluster_name = 1;
-	string sp_name = 2;
-    SpRev sp_rev = 3;
-    SpNote sp_note = 4;
-}
-
-message UpdateStoragePoolNoteReply {
     uint64 sp_id = 1;
 }
 
@@ -823,7 +728,7 @@ message CreateThinDeviceRequest {
     string sp_name = 2;
     SpRev sp_rev = 3;
     string td_name = 4;
-    uint32 ori_name = 5;
+    string ori_name = 5;
     uint64 size = 6;
 }
 
@@ -902,7 +807,10 @@ message CreateNamespaceRequest {
     SpRev sp_rev = 3;
     string nqn = 4;
     uint32 ns_idx = 5;
-    string td_name = 6;
+    string dev_uuid = 6;
+    string dev_nguid = 7;
+    bool suspended = 8;
+    string td_name = 9;
 }
 
 message CreateNamespaceReply {
@@ -1126,7 +1034,7 @@ message CreateSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
     SpRev sp_rev = 3;
-    string grp_id = 4;
+    uint64 grp_id = 4;
 	NodeSelector dn_selector = 5;
 }
 
@@ -1138,7 +1046,8 @@ message DeleteSpareLegRequest {
     string cluster_name = 1;
     string sp_name = 2;
     SpRev sp_rev = 3;
-    string grp_id = 4;
+    uint64 grp_id = 4;
+    uint64 leg_id = 5;
 }
 
 message DeleteSpareLegReply {
@@ -1194,18 +1103,12 @@ service Gateway {
     rpc DeleteDiskNode(DeleteDiskNodeRequest) returns(DeleteDiskNodeReply) {}
     rpc GetDiskNode(GetDiskNodeRequest) returns(GetDiskNodeReply) {}
     rpc ListDiskNodes(ListDiskNodesRequest) returns(ListDiskNodesReply) {}
-    rpc UpdateDiskNodeNote(UpdateDiskNodeNoteRequest) returns(UpdateDiskNodeNoteReply) {}
-    rpc SetDiskNodeFlag(SetDiskNodeFlagRequest) returns(SetDiskNodeFlagReply) {}
-    rpc ClearDiskNodeFlag(ClearDiskNodeFlagRequest) returns(ClearDiskNodeFlagReply) {}
     rpc InspectDiskNode(InspectDiskNodeRequest) returns(InspectDiskNodeReply) {}
 
     rpc CreateControllerNode(CreateControllerNodeRequest) returns(CreateControllerNodeReply) {}
     rpc DeleteControllerNode(DeleteControllerNodeRequest) returns(DeleteControllerNodeReply) {}
     rpc GetControllerNode(GetControllerNodeRequest) returns(GetControllerNodeReply) {}
     rpc ListControllerNodes(ListControllerNodesRequest) returns(ListControllerNodesReply) {}
-    rpc UpdateControllerNodeNote(UpdateControllerNodeNoteRequest) returns(UpdateControllerNodeNoteReply) {}
-    rpc SetControllerNodeFlag(SetControllerNodeFlagRequest) returns(SetControllerNodeFlagReply) {}
-    rpc ClearControllerNodeFlag(ClearControllerNodeFlagRequest) returns(ClearControllerNodeFlagReply) {}
     rpc InspectControllerNode(InspectControllerNodeRequest) returns(InspectControllerNodeReply) {}
 
     rpc CreateStoragePool(CreateStoragePoolRequest) returns(CreateStoragePoolReply) {}
@@ -1214,7 +1117,6 @@ service Gateway {
     rpc ListStoragePools(ListStoragePoolsRequest) returns(ListStoragePoolsReply) {}
 	rpc UpdateStoragePoolCntlidSlotList(UpdateStoragePoolCntlidSlotListRequest) returns(UpdateStoragePoolCntlidSlotListReply) {}
 	rpc UpdateStoragePoolLevel(UpdateStoragePoolLevelRequest) returns(UpdateStoragePoolLevelReply) {}
-    rpc UpdateStoragePoolNote(UpdateStoragePoolNoteRequest) returns(UpdateStoragePoolNoteReply) {}
     rpc FindStoragePoolName(FindStoragePoolNamesRequest) returns(FindStoragePoolNamesReply) {}
 
     rpc GrowSlice(GrowSliceRequest) returns(GrowSliceReply) {}
@@ -1238,7 +1140,7 @@ service Gateway {
     rpc CreateNamespace(CreateNamespaceRequest) returns(CreateNamespaceReply) {}
     rpc DeleteNamespace(DeleteNamespaceRequest) returns(DeleteNamespaceReply) {}
     rpc UpdateNamespaceDev(UpdateNamespaceDevRequest) returns(UpdateNamespaceDevReply) {}
-    rpc UpdatenamespaceSuspended(UpdateNamespaceSuspendedRequest) returns(UpdateNamespaceSuspendedReply) {}
+    rpc UpdateNamespaceSuspended(UpdateNamespaceSuspendedRequest) returns(UpdateNamespaceSuspendedReply) {}
 
     rpc CreateClone(CreateCloneRequest) returns(CreateCloneReply) {}
     rpc DeleteClone(DeleteCloneRequest) returns(DeleteCloneReply) {}
@@ -1279,8 +1181,7 @@ message SyncupDnRequest {
     uint64 dn_id = 2;
     uint64 revision = 3;
 	ClusterConf cluster_conf = 4;
-    bool partial = 5;
-    repeated SidePointer side_pointer_list = 6;
+    repeated SidePointer side_pointer_list = 5;
 }
 
 message SyncupDnReply {
@@ -1291,27 +1192,26 @@ message SyncupDnReply {
 message SyncupSideRequest {
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
-    SidePointer side_poiner = 3;
+    SidePointer side_pointer = 3;
     uint64 revision = 4;
-	bool partial = 5;
-    uint64 ext_cnt = 6;
-	uint64 primary_cn_id = 7;
-	uint32 primary_idx = 8;
-	map<uint64, uint32> standby_id_to_idx = 9;
-    Migration migration = 10;
-    Side src_side = 11;
+    uint64 ext_cnt = 5;
+	uint64 primary_cn_id = 6;
+    repeated uint64 standby_id_list = 7;
+    SpLevel sp_level = 8;
+    Migration migration = 9;
+    Side src_side = 10;
 }
 
 message SyncupSideReply {
     AgentReply agent_reply = 1;
     SideInfo side_info = 2;
-    BitmapInfo bm_info_list = 3;
+    BitmapInfo bm_info = 3;
 }
 
 message PushMigrBitmapRequest {
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
-    SidePointer side_ponter = 3;
+    SidePointer side_pointer = 3;
     uint64 revision = 4;
     uint64 migr_id = 5;
     uint32 bm_idx = 6;
@@ -1366,8 +1266,7 @@ message SyncupCnRequest {
     uint64 cn_id = 2;
     uint64 revision = 3;
 	ClusterConf cluster_conf = 4;
-	bool partial = 5;
-    repeated CntlrPointer cntlr_pointer_list = 6;
+    repeated CntlrPointer cntlr_pointer_list = 5;
 }
 
 message SyncupCnReply {
@@ -1380,8 +1279,8 @@ message SyncupCntlrRequest {
     uint64 cn_id = 2;
     CntlrPointer cntlr_pointer = 3;
     uint64 revision = 4;
-	bool partial = 5;
-    BdevConf bdev_conf = 6;
+    BdevConf bdev_conf = 5;
+    SpLevel sp_level = 6;
     Cntlr cntlr = 7;
 	map<string, Slice> id_to_slice = 8;
     repeated ThinDevice td_list = 9;
@@ -1433,6 +1332,35 @@ message GetCntlrInfoReply {
     CntlrInfo cntlr_info = 2;
 }
 
+message GetThinDeviceBmRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 sp_id = 3;
+    uint64 cntlr_id = 4;
+    uint64 td_id = 5;
+    uint32 slice_idx = 6;
+    uint64 start_block = 7;
+    uint64 block_cnt = 8;
+}
+
+message GetThinDeviceBmReply {
+    bytes bitmap = 1;
+}
+
+message GetLegBmRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 sp_id = 3;
+    uint64 cntlr_id = 4;
+    uint64 leg_id = 5;
+    uint64 start_block = 6;
+    uint64 block_cnt = 7;
+}
+
+message GetLegBmReply {
+    bytes bitmap = 1;
+}
+
 service ControllerNodeAgent {
     rpc GetCnSize(GetCnSizeRequest) returns(GetCnSizeReply) {}
     rpc SyncupCn(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
@@ -1440,4 +1368,6 @@ service ControllerNodeAgent {
     rpc PushCloneBitmap(stream PushCloneBitmapRequest) returns(stream PushCloneBitmapReply) {}
     rpc GetCnInfo(GetCnInfoRequest) returns(GetCnInfoReply) {}
     rpc GetCntlrInfo(GetCntlrInfoRequest) returns(GetCntlrInfoReply) {}
+    rpc GetThinDeviceBm(GetThinDeviceBmRequest) returns(GetThinDeviceBmReply) {}
+    rpc GetLegBm(GetLegBmRequest) returns(GetLegBmReply) {}
 }
