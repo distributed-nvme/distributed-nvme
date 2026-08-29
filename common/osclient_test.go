@@ -1,0 +1,446 @@
+package common
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/distributed-nvme/distributed-nvme/pb"
+)
+
+// ---------------------------------------------------------------------------
+// RunCommand (osclient.md §8.1, §8.2)
+// ---------------------------------------------------------------------------
+
+func TestRunCommandExitCodes(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+
+	if _, _, exitCode, err := client.RunCommand(
+		ctx, "sh", []string{"-c", "exit 0"}, "",
+	); exitCode != 0 || err != nil {
+		t.Errorf("exit 0 → (%d, %v), want (0, nil)", exitCode, err)
+	}
+
+	if _, _, exitCode, err := client.RunCommand(
+		ctx, "sh", []string{"-c", "exit 3"}, "",
+	); exitCode != 3 || err == nil {
+		t.Errorf("exit 3 → (%d, %v), want (3, non-nil)", exitCode, err)
+	}
+
+	if _, _, exitCode, err := client.RunCommand(
+		ctx, "dnv-no-such-binary-xyz", nil, "",
+	); exitCode != -1 || err == nil {
+		t.Errorf("missing binary → (%d, %v), want (-1, non-nil)", exitCode, err)
+	}
+}
+
+func TestRunCommandStreams(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+
+	stdout, stderr, exitCode, err := client.RunCommand(ctx, "cat", nil, "hello")
+	if err != nil || exitCode != 0 {
+		t.Fatalf("cat → (%d, %v)", exitCode, err)
+	}
+	if stdout != "hello" || stderr != "" {
+		t.Errorf("cat stdout=%q stderr=%q, want %q and empty", stdout, stderr, "hello")
+	}
+
+	stdout, stderr, _, err = client.RunCommand(
+		ctx, "sh", []string{"-c", "echo out; echo err 1>&2"}, "",
+	)
+	if err != nil {
+		t.Fatalf("sh → %v", err)
+	}
+	if stdout != "out\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "out\n")
+	}
+	if stderr != "err\n" {
+		t.Errorf("stderr = %q, want %q", stderr, "err\n")
+	}
+}
+
+// The caller owns the deadline (architecture.md §7): the ctx firing SIGTERMs
+// the process.
+func TestRunCommandSoftTimeoutSigterm(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, _, exitCode, err := client.RunCommand(ctx, "sleep", []string{"10"}, "")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("a killed command reported success")
+	}
+	if exitCode != -1 {
+		t.Errorf("exit_code = %d, want -1 for a signal-killed process", exitCode)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("SIGTERM path took %v, want ~100ms", elapsed)
+	}
+}
+
+// A process that ignores SIGTERM is SIGKILLed WaitDelay later, i.e. at the
+// hard timeout relative to the soft one (CmdHardTimeout-CmdSoftTimeout).
+func TestRunCommandHardTimeoutSigkill(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow: waits out cmd.WaitDelay")
+	}
+	client := NewLimitedOsClient(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	waitDelay := time.Duration(CmdHardTimeout-CmdSoftTimeout) * time.Second
+	start := time.Now()
+	_, _, _, err := client.RunCommand(
+		ctx, "sh", []string{"-c", `trap "" TERM; sleep 30`}, "",
+	)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("a SIGKILLed command reported success")
+	}
+	if elapsed < waitDelay {
+		t.Errorf("returned after %v, want at least the %v grace", elapsed, waitDelay)
+	}
+	if elapsed > waitDelay+2*time.Second {
+		t.Errorf("returned after %v, want ~%v", elapsed, waitDelay)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency limit (osclient.md §8.4, §4.1)
+// ---------------------------------------------------------------------------
+
+func TestInFlightLimit(t *testing.T) {
+	client := NewLimitedOsClient(2)
+	ctx := context.Background()
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, _, err := client.RunCommand(
+				ctx, "sleep", []string{"0.2"}, "",
+			); err != nil {
+				t.Errorf("sleep failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if elapsed < 400*time.Millisecond {
+		t.Errorf("3 x sleep 0.2 with limit 2 took %v, want >= 400ms "+
+			"(the third call must wait for a slot)", elapsed)
+	}
+}
+
+func TestLimitBlocksAndCanceledCtxDoesNotRun(t *testing.T) {
+	capture := captureLogs(t)
+	client := NewLimitedOsClient(1)
+
+	// Hold the only slot.
+	if err := client.sem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer client.sem.Release(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	stdout, stderr, exitCode, err := client.RunCommand(ctx, "echo", []string{"hi"}, "")
+	if err != context.Canceled {
+		t.Errorf("RunCommand err = %v, want context.Canceled", err)
+	}
+	if stdout != "" || stderr != "" || exitCode != -1 {
+		t.Errorf("RunCommand ran anyway: (%q, %q, %d)", stdout, stderr, exitCode)
+	}
+	if _, err := client.ReadFile(ctx, "/etc/hostname"); err != context.Canceled {
+		t.Errorf("ReadFile err = %v, want context.Canceled", err)
+	}
+	if err := client.WriteFile(ctx, filepath.Join(t.TempDir(), "f"), "x"); err != context.Canceled {
+		t.Errorf("WriteFile err = %v, want context.Canceled", err)
+	}
+
+	// A semaphore-acquire failure logs nothing: the operation never happened.
+	if recs := capture.records(t); len(recs) != 0 {
+		t.Errorf("blocked calls logged %d records: %s", len(recs), capture.buf.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// File and proto I/O (osclient.md §8.5, §8.6)
+// ---------------------------------------------------------------------------
+
+func TestFileRoundTrip(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state")
+
+	if err := client.WriteFile(ctx, path, "first version"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	data, err := client.ReadFile(ctx, path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if data != "first version" {
+		t.Errorf("read back %q", data)
+	}
+
+	if err := client.WriteFile(ctx, path, "second version"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if data, _ = client.ReadFile(ctx, path); data != "second version" {
+		t.Errorf("after overwrite read back %q", data)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("mode = %v, want 0644", perm)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "state" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("leftover temp files: %v", names)
+	}
+
+	if _, err := client.ReadFile(ctx, filepath.Join(dir, "missing")); err == nil {
+		t.Error("reading a missing file succeeded")
+	}
+}
+
+func TestProtoRoundTrip(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "side-0-0-0-0")
+
+	want := &pb.SyncupSideRequest{
+		ClusterId:     16981786240730056190,
+		DnId:          3,
+		SidePointer:   &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
+		Revision:      9,
+		ExtCnt:        10,
+		PrimaryCnId:   5,
+		StandbyIdList: []uint64{6, 7},
+		SpLevel:       pb.SpLevel_SP_LEVEL_READONLY,
+	}
+	if err := client.WriteProto(ctx, path, want); err != nil {
+		t.Fatalf("WriteProto: %v", err)
+	}
+
+	got := &pb.SyncupSideRequest{}
+	if err := client.ReadProto(ctx, path, got); err != nil {
+		t.Fatalf("ReadProto: %v", err)
+	}
+	if !proto.Equal(want, got) {
+		t.Errorf("round trip changed the message:\nwant %v\ngot  %v", want, got)
+	}
+
+	if err := client.ReadProto(ctx, path+"-missing", &pb.SyncupSideRequest{}); err == nil {
+		t.Error("ReadProto of a missing file succeeded")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Logging (osclient.md §8.7, §4.5)
+// ---------------------------------------------------------------------------
+
+func hasAttrs(t *testing.T, rec map[string]any, keys ...string) {
+	t.Helper()
+	for _, key := range keys {
+		if _, ok := rec[key]; !ok {
+			t.Errorf("record %v is missing attr %q", rec, key)
+		}
+	}
+}
+
+func TestOsClientLogRecords(t *testing.T) {
+	capture := captureLogs(t)
+	client := NewLimitedOsClient(0)
+	ctx := WithTraceId(context.Background(), "os-trace")
+	dir := t.TempDir()
+
+	// 1. command
+	if _, _, _, err := client.RunCommand(
+		ctx, "sh", []string{"-c", "echo out; echo err 1>&2"}, "stdin data",
+	); err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	cmdRec := capture.onlyMsg(t, "os command")
+	hasAttrs(t, cmdRec, "cmd", "args", "stdin", "stdout", "stderr", "exit_code", TraceIdLogKey)
+	if cmdRec["cmd"] != "sh" || cmdRec["stdin"] != "stdin data" ||
+		cmdRec["stdout"] != "out\n" || cmdRec["stderr"] != "err\n" ||
+		cmdRec["exit_code"] != float64(0) {
+		t.Errorf("os command record = %v", cmdRec)
+	}
+	if args, ok := cmdRec["args"].([]any); !ok || len(args) != 2 || args[0] != "-c" {
+		t.Errorf("args rendered as %v", cmdRec["args"])
+	}
+	if _, ok := cmdRec["error"]; ok {
+		t.Errorf("successful command carries an error attr: %v", cmdRec)
+	}
+	if cmdRec[TraceIdLogKey] != "os-trace" {
+		t.Errorf("trace_id = %v, want os-trace", cmdRec[TraceIdLogKey])
+	}
+
+	// 2. failing command: same record, plus error
+	if _, _, _, err := client.RunCommand(ctx, "sh", []string{"-c", "exit 4"}, ""); err == nil {
+		t.Fatal("exit 4 reported success")
+	}
+	failRec := capture.withMsg(t, "os command")[1]
+	if failRec["exit_code"] != float64(4) {
+		t.Errorf("exit_code = %v, want 4", failRec["exit_code"])
+	}
+	if _, ok := failRec["error"]; !ok {
+		t.Errorf("failed command has no error attr: %v", failRec)
+	}
+
+	// 3. file write/read, with truncation of long data (R11)
+	longData := strings.Repeat("z", LogStrDataLimit+50)
+	path := filepath.Join(dir, "long")
+	if err := client.WriteFile(ctx, path, longData); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := client.ReadFile(ctx, path); err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	for _, msg := range []string{"os write file", "os read file"} {
+		rec := capture.onlyMsg(t, msg)
+		hasAttrs(t, rec, "path", "size", "data", TraceIdLogKey)
+		if rec["path"] != path {
+			t.Errorf("%s: path = %v", msg, rec["path"])
+		}
+		if rec["size"] != float64(len(longData)) {
+			t.Errorf("%s: size = %v, want %d", msg, rec["size"], len(longData))
+		}
+		data, _ := rec["data"].(string)
+		if !strings.HasSuffix(data, "...(178 chars total)") {
+			t.Errorf("%s: data not truncated: %q", msg, data)
+		}
+		if len([]rune(data)) != LogStrDataLimit+len("...(178 chars total)") {
+			t.Errorf("%s: data kept %d runes", msg, len([]rune(data)))
+		}
+	}
+
+	// 4. proto write/read: bytes fields are logged as sizes only (R10)
+	protoPath := filepath.Join(dir, "migr-bm")
+	msg := &pb.PushMigrBitmapRequest{
+		ClusterId:   16981786240730056190,
+		DnId:        3,
+		SidePointer: &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
+		Revision:    9,
+		MigrId:      30,
+		Bitmap:      []byte{1, 2, 3, 4},
+	}
+	if err := client.WriteProto(ctx, protoPath, msg); err != nil {
+		t.Fatalf("WriteProto: %v", err)
+	}
+	if err := client.ReadProto(ctx, protoPath, &pb.PushMigrBitmapRequest{}); err != nil {
+		t.Fatalf("ReadProto: %v", err)
+	}
+	serialized, err := proto.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, name := range []string{"os write proto", "os read proto"} {
+		rec := capture.onlyMsg(t, name)
+		hasAttrs(t, rec, "path", "size", "data", TraceIdLogKey)
+		if rec["path"] != protoPath {
+			t.Errorf("%s: path = %v", name, rec["path"])
+		}
+		if rec["size"] != float64(len(serialized)) {
+			t.Errorf("%s: size = %v, want %d", name, rec["size"], len(serialized))
+		}
+		data, ok := rec["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: data = %T, want a decoded map", name, rec["data"])
+		}
+		if data["bitmap"] != "<4 bytes>" {
+			t.Errorf("%s: bitmap = %v, want <4 bytes>", name, data["bitmap"])
+		}
+		if _, ok := data["side_pointer"].(map[string]any); !ok {
+			t.Errorf("%s: side_pointer = %v", name, data["side_pointer"])
+		}
+	}
+
+	// 5. failing file read still emits exactly one record, carrying the error
+	if _, err := client.ReadFile(ctx, filepath.Join(dir, "nope")); err == nil {
+		t.Fatal("reading a missing file succeeded")
+	}
+	readRecs := capture.withMsg(t, "os read file")
+	failRead := readRecs[len(readRecs)-1]
+	if _, ok := failRead["error"]; !ok {
+		t.Errorf("failed read has no error attr: %v", failRead)
+	}
+	if failRead["size"] != float64(0) {
+		t.Errorf("failed read size = %v, want 0", failRead["size"])
+	}
+}
+
+func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
+	ctx := context.Background()
+	fake := &FakeOsClient{}
+
+	stdout, stderr, exitCode, err := fake.RunCommand(ctx, "anything", nil, "")
+	if stdout != "" || stderr != "" || exitCode != 0 || err != nil {
+		t.Errorf("unset RunCommandFn = (%q, %q, %d, %v)", stdout, stderr, exitCode, err)
+	}
+	if data, err := fake.ReadFile(ctx, "/x"); data != "" || err != nil {
+		t.Errorf("unset ReadFileFn = (%q, %v)", data, err)
+	}
+	if err := fake.WriteFile(ctx, "/x", "d"); err != nil {
+		t.Errorf("unset WriteFileFn = %v", err)
+	}
+	if err := fake.ReadProto(ctx, "/x", &pb.SidePointer{}); err != nil {
+		t.Errorf("unset ReadProtoFn = %v", err)
+	}
+	if err := fake.WriteProto(ctx, "/x", &pb.SidePointer{}); err != nil {
+		t.Errorf("unset WriteProtoFn = %v", err)
+	}
+
+	var gotName string
+	var gotArgs []string
+	fake.RunCommandFn = func(_ context.Context, name string, args []string, stdin string) (string, string, int, error) {
+		gotName, gotArgs = name, args
+		return "table\n", "", 0, nil
+	}
+	fake.ReadProtoFn = func(_ context.Context, _ string, target proto.Message) error {
+		proto.Merge(target, &pb.SidePointer{SpId: 7})
+		return nil
+	}
+
+	if stdout, _, _, _ := fake.RunCommand(ctx, "dmsetup", []string{"table"}, ""); stdout != "table\n" {
+		t.Errorf("stubbed RunCommand returned %q", stdout)
+	}
+	if gotName != "dmsetup" || len(gotArgs) != 1 || gotArgs[0] != "table" {
+		t.Errorf("stub saw (%q, %v)", gotName, gotArgs)
+	}
+	target := &pb.SidePointer{}
+	if err := fake.ReadProto(ctx, "/x", target); err != nil || target.GetSpId() != 7 {
+		t.Errorf("stubbed ReadProto → (%v, %v)", target, err)
+	}
+}

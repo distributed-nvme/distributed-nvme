@@ -1,7 +1,0 @@
-1787034105.392162584 cn0 step1 ns-path-cn0 ana_grpid -> 2 (inaccessible)
-1787034105.402406536 cn0 step1 done
-1787034105.414669130 cn0 step2 waiting for nvme0 ana_state=non-optimized (now: optimized)
-1787034110.488775524 cn0 step2 done, ana_state=non-optimized
-1787034110.490919089 cn0 step3 reload dnv-lin-on-cn0 -> dnv-err-on-cn0
-1787034110.580634790 cn0 step3 done
-1787034110.586651051 cn0 finished in 5.194528573s
