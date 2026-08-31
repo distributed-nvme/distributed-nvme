@@ -239,14 +239,16 @@ func TestProtoRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "side-0-0-0-0")
 
 	want := &pb.SyncupSideRequest{
-		ClusterId:     16981786240730056190,
-		DnId:          3,
-		SidePointer:   &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
-		Revision:      9,
-		ExtCnt:        10,
-		PrimaryCnId:   5,
-		StandbyIdList: []uint64{6, 7},
-		SpLevel:       pb.SpLevel_SP_LEVEL_READONLY,
+		ClusterId:   16981786240730056190,
+		DnId:        3,
+		SidePointer: &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
+		Revision:    9,
+		SideConf: &pb.SyncupSideRequest_SideConf{
+			ExtCnt:        10,
+			PrimaryCnId:   5,
+			StandbyIdList: []uint64{6, 7},
+			SpLevel:       pb.SpLevel_SP_LEVEL_READONLY,
+		},
 	}
 	if err := client.WriteProto(ctx, path, want); err != nil {
 		t.Fatalf("WriteProto: %v", err)

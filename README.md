@@ -26,6 +26,7 @@ nothing internal, agents and `dnvctl` never link the etcd client.
 make build   # compiles every cmd/* that has sources into bin/
 make vet
 make test
+make fmt     # gofmt + clang-format on pb/schema.proto (pip install clang-format)
 ```
 
 `make gen` regenerates `pb/schema.pb.go` and `pb/schema_grpc.pb.go`; it needs
@@ -34,8 +35,8 @@ files are committed, so an ordinary build or test never requires protoc.
 
 ## Implemented so far
 
-* `pb/` — generated from `pb/schema.proto` (protoc 29.3, protoc-gen-go
-  v1.36.12, protoc-gen-go-grpc v1.6.2). The proto deliberately has no
+* `pb/` — generated from `pb/schema.proto` (protoc v7.36.0 / libprotoc 36.0,
+  protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2). The proto deliberately has no
   `package` statement, so method names stay `/Gateway/…`,
   `/DiskNodeAgent/…`, `/ControllerNodeAgent/…`.
 * `common/log.go` — `log/slog` JSON logging on stdout, trace ids on the

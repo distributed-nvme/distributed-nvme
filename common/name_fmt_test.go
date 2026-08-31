@@ -21,6 +21,7 @@ const (
 	testMigr    = uint64(0x1e)
 	testClone   = uint64(0x41)
 	testXfer    = uint64(0x51)
+	testNs      = uint64(0x32)
 )
 
 func checkName(t *testing.T, what, got, want string) {
@@ -67,8 +68,8 @@ func TestDmNames(t *testing.T) {
 		nf.CnErrorName(testCluster, testCn, testSp, testTd),
 		"dnv-"+c+"-0000000000000005-5-0000000000000011-0000000000000031")
 	checkName(t, "CnNsDevName",
-		nf.CnNsDevName(testCluster, testCn, testSp, testTd),
-		"dnv-"+c+"-0000000000000005-6-0000000000000011-0000000000000031")
+		nf.CnNsDevName(testCluster, testCn, testSp, testNs),
+		"dnv-"+c+"-0000000000000005-6-0000000000000011-0000000000000032")
 	checkName(t, "CnCloneFinalName",
 		nf.CnCloneFinalName(testCluster, testCn, testSp, testClone),
 		"dnv-"+c+"-0000000000000005-7-0000000000000011-0000000000000041")
@@ -84,24 +85,25 @@ func TestDmNames(t *testing.T) {
 func TestMdNames(t *testing.T) {
 	nf := NewNameFmt("")
 
-	// shortId = fnv64a("%016x%016x") & 0x0000FFFFFFFFFFFF
+	// shortId = uint32(fnv64a("%016x%016x")) — the hash's low 32 bits.
 	h := fnv.New64a()
 	fmt.Fprintf(h, "%016x%016x", testCluster, testCn)
-	shortId := h.Sum64() & 0x0000FFFFFFFFFFFF
+	shortId := uint32(h.Sum64())
 
 	dataName := nf.CnMdDevName(testCluster, testCn, testSp, 2, 1, false)
 	metaName := nf.CnMdDevName(testCluster, testCn, testSp, 2, 1, true)
 
 	checkName(t, "CnMdDevName(data)", dataName,
-		fmt.Sprintf("%012x%016x%02x%02x", shortId, testSp, 2, 1))
+		fmt.Sprintf("%08x%016x%02x%02x", shortId, testSp, 2, 1))
 	checkName(t, "CnMdDevName(meta)", metaName,
-		fmt.Sprintf("%012x%016x%02x%02x", shortId, testSp, 2|0x80, 1))
+		fmt.Sprintf("%08x%016x%02x%02x", shortId, testSp, 2|0x80, 1))
 
-	// Both must fit the kernel md name limit: 32 hex chars, no separators.
-	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// 28 hex chars, no separators: "md_" + 28 = 31 stays within the kernel
+	// DISK_NAME_LEN (32) even as a named array's kernel disk name.
+	hex28 := regexp.MustCompile(`^[0-9a-f]{28}$`)
 	for _, name := range []string{dataName, metaName} {
-		if !hex32.MatchString(name) {
-			t.Errorf("md dev name %q is not 32 hex chars", name)
+		if !hex28.MatchString(name) {
+			t.Errorf("md dev name %q is not 28 hex chars", name)
 		}
 	}
 	if other := nf.CnMdDevName(testCluster, testCn+1, testSp, 2, 1, false); other == dataName {
@@ -109,9 +111,9 @@ func TestMdNames(t *testing.T) {
 	}
 
 	checkName(t, "CnMdArrayName(data)",
-		nf.CnMdArrayName(testSp, 2, 1, false), "0000000000000011-02-01")
+		nf.CnMdArrayName(testSp, 2, 1, false), "dnv-0000000000000011-02-01")
 	checkName(t, "CnMdArrayName(meta)",
-		nf.CnMdArrayName(testSp, 2, 1, true), "0000000000000011-82-01")
+		nf.CnMdArrayName(testSp, 2, 1, true), "dnv-0000000000000011-82-01")
 }
 
 // §4.4 NQNs.
@@ -132,9 +134,10 @@ func TestNqns(t *testing.T) {
 	checkName(t, "MigrSrcNqn",
 		nf.MigrSrcNqn(testCluster, testDn, testSp, testMigr),
 		p+":3:"+c+":0000000000000003:0000000000000011:000000000000001e")
-	// A transfer NQN carries dn_id, between cluster_id and sp_id.
-	checkName(t, "XferNqn", nf.XferNqn(testCluster, testDn, testSp, testXfer),
-		p+":4:"+c+":0000000000000003:0000000000000011:0000000000000051")
+	// A transfer NQN carries no node id: every enabled cntlr of the SP
+	// exports the identical subsystem (§8.10).
+	checkName(t, "XferNqn", nf.XferNqn(testCluster, testSp, testXfer),
+		p+":4:"+c+":0000000000000011:0000000000000051")
 
 	// No dn component: the src and dst sides of a migrating leg live on two
 	// DNs and must still produce the identical string, which is what lets the
@@ -155,7 +158,7 @@ func TestNqns(t *testing.T) {
 		nf.CnHostNqn(testCluster, testCn),
 		nf.SideToCnNqn(testCluster, testSp, testLeg, testCn),
 		nf.MigrSrcNqn(testCluster, testDn, testSp, testMigr),
-		nf.XferNqn(testCluster, testDn, testSp, testXfer),
+		nf.XferNqn(testCluster, testSp, testXfer),
 	} {
 		if len(nqn) > MaxNqnLength {
 			t.Errorf("nqn %q is %d chars, over the %d limit", nqn, len(nqn), MaxNqnLength)

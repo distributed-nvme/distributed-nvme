@@ -11,13 +11,15 @@ design inputs are `architecture.md`, `schema.proto`, `constants.go` and
 
 * Repository: `https://github.com/distributed-nvme/distributed-nvme`
 * Repo root folder: `distributed-nvme/` = Go module root.
-* `go.mod`: `module github.com/distributed-nvme/distributed-nvme`, `go 1.21`
-  (or newer; `log/slog` and `exec.Cmd.Cancel`/`WaitDelay` are required).
-* Direct dependencies: `google.golang.org/grpc`,
-  `google.golang.org/protobuf`, `go.etcd.io/etcd/client/v3`,
-  `golang.org/x/sync`, `github.com/spf13/viper` (flags/config/env per
-  `architecture.md` §13; a CLI framework such as `github.com/spf13/cobra` MAY
-  be added for the `dnvctl` subcommand tree).
+* `go.mod`: `module github.com/distributed-nvme/distributed-nvme`, `go 1.26.5`
+  (feature floors: `log/slog` 1.21, `exec.Cmd.Cancel`/`WaitDelay` 1.20, the
+  `crypto/rand.Read` never-fails guarantee 1.24 — `go.mod` is authoritative).
+* Direct dependencies today (must match `go.mod`): `google.golang.org/grpc`,
+  `google.golang.org/protobuf`, `golang.org/x/sync`. Planned — they enter
+  `go.mod` when `etcdutil/` and `cmd/*` land (§4): `go.etcd.io/etcd/client/v3`
+  and `github.com/spf13/viper` (flags/config/env per `architecture.md` §13; a
+  CLI framework such as `github.com/spf13/cobra` MAY be added for the `dnvctl`
+  subcommand tree).
 
 Library packages sit directly under the module root (no `pkg/` or
 `internal/` prefix), so the file paths used by the component specs —
@@ -30,7 +32,8 @@ repository paths. Binaries live one-per-directory under `cmd/`.
 distributed-nvme/                      # repo root = module root
 ├── go.mod                             # module github.com/distributed-nvme/distributed-nvme
 ├── go.sum
-├── Makefile                           # targets: gen, build, vet, test
+├── .clang-format                      # proto style for `make fmt` (4-space indent, no column limit)
+├── Makefile                           # targets: gen, fmt, build, vet, test
 ├── README.md
 ├── LICENSE
 ├── .gitignore                         # ignores bin/
@@ -76,14 +79,15 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnrole.go                      # §10.2 (dn)
 │   ├── cnrole.go                      # §10.2 (cn)
 │   ├── sprole.go                      # §10.3
-│   ├── bmpush.go                      # §9.6 worker side (per-node Push* streams)
+│   ├── bmpush.go                      # §9.6 worker side (Push*Bitmap calls, bm_idx bookkeeping)
+│   ├── check.go                       # §9.7 Check* streams (one per owned object)
 │   └── health.go                      # err_epoch / capacity-key maintenance, §10.4 reactions
 ├── agent/
 │   ├── agent.go                       # shared bootstrap: grpc server, local store, OsClient wiring
 │   ├── dnagent/                       # DiskNodeAgent (§9.2): syncup_dn.go, syncup_side.go,
-│   │                                  # push_migr_bm.go, lvm.go, nvmet.go, migr.go
+│   │                                  # push_migr_bm.go, check.go (§9.7), lvm.go, nvmet.go, migr.go
 │   └── cnagent/                       # ControllerNodeAgent (§9.3): syncup_cn.go, syncup_cntlr.go,
-│                                      # push_clone_bm.go, leg.go, md.go, pool.go, td.go,
+│                                      # push_clone_bm.go, check.go (§9.7), leg.go, md.go, pool.go, td.go,
 │                                      # clone.go, xfer.go, healthcheck.go, bitmaps.go (§11.4 math)
 ├── cdc/
 │   └── cdc.go                         # §12 discovery controller
@@ -153,6 +157,9 @@ nothing internal.
   ```
 
   (requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc` on PATH).
+* Makefile `fmt` target: `gofmt -w ./common` plus `clang-format -i
+  pb/schema.proto` (style pinned in `.clang-format`; the binary comes from
+  `pip install clang-format`). Run it before committing proto changes.
 * `schema.pb.go` and `schema_grpc.pb.go` are **committed**, so `go build` /
   `go test` / CI never require protoc; `make gen` is rerun only when
   `schema.proto` changes.

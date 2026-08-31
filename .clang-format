@@ -1,0 +1,6 @@
+# Formatting for pb/schema.proto (run via `make fmt`); Go files use gofmt.
+# clang-format comes from `pip install clang-format`.
+Language: Proto
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 0

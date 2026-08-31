@@ -18,8 +18,9 @@ timeouts), `constants.go`, `name_fmt.go`, `schema.proto`.
 * Every dnv binary (`dnv-gateway`, `dnv-worker`, `dnv-agent`, `dnv-cdc`, `dnvctl`)
   imports `common`, so the `init()` below installs the default logger before any
   `main()` runs.
-* Go ≥ 1.21 is required (`log/slog`). Dependency: `google.golang.org/protobuf`
-  (already required by the schema).
+* Go ≥ 1.24 is required (`log/slog` needs only 1.21, but `NewTraceId` relies on the
+  Go 1.24 guarantee that `crypto/rand.Read` never fails). Dependency:
+  `google.golang.org/protobuf` (already required by the schema).
 
 ## 2. Normative requirements
 
@@ -368,7 +369,7 @@ etcd keys in dnv are already human-readable space-joined strings
 ```json
 {"time":"2026-08-28T10:00:00.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-...-5-...","--table","0 2097152 error"],"stdin":"","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
 {"time":"2026-08-28T10:00:00.010Z","level":"INFO","msg":"etcd put","key":"dnv sp_rev 04 ebada5168620c5fe 0000000000000011","value":{"sp_name":"pool1","revision":7},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"2026-08-28T10:00:00.020Z","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":0,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:00.020Z","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
 ## 7. Tests and acceptance checklist
@@ -385,8 +386,9 @@ Unit tests (`common/log_test.go`):
    rendered map has `"bitmap": "<4 bytes>"`, nested `side_pointer` rendered as
    a map, and the whole value marshals with `encoding/json` without error.
 5. `PbToLogValue` renders enum fields by name (e.g. `SpLevel` →
-   `"SP_LEVEL_READWRITE"`), repeated fields as arrays, and map fields with
-   stringified keys.
+   `"SP_LEVEL_READONLY"`; a zero-valued enum such as `SP_LEVEL_READWRITE` is
+   omitted like any proto3 zero), repeated fields as arrays, and map fields
+   with stringified keys.
 6. `SetLogLevel(slog.LevelWarn)` suppresses Info records.
 
 Acceptance: `go build ./...` and `go test ./common/...` pass; every binary's

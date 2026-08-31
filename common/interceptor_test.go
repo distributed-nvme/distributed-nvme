@@ -27,8 +27,8 @@ type stubDnAgent struct {
 	pb.UnimplementedDiskNodeAgentServer
 
 	getDnInfoFn      func(ctx context.Context, req *pb.GetDnInfoRequest) (*pb.GetDnInfoReply, error)
-	syncupDnFn       func(stream grpc.BidiStreamingServer[pb.SyncupDnRequest, pb.SyncupDnReply]) error
-	pushMigrBitmapFn func(stream grpc.BidiStreamingServer[pb.PushMigrBitmapRequest, pb.PushMigrBitmapReply]) error
+	pushMigrBitmapFn func(ctx context.Context, req *pb.PushMigrBitmapRequest) (*pb.PushMigrBitmapReply, error)
+	checkDnFn        func(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply]) error
 }
 
 func (s *stubDnAgent) GetDnInfo(
@@ -40,22 +40,40 @@ func (s *stubDnAgent) GetDnInfo(
 	return &pb.GetDnInfoReply{}, nil
 }
 
-func (s *stubDnAgent) SyncupDn(
-	stream grpc.BidiStreamingServer[pb.SyncupDnRequest, pb.SyncupDnReply],
+func (s *stubDnAgent) PushMigrBitmap(
+	ctx context.Context, req *pb.PushMigrBitmapRequest,
+) (*pb.PushMigrBitmapReply, error) {
+	if s.pushMigrBitmapFn != nil {
+		return s.pushMigrBitmapFn(ctx, req)
+	}
+	return &pb.PushMigrBitmapReply{}, nil
+}
+
+func (s *stubDnAgent) CheckDn(
+	stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply],
 ) error {
-	if s.syncupDnFn != nil {
-		return s.syncupDnFn(stream)
+	if s.checkDnFn != nil {
+		return s.checkDnFn(stream)
 	}
 	return nil
 }
 
-func (s *stubDnAgent) PushMigrBitmap(
-	stream grpc.BidiStreamingServer[pb.PushMigrBitmapRequest, pb.PushMigrBitmapReply],
-) error {
-	if s.pushMigrBitmapFn != nil {
-		return s.pushMigrBitmapFn(stream)
+// checkDnEcho replies to every CheckDnRequest with the request's revision.
+func checkDnEcho(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply]) error {
+	for {
+		req, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := stream.Send(&pb.CheckDnReply{
+			Revision: req.GetRevision(),
+		}); err != nil {
+			return err
+		}
 	}
-	return nil
 }
 
 // startStub brings up the stub agent behind the §4 server interceptors and
@@ -140,7 +158,7 @@ func TestUnaryTracePropagation(t *testing.T) {
 			}
 			s.traceId, s.ok = TraceIdFromCtx(ctx)
 			got <- s
-			return &pb.GetDnInfoReply{DnInfo: &pb.DnInfo{Revision: 9}}, nil
+			return &pb.GetDnInfoReply{Revision: 9}, nil
 		},
 	})
 
@@ -149,7 +167,7 @@ func TestUnaryTracePropagation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
 	}
-	if reply.GetDnInfo().GetRevision() != 9 {
+	if reply.GetRevision() != 9 {
 		t.Errorf("reply = %v", reply)
 	}
 
@@ -188,46 +206,33 @@ func TestNoTraceIdIsMinted(t *testing.T) {
 }
 
 // The wrapped ServerStream must hand the trace-enriched ctx to the handler
-// (T2, the Context() override).
+// (T2, the Context() override), exercised over a CheckDn stream (§9.7).
 func TestStreamTracePropagation(t *testing.T) {
 	got := make(chan string, 1)
 	client := startStub(t, &stubDnAgent{
-		syncupDnFn: func(stream grpc.BidiStreamingServer[pb.SyncupDnRequest, pb.SyncupDnReply]) error {
+		checkDnFn: func(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply]) error {
 			traceId, ok := TraceIdFromCtx(stream.Context())
 			if !ok {
 				traceId = "<none>"
 			}
 			got <- traceId
-			for {
-				req, err := stream.Recv()
-				if errors.Is(err, io.EOF) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				if err := stream.Send(&pb.SyncupDnReply{
-					DnInfo: &pb.DnInfo{Revision: req.GetRevision()},
-				}); err != nil {
-					return err
-				}
-			}
+			return checkDnEcho(stream)
 		},
 	})
 
 	ctx := WithTraceId(context.Background(), "stream-trace")
-	stream, err := client.SyncupDn(ctx)
+	stream, err := client.CheckDn(ctx)
 	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
+		t.Fatalf("CheckDn: %v", err)
 	}
-	if err := stream.Send(&pb.SyncupDnRequest{ClusterId: 1, DnId: 3, Revision: 7}); err != nil {
+	if err := stream.Send(&pb.CheckDnRequest{ClusterId: 1, DnId: 3, Revision: 7}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	reply, err := stream.Recv()
 	if err != nil {
 		t.Fatalf("Recv: %v", err)
 	}
-	if reply.GetDnInfo().GetRevision() != 7 {
+	if reply.GetRevision() != 7 {
 		t.Errorf("reply = %v", reply)
 	}
 	if err := stream.CloseSend(); err != nil {
@@ -252,7 +257,7 @@ func TestUnaryLogRecords(t *testing.T) {
 	capture := captureLogs(t)
 	client := startStub(t, &stubDnAgent{
 		getDnInfoFn: func(_ context.Context, _ *pb.GetDnInfoRequest) (*pb.GetDnInfoReply, error) {
-			return &pb.GetDnInfoReply{DnInfo: &pb.DnInfo{Revision: 9}}, nil
+			return &pb.GetDnInfoReply{Revision: 9}, nil
 		},
 	})
 
@@ -287,47 +292,24 @@ func TestUnaryLogRecords(t *testing.T) {
 		t.Errorf("request data = %v", req)
 	}
 	reply := capture.onlyMsg(t, "grpc server reply")["data"].(map[string]any)
-	dnInfo, ok := reply["dn_info"].(map[string]any)
-	if !ok || dnInfo["revision"] != float64(9) {
+	if reply["revision"] != float64(9) {
 		t.Errorf("reply data = %v", reply)
 	}
 }
 
-func TestStreamLogRecordsAndBytesRedaction(t *testing.T) {
+// Message logging over a two-round CheckDn exchange (grpc.md §6 item 4, L4).
+func TestStreamLogRecords(t *testing.T) {
 	capture := captureLogs(t)
-	client := startStub(t, &stubDnAgent{
-		pushMigrBitmapFn: func(stream grpc.BidiStreamingServer[pb.PushMigrBitmapRequest, pb.PushMigrBitmapReply]) error {
-			for {
-				req, err := stream.Recv()
-				if errors.Is(err, io.EOF) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				if err := stream.Send(&pb.PushMigrBitmapReply{
-					AgentReply: &pb.AgentReply{Code: 0, Details: req.GetSidePointer().String()},
-				}); err != nil {
-					return err
-				}
-			}
-		},
-	})
+	client := startStub(t, &stubDnAgent{checkDnFn: checkDnEcho})
 
-	ctx := WithTraceId(context.Background(), "bm-trace")
-	stream, err := client.PushMigrBitmap(ctx)
+	ctx := WithTraceId(context.Background(), "check-trace")
+	stream, err := client.CheckDn(ctx)
 	if err != nil {
-		t.Fatalf("PushMigrBitmap: %v", err)
+		t.Fatalf("CheckDn: %v", err)
 	}
-	for bmIdx := uint32(1); bmIdx <= 2; bmIdx++ {
-		if err := stream.Send(&pb.PushMigrBitmapRequest{
-			ClusterId:   16981786240730056190,
-			DnId:        3,
-			SidePointer: &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
-			Revision:    9,
-			MigrId:      30,
-			BmIdx:       bmIdx,
-			Bitmap:      []byte{1, 2, 3, 4},
+	for round := uint64(1); round <= 2; round++ {
+		if err := stream.Send(&pb.CheckDnRequest{
+			ClusterId: 1, DnId: 3, Revision: round, ShowInfo: true,
 		}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
@@ -358,30 +340,62 @@ func TestStreamLogRecordsAndBytesRedaction(t *testing.T) {
 	for _, msg := range []string{"grpc client stream open", "grpc server stream open",
 		"grpc server stream close"} {
 		rec := capture.onlyMsg(t, msg)
-		if rec["method"] != "/DiskNodeAgent/PushMigrBitmap" {
+		if rec["method"] != "/DiskNodeAgent/CheckDn" {
 			t.Errorf("%s: method = %v", msg, rec["method"])
 		}
 		if _, ok := rec["data"]; ok {
 			t.Errorf("%s: carries a data attr: %v", msg, rec)
 		}
 	}
+	for i, rec := range capture.withMsg(t, "grpc client send") {
+		if rec[TraceIdLogKey] != "check-trace" {
+			t.Errorf("send[%d]: trace_id = %v", i, rec[TraceIdLogKey])
+		}
+		data, ok := rec["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("send[%d]: data = %v", i, rec["data"])
+		}
+		if data["revision"] != float64(i+1) {
+			t.Errorf("send[%d]: revision = %v", i, data["revision"])
+		}
+	}
+}
 
-	// Bytes redaction on both sides (L1).
-	for _, msg := range []string{"grpc client send", "grpc server recv"} {
-		for i, rec := range capture.withMsg(t, msg) {
-			if rec[TraceIdLogKey] != "bm-trace" {
-				t.Errorf("%s[%d]: trace_id = %v", msg, i, rec[TraceIdLogKey])
-			}
-			data, ok := rec["data"].(map[string]any)
-			if !ok {
-				t.Fatalf("%s[%d]: data = %v", msg, i, rec["data"])
-			}
-			if data["bitmap"] != "<4 bytes>" {
-				t.Errorf("%s[%d]: bitmap = %v, want <4 bytes>", msg, i, data["bitmap"])
-			}
-			if data["bm_idx"] != float64(i+1) {
-				t.Errorf("%s[%d]: bm_idx = %v", msg, i, data["bm_idx"])
-			}
+// Bytes redaction on the unary PushMigrBitmap (grpc.md §6 item 5, L1).
+func TestUnaryBytesRedaction(t *testing.T) {
+	capture := captureLogs(t)
+	client := startStub(t, &stubDnAgent{})
+
+	ctx := WithTraceId(context.Background(), "bm-trace")
+	if _, err := client.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
+		ClusterId:   16981786240730056190,
+		DnId:        3,
+		SidePointer: &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
+		Revision:    9,
+		MigrId:      30,
+		BmIdx:       1,
+		Bitmap:      []byte{1, 2, 3, 4},
+	}); err != nil {
+		t.Fatalf("PushMigrBitmap: %v", err)
+	}
+
+	for _, msg := range []string{"grpc client request", "grpc server request"} {
+		rec := capture.onlyMsg(t, msg)
+		if rec["method"] != "/DiskNodeAgent/PushMigrBitmap" {
+			t.Errorf("%s: method = %v", msg, rec["method"])
+		}
+		if rec[TraceIdLogKey] != "bm-trace" {
+			t.Errorf("%s: trace_id = %v", msg, rec[TraceIdLogKey])
+		}
+		data, ok := rec["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: data = %v", msg, rec["data"])
+		}
+		if data["bitmap"] != "<4 bytes>" {
+			t.Errorf("%s: bitmap = %v, want <4 bytes>", msg, data["bitmap"])
+		}
+		if data["bm_idx"] != float64(1) {
+			t.Errorf("%s: bm_idx = %v", msg, data["bm_idx"])
 		}
 	}
 	if strings.Contains(capture.buf.String(), "AQIDBA") { // base64 of the payload
@@ -430,7 +444,7 @@ func TestUnaryErrorRecords(t *testing.T) {
 func TestStreamErrorRecords(t *testing.T) {
 	capture := captureLogs(t)
 	client := startStub(t, &stubDnAgent{
-		syncupDnFn: func(stream grpc.BidiStreamingServer[pb.SyncupDnRequest, pb.SyncupDnReply]) error {
+		checkDnFn: func(stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply]) error {
 			if _, err := stream.Recv(); err != nil {
 				return err
 			}
@@ -438,11 +452,11 @@ func TestStreamErrorRecords(t *testing.T) {
 		},
 	})
 
-	stream, err := client.SyncupDn(WithTraceId(context.Background(), "stream-err"))
+	stream, err := client.CheckDn(WithTraceId(context.Background(), "stream-err"))
 	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
+		t.Fatalf("CheckDn: %v", err)
 	}
-	if err := stream.Send(&pb.SyncupDnRequest{ClusterId: 1}); err != nil {
+	if err := stream.Send(&pb.CheckDnRequest{ClusterId: 1}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if _, err := stream.Recv(); status.Code(err) != codes.Aborted {

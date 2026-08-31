@@ -60,6 +60,7 @@ Process / RPC view:
 Hosts  ──nvme-of──▶  Controller Nodes (cntlrs)  ──nvme-of──▶  Disk Nodes (sides)
                           ▲            ▲                            ▲
                           └── SyncupCn/SyncupCntlr        SyncupDn/SyncupSide
+                              + CheckCn/CheckCntlr        + CheckDn/CheckSide
                                    │                                │
               dnv-gateway ──▶ etcd ◀── dnv-worker (roles dn,cn,sp) ─┘
                                    ▲
@@ -71,8 +72,8 @@ environment variables; see §13):
 
 | binary       | role |
 |--------------|------|
-| `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, `Inspect*` and the bitmap reads. |
-| `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, and drives agents via `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements). |
+| `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, and the `Get*Bm` bitmap reads (the worker never calls `Get*Info` — it watches through `Check*`, §9.7/§10.2). |
+| `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow). |
 | `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local LVM / device-mapper / mdadm / nvmet state; persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
 | `dnv-cdc`    | NVMe-oF Central Discovery Controller. Watches the `cdc` keys and serves discovery + AENs to hosts. |
 | `dnvctl`     | CLI over the Gateway. Also carries the userspace copier of §11.4. |
@@ -183,14 +184,15 @@ Per **side** (one per hosted leg replica):
 * LV `DnLvName = {sp_id}-{side_id}` in the DN VG, `--extents` = `Group.ext_cnt` of the
   owning group. LV provisioning MUST follow the trim protocol of §9.4 (`not_trimmed` /
   `trimmed` LV tags + `blkdiscard`).
-* Per cntlr of the SP (primary and standbys — the side learns them from
-  `SyncupSideRequest.primary_cn_id` / `standby_id_list`):
+* Per cntlr of the SP (primary and standbys — the side learns their CN ids from
+  `SyncupSideRequest.side_conf.primary_cn_id` / `standby_id_list`):
   * a dm-error device `DnErrorName` sized like the LV,
   * a dm-linear device `DnLinearName` whose table points at the **LV** for the primary
     cntlr's CN and at the **dm-error** device for every standby CN,
   * an nvmet subsystem `SideToCnNqn(cluster,sp,leg,cn)` on the DN's port,
     `allowed_hosts = [CnHostNqn(cluster,cn)]`, `attr_cntlid_min/max` from
-    `Side.cntlid_slot` (§11.8), exposing one namespace backed by the dm-linear device.
+    `side_conf.cntlid_slot` (the etcd `Side.cntlid_slot`, §11.8), exposing one namespace
+    backed by the dm-linear device.
     ANA state of the namespace's group on the port: `optimized` for the primary CN's
     subsystem, `non-optimized` for standby CNs' subsystems (a standby path therefore
     exists but errors out — a pre-connected placeholder that makes failover fast). ANA
@@ -232,13 +234,16 @@ dm-linear tables and flips ANA (dashed alternatives).*
 Failover and migration only ever *reload* the dm-linear tables and flip ANA states; the
 exported namespace object never changes, so CN NVMe connections survive.
 
-Additionally, while this DN hosts the **source** side of a migration: a dm-linear
+Additionally, while this DN hosts the **source** side of a migration (its
+`SyncupSide` carries `migr_src_conf`): a dm-linear
 `DnMigrSrcName` on top of the LV, exported through subsystem `MigrSrcNqn` (same port)
-with `allowed_hosts = [DnHostNqn(cluster, dst_dn)]`. While it hosts the **destination**
-side: an nvme host connection to the source's `MigrSrcNqn` (hostnqn `DnHostNqn`), a
+with `allowed_hosts = [DnHostNqn(cluster, migr_src_conf.dst_dn_id)]`. While it hosts
+the **destination** side (`migr_dst_conf`): an nvme host connection to
+`MigrSrcNqn(cluster, migr_dst_conf.src_dn_id, sp, migr_id)` at
+`migr_dst_conf.src_nvme_tr_conf` (hostnqn `DnHostNqn`), a
 dm-clone metadata LV `DnMigrMetaName = {sp_id}-{migr_id}` in the migration VG, and a
 dm-clone device `DnMigrFinalName` (dest = the local LV, source = the connected nvme
-device, region size = the SP's `block_size`). The per-cntlr dm-linears of the
+device, region size = `migr_dst_conf.block_size`). The per-cntlr dm-linears of the
 destination side sit on top of the dm-clone (primary CN) / dm-error (standbys). See
 fig. `080Migration` (§11.2) and §11.2.
 
@@ -279,6 +284,31 @@ Per CN, once (created by the cn agent at first `SyncupCn`):
    blocks of the destination td, so no clone state needs to survive the CN.
 3. Exactly **one** nvmet port from `CnConf.nvme_tr_conf`; every host-facing subsystem
    and every transfer subsystem of every cntlr on this CN attaches to it.
+4. **QoS** from `SyncupCnRequest.qos_ratio` (a copy of `ClusterConf.qos_ratio`,
+   §10.2). Limits are size-proportional: for a device of `size` bytes,
+   `iops = size / bytes_per_iops` and `bps = size / bytes_per_bps` (a zero divisor
+   leaves that limit unset). The agent programs them through the cgroup io controller
+   (`io.max`, keyed by the device's MAJ:MIN, as `riops`/`wiops` and `rbps`/`wbps`):
+   `strict = false` ⇒ limit every dm thin-pool (`CnPoolFinalName`) on the CN by its
+   data-device size; `strict = true` ⇒ additionally limit every leg device by the
+   leg's size. Limits are (re)applied on every `SyncupCn` and whenever one of these
+   devices is (re)created.
+
+   **Open issue — enforcement mechanism (decide when QoS is implemented).** `io.max`
+   is a *(cgroup, device)* limit, not a device-wide cap: a bio is throttled only if
+   it is charged to a cgroup that configured a limit for that device. Host IO enters
+   through nvmet **kernel threads**, which live in the root cgroup (and cannot leave
+   it under cgroup v2), and the root cgroup exposes no `io.max` — so limits written
+   in any agent-created cgroup would bind the agent's own tools but not host
+   traffic. Candidate mechanisms: cgroup v1 `blkio.throttle` mounted hybrid (v1's
+   root **does** expose per-device throttle files, and kthreads sit in root); a
+   small nvmet patch associating each namespace's bios with a configurable blkcg
+   (the loop driver's `kthread_associate_blkcg` pattern — v2 `io.max` then works as
+   specified); `queue/nr_requests` (device-global, but a concurrency cap, not
+   iops/bps); network-level `tc` (bps only). Whatever binds, note: a leg-level limit
+   also throttles md bitmap/superblock writes, resync and the §3.6 health-check
+   probe — tight limits can fake "leg unhealthy" — and a pool-data limit throttles
+   clone/migration hydration; those flows need headroom or exemption.
 
 A CN hosts up to `MaxCntlrCntPerCn` cntlrs of different SPs; at most one cntlr **per SP**
 per CN.
@@ -337,21 +367,29 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
    meta group devices (in `meta_grp_list` order) and a dm-linear concat `CnPoolDataName`
    over its data group devices; a dm thin-pool `CnPoolFinalName` (metadata dev = pool
    meta, data dev = pool data, block size = `block_size`, `low_water_mark` = data-dev
-   blocks × `EventThreshold.pool_low_water_mark_pct` / 100).
+   blocks × (100 − `DmPoolConf.low_water_mark_pct`) / 100 — i.e. the dm event fires
+   exactly when the pool's **usage** exceeds `low_water_mark_pct`%, the condition the
+   §10.4 auto-grow acts on; both values from
+   `SyncupCntlrRequest.bdev_conf.dm_pool_conf`; `low_water_mark_pct = 0` ⇒
+   `DefaultPoolLowWatermarkPct` = 50; `> 100` ⇒ the agent passes `low_water_mark = 0`
+   — no dm events — as the value only means "auto-grow off", §10.4).
 4. **Per thin device × slice**: a dm-thin volume `CnThinDevName`, created with pool
    message `create_thin {dev_id}` or `create_snap {dev_id} {ori_id}`, virtual size =
    `ThinDevice.size / slice_cnt`.
 5. **Per thin device**: a dm-striped raid0 `CnRaid0Name` across its per-slice thin
    volumes (slice order = `slice_idx`), chunk = `DmRaid0Conf.stripe_size`; a dm-error
-   `CnErrorName` of the same size (permanent reload target); a dm-linear `CnNsDevName`
-   — **the** namespace backing device — whose table points at the raid0 (normal), the
-   dm-clone `CnCloneFinalName` (while a clone targets this td, fig. `090Clone` §8.9),
-   or dm-error (standby / failover transitions).
+   `CnErrorName` of the same size (permanent reload target). **Per namespace** (§8.8):
+   a dm-linear `CnNsDevName(cluster, cn, sp, ns_id)` — **the** namespace backing
+   device — whose table points at its td's raid0 (normal), the dm-clone
+   `CnCloneFinalName` (while a clone targets that td, fig. `090Clone` §8.9), or
+   dm-error (standby / failover / suspended transitions). Namespaces backed by the
+   same td each have their own `CnNsDevName` over the same raid0.
 6. **Host-facing nvmet**: per `Subsystem` a nvmet subsystem on the CN's port with
    `attr_cntlid_min/max` from `Cntlr.cntlid_slot`, `serial`/`model` from the etcd
    `Subsystem`, allowed hosts as configured (empty list ⇒ `attr_allow_any_host=1`);
-   per `Namespace` an nvmet namespace `nsid = ns_idx`, `device_path` = the td's
-   `CnNsDevName`, `uuid`/`nguid` from the etcd record, an agent-allocated ANA group
+   per `Namespace` an nvmet namespace `nsid = ns_idx`, `device_path` = the
+   namespace's own `CnNsDevName`, `uuid`/`nguid` from the etcd record, an
+   agent-allocated ANA group
    [D4], state `optimized` (primary) unless `suspended` (§8.8) — suspended ⇒ dm device
    suspended + ANA `inaccessible` everywhere.
 7. **Clones / transfers / migrations** hosted by the SP, per §11.
@@ -419,7 +457,8 @@ flowchart BT
 namespaces error out.*
 
 A standby keeps only: the leg nvme connections + leg wrappers + health-check IO
-(step 1 above), the per-td `CnErrorName` and `CnNsDevName` (table → dm-error), and the
+(step 1 above), the per-td `CnErrorName` and per-namespace `CnNsDevName` (table →
+dm-error), and the
 host-facing nvmet objects with every namespace's ANA group `inaccessible`. It has
 **no** md arrays, pools, thin volumes or raid0s ("cleanup all resources that a primary
 shouldn't have"). For a transfer it also keeps the dm-error-backed `CnXferFinalName` +
@@ -484,7 +523,7 @@ write-intent bitmap, **plus an additional 4 KiB used for the leg health check**:
 health-check area is the **last 4 KiB of the last meta block** (byte offsets
 `meta_blocks × block_size − 4096 … meta_blocks × block_size`). The cn agent
 periodically writes and reads back this 4 KiB block through each connected leg device
-(direct IO, a magic + timestamp payload [D7]) to decide whether the leg is healthy —
+(direct IO, a magic + timestamp payload [D6]) to decide whether the leg is healthy —
 including standby cntlrs and spare legs, and covering the whole path CN → side →
 LV even when md would otherwise mask a member failure. md never touches this area:
 the superblock sits at 4 KiB into block 0, the bitmap right after it (the
@@ -510,7 +549,8 @@ kind field is `%01x`, joined by `-`. The signatures and formats in this section 
 normative and match `name_fmt.go`. Two of them deserve their rationale up front: a
 side subsystem is keyed by `leg_id` and carries **no** `dn_id`, so the two sides of a
 leg export one and the same NQN from their two DNs (§4.4, §11.2); a transfer NQN
-carries the `dn_id` of the exporting node.
+carries no node id either — every enabled cntlr of the SP exports the same transfer
+subsystem (§8.10), so the destination clone can pull through any of them.
 
 The `{cluster}` component of every name below is the `cluster_id` (`%016x`), never the
 `cluster_name`. Because `cluster_id` now folds in `ClusterConf.creation_epoch` (§5.2), a
@@ -539,7 +579,7 @@ CN-side (`dmKindCn*`): `0` pool-meta, `1` pool-data, `2` pool-final(thin-pool),
 | `CnThinDevName(cluster,cn,sp,td,slice)`| `dnv-{cluster}-{cn}-3-{sp}-{td}-{slice}` |
 | `CnRaid0Name(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-4-{sp}-{td}` |
 | `CnErrorName(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-5-{sp}-{td}` |
-| `CnNsDevName(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-6-{sp}-{td}` |
+| `CnNsDevName(cluster,cn,sp,ns)`       | `dnv-{cluster}-{cn}-6-{sp}-{ns}` — one per **namespace**, not per td (§3.3 step 5, §8.8) |
 | `CnCloneFinalName(cluster,cn,sp,clone)`| `dnv-{cluster}-{cn}-7-{sp}-{clone}` |
 | `CnXferFinalName(cluster,cn,sp,xfer)` | `dnv-{cluster}-{cn}-8-{sp}-{xfer}` |
 
@@ -548,15 +588,18 @@ desired, but it is not part of the cross-component contract [D1].
 
 ### 4.3 md names (node path = `MdPath` = `/dev/md/{name}`)
 
-`getShortId(clusterId, nodeId) = fnv64a(sprintf("%016x%016x", clusterId, nodeId)) &
-0x0000FFFFFFFFFFFF` (48 bits). With `sliceIdxM = slice_idx | 0x80` when the group is a
-**meta** group, else `slice_idx`:
+`getShortId(clusterId, nodeId) = uint32(fnv64a(sprintf("%016x%016x", clusterId,
+nodeId)))` — the hash's low 32 bits. With `sliceIdxM = slice_idx | 0x80` when the
+group is a **meta** group, else `slice_idx`:
 
 * `CnMdDevName(cluster,cn,sp,sliceIdx,grpIdx,isMeta)` =
-  `{shortId:%012x}{sp_id:%016x}{sliceIdxM:%02x}{grpIdx:%02x}` — 32 hex chars, no
-  separators (fits the kernel md name limit); used for `/dev/md/{name}`.
-* `CnMdArrayName(sp,sliceIdx,grpIdx,isMeta)` = `{sp_id:%016x}-{sliceIdxM:%02x}-{grpIdx:%02x}`
-  — used for `mdadm --name` (the array's superblock name).
+  `{shortId:%08x}{sp_id:%016x}{sliceIdxM:%02x}{grpIdx:%02x}` — 28 hex chars, no
+  separators, so even as the kernel disk name of a named array (`md_` + 28 = 31) it
+  stays within `DISK_NAME_LEN` (32); used for `/dev/md/{name}`.
+* `CnMdArrayName(sp,sliceIdx,grpIdx,isMeta)` =
+  `dnv-{sp_id:%016x}-{sliceIdxM:%02x}-{grpIdx:%02x}` — used for `mdadm --name` (the
+  array's superblock name; 26 chars, within mdadm's 32-byte name limit). The fixed
+  `dnv-` prefix is what the Appendix A udev guard matches (`ENV{MD_NAME}=="dnv-*"`).
 
 `grpIdx` is the group's index inside its `meta_grp_list` / `data_grp_list` (stable:
 groups are only appended, never removed).
@@ -571,7 +614,7 @@ nqnKinds: `0` DnHost, `1` CnHost, `2` SideToCn, `3` MigrSrc, `4` Xfer. `:` joine
 | `CnHostNqn(cluster,cn)` | `nqn.2024-01.io.dnv:1:{cluster}:{cn}` — hostnqn a CN uses toward sides, migr-src and xfer targets; also what users put into `Transfer.allowed_hosts`. |
 | `SideToCnNqn(cluster,sp,leg,cn)` | `nqn.2024-01.io.dnv:2:{cluster}:{sp}:{leg}:{cn}` — subsystem a side exports to one CN. Keyed by the **leg**, with no `dn` component: during a migration the leg's src and dst sides sit on two different DNs and export this identical NQN, so the CN's kernel aggregates the two exports into a single nvme multipath namespace and ANA decides which path carries IO (§11.2, [D1]). Outside a migration a leg has one side and the subsystem exists once. |
 | `MigrSrcNqn(cluster,dn,sp,migr)` | `nqn.2024-01.io.dnv:3:{cluster}:{dn}:{sp}:{migr}` — subsystem the migration source side exports to the destination DN. |
-| `XferNqn(cluster,dn,sp,xfer)` | `nqn.2024-01.io.dnv:4:{cluster}:{dn}:{sp}:{xfer}` — subsystem a transfer exports; the destination SP's user passes it as `Clone.src_nqn`. |
+| `XferNqn(cluster,sp,xfer)` | `nqn.2024-01.io.dnv:4:{cluster}:{sp}:{xfer}` — subsystem a transfer exports; no node id, so every enabled cntlr of the SP exports the identical subsystem (§8.10) and the destination clone may pull through any of them. The destination SP's user passes it as `Clone.src_nqn`. |
 
 ### 4.5 LVM / tmpfs / file names
 
@@ -863,8 +906,10 @@ capacity keys maintained per §5.6; reverse on delete.
   `clone_name`, `xfer_name`, `migr_name`, `location`, `NvmeTrConf` members,
   `Subsystem.serial/model`. Names additionally MUST match
   `ValidStrPattern = ^[a-zA-Z0-9\-_/.:]+$`.
-* NQNs: length ≤ `MaxNqnLength` = 223 and match `ValidNqnPattern`; the well-known
-  discovery NQN `nqn.2014-08.org.nvmexpress.discovery` is rejected for `CreateSubsystem`.
+* NQNs: length ≤ `MaxNqnLength` = 223 and match `ValidNqnPattern`. The pattern
+  requires a `:` after the domain part, so the well-known discovery NQN
+  `nqn.2014-08.org.nvmexpress.discovery` can never validate — `CreateSubsystem` needs
+  no separate rejection for it.
 * `addr_port` looks like `192.168.0.17:9000` — the gRPC endpoint of the node's agent.
 * Bounded numeric parameters (reject outside `[Min, Max]`, substitute the `Default*`
   when a proto3 zero is received and a default exists):
@@ -874,7 +919,7 @@ capacity keys maintained per §5.6; reverse on delete.
 | `dn_bin_conf.extent_size` | 64 MiB | 1 TiB | 1 GiB |
 | `alloc_conf.dn_batch_size` / `cn_batch_size` | 1 | 1024 | 16 |
 | `dm_pool_conf.data_block_size` | 64 KiB | 1 GiB | 1 MiB |
-| `EventThreshold.pool_low_water_mark_pct` | 10 | 90 | 50 |
+| `dm_pool_conf.low_water_mark_pct` | 1 | 100 | 50 (`DefaultPoolLowWatermarkPct`; `0` selects it). Values > 100 are accepted and switch the §10.4 auto-grow **off** (`schema.proto`); the agent then passes `low_water_mark = 0` to the thin-pool table — no dm events |
 | `dm_raid0_conf.stripe_size` | 4 KiB | 64 MiB | 64 KiB |
 | `redund_md_raid1.bitmap_chunk_block_cnt` | 1 | 1024 | 128 |
 | (dm region block cnt, same meaning) | 1 | 1024 | 128 |
@@ -886,8 +931,12 @@ capacity keys maintained per §5.6; reverse on delete.
 | `EventThreshold.cntlr_unhealthy` (s) | ≥1 | — | 600 |
 | `EventThreshold.side_unhealthy` (s) | ≥1 | — | 600 |
 | `EventThreshold.leg_unhealthy` (s) | ≥1 | — | 1200 |
+| `health_check_conf.dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval` (s) | 1 | 3600 | 5 (`{Min,Max,Default}HealthCheckInterval`) |
 | list `count` | 1 | 1024 | 64 |
 
+* `QosRatio.bytes_per_iops` / `bytes_per_bps` are deliberately **not**
+  range-checked: `0` means "that limit is unset" (§3.2 step 4); any non-zero value
+  is accepted as-is.
 * `bdev_feature_list` MUST be empty in this version (`INVALID_ARGUMENT` otherwise);
   `RedundConf` accepts only `redund_none` and `redund_md_raid1`.
 * `ClusterConf.creation_epoch` is never user input — no request message carries it, it is
@@ -933,6 +982,10 @@ which is why the collision guard is re-evaluated inside every attempt's STM.
 Action: one STM creates `ClusterConf` (from the request plus the stamped
 `creation_epoch`), and `DnGlobal`, `CnGlobal`, `SpGlobal` each with `next_id = 1` and
 `shard_bucket` = 256 zeros. Reply `cluster_id`.
+`ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
+`alloc_conf` and `health_check_conf` can only be set here — no `UpdateCluster*` RPC
+exists, deliberately; changing them means creating a new cluster. (`bdev_conf`
+defaults can still be overridden per SP at `CreateStoragePool`, §8.4.)
 
 **DeleteCluster** —
 Errors: `NOT_FOUND` cluster; `FAILED_PRECONDITION` if any key exists under
@@ -971,8 +1024,8 @@ STM then: allocate `dn_id` + `shard_code` from `DnGlobal` (§5.4); write `DnConf
 `{p} dn_rev {shard_code} {cluster_id} {dn_id}` with `revision = 1` and
 `addr_port` = the node's endpoint (its appearance makes the owning dn-worker start
 syncing and health-checking the node); update `DnGlobal`. Reply `dn_id`. Later changes
-to `disabled` go through `UpdateDiskNodeDisabled` (and `UpdateControllerNodeDisabled`
-for CNs, §8.3), declared in `schema.proto` but not yet specified in this document.
+to `disabled` go through `UpdateDiskNodeDisabled` below (and
+`UpdateControllerNodeDisabled` for CNs, §8.3).
 
 **DeleteDiskNode** —
 Errors: `NOT_FOUND` cluster/dn; `FAILED_PRECONDITION` `side_ptr_list` not empty (delete
@@ -992,10 +1045,20 @@ missing. Action: one STM reads `DnConf` (by `addr_port`) and then `DnRev` (by th
 list it first reads `{p} cluster_conf {cluster_name}` (`NOT_FOUND` if absent) to derive
 the `cluster_id` in that prefix (§5.2); the range itself still uses no STM.
 
+**UpdateDiskNodeDisabled** —
+Errors: `NOT_FOUND` cluster/dn; `ABORTED` stale `dn_rev`.
+Action: one STM reads `DnConf`, checks the `dn_rev` token (§5.5), sets
+`DnConf.disabled = request.disabled` and maintains the `DnCapacity` key per §5.6
+(`disabled = true` ⇒ delete the key if present; `false` ⇒ recreate it iff the node is
+otherwise allocatable). Idempotent. `disabled` only gates CP scheduling (§5.6), so —
+like `err_epoch` and capacity-key maintenance (§5.5) — it bumps no revision and reaches
+no agent; sides already hosted by the node keep running. Reply `dn_id`.
+
 **InspectDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the agent gRPC fails.
 Action: STM-read `DnConf` for logging ids only; then, outside the STM, call
-`DiskNodeAgent.GetDnInfo` and return the `DnInfo` (live/applied state incl. the last
-applied revision, so callers can diff against `GetDiskNode`'s desired state).
+`DiskNodeAgent.GetDnInfo` and return its `revision` + `DnInfo`
+(`InspectDiskNodeReply.revision` = the agent's last applied revision, so callers can
+diff it against `GetDiskNode`'s desired `DnRev.revision`).
 
 ### 8.3 Controller nodes
 
@@ -1006,7 +1069,9 @@ differences:
   the reply to `total_ext_cnt` per §6.1 (0 ⇒ default 4 TiB, clamp to 64 TiB).
   `RESOURCE_EXHAUSTED` at `MaxCnCntPerCluster`.
 * **DeleteControllerNode**: `FAILED_PRECONDITION` if `cntlr_ptr_list` not empty.
-* **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`.
+* **UpdateControllerNodeDisabled**: as `UpdateDiskNodeDisabled` against `CnConf` /
+  `CnCapacity`, with the `cn_rev` token; reply `cn_id`.
+* **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply `revision` + `cn_info`.
 
 ### 8.4 Storage pools
 
@@ -1118,7 +1183,7 @@ another **cntlr** of the SP (§11.8).
 Action: pick a CN (§6.5); STM: new `Cntlr` (`primary = false`, `disabled = false`),
 append id, CN bookkeeping + `CnRev`, append the CN's `nvme_tr_conf` to every `CdcEntry`
 of the SP, bump `SpRev`. The sp-worker's next `SyncupSide` round tells every side about
-the new standby (`standby_id_list`), and the sides grow a dm-error/dm-linear/nvmet
+the new standby (`side_conf.standby_id_list`), and the sides grow a dm-error/dm-linear/nvmet
 export for it (§3.1). Reply `cntlr_id`.
 
 **DeleteCntlr** —
@@ -1139,11 +1204,12 @@ last enabled cntlr is allowed but stops IO (dnvctl prints a warning). Reply `cnt
 
 **InspectCntlr** — read the `Cntlr` in an STM for its `cn_addr_port`; outside the STM
 call `ControllerNodeAgent.GetCntlrInfo(cluster_id, cn_id, sp_id, cntlr_id)`; agent
-failure ⇒ `ABORTED`. Reply `CntlrInfo`.
+failure ⇒ `ABORTED`. Reply `revision` + `CntlrInfo`.
 
 **InspectSide** — locate the side by scanning the SP's slices in the STM (bounded by
 `MaxSliceCntPerSp × groups × MaxLegPerGrp`), get its DN; outside the STM call
-`DiskNodeAgent.GetSideInfo(cluster_id, dn_id, side_pointer)`. Reply `SideInfo`. Both
+`DiskNodeAgent.GetSideInfo(cluster_id, dn_id, side_pointer)`. Reply `revision` +
+`SideInfo`. Both
 Inspect RPCs are the way to watch clone/migration hydration before
 `DeleteClone`/`FinishMigration`.
 
@@ -1159,7 +1225,8 @@ Defaults: `ori_name = ""` (fresh device, not a snapshot); when `ori_name` is set
 Action: STM: `td_id` from `next_id`, `dev_id` from `next_dev_id++`,
 `ori_id` = origin's `dev_id` or 0; write `ThinDevice`, append `td_name_list`, bump
 `SpRev`. Reply `td_id`, `dev_id`. The primary creates one thin volume per slice
-(`create_thin` / `create_snap` pool message) + the raid0/error/ns-dev of §3.3.
+(`create_thin` / `create_snap` pool message) + the raid0/error of §3.3 (namespace
+devices are per `Namespace` and appear with §8.8).
 
 **DeleteThinDevice** —
 Errors: `FAILED_PRECONDITION` if the `td_id` is referenced by any `Namespace.td_id` of
@@ -1199,20 +1266,25 @@ Errors: `NOT_FOUND` nqn/td; `RESOURCE_EXHAUSTED` `len(ns_list) ≥ MaxNsCntPerSs
 supplied `dev_uuid`/`dev_nguid` is malformed.
 Defaults: empty `dev_uuid` ⇒ generate an RFC 4122 v4 uuid; empty `dev_nguid` ⇒ generate
 16 random bytes (hex). Callers supply both only when the namespace must impersonate an
-existing one — the transfer+clone flow of §11.3.
+existing one — the transfer+clone flow of §11.3. `suspended` as sent (proto3 default
+`false`); `true` creates the namespace already retired (§11.6) — this is how the clone
+destination namespace of §11.3 is created.
 Action: STM: `ns_id` from `next_id`; append
-`Namespace{ns_id, ns_idx, td_id, dev_uuid, dev_nguid, suspended = false}` to the
-subsystem, bump `SpRev`. Reply `ns_id`. `ns_idx` is the NVMe NSID. ANA group ids are
+`Namespace{ns_id, ns_idx, td_id, dev_uuid, dev_nguid, suspended = request.suspended}`
+to the subsystem, bump `SpRev`. Reply `ns_id`. `ns_idx` is the NVMe NSID. Every
+cntlr creates the namespace's own dm-linear `CnNsDevName(…, ns_id)` (§3.3 step 5)
+and the nvmet namespace on top of it. ANA group ids are
 not stored — each agent assigns one per exported namespace locally [D4].
 
 **DeleteNamespace** — STM remove the `ns_idx` entry, bump `SpRev`. Reply `ns_id`.
 
 **UpdateNamespaceDev** — repoint the namespace at another td (`td_name`), e.g. to expose
-a snapshot in place of the origin. STM update `td_id`, bump `SpRev`; agents reload the
-nvmet namespace onto the new td's `CnNsDevName`. Reply `ns_id`.
+a snapshot in place of the origin. STM update `td_id`, bump `SpRev`; agents reload
+the namespace's own `CnNsDevName` onto the new td's raid0 (a dm reload — the nvmet
+`device_path` never changes, so the switch is invisible to the host). Reply `ns_id`.
 
 **UpdateNamespaceSuspended** — STM set `suspended`, bump `SpRev`. Suspended ⇒ every
-cntlr suspends the td's `CnNsDevName` and sets the ns ANA group `inaccessible`;
+cntlr suspends the namespace's `CnNsDevName` and sets the ns ANA group `inaccessible`;
 resumed ⇒ reverse. Used by the transfer/clone choreography of §11.3. Reply `ns_id`.
 
 ### 8.9 Clones (destination side of a copy; fig. `090Clone`)
@@ -1244,9 +1316,9 @@ flowchart BT
     G --> SL1
 ```
 
-*Fig. `090Clone` — while a clone targets a td, its `CnNsDevName` is reloaded onto the
-dm-clone; dm-clone pulls missing regions from the source and hydrates in the
-background.*
+*Fig. `090Clone` — while a clone targets a td, the `CnNsDevName` of each namespace
+backed by that td is reloaded onto the dm-clone; dm-clone pulls missing regions from
+the source and hydrates in the background.*
 
 **CreateClone** —
 Errors: `ALREADY_EXISTS` clone key; `RESOURCE_EXHAUSTED` at `MaxCloneCntPerSp`;
@@ -1267,7 +1339,7 @@ the source (`src_tr_conf_list` + `src_nqn`, hostnqn `CnHostNqn`,
 `CnCloneMetaName` in the clone VG, build dm-clone `CnCloneFinalName` (metadata = that
 LV, dest = the dst td's `CnRaid0Name`, source = the connected nvme ns at `src_ns_idx`,
 region size = this SP's `block_size`, `hydration_threshold`/`batch_size` from
-`dm_clone_conf`), reload `CnNsDevName` onto the dm-clone, and, iff `auto_resume`,
+`dm_clone_conf`), reload the dst td's namespaces' `CnNsDevName`s onto the dm-clone, and, iff `auto_resume`,
 resume the device and move the td's namespace(s) to ANA `optimized` — i.e. steps 1-5 of
 §11.3's destination list. After a CN reboot the primary rebuilds the clone by the
 §11.5 recovery procedure before letting any IO through.
@@ -1279,7 +1351,8 @@ checked outside the STM via `GetCntlrInfo` of the primary
 `FAILED_PRECONDITION`).
 Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap`, set
 `suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. The
-primary reloads `CnNsDevName` back onto the raid0 (all data now local), removes the
+primary reloads those namespaces' `CnNsDevName`s back onto the raid0 (all data now
+local), removes the
 dm-clone + metadata LV, disconnects the source, and deletes the clone's
 `LocalCloneBmPath` files (§9.6). Reply `clone_id`.
 
@@ -1350,8 +1423,8 @@ namespace, `allowed_hosts` from the record, `Cntlr.cntlid_slot` bounds); standby
 export the same subsystem backed by a dm-error `CnXferFinalName` with ANA
 `inaccessible` (fig. `100Transfer` right half). Iff `auto_suspend`, the primary first
 (1) moves the origin namespace to ANA `inaccessible` on every cntlr, (2) suspends the
-origin td's `CnNsDevName` — the destination clone is now the only reader/writer of the
-bytes.
+origin namespace's `CnNsDevName` — the destination clone is now the only
+reader/writer of the bytes.
 
 **DeleteTransfer** —
 Semantics: `force = false` **finalizes** a completed hand-over: the STM additionally
@@ -1382,7 +1455,7 @@ choreography: §11.2.
 **FinishMigration** —
 Errors: `FAILED_PRECONDITION` when `force = false` and hydration is incomplete
 (checked outside the STM via `GetSideInfo` of the **destination** side —
-`migr_dm_clone.details`).
+`migr_dst_info.dm_clone_info.details`).
 Action: STM: remove the **src** `Side` from the leg (the dst side becomes the only
 one); src-DN bookkeeping (pointer out, extents back, capacity key per §5.6, `DnRev`);
 delete `Migration` + every `MigrBitmap`, remove from `migr_name_list`; bump `SpRev`.
@@ -1405,8 +1478,9 @@ chunks concatenate (in `bm_idx` order) into one bitmap over the **leg's data reg
 bit *k* covers `block_size` bytes, **1 = never written ⇒ skippable**. Every append
 creates a **new** chunk key, so a written chunk is immutable. Delivery to the
 destination DN goes through `PushMigrBitmap` (§9.6); the dst side agent shifts by the
-leg's `meta_blocks` (the meta region — md superblock, bitmap, health block — must
-always be copied, §3.6) and `blkdiscard`s fully-skippable dm-clone regions.
+leg's `meta_blocks` (`migr_dst_conf.meta_blocks`, §3.6 — the meta region: md
+superblock, bitmap, health block, must always be copied) and `blkdiscard`s
+fully-skippable dm-clone regions.
 
 ### 8.12 Spare legs
 
@@ -1433,7 +1507,7 @@ resync). Reply the current active + spare leg ids.
 
 **GetThinDeviceBitmap** — inputs `td_name`, `slice_idx`, `start_block`, `block_cnt`.
 The gateway resolves the primary cntlr's CN in an STM, then (outside) calls the agent's
-`GetTdBitmap` to compute, from a dm-thin metadata snapshot of that slice's pool, the
+`GetThinDeviceBm` to compute, from a dm-thin metadata snapshot of that slice's pool, the
 mapping bitmap of the td's thin volume in that slice: bit *k* (for block
 `start_block + k`, block = `block_size`) = **1 iff unmapped/never written**.
 `block_cnt = 0` ⇒ to the end. Callers page through it and feed `AppendCloneBitmap` on
@@ -1475,12 +1549,18 @@ answers **mapped = written**; agents and callers invert once at the boundary (§
   their resources down (ids are never reused, so a deleted side/cntlr never comes
   back). The embedded object lists inside `SyncupSide`/`SyncupCntlr` diff the same way.
   Bitmap chunks are the one thing that never rides in a `Syncup*` request; they travel
-  only over the dedicated `Push*Bitmap` streams (§9.6).
-* Every reply embeds `AgentReply{code, details}` (0 = OK) and the current `*Info`
-  (§9.5). All four `Syncup*` and both `Push*` RPCs are bidirectional streams: one
-  request message yields one reply message; the worker keeps the stream open and reuses
-  it — a `Syncup*` stream for successive revisions of the same target, a `Push*Bitmap`
-  stream for all migrations/clones on the same node (§9.6).
+  only over the dedicated `Push*Bitmap` RPCs (§9.6).
+* **RPC shapes.** `Syncup*`, `Push*Bitmap`, `Get*Info`, `GetDnSize`/`GetCnSize` and
+  `GetThinDeviceBm`/`GetLegBm` are unary; the four `Check*` RPCs are the only
+  bidirectional streams (§9.7). `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*`
+  replies embed `AgentReply{code, details}` (0 = OK); `Syncup*` and `Get*Info` replies
+  also carry the current `*Info` (§9.5), and every `Syncup*`, `Get*Info` and `Check*`
+  reply additionally carries the agent's last fully applied `revision` —
+  the exact reply fields are listed per RPC in §9.2/§9.3. `Push*BitmapReply` carries
+  only `AgentReply`; `GetDnSize`/`GetCnSize` and `GetThinDeviceBm`/`GetLegBm` return
+  only their payload (`size` / `bitmap`) and report failure through the gRPC status. A
+  worker issues the `Syncup*` calls for one object sequentially — the next revision
+  only after the previous call returned.
 * Shell execution uses the §7 timeouts; failures are captured into the affected
   resource's `ResInfo{status = RES_STATUS_ERROR, details}` rather than crashing the
   reconcile — the agent always converges as much as it can and reports the rest.
@@ -1489,28 +1569,30 @@ answers **mapped = written**; agents and callers invert once at the boundary (§
   `bm_info`/`bm_info_list` are derived from the files present, so they survive agent
   restarts and the worker does not have to re-push after one. Re-applying a chunk is
   always harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a no-op.
-  Full protocol: §9.6.
+  Full protocol: §9.6 [D7].
 
 ### 9.2 `service DiskNodeAgent`
 
 | rpc | behavior |
 |---|---|
 | `GetDnSize` | Return the byte size of the `--disk` block device (`lsblk --bytes`). Called by the gateway pre-registration; `dn_id` in the request is for logging only. |
-| `SyncupDn` (stream) | Carries `revision`, `cluster_conf`, `side_pointer_list`. Ensure §3.1 base state (PV/VG, `migr-pv` + migration VG, the single nvmet port); diff the pointer list per §9.1; reply `DnInfo`. |
-| `SyncupSide` (stream) | Carries one `side_pointer`, `revision`, `ext_cnt`, `sp_level`, `primary_cn_id`, `standby_id_list`, and — when this side is a migration endpoint — `migration` + `src_side`. Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: LV of `ext_cnt` extents (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `SideInfo` + `bm_info` (the applied migration-bitmap indexes, §9.6). |
-| `PushMigrBitmap` (stream) | Deliver one `MigrBitmap` chunk (`side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). One stream per DN, shared by every migration whose destination lives on it (§9.6). |
-| `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything. |
+| `SyncupDn` | Carries `revision`, `side_pointer_list`, `extent_size` (the cluster's `dn_bin_conf.extent_size`, for `vgcreate --physicalextentsize`, §3.1). Ensure §3.1 base state (PV/VG, `migr-pv` + migration VG, the single nvmet port); diff the pointer list per §9.1. Reply `agent_reply`, `revision`, `dn_info`. |
+| `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: LV of `ext_cnt` extents (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info`, `bm_info` (the applied migration-bitmap indexes, §9.6). |
+| `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
+| `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything (`agent_reply`, `revision`, info). |
+| `CheckDn` / `CheckSide` (stream) | Health streams, one per DN resp. per side, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `dn_info` / `side_info`. |
 
 ### 9.3 `service ControllerNodeAgent`
 
 | rpc | behavior |
 |---|---|
 | `GetCnSize` | Return the capacity budget in bytes this CN is willing to host (0 = "use the default"); typically from local config. |
-| `SyncupCn` (stream) | `revision`, `cluster_conf`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, loop, clone VG, the single nvmet port); diff pointers; reply `CnInfo`. |
-| `SyncupCntlr` (stream) | One `cntlr_pointer`, `revision`, `bdev_conf`, `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `CntlrInfo` + `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
-| `PushCloneBitmap` (stream) | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). One stream per CN, shared by every clone on it (§9.6). |
-| `GetCnInfo` / `GetCntlrInfo` | Read-only live state. |
-| `GetTdBitmap` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
+| `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, loop, clone VG, the single nvmet port); apply the §3.2 step 4 QoS limits via cgroup `io.max` (thin pools; legs too iff `strict`); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
+| `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
+| `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
+| `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
+| `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
+| `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
 
 ### 9.4 LV provisioning protocol (trim tags)
 
@@ -1529,9 +1611,12 @@ An LV carrying `not_trimmed` is never exported; on restart the agent redoes 2-3.
 `ResInfo{res_name, status, details, epoch}` with `ResStatus`: `UNKNOWN`(no answer from
 the node — set by *workers*, never by the agent itself), `MISSING`(agent hasn't created
 it), `ERROR`(tried and failed; `details` = why / command output), `OK`. `epoch` = unix
-seconds of the last status change. `revision` in each `*Info` = last fully applied
-revision. Map keys in `SideInfo`/`CntlrInfo` are the obvious owner ids (cntlr_id,
-td_id, slice_id, grp_id, leg_id, ns_id, ss_id, clone_id, xfer_id). dm-clone `details`
+seconds of the last status change. The `revision` returned next to an `*Info`
+(`Syncup*`, `Check*`, `Get*Info` replies) = last fully applied revision. Map keys in
+`SideInfo`/`CntlrInfo` are the obvious owner ids (`cn_id` for a side's per-CN export
+stack; td_id, slice_id, grp_id, leg_id, ns_id, ss_id, clone_id, xfer_id in `CntlrInfo`,
+with `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin volumes).
+dm-clone `details`
 strings carry the raw `dmsetup status` line so hydration progress is visible through
 `Inspect*`. `CntlrInfo.leg_id_to_leg` reflects the §3.6 health-check block IO: a leg
 whose probe write/read fails (or times out per the nvme `fast_io_fail_tmo`) is reported
@@ -1540,7 +1625,7 @@ whose probe write/read fails (or times out per the nvme `fast_io_fail_tmo`) is r
 ### 9.6 Bitmap push protocol (`PushMigrBitmap` / `PushCloneBitmap`)
 
 The skip bitmaps of §8.9/§8.11 reach the data plane exclusively through these two
-**streaming** RPCs — never through `Syncup*`. Both follow one protocol; the table maps
+**unary** RPCs — never through `Syncup*`. Both follow one protocol; the table maps
 the per-RPC roles:
 
 | | `PushMigrBitmap` (`DiskNodeAgent`) | `PushCloneBitmap` (`ControllerNodeAgent`) |
@@ -1576,17 +1661,14 @@ readers, not because bitmaps are inherently huge.)
    `PushMigrBitmapRequest` / `PushCloneBitmapRequest` carrying the addressing ids
    (`side_pointer` + `migr_id`, resp. `cntlr_pointer` + `clone_id`), the `revision`,
    the `bm_idx` and the raw chunk bytes.
-3. **One in flight.** The worker sends the next request on a stream **only after the
-   reply to the previous one has arrived**. Per migration/clone it pushes missed parts
-   in ascending `bm_idx`; together with the one-in-flight rule this guarantees the
-   in-order arrival that migration chunk concatenation requires.
-4. **Stream sharing.** The worker keeps at most **one** `PushMigrBitmap` stream open
-   per DN agent: **all migrations on the same DN share the same stream** — every
-   migration (of every SP the worker owns) whose destination side lives on that DN is
-   multiplexed over it, requests for different migrations simply interleaving.
-   `PushCloneBitmap` works the same way on the CNs: at most one stream per CN agent,
-   shared by all clones of all cntlrs the worker owns on that CN. (Contrast §9.1: the
-   `Syncup*` streams are per object; the `Push*` streams are per node.)
+3. **One in flight per migration/clone.** The worker issues the next `Push*Bitmap`
+   call for a migration/clone **only after the reply to the previous one has
+   arrived**, and pushes its missed parts in ascending `bm_idx`; together this
+   guarantees the in-order arrival that migration chunk concatenation requires.
+4. **Independence across objects.** Calls for different migrations/clones are
+   independent unary calls and MAY run concurrently, also toward the same agent; only
+   the per-object ordering of step 3 matters. (Contrast the `Check*` streams of §9.7,
+   which are long-lived and one per object.)
 5. **Targets.** Migration chunks go only to the destination side's DN; clone chunks go
    only to the CN currently hosting the primary cntlr. After a failover or a
    destination change the new node's syncup reply simply reports an empty/partial
@@ -1619,8 +1701,8 @@ readers, not because bitmaps are inherently huge.)
    removes them with the rest of the local state.
 
 **Grown clone chunks [D8].** `AppendCloneBitmap` may append more bytes to a `bm_idx`
-that was already pushed and acknowledged. The worker therefore keeps an in-memory,
-per-stream memo of the byte length it last pushed per `(clone_id, bm_idx)` and
+that was already pushed and acknowledged. The worker therefore keeps an in-memory
+memo of the byte length it last pushed per `(clone_id, bm_idx)` and
 re-pushes a chunk whose etcd value grew past that length; the agent overwrites the
 stored file and re-applies whenever a received payload differs from it. If the worker
 changes (crash, shard re-ownership) the memo is lost, and a chunk that grows afterwards
@@ -1629,6 +1711,40 @@ accepted: src bitmaps are a pure optimization that never affects correctness (§
 §11.5); the only cost is copying some regions that could have been skipped. Migration
 chunks are immutable (every `AppendMigrationBitmap` creates a new `bm_idx`), so they
 have no such caveat.
+
+### 9.7 Check streams (`CheckDn` / `CheckSide` / `CheckCn` / `CheckCntlr`)
+
+The four `Check*` RPCs are the only bidirectional streams of the agent services. They
+carry no desired state — `Syncup*` does that — and exist so a worker can watch an
+object's live state cheaply instead of polling `Get*Info`:
+
+* **One stream per object.** The owning worker keeps one `CheckDn` per DN, one
+  `CheckSide` per side, one `CheckCn` per CN and one `CheckCntlr` per cntlr open for as
+  long as it owns the object (§10.1). Rounds are **worker-initiated**: one request per
+  health round, exactly one reply per request, never an unsolicited agent message. The
+  round interval is the object kind's field of `ClusterConf.health_check_conf`
+  (`dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval`, seconds; `0` ⇒
+  `DefaultHealthCheckInterval` = 5, bounds `[MinHealthCheckInterval,
+  MaxHealthCheckInterval]` = [1, 3600], §7).
+* **Request:** the object ids (`cluster_id` + `dn_id`/`cn_id`, plus `side_pointer` /
+  `cntlr_pointer`), `revision` = the revision the worker last synced to the agent, and
+  `show_info`.
+* **Reply:** `agent_reply`, `revision` = the agent's last fully applied revision for the
+  object, and the `*Info`:
+  * `show_info = true` ⇒ the agent always fills the complete current `*Info` (§9.5);
+  * `show_info = false` ⇒ the `*Info` is filled only when something changed since the
+    previous reply on this stream — a leg became unhealthy, a thin pool crossed its
+    low water mark, a resource flipped between `RES_STATUS_OK` and `RES_STATUS_ERROR` —
+    and is left unset otherwise. The first reply on a fresh stream always carries the
+    full `*Info`.
+* **Revision check.** A reply whose `revision` differs from the request's means the
+  agent has not applied the revision the worker believes current (or does not know the
+  object at all: `agent_reply.code != 0`); the worker re-issues the object's `Syncup*`.
+* **Health.** The worker turns a broken stream, a missing reply within the round
+  timeout, or `RES_STATUS_ERROR` entries in the `*Info` into the `err_epoch` updates of
+  §10.2/§10.3 (`RES_STATUS_UNKNOWN` is what the worker records itself while the stream
+  is dead, §9.5). The `Check*` replies are the primary health signal; the `Syncup*`
+  replies are the secondary one.
 
 ---
 
@@ -1649,14 +1765,17 @@ currently owns and re-evaluates on every membership change.
 For each owned shard `s`, watch prefix `{p} dn_rev {s} ` (resp. `cn_rev`). On a `put`:
 the key yields `cluster_id` + `dn_id` (resp. `cn_id`) and the value yields `revision` +
 `addr_port`; read the node's desired state with that `addr_port`
-(`DnConf` at `{p} dn_conf {cluster_id} {addr_port}`, plus `ClusterConf`; the sides'
+(`DnConf` at `{p} dn_conf {cluster_id} {addr_port}`, plus `ClusterConf` — it supplies
+`SyncupDn.extent_size` from `dn_bin_conf` and `SyncupCn.qos_ratio`; the sides'
 details are pushed by the sp role) and call `SyncupDn` (resp. `SyncupCn`) at that same
 `addr_port` with that revision. A `put` whose only change is `addr_port` (a moved node,
 §5.5) therefore re-syncs the node at its new endpoint without the worker ever seeing the
-node disappear. On a `delete`: stop syncing/health-checking the node. Additionally poll
-owned nodes (`GetDnInfo`/`GetCnInfo`, suggested every few seconds): on failure or bad
+node disappear. On a `delete`: stop syncing/health-checking the node and close its
+`Check*` stream. Additionally keep a `CheckDn`/`CheckCn` stream (§9.7) open to every
+owned node, one request per `health_check_conf.dn_interval`/`cn_interval` seconds
+(§9.7): on a broken stream, a missed reply or a bad
 status set `DnConf.err_epoch`/`CnConf.err_epoch` = now (if 0) in an STM; clear to 0 on
-recovery. The same STM maintains the node's capacity key per §5.6 (unhealthy ⇒ delete, recovered
+recovery; on a `revision` mismatch re-issue `SyncupDn`/`SyncupCn`. The same STM maintains the node's capacity key per §5.6 (unhealthy ⇒ delete, recovered
 ⇒ recreate). `err_epoch`/capacity changes never bump revisions.
 
 ### 10.3 sp role
@@ -1666,18 +1785,29 @@ value `revision` + `sp_name` (the `SpConf` key suffix — no `sp_id_to_name` loo
 on this path). On a bump: load the SP (SpConf, cntlrs,
 slices, tds, subsystems, clones, xfers, migrs, bitmaps) and fan out `SyncupSide` to
 **every side** of the SP and `SyncupCntlr` to **every cntlr**, with the new revision —
-each request always carries the full desired state (§9.1). Bitmap chunks travel over
-the dedicated `PushCloneBitmap`/`PushMigrBitmap` streams instead (§9.6): the replies'
+each request always carries the full desired state (§9.1). Resolve each side's DN and
+each cntlr's CN by reading `DnConf`/`CnConf` at the record's endpoint
+(`Side.addr_port` / `Cntlr.cn_addr_port` — those keys are endpoint-addressed, §5.3):
+that yields the `dn_id`/`cn_id` the `Syncup*` requests and the
+`migr_src_conf.dst_dn_id`/`migr_dst_conf.src_dn_id` fields carry (cacheable per
+round; a moved node re-resolves on its next `DnRev`/`CnRev` event, §5.5). Bitmap chunks travel over
+the dedicated `PushCloneBitmap`/`PushMigrBitmap` calls instead (§9.6): the replies'
 `bm_info`/`bm_info_list` tell the worker which chunk indexes each agent already holds,
-and it pushes the missed parts — one request in flight per per-node stream, in
-ascending `bm_idx`. The replies' `*Info` also feed health: set/clear `err_epoch` on
+and it pushes the missed parts — one call in flight per migration/clone, in
+ascending `bm_idx`. The `Syncup*` replies and, continuously, the `CheckSide`/
+`CheckCntlr` streams the sp-worker keeps open to every side and cntlr of its SPs
+(§9.7; one round per `health_check_conf.side_interval`/`cntlr_interval` seconds)
+feed health: set/clear `err_epoch` on
 `Cntlr`, `Leg`, `Side` records accordingly (STM, no rev bump) — in particular a
 failing §3.6 health-check block turns into `Leg.err_epoch` (and `Side.err_epoch` when
 the side path itself is the failing part).
 
-### 10.4 Automatic reactions (`EventThreshold`)
+### 10.4 Automatic reactions (`EventThreshold`, thin-pool auto-grow)
 
-All comparisons are `now − err_epoch ≥ threshold` with the SP's `event_threshold`
+Two families of automation, both the **dnv-worker's** job (agents only report): the
+`EventThreshold` reactions, triggered when any threshold is breached, and the
+thin-pool auto-grow driven by `DmPoolConf.low_water_mark_pct`. Threshold comparisons
+are `now − err_epoch ≥ threshold` with the SP's `event_threshold`
 (0-valued fields fall back to the §7 defaults). All actions are ordinary STM mutations
 that bump `SpRev`, so the data-plane choreography is the same as for the equivalent
 manual RPC:
@@ -1693,11 +1823,17 @@ manual RPC:
 * `leg_unhealthy` (1200 s): a leg stays unhealthy ⇒ if the group has a spare, perform an
   internal `SwitchSpareLeg` (§8.12 — the spare is only now `mdadm --add`-ed and
   rebuilt); otherwise create a spare on a fresh DN first, then switch.
-* `pool_low_water_mark_pct`: not a worker action — it is compiled into the thin-pool
-  table (§3.3) so the kernel emits a dm event; the agent surfaces data-space and
-  metadata-space pressure as `RES_STATUS_ERROR`-with-details on the pool's `ResInfo`,
-  and operators react with `GrowSlice` (data: `is_meta = false` with a chosen
-  `ext_cnt`; metadata: `is_meta = true`, sized by the §8.5 ladder).
+* `DmPoolConf.low_water_mark_pct` (not an `EventThreshold` field) — **thin-pool
+  auto-grow**, the sp-worker's task. The agent reports every slice pool's data and
+  metadata usage (used/total blocks from `dmsetup status`, carried in the pool
+  `ResInfo.details` per §9.5 and delivered through the `CheckCntlr` stream, §9.7).
+  When a pool's **data** usage exceeds `low_water_mark_pct`%, the worker runs an
+  internal `GrowSlice` (`is_meta = false`, `ext_cnt` = the slice's first data group's
+  `ext_cnt` — grow by the original allocation unit); when its **metadata** usage
+  exceeds the same percentage, an internal `GrowSlice(is_meta = true)` (ladder-sized,
+  §8.5). One grow per pool at a time: no second grow starts while the previous one is
+  not yet visible in the reported usage. `low_water_mark_pct > 100` disables this
+  automation (§7); operators then grow manually.
 
 The worker never deletes user data on its own; every automatic action above only
 re-homes redundancy or roles.
@@ -1829,22 +1965,26 @@ wrappers are untouched by the switch.*
 
 Starting a migration resembles a failover; the leg temporarily owns two sides.
 
-**src side** (driven by its `SyncupSide` carrying the `Migration`):
+**src side** (driven by its `SyncupSide` carrying `migr_src_conf` = `migr_id`,
+`dst_side_id`, `dst_dn_id`):
 
 1. Move every per-CN subsystem's namespace to `inaccessible` (all cntlrs).
 2. Suspend every per-CN dm-linear.
 3. Build `DnMigrSrcName` (linear on the LV) and export it via `MigrSrcNqn`,
-   `allowed_hosts = [DnHostNqn(cluster, dst_dn)]`.
+   `allowed_hosts = [DnHostNqn(cluster, migr_src_conf.dst_dn_id)]`.
 
-**dst side** (its `SyncupSide` carries `Migration` + `src_side`):
+**dst side** (its `SyncupSide` carries `migr_dst_conf`: `migr_id`, `src_side_id`,
+`src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`,
+`bm_cnt`):
 
 1. Create the per-CN subsystems/namespaces with dm-error backing, all `inaccessible`.
 2. `lvcreate` `DnMigrMetaName` in the migration VG (metadata for the dm-clone).
-3. `nvme connect` to `MigrSrcNqn` at `src_side.nvme_tr_conf` (hostnqn `DnHostNqn`,
-   `fast_io_fail_tmo = 5`, `ctrl_loss_tmo = -1`), retrying until success.
+3. `nvme connect` to `MigrSrcNqn(cluster, migr_dst_conf.src_dn_id, sp, migr_id)` at
+   `migr_dst_conf.src_nvme_tr_conf` (hostnqn `DnHostNqn`, `fast_io_fail_tmo = 5`,
+   `ctrl_loss_tmo = -1`), retrying until success.
 4. Create the dm-clone `DnMigrFinalName`: metadata = step 2's LV, dest = the local side
-   LV, source = the connected nvme device, region size = the SP's `block_size`,
-   hydration knobs from `Migration.dm_clone_conf`.
+   LV, source = the connected nvme device, region size = `migr_dst_conf.block_size`
+   (= the SP's `block_size`), hydration knobs from `migr_dst_conf.dm_clone_conf`.
 5. Reload the **primary** CN's dm-linear onto the dm-clone; set that subsystem
    `optimized`, all other CNs' `non-optimized`. Each CN already holds a connection to
    this side (same NQN as the src side, so it is a second path of the leg's existing
@@ -1874,8 +2014,9 @@ moving ss/ns from `sp1` to `sp2`:
   exactly enough). If not, rotate a cntlr: `UpdateCntlrEnabled(false)` → `DeleteCntlr`
   → `CreateCntlr` with a free slot. Likewise the two SPs' cntlrs MUST NOT share CNs;
   rotate the same way if they do.
-* Ensure `Namespace.suspended = false` on sp1 and `= true` on sp2
-  (`UpdateNamespaceSuspended`).
+* Ensure `Namespace.suspended = false` on sp1 and `= true` on sp2 (create the sp2
+  namespace with `CreateNamespace(suspended = true)`, or `UpdateNamespaceSuspended` on
+  an existing one).
 * Collect the sp2 cntlrs' CN ids ⇒ `CnHostNqn` list.
 * `CreateTransfer` on sp1 (`ori_nqn`/`ori_ns_idx`, `allowed_hosts` = that list,
   `auto_suspend = true`) — the sp1 primary then: (1) origin ns → `inaccessible`,
@@ -1886,7 +2027,7 @@ moving ss/ns from `sp1` to `sp2`:
   `src_slice_cnt`/`src_stripe_size`/`src_block_size` = sp1's slice count / raid0 stripe
   / pool block size, `dst_td_name`, `auto_resume = true`) — the sp2 primary then:
   (1) connect to the targets, (2) create `CnCloneMetaName`, (3) create
-  `CnCloneFinalName`, (4) reload `CnNsDevName` onto it and resume, (5) origin
+  `CnCloneFinalName`, (4) reload the ns's `CnNsDevName` onto it and resume, (5) origin
   namespace → `optimized`. Hosts flip to sp2 transparently.
 * Optional bitmap fast-path: per sp1 slice `GetThinDeviceBitmap` (paged) →
   `AppendCloneBitmap(slice_idx, …)` on sp2 → worker `PushCloneBitmap` (§9.6) → sp2
@@ -1948,14 +2089,14 @@ thin pool" ⇔ "block already copied". The volatile clone metadata LV (tmpfs, §
 therefore rebuildable. Whenever the primary (re)builds a clone whose dm-clone metadata
 is missing — CN reboot, failover to a cntlr that never ran it, tmpfs loss — it MUST:
 
-1. Suspend the dm-linear `CnNsDevName` of the td's namespace (or make sure it is not
-   created / not yet pointing anywhere live).
+1. Suspend the dm-linear `CnNsDevName` of every namespace backed by the td (or make
+   sure none is created / pointing anywhere live yet).
 2. Read the **dst bitmaps**: the mapping bitmap of the dst td from every thin pool of
    the SP (per slice, *mapped = 1 = copied*).
 3. Create the dm-clone with **hydration disabled** and a fresh metadata LV.
 4. `blkdiscard` every dm-clone region whose bits are 1 in the dst bitmaps (§11.4,
    B-side only) — marking those regions "already hydrated".
-5. Resume the dm-linear `CnNsDevName`; enable background hydration.
+5. Resume those `CnNsDevName`s; enable background hydration.
 
 The dst bitmaps MUST be fully applied **before** the dm-clone handles any IO —
 otherwise a read of an already-copied (and possibly since-rewritten) region would be
@@ -1967,9 +2108,10 @@ the dm-clone is rebuilt (§9.6), with no worker involvement.
 
 ### 11.6 Namespace suspend semantics
 
-`suspended = true` ⇔ every cntlr keeps the td's `CnNsDevName` dm-suspended and the ns
-ANA group `inaccessible`; `false` ⇔ normal §3.3/§3.4 behavior. Set by users
-(`UpdateNamespaceSuspended`) and by the transfer/clone finalization (§8.9/§8.10).
+`suspended = true` ⇔ every cntlr keeps the namespace's `CnNsDevName` dm-suspended and
+the ns ANA group `inaccessible`; `false` ⇔ normal §3.3/§3.4 behavior. Set by users
+(`CreateNamespace.suspended`, `UpdateNamespaceSuspended`) and by the transfer/clone
+finalization (§8.9/§8.10).
 
 ### 11.7 SpLevel (see §8.4 UpdateStoragePoolLevel)
 
@@ -2080,9 +2222,26 @@ lvcreate --name {CnCloneMetaName} --size {meta_size}B {CnCloneVgName}
 ```
 
 **md-raid1** (`{data_offset_k} = meta_blocks × block_size / 1024`, §3.6; every member
-is failfast; masking udev incremental assembly for dnv arrays —
-`SUBSYSTEM=="block", ENV{MD_NAME}=="dnv-*", ENV{SYSTEMD_READY}="0"` — is recommended so
-only the agent assembles):
+is failfast). So that only the agent assembles dnv arrays, mask udev incremental
+assembly with an `/etc/udev/rules.d/63-dnv-md.rules` that imports the md envs itself
+— `MD_NAME` does not exist before the stock `64-md-raid-assembly.rules` runs its own
+import, so a bare `ENV{MD_NAME}` match in an earlier file never fires:
+
+```text
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
+  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
+ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
+```
+
+`CnMdArrayName`'s fixed `dnv-` prefix (§4.3) is what the rule matches; the `*:dnv-*`
+alternative covers the `homehost:name` form `mdadm --examine --export` reports when a
+homehost is stored (`--homehost any` below keeps the stored name bare). The mask works
+because the stock `64-md-raid-assembly.rules` skips devices carrying
+`ENV{SYSTEMD_READY}=="0"` — verify that skip exists in the deployed mdadm's rules. On
+dedicated CN hosts two blunter alternatives need no name matching at all: `mdadm.conf`
+`AUTO -all` (arrays with explicit `ARRAY` lines — e.g. the OS array — still assemble;
+unlisted dnv arrays never do), or shadowing the stock rule entirely via
+`ln -s /dev/null /etc/udev/rules.d/64-md-raid-assembly.rules`. The commands:
 
 ```shell
 mdadm --create /dev/md/{CnMdDevName} --name {CnMdArrayName} --level 1 \
@@ -2156,10 +2315,10 @@ func getClusterId(name string, creationEpoch uint64) uint64 {
     h.Write(b[:])
     return h.Sum64()
 }
-func getShortId(clusterId, nodeId uint64) uint64 {
+func getShortId(clusterId, nodeId uint64) uint32 {
     h := fnv.New64a()
-    h.Write([]byte(fmt.Sprintf("%016x%016x", clusterId, nodeId)))
-    return h.Sum64() & 0x0000FFFFFFFFFFFF
+    fmt.Fprintf(h, "%016x%016x", clusterId, nodeId)
+    return uint32(h.Sum64())
 }
 ```
 
@@ -2198,6 +2357,10 @@ func getShortId(clusterId, nodeId uint64) uint64 {
   accepted gap: a clone chunk grown by `AppendCloneBitmap` after its last push is
   re-delivered only while the pushing worker keeps its in-memory length memo — src
   bitmaps never affect correctness, so a missed tail only costs some avoidable copying.
+* **[D8] Grown clone chunks.** `AppendCloneBitmap` may grow an already-acknowledged
+  `bm_idx`; the worker re-pushes when it observes growth, and a worker change can
+  leave the shorter version at the agent — accepted, because src bitmaps only ever
+  cost extra copying, never correctness (§9.6, §11.5).
 * **[D9] `creation_epoch` in `cluster_id`.** Hashing only the name made `cluster_id` a
   pure function of a user-chosen string: a cluster deleted and recreated under the same
   name reused the whole key space and every derived node-local name (`getShortId`, dm/LV

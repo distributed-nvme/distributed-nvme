@@ -291,17 +291,23 @@ func TestPbToLogValueBytesAndNesting(t *testing.T) {
 func TestPbToLogValueEnumsListsMaps(t *testing.T) {
 	// Enum by name + repeated scalar + repeated message.
 	side := &pb.SyncupSideRequest{
-		SpLevel:       pb.SpLevel_SP_LEVEL_READONLY,
-		StandbyIdList: []uint64{5, 6, 7},
+		SideConf: &pb.SyncupSideRequest_SideConf{
+			SpLevel:       pb.SpLevel_SP_LEVEL_READONLY,
+			StandbyIdList: []uint64{5, 6, 7},
+		},
 	}
 	sideValue := PbToLogValue(side).(map[string]any)
-	if got := sideValue["sp_level"]; got != "SP_LEVEL_READONLY" {
+	sideConf, ok := sideValue["side_conf"].(map[string]any)
+	if !ok {
+		t.Fatalf("side_conf rendered as %T", sideValue["side_conf"])
+	}
+	if got := sideConf["sp_level"]; got != "SP_LEVEL_READONLY" {
 		t.Errorf("sp_level = %v, want SP_LEVEL_READONLY", got)
 	}
-	list, ok := sideValue["standby_id_list"].([]any)
+	list, ok := sideConf["standby_id_list"].([]any)
 	if !ok || len(list) != 3 || list[0] != uint64(5) {
 		t.Errorf("standby_id_list rendered as %v (%T)",
-			sideValue["standby_id_list"], sideValue["standby_id_list"])
+			sideConf["standby_id_list"], sideConf["standby_id_list"])
 	}
 
 	dn := &pb.SyncupDnRequest{
@@ -322,8 +328,7 @@ func TestPbToLogValueEnumsListsMaps(t *testing.T) {
 
 	// Map with a non-string key and a message value.
 	info := &pb.SideInfo{
-		Revision: 9,
-		CntlrIdToDmError: map[uint64]*pb.ResInfo{
+		CnIdToDmError: map[uint64]*pb.ResInfo{
 			42: {
 				ResName: "dnv-x-0-y",
 				Status:  pb.ResStatus_RES_STATUS_ERROR,
@@ -332,9 +337,9 @@ func TestPbToLogValueEnumsListsMaps(t *testing.T) {
 		},
 	}
 	infoValue := PbToLogValue(info).(map[string]any)
-	errMap, ok := infoValue["cntlr_id_to_dm_error"].(map[string]any)
+	errMap, ok := infoValue["cn_id_to_dm_error"].(map[string]any)
 	if !ok {
-		t.Fatalf("map field rendered as %T", infoValue["cntlr_id_to_dm_error"])
+		t.Fatalf("map field rendered as %T", infoValue["cn_id_to_dm_error"])
 	}
 	entry, ok := errMap["42"].(map[string]any)
 	if !ok {

@@ -3,11 +3,11 @@ package common
 const (
 	ValidStrPattern = `^[a-zA-Z0-9\-_/.:]+$`
 	MaxStrSize      = 64
-	MaxNoteSize     = 4 * 1024
-	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:` +
-		`(uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{` +
-		`4}-[0-9a-fA-F]{12}|discovery|.+)$`
-	MaxNqnLength = 223
+	// ValidNqnPattern requires a ':' after the domain part, so the
+	// well-known discovery NQN "nqn.2014-08.org.nvmexpress.discovery" can
+	// never validate (architecture.md §7).
+	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:.+$`
+	MaxNqnLength    = 223
 
 	ShardBucketSize = 256
 	ShardCodeFmt    = "%02x"
@@ -20,6 +20,10 @@ const (
 	DefaultDnBin2Shift = 8
 	DefaultDnBin3Shift = 12
 
+	MaxHealthCheckInterval     = 3600
+	MinHealthCheckInterval     = 1
+	DefaultHealthCheckInterval = 5
+
 	MinAllocDnBatchSize     = 1
 	MaxAllocDnBatchSize     = 1024
 	DefaultAllocDnBatchSize = 16
@@ -27,17 +31,14 @@ const (
 	MaxAllocCnBatchSize     = 1024
 	DefaultAllocCnBatchSize = 16
 
-	MaxDmPoolDataBlockSize       = 1 * 1024 * 1024 * 1024
-	MinDmPoolDataBlockSize       = 64 * 1024
-	DefaultDmPoolDataBlockSize   = 1 * 1024 * 1024
-	MaxDmPoolLowWaterMarkPct     = 90
-	MinDmPoolLowWaterMarkPct     = 10
-	DefaultDmPoolLowWaterMarkPct = 50
-	MaxDmRaid0StripeSize         = 64 * 1024 * 1024
-	MinDmRaid0StripeSize         = 4 * 1024
-	DefaultDmRaid0StripeSize     = 64 * 1024
+	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
+	MinDmPoolDataBlockSize     = 64 * 1024
+	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
+	MaxDmRaid0StripeSize       = 64 * 1024 * 1024
+	MinDmRaid0StripeSize       = 4 * 1024
+	DefaultDmRaid0StripeSize   = 64 * 1024
 
-	// Chunk and region have samilar meaning.
+	// Chunk and region have similar meaning.
 	// It is chunk in md, It is region in dm.
 	MinChunkBlockCnt      = 1
 	MaxChunkBlockCnt      = 1024
@@ -112,10 +113,12 @@ const (
 	MaxCloneBatchSize     = 4
 	DefaultCloneBatchSize = 1
 	MaxCloneBmCnt         = 16
-	MaxMigrThreshold      = 8
-	DefaultMigrThreshold  = 1
-	MaxMigrBatchSize      = 4
-	MaxMigrBmCnt          = 4
+
+	MaxMigrThreshold     = 8
+	DefaultMigrThreshold = 1
+	MaxMigrBatchSize     = 4
+	DefaultMigrBatchSize = 1
+	MaxMigrBmCnt         = 4
 
 	DefaultPrimaryUnhealthy    = 5
 	DefaultCntlrUnhealthy      = 600
@@ -125,6 +128,8 @@ const (
 
 	DefaultNvmeFastIoFailTmo = 5
 
+	// Default cap on the number of in-flight OsClient operations
+	// (commands + file I/O + proto I/O combined). See osclient.md.
 	DefaultOsClientLimit = 32
 
 	// Maximum number of characters of string file data included in a log

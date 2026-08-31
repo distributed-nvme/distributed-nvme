@@ -41,7 +41,7 @@ const (
 	Gateway_ListStoragePools_FullMethodName                = "/Gateway/ListStoragePools"
 	Gateway_UpdateStoragePoolCntlidSlotList_FullMethodName = "/Gateway/UpdateStoragePoolCntlidSlotList"
 	Gateway_UpdateStoragePoolLevel_FullMethodName          = "/Gateway/UpdateStoragePoolLevel"
-	Gateway_FindStoragePoolName_FullMethodName             = "/Gateway/FindStoragePoolName"
+	Gateway_FindStoragePoolNames_FullMethodName            = "/Gateway/FindStoragePoolNames"
 	Gateway_GrowSlice_FullMethodName                       = "/Gateway/GrowSlice"
 	Gateway_CreateCntlr_FullMethodName                     = "/Gateway/CreateCntlr"
 	Gateway_DeleteCntlr_FullMethodName                     = "/Gateway/DeleteCntlr"
@@ -106,7 +106,7 @@ type GatewayClient interface {
 	ListStoragePools(ctx context.Context, in *ListStoragePoolsRequest, opts ...grpc.CallOption) (*ListStoragePoolsReply, error)
 	UpdateStoragePoolCntlidSlotList(ctx context.Context, in *UpdateStoragePoolCntlidSlotListRequest, opts ...grpc.CallOption) (*UpdateStoragePoolCntlidSlotListReply, error)
 	UpdateStoragePoolLevel(ctx context.Context, in *UpdateStoragePoolLevelRequest, opts ...grpc.CallOption) (*UpdateStoragePoolLevelReply, error)
-	FindStoragePoolName(ctx context.Context, in *FindStoragePoolNamesRequest, opts ...grpc.CallOption) (*FindStoragePoolNamesReply, error)
+	FindStoragePoolNames(ctx context.Context, in *FindStoragePoolNamesRequest, opts ...grpc.CallOption) (*FindStoragePoolNamesReply, error)
 	GrowSlice(ctx context.Context, in *GrowSliceRequest, opts ...grpc.CallOption) (*GrowSliceReply, error)
 	CreateCntlr(ctx context.Context, in *CreateCntlrRequest, opts ...grpc.CallOption) (*CreateCntlrReply, error)
 	DeleteCntlr(ctx context.Context, in *DeleteCntlrRequest, opts ...grpc.CallOption) (*DeleteCntlrReply, error)
@@ -373,10 +373,10 @@ func (c *gatewayClient) UpdateStoragePoolLevel(ctx context.Context, in *UpdateSt
 	return out, nil
 }
 
-func (c *gatewayClient) FindStoragePoolName(ctx context.Context, in *FindStoragePoolNamesRequest, opts ...grpc.CallOption) (*FindStoragePoolNamesReply, error) {
+func (c *gatewayClient) FindStoragePoolNames(ctx context.Context, in *FindStoragePoolNamesRequest, opts ...grpc.CallOption) (*FindStoragePoolNamesReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(FindStoragePoolNamesReply)
-	err := c.cc.Invoke(ctx, Gateway_FindStoragePoolName_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Gateway_FindStoragePoolNames_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -769,7 +769,7 @@ type GatewayServer interface {
 	ListStoragePools(context.Context, *ListStoragePoolsRequest) (*ListStoragePoolsReply, error)
 	UpdateStoragePoolCntlidSlotList(context.Context, *UpdateStoragePoolCntlidSlotListRequest) (*UpdateStoragePoolCntlidSlotListReply, error)
 	UpdateStoragePoolLevel(context.Context, *UpdateStoragePoolLevelRequest) (*UpdateStoragePoolLevelReply, error)
-	FindStoragePoolName(context.Context, *FindStoragePoolNamesRequest) (*FindStoragePoolNamesReply, error)
+	FindStoragePoolNames(context.Context, *FindStoragePoolNamesRequest) (*FindStoragePoolNamesReply, error)
 	GrowSlice(context.Context, *GrowSliceRequest) (*GrowSliceReply, error)
 	CreateCntlr(context.Context, *CreateCntlrRequest) (*CreateCntlrReply, error)
 	DeleteCntlr(context.Context, *DeleteCntlrRequest) (*DeleteCntlrReply, error)
@@ -882,8 +882,8 @@ func (UnimplementedGatewayServer) UpdateStoragePoolCntlidSlotList(context.Contex
 func (UnimplementedGatewayServer) UpdateStoragePoolLevel(context.Context, *UpdateStoragePoolLevelRequest) (*UpdateStoragePoolLevelReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateStoragePoolLevel not implemented")
 }
-func (UnimplementedGatewayServer) FindStoragePoolName(context.Context, *FindStoragePoolNamesRequest) (*FindStoragePoolNamesReply, error) {
-	return nil, status.Error(codes.Unimplemented, "method FindStoragePoolName not implemented")
+func (UnimplementedGatewayServer) FindStoragePoolNames(context.Context, *FindStoragePoolNamesRequest) (*FindStoragePoolNamesReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindStoragePoolNames not implemented")
 }
 func (UnimplementedGatewayServer) GrowSlice(context.Context, *GrowSliceRequest) (*GrowSliceReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GrowSlice not implemented")
@@ -1410,20 +1410,20 @@ func _Gateway_UpdateStoragePoolLevel_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Gateway_FindStoragePoolName_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _Gateway_FindStoragePoolNames_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(FindStoragePoolNamesRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(GatewayServer).FindStoragePoolName(ctx, in)
+		return srv.(GatewayServer).FindStoragePoolNames(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Gateway_FindStoragePoolName_FullMethodName,
+		FullMethod: Gateway_FindStoragePoolNames_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(GatewayServer).FindStoragePoolName(ctx, req.(*FindStoragePoolNamesRequest))
+		return srv.(GatewayServer).FindStoragePoolNames(ctx, req.(*FindStoragePoolNamesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2172,8 +2172,8 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Gateway_UpdateStoragePoolLevel_Handler,
 		},
 		{
-			MethodName: "FindStoragePoolName",
-			Handler:    _Gateway_FindStoragePoolName_Handler,
+			MethodName: "FindStoragePoolNames",
+			Handler:    _Gateway_FindStoragePoolNames_Handler,
 		},
 		{
 			MethodName: "GrowSlice",
@@ -2331,6 +2331,8 @@ const (
 	DiskNodeAgent_PushMigrBitmap_FullMethodName = "/DiskNodeAgent/PushMigrBitmap"
 	DiskNodeAgent_GetDnInfo_FullMethodName      = "/DiskNodeAgent/GetDnInfo"
 	DiskNodeAgent_GetSideInfo_FullMethodName    = "/DiskNodeAgent/GetSideInfo"
+	DiskNodeAgent_CheckDn_FullMethodName        = "/DiskNodeAgent/CheckDn"
+	DiskNodeAgent_CheckSide_FullMethodName      = "/DiskNodeAgent/CheckSide"
 )
 
 // DiskNodeAgentClient is the client API for DiskNodeAgent service.
@@ -2338,11 +2340,13 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type DiskNodeAgentClient interface {
 	GetDnSize(ctx context.Context, in *GetDnSizeRequest, opts ...grpc.CallOption) (*GetDnSizeReply, error)
-	SyncupDn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupDnRequest, SyncupDnReply], error)
-	SyncupSide(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupSideRequest, SyncupSideReply], error)
-	PushMigrBitmap(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushMigrBitmapRequest, PushMigrBitmapReply], error)
+	SyncupDn(ctx context.Context, in *SyncupDnRequest, opts ...grpc.CallOption) (*SyncupDnReply, error)
+	SyncupSide(ctx context.Context, in *SyncupSideRequest, opts ...grpc.CallOption) (*SyncupSideReply, error)
+	PushMigrBitmap(ctx context.Context, in *PushMigrBitmapRequest, opts ...grpc.CallOption) (*PushMigrBitmapReply, error)
 	GetDnInfo(ctx context.Context, in *GetDnInfoRequest, opts ...grpc.CallOption) (*GetDnInfoReply, error)
 	GetSideInfo(ctx context.Context, in *GetSideInfoRequest, opts ...grpc.CallOption) (*GetSideInfoReply, error)
+	CheckDn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckDnRequest, CheckDnReply], error)
+	CheckSide(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckSideRequest, CheckSideReply], error)
 }
 
 type diskNodeAgentClient struct {
@@ -2363,44 +2367,35 @@ func (c *diskNodeAgentClient) GetDnSize(ctx context.Context, in *GetDnSizeReques
 	return out, nil
 }
 
-func (c *diskNodeAgentClient) SyncupDn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupDnRequest, SyncupDnReply], error) {
+func (c *diskNodeAgentClient) SyncupDn(ctx context.Context, in *SyncupDnRequest, opts ...grpc.CallOption) (*SyncupDnReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &DiskNodeAgent_ServiceDesc.Streams[0], DiskNodeAgent_SyncupDn_FullMethodName, cOpts...)
+	out := new(SyncupDnReply)
+	err := c.cc.Invoke(ctx, DiskNodeAgent_SyncupDn_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[SyncupDnRequest, SyncupDnReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_SyncupDnClient = grpc.BidiStreamingClient[SyncupDnRequest, SyncupDnReply]
-
-func (c *diskNodeAgentClient) SyncupSide(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupSideRequest, SyncupSideReply], error) {
+func (c *diskNodeAgentClient) SyncupSide(ctx context.Context, in *SyncupSideRequest, opts ...grpc.CallOption) (*SyncupSideReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &DiskNodeAgent_ServiceDesc.Streams[1], DiskNodeAgent_SyncupSide_FullMethodName, cOpts...)
+	out := new(SyncupSideReply)
+	err := c.cc.Invoke(ctx, DiskNodeAgent_SyncupSide_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[SyncupSideRequest, SyncupSideReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_SyncupSideClient = grpc.BidiStreamingClient[SyncupSideRequest, SyncupSideReply]
-
-func (c *diskNodeAgentClient) PushMigrBitmap(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushMigrBitmapRequest, PushMigrBitmapReply], error) {
+func (c *diskNodeAgentClient) PushMigrBitmap(ctx context.Context, in *PushMigrBitmapRequest, opts ...grpc.CallOption) (*PushMigrBitmapReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &DiskNodeAgent_ServiceDesc.Streams[2], DiskNodeAgent_PushMigrBitmap_FullMethodName, cOpts...)
+	out := new(PushMigrBitmapReply)
+	err := c.cc.Invoke(ctx, DiskNodeAgent_PushMigrBitmap_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[PushMigrBitmapRequest, PushMigrBitmapReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_PushMigrBitmapClient = grpc.BidiStreamingClient[PushMigrBitmapRequest, PushMigrBitmapReply]
 
 func (c *diskNodeAgentClient) GetDnInfo(ctx context.Context, in *GetDnInfoRequest, opts ...grpc.CallOption) (*GetDnInfoReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -2422,16 +2417,44 @@ func (c *diskNodeAgentClient) GetSideInfo(ctx context.Context, in *GetSideInfoRe
 	return out, nil
 }
 
+func (c *diskNodeAgentClient) CheckDn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckDnRequest, CheckDnReply], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &DiskNodeAgent_ServiceDesc.Streams[0], DiskNodeAgent_CheckDn_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[CheckDnRequest, CheckDnReply]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiskNodeAgent_CheckDnClient = grpc.BidiStreamingClient[CheckDnRequest, CheckDnReply]
+
+func (c *diskNodeAgentClient) CheckSide(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckSideRequest, CheckSideReply], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &DiskNodeAgent_ServiceDesc.Streams[1], DiskNodeAgent_CheckSide_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[CheckSideRequest, CheckSideReply]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiskNodeAgent_CheckSideClient = grpc.BidiStreamingClient[CheckSideRequest, CheckSideReply]
+
 // DiskNodeAgentServer is the server API for DiskNodeAgent service.
 // All implementations must embed UnimplementedDiskNodeAgentServer
 // for forward compatibility.
 type DiskNodeAgentServer interface {
 	GetDnSize(context.Context, *GetDnSizeRequest) (*GetDnSizeReply, error)
-	SyncupDn(grpc.BidiStreamingServer[SyncupDnRequest, SyncupDnReply]) error
-	SyncupSide(grpc.BidiStreamingServer[SyncupSideRequest, SyncupSideReply]) error
-	PushMigrBitmap(grpc.BidiStreamingServer[PushMigrBitmapRequest, PushMigrBitmapReply]) error
+	SyncupDn(context.Context, *SyncupDnRequest) (*SyncupDnReply, error)
+	SyncupSide(context.Context, *SyncupSideRequest) (*SyncupSideReply, error)
+	PushMigrBitmap(context.Context, *PushMigrBitmapRequest) (*PushMigrBitmapReply, error)
 	GetDnInfo(context.Context, *GetDnInfoRequest) (*GetDnInfoReply, error)
 	GetSideInfo(context.Context, *GetSideInfoRequest) (*GetSideInfoReply, error)
+	CheckDn(grpc.BidiStreamingServer[CheckDnRequest, CheckDnReply]) error
+	CheckSide(grpc.BidiStreamingServer[CheckSideRequest, CheckSideReply]) error
 	mustEmbedUnimplementedDiskNodeAgentServer()
 }
 
@@ -2445,20 +2468,26 @@ type UnimplementedDiskNodeAgentServer struct{}
 func (UnimplementedDiskNodeAgentServer) GetDnSize(context.Context, *GetDnSizeRequest) (*GetDnSizeReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDnSize not implemented")
 }
-func (UnimplementedDiskNodeAgentServer) SyncupDn(grpc.BidiStreamingServer[SyncupDnRequest, SyncupDnReply]) error {
-	return status.Error(codes.Unimplemented, "method SyncupDn not implemented")
+func (UnimplementedDiskNodeAgentServer) SyncupDn(context.Context, *SyncupDnRequest) (*SyncupDnReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncupDn not implemented")
 }
-func (UnimplementedDiskNodeAgentServer) SyncupSide(grpc.BidiStreamingServer[SyncupSideRequest, SyncupSideReply]) error {
-	return status.Error(codes.Unimplemented, "method SyncupSide not implemented")
+func (UnimplementedDiskNodeAgentServer) SyncupSide(context.Context, *SyncupSideRequest) (*SyncupSideReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncupSide not implemented")
 }
-func (UnimplementedDiskNodeAgentServer) PushMigrBitmap(grpc.BidiStreamingServer[PushMigrBitmapRequest, PushMigrBitmapReply]) error {
-	return status.Error(codes.Unimplemented, "method PushMigrBitmap not implemented")
+func (UnimplementedDiskNodeAgentServer) PushMigrBitmap(context.Context, *PushMigrBitmapRequest) (*PushMigrBitmapReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method PushMigrBitmap not implemented")
 }
 func (UnimplementedDiskNodeAgentServer) GetDnInfo(context.Context, *GetDnInfoRequest) (*GetDnInfoReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetDnInfo not implemented")
 }
 func (UnimplementedDiskNodeAgentServer) GetSideInfo(context.Context, *GetSideInfoRequest) (*GetSideInfoReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSideInfo not implemented")
+}
+func (UnimplementedDiskNodeAgentServer) CheckDn(grpc.BidiStreamingServer[CheckDnRequest, CheckDnReply]) error {
+	return status.Error(codes.Unimplemented, "method CheckDn not implemented")
+}
+func (UnimplementedDiskNodeAgentServer) CheckSide(grpc.BidiStreamingServer[CheckSideRequest, CheckSideReply]) error {
+	return status.Error(codes.Unimplemented, "method CheckSide not implemented")
 }
 func (UnimplementedDiskNodeAgentServer) mustEmbedUnimplementedDiskNodeAgentServer() {}
 func (UnimplementedDiskNodeAgentServer) testEmbeddedByValue()                       {}
@@ -2499,26 +2528,59 @@ func _DiskNodeAgent_GetDnSize_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _DiskNodeAgent_SyncupDn_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(DiskNodeAgentServer).SyncupDn(&grpc.GenericServerStream[SyncupDnRequest, SyncupDnReply]{ServerStream: stream})
+func _DiskNodeAgent_SyncupDn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncupDnRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiskNodeAgentServer).SyncupDn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiskNodeAgent_SyncupDn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiskNodeAgentServer).SyncupDn(ctx, req.(*SyncupDnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_SyncupDnServer = grpc.BidiStreamingServer[SyncupDnRequest, SyncupDnReply]
-
-func _DiskNodeAgent_SyncupSide_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(DiskNodeAgentServer).SyncupSide(&grpc.GenericServerStream[SyncupSideRequest, SyncupSideReply]{ServerStream: stream})
+func _DiskNodeAgent_SyncupSide_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncupSideRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiskNodeAgentServer).SyncupSide(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiskNodeAgent_SyncupSide_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiskNodeAgentServer).SyncupSide(ctx, req.(*SyncupSideRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_SyncupSideServer = grpc.BidiStreamingServer[SyncupSideRequest, SyncupSideReply]
-
-func _DiskNodeAgent_PushMigrBitmap_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(DiskNodeAgentServer).PushMigrBitmap(&grpc.GenericServerStream[PushMigrBitmapRequest, PushMigrBitmapReply]{ServerStream: stream})
+func _DiskNodeAgent_PushMigrBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PushMigrBitmapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DiskNodeAgentServer).PushMigrBitmap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DiskNodeAgent_PushMigrBitmap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DiskNodeAgentServer).PushMigrBitmap(ctx, req.(*PushMigrBitmapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type DiskNodeAgent_PushMigrBitmapServer = grpc.BidiStreamingServer[PushMigrBitmapRequest, PushMigrBitmapReply]
 
 func _DiskNodeAgent_GetDnInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetDnInfoRequest)
@@ -2556,6 +2618,20 @@ func _DiskNodeAgent_GetSideInfo_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DiskNodeAgent_CheckDn_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(DiskNodeAgentServer).CheckDn(&grpc.GenericServerStream[CheckDnRequest, CheckDnReply]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiskNodeAgent_CheckDnServer = grpc.BidiStreamingServer[CheckDnRequest, CheckDnReply]
+
+func _DiskNodeAgent_CheckSide_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(DiskNodeAgentServer).CheckSide(&grpc.GenericServerStream[CheckSideRequest, CheckSideReply]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DiskNodeAgent_CheckSideServer = grpc.BidiStreamingServer[CheckSideRequest, CheckSideReply]
+
 // DiskNodeAgent_ServiceDesc is the grpc.ServiceDesc for DiskNodeAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2568,6 +2644,18 @@ var DiskNodeAgent_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _DiskNodeAgent_GetDnSize_Handler,
 		},
 		{
+			MethodName: "SyncupDn",
+			Handler:    _DiskNodeAgent_SyncupDn_Handler,
+		},
+		{
+			MethodName: "SyncupSide",
+			Handler:    _DiskNodeAgent_SyncupSide_Handler,
+		},
+		{
+			MethodName: "PushMigrBitmap",
+			Handler:    _DiskNodeAgent_PushMigrBitmap_Handler,
+		},
+		{
 			MethodName: "GetDnInfo",
 			Handler:    _DiskNodeAgent_GetDnInfo_Handler,
 		},
@@ -2578,20 +2666,14 @@ var DiskNodeAgent_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "SyncupDn",
-			Handler:       _DiskNodeAgent_SyncupDn_Handler,
+			StreamName:    "CheckDn",
+			Handler:       _DiskNodeAgent_CheckDn_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
 		{
-			StreamName:    "SyncupSide",
-			Handler:       _DiskNodeAgent_SyncupSide_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
-		},
-		{
-			StreamName:    "PushMigrBitmap",
-			Handler:       _DiskNodeAgent_PushMigrBitmap_Handler,
+			StreamName:    "CheckSide",
+			Handler:       _DiskNodeAgent_CheckSide_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
@@ -2608,6 +2690,8 @@ const (
 	ControllerNodeAgent_GetCntlrInfo_FullMethodName    = "/ControllerNodeAgent/GetCntlrInfo"
 	ControllerNodeAgent_GetThinDeviceBm_FullMethodName = "/ControllerNodeAgent/GetThinDeviceBm"
 	ControllerNodeAgent_GetLegBm_FullMethodName        = "/ControllerNodeAgent/GetLegBm"
+	ControllerNodeAgent_CheckCn_FullMethodName         = "/ControllerNodeAgent/CheckCn"
+	ControllerNodeAgent_CheckCntlr_FullMethodName      = "/ControllerNodeAgent/CheckCntlr"
 )
 
 // ControllerNodeAgentClient is the client API for ControllerNodeAgent service.
@@ -2615,13 +2699,15 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ControllerNodeAgentClient interface {
 	GetCnSize(ctx context.Context, in *GetCnSizeRequest, opts ...grpc.CallOption) (*GetCnSizeReply, error)
-	SyncupCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupCnRequest, SyncupCnReply], error)
-	SyncupCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupCntlrRequest, SyncupCntlrReply], error)
-	PushCloneBitmap(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushCloneBitmapRequest, PushCloneBitmapReply], error)
+	SyncupCn(ctx context.Context, in *SyncupCnRequest, opts ...grpc.CallOption) (*SyncupCnReply, error)
+	SyncupCntlr(ctx context.Context, in *SyncupCntlrRequest, opts ...grpc.CallOption) (*SyncupCntlrReply, error)
+	PushCloneBitmap(ctx context.Context, in *PushCloneBitmapRequest, opts ...grpc.CallOption) (*PushCloneBitmapReply, error)
 	GetCnInfo(ctx context.Context, in *GetCnInfoRequest, opts ...grpc.CallOption) (*GetCnInfoReply, error)
 	GetCntlrInfo(ctx context.Context, in *GetCntlrInfoRequest, opts ...grpc.CallOption) (*GetCntlrInfoReply, error)
 	GetThinDeviceBm(ctx context.Context, in *GetThinDeviceBmRequest, opts ...grpc.CallOption) (*GetThinDeviceBmReply, error)
 	GetLegBm(ctx context.Context, in *GetLegBmRequest, opts ...grpc.CallOption) (*GetLegBmReply, error)
+	CheckCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply], error)
+	CheckCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply], error)
 }
 
 type controllerNodeAgentClient struct {
@@ -2642,44 +2728,35 @@ func (c *controllerNodeAgentClient) GetCnSize(ctx context.Context, in *GetCnSize
 	return out, nil
 }
 
-func (c *controllerNodeAgentClient) SyncupCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupCnRequest, SyncupCnReply], error) {
+func (c *controllerNodeAgentClient) SyncupCn(ctx context.Context, in *SyncupCnRequest, opts ...grpc.CallOption) (*SyncupCnReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[0], ControllerNodeAgent_SyncupCn_FullMethodName, cOpts...)
+	out := new(SyncupCnReply)
+	err := c.cc.Invoke(ctx, ControllerNodeAgent_SyncupCn_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[SyncupCnRequest, SyncupCnReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_SyncupCnClient = grpc.BidiStreamingClient[SyncupCnRequest, SyncupCnReply]
-
-func (c *controllerNodeAgentClient) SyncupCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[SyncupCntlrRequest, SyncupCntlrReply], error) {
+func (c *controllerNodeAgentClient) SyncupCntlr(ctx context.Context, in *SyncupCntlrRequest, opts ...grpc.CallOption) (*SyncupCntlrReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[1], ControllerNodeAgent_SyncupCntlr_FullMethodName, cOpts...)
+	out := new(SyncupCntlrReply)
+	err := c.cc.Invoke(ctx, ControllerNodeAgent_SyncupCntlr_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[SyncupCntlrRequest, SyncupCntlrReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_SyncupCntlrClient = grpc.BidiStreamingClient[SyncupCntlrRequest, SyncupCntlrReply]
-
-func (c *controllerNodeAgentClient) PushCloneBitmap(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PushCloneBitmapRequest, PushCloneBitmapReply], error) {
+func (c *controllerNodeAgentClient) PushCloneBitmap(ctx context.Context, in *PushCloneBitmapRequest, opts ...grpc.CallOption) (*PushCloneBitmapReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[2], ControllerNodeAgent_PushCloneBitmap_FullMethodName, cOpts...)
+	out := new(PushCloneBitmapReply)
+	err := c.cc.Invoke(ctx, ControllerNodeAgent_PushCloneBitmap_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &grpc.GenericClientStream[PushCloneBitmapRequest, PushCloneBitmapReply]{ClientStream: stream}
-	return x, nil
+	return out, nil
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_PushCloneBitmapClient = grpc.BidiStreamingClient[PushCloneBitmapRequest, PushCloneBitmapReply]
 
 func (c *controllerNodeAgentClient) GetCnInfo(ctx context.Context, in *GetCnInfoRequest, opts ...grpc.CallOption) (*GetCnInfoReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -2721,18 +2798,46 @@ func (c *controllerNodeAgentClient) GetLegBm(ctx context.Context, in *GetLegBmRe
 	return out, nil
 }
 
+func (c *controllerNodeAgentClient) CheckCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[0], ControllerNodeAgent_CheckCn_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[CheckCnRequest, CheckCnReply]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControllerNodeAgent_CheckCnClient = grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply]
+
+func (c *controllerNodeAgentClient) CheckCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControllerNodeAgent_ServiceDesc.Streams[1], ControllerNodeAgent_CheckCntlr_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[CheckCntlrRequest, CheckCntlrReply]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControllerNodeAgent_CheckCntlrClient = grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply]
+
 // ControllerNodeAgentServer is the server API for ControllerNodeAgent service.
 // All implementations must embed UnimplementedControllerNodeAgentServer
 // for forward compatibility.
 type ControllerNodeAgentServer interface {
 	GetCnSize(context.Context, *GetCnSizeRequest) (*GetCnSizeReply, error)
-	SyncupCn(grpc.BidiStreamingServer[SyncupCnRequest, SyncupCnReply]) error
-	SyncupCntlr(grpc.BidiStreamingServer[SyncupCntlrRequest, SyncupCntlrReply]) error
-	PushCloneBitmap(grpc.BidiStreamingServer[PushCloneBitmapRequest, PushCloneBitmapReply]) error
+	SyncupCn(context.Context, *SyncupCnRequest) (*SyncupCnReply, error)
+	SyncupCntlr(context.Context, *SyncupCntlrRequest) (*SyncupCntlrReply, error)
+	PushCloneBitmap(context.Context, *PushCloneBitmapRequest) (*PushCloneBitmapReply, error)
 	GetCnInfo(context.Context, *GetCnInfoRequest) (*GetCnInfoReply, error)
 	GetCntlrInfo(context.Context, *GetCntlrInfoRequest) (*GetCntlrInfoReply, error)
 	GetThinDeviceBm(context.Context, *GetThinDeviceBmRequest) (*GetThinDeviceBmReply, error)
 	GetLegBm(context.Context, *GetLegBmRequest) (*GetLegBmReply, error)
+	CheckCn(grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]) error
+	CheckCntlr(grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]) error
 	mustEmbedUnimplementedControllerNodeAgentServer()
 }
 
@@ -2746,14 +2851,14 @@ type UnimplementedControllerNodeAgentServer struct{}
 func (UnimplementedControllerNodeAgentServer) GetCnSize(context.Context, *GetCnSizeRequest) (*GetCnSizeReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetCnSize not implemented")
 }
-func (UnimplementedControllerNodeAgentServer) SyncupCn(grpc.BidiStreamingServer[SyncupCnRequest, SyncupCnReply]) error {
-	return status.Error(codes.Unimplemented, "method SyncupCn not implemented")
+func (UnimplementedControllerNodeAgentServer) SyncupCn(context.Context, *SyncupCnRequest) (*SyncupCnReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncupCn not implemented")
 }
-func (UnimplementedControllerNodeAgentServer) SyncupCntlr(grpc.BidiStreamingServer[SyncupCntlrRequest, SyncupCntlrReply]) error {
-	return status.Error(codes.Unimplemented, "method SyncupCntlr not implemented")
+func (UnimplementedControllerNodeAgentServer) SyncupCntlr(context.Context, *SyncupCntlrRequest) (*SyncupCntlrReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncupCntlr not implemented")
 }
-func (UnimplementedControllerNodeAgentServer) PushCloneBitmap(grpc.BidiStreamingServer[PushCloneBitmapRequest, PushCloneBitmapReply]) error {
-	return status.Error(codes.Unimplemented, "method PushCloneBitmap not implemented")
+func (UnimplementedControllerNodeAgentServer) PushCloneBitmap(context.Context, *PushCloneBitmapRequest) (*PushCloneBitmapReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method PushCloneBitmap not implemented")
 }
 func (UnimplementedControllerNodeAgentServer) GetCnInfo(context.Context, *GetCnInfoRequest) (*GetCnInfoReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetCnInfo not implemented")
@@ -2766,6 +2871,12 @@ func (UnimplementedControllerNodeAgentServer) GetThinDeviceBm(context.Context, *
 }
 func (UnimplementedControllerNodeAgentServer) GetLegBm(context.Context, *GetLegBmRequest) (*GetLegBmReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetLegBm not implemented")
+}
+func (UnimplementedControllerNodeAgentServer) CheckCn(grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]) error {
+	return status.Error(codes.Unimplemented, "method CheckCn not implemented")
+}
+func (UnimplementedControllerNodeAgentServer) CheckCntlr(grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]) error {
+	return status.Error(codes.Unimplemented, "method CheckCntlr not implemented")
 }
 func (UnimplementedControllerNodeAgentServer) mustEmbedUnimplementedControllerNodeAgentServer() {}
 func (UnimplementedControllerNodeAgentServer) testEmbeddedByValue()                             {}
@@ -2806,26 +2917,59 @@ func _ControllerNodeAgent_GetCnSize_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ControllerNodeAgent_SyncupCn_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(ControllerNodeAgentServer).SyncupCn(&grpc.GenericServerStream[SyncupCnRequest, SyncupCnReply]{ServerStream: stream})
+func _ControllerNodeAgent_SyncupCn_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncupCnRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControllerNodeAgentServer).SyncupCn(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControllerNodeAgent_SyncupCn_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControllerNodeAgentServer).SyncupCn(ctx, req.(*SyncupCnRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_SyncupCnServer = grpc.BidiStreamingServer[SyncupCnRequest, SyncupCnReply]
-
-func _ControllerNodeAgent_SyncupCntlr_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(ControllerNodeAgentServer).SyncupCntlr(&grpc.GenericServerStream[SyncupCntlrRequest, SyncupCntlrReply]{ServerStream: stream})
+func _ControllerNodeAgent_SyncupCntlr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncupCntlrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControllerNodeAgentServer).SyncupCntlr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControllerNodeAgent_SyncupCntlr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControllerNodeAgentServer).SyncupCntlr(ctx, req.(*SyncupCntlrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_SyncupCntlrServer = grpc.BidiStreamingServer[SyncupCntlrRequest, SyncupCntlrReply]
-
-func _ControllerNodeAgent_PushCloneBitmap_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(ControllerNodeAgentServer).PushCloneBitmap(&grpc.GenericServerStream[PushCloneBitmapRequest, PushCloneBitmapReply]{ServerStream: stream})
+func _ControllerNodeAgent_PushCloneBitmap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PushCloneBitmapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControllerNodeAgentServer).PushCloneBitmap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControllerNodeAgent_PushCloneBitmap_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControllerNodeAgentServer).PushCloneBitmap(ctx, req.(*PushCloneBitmapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type ControllerNodeAgent_PushCloneBitmapServer = grpc.BidiStreamingServer[PushCloneBitmapRequest, PushCloneBitmapReply]
 
 func _ControllerNodeAgent_GetCnInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetCnInfoRequest)
@@ -2899,6 +3043,20 @@ func _ControllerNodeAgent_GetLegBm_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControllerNodeAgent_CheckCn_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControllerNodeAgentServer).CheckCn(&grpc.GenericServerStream[CheckCnRequest, CheckCnReply]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControllerNodeAgent_CheckCnServer = grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]
+
+func _ControllerNodeAgent_CheckCntlr_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControllerNodeAgentServer).CheckCntlr(&grpc.GenericServerStream[CheckCntlrRequest, CheckCntlrReply]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControllerNodeAgent_CheckCntlrServer = grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]
+
 // ControllerNodeAgent_ServiceDesc is the grpc.ServiceDesc for ControllerNodeAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2909,6 +3067,18 @@ var ControllerNodeAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetCnSize",
 			Handler:    _ControllerNodeAgent_GetCnSize_Handler,
+		},
+		{
+			MethodName: "SyncupCn",
+			Handler:    _ControllerNodeAgent_SyncupCn_Handler,
+		},
+		{
+			MethodName: "SyncupCntlr",
+			Handler:    _ControllerNodeAgent_SyncupCntlr_Handler,
+		},
+		{
+			MethodName: "PushCloneBitmap",
+			Handler:    _ControllerNodeAgent_PushCloneBitmap_Handler,
 		},
 		{
 			MethodName: "GetCnInfo",
@@ -2929,20 +3099,14 @@ var ControllerNodeAgent_ServiceDesc = grpc.ServiceDesc{
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "SyncupCn",
-			Handler:       _ControllerNodeAgent_SyncupCn_Handler,
+			StreamName:    "CheckCn",
+			Handler:       _ControllerNodeAgent_CheckCn_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},
 		{
-			StreamName:    "SyncupCntlr",
-			Handler:       _ControllerNodeAgent_SyncupCntlr_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
-		},
-		{
-			StreamName:    "PushCloneBitmap",
-			Handler:       _ControllerNodeAgent_PushCloneBitmap_Handler,
+			StreamName:    "CheckCntlr",
+			Handler:       _ControllerNodeAgent_CheckCntlr_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

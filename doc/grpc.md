@@ -5,8 +5,9 @@ Status: **normative**. Read `log.md` first — this document reuses
 follows its rules (Info records, typed attributes).
 
 Required background: `schema.proto` (services `Gateway`, `DiskNodeAgent`,
-`ControllerNodeAgent`; note the four `Syncup*`/`Push*` RPCs are bidirectional
-streams), `architecture.md` §1/§9/§10 (who calls whom), `log.md`.
+`ControllerNodeAgent`; note that the four `Check*` RPCs — `CheckDn`, `CheckSide`,
+`CheckCn`, `CheckCntlr` — are bidirectional streams and every other RPC is unary),
+`architecture.md` §1/§9/§10 (who calls whom), `log.md`.
 
 ---
 
@@ -107,10 +108,11 @@ L4. Stream rules: `stream open` records carry `method` (+ `error?` if opening
 L5. If a message is not a `proto.Message` (defensive; should not happen with
     generated code), fall back to `slog.Any("data", msg)`.
 
-L6. The long-lived `Syncup*`/`Push*` streams of `architecture.md` §9 are
-    multiplexed and reused; with per-message logging each pushed bitmap chunk
-    and each syncup round produces its own records, which is exactly the
-    intent of the "all grpc client/server request/reply" rule.
+L6. The long-lived `Check*` streams of `architecture.md` §9.7 carry one
+    request/reply pair per health round; with per-message logging each round
+    produces its own records, just as every unary `Syncup*`/`Push*Bitmap` call
+    produces one request and one reply record — which is exactly the intent of
+    the "all grpc client/server request/reply" rule.
 
 ## 3. Reference implementation — `common/interceptor.go` (complete)
 
@@ -405,24 +407,35 @@ grpcServer := grpc.NewServer(
 
 | binary | server interceptors on | client interceptors on |
 |---|---|---|
-| dnv-gateway | its `Gateway` gRPC server | its connections to dn/cn agents (`GetDnSize`/`GetCnSize`, `Inspect*`, bitmap reads) |
-| dnv-worker | — | its connections to dn/cn agents (`Syncup*`, `Push*Bitmap`, `Get*Info`) |
+| dnv-gateway | its `Gateway` gRPC server | its connections to dn/cn agents (`GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, the `Get*Bm` bitmap reads) |
+| dnv-worker | — | its connections to dn/cn agents (`Syncup*`, `Push*Bitmap`, the `Check*` streams — the worker never calls `Get*Info`) |
 | dnv-agent dn / cn | its `DiskNodeAgent` / `ControllerNodeAgent` server | — |
 | dnvctl | — | its connection to the gateway (mints a trace id per invocation, T4) |
 | dnv-cdc | — | — (talks only to etcd; excluded, see §1) |
 
 ## 5. Example output
 
-One `PushMigrBitmap` chunk, worker side then agent side:
+One (unary) `PushMigrBitmap` chunk, worker side then agent side:
 
 ```json
-{"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":0,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":0,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{"code":0}},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"...","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"...","level":"INFO","msg":"grpc server request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"...","level":"INFO","msg":"grpc server reply","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{}},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"...","level":"INFO","msg":"grpc client reply","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{}},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
-(`agent_reply.code = 0` may render as `{}`/absent because proto3 zero values
-are unpopulated; that is acceptable.)
+and one round on a long-lived `CheckDn` stream:
+
+```json
+{"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"vg_info":{"res_name":"dnv-dn-ebada5168620c5fe-0000000000000003","status":"RES_STATUS_OK","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc client recv","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"vg_info":{"res_name":"dnv-dn-ebada5168620c5fe-0000000000000003","status":"RES_STATUS_OK","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
+```
+
+(`agent_reply` renders as `{}` because `code = 0` and an empty `details` are proto3
+zero values and therefore unpopulated; a zero-valued scalar such as `bm_idx = 0` is
+omitted altogether. That is acceptable.)
 
 ## 6. Tests and acceptance checklist
 
@@ -438,18 +451,18 @@ Unit tests (`common/interceptor_test.go`) using
    `"t-123"` inside the handler.
 2. **No minting**: the same call without a ctx trace id produces no
    `trace_id` metadata key.
-3. **Stream propagation**: a stub `SyncupDn` echo handler asserts
+3. **Stream propagation**: a stub `CheckDn` echo handler asserts
    `TraceIdFromCtx(stream.Context())` inside the handler (verifies the
    `Context()` override).
 4. **Log records**: install a capturing handler (JSONHandler over a
    `bytes.Buffer` wrapped in `TraceIdHandler`, as in `log.md` §7) around a
-   unary call and a two-message stream exchange; assert the exact `msg`
-   strings of L2 appear in order, each with `method`, `data` and `trace_id`;
-   assert no record is emitted for the terminating `io.EOF`.
+   unary call and a two-round `CheckDn` stream exchange; assert the exact
+   `msg` strings of L2 appear in order, each with `method`, `data` and
+   `trace_id`; assert no record is emitted for the terminating `io.EOF`.
 5. **Bytes redaction**: send a `PushMigrBitmapRequest` with a 4-byte bitmap
-   through the stream; assert the captured `grpc client send` /
-   `grpc server recv` records contain `"bitmap":"<4 bytes>"` and not the
-   payload.
+   through the (unary) `PushMigrBitmap`; assert the captured
+   `grpc client request` / `grpc server request` records contain
+   `"bitmap":"<4 bytes>"` and not the payload.
 6. **Error path**: a handler returning `status.Error(codes.Aborted, "boom")`
    yields a `grpc server reply` / `grpc client reply` record with the `error`
    attribute and no `data` attribute.

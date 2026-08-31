@@ -5,7 +5,7 @@ PROTOC ?= protoc
 # The cmd/ directories that already contain Go sources.
 CMDS := $(sort $(patsubst cmd/%/,%,$(dir $(wildcard cmd/*/*.go))))
 
-.PHONY: all gen build vet test clean
+.PHONY: all gen fmt build vet test clean
 
 all: build
 
@@ -18,6 +18,14 @@ gen:
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		pb/schema.proto
+
+# Format sources: gofmt for Go, clang-format for the proto (settings in
+# .clang-format; the binary comes from `pip install clang-format`).
+CLANG_FORMAT ?= clang-format
+
+fmt:
+	gofmt -w ./common
+	$(CLANG_FORMAT) -i pb/schema.proto
 
 build:
 	@for c in $(CMDS); do \

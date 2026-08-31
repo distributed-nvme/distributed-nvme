@@ -227,10 +227,10 @@ func (nf *NameFmt) DnMigrFinalName(
 	)
 }
 
-func getShortId(clusterId, nodeId uint64) uint64 {
+func getShortId(clusterId, nodeId uint64) uint32 {
 	h := fnv.New64a()
 	fmt.Fprintf(h, "%016x%016x", clusterId, nodeId)
-	return h.Sum64() & 0x0000FFFFFFFFFFFF
+	return uint32(h.Sum64())
 }
 
 func (nf *NameFmt) CnMdDevName(
@@ -246,7 +246,7 @@ func (nf *NameFmt) CnMdDevName(
 		sliceIdx |= 0x80
 	}
 	return fmt.Sprintf(
-		"%012x%016x%02x%02x",
+		"%08x%016x%02x%02x",
 		shortId,
 		spId,
 		sliceIdx,
@@ -254,6 +254,9 @@ func (nf *NameFmt) CnMdDevName(
 	)
 }
 
+// CnMdArrayName is the array's superblock name (mdadm --name). The fixed
+// "dnv-" prefix is what the udev guard matches (ENV{MD_NAME}=="dnv-*",
+// architecture.md §4.3 / Appendix A); 26 chars, within mdadm's 32-byte limit.
 func (nf *NameFmt) CnMdArrayName(
 	spId uint64,
 	sliceIdx uint32,
@@ -264,7 +267,8 @@ func (nf *NameFmt) CnMdArrayName(
 		sliceIdx |= 0x80
 	}
 	return fmt.Sprintf(
-		"%016x-%02x-%02x",
+		"%s-%016x-%02x-%02x",
+		DnvPrefix,
 		spId,
 		sliceIdx,
 		grpIdx,
@@ -379,7 +383,7 @@ func (nf *NameFmt) CnNsDevName(
 	clusterId uint64,
 	cnId uint64,
 	spId uint64,
-	tdId uint64,
+	nsId uint64,
 ) string {
 	return fmt.Sprintf(
 		"%s-%016x-%016x-%01x-%016x-%016x",
@@ -388,7 +392,7 @@ func (nf *NameFmt) CnNsDevName(
 		cnId,
 		dmKindCnNsDev,
 		spId,
-		tdId,
+		nsId,
 	)
 }
 
@@ -569,16 +573,14 @@ func (nf *NameFmt) MigrSrcNqn(
 
 func (nf *NameFmt) XferNqn(
 	clusterId uint64,
-	dnId uint64,
 	spId uint64,
 	xferId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s:%01x:%016x:%016x:%016x:%016x",
+		"%s:%01x:%016x:%016x:%016x",
 		nf.nqnPrefix,
 		nqnKindXfer,
 		clusterId,
-		dnId,
 		spId,
 		xferId,
 	)

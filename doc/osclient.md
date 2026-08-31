@@ -24,7 +24,8 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
   the logging rules of `log.md` R8.1/R8.2 enforceable and makes every consumer
   unit-testable via `FakeOsClient`.
 * Dependencies: `golang.org/x/sync/semaphore`, `google.golang.org/protobuf`.
-  Go ≥ 1.21 (also needed for `exec.Cmd.Cancel`/`WaitDelay`, Go 1.20+).
+  Go ≥ 1.20 for `exec.Cmd.Cancel`/`WaitDelay`; the module itself pins
+  `go 1.26.5` in `go.mod`.
 
 ## 2. Interface (normative, verbatim)
 
@@ -485,7 +486,7 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 
 ```json
 {"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"lvcreate","args":["--addtag","not_trimmed","--name","0000000000000011-0000000000000016","--extents","10","dnv-dn-ebada5168620c5fe-0000000000000003"],"stdin":"","stdout":"  Logical volume \"...\" created.\n","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
-{"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/tmp/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":214,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"ext_cnt":10,"primary_cn_id":5,"sp_level":"SP_LEVEL_READWRITE"},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/tmp/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":34,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"side_conf":{"ext_cnt":10,"cntlid_slot":1,"primary_cn_id":5,"standby_id_list":[6]}},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
 ## 8. Tests and acceptance checklist

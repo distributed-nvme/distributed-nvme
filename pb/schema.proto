@@ -26,12 +26,17 @@ message QosRatio {
 }
 
 message DmCloneConf {
-	uint32 hydration_threshold  = 1;
-	uint32 hydration_batch_size = 2;
+    uint32 hydration_threshold = 1;
+    uint32 hydration_batch_size = 2;
 }
 
 message DmPoolConf {
     uint64 data_block_size = 1;
+    // Thin pool low water mark.
+    // 0 means using DefaultPoolLowWatermarkPct
+    // 1 - 100 means percentage
+    // >100 means won't grow a slice automatically.
+    uint32 low_water_mark_pct = 2;
 }
 
 message RedundNone {}
@@ -42,10 +47,10 @@ message RedundMdRaid1 {
 }
 
 message RedundConf {
-   oneof RedunKind {
-       RedundNone redund_none = 1;
-	   RedundMdRaid1 redund_md_raid1 = 2;
-   }
+    oneof RedunKind {
+        RedundNone redund_none = 1;
+        RedundMdRaid1 redund_md_raid1 = 2;
+    }
 }
 
 // Just a placeholder
@@ -53,8 +58,8 @@ message BdevFeatureNone {}
 
 message BdevFeature {
     oneof BdevFeatureKind {
-	    BdevFeatureNone bdev_feature_none = 1;
-	}
+        BdevFeatureNone bdev_feature_none = 1;
+    }
 }
 
 message DmRaid0Conf {
@@ -64,11 +69,11 @@ message DmRaid0Conf {
 message BdevConf {
     DmPoolConf dm_pool_conf = 1;
     DmRaid0Conf dm_raid0_conf = 2;
-	RedundConf redund_conf = 3;
-	repeated BdevFeature bdev_feature_list = 4;
+    RedundConf redund_conf = 3;
+    repeated BdevFeature bdev_feature_list = 4;
 }
 
-// For all EventThreahold feilds, 0 means using the
+// For all EventThreshold fields, 0 means using the
 // default value.
 message EventThreshold {
     // How many seconds to wait before selecting a
@@ -83,9 +88,6 @@ message EventThreshold {
     // How long time to wait before allocating a
     // new side when the leg is unhealthy.
     uint32 leg_unhealthy = 4;
-    // Thin pool low water mark percentage,
-    // 1 - 99
-    uint32 pool_low_water_mark_pct = 5;
 }
 
 message SidePointer {
@@ -102,8 +104,8 @@ message CntlrPointer {
 message Side {
     uint64 side_id = 1;
     string addr_port = 2;
-	NvmeTrConf nvme_tr_conf = 3;
-    uint32 cntlid_slot = 4;
+    uint32 cntlid_slot = 3;
+    NvmeTrConf nvme_tr_conf = 4;
     uint64 err_epoch = 5;
 }
 
@@ -127,9 +129,9 @@ message Namespace {
     uint64 ns_id = 1;
     uint32 ns_idx = 2;
     uint64 td_id = 3;
-    string dev_uuid = 5;
-    string dev_nguid = 6;
-    bool suspended = 7;
+    string dev_uuid = 4;
+    string dev_nguid = 5;
+    bool suspended = 6;
 }
 
 enum SpLevel {
@@ -178,46 +180,59 @@ message ResInfo {
 }
 
 message DnInfo {
-    uint64 revision = 1;
-    ResInfo disk_info = 2;
-    ResInfo vg_info = 3;
-    ResInfo port_info = 4;
+    ResInfo disk_info = 1;
+    ResInfo vg_info = 2;
+    ResInfo port_info = 3;
+    ResInfo migr_pv_info = 4;
+    ResInfo migr_vg_info = 5;
 }
 
 message CnInfo {
-    uint64 revision = 1;
+    ResInfo port_info = 1;
     ResInfo tmpfs_info = 2;
-    ResInfo port_info = 3;
+    ResInfo tmp_file_info = 3;
+    ResInfo loop_dev_info = 4;
+    ResInfo clone_vg_info = 5;
 }
 
 message SideInfo {
-    uint64 revision = 1;
-    ResInfo lv_info = 2;
-    map<uint64, ResInfo> cntlr_id_to_dm_error = 3;
-    map<uint64, ResInfo> cntlr_id_to_dm_linear = 4;
-    map<uint64, ResInfo> cntlr_id_to_nvmeof = 5;
-    ResInfo migr_target = 6;
-    ResInfo migr_dm_clone = 7;
+    message MigrSrcInfo {
+        ResInfo dm_linear_info = 1;
+        ResInfo nvmeof_info = 2;
+    }
+    message MigrDstInfo {
+        ResInfo target_info = 1;
+        ResInfo dm_clone_info = 2;
+    }
+    ResInfo lv_info = 1;
+    map<uint64, ResInfo> cn_id_to_dm_error = 2;
+    map<uint64, ResInfo> cn_id_to_dm_linear = 3;
+    map<uint64, ResInfo> cn_id_to_nvmeof = 4;
+    MigrSrcInfo migr_src_info = 5;
+    MigrDstInfo migr_dst_info = 6;
 }
 
 message CntlrInfo {
-    uint64 revision = 1;
-    map<uint64, ResInfo> ss_id_to_subsystem = 2;
-    map<uint64, ResInfo> ns_id_to_namespace = 3;
-    map<uint64, ResInfo> ns_id_to_dm_linear = 4;
-    map<uint64, ResInfo> td_id_to_raid0 = 5;
-    map<uint64, ResInfo> td_id_to_dm_error = 6;
-    map<uint64, ResInfo> slice_id_to_dm_thin = 7;
-    map<uint64, ResInfo> slice_id_to_dm_pool = 8;
-    map<uint64, ResInfo> slice_id_to_meta = 9;
-    map<uint64, ResInfo> slice_id_to_data = 10;
-    map<uint64, ResInfo> grp_id_to_md_raid = 11;
-    map<uint64, ResInfo> leg_id_to_leg = 12;
-    map<uint64, ResInfo> xfer_id_to_dm_linear = 13;
-    map<uint64, ResInfo> xfer_id_to_subsystem = 14;
-    map<uint64, ResInfo> xfer_id_to_namespace = 15;
-    map<uint64, ResInfo> clone_id_to_target = 16;
-    map<uint64, ResInfo> clone_id_to_dm_clone = 17;
+    message ThinInfo {
+        map<uint64, ResInfo> slice_id_to_dm_thin = 1;
+    }
+    map<uint64, ResInfo> ss_id_to_subsystem = 1;
+    map<uint64, ResInfo> ns_id_to_namespace = 2;
+    map<uint64, ResInfo> ns_id_to_dm_linear = 3;
+    map<uint64, ResInfo> td_id_to_raid0 = 4;
+    map<uint64, ResInfo> td_id_to_dm_error = 5;
+    map<uint64, ThinInfo> td_id_to_thin_info = 6;
+    map<uint64, ResInfo> slice_id_to_dm_pool = 7;
+    map<uint64, ResInfo> slice_id_to_meta = 8;
+    map<uint64, ResInfo> slice_id_to_data = 9;
+    map<uint64, ResInfo> grp_id_to_md_raid = 10;
+    map<uint64, ResInfo> leg_id_to_leg = 11;
+    map<uint64, ResInfo> xfer_id_to_dm_linear = 12;
+    map<uint64, ResInfo> xfer_id_to_subsystem = 13;
+    map<uint64, ResInfo> xfer_id_to_namespace = 14;
+    map<uint64, ResInfo> clone_id_to_target = 15;
+    map<uint64, ResInfo> clone_id_to_dm_clone = 16;
+    map<uint64, ResInfo> clone_id_to_meta = 17;
 }
 
 message BitmapInfo {
@@ -238,6 +253,13 @@ message AllocConf {
     uint32 cn_batch_size = 2;
 }
 
+message HealthCheckConf {
+    uint32 dn_interval = 1;
+    uint32 cn_interval = 2;
+    uint32 side_interval = 3;
+    uint32 cntlr_interval = 4;
+}
+
 // {dnv_prefix} cluster_conf {cluster_name}
 message ClusterConf {
     uint64 creation_epoch = 1;
@@ -245,6 +267,7 @@ message ClusterConf {
     BdevConf bdev_conf = 3;
     DnBinConf dn_bin_conf = 4;
     AllocConf alloc_conf = 5;
+    HealthCheckConf health_check_conf = 6;
 }
 
 // {dnv_prefix} dn_global {cluster_id}
@@ -334,8 +357,8 @@ message SpConf {
     uint32 next_dev_id = 4;
     BdevConf bdev_conf = 5;
     EventThreshold event_threshold = 6;
-	repeated uint32 cntlid_slot_list = 7;
-	SpLevel sp_level = 8;
+    repeated uint32 cntlid_slot_list = 7;
+    SpLevel sp_level = 8;
     bool deleting = 9;
     repeated uint64 cntlr_id_list = 10;
     repeated uint64 slice_id_list = 11;
@@ -348,8 +371,8 @@ message SpConf {
 
 // {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
 message Cntlr {
-    string cn_addr_port = 1;
-	NvmeTrConf nvme_tr_conf = 2;
+    string addr_port = 1;
+    NvmeTrConf nvme_tr_conf = 2;
     uint32 cntlid_slot = 3;
     bool primary = 4;
     bool disabled = 5;
@@ -434,6 +457,7 @@ message CreateClusterRequest {
     BdevConf bdev_conf = 3;
     DnBinConf dn_bin_conf = 4;
     AllocConf alloc_conf = 5;
+    HealthCheckConf health_check_conf = 6;
 }
 
 message CreateClusterReply {
@@ -468,6 +492,7 @@ message ListClustersRequest {
 
 message ListClustersReply {
     repeated string cluster_name = 1;
+    string page_token = 2;
 }
 
 message CreateDiskNodeRequest {
@@ -514,11 +539,6 @@ message ListDiskNodesReply {
     string page_token = 2;
 }
 
-message InspectDiskNodeRequest {
-    string cluster_name = 1;
-    string addr_port = 2;
-}
-
 message UpdateDiskNodeDisabledRequest {
     string cluster_name = 1;
     string addr_port = 2;
@@ -530,8 +550,14 @@ message UpdateDiskNodeDisabledReply {
     uint64 dn_id = 1;
 }
 
+message InspectDiskNodeRequest {
+    string cluster_name = 1;
+    string addr_port = 2;
+}
+
 message InspectDiskNodeReply {
-    DnInfo dn_info = 1;
+    uint64 revision = 1;
+    DnInfo dn_info = 2;
 }
 
 message CreateControllerNodeRequest {
@@ -595,7 +621,8 @@ message InspectControllerNodeRequest {
 }
 
 message InspectControllerNodeReply {
-    CnInfo cn_info = 1;
+    uint64 revision = 1;
+    CnInfo cn_info = 2;
 }
 
 message CreateStoragePoolRequest {
@@ -603,7 +630,7 @@ message CreateStoragePoolRequest {
     string sp_name = 2;
     BdevConf bdev_conf = 3;
     EventThreshold event_threshold = 4;
-	repeated uint32 cntlid_slot_list = 5;
+    repeated uint32 cntlid_slot_list = 5;
     uint32 cntlr_cnt = 6;
     uint32 slice_cnt = 7;
     uint64 init_ext_cnt = 8;
@@ -651,9 +678,9 @@ message ListStoragePoolsReply {
 
 message UpdateStoragePoolCntlidSlotListRequest {
     string cluster_name = 1;
-	string sp_name = 2;
+    string sp_name = 2;
     SpRev sp_rev = 3;
-	repeated uint32 cntlid_slot_list = 4;
+    repeated uint32 cntlid_slot_list = 4;
 }
 
 message UpdateStoragePoolCntlidSlotListReply {
@@ -662,9 +689,9 @@ message UpdateStoragePoolCntlidSlotListReply {
 
 message UpdateStoragePoolLevelRequest {
     string cluster_name = 1;
-	string sp_name = 2;
+    string sp_name = 2;
     SpRev sp_rev = 3;
-	SpLevel sp_level = 4;
+    SpLevel sp_level = 4;
 }
 
 message UpdateStoragePoolLevelReply {
@@ -728,7 +755,7 @@ message UpdateCntlrEnabledRequest {
 
 message UpdateCntlrEnabledReply {
     uint64 cntlr_id = 1;
-	bool enabled = 2;
+    bool enabled = 2;
 }
 
 message InspectCntlrRequest {
@@ -738,7 +765,8 @@ message InspectCntlrRequest {
 }
 
 message InspectCntlrReply {
-    CntlrInfo cntlr_info = 1;
+    uint64 revision = 1;
+    CntlrInfo cntlr_info = 2;
 }
 
 message InspectSideRequest {
@@ -748,7 +776,8 @@ message InspectSideRequest {
 }
 
 message InspectSideReply {
-    SideInfo side_info = 1;
+    uint64 revision = 1;
+    SideInfo side_info = 2;
 }
 
 message CreateThinDeviceRequest {
@@ -762,7 +791,7 @@ message CreateThinDeviceRequest {
 
 message CreateThinDeviceReply {
     uint64 td_id = 1;
-	uint32 dev_id = 2;
+    uint32 dev_id = 2;
 }
 
 message DeleteThinDeviceRequest {
@@ -887,7 +916,7 @@ message CreateCloneRequest {
     string cluster_name = 1;
     string sp_name = 2;
     SpRev sp_rev = 3;
-    string  clone_name = 4;
+    string clone_name = 4;
     repeated NvmeTrConf src_tr_conf = 5;
     string src_nqn = 6;
     uint32 src_ns_idx = 7;
@@ -907,7 +936,7 @@ message DeleteCloneRequest {
     string cluster_name = 1;
     string sp_name = 2;
     SpRev sp_rev = 3;
-    string  clone_name = 4;
+    string clone_name = 4;
     bool force = 5;
 }
 
@@ -929,7 +958,7 @@ message UpdateCloneTrConfRequest {
     string cluster_name = 1;
     string sp_name = 2;
     SpRev sp_rev = 3;
-    string  clone_name = 4;
+    string clone_name = 4;
     repeated NvmeTrConf src_tr_conf = 5;
 }
 
@@ -1005,7 +1034,7 @@ message CreateMigrationRequest {
     SpRev sp_rev = 3;
     string migr_name = 4;
     uint64 src_side_id = 5;
-	NodeSelector dn_selector = 6;
+    NodeSelector dn_selector = 6;
     DmCloneConf dm_clone_conf = 7;
 }
 
@@ -1063,7 +1092,7 @@ message CreateSpareLegRequest {
     string sp_name = 2;
     SpRev sp_rev = 3;
     uint64 grp_id = 4;
-	NodeSelector dn_selector = 5;
+    NodeSelector dn_selector = 5;
 }
 
 message CreateSpareLegReply {
@@ -1093,7 +1122,7 @@ message SwitchSpareLegRequest {
 
 message SwitchSpareLegReply {
     uint64 curr_active_leg_id = 1;
-	uint64 curr_spare_leg_id = 2;
+    uint64 curr_spare_leg_id = 2;
 }
 
 message GetThinDeviceBitmapRequest {
@@ -1122,79 +1151,79 @@ message GetLegBitmapReply {
 }
 
 service Gateway {
-    rpc CreateCluster(CreateClusterRequest) returns(CreateClusterReply) {}
-    rpc DeleteCluster(DeleteClusterRequest) returns(DeleteClusterReply) {}
-    rpc GetCluster(GetClusterRequest) returns(GetClusterReply) {}
-    rpc ListClusters(ListClustersRequest) returns(ListClustersReply) {}
+    rpc CreateCluster(CreateClusterRequest) returns (CreateClusterReply) {}
+    rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterReply) {}
+    rpc GetCluster(GetClusterRequest) returns (GetClusterReply) {}
+    rpc ListClusters(ListClustersRequest) returns (ListClustersReply) {}
 
-    rpc CreateDiskNode(CreateDiskNodeRequest) returns(CreateDiskNodeReply) {}
-    rpc DeleteDiskNode(DeleteDiskNodeRequest) returns(DeleteDiskNodeReply) {}
-    rpc GetDiskNode(GetDiskNodeRequest) returns(GetDiskNodeReply) {}
-    rpc ListDiskNodes(ListDiskNodesRequest) returns(ListDiskNodesReply) {}
-    rpc UpdateDiskNodeDisabled(UpdateDiskNodeDisabledRequest) returns(UpdateDiskNodeDisabledReply) {}
-    rpc InspectDiskNode(InspectDiskNodeRequest) returns(InspectDiskNodeReply) {}
+    rpc CreateDiskNode(CreateDiskNodeRequest) returns (CreateDiskNodeReply) {}
+    rpc DeleteDiskNode(DeleteDiskNodeRequest) returns (DeleteDiskNodeReply) {}
+    rpc GetDiskNode(GetDiskNodeRequest) returns (GetDiskNodeReply) {}
+    rpc ListDiskNodes(ListDiskNodesRequest) returns (ListDiskNodesReply) {}
+    rpc UpdateDiskNodeDisabled(UpdateDiskNodeDisabledRequest) returns (UpdateDiskNodeDisabledReply) {}
+    rpc InspectDiskNode(InspectDiskNodeRequest) returns (InspectDiskNodeReply) {}
 
-    rpc CreateControllerNode(CreateControllerNodeRequest) returns(CreateControllerNodeReply) {}
-    rpc DeleteControllerNode(DeleteControllerNodeRequest) returns(DeleteControllerNodeReply) {}
-    rpc GetControllerNode(GetControllerNodeRequest) returns(GetControllerNodeReply) {}
-    rpc ListControllerNodes(ListControllerNodesRequest) returns(ListControllerNodesReply) {}
-    rpc UpdateControllerNodeDisabled(UpdateControllerNodeDisabledRequest) returns(UpdateControllerNodeDisabledReply) {}
-    rpc InspectControllerNode(InspectControllerNodeRequest) returns(InspectControllerNodeReply) {}
+    rpc CreateControllerNode(CreateControllerNodeRequest) returns (CreateControllerNodeReply) {}
+    rpc DeleteControllerNode(DeleteControllerNodeRequest) returns (DeleteControllerNodeReply) {}
+    rpc GetControllerNode(GetControllerNodeRequest) returns (GetControllerNodeReply) {}
+    rpc ListControllerNodes(ListControllerNodesRequest) returns (ListControllerNodesReply) {}
+    rpc UpdateControllerNodeDisabled(UpdateControllerNodeDisabledRequest) returns (UpdateControllerNodeDisabledReply) {}
+    rpc InspectControllerNode(InspectControllerNodeRequest) returns (InspectControllerNodeReply) {}
 
-    rpc CreateStoragePool(CreateStoragePoolRequest) returns(CreateStoragePoolReply) {}
-    rpc DeleteStoragePool(DeleteStoragePoolRequest) returns(DeleteStoragePoolReply) {}
-    rpc GetStoragePool(GetStoragePoolRequest) returns(GetStoragePoolReply) {}
-    rpc ListStoragePools(ListStoragePoolsRequest) returns(ListStoragePoolsReply) {}
-	rpc UpdateStoragePoolCntlidSlotList(UpdateStoragePoolCntlidSlotListRequest) returns(UpdateStoragePoolCntlidSlotListReply) {}
-	rpc UpdateStoragePoolLevel(UpdateStoragePoolLevelRequest) returns(UpdateStoragePoolLevelReply) {}
-    rpc FindStoragePoolName(FindStoragePoolNamesRequest) returns(FindStoragePoolNamesReply) {}
+    rpc CreateStoragePool(CreateStoragePoolRequest) returns (CreateStoragePoolReply) {}
+    rpc DeleteStoragePool(DeleteStoragePoolRequest) returns (DeleteStoragePoolReply) {}
+    rpc GetStoragePool(GetStoragePoolRequest) returns (GetStoragePoolReply) {}
+    rpc ListStoragePools(ListStoragePoolsRequest) returns (ListStoragePoolsReply) {}
+    rpc UpdateStoragePoolCntlidSlotList(UpdateStoragePoolCntlidSlotListRequest) returns (UpdateStoragePoolCntlidSlotListReply) {}
+    rpc UpdateStoragePoolLevel(UpdateStoragePoolLevelRequest) returns (UpdateStoragePoolLevelReply) {}
+    rpc FindStoragePoolNames(FindStoragePoolNamesRequest) returns (FindStoragePoolNamesReply) {}
 
-    rpc GrowSlice(GrowSliceRequest) returns(GrowSliceReply) {}
+    rpc GrowSlice(GrowSliceRequest) returns (GrowSliceReply) {}
 
-    rpc CreateCntlr(CreateCntlrRequest) returns(CreateCntlrReply) {}
-    rpc DeleteCntlr(DeleteCntlrRequest) returns(DeleteCntlrReply) {}
-    rpc UpdateCntlrEnabled(UpdateCntlrEnabledRequest) returns(UpdateCntlrEnabledReply) {}
+    rpc CreateCntlr(CreateCntlrRequest) returns (CreateCntlrReply) {}
+    rpc DeleteCntlr(DeleteCntlrRequest) returns (DeleteCntlrReply) {}
+    rpc UpdateCntlrEnabled(UpdateCntlrEnabledRequest) returns (UpdateCntlrEnabledReply) {}
 
-    rpc InspectCntlr(InspectCntlrRequest) returns(InspectCntlrReply) {}
-    rpc InspectSide(InspectSideRequest) returns(InspectSideReply) {}
+    rpc InspectCntlr(InspectCntlrRequest) returns (InspectCntlrReply) {}
+    rpc InspectSide(InspectSideRequest) returns (InspectSideReply) {}
 
-    rpc CreateThinDevice(CreateThinDeviceRequest) returns(CreateThinDeviceReply) {}
-    rpc DeleteThinDevice(DeleteThinDeviceRequest) returns(DeleteThinDeviceReply) {}
-    rpc ListThinDevices(ListThinDevicesRequest) returns(ListThinDevicesReply) {}
+    rpc CreateThinDevice(CreateThinDeviceRequest) returns (CreateThinDeviceReply) {}
+    rpc DeleteThinDevice(DeleteThinDeviceRequest) returns (DeleteThinDeviceReply) {}
+    rpc ListThinDevices(ListThinDevicesRequest) returns (ListThinDevicesReply) {}
 
-    rpc CreateSubsystem(CreateSubsystemRequest) returns(CreateSubsystemReply) {}
-    rpc DeleteSubsystem(DeleteSubsystemRequest) returns(DeleteSubsystemReply) {}
-    rpc ListSubsystems(ListSubsystemsRequest) returns(ListSubsystemsReply) {}
-    rpc UpdateSubsystemHosts(UpdateSubsystemHostsRequest) returns(UpdateSubsystemHostsReply) {}
+    rpc CreateSubsystem(CreateSubsystemRequest) returns (CreateSubsystemReply) {}
+    rpc DeleteSubsystem(DeleteSubsystemRequest) returns (DeleteSubsystemReply) {}
+    rpc ListSubsystems(ListSubsystemsRequest) returns (ListSubsystemsReply) {}
+    rpc UpdateSubsystemHosts(UpdateSubsystemHostsRequest) returns (UpdateSubsystemHostsReply) {}
 
-    rpc CreateNamespace(CreateNamespaceRequest) returns(CreateNamespaceReply) {}
-    rpc DeleteNamespace(DeleteNamespaceRequest) returns(DeleteNamespaceReply) {}
-    rpc UpdateNamespaceDev(UpdateNamespaceDevRequest) returns(UpdateNamespaceDevReply) {}
-    rpc UpdateNamespaceSuspended(UpdateNamespaceSuspendedRequest) returns(UpdateNamespaceSuspendedReply) {}
+    rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceReply) {}
+    rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceReply) {}
+    rpc UpdateNamespaceDev(UpdateNamespaceDevRequest) returns (UpdateNamespaceDevReply) {}
+    rpc UpdateNamespaceSuspended(UpdateNamespaceSuspendedRequest) returns (UpdateNamespaceSuspendedReply) {}
 
-    rpc CreateClone(CreateCloneRequest) returns(CreateCloneReply) {}
-    rpc DeleteClone(DeleteCloneRequest) returns(DeleteCloneReply) {}
-    rpc GetClone(GetCloneRequest) returns(GetCloneReply) {}
-    rpc UpdateCloneTrConf(UpdateCloneTrConfRequest) returns(UpdateCloneTrConfReply) {}
-    rpc AppendCloneBitmap(AppendCloneBitmapRequest) returns(AppendCloneBitmapReply) {}
+    rpc CreateClone(CreateCloneRequest) returns (CreateCloneReply) {}
+    rpc DeleteClone(DeleteCloneRequest) returns (DeleteCloneReply) {}
+    rpc GetClone(GetCloneRequest) returns (GetCloneReply) {}
+    rpc UpdateCloneTrConf(UpdateCloneTrConfRequest) returns (UpdateCloneTrConfReply) {}
+    rpc AppendCloneBitmap(AppendCloneBitmapRequest) returns (AppendCloneBitmapReply) {}
 
-    rpc CreateTransfer(CreateTransferRequest) returns(CreateTransferReply) {}
-    rpc DeleteTransfer(DeleteTransferRequest) returns(DeleteTransferReply) {}
-    rpc GetTransfer(GetTransferRequest) returns(GetTransferReply) {}
-    rpc UpdateTransferHosts(UpdateTransferHostsRequest) returns(UpdateTransferHostsReply) {}
+    rpc CreateTransfer(CreateTransferRequest) returns (CreateTransferReply) {}
+    rpc DeleteTransfer(DeleteTransferRequest) returns (DeleteTransferReply) {}
+    rpc GetTransfer(GetTransferRequest) returns (GetTransferReply) {}
+    rpc UpdateTransferHosts(UpdateTransferHostsRequest) returns (UpdateTransferHostsReply) {}
 
-    rpc CreateMigration(CreateMigrationRequest) returns(CreateMigrationReply) {}
-    rpc FinishMigration(FinishMigrationRequest) returns(FinishMigrationReply) {}
-    rpc CancelMigration(CancelMigrationRequest) returns(CancelMigrationReply) {}
-    rpc GetMigration(GetMigrationRequest) returns(GetMigrationReply) {}
-    rpc AppendMigrationBitmap(AppendMigrationBitmapRequest) returns(AppendMigrationBitmapReply) {}
+    rpc CreateMigration(CreateMigrationRequest) returns (CreateMigrationReply) {}
+    rpc FinishMigration(FinishMigrationRequest) returns (FinishMigrationReply) {}
+    rpc CancelMigration(CancelMigrationRequest) returns (CancelMigrationReply) {}
+    rpc GetMigration(GetMigrationRequest) returns (GetMigrationReply) {}
+    rpc AppendMigrationBitmap(AppendMigrationBitmapRequest) returns (AppendMigrationBitmapReply) {}
 
-    rpc CreateSpareLeg(CreateSpareLegRequest) returns(CreateSpareLegReply) {}
-    rpc DeleteSpareLeg(DeleteSpareLegRequest) returns(DeleteSpareLegReply) {}
-    rpc SwitchSpareLeg(SwitchSpareLegRequest) returns(SwitchSpareLegReply) {}
+    rpc CreateSpareLeg(CreateSpareLegRequest) returns (CreateSpareLegReply) {}
+    rpc DeleteSpareLeg(DeleteSpareLegRequest) returns (DeleteSpareLegReply) {}
+    rpc SwitchSpareLeg(SwitchSpareLegRequest) returns (SwitchSpareLegReply) {}
 
-    rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns(GetThinDeviceBitmapReply) {}
-    rpc GetLegBitmap(GetLegBitmapRequest) returns(GetLegBitmapReply) {}
+    rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
+    rpc GetLegBitmap(GetLegBitmapRequest) returns (GetLegBitmapReply) {}
 }
 
 message GetDnSizeRequest {
@@ -1210,32 +1239,53 @@ message SyncupDnRequest {
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
     uint64 revision = 3;
-	ClusterConf cluster_conf = 4;
-    repeated SidePointer side_pointer_list = 5;
+    repeated SidePointer side_pointer_list = 4;
+    uint64 extent_size = 5;
 }
 
 message SyncupDnReply {
     AgentReply agent_reply = 1;
-    DnInfo dn_info = 2;
+    uint64 revision = 2;
+    DnInfo dn_info = 3;
 }
 
 message SyncupSideRequest {
+    message SideConf {
+        uint64 ext_cnt = 1;
+        uint32 cntlid_slot = 2;
+        uint64 primary_cn_id = 3;
+        repeated uint64 standby_id_list = 4;
+        SpLevel sp_level = 5;
+    }
+    message MigrSrcConf {
+        uint64 migr_id = 1;
+        uint64 dst_side_id = 2;
+        uint64 dst_dn_id = 3;
+    }
+    message MigrDstConf {
+        uint64 migr_id = 1;
+        uint64 src_side_id = 2;
+        uint64 src_dn_id = 3;
+        NvmeTrConf src_nvme_tr_conf = 4;
+        uint64 block_size = 5;
+        uint64 meta_blocks = 6;
+        DmCloneConf dm_clone_conf = 7;
+        uint32 bm_cnt = 8;
+    }
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
     SidePointer side_pointer = 3;
     uint64 revision = 4;
-    uint64 ext_cnt = 5;
-	uint64 primary_cn_id = 6;
-    repeated uint64 standby_id_list = 7;
-    SpLevel sp_level = 8;
-    Migration migration = 9;
-    Side src_side = 10;
+    SideConf side_conf = 5;
+    MigrSrcConf migr_src_conf = 6;
+    MigrDstConf migr_dst_conf = 7;
 }
 
 message SyncupSideReply {
     AgentReply agent_reply = 1;
-    SideInfo side_info = 2;
-    BitmapInfo bm_info = 3;
+    uint64 revision = 2;
+    SideInfo side_info = 3;
+    BitmapInfo bm_info = 4;
 }
 
 message PushMigrBitmapRequest {
@@ -1259,7 +1309,8 @@ message GetDnInfoRequest {
 
 message GetDnInfoReply {
     AgentReply agent_reply = 1;
-    DnInfo dn_info = 2;
+    uint64 revision = 2;
+    DnInfo dn_info = 3;
 }
 
 message GetSideInfoRequest {
@@ -1270,16 +1321,46 @@ message GetSideInfoRequest {
 
 message GetSideInfoReply {
     AgentReply agent_reply = 1;
-    SideInfo side_info = 2;
+    uint64 revision = 2;
+    SideInfo side_info = 3;
+}
+
+message CheckDnRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    uint64 revision = 3;
+    bool show_info = 4;
+}
+
+message CheckDnReply {
+    AgentReply agent_reply = 1;
+    uint64 revision = 2;
+    DnInfo dn_info = 3;
+}
+
+message CheckSideRequest {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    SidePointer side_pointer = 3;
+    uint64 revision = 4;
+    bool show_info = 5;
+}
+
+message CheckSideReply {
+    AgentReply agent_reply = 1;
+    uint64 revision = 2;
+    SideInfo side_info = 3;
 }
 
 service DiskNodeAgent {
-    rpc GetDnSize(GetDnSizeRequest) returns(GetDnSizeReply) {}
-    rpc SyncupDn(stream SyncupDnRequest) returns(stream SyncupDnReply) {}
-    rpc SyncupSide(stream SyncupSideRequest) returns(stream SyncupSideReply) {}
-    rpc PushMigrBitmap(stream PushMigrBitmapRequest) returns(stream PushMigrBitmapReply) {}
-    rpc GetDnInfo(GetDnInfoRequest) returns(GetDnInfoReply) {}
-    rpc GetSideInfo(GetSideInfoRequest) returns(GetSideInfoReply) {}
+    rpc GetDnSize(GetDnSizeRequest) returns (GetDnSizeReply) {}
+    rpc SyncupDn(SyncupDnRequest) returns (SyncupDnReply) {}
+    rpc SyncupSide(SyncupSideRequest) returns (SyncupSideReply) {}
+    rpc PushMigrBitmap(PushMigrBitmapRequest) returns (PushMigrBitmapReply) {}
+    rpc GetDnInfo(GetDnInfoRequest) returns (GetDnInfoReply) {}
+    rpc GetSideInfo(GetSideInfoRequest) returns (GetSideInfoReply) {}
+    rpc CheckDn(stream CheckDnRequest) returns (stream CheckDnReply) {}
+    rpc CheckSide(stream CheckSideRequest) returns (stream CheckSideReply) {}
 }
 
 message GetCnSizeRequest {
@@ -1295,13 +1376,14 @@ message SyncupCnRequest {
     uint64 cluster_id = 1;
     uint64 cn_id = 2;
     uint64 revision = 3;
-	ClusterConf cluster_conf = 4;
-    repeated CntlrPointer cntlr_pointer_list = 5;
+    repeated CntlrPointer cntlr_pointer_list = 4;
+    QosRatio qos_ratio = 5;
 }
 
 message SyncupCnReply {
-    AgentReply agent_reply =  1;
-    CnInfo cn_info = 2;
+    AgentReply agent_reply = 1;
+    uint64 revision = 2;
+    CnInfo cn_info = 3;
 }
 
 message SyncupCntlrRequest {
@@ -1312,9 +1394,9 @@ message SyncupCntlrRequest {
     BdevConf bdev_conf = 5;
     SpLevel sp_level = 6;
     Cntlr cntlr = 7;
-	map<string, Slice> id_to_slice = 8;
+    map<string, Slice> id_to_slice = 8;
     repeated ThinDevice td_list = 9;
-	map<string, Subsystem> nqn_to_subsystem = 10;
+    map<string, Subsystem> nqn_to_subsystem = 10;
     repeated Clone clone_list = 11;
     repeated Transfer xfer_list = 12;
     repeated Migration migr_list = 13;
@@ -1322,8 +1404,9 @@ message SyncupCntlrRequest {
 
 message SyncupCntlrReply {
     AgentReply agent_reply = 1;
-    CntlrInfo cntlr_info = 2;
-    repeated BitmapInfo bm_info_list = 3;
+    uint64 revision = 2;
+    CntlrInfo cntlr_info = 3;
+    repeated BitmapInfo bm_info_list = 4;
 }
 
 message PushCloneBitmapRequest {
@@ -1347,19 +1430,20 @@ message GetCnInfoRequest {
 
 message GetCnInfoReply {
     AgentReply agent_reply = 1;
-    CnInfo cn_info = 2;
+    uint64 revision = 2;
+    CnInfo cn_info = 3;
 }
 
 message GetCntlrInfoRequest {
     uint64 cluster_id = 1;
     uint64 cn_id = 2;
-    uint64 sp_id = 3;
-    uint64 cntlr_id = 4;
+    CntlrPointer cntlr_pointer = 3;
 }
 
 message GetCntlrInfoReply {
     AgentReply agent_reply = 1;
-    CntlrInfo cntlr_info = 2;
+    uint64 revision = 2;
+    CntlrInfo cntlr_info = 3;
 }
 
 message GetThinDeviceBmRequest {
@@ -1391,13 +1475,42 @@ message GetLegBmReply {
     bytes bitmap = 1;
 }
 
+message CheckCnRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    uint64 revision = 3;
+    bool show_info = 4;
+}
+
+message CheckCnReply {
+    AgentReply agent_reply = 1;
+    uint64 revision = 2;
+    CnInfo cn_info = 3;
+}
+
+message CheckCntlrRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    CntlrPointer cntlr_pointer = 3;
+    uint64 revision = 4;
+    bool show_info = 5;
+}
+
+message CheckCntlrReply {
+    AgentReply agent_reply = 1;
+    uint64 revision = 2;
+    CntlrInfo cntlr_info = 3;
+}
+
 service ControllerNodeAgent {
-    rpc GetCnSize(GetCnSizeRequest) returns(GetCnSizeReply) {}
-    rpc SyncupCn(stream SyncupCnRequest) returns(stream SyncupCnReply) {}
-    rpc SyncupCntlr(stream SyncupCntlrRequest) returns(stream SyncupCntlrReply) {}
-    rpc PushCloneBitmap(stream PushCloneBitmapRequest) returns(stream PushCloneBitmapReply) {}
-    rpc GetCnInfo(GetCnInfoRequest) returns(GetCnInfoReply) {}
-    rpc GetCntlrInfo(GetCntlrInfoRequest) returns(GetCntlrInfoReply) {}
-    rpc GetThinDeviceBm(GetThinDeviceBmRequest) returns(GetThinDeviceBmReply) {}
-    rpc GetLegBm(GetLegBmRequest) returns(GetLegBmReply) {}
+    rpc GetCnSize(GetCnSizeRequest) returns (GetCnSizeReply) {}
+    rpc SyncupCn(SyncupCnRequest) returns (SyncupCnReply) {}
+    rpc SyncupCntlr(SyncupCntlrRequest) returns (SyncupCntlrReply) {}
+    rpc PushCloneBitmap(PushCloneBitmapRequest) returns (PushCloneBitmapReply) {}
+    rpc GetCnInfo(GetCnInfoRequest) returns (GetCnInfoReply) {}
+    rpc GetCntlrInfo(GetCntlrInfoRequest) returns (GetCntlrInfoReply) {}
+    rpc GetThinDeviceBm(GetThinDeviceBmRequest) returns (GetThinDeviceBmReply) {}
+    rpc GetLegBm(GetLegBmRequest) returns (GetLegBmReply) {}
+    rpc CheckCn(stream CheckCnRequest) returns (stream CheckCnReply) {}
+    rpc CheckCntlr(stream CheckCntlrRequest) returns (stream CheckCntlrReply) {}
 }
