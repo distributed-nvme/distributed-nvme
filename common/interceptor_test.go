@@ -114,13 +114,23 @@ func startStub(t *testing.T, stub *stubDnAgent) pb.DiskNodeAgentClient {
 }
 
 // sideMsgs returns the captured msg strings of one side ("client"/"server"),
-// in the order that side emitted them.
-func (c *logCapture) sideMsgs(t *testing.T, side string) []string {
+// in the order that side emitted them, restricted to one trace id.
+//
+// The trace-id filter is load-bearing, not decoration: a server-side stream
+// handler emits its "grpc server stream close" record from its own goroutine,
+// which can run after the test that started it has returned and the *next*
+// test has installed its capture buffer. Every gRPC record carries the trace
+// id of the RPC that produced it, so keying on it confines each test to its
+// own calls (log.md §7.1).
+func (c *logCapture) sideMsgs(
+	t *testing.T, side string, traceId string,
+) []string {
 	t.Helper()
 	prefix := "grpc " + side + " "
 	var out []string
-	for _, msg := range c.msgs(t) {
-		if strings.HasPrefix(msg, prefix) {
+	for _, rec := range c.records(t) {
+		msg, _ := rec["msg"].(string)
+		if strings.HasPrefix(msg, prefix) && rec[TraceIdLogKey] == traceId {
 			out = append(out, msg)
 		}
 	}
@@ -266,9 +276,9 @@ func TestUnaryLogRecords(t *testing.T) {
 		t.Fatalf("GetDnInfo: %v", err)
 	}
 
-	wantMsgs(t, capture.sideMsgs(t, "client"),
+	wantMsgs(t, capture.sideMsgs(t, "client", "unary-trace"),
 		[]string{"grpc client request", "grpc client reply"})
-	wantMsgs(t, capture.sideMsgs(t, "server"),
+	wantMsgs(t, capture.sideMsgs(t, "server", "unary-trace"),
 		[]string{"grpc server request", "grpc server reply"})
 
 	for _, msg := range []string{
@@ -325,12 +335,12 @@ func TestStreamLogRecords(t *testing.T) {
 		t.Fatalf("final Recv = %v, want io.EOF", err)
 	}
 
-	wantMsgs(t, capture.sideMsgs(t, "client"), []string{
+	wantMsgs(t, capture.sideMsgs(t, "client", "check-trace"), []string{
 		"grpc client stream open",
 		"grpc client send", "grpc client recv",
 		"grpc client send", "grpc client recv",
 	})
-	wantMsgs(t, capture.sideMsgs(t, "server"), []string{
+	wantMsgs(t, capture.sideMsgs(t, "server", "check-trace"), []string{
 		"grpc server stream open",
 		"grpc server recv", "grpc server send",
 		"grpc server recv", "grpc server send",

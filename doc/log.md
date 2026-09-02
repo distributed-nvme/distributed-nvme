@@ -321,12 +321,17 @@ See `osclient.md` §5 for the code. Summary of the records it must emit:
 | command run | `os command` | `cmd` (string), `args` (`slog.Any`, `[]string`), `stdin` (string), `stdout` (string), `stderr` (string), `exit_code` (int), `error?` |
 | file read | `os read file` | `path`, `size` (bytes read), `data` (`TruncForLog`), `error?` |
 | file write | `os write file` | `path`, `size` (bytes written), `data` (`TruncForLog`), `error?` |
+| direct file write | `os write file direct` | `path`, `size` (bytes written), `data` (`TruncForLog`), `error?` |
+| raw block read | `os read block` | `path`, `offset`, `length`, `error?` — **never** `data` |
+| raw block write | `os write block` | `path`, `offset`, `length` (bytes written), `error?` — **never** `data` |
 | proto read | `os read proto` | `path`, `size` (serialized bytes), `data` (`slog.Any` of `PbToLogValue(target)`), `error?` |
 | proto write | `os write proto` | `path`, `size` (serialized bytes), `data` (`slog.Any` of `PbToLogValue(msg)`), `error?` |
 
 Command stdin/stdout/stderr are logged in full (the 128-character truncation
 applies to file data only, per the requirement). The file `data` rule follows
-R11.
+R11. The two raw-block records — the DN's on-disk metadata path ([D13]) —
+deliberately carry no `data` attribute at all: the blocks are large, opaque,
+and may hold arbitrary tenant bytes.
 
 ### 5.2 gRPC — implemented in the interceptors
 

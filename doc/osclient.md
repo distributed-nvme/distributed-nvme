@@ -77,6 +77,25 @@ type OsClient interface {
 	// string data using default file permissions.
 	WriteFile(ctx context.Context, path string, data string) (err error)
 
+	// WriteFileDirect writes data straight into the file at path with a
+	// plain open/truncate/write/close — no temp file, no rename. It exists
+	// for kernel virtual filesystems (nvmet configfs, sysfs), where the
+	// atomic-replace protocol of WriteFile is impossible: configfs forbids
+	// creating arbitrary files, so a temp file + rename can never succeed
+	// there. Use WriteFile for every regular-file write; use
+	// WriteFileDirect only for virtual-filesystem attribute writes
+	// (dnagent.md SH18).
+	WriteFileDirect(ctx context.Context, path string, data string) (err error)
+
+	// ReadBlock reads exactly length bytes at byte offset from a block
+	// device (or regular file). A short read is an error. Buffered IO —
+	// callers use it only for regions no dm table references.
+	ReadBlock(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
+
+	// WriteBlock writes data at byte offset and fdatasyncs the file
+	// descriptor before returning.
+	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
+
 	// ReadProto loads a raw Protobuf binary file from disk and deserializes
 	// it into a target message struct (target must be a non-nil pointer,
 	// e.g. &pb.SyncupDnRequest{}).
@@ -112,7 +131,7 @@ while leaving ample parallelism.
 
 * `func NewLimitedOsClient(limit int64) *LimitedOsClient` — `limit <= 0` means
   "use `DefaultOsClientLimit`".
-* The limit caps the **sum of in-flight calls across all five methods**. Use a
+* The limit caps the **sum of in-flight calls across all six methods**. Use a
   single `semaphore.Weighted(limit)`. Every public method first does
   `sem.Acquire(ctx, 1)` (blocking, ctx-aware: a canceled/expired ctx returns
   `ctx.Err()` without performing the operation and without logging an
@@ -144,7 +163,7 @@ while leaving ample parallelism.
   start failure, or ctx cancellation). Do not wrap stderr into the error; the
   caller already receives stderr separately.
 
-### 4.3 ReadFile / WriteFile
+### 4.3 ReadFile / WriteFile / WriteFileDirect
 
 * Check `ctx.Err()` after acquiring the semaphore and return it if non-nil
   (plain file I/O on local disks is not further cancelable; this is
@@ -154,7 +173,14 @@ while leaving ample parallelism.
   directory, `Sync`, `Close`, `Chmod(0o644)` ("default file permissions"),
   then `os.Rename` onto `path`. This makes the agents' §9.1 requirement
   ("temp file in the same dir, fsync, rename") automatic for every state
-  file, and is harmless for all other writes.
+  file, and is the right default for every regular-file write.
+* `WriteFileDirect`: plain in-place write — `os.WriteFile(path,
+  []byte(data), 0o644)`, no temp file, no fsync, no rename. It exists for
+  kernel virtual filesystems (nvmet configfs, sysfs), where the atomic
+  replace is impossible: configfs forbids creating arbitrary files, so
+  `WriteFile` can never succeed there. Use it **only** for such attribute
+  writes; the agents' §9.1 state files MUST keep using
+  `WriteFile`/`WriteProto` (`dnagent.md` SH18).
 
 ### 4.4 ReadProto / WriteProto
 
@@ -166,7 +192,42 @@ while leaving ample parallelism.
   `architecture.md` §4.6/§9.1 (last applied `Syncup*Request`s and received
   `Push*BitmapRequest` chunks).
 
-### 4.5 Logging (implements `log.md` §5.1)
+### 4.5 ReadBlock / WriteBlock
+
+The raw-device metadata path of `architecture.md` [D13]: the dn agent reads
+and writes its own on-disk format (header block, A/B volume-table slots,
+dm-clone metadata slots) directly on the `--disk` device through these two
+methods.
+
+* Check `ctx.Err()` after acquiring the semaphore, exactly like §4.3.
+* `ReadBlock`: `os.OpenFile(path, os.O_RDONLY, 0)`, read exactly `length`
+  bytes at `offset` (`io.ReadFull` over an `io.SectionReader`), close.
+  **A short read is an error** — the method never returns a partially filled
+  buffer, so a caller can trust `len(data) == length` whenever `err == nil`.
+  A region inside the device that was never written reads as zeros; that is
+  not an error.
+* `WriteBlock`: `os.OpenFile(path, os.O_WRONLY, 0)`, `WriteAt(data, offset)`,
+  `Sync()` (the fdatasync the caller's crash protocol depends on), close. It
+  never *creates* a file (no `O_CREATE`); the intended target is a block
+  device, which always exists at full size. Against a regular file — tests —
+  `WriteAt` past the end extends it, as `pwrite` does.
+* **Buffered IO, never `O_DIRECT`.** Durability comes from the `Sync()`. The
+  regions the DN agent reads back this way — the header block and the two
+  volume-table slots — are never part of any dm table, so no dm path can
+  write bytes underneath a cached read. The clone-metadata area *is* mapped,
+  by each migration's wrapper dm-linear, but the agent only ever **writes**
+  there (the 8 KiB zeroing of a freshly allocated slot), only before that
+  slot's wrapper exists, and always followed by the `Sync()` — so the bytes
+  reach the device before anything can map them, and no read of that area is
+  ever served from the page cache.
+* **Never shell out to `dd` for this.** The lab VMs ship uutils dd 0.8.0,
+  whose `iflag=`/`oflag=direct` silently misbehave — false failures and
+  dropped writes (`dnagent_integtest.md` §4).
+* The payload is **never** logged: the records carry `path`, `offset` and
+  `length` only (§4.6). Metadata blocks are large and uninteresting in a log,
+  and a device region may hold arbitrary tenant bytes.
+
+### 4.6 Logging (implements `log.md` §5.1)
 
 One `slog.InfoContext(ctx, ...)` record per call, emitted on completion, with
 the exact `msg` strings and attributes below. Append
@@ -177,6 +238,9 @@ the exact `msg` strings and attributes below. Append
 | RunCommand | `os command` | `cmd`, `args` (`slog.Any`), `stdin`, `stdout`, `stderr`, `exit_code`, `error?` |
 | ReadFile | `os read file` | `path`, `size` (= `len(data)`), `data` (= `TruncForLog(data)`), `error?` |
 | WriteFile | `os write file` | `path`, `size`, `data` (= `TruncForLog(data)`), `error?` |
+| WriteFileDirect | `os write file direct` | `path`, `size`, `data` (= `TruncForLog(data)`), `error?` |
+| ReadBlock | `os read block` | `path`, `offset`, `length`, `error?` — never `data` |
+| WriteBlock | `os write block` | `path`, `offset`, `length` (= `len(data)`), `error?` — never `data` |
 | ReadProto | `os read proto` | `path`, `size` (= serialized length read), `data` (`slog.Any(PbToLogValue(target))`), `error?` |
 | WriteProto | `os write proto` | `path`, `size` (= serialized length), `data` (`slog.Any(PbToLogValue(msg))`), `error?` |
 
@@ -198,6 +262,7 @@ package common
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -333,6 +398,31 @@ func (c *LimitedOsClient) WriteFile(
 	return err
 }
 
+func (c *LimitedOsClient) WriteFileDirect(
+	ctx context.Context,
+	path string,
+	data string,
+) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	err := os.WriteFile(path, []byte(data), 0o644)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Int("size", len(data)),
+		slog.String("data", TruncForLog(data)),
+	}
+	slog.InfoContext(ctx, "os write file direct", appendErr(attrs, err)...)
+
+	return err
+}
+
 func (c *LimitedOsClient) ReadProto(
 	ctx context.Context,
 	path string,
@@ -418,6 +508,102 @@ func atomicWrite(path string, data []byte) error {
 	}
 	return os.Rename(tmpPath, path)
 }
+
+func (c *LimitedOsClient) ReadBlock(
+	ctx context.Context,
+	path string,
+	offset uint64,
+	length uint64,
+) ([]byte, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	data, err := readBlockAt(path, offset, length)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Uint64("offset", offset),
+		slog.Uint64("length", length),
+	}
+	slog.InfoContext(ctx, "os read block", appendErr(attrs, err)...)
+
+	return data, err
+}
+
+func (c *LimitedOsClient) WriteBlock(
+	ctx context.Context,
+	path string,
+	offset uint64,
+	data []byte,
+) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	err := writeBlockAt(path, offset, data)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Uint64("offset", offset),
+		slog.Int("length", len(data)),
+	}
+	slog.InfoContext(ctx, "os write block", appendErr(attrs, err)...)
+
+	return err
+}
+
+// readBlockAt / writeBlockAt are the §4.5 raw-device helpers. Buffered
+// pread/pwrite plus an fdatasync on the write side; no O_DIRECT, and never a
+// shell-out to dd.
+func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Bound-check before allocating: os.Stat reports 0 for a block device,
+	// so the size comes from a seek to the end.
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	if offset+length > uint64(size) || offset+length < offset {
+		return nil, fmt.Errorf(
+			"short read: %s offset=%d length=%d size=%d",
+			path, offset, length, size)
+	}
+	data := make([]byte, length)
+	if _, err := io.ReadFull(io.NewSectionReader(
+		f, int64(offset), int64(length)), data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func writeBlockAt(path string, offset uint64, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteAt(data, int64(offset)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
 ```
 
 ## 6. Test double — `common/osclient_fake.go` (complete)
@@ -437,11 +623,14 @@ import (
 // FakeOsClient is a configurable OsClient test double: set only the function
 // fields your test needs; unset fields succeed with zero values.
 type FakeOsClient struct {
-	RunCommandFn func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
-	ReadFileFn   func(ctx context.Context, path string) (string, error)
-	WriteFileFn  func(ctx context.Context, path string, data string) error
-	ReadProtoFn  func(ctx context.Context, path string, target proto.Message) error
-	WriteProtoFn func(ctx context.Context, path string, msg proto.Message) error
+	RunCommandFn      func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
+	ReadFileFn        func(ctx context.Context, path string) (string, error)
+	WriteFileFn       func(ctx context.Context, path string, data string) error
+	WriteFileDirectFn func(ctx context.Context, path string, data string) error
+	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
+	WriteBlockFn      func(ctx context.Context, path string, offset uint64, data []byte) error
+	ReadProtoFn       func(ctx context.Context, path string, target proto.Message) error
+	WriteProtoFn      func(ctx context.Context, path string, msg proto.Message) error
 }
 
 var _ OsClient = (*FakeOsClient)(nil)
@@ -467,6 +656,27 @@ func (f *FakeOsClient) WriteFile(ctx context.Context, path string, data string) 
 	return nil
 }
 
+func (f *FakeOsClient) WriteFileDirect(ctx context.Context, path string, data string) error {
+	if f.WriteFileDirectFn != nil {
+		return f.WriteFileDirectFn(ctx, path, data)
+	}
+	return nil
+}
+
+func (f *FakeOsClient) ReadBlock(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error) {
+	if f.ReadBlockFn != nil {
+		return f.ReadBlockFn(ctx, path, offset, length)
+	}
+	return nil, nil
+}
+
+func (f *FakeOsClient) WriteBlock(ctx context.Context, path string, offset uint64, data []byte) error {
+	if f.WriteBlockFn != nil {
+		return f.WriteBlockFn(ctx, path, offset, data)
+	}
+	return nil
+}
+
 func (f *FakeOsClient) ReadProto(ctx context.Context, path string, target proto.Message) error {
 	if f.ReadProtoFn != nil {
 		return f.ReadProtoFn(ctx, path, target)
@@ -485,8 +695,13 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 ## 7. Example log output
 
 ```json
-{"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"lvcreate","args":["--addtag","not_trimmed","--name","0000000000000011-0000000000000016","--extents","10","dnv-dn-ebada5168620c5fe-0000000000000003"],"stdin":"","stdout":"  Logical volume \"...\" created.\n","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-ebada5168620c5fe-0000000000000003-4-0000000000000011-0000000000000016"],"stdin":"0 20480 linear 253:0 524288\n","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
 {"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/tmp/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":34,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"side_conf":{"ext_cnt":10,"cntlid_slot":1,"primary_cn_id":5,"standby_id_list":[6]}},"trace_id":"a1b2c3d4e5f60718"}
+```
+
+```json
+{"time":"2026-08-28T10:00:02.100Z","level":"INFO","msg":"os read block","path":"/dev/loop0","offset":0,"length":4096,"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:02.140Z","level":"INFO","msg":"os write block","path":"/dev/loop0","offset":4194304,"length":4096,"trace_id":"a1b2c3d4e5f60718"}
 ```
 
 ## 8. Tests and acceptance checklist
@@ -517,9 +732,22 @@ available):
    generated message), `ReadProto` into a fresh instance,
    `proto.Equal` holds.
 7. **Log records**: swap in a captured handler (as in `log.md` §7), run one
-   call of each method, assert the `msg` strings and required attrs of §4.5,
+   call of each method, assert the `msg` strings and required attrs of §4.6,
    assert file `data` is truncated at `LogStrDataLimit` characters for a long
    string, and assert a proto containing a `bytes` field logs `"<N bytes>"`.
+8. **Direct write**: `WriteFileDirect` creates a missing file and overwrites
+   an existing one in place, leaving no `*.tmp-*` file behind; its log
+   record uses msg `os write file direct`.
+9. **Block round-trip**: against a pre-sized backing file, `WriteBlock` at
+   two offsets then `ReadBlock` returns the same bytes; overwriting part of
+   an existing region replaces exactly that region and leaves its
+   neighbours (and the header at offset 0) untouched; an untouched region
+   reads as zeros. A short read — `length` past the end of the file, or an
+   `offset` past it — is an **error**, rejected *before* the buffer is
+   allocated so a nonsense length cannot become an OOM; a missing path fails
+   on either method. The `os read block` / `os write block` records carry
+   `path`/`offset`/`length` and **no** `data` attribute. The fake dispatches
+   both methods and returns zero values when the fn fields are unset.
 
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;
 `DefaultOsClientLimit` exists in `constants.go`; repo-wide grep shows no

@@ -1,6 +1,8 @@
 package common
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 )
@@ -10,6 +12,8 @@ const (
 	dmKindDnLinear    = 0x1
 	dmKindDnMigrSrc   = 0x2
 	dmKindDnMigrFinal = 0x3
+	dmKindDnSide      = 0x4
+	dmKindDnMigrMeta  = 0x5
 
 	dmKindCnPoolMeta   = 0x0
 	dmKindCnPoolData   = 0x1
@@ -34,7 +38,6 @@ const (
 	localStorKindMigrBm  = "migr-bm"
 	localStorKindCloneBm = "clone-bm"
 
-	migrPvName  = "migr-pv"
 	tmpFileName = "tmp-file"
 )
 
@@ -42,9 +45,7 @@ type NameFmt struct {
 	dmPrefix        string
 	nqnPrefix       string
 	tmpfsPrefix     string
-	dnVgPrefix      string
 	cloneVgPrefix   string
-	migrVgPrefix    string
 	localStorPrefix string
 }
 
@@ -59,49 +60,9 @@ func NewNameFmt(localStorPrefix string) *NameFmt {
 		dmPrefix:        DmPrefix,
 		nqnPrefix:       NqnPrefix,
 		tmpfsPrefix:     DefaultTmpfsPrefix,
-		dnVgPrefix:      DefaultDnVgPrefix,
 		cloneVgPrefix:   DefaultCloneVgPrefix,
-		migrVgPrefix:    DefaultMigrVgPrefix,
 		localStorPrefix: localStorPrefix,
 	}
-}
-
-func (nf *NameFmt) DnVgName(
-	clusterId uint64,
-	dnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x",
-		nf.dnVgPrefix,
-		clusterId,
-		dnId,
-	)
-}
-
-func (nf *NameFmt) DnLvName(
-	spId uint64,
-	sideId uint64,
-) string {
-	return fmt.Sprintf(
-		"%016x-%016x",
-		spId,
-		sideId,
-	)
-}
-
-func (nf *NameFmt) DnLvPath(
-	clusterId uint64,
-	dnId uint64,
-	spId uint64,
-	sideId uint64,
-) string {
-	vgName := nf.DnVgName(clusterId, dnId)
-	lvName := nf.DnLvName(spId, sideId)
-	return fmt.Sprintf(
-		"/dev/%s/%s",
-		vgName,
-		lvName,
-	)
 }
 
 func (nf *NameFmt) DnErrorName(
@@ -142,54 +103,43 @@ func (nf *NameFmt) DnLinearName(
 	)
 }
 
-func (nf *NameFmt) DnMigrPvName() string {
-	return migrPvName
-}
-
-func (nf *NameFmt) DnMigrPvPath(
+// DnSideName is the side's data device ([D13]): one dm-linear concatenating
+// the extent runs the on-disk volume table allocated to the side. It is the
+// successor of the LVM logical volume the side used to sit on.
+func (nf *NameFmt) DnSideName(
 	clusterId uint64,
 	dnId uint64,
+	spId uint64,
+	sideId uint64,
 ) string {
 	return fmt.Sprintf(
-		"/dev/%s/%s",
-		nf.DnVgName(clusterId, dnId),
-		nf.DnMigrPvName(),
-	)
-}
-
-func (nf *NameFmt) DnMigrVgName(
-	clusterId uint64,
-	dnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x",
-		nf.migrVgPrefix,
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
 		clusterId,
 		dnId,
-	)
-}
-
-func (nf *NameFmt) DnMigrMetaName(
-	spId uint64,
-	migrId uint64,
-) string {
-	return fmt.Sprintf(
-		"%016x-%016x",
+		dmKindDnSide,
 		spId,
-		migrId,
+		sideId,
 	)
 }
 
-func (nf *NameFmt) DnMigrMetaPath(
+// DnMigrMetaDmName wraps one migration's dm-clone metadata slot: the dm-clone
+// target reads its metadata device from sector 0 and takes no offset
+// argument, so the slot needs a dm-linear of its own ([P6]).
+func (nf *NameFmt) DnMigrMetaDmName(
 	clusterId uint64,
 	dnId uint64,
 	spId uint64,
 	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"/dev/%s/%s",
-		nf.DnMigrVgName(clusterId, dnId),
-		nf.DnMigrMetaName(spId, migrId),
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		dnId,
+		dmKindDnMigrMeta,
+		spId,
+		migrId,
 	)
 }
 
@@ -584,6 +534,20 @@ func (nf *NameFmt) XferNqn(
 		spId,
 		xferId,
 	)
+}
+
+// DnNsIdentity derives the deterministic namespace identity that both sides
+// of a leg MUST present identically (architecture.md §3.1): 16 bytes of
+// sha256("dnv-ns:{cluster:%016x}:{sp:%016x}:{leg:%016x}"), rendered as an
+// RFC-4122-shaped uuid string and a 32-hex-digit nguid.
+func DnNsIdentity(clusterId, spId, legId uint64) (uuid string, nguid string) {
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"dnv-ns:%016x:%016x:%016x", clusterId, spId, legId,
+	)))
+	nguid = hex.EncodeToString(sum[:16])
+	uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
+		nguid[0:8], nguid[8:12], nguid[12:16], nguid[16:20], nguid[20:32])
+	return uuid, nguid
 }
 
 func (nf *NameFmt) LocalDnPath(

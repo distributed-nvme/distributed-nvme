@@ -1,7 +1,7 @@
 # layout.md — Repository Layout (dnv)
 
 Status: **normative**. Companion to `architecture.md` (design), `log.md`,
-`osclient.md`, `grpc.md` (component specs). This document fixes where every
+`osclient.md`, `grpc.md`, `dnagent.md` (component specs). This document fixes where every
 package and file lives, so that all specs and implementers agree on paths and
 import strings. The project is built from scratch against this layout; the
 design inputs are `architecture.md`, `schema.proto`, `constants.go` and
@@ -15,11 +15,12 @@ design inputs are `architecture.md`, `schema.proto`, `constants.go` and
   (feature floors: `log/slog` 1.21, `exec.Cmd.Cancel`/`WaitDelay` 1.20, the
   `crypto/rand.Read` never-fails guarantee 1.24 — `go.mod` is authoritative).
 * Direct dependencies today (must match `go.mod`): `google.golang.org/grpc`,
-  `google.golang.org/protobuf`, `golang.org/x/sync`. Planned — they enter
-  `go.mod` when `etcdutil/` and `cmd/*` land (§4): `go.etcd.io/etcd/client/v3`
-  and `github.com/spf13/viper` (flags/config/env per `architecture.md` §13; a
-  CLI framework such as `github.com/spf13/cobra` MAY be added for the `dnvctl`
-  subcommand tree).
+  `google.golang.org/protobuf`, `golang.org/x/sync`,
+  `github.com/spf13/viper` (flags/config/env per `architecture.md` §13) and
+  `github.com/spf13/cobra` (the `dnv-agent` and `dnvctl` subcommand trees,
+  `dnagent.md` §3) — the last two entered `go.mod` with `cmd/dnv-agent`.
+  Planned — it enters `go.mod` when `etcdutil/` lands (§4):
+  `go.etcd.io/etcd/client/v3`.
 
 Library packages sit directly under the module root (no `pkg/` or
 `internal/` prefix), so the file paths used by the component specs —
@@ -39,12 +40,13 @@ distributed-nvme/                      # repo root = module root
 ├── .gitignore                         # ignores bin/
 ├── bin/                               # build outputs (never committed):
 │                                      # dnv-gateway, dnv-worker, dnv-agent, dnv-cdc, dnvctl
-├── doc/                               # the five documents driving the implementation
+├── doc/                               # the documents driving the implementation
 │   ├── architecture.md
 │   ├── layout.md                      # this document
 │   ├── log.md
 │   ├── osclient.md
-│   └── grpc.md
+│   ├── grpc.md
+│   └── dnagent.md                     # dnv-agent: agent/, agent/dnagent/, cmd/dnv-agent
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -82,13 +84,23 @@ distributed-nvme/                      # repo root = module root
 │   ├── bmpush.go                      # §9.6 worker side (Push*Bitmap calls, bm_idx bookkeeping)
 │   ├── check.go                       # §9.7 Check* streams (one per owned object)
 │   └── health.go                      # err_epoch / capacity-key maintenance, §10.4 reactions
-├── agent/
-│   ├── agent.go                       # shared bootstrap: grpc server, local store, OsClient wiring
-│   ├── dnagent/                       # DiskNodeAgent (§9.2): syncup_dn.go, syncup_side.go,
-│   │                                  # push_migr_bm.go, check.go (§9.7), lvm.go, nvmet.go, migr.go
-│   └── cnagent/                       # ControllerNodeAgent (§9.3): syncup_cn.go, syncup_cntlr.go,
-│                                      # push_clone_bm.go, check.go (§9.7), leg.go, md.go, pool.go, td.go,
-│                                      # clone.go, xfer.go, healthcheck.go, bitmaps.go (§11.4 math)
+├── agent/                             # shared dn/cn mechanism (dnagent.md §2)
+│   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring
+│   ├── store.go                       # local store helper (Local*Path files, load-on-start)
+│   ├── revision.go                    # §9.1 revision gate + reply codes
+│   ├── locks.go                       # node/object lock hierarchy (dnagent.md §2.6)
+│   ├── resinfo.go                     # ResInfo/status-epoch tracker (§9.5)
+│   ├── bitmap.go                      # §9.6 chunk store + §11.4 math skeleton
+│   ├── dm.go                          # dmsetup wrapper + table builders, blkdiscard, lsblk
+│   ├── nvmet.go                       # nvmet configfs wrapper, fixed ANA groups [D4]
+│   ├── nvmehost.go                    # nvme connect/disconnect/list-subsys wrapper
+│   ├── dnagent/                       # DiskNodeAgent policy (§9.2, dnagent.md §4): server.go,
+│   │                                  # diskmeta.go ([D13] on-disk format + allocators),
+│   │                                  # syncup_dn.go, syncup_side.go, push_migr_bm.go,
+│   │                                  # check.go (§9.7), migr.go, probe.go
+│   └── cnagent/                       # ControllerNodeAgent policy (§9.3): server.go, syncup_cn.go,
+│                                      # syncup_cntlr.go, push_clone_bm.go, check.go (§9.7), leg.go,
+│                                      # md.go, pool.go, td.go, clone.go, xfer.go, healthcheck.go, probe.go
 ├── cdc/
 │   └── cdc.go                         # §12 discovery controller
 ├── ctl/
@@ -127,7 +139,7 @@ client is linked only into the binaries that use it (§3).
 | `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
 | `cdc` | `common`, `pb`, `etcdutil` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | grpc client to the Gateway; **no etcd** |
-| `cmd/*` | the matching top-level package + `common` | viper lives here (flag/config/env parsing per §13) |
+| `cmd/*` | the matching top-level package + `common` | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import
@@ -157,7 +169,7 @@ nothing internal.
   ```
 
   (requires `protoc`, `protoc-gen-go`, `protoc-gen-go-grpc` on PATH).
-* Makefile `fmt` target: `gofmt -w ./common` plus `clang-format -i
+* Makefile `fmt` target: `gofmt -w .` plus `clang-format -i
   pb/schema.proto` (style pinned in `.clang-format`; the binary comes from
   `pip install clang-format`). Run it before committing proto changes.
 * `schema.pb.go` and `schema_grpc.pb.go` are **committed**, so `go build` /
@@ -174,10 +186,10 @@ Because every main imports `common` (at least transitively), the `init()` in
 
 * `cmd/dnvctl/main.go` — first statement:
   `common.SetLogLevel(slog.LevelWarn)` (`log.md` R6).
-* `cmd/dnv-agent/main.go` — reads the `dn`/`cn` subcommand and dispatches to
-  `agent/dnagent` or `agent/cnagent`; both share `agent` for the server
-  bootstrap, `--local-store` handling and the single
-  `common.NewLimitedOsClient(...)` instance.
+* `cmd/dnv-agent/main.go` — a cobra root command with `dn`/`cn` subcommands
+  (`dnagent.md` §3) dispatching to `agent/dnagent` or `agent/cnagent`; both
+  share `agent` for the server bootstrap, `--local-store` handling and the
+  single `common.NewLimitedOsClient(...)` instance.
 * Interceptor wiring per binary follows the table in `grpc.md` (gateway:
   server + client; worker: client; agents: server; dnvctl: client; cdc:
   none).

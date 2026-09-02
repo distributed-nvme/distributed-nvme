@@ -1,0 +1,446 @@
+package dnagent
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
+)
+
+// ResTracker keys of the node-level resources.
+const (
+	resKeyDisk = "disk"
+	resKeyMeta = "meta"
+	resKeyPort = "port"
+)
+
+// Reconcile is the SH1 startup pass (DN2): load the local store, converge
+// every stored DN, tear down sides whose pointer left their DN's list,
+// converge the rest, then re-apply every persisted bitmap chunk. It runs
+// under the node write lock with the caller's startup trace id (SH2), and
+// fails only when the local store itself is unreadable (SH3).
+func (s *DnAgentServer) Reconcile(ctx context.Context) error {
+	s.rootCtx = ctx
+	s.locks.Node().Lock()
+	defer s.locks.Node().Unlock()
+
+	files, err := s.store.List(ctx,
+		agent.StoreKindDn, agent.StoreKindSide, agent.StoreKindMigrBm)
+	if err != nil {
+		return err
+	}
+
+	for _, path := range files[agent.StoreKindDn] {
+		req := &pb.SyncupDnRequest{}
+		if err := s.store.Load(ctx, path, req); err != nil {
+			slog.ErrorContext(ctx, "skipping unreadable dn state file",
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			continue
+		}
+		s.putDn(dnKey(req.GetClusterId(), req.GetDnId()), &dnState{
+			req:     req,
+			tracker: agent.NewResTracker(),
+		})
+	}
+	for _, path := range files[agent.StoreKindSide] {
+		req := &pb.SyncupSideRequest{}
+		if err := s.store.Load(ctx, path, req); err != nil {
+			slog.ErrorContext(ctx, "skipping unreadable side state file",
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			continue
+		}
+		key := sideKey(req.GetClusterId(), req.GetDnId(),
+			req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
+		st := newSideState(req)
+		// Any per-CN linear this side left suspended belongs to the previous
+		// process; DN12 retires it at once rather than opening a second
+		// grace window.
+		s.adoptFence(st)
+		s.putSide(key, st)
+	}
+
+	// Bitmap chunks name their own side, so the owning side is found by
+	// decoding the persisted request (SH21).
+	orphans := make(map[string]struct{})
+	for _, path := range files[agent.StoreKindMigrBm] {
+		chunk := &pb.PushMigrBitmapRequest{}
+		if err := s.store.Load(ctx, path, chunk); err != nil {
+			slog.ErrorContext(ctx, "skipping unreadable bitmap chunk file",
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			continue
+		}
+		key := sideKey(chunk.GetClusterId(), chunk.GetDnId(),
+			chunk.GetSidePointer().GetSpId(),
+			chunk.GetSidePointer().GetSideId())
+		st := s.getSide(key)
+		if st == nil || st.req.GetMigrDstConf().GetMigrId() !=
+			chunk.GetMigrId() {
+			orphans[path] = struct{}{}
+			continue
+		}
+		st.chunkMigrId = chunk.GetMigrId()
+		st.chunks.Put(chunk.GetBmIdx(), chunk.GetBitmap())
+	}
+	if len(orphans) > 0 {
+		paths := make([]string, 0, len(orphans))
+		for path := range orphans {
+			paths = append(paths, path)
+		}
+		if err := s.store.Remove(ctx, paths...); err != nil {
+			slog.ErrorContext(ctx, "removing orphan bitmap chunks failed",
+				slog.String("error", err.Error()))
+		}
+	}
+
+	for _, key := range s.dnKeys() {
+		st := s.getDn(key)
+		s.convergeDn(ctx, st)
+	}
+	for _, key := range s.allSideKeys() {
+		st := s.getSide(key)
+		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+		if dn == nil || !pointerKnown(dn.req, st.req.GetSidePointer()) {
+			// Removed from its parent's list mid-teardown.
+			s.teardownSide(ctx, key, st)
+			continue
+		}
+		s.convergeSide(ctx, st, dn.req.GetExtentSize())
+	}
+	// DN2: the dm-clone may have survived the restart, so re-apply every
+	// chunk once here rather than only on (re)creation.
+	for _, key := range s.allSideKeys() {
+		st := s.getSide(key)
+		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+		if dn == nil {
+			continue
+		}
+		s.applyMigrBitmaps(ctx, st, dn.req.GetExtentSize())
+	}
+	s.sweepOrphanRecords(ctx)
+	return nil
+}
+
+// sweepOrphanRecords closes the crash window between a teardown's resource
+// removal and its table update: a side torn down by DN6 whose FreeSide never
+// ran would otherwise leak its extents forever.
+//
+// The rule is deliberately narrow, because the volume table — not the local
+// store — is authoritative for extent placement ([D13], [P4]): a record is
+// swept only when the DN's **authoritative side_pointer_list** proves its
+// owner is gone. "No local state for this side" is NOT such a proof. A node
+// that lost --local-store but kept its disk still has every side in its DN's
+// pointer list, and must rebuild those sides from their records; sweeping
+// them would free the extents and send the next SyncupSide through the §9.4
+// trim protocol again, discarding live data.
+//
+// The caller holds the node write lock, so neither the DN set nor the side
+// set can move under it.
+func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
+	clusterId, dnId, ok := s.meta.Identity()
+	if !ok {
+		// Unformatted, unreadable, or a disk this node has not confirmed as
+		// its own — nothing here may be freed.
+		return
+	}
+	known, haveState, ok := s.knownSides()
+	if !ok {
+		// No DN has been synced or reloaded yet, so nothing is authoritative
+		// and no record can be shown to be an orphan.
+		return
+	}
+
+	sideRecs, err := s.meta.SideRecords(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "reading the volume table failed",
+			slog.String("error", err.Error()))
+		return
+	}
+	for _, rec := range sideRecs {
+		key := [2]uint64{rec.GetSpId(), rec.GetSideId()}
+		if _, live := known[key]; live {
+			continue
+		}
+		if !s.removeDm(ctx, s.nf.DnSideName(
+			clusterId, dnId, rec.GetSpId(), rec.GetSideId())) {
+			// The extents stay allocated while a device still maps them;
+			// the next node-level pass retries.
+			continue
+		}
+		if err := s.meta.FreeSide(
+			ctx, rec.GetSpId(), rec.GetSideId()); err != nil {
+			slog.ErrorContext(ctx, "freeing an orphan side record failed",
+				slog.String("error", err.Error()))
+		}
+	}
+
+	cloneRecs, err := s.meta.CloneMetaRecords(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "reading the volume table failed",
+			slog.String("error", err.Error()))
+		return
+	}
+	claimed := s.claimedMigrs()
+	for _, rec := range cloneRecs {
+		if _, live := claimed[[2]uint64{
+			rec.GetSpId(), rec.GetMigrId()}]; live {
+			continue
+		}
+		// A metadata slot is only provably orphaned when every side of its
+		// sp is one whose state we actually hold — otherwise a side we have
+		// not heard from yet could still own it, and freeing the slot would
+		// strand an in-flight migration whose hydration is supposed to
+		// resume from disk (§11.2).
+		if !s.spFullyKnown(rec.GetSpId(), known, haveState) {
+			continue
+		}
+		if !s.removeDm(ctx, s.nf.DnMigrMetaDmName(
+			clusterId, dnId, rec.GetSpId(), rec.GetMigrId())) {
+			continue
+		}
+		if err := s.meta.FreeCloneMeta(
+			ctx, rec.GetSpId(), rec.GetMigrId()); err != nil {
+			slog.ErrorContext(ctx,
+				"freeing an orphan clone-metadata record failed",
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// knownSides returns every side this node may still host: the union of every
+// synced DN's authoritative side_pointer_list and every side with local
+// state. haveState is the subset whose SyncupSideRequest the agent actually
+// holds. ok is false when no DN has been synced or reloaded at all.
+func (s *DnAgentServer) knownSides() (
+	map[[2]uint64]struct{}, map[[2]uint64]struct{}, bool,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.dns) == 0 {
+		return nil, nil, false
+	}
+	known := make(map[[2]uint64]struct{})
+	haveState := make(map[[2]uint64]struct{})
+	for _, dn := range s.dns {
+		for _, ptr := range dn.req.GetSidePointerList() {
+			known[[2]uint64{ptr.GetSpId(), ptr.GetSideId()}] = struct{}{}
+		}
+	}
+	for _, st := range s.sides {
+		ptr := st.req.GetSidePointer()
+		key := [2]uint64{ptr.GetSpId(), ptr.GetSideId()}
+		known[key] = struct{}{}
+		haveState[key] = struct{}{}
+	}
+	return known, haveState, true
+}
+
+// claimedMigrs lists the (sp_id, migr_id) pairs a live destination role owns.
+// Both the currently requested and the last applied conf count, so a converge
+// that has not run yet never loses its metadata slot.
+func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[[2]uint64]struct{})
+	for _, st := range s.sides {
+		spId := st.req.GetSidePointer().GetSpId()
+		for _, dst := range []*pb.SyncupSideRequest_MigrDstConf{
+			st.req.GetMigrDstConf(), st.appliedMigrDst,
+		} {
+			if dst == nil {
+				continue
+			}
+			out[[2]uint64{spId, dst.GetMigrId()}] = struct{}{}
+		}
+	}
+	return out
+}
+
+// spFullyKnown reports whether every side of one sp that this node may host
+// is a side whose local state the agent holds.
+func (s *DnAgentServer) spFullyKnown(
+	spId uint64,
+	known map[[2]uint64]struct{},
+	haveState map[[2]uint64]struct{},
+) bool {
+	for key := range known {
+		if key[0] != spId {
+			continue
+		}
+		if _, ok := haveState[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *DnAgentServer) dnKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.dns))
+	for key := range s.dns {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (s *DnAgentServer) allSideKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(s.sides))
+	for key := range s.sides {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func newSideState(req *pb.SyncupSideRequest) *sideState {
+	return &sideState{
+		req:            req,
+		tracker:        agent.NewResTracker(),
+		chunks:         agent.NewChunkSet(),
+		appliedCnIds:   cnIdsOf(req.GetSideConf()),
+		appliedMigrSrc: req.GetMigrSrcConf(),
+		appliedMigrDst: req.GetMigrDstConf(),
+	}
+}
+
+// pointerKnown reports whether a side pointer is in the DN's authoritative
+// list — what makes a side known to the agent at all (DN6, DN8).
+func pointerKnown(req *pb.SyncupDnRequest, ptr *pb.SidePointer) bool {
+	for _, known := range req.GetSidePointerList() {
+		if known.GetSpId() == ptr.GetSpId() &&
+			known.GetSideId() == ptr.GetSideId() {
+			return true
+		}
+	}
+	return false
+}
+
+// syncupDn implements DN4-DN7. The node write lock is held by the caller.
+func (s *DnAgentServer) syncupDn(
+	ctx context.Context,
+	req *pb.SyncupDnRequest,
+) *pb.SyncupDnReply {
+	key := dnKey(req.GetClusterId(), req.GetDnId())
+	st := s.getDn(key)
+	var stored uint64
+	if st != nil {
+		stored = st.req.GetRevision()
+	}
+	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
+		return &pb.SyncupDnReply{AgentReply: reject, Revision: stored}
+	}
+	if st == nil {
+		st = &dnState{tracker: agent.NewResTracker()}
+	}
+	st.req = req
+	s.putDn(key, st)
+
+	info := s.convergeDn(ctx, st)
+	s.teardownRemovedSides(ctx, req)
+	s.sweepOrphanRecords(ctx)
+
+	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
+	if err := s.store.Save(ctx, path, req); err != nil {
+		slog.ErrorContext(ctx, "persisting dn state failed",
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+	}
+	return &pb.SyncupDnReply{
+		AgentReply: agent.OkReply(),
+		Revision:   req.GetRevision(),
+		DnInfo:     info,
+	}
+}
+
+// convergeDn builds the once-per-DN base state of §3.1 probe-first (DN5),
+// recording each resource's outcome as it goes. A failed resource never
+// aborts the pass (DN19).
+func (s *DnAgentServer) convergeDn(
+	ctx context.Context,
+	st *dnState,
+) *pb.DnInfo {
+	req := st.req
+	t := st.tracker
+	info := &pb.DnInfo{}
+
+	size, err := s.dm.DiskSize(ctx, s.disk)
+	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", err)
+	if err == nil {
+		// The allocator needs the extent count of the data area; the raw
+		// size is the only part of it the disk format does not carry.
+		s.meta.SetDiskSize(size)
+	}
+
+	info.MetaInfo = s.ensureDiskMeta(ctx, t, req)
+
+	info.PortInfo = s.ensurePort(ctx, t)
+	return info
+}
+
+// ensureDiskMeta converges the [D13] disk format: a blank disk is formatted
+// (header + an empty volume table in slot A), a disk already formatted for
+// this cluster/dn/extent_size is left untouched, and a disk formatted for
+// anything else is refused rather than overwritten (DN5).
+func (s *DnAgentServer) ensureDiskMeta(
+	ctx context.Context,
+	t *agent.ResTracker,
+	req *pb.SyncupDnRequest,
+) *pb.ResInfo {
+	if err := s.meta.EnsureFormatted(ctx, req.GetClusterId(),
+		req.GetDnId(), req.GetExtentSize()); err != nil {
+		return t.Err(resKeyMeta, s.disk, err.Error())
+	}
+	return t.Ok(resKeyMeta, s.disk, s.meta.Describe())
+}
+
+// ensurePort converges the node's single nvmet port and its three fixed ANA
+// groups (SH19). Probing first keeps a converged port untouched: the port
+// attributes cannot be rewritten once a subsystem is linked.
+func (s *DnAgentServer) ensurePort(
+	ctx context.Context,
+	t *agent.ResTracker,
+) *pb.ResInfo {
+	resName := fmt.Sprintf("%d", common.NvmetPortId)
+	ok, details, err := s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	if err != nil {
+		return t.Err(resKeyPort, resName, err.Error())
+	}
+	if ok {
+		return t.Ok(resKeyPort, resName, "")
+	}
+	if err := s.nvmet.EnsurePort(
+		ctx, common.NvmetPortId, s.port); err != nil {
+		return t.Err(resKeyPort, resName, err.Error())
+	}
+	ok, details, err = s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	if err != nil {
+		return t.Err(resKeyPort, resName, err.Error())
+	}
+	if !ok {
+		return t.Err(resKeyPort, resName, details)
+	}
+	return t.Ok(resKeyPort, resName, "")
+}
+
+// teardownRemovedSides implements the DN6 pointer diff: a local side whose
+// pointer left the authoritative list is torn down top-down. Ids are never
+// reused, so a deleted side never comes back.
+func (s *DnAgentServer) teardownRemovedSides(
+	ctx context.Context,
+	req *pb.SyncupDnRequest,
+) {
+	for _, key := range s.sideKeysOf(req.GetClusterId(), req.GetDnId()) {
+		st := s.getSide(key)
+		if st == nil || pointerKnown(req, st.req.GetSidePointer()) {
+			continue
+		}
+		s.teardownSide(ctx, key, st)
+	}
+}

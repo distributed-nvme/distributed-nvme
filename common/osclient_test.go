@@ -417,6 +417,12 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	if err := fake.WriteFile(ctx, "/x", "d"); err != nil {
 		t.Errorf("unset WriteFileFn = %v", err)
 	}
+	if data, err := fake.ReadBlock(ctx, "/x", 0, 8); data != nil || err != nil {
+		t.Errorf("unset ReadBlockFn = (%v, %v)", data, err)
+	}
+	if err := fake.WriteBlock(ctx, "/x", 0, []byte{1}); err != nil {
+		t.Errorf("unset WriteBlockFn = %v", err)
+	}
 	if err := fake.ReadProto(ctx, "/x", &pb.SidePointer{}); err != nil {
 		t.Errorf("unset ReadProtoFn = %v", err)
 	}
@@ -444,5 +450,195 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	target := &pb.SidePointer{}
 	if err := fake.ReadProto(ctx, "/x", target); err != nil || target.GetSpId() != 7 {
 		t.Errorf("stubbed ReadProto → (%v, %v)", target, err)
+	}
+
+	var blockOff uint64
+	var blockData []byte
+	fake.WriteBlockFn = func(_ context.Context, _ string, offset uint64, data []byte) error {
+		blockOff, blockData = offset, data
+		return nil
+	}
+	fake.ReadBlockFn = func(_ context.Context, _ string, _ uint64, length uint64) ([]byte, error) {
+		return make([]byte, length), nil
+	}
+	if err := fake.WriteBlock(ctx, "/disk", 4096, []byte("DNVDISK1")); err != nil {
+		t.Errorf("stubbed WriteBlock = %v", err)
+	}
+	if blockOff != 4096 || string(blockData) != "DNVDISK1" {
+		t.Errorf("stub saw (%d, %q)", blockOff, blockData)
+	}
+	if got, err := fake.ReadBlock(ctx, "/disk", 0, 5); err != nil || len(got) != 5 {
+		t.Errorf("stubbed ReadBlock → (%v, %v)", got, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReadBlock / WriteBlock (osclient.md §8.9, §4.6 — architecture.md [D13])
+// ---------------------------------------------------------------------------
+
+func TestBlockRoundTrip(t *testing.T) {
+	capture := captureLogs(t)
+	client := NewLimitedOsClient(0)
+	ctx := WithTraceId(context.Background(), "block-trace")
+	path := filepath.Join(t.TempDir(), "disk.img")
+
+	// A block device always exists at full size; model that with a
+	// pre-sized regular file, since WriteBlock never extends one.
+	if err := os.WriteFile(path, make([]byte, 4096*4), 0o644); err != nil {
+		t.Fatalf("create backing file: %v", err)
+	}
+
+	head := []byte("DNVDISK1\x01\x00\x00\x00")
+	if err := client.WriteBlock(ctx, path, 0, head); err != nil {
+		t.Fatalf("WriteBlock at 0: %v", err)
+	}
+	tail := []byte{0xde, 0xad, 0xbe, 0xef}
+	if err := client.WriteBlock(ctx, path, 8192, tail); err != nil {
+		t.Fatalf("WriteBlock at 8192: %v", err)
+	}
+
+	got, err := client.ReadBlock(ctx, path, 0, uint64(len(head)))
+	if err != nil {
+		t.Fatalf("ReadBlock at 0: %v", err)
+	}
+	if string(got) != string(head) {
+		t.Errorf("read back %q, want %q", got, head)
+	}
+	if got, err = client.ReadBlock(
+		ctx, path, 8192, uint64(len(tail))); err != nil ||
+		string(got) != string(tail) {
+		t.Errorf("read at 8192 → (%v, %v)", got, err)
+	}
+
+	// A write into an existing region replaces exactly that region and
+	// leaves its neighbours alone.
+	if err := client.WriteBlock(ctx, path, 8192, []byte{0x00, 0x00}); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if got, err = client.ReadBlock(ctx, path, 8192, 4); err != nil ||
+		got[0] != 0 || got[1] != 0 || got[2] != 0xbe || got[3] != 0xef {
+		t.Errorf("partial overwrite → (%v, %v)", got, err)
+	}
+	if got, err = client.ReadBlock(
+		ctx, path, 0, uint64(len(head))); err != nil ||
+		string(got) != string(head) {
+		t.Errorf("the header was disturbed: (%q, %v)", got, err)
+	}
+
+	// An unwritten region reads as zeros, not as an error.
+	if got, err = client.ReadBlock(ctx, path, 12288, 16); err != nil {
+		t.Fatalf("ReadBlock of an untouched region: %v", err)
+	}
+	for i, b := range got {
+		if b != 0 {
+			t.Fatalf("untouched byte %d = %#x, want 0", i, b)
+		}
+	}
+
+	// Logging: one record per call, with path/offset/length and never data.
+	rec := capture.withMsg(t, "os write block")[0]
+	hasAttrs(t, rec, "path", "offset", "length", TraceIdLogKey)
+	if rec["path"] != path || rec["offset"] != float64(0) ||
+		rec["length"] != float64(len(head)) ||
+		rec[TraceIdLogKey] != "block-trace" {
+		t.Errorf("os write block record = %v", rec)
+	}
+	if _, ok := rec["data"]; ok {
+		t.Errorf("os write block logged the payload: %v", rec)
+	}
+	rec = capture.withMsg(t, "os read block")[0]
+	hasAttrs(t, rec, "path", "offset", "length", TraceIdLogKey)
+	if _, ok := rec["data"]; ok {
+		t.Errorf("os read block logged the payload: %v", rec)
+	}
+}
+
+// A short read is an error, never a silently truncated buffer.
+func TestReadBlockShortReadIsError(t *testing.T) {
+	capture := captureLogs(t)
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "small.img")
+	if err := os.WriteFile(path, make([]byte, 100), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if data, err := client.ReadBlock(ctx, path, 0, 4096); err == nil {
+		t.Errorf("a short read succeeded with %d bytes", len(data))
+	}
+	if data, err := client.ReadBlock(ctx, path, 4096, 8); err == nil {
+		t.Errorf("a read past the end succeeded with %d bytes", len(data))
+	}
+	if _, err := client.ReadBlock(
+		ctx, filepath.Join(t.TempDir(), "absent"), 0, 8); err == nil {
+		t.Error("reading a missing file succeeded")
+	}
+	// A nonsense length is rejected before anything is allocated, so a
+	// corrupt on-disk length field cannot turn into an OOM.
+	if _, err := client.ReadBlock(ctx, path, 0, 1<<40); err == nil {
+		t.Error("a 1 TiB read of a 100-byte file succeeded")
+	}
+	if _, err := client.ReadBlock(
+		ctx, path, ^uint64(0)-4, 8); err == nil {
+		t.Error("an offset+length overflow succeeded")
+	}
+	if err := client.WriteBlock(
+		ctx, filepath.Join(t.TempDir(), "absent"), 0, []byte{1}); err == nil {
+		t.Error("writing a missing file succeeded")
+	}
+	for _, rec := range capture.withMsg(t, "os read block") {
+		if _, ok := rec["error"]; !ok {
+			t.Errorf("a failed read block has no error attr: %v", rec)
+		}
+	}
+}
+
+// osclient.md §8.8: WriteFileDirect creates a missing file and overwrites an
+// existing one in place, with no temp file left behind, and emits its own
+// "os write file direct" record.
+func TestWriteFileDirect(t *testing.T) {
+	capture := captureLogs(t)
+	client := NewLimitedOsClient(0)
+	ctx := WithTraceId(context.Background(), "direct-trace")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ana_state")
+
+	if err := client.WriteFileDirect(ctx, path, "optimized"); err != nil {
+		t.Fatalf("WriteFileDirect: %v", err)
+	}
+	if data, _ := client.ReadFile(ctx, path); data != "optimized" {
+		t.Errorf("read back %q", data)
+	}
+	if err := client.WriteFileDirect(ctx, path, "inaccessible"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if data, _ := client.ReadFile(ctx, path); data != "inaccessible" {
+		t.Errorf("after overwrite read back %q", data)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "ana_state" {
+		t.Errorf("direct write left extra files: %v", entries)
+	}
+
+	rec := capture.withMsg(t, "os write file direct")[0]
+	hasAttrs(t, rec, "path", "size", "data", TraceIdLogKey)
+	if rec["path"] != path || rec["data"] != "optimized" ||
+		rec[TraceIdLogKey] != "direct-trace" {
+		t.Errorf("os write file direct record = %v", rec)
+	}
+
+	// A path whose directory does not exist fails, and says so.
+	err = client.WriteFileDirect(
+		ctx, filepath.Join(dir, "missing", "x"), "v")
+	if err == nil {
+		t.Error("writing into a missing directory succeeded")
+	}
+	failRec := capture.withMsg(t, "os write file direct")[2]
+	if _, ok := failRec["error"]; !ok {
+		t.Errorf("failed direct write has no error attr: %v", failRec)
 	}
 }

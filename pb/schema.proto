@@ -137,9 +137,11 @@ message Namespace {
 enum SpLevel {
     // all dm/md devices are readable/writable
     SP_LEVEL_READWRITE = 0;
-    // all thin device are readonly
-    // all side are readonly
-    // all hydration of clones/migrations are disabled
+    // all user-facing namespaces are readonly:
+    // reads are served, writes fail with an IO error.
+    // Enforced on the CN only, by a write-failing table on the
+    // namespace device — never by a bdev read-only flag, and never
+    // on the DN (architecture.md §11.7, [D11]).
     SP_LEVEL_READONLY = 16;
     // Do not create all dm-clone for clones
     // and include all in SP_LEVEL_READONLY
@@ -156,7 +158,7 @@ enum SpLevel {
     // Do not export sides
     // and include all in SP_LEVEL_NO_MIGRATION
     SP_LEVEL_NO_SIDE = 96;
-    // Only create logical volumes
+    // Only keep the side data devices and their allocation records,
     // and nothing else
     SP_LEVEL_DISABLE = 112;
 }
@@ -181,10 +183,8 @@ message ResInfo {
 
 message DnInfo {
     ResInfo disk_info = 1;
-    ResInfo vg_info = 2;
+    ResInfo meta_info = 2;
     ResInfo port_info = 3;
-    ResInfo migr_pv_info = 4;
-    ResInfo migr_vg_info = 5;
 }
 
 message CnInfo {
@@ -204,7 +204,7 @@ message SideInfo {
         ResInfo target_info = 1;
         ResInfo dm_clone_info = 2;
     }
-    ResInfo lv_info = 1;
+    ResInfo side_dev_info = 1;
     map<uint64, ResInfo> cn_id_to_dm_error = 2;
     map<uint64, ResInfo> cn_id_to_dm_linear = 3;
     map<uint64, ResInfo> cn_id_to_nvmeof = 4;
@@ -1513,4 +1513,37 @@ service ControllerNodeAgent {
     rpc GetLegBm(GetLegBmRequest) returns (GetLegBmReply) {}
     rpc CheckCn(stream CheckCnRequest) returns (stream CheckCnReply) {}
     rpc CheckCntlr(stream CheckCntlrRequest) returns (stream CheckCntlrReply) {}
+}
+
+// agent-local on-disk metadata ([D13]); never sent over any RPC.
+
+message DnDiskHeader {
+    uint64 cluster_id = 1;
+    uint64 dn_id = 2;
+    uint64 extent_size = 3;
+    uint64 format_uuid = 4;
+    uint64 data_offset = 5;        // = DnDataOffset when written
+    uint64 clone_meta_offset = 6;  // = DnCloneMetaOffset
+    uint64 clone_meta_size = 7;    // = DnCloneMetaSize
+}
+
+message DnDiskTable {
+    message ExtentRun {
+        uint64 start = 1;  // extent index within the data area
+        uint64 count = 2;
+    }
+    message SideRecord {
+        uint64 sp_id = 1;
+        uint64 side_id = 2;
+        bool trimmed = 3;
+        repeated ExtentRun run_list = 4;  // ordered; concat = side device
+    }
+    message CloneMetaRecord {
+        uint64 sp_id = 1;
+        uint64 migr_id = 2;
+        uint64 unit_start = 3;  // in DnCloneMetaUnit units within the area
+        uint64 unit_count = 4;
+    }
+    repeated SideRecord side_list = 1;
+    repeated CloneMetaRecord clone_meta_list = 2;
 }

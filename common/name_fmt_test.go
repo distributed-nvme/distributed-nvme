@@ -1,6 +1,8 @@
 package common
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"hash/fnv"
 	"regexp"
@@ -48,6 +50,12 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "DnMigrFinalName",
 		nf.DnMigrFinalName(testCluster, testDn, testSp, testMigr),
 		"dnv-"+c+"-0000000000000003-3-0000000000000011-000000000000001e")
+	checkName(t, "DnSideName",
+		nf.DnSideName(testCluster, testDn, testSp, testSide),
+		"dnv-"+c+"-0000000000000003-4-0000000000000011-0000000000000016")
+	checkName(t, "DnMigrMetaDmName",
+		nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigr),
+		"dnv-"+c+"-0000000000000003-5-0000000000000011-000000000000001e")
 
 	checkName(t, "CnPoolMetaName",
 		nf.CnPoolMetaName(testCluster, testCn, testSp, testSlice),
@@ -169,27 +177,11 @@ func TestNqns(t *testing.T) {
 	}
 }
 
-// §4.5 LVM / tmpfs / file names.
+// §4.5 LVM / tmpfs / file names. Only the CN clone VG is left: the DN carries
+// the [D13] disk format instead of LVM.
 func TestLvmAndTmpfsNames(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
-
-	checkName(t, "DnVgName", nf.DnVgName(testCluster, testDn),
-		"dnv-dn-"+c+"-0000000000000003")
-	checkName(t, "DnLvName", nf.DnLvName(testSp, testSide),
-		"0000000000000011-0000000000000016")
-	checkName(t, "DnLvPath", nf.DnLvPath(testCluster, testDn, testSp, testSide),
-		"/dev/dnv-dn-"+c+"-0000000000000003/0000000000000011-0000000000000016")
-
-	checkName(t, "DnMigrPvName", nf.DnMigrPvName(), "migr-pv")
-	checkName(t, "DnMigrPvPath", nf.DnMigrPvPath(testCluster, testDn),
-		"/dev/dnv-dn-"+c+"-0000000000000003/migr-pv")
-	checkName(t, "DnMigrVgName", nf.DnMigrVgName(testCluster, testDn),
-		"dnv-migr-"+c+"-0000000000000003")
-	checkName(t, "DnMigrMetaName", nf.DnMigrMetaName(testSp, testMigr),
-		"0000000000000011-000000000000001e")
-	checkName(t, "DnMigrMetaPath", nf.DnMigrMetaPath(testCluster, testDn, testSp, testMigr),
-		"/dev/dnv-migr-"+c+"-0000000000000003/0000000000000011-000000000000001e")
 
 	checkName(t, "CnCloneVgName", nf.CnCloneVgName(testCluster, testCn),
 		"dnv-clone-vg-"+c+"-0000000000000005")
@@ -239,12 +231,46 @@ func TestNamesAreClusterScoped(t *testing.T) {
 	for _, pair := range [][2]string{
 		{nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn),
 			nf.DnLinearName(testCluster+1, testDn, testSp, testSide, testCn)},
-		{nf.DnVgName(testCluster, testDn), nf.DnVgName(testCluster+1, testDn)},
+		{nf.DnSideName(testCluster, testDn, testSp, testSide),
+			nf.DnSideName(testCluster+1, testDn, testSp, testSide)},
 		{nf.CnHostNqn(testCluster, testCn), nf.CnHostNqn(testCluster+1, testCn)},
 		{nf.LocalCnPath(testCluster, testCn), nf.LocalCnPath(testCluster+1, testCn)},
 	} {
 		if pair[0] == pair[1] {
 			t.Errorf("two clusters share the name %q", pair[0])
 		}
+	}
+}
+
+// DnNsIdentity is the deterministic namespace identity both sides of a leg
+// present (architecture.md §3.1, dnagent.md §2.2).
+func TestDnNsIdentity(t *testing.T) {
+	uuid, nguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
+	again, againNguid := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
+	if uuid != again || nguid != againNguid {
+		t.Fatal("DnNsIdentity is not deterministic")
+	}
+	if len(nguid) != 32 {
+		t.Errorf("nguid = %q, want 32 hex digits", nguid)
+	}
+	if want := fmt.Sprintf("%s-%s-%s-%s-%s", nguid[0:8], nguid[8:12],
+		nguid[12:16], nguid[16:20], nguid[20:32]); uuid != want {
+		t.Errorf("uuid = %q, want %q", uuid, want)
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"dnv-ns:%016x:%016x:%016x", uint64(0xebada5168620c5fe),
+		uint64(0x11), uint64(0x15))))
+	if want := hex.EncodeToString(sum[:16]); nguid != want {
+		t.Errorf("nguid = %q, want %q", nguid, want)
+	}
+	// The identity is keyed by the leg, never by the side: a migrating
+	// leg's two sides must present the same one.
+	otherLeg, _ := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x16)
+	if uuid == otherLeg {
+		t.Error("two legs share a namespace identity")
+	}
+	otherSp, _ := DnNsIdentity(0xebada5168620c5fe, 0x12, 0x15)
+	if uuid == otherSp {
+		t.Error("two storage pools share a namespace identity")
 	}
 }

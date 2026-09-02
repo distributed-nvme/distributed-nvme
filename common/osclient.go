@@ -3,6 +3,8 @@ package common
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -61,6 +63,25 @@ type OsClient interface {
 	// a temp file in the same directory is written, fsynced and renamed onto
 	// path, so readers never observe a partial file (architecture.md §9.1).
 	WriteFile(ctx context.Context, path string, data string) (err error)
+
+	// WriteFileDirect writes data straight into the file at path with a
+	// plain open/truncate/write/close — no temp file, no rename. It exists
+	// for kernel virtual filesystems (nvmet configfs, sysfs), where the
+	// atomic-replace protocol of WriteFile is impossible: configfs forbids
+	// creating arbitrary files, so a temp file + rename can never succeed
+	// there. Use WriteFile for every regular-file write; use
+	// WriteFileDirect only for virtual-filesystem attribute writes
+	// (dnagent.md SH18).
+	WriteFileDirect(ctx context.Context, path string, data string) (err error)
+
+	// ReadBlock reads exactly length bytes at byte offset from a block
+	// device (or regular file). A short read is an error. Buffered IO —
+	// callers use it only for regions no dm table references.
+	ReadBlock(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
+
+	// WriteBlock writes data at byte offset and fdatasyncs the file
+	// descriptor before returning.
+	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
 
 	// ReadProto loads a raw Protobuf binary file from disk and deserializes
 	// it into a target message struct (target must be a non-nil pointer,
@@ -193,6 +214,134 @@ func (c *LimitedOsClient) WriteFile(
 	slog.InfoContext(ctx, "os write file", appendErr(attrs, err)...)
 
 	return err
+}
+
+func (c *LimitedOsClient) WriteFileDirect(
+	ctx context.Context,
+	path string,
+	data string,
+) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	err := os.WriteFile(path, []byte(data), 0o644)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Int("size", len(data)),
+		slog.String("data", TruncForLog(data)),
+	}
+	slog.InfoContext(ctx, "os write file direct", appendErr(attrs, err)...)
+
+	return err
+}
+
+// ReadBlock / WriteBlock are the raw-device metadata path of
+// architecture.md [D13]: buffered pread/pwrite plus an fdatasync on the write
+// side. No O_DIRECT — the regions they touch are never part of any dm table
+// and the agent is their only writer, so page-cache aliasing cannot occur —
+// and never a shell-out to dd, whose uutils build silently mishandles
+// iflag=/oflag=direct (dnagent_integtest.md §4).
+func (c *LimitedOsClient) ReadBlock(
+	ctx context.Context,
+	path string,
+	offset uint64,
+	length uint64,
+) ([]byte, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	data, err := readBlockAt(path, offset, length)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Uint64("offset", offset),
+		slog.Uint64("length", length),
+	}
+	slog.InfoContext(ctx, "os read block", appendErr(attrs, err)...)
+
+	return data, err
+}
+
+func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Bound-check before allocating. os.Stat reports 0 for a block device,
+	// so the size comes from a seek to the end — which works for both block
+	// devices and regular files. Without this a nonsense length (a corrupt
+	// on-disk length field, say) would be a multi-gigabyte allocation before
+	// the read could fail.
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	if offset+length > uint64(size) || offset+length < offset {
+		return nil, fmt.Errorf(
+			"short read: %s offset=%d length=%d size=%d",
+			path, offset, length, size)
+	}
+	data := make([]byte, length)
+	// A short read is still an error, never a silent truncation.
+	if _, err := io.ReadFull(io.NewSectionReader(
+		f, int64(offset), int64(length)), data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (c *LimitedOsClient) WriteBlock(
+	ctx context.Context,
+	path string,
+	offset uint64,
+	data []byte,
+) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	err := writeBlockAt(path, offset, data)
+
+	attrs := []any{
+		slog.String("path", path),
+		slog.Uint64("offset", offset),
+		slog.Int("length", len(data)),
+	}
+	slog.InfoContext(ctx, "os write block", appendErr(attrs, err)...)
+
+	return err
+}
+
+func writeBlockAt(path string, offset uint64, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteAt(data, int64(offset)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func (c *LimitedOsClient) ReadProto(

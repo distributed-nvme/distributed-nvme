@@ -90,11 +90,16 @@ const (
 	DefaultCloneVgSize    = 1 * 1024 * 1024 * 1024
 	DefaultCloneVgExtSize = 4 * 1024 * 1024
 
-	DefaultDnVgPrefix = "dnv-dn"
-
-	DefaultMigrVgPrefix  = "dnv-migr"
-	DefaultMigrVgSize    = 1 * 1024 * 1024 * 1024
-	DefaultMigrVgExtSize = 4 * 1024 * 1024
+	// dnv DN disk format ([D13]). All byte offsets on the raw --disk device.
+	DnHeaderOffset     = 0 // 4 KiB header block
+	DnHeaderSize       = 4096
+	DnTableSlotAOffset = 4 * 1024 * 1024  // volume-table slot A
+	DnTableSlotBOffset = 20 * 1024 * 1024 // volume-table slot B
+	DnTableSlotSize    = 16 * 1024 * 1024
+	DnCloneMetaOffset  = 64 * 1024 * 1024  // dm-clone metadata slot area
+	DnCloneMetaSize    = 192 * 1024 * 1024 // 48 units
+	DnCloneMetaUnit    = 4 * 1024 * 1024   // slot allocation granularity
+	DnDataOffset       = 256 * 1024 * 1024 // extent area start (fixed!)
 
 	DefaultLocalStorPrefix = "/var/tmp"
 
@@ -105,8 +110,6 @@ const (
 
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
-
-	SideSwitchWait = 300
 
 	MaxCloneThreshold     = 8
 	DefaultCloneThreshold = 1
@@ -135,4 +138,36 @@ const (
 	// Maximum number of characters of string file data included in a log
 	// record (see log.md R11).
 	LogStrDataLimit = 128
+
+	// The single nvmet port every node exports (architecture.md §3.1/§3.2).
+	NvmetPortId = 1
+
+	// The three fixed ANA groups on every node's port (architecture.md
+	// [D4]). Group 1 always exists in nvmet and defaults to optimized;
+	// groups 2 and 3 are created at port setup. Group states are written
+	// once and never changed; every ANA transition rewrites a namespace's
+	// ana_grpid instead.
+	AnaGrpIdOptimized    = 1
+	AnaGrpIdNonOptimized = 2
+	AnaGrpIdInaccessible = 3
+
+	// AgentReply.code values (dnagent.md §2.5). 0 = OK. Callers only ever
+	// branch on code != 0; the specific values exist for details/log
+	// readability and tests.
+	ReplyCodeStaleRevision = 1
+	ReplyCodeUnknownObject = 2
+
+	// Seconds between background retries of a pending migration-destination
+	// nvme connect (dnagent.md DN8).
+	DnMigrConnectRetryInterval = 5
+
+	// SuspendSeconds is the §11.2 src-cutover grace window: a migration
+	// source's per-CN dm-linears are held suspended for at least this long
+	// before they are reloaded onto their dm-errors, so IO the old primary
+	// still had in flight is absorbed rather than immediately failed. The
+	// deferred bios are released against the dm-error table the reload
+	// installs, so they error at the end of the window instead of replaying
+	// onto the side's data ([D12]). It is a floor, not a deadline: the
+	// reload happens on the first converge at or after it.
+	SuspendSeconds = 60
 )

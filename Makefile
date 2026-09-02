@@ -24,7 +24,7 @@ gen:
 CLANG_FORMAT ?= clang-format
 
 fmt:
-	gofmt -w ./common
+	gofmt -w .
 	$(CLANG_FORMAT) -i pb/schema.proto
 
 build:
