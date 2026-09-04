@@ -231,6 +231,79 @@ func (d *Dm) BlkDiscardRange(
 		dev)
 }
 
+// BlkZeroout writes zeros over one byte range of a device — the §9.4 side
+// provisioning primitive ([D15], update_01.md U4). Unlike BlkDiscardRange (a
+// metadata-only "mark hydrated" hint) this is a *guaranteed* zero write:
+// discard-reads-zeros is not a hardware guarantee (the kernel dropped
+// discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and dnv is
+// multi-tenant, so one tenant must never read another's stale bytes.
+//
+// It must never be pointed at the CN clone-metadata arena: that arena is a
+// sparse tmpfs file and --zeroout would materialize it in RAM, which is why
+// the CN allocator uses the plain hole-punch discard instead (update_01.md U3).
+//
+// --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
+// keeps meaning dm-clone hydration marking only.
+func (d *Dm) BlkZeroout(
+	ctx context.Context,
+	dev string,
+	offset uint64,
+	length uint64,
+) error {
+	return d.runOk(ctx, "blkdiscard", "--zeroout",
+		"--offset", strconv.FormatUint(offset, 10),
+		"--length", strconv.FormatUint(length, 10),
+		dev)
+}
+
+// sysfsBlockDir is where the kernel publishes every block device's queue
+// limits. Unlike /sys/block it covers partitions and dm/nvme namespaces too.
+const sysfsBlockDir = "/sys/class/block"
+
+// WriteZeroesMaxBytes reads
+// /sys/class/block/{kname}/queue/write_zeroes_max_bytes for dev — the DN5
+// fail-fast check behind §9.4's fast-Write-Zeroes assumption. A 0 there means
+// the kernel would fall back to writing zero pages at bulk speed, so the
+// assumption cannot hold and the DN must be taken out of allocation.
+//
+// dev's kernel name is resolved with `lsblk --nodeps --noheadings --output
+// KNAME` first: the agent's --disk is documented as a /dev/disk/by-uuid
+// symlink, whose basename is not a sysfs node (ruling R4.10).
+//
+// ok is false when the attribute does not exist — that is NOT a verdict (an
+// older kernel simply may not publish it); only a present 0 is.
+func (d *Dm) WriteZeroesMaxBytes(
+	ctx context.Context,
+	dev string,
+) (value uint64, ok bool, err error) {
+	stdout, stderr, _, err := d.run(ctx, "lsblk",
+		"--nodeps", "--noheadings", "--output", "KNAME", dev)
+	if err != nil {
+		return 0, false, cmdError("lsblk", []string{dev}, stdout, stderr, err)
+	}
+	kname := strings.TrimSpace(stdout)
+	if idx := strings.IndexByte(kname, '\n'); idx >= 0 {
+		kname = strings.TrimSpace(kname[:idx])
+	}
+	if kname == "" {
+		return 0, false, fmt.Errorf("lsblk %s: empty KNAME", dev)
+	}
+	raw, present, err := d.readAttr(ctx,
+		sysfsBlockDir+"/"+kname+"/queue/write_zeroes_max_bytes")
+	if err != nil {
+		return 0, false, err
+	}
+	if !present {
+		return 0, false, nil
+	}
+	parsed, parseErr := strconv.ParseUint(raw, 10, 64)
+	if parseErr != nil {
+		return 0, false, fmt.Errorf(
+			"%s: unparsable write_zeroes_max_bytes %q", dev, raw)
+	}
+	return parsed, true, nil
+}
+
 // ---------------------------------------------------------------------------
 // Table builders (Appendix A). Device references are "major:minor" strings.
 // ---------------------------------------------------------------------------
@@ -242,6 +315,21 @@ func ErrorTable(sectors uint64) string {
 func LinearTable(sectors uint64, dev string, offsetSectors uint64) string {
 	return fmt.Sprintf("0 %d linear %s %d", sectors, dev, offsetSectors)
 }
+
+// FlakeyErrorWritesTable is the [D11] read-only table: dm-flakey with
+// up_interval 0 and down_interval 1 is permanently "down", and the single
+// `error_writes` feature makes "down" mean reads pass / writes error.
+// `<num_features>` counts the feature *name*, so it is 1 here.
+func FlakeyErrorWritesTable(sectors uint64, dev string) string {
+	return fmt.Sprintf("0 %d flakey %s 0 0 1 1 error_writes", sectors, dev)
+}
+
+// The remaining Appendix A targets — striped, thin-pool, thin — have no
+// builder here on purpose. dm-thin and dm-stripe print their tables back with
+// status-derived arguments appended, so the cn role compares a *prefix* of the
+// arguments rather than a whole string; it therefore builds those tables from
+// the same argument slice it compares against, and a second representation
+// here could only drift from it.
 
 // ExtentRunSectors is one run of a side's allocation, already converted to
 // sectors: the byte offset of its first extent on the raw disk and its
@@ -265,11 +353,6 @@ func LinearRunsTable(runs []ExtentRunSectors, devNo string) string {
 	return sb.String()
 }
 
-// BlkDiscard discards a whole device (step 2 of the §9.4 trim protocol).
-func (d *Dm) BlkDiscard(ctx context.Context, path string) error {
-	return d.runOk(ctx, "blkdiscard", "--force", path)
-}
-
 // DiskSize returns the byte size of a block device
 // (`lsblk --bytes --nodeps`, the GetDnSize probe).
 func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
@@ -289,9 +372,25 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 	return size, nil
 }
 
-// CloneTable builds a dm-clone table. Hydration is a feature flag, the
-// hydration knobs are core arguments; both are also reachable through
-// `dmsetup message` on a live device, which is how they are changed later.
+// CloneTable builds a dm-clone table. Hydration and discard passdown are
+// feature flags, the hydration knobs are core arguments; both are also
+// reachable through `dmsetup message` on a live device, which is how they are
+// changed later.
+//
+// noDiscardPassdown matters because §9.6/§11.4 use `blkdiscard` on the
+// dm-clone as a metadata-only "mark this region hydrated" primitive. dm-clone
+// enables discard passdown by default whenever the destination advertises a
+// discard granularity no larger than a region, and then *also* remaps the
+// discard to the destination — which would unmap exactly the blocks the
+// destination already owns. Every dnv caller therefore passes true, with no
+// exceptions (update_01.md U1): on the cn clone because the §9.6 chunk pushes
+// mark regions hydrated, and on the dn migration because after the §11.2
+// cutover host IO flows through the dst dm-clone, so a chunk whose bits were
+// read from the CN thin metadata *before* a host write can arrive afterwards
+// and blkdiscard a region the host has already written — with passdown that
+// discard would reach the dst side device and destroy the only copy of an
+// acknowledged write (cnagent.md CN18 step 3, Appendix A's
+// `2 no_hydration no_discard_passdown`, [D7]).
 func CloneTable(
 	sectors uint64,
 	metaDev string,
@@ -299,16 +398,24 @@ func CloneTable(
 	srcDev string,
 	regionSectors uint64,
 	noHydration bool,
+	noDiscardPassdown bool,
 	threshold uint32,
 	batchSize uint32,
 ) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "0 %d clone %s %s %s %d",
 		sectors, metaDev, destDev, srcDev, regionSectors)
+	var features []string
 	if noHydration {
-		sb.WriteString(" 1 no_hydration")
-	} else {
-		sb.WriteString(" 0")
+		features = append(features, "no_hydration")
+	}
+	if noDiscardPassdown {
+		features = append(features, "no_discard_passdown")
+	}
+	fmt.Fprintf(&sb, " %d", len(features))
+	for _, feature := range features {
+		sb.WriteString(" ")
+		sb.WriteString(feature)
 	}
 	var core []string
 	if threshold > 0 {

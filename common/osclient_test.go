@@ -2,10 +2,12 @@ package common
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -640,5 +642,83 @@ func TestWriteFileDirect(t *testing.T) {
 	failRec := capture.withMsg(t, "os write file direct")[2]
 	if _, ok := failRec["error"]; !ok {
 		t.Errorf("failed direct write has no error attr: %v", failRec)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md §4.5.1,
+// update_01.md U2): exported, unlogged, semaphore-free
+// ---------------------------------------------------------------------------
+
+// TestReadBlockDirectAt covers the exported raw helpers of osclient.md §4.5.1
+// (update_01.md U2): the write + O_DIRECT read-back the §3.6 leg health probe
+// needs, now package functions outside the OsClient. t.TempDir() may sit on
+// tmpfs, which rejects O_DIRECT outright, so the round trip is skipped with a
+// diagnostic there — the alignment rejection and the log silence are checked
+// regardless, since neither reaches the filesystem.
+func TestReadBlockDirectAt(t *testing.T) {
+	capture := captureLogs(t)
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, make([]byte, 4096*4), 0o644); err != nil {
+		t.Fatalf("create backing file: %v", err)
+	}
+
+	// Misaligned offsets and lengths are rejected before the open, so a
+	// caller can never get a partial or page-cached answer.
+	for _, bad := range []struct{ offset, length uint64 }{
+		{1, 4096}, {0, 4095}, {0, 0}, {4096, 8192 + 1},
+	} {
+		if _, err := ReadBlockDirectAt(
+			path, bad.offset, bad.length); err == nil {
+			t.Errorf("ReadBlockDirectAt(off=%d,len=%d) was accepted",
+				bad.offset, bad.length)
+		}
+	}
+	// The rejection happens before the open, so a missing path is
+	// irrelevant to it.
+	if _, err := ReadBlockDirectAt(
+		filepath.Join(t.TempDir(), "absent"), 0, 4096); err == nil {
+		t.Error("ReadBlockDirectAt of a missing path succeeded")
+	}
+
+	payload := make([]byte, 4096)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	// WriteBlockAt is the write half of the same probe round: a plain
+	// O_WRONLY open of a pre-sized file, one pwrite, one fdatasync. It never
+	// creates the target, so a missing path is an error, not an empty file.
+	if err := WriteBlockAt(
+		filepath.Join(t.TempDir(), "absent"), 0, payload); err == nil {
+		t.Error("WriteBlockAt of a missing path succeeded")
+	}
+	if err := WriteBlockAt(path, 4096, payload); err != nil {
+		t.Fatalf("WriteBlockAt: %v", err)
+	}
+	got, err := ReadBlockDirectAt(path, 4096, 4096)
+	switch {
+	case errors.Is(err, syscall.EINVAL):
+		t.Logf("skipping the O_DIRECT round trip: %v "+
+			"(the temp dir does not support it)", err)
+	case err != nil:
+		t.Fatalf("ReadBlockDirectAt: %v", err)
+	default:
+		if string(got) != string(payload) {
+			t.Errorf("read back %d bytes that differ from the write",
+				len(got))
+		}
+		// A read past the end is a short read, never a truncated buffer.
+		if _, err := ReadBlockDirectAt(path, 4096*4, 4096); err == nil {
+			t.Error("a read past the end succeeded")
+		}
+	}
+
+	// The raw helpers are silent by construction: they hold no semaphore
+	// slot and emit no record, which is why every direct caller MUST log its
+	// own (update_01.md U2 spec 1-2 — the prober's "probe write block" /
+	// "probe read block direct").
+	if recs := capture.records(t); len(recs) != 0 {
+		t.Errorf("the raw helpers logged %d records: %s",
+			len(recs), capture.buf.String())
 	}
 }

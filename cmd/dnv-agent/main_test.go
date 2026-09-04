@@ -206,3 +206,68 @@ func TestConfigFile(t *testing.T) {
 func writeFileForTest(path string, data string) error {
 	return os.WriteFile(path, []byte(data), 0o600)
 }
+
+// ---------------------------------------------------------------------------
+// The cn role (cnagent.md §6.16, CN-CM1/CN-CM2)
+// ---------------------------------------------------------------------------
+
+// The invocation from architecture.md §13, plus the cn-only --capacity of
+// CN-CM1.
+var exampleCnArgs = []string{
+	"--grpc-network", "tcp",
+	"--grpc-address", "192.168.0.20:29529",
+	"--tr-type", "tcp",
+	"--adr-fam", "ipv4",
+	"--tr-addr", "192.168.0.20",
+	"--tr-svc-id", "4200",
+	"--local-store", "/var/tmp",
+	"--capacity", "1099511627776",
+}
+
+func TestCnExampleInvocationParses(t *testing.T) {
+	parse(t, "cn", exampleCnArgs)
+	if err := requireValues(requiredCommon...); err != nil {
+		t.Fatalf("the §13 cn example was rejected: %v", err)
+	}
+	if got := viper.GetString("grpc-address"); got !=
+		"192.168.0.20:29529" {
+		t.Errorf("grpc-address = %q", got)
+	}
+	if got := viper.GetUint64("capacity"); got != 1099511627776 {
+		t.Errorf("capacity = %d, want 1099511627776", got)
+	}
+}
+
+// CN-CM1: --capacity is cn-only and optional; 0 means "use the CP default".
+func TestCapacityIsCnOnlyAndOptional(t *testing.T) {
+	if subCmd(t, "dn").Flags().Lookup("capacity") != nil {
+		t.Error("dn has a --capacity flag")
+	}
+	if subCmd(t, "cn").Flags().Lookup("capacity") == nil {
+		t.Fatal("cn has no --capacity flag")
+	}
+	parse(t, "cn", []string{
+		"--grpc-address", "192.168.0.20:29529",
+		"--tr-type", "tcp", "--adr-fam", "ipv4",
+		"--tr-addr", "192.168.0.20", "--tr-svc-id", "4200",
+	})
+	if err := requireValues(requiredCommon...); err != nil {
+		t.Fatalf("cn without --capacity was rejected: %v", err)
+	}
+	if got := viper.GetUint64("capacity"); got != 0 {
+		t.Errorf("capacity default = %d, want 0", got)
+	}
+}
+
+// CM3: the environment reaches --capacity like every other flag.
+func TestCapacityFromEnv(t *testing.T) {
+	t.Setenv("DNV_AGENT_CAPACITY", "4294967296")
+	parse(t, "cn", []string{
+		"--grpc-address", "192.168.0.20:29529",
+		"--tr-type", "tcp", "--adr-fam", "ipv4",
+		"--tr-addr", "192.168.0.20", "--tr-svc-id", "4200",
+	})
+	if got := viper.GetUint64("capacity"); got != 4294967296 {
+		t.Errorf("capacity = %d, want the environment value", got)
+	}
+}

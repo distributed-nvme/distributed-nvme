@@ -114,6 +114,9 @@ const (
 	ResStatus_RES_STATUS_ERROR ResStatus = 2
 	// OK means OK
 	ResStatus_RES_STATUS_OK ResStatus = 3
+	// PROVISIONING means deliberately not created / being prepared;
+	// healthy; no action needed
+	ResStatus_RES_STATUS_PROVISIONING ResStatus = 4
 )
 
 // Enum value maps for ResStatus.
@@ -123,12 +126,14 @@ var (
 		1: "RES_STATUS_MISSING",
 		2: "RES_STATUS_ERROR",
 		3: "RES_STATUS_OK",
+		4: "RES_STATUS_PROVISIONING",
 	}
 	ResStatus_value = map[string]int32{
-		"RES_STATUS_UNKNOWN": 0,
-		"RES_STATUS_MISSING": 1,
-		"RES_STATUS_ERROR":   2,
-		"RES_STATUS_OK":      3,
+		"RES_STATUS_UNKNOWN":      0,
+		"RES_STATUS_MISSING":      1,
+		"RES_STATUS_ERROR":        2,
+		"RES_STATUS_OK":           3,
+		"RES_STATUS_PROVISIONING": 4,
 	}
 )
 
@@ -1074,6 +1079,7 @@ type Side struct {
 	CntlidSlot    uint32                 `protobuf:"varint,3,opt,name=cntlid_slot,json=cntlidSlot,proto3" json:"cntlid_slot,omitempty"`
 	NvmeTrConf    *NvmeTrConf            `protobuf:"bytes,4,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
 	ErrEpoch      uint64                 `protobuf:"varint,5,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	Provisioned   bool                   `protobuf:"varint,6,opt,name=provisioned,proto3" json:"provisioned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1141,6 +1147,13 @@ func (x *Side) GetErrEpoch() uint64 {
 		return x.ErrEpoch
 	}
 	return 0
+}
+
+func (x *Side) GetProvisioned() bool {
+	if x != nil {
+		return x.Provisioned
+	}
+	return false
 }
 
 type Leg struct {
@@ -1513,7 +1526,6 @@ type CnInfo struct {
 	TmpfsInfo     *ResInfo               `protobuf:"bytes,2,opt,name=tmpfs_info,json=tmpfsInfo,proto3" json:"tmpfs_info,omitempty"`
 	TmpFileInfo   *ResInfo               `protobuf:"bytes,3,opt,name=tmp_file_info,json=tmpFileInfo,proto3" json:"tmp_file_info,omitempty"`
 	LoopDevInfo   *ResInfo               `protobuf:"bytes,4,opt,name=loop_dev_info,json=loopDevInfo,proto3" json:"loop_dev_info,omitempty"`
-	CloneVgInfo   *ResInfo               `protobuf:"bytes,5,opt,name=clone_vg_info,json=cloneVgInfo,proto3" json:"clone_vg_info,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1576,13 +1588,6 @@ func (x *CnInfo) GetLoopDevInfo() *ResInfo {
 	return nil
 }
 
-func (x *CnInfo) GetCloneVgInfo() *ResInfo {
-	if x != nil {
-		return x.CloneVgInfo
-	}
-	return nil
-}
-
 type SideInfo struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	SideDevInfo    *ResInfo               `protobuf:"bytes,1,opt,name=side_dev_info,json=sideDevInfo,proto3" json:"side_dev_info,omitempty"`
@@ -1591,6 +1596,8 @@ type SideInfo struct {
 	CnIdToNvmeof   map[uint64]*ResInfo    `protobuf:"bytes,4,rep,name=cn_id_to_nvmeof,json=cnIdToNvmeof,proto3" json:"cn_id_to_nvmeof,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	MigrSrcInfo    *SideInfo_MigrSrcInfo  `protobuf:"bytes,5,opt,name=migr_src_info,json=migrSrcInfo,proto3" json:"migr_src_info,omitempty"`
 	MigrDstInfo    *SideInfo_MigrDstInfo  `protobuf:"bytes,6,opt,name=migr_dst_info,json=migrDstInfo,proto3" json:"migr_dst_info,omitempty"`
+	ZeroedExtCnt   uint64                 `protobuf:"varint,7,opt,name=zeroed_ext_cnt,json=zeroedExtCnt,proto3" json:"zeroed_ext_cnt,omitempty"`
+	TotalExtCnt    uint64                 `protobuf:"varint,8,opt,name=total_ext_cnt,json=totalExtCnt,proto3" json:"total_ext_cnt,omitempty"` // always filled; equal => fully zeroed
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -1665,6 +1672,20 @@ func (x *SideInfo) GetMigrDstInfo() *SideInfo_MigrDstInfo {
 		return x.MigrDstInfo
 	}
 	return nil
+}
+
+func (x *SideInfo) GetZeroedExtCnt() uint64 {
+	if x != nil {
+		return x.ZeroedExtCnt
+	}
+	return 0
+}
+
+func (x *SideInfo) GetTotalExtCnt() uint64 {
+	if x != nil {
+		return x.TotalExtCnt
+	}
+	return 0
 }
 
 type CntlrInfo struct {
@@ -13413,6 +13434,7 @@ type SyncupSideRequest_SideConf struct {
 	PrimaryCnId   uint64                 `protobuf:"varint,3,opt,name=primary_cn_id,json=primaryCnId,proto3" json:"primary_cn_id,omitempty"`
 	StandbyIdList []uint64               `protobuf:"varint,4,rep,packed,name=standby_id_list,json=standbyIdList,proto3" json:"standby_id_list,omitempty"`
 	SpLevel       SpLevel                `protobuf:"varint,5,opt,name=sp_level,json=spLevel,proto3,enum=SpLevel" json:"sp_level,omitempty"`
+	Provisioned   bool                   `protobuf:"varint,6,opt,name=provisioned,proto3" json:"provisioned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13482,13 +13504,21 @@ func (x *SyncupSideRequest_SideConf) GetSpLevel() SpLevel {
 	return SpLevel_SP_LEVEL_READWRITE
 }
 
+func (x *SyncupSideRequest_SideConf) GetProvisioned() bool {
+	if x != nil {
+		return x.Provisioned
+	}
+	return false
+}
+
 type SyncupSideRequest_MigrSrcConf struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MigrId        uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
-	DstSideId     uint64                 `protobuf:"varint,2,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"`
-	DstDnId       uint64                 `protobuf:"varint,3,opt,name=dst_dn_id,json=dstDnId,proto3" json:"dst_dn_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	MigrId         uint64                 `protobuf:"varint,1,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
+	DstSideId      uint64                 `protobuf:"varint,2,opt,name=dst_side_id,json=dstSideId,proto3" json:"dst_side_id,omitempty"`
+	DstDnId        uint64                 `protobuf:"varint,3,opt,name=dst_dn_id,json=dstDnId,proto3" json:"dst_dn_id,omitempty"`
+	DstProvisioned bool                   `protobuf:"varint,4,opt,name=dst_provisioned,json=dstProvisioned,proto3" json:"dst_provisioned,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *SyncupSideRequest_MigrSrcConf) Reset() {
@@ -13540,6 +13570,13 @@ func (x *SyncupSideRequest_MigrSrcConf) GetDstDnId() uint64 {
 		return x.DstDnId
 	}
 	return 0
+}
+
+func (x *SyncupSideRequest_MigrSrcConf) GetDstProvisioned() bool {
+	if x != nil {
+		return x.DstProvisioned
+	}
+	return false
 }
 
 type SyncupSideRequest_MigrDstConf struct {
@@ -13698,8 +13735,8 @@ type DnDiskTable_SideRecord struct {
 	state         protoimpl.MessageState   `protogen:"open.v1"`
 	SpId          uint64                   `protobuf:"varint,1,opt,name=sp_id,json=spId,proto3" json:"sp_id,omitempty"`
 	SideId        uint64                   `protobuf:"varint,2,opt,name=side_id,json=sideId,proto3" json:"side_id,omitempty"`
-	Trimmed       bool                     `protobuf:"varint,3,opt,name=trimmed,proto3" json:"trimmed,omitempty"`
-	RunList       []*DnDiskTable_ExtentRun `protobuf:"bytes,4,rep,name=run_list,json=runList,proto3" json:"run_list,omitempty"` // ordered; concat = side device
+	RunList       []*DnDiskTable_ExtentRun `protobuf:"bytes,4,rep,name=run_list,json=runList,proto3" json:"run_list,omitempty"`          // ordered; concat = side device
+	ZeroedBits    []byte                   `protobuf:"bytes,5,opt,name=zeroed_bits,json=zeroedBits,proto3" json:"zeroed_bits,omitempty"` // bit i = logical extent i zeroed;
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13748,16 +13785,16 @@ func (x *DnDiskTable_SideRecord) GetSideId() uint64 {
 	return 0
 }
 
-func (x *DnDiskTable_SideRecord) GetTrimmed() bool {
-	if x != nil {
-		return x.Trimmed
-	}
-	return false
-}
-
 func (x *DnDiskTable_SideRecord) GetRunList() []*DnDiskTable_ExtentRun {
 	if x != nil {
 		return x.RunList
+	}
+	return nil
+}
+
+func (x *DnDiskTable_SideRecord) GetZeroedBits() []byte {
+	if x != nil {
+		return x.ZeroedBits
 	}
 	return nil
 }
@@ -13896,7 +13933,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\aside_id\x18\x03 \x01(\x04R\x06sideId\">\n" +
 	"\fCntlrPointer\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x19\n" +
-	"\bcntlr_id\x18\x02 \x01(\x04R\acntlrId\"\xa9\x01\n" +
+	"\bcntlr_id\x18\x02 \x01(\x04R\acntlrId\"\xcb\x01\n" +
 	"\x04Side\x12\x17\n" +
 	"\aside_id\x18\x01 \x01(\x04R\x06sideId\x12\x1b\n" +
 	"\taddr_port\x18\x02 \x01(\tR\baddrPort\x12\x1f\n" +
@@ -13904,7 +13941,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"cntlidSlot\x12-\n" +
 	"\fnvme_tr_conf\x18\x04 \x01(\v2\v.NvmeTrConfR\n" +
 	"nvmeTrConf\x12\x1b\n" +
-	"\terr_epoch\x18\x05 \x01(\x04R\berrEpoch\"v\n" +
+	"\terr_epoch\x18\x05 \x01(\x04R\berrEpoch\x12 \n" +
+	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\"v\n" +
 	"\x03Leg\x12\x15\n" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x17\n" +
 	"\aleg_idx\x18\x02 \x01(\rR\x06legIdx\x12\"\n" +
@@ -13935,21 +13973,22 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x06DnInfo\x12%\n" +
 	"\tdisk_info\x18\x01 \x01(\v2\b.ResInfoR\bdiskInfo\x12%\n" +
 	"\tmeta_info\x18\x02 \x01(\v2\b.ResInfoR\bmetaInfo\x12%\n" +
-	"\tport_info\x18\x03 \x01(\v2\b.ResInfoR\bportInfo\"\xe2\x01\n" +
+	"\tport_info\x18\x03 \x01(\v2\b.ResInfoR\bportInfo\"\xba\x01\n" +
 	"\x06CnInfo\x12%\n" +
 	"\tport_info\x18\x01 \x01(\v2\b.ResInfoR\bportInfo\x12'\n" +
 	"\n" +
 	"tmpfs_info\x18\x02 \x01(\v2\b.ResInfoR\ttmpfsInfo\x12,\n" +
 	"\rtmp_file_info\x18\x03 \x01(\v2\b.ResInfoR\vtmpFileInfo\x12,\n" +
-	"\rloop_dev_info\x18\x04 \x01(\v2\b.ResInfoR\vloopDevInfo\x12,\n" +
-	"\rclone_vg_info\x18\x05 \x01(\v2\b.ResInfoR\vcloneVgInfo\"\xbb\x06\n" +
+	"\rloop_dev_info\x18\x04 \x01(\v2\b.ResInfoR\vloopDevInfoJ\x04\b\x05\x10\x06\"\x85\a\n" +
 	"\bSideInfo\x12,\n" +
 	"\rside_dev_info\x18\x01 \x01(\v2\b.ResInfoR\vsideDevInfo\x12F\n" +
 	"\x11cn_id_to_dm_error\x18\x02 \x03(\v2\x1c.SideInfo.CnIdToDmErrorEntryR\rcnIdToDmError\x12I\n" +
 	"\x12cn_id_to_dm_linear\x18\x03 \x03(\v2\x1d.SideInfo.CnIdToDmLinearEntryR\x0ecnIdToDmLinear\x12B\n" +
 	"\x0fcn_id_to_nvmeof\x18\x04 \x03(\v2\x1b.SideInfo.CnIdToNvmeofEntryR\fcnIdToNvmeof\x129\n" +
 	"\rmigr_src_info\x18\x05 \x01(\v2\x15.SideInfo.MigrSrcInfoR\vmigrSrcInfo\x129\n" +
-	"\rmigr_dst_info\x18\x06 \x01(\v2\x15.SideInfo.MigrDstInfoR\vmigrDstInfo\x1ah\n" +
+	"\rmigr_dst_info\x18\x06 \x01(\v2\x15.SideInfo.MigrDstInfoR\vmigrDstInfo\x12$\n" +
+	"\x0ezeroed_ext_cnt\x18\a \x01(\x04R\fzeroedExtCnt\x12\"\n" +
+	"\rtotal_ext_cnt\x18\b \x01(\x04R\vtotalExtCnt\x1ah\n" +
 	"\vMigrSrcInfo\x12.\n" +
 	"\x0edm_linear_info\x18\x01 \x01(\v2\b.ResInfoR\fdmLinearInfo\x12)\n" +
 	"\vnvmeof_info\x18\x02 \x01(\v2\b.ResInfoR\n" +
@@ -14749,7 +14788,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
-	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\x96\a\n" +
+	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\xe2\a\n" +
 	"\x11SyncupSideRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -14758,18 +14797,20 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\brevision\x18\x04 \x01(\x04R\brevision\x128\n" +
 	"\tside_conf\x18\x05 \x01(\v2\x1b.SyncupSideRequest.SideConfR\bsideConf\x12B\n" +
 	"\rmigr_src_conf\x18\x06 \x01(\v2\x1e.SyncupSideRequest.MigrSrcConfR\vmigrSrcConf\x12B\n" +
-	"\rmigr_dst_conf\x18\a \x01(\v2\x1e.SyncupSideRequest.MigrDstConfR\vmigrDstConf\x1a\xb5\x01\n" +
+	"\rmigr_dst_conf\x18\a \x01(\v2\x1e.SyncupSideRequest.MigrDstConfR\vmigrDstConf\x1a\xd7\x01\n" +
 	"\bSideConf\x12\x17\n" +
 	"\aext_cnt\x18\x01 \x01(\x04R\x06extCnt\x12\x1f\n" +
 	"\vcntlid_slot\x18\x02 \x01(\rR\n" +
 	"cntlidSlot\x12\"\n" +
 	"\rprimary_cn_id\x18\x03 \x01(\x04R\vprimaryCnId\x12&\n" +
 	"\x0fstandby_id_list\x18\x04 \x03(\x04R\rstandbyIdList\x12#\n" +
-	"\bsp_level\x18\x05 \x01(\x0e2\b.SpLevelR\aspLevel\x1ab\n" +
+	"\bsp_level\x18\x05 \x01(\x0e2\b.SpLevelR\aspLevel\x12 \n" +
+	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\x1a\x8b\x01\n" +
 	"\vMigrSrcConf\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\x12\x1e\n" +
 	"\vdst_side_id\x18\x02 \x01(\x04R\tdstSideId\x12\x1a\n" +
-	"\tdst_dn_id\x18\x03 \x01(\x04R\adstDnId\x1a\xa1\x02\n" +
+	"\tdst_dn_id\x18\x03 \x01(\x04R\adstDnId\x12'\n" +
+	"\x0fdst_provisioned\x18\x04 \x01(\bR\x0edstProvisioned\x1a\xa1\x02\n" +
 	"\vMigrDstConf\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\x12\x1e\n" +
 	"\vsrc_side_id\x18\x02 \x01(\x04R\tsrcSideId\x12\x1a\n" +
@@ -14987,19 +15028,20 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vdata_offset\x18\x05 \x01(\x04R\n" +
 	"dataOffset\x12*\n" +
 	"\x11clone_meta_offset\x18\x06 \x01(\x04R\x0fcloneMetaOffset\x12&\n" +
-	"\x0fclone_meta_size\x18\a \x01(\x04R\rcloneMetaSize\"\xcb\x03\n" +
+	"\x0fclone_meta_size\x18\a \x01(\x04R\rcloneMetaSize\"\xd8\x03\n" +
 	"\vDnDiskTable\x124\n" +
 	"\tside_list\x18\x01 \x03(\v2\x17.DnDiskTable.SideRecordR\bsideList\x12D\n" +
 	"\x0fclone_meta_list\x18\x02 \x03(\v2\x1c.DnDiskTable.CloneMetaRecordR\rcloneMetaList\x1a7\n" +
 	"\tExtentRun\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x04R\x05start\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x04R\x05count\x1a\x87\x01\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\x1a\x94\x01\n" +
 	"\n" +
 	"SideRecord\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x17\n" +
-	"\aside_id\x18\x02 \x01(\x04R\x06sideId\x12\x18\n" +
-	"\atrimmed\x18\x03 \x01(\bR\atrimmed\x121\n" +
-	"\brun_list\x18\x04 \x03(\v2\x16.DnDiskTable.ExtentRunR\arunList\x1a}\n" +
+	"\aside_id\x18\x02 \x01(\x04R\x06sideId\x121\n" +
+	"\brun_list\x18\x04 \x03(\v2\x16.DnDiskTable.ExtentRunR\arunList\x12\x1f\n" +
+	"\vzeroed_bits\x18\x05 \x01(\fR\n" +
+	"zeroedBitsJ\x04\b\x03\x10\x04\x1a}\n" +
 	"\x0fCloneMetaRecord\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x17\n" +
 	"\amigr_id\x18\x02 \x01(\x04R\x06migrId\x12\x1d\n" +
@@ -15015,12 +15057,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x12SP_LEVEL_NO_REDUND\x10@\x12\x19\n" +
 	"\x15SP_LEVEL_NO_MIGRATION\x10P\x12\x14\n" +
 	"\x10SP_LEVEL_NO_SIDE\x10`\x12\x14\n" +
-	"\x10SP_LEVEL_DISABLE\x10p*d\n" +
+	"\x10SP_LEVEL_DISABLE\x10p*\x81\x01\n" +
 	"\tResStatus\x12\x16\n" +
 	"\x12RES_STATUS_UNKNOWN\x10\x00\x12\x16\n" +
 	"\x12RES_STATUS_MISSING\x10\x01\x12\x14\n" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
-	"\rRES_STATUS_OK\x10\x032\xee \n" +
+	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
+	"\x17RES_STATUS_PROVISIONING\x10\x042\xee \n" +
 	"\aGateway\x12=\n" +
 	"\rCreateCluster\x12\x15.CreateClusterRequest\x1a\x13.CreateClusterReply\"\x00\x12=\n" +
 	"\rDeleteCluster\x12\x15.DeleteClusterRequest\x1a\x13.DeleteClusterReply\"\x00\x124\n" +
@@ -15386,372 +15429,371 @@ var file_pb_schema_proto_depIdxs = []int32{
 	22,  // 16: CnInfo.tmpfs_info:type_name -> ResInfo
 	22,  // 17: CnInfo.tmp_file_info:type_name -> ResInfo
 	22,  // 18: CnInfo.loop_dev_info:type_name -> ResInfo
-	22,  // 19: CnInfo.clone_vg_info:type_name -> ResInfo
-	22,  // 20: SideInfo.side_dev_info:type_name -> ResInfo
-	212, // 21: SideInfo.cn_id_to_dm_error:type_name -> SideInfo.CnIdToDmErrorEntry
-	213, // 22: SideInfo.cn_id_to_dm_linear:type_name -> SideInfo.CnIdToDmLinearEntry
-	214, // 23: SideInfo.cn_id_to_nvmeof:type_name -> SideInfo.CnIdToNvmeofEntry
-	210, // 24: SideInfo.migr_src_info:type_name -> SideInfo.MigrSrcInfo
-	211, // 25: SideInfo.migr_dst_info:type_name -> SideInfo.MigrDstInfo
-	216, // 26: CntlrInfo.ss_id_to_subsystem:type_name -> CntlrInfo.SsIdToSubsystemEntry
-	217, // 27: CntlrInfo.ns_id_to_namespace:type_name -> CntlrInfo.NsIdToNamespaceEntry
-	218, // 28: CntlrInfo.ns_id_to_dm_linear:type_name -> CntlrInfo.NsIdToDmLinearEntry
-	219, // 29: CntlrInfo.td_id_to_raid0:type_name -> CntlrInfo.TdIdToRaid0Entry
-	220, // 30: CntlrInfo.td_id_to_dm_error:type_name -> CntlrInfo.TdIdToDmErrorEntry
-	221, // 31: CntlrInfo.td_id_to_thin_info:type_name -> CntlrInfo.TdIdToThinInfoEntry
-	222, // 32: CntlrInfo.slice_id_to_dm_pool:type_name -> CntlrInfo.SliceIdToDmPoolEntry
-	223, // 33: CntlrInfo.slice_id_to_meta:type_name -> CntlrInfo.SliceIdToMetaEntry
-	224, // 34: CntlrInfo.slice_id_to_data:type_name -> CntlrInfo.SliceIdToDataEntry
-	225, // 35: CntlrInfo.grp_id_to_md_raid:type_name -> CntlrInfo.GrpIdToMdRaidEntry
-	226, // 36: CntlrInfo.leg_id_to_leg:type_name -> CntlrInfo.LegIdToLegEntry
-	227, // 37: CntlrInfo.xfer_id_to_dm_linear:type_name -> CntlrInfo.XferIdToDmLinearEntry
-	228, // 38: CntlrInfo.xfer_id_to_subsystem:type_name -> CntlrInfo.XferIdToSubsystemEntry
-	229, // 39: CntlrInfo.xfer_id_to_namespace:type_name -> CntlrInfo.XferIdToNamespaceEntry
-	230, // 40: CntlrInfo.clone_id_to_target:type_name -> CntlrInfo.CloneIdToTargetEntry
-	231, // 41: CntlrInfo.clone_id_to_dm_clone:type_name -> CntlrInfo.CloneIdToDmCloneEntry
-	232, // 42: CntlrInfo.clone_id_to_meta:type_name -> CntlrInfo.CloneIdToMetaEntry
-	5,   // 43: ClusterConf.qos_ratio:type_name -> QosRatio
-	14,  // 44: ClusterConf.bdev_conf:type_name -> BdevConf
-	28,  // 45: ClusterConf.dn_bin_conf:type_name -> DnBinConf
-	29,  // 46: ClusterConf.alloc_conf:type_name -> AllocConf
-	30,  // 47: ClusterConf.health_check_conf:type_name -> HealthCheckConf
-	4,   // 48: DnConf.nvme_tr_conf:type_name -> NvmeTrConf
-	16,  // 49: DnConf.side_ptr_list:type_name -> SidePointer
-	4,   // 50: CnConf.nvme_tr_conf:type_name -> NvmeTrConf
-	17,  // 51: CnConf.cntlr_ptr_list:type_name -> CntlrPointer
-	4,   // 52: CdcEntry.nvme_tr_conf_list:type_name -> NvmeTrConf
-	14,  // 53: SpConf.bdev_conf:type_name -> BdevConf
-	15,  // 54: SpConf.event_threshold:type_name -> EventThreshold
-	0,   // 55: SpConf.sp_level:type_name -> SpLevel
-	4,   // 56: Cntlr.nvme_tr_conf:type_name -> NvmeTrConf
-	20,  // 57: Slice.meta_grp_list:type_name -> Group
-	20,  // 58: Slice.data_grp_list:type_name -> Group
-	21,  // 59: Subsystem.ns_list:type_name -> Namespace
-	4,   // 60: Clone.src_tr_conf_list:type_name -> NvmeTrConf
-	6,   // 61: Clone.dm_clone_conf:type_name -> DmCloneConf
-	6,   // 62: Migration.dm_clone_conf:type_name -> DmCloneConf
-	5,   // 63: CreateClusterRequest.qos_ratio:type_name -> QosRatio
-	14,  // 64: CreateClusterRequest.bdev_conf:type_name -> BdevConf
-	28,  // 65: CreateClusterRequest.dn_bin_conf:type_name -> DnBinConf
-	29,  // 66: CreateClusterRequest.alloc_conf:type_name -> AllocConf
-	30,  // 67: CreateClusterRequest.health_check_conf:type_name -> HealthCheckConf
-	31,  // 68: GetClusterReply.cluster_conf:type_name -> ClusterConf
-	32,  // 69: GetClusterReply.dn_global:type_name -> DnGlobal
-	33,  // 70: GetClusterReply.cn_global:type_name -> CnGlobal
-	34,  // 71: GetClusterReply.sp_global:type_name -> SpGlobal
-	4,   // 72: CreateDiskNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
-	35,  // 73: DeleteDiskNodeRequest.dn_rev:type_name -> DnRev
-	38,  // 74: GetDiskNodeReply.dn_conf:type_name -> DnConf
-	35,  // 75: GetDiskNodeReply.dn_rev:type_name -> DnRev
-	35,  // 76: UpdateDiskNodeDisabledRequest.dn_rev:type_name -> DnRev
-	23,  // 77: InspectDiskNodeReply.dn_info:type_name -> DnInfo
-	4,   // 78: CreateControllerNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
-	36,  // 79: DeleteControllerNodeRequest.cn_rev:type_name -> CnRev
-	39,  // 80: GetControllerNodeReply.cn_conf:type_name -> CnConf
-	36,  // 81: GetControllerNodeReply.cn_rev:type_name -> CnRev
-	36,  // 82: UpdateControllerNodeDisabledRequest.cn_rev:type_name -> CnRev
-	24,  // 83: InspectControllerNodeReply.cn_info:type_name -> CnInfo
-	14,  // 84: CreateStoragePoolRequest.bdev_conf:type_name -> BdevConf
-	15,  // 85: CreateStoragePoolRequest.event_threshold:type_name -> EventThreshold
-	3,   // 86: CreateStoragePoolRequest.cn_selector:type_name -> NodeSelector
-	3,   // 87: CreateStoragePoolRequest.dn_selector:type_name -> NodeSelector
-	37,  // 88: DeleteStoragePoolRequest.sp_rev:type_name -> SpRev
-	43,  // 89: GetStoragePoolReply.sp_conf:type_name -> SpConf
-	37,  // 90: GetStoragePoolReply.sp_rev:type_name -> SpRev
-	44,  // 91: GetStoragePoolReply.cntlr_list:type_name -> Cntlr
-	45,  // 92: GetStoragePoolReply.slice_list:type_name -> Slice
-	37,  // 93: UpdateStoragePoolCntlidSlotListRequest.sp_rev:type_name -> SpRev
-	37,  // 94: UpdateStoragePoolLevelRequest.sp_rev:type_name -> SpRev
-	0,   // 95: UpdateStoragePoolLevelRequest.sp_level:type_name -> SpLevel
-	234, // 96: FindStoragePoolNamesReply.sp_id_to_name:type_name -> FindStoragePoolNamesReply.SpIdToNameEntry
-	37,  // 97: GrowSliceRequest.sp_rev:type_name -> SpRev
-	3,   // 98: GrowSliceRequest.dn_selector:type_name -> NodeSelector
-	37,  // 99: CreateCntlrRequest.sp_rev:type_name -> SpRev
-	3,   // 100: CreateCntlrRequest.cn_selector:type_name -> NodeSelector
-	37,  // 101: DeleteCntlrRequest.sp_rev:type_name -> SpRev
-	37,  // 102: UpdateCntlrEnabledRequest.sp_rev:type_name -> SpRev
-	26,  // 103: InspectCntlrReply.cntlr_info:type_name -> CntlrInfo
-	25,  // 104: InspectSideReply.side_info:type_name -> SideInfo
-	37,  // 105: CreateThinDeviceRequest.sp_rev:type_name -> SpRev
-	37,  // 106: DeleteThinDeviceRequest.sp_rev:type_name -> SpRev
-	235, // 107: ListThinDevicesReply.name_to_td:type_name -> ListThinDevicesReply.NameToTdEntry
-	37,  // 108: CreateSubsystemRequest.sp_rev:type_name -> SpRev
-	37,  // 109: DeleteSubsystemRequest.sp_rev:type_name -> SpRev
-	236, // 110: ListSubsystemsReply.nqn_to_subsystem:type_name -> ListSubsystemsReply.NqnToSubsystemEntry
-	37,  // 111: UpdateSubsystemHostsRequest.sp_rev:type_name -> SpRev
-	37,  // 112: CreateNamespaceRequest.sp_rev:type_name -> SpRev
-	37,  // 113: DeleteNamespaceRequest.sp_rev:type_name -> SpRev
-	37,  // 114: UpdateNamespaceDevRequest.sp_rev:type_name -> SpRev
-	37,  // 115: UpdateNamespaceSuspendedRequest.sp_rev:type_name -> SpRev
-	37,  // 116: CreateCloneRequest.sp_rev:type_name -> SpRev
-	4,   // 117: CreateCloneRequest.src_tr_conf:type_name -> NvmeTrConf
-	6,   // 118: CreateCloneRequest.dm_clone_conf:type_name -> DmCloneConf
-	37,  // 119: DeleteCloneRequest.sp_rev:type_name -> SpRev
-	48,  // 120: GetCloneReply.clone:type_name -> Clone
-	37,  // 121: UpdateCloneTrConfRequest.sp_rev:type_name -> SpRev
-	4,   // 122: UpdateCloneTrConfRequest.src_tr_conf:type_name -> NvmeTrConf
-	37,  // 123: AppendCloneBitmapRequest.sp_rev:type_name -> SpRev
-	37,  // 124: CreateTransferRequest.sp_rev:type_name -> SpRev
-	37,  // 125: DeleteTransferRequest.sp_rev:type_name -> SpRev
-	50,  // 126: GetTransferReply.xfer:type_name -> Transfer
-	37,  // 127: UpdateTransferHostsRequest.sp_rev:type_name -> SpRev
-	37,  // 128: CreateMigrationRequest.sp_rev:type_name -> SpRev
-	3,   // 129: CreateMigrationRequest.dn_selector:type_name -> NodeSelector
-	6,   // 130: CreateMigrationRequest.dm_clone_conf:type_name -> DmCloneConf
-	37,  // 131: FinishMigrationRequest.sp_rev:type_name -> SpRev
-	37,  // 132: CancelMigrationRequest.sp_rev:type_name -> SpRev
-	51,  // 133: GetMigrationReply.migr:type_name -> Migration
-	37,  // 134: AppendMigrationBitmapRequest.sp_rev:type_name -> SpRev
-	37,  // 135: CreateSpareLegRequest.sp_rev:type_name -> SpRev
-	3,   // 136: CreateSpareLegRequest.dn_selector:type_name -> NodeSelector
-	37,  // 137: DeleteSpareLegRequest.sp_rev:type_name -> SpRev
-	37,  // 138: SwitchSpareLegRequest.sp_rev:type_name -> SpRev
-	16,  // 139: SyncupDnRequest.side_pointer_list:type_name -> SidePointer
-	2,   // 140: SyncupDnReply.agent_reply:type_name -> AgentReply
-	23,  // 141: SyncupDnReply.dn_info:type_name -> DnInfo
-	16,  // 142: SyncupSideRequest.side_pointer:type_name -> SidePointer
-	237, // 143: SyncupSideRequest.side_conf:type_name -> SyncupSideRequest.SideConf
-	238, // 144: SyncupSideRequest.migr_src_conf:type_name -> SyncupSideRequest.MigrSrcConf
-	239, // 145: SyncupSideRequest.migr_dst_conf:type_name -> SyncupSideRequest.MigrDstConf
-	2,   // 146: SyncupSideReply.agent_reply:type_name -> AgentReply
-	25,  // 147: SyncupSideReply.side_info:type_name -> SideInfo
-	27,  // 148: SyncupSideReply.bm_info:type_name -> BitmapInfo
-	16,  // 149: PushMigrBitmapRequest.side_pointer:type_name -> SidePointer
-	2,   // 150: PushMigrBitmapReply.agent_reply:type_name -> AgentReply
-	2,   // 151: GetDnInfoReply.agent_reply:type_name -> AgentReply
-	23,  // 152: GetDnInfoReply.dn_info:type_name -> DnInfo
-	16,  // 153: GetSideInfoRequest.side_pointer:type_name -> SidePointer
-	2,   // 154: GetSideInfoReply.agent_reply:type_name -> AgentReply
-	25,  // 155: GetSideInfoReply.side_info:type_name -> SideInfo
-	2,   // 156: CheckDnReply.agent_reply:type_name -> AgentReply
-	23,  // 157: CheckDnReply.dn_info:type_name -> DnInfo
-	16,  // 158: CheckSideRequest.side_pointer:type_name -> SidePointer
-	2,   // 159: CheckSideReply.agent_reply:type_name -> AgentReply
-	25,  // 160: CheckSideReply.side_info:type_name -> SideInfo
-	17,  // 161: SyncupCnRequest.cntlr_pointer_list:type_name -> CntlrPointer
-	5,   // 162: SyncupCnRequest.qos_ratio:type_name -> QosRatio
-	2,   // 163: SyncupCnReply.agent_reply:type_name -> AgentReply
-	24,  // 164: SyncupCnReply.cn_info:type_name -> CnInfo
-	17,  // 165: SyncupCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
-	14,  // 166: SyncupCntlrRequest.bdev_conf:type_name -> BdevConf
-	0,   // 167: SyncupCntlrRequest.sp_level:type_name -> SpLevel
-	44,  // 168: SyncupCntlrRequest.cntlr:type_name -> Cntlr
-	240, // 169: SyncupCntlrRequest.id_to_slice:type_name -> SyncupCntlrRequest.IdToSliceEntry
-	46,  // 170: SyncupCntlrRequest.td_list:type_name -> ThinDevice
-	241, // 171: SyncupCntlrRequest.nqn_to_subsystem:type_name -> SyncupCntlrRequest.NqnToSubsystemEntry
-	48,  // 172: SyncupCntlrRequest.clone_list:type_name -> Clone
-	50,  // 173: SyncupCntlrRequest.xfer_list:type_name -> Transfer
-	51,  // 174: SyncupCntlrRequest.migr_list:type_name -> Migration
-	2,   // 175: SyncupCntlrReply.agent_reply:type_name -> AgentReply
-	26,  // 176: SyncupCntlrReply.cntlr_info:type_name -> CntlrInfo
-	27,  // 177: SyncupCntlrReply.bm_info_list:type_name -> BitmapInfo
-	17,  // 178: PushCloneBitmapRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 179: PushCloneBitmapReply.agent_reply:type_name -> AgentReply
-	2,   // 180: GetCnInfoReply.agent_reply:type_name -> AgentReply
-	24,  // 181: GetCnInfoReply.cn_info:type_name -> CnInfo
-	17,  // 182: GetCntlrInfoRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 183: GetCntlrInfoReply.agent_reply:type_name -> AgentReply
-	26,  // 184: GetCntlrInfoReply.cntlr_info:type_name -> CntlrInfo
-	2,   // 185: CheckCnReply.agent_reply:type_name -> AgentReply
-	24,  // 186: CheckCnReply.cn_info:type_name -> CnInfo
-	17,  // 187: CheckCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
-	2,   // 188: CheckCntlrReply.agent_reply:type_name -> AgentReply
-	26,  // 189: CheckCntlrReply.cntlr_info:type_name -> CntlrInfo
-	243, // 190: DnDiskTable.side_list:type_name -> DnDiskTable.SideRecord
-	244, // 191: DnDiskTable.clone_meta_list:type_name -> DnDiskTable.CloneMetaRecord
-	22,  // 192: SideInfo.MigrSrcInfo.dm_linear_info:type_name -> ResInfo
-	22,  // 193: SideInfo.MigrSrcInfo.nvmeof_info:type_name -> ResInfo
-	22,  // 194: SideInfo.MigrDstInfo.target_info:type_name -> ResInfo
-	22,  // 195: SideInfo.MigrDstInfo.dm_clone_info:type_name -> ResInfo
-	22,  // 196: SideInfo.CnIdToDmErrorEntry.value:type_name -> ResInfo
-	22,  // 197: SideInfo.CnIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 198: SideInfo.CnIdToNvmeofEntry.value:type_name -> ResInfo
-	233, // 199: CntlrInfo.ThinInfo.slice_id_to_dm_thin:type_name -> CntlrInfo.ThinInfo.SliceIdToDmThinEntry
-	22,  // 200: CntlrInfo.SsIdToSubsystemEntry.value:type_name -> ResInfo
-	22,  // 201: CntlrInfo.NsIdToNamespaceEntry.value:type_name -> ResInfo
-	22,  // 202: CntlrInfo.NsIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 203: CntlrInfo.TdIdToRaid0Entry.value:type_name -> ResInfo
-	22,  // 204: CntlrInfo.TdIdToDmErrorEntry.value:type_name -> ResInfo
-	215, // 205: CntlrInfo.TdIdToThinInfoEntry.value:type_name -> CntlrInfo.ThinInfo
-	22,  // 206: CntlrInfo.SliceIdToDmPoolEntry.value:type_name -> ResInfo
-	22,  // 207: CntlrInfo.SliceIdToMetaEntry.value:type_name -> ResInfo
-	22,  // 208: CntlrInfo.SliceIdToDataEntry.value:type_name -> ResInfo
-	22,  // 209: CntlrInfo.GrpIdToMdRaidEntry.value:type_name -> ResInfo
-	22,  // 210: CntlrInfo.LegIdToLegEntry.value:type_name -> ResInfo
-	22,  // 211: CntlrInfo.XferIdToDmLinearEntry.value:type_name -> ResInfo
-	22,  // 212: CntlrInfo.XferIdToSubsystemEntry.value:type_name -> ResInfo
-	22,  // 213: CntlrInfo.XferIdToNamespaceEntry.value:type_name -> ResInfo
-	22,  // 214: CntlrInfo.CloneIdToTargetEntry.value:type_name -> ResInfo
-	22,  // 215: CntlrInfo.CloneIdToDmCloneEntry.value:type_name -> ResInfo
-	22,  // 216: CntlrInfo.CloneIdToMetaEntry.value:type_name -> ResInfo
-	22,  // 217: CntlrInfo.ThinInfo.SliceIdToDmThinEntry.value:type_name -> ResInfo
-	46,  // 218: ListThinDevicesReply.NameToTdEntry.value:type_name -> ThinDevice
-	47,  // 219: ListSubsystemsReply.NqnToSubsystemEntry.value:type_name -> Subsystem
-	0,   // 220: SyncupSideRequest.SideConf.sp_level:type_name -> SpLevel
-	4,   // 221: SyncupSideRequest.MigrDstConf.src_nvme_tr_conf:type_name -> NvmeTrConf
-	6,   // 222: SyncupSideRequest.MigrDstConf.dm_clone_conf:type_name -> DmCloneConf
-	45,  // 223: SyncupCntlrRequest.IdToSliceEntry.value:type_name -> Slice
-	47,  // 224: SyncupCntlrRequest.NqnToSubsystemEntry.value:type_name -> Subsystem
-	242, // 225: DnDiskTable.SideRecord.run_list:type_name -> DnDiskTable.ExtentRun
-	54,  // 226: Gateway.CreateCluster:input_type -> CreateClusterRequest
-	56,  // 227: Gateway.DeleteCluster:input_type -> DeleteClusterRequest
-	58,  // 228: Gateway.GetCluster:input_type -> GetClusterRequest
-	60,  // 229: Gateway.ListClusters:input_type -> ListClustersRequest
-	62,  // 230: Gateway.CreateDiskNode:input_type -> CreateDiskNodeRequest
-	64,  // 231: Gateway.DeleteDiskNode:input_type -> DeleteDiskNodeRequest
-	66,  // 232: Gateway.GetDiskNode:input_type -> GetDiskNodeRequest
-	68,  // 233: Gateway.ListDiskNodes:input_type -> ListDiskNodesRequest
-	70,  // 234: Gateway.UpdateDiskNodeDisabled:input_type -> UpdateDiskNodeDisabledRequest
-	72,  // 235: Gateway.InspectDiskNode:input_type -> InspectDiskNodeRequest
-	74,  // 236: Gateway.CreateControllerNode:input_type -> CreateControllerNodeRequest
-	76,  // 237: Gateway.DeleteControllerNode:input_type -> DeleteControllerNodeRequest
-	78,  // 238: Gateway.GetControllerNode:input_type -> GetControllerNodeRequest
-	80,  // 239: Gateway.ListControllerNodes:input_type -> ListControllerNodesRequest
-	82,  // 240: Gateway.UpdateControllerNodeDisabled:input_type -> UpdateControllerNodeDisabledRequest
-	84,  // 241: Gateway.InspectControllerNode:input_type -> InspectControllerNodeRequest
-	86,  // 242: Gateway.CreateStoragePool:input_type -> CreateStoragePoolRequest
-	88,  // 243: Gateway.DeleteStoragePool:input_type -> DeleteStoragePoolRequest
-	90,  // 244: Gateway.GetStoragePool:input_type -> GetStoragePoolRequest
-	92,  // 245: Gateway.ListStoragePools:input_type -> ListStoragePoolsRequest
-	94,  // 246: Gateway.UpdateStoragePoolCntlidSlotList:input_type -> UpdateStoragePoolCntlidSlotListRequest
-	96,  // 247: Gateway.UpdateStoragePoolLevel:input_type -> UpdateStoragePoolLevelRequest
-	98,  // 248: Gateway.FindStoragePoolNames:input_type -> FindStoragePoolNamesRequest
-	100, // 249: Gateway.GrowSlice:input_type -> GrowSliceRequest
-	102, // 250: Gateway.CreateCntlr:input_type -> CreateCntlrRequest
-	104, // 251: Gateway.DeleteCntlr:input_type -> DeleteCntlrRequest
-	106, // 252: Gateway.UpdateCntlrEnabled:input_type -> UpdateCntlrEnabledRequest
-	108, // 253: Gateway.InspectCntlr:input_type -> InspectCntlrRequest
-	110, // 254: Gateway.InspectSide:input_type -> InspectSideRequest
-	112, // 255: Gateway.CreateThinDevice:input_type -> CreateThinDeviceRequest
-	114, // 256: Gateway.DeleteThinDevice:input_type -> DeleteThinDeviceRequest
-	116, // 257: Gateway.ListThinDevices:input_type -> ListThinDevicesRequest
-	118, // 258: Gateway.CreateSubsystem:input_type -> CreateSubsystemRequest
-	120, // 259: Gateway.DeleteSubsystem:input_type -> DeleteSubsystemRequest
-	122, // 260: Gateway.ListSubsystems:input_type -> ListSubsystemsRequest
-	124, // 261: Gateway.UpdateSubsystemHosts:input_type -> UpdateSubsystemHostsRequest
-	126, // 262: Gateway.CreateNamespace:input_type -> CreateNamespaceRequest
-	128, // 263: Gateway.DeleteNamespace:input_type -> DeleteNamespaceRequest
-	130, // 264: Gateway.UpdateNamespaceDev:input_type -> UpdateNamespaceDevRequest
-	132, // 265: Gateway.UpdateNamespaceSuspended:input_type -> UpdateNamespaceSuspendedRequest
-	134, // 266: Gateway.CreateClone:input_type -> CreateCloneRequest
-	136, // 267: Gateway.DeleteClone:input_type -> DeleteCloneRequest
-	138, // 268: Gateway.GetClone:input_type -> GetCloneRequest
-	140, // 269: Gateway.UpdateCloneTrConf:input_type -> UpdateCloneTrConfRequest
-	142, // 270: Gateway.AppendCloneBitmap:input_type -> AppendCloneBitmapRequest
-	144, // 271: Gateway.CreateTransfer:input_type -> CreateTransferRequest
-	146, // 272: Gateway.DeleteTransfer:input_type -> DeleteTransferRequest
-	148, // 273: Gateway.GetTransfer:input_type -> GetTransferRequest
-	150, // 274: Gateway.UpdateTransferHosts:input_type -> UpdateTransferHostsRequest
-	152, // 275: Gateway.CreateMigration:input_type -> CreateMigrationRequest
-	154, // 276: Gateway.FinishMigration:input_type -> FinishMigrationRequest
-	156, // 277: Gateway.CancelMigration:input_type -> CancelMigrationRequest
-	158, // 278: Gateway.GetMigration:input_type -> GetMigrationRequest
-	160, // 279: Gateway.AppendMigrationBitmap:input_type -> AppendMigrationBitmapRequest
-	162, // 280: Gateway.CreateSpareLeg:input_type -> CreateSpareLegRequest
-	164, // 281: Gateway.DeleteSpareLeg:input_type -> DeleteSpareLegRequest
-	166, // 282: Gateway.SwitchSpareLeg:input_type -> SwitchSpareLegRequest
-	168, // 283: Gateway.GetThinDeviceBitmap:input_type -> GetThinDeviceBitmapRequest
-	170, // 284: Gateway.GetLegBitmap:input_type -> GetLegBitmapRequest
-	172, // 285: DiskNodeAgent.GetDnSize:input_type -> GetDnSizeRequest
-	174, // 286: DiskNodeAgent.SyncupDn:input_type -> SyncupDnRequest
-	176, // 287: DiskNodeAgent.SyncupSide:input_type -> SyncupSideRequest
-	178, // 288: DiskNodeAgent.PushMigrBitmap:input_type -> PushMigrBitmapRequest
-	180, // 289: DiskNodeAgent.GetDnInfo:input_type -> GetDnInfoRequest
-	182, // 290: DiskNodeAgent.GetSideInfo:input_type -> GetSideInfoRequest
-	184, // 291: DiskNodeAgent.CheckDn:input_type -> CheckDnRequest
-	186, // 292: DiskNodeAgent.CheckSide:input_type -> CheckSideRequest
-	188, // 293: ControllerNodeAgent.GetCnSize:input_type -> GetCnSizeRequest
-	190, // 294: ControllerNodeAgent.SyncupCn:input_type -> SyncupCnRequest
-	192, // 295: ControllerNodeAgent.SyncupCntlr:input_type -> SyncupCntlrRequest
-	194, // 296: ControllerNodeAgent.PushCloneBitmap:input_type -> PushCloneBitmapRequest
-	196, // 297: ControllerNodeAgent.GetCnInfo:input_type -> GetCnInfoRequest
-	198, // 298: ControllerNodeAgent.GetCntlrInfo:input_type -> GetCntlrInfoRequest
-	200, // 299: ControllerNodeAgent.GetThinDeviceBm:input_type -> GetThinDeviceBmRequest
-	202, // 300: ControllerNodeAgent.GetLegBm:input_type -> GetLegBmRequest
-	204, // 301: ControllerNodeAgent.CheckCn:input_type -> CheckCnRequest
-	206, // 302: ControllerNodeAgent.CheckCntlr:input_type -> CheckCntlrRequest
-	55,  // 303: Gateway.CreateCluster:output_type -> CreateClusterReply
-	57,  // 304: Gateway.DeleteCluster:output_type -> DeleteClusterReply
-	59,  // 305: Gateway.GetCluster:output_type -> GetClusterReply
-	61,  // 306: Gateway.ListClusters:output_type -> ListClustersReply
-	63,  // 307: Gateway.CreateDiskNode:output_type -> CreateDiskNodeReply
-	65,  // 308: Gateway.DeleteDiskNode:output_type -> DeleteDiskNodeReply
-	67,  // 309: Gateway.GetDiskNode:output_type -> GetDiskNodeReply
-	69,  // 310: Gateway.ListDiskNodes:output_type -> ListDiskNodesReply
-	71,  // 311: Gateway.UpdateDiskNodeDisabled:output_type -> UpdateDiskNodeDisabledReply
-	73,  // 312: Gateway.InspectDiskNode:output_type -> InspectDiskNodeReply
-	75,  // 313: Gateway.CreateControllerNode:output_type -> CreateControllerNodeReply
-	77,  // 314: Gateway.DeleteControllerNode:output_type -> DeleteControllerNodeReply
-	79,  // 315: Gateway.GetControllerNode:output_type -> GetControllerNodeReply
-	81,  // 316: Gateway.ListControllerNodes:output_type -> ListControllerNodesReply
-	83,  // 317: Gateway.UpdateControllerNodeDisabled:output_type -> UpdateControllerNodeDisabledReply
-	85,  // 318: Gateway.InspectControllerNode:output_type -> InspectControllerNodeReply
-	87,  // 319: Gateway.CreateStoragePool:output_type -> CreateStoragePoolReply
-	89,  // 320: Gateway.DeleteStoragePool:output_type -> DeleteStoragePoolReply
-	91,  // 321: Gateway.GetStoragePool:output_type -> GetStoragePoolReply
-	93,  // 322: Gateway.ListStoragePools:output_type -> ListStoragePoolsReply
-	95,  // 323: Gateway.UpdateStoragePoolCntlidSlotList:output_type -> UpdateStoragePoolCntlidSlotListReply
-	97,  // 324: Gateway.UpdateStoragePoolLevel:output_type -> UpdateStoragePoolLevelReply
-	99,  // 325: Gateway.FindStoragePoolNames:output_type -> FindStoragePoolNamesReply
-	101, // 326: Gateway.GrowSlice:output_type -> GrowSliceReply
-	103, // 327: Gateway.CreateCntlr:output_type -> CreateCntlrReply
-	105, // 328: Gateway.DeleteCntlr:output_type -> DeleteCntlrReply
-	107, // 329: Gateway.UpdateCntlrEnabled:output_type -> UpdateCntlrEnabledReply
-	109, // 330: Gateway.InspectCntlr:output_type -> InspectCntlrReply
-	111, // 331: Gateway.InspectSide:output_type -> InspectSideReply
-	113, // 332: Gateway.CreateThinDevice:output_type -> CreateThinDeviceReply
-	115, // 333: Gateway.DeleteThinDevice:output_type -> DeleteThinDeviceReply
-	117, // 334: Gateway.ListThinDevices:output_type -> ListThinDevicesReply
-	119, // 335: Gateway.CreateSubsystem:output_type -> CreateSubsystemReply
-	121, // 336: Gateway.DeleteSubsystem:output_type -> DeleteSubsystemReply
-	123, // 337: Gateway.ListSubsystems:output_type -> ListSubsystemsReply
-	125, // 338: Gateway.UpdateSubsystemHosts:output_type -> UpdateSubsystemHostsReply
-	127, // 339: Gateway.CreateNamespace:output_type -> CreateNamespaceReply
-	129, // 340: Gateway.DeleteNamespace:output_type -> DeleteNamespaceReply
-	131, // 341: Gateway.UpdateNamespaceDev:output_type -> UpdateNamespaceDevReply
-	133, // 342: Gateway.UpdateNamespaceSuspended:output_type -> UpdateNamespaceSuspendedReply
-	135, // 343: Gateway.CreateClone:output_type -> CreateCloneReply
-	137, // 344: Gateway.DeleteClone:output_type -> DeleteCloneReply
-	139, // 345: Gateway.GetClone:output_type -> GetCloneReply
-	141, // 346: Gateway.UpdateCloneTrConf:output_type -> UpdateCloneTrConfReply
-	143, // 347: Gateway.AppendCloneBitmap:output_type -> AppendCloneBitmapReply
-	145, // 348: Gateway.CreateTransfer:output_type -> CreateTransferReply
-	147, // 349: Gateway.DeleteTransfer:output_type -> DeleteTransferReply
-	149, // 350: Gateway.GetTransfer:output_type -> GetTransferReply
-	151, // 351: Gateway.UpdateTransferHosts:output_type -> UpdateTransferHostsReply
-	153, // 352: Gateway.CreateMigration:output_type -> CreateMigrationReply
-	155, // 353: Gateway.FinishMigration:output_type -> FinishMigrationReply
-	157, // 354: Gateway.CancelMigration:output_type -> CancelMigrationReply
-	159, // 355: Gateway.GetMigration:output_type -> GetMigrationReply
-	161, // 356: Gateway.AppendMigrationBitmap:output_type -> AppendMigrationBitmapReply
-	163, // 357: Gateway.CreateSpareLeg:output_type -> CreateSpareLegReply
-	165, // 358: Gateway.DeleteSpareLeg:output_type -> DeleteSpareLegReply
-	167, // 359: Gateway.SwitchSpareLeg:output_type -> SwitchSpareLegReply
-	169, // 360: Gateway.GetThinDeviceBitmap:output_type -> GetThinDeviceBitmapReply
-	171, // 361: Gateway.GetLegBitmap:output_type -> GetLegBitmapReply
-	173, // 362: DiskNodeAgent.GetDnSize:output_type -> GetDnSizeReply
-	175, // 363: DiskNodeAgent.SyncupDn:output_type -> SyncupDnReply
-	177, // 364: DiskNodeAgent.SyncupSide:output_type -> SyncupSideReply
-	179, // 365: DiskNodeAgent.PushMigrBitmap:output_type -> PushMigrBitmapReply
-	181, // 366: DiskNodeAgent.GetDnInfo:output_type -> GetDnInfoReply
-	183, // 367: DiskNodeAgent.GetSideInfo:output_type -> GetSideInfoReply
-	185, // 368: DiskNodeAgent.CheckDn:output_type -> CheckDnReply
-	187, // 369: DiskNodeAgent.CheckSide:output_type -> CheckSideReply
-	189, // 370: ControllerNodeAgent.GetCnSize:output_type -> GetCnSizeReply
-	191, // 371: ControllerNodeAgent.SyncupCn:output_type -> SyncupCnReply
-	193, // 372: ControllerNodeAgent.SyncupCntlr:output_type -> SyncupCntlrReply
-	195, // 373: ControllerNodeAgent.PushCloneBitmap:output_type -> PushCloneBitmapReply
-	197, // 374: ControllerNodeAgent.GetCnInfo:output_type -> GetCnInfoReply
-	199, // 375: ControllerNodeAgent.GetCntlrInfo:output_type -> GetCntlrInfoReply
-	201, // 376: ControllerNodeAgent.GetThinDeviceBm:output_type -> GetThinDeviceBmReply
-	203, // 377: ControllerNodeAgent.GetLegBm:output_type -> GetLegBmReply
-	205, // 378: ControllerNodeAgent.CheckCn:output_type -> CheckCnReply
-	207, // 379: ControllerNodeAgent.CheckCntlr:output_type -> CheckCntlrReply
-	303, // [303:380] is the sub-list for method output_type
-	226, // [226:303] is the sub-list for method input_type
-	226, // [226:226] is the sub-list for extension type_name
-	226, // [226:226] is the sub-list for extension extendee
-	0,   // [0:226] is the sub-list for field type_name
+	22,  // 19: SideInfo.side_dev_info:type_name -> ResInfo
+	212, // 20: SideInfo.cn_id_to_dm_error:type_name -> SideInfo.CnIdToDmErrorEntry
+	213, // 21: SideInfo.cn_id_to_dm_linear:type_name -> SideInfo.CnIdToDmLinearEntry
+	214, // 22: SideInfo.cn_id_to_nvmeof:type_name -> SideInfo.CnIdToNvmeofEntry
+	210, // 23: SideInfo.migr_src_info:type_name -> SideInfo.MigrSrcInfo
+	211, // 24: SideInfo.migr_dst_info:type_name -> SideInfo.MigrDstInfo
+	216, // 25: CntlrInfo.ss_id_to_subsystem:type_name -> CntlrInfo.SsIdToSubsystemEntry
+	217, // 26: CntlrInfo.ns_id_to_namespace:type_name -> CntlrInfo.NsIdToNamespaceEntry
+	218, // 27: CntlrInfo.ns_id_to_dm_linear:type_name -> CntlrInfo.NsIdToDmLinearEntry
+	219, // 28: CntlrInfo.td_id_to_raid0:type_name -> CntlrInfo.TdIdToRaid0Entry
+	220, // 29: CntlrInfo.td_id_to_dm_error:type_name -> CntlrInfo.TdIdToDmErrorEntry
+	221, // 30: CntlrInfo.td_id_to_thin_info:type_name -> CntlrInfo.TdIdToThinInfoEntry
+	222, // 31: CntlrInfo.slice_id_to_dm_pool:type_name -> CntlrInfo.SliceIdToDmPoolEntry
+	223, // 32: CntlrInfo.slice_id_to_meta:type_name -> CntlrInfo.SliceIdToMetaEntry
+	224, // 33: CntlrInfo.slice_id_to_data:type_name -> CntlrInfo.SliceIdToDataEntry
+	225, // 34: CntlrInfo.grp_id_to_md_raid:type_name -> CntlrInfo.GrpIdToMdRaidEntry
+	226, // 35: CntlrInfo.leg_id_to_leg:type_name -> CntlrInfo.LegIdToLegEntry
+	227, // 36: CntlrInfo.xfer_id_to_dm_linear:type_name -> CntlrInfo.XferIdToDmLinearEntry
+	228, // 37: CntlrInfo.xfer_id_to_subsystem:type_name -> CntlrInfo.XferIdToSubsystemEntry
+	229, // 38: CntlrInfo.xfer_id_to_namespace:type_name -> CntlrInfo.XferIdToNamespaceEntry
+	230, // 39: CntlrInfo.clone_id_to_target:type_name -> CntlrInfo.CloneIdToTargetEntry
+	231, // 40: CntlrInfo.clone_id_to_dm_clone:type_name -> CntlrInfo.CloneIdToDmCloneEntry
+	232, // 41: CntlrInfo.clone_id_to_meta:type_name -> CntlrInfo.CloneIdToMetaEntry
+	5,   // 42: ClusterConf.qos_ratio:type_name -> QosRatio
+	14,  // 43: ClusterConf.bdev_conf:type_name -> BdevConf
+	28,  // 44: ClusterConf.dn_bin_conf:type_name -> DnBinConf
+	29,  // 45: ClusterConf.alloc_conf:type_name -> AllocConf
+	30,  // 46: ClusterConf.health_check_conf:type_name -> HealthCheckConf
+	4,   // 47: DnConf.nvme_tr_conf:type_name -> NvmeTrConf
+	16,  // 48: DnConf.side_ptr_list:type_name -> SidePointer
+	4,   // 49: CnConf.nvme_tr_conf:type_name -> NvmeTrConf
+	17,  // 50: CnConf.cntlr_ptr_list:type_name -> CntlrPointer
+	4,   // 51: CdcEntry.nvme_tr_conf_list:type_name -> NvmeTrConf
+	14,  // 52: SpConf.bdev_conf:type_name -> BdevConf
+	15,  // 53: SpConf.event_threshold:type_name -> EventThreshold
+	0,   // 54: SpConf.sp_level:type_name -> SpLevel
+	4,   // 55: Cntlr.nvme_tr_conf:type_name -> NvmeTrConf
+	20,  // 56: Slice.meta_grp_list:type_name -> Group
+	20,  // 57: Slice.data_grp_list:type_name -> Group
+	21,  // 58: Subsystem.ns_list:type_name -> Namespace
+	4,   // 59: Clone.src_tr_conf_list:type_name -> NvmeTrConf
+	6,   // 60: Clone.dm_clone_conf:type_name -> DmCloneConf
+	6,   // 61: Migration.dm_clone_conf:type_name -> DmCloneConf
+	5,   // 62: CreateClusterRequest.qos_ratio:type_name -> QosRatio
+	14,  // 63: CreateClusterRequest.bdev_conf:type_name -> BdevConf
+	28,  // 64: CreateClusterRequest.dn_bin_conf:type_name -> DnBinConf
+	29,  // 65: CreateClusterRequest.alloc_conf:type_name -> AllocConf
+	30,  // 66: CreateClusterRequest.health_check_conf:type_name -> HealthCheckConf
+	31,  // 67: GetClusterReply.cluster_conf:type_name -> ClusterConf
+	32,  // 68: GetClusterReply.dn_global:type_name -> DnGlobal
+	33,  // 69: GetClusterReply.cn_global:type_name -> CnGlobal
+	34,  // 70: GetClusterReply.sp_global:type_name -> SpGlobal
+	4,   // 71: CreateDiskNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
+	35,  // 72: DeleteDiskNodeRequest.dn_rev:type_name -> DnRev
+	38,  // 73: GetDiskNodeReply.dn_conf:type_name -> DnConf
+	35,  // 74: GetDiskNodeReply.dn_rev:type_name -> DnRev
+	35,  // 75: UpdateDiskNodeDisabledRequest.dn_rev:type_name -> DnRev
+	23,  // 76: InspectDiskNodeReply.dn_info:type_name -> DnInfo
+	4,   // 77: CreateControllerNodeRequest.nvme_tr_conf:type_name -> NvmeTrConf
+	36,  // 78: DeleteControllerNodeRequest.cn_rev:type_name -> CnRev
+	39,  // 79: GetControllerNodeReply.cn_conf:type_name -> CnConf
+	36,  // 80: GetControllerNodeReply.cn_rev:type_name -> CnRev
+	36,  // 81: UpdateControllerNodeDisabledRequest.cn_rev:type_name -> CnRev
+	24,  // 82: InspectControllerNodeReply.cn_info:type_name -> CnInfo
+	14,  // 83: CreateStoragePoolRequest.bdev_conf:type_name -> BdevConf
+	15,  // 84: CreateStoragePoolRequest.event_threshold:type_name -> EventThreshold
+	3,   // 85: CreateStoragePoolRequest.cn_selector:type_name -> NodeSelector
+	3,   // 86: CreateStoragePoolRequest.dn_selector:type_name -> NodeSelector
+	37,  // 87: DeleteStoragePoolRequest.sp_rev:type_name -> SpRev
+	43,  // 88: GetStoragePoolReply.sp_conf:type_name -> SpConf
+	37,  // 89: GetStoragePoolReply.sp_rev:type_name -> SpRev
+	44,  // 90: GetStoragePoolReply.cntlr_list:type_name -> Cntlr
+	45,  // 91: GetStoragePoolReply.slice_list:type_name -> Slice
+	37,  // 92: UpdateStoragePoolCntlidSlotListRequest.sp_rev:type_name -> SpRev
+	37,  // 93: UpdateStoragePoolLevelRequest.sp_rev:type_name -> SpRev
+	0,   // 94: UpdateStoragePoolLevelRequest.sp_level:type_name -> SpLevel
+	234, // 95: FindStoragePoolNamesReply.sp_id_to_name:type_name -> FindStoragePoolNamesReply.SpIdToNameEntry
+	37,  // 96: GrowSliceRequest.sp_rev:type_name -> SpRev
+	3,   // 97: GrowSliceRequest.dn_selector:type_name -> NodeSelector
+	37,  // 98: CreateCntlrRequest.sp_rev:type_name -> SpRev
+	3,   // 99: CreateCntlrRequest.cn_selector:type_name -> NodeSelector
+	37,  // 100: DeleteCntlrRequest.sp_rev:type_name -> SpRev
+	37,  // 101: UpdateCntlrEnabledRequest.sp_rev:type_name -> SpRev
+	26,  // 102: InspectCntlrReply.cntlr_info:type_name -> CntlrInfo
+	25,  // 103: InspectSideReply.side_info:type_name -> SideInfo
+	37,  // 104: CreateThinDeviceRequest.sp_rev:type_name -> SpRev
+	37,  // 105: DeleteThinDeviceRequest.sp_rev:type_name -> SpRev
+	235, // 106: ListThinDevicesReply.name_to_td:type_name -> ListThinDevicesReply.NameToTdEntry
+	37,  // 107: CreateSubsystemRequest.sp_rev:type_name -> SpRev
+	37,  // 108: DeleteSubsystemRequest.sp_rev:type_name -> SpRev
+	236, // 109: ListSubsystemsReply.nqn_to_subsystem:type_name -> ListSubsystemsReply.NqnToSubsystemEntry
+	37,  // 110: UpdateSubsystemHostsRequest.sp_rev:type_name -> SpRev
+	37,  // 111: CreateNamespaceRequest.sp_rev:type_name -> SpRev
+	37,  // 112: DeleteNamespaceRequest.sp_rev:type_name -> SpRev
+	37,  // 113: UpdateNamespaceDevRequest.sp_rev:type_name -> SpRev
+	37,  // 114: UpdateNamespaceSuspendedRequest.sp_rev:type_name -> SpRev
+	37,  // 115: CreateCloneRequest.sp_rev:type_name -> SpRev
+	4,   // 116: CreateCloneRequest.src_tr_conf:type_name -> NvmeTrConf
+	6,   // 117: CreateCloneRequest.dm_clone_conf:type_name -> DmCloneConf
+	37,  // 118: DeleteCloneRequest.sp_rev:type_name -> SpRev
+	48,  // 119: GetCloneReply.clone:type_name -> Clone
+	37,  // 120: UpdateCloneTrConfRequest.sp_rev:type_name -> SpRev
+	4,   // 121: UpdateCloneTrConfRequest.src_tr_conf:type_name -> NvmeTrConf
+	37,  // 122: AppendCloneBitmapRequest.sp_rev:type_name -> SpRev
+	37,  // 123: CreateTransferRequest.sp_rev:type_name -> SpRev
+	37,  // 124: DeleteTransferRequest.sp_rev:type_name -> SpRev
+	50,  // 125: GetTransferReply.xfer:type_name -> Transfer
+	37,  // 126: UpdateTransferHostsRequest.sp_rev:type_name -> SpRev
+	37,  // 127: CreateMigrationRequest.sp_rev:type_name -> SpRev
+	3,   // 128: CreateMigrationRequest.dn_selector:type_name -> NodeSelector
+	6,   // 129: CreateMigrationRequest.dm_clone_conf:type_name -> DmCloneConf
+	37,  // 130: FinishMigrationRequest.sp_rev:type_name -> SpRev
+	37,  // 131: CancelMigrationRequest.sp_rev:type_name -> SpRev
+	51,  // 132: GetMigrationReply.migr:type_name -> Migration
+	37,  // 133: AppendMigrationBitmapRequest.sp_rev:type_name -> SpRev
+	37,  // 134: CreateSpareLegRequest.sp_rev:type_name -> SpRev
+	3,   // 135: CreateSpareLegRequest.dn_selector:type_name -> NodeSelector
+	37,  // 136: DeleteSpareLegRequest.sp_rev:type_name -> SpRev
+	37,  // 137: SwitchSpareLegRequest.sp_rev:type_name -> SpRev
+	16,  // 138: SyncupDnRequest.side_pointer_list:type_name -> SidePointer
+	2,   // 139: SyncupDnReply.agent_reply:type_name -> AgentReply
+	23,  // 140: SyncupDnReply.dn_info:type_name -> DnInfo
+	16,  // 141: SyncupSideRequest.side_pointer:type_name -> SidePointer
+	237, // 142: SyncupSideRequest.side_conf:type_name -> SyncupSideRequest.SideConf
+	238, // 143: SyncupSideRequest.migr_src_conf:type_name -> SyncupSideRequest.MigrSrcConf
+	239, // 144: SyncupSideRequest.migr_dst_conf:type_name -> SyncupSideRequest.MigrDstConf
+	2,   // 145: SyncupSideReply.agent_reply:type_name -> AgentReply
+	25,  // 146: SyncupSideReply.side_info:type_name -> SideInfo
+	27,  // 147: SyncupSideReply.bm_info:type_name -> BitmapInfo
+	16,  // 148: PushMigrBitmapRequest.side_pointer:type_name -> SidePointer
+	2,   // 149: PushMigrBitmapReply.agent_reply:type_name -> AgentReply
+	2,   // 150: GetDnInfoReply.agent_reply:type_name -> AgentReply
+	23,  // 151: GetDnInfoReply.dn_info:type_name -> DnInfo
+	16,  // 152: GetSideInfoRequest.side_pointer:type_name -> SidePointer
+	2,   // 153: GetSideInfoReply.agent_reply:type_name -> AgentReply
+	25,  // 154: GetSideInfoReply.side_info:type_name -> SideInfo
+	2,   // 155: CheckDnReply.agent_reply:type_name -> AgentReply
+	23,  // 156: CheckDnReply.dn_info:type_name -> DnInfo
+	16,  // 157: CheckSideRequest.side_pointer:type_name -> SidePointer
+	2,   // 158: CheckSideReply.agent_reply:type_name -> AgentReply
+	25,  // 159: CheckSideReply.side_info:type_name -> SideInfo
+	17,  // 160: SyncupCnRequest.cntlr_pointer_list:type_name -> CntlrPointer
+	5,   // 161: SyncupCnRequest.qos_ratio:type_name -> QosRatio
+	2,   // 162: SyncupCnReply.agent_reply:type_name -> AgentReply
+	24,  // 163: SyncupCnReply.cn_info:type_name -> CnInfo
+	17,  // 164: SyncupCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
+	14,  // 165: SyncupCntlrRequest.bdev_conf:type_name -> BdevConf
+	0,   // 166: SyncupCntlrRequest.sp_level:type_name -> SpLevel
+	44,  // 167: SyncupCntlrRequest.cntlr:type_name -> Cntlr
+	240, // 168: SyncupCntlrRequest.id_to_slice:type_name -> SyncupCntlrRequest.IdToSliceEntry
+	46,  // 169: SyncupCntlrRequest.td_list:type_name -> ThinDevice
+	241, // 170: SyncupCntlrRequest.nqn_to_subsystem:type_name -> SyncupCntlrRequest.NqnToSubsystemEntry
+	48,  // 171: SyncupCntlrRequest.clone_list:type_name -> Clone
+	50,  // 172: SyncupCntlrRequest.xfer_list:type_name -> Transfer
+	51,  // 173: SyncupCntlrRequest.migr_list:type_name -> Migration
+	2,   // 174: SyncupCntlrReply.agent_reply:type_name -> AgentReply
+	26,  // 175: SyncupCntlrReply.cntlr_info:type_name -> CntlrInfo
+	27,  // 176: SyncupCntlrReply.bm_info_list:type_name -> BitmapInfo
+	17,  // 177: PushCloneBitmapRequest.cntlr_pointer:type_name -> CntlrPointer
+	2,   // 178: PushCloneBitmapReply.agent_reply:type_name -> AgentReply
+	2,   // 179: GetCnInfoReply.agent_reply:type_name -> AgentReply
+	24,  // 180: GetCnInfoReply.cn_info:type_name -> CnInfo
+	17,  // 181: GetCntlrInfoRequest.cntlr_pointer:type_name -> CntlrPointer
+	2,   // 182: GetCntlrInfoReply.agent_reply:type_name -> AgentReply
+	26,  // 183: GetCntlrInfoReply.cntlr_info:type_name -> CntlrInfo
+	2,   // 184: CheckCnReply.agent_reply:type_name -> AgentReply
+	24,  // 185: CheckCnReply.cn_info:type_name -> CnInfo
+	17,  // 186: CheckCntlrRequest.cntlr_pointer:type_name -> CntlrPointer
+	2,   // 187: CheckCntlrReply.agent_reply:type_name -> AgentReply
+	26,  // 188: CheckCntlrReply.cntlr_info:type_name -> CntlrInfo
+	243, // 189: DnDiskTable.side_list:type_name -> DnDiskTable.SideRecord
+	244, // 190: DnDiskTable.clone_meta_list:type_name -> DnDiskTable.CloneMetaRecord
+	22,  // 191: SideInfo.MigrSrcInfo.dm_linear_info:type_name -> ResInfo
+	22,  // 192: SideInfo.MigrSrcInfo.nvmeof_info:type_name -> ResInfo
+	22,  // 193: SideInfo.MigrDstInfo.target_info:type_name -> ResInfo
+	22,  // 194: SideInfo.MigrDstInfo.dm_clone_info:type_name -> ResInfo
+	22,  // 195: SideInfo.CnIdToDmErrorEntry.value:type_name -> ResInfo
+	22,  // 196: SideInfo.CnIdToDmLinearEntry.value:type_name -> ResInfo
+	22,  // 197: SideInfo.CnIdToNvmeofEntry.value:type_name -> ResInfo
+	233, // 198: CntlrInfo.ThinInfo.slice_id_to_dm_thin:type_name -> CntlrInfo.ThinInfo.SliceIdToDmThinEntry
+	22,  // 199: CntlrInfo.SsIdToSubsystemEntry.value:type_name -> ResInfo
+	22,  // 200: CntlrInfo.NsIdToNamespaceEntry.value:type_name -> ResInfo
+	22,  // 201: CntlrInfo.NsIdToDmLinearEntry.value:type_name -> ResInfo
+	22,  // 202: CntlrInfo.TdIdToRaid0Entry.value:type_name -> ResInfo
+	22,  // 203: CntlrInfo.TdIdToDmErrorEntry.value:type_name -> ResInfo
+	215, // 204: CntlrInfo.TdIdToThinInfoEntry.value:type_name -> CntlrInfo.ThinInfo
+	22,  // 205: CntlrInfo.SliceIdToDmPoolEntry.value:type_name -> ResInfo
+	22,  // 206: CntlrInfo.SliceIdToMetaEntry.value:type_name -> ResInfo
+	22,  // 207: CntlrInfo.SliceIdToDataEntry.value:type_name -> ResInfo
+	22,  // 208: CntlrInfo.GrpIdToMdRaidEntry.value:type_name -> ResInfo
+	22,  // 209: CntlrInfo.LegIdToLegEntry.value:type_name -> ResInfo
+	22,  // 210: CntlrInfo.XferIdToDmLinearEntry.value:type_name -> ResInfo
+	22,  // 211: CntlrInfo.XferIdToSubsystemEntry.value:type_name -> ResInfo
+	22,  // 212: CntlrInfo.XferIdToNamespaceEntry.value:type_name -> ResInfo
+	22,  // 213: CntlrInfo.CloneIdToTargetEntry.value:type_name -> ResInfo
+	22,  // 214: CntlrInfo.CloneIdToDmCloneEntry.value:type_name -> ResInfo
+	22,  // 215: CntlrInfo.CloneIdToMetaEntry.value:type_name -> ResInfo
+	22,  // 216: CntlrInfo.ThinInfo.SliceIdToDmThinEntry.value:type_name -> ResInfo
+	46,  // 217: ListThinDevicesReply.NameToTdEntry.value:type_name -> ThinDevice
+	47,  // 218: ListSubsystemsReply.NqnToSubsystemEntry.value:type_name -> Subsystem
+	0,   // 219: SyncupSideRequest.SideConf.sp_level:type_name -> SpLevel
+	4,   // 220: SyncupSideRequest.MigrDstConf.src_nvme_tr_conf:type_name -> NvmeTrConf
+	6,   // 221: SyncupSideRequest.MigrDstConf.dm_clone_conf:type_name -> DmCloneConf
+	45,  // 222: SyncupCntlrRequest.IdToSliceEntry.value:type_name -> Slice
+	47,  // 223: SyncupCntlrRequest.NqnToSubsystemEntry.value:type_name -> Subsystem
+	242, // 224: DnDiskTable.SideRecord.run_list:type_name -> DnDiskTable.ExtentRun
+	54,  // 225: Gateway.CreateCluster:input_type -> CreateClusterRequest
+	56,  // 226: Gateway.DeleteCluster:input_type -> DeleteClusterRequest
+	58,  // 227: Gateway.GetCluster:input_type -> GetClusterRequest
+	60,  // 228: Gateway.ListClusters:input_type -> ListClustersRequest
+	62,  // 229: Gateway.CreateDiskNode:input_type -> CreateDiskNodeRequest
+	64,  // 230: Gateway.DeleteDiskNode:input_type -> DeleteDiskNodeRequest
+	66,  // 231: Gateway.GetDiskNode:input_type -> GetDiskNodeRequest
+	68,  // 232: Gateway.ListDiskNodes:input_type -> ListDiskNodesRequest
+	70,  // 233: Gateway.UpdateDiskNodeDisabled:input_type -> UpdateDiskNodeDisabledRequest
+	72,  // 234: Gateway.InspectDiskNode:input_type -> InspectDiskNodeRequest
+	74,  // 235: Gateway.CreateControllerNode:input_type -> CreateControllerNodeRequest
+	76,  // 236: Gateway.DeleteControllerNode:input_type -> DeleteControllerNodeRequest
+	78,  // 237: Gateway.GetControllerNode:input_type -> GetControllerNodeRequest
+	80,  // 238: Gateway.ListControllerNodes:input_type -> ListControllerNodesRequest
+	82,  // 239: Gateway.UpdateControllerNodeDisabled:input_type -> UpdateControllerNodeDisabledRequest
+	84,  // 240: Gateway.InspectControllerNode:input_type -> InspectControllerNodeRequest
+	86,  // 241: Gateway.CreateStoragePool:input_type -> CreateStoragePoolRequest
+	88,  // 242: Gateway.DeleteStoragePool:input_type -> DeleteStoragePoolRequest
+	90,  // 243: Gateway.GetStoragePool:input_type -> GetStoragePoolRequest
+	92,  // 244: Gateway.ListStoragePools:input_type -> ListStoragePoolsRequest
+	94,  // 245: Gateway.UpdateStoragePoolCntlidSlotList:input_type -> UpdateStoragePoolCntlidSlotListRequest
+	96,  // 246: Gateway.UpdateStoragePoolLevel:input_type -> UpdateStoragePoolLevelRequest
+	98,  // 247: Gateway.FindStoragePoolNames:input_type -> FindStoragePoolNamesRequest
+	100, // 248: Gateway.GrowSlice:input_type -> GrowSliceRequest
+	102, // 249: Gateway.CreateCntlr:input_type -> CreateCntlrRequest
+	104, // 250: Gateway.DeleteCntlr:input_type -> DeleteCntlrRequest
+	106, // 251: Gateway.UpdateCntlrEnabled:input_type -> UpdateCntlrEnabledRequest
+	108, // 252: Gateway.InspectCntlr:input_type -> InspectCntlrRequest
+	110, // 253: Gateway.InspectSide:input_type -> InspectSideRequest
+	112, // 254: Gateway.CreateThinDevice:input_type -> CreateThinDeviceRequest
+	114, // 255: Gateway.DeleteThinDevice:input_type -> DeleteThinDeviceRequest
+	116, // 256: Gateway.ListThinDevices:input_type -> ListThinDevicesRequest
+	118, // 257: Gateway.CreateSubsystem:input_type -> CreateSubsystemRequest
+	120, // 258: Gateway.DeleteSubsystem:input_type -> DeleteSubsystemRequest
+	122, // 259: Gateway.ListSubsystems:input_type -> ListSubsystemsRequest
+	124, // 260: Gateway.UpdateSubsystemHosts:input_type -> UpdateSubsystemHostsRequest
+	126, // 261: Gateway.CreateNamespace:input_type -> CreateNamespaceRequest
+	128, // 262: Gateway.DeleteNamespace:input_type -> DeleteNamespaceRequest
+	130, // 263: Gateway.UpdateNamespaceDev:input_type -> UpdateNamespaceDevRequest
+	132, // 264: Gateway.UpdateNamespaceSuspended:input_type -> UpdateNamespaceSuspendedRequest
+	134, // 265: Gateway.CreateClone:input_type -> CreateCloneRequest
+	136, // 266: Gateway.DeleteClone:input_type -> DeleteCloneRequest
+	138, // 267: Gateway.GetClone:input_type -> GetCloneRequest
+	140, // 268: Gateway.UpdateCloneTrConf:input_type -> UpdateCloneTrConfRequest
+	142, // 269: Gateway.AppendCloneBitmap:input_type -> AppendCloneBitmapRequest
+	144, // 270: Gateway.CreateTransfer:input_type -> CreateTransferRequest
+	146, // 271: Gateway.DeleteTransfer:input_type -> DeleteTransferRequest
+	148, // 272: Gateway.GetTransfer:input_type -> GetTransferRequest
+	150, // 273: Gateway.UpdateTransferHosts:input_type -> UpdateTransferHostsRequest
+	152, // 274: Gateway.CreateMigration:input_type -> CreateMigrationRequest
+	154, // 275: Gateway.FinishMigration:input_type -> FinishMigrationRequest
+	156, // 276: Gateway.CancelMigration:input_type -> CancelMigrationRequest
+	158, // 277: Gateway.GetMigration:input_type -> GetMigrationRequest
+	160, // 278: Gateway.AppendMigrationBitmap:input_type -> AppendMigrationBitmapRequest
+	162, // 279: Gateway.CreateSpareLeg:input_type -> CreateSpareLegRequest
+	164, // 280: Gateway.DeleteSpareLeg:input_type -> DeleteSpareLegRequest
+	166, // 281: Gateway.SwitchSpareLeg:input_type -> SwitchSpareLegRequest
+	168, // 282: Gateway.GetThinDeviceBitmap:input_type -> GetThinDeviceBitmapRequest
+	170, // 283: Gateway.GetLegBitmap:input_type -> GetLegBitmapRequest
+	172, // 284: DiskNodeAgent.GetDnSize:input_type -> GetDnSizeRequest
+	174, // 285: DiskNodeAgent.SyncupDn:input_type -> SyncupDnRequest
+	176, // 286: DiskNodeAgent.SyncupSide:input_type -> SyncupSideRequest
+	178, // 287: DiskNodeAgent.PushMigrBitmap:input_type -> PushMigrBitmapRequest
+	180, // 288: DiskNodeAgent.GetDnInfo:input_type -> GetDnInfoRequest
+	182, // 289: DiskNodeAgent.GetSideInfo:input_type -> GetSideInfoRequest
+	184, // 290: DiskNodeAgent.CheckDn:input_type -> CheckDnRequest
+	186, // 291: DiskNodeAgent.CheckSide:input_type -> CheckSideRequest
+	188, // 292: ControllerNodeAgent.GetCnSize:input_type -> GetCnSizeRequest
+	190, // 293: ControllerNodeAgent.SyncupCn:input_type -> SyncupCnRequest
+	192, // 294: ControllerNodeAgent.SyncupCntlr:input_type -> SyncupCntlrRequest
+	194, // 295: ControllerNodeAgent.PushCloneBitmap:input_type -> PushCloneBitmapRequest
+	196, // 296: ControllerNodeAgent.GetCnInfo:input_type -> GetCnInfoRequest
+	198, // 297: ControllerNodeAgent.GetCntlrInfo:input_type -> GetCntlrInfoRequest
+	200, // 298: ControllerNodeAgent.GetThinDeviceBm:input_type -> GetThinDeviceBmRequest
+	202, // 299: ControllerNodeAgent.GetLegBm:input_type -> GetLegBmRequest
+	204, // 300: ControllerNodeAgent.CheckCn:input_type -> CheckCnRequest
+	206, // 301: ControllerNodeAgent.CheckCntlr:input_type -> CheckCntlrRequest
+	55,  // 302: Gateway.CreateCluster:output_type -> CreateClusterReply
+	57,  // 303: Gateway.DeleteCluster:output_type -> DeleteClusterReply
+	59,  // 304: Gateway.GetCluster:output_type -> GetClusterReply
+	61,  // 305: Gateway.ListClusters:output_type -> ListClustersReply
+	63,  // 306: Gateway.CreateDiskNode:output_type -> CreateDiskNodeReply
+	65,  // 307: Gateway.DeleteDiskNode:output_type -> DeleteDiskNodeReply
+	67,  // 308: Gateway.GetDiskNode:output_type -> GetDiskNodeReply
+	69,  // 309: Gateway.ListDiskNodes:output_type -> ListDiskNodesReply
+	71,  // 310: Gateway.UpdateDiskNodeDisabled:output_type -> UpdateDiskNodeDisabledReply
+	73,  // 311: Gateway.InspectDiskNode:output_type -> InspectDiskNodeReply
+	75,  // 312: Gateway.CreateControllerNode:output_type -> CreateControllerNodeReply
+	77,  // 313: Gateway.DeleteControllerNode:output_type -> DeleteControllerNodeReply
+	79,  // 314: Gateway.GetControllerNode:output_type -> GetControllerNodeReply
+	81,  // 315: Gateway.ListControllerNodes:output_type -> ListControllerNodesReply
+	83,  // 316: Gateway.UpdateControllerNodeDisabled:output_type -> UpdateControllerNodeDisabledReply
+	85,  // 317: Gateway.InspectControllerNode:output_type -> InspectControllerNodeReply
+	87,  // 318: Gateway.CreateStoragePool:output_type -> CreateStoragePoolReply
+	89,  // 319: Gateway.DeleteStoragePool:output_type -> DeleteStoragePoolReply
+	91,  // 320: Gateway.GetStoragePool:output_type -> GetStoragePoolReply
+	93,  // 321: Gateway.ListStoragePools:output_type -> ListStoragePoolsReply
+	95,  // 322: Gateway.UpdateStoragePoolCntlidSlotList:output_type -> UpdateStoragePoolCntlidSlotListReply
+	97,  // 323: Gateway.UpdateStoragePoolLevel:output_type -> UpdateStoragePoolLevelReply
+	99,  // 324: Gateway.FindStoragePoolNames:output_type -> FindStoragePoolNamesReply
+	101, // 325: Gateway.GrowSlice:output_type -> GrowSliceReply
+	103, // 326: Gateway.CreateCntlr:output_type -> CreateCntlrReply
+	105, // 327: Gateway.DeleteCntlr:output_type -> DeleteCntlrReply
+	107, // 328: Gateway.UpdateCntlrEnabled:output_type -> UpdateCntlrEnabledReply
+	109, // 329: Gateway.InspectCntlr:output_type -> InspectCntlrReply
+	111, // 330: Gateway.InspectSide:output_type -> InspectSideReply
+	113, // 331: Gateway.CreateThinDevice:output_type -> CreateThinDeviceReply
+	115, // 332: Gateway.DeleteThinDevice:output_type -> DeleteThinDeviceReply
+	117, // 333: Gateway.ListThinDevices:output_type -> ListThinDevicesReply
+	119, // 334: Gateway.CreateSubsystem:output_type -> CreateSubsystemReply
+	121, // 335: Gateway.DeleteSubsystem:output_type -> DeleteSubsystemReply
+	123, // 336: Gateway.ListSubsystems:output_type -> ListSubsystemsReply
+	125, // 337: Gateway.UpdateSubsystemHosts:output_type -> UpdateSubsystemHostsReply
+	127, // 338: Gateway.CreateNamespace:output_type -> CreateNamespaceReply
+	129, // 339: Gateway.DeleteNamespace:output_type -> DeleteNamespaceReply
+	131, // 340: Gateway.UpdateNamespaceDev:output_type -> UpdateNamespaceDevReply
+	133, // 341: Gateway.UpdateNamespaceSuspended:output_type -> UpdateNamespaceSuspendedReply
+	135, // 342: Gateway.CreateClone:output_type -> CreateCloneReply
+	137, // 343: Gateway.DeleteClone:output_type -> DeleteCloneReply
+	139, // 344: Gateway.GetClone:output_type -> GetCloneReply
+	141, // 345: Gateway.UpdateCloneTrConf:output_type -> UpdateCloneTrConfReply
+	143, // 346: Gateway.AppendCloneBitmap:output_type -> AppendCloneBitmapReply
+	145, // 347: Gateway.CreateTransfer:output_type -> CreateTransferReply
+	147, // 348: Gateway.DeleteTransfer:output_type -> DeleteTransferReply
+	149, // 349: Gateway.GetTransfer:output_type -> GetTransferReply
+	151, // 350: Gateway.UpdateTransferHosts:output_type -> UpdateTransferHostsReply
+	153, // 351: Gateway.CreateMigration:output_type -> CreateMigrationReply
+	155, // 352: Gateway.FinishMigration:output_type -> FinishMigrationReply
+	157, // 353: Gateway.CancelMigration:output_type -> CancelMigrationReply
+	159, // 354: Gateway.GetMigration:output_type -> GetMigrationReply
+	161, // 355: Gateway.AppendMigrationBitmap:output_type -> AppendMigrationBitmapReply
+	163, // 356: Gateway.CreateSpareLeg:output_type -> CreateSpareLegReply
+	165, // 357: Gateway.DeleteSpareLeg:output_type -> DeleteSpareLegReply
+	167, // 358: Gateway.SwitchSpareLeg:output_type -> SwitchSpareLegReply
+	169, // 359: Gateway.GetThinDeviceBitmap:output_type -> GetThinDeviceBitmapReply
+	171, // 360: Gateway.GetLegBitmap:output_type -> GetLegBitmapReply
+	173, // 361: DiskNodeAgent.GetDnSize:output_type -> GetDnSizeReply
+	175, // 362: DiskNodeAgent.SyncupDn:output_type -> SyncupDnReply
+	177, // 363: DiskNodeAgent.SyncupSide:output_type -> SyncupSideReply
+	179, // 364: DiskNodeAgent.PushMigrBitmap:output_type -> PushMigrBitmapReply
+	181, // 365: DiskNodeAgent.GetDnInfo:output_type -> GetDnInfoReply
+	183, // 366: DiskNodeAgent.GetSideInfo:output_type -> GetSideInfoReply
+	185, // 367: DiskNodeAgent.CheckDn:output_type -> CheckDnReply
+	187, // 368: DiskNodeAgent.CheckSide:output_type -> CheckSideReply
+	189, // 369: ControllerNodeAgent.GetCnSize:output_type -> GetCnSizeReply
+	191, // 370: ControllerNodeAgent.SyncupCn:output_type -> SyncupCnReply
+	193, // 371: ControllerNodeAgent.SyncupCntlr:output_type -> SyncupCntlrReply
+	195, // 372: ControllerNodeAgent.PushCloneBitmap:output_type -> PushCloneBitmapReply
+	197, // 373: ControllerNodeAgent.GetCnInfo:output_type -> GetCnInfoReply
+	199, // 374: ControllerNodeAgent.GetCntlrInfo:output_type -> GetCntlrInfoReply
+	201, // 375: ControllerNodeAgent.GetThinDeviceBm:output_type -> GetThinDeviceBmReply
+	203, // 376: ControllerNodeAgent.GetLegBm:output_type -> GetLegBmReply
+	205, // 377: ControllerNodeAgent.CheckCn:output_type -> CheckCnReply
+	207, // 378: ControllerNodeAgent.CheckCntlr:output_type -> CheckCntlrReply
+	302, // [302:379] is the sub-list for method output_type
+	225, // [225:302] is the sub-list for method input_type
+	225, // [225:225] is the sub-list for extension type_name
+	225, // [225:225] is the sub-list for extension extendee
+	0,   // [0:225] is the sub-list for field type_name
 }
 
 func init() { file_pb_schema_proto_init() }

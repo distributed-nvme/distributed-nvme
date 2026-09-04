@@ -177,8 +177,9 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 			ctx, testSp, testMigrId, 1<<20); err == nil {
 			t.Errorf("%s: AllocCloneMeta succeeded", tc.name)
 		}
-		if err := meta.SetSideTrimmed(ctx, testSp, testSide); err == nil {
-			t.Errorf("%s: SetSideTrimmed succeeded", tc.name)
+		if err := meta.SetSideZeroed(
+			ctx, testSp, testSide, 0, 1); err == nil {
+			t.Errorf("%s: SetSideZeroed succeeded", tc.name)
 		}
 		if _, _, ok := meta.Identity(); ok {
 			t.Errorf("%s: Identity reported a usable disk", tc.name)
@@ -509,8 +510,13 @@ func TestDiskMetaAllocSideContiguous(t *testing.T) {
 		first.GetRunList()[0].GetCount() != 4 {
 		t.Fatalf("first allocation = %v, want one run 0+4", first.GetRunList())
 	}
-	if first.GetTrimmed() {
-		t.Error("a fresh record must start untrimmed (§9.4)")
+	if sideZeroedCnt(first) != 0 || sideExtCnt(first) != 4 {
+		t.Errorf("a fresh record must start not-zeroed (§9.4): %d/%d",
+			sideZeroedCnt(first), sideExtCnt(first))
+	}
+	if len(first.GetZeroedBits()) != 0 {
+		t.Errorf("a fresh record carries a bitmap: %v",
+			first.GetZeroedBits())
 	}
 
 	second, err := meta.AllocSide(ctx, testSp, testSide2, 3)
@@ -682,7 +688,7 @@ func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Rule 5 — free is idempotent; the trim flag; the sweep snapshots
+// Rule 5 — free is idempotent; the zeroed bits; the sweep snapshots
 // ---------------------------------------------------------------------------
 
 func TestDiskMetaFreeIsIdempotent(t *testing.T) {
@@ -727,41 +733,230 @@ func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestDiskMetaSetSideTrimmed(t *testing.T) {
+// The §9.4 batch setter: half-open ranges, an idempotent re-set that writes
+// nothing, and progress that survives the A/B slot round trip
+// (update_01.md U4).
+func TestDiskMetaSetSideZeroed(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
-	if _, err := meta.AllocSide(ctx, testSp, testSide, 2); err != nil {
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 4); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
-	if rec.GetTrimmed() {
-		t.Fatal("a fresh record is trimmed")
+	if sideZeroedCnt(rec) != 0 || sideFullyZeroed(rec) {
+		t.Fatalf("a fresh record is already zeroed: %d/%d",
+			sideZeroedCnt(rec), sideExtCnt(rec))
 	}
-	if err := meta.SetSideTrimmed(ctx, testSp, testSide); err != nil {
-		t.Fatalf("SetSideTrimmed: %v", err)
+	if from, count, ok := sideNextZeroBatch(rec, 10); !ok ||
+		from != 0 || count != 4 {
+		t.Fatalf("first batch = (%d,%d,%v), want (0,4,true)",
+			from, count, ok)
 	}
-	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
-	if !rec.GetTrimmed() {
-		t.Error("SetSideTrimmed did not stick")
+	// meta_info carries the same fact per node: provisioning= counts the sides
+	// whose bits are INCOMPLETE, not the sides (update_01.md U4, DN18). An
+	// operator reading it on a fully provisioned DN must see 0.
+	if got := meta.Describe(); !strings.Contains(got, "provisioning=1") {
+		t.Errorf("Describe() = %q, want provisioning=1 while the side is "+
+			"being zeroed", got)
 	}
 
+	// An empty range is a no-op, not an error, and writes nothing.
 	node.Reset()
-	if err := meta.SetSideTrimmed(ctx, testSp, testSide); err != nil {
-		t.Fatalf("re-SetSideTrimmed: %v", err)
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 2, 2); err != nil {
+		t.Fatalf("empty SetSideZeroed: %v", err)
 	}
-	for _, call := range node.Calls() {
-		if strings.HasPrefix(call, "writeblock") {
-			t.Errorf("re-flagging a trimmed side wrote: %s", call)
+	assertNoWrite(t, node, "an empty zeroed range")
+
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 2); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
+	if sideZeroedCnt(rec) != 2 || sideFullyZeroed(rec) {
+		t.Errorf("after [0,2): %d/%d zeroed, fully=%v",
+			sideZeroedCnt(rec), sideExtCnt(rec), sideFullyZeroed(rec))
+	}
+	if from, count, ok := sideNextZeroBatch(rec, 10); !ok ||
+		from != 2 || count != 2 {
+		t.Errorf("second batch = (%d,%d,%v), want (2,2,true)",
+			from, count, ok)
+	}
+
+	// Re-setting a range whose bits are already set issues no write: that is
+	// what makes a restart's replay free (SH16).
+	node.Reset()
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 2); err != nil {
+		t.Fatalf("re-SetSideZeroed: %v", err)
+	}
+	assertNoWrite(t, node, "re-zeroing an already-zeroed range")
+
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 2, 4); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
+	if !sideFullyZeroed(rec) {
+		t.Errorf("after [2,4) the side is not fully zeroed: %d/%d",
+			sideZeroedCnt(rec), sideExtCnt(rec))
+	}
+	if _, _, ok := sideNextZeroBatch(rec, 10); ok {
+		t.Error("a fully zeroed side still offers a batch")
+	}
+	if got := meta.Describe(); !strings.Contains(got, "sides=1") ||
+		!strings.Contains(got, "provisioning=0") {
+		t.Errorf("Describe() = %q, want sides=1 with provisioning=0 once "+
+			"every bit is set", got)
+	}
+
+	// Out of range and inverted ranges are refused, and refused before any
+	// write: the record's own extent total is the bit count, so a batch
+	// computed against a stale record can never set a pad bit.
+	node.Reset()
+	for _, tc := range []struct{ from, to uint64 }{{0, 5}, {3, 1}, {4, 9}} {
+		err := meta.SetSideZeroed(ctx, testSp, testSide, tc.from, tc.to)
+		if err == nil {
+			t.Errorf("SetSideZeroed accepted [%d,%d)", tc.from, tc.to)
+			continue
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf(
+			"zeroed range [%d,%d) is outside the side's 4 extents",
+			tc.from, tc.to)) {
+			t.Errorf("range error = %v", err)
 		}
 	}
-	if err := meta.SetSideTrimmed(ctx, testSp, 0xdead); err == nil {
-		t.Error("SetSideTrimmed accepted an unknown side")
+	assertNoWrite(t, node, "an out-of-range zeroed range")
+
+	if err := meta.SetSideZeroed(ctx, testSp, 0xdead, 0, 1); err == nil {
+		t.Error("SetSideZeroed accepted an unknown side")
 	}
-	// It survives a reload — the disk, not the local store, is authoritative.
+
+	// The bits survive a reload — the disk, not the local store, is
+	// authoritative ([D13]), and every batch went through the alternating
+	// A/B slots.
 	back := reopen(node)
 	rec, ok, _ := back.LookupSide(ctx, testSp, testSide)
-	if !ok || !rec.GetTrimmed() {
-		t.Error("the trim flag did not survive a reload")
+	if !ok || !sideFullyZeroed(rec) {
+		t.Error("the zeroed bits did not survive a reload")
+	}
+
+	// The U4 invariant: zeroed is a property of the side's ALLOCATION, not of
+	// the disk extent. Freeing and re-allocating the same ids hands back the
+	// same extents with a record that starts all-not-zeroed again.
+	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
+		t.Fatalf("FreeSide: %v", err)
+	}
+	again, err := meta.AllocSide(ctx, testSp, testSide, 4)
+	if err != nil {
+		t.Fatalf("re-AllocSide: %v", err)
+	}
+	if again.GetRunList()[0].GetStart() != 0 {
+		t.Fatalf("the re-allocation moved: %v", again.GetRunList())
+	}
+	if sideZeroedCnt(again) != 0 || sideFullyZeroed(again) {
+		t.Errorf("a re-allocated side inherited zeroed bits: %d/%d",
+			sideZeroedCnt(again), sideExtCnt(again))
+	}
+}
+
+// The on-disk encoding of zeroed_bits: LSB-first, trailing pad bits 0, and a
+// bit count that is the side's extent total rather than len(bits)*8 — a
+// 10-extent side must never look 16-extent (ruling R4.6, U5 item 3).
+func TestDiskMetaZeroedBitsEncoding(t *testing.T) {
+	meta, _ := formatted(t)
+	ctx := context.Background()
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 10); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+
+	// A batch that crosses a byte boundary sets exactly its own bits.
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 6, 9); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
+	if got := rec.GetZeroedBits(); len(got) != 2 ||
+		got[0] != 0xc0 || got[1] != 0x01 {
+		t.Fatalf("zeroed_bits after [6,9) = %#v, want [0xc0 0x01]", got)
+	}
+	if got := sideZeroedCnt(rec); got != 3 {
+		t.Errorf("zeroed count = %d, want 3", got)
+	}
+
+	if err := meta.SetSideZeroed(ctx, testSp, testSide, 0, 10); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
+	if got := rec.GetZeroedBits(); len(got) != 2 ||
+		got[0] != 0xff || got[1] != 0x03 {
+		t.Fatalf("zeroed_bits after [0,10) = %#v, want [0xff 0x03]", got)
+	}
+	// The pad bits of the last byte stay 0, and the count is 10 — not the 16
+	// a len(bits)*8 bit count would report.
+	if got := sideZeroedCnt(rec); got != 10 {
+		t.Errorf("zeroed count = %d, want 10", got)
+	}
+	if !sideFullyZeroed(rec) {
+		t.Error("10 of 10 extents zeroed is not fully zeroed")
+	}
+}
+
+// sideNextZeroBatch walks a side in DnZeroBatchExtCnt-sized steps and stops
+// exactly at the side's extent total, which is not a multiple of 8 (nor of the
+// batch size) — the case where a pad-bit-counting cursor would run off the end
+// of the side and zero another tenant's extents.
+func TestDiskMetaNextZeroBatchSteps(t *testing.T) {
+	meta, _ := formatted(t)
+	ctx := context.Background()
+	const extCnt = 21
+	if _, err := meta.AllocSide(ctx, testSp, testSide, extCnt); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+
+	want := [][2]uint64{{0, 10}, {10, 10}, {20, 1}}
+	for _, step := range want {
+		rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
+		from, count, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt)
+		if !ok || from != step[0] || count != step[1] {
+			t.Fatalf("batch = (%d,%d,%v), want (%d,%d,true)",
+				from, count, ok, step[0], step[1])
+		}
+		if err := meta.SetSideZeroed(
+			ctx, testSp, testSide, from, from+count); err != nil {
+			t.Fatalf("SetSideZeroed: %v", err)
+		}
+	}
+	rec, _, _ := meta.LookupSide(ctx, testSp, testSide)
+	if _, _, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt); ok {
+		t.Error("the walk did not stop at the side's last extent")
+	}
+	if got := sideZeroedCnt(rec); got != extCnt {
+		t.Errorf("zeroed count = %d, want %d", got, extCnt)
+	}
+
+	// A hole left behind by a failed batch is picked up again from
+	// first-unset, not from a count-derived offset (ruling R4.7).
+	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
+		t.Fatalf("FreeSide: %v", err)
+	}
+	if _, err := meta.AllocSide(ctx, testSp, testSide, extCnt); err != nil {
+		t.Fatalf("re-AllocSide: %v", err)
+	}
+	if err := meta.SetSideZeroed(
+		ctx, testSp, testSide, 3, extCnt); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	rec, _, _ = meta.LookupSide(ctx, testSp, testSide)
+	from, count, ok := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt)
+	if !ok || from != 0 || count != 3 {
+		t.Errorf("batch over a hole = (%d,%d,%v), want (0,3,true)",
+			from, count, ok)
+	}
+}
+
+// assertNoWrite fails when anything reached the disk since the last Reset.
+func assertNoWrite(t *testing.T, node *fakeNode, what string) {
+	t.Helper()
+	for _, call := range node.Calls() {
+		if strings.HasPrefix(call, "writeblock") {
+			t.Errorf("%s wrote: %s", what, call)
+		}
 	}
 }
 

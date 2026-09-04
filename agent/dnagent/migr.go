@@ -16,10 +16,19 @@ import (
 // migrMetaBaseSize covers the dm-clone superblock and rounding; the bitmap
 // itself needs one bit per region, so budgeting one byte per region on top is
 // a generous bound. AllocCloneMeta rounds the result up to whole
-// DnCloneMetaUnit slots — and because the base alone is exactly one unit,
-// every migration takes at least two, so the 48-unit area holds up to 24
-// concurrent destination roles per DN. That is well clear of
-// MaxMigrCntPerSp; growing DnCloneMetaSize would be a format-version bump.
+// DnCloneMetaUnit slots.
+//
+// The area is **per DN**, not per SP: DnCloneMetaSize is one 48-unit region of
+// the disk shared by every destination role the node hosts, across every SP on
+// it, so the capacity is sum(migrMetaSize(migr)) <= 48 units node-wide and
+// MaxMigrCntPerSp = 4 says nothing about it. Because the base alone is exactly
+// one unit, every migration costs >= 2 units, so 24 *minimum-cost* destination
+// roles is the node-wide ceiling — and fewer for large sides at a small
+// region size, where the one-byte-per-region term dominates (a 1 TiB side at
+// 1 MiB regions costs 2 units, at 64 KiB regions 5). Nothing gates the
+// destination count against this; exhaustion is reported the way the cn arena
+// reports it (clonemeta.go's cloneMetaUnits carries the same note), and
+// growing DnCloneMetaSize would be a format-version bump.
 const migrMetaBaseSize = 4 * 1024 * 1024
 
 func migrMetaSize(regions uint64) uint64 {
@@ -256,8 +265,23 @@ func (s *DnAgentServer) ensureDmClone(
 		return false, err
 	}
 	conf := plan.migrDst.GetDmCloneConf()
+	// no_discard_passdown is mandatory on every dnv dm-clone (update_01.md
+	// U1): `blkdiscard` on a dm-clone is this design's metadata-only "mark
+	// this region hydrated" primitive (§9.6, §11.4, §11.5), and dm-clone
+	// turns passdown on by default whenever the destination's discard
+	// granularity is no larger than a region — which a dm-linear over a raw
+	// disk satisfies. The hazard is *after* the §11.2 cutover, not before it:
+	// host IO then flows through this dm-clone, a host write hydrates region
+	// r, and a skip-bitmap chunk whose bit for r was read from the CN thin
+	// metadata before that write can still arrive later (chunk pushes are
+	// legal at any time, and a restart re-applies every stored chunk). The
+	// agent then `blkdiscard`s r; with passdown that discard would reach the
+	// side device and destroy the only copy of an acknowledged write. Without
+	// it the same discard is the metadata no-op that §9.6 and [D7] already
+	// assume. Cost: only discards issued during an active migration stop
+	// reaching the disk; after FinishMigration the dm-clone is gone.
 	table := agent.CloneTable(plan.sectors, metaNo, destNo, srcNo,
-		regionSectors, true,
+		regionSectors, true, true,
 		conf.GetHydrationThreshold(), conf.GetHydrationBatchSize())
 
 	dev, err := s.dm.Info(ctx, name)
@@ -332,15 +356,24 @@ func (s *DnAgentServer) ensureHydration(
 // teardownMigrDst removes the destination role's resources top-down: the
 // dm-clone, then the nvme connection and its retry loop, then the metadata
 // wrapper and its slot. The dm-clone goes first because the connection is its
-// source device (DN6): removing the source from under a live dm-clone would
-// leave in-flight hydration IO with nowhere to go.
+// source device and the wrapper its metadata device (DN6): removing either
+// from under a live dm-clone would leave in-flight hydration IO with nowhere
+// to go, and `dmsetup remove` on the wrapper fails EBUSY anyway.
+//
+// It reports whether the dm-clone is really gone. A clone that would not go
+// stops the teardown where it stands — every remaining step is one the live
+// clone still depends on — and leaves st.appliedMigrDst naming the role, so
+// the next converge retries the whole thing. The caller is responsible for
+// the layer *above*: see retireMigrDst.
 func (s *DnAgentServer) teardownMigrDst(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
-) {
+) bool {
 	s.stopMigrRetry(st)
-	s.removeDm(ctx, plan.migrFinalName())
+	if !s.removeDm(ctx, plan.migrFinalName()) {
+		return false
+	}
 	s.disconnect(ctx, plan.srcNqnOfDst())
 	// The slot is released only once its wrapper is really gone; a record
 	// left behind is retried by the DN6 orphan sweep.
@@ -353,6 +386,7 @@ func (s *DnAgentServer) teardownMigrDst(
 	}
 	st.tracker.Drop(resKeyMigrDstTarget)
 	st.tracker.Drop(resKeyMigrDstClone)
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -363,10 +397,16 @@ func (s *DnAgentServer) teardownMigrDst(
 // goroutine re-runs the destination converge every
 // DnMigrConnectRetryInterval seconds under the DN1 locks, until it succeeds
 // or the side is torn down — the RPC itself never blocks on the connect.
+//
+// The loop is enrolled in the server's WaitGroup so WaitBackground means
+// "every dn background goroutine", not just zeroing (ruling R4.22). Like
+// startZeroing it therefore refuses once rootCtx is done: an armed §11.2 fence
+// timer is not enrolled and can still reach a converge after the join
+// returned, and a bg.Add after bg.Wait panics.
 func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	s.mu.Lock()
-	if st.retrying {
+	if st.retrying || s.rootCtx.Err() != nil {
 		s.mu.Unlock()
 		return
 	}
@@ -374,7 +414,11 @@ func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
 	st.retrying = true
 	st.cancel = cancel
 	s.mu.Unlock()
-	go s.migrRetryLoop(ctx, key, st)
+	s.bg.Add(1)
+	go func() {
+		defer s.bg.Done()
+		s.migrRetryLoop(ctx, key, st)
+	}()
 }
 
 func (s *DnAgentServer) stopMigrRetry(st *sideState) {

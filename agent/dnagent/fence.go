@@ -1,6 +1,7 @@
 package dnagent
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -61,6 +62,15 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 	return time.Since(st.fenceAt) < s.fenceWait
 }
 
+// fenceStarted reports whether a window was ever started for this side,
+// elapsed or not. It is the guard settleFence needs: beginFence would *start*
+// one, which a converge that builds nothing must never do.
+func (s *DnAgentServer) fenceStarted(st *sideState) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !st.fenceAt.IsZero()
+}
+
 // inFence reports whether a window is currently running, without starting
 // one. The probe path uses it: a Check round must never mutate, and starting
 // the clock is a mutation of the side's state.
@@ -100,6 +110,56 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 	s.mu.Unlock()
 }
 
+// settleFence is the fence bookkeeping of a converge that took the U4 gate
+// (syncup_side.go's `state != sideDevReady` fork) and so never reached
+// ensureCnDm.
+//
+// Without it the window can end with the per-CN dm-linears still suspended and
+// nothing left to re-arm: the timer nils itself before it converges
+// (armFenceTimer), unfenceLinears runs only from teardownSide, there is no
+// periodic side converge, and a CheckSide round neither converges nor bumps a
+// revision — so one transient `dmsetup info` failure on the side device would
+// leave suspended devices behind until the worker happened to re-sync the
+// side. A suspended dm target queues bios with no timeout (see the header), so
+// [D12]'s bound is the safety property, not a best effort.
+//
+// Inside the window it only re-arms the timer. Once the window has elapsed it
+// finishes phase 2 itself. That is safe under the U4 gate: the dm-error and
+// the dm-linear are the devices the fence suspended, not something built on
+// top of the side, and retiring them only moves the side *further* from
+// exporting data — which is exactly what the end of the window is for.
+func (s *DnAgentServer) settleFence(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+) {
+	if plan.migrSrc == nil || !s.fenceStarted(st) {
+		return
+	}
+	if s.inFence(st) {
+		s.armFenceTimer(st, plan)
+		return
+	}
+	for _, cnId := range plan.cnIds {
+		errName := plan.errName(cnId)
+		if err := s.ensureDmError(ctx, errName, plan.sectors); err != nil {
+			slog.ErrorContext(ctx, "retiring a fenced dm-linear failed",
+				slog.String("name", errName),
+				slog.String("error", err.Error()))
+			continue
+		}
+		linName := plan.linearName(cnId)
+		// cloneLive is irrelevant here: a migration source fences every
+		// per-CN linear onto its dm-error, the primary's included.
+		if err := s.ensureDmLinear(ctx, linName, plan.sectors,
+			plan.linearBacking(cnId, false)); err != nil {
+			slog.ErrorContext(ctx, "retiring a fenced dm-linear failed",
+				slog.String("name", linName),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
 // clearFence stops the window: the migration source role ended, or the side
 // is being torn down. Phase 2 (or an ordinary converge) puts the linears back
 // wherever the new desired state wants them, resumed.
@@ -115,10 +175,37 @@ func (s *DnAgentServer) clearFence(st *sideState) {
 	}
 }
 
-// adoptFence marks a side reloaded from the local store, so that per-CN
-// linears this process finds suspended are recognised as debris from the
-// previous one and retired immediately (see beginFence).
-func (s *DnAgentServer) adoptFence(st *sideState) {
+// adoptFence marks a side reloaded from the local store **whose per-CN linears
+// this process actually finds suspended**, so that debris from the previous
+// process is recognised as such and retired immediately (see beginFence).
+//
+// The probe is what confines the adoption to the sides it is meant for. A flag
+// set on every reloaded side would sit there until the side's next migration —
+// hours or days later — and then consume that cutover's whole
+// common.SuspendSeconds window on a side the previous process never fenced:
+// the primary's in-flight writes would be errored in the same pass that moved
+// its namespaces to AnaGrpIdInaccessible, which is precisely the two-phase
+// property [D12] exists to provide. The bound is on how long a device may stay
+// suspended, not a licence to skip the window.
+//
+// The caller holds the node write lock (Reconcile, DN2), and s.mu is taken
+// only after the last OS call — it is a leaf lock never held across one.
+func (s *DnAgentServer) adoptFence(ctx context.Context, st *sideState) {
+	// extentSize is irrelevant here: only the per-CN linear names are needed,
+	// and those are pure functions of the side's ids.
+	plan := newSidePlan(s.nf, st.req, 0)
+	suspended := false
+	for _, cnId := range plan.cnIds {
+		dev, err := s.dm.Info(ctx, plan.linearName(cnId))
+		if err != nil || dev == nil || !dev.Suspended {
+			continue
+		}
+		suspended = true
+		break
+	}
+	if !suspended {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st.fenceRestarted = true

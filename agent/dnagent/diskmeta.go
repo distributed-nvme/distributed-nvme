@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -483,9 +484,25 @@ func (d *DiskMeta) describeLocked() string {
 		return "unformatted"
 	}
 	return fmt.Sprintf(
-		"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d",
+		"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d"+
+			" provisioning=%d",
 		d.seq, len(d.table.GetSideList()), len(d.table.GetCloneMetaList()),
-		d.freeExtCnt(), d.freeUnitCnt())
+		d.freeExtCnt(), d.freeUnitCnt(), d.provisioningSideCntLocked())
+}
+
+// provisioningSideCntLocked counts the sides whose §9.4 zeroing has not
+// finished — the meta_info half of the per-side "zeroing k/n" detail
+// (update_01.md U4). It is appended to Describe rather than folded into
+// sides=%d so an operator can tell "this DN carries 12 sides" from "3 of them
+// are still being provisioned" at a glance.
+func (d *DiskMeta) provisioningSideCntLocked() uint64 {
+	var cnt uint64
+	for _, rec := range d.table.GetSideList() {
+		if !sideFullyZeroed(rec) {
+			cnt++
+		}
+	}
+	return cnt
 }
 
 // ProbeHeader re-reads only the 4 KiB header — cheap enough for the 5 s
@@ -661,6 +678,71 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// zeroed_bits — the §9.4 side-provisioning bitmap (update_01.md U4)
+//
+// **Logical extent i** is the i-th extent of the concatenation of the record's
+// run_list, i.e. bytes [i, i+1) x extent_size of the side's DnSideName
+// dm-linear. That device is a gap-free concatenation of the runs in run_list
+// order (sideRunSectors + sideDmConverged), so the logical index is the one
+// address the zeroing command needs: one `blkdiscard --zeroout` covers a whole
+// batch of consecutive logical extents no matter how fragmented the physical
+// placement is.
+//
+// Bit i of zeroed_bits says logical extent i has been zeroed. The encoding is
+// agent/bitmap.go's LSB-first one, and the bit count is ALWAYS the record's own
+// extent total — never agent.BitmapBitCount, which returns len(bits)*8 and
+// would make a 10-extent side look 16-extent, fire "zeroed == total" early and
+// export another tenant's bytes.
+//
+// The helpers are free functions on the record rather than DiskMeta methods so
+// the converge, the probe and the zeroing loop can all work off one LookupSide
+// snapshot without re-taking d.mu (rulings R4.6/R4.7).
+// ---------------------------------------------------------------------------
+
+// sideExtCnt is the side's logical extent count — the bit count of
+// zeroed_bits, and SideInfo.total_ext_cnt. It is runTotal by another name; use
+// it wherever the number is a bit count so the two can never drift.
+func sideExtCnt(rec *pb.DnDiskTable_SideRecord) uint64 {
+	return runTotal(rec)
+}
+
+// sideZeroedCnt is SideInfo.zeroed_ext_cnt: how many of the side's extents are
+// already zeroed.
+func sideZeroedCnt(rec *pb.DnDiskTable_SideRecord) uint64 {
+	return agent.BitmapCountSet(rec.GetZeroedBits(), runTotal(rec))
+}
+
+// sideFullyZeroed is the export gate's local half (§9.4 step 4): the agent
+// trusts its own bits over the request's provisioned flag, because the disk is
+// authoritative ([D13]) and the etcd flag is a gate, never evidence.
+func sideFullyZeroed(rec *pb.DnDiskTable_SideRecord) bool {
+	return agent.BitmapAllSet(rec.GetZeroedBits(), runTotal(rec))
+}
+
+// sideNextZeroBatch is the zeroing loop's cursor: the first not-yet-zeroed
+// logical extent and how many consecutive not-yet-zeroed extents to cover in
+// one `blkdiscard --zeroout`, capped at batch. ok is false when the side is
+// fully zeroed.
+//
+// The offset comes from first-unset, never from the *count* of zeroed extents
+// (ruling R4.7): the two agree only while the set bits are a contiguous
+// prefix, which is all this protocol produces but not all the record can
+// hold, and a count-derived offset would silently zero the wrong range for
+// any other bitmap.
+func sideNextZeroBatch(
+	rec *pb.DnDiskTable_SideRecord,
+	batch uint64,
+) (from uint64, count uint64, ok bool) {
+	total := runTotal(rec)
+	from, ok = agent.BitmapFirstUnset(rec.GetZeroedBits(), total)
+	if !ok {
+		return 0, 0, false
+	}
+	return from, agent.BitmapUnsetRunFrom(
+		rec.GetZeroedBits(), from, total, batch), true
+}
+
+// ---------------------------------------------------------------------------
 // Allocation (rule 4). The free maps are derived from the table on load and
 // never persisted.
 // ---------------------------------------------------------------------------
@@ -696,10 +778,23 @@ func (d *DiskMeta) AllocSide(
 	if err != nil {
 		return nil, fmt.Errorf("allocating %d extents: %w", extCnt, err)
 	}
+	// zeroed_bits is left empty on purpose (ruling R4.5): proto3 does not
+	// serialize an empty bytes field, out-of-range bits read as 0, and
+	// BitmapSetRange grows the slice on the first batch — so an absent field
+	// is exactly update_01.md's "persist the record with zeroed_bits all 0",
+	// at no cost in every slot write that follows.
+	//
+	// This literal is also where the U4 invariant is enforced: **zeroed is a
+	// property of the side's ALLOCATION, not of the disk extent**. Extents
+	// freed and reallocated to a new side start all-not-zeroed again, whatever
+	// happened to them before, because this constructor is the only code that
+	// can put extents into a record (an existing record's runs are never
+	// changed — a resize is rejected above) and FreeSide deletes records
+	// whole rather than blanking fields. A recycled extent therefore cannot
+	// inherit a previous side's set bit.
 	rec := &pb.DnDiskTable_SideRecord{
 		SpId:    spId,
 		SideId:  sideId,
-		Trimmed: false,
 		RunList: runs,
 	}
 	next := proto.Clone(d.table).(*pb.DnDiskTable)
@@ -711,11 +806,21 @@ func (d *DiskMeta) AllocSide(
 	return findSide(d.table, spId, sideId), nil
 }
 
-// SetSideTrimmed flips a record to trimmed — step 3 of the §9.4 protocol.
-func (d *DiskMeta) SetSideTrimmed(
+// SetSideZeroed marks logical extents [fromExt, toExt) of a side as zeroed —
+// step 3 of the §9.4 provisioning protocol (update_01.md U4), run once per
+// completed batch. The range is half-open, and persisting it *after* the
+// `blkdiscard --zeroout` returned is what makes an interrupted batch simply
+// re-run: its bits stay 0, so the next pass redoes it rather than leaving a
+// hole nobody knows about.
+//
+// It is a no-op — and issues no write — when every bit in the range is
+// already set, which is what makes a restart's replay free (SH16).
+func (d *DiskMeta) SetSideZeroed(
 	ctx context.Context,
 	spId uint64,
 	sideId uint64,
+	fromExt uint64,
+	toExt uint64,
 ) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -730,11 +835,33 @@ func (d *DiskMeta) SetSideTrimmed(
 		return fmt.Errorf("no allocation record for side %016x-%016x",
 			spId, sideId)
 	}
-	if rec.GetTrimmed() {
+	// The record's own extent total is the bit count, so a batch the caller
+	// computed against a stale record — one whose side was freed and
+	// reallocated meanwhile — is refused rather than setting pad bits.
+	total := runTotal(rec)
+	if fromExt > toExt || toExt > total {
+		return fmt.Errorf(
+			"zeroed range [%d,%d) is outside the side's %d extents",
+			fromExt, toExt, total)
+	}
+	if fromExt == toExt {
+		return nil
+	}
+	bits := rec.GetZeroedBits()
+	already := true
+	for i := fromExt; i < toExt; i++ {
+		if !agent.BitmapBit(bits, i) {
+			already = false
+			break
+		}
+	}
+	if already {
 		return nil
 	}
 	next := proto.Clone(d.table).(*pb.DnDiskTable)
-	findSide(next, spId, sideId).Trimmed = true
+	target := findSide(next, spId, sideId)
+	target.ZeroedBits = agent.BitmapSetRange(
+		target.GetZeroedBits(), fromExt, toExt)
 	return d.save(ctx, next)
 }
 

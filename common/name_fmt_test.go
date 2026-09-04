@@ -24,6 +24,7 @@ const (
 	testClone   = uint64(0x41)
 	testXfer    = uint64(0x51)
 	testNs      = uint64(0x32)
+	testGrp     = uint64(0x61)
 )
 
 func checkName(t *testing.T, what, got, want string) {
@@ -84,6 +85,23 @@ func TestDmNames(t *testing.T) {
 	checkName(t, "CnXferFinalName",
 		nf.CnXferFinalName(testCluster, testCn, testSp, testXfer),
 		"dnv-"+c+"-0000000000000005-8-0000000000000011-0000000000000051")
+	// The three cn kinds added by cnagent.md §2.1: the [D1] leg wrapper,
+	// the RedundNone group device, and the kind-`b` clone-metadata wrapper
+	// that replaced the clone-VG metadata LV (update_01.md U3).
+	checkName(t, "CnLegName",
+		nf.CnLegName(testCluster, testCn, testSp, testLeg),
+		"dnv-"+c+"-0000000000000005-9-0000000000000011-0000000000000015")
+	checkName(t, "CnGrpName",
+		nf.CnGrpName(testCluster, testCn, testSp, testGrp),
+		"dnv-"+c+"-0000000000000005-a-0000000000000011-0000000000000061")
+	checkName(t, "CnCloneMetaDmName",
+		nf.CnCloneMetaDmName(testCluster, testCn, testSp, testClone),
+		"dnv-"+c+"-0000000000000005-b-0000000000000011-0000000000000041")
+	// The `dmsetup ls` filter that rebuilds the allocator's used-unit map
+	// must be a strict prefix of the wrapper names it selects.
+	checkName(t, "CnCloneMetaDmPrefix",
+		nf.CnCloneMetaDmPrefix(testCluster, testCn),
+		"dnv-"+c+"-0000000000000005-b-")
 
 	checkName(t, "DmPath", nf.DmPath("dnv-x"), "/dev/mapper/dnv-x")
 	checkName(t, "MdPath", nf.MdPath("dnv-x"), "/dev/md/dnv-x")
@@ -177,24 +195,36 @@ func TestNqns(t *testing.T) {
 	}
 }
 
-// §4.5 LVM / tmpfs / file names. Only the CN clone VG is left: the DN carries
-// the [D13] disk format instead of LVM.
-func TestLvmAndTmpfsNames(t *testing.T) {
+// §4.5 tmpfs / file names. LVM is gone from dnv entirely (update_01.md U3):
+// the DN carries the [D13] disk format, and the CN's clone-metadata arena is a
+// slot allocator over one loop device whose kind-`b` wrapper tables are its
+// registry, so the clone-VG and metadata-LV names are gone with it.
+func TestTmpfsAndFileNames(t *testing.T) {
 	nf := NewNameFmt("")
 	const c = "ebada5168620c5fe"
-
-	checkName(t, "CnCloneVgName", nf.CnCloneVgName(testCluster, testCn),
-		"dnv-clone-vg-"+c+"-0000000000000005")
-	checkName(t, "CnCloneMetaName", nf.CnCloneMetaName(testSp, testClone),
-		"0000000000000011-0000000000000041")
-	checkName(t, "CnCloneMetaPath", nf.CnCloneMetaPath(testCluster, testCn, testSp, testClone),
-		"/dev/dnv-clone-vg-"+c+"-0000000000000005/0000000000000011-0000000000000041")
 
 	checkName(t, "CnTmpfsPath", nf.CnTmpfsPath(testCluster, testCn),
 		DefaultTmpfsPrefix+"/"+c+"-0000000000000005")
 	checkName(t, "CnTmpFileName", nf.CnTmpFileName(), "tmp-file")
 	checkName(t, "CnTmpFilePath", nf.CnTmpFilePath(testCluster, testCn),
 		DefaultTmpfsPrefix+"/"+c+"-0000000000000005/tmp-file")
+}
+
+// The CN clone-metadata arena must divide into whole units, and the tmpfs must
+// hold a fully materialized arena with slack (update_01.md U3 spec 2/3). The
+// dn twin of this layout assertion is diskmeta_test.go's DnCloneMeta* check.
+func TestCloneMetaArenaConstants(t *testing.T) {
+	if CnCloneMetaAreaSize%CnCloneMetaUnit != 0 {
+		t.Fatalf("arena %d is not a whole number of %d-byte units",
+			CnCloneMetaAreaSize, CnCloneMetaUnit)
+	}
+	if units := CnCloneMetaAreaSize / CnCloneMetaUnit; units != 256 {
+		t.Errorf("arena holds %d units, want 256", units)
+	}
+	if DefaultCnTmpfsSize < 2*CnCloneMetaAreaSize {
+		t.Errorf("tmpfs %d is under 2 × arena %d",
+			DefaultCnTmpfsSize, CnCloneMetaAreaSize)
+	}
 }
 
 // §4.6 agent local-store paths.

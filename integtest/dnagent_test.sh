@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # dnagent_test.sh — the `dnv-agent dn` integration test of
-# doc/dnagent_integtest.md. Two real VMs, real LVM/dm/nvmet/nvme-tcp, driven
+# doc/dnagent_integtest.md. Two real VMs, real dm/nvmet/nvme-tcp, driven
 # over gRPC from this machine by integtest/dnagentctl.
 #
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
@@ -9,7 +9,7 @@
 #
 # Cases: smoke, sides, migr_full, migr_bitmap, restart (§10-§15). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
-# leaves every dm/nvmet/LVM object and both agent logs in place and dumps
+# leaves every dm/nvmet object and both agent logs in place and dumps
 # diagnostics (§17).
 #
 # The uutils dd rule of §4 is absolute: this script never passes iflag= or
@@ -48,6 +48,12 @@ HYDR_BATCH=1
 
 # Per-RPC deadline for the converge RPCs (see ctl).
 SYNCUP_TIMEOUT=60
+
+# Polling budget of `dnagentctl wait-zeroed` (update_01.md U4). With 64 MiB
+# extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
+# so a 1-2 extent side finishes in well under a second; the budget only has to
+# cover a stalled retry loop (DnZeroRetryInterval = 5 s).
+ZERO_TIMEOUT=120
 
 NQN_PREFIX=nqn.2024-01.io.dnv
 
@@ -122,6 +128,47 @@ assert_not_ok() {
 	[ "$got" != "RES_STATUS_OK" ] || die "$3: status is OK, want not OK"
 }
 
+# assert_gated is assert_not_ok's strict twin (ruling R4.35).
+# RES_STATUS_PROVISIONING (update_01.md U4) is a *healthy* status, so it
+# satisfies a bare assert_not_ok: every "this must not be built" check would
+# silently start accepting a side that never provisioned. Where the expectation
+# is "deliberately not created", name the two statuses that mean it — the field
+# omitted entirely (ABSENT, which is what a converge that never reaches the
+# resource produces) or MISSING — and reject OK, ERROR and PROVISIONING alike.
+assert_gated() {
+	local got
+	got=$(jq_of "$1" "$2 // \"ABSENT\"")
+	case "$got" in
+	ABSENT | RES_STATUS_MISSING) ;;
+	*) die "$3: status is $got, want ABSENT or RES_STATUS_MISSING" ;;
+	esac
+}
+
+# assert_provisioning_or_ok accepts the two statuses a side may legally hold at
+# provisioned = false (update_01.md U4's converge matrix rows 2 and 3):
+# PROVISIONING while the background goroutine still has extents to zero, and OK
+# once every bit is set. Zeroing 64-128 MiB on a loop device is a `fallocate`,
+# so which of the two a phase-1 reply carries is a genuine race — do not pick
+# one.
+assert_provisioning_or_ok() {
+	local got
+	got=$(jq_of "$1" "$2 // \"ABSENT\"")
+	case "$got" in
+	RES_STATUS_PROVISIONING | RES_STATUS_OK) ;;
+	*) die "$3: status is $got, want PROVISIONING or OK" ;;
+	esac
+}
+
+# assert_provisioning is the exact form, for the rows update_01.md pins to
+# PROVISIONING with no race: the resources a deferred side deliberately does
+# not create.
+assert_provisioning() {
+	local got
+	got=$(jq_of "$1" "$2 // \"ABSENT\"")
+	[ "$got" = "RES_STATUS_PROVISIONING" ] ||
+		die "$3: status is $got, want RES_STATUS_PROVISIONING"
+}
+
 # assert_cn_ok checks one entry of a map<uint64, ResInfo>; protojson renders
 # the keys as decimal strings.
 assert_cn_ok() {
@@ -167,7 +214,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
 
 # sshv runs one command as root on a VM and returns its stdout. Everything the
-# agents touch (LVM, dm, configfs, nvme) needs root, so every remote command
+# agents touch (dm, configfs, nvme) needs root, so every remote command
 # goes through sudo (§3).
 sshv() {
 	local idx=$1
@@ -195,9 +242,9 @@ helper_ok() {
 #
 # The §8 default 10 s deadline suits the read-only RPCs, but one converge pass
 # runs dozens of OS commands, each with its own 3 s soft / 5 s hard budget
-# (§7) — enabling a migration destination alone creates an LV, an nvme
-# connection, a dm-clone and reloads the export stack, with the two
-# concurrent migrations converging on the node at once. Syncups therefore get
+# (§7) — enabling a migration destination alone creates a clone-metadata
+# wrapper, an nvme connection, a dm-clone and reloads the export stack, with
+# the two concurrent migrations converging on the node at once. Syncups get
 # a much larger budget; a caller's own --timeout still wins, since it lands
 # later on the command line.
 ctl() {
@@ -260,11 +307,19 @@ ns_by_id() { "$CTL" ns-id --cluster "$CLUSTER" --sp "$1" --leg "$2" | "$JQ" -r .
 # `nvme connect --hostnqn <CnHostNqn>` from the VMs, cross-connected.
 # ---------------------------------------------------------------------------
 
+# host_id mirrors common.NvmeHostId. Every emulated connect must pass it: the
+# kernel allows exactly one hostnqn per hostid, and each VM plays two CN
+# identities on top of its own dn agent's DnHostNqn, so leaving the node-wide
+# /etc/nvme/hostid implicit makes the second identity fail EINVAL
+# ("found same hostid ... but different hostnqn").
+host_id() { "$CTL" host-id --hostnqn "$1"; }
+
 cn_connect() { # cnvm targetdn sp leg cn
-	local vm=$1 dn=$2 sp=$3 leg=$4 cn=$5 nqn host
+	local vm=$1 dn=$2 sp=$3 leg=$4 cn=$5 nqn host hid
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$leg" "$cn")
 	host=$(cn_host_nqn "$CLUSTER" "$cn")
-	sshv "$vm" "nvme connect -t tcp -a ${IP[$dn]} -s $TR_SVC_ID -n '$nqn' --hostnqn '$host'"
+	hid=$(host_id "$host")
+	sshv "$vm" "nvme connect -t tcp -a ${IP[$dn]} -s $TR_SVC_ID -n '$nqn' --hostnqn '$host' --hostid '$hid'"
 }
 
 cn_disconnect() { # cnvm sp leg cn
@@ -407,6 +462,13 @@ read_probe() {
 
 allowed_host_cnt() { ls "$NVMET/subsystems/$1/allowed_hosts" 2>/dev/null | wc -l; }
 
+# subsys_present <nqn> — yes/no, so a "this export must NOT exist" assertion
+# (the dst_provisioned = false equivalence proof of update_01.md U4) does not
+# have to parse `residue`.
+subsys_present() {
+	if [ -d "$NVMET/subsystems/$1" ]; then echo yes; else echo no; fi
+}
+
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
 # The dm-name pattern covers the side device too, now that it is dm kind 4.
@@ -414,6 +476,25 @@ residue() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-$1-" || true
 	ls "$NVMET/subsystems" 2>/dev/null | grep -E ":$1:" || true
+}
+
+# export_dms <sp16> <side16> — the per-CN *export stack* one side currently
+# has on this node: the dm-error (kind 0, DnErrorName) and the dm-linear
+# (kind 1, DnLinearName), which are the only two dm kinds that exist per CN.
+# It is the kernel-side half of the update_01.md U4 gate — nothing is exported
+# before the side is fully zeroed — so it deliberately does NOT match kind 4
+# (DnSideName): the side device is exactly what phase (a) is supposed to
+# build, and `residue` would report it. See common/name_fmt.go:11-15 for the
+# kind digits and DnErrorName/DnLinearName for the field order,
+# dnv-<cluster16>-<dn16>-<kind>-<sp16>-<side16>-<cn16>.
+#
+# The scope is the side, not the storage pool: cases A and B/C provision the
+# sides of one sp one after another, so a pool-wide pattern would match a
+# sibling side's already-live export and fail a correct run.
+export_dms() { # sp16 side16
+	agent_dm_names |
+		awk -F- -v sp="$1" -v side="$2" \
+			'($4 == "0" || $4 == "1") && $5 == sp && $6 == side'
 }
 
 # fenced_linears <sp16> — the per-CN dm-linears of one storage pool that are
@@ -424,6 +505,10 @@ fenced_linears() {
 	dmsetup info -c --noheadings -o name,attr 2>/dev/null |
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-1-$1-.*:.-s" || true
 }
+
+# clone_table <clone dm name> — the live dm-clone table, so U1's feature pair
+# can be asserted against a real kernel and not only in the unit tests.
+clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 
 # clone_discards <clone dm name> — the blkdiscard records the agent logged
 # against one dm-clone device (§14 layer 4).
@@ -757,13 +842,23 @@ start_agent() { # <idx>
 setup() {
 	CASE=setup
 	stage vms "creating the backing store and launching both agents"
-	local idx out
+	local idx out wz
 	for idx in 1 2; do
 		# --local-store must pre-exist: startup reconcile fails without it.
 		sshv "$idx" "mkdir -p $WORK/store && chmod 0777 $WORK && chmod 0755 $WORK/store"
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
+		# The §4 preflight item of update_01.md U4, deferred to here because
+		# the device only exists now (preflight_vms runs before setup). The
+		# §9.4 zeroing assumes fast Write Zeroes; a loop device maps
+		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
+		# would write zero pages at bulk speed and the agent's DN5 fail-fast
+		# would refuse the disk outright. Read from /sys/class/block, the same
+		# directory agent.Dm.WriteZeroesMaxBytes uses.
+		wz=$(sshv "$idx" "cat /sys/class/block/\$(basename ${LOOP[$idx]})/queue/write_zeroes_max_bytes")
+		[ "$wz" -gt 0 ] ||
+			die "vm$idx: ${LOOP[$idx]} reports write_zeroes_max_bytes=0"
 		log "[vm$idx] scp dnv-agent"
 		scp -q "${SSH_OPTS[@]}" "$AGENT_BIN" "${VM[$idx]}:$WORK/dnv-agent"
 		sshv "$idx" "chmod 0755 $WORK/dnv-agent"
@@ -813,6 +908,90 @@ assert_no_residue() { # sp
 	done
 }
 
+# wait_zeroed blocks until a side's background zeroing goroutine has zeroed
+# every logical extent (§9.4). `ctl` adds no --timeout for this subcommand, so
+# the one below is wait-zeroed's own polling budget, not an RPC deadline.
+wait_zeroed() { # dnidx sp leg side
+	local idx=$1
+	ctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
+		--interval 0.5 --timeout "$ZERO_TIMEOUT" >/dev/null
+}
+
+# sync_side_cns lists every CN id one syncup-side request names — the primary
+# and every standby — by scanning the caller's flag list the way Go's flag
+# package does (`--flag value`, plus the `--flag=value` spelling). Phase (a)
+# must be asserted for *all* of them: dnagent_integtest.md §9 and §11 step 1
+# pin "every cn_id_to_* map entry PROVISIONING … for both CN ids", and a case
+# A/D side carries a standby, so looking at one map entry leaves one of the
+# two per-CN stacks unexamined while it is gated.
+sync_side_cns() { # syncup-side flags…
+	local arg want=""
+	for arg in "$@"; do
+		if [ -n "$want" ]; then
+			printf '%s\n' "$arg"
+			want=""
+			continue
+		fi
+		case "$arg" in
+		--primary-cn | --standby-cn) want=cn ;;
+		--primary-cn=* | --standby-cn=*) printf '%s\n' "${arg#*=}" ;;
+		esac
+	done
+}
+
+# sync_side_2phase performs the two-phase side provisioning the sp-worker
+# performs in production (update_01.md U4). Phase 1 syncs the side with
+# --provisioned=false: allocate the extent runs, build DnSideName, start the
+# zeroing goroutine — and export nothing. wait_zeroed then blocks until every
+# extent is zeroed, and phase 2 re-sends the identical request at a fresh
+# revision with --provisioned=true, which is the worker's flip rule played by
+# the script.
+#
+# Both revisions are minted by the caller in the parent shell (§9), so this is
+# safe inside a background job. The phase-2 reply is left in SYNC_SIDE_REPLY:
+# a bash function cannot both echo the reply and be called outside a command
+# substitution, and the caller must not run bump_rev in one.
+SYNC_SIDE_REPLY=""
+sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
+	local idx=$1 rev1=$2 rev2=$3 sp=$4 leg=$5 side=$6 out
+	local cns cn key field left
+	shift 6
+	out=$(ctl "$idx" syncup-side --revision "$rev1" \
+		--sp "$sp" --leg "$leg" --side "$side" --provisioned=false "$@")
+	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
+		"provisioning $sp/$leg/$side phase 1"
+	# The whole point of the gate: nothing above the side device exists before
+	# the bytes are zeroed, whatever the zeroing progress happens to be.
+	#
+	# All three per-CN maps, for every CN — not one entry of one map. The
+	# reply half of this is close to a self-report (reportAboveSideDeferred
+	# fills the three maps with PROVISIONING in the same branch that decides
+	# not to build), so it is paired below with the kernel-side half, which is
+	# the only thing that can catch a stale subsystem surviving from a prior
+	# incarnation or a fault in the nvmet/OsClient layer the unit tests' fake
+	# node does not model (dnagent_integtest.md §9 phase (a), §10 step 2).
+	cns=$(sync_side_cns "$@")
+	[ -n "$cns" ] ||
+		die "provisioning $sp/$leg/$side: the request names no CN"
+	for cn in $cns; do
+		key=$((cn))
+		for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
+			assert_provisioning "$out" ".side_info.$field[\"$key\"].status" \
+				"provisioning $sp/$leg/$side must not export at provisioned=false: $field[$cn]"
+		done
+		assert_eq "$(helper "$idx" \
+			"subsys_present '$(side_to_cn_nqn "$CLUSTER" "$sp" "$leg" "$cn")'")" \
+			no \
+			"provisioning $sp/$leg/$side: cn $cn has a :2: subsystem at provisioned=false"
+	done
+	left=$(helper "$idx" "export_dms $(hex16 "$sp") $(hex16 "$side")")
+	[ -z "$left" ] ||
+		die "provisioning $sp/$leg/$side: export dm devices exist at provisioned=false: $left"
+	wait_zeroed "$idx" "$sp" "$leg" "$side"
+	SYNC_SIDE_REPLY=$(ctl "$idx" syncup-side --revision "$rev2" \
+		--sp "$sp" --leg "$leg" --side "$side" --provisioned=true "$@")
+}
+
 # ---------------------------------------------------------------------------
 # Case S — smoke (§10)
 # ---------------------------------------------------------------------------
@@ -820,7 +999,7 @@ assert_no_residue() { # sp
 case_smoke() {
 	CASE=smoke
 	local sp=0xa1 leg=0x1 side=0x11 cn=0x21 cnvm=2 dn=1
-	local out dev nqn siderev
+	local out dev nqn siderev provrev
 
 	stage dn "SyncupDn introduces the side pointer"
 	bump_dn_rev "$dn"
@@ -828,12 +1007,14 @@ case_smoke() {
 		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
 	assert_dn_info_ok "$out" "smoke syncup-dn"
 
-	stage side "SyncupSide builds LV, dm stack and the nvmet export"
+	stage side "two-phase provisioning, then the dm stack and the nvmet export"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
 	bump_rev "$dn"
 	siderev=${REV[$dn]}
-	out=$(ctl "$dn" syncup-side --revision "$siderev" \
-		--sp "$sp" --leg "$leg" --side "$side" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite)
+	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$leg" "$side" \
+		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "smoke side_dev"
 	assert_cn_ok "$out" cn_id_to_dm_error "$cn" smoke
 	assert_cn_ok "$out" cn_id_to_dm_linear "$cn" smoke
@@ -889,7 +1070,7 @@ a_cn_vm() { [ "$1" = "0x21" ] && echo 2 || echo 1; }
 case_sides() {
 	CASE=sides
 	local sp=0xb1
-	local i out dn nqn
+	local i out dn nqn provrev
 	local siderev=("" 0 0 0 0)
 
 	stage dn "both DNs learn their two side pointers"
@@ -904,16 +1085,19 @@ case_sides() {
 		--side "$sp:${A_LEG[3]}:${A_SIDE[3]}" --side "$sp:${A_LEG[4]}:${A_SIDE[4]}")
 	assert_dn_info_ok "$out" "sides dn2"
 
-	stage sides "4 sides, each exported to a primary and a standby CN"
+	stage sides "4 sides provision two-phase, then export to primary + standby"
 	for i in 1 2 3 4; do
 		dn=${A_DN[$i]}
 		bump_rev "$dn"
+		provrev=${REV[$dn]}
+		bump_rev "$dn"
 		siderev[i]=${REV[$dn]}
-		out=$(ctl "$dn" syncup-side --revision "${REV[$dn]}" \
-			--sp "$sp" --leg "${A_LEG[$i]}" --side "${A_SIDE[$i]}" \
+		sync_side_2phase "$dn" "$provrev" "${siderev[$i]}" \
+			"$sp" "${A_LEG[$i]}" "${A_SIDE[$i]}" \
 			--ext-cnt 1 --cntlid-slot 0 \
 			--primary-cn "${A_PRIMARY[$i]}" --standby-cn "${A_STANDBY[$i]}" \
-			--sp-level readwrite)
+			--sp-level readwrite
+		out=$SYNC_SIDE_REPLY
 		assert_ok "$out" ".side_info.side_dev_info.status" "sides leg ${A_LEG[$i]} side_dev"
 		assert_cn_ok "$out" cn_id_to_dm_error "${A_PRIMARY[$i]}" "leg ${A_LEG[$i]}"
 		assert_cn_ok "$out" cn_id_to_dm_linear "${A_PRIMARY[$i]}" "leg ${A_LEG[$i]}"
@@ -1026,12 +1210,13 @@ migr_dn_sides() { # sp dnidx with_src
 # concurrently, so each agent plays src for one leg and dst for the other at
 # the same time.
 
-migr_src_side() { # m revision
-	local m=$1 rev=$2 out
-	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
-		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
+migr_src_side() { # m provrev revision
+	local m=$1 provrev=$2 rev=$3 out
+	sync_side_2phase "${MSRCDN[$m]}" "$provrev" "$rev" \
+		"$SP" "${MLEG[$m]}" "${MSRCSIDE[$m]}" \
 		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
-		--sp-level readwrite)
+		--sp-level readwrite
+	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "migr $m src side_dev"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m src"
 }
@@ -1061,12 +1246,16 @@ migr_prep_data() { # m
 # sp_level no_migration (so bitmap chunks land before any region is copied),
 # then at readwrite to build the clone. Passing the level in makes the two
 # calls provably identical apart from it.
+#
+# The destination has already been provisioned by migr_provision_dst, so every
+# call here carries --provisioned=true (update_01.md U4): re-sending false
+# would retract the export stacks a later stage relies on.
 migr_declare_dst() { # m revision sp_level
 	local m=$1 rev=$2 level=$3 out
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
-		--sp-level "$level" \
+		--sp-level "$level" --provisioned=true \
 		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
 		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
@@ -1078,14 +1267,83 @@ migr_declare_dst() { # m revision sp_level
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m dst"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m dst"
 	if [ "$level" = no_migration ]; then
-		assert_not_ok "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
+		# CN19-style suppression: wantMigr is false below SP_LEVEL_NO_MIGRATION,
+		# so migr_dst_info is not emitted at all. assert_gated, not
+		# assert_not_ok, so a PROVISIONING dst cannot satisfy it (ruling R4.35).
+		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
 	else
 		assert_ok "$out" ".side_info.migr_dst_info.target_info.status" \
 			"migr $m dst target"
 		assert_ok "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m dst clone"
+		# U1: every dnv dm-clone carries no_discard_passdown, without
+		# exception. The dn migration clone is the call site U1 fixed, and
+		# without the feature the §11.4 "mark this region hydrated"
+		# blkdiscard would also reach the destination side device and destroy
+		# an acknowledged write.
+		#
+		# The whole feature list is pinned, not just the one word: the exact
+		# `2 no_hydration no_discard_passdown` of agent.CloneTable's derived
+		# feature count (agent/dm.go:405-419), which is the string
+		# dnagent_integtest.md §12 step 11 and §20 name. `dmsetup message …
+		# enable_hydration` does NOT weaken it — dm-clone's STATUSTYPE_TABLE
+		# reprints the constructor args saved by copy_ctr_args verbatim
+		# (drivers/md/dm-clone-target.c), and only `dmsetup status`
+		# (STATUSTYPE_INFO) recomputes the live flags. The grep is scoped to
+		# this migration's clone device by name, so nothing else on the node
+		# can satisfy it. A substring test for no_discard_passdown alone
+		# accepts `1 no_discard_passdown`, i.e. a clone created with hydration
+		# already enabled, which would copy the very regions §11.4 asked to
+		# skip.
+		local ctable
+		ctable=$(helper "${MDSTDN[$m]}" \
+			"clone_table '$(dn_clone_name "$CLUSTER" \
+				"${DNID[${MDSTDN[$m]}]}" "$SP" "${MID[$m]}")'")
+		printf '%s\n' "$ctable" |
+			grep -qE ' 2 no_hydration no_discard_passdown( |$)' ||
+			die "migr $m: dm-clone table is not '2 no_hydration no_discard_passdown': $ctable"
 	fi
+}
+
+# migr_provision_dst is the dst half of update_01.md U4's migration rule: the
+# destination side provisions FIRST, under the ordinary §9.4 protocol — the
+# dm-linear and the zeroing goroutine only, no per-CN stacks, no connect and no
+# dm-clone. The request is byte-for-byte migr_declare_dst's gated one except
+# --provisioned=false, which is what makes the gate provable.
+migr_provision_dst() { # m revision
+	local m=$1 rev=$2 out field left nqn
+	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
+		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
+		--sp-level no_migration --provisioned=false \
+		--migr-dst "${MID[$m]}:${MSRCSIDE[$m]}:${DNID[${MSRCDN[$m]}]}" \
+		--src-traddr "${IP[${MSRCDN[$m]}]}" --src-trsvcid "$TR_SVC_ID" \
+		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
+		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
+		--bm-cnt "$BM_CNT")
+	assert_provisioning_or_ok "$out" ".side_info.side_dev_info.status" \
+		"migr $m dst phase 1"
+	# sp_level no_migration already suppresses the clone; the gate must not
+	# turn that into anything else.
+	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
+		"migr $m dst clone before provisioning"
+	# The same three-map + kernel-side gate proof sync_side_2phase runs; this
+	# request names one CN (the migration's primary), so the loop over the
+	# request's CN ids collapses to it (dnagent_integtest.md §9 phase (a)).
+	for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
+		assert_provisioning "$out" \
+			".side_info.$field[\"$((${MCN[$m]}))\"].status" \
+			"migr $m dst must not export before it is provisioned: $field"
+	done
+	nqn=$(side_to_cn_nqn "$CLUSTER" "$SP" "${MLEG[$m]}" "${MCN[$m]}")
+	assert_eq "$(helper "${MDSTDN[$m]}" "subsys_present '$nqn'")" no \
+		"migr $m dst has a :2: subsystem before it is provisioned"
+	left=$(helper "${MDSTDN[$m]}" \
+		"export_dms $(hex16 "$SP") $(hex16 "${MDSTSIDE[$m]}")")
+	[ -z "$left" ] ||
+		die "migr $m dst has export dm devices before it is provisioned: $left"
+	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
 }
 
 migr_connect_dst() { # m
@@ -1099,13 +1357,53 @@ migr_connect_dst() { # m
 	assert_eq "$state" inaccessible "migr $m dst path before cutover"
 }
 
+# migr_gate_src is the dst_provisioned = false half of update_01.md U4's
+# migration rule, and it runs before the cutover: the request is byte-for-byte
+# migr_cutover_src's except --dst-provisioned=false, which the spec declares
+# **exactly equivalent** to migr_src_conf being absent. The source keeps
+# serving, does not fence its per-CN linears and exports no migr-src subsystem;
+# only the would-be migr_src_info.* rows differ, reporting PROVISIONING.
+#
+# Without that equivalence the source would fence the primary's path the moment
+# the migration was created, leaving the leg with no serving path for the whole
+# destination zeroing window — which is exactly what this stage proves it does
+# not do.
+migr_gate_src() { # m revision
+	local m=$1 rev=$2 out nqn susp
+	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
+		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
+		--sp-level readwrite --provisioned=true \
+		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}" \
+		--dst-provisioned=false)
+	assert_provisioning "$out" ".side_info.migr_src_info.dm_linear_info.status" \
+		"migr $m gated src dm-linear"
+	assert_provisioning "$out" ".side_info.migr_src_info.nvmeof_info.status" \
+		"migr $m gated src export"
+	# Untouched: the per-CN export stacks still serve.
+	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m gated src"
+	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m gated src"
+	# Untouched: nothing is fenced and no migr-src subsystem exists.
+	susp=$(helper "${MSRCDN[$m]}" "fenced_linears $(hex16 "$SP")")
+	[ -z "$susp" ] ||
+		die "migr $m: the gated src fenced its linears: $susp"
+	nqn=$(migr_src_nqn "$CLUSTER" "${DNID[${MSRCDN[$m]}]}" "$SP" "${MID[$m]}")
+	assert_eq "$(helper "${MSRCDN[$m]}" "subsys_present '$nqn'")" no \
+		"migr $m: the gated src must export no migr-src subsystem"
+	# Untouched: the CN keeps its optimized path to the source.
+	assert_eq "$(cn_ana_state "${MCNVM[$m]}" "$SP" "${MLEG[$m]}" \
+		"${MCN[$m]}" "${MSRCDN[$m]}")" optimized \
+		"migr $m: the gated src keeps serving"
+}
+
 migr_cutover_src() { # m revision
 	local m=$1 rev=$2 out
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
 		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
-		--sp-level readwrite \
-		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}")
+		--sp-level readwrite --provisioned=true \
+		--migr-src "${MID[$m]}:${MDSTSIDE[$m]}:${DNID[${MDSTDN[$m]}]}" \
+		--dst-provisioned=true)
 	assert_ok "$out" ".side_info.migr_src_info.dm_linear_info.status" \
 		"migr $m src dm-linear"
 	assert_ok "$out" ".side_info.migr_src_info.nvmeof_info.status" \
@@ -1160,8 +1458,10 @@ migr_finish_dst() { # m revision
 	out=$(ctl "${MDSTDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
-		--sp-level readwrite)
-	assert_not_ok "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
+		--sp-level readwrite --provisioned=true)
+	# The request drops --migr-dst, so the whole migr_dst_info block goes away
+	# with the clone (ruling R4.35: gated, never merely "not OK").
+	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m clone after finish"
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m finished dst"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m finished dst"
@@ -1210,7 +1510,7 @@ declare -a PAT_SHA_HEAD=("" "" "")
 REPLY_DIR=""
 
 run_migration_cases() {
-	local m out pids rev1 rev2 dn
+	local m out pids rev1 rev2 prov1 prov2 dn
 	REPLY_DIR=$(mktemp -d)
 
 	stage stage0dn "both DNs learn all four side pointers"
@@ -1222,15 +1522,22 @@ run_migration_cases() {
 		assert_dn_info_ok "$out" "$CASE dn$dn pointers"
 	done
 
-	stage stage0src "both source sides come up (concurrently)"
+	stage stage0src "both source sides provision and come up (concurrently)"
+	# Two revisions per source: the §9.4 phase-1 sync and the worker's flip.
+	# Both are minted here, in the parent shell, because bump_rev inside a
+	# background job would increment a copy (§9).
+	bump_rev "${MSRCDN[1]}"
+	prov1=${REV[${MSRCDN[1]}]}
 	bump_rev "${MSRCDN[1]}"
 	rev1=${REV[${MSRCDN[1]}]}
 	bump_rev "${MSRCDN[2]}"
+	prov2=${REV[${MSRCDN[2]}]}
+	bump_rev "${MSRCDN[2]}"
 	rev2=${REV[${MSRCDN[2]}]}
 	pids=()
-	migr_src_side 1 "$rev1" &
+	migr_src_side 1 "$prov1" "$rev1" &
 	pids+=($!)
-	migr_src_side 2 "$rev2" &
+	migr_src_side 2 "$prov2" "$rev2" &
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
@@ -1247,6 +1554,18 @@ run_migration_cases() {
 		PAT_SHA[m]=$(sha_range "${MCNVM[$m]}" "$WORK/pattern-$m.bin" 128)
 		PAT_SHA_HEAD[m]=$(sha_range "${MCNVM[$m]}" "$WORK/pattern-$m.bin" 64)
 	done
+
+	stage stage1prov "the destinations provision first (U4): zero, then gate"
+	bump_rev "${MDSTDN[1]}"
+	prov1=${REV[${MDSTDN[1]}]}
+	bump_rev "${MDSTDN[2]}"
+	prov2=${REV[${MDSTDN[2]}]}
+	pids=()
+	migr_provision_dst 1 "$prov1" &
+	pids+=($!)
+	migr_provision_dst 2 "$prov2" &
+	pids+=($!)
+	join_jobs "${pids[@]}"
 
 	stage stage1 "destinations declared, gated at sp_level no_migration"
 	bump_rev "${MDSTDN[1]}"
@@ -1270,6 +1589,18 @@ run_migration_cases() {
 
 	stage stage1bm "bitmap chunks and the equal-revision bm_info read-back"
 	push_bitmaps "$rev1" "$rev2"
+
+	stage stage2gate "dst_provisioned=false: the source is provably untouched"
+	bump_rev "${MSRCDN[1]}"
+	rev1=${REV[${MSRCDN[1]}]}
+	bump_rev "${MSRCDN[2]}"
+	rev2=${REV[${MSRCDN[2]}]}
+	pids=()
+	migr_gate_src 1 "$rev1" &
+	pids+=($!)
+	migr_gate_src 2 "$rev2" &
+	pids+=($!)
+	join_jobs "${pids[@]}"
 
 	stage stage2 "source cutover: the source hands IO over"
 	bump_rev "${MSRCDN[1]}"
@@ -1407,9 +1738,10 @@ case_migr_full() {
 		local m=$1 got
 		got=$(sha_range "${MCNVM[$m]}" "$(ns_by_id "$SP" "${MLEG[$m]}")" 128)
 		assert_eq "$got" "${PAT_SHA[$m]}" "migr $m full-copy sha256"
-		# Discard-based skipping must not happen without bitmaps. The
-		# side-create trim blkdiscard targets the side device (dnv-*-4-*),
-		# not a dm-clone (dnv-*-3-*), so it does not match.
+		# Discard-based skipping must not happen without bitmaps. The §9.4
+		# provisioning `blkdiscard --zeroout` that replaced the old side-create
+		# trim targets the side device (dnv-*-4-*), never a dm-clone
+		# (dnv-*-3-*), so it does not match this filter either.
 		local discards
 		discards=$(helper "${MDSTDN[$m]}" any_clone_discards)
 		[ -z "$discards" ] ||
@@ -1469,7 +1801,10 @@ case_migr_bitmap() {
 		got=$(sha_range "$vm" "$dev" 64)
 		assert_eq "$got" "${PAT_SHA_HEAD[$m]}" "migr $m first 64 MiB"
 		# Layer 1b: the skipped half reads zero even though the source holds
-		# random data there — the agent skipped it, it did not copy it.
+		# random data there — the agent skipped it, it did not copy it. Since
+		# U4 those zeros are *guaranteed* by the destination's §9.4
+		# `blkdiscard --zeroout` provisioning rather than hoped for from
+		# discard-reads-zeros, which was never a hardware guarantee ([D15]).
 		sshv "$vm" "dd if=$dev of=$WORK/tail-$m.bin bs=1M skip=64 count=64 status=none"
 		got=$(sshv "$vm" "dd if=/dev/zero bs=1M count=64 status=none > $WORK/zero-$m.bin; cmp -s $WORK/tail-$m.bin $WORK/zero-$m.bin && echo zeros || echo data")
 		assert_eq "$got" zeros "migr $m second 64 MiB must be zeros"
@@ -1497,7 +1832,7 @@ case_restart() {
 	CASE=restart
 	local sp=0xe1 leg=0x1 srcside=0x11 dstside=0x12 migr=0x51
 	local cn=0x21 cnvm=2
-	local out dev want snap idx
+	local out dev want snap idx provrev
 
 	snap=$(mktemp -d)
 
@@ -1512,23 +1847,27 @@ case_restart() {
 	assert_dn_info_ok "$out" "restart dn2 pointers"
 
 	bump_rev 1
-	out=$(ctl 1 syncup-side --revision "${REV[1]}" \
-		--sp "$sp" --leg "$leg" --side "$srcside" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite)
+	provrev=${REV[1]}
+	bump_rev 1
+	sync_side_2phase 1 "$provrev" "${REV[1]}" "$sp" "$leg" "$srcside" \
+		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart src side_dev"
 	assert_cn_ok "$out" cn_id_to_nvmeof "$cn" "restart src"
 
 	bump_rev 2
-	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
-		--sp "$sp" --leg "$leg" --side "$dstside" \
+	provrev=${REV[2]}
+	bump_rev 2
+	sync_side_2phase 2 "$provrev" "${REV[2]}" "$sp" "$leg" "$dstside" \
 		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
 		--hydr-threshold "$HYDR_THRESHOLD" --hydr-batch "$HYDR_BATCH" \
-		--bm-cnt 1)
+		--bm-cnt 1
+	out=$SYNC_SIDE_REPLY
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart dst side_dev"
-	assert_not_ok "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
+	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"restart gated clone"
 
 	stage data "the CN connects and writes its 4 MiB of test data"
@@ -1555,6 +1894,7 @@ case_restart() {
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
 		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
@@ -1606,6 +1946,7 @@ case_restart() {
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
 		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
@@ -1625,11 +1966,13 @@ case_restart() {
 	assert_dn_info_ok "$out" "restart re-apply dn2"
 	out=$(ctl 1 syncup-side --revision "${REV[1]}" \
 		--sp "$sp" --leg "$leg" --side "$srcside" \
-		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite)
+		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
+		--provisioned=true)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side1"
 	out=$(ctl 2 syncup-side --revision "${REV[2]}" \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
 		--ext-cnt 1 --cntlid-slot 1 --primary-cn "$cn" --sp-level no_migration \
+		--provisioned=true \
 		--migr-dst "$migr:$srcside:${DNID[1]}" \
 		--src-traddr "${IP[1]}" --src-trsvcid "$TR_SVC_ID" \
 		--block-size "$BLOCK_SIZE" --meta-blocks "$META_BLOCKS" \
@@ -1637,6 +1980,9 @@ case_restart() {
 		--bm-cnt 1)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side2"
 	# The post-restart log covers the startup reconcile and these re-applies.
+	# Since U4 this is also the §9.4 resume-at-k net: `blkdiscard` is in
+	# mutations()' verb list, so a reconcile that re-zeroes an already-complete
+	# side — the resume logic reading its bits wrong — fails the case here.
 	for idx in 1 2; do
 		local muts
 		muts=$(helper "$idx" mutations)

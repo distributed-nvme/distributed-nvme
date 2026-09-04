@@ -2,7 +2,6 @@ package dnagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -60,6 +59,14 @@ type fakeNode struct {
 	failCmdAlways map[string]string
 	// gate blocks a command until the channel is closed (lock tests).
 	gate map[string]chan struct{}
+	// hardGate blocks a command until the channel is closed and — unlike gate
+	// — ignores ctx cancellation, modelling the real child of
+	// common/osclient.go: a cancelled RunCommand SIGTERMs the process and only
+	// SIGKILLs it CmdHardTimeout−CmdSoftTimeout later, so `cmd.Run` can return
+	// seconds after the cancel while the child still holds its fds open. That
+	// gap is exactly what makes the §9.4 cancel-**and-wait** different from a
+	// bare cancel, so a test that pins the wait cannot use the ctx-aware gate.
+	hardGate map[string]chan struct{}
 }
 
 // fakeSegment is one recorded WriteBlock, in write order: later segments
@@ -74,15 +81,27 @@ type fakeDm struct {
 	readOnly  bool
 	suspended bool
 	// dm-clone bookkeeping
-	noHydration bool
-	threshold   uint32
-	batchSize   uint32
-	discards    []string
+	noHydration       bool
+	noDiscardPassdown bool
+	threshold         uint32
+	batchSize         uint32
+	// discards holds the metadata-only `blkdiscard --offset/--length` hints
+	// (dm-clone hydration marking); zeroouts holds the §9.4
+	// `blkdiscard --zeroout` side-provisioning writes. They are deliberately
+	// separate — see cmdBlkdiscard.
+	discards []string
+	zeroouts []string
 }
 
 type fakeConn struct {
 	device string
 	state  string
+	// ctrl and subsys are the sysfs names the connection materialises.
+	// NvmeHost.ListSubsys reads /sys, not `nvme list-subsys -o json` (which
+	// on real nvme-cli lists no namespaces at all), so the fake has to build
+	// the same tree a real connect does.
+	ctrl   string
+	subsys string
 }
 
 func newFakeNode() *fakeNode {
@@ -100,6 +119,31 @@ func newFakeNode() *fakeNode {
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
 		gate:          make(map[string]chan struct{}),
+		hardGate:      make(map[string]chan struct{}),
+	}
+}
+
+// blockCmd parks every command whose recorded line contains key until
+// releaseCmd, ignoring ctx cancellation (see hardGate).
+func (f *fakeNode) blockCmd(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.hardGate[key]; ok {
+		return
+	}
+	f.hardGate[key] = make(chan struct{})
+}
+
+// releaseCmd lets a blockCmd'd command finish. It is idempotent, so a test may
+// both release it inline and register a cleanup that releases it again — which
+// it must, or the server's WaitBackground would never return.
+func (f *fakeNode) releaseCmd(key string) {
+	f.mu.Lock()
+	ch, ok := f.hardGate[key]
+	delete(f.hardGate, key)
+	f.mu.Unlock()
+	if ok {
+		close(ch)
 	}
 }
 
@@ -228,8 +272,26 @@ func (f *fakeNode) writeFileDirect(
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
 	}
-	f.files[path] = data
+	f.files[path] = configfsNormalize(path, data)
 	return nil
+}
+
+// configfsNormalize models how the nvmet kernel module stores an attribute
+// rather than echoing back the bytes written. device_uuid and device_nguid
+// both accept a bare 32-hex-digit string and both always read back
+// dash-separated, which is what makes a byte-wise idempotency check on the
+// nguid rewrite it forever (agent.sameNsId).
+func configfsNormalize(path, data string) string {
+	base := path[strings.LastIndex(path, "/")+1:]
+	if base != "device_uuid" && base != "device_nguid" {
+		return data
+	}
+	hexed := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(data), "-", ""))
+	if len(hexed) != 32 {
+		return data
+	}
+	return fmt.Sprintf("%s-%s-%s-%s-%s\n",
+		hexed[0:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:32])
 }
 
 func (f *fakeNode) readProto(
@@ -370,6 +432,13 @@ func (f *fakeNode) runCommand(
 			break
 		}
 	}
+	var hard chan struct{}
+	for key, ch := range f.hardGate {
+		if strings.Contains(line, key) {
+			hard = ch
+			break
+		}
+	}
 	for key, stderr := range f.failCmd {
 		if strings.Contains(line, key) {
 			delete(f.failCmd, key)
@@ -391,6 +460,10 @@ func (f *fakeNode) runCommand(
 		case <-ctx.Done():
 			return "", "", -1, ctx.Err()
 		}
+	}
+	// No ctx arm: a hard gate is a child that outlives the cancel.
+	if hard != nil {
+		<-hard
 	}
 
 	f.mu.Lock()
@@ -581,6 +654,15 @@ func (f *fakeNode) cmdLsblk(args []string) (string, int) {
 		}
 		return fmt.Sprintf("%d\n", size), 0
 	}
+	if contains(args, "KNAME") {
+		// The kernel name Dm.WriteZeroesMaxBytes turns into a
+		// /sys/class/block entry (§9.4's DN5 check). The fake's devices are
+		// already plain /dev paths, so the basename is the kernel name.
+		if _, ok := f.devNo[path]; !ok {
+			return "", 32
+		}
+		return path[strings.LastIndexByte(path, '/')+1:] + "\n", 0
+	}
 	devNo, ok := f.devNo[path]
 	if !ok {
 		return "", 32
@@ -604,13 +686,22 @@ func (f *fakeNode) newDevNo() string {
 
 func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	dev := args[len(args)-1]
-	if !contains(args, "--force") {
-		name := strings.TrimPrefix(dev, "/dev/mapper/")
-		if dm, ok := f.dms[name]; ok {
-			dm.discards = append(dm.discards,
-				strings.Join(args[:len(args)-1], " "))
-		}
+	name := strings.TrimPrefix(dev, "/dev/mapper/")
+	dm, ok := f.dms[name]
+	if !ok {
+		return "", 0
 	}
+	// The §9.4 side-provisioning write and the metadata-only "mark this
+	// region hydrated" discard are recorded in separate lists: a
+	// migration-dst side zeroes its own dm-linear while the dm-clone above it
+	// takes hydration discards, and one shared list would make either
+	// assertion meaningless (update_01.md U4).
+	if contains(args, "--zeroout") {
+		dm.zeroouts = append(dm.zeroouts,
+			strings.Join(args[:len(args)-1], " "))
+		return "", 0
+	}
+	dm.discards = append(dm.discards, strings.Join(args[:len(args)-1], " "))
 	return "", 0
 }
 
@@ -765,6 +856,7 @@ func applyCloneTable(dm *fakeDm, table string) {
 		return
 	}
 	dm.noHydration = contains(fields, "no_hydration")
+	dm.noDiscardPassdown = contains(fields, "no_discard_passdown")
 	for i := 0; i+1 < len(fields); i++ {
 		value, err := strconv.ParseUint(fields[i+1], 10, 32)
 		if err != nil {
@@ -841,9 +933,20 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if region > 0 {
 			regions /= region
 		}
-		features := "0"
+		// The kernel prints back the features that are still in force, in
+		// table order, with a derived count: a dnv dm-clone starts at
+		// `2 no_hydration no_discard_passdown` and drops to
+		// `1 no_discard_passdown` once hydration is enabled (update_01.md U1).
+		var names []string
 		if dm.noHydration {
-			features = "1 no_hydration"
+			names = append(names, "no_hydration")
+		}
+		if dm.noDiscardPassdown {
+			names = append(names, "no_discard_passdown")
+		}
+		features := strconv.Itoa(len(names))
+		if len(names) > 0 {
+			features += " " + strings.Join(names, " ")
 		}
 		return fmt.Sprintf(
 			"0 %s clone 8 1/1024 %s 0/%d 0 %s 4 hydration_threshold %d "+
@@ -866,9 +969,16 @@ func (f *fakeNode) cmdNvme(args []string) (string, int) {
 		if nqn == "" {
 			return "", 3
 		}
-		device := fmt.Sprintf("nvme%dn1", len(f.conns))
-		f.conns[nqn] = &fakeConn{device: device, state: "live"}
+		idx := len(f.conns)
+		ctrl := fmt.Sprintf("nvme%d", idx)
+		device := ctrl + "n1"
+		subsys := fmt.Sprintf("nvme-subsys%d", idx)
+		conn := &fakeConn{
+			device: device, state: "live", ctrl: ctrl, subsys: subsys,
+		}
+		f.conns[nqn] = conn
 		f.devNo["/dev/"+device] = f.newDevNo()
+		f.addSubsysSysfs(conn, nqn, args)
 		return "", 0
 	case "disconnect":
 		var nqn string
@@ -882,36 +992,74 @@ func (f *fakeNode) cmdNvme(args []string) (string, int) {
 			return "", 1
 		}
 		delete(f.devNo, "/dev/"+conn.device)
+		f.dropSubsysSysfs(conn)
 		delete(f.conns, nqn)
 		return "", 0
-	case "list-subsys":
-		return f.listSubsysJson(), 0
 	}
 	return "", 3
 }
 
-func (f *fakeNode) listSubsysJson() string {
-	nqns := make([]string, 0, len(f.conns))
-	for nqn := range f.conns {
-		nqns = append(nqns, nqn)
+// addSubsysSysfs materialises the /sys tree a real `nvme connect` creates:
+// the subsystem directory keyed by subsysnqn, holding the multipath namespace
+// node and the controller, and the controller's own directory with its
+// transport, state and hidden path device carrying ana_state.
+func (f *fakeNode) addSubsysSysfs(conn *fakeConn, nqn string, args []string) {
+	var trAddr, trSvcId, trType string
+	for i := 0; i+1 < len(args); i++ {
+		switch args[i] {
+		case "--traddr":
+			trAddr = args[i+1]
+		case "--trsvcid":
+			trSvcId = args[i+1]
+		case "--transport":
+			trType = args[i+1]
+		}
 	}
-	sort.Strings(nqns)
-	subsystems := make([]map[string]any, 0, len(nqns))
-	for i, nqn := range nqns {
-		conn := f.conns[nqn]
-		subsystems = append(subsystems, map[string]any{
-			"Name": fmt.Sprintf("nvme-subsys%d", i),
-			"NQN":  nqn,
-			"Paths": []map[string]any{
-				{"Name": conn.device, "State": conn.state},
-			},
-			"Namespaces": []map[string]any{
-				{"NameSpace": conn.device, "NSID": 1},
-			},
-		})
+	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
+	ctrlDir := "/sys/class/nvme/" + conn.ctrl
+	pathDev := conn.ctrl + "c0n1"
+	f.dirs["/sys/class/nvme-subsystem"] = true
+	f.dirs["/sys/class/nvme"] = true
+	f.dirs[subsysDir] = true
+	f.dirs[subsysDir+"/"+conn.device] = true
+	f.dirs[subsysDir+"/"+conn.ctrl] = true
+	f.dirs[ctrlDir] = true
+	f.dirs[ctrlDir+"/"+pathDev] = true
+	f.files[subsysDir+"/subsysnqn"] = nqn + "\n"
+	f.files[ctrlDir+"/transport"] = trType + "\n"
+	f.files[ctrlDir+"/address"] = fmt.Sprintf(
+		"traddr=%s,trsvcid=%s\n", trAddr, trSvcId)
+	f.files[ctrlDir+"/state"] = conn.state + "\n"
+	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = "optimized\n"
+}
+
+func (f *fakeNode) dropSubsysSysfs(conn *fakeConn) {
+	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
+	ctrlDir := "/sys/class/nvme/" + conn.ctrl
+	for path := range f.dirs {
+		if path == subsysDir || path == ctrlDir ||
+			strings.HasPrefix(path, subsysDir+"/") ||
+			strings.HasPrefix(path, ctrlDir+"/") {
+			delete(f.dirs, path)
+		}
 	}
-	raw, _ := json.Marshal([]map[string]any{
-		{"HostNQN": "fake", "Subsystems": subsystems},
-	})
-	return string(raw)
+	for path := range f.files {
+		if strings.HasPrefix(path, subsysDir+"/") ||
+			strings.HasPrefix(path, ctrlDir+"/") {
+			delete(f.files, path)
+		}
+	}
+}
+
+// setConnState re-stamps a live connection's controller state, so a test can
+// make a path dead without disconnecting it.
+func (f *fakeNode) setConnState(nqn, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	conn, ok := f.conns[nqn]
+	if !ok {
+		return
+	}
+	conn.state = state
+	f.files["/sys/class/nvme/"+conn.ctrl+"/state"] = state + "\n"
 }

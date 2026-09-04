@@ -10,7 +10,8 @@ import (
 // ResTracker turns probe outcomes into pb.ResInfo values per
 // architecture.md §9.5 / dnagent.md SH14: epoch is the unix second of the
 // last *status* change — a details-only change does not bump it. The agent
-// emits MISSING/ERROR/OK and never UNKNOWN (that one is worker-only).
+// emits MISSING/ERROR/OK/PROVISIONING and never UNKNOWN (that one is
+// worker-only).
 //
 // One tracker belongs to one synced object (a DN, a side, …). State is
 // in-memory: after a restart the epochs restart at the reconcile time, which
@@ -60,7 +61,8 @@ func (t *ResTracker) Set(
 	}
 }
 
-// Ok / Missing / Err are the three outcomes an agent may report.
+// Ok / Missing / Err / Provisioning are the four outcomes an agent may
+// report.
 func (t *ResTracker) Ok(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_OK, details)
 }
@@ -71,6 +73,14 @@ func (t *ResTracker) Missing(key, resName, details string) *pb.ResInfo {
 
 func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_ERROR, details)
+}
+
+// Provisioning is the U4 outcome: the resource is deliberately not created
+// yet, because the sides underneath it are still being zeroed (§9.4). It
+// means healthy / not ready / no action needed, and — unlike ERROR — never
+// feeds err_epoch (architecture.md §9.5, §10.2-§10.4, update_01.md U4).
+func (t *ResTracker) Provisioning(key, resName, details string) *pb.ResInfo {
+	return t.Set(key, resName, pb.ResStatus_RES_STATUS_PROVISIONING, details)
 }
 
 // FromErr is the common shape of DN19 error capture: err == nil ⇒ OK with

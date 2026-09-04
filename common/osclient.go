@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
@@ -26,6 +27,14 @@ import (
 // outside this file (osclient.md §1). That is what makes the logging rules of
 // log.md R8.1/R8.2 enforceable, and every consumer unit-testable through
 // FakeOsClient.
+//
+// One carve-out is recorded (update_01.md U2, osclient.md §4.5.1): the CN11
+// leg health prober calls the raw helpers WriteBlockAt / ReadBlockDirectAt
+// directly, because its IO may block indefinitely by design — a pathless leg
+// queues IO forever — and must never hold one of the LimitedOsClient's
+// semaphore slots, nor run under a lock, while it does. It logs its own
+// records ("probe write block" / "probe read block direct") and is faked
+// through its own LegProbeIO interface, so both properties above survive.
 type OsClient interface {
 
 	// RunCommand executes an operating system binary with the given
@@ -316,7 +325,7 @@ func (c *LimitedOsClient) WriteBlock(
 		return err
 	}
 
-	err := writeBlockAt(path, offset, data)
+	err := WriteBlockAt(path, offset, data)
 
 	attrs := []any{
 		slog.String("path", path),
@@ -328,7 +337,18 @@ func (c *LimitedOsClient) WriteBlock(
 	return err
 }
 
-func writeBlockAt(path string, offset uint64, data []byte) error {
+// WriteBlockAt writes data at byte offset and fdatasyncs before returning: a
+// plain O_WRONLY open (never O_CREATE — the target is a block device, which
+// always exists at full size), one pwrite, one Sync, close. The fd is opened
+// and closed per call; nothing is ever cached.
+//
+// It is the raw helper behind OsClient.WriteBlock. It takes no context, does
+// no logging and holds no semaphore slot, so a caller that uses it directly
+// MUST emit its own log record. The only sanctioned direct caller is the CN11
+// leg health prober (update_01.md U2, osclient.md §4.5.1): its IO may block
+// for as long as the device queues IO, and it must never occupy an OsClient
+// slot — nor run under a lock — while it does (cnagent.md CN1/CN11).
+func WriteBlockAt(path string, offset uint64, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return err
@@ -342,6 +362,61 @@ func writeBlockAt(path string, offset uint64, data []byte) error {
 		return err
 	}
 	return f.Close()
+}
+
+// ReadBlockDirectAt reads exactly length bytes at byte offset with O_DIRECT,
+// so the read is served by the device and not by the page cache: the §3.6 leg
+// health probe writes a block through a device and must read it back *from the
+// device*, and a buffered read of a just-written block would be answered from
+// cache and observe no IO at all.
+//
+// offset and length MUST be multiples of 4096; the check happens before the
+// open, so a misaligned caller never touches the device at all. The pread
+// lands in a 4096-aligned scratch buffer and is copied out. A short read is an
+// error, never a silently truncated buffer.
+//
+// Like WriteBlockAt it takes no context, does no logging and holds no OsClient
+// semaphore slot; the caller logs. It may block for as long as the device
+// queues IO — a pathless nvme multipath leg queues forever — which is
+// precisely why update_01.md U2 took it out of the OsClient: a wedged probe
+// must not consume one of the DefaultOsClientLimit slots the node's teardown
+// commands need. The only sanctioned direct caller is the CN11 leg health
+// prober, and it must never run under a lock (osclient.md §4.5.1,
+// cnagent.md CN1/CN11).
+func ReadBlockDirectAt(
+	path string,
+	offset uint64,
+	length uint64,
+) ([]byte, error) {
+	const align = 4096
+	if offset%align != 0 || length%align != 0 || length == 0 {
+		return nil, fmt.Errorf(
+			"read block direct: %s offset=%d length=%d not %d-aligned",
+			path, offset, length, align)
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECT, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer syscall.Close(fd)
+	raw := make([]byte, length+align)
+	shift := align - (uint64(uintptr(unsafe.Pointer(&raw[0]))) % align)
+	if shift == align {
+		shift = 0
+	}
+	buf := raw[shift : shift+length]
+	n, err := syscall.Pread(fd, buf, int64(offset))
+	if err != nil {
+		return nil, &os.PathError{Op: "pread", Path: path, Err: err}
+	}
+	if uint64(n) != length {
+		return nil, fmt.Errorf(
+			"short read: %s offset=%d length=%d got=%d",
+			path, offset, length, n)
+	}
+	data := make([]byte, length)
+	copy(data, buf)
+	return data, nil
 }
 
 func (c *LimitedOsClient) ReadProto(

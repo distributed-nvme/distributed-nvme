@@ -31,10 +31,17 @@ func (s *DnAgentServer) probeDn(
 	// rounds, and enough to catch a wiped, corrupt or foreign disk.
 	details, err := s.meta.ProbeHeader(ctx, req.GetClusterId(),
 		req.GetDnId(), req.GetExtentSize())
-	if err != nil {
+	switch {
+	case err != nil:
 		info.MetaInfo = t.Err(resKeyMeta, s.disk, err.Error())
-	} else {
-		info.MetaInfo = t.Ok(resKeyMeta, s.disk, details)
+	default:
+		// §9.4's DN5 fail-fast is re-checked every round, so a disk whose
+		// queue limits changed under the agent surfaces without a re-sync.
+		if wzDetails, ok := s.checkWriteZeroes(ctx); !ok {
+			info.MetaInfo = t.Err(resKeyMeta, s.disk, wzDetails)
+		} else {
+			info.MetaInfo = t.Ok(resKeyMeta, s.disk, details)
+		}
 	}
 
 	portName := fmt.Sprintf("%d", common.NvmetPortId)
@@ -61,39 +68,104 @@ func (s *DnAgentServer) probeSide(
 	}
 	plan := newSidePlan(s.nf, st.req, extentSize)
 	info := &pb.SideInfo{}
-	s.probeSideDev(ctx, st, plan, info)
-	if plan.wantDm {
-		s.probeAboveSideDev(ctx, st, plan, info)
+	state := s.probeSideDev(ctx, st, plan, info)
+	if !plan.wantDm {
+		return info
 	}
+	// The same gate the converge uses (ruling R4.3), so a probe can never
+	// claim a stack the converge deliberately did not build.
+	if state != sideDevReady {
+		s.reportAboveSideDeferred(st, plan, info)
+		return info
+	}
+	s.probeAboveSideDev(ctx, st, plan, info)
 	return info
 }
 
-// probeSideDev checks the side's allocation record, its trim flag and the
-// aggregate dm-linear built from its extent runs (DN18).
+// probeSideDev is the read-only half of the §9.4 converge matrix (DN18): it
+// checks the side's allocation record, its zeroing progress and the aggregate
+// dm-linear built from its extent runs, and reports whether the side is
+// exportable.
+//
+// Unlike ensureSideDev it never allocates and never starts or stops the
+// zeroing goroutine (DN16, SH25). That is why "record absent at
+// provisioned = false" reports MISSING with empty details rather than the
+// matrix's "zeroing 0/n": with no record the only available extent count is
+// the request's, and the etcd flag is a gate, never evidence (ruling R4.15).
 func (s *DnAgentServer) probeSideDev(
 	ctx context.Context,
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) {
+) sideDevState {
 	t := st.tracker
 	name := plan.sideDevName
+	info.TotalExtCnt = plan.conf.GetExtCnt()
 	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return
+		return sideDevFailed
 	}
 	if !ok {
-		info.SideDevInfo = t.Missing(resKeySideDev, name, "")
-		return
+		if plan.provisioned {
+			info.SideDevInfo = t.Err(resKeySideDev, name, tagRecordMissing)
+		} else {
+			info.SideDevInfo = t.Missing(resKeySideDev, name, "")
+		}
+		return sideDevFailed
 	}
-	if !rec.GetTrimmed() {
-		info.SideDevInfo = t.Err(resKeySideDev, name, tagNotTrimmed)
-		return
+	// The counters are filled on every round, whatever the outcome below is:
+	// they are what the worker's provisioned-flip rule reads (update_01.md
+	// U4). They come from the record, never from the request — the disk is
+	// authoritative ([D13]).
+	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
+	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total
+	if zeroed < total {
+		// The device is judged on every round, provisioning or not: DN18 reads
+		// this row off "the volume-table record + its zeroed_bits +
+		// `dmsetup table`", and a non-OK device wins. Skipping the check while
+		// the bits are incomplete would let a side whose dm-linear could not be
+		// built report healthy PROVISIONING for ever — and PROVISIONING never
+		// feeds err_epoch (§9.5), so nothing would ever bump a revision and
+		// re-send the SyncupSide that is the only thing able to rebuild it.
+		if status, details := s.probeSideDm(ctx, plan, rec); status !=
+			pb.ResStatus_RES_STATUS_OK {
+			info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
+			return sideDevFailed
+		}
+		// zeroErr is bound ONCE and then used: the zeroing loop clears it from
+		// outside both DN1 locks (zeroing.go's success path runs after
+		// release(), holding only s.mu), so testing the accessor and
+		// re-reading it for the details would call .Error() on a nil error the
+		// instant a retried batch succeeds — a panic in an RPC handler that no
+		// interceptor recovers. ensureSideDev binds it exactly this way.
+		zeroErr := s.zeroingErr(st)
+		switch {
+		case plan.provisioned:
+			// The agent trusts its own bits over the flag.
+			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
+			return sideDevFailed
+		case zeroErr != nil:
+			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
+		default:
+			// Healthy, not ready: nothing is exported until the last extent is
+			// zeroed, and PROVISIONING says so without feeding err_epoch.
+			info.SideDevInfo = t.Provisioning(resKeySideDev, name,
+				fmt.Sprintf(zeroingDetailsFmt, zeroed, total))
+		}
+		return sideDevProvisioning
 	}
 	status, details := s.probeSideDm(ctx, plan, rec)
 	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
+	switch {
+	case status != pb.ResStatus_RES_STATUS_OK:
+		return sideDevFailed
+	case !plan.provisioned:
+		return sideDevProvisioning
+	default:
+		return sideDevReady
+	}
 }
 
 // probeSideDm compares the live aggregate table against the record's runs —
@@ -203,6 +275,13 @@ func (s *DnAgentServer) probeAboveSideDev(
 			info.CnIdToNvmeof[cnId] = t.Set(
 				resKeyOf(resKeyNvmeofFmt, cnId), nqn, status, details)
 		}
+	}
+
+	if plan.migrSrcDeferred {
+		// The destination has not provisioned: this side is serving exactly as
+		// if it had no migr_src_conf, and only the would-be rows differ
+		// (§11.2).
+		s.reportMigrSrcDeferred(st, plan, info)
 	}
 
 	if plan.migrSrc != nil {

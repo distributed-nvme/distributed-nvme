@@ -36,6 +36,11 @@ func migrSrcReq(revision uint64) *pb.SyncupSideRequest {
 		MigrId:    testMigrId,
 		DstSideId: testSide2,
 		DstDnId:   testSrcDn,
+		// The steady state: the destination has finished provisioning, so the
+		// source really does take on its role (§11.2). The false case is
+		// exactly equivalent to having no migr_src_conf at all and is covered
+		// by TestMigrationSourceDeferredUntilDestinationProvisions.
+		DstProvisioned: true,
 	}
 	return req
 }
@@ -49,10 +54,13 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ctx := context.Background()
 	// A migration destination is a freshly allocated side: its very first
-	// SyncupSide already carries migr_dst_conf.
+	// SyncupSide already carries migr_dst_conf. Under U4 that side provisions
+	// first — linear and zeroing only, no metadata slot, no connect, no
+	// dm-clone — and only then does the worker flip its flag (§11.2).
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
+	provisionSide(t, srv, 1, testSide)
 	node.Reset()
 	reply, err := srv.SyncupSide(ctx,
 		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE))
@@ -95,13 +103,30 @@ func TestMigrationDestinationSequence(t *testing.T) {
 		t.Errorf("dm-clone table %q does not use meta %s / dest %s",
 			node.dms[cloneName].table, metaNo, destNo)
 	}
-	if !node.hasCall("--hostnqn " + nf.DnHostNqn(testCluster, testDn)) {
+	// Every dnv dm-clone carries both features (update_01.md U1). The dn
+	// hazard is after the §11.2 cutover: a skip-bitmap chunk `blkdiscard`ing
+	// a region the host already hydrated must stay metadata-only.
+	create := node.callsMatching("cmd dmsetup create " + cloneName)
+	if len(create) != 1 ||
+		!strings.Contains(create[0], "2 no_hydration no_discard_passdown") {
+		t.Fatalf("dm-clone features are wrong: %v", create)
+	}
+	dnHostNqn := nf.DnHostNqn(testCluster, testDn)
+	if !node.hasCall("--hostnqn " + dnHostNqn) {
 		t.Error("nvme connect did not use the DN host nqn")
+	}
+	// The hostid is derived from the hostnqn, never left to the node-wide
+	// /etc/nvme/hostid: the kernel keeps a 1:1 hostnqn<->hostid mapping and
+	// rejects the second hostnqn under a known hostid with EINVAL, so an
+	// implicit id makes this connect fail whenever anything else on the node
+	// (another dnv identity, an unrelated NVMe-oF mount) claimed it first.
+	if !node.hasCall("--hostid " + common.NvmeHostId(dnHostNqn)) {
+		t.Error("nvme connect did not derive its hostid from the host nqn")
 	}
 	if !node.hasCall("--nqn " + srcNqn) {
 		t.Error("nvme connect did not target the migration source nqn")
 	}
-	if !node.hasCall("--fast-io-fail-tmo 5 --ctrl-loss-tmo -1") {
+	if !node.hasCall("--fast_io_fail_tmo 5 --ctrl-loss-tmo -1") {
 		t.Error("nvme connect missed the SH20 timeouts")
 	}
 	// The primary's dm-linear now points at the dm-clone.
@@ -123,6 +148,132 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	if details := reply.GetSideInfo().GetMigrDstInfo().GetDmCloneInfo().
 		GetDetails(); !strings.Contains(details, "clone") {
 		t.Errorf("dm_clone details %q does not carry the status line", details)
+	}
+}
+
+// §11.2 under U4: a migration destination provisions before it does anything
+// else — the aggregate dm-linear and the zeroing, and nothing above it: no
+// clone-metadata slot, no connect, no dm-clone. Its migr_dst_info rows report
+// PROVISIONING throughout.
+// The §11.2 finish step: the request drops migr_dst_conf and the destination
+// becomes a plain side. The dm-clone sits *under* the per-CN dm-linear, so the
+// linear must be reloaded onto the plain side device **before** the clone is
+// removed. Removing it first fails EBUSY and leaks the clone, its metadata
+// wrapper and — because both sit on it — the side device itself, which no
+// later empty side list can then remove either.
+func TestMigrationDestinationFinishRepointsBeforeRemovingTheClone(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	provisionSide(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+	metaName := nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigrId)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	if _, ok := node.dms[cloneName]; !ok {
+		t.Fatal("the migration destination did not build a dm-clone")
+	}
+
+	node.Reset()
+	// The same side, with no migr_dst_conf: the finish.
+	reply, err := srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	assertOrder(t, node,
+		"cmd dmsetup reload "+linName,
+		"cmd dmsetup remove "+cloneName,
+		"cmd nvme disconnect",
+		"cmd dmsetup remove "+metaName,
+	)
+	// Nothing of the migration is left, and the linear now serves the plain
+	// side device.
+	for _, name := range []string{cloneName, metaName} {
+		if _, ok := node.dms[name]; ok {
+			t.Errorf("%s survived the finish", name)
+		}
+	}
+	if want := node.devNo[nf.DmPath(sideName)]; !strings.Contains(
+		node.dms[linName].table, want) {
+		t.Errorf("dm-linear table %q does not point at the side device (%s)",
+			node.dms[linName].table, want)
+	}
+}
+
+func TestMigrationDestinationProvisionsFirst(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+
+	node.Reset()
+	req := migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)
+	req.SideConf.Provisioned = false
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	dst := reply.GetSideInfo().GetMigrDstInfo()
+	for _, row := range []struct {
+		name string
+		info *pb.ResInfo
+	}{
+		{"target", dst.GetTargetInfo()},
+		{"dm_clone", dst.GetDmCloneInfo()},
+	} {
+		if row.info.GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING ||
+			row.info.GetDetails() != tagProvisioningWait {
+			t.Errorf("migr_dst %s = %v/%q, want PROVISIONING/%q", row.name,
+				row.info.GetStatus(), row.info.GetDetails(),
+				tagProvisioningWait)
+		}
+	}
+	// The side device exists; nothing above it does.
+	if _, ok := node.dms[nf.DnSideName(
+		testCluster, testDn, testSp, testSide)]; !ok {
+		t.Error("the destination side device was not built")
+	}
+	for _, name := range []string{
+		nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigrId),
+		nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId),
+		nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0),
+	} {
+		if _, ok := node.dms[name]; ok {
+			t.Errorf("a provisioning destination built %s", name)
+		}
+	}
+	if node.hasCall("cmd nvme connect") {
+		t.Error("a provisioning destination connected to its source")
+	}
+	if _, ok, _ := srv.meta.LookupCloneMeta(ctx, testSp, testMigrId); ok {
+		t.Error("a provisioning destination reserved a clone-metadata slot")
+	}
+
+	// After the flip the ordinary DN13 sequence runs.
+	waitZeroed(t, srv, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if _, ok := node.dms[nf.DnMigrFinalName(
+		testCluster, testDn, testSp, testMigrId)]; !ok {
+		t.Error("the flip did not build the dm-clone")
 	}
 }
 
@@ -234,6 +385,179 @@ func TestMigrationDestinationConnectFailureRetries(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Migration source (DN12)
 // ---------------------------------------------------------------------------
+
+// §11.2: `migr_src_conf.dst_provisioned = false` makes the source behave
+// **exactly** as if migr_src_conf were absent — it keeps serving, it does not
+// fence, and it exports nothing — differing only in reporting the would-be
+// migr_src_info rows as PROVISIONING. Without the gate the source would fence
+// the primary's path at migration start and the leg would have no serving path
+// for the whole zeroing window.
+func TestMigrationSourceDeferredUntilDestinationProvisions(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideNo := node.devNo[nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))]
+
+	node.Reset()
+	req := migrSrcReq(2)
+	req.MigrSrcConf.DstProvisioned = false
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	// The side is byte-for-byte the side it was: no fence, no ANA handover,
+	// no source export.
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto") {
+			continue // SH5: the request itself is re-persisted
+		}
+		t.Errorf("a deferred migration source mutated the dn: %s", call)
+	}
+	if node.dms[linName].suspended {
+		t.Error("a deferred migration source fenced its per-CN dm-linear")
+	}
+	if !strings.Contains(node.dms[linName].table, sideNo) {
+		t.Errorf("dm-linear table %q left the side device (%s)",
+			node.dms[linName].table, sideNo)
+	}
+	if _, ok := node.dms[srcName]; ok {
+		t.Error("a deferred migration source built its dm-linear")
+	}
+	if node.dirs[agent.NvmetRoot+"/subsystems/"+srcNqn] {
+		t.Error("a deferred migration source exported itself")
+	}
+	// Only the reporting differs.
+	src := reply.GetSideInfo().GetMigrSrcInfo()
+	for _, row := range []struct {
+		name string
+		info *pb.ResInfo
+	}{
+		{"dm_linear", src.GetDmLinearInfo()},
+		{"nvmeof", src.GetNvmeofInfo()},
+	} {
+		if row.info.GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING ||
+			row.info.GetDetails() != tagProvisioningWait {
+			t.Errorf("migr_src %s = %v/%q, want PROVISIONING/%q", row.name,
+				row.info.GetStatus(), row.info.GetDetails(),
+				tagProvisioningWait)
+		}
+	}
+	// The per-CN namespaces are still the primary's, optimized and serving.
+	for cnId, info := range reply.GetSideInfo().GetCnIdToNvmeof() {
+		if info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("cn %d nvmeof = %v/%q, want OK",
+				cnId, info.GetStatus(), info.GetDetails())
+		}
+	}
+	// The read-only probe agrees.
+	infoReply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := infoReply.GetSideInfo().GetMigrSrcInfo().GetDmLinearInfo(); got.
+		GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING {
+		t.Errorf("probed migr_src dm_linear = %v/%q, want PROVISIONING",
+			got.GetStatus(), got.GetDetails())
+	}
+
+	// Once the destination provisions, the real §11.2 sequence runs.
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(3)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if _, ok := node.dms[srcName]; !ok {
+		t.Error("the flip did not build the migration-source dm-linear")
+	}
+	if !node.dirs[agent.NvmetRoot+"/subsystems/"+srcNqn] {
+		t.Error("the flip did not export the migration source")
+	}
+}
+
+// A migration cancelled while it was still deferred built nothing — but it did
+// register its migr_src_* rows, and those must go with the role. SH14 defines
+// epoch as the unix second of the *last status change*, so a leaked entry
+// silently hands a later deferral the dead migration's epoch: the worker would
+// be told resources created a moment ago have been provisioning for as long as
+// the agent has been up.
+func TestDeferredMigrationSourceDropsItsRowsWhenCancelled(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+
+	deferredReq := func(revision, migrId uint64) *pb.SyncupSideRequest {
+		req := migrSrcReq(revision)
+		req.MigrSrcConf.MigrId = migrId
+		req.MigrSrcConf.DstProvisioned = false
+		return req
+	}
+	first, err := srv.SyncupSide(ctx, deferredReq(2, testMigrId))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	firstSrc := first.GetSideInfo().GetMigrSrcInfo()
+	if firstSrc.GetDmLinearInfo().GetStatus() !=
+		pb.ResStatus_RES_STATUS_PROVISIONING {
+		t.Fatalf("the first deferred migration did not report its rows: %v",
+			firstSrc.GetDmLinearInfo())
+	}
+
+	// Cancelled while still deferred: the next request carries no
+	// migr_src_conf at all.
+	if _, err := srv.SyncupSide(ctx, sideReq(3, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+
+	// A second migration, also deferred, reports the same status — so only a
+	// dropped entry can give it a fresh epoch.
+	waitForNextUnixSecond()
+	second, err := srv.SyncupSide(ctx, deferredReq(4, testMigrId+1))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	secondSrc := second.GetSideInfo().GetMigrSrcInfo()
+	for _, row := range []struct {
+		name        string
+		was, is     *pb.ResInfo
+		wantPresent bool
+	}{
+		{"dm_linear", firstSrc.GetDmLinearInfo(),
+			secondSrc.GetDmLinearInfo(), true},
+		{"nvmeof", firstSrc.GetNvmeofInfo(),
+			secondSrc.GetNvmeofInfo(), true},
+	} {
+		if row.is.GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING {
+			t.Errorf("migr_src %s = %v, want PROVISIONING",
+				row.name, row.is.GetStatus())
+			continue
+		}
+		if row.is.GetEpoch() <= row.was.GetEpoch() {
+			t.Errorf("migr_src %s epoch = %d, want later than the cancelled "+
+				"migration's %d — the tracker entry outlived its role",
+				row.name, row.is.GetEpoch(), row.was.GetEpoch())
+		}
+	}
+}
+
+// waitForNextUnixSecond blocks until the unix second has moved on, so a
+// re-registered ResInfo can be told apart from one that reused a stale entry's
+// epoch (SH14: epoch is the unix second of the last status change).
+func waitForNextUnixSecond() {
+	start := time.Now().Unix()
+	for time.Now().Unix() == start {
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 func TestMigrationSourceSequence(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -829,6 +1153,105 @@ func TestFenceClearedWhenTheSourceRoleEnds(t *testing.T) {
 	}
 }
 
+// breakSideDev makes the side device unreadable the way one transient
+// `dmsetup info` failure does: Dm.Info collapses a failed probe into "the
+// device is absent", so the converge tries to re-create it, fails, and returns
+// sideDevFailed — the U4 gate, taken by a side that is in fact serving.
+func breakSideDev(node *fakeNode, sideDevName string) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.failCmdAlways["dmsetup info --columns --noheadings -o attr "+
+		sideDevName] = "no such device"
+	node.failCmdAlways["dmsetup create "+sideDevName] = "device already exists"
+}
+
+// The window has to end even when the converge that ends it cannot get past
+// the side device: [D12] promises no dnv device stays suspended for more than
+// the window plus one converge, and a suspended dm target queues bios with no
+// timeout, so the promise is the safety property — not a best effort that a
+// transient `dmsetup info` failure may drop.
+func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+
+	srv.fenceWait = 50 * time.Millisecond
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	suspended := node.dms[linName].suspended
+	node.mu.Unlock()
+	if !suspended {
+		t.Fatal("the cutover did not suspend the primary's dm-linear")
+	}
+
+	// The side device goes unreadable before the timer fires, so the converge
+	// that ends the window takes the U4 gate.
+	breakSideDev(node, sideDevName)
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		return !node.dms[linName].suspended
+	}) {
+		t.Fatal("the grace window ended with the per-CN dm-linears still " +
+			"suspended and nothing left to re-arm")
+	}
+	node.mu.Lock()
+	table := node.dms[linName].table
+	node.mu.Unlock()
+	if !strings.Contains(table, errNo) {
+		t.Errorf("the window ended without fencing the linear onto its "+
+			"dm-error: %q", table)
+	}
+}
+
+// The same for the other half of the bookkeeping: when the source role ends,
+// the linears go back into service from teardownForbidden itself, rather than
+// from an ensureCnDm the U4 gate may never let run.
+func TestFenceClearedOnARoleEndWithABrokenSideDevice(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	stbName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn1)
+	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !node.dms[linName].suspended {
+		t.Fatal("the cutover did not suspend the primary's dm-linear")
+	}
+
+	breakSideDev(node, sideDevName)
+	// The migration is cancelled while the side device is unreadable.
+	if _, err := srv.SyncupSide(ctx, sideReq(3, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	for _, name := range []string{linName, stbName} {
+		node.mu.Lock()
+		suspended := node.dms[name].suspended
+		node.mu.Unlock()
+		if suspended {
+			t.Errorf("%s stayed suspended after the source role ended", name)
+		}
+	}
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	if srv.inFence(st) {
+		t.Error("the grace window outlived the migration source role")
+	}
+}
+
 // A side torn down inside the window still tears down: `dmsetup remove` does
 // not succeed on a suspended device, so the teardown resumes it first.
 func TestTeardownInsideTheFenceWindow(t *testing.T) {
@@ -900,5 +1323,48 @@ func TestFenceNotRestartedAcrossAnAgentRestart(t *testing.T) {
 	if !strings.Contains(node.dms[linName].table, errNo) {
 		t.Errorf("the reconcile did not retire the fenced linear: %q",
 			node.dms[linName].table)
+	}
+}
+
+// ...and the converse: a restart of a side that was never fenced must not
+// consume the *next* cutover's window. The adoption is a rule about the
+// debris a previous process left suspended, and [D12] bounds how long a device
+// stays suspended — it does not licence skipping the window that bound
+// applies to.
+func TestFenceWindowSurvivesAnUnrelatedAgentRestart(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideNo := node.devNo[nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))]
+
+	// A routine restart of a side that is simply serving: no migration, and
+	// nothing of its own suspended.
+	stopTestServer(t, srv)
+	node.Reset()
+	restarted := startTestServer(t, node)
+	restarted.fenceWait = time.Hour
+
+	// The migration is created only afterwards, so its cutover is entitled to
+	// the whole common.SuspendSeconds window.
+	if _, err := restarted.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	suspended := node.dms[linName].suspended
+	table := node.dms[linName].table
+	node.mu.Unlock()
+	if !suspended {
+		t.Error("the first cutover after an unrelated restart skipped the " +
+			"grace window")
+	}
+	if node.hasCall("cmd dmsetup reload " + linName) {
+		t.Error("phase 2 ran inside the window")
+	}
+	if !strings.Contains(table, sideNo) {
+		t.Errorf("phase 1 moved the primary's table off the side device: %q",
+			table)
 	}
 }

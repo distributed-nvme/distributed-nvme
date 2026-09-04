@@ -39,10 +39,32 @@ files are committed, so an ordinary build or test never requires protoc.
   protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2). The proto deliberately has no
   `package` statement, so method names stay `/Gateway/…`,
   `/DiskNodeAgent/…`, `/ControllerNodeAgent/…`.
-* `common/log.go` — `log/slog` JSON logging on stdout, trace ids on the
-  context, `PbToLogValue` (bytes fields → `"<N bytes>"`), `TruncForLog`.
-* `common/osclient.go`, `common/osclient_fake.go` — the single path for OS
-  commands and file/proto I/O: concurrency-limited, atomic file replaces, one
-  Info record per operation.
-* `common/interceptor.go` — the four gRPC interceptors that move the trace id
-  between context and metadata and log every request/reply message.
+* `common/` — complete per its specs: `constants.go` and `name_fmt.go` (the
+  architecture §4/§7 constants and the deterministic dm/md/NQN/local-store
+  name formats, `DnNsIdentity`, `NvmeHostId`), `log.go` (`log/slog` JSON
+  logging on stdout, trace ids on the context, `PbToLogValue`,
+  `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
+  commands and file/proto/block I/O plus the §4.5.1 raw probe helpers), and
+  `interceptor.go` (the four gRPC interceptors).
+* `agent/` — the shared dn/cn agent mechanism of `dnagent.md` §2:
+  reconcile-then-serve bootstrap, local store, revision gate, lock
+  hierarchy, `ResInfo` tracking, dm/nvmet/nvme-host wrappers, bitmap-chunk
+  store.
+* `agent/dnagent/` — the dn role (`dnagent.md` §4): the [D13] on-disk
+  format, [D15] side provisioning (background zeroing), per-CN exports,
+  migration source/destination with the [D12] bounded fence, bitmap pushes,
+  check streams.
+* `agent/cnagent/` — the cn role (`cnagent.md` §4): leg connections and
+  md-raid1 groups, thin pools and volumes, raid0/ns-dev/nvmet stacks,
+  clones and transfers, the CN11 leg health probers, thin-metadata bitmap
+  reads.
+* `cmd/dnv-agent` — the cobra/viper `dn`/`cn` binary (`dnagent.md` §3).
+* `integtest/` — the on-hardware suites of `dnagent_integtest.md` and
+  `cnagent_integtest.md` (`dnagent_test.sh`, `cnagent_test.sh` and their
+  gRPC drivers); both have passed against the two lab VMs.
+
+Not yet implemented: `etcdutil/`, `gateway/`, `worker/`, `cdc/`, `ctl/` and
+their binaries — `doc/architecture.md` §§5-8, §10, §12 and §13 are their
+spec. `doc/update_02.md` records the post-review fixes, all applied;
+`doc/update_03.md` records two findings from implementing them — one applied,
+one open.

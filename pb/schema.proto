@@ -107,6 +107,7 @@ message Side {
     uint32 cntlid_slot = 3;
     NvmeTrConf nvme_tr_conf = 4;
     uint64 err_epoch = 5;
+    bool provisioned = 6;
 }
 
 message Leg {
@@ -172,6 +173,9 @@ enum ResStatus {
     RES_STATUS_ERROR = 2;
     // OK means OK
     RES_STATUS_OK = 3;
+    // PROVISIONING means deliberately not created / being prepared;
+    // healthy; no action needed
+    RES_STATUS_PROVISIONING = 4;
 }
 
 message ResInfo {
@@ -192,7 +196,7 @@ message CnInfo {
     ResInfo tmpfs_info = 2;
     ResInfo tmp_file_info = 3;
     ResInfo loop_dev_info = 4;
-    ResInfo clone_vg_info = 5;
+    reserved 5;  // was: ResInfo clone_vg_info (update_01.md U3)
 }
 
 message SideInfo {
@@ -210,6 +214,8 @@ message SideInfo {
     map<uint64, ResInfo> cn_id_to_nvmeof = 4;
     MigrSrcInfo migr_src_info = 5;
     MigrDstInfo migr_dst_info = 6;
+    uint64 zeroed_ext_cnt = 7;
+    uint64 total_ext_cnt = 8;  // always filled; equal => fully zeroed
 }
 
 message CntlrInfo {
@@ -1256,11 +1262,13 @@ message SyncupSideRequest {
         uint64 primary_cn_id = 3;
         repeated uint64 standby_id_list = 4;
         SpLevel sp_level = 5;
+        bool provisioned = 6;
     }
     message MigrSrcConf {
         uint64 migr_id = 1;
         uint64 dst_side_id = 2;
         uint64 dst_dn_id = 3;
+        bool dst_provisioned = 4;
     }
     message MigrDstConf {
         uint64 migr_id = 1;
@@ -1535,8 +1543,10 @@ message DnDiskTable {
     message SideRecord {
         uint64 sp_id = 1;
         uint64 side_id = 2;
-        bool trimmed = 3;
+        reserved 3;                       // was: bool trimmed (update_01.md U4)
         repeated ExtentRun run_list = 4;  // ordered; concat = side device
+        bytes zeroed_bits = 5;            // bit i = logical extent i zeroed;
+                                          // LSB-first per agent/bitmap.go
     }
     message CloneMetaRecord {
         uint64 sp_id = 1;

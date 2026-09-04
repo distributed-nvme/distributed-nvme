@@ -147,8 +147,9 @@ type globals struct {
 }
 
 // bind registers the §8 global flags on a subcommand's flag set, so they may
-// be given in any order after the subcommand name. wait-hydrated binds with
-// withTimeout = false and spends --timeout on its own polling budget.
+// be given in any order after the subcommand name. The two pollers
+// (wait-hydrated, wait-zeroed) bind with withTimeout = false and spend
+// --timeout on their own polling budget instead.
 func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
 	fs.StringVar(&g.addr, "addr", "", "agent gRPC endpoint ip:port (required)")
 	g.cluster = 1
@@ -241,7 +242,9 @@ var commands = []command{
 	{"check-dn", cmdCheckDn},
 	{"check-side", cmdCheckSide},
 	{"wait-hydrated", cmdWaitHydrated},
+	{"wait-zeroed", cmdWaitZeroed},
 	{"ns-id", cmdNsId},
+	{"host-id", cmdHostId},
 }
 
 func main() {
@@ -378,6 +381,17 @@ func cmdSyncupSide(args []string) {
 	hydrThreshold := fs.Uint("hydr-threshold", 0, "dm-clone hydration threshold")
 	hydrBatch := fs.Uint("hydr-batch", 0, "dm-clone hydration batch size")
 	bmCnt := fs.Uint("bm-cnt", 0, "number of bitmap chunks the CP will push")
+	// The §9.4 provisioning gates. Both default to false, which is proto3's
+	// zero and the value the gateway writes for a brand new side, so every
+	// steady-state call site must pass them explicitly. Go's flag package never
+	// consumes the following argument for a bool, so callers must always write
+	// --provisioned=true, never --provisioned true (update_01.md U4).
+	provisioned := fs.Bool("provisioned", false,
+		"side_conf.provisioned — the CP's export gate; false means "+
+			"allocate and zero only, no per-CN export stacks")
+	dstProvisioned := fs.Bool("dst-provisioned", false,
+		"migr_src_conf.dst_provisioned — false makes the source behave "+
+			"exactly as if migr_src_conf were absent")
 	fs.Var(&revision, "revision", "request revision")
 	fs.Var(&extCnt, "ext-cnt", "side size in DN VG extents")
 	fs.Var(&primaryCn, "primary-cn", "primary CN id")
@@ -399,6 +413,7 @@ func cmdSyncupSide(args []string) {
 			PrimaryCnId:   uint64(primaryCn),
 			StandbyIdList: standbys,
 			SpLevel:       level,
+			Provisioned:   *provisioned,
 		},
 	}
 	if *migrSrc != "" {
@@ -407,9 +422,10 @@ func cmdSyncupSide(args []string) {
 			die("--migr-src: %v", err)
 		}
 		req.MigrSrcConf = &pb.SyncupSideRequest_MigrSrcConf{
-			MigrId:    migrId,
-			DstSideId: dstSideId,
-			DstDnId:   dstDnId,
+			MigrId:         migrId,
+			DstSideId:      dstSideId,
+			DstDnId:        dstDnId,
+			DstProvisioned: *dstProvisioned,
 		}
 	}
 	if *migrDst != "" {
@@ -539,6 +555,12 @@ func cmdGetSideInfo(args []string) {
 		die("GetSideInfo failed: %v", err)
 	}
 	emit(reply)
+	// The §9.4 provisioning counters as one human line on **stderr**: stdout
+	// stays exactly one protojson line, because case D diffs it (§8) and every
+	// caller parses it with jq (update_01.md U4).
+	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n",
+		reply.GetSideInfo().GetZeroedExtCnt(),
+		reply.GetSideInfo().GetTotalExtCnt())
 	g.checkReply(reply.GetAgentReply())
 }
 
@@ -704,6 +726,79 @@ func cmdWaitHydrated(args []string) {
 	}
 }
 
+// cmdWaitZeroed polls GetSideInfo until the side reports every logical extent
+// zeroed (update_01.md U4, the §9.4 provisioning protocol). It is the script's
+// stand-in for the sp-worker's flip rule: once it returns, the caller re-sends
+// the same SyncupSide at a fresh revision with --provisioned=true.
+//
+// Two guards make it a real assertion rather than a sleep. total != 0, because
+// a reply whose counters are both zero — nothing sized yet — would satisfy a
+// bare `zeroed >= total` and report a side that does not exist as complete.
+// And a fail-fast on side_dev_info = RES_STATUS_ERROR, because "record
+// missing", "not zeroed" and a failing batch are terminal or paced — waiting
+// out the whole budget for them only hides the reason. MISSING is deliberately
+// NOT terminal: a read-only probe reports it while the allocation record is
+// still being written, which is exactly what this call is waiting through.
+func cmdWaitZeroed(args []string) {
+	var g globals
+	fs := flag.NewFlagSet("wait-zeroed", flag.ExitOnError)
+	g.bind(fs, false)
+	sp, leg, side := sidePointerFlags(fs)
+	interval := fs.Float64("interval", 0.5, "seconds between samples")
+	limit := fs.Float64("timeout", 120, "seconds to wait for full zeroing")
+	fs.Parse(args)
+
+	conn, client, err := g.dial()
+	if err != nil {
+		die("%v", err)
+	}
+	defer conn.Close()
+
+	req := &pb.GetSideInfoRequest{
+		ClusterId:   uint64(g.cluster),
+		DnId:        uint64(g.dn),
+		SidePointer: sidePointerOf(sp, leg, side),
+	}
+	deadline := time.Now().Add(time.Duration(*limit * float64(time.Second)))
+	samples := 0
+	var zeroed, total uint64
+	for {
+		ctx, cancel := g.rpcCtx()
+		reply, err := client.GetSideInfo(ctx, req)
+		cancel()
+		if err != nil {
+			die("GetSideInfo failed: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			die("agent_reply.code = %d (%s)",
+				reply.GetAgentReply().GetCode(),
+				reply.GetAgentReply().GetDetails())
+		}
+		info := reply.GetSideInfo()
+		samples++
+		zeroed, total = info.GetZeroedExtCnt(), info.GetTotalExtCnt()
+		fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n", zeroed, total)
+		if dev := info.GetSideDevInfo(); dev.GetStatus() ==
+			pb.ResStatus_RES_STATUS_ERROR {
+			die("side_dev_info is ERROR (%s)", dev.GetDetails())
+		}
+		if total != 0 && zeroed >= total {
+			out, _ := json.Marshal(map[string]any{
+				"zeroed":  zeroed,
+				"total":   total,
+				"samples": samples,
+			})
+			fmt.Println(string(out))
+			return
+		}
+		if time.Now().After(deadline) {
+			die("zeroing did not finish within %gs (last %d/%d)",
+				*limit, zeroed, total)
+		}
+		time.Sleep(time.Duration(*interval * float64(time.Second)))
+	}
+}
+
 // cmdNsId prints the deterministic namespace identity of a leg, which is how
 // the test finds the CN-side device node (/dev/disk/by-id/nvme-uuid.<uuid>).
 func cmdNsId(args []string) {
@@ -724,4 +819,22 @@ func cmdNsId(args []string) {
 		die("%v", err)
 	}
 	fmt.Println(string(out))
+}
+
+// cmdHostId prints the deterministic NVMe host id of a hostnqn. Every
+// `nvme connect` the suites issue by hand — the emulated CN and host
+// identities — must pass it, for the same reason the agent does: the kernel
+// allows one hostnqn per hostid, and a VM that plays several identities
+// would otherwise have them all collide on the node-wide /etc/nvme/hostid
+// (common.NvmeHostId).
+func cmdHostId(args []string) {
+	var g globals
+	fs := newFlagSet("host-id", &g)
+	hostNqn := fs.String("hostnqn", "", "host nqn to derive the id from")
+	fs.Parse(args)
+
+	if *hostNqn == "" {
+		die("--hostnqn is required")
+	}
+	fmt.Println(common.NvmeHostId(*hostNqn))
 }

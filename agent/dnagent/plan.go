@@ -21,10 +21,28 @@ const (
 	resKeyMigrDstClone  = "migr_dst_clone"
 )
 
-// details strings of the §9.4 trim protocol. The flag itself lives in the
-// side's on-disk allocation record ([D13]); this is only what a side that has
-// not been discarded yet reports.
-const tagNotTrimmed = "not_trimmed"
+// details strings of the §9.4 side-provisioning protocol. The bits themselves
+// live in the side's on-disk allocation record ([D13]); these are only what a
+// side reports about them (update_01.md U4).
+const (
+	// zeroingDetailsFmt is the RES_STATUS_PROVISIONING progress detail: k of
+	// n logical extents zeroed. PROVISIONING means healthy / not ready / no
+	// action, and never feeds err_epoch.
+	zeroingDetailsFmt = "zeroing %d/%d"
+	// tagNotZeroed is the RES_STATUS_ERROR detail for a request that claims
+	// provisioned = true over a side whose bits are incomplete: the agent
+	// trusts its own bits over the flag and refuses the exports.
+	tagNotZeroed = "not zeroed"
+	// tagRecordMissing is the RES_STATUS_ERROR detail for provisioned = true
+	// with no allocation record: the data is gone (lost or foreign disk), and
+	// re-allocating would present a zeroed impostor as the data-bearing leg.
+	tagRecordMissing = "record missing"
+	// tagProvisioningWait is what the rows above the side device report while
+	// the side itself is still provisioning: one cause is reported once, on
+	// side_dev_info, instead of multiplying err_epoch churn across every
+	// per-CN stack.
+	tagProvisioningWait = "side provisioning"
+)
 
 // nsModel is the attr_model every DN side export presents (§3.1).
 const nsModel = "dnv"
@@ -48,6 +66,20 @@ type sidePlan struct {
 	migrSrc *pb.SyncupSideRequest_MigrSrcConf
 	migrDst *pb.SyncupSideRequest_MigrDstConf
 	level   pb.SpLevel
+
+	// provisioned is side_conf.provisioned: the CP's gate on exporting this
+	// side. It is a gate, never evidence — the agent always trusts its own
+	// zeroed_bits over the flag, because the disk is authoritative ([D13]).
+	provisioned bool
+	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
+	// says the destination has not provisioned yet. In that case migrSrc above
+	// is nil, because update_01.md makes `dst_provisioned = false` **exactly
+	// equivalent** to "no migr_src_conf at all" (§11.2): fencing at migration
+	// start would leave the leg with no serving path for the whole zeroing
+	// window. The only visible difference is that the would-be migr_src_info
+	// rows report PROVISIONING.
+	migrSrcRaw      *pb.SyncupSideRequest_MigrSrcConf
+	migrSrcDeferred bool
 
 	sideDevName string
 	sideDevPath string
@@ -92,6 +124,17 @@ func newSidePlan(
 	}
 	p.wantMigr = p.migrDst != nil &&
 		level < pb.SpLevel_SP_LEVEL_NO_MIGRATION
+	p.provisioned = conf.GetProvisioned()
+	p.migrSrcRaw = req.GetMigrSrcConf()
+	if p.migrSrcRaw != nil && !p.migrSrcRaw.GetDstProvisioned() {
+		// Nil-ing the field is the whole implementation of the equivalence:
+		// linearBacking, preFenceBacking, anaGrpId, ensureCnDm's fence,
+		// convergeSide's ANA handover and teardownForbidden's applied-role diff
+		// all key off migrSrc, so the side keeps serving exactly as it did
+		// before the migration was created.
+		p.migrSrcDeferred = true
+		p.migrSrc = nil
+	}
 	p.sideDevName = nf.DnSideName(p.clusterId, p.dnId, p.spId, p.sideId)
 	p.sideDevPath = nf.DmPath(p.sideDevName)
 	p.cnIds = cnIdsOf(conf)

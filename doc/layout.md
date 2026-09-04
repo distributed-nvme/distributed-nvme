@@ -46,7 +46,8 @@ distributed-nvme/                      # repo root = module root
 │   ├── log.md
 │   ├── osclient.md
 │   ├── grpc.md
-│   └── dnagent.md                     # dnv-agent: agent/, agent/dnagent/, cmd/dnv-agent
+│   ├── dnagent.md                     # dnv-agent: agent/ (shared), agent/dnagent/, cmd/dnv-agent
+│   └── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -55,7 +56,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── constants.go                   # from the design inputs + LogStrDataLimit, DefaultOsClientLimit
 │   ├── name_fmt.go                    # NameFmt helpers; architecture.md §4 is normative where the input file differs
 │   ├── log.go                         # per log.md
-│   ├── osclient.go                    # per osclient.md
+│   ├── osclient.go                    # per osclient.md (+ the exported raw block helpers of §4.5.1)
 │   ├── osclient_fake.go               # per osclient.md §6
 │   └── interceptor.go                 # per grpc.md
 ├── etcdutil/                          # central etcd helpers of log.md §5.3
@@ -97,10 +98,19 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnagent/                       # DiskNodeAgent policy (§9.2, dnagent.md §4): server.go,
 │   │                                  # diskmeta.go ([D13] on-disk format + allocators),
 │   │                                  # syncup_dn.go, syncup_side.go, push_migr_bm.go,
-│   │                                  # check.go (§9.7), migr.go, probe.go
-│   └── cnagent/                       # ControllerNodeAgent policy (§9.3): server.go, syncup_cn.go,
-│                                      # syncup_cntlr.go, push_clone_bm.go, check.go (§9.7), leg.go,
-│                                      # md.go, pool.go, td.go, clone.go, xfer.go, healthcheck.go, probe.go
+│   │                                  # check.go (§9.7), migr.go, probe.go,
+│   │                                  # zeroing.go (§9.4 background side zeroing)
+│   └── cnagent/                       # ControllerNodeAgent policy (§9.3, cnagent.md §4): server.go,
+│                                      # plan.go, syncup_cn.go, syncup_cntlr.go, push_clone_bm.go,
+│                                      # check.go (§9.7), leg.go, healthcheck.go (the CN11 probers
+│                                      # and their direct-syscall IO, osclient.md §4.5.1), md.go,
+│                                      # clonemeta.go (the CN base state plus the clone-metadata
+│                                      # slot allocator over the one loop device — no LVM anywhere),
+│                                      # pool.go, td.go, clone.go, xfer.go,
+│                                      # dmutil.go (the shared dm ensure/probe helpers),
+│                                      # thinbm.go (the thin-metadata reader and the §11.4
+│                                      # bitmap math), bitmapread.go (the GetThinDeviceBm /
+│                                      # GetLegBm RPCs), probe.go
 ├── cdc/
 │   └── cdc.go                         # §12 discovery controller
 ├── ctl/
@@ -189,7 +199,8 @@ Because every main imports `common` (at least transitively), the `init()` in
 * `cmd/dnv-agent/main.go` — a cobra root command with `dn`/`cn` subcommands
   (`dnagent.md` §3) dispatching to `agent/dnagent` or `agent/cnagent`; both
   share `agent` for the server bootstrap, `--local-store` handling and the
-  single `common.NewLimitedOsClient(...)` instance.
+  single `common.NewLimitedOsClient(...)` instance (the CN11 leg probers
+  deliberately bypass that instance — `osclient.md` §4.5.1).
 * Interceptor wiring per binary follows the table in `grpc.md` (gateway:
   server + client; worker: client; agents: server; dnvctl: client; cdc:
   none).
@@ -223,3 +234,33 @@ Each step compiles and passes its tests before the next begins:
    `common`.
 6. All five binaries build into `bin/` via `make build`, and `bin/` is listed
    in `.gitignore`.
+
+## 8. Amendments applied to this document
+
+Recorded for traceability; the edits are already applied. Unlike the
+"amendments applied to companion documents" sections of `dnagent.md` §5 and
+`cnagent.md` §5, this one records edits made **to this document**. It is
+appended rather than inserted because §2, §3, §4 and §7 are cited by number
+from `cnagent.md`, `dnagent.md` and this file itself.
+
+* `update_01.md` U3 (U3-T4) — LVM is gone from the CN as well as the DN, so the
+  §2 `agent/cnagent/` list loses `lvm.go` ("the clone VG — the one LVM user
+  left") and gains `clonemeta.go`: the CN base-state wrappers plus the
+  clone-metadata slot allocator over the single loop device, whose kind-`b`
+  wrapper dm-linears are their own allocation registry (`cnagent.md` §4.1,
+  `architecture.md` [D14]).
+* `update_01.md` U4 (U4-T2) — the §2 `agent/dnagent/` list gains `zeroing.go`,
+  the background side-provisioning goroutine of `architecture.md` §9.4
+  ([D15]). No package boundary changed: it is a new file in an existing
+  package.
+* `update_01.md` U2 (U2-T2/U2-T4) — the cn probers' block IO left the
+  `OsClient`. The probe-IO dependency lives in the already-listed
+  `healthcheck.go` (no new file), so the §2 note only names it; `common/`
+  gained the exported raw helpers `WriteBlockAt`/`ReadBlockDirectAt` inside the
+  existing `osclient.go` (`osclient.md` §4.5.1), and §5's `cmd/` wiring records
+  that the probers bypass the process's single `LimitedOsClient`. The `common/`
+  file count of §7 item 5 is therefore unchanged.
+* Earlier amendments, recorded in their originating documents: `dnagent.md` §5
+  (cobra/viper in §1, the `agent/` split, this document listed in the `doc/`
+  tree, `agent/lvm.go` deleted with the dn LVM removal) and `cnagent.md` §5
+  (the `doc/` tree entry, the `agent/cnagent/` split).

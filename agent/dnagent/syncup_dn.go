@@ -17,6 +17,14 @@ const (
 	resKeyPort = "port"
 )
 
+// tagNoWriteZeroes is the DN5 fail-fast detail of §9.4's standing hardware
+// assumption: a disk whose write_zeroes_max_bytes is 0 would make the kernel
+// fall back to writing zero pages at bulk speed, so a DnZeroBatchExtCnt batch
+// could not finish inside CmdSoftTimeout and side provisioning would never
+// converge. Reporting it on meta_info is what flows into err_epoch →
+// capacity-key removal, taking the unsuitable DN out of allocation.
+const tagNoWriteZeroes = "disk lacks Write Zeroes"
+
 // Reconcile is the SH1 startup pass (DN2): load the local store, converge
 // every stored DN, tear down sides whose pointer left their DN's list,
 // converge the rest, then re-apply every persisted bitmap chunk. It runs
@@ -60,7 +68,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// Any per-CN linear this side left suspended belongs to the previous
 		// process; DN12 retires it at once rather than opening a second
 		// grace window.
-		s.adoptFence(st)
+		s.adoptFence(ctx, st)
 		s.putSide(key, st)
 	}
 
@@ -137,7 +145,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 // that lost --local-store but kept its disk still has every side in its DN's
 // pointer list, and must rebuild those sides from their records; sweeping
 // them would free the extents and send the next SyncupSide through the §9.4
-// trim protocol again, discarding live data.
+// provisioning protocol again, zeroing live data.
 //
 // The caller holds the node write lock, so neither the DN set nor the side
 // set can move under it.
@@ -166,6 +174,12 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 		if _, live := known[key]; live {
 			continue
 		}
+		// A record is provably orphaned only when no local state claims it, so
+		// there is normally no goroutine to stop here — but the join must
+		// happen before the removal all the same: a `blkdiscard --zeroout`
+		// child holds the side device open and `dmsetup remove` would fail
+		// EBUSY (§9.4).
+		s.stopZeroingOf(clusterId, dnId, rec.GetSpId(), rec.GetSideId())
 		if !s.removeDm(ctx, s.nf.DnSideName(
 			clusterId, dnId, rec.GetSpId(), rec.GetSideId())) {
 			// The extents stay allocated while a device still maps them;
@@ -209,6 +223,21 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 				"freeing an orphan clone-metadata record failed",
 				slog.String("error", err.Error()))
 		}
+	}
+}
+
+// stopZeroingOf cancels and joins the §9.4 zeroing goroutine of a side named
+// only by its allocation record — the shape the DN6 orphan sweep works in. It
+// is a no-op when no local state for that side exists, which is the sweep's
+// normal case.
+func (s *DnAgentServer) stopZeroingOf(
+	clusterId uint64,
+	dnId uint64,
+	spId uint64,
+	sideId uint64,
+) {
+	if st := s.getSide(sideKey(clusterId, dnId, spId, sideId)); st != nil {
+		s.stopZeroing(st)
 	}
 }
 
@@ -301,12 +330,13 @@ func (s *DnAgentServer) allSideKeys() []string {
 
 func newSideState(req *pb.SyncupSideRequest) *sideState {
 	return &sideState{
-		req:            req,
-		tracker:        agent.NewResTracker(),
-		chunks:         agent.NewChunkSet(),
-		appliedCnIds:   cnIdsOf(req.GetSideConf()),
-		appliedMigrSrc: req.GetMigrSrcConf(),
-		appliedMigrDst: req.GetMigrDstConf(),
+		req:               req,
+		tracker:           agent.NewResTracker(),
+		chunks:            agent.NewChunkSet(),
+		appliedCnIds:      cnIdsOf(req.GetSideConf()),
+		appliedMigrSrc:    req.GetMigrSrcConf(),
+		appliedMigrSrcRaw: req.GetMigrSrcConf(),
+		appliedMigrDst:    req.GetMigrDstConf(),
 	}
 }
 
@@ -397,7 +427,33 @@ func (s *DnAgentServer) ensureDiskMeta(
 		req.GetDnId(), req.GetExtentSize()); err != nil {
 		return t.Err(resKeyMeta, s.disk, err.Error())
 	}
+	if details, ok := s.checkWriteZeroes(ctx); !ok {
+		return t.Err(resKeyMeta, s.disk, details)
+	}
 	return t.Ok(resKeyMeta, s.disk, s.meta.Describe())
+}
+
+// checkWriteZeroes is §9.4's DN5 fail-fast. It returns
+// (tagNoWriteZeroes, false) **only** when the sysfs attribute is present and
+// reads 0. An absent or unreadable attribute is not a verdict — an older
+// kernel simply may not publish it, and failing a healthy DN for that would
+// take it out of allocation for a reason the spec never states (ruling R4.11).
+//
+// A failure reports meta_info but never gates converging (ruling R4.12): an
+// already-populated DN keeps serving the sides it hosts, and DN5's identity
+// check stays the only write gate.
+func (s *DnAgentServer) checkWriteZeroes(ctx context.Context) (string, bool) {
+	value, present, err := s.dm.WriteZeroesMaxBytes(ctx, s.disk)
+	if err != nil {
+		slog.WarnContext(ctx, "reading write_zeroes_max_bytes failed",
+			slog.String("disk", s.disk),
+			slog.String("error", err.Error()))
+		return "", true
+	}
+	if !present || value != 0 {
+		return "", true
+	}
+	return tagNoWriteZeroes, false
 }
 
 // ensurePort converges the node's single nvmet port and its three fixed ANA

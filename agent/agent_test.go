@@ -2,14 +2,94 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
+
+// ---------------------------------------------------------------------------
+// Agent lifecycle (SH1-SH3)
+// ---------------------------------------------------------------------------
+
+// update_01.md U4 "Process exit": the role server tracks its background
+// goroutines in a WaitGroup and `agent.Serve` waits for them before returning,
+// so **no orphan `blkdiscard` child ever outlives the agent**. `reconcile`
+// already starts those goroutines (a dn Reconcile arms one zeroing loop per
+// unprovisioned side, each forking a `blkdiscard --zeroout` child), so the
+// guarantee has to hold on the *early* return paths too — a `net.Listen`
+// failure (a stale unix socket, a duplicate instance, an interface that is not
+// up yet at boot) and a `reconcile` failure both return after the children are
+// already running. Cancelling `runCtx` alone does not kill them: the
+// `exec.CommandContext` watchdog that turns cancellation into SIGTERM/SIGKILL
+// (osclient.md §4.2, SH15) lives in *this* process and dies with it, so the
+// child is reparented to init and keeps `/dev/mapper/{DnSideName}` open —
+// EBUSY for the next incarnation's `dmsetup remove`.
+//
+// The fake background goroutine below is the shape that matters: rooted at the
+// ctx handed to `reconcile`, reaped only by cancellation. So a Serve that skips
+// the join fails on the closed-channel check, and a Serve that joins *before*
+// cancelling deadlocks and fails on the deadline.
+func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		address      string
+		reconcileErr error
+	}{
+		// An unusable listen address: net.Listen fails after reconcile has
+		// already started the zeroing goroutines.
+		{"listener failure", "127.0.0.1:999999", nil},
+		// reconcile itself fails after starting some of them — convergeSide
+		// arms the goroutine before the loop's later error (U4 §9.4).
+		{"reconcile failure", "127.0.0.1:0", errors.New("reconcile failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var background sync.WaitGroup
+			joined := make(chan struct{})
+			reconcile := func(runCtx context.Context) error {
+				background.Add(1)
+				go func() {
+					defer background.Done()
+					<-runCtx.Done()
+				}()
+				return tc.reconcileErr
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- Serve(
+					context.Background(), "tcp", tc.address, reconcile,
+					func(*grpc.Server) {},
+					func() {
+						background.Wait()
+						close(joined)
+					})
+			}()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("Serve reported success on a failure path")
+				}
+			case <-time.After(10 * time.Second):
+				// Waiting before cancelling can never finish: the background
+				// goroutine only returns on cancellation.
+				t.Fatal("Serve never returned; it joined before cancelling")
+			}
+			select {
+			case <-joined:
+			default:
+				t.Fatal("Serve returned without joining the background, " +
+					"orphaning its children")
+			}
+		})
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Revision gate (SH8, SH9)
@@ -135,7 +215,7 @@ func TestResTrackerEpoch(t *testing.T) {
 	}
 	// A status change does.
 	now = 300
-	changed := tracker.Err("lv", "side-lv", "not_trimmed")
+	changed := tracker.Err("lv", "side-lv", "zeroing 0/4")
 	if changed.GetEpoch() != 300 {
 		t.Errorf("epoch = %d, want 300", changed.GetEpoch())
 	}
@@ -157,6 +237,26 @@ func TestResTrackerEpoch(t *testing.T) {
 	if got := tracker.Missing("m", "n", "").GetStatus(); got !=
 		pb.ResStatus_RES_STATUS_MISSING {
 		t.Errorf("status = %v, want MISSING", got)
+	}
+	// PROVISIONING is the fourth outcome (update_01.md U4): healthy, not
+	// ready, no action needed. It is an ordinary status change, so it moves
+	// the epoch exactly like the other three — what makes it special is that
+	// the *worker* never turns it into err_epoch (§9.5).
+	now = 500
+	provisioning := tracker.Provisioning("p", "side-dev", "zeroing 3/10")
+	if provisioning.GetStatus() !=
+		pb.ResStatus_RES_STATUS_PROVISIONING {
+		t.Errorf("status = %v, want PROVISIONING", provisioning.GetStatus())
+	}
+	if provisioning.GetEpoch() != 500 ||
+		provisioning.GetDetails() != "zeroing 3/10" {
+		t.Errorf("provisioning info = %+v", provisioning)
+	}
+	now = 600
+	if got := tracker.Provisioning("p", "side-dev", "zeroing 7/10"); got.
+		GetEpoch() != 500 {
+		t.Errorf("a progress-only change bumped the epoch to %d",
+			got.GetEpoch())
 	}
 }
 
@@ -337,16 +437,31 @@ func TestTableBuilders(t *testing.T) {
 	if got := LinearTable(2048, "253:3", 0); got != "0 2048 linear 253:3 0" {
 		t.Errorf("linear table = %q", got)
 	}
-	got := CloneTable(2048, "253:1", "253:2", "259:0", 2048, true, 1, 2)
+	// Builder-level coverage of the single-feature rendering: the derived
+	// `<#feature args>` count must still come out as 1. No dnv call site
+	// passes this combination any more — after update_01.md U1 both dm-clones
+	// pass noDiscardPassdown = true (the case below).
+	got := CloneTable(
+		2048, "253:1", "253:2", "259:0", 2048, true, false, 1, 2)
 	want := "0 2048 clone 253:1 253:2 259:0 2048 1 no_hydration 4 " +
 		"hydration_threshold 1 hydration_batch_size 2"
 	if got != want {
 		t.Errorf("clone table = %q, want %q", got, want)
 	}
 	if got := CloneTable(
-		2048, "253:1", "253:2", "259:0", 2048, false, 0, 0); got !=
+		2048, "253:1", "253:2", "259:0", 2048, false, false, 0, 0); got !=
 		"0 2048 clone 253:1 253:2 259:0 2048 0 0" {
 		t.Errorf("bare clone table = %q", got)
+	}
+	// The dnv form, used by both role packages after update_01.md U1:
+	// `blkdiscard` must stay a metadata-only "mark hydrated" primitive, so
+	// every dnv dm-clone disables discard passdown (cnagent.md CN18 step 3).
+	if got := CloneTable(
+		2048, "253:1", "253:2", "259:0", 2048, true, true, 1, 1); got !=
+		"0 2048 clone 253:1 253:2 259:0 2048 2 no_hydration "+
+			"no_discard_passdown 4 hydration_threshold 1 "+
+			"hydration_batch_size 1" {
+		t.Errorf("cn clone table = %q", got)
 	}
 }
 
@@ -403,60 +518,142 @@ func TestAnaStateOf(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// nvme list-subsys parsing (SH20)
+// ListSubsys reads sysfs (SH20)
 // ---------------------------------------------------------------------------
 
-func TestListSubsysBothJsonShapes(t *testing.T) {
-	const nqn = "nqn.2024-01.io.dnv:3:a:b:c"
-	arrayForm := `[{"HostNQN":"h","Subsystems":[{"Name":"nvme-subsys0",
-	  "NQN":"` + nqn + `","Paths":[{"Name":"nvme3","State":"live"}],
-	  "Namespaces":[{"NameSpace":"nvme3n1","NSID":1}]}]}]`
-	objectForm := `{"HostNQN":"h","Subsystems":[{"Name":"nvme-subsys0",
-	  "NQN":"` + nqn + `","Paths":[{"Name":"nvme3","State":"connecting",
-	  "Namespaces":[{"Name":"nvme3n1"}]}]}]}`
+// fakeSysfs is a tiny read-only tree: `ls -1 <dir>` lists the direct children
+// of a registered directory, ReadFile serves a registered file. It also pins
+// update_02.md U2: every read of the SH20 walk must arrive with an SH15
+// deadline on its ctx, so a stalled /sys/class/nvme* read can never hold a
+// converge — and through the node lock, a whole node's RPC surface — open.
+type fakeSysfs struct {
+	dirs  map[string][]string
+	files map[string]string
+	// read is every path ReadFile served, and noDeadline the subset that
+	// arrived on a ctx carrying no deadline.
+	read       []string
+	noDeadline []string
+}
 
-	for name, payload := range map[string]string{
-		"array": arrayForm, "object": objectForm,
-	} {
-		oc := &common.FakeOsClient{
-			RunCommandFn: func(
-				ctx context.Context, cmd string, args []string, stdin string,
-			) (string, string, int, error) {
-				return payload, "", 0, nil
-			},
-		}
-		state, err := NewNvmeHost(oc).ListSubsys(context.Background(), nqn)
-		if err != nil {
-			t.Fatalf("%s: ListSubsys: %v", name, err)
-		}
-		if !state.Found {
-			t.Fatalf("%s: subsystem not found", name)
-		}
-		if state.DevicePath != "/dev/nvme3n1" {
-			t.Errorf("%s: device = %q", name, state.DevicePath)
-		}
-		if name == "array" && !state.Live {
-			t.Errorf("%s: a live path was not detected", name)
-		}
-		if name == "object" && state.Live {
-			t.Errorf("%s: a connecting path counted as live", name)
-		}
-	}
-
-	oc := &common.FakeOsClient{
+func (fs *fakeSysfs) osClient() *common.FakeOsClient {
+	return &common.FakeOsClient{
 		RunCommandFn: func(
 			ctx context.Context, cmd string, args []string, stdin string,
 		) (string, string, int, error) {
-			return "[]", "", 0, nil
+			if cmd != "ls" {
+				return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
+			}
+			entries, ok := fs.dirs[args[len(args)-1]]
+			if !ok {
+				return "", "", 2, fmt.Errorf("no such directory")
+			}
+			return strings.Join(entries, "\n") + "\n", "", 0, nil
+		},
+		ReadFileFn: func(ctx context.Context, path string) (string, error) {
+			fs.read = append(fs.read, path)
+			if _, ok := ctx.Deadline(); !ok {
+				fs.noDeadline = append(fs.noDeadline, path)
+			}
+			data, ok := fs.files[path]
+			if !ok {
+				return "", fmt.Errorf("no such file: %s", path)
+			}
+			return data, nil
 		},
 	}
-	state, err := NewNvmeHost(oc).ListSubsys(context.Background(), nqn)
+}
+
+// The namespace device, the per-path ana_state and the controller state all
+// come from sysfs: `nvme list-subsys -o json` carries none of the three
+// (nvme-cli 2.16 lists no namespaces at all, and no ANAState without a
+// namespace device argument), which is why ListSubsys never runs it.
+func TestListSubsysReadsSysfs(t *testing.T) {
+	const nqn = "nqn.2024-01.io.dnv:3:a:b:c"
+	fs := &fakeSysfs{
+		dirs: map[string][]string{
+			"/sys/class/nvme-subsystem":              {"nvme-subsys0"},
+			"/sys/class/nvme-subsystem/nvme-subsys0": {"nvme3", "nvme3n1", "subsysnqn"},
+			"/sys/class/nvme/nvme3":                  {"nvme3c3n1", "state", "address"},
+		},
+		files: map[string]string{
+			"/sys/class/nvme-subsystem/nvme-subsys0/subsysnqn": nqn + "\n",
+			"/sys/class/nvme/nvme3/state":                      "live\n",
+			"/sys/class/nvme/nvme3/transport":                  "tcp\n",
+			"/sys/class/nvme/nvme3/address":                    "traddr=10.0.0.1,trsvcid=4420\n",
+			"/sys/class/nvme/nvme3/nvme3c3n1/ana_state":        "non-optimized\n",
+		},
+	}
+	state, err := NewNvmeHost(fs.osClient()).ListSubsys(context.Background(), nqn)
+	if err != nil {
+		t.Fatalf("ListSubsys: %v", err)
+	}
+	if !state.Found {
+		t.Fatal("subsystem not found")
+	}
+	if state.DevicePath != "/dev/nvme3n1" {
+		t.Errorf("device = %q, want /dev/nvme3n1", state.DevicePath)
+	}
+	if !state.Live {
+		t.Error("a live controller was not detected")
+	}
+	if len(state.Paths) != 1 {
+		t.Fatalf("paths = %v", state.Paths)
+	}
+	path := state.Paths[0]
+	if path.Name != "nvme3" || path.TrAddr != "10.0.0.1" ||
+		path.TrSvcId != "4420" || path.Transport != "tcp" {
+		t.Errorf("path transport identity = %+v", path)
+	}
+	if path.AnaState != "non-optimized" {
+		t.Errorf("ana_state = %q", path.AnaState)
+	}
+
+	// A connecting controller is found but not live: the migration
+	// destination must keep waiting rather than build a dm-clone on it.
+	fs.files["/sys/class/nvme/nvme3/state"] = "connecting\n"
+	state, err = NewNvmeHost(fs.osClient()).ListSubsys(context.Background(), nqn)
+	if err != nil {
+		t.Fatalf("ListSubsys: %v", err)
+	}
+	if !state.Found || state.Live {
+		t.Errorf("connecting path: found=%v live=%v", state.Found, state.Live)
+	}
+
+	// No nvme subsystem at all is "not connected", never an error: the tree
+	// does not exist until the host holds its first fabrics controller.
+	empty := &fakeSysfs{dirs: map[string][]string{}, files: map[string]string{}}
+	state, err = NewNvmeHost(empty.osClient()).ListSubsys(
+		context.Background(), nqn)
 	if err != nil {
 		t.Fatalf("ListSubsys: %v", err)
 	}
 	if state.Found {
-		t.Error("an empty listing reported the subsystem as present")
+		t.Error("an empty sysfs reported the subsystem as present")
 	}
+
+	// update_02.md U2: every sysfs read of the walk is SH15-bounded, exactly
+	// like every command and every configfs attribute. Reverting the cmdCtx
+	// in readTrimmed fails here. The per-suffix guard keeps the assertion
+	// from going vacuous if a later fixture stops exercising one attribute.
+	for _, suffix := range []string{
+		"/subsysnqn", "/address", "/transport", "/state", "/ana_state"} {
+		if !anySuffix(fs.read, suffix) {
+			t.Fatalf("no sysfs read of %s: the deadline check is vacuous",
+				suffix)
+		}
+	}
+	if len(fs.noDeadline) != 0 {
+		t.Errorf("sysfs reads without an SH15 deadline: %v", fs.noDeadline)
+	}
+}
+
+func anySuffix(paths []string, suffix string) bool {
+	for _, path := range paths {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // The dm `attr` column is four positions — dmsetup(8): "(L)ive, (I)nactive,

@@ -73,18 +73,41 @@ func (s *DnAgentServer) convergeSide(
 	s.teardownForbidden(ctx, st, plan)
 	st.appliedCnIds = plan.cnIds
 	st.appliedMigrSrc = plan.migrSrc
-	st.appliedMigrDst = plan.migrDst
+	// The raw conf is tracked alongside the effective one: it is what says a
+	// source role exists at all, and so what teardownForbidden keys its
+	// tracker cleanup on (§11.2).
+	st.appliedMigrSrcRaw = plan.migrSrcRaw
+	// A destination role the request still wants is simply re-applied; one it
+	// has dropped is retired by retireMigrDst, which owns st.appliedMigrDst
+	// until the dm-clone is actually gone.
+	retiredDst := st.appliedMigrDst
+	if plan.wantMigr {
+		st.appliedMigrDst = plan.migrDst
+		retiredDst = nil
+	}
 
-	sideDevReady := s.ensureSideDev(ctx, st, plan, info)
+	state := s.ensureSideDev(ctx, st, plan, info)
 	if !plan.wantDm {
-		// SP_LEVEL_DISABLE: only the side device and its allocation record
-		// remain.
+		// SP_LEVEL_DISABLE: only the side device, its allocation record and —
+		// because zeroing is bottom-layer provisioning, like the trim it
+		// replaced — its zeroing goroutine remain (DN11, §9.4).
+		// teardownForbidden has just removed the per-CN linears, so nothing
+		// holds the dm-clone open any more.
+		s.retireMigrDst(ctx, st, plan, retiredDst)
 		return info
 	}
-	if !sideDevReady {
-		// A side device that is missing or not yet discarded is never
-		// exported (§9.4); report the rest as it currently stands.
-		s.probeAboveSideDev(ctx, st, plan, info)
+	if state != sideDevReady {
+		// The whole per-CN stack is gated together (ruling R4.3): dm-error,
+		// dm-linear, nvmet, migr-src and migr-dst. A side that is still
+		// provisioning has nothing above it by design, and a side whose bits
+		// are incomplete must not export a zeroed impostor of the data.
+		//
+		// The §11.2 fence is the one thing the gate may not skip: a window
+		// opened by an earlier pass is a suspension already in place, and
+		// [D12] bounds it at the window plus one converge whatever the side
+		// device is doing.
+		s.settleFence(ctx, st, plan)
+		s.reportAboveSideDeferred(st, plan, info)
 		return info
 	}
 
@@ -99,8 +122,15 @@ func (s *DnAgentServer) convergeSide(
 		cloneLive = s.ensureMigrDst(ctx, st, plan, info)
 	}
 	s.ensureCnDm(ctx, st, plan, info, cloneLive)
-	if plan.migrSrc != nil {
+	// Only now do the per-CN linears point at the plain side device again,
+	// which is what lets the finished migration's dm-clone be removed.
+	s.retireMigrDst(ctx, st, plan, retiredDst)
+	switch {
+	case plan.migrSrc != nil:
 		s.ensureMigrSrc(ctx, st, plan, info)
+	case plan.migrSrcDeferred:
+		// Serving is untouched; only the reporting differs (§11.2).
+		s.reportMigrSrcDeferred(st, plan, info)
 	}
 	if plan.wantExport {
 		s.ensureCnExports(ctx, st, plan, info, cloneLive)
@@ -109,12 +139,52 @@ func (s *DnAgentServer) convergeSide(
 }
 
 // ---------------------------------------------------------------------------
-// Side device — allocation + the §9.4 trim protocol (DN9)
+// Side device — allocation + the §9.4 provisioning protocol (DN9)
 // ---------------------------------------------------------------------------
 
-// ensureSideDev allocates the side's extents in the on-disk volume table,
-// builds the aggregate dm-linear that concatenates them, and runs the trim
-// protocol; it reports whether the side is ready to be exported.
+// sideDevState is the outcome of one side-device converge — the three things
+// the §9.4 matrix has to distinguish, which a bool cannot.
+type sideDevState int
+
+const (
+	// sideDevFailed is a real fault: an unreadable disk, a table that will not
+	// converge, or a request claiming provisioned = true over a side whose
+	// data is missing or not fully zeroed. ERROR is reported and feeds
+	// err_epoch.
+	sideDevFailed sideDevState = iota
+	// sideDevProvisioning is healthy but not exportable yet: the side is being
+	// zeroed, or it is zeroed and the CP has not flipped its flag. No
+	// err_epoch (§9.5).
+	sideDevProvisioning
+	// sideDevReady is zeroed *and* released by the CP: the per-CN stacks may
+	// converge.
+	sideDevReady
+)
+
+// ensureSideDev implements the §9.4 side provisioning protocol (DN9): allocate
+// the side's extents in the on-disk volume table, build the aggregate
+// dm-linear that concatenates them, and keep the background zeroing goroutine
+// running until every logical extent is zeroed.
+//
+// Zeroing is whole-side and mandatory: dnv is multi-tenant and
+// discard-reads-zeros is not a hardware guarantee, so `blkdiscard --zeroout`
+// is what actually funds "a fresh side reads as zeros" ([D15]). The bits live
+// in the record because zeroed is a property of the side's *allocation*, not
+// of the disk extent.
+//
+// The six rows of update_01.md's matrix (request provisioned × local state):
+//
+//	false / absent   allocate (bits 0), build the linear, start the goroutine
+//	false / partial  ensure the linear, keep the goroutine
+//	false / complete linear ensured, goroutine stopped, still no exports
+//	true  / complete the full DN10 export converge
+//	true  / partial  refuse the exports, keep the goroutine (it self-heals)
+//	true  / absent   never allocate; the data is gone
+//
+// Allocation is permitted **only** at provisioned = false. At true a missing
+// record means the data is gone (a lost or foreign disk); silently
+// re-allocating would present a zeroed impostor as the data-bearing leg, so it
+// is a hard resource error that feeds err_epoch and the replacement flows.
 //
 // The table, not the local store, is authoritative for placement ([D13]): the
 // lookup-or-allocate below is what makes a node that lost --local-store but
@@ -124,32 +194,91 @@ func (s *DnAgentServer) ensureSideDev(
 	st *sideState,
 	plan *sidePlan,
 	info *pb.SideInfo,
-) bool {
+) sideDevState {
 	t := st.tracker
 	name := plan.sideDevName
-	rec, err := s.meta.AllocSide(
+	// total_ext_cnt is never omitted (ruling R4.16). Until a record exists the
+	// only number available is the request's, which is why it is seeded here
+	// and overwritten from the record below — the record always wins.
+	info.TotalExtCnt = plan.conf.GetExtCnt()
+
+	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
+	if err != nil {
+		// An unreadable or corrupt disk is an error, never "absent".
+		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
+		return sideDevFailed
+	}
+	if !ok && plan.provisioned {
+		// Row 6. The detail string is byte-exact on purpose: runbooks and the
+		// integ suites grep it.
+		info.SideDevInfo = t.Err(resKeySideDev, name, tagRecordMissing)
+		return sideDevFailed
+	}
+	if ok {
+		// The record exists, so it — not the request — is what the counters
+		// report from here on, including on the failure paths below: AllocSide
+		// can still refuse (a DN9 ext-count mismatch, or a disk this agent may
+		// not mutate) and those replies must carry the disk's numbers, not a
+		// request value the agent can prove wrong (ruling R4.16). They are
+		// overwritten with the identical values once AllocSide hands the
+		// record back.
+		info.ZeroedExtCnt, info.TotalExtCnt = sideZeroedCnt(rec), sideExtCnt(rec)
+	}
+	// Rows 1-5 all go through AllocSide: it returns the existing record —
+	// re-checking DN9's ext-count invariant, which a resize would violate —
+	// and allocates only when there is none, a case row 6 has already taken
+	// off the table. Its error is reported rather than discarded, because the
+	// matrix needs "could not allocate" to be distinguishable from "allocated"
+	// and from "must not allocate" (ruling R4.2).
+	rec, err = s.meta.AllocSide(
 		ctx, plan.spId, plan.sideId, plan.conf.GetExtCnt())
-	_ = err
+	if err != nil {
+		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
+		return sideDevFailed
+	}
+	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
+	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total
+
 	if err := s.ensureSideDm(ctx, plan, rec); err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-		return false
+		return sideDevFailed
 	}
-	if !rec.GetTrimmed() {
-		// Steps 2-3 of §9.4 are redone on every restart until they stick:
-		// the record is created untrimmed, the discard runs against the
-		// assembled device, and only then does the flag flip.
-		if err := s.dm.BlkDiscard(ctx, plan.sideDevPath); err != nil {
-			info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-			return false
+	if zeroed < total {
+		// Rows 2 and 5. The goroutine runs on both sides of the gate: at
+		// provisioned = true it is what self-heals a side whose bits were lost
+		// or never finished.
+		s.startZeroing(st, plan)
+		if plan.provisioned {
+			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
+			return sideDevFailed
 		}
-		if err := s.meta.SetSideTrimmed(
-			ctx, plan.spId, plan.sideId); err != nil {
-			info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
-			return false
+		if zeroErr := s.zeroingErr(st); zeroErr != nil {
+			// A batch that failed or was killed reports its output, and ERROR
+			// wins while that failure is outstanding; the next successful
+			// batch puts the row back to PROVISIONING (ruling R4.14).
+			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
+			return sideDevProvisioning
 		}
+		info.SideDevInfo = t.Provisioning(resKeySideDev, name,
+			fmt.Sprintf(zeroingDetailsFmt, zeroed, total))
+		return sideDevProvisioning
 	}
-	info.SideDevInfo = t.Ok(resKeySideDev, name, "")
-	return true
+
+	// Rows 3 and 4: fully zeroed. Cancel-and-wait rather than a bare cancel —
+	// a straggler batch's child would otherwise still hold the side device
+	// open (§9.4).
+	s.stopZeroing(st)
+	status, details := s.probeSideDm(ctx, plan, rec)
+	info.SideDevInfo = t.Set(resKeySideDev, name, status, details)
+	switch {
+	case status != pb.ResStatus_RES_STATUS_OK:
+		return sideDevFailed
+	case !plan.provisioned:
+		// Row 3: the side is ready, but the CP has not released it yet.
+		return sideDevProvisioning
+	default:
+		return sideDevReady
+	}
 }
 
 // ensureSideDm converges the aggregate dm-linear against the record's extent
@@ -516,6 +645,94 @@ func (s *DnAgentServer) moveCnAnaGroups(
 }
 
 // ---------------------------------------------------------------------------
+// Provisioning-deferred reporting (§9.4)
+// ---------------------------------------------------------------------------
+
+// reportAboveSideDeferred fills every row above the side device with
+// RES_STATUS_PROVISIONING. It probes nothing, because there is nothing to look
+// at: those resources are deliberately not created while the side underneath
+// them is not exportable.
+//
+// PROVISIONING never feeds err_epoch (§9.5), which is the point: one cause is
+// reported once — on side_dev_info, as ERROR when it really is one — instead
+// of multiplying a single fault across every per-CN stack (ruling R4.4).
+//
+// It fills exactly the keys probeAboveSideDev fills, so a side that becomes
+// exportable later replaces them one for one.
+func (s *DnAgentServer) reportAboveSideDeferred(
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+) {
+	t := st.tracker
+	info.CnIdToDmError = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
+	info.CnIdToDmLinear = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
+	if plan.wantExport {
+		info.CnIdToNvmeof = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
+	}
+	for _, cnId := range plan.cnIds {
+		errName := plan.errName(cnId)
+		info.CnIdToDmError[cnId] = t.Provisioning(
+			resKeyOf(resKeyDmErrorFmt, cnId), errName, tagProvisioningWait)
+		linName := plan.linearName(cnId)
+		info.CnIdToDmLinear[cnId] = t.Provisioning(
+			resKeyOf(resKeyDmLinearFmt, cnId), linName, tagProvisioningWait)
+		if plan.wantExport {
+			nqn := plan.sideNqn(cnId)
+			info.CnIdToNvmeof[cnId] = t.Provisioning(
+				resKeyOf(resKeyNvmeofFmt, cnId), nqn, tagProvisioningWait)
+		}
+	}
+	if plan.migrSrc != nil || plan.migrSrcDeferred {
+		s.reportMigrSrcDeferred(st, plan, info)
+	}
+	if plan.wantMigr {
+		// The destination provisions first, under this same protocol: linear
+		// and zeroing only, no metadata slot, no connect, no dm-clone
+		// (§11.2).
+		dstInfo := &pb.SideInfo_MigrDstInfo{}
+		info.MigrDstInfo = dstInfo
+		nqn := plan.srcNqnOfDst()
+		dstInfo.TargetInfo = t.Provisioning(
+			resKeyMigrDstTarget, nqn, tagProvisioningWait)
+		dstInfo.DmCloneInfo = t.Provisioning(
+			resKeyMigrDstClone, plan.migrFinalName(), tagProvisioningWait)
+	}
+}
+
+// reportMigrSrcDeferred fills the migration-source rows a side would publish
+// once its destination has provisioned.
+//
+// `migr_src_conf.dst_provisioned = false` makes the source behave **exactly**
+// as if migr_src_conf were absent (§11.2): it keeps serving, it does not
+// fence, and it exports nothing to the destination. Without that equivalence
+// the source would fence the primary's path the moment the migration was
+// created, and the leg would have no serving path for the whole zeroing
+// window. The only visible difference is right here — the would-be rows report
+// PROVISIONING instead of being omitted.
+func (s *DnAgentServer) reportMigrSrcDeferred(
+	st *sideState,
+	plan *sidePlan,
+	info *pb.SideInfo,
+) {
+	if plan.migrSrcRaw == nil {
+		return
+	}
+	t := st.tracker
+	// migrSrc is nil while the role is deferred, so the names come from a plan
+	// with the raw conf re-attached.
+	srcPlan := plan.withMigrSrc(plan.migrSrcRaw)
+	srcInfo := &pb.SideInfo_MigrSrcInfo{}
+	info.MigrSrcInfo = srcInfo
+	srcInfo.DmLinearInfo = t.Provisioning(
+		resKeyMigrSrcDm, srcPlan.migrSrcName(), tagProvisioningWait)
+	if plan.wantExport {
+		srcInfo.NvmeofInfo = t.Provisioning(
+			resKeyMigrSrcNvmeof, srcPlan.migrSrcNqn(), tagProvisioningWait)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Teardown
 // ---------------------------------------------------------------------------
 
@@ -541,26 +758,41 @@ func (s *DnAgentServer) teardownForbidden(
 			st.tracker.Drop(resKeyOf(resKeyNvmeofFmt, cnId))
 		}
 	}
-	// A migration role that ended is named by the *previously* applied
-	// conf: the incoming request no longer carries it.
-	if src := st.appliedMigrSrc; src != nil {
-		if plan.migrSrc == nil {
+	// A migration role that ended is named by the *previously* applied conf:
+	// the incoming request no longer carries it. The RAW conf is what the
+	// block keys on, because a source role exists — and reports rows — from
+	// the moment migr_src_conf appears, whether or not the destination has
+	// provisioned (§11.2). Only the resource work is guarded by the
+	// *effective* conf: a role that never left the deferred state built
+	// nothing to remove.
+	if raw := st.appliedMigrSrcRaw; raw != nil {
+		srcPlan := plan.withMigrSrc(raw)
+		built := st.appliedMigrSrc != nil
+		if built && plan.migrSrc == nil {
 			// The cutover was cancelled or finished: the window is over and
-			// the linears go back to their normal targets, resumed.
+			// the linears go back to their normal targets, resumed. They are
+			// resumed here rather than left to ensureCnDm, which a pass that
+			// takes the U4 gate never reaches — and nothing else would ever
+			// resume them ([D12]).
 			s.clearFence(st)
+			s.unfenceLinears(ctx, st, plan)
 		}
-		srcPlan := plan.withMigrSrc(src)
-		if plan.migrSrc == nil || !plan.wantExport {
+		if built && (plan.migrSrc == nil || !plan.wantExport) {
 			s.removeExport(ctx, srcPlan.migrSrcNqn())
+		}
+		if built && (plan.migrSrc == nil || !plan.wantDm) {
+			s.removeDm(ctx, srcPlan.migrSrcName())
+		}
+		// The tracker keys go the moment the role does, deferred or not: an
+		// entry that outlives its resource makes the *next* migration on this
+		// side report the dead one's epoch, because epoch is only refreshed on
+		// a status change (SH14) and both report PROVISIONING.
+		if plan.migrSrcRaw == nil || !plan.wantExport {
 			st.tracker.Drop(resKeyMigrSrcNvmeof)
 		}
-		if plan.migrSrc == nil || !plan.wantDm {
-			s.removeDm(ctx, srcPlan.migrSrcName())
+		if plan.migrSrcRaw == nil || !plan.wantDm {
 			st.tracker.Drop(resKeyMigrSrcDm)
 		}
-	}
-	if dst := st.appliedMigrDst; dst != nil && !plan.wantMigr {
-		s.teardownMigrDst(ctx, st, plan.withMigrDst(dst))
 	}
 	if !plan.wantDm {
 		for _, cnId := range plan.cnIds {
@@ -569,6 +801,35 @@ func (s *DnAgentServer) teardownForbidden(
 			st.tracker.Drop(resKeyOf(resKeyDmLinearFmt, cnId))
 			st.tracker.Drop(resKeyOf(resKeyDmErrorFmt, cnId))
 		}
+	}
+}
+
+// retireMigrDst tears down a destination role the request has dropped — the
+// §11.2 finish step, and any level that forbids the migration layer.
+//
+// It is deliberately *not* part of teardownForbidden, which runs before the
+// per-CN layer is converged. The dm-clone sits **under** the per-CN
+// dm-linears: while one still points at it, `dmsetup remove` on the clone
+// fails EBUSY, and so then does every device beneath it — the metadata
+// wrapper and the side device itself, which a later empty side list can then
+// never remove either. So this runs only where the linears have already left
+// the clone: repointed onto the plain side device by ensureCnDm, or removed
+// outright by teardownForbidden at SP_LEVEL_DISABLE.
+//
+// st.appliedMigrDst is cleared only on success. A pass that could not finish
+// (a gated side still exporting through the clone, a transient EBUSY) leaves
+// the role named, and the next converge retries it.
+func (s *DnAgentServer) retireMigrDst(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	dst *pb.SyncupSideRequest_MigrDstConf,
+) {
+	if dst == nil {
+		return
+	}
+	if s.teardownMigrDst(ctx, st, plan.withMigrDst(dst)) {
+		st.appliedMigrDst = nil
 	}
 }
 
@@ -638,6 +899,13 @@ func (s *DnAgentServer) teardownSide(
 	}
 
 	s.stopMigrRetry(st)
+	// Cancel the §9.4 zeroing goroutine **and wait for it**: its
+	// `blkdiscard --zeroout` child holds /dev/mapper/{DnSideName} open, and
+	// `dmsetup remove` on a device with an open fd fails EBUSY. The wait is
+	// bounded — the child is SIGTERMed at CmdSoftTimeout and SIGKILLed at
+	// CmdHardTimeout — and the loop never blocks on a lock, so waiting for it
+	// here, under the node write lock, cannot deadlock (ruling R4.20).
+	s.stopZeroing(st)
 	// Strictly top-down. The per-CN dm-linears go first because everything
 	// below is one of their table targets — `dmsetup remove` on a device
 	// another dm device still maps fails with EBUSY. The dm-clone then goes

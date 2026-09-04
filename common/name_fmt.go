@@ -24,6 +24,9 @@ const (
 	dmKindCnNsDev      = 0x6
 	dmKindCnCloneFinal = 0x7
 	dmKindCnXferFinal  = 0x8
+	dmKindCnLeg        = 0x9
+	dmKindCnGrp        = 0xa
+	dmKindCnCloneMeta  = 0xb
 
 	nqnKindDnHost   = 0x0
 	nqnKindCnHost   = 0x1
@@ -45,7 +48,6 @@ type NameFmt struct {
 	dmPrefix        string
 	nqnPrefix       string
 	tmpfsPrefix     string
-	cloneVgPrefix   string
 	localStorPrefix string
 }
 
@@ -60,7 +62,6 @@ func NewNameFmt(localStorPrefix string) *NameFmt {
 		dmPrefix:        DmPrefix,
 		nqnPrefix:       NqnPrefix,
 		tmpfsPrefix:     DefaultTmpfsPrefix,
-		cloneVgPrefix:   DefaultCloneVgPrefix,
 		localStorPrefix: localStorPrefix,
 	}
 }
@@ -346,6 +347,47 @@ func (nf *NameFmt) CnNsDevName(
 	)
 }
 
+// CnLegName is the cn-local leg wrapper of architecture.md §3.3 step 1
+// ([D1]): one dm-linear over the leg's single nvme multipath namespace
+// device, kept as the leg-level indirection point (what a teardown reloads
+// onto an error target, and what md/groups consume as the member device).
+func (nf *NameFmt) CnLegName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	legId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnLeg,
+		spId,
+		legId,
+	)
+}
+
+// CnGrpName is a RedundNone group device (§3.3 step 2): a dm-linear over the
+// single leg's data region. RedundMdRaid1 groups use the md names of §4.3
+// instead and have no dm name.
+func (nf *NameFmt) CnGrpName(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	grpId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnGrp,
+		spId,
+		grpId,
+	)
+}
+
 func (nf *NameFmt) CnTmpfsPath(
 	clusterId uint64,
 	cnId uint64,
@@ -373,39 +415,46 @@ func (nf *NameFmt) CnTmpFilePath(
 	)
 }
 
-func (nf *NameFmt) CnCloneVgName(
+// CnCloneMetaDmName wraps one clone's dm-clone metadata slot in the CN
+// clone-metadata arena ([D14], cnagent.md CN18): the slot is a unit range of
+// the single loop device over CnTmpFilePath, and the dm-clone target reads its
+// metadata device from sector 0 and takes no offset argument, so the slot needs
+// a dm-linear of its own — exactly the reason DnMigrMetaDmName exists on the dn
+// side (update_01.md U3). The wrapper's own table is the allocator's registry:
+// there is no on-file allocation table.
+func (nf *NameFmt) CnCloneMetaDmName(
 	clusterId uint64,
 	cnId uint64,
-) string {
-	return fmt.Sprintf(
-		"%s-%016x-%016x",
-		nf.cloneVgPrefix,
-		clusterId,
-		cnId,
-	)
-}
-
-func (nf *NameFmt) CnCloneMetaName(
 	spId uint64,
 	cloneId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%016x-%016x",
+		"%s-%016x-%016x-%01x-%016x-%016x",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnCloneMeta,
 		spId,
 		cloneId,
 	)
 }
 
-func (nf *NameFmt) CnCloneMetaPath(
+// CnCloneMetaDmPrefix is the `dmsetup ls` filter that enumerates this CN's
+// clone-metadata wrappers. Because the dm tables ARE the allocator's registry
+// (update_01.md U3), rebuilding the used-unit map means listing every kind-`b`
+// device of this cluster and cn — so the prefix has to be built from the same
+// nf.dmPrefix and the same kind constant as CnCloneMetaDmName, never from an
+// ad-hoc literal in the role package.
+func (nf *NameFmt) CnCloneMetaDmPrefix(
 	clusterId uint64,
 	cnId uint64,
-	spId uint64,
-	cloneId uint64,
 ) string {
 	return fmt.Sprintf(
-		"/dev/%s/%s",
-		nf.CnCloneVgName(clusterId, cnId),
-		nf.CnCloneMetaName(spId, cloneId),
+		"%s-%016x-%016x-%01x-",
+		nf.dmPrefix,
+		clusterId,
+		cnId,
+		dmKindCnCloneMeta,
 	)
 }
 
@@ -646,4 +695,27 @@ func (nf *NameFmt) LocalCloneBmPath(
 		cloneId,
 		bmIdx,
 	)
+}
+
+// NvmeHostId derives the deterministic NVMe host id that every dnv
+// `nvme connect` MUST carry alongside its dnv hostnqn: 16 bytes of
+// sha256("dnv-hostid:{hostnqn}"), rendered RFC-4122-shaped, exactly like
+// DnNsIdentity.
+//
+// The kernel keeps a strict 1:1 hostnqn<->hostid mapping (nvmf_host_add: a
+// second hostnqn under an already-known hostid is rejected with EINVAL,
+// "found same hostid ... but different hostnqn"), and nvme-cli fills an
+// omitted --hostid from the node-wide /etc/nvme/hostid. dnv picks its own
+// per-identity hostnqn, so an implicit hostid makes every connect a hostage
+// to whatever else on the node connected first — an unrelated NVMe-oF mount
+// under /etc/nvme/hostnqn is enough to make dnv's first connect fail EINVAL,
+// and two dnv identities on one node (a migration dst that is also a leg
+// target, or the integration suite's emulated CNs) collide with each other.
+// Deriving the id from the nqn makes the mapping hold by construction and
+// stay stable across reconnects and restarts.
+func NvmeHostId(hostNqn string) string {
+	sum := sha256.Sum256([]byte("dnv-hostid:" + hostNqn))
+	hexed := hex.EncodeToString(sum[:16])
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hexed[0:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:32])
 }

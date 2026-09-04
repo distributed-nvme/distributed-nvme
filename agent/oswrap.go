@@ -22,6 +22,13 @@ func cmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 		ctx, common.CmdSoftTimeout*time.Second)
 }
 
+// CmdCtx bounds one OS touch by the §7 soft timeout (SH15). The unexported
+// cmdCtx stays; this is the same thing for role packages that call the
+// OsClient directly (the cn sysfs walk of leg.go).
+func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return cmdCtx(ctx)
+}
+
 // run executes one command under the soft timeout. It returns the raw
 // results; callers decide whether a non-zero exit means "absent" or "failed".
 func (b *osBase) run(
@@ -76,6 +83,48 @@ func (b *osBase) runOk(
 	return nil
 }
 
+// Cmd is the exported form of osBase for role packages that must wrap a tool
+// only *they* run — the cn role's mdadm wrapper (`md.go`), the CN base-state
+// and clone-metadata tooling of `clonemeta.go` (tmpfs, `truncate`, `losetup`,
+// `blkdiscard`) and the thin-provisioning-tools reader (`thinbm.go`), i.e. the
+// `cnagent.md` §4.1 file list. There is no LVM in that list, and none anywhere
+// else in dnv: [D14] removed the clone VG, LVM's last user (update_01.md U3).
+// By the §1 split rule those wrappers stay role code, but they still owe the
+// SH15 soft-timeout discipline and the DN19 error capture, which is exactly
+// what this type carries.
+type Cmd struct {
+	osBase
+}
+
+func NewCmd(oc common.OsClient) *Cmd {
+	return &Cmd{osBase{oc: oc}}
+}
+
+// Run executes one command under the soft timeout and returns the raw results;
+// the caller decides whether a non-zero exit means "absent" or "failed".
+func (c *Cmd) Run(
+	ctx context.Context,
+	name string,
+	args ...string,
+) (string, string, int, error) {
+	return c.run(ctx, name, args...)
+}
+
+// RunOk folds a non-zero exit into an error carrying the command output.
+func (c *Cmd) RunOk(ctx context.Context, name string, args ...string) error {
+	return c.runOk(ctx, name, args...)
+}
+
+// RunStdinOk is RunOk with a stdin payload.
+func (c *Cmd) RunStdinOk(
+	ctx context.Context,
+	stdin string,
+	name string,
+	args ...string,
+) error {
+	return c.runStdinOk(ctx, stdin, name, args...)
+}
+
 func cmdError(
 	name string,
 	args []string,
@@ -94,7 +143,7 @@ func cmdError(
 }
 
 // readAttr reads a virtual-filesystem attribute and reports whether it
-// exists. Read-back is trimmed: configfs normalizes and pads some
+// exists. Read-back is whitespace-stripped: configfs normalizes and pads some
 // attributes (SH17).
 func (b *osBase) readAttr(
 	ctx context.Context,
@@ -125,7 +174,7 @@ func (b *osBase) writeAttr(
 }
 
 // ensureAttr is the probe-first attribute write (SH16): read, compare
-// trimmed, write only on a difference.
+// whitespace-stripped, write only on a difference.
 func (b *osBase) ensureAttr(
 	ctx context.Context,
 	path string,

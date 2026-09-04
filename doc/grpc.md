@@ -429,8 +429,8 @@ and one round on a long-lived `CheckDn` stream:
 ```json
 {"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
 {"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc client recv","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc client recv","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
 ```
 
 (`agent_reply` renders as `{}` because `code = 0` and an empty `details` are proto3
@@ -472,3 +472,15 @@ Acceptance: `go test ./common/...` passes; every `grpc.NewClient` /
 options of §4; a manual end-to-end run shows one `trace_id` value flowing
 dnvctl → gateway → agent across `grpc client request`, `grpc server request`,
 `os command` and `etcd put` records.
+
+## 7. Amendments applied to this document
+
+Recorded for traceability; the edits are already applied. Appended rather than
+inserted because §2, §3 and §4 are cited by number from `log.md` and
+`layout.md`.
+
+* `update_01.md` U4 — the §5 `CheckDn` sample's `meta_info.details` gained the
+  trailing ` provisioning=0` field. `DiskMeta.Describe()` now renders
+  `seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d`,
+  the appended count being the sides whose §9.4 zeroing has not finished
+  (`dnagent.md` DN18). Sample values only; no interceptor behaviour changed.

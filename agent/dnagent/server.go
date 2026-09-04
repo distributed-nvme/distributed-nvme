@@ -39,6 +39,16 @@ type DnAgentServer struct {
 	// else ever changes it.
 	fenceWait time.Duration
 
+	// zeroRetryInterval paces the §9.4 background zeroing loop's retries
+	// (common.DnZeroRetryInterval). Field rather than constant for the same
+	// reason as fenceWait: no unit test can wait out the production value.
+	zeroRetryInterval time.Duration
+
+	// bg tracks every background goroutine that owns a child process, so
+	// agent.Serve can join them after GracefulStop and no orphan
+	// `blkdiscard --zeroout` ever outlives the agent (§9.4, update_01.md U4).
+	bg sync.WaitGroup
+
 	// mu guards the in-memory mirrors of the local store below. It is a
 	// leaf lock: never held across an OS call.
 	mu    sync.Mutex
@@ -46,8 +56,16 @@ type DnAgentServer struct {
 	sides map[string]*sideState
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the DN8
-	// background retries hang off it so shutdown stops them.
+	// background retries and the §9.4 zeroing loops hang off it so shutdown
+	// stops them.
 	rootCtx context.Context
+}
+
+// WaitBackground joins every dn background goroutine. cmd/dnv-agent passes it
+// to agent.Serve, which cancels rootCtx and calls it after GracefulStop has
+// drained the last RPC (update_01.md U4, ruling R4.13).
+func (s *DnAgentServer) WaitBackground() {
+	s.bg.Wait()
 }
 
 // dnState is one synced DN: its last fully applied request plus the ResInfo
@@ -71,11 +89,29 @@ type sideState struct {
 	// role ending — can still be named when they are torn down.
 	appliedCnIds   []uint64
 	appliedMigrSrc *pb.SyncupSideRequest_MigrSrcConf
-	appliedMigrDst *pb.SyncupSideRequest_MigrDstConf
+	// appliedMigrSrcRaw is the source conf as received, deferred or not.
+	// appliedMigrSrc is nil for a deferred one — nothing was built — but the
+	// role still registered its migr_src_* rows, so the tracker cleanup has to
+	// key on this one or a role that ends while deferred leaks its entries and
+	// the next migration inherits their epoch (§11.2, SH14).
+	appliedMigrSrcRaw *pb.SyncupSideRequest_MigrSrcConf
+	appliedMigrDst    *pb.SyncupSideRequest_MigrDstConf
 
 	// retrying/cancel drive the DN8 background migration-connect retry.
 	retrying bool
 	cancel   context.CancelFunc
+
+	// zeroing/zeroCancel/zeroDone drive the §9.4 background side-zeroing
+	// goroutine. zeroDone is closed by the goroutine on exit, which is what
+	// makes cancel-and-wait possible before the side device is removed — its
+	// `blkdiscard --zeroout` child holds that device open.
+	zeroing    bool
+	zeroCancel context.CancelFunc
+	zeroDone   chan struct{}
+	// zeroErr is the last failed batch's error, published for side_dev_info
+	// exactly the way a cn legProber publishes its outcome (CN11). It is
+	// cleared by the next successful batch (ruling R4.14).
+	zeroErr error
 
 	// fenceAt is when this side's per-CN dm-linears were suspended for the
 	// §11.2 src cutover; zero when no fence is in progress. fenceTimer
@@ -86,9 +122,11 @@ type sideState struct {
 	// that no dnv device stays suspended indefinitely.
 	fenceAt    time.Time
 	fenceTimer *time.Timer
-	// fenceRestarted marks a side reloaded from the local store: any
-	// suspended linear it owns is debris from the previous process, and is
-	// retired at once rather than starting a second window.
+	// fenceRestarted marks a side reloaded from the local store whose per-CN
+	// linears this process found suspended: they are debris from the previous
+	// one, and are retired at once rather than starting a second window. It is
+	// set only for those sides — a blanket flag would silently skip the first
+	// real cutover window after any restart (adoptFence).
 	fenceRestarted bool
 }
 
@@ -103,15 +141,16 @@ func NewDnAgentServer(
 	trConf *pb.NvmeTrConf,
 ) *DnAgentServer {
 	return &DnAgentServer{
-		nf:        nf,
-		store:     agent.NewStore(oc, localStore),
-		meta:      NewDiskMeta(oc, disk),
-		dm:        agent.NewDm(oc),
-		nvmet:     agent.NewNvmet(oc),
-		host:      agent.NewNvmeHost(oc),
-		locks:     agent.NewLockSet(),
-		disk:      disk,
-		fenceWait: common.SuspendSeconds * time.Second,
+		nf:                nf,
+		store:             agent.NewStore(oc, localStore),
+		meta:              NewDiskMeta(oc, disk),
+		dm:                agent.NewDm(oc),
+		nvmet:             agent.NewNvmet(oc),
+		host:              agent.NewNvmeHost(oc),
+		locks:             agent.NewLockSet(),
+		disk:              disk,
+		fenceWait:         common.SuspendSeconds * time.Second,
+		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
 		port: agent.PortConf{
 			TrType:  trConf.GetTrType(),
 			AdrFam:  trConf.GetAdrFam(),

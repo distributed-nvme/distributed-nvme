@@ -44,7 +44,7 @@ func TestLockMapping(t *testing.T) {
 	blocked := make(chan struct{})
 	go func() {
 		defer close(blocked)
-		_, _ = srv.SyncupSide(ctx, sideReq(1, testSide, testCn0, nil,
+		_, _ = srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide, testCn0, nil,
 			pb.SpLevel_SP_LEVEL_READWRITE))
 	}()
 	if !waitFor(t, 2*time.Second, func() bool { return node.hasCall(slow) }) {
@@ -69,7 +69,7 @@ func TestLockMapping(t *testing.T) {
 	otherDone := make(chan struct{})
 	go func() {
 		defer close(otherDone)
-		_, _ = srv.SyncupSide(ctx, sideReq(1, testSide2, testCn0, nil,
+		_, _ = srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide2, testCn0, nil,
 			pb.SpLevel_SP_LEVEL_READWRITE))
 	}()
 	select {
@@ -82,7 +82,7 @@ func TestLockMapping(t *testing.T) {
 	sameDone := make(chan struct{})
 	go func() {
 		defer close(sameDone)
-		_, _ = srv.SyncupSide(ctx, sideReq(1, testSide, testCn0, nil,
+		_, _ = srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide, testCn0, nil,
 			pb.SpLevel_SP_LEVEL_READWRITE))
 	}()
 	select {
@@ -120,7 +120,7 @@ func TestSyncupDnWaitsForBusySide(t *testing.T) {
 	sideDone := make(chan struct{})
 	go func() {
 		defer close(sideDone)
-		_, _ = srv.SyncupSide(ctx, sideReq(1, testSide, testCn0, nil,
+		_, _ = srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide, testCn0, nil,
 			pb.SpLevel_SP_LEVEL_READWRITE))
 	}()
 	if !waitFor(t, 2*time.Second, func() bool { return node.hasCall(slow) }) {

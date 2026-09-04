@@ -13,16 +13,21 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
 
 ## 1. Scope and placement
 
-* Files: `common/osclient.go` (interface + `LimitedOsClient`),
+* Files: `common/osclient.go` (interface + `LimitedOsClient` + the exported raw
+  block helpers `WriteBlockAt`/`ReadBlockDirectAt` of §4.5.1),
   `common/osclient_fake.go` (test double), `common/osclient_test.go`.
 * Package: `common`, alongside `constants.go`/`name_fmt.go`.
-* Consumers: primarily `dnv-agent` (dn/cn) for `dmsetup`/LVM/`mdadm`/`nvme`/
+* Consumers: primarily `dnv-agent` (dn/cn) for `dmsetup`/`mdadm`/`nvme`/
   nvmet-configfs work and for persisting the `Local*Path` protobuf state files;
   `dnvctl`'s copier may use it too. **All** OS command execution and disk file
   I/O in the codebase goes through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile` directly outside this file. This is what makes
   the logging rules of `log.md` R8.1/R8.2 enforceable and makes every consumer
-  unit-testable via `FakeOsClient`.
+  unit-testable via `FakeOsClient`. There is exactly **one** sanctioned
+  exception, recorded in §4.5.1: the CN11 leg-health probers call the
+  package-level helpers `common.WriteBlockAt` / `common.ReadBlockDirectAt`
+  directly — outside the semaphore, never under a lock — and log their own
+  records (`update_01.md` U2).
 * Dependencies: `golang.org/x/sync/semaphore`, `google.golang.org/protobuf`.
   Go ≥ 1.20 for `exec.Cmd.Cancel`/`WaitDelay`; the module itself pins
   `go 1.26.5` in `go.mod`.
@@ -108,7 +113,11 @@ type OsClient interface {
 ```
 
 (The full doc comments from the requirement are kept in the source; they are
-abbreviated above for readability. Signatures are exact and MUST NOT change.)
+abbreviated above for readability. Signatures are exact and MUST NOT change.
+The *method set* has changed twice by recorded amendment: `WriteFileDirect` was
+added by `dnagent.md` §5, and `ReadBlockDirect` was **removed** by
+`update_01.md` U2 — its only caller, the CN11 leg prober, now calls the
+package-level helper of §4.5.1 outside the semaphore. §9 records both.)
 
 ## 3. Constant to add to `constants.go`
 
@@ -121,9 +130,9 @@ existing `const` block:
 	DefaultOsClientLimit = 32
 ```
 
-Rationale: during convergence an agent fans out many `dmsetup`/`lvm`/`mdadm`/
-`nvme` invocations plus state-file writes; 32 bounds fork and disk pressure
-while leaving ample parallelism.
+Rationale: during convergence an agent fans out many `dmsetup`/`mdadm`/`nvme`/
+`blkdiscard` invocations plus state-file writes; 32 bounds fork and disk
+pressure while leaving ample parallelism.
 
 ## 4. `LimitedOsClient` — normative behavior
 
@@ -131,8 +140,10 @@ while leaving ample parallelism.
 
 * `func NewLimitedOsClient(limit int64) *LimitedOsClient` — `limit <= 0` means
   "use `DefaultOsClientLimit`".
-* The limit caps the **sum of in-flight calls across all six methods**. Use a
-  single `semaphore.Weighted(limit)`. Every public method first does
+* The limit caps the **sum of in-flight calls across all eight interface
+  methods**. It deliberately does **not** cover the §4.5.1 package-level
+  helpers: probe IO must never consume a slot. Use a single
+  `semaphore.Weighted(limit)`. Every public method first does
   `sem.Acquire(ctx, 1)` (blocking, ctx-aware: a canceled/expired ctx returns
   `ctx.Err()` without performing the operation and without logging an
   operation record), and `defer sem.Release(1)`.
@@ -210,7 +221,9 @@ methods.
   `Sync()` (the fdatasync the caller's crash protocol depends on), close. It
   never *creates* a file (no `O_CREATE`); the intended target is a block
   device, which always exists at full size. Against a regular file — tests —
-  `WriteAt` past the end extends it, as `pwrite` does.
+  `WriteAt` past the end extends it, as `pwrite` does. The body is the
+  package-level helper `WriteBlockAt` (§4.5.1); `WriteBlock` adds only the
+  semaphore slot and the `os write block` record.
 * **Buffered IO, never `O_DIRECT`.** Durability comes from the `Sync()`. The
   regions the DN agent reads back this way — the header block and the two
   volume-table slots — are never part of any dm table, so no dm path can
@@ -227,13 +240,94 @@ methods.
   `length` only (§4.6). Metadata blocks are large and uninteresting in a log,
   and a device region may hold arbitrary tenant bytes.
 
+### 4.5.1 Exported raw helpers and the probe-IO carve-out
+
+`update_01.md` U2 removed `ReadBlockDirect` from the `OsClient` interface — the
+CN11 leg-health prober was its only caller, and a prober must never hold a
+semaphore slot (below). The two raw bodies are exported from
+`common/osclient.go` as plain package-level functions instead. They take no
+`ctx`, acquire **no** semaphore slot, and log **nothing**:
+
+```go
+// WriteBlockAt pwrites data at byte offset and fdatasyncs the file
+// descriptor before returning. Buffered IO; a fresh fd per call, never a
+// cached one; never O_CREATE (the target is a block device that already
+// exists at full size).
+func WriteBlockAt(path string, offset uint64, data []byte) error
+
+// ReadBlockDirectAt preads exactly length bytes at byte offset with
+// O_RDONLY|O_DIRECT into a 4096-aligned bounce buffer (allocate
+// length+4096, slice to the first aligned boundary, copy out), then
+// closes. offset and length MUST be multiples of 4096 and length != 0 —
+// checked **before** the open, so a misaligned caller never touches the
+// device. A short read is an error, exactly like ReadBlock. A fresh fd per
+// call.
+func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error)
+```
+
+4096 is the alignment because O_DIRECT alignment is per-device, 4096 satisfies
+every device dnv touches, and it is the probe's natural unit
+(`LegHealthBlockSize`). `LimitedOsClient.WriteBlock` is a thin wrapper over
+`WriteBlockAt` (semaphore + the `os write block` record of §4.6);
+`ReadBlockDirectAt` has no `OsClient` wrapper at all. The buffered `readBlockAt`
+behind `ReadBlock` stays **unexported** — nothing outside the `OsClient` may
+bypass it for metadata IO ([D13]).
+
+**The recorded carve-out.** Probe IO — and only probe IO — is the one
+sanctioned direct-syscall path in dnv:
+
+* *What it is.* The §3.6 / [D6] leg health probe (`cnagent.md` CN11, §2.2):
+  write a block through the leg wrapper with `WriteBlockAt`, read it back with
+  `ReadBlockDirectAt`. The read must bypass the page cache — a buffered read of
+  a just-written block would be answered from cache and observe no device IO at
+  all, making the read-back vacuous. The write half needs no direct twin: its
+  `fdatasync` already forces the data to the device and surfaces the IO error.
+* *It may block indefinitely, by design.* A leg with no serving path
+  (`ctrl_loss_tmo = -1`) queues IO forever, so the calling goroutine sits in
+  uninterruptible D state until that IO is errored — which happens only when the
+  agent disconnects the path (`cnagent.md` CN21). This is the feature working: a
+  hung probe is how a silently stalled target is detected. Two consequences the
+  implementer must not design around: **cancelling the prober's context does not
+  unblock a syscall already in flight** (the helpers take no ctx; the prober's
+  ctx is checked once before the call and otherwise only carries the CN2
+  per-attempt trace id into the records below), and **nothing ever waits for a
+  prober to finish** — cancel and move on, never cancel-and-wait. (Contrast
+  `update_01.md` U4's dn zeroing goroutines, which *are* waited for: their
+  `blkdiscard` is a killable child process, not a blocked syscall.)
+* *It must never run under a lock.* CN1 already keeps the probers out of the
+  lock hierarchy; a wedged probe under the node or object lock would freeze
+  every converge and Check round on the node.
+* *It must never run through the semaphore.* `LimitedOsClient` is a
+  `DefaultOsClientLimit` = 32 slot semaphore held across the blocking syscall.
+  One dead or partitioned DN can back ≥ 32 legs on a CN (`MaxSideCntPerDn` =
+  1024); 32 wedged probes then starve **every** OS operation on the node —
+  including the `nvme disconnect` that is the only documented release mechanism
+  for those very probes, and the mdadm/dm commands the §10.4 self-healing
+  needs. Deadlock by construction; hence the helpers, not a second OsClient and
+  not a probe budget (`update_01.md` §8 rejects both).
+* *Who may call them.* Only the cn agent's lock-free prober goroutines
+  (`cnagent.md` CN1/CN11), through the small fakeable probe-IO dependency U2
+  defines alongside `healthcheck.go`. These two helpers are the only block-IO
+  syscalls any package outside `common` may call; every other caller — the dn
+  `diskmeta.go` header/volume-table path above all — keeps using the `OsClient`
+  methods of §4.5.
+* *Records.* Because the helpers log nothing, the prober emits its own two
+  records, `probe write block` and `probe read block direct` (§4.6). They are
+  deliberately **not** `os …` messages.
+
+Everything §4.5 says about payload logging (`path`, `offset` and `length` only,
+never `data` — a device region may hold arbitrary tenant bytes) and about never
+shelling out to `dd` (uutils dd 0.8.0's broken `iflag=`/`oflag=direct`,
+`dnagent_integtest.md` §4) applies to the helpers and to the prober's records
+unchanged.
+
 ### 4.6 Logging (implements `log.md` §5.1)
 
 One `slog.InfoContext(ctx, ...)` record per call, emitted on completion, with
 the exact `msg` strings and attributes below. Append
 `slog.String("error", err.Error())` only when `err != nil`.
 
-| method | msg | attrs |
+| OsClient method | msg | attrs |
 |---|---|---|
 | RunCommand | `os command` | `cmd`, `args` (`slog.Any`), `stdin`, `stdout`, `stderr`, `exit_code`, `error?` |
 | ReadFile | `os read file` | `path`, `size` (= `len(data)`), `data` (= `TruncForLog(data)`), `error?` |
@@ -244,6 +338,26 @@ the exact `msg` strings and attributes below. Append
 | ReadProto | `os read proto` | `path`, `size` (= serialized length read), `data` (`slog.Any(PbToLogValue(target))`), `error?` |
 | WriteProto | `os write proto` | `path`, `size` (= serialized length), `data` (`slog.Any(PbToLogValue(msg))`), `error?` |
 
+The CN11 leg probers do **not** call an `OsClient` (§4.5.1). They call the
+package-level helpers and emit these two records themselves, one per probe
+half, under the attempt's fresh trace id — same attributes, same "never `data`"
+rule:
+
+| emitter | msg | attrs |
+|---|---|---|
+| prober write half (`common.WriteBlockAt`) | `probe write block` | `path`, `offset`, `length` (= `len(data)`), `error?` — never `data` |
+| prober read half (`common.ReadBlockDirectAt`) | `probe read block direct` | `path`, `offset`, `length`, `error?` — never `data` |
+
+The `probe …` prefix is load-bearing: `cnagent_integtest.md` §9's `mutations()`
+grepped for `os write block` **and** `os read block direct` records, and needed
+a `-9-` path exemption to tolerate the continuous health probes. With these
+messages the probe records fall out of that grep **by construction**, so the
+exemption is deleted and the grep list keeps `os write block` alone — no agent
+emits `os read block direct` any more (`update_01.md` U2-T5). `os write block`
+survives unchanged as the
+dn agent's `diskmeta.go` record, so a `probe …` record and an `os …` record can
+never be confused for one another.
+
 Notes:
 
 * Command stdin/stdout/stderr are logged in full (no truncation) — the
@@ -253,6 +367,10 @@ Notes:
   never reach the log.
 * A semaphore-acquire failure (ctx canceled while waiting) logs nothing — the
   operation never happened.
+* The `probe …` records carry no semaphore semantics: a prober never waits for
+  a slot. The same "never happened, never logged" rule still applies to it,
+  through the one `ctx.Err()` check the prober makes *before* calling a helper
+  — an attempt cancelled there emits no record at all.
 
 ## 5. Reference implementation — `common/osclient.go` (core, complete)
 
@@ -262,6 +380,7 @@ package common
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -270,6 +389,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/protobuf/proto"
@@ -549,7 +669,7 @@ func (c *LimitedOsClient) WriteBlock(
 		return err
 	}
 
-	err := writeBlockAt(path, offset, data)
+	err := WriteBlockAt(path, offset, data)
 
 	attrs := []any{
 		slog.String("path", path),
@@ -561,9 +681,48 @@ func (c *LimitedOsClient) WriteBlock(
 	return err
 }
 
-// readBlockAt / writeBlockAt are the §4.5 raw-device helpers. Buffered
-// pread/pwrite plus an fdatasync on the write side; no O_DIRECT, and never a
-// shell-out to dd.
+// ReadBlockDirectAt is the §4.5.1 O_DIRECT read: pread into a 4096-aligned
+// buffer so the read is served by the device, not the page cache (the leg
+// health probe's read-back would otherwise observe nothing). It is NOT an
+// OsClient method: it takes no semaphore slot and logs nothing, because it may
+// block for as long as the device queues IO. Its only caller is the cn agent's
+// lock-free prober, which logs `probe read block direct` itself.
+func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error) {
+	const align = 4096
+	if offset%align != 0 || length%align != 0 || length == 0 {
+		return nil, fmt.Errorf(
+			"read block direct: %s offset=%d length=%d not %d-aligned",
+			path, offset, length, align)
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECT, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	defer syscall.Close(fd)
+	raw := make([]byte, length+align)
+	shift := align - (uint64(uintptr(unsafe.Pointer(&raw[0]))) % align)
+	if shift == align {
+		shift = 0
+	}
+	buf := raw[shift : shift+length]
+	n, err := syscall.Pread(fd, buf, int64(offset))
+	if err != nil {
+		return nil, &os.PathError{Op: "pread", Path: path, Err: err}
+	}
+	if uint64(n) != length {
+		return nil, fmt.Errorf(
+			"short read: %s offset=%d length=%d got=%d",
+			path, offset, length, n)
+	}
+	data := make([]byte, length)
+	copy(data, buf)
+	return data, nil
+}
+
+// readBlockAt is the §4.5 buffered raw-device read behind ReadBlock, and stays
+// unexported. WriteBlockAt is the buffered pwrite + fdatasync behind
+// WriteBlock, and is exported because the §4.5.1 probe write half calls it
+// directly. Neither uses O_DIRECT, and neither ever shells out to dd.
 func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
@@ -589,7 +748,7 @@ func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
 	return data, nil
 }
 
-func writeBlockAt(path string, offset uint64, data []byte) error {
+func WriteBlockAt(path string, offset uint64, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return err
@@ -609,7 +768,10 @@ func writeBlockAt(path string, offset uint64, data []byte) error {
 ## 6. Test double — `common/osclient_fake.go` (complete)
 
 Exported (not `_test.go`) so agent/worker/gateway tests in other packages can
-reuse it. Unset function fields default to success.
+reuse it. Unset function fields default to success. There is no
+`ReadBlockDirectFn`: the probe read left the interface with `update_01.md` U2,
+and probe IO is faked through the cn agent's own probe-IO dependency
+(`cnagent.md` §4.2 / §6 test 15), not through this double.
 
 ```go
 package common
@@ -704,6 +866,15 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 {"time":"2026-08-28T10:00:02.140Z","level":"INFO","msg":"os write block","path":"/dev/loop0","offset":4194304,"length":4096,"trace_id":"a1b2c3d4e5f60718"}
 ```
 
+One CN11 probe attempt against a kind-`9` leg wrapper — emitted by the prober
+itself, not by an `OsClient` (§4.5.1). Both halves carry the *same* trace id,
+the fresh per-attempt id of `cnagent.md` CN2:
+
+```json
+{"time":"2026-08-28T10:00:03.010Z","level":"INFO","msg":"probe write block","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
+{"time":"2026-08-28T10:00:03.014Z","level":"INFO","msg":"probe read block direct","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
+```
+
 ## 8. Tests and acceptance checklist
 
 Unit tests (`common/osclient_test.go`; Linux assumed — `sh`, `sleep`, `cat`
@@ -748,7 +919,64 @@ available):
    on either method. The `os read block` / `os write block` records carry
    `path`/`offset`/`length` and **no** `data` attribute. The fake dispatches
    both methods and returns zero values when the fn fields are unset.
+10. **Direct read helper** (`common.ReadBlockDirectAt` — no `OsClient`
+    involved): against a pre-sized backing file, `WriteBlock` then
+    `ReadBlockDirectAt` at an aligned offset returns the same bytes (tmpfs
+    rejects O_DIRECT — run against a file on a real filesystem, and skip
+    with a diagnostic if the open fails with `EINVAL`); a misaligned
+    `offset` or `length` (or `length == 0`) is rejected **before** the
+    open, so a missing path is irrelevant to the rejection; a read past the
+    end is a short read, i.e. an error. The helper emits **no** log record —
+    assert the captured handler is empty after the call (`os read block
+    direct` no longer exists anywhere in `common`). The `OsClient` interface,
+    `LimitedOsClient` and `FakeOsClient` no longer carry
+    `ReadBlockDirect`/`ReadBlockDirectFn` at all, so there is no
+    interface-level dispatch test for it.
+11. **Exported write helper**: `common.WriteBlockAt` is exercised by item 9
+    through `WriteBlock`; assert additionally that calling it directly writes
+    and fdatasyncs without emitting any record (the `os write block` record
+    belongs to the `OsClient` wrapper alone).
 
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;
 `DefaultOsClientLimit` exists in `constants.go`; repo-wide grep shows no
-`os/exec` usage outside `common/osclient.go`.
+`os/exec` usage outside `common/osclient.go`;
+`grep -rn "ReadBlockDirect" common/` hits only the exported helper
+`ReadBlockDirectAt` (and its test) — the `OsClient` interface,
+`LimitedOsClient` and `FakeOsClient` no longer carry the method
+(`update_01.md` §7 item 3); `grep -rn "os read block direct" .` finds nothing
+outside historical documents.
+
+## 9. Amendments applied to this document
+
+Recorded for traceability; the edits are already applied. Unlike the
+"amendments applied to companion documents" sections of `dnagent.md` §5 and
+`cnagent.md` §5, this one records edits made **to this document**.
+
+* `update_01.md` U2 (U2-T4) — **`ReadBlockDirect` removed** from the `OsClient`
+  interface (§2), from `LimitedOsClient` (§5) and from `FakeOsClient` (§6). Its
+  two raw bodies are exported instead as the package-level helpers
+  `common.WriteBlockAt` / `common.ReadBlockDirectAt`, which take no `ctx`, no
+  semaphore slot and log nothing. §4.5.1 was rewritten from a method
+  specification into the **probe-IO carve-out**: probe IO is the one sanctioned
+  direct-syscall path in dnv, it may block indefinitely by design, and it must
+  never run under a lock or through the semaphore (a wedged probe would
+  otherwise pin one of the 32 `DefaultOsClientLimit` slots, and ≥ 32 of them
+  starve the node — including the `nvme disconnect` that releases them). §1's
+  "never call `os/exec` or `os.ReadFile`/`os.WriteFile` directly" absolute
+  gained that same carve-out, and §4.1's slot count now excludes the helpers.
+  §4.6 lost the `ReadBlockDirect` row and gained the prober-emitted
+  `probe write block` / `probe read block direct` records; §7 shows a probe
+  attempt; §8 test 10 was retargeted at the helper and test 11 added. The
+  `os read block` / `os write block` rows are deliberately **unchanged** —
+  `WriteBlock` is still the dn `diskmeta.go` path and
+  `integtest/dnagent_test.sh` greps that record. §4.6's note on the
+  `mutations()` grep is past tense about `os read block direct`: with the msg
+  emitted by nothing, `integtest/cnagent_test.sh` drops it from that `jq`
+  clause too, which is what makes §8's `grep -rn "os read block direct" .`
+  acceptance line true outside this and the other narrative documents.
+* `update_01.md` U3 — LVM is gone from the whole repo (the CN clone-metadata
+  arena became a slot allocator over one loop device, `architecture.md` [D14]),
+  so §1's consumer list and §3's rationale no longer name it.
+* Earlier amendments, recorded in their originating documents: `dnagent.md` §5
+  added `WriteFileDirect` (`os write file direct`); `cnagent.md` §5 added
+  `ReadBlockDirect`, which U2 above has now removed again.

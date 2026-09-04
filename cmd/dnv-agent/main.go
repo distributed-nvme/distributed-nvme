@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/agent/cnagent"
 	"github.com/distributed-nvme/distributed-nvme/agent/dnagent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -69,6 +70,9 @@ func newCnCmd() *cobra.Command {
 		RunE:  runCn,
 	}
 	addCommonFlags(cmd)
+	cmd.Flags().Uint64("capacity", 0,
+		"capacity budget in bytes this CN is willing to host; "+
+			"GetCnSize replies it verbatim, 0 = use the CP default")
 	return cmd
 }
 
@@ -151,9 +155,16 @@ func runDn(cmd *cobra.Command, args []string) error {
 		srv.Reconcile,
 		func(grpcServer *grpc.Server) {
 			pb.RegisterDiskNodeAgentServer(grpcServer, srv)
-		})
+		},
+		// The dn owns background goroutines with long-running children — the
+		// §9.4 zeroing loop's `blkdiscard --zeroout` — so shutdown joins them
+		// and no orphan child outlives the agent (update_01.md U4).
+		srv.WaitBackground)
 }
 
+// runCn mirrors runDn (CM4/CN-CM2): --capacity is the one cn-only value and
+// is optional, since 0 means "no local opinion" and the CP substitutes
+// DefaultCnCap.
 func runCn(cmd *cobra.Command, args []string) error {
 	if err := bindViper(cmd); err != nil {
 		return err
@@ -161,8 +172,26 @@ func runCn(cmd *cobra.Command, args []string) error {
 	if err := requireValues(requiredCommon...); err != nil {
 		return err
 	}
-	// The cn role's policy package (agent/cnagent) is specified by the
-	// companion cnagent.md and lands with it; the shared mechanism it plugs
-	// into — package agent and this command tree — is already in place.
-	return fmt.Errorf("the cn role is not implemented yet")
+	ctx, stop := signal.NotifyContext(
+		context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	localStore := viper.GetString("local-store")
+	nf := common.NewNameFmt(localStore)
+	// The process's single OsClient, shared by every wrapper (osclient.md).
+	oc := common.NewLimitedOsClient(0)
+	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
+		viper.GetUint64("capacity"), trConfFromViper())
+
+	return agent.Serve(ctx,
+		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
+		srv.Reconcile,
+		func(grpcServer *grpc.Server) {
+			pb.RegisterControllerNodeAgentServer(grpcServer, srv)
+		},
+		// The cn passes nil: its CN11 leg probers are stopped by cancelling
+		// rootCtx and are deliberately never joined — a probe wedged in an
+		// uninterruptible pread would hang shutdown forever, which is the very
+		// starvation U2 exists to prevent (ruling R4.13).
+		nil)
 }

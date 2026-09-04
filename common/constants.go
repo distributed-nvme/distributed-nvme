@@ -85,10 +85,20 @@ const (
 	DmPrefix  = "dnv"
 	NqnPrefix = "nqn.2024-01.io.dnv"
 
-	DefaultTmpfsPrefix    = "/tmp/dnv-tmpfs"
-	DefaultCloneVgPrefix  = "dnv-clone-vg"
-	DefaultCloneVgSize    = 1 * 1024 * 1024 * 1024
-	DefaultCloneVgExtSize = 4 * 1024 * 1024
+	DefaultTmpfsPrefix = "/tmp/dnv-tmpfs"
+
+	// The CN clone-metadata arena ([D14], cnagent.md CN5/CN18): one sparse
+	// file (CnTmpFilePath) on the CN tmpfs, attached to a single loop
+	// device, carved into fixed units by the CN slot allocator whose
+	// registry is the kind-`b` wrapper dm tables themselves. No LVM
+	// (update_01.md U3).
+	// CnCloneMetaAreaSize is the `truncate` size of that file — and so the
+	// arena the slot allocator carves, 256 units. CnCloneMetaUnit is the
+	// allocation granularity, the cn twin of DnCloneMetaUnit; it is
+	// deliberately NOT called an "extent", which everywhere else in dnv
+	// means the 1 GiB DN/CN allocation unit (DefaultDnExtSize).
+	CnCloneMetaAreaSize = 1 * 1024 * 1024 * 1024
+	CnCloneMetaUnit     = 4 * 1024 * 1024
 
 	// dnv DN disk format ([D13]). All byte offsets on the raw --disk device.
 	DnHeaderOffset     = 0 // 4 KiB header block
@@ -160,6 +170,44 @@ const (
 	// Seconds between background retries of a pending migration-destination
 	// nvme connect (dnagent.md DN8).
 	DnMigrConnectRetryInterval = 5
+
+	// Side provisioning ([D15], update_01.md U4, architecture.md §9.4,
+	// dnagent.md DN9): the background zeroing goroutine zeroes
+	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
+	// command, through the side's dm-linear, and persists that batch's
+	// `zeroed_bits` after each success. The batch size assumes fast
+	// hardware Write Zeroes: batch × ext_size must stay inside
+	// CmdSoftTimeout. A failed or timed-out batch is retried no sooner
+	// than DnZeroRetryInterval seconds later — the zeroing twin of
+	// DnMigrConnectRetryInterval, never a hot loop.
+	DnZeroBatchExtCnt   = 10
+	DnZeroRetryInterval = 5
+
+	// CN base state (architecture.md §3.2): the tmpfs that carries the
+	// clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so that even
+	// a fully materialized arena plus slack never hits ENOSPC on the mount.
+	// The file itself is sparse: pages appear as dm-clone writes metadata
+	// and are released again by the allocator's hole-punch discard
+	// (update_01.md U3).
+	DefaultCnTmpfsSize = 2 * 1024 * 1024 * 1024
+
+	// Seconds between two §3.6 leg health-probe rounds on a primary
+	// cntlr, and how long one probe IO may stay in flight before the leg
+	// is reported stalled (cnagent.md CN11). Probes are single-flight per
+	// leg and run outside every lock.
+	CnLegProbeInterval     = 5
+	CnLegProbeStallSeconds = 15
+
+	// The §3.6 health block: the last 4 KiB of the leg's meta region.
+	// Payload = magic + writer id + timestamp, never interpreted on read
+	// ([D6]).
+	LegHealthBlockSize = 4096
+	LegHealthMagic     = "DNVHLTH1"
+
+	// Seconds between background retries of a pending cn outbound nvme
+	// connect — leg side connections and clone source connections
+	// (cnagent.md CN10/CN18); the cn twin of DnMigrConnectRetryInterval.
+	CnConnectRetryInterval = 5
 
 	// SuspendSeconds is the §11.2 src-cutover grace window: a migration
 	// source's per-CN dm-linears are held suspended for at least this long

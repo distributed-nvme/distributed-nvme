@@ -333,6 +333,23 @@ R11. The two raw-block records — the DN's on-disk metadata path ([D13]) —
 deliberately carry no `data` attribute at all: the blocks are large, opaque,
 and may hold arbitrary tenant bytes.
 
+Two block-IO records are emitted **outside** `LimitedOsClient`, by the cn
+agent's `directLegProbeIO` (`agent/cnagent`), because the CN11 leg health
+probers deliberately bypass the OsClient semaphore (`osclient.md` §4.5.1,
+`update_01.md` U2). Their `msg` strings are normative here like every other:
+
+| event | msg | required attrs |
+|---|---|---|
+| probe block write | `probe write block` | `path`, `offset`, `length` (bytes written), `error?` — **never** `data` |
+| probe block direct read | `probe read block direct` | `path`, `offset`, `length`, `error?` — **never** `data` |
+
+They are `probe …` and not `os …` on purpose: `cnagent_integtest.md` §9's
+mutation grep names `os write block` explicitly, and the continuous health
+probes must fall out of that list by construction rather than by a path-based
+exemption. Everything else about them — one Info record per operation, emitted
+on completion, under the caller's trace id, with `error?` only on failure —
+follows the same rules as the table above.
+
 ### 5.2 gRPC — implemented in the interceptors
 
 See `grpc.md` §2 and §3. Every request and reply message of the dnv-internal
@@ -400,3 +417,18 @@ Acceptance: `go build ./...` and `go test ./common/...` pass; every binary's
 `main` package imports `common` (directly or transitively); `dnvctl`'s `main()`
 starts with `common.SetLogLevel(slog.LevelWarn)`; a grep for `log.Print`,
 `logrus`, `zap`, `zerolog` over the repo finds nothing.
+
+## 8. Amendments applied to this document
+
+Recorded for traceability; the edits are already applied. Appended rather than
+inserted because §2, §3, §5.1 and §5.3 are cited by number from `osclient.md`,
+`grpc.md` and `layout.md`.
+
+* `update_01.md` U2 — §5.1 gained the two prober-emitted records
+  `probe write block` and `probe read block direct`, in their own table. They
+  are emitted by `agent/cnagent`'s `directLegProbeIO`, **not** by an `OsClient`
+  method: the CN11 leg health probers call `common.WriteBlockAt` /
+  `common.ReadBlockDirectAt` directly, outside the semaphore
+  (`osclient.md` §4.5.1). `ReadBlockDirect` left the `OsClient` interface in
+  the same change; §5.1 never had a row for it, so nothing was removed, and the
+  `os read block` / `os write block` rows are unchanged.

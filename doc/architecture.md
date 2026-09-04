@@ -74,7 +74,7 @@ environment variables; see §13):
 |--------------|------|
 | `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, and the `Get*Bm` bitmap reads (the worker never calls `Get*Info` — it watches through `Check*`, §9.7/§10.2). |
 | `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow). |
-| `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local device-mapper / mdadm / nvmet state (and, on a DN, the [D13] on-disk extent metadata; LVM appears only in the CN clone VG); persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
+| `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local device-mapper / mdadm / nvmet state (and, on a DN, the [D13] on-disk extent metadata; no LVM anywhere — [D13] removed it from the DN, [D14] from the CN); persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
 | `dnv-cdc`    | NVMe-oF Central Discovery Controller. Watches the `cdc` keys and serves discovery + AENs to hosts. |
 | `dnvctl`     | CLI over the Gateway. Also carries the userspace copier of §11.4. |
 
@@ -91,7 +91,7 @@ environment variables; see §13):
 | **slice** | A vertical shard of an SP. Each slice is one dm thin-pool on the primary. Thin devices are striped (raid0) across all slices. `1 ≤ slice_cnt ≤ MaxSliceCntPerSp(16)`, fixed at SP creation. Fig. `040Slice` (§3.3). |
 | **group** | A contiguous chunk of pool space inside a slice. Each slice has ≥1 **meta group** (backs the thin-pool metadata device) and ≥1 **data group** (backs the thin-pool data device). `GrowSlice` appends groups. A group is either a single leg (RedundNone) or an md-raid1 over its legs (RedundMdRaid1). Every leg of a group reserves a small **meta region** at its start (md superblock + write-intent bitmap + health block, §3.6); only the remaining **data region** feeds the pool. |
 | **leg** | One replica of a group. Backed by exactly one **side** normally, two sides while that leg is being migrated. Groups may also carry **spare legs** (`MaxSpareLegPerGrp` = 2) — connected and health-checked, but not md members until a switch (§8.12). |
-| **side** | The DN-resident part of a leg: one LV in the DN VG plus, per cntlr, a dm-error + dm-linear + nvmet subsystem exported to that cntlr's CN. Figs `000DiskNode`, `010Side` (§3.1). |
+| **side** | The DN-resident part of a leg: one side device `DnSideName` (a dm-linear over the side's [D13] extent runs) plus, per cntlr, a dm-error + dm-linear + nvmet subsystem exported to that cntlr's CN. Figs `000DiskNode`, `010Side` (§3.1). |
 | **thin device (td)** | A user volume: one dm-thin volume per slice + one raid0 (dm striped) across the per-slice thin volumes on the primary. Snapshots are thin devices with `ori_id` set. |
 | **subsystem (ss) / namespace (ns)** | The host-facing NVMe-oF objects. A namespace binds an `ns_idx` (NSID) of a subsystem to a thin device. Fig. `060VirtualVolume` (§3.5). |
 | **clone** | Pull-copy of an external NVMe-oF namespace into a local thin device via dm-clone, on the primary cntlr. Fig. `090Clone` (§8.9). |
@@ -140,7 +140,7 @@ ClusterConf
 
 ## 3. Data-plane device stacks
 
-The data plane is built from stock Linux pieces: LVM, device-mapper targets
+The data plane is built from stock Linux pieces: device-mapper targets
 (`error`, `linear`, `striped` a.k.a. raid0, `thin-pool`, `thin`, `clone`), md-raid1 and
 the kernel `nvmet` target / `nvme` host. Every device dnv creates has a deterministic
 name (§4) so agents are fully idempotent and crash-restartable.
@@ -167,7 +167,7 @@ every side exports one path per cntlr of its SP.*
 
 Per DN, once (created by the dn agent at first `SyncupDn`):
 
-1. The **dnv disk format** [D13] on the `--disk` device — no LVM. Fixed byte offsets,
+1. The **dnv disk format** [D13] on the `--disk` device. Fixed byte offsets,
    all constants in `constants.go`:
    * `DnHeaderOffset = 0`, `DnHeaderSize = 4096` — a self-describing header block
      (magic `DNVDISK1`, version, a CRC32, and a `DnDiskHeader` carrying `cluster_id`,
@@ -196,15 +196,18 @@ Per **side** (one per hosted leg replica):
 
 * A **side device** `DnSideName` (dm kind `4`): one dm-linear whose targets concatenate
   the extent runs the volume table allocated to `(sp_id, side_id)`, `Group.ext_cnt`
-  extents in total. Provisioning MUST follow the trim protocol of §9.4 (the record is
-  created `trimmed = false`, the assembled device is `blkdiscard`ed, then the flag is
-  persisted). Everything above the side device — the per-CN stacks, the migration
-  endpoints — sees one ordinary single-device backing reference.
+  extents in total. Provisioning MUST follow the §9.4 protocol: the record is created
+  with `zeroed_bits` all 0, the assembled device is zeroed batch by batch with
+  `blkdiscard --zeroout` through the dm-linear, each batch's bits are persisted as it
+  completes, and no per-CN export stack is converged until the side's `provisioned`
+  flag is `true` **and** every bit is set ([D15]). Everything above the side device —
+  the per-CN stacks, the migration endpoints — sees one ordinary single-device backing
+  reference.
 * Per cntlr of the SP (primary and standbys — the side learns their CN ids from
   `SyncupSideRequest.side_conf.primary_cn_id` / `standby_id_list`):
-  * a dm-error device `DnErrorName` sized like the LV,
-  * a dm-linear device `DnLinearName` whose table points at the **LV** for the primary
-    cntlr's CN and at the **dm-error** device for every standby CN,
+  * a dm-error device `DnErrorName` sized like the side device,
+  * a dm-linear device `DnLinearName` whose table points at the **side device** for the
+    primary cntlr's CN and at the **dm-error** device for every standby CN,
   * an nvmet subsystem `SideToCnNqn(cluster,sp,leg,cn)` on the DN's port,
     `allowed_hosts = [CnHostNqn(cluster,cn)]`, `attr_cntlid_min/max` from
     `side_conf.cntlid_slot` (the etcd `Side.cntlid_slot`, §11.8), exposing one namespace
@@ -253,7 +256,7 @@ exported namespace object never changes, so CN NVMe connections survive.
 
 Additionally, while this DN hosts the **source** side of a migration (its
 `SyncupSide` carries `migr_src_conf`): a dm-linear
-`DnMigrSrcName` on top of the LV, exported through subsystem `MigrSrcNqn` (same port)
+`DnMigrSrcName` on top of the side device, exported through subsystem `MigrSrcNqn` (same port)
 with `allowed_hosts = [DnHostNqn(cluster, migr_src_conf.dst_dn_id)]`. While it hosts
 the **destination** side (`migr_dst_conf`): an nvme host connection to
 `MigrSrcNqn(cluster, migr_dst_conf.src_dn_id, sp, migr_id)` at
@@ -294,15 +297,33 @@ SPs, in a mix of primary and standby roles.*
 Per CN, once (created by the cn agent at first `SyncupCn`):
 
 1. tmpfs mounted at `CnTmpfsPath = {tmpfs_prefix}/{cluster_id}-{cn_id}`
-   (`DefaultTmpfsPrefix = /tmp/dnv-tmpfs`), sized `DefaultCloneVgSize` + slack
-   (mount `-o size=2G` is fine for the 1 GiB default VG).
-2. A file `tmp-file` (`CnTmpFilePath`) of `DefaultCloneVgSize` = 1 GiB inside it,
-   attached to a free loop device; `pvcreate` + `vgcreate` the clone VG `CnCloneVgName`
-   with `--physicalextentsize` = `DefaultCloneVgExtSize` = 4 MiB. It stores the dm-clone
-   metadata LVs `CnCloneMetaName = {sp_id}-{clone_id}` of clones running on this CN.
-   The metadata is deliberately volatile: after a reboot a clone is rebuilt from the
-   **destination thin-pool bitmaps** (§11.5) — copied blocks are exactly the mapped
-   blocks of the destination td, so no clone state needs to survive the CN.
+   (`DefaultTmpfsPrefix = /tmp/dnv-tmpfs`), sized `DefaultCnTmpfsSize` = 2 GiB —
+   `CnCloneMetaAreaSize` (1 GiB) plus slack.
+2. A **sparse** file `tmp-file` (`CnTmpFilePath`) of `CnCloneMetaAreaSize` = 1 GiB
+   inside it, attached to **one** free loop device. That loop device is the CN's
+   **clone-metadata arena**; it is re-learned on every converge with
+   `losetup --associated {CnTmpFilePath}` and never persisted (loop names are
+   unpredictable, and a second loop per CN is never wanted). The arena is carved into
+   `CnCloneMetaAreaSize / CnCloneMetaUnit` = 256 **units** of `CnCloneMetaUnit` = 4 MiB
+   — "unit", never "extent": an extent is the 1 GiB allocation unit of §2. A clone's
+   dm-clone metadata device is a **wrapper dm-linear** `CnCloneMetaDmName` (CN dm kind
+   `b`, `cnagent.md` §2.1) over `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)`
+   **contiguous** units, first-fit, with `region_cnt = td.size / block_size`; the
+   wrapper exists for the same reason `DnMigrMetaDmName` does — dm-clone reads its
+   superblock from sector 0 and takes no offset argument. **The kernel's dm tables are
+   the allocation registry**: enumerating this CN's kind-`b` wrappers and reading their
+   `0 {len} linear {loopdev_majmin} {offset_sectors}` tables reconstructs the used map, so
+   there is no on-file allocation table and none of the [D13] header/CRC/A-B machinery
+   is needed — the arena is volatile *together with* the kernel's dm state (a reboot
+   clears both, an agent restart preserves both). Before creating a wrapper the agent
+   hole-punches the range with plain
+   `blkdiscard --offset {off} --length {len} {loopdev}`, so a recycled unit can never
+   hand a new dm-clone a previous clone's valid dm-clone superblock; **`--zeroout` is
+   forbidden here** — it would materialize up to the whole arena in RAM and defeat the
+   sparse file. Arena exhaustion ⇒ the clone's resources report `RES_STATUS_ERROR`
+   ([D14]). The metadata is deliberately volatile: after a reboot a clone is rebuilt
+   from the **destination thin-pool bitmaps** (§11.5) — copied blocks are exactly the
+   mapped blocks of the destination td, so no clone state needs to survive the CN.
 3. Exactly **one** nvmet port from `CnConf.nvme_tr_conf`; every host-facing subsystem
    and every transfer subsystem of every cntlr on this CN attaches to it.
 4. **QoS** from `SyncupCnRequest.qos_ratio` (a copy of `ClusterConf.qos_ratio`,
@@ -330,6 +351,10 @@ Per CN, once (created by the cn agent at first `SyncupCn`):
    also throttles md bitmap/superblock writes, resync and the §3.6 health-check
    probe — tight limits can fake "leg unhealthy" — and a pool-data limit throttles
    clone/migration hydration; those flows need headroom or exemption.
+
+   **Until the issue is decided, QoS is deferred**: the cn agent accepts and
+   persists `qos_ratio` and programs no limit at all (`cnagent.md` CN6) — writing
+   `io.max` from an agent cgroup would bind nothing that matters and only pretend.
 
 A CN hosts up to `MaxCntlrCntPerCn` cntlrs of different SPs; at most one cntlr **per SP**
 per CN.
@@ -363,7 +388,8 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
 
 1. **Legs.** For each side of each leg (spare legs included): `nvme connect` to
    `SideToCnNqn(cluster, sp, leg, cn_id = this CN)` at `Side.nvme_tr_conf`, hostnqn =
-   `CnHostNqn(cluster, cn)`, `--fast-io-fail-tmo = DefaultNvmeFastIoFailTmo`(5),
+   `CnHostNqn(cluster, cn)`, `--hostid = NvmeHostId(hostnqn)`,
+   `--fast_io_fail_tmo = DefaultNvmeFastIoFailTmo`(5),
    `--ctrl-loss-tmo = -1` (reconnect forever). Because every side of a leg exports that
    one NQN with one namespace identity (§3.1, §4.4), the connections of a leg land in a
    single subsystem: the kernel presents **one** nvme multipath namespace device per
@@ -523,7 +549,7 @@ standby paths `inaccessible`.
 
 ### 3.6 Group on-leg layout: meta region, data region, health block
 
-Every leg LV of a group is split into a **meta region** (`meta_blocks` blocks of
+Every leg's side device of a group is split into a **meta region** (`meta_blocks` blocks of
 `block_size`) followed by the **data region** (`data_blocks` blocks). Both counts are
 computed automatically — never configured — and stored in the `Group`:
 
@@ -542,11 +568,16 @@ data_blocks        = total_group_blocks − meta_blocks
 The meta region must be large enough for the md superblock and the internal
 write-intent bitmap, **plus an additional 4 KiB used for the leg health check**: the
 health-check area is the **last 4 KiB of the last meta block** (byte offsets
-`meta_blocks × block_size − 4096 … meta_blocks × block_size`). The cn agent
-periodically writes and reads back this 4 KiB block through each connected leg device
-(direct IO, a magic + timestamp payload [D6]) to decide whether the leg is healthy —
-including standby cntlrs and spare legs, and covering the whole path CN → side →
-LV even when md would otherwise mask a member failure. md never touches this area:
+`meta_blocks × block_size − 4096 … meta_blocks × block_size`). The **primary**
+cntlr's cn agent periodically writes and reads back this 4 KiB block through each
+connected leg device — spare legs included — (direct IO, a magic + timestamp payload
+[D6]) to decide whether the leg is healthy, covering the whole path CN → side →
+side device even when md would otherwise mask a member failure. A **standby** cntlr cannot
+run the block probe — its path to every side deliberately terminates in the side's
+dm-error (§3.1), so block IO through it can never succeed — and instead reports
+leg health from transport liveness: a live controller per side with the expected
+ana_state (`cnagent.md` CN11); that is what failover readiness actually needs from
+a standby. md never touches this area:
 the superblock sits at 4 KiB into block 0, the bitmap right after it (the
 `bitmap_blocks` reservation is an upper bound), and member data starts at
 `--data-offset = meta_blocks × block_size`. On migration the meta region is copied
@@ -562,8 +593,7 @@ gets `bitmap_bits = 8192`, `bitmap_bytes = 1280`, `bitmap_blocks = 1`, so
 
 All formats below are normative. `NameFmt` is constructed from the prefixes in
 `constants.go`: `dmPrefix = DmPrefix = "dnv"`, `nqnPrefix = NqnPrefix =
-"nqn.2024-01.io.dnv"`, `tmpfsPrefix = DefaultTmpfsPrefix`,
-`cloneVgPrefix = DefaultCloneVgPrefix = "dnv-clone-vg"`, `localStorPrefix =
+"nqn.2024-01.io.dnv"`, `tmpfsPrefix = DefaultTmpfsPrefix`, `localStorPrefix =
 DefaultLocalStorPrefix = "/var/tmp"`. Unless noted, every id field is `%016x` and every
 kind field is `%01x`, joined by `-`. The signatures and formats in this section are
 normative and match `name_fmt.go`. Two of them deserve their rationale up front: a
@@ -574,7 +604,7 @@ subsystem (§8.10), so the destination clone can pull through any of them.
 
 The `{cluster}` component of every name below is the `cluster_id` (`%016x`), never the
 `cluster_name`. Because `cluster_id` now folds in `ClusterConf.creation_epoch` (§5.2), a
-cluster deleted and recreated under the same name produces a disjoint set of dm/md/LVM/
+cluster deleted and recreated under the same name produces a disjoint set of dm/md/
 NQN/local-file names, so a new incarnation never collides with leftovers of the old one
 on a node that was not cleaned up.
 
@@ -584,7 +614,10 @@ DN-side (`dmKindDn*`): `0` error, `1` linear, `2` migr-src, `3` migr-final(dm-cl
 `4` side (the [D13] extent-run concat), `5` migr-meta (the dm-clone metadata wrapper).
 CN-side (`dmKindCn*`): `0` pool-meta, `1` pool-data, `2` pool-final(thin-pool),
 `3` thin-dev, `4` raid0, `5` error, `6` ns-dev, `7` clone-final(dm-clone),
-`8` xfer-final.
+`8` xfer-final. CN kinds `9` (leg wrapper `CnLegName`), `a` (RedundNone group device
+`CnGrpName`) and `b` (clone-metadata wrapper `CnCloneMetaDmName`, [D14]) are
+cn-agent-internal and are **defined in `cnagent.md` §2.1**; they follow the same
+`dnv-{cluster}-{cn}-{kind}-…` format as §4.2's rows.
 
 ### 4.2 dm device names (`dmsetup` names; node path = `DmPath` = `/dev/mapper/{name}`)
 
@@ -606,8 +639,9 @@ CN-side (`dmKindCn*`): `0` pool-meta, `1` pool-data, `2` pool-final(thin-pool),
 | `CnCloneFinalName(cluster,cn,sp,clone)`| `dnv-{cluster}-{cn}-7-{sp}-{clone}` |
 | `CnXferFinalName(cluster,cn,sp,xfer)` | `dnv-{cluster}-{cn}-8-{sp}-{xfer}` |
 
-The leg wrapper of §3.3 step 1 is agent-internal; name it like a dm kind of its own if
-desired, but it is not part of the cross-component contract [D1].
+The leg wrapper of §3.3 step 1 is agent-internal — it is CN dm kind `9`, `CnLegName`
+in `cnagent.md` §2.1 — and, like kinds `a` and `b`, is not part of the cross-component
+contract [D1].
 
 ### 4.3 md names (node path = `MdPath` = `/dev/md/{name}`)
 
@@ -639,15 +673,14 @@ nqnKinds: `0` DnHost, `1` CnHost, `2` SideToCn, `3` MigrSrc, `4` Xfer. `:` joine
 | `MigrSrcNqn(cluster,dn,sp,migr)` | `nqn.2024-01.io.dnv:3:{cluster}:{dn}:{sp}:{migr}` — subsystem the migration source side exports to the destination DN. |
 | `XferNqn(cluster,sp,xfer)` | `nqn.2024-01.io.dnv:4:{cluster}:{sp}:{xfer}` — subsystem a transfer exports; no node id, so every enabled cntlr of the SP exports the identical subsystem (§8.10) and the destination clone may pull through any of them. The destination SP's user passes it as `Clone.src_nqn`. |
 
-### 4.5 LVM / tmpfs / file names
+### 4.5 tmpfs / file names
 
-LVM survives only on the CN (the clone VG); a DN carries the [D13] disk format instead
-and every DN-side name is a dm name from §4.2.
+**LVM survives nowhere in dnv** — [D13] removed it from the DN, [D14] from the CN. A DN
+carries the [D13] disk format, a CN carries the loop-backed clone-metadata arena of §3.2
+step 2, and every dnv device name is a dm name from §4.2 (kinds `9`/`a`/`b` per §4.1).
 
 | function | value |
 |---|---|
-| `CnCloneVgName(cluster,cn)` | `dnv-clone-vg-{cluster}-{cn}` |
-| `CnCloneMetaName(sp,clone)` / `CnCloneMetaPath` | `{sp}-{clone}` / `/dev/{CnCloneVgName}/{CnCloneMetaName}` |
 | `CnTmpfsPath(cluster,cn)` | `{tmpfs_prefix}/{cluster:%016x}-{cn:%016x}` |
 | `CnTmpFileName` / `CnTmpFilePath` | `tmp-file` / `{CnTmpfsPath}/tmp-file` |
 
@@ -706,7 +739,7 @@ separator, no text formatting. Consequences that the rest of this document relie
   So any RPC beyond `CreateCluster`/`ListClusters` must first read `ClusterConf` to learn
   `creation_epoch`, derive `cluster_id`, and only then build its keys (§5.8, §8 preamble).
 * **Delete + recreate under the same name yields a fresh `cluster_id`,** hence a fresh
-  etcd key space and fresh node-local names — `getShortId` (§4.3), the dm/LV names of
+  etcd key space and fresh node-local names — `getShortId` (§4.3), the dm names of
   §4.2 and the NQNs of §4.4 all fold in `cluster_id`. Leftover keys or leftover
   node-local objects of a previous incarnation can never be mistaken for the new one,
   and a re-created cluster never inherits stale agent state.
@@ -1122,12 +1155,13 @@ Action:
    `SpName`; one `Cntlr` per picked CN, created in pick order (the first created —
    smallest `cntlr_id` — gets `primary = true`, the rest `primary = false`; all
    `disabled = false`; `cntlid_slot` = the next unused entry of `cntlid_slot_list` in
-   list order — §11.8 requires all cntlr slots of one SP distinct; `cn_addr_port` +
+   list order — §11.8 requires all cntlr slots of one SP distinct; `addr_port` +
    `nvme_tr_conf` copied from the CN); one `Slice` per slice
    (`slice_idx` 0…, groups → legs (`leg_idx` 0…) → one `Side` each:
    `addr_port`/`nvme_tr_conf` copied from the picked DN, `cntlid_slot` =
    `cntlid_slot_list[0]` (sides of different legs may share slots, §11.8),
-   `err_epoch = 0`); update every
+   `provisioned = false` ([D15] — every new `Side` is written unprovisioned and is
+   flipped by the sp-worker, §10.3), `err_epoch = 0`); update every
    picked DN's `DnConf.side_ptr_list`/`free_ext_cnt`/`DnCapacity` per §5.6 and bump each
    `DnRev` once; likewise every picked CN (`cntlr_ptr_list`) and `CnRev`; write the
    `SpRev` key `{p} sp_rev {shard_code} {cluster_id} {sp_id}` with `revision = 1` and
@@ -1135,6 +1169,15 @@ Action:
 3. Reply `sp_id`. Workers then converge: dn-workers push the new side pointers
    (`SyncupDn`), sp-workers push side + cntlr configs (`SyncupSide`/`SyncupCntlr`), and
    the primary builds §3.3.
+
+The SP does **not** serve immediately: every side it just created is
+`provisioned = false`, so the DN agents build the side devices and zero them (§9.4)
+while the CN stacks stay deferred and report `RES_STATUS_PROVISIONING` — healthy, not
+ready, no action needed. On the standing fast-Write-Zeroes hardware assumption ([D15],
+§9.4) this is seconds, not minutes. Progress is visible through `InspectSide`
+(`SideInfo.zeroed_ext_cnt` / `total_ext_cnt`) and through `GetStoragePool` (each
+`Side.provisioned`); the sp-worker flips the flags and the normal watch fan-out brings
+the SP up (§10.3).
 
 **DeleteStoragePool** —
 Errors: `FAILED_PRECONDITION` if any of `td_name_list`, `nqn_list`, `clone_name_list`,
@@ -1169,7 +1212,9 @@ enforced on the CN by reloading the namespace's `CnNsDevName` onto a dm-flakey
 `NO_CLONE`(32) also don't build clone dm-clones; `NO_THINPOOL`(48) also no thin pools;
 `NO_REDUND`(64) also no raid1; `NO_MIGRATION`(80) also no migration dm-clones;
 `NO_SIDE`(96) also don't export sides; `DISABLE`(112) agents keep only the DN side
-data devices and their extent records (and, on a CN, the equivalent bottom layer). Levels exist for staged disaster recovery / maintenance (§11.7).
+data devices and their extent records (and, on a CN, the equivalent bottom layer).
+Side zeroing (§9.4) runs at **every** level, `DISABLE` included — it is bottom-layer
+provisioning, exactly like the trim it replaced. Levels exist for staged disaster recovery / maintenance (§11.7).
 
 **FindStoragePoolNames** — no STM required beyond one snapshot read; for each requested
 `sp_id` read `{p} sp_id_to_name {cluster_id} {sp_id}` and put found pairs into the reply
@@ -1193,9 +1238,13 @@ the slice's current meta total in extents), stopping once the total meta size re
 dm-thin metadata ceiling, so further meta growth is refused.
 Action: allocate legs for one new group (`is_meta` selects the list; `ext_cnt` for meta
 computed per the ladder); compute `meta_blocks`/`data_blocks` (§3.6); in the STM append
-`Group{grp_id, ext_cnt, meta_blocks, data_blocks, legs+sides}` to the slice, update the
+`Group{grp_id, ext_cnt, meta_blocks, data_blocks, legs+sides}` to the slice (every new
+`Side` written `provisioned = false`, [D15]), update the
 involved DNs (+`DnRev`s) and every cntlr CN's budget (+`CnRev`s), bump `SpRev`. Agents
-extend the pool-meta/pool-data linear tables and resize the thin pool online. Reply
+extend the pool-meta/pool-data linear tables and resize the thin pool online — but the
+growth is **deferred on the CN** while the new group still contains a provisioning leg:
+the concat and the pool keep their old, effective size and keep reporting `OK` at that
+size, and the grow completes by itself once the leg clears (§9.4, §10.4). Reply
 `slice_id`, `grp_id`.
 
 ### 8.6 Cntlrs
@@ -1227,7 +1276,7 @@ disabling the current primary triggers the §10.4 primary re-election; disabling
 last enabled cntlr is allowed but stops IO (dnvctl prints a warning). Reply `cntlr_id`,
 `enabled`.
 
-**InspectCntlr** — read the `Cntlr` in an STM for its `cn_addr_port`; outside the STM
+**InspectCntlr** — read the `Cntlr` in an STM for its `addr_port`; outside the STM
 call `ControllerNodeAgent.GetCntlrInfo(cluster_id, cn_id, sp_id, cntlr_id)`; agent
 failure ⇒ `ABORTED`. Reply `revision` + `CntlrInfo`.
 
@@ -1252,6 +1301,21 @@ Action: STM: `td_id` from `next_id`, `dev_id` from `next_dev_id++`,
 `SpRev`. Reply `td_id`, `dev_id`. The primary creates one thin volume per slice
 (`create_thin` / `create_snap` pool message) + the raid0/error of §3.3 (namespace
 devices are per `Namespace` and appear with §8.8).
+
+**Snapshot point-in-time (update_02.md U1).** A td is striped across every
+slice, so a snapshot is crash-consistent only if all `slice_cnt` `create_snap`
+messages capture one instant. The primary therefore quiesces the **origin
+td's raid0** (`CnRaid0Name`) around the whole per-slice sequence: suspend the
+raid0 (flushing every in-flight write), then per slice suspend the origin's
+thin volume, send `create_snap`, resume the thin volume (the per-slice suspend
+is dm-thin's own documented requirement and stays), and resume the raid0 only
+after the last slice's message — on every error path too, so no device
+outlives the sequence suspended ([D12]). The window is bounded by `slice_cnt`
+dmsetup messages under the §7 timeouts. Residual: a primary crash *between*
+two slices' messages still yields a torn snapshot (the per-slice snaps date
+from different instants); a snapshot whose creation raced a primary crash
+SHOULD be deleted and re-created (Appendix D). `cnagent.md` CN14 is the
+agent-side spec.
 
 **DeleteThinDevice** —
 Errors: `FAILED_PRECONDITION` if the `td_id` is referenced by any `Namespace.td_id` of
@@ -1320,7 +1384,7 @@ flowchart BT
         SL0["slice 0"]
         SL1["slice 1 …"]
         R["raid0 of the dst td<br/>CnRaid0Name"]
-        MLV["dm-clone metadata LV<br/>CnCloneMetaName (tmpfs clone VG)"]
+        MLV["dm-clone metadata wrapper<br/>CnCloneMetaDmName (loop arena slot)"]
         SRC["nvme host device<br/>(connected to the source ns)"]
         DC["dm-clone<br/>CnCloneFinalName"]
         NS["dm-linear ns-dev<br/>CnNsDevName"]
@@ -1360,14 +1424,27 @@ for an initially empty td.
 Action: STM: `clone_id` from `next_id`, `bm_cnt = 0`; write `Clone`, append
 `clone_name_list`, bump `SpRev`. Reply `clone_id`. Primary-cntlr behavior — connect to
 the source (`src_tr_conf_list` + `src_nqn`, hostnqn `CnHostNqn`,
-`fast_io_fail_tmo = 5`, `ctrl_loss_tmo = -1`, retry until it succeeds), `lvcreate`
-`CnCloneMetaName` in the clone VG, build dm-clone `CnCloneFinalName` (metadata = that
-LV, dest = the dst td's `CnRaid0Name`, source = the connected nvme ns at `src_ns_idx`,
+`fast_io_fail_tmo = 5`, `ctrl_loss_tmo = -1`, retry until it succeeds), allocate the
+clone's contiguous units in the §3.2 arena, `blkdiscard` that range on the loop device
+and `dmsetup create` the wrapper `CnCloneMetaDmName` ([D14]), build dm-clone
+`CnCloneFinalName` (metadata = that
+wrapper, dest = the dst td's `CnRaid0Name`, source = the connected nvme ns at `src_ns_idx`,
 region size = this SP's `block_size`, `hydration_threshold`/`batch_size` from
 `dm_clone_conf`), reload the dst td's namespaces' `CnNsDevName`s onto the dm-clone, and, iff `auto_resume`,
 resume the device and move the td's namespace(s) to ANA `optimized` — i.e. steps 1-5 of
 §11.3's destination list. After a CN reboot the primary rebuilds the clone by the
 §11.5 recovery procedure before letting any IO through.
+
+Admission note (update_02.md U4): the checks above gate `MaxCloneCntPerSp`
+only. The binding ceiling is the primary CN's clone-metadata arena — 256
+`CnCloneMetaUnit` units per **CN**, shared by every clone of every cntlr on
+that CN (≥ 2 units per clone ⇒ at most 128 concurrent clones per CN, far
+fewer for large tds at small block sizes; `cnagent.md` CN18 carries the
+arithmetic). The CP does not gate against it: an over-committed clone is
+created normally and its `clone_id_to_meta` / `clone_id_to_dm_clone` rows
+report `RES_STATUS_ERROR` until arena units free up. Callers MUST place
+clones against the per-CN budget, not against `MaxCloneCntPerSp`; a future
+gateway MAY track the budget in etcd.
 
 **DeleteClone** —
 Errors: `FAILED_PRECONDITION` when `force = false` and hydration is not complete —
@@ -1378,7 +1455,8 @@ Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap`
 `suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. The
 primary reloads those namespaces' `CnNsDevName`s back onto the raid0 (all data now
 local), removes the
-dm-clone + metadata LV, disconnects the source, and deletes the clone's
+dm-clone first and then its metadata wrapper `CnCloneMetaDmName` (whose arena units
+become free again in the next registry enumeration, [D14]), disconnects the source, and deletes the clone's
 `LocalCloneBmPath` files (§9.6). Reply `clone_id`.
 
 **GetClone** — STM read. **UpdateCloneTrConf** — STM replace `src_tr_conf_list`, bump
@@ -1471,11 +1549,24 @@ already has 2 sides (a migration is already running on it).
 Action: allocate one DN; STM: `migr_id` + `dst_side_id` from `next_id`; append a new
 `Side` to the leg's `side_list` (`cntlid_slot` = a slot from `cntlid_slot_list`
 different from the src side's — the only slot constraint sides have, §11.8;
-`addr_port`/`nvme_tr_conf` copied from the dst DN); write
+`addr_port`/`nvme_tr_conf` copied from the dst DN; `provisioned = false`, [D15]); write
 `Migration{migr_id, src_side_id, dst_side_id, dm_clone_conf, bm_cnt = 0}`, append
 `migr_name_list`; dst-DN bookkeeping (`side_ptr_list`, `free_ext_cnt -= group.ext_cnt`,
-capacity key per §5.6, `DnRev`); bump `SpRev`. Reply `migr_id`. Data-plane
-choreography: §11.2.
+capacity key per §5.6, `DnRev`); bump `SpRev`. Reply `migr_id`. The dst side therefore
+provisions (§9.4) before any migration machinery starts; until the sp-worker flips it,
+`migr_src_conf.dst_provisioned = false` keeps the src side serving untouched (§11.2).
+Data-plane choreography: §11.2.
+
+Admission note (update_02.md U4): the DN candidate scan covers **extents**
+only. The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` = 48
+`DnCloneMetaUnit` slots per **DN**, shared by every destination role the node
+hosts across every SP — is not part of admission: each migration costs
+`ceil((4 MiB + region_cnt bytes) / DnCloneMetaUnit)` slots with `region_cnt`
+= side bytes / `block_size` (≥ 2 — the base alone is one whole unit), so at
+most 24 concurrent destination roles fit one DN, fewer for large sides at
+small block sizes (`dnagent.md` DN13). A migration the area cannot serve is
+still created; its `migr_dst_info` rows report `RES_STATUS_ERROR` until slots
+free up. `MaxMigrCntPerSp` = 4 bounds none of this.
 
 **FinishMigration** —
 Errors: `FAILED_PRECONDITION` when `force = false` and hydration is incomplete
@@ -1512,9 +1603,12 @@ fully-skippable dm-clone regions.
 **CreateSpareLeg** — Errors: `NOT_FOUND` `grp_id` not in the SP; `INVALID_ARGUMENT` the
 group is RedundNone; `RESOURCE_EXHAUSTED` at `MaxSpareLegPerGrp` or no DN (§6.5).
 Action: STM: new `Leg{leg_id, leg_idx = next unused idx in the group, one Side}`
-appended to `spare_leg_list`; DN bookkeeping + `DnRev`; bump `SpRev`. Every cntlr
+(that `Side` written `provisioned = false`, [D15]) appended to `spare_leg_list`; DN
+bookkeeping + `DnRev`; bump `SpRev`. Every cntlr
 connects to the spare's side and health-checks it (§3.3 step 1), **but the spare is not
-added to the md array** — it is pre-connected standby capacity only. Reply `leg_id`.
+added to the md array** — it is pre-connected standby capacity only. An unprovisioned
+spare defers only itself — spares never assemble (§11.1.1) — and reports
+`RES_STATUS_PROVISIONING` until it clears. Reply `leg_id`.
 
 **DeleteSpareLeg** — Errors: `NOT_FOUND` `grp_id`/`leg_id`. Action: STM remove from
 `spare_leg_list`, DN bookkeeping back, bump `SpRev`. Reply `leg_id`.
@@ -1547,6 +1641,10 @@ Callers feed `AppendMigrationBitmap`.
 Note the wire convention for every bitmap RPC (`Get*Bitmap`, `Append*Bitmap`,
 `Push*Bitmap`) is **1 = unwritten/skippable**, while thin-pool metadata natively
 answers **mapped = written**; agents and callers invert once at the boundary (§11.4).
+The **bit order** is normative too: bits are **LSB-first within each byte** — bit *i*
+lives at `bitmap[i/8] & (1 << (i%8))` — and the trailing pad bits of the last byte are
+`0`. Chunks are byte-aligned, so migration's bit-level concatenation is plain byte
+concatenation (§9.6, §11.4).
 
 ---
 
@@ -1593,8 +1691,9 @@ answers **mapped = written**; agents and callers invert once at the boundary (§
   `LocalMigrBmPath`/`LocalCloneBmPath`; the applied-index sets reported through
   `bm_info`/`bm_info_list` are derived from the files present, so they survive agent
   restarts and the worker does not have to re-push after one. Re-applying a chunk is
-  always harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a no-op.
-  Full protocol: §9.6 [D7].
+  always harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a no-op,
+  which holds only because every dnv dm-clone carries `no_discard_passdown` ([D7],
+  Appendix A). Full protocol: §9.6 [D7].
 
 ### 9.2 `service DiskNodeAgent`
 
@@ -1602,7 +1701,7 @@ answers **mapped = written**; agents and callers invert once at the boundary (§
 |---|---|
 | `GetDnSize` | Return the byte size of the `--disk` device's **data area** — the raw size (`lsblk --bytes`) minus the fixed `DnDataOffset` prefix of the [D13] format. A device at or below `DnDataOffset` is an `Internal` error. Called by the gateway pre-registration; `dn_id` in the request is for logging only. |
 | `SyncupDn` | Carries `revision`, `side_pointer_list`, `extent_size` (the cluster's `dn_bin_conf.extent_size`, stamped into the disk header at format time and immutable thereafter, §3.1). Ensure §3.1 base state (the [D13] disk format, the single nvmet port); diff the pointer list per §9.1. Reply `agent_reply`, `revision`, `dn_info`. |
-| `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: the side device of `ext_cnt` extents (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info`, `bm_info` (the applied migration-bitmap indexes, §9.6). |
+| `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`, `provisioned`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: the side device of `ext_cnt` extents and its zeroing state (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info` (which always reports `zeroed_ext_cnt` / `total_ext_cnt`, §9.4), `bm_info` (the applied migration-bitmap indexes, §9.6). |
 | `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
 | `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything (`agent_reply`, `revision`, info). |
 | `CheckDn` / `CheckSide` (stream) | Health streams, one per DN resp. per side, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `dn_info` / `side_info`. |
@@ -1612,33 +1711,124 @@ answers **mapped = written**; agents and callers invert once at the boundary (§
 | rpc | behavior |
 |---|---|
 | `GetCnSize` | Return the capacity budget in bytes this CN is willing to host (0 = "use the default"); typically from local config. |
-| `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, loop, clone VG, the single nvmet port); apply the §3.2 step 4 QoS limits via cgroup `io.max` (thin pools; legs too iff `strict`); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
+| `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, the 1 GiB sparse backing file, the single loop device — re-learned via `losetup --associated`, never persisted — and the single nvmet port; there is no VG, [D14]); accept and persist `qos_ratio` (enforcement is deferred until the §3.2 step 4 open issue is decided — the agent programs no limit, `cnagent.md` CN6); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
 | `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
 | `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
 | `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
 | `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
 | `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
 
-### 9.4 Side provisioning protocol (trim flag)
+### 9.4 Side provisioning protocol (whole-side zeroing behind the `provisioned` gate)
 
-To guarantee a new side never leaks a previous tenant's data, DN agents provision a
-side in three idempotent steps (restart-safe at every point):
+dnv is a **multi-tenant** service: one tenant must never be able to read another
+tenant's bytes. The trim protocol this section used to describe (`blkdiscard` of the
+whole side device, then a `trimmed` flag) claimed that guarantee but could not give it
+— discard-reads-zeros is not a hardware property (the kernel dropped
+`discard_zeroes_data` in 4.12; NVMe DLFEAT read-zeroes is optional). Stale bytes also
+break correctness where this design *assumes* zeros: a recycled meta-group extent can
+hold a previous SP's valid thin-metadata superblock (a fresh pool would adopt stale
+metadata), and a stale md superblock flips §11.1.1 into the wrong assembly case with no
+`--zero-superblock` escape. Therefore **every side is fully zeroed before its first
+export**, tracked per extent on disk, gated by a CP-visible `provisioned` flag ([D15]).
 
-1. Allocate the side's extent runs in the volume table with `trimmed = false`, and
-   build `DnSideName` (a dm-linear concatenating the runs).
-2. `blkdiscard --force {DmPath(DnSideName)}`
-3. Persist `trimmed = true` in the volume table.
+**Key invariant.** *Zeroed is a property of the side's allocation, not of the disk
+extent* — extents freed and reallocated to a new side start all-not-zeroed again,
+whatever happened to them before. "Logical extent *i*" is the *i*-th extent in the
+concatenation of the record's `run_list`, i.e. bytes `[i, i+1) × extent_size` of the
+`DnSideName` device.
 
-A side whose record is still `trimmed = false` is never exported; on restart the agent
-redoes 2-3. The probe is the record plus the live table: a missing record ⇒
-`RES_STATUS_MISSING`, `trimmed = false` ⇒ `RES_STATUS_ERROR` details `"not_trimmed"`,
-a table that does not match the record's runs ⇒ `RES_STATUS_ERROR`.
+**Standing hardware assumption (v1).** DN disks support **fast Write Zeroes**: at the
+defaults, `DnZeroBatchExtCnt` = 10 × 1 GiB extents zero inside `CmdSoftTimeout` (3 s),
+i.e. ≳3.3 GiB/s effective. Zeroing commands run under the ordinary §7 command timeouts;
+there is no special zeroing timeout. Tuning for other hardware arrives later as
+per-node agent flags — per-node because they describe hardware, while `ClusterConf` is
+write-once and cluster-wide. Operators must then respect
+`batch × extent_size ≤ WZ_rate × CmdSoftTimeout`; raising the global timeouts stretches
+every command's bound, not just zeroing's.
+
+**Protocol (dn agent), four idempotent steps, restart-safe at every point:**
+
+1. Allocate the extent runs; persist the record with `zeroed_bits` all 0.
+2. Build `DnSideName` (the multi-target dm-linear over the runs).
+3. A **background zeroing goroutine** zeroes not-yet-zeroed extents in batches of
+   `DnZeroBatchExtCnt` = 10, in order, **through the dm-linear** — the side is
+   contiguous in device offsets there, so one command covers a batch regardless of
+   physical fragmentation:
+   `blkdiscard --zeroout --offset {done × extent_size} --length {min(batch, remaining) ×
+   extent_size} {DmPath(DnSideName)}`; after each successful batch, persist that batch's
+   bits in the volume table. `done` is the **lowest not-yet-set bit**, never a count of
+   set bits: the two agree while the set bits are a contiguous prefix, and only the
+   first-unset rule stays correct when they are not (the per-extent bits were chosen
+   over a watermark precisely because they are strictly more general).
+4. Per-CN export stacks are converged **only** when the request says
+   `provisioned = true` **and** all bits are set.
+
+**Converge matrix** (request `side_conf.provisioned` × local state):
+
+| provisioned | record | bits | behavior | `side_dev_info` |
+|---|---|---|---|---|
+| false | absent | — | allocate (bits 0), build linear, ensure goroutine | `PROVISIONING` `"zeroing 0/n"` |
+| false | present | partial | ensure linear + goroutine | `PROVISIONING` `"zeroing k/n"` |
+| false | present | complete | linear ensured; no goroutine; no exports | `OK` (per-CN stacks report `PROVISIONING`) |
+| true | present | complete | full §3.1 export converge | normal |
+| true | present | partial | **refuse exports**; keep the goroutine (self-heals) | `ERROR` `"not zeroed"` |
+| true | absent | — | **never allocate**; nothing converged | `ERROR` `"record missing"` |
+
+Rules embedded there: allocation is permitted **only** at `provisioned = false`. At
+`true`, a missing record means the data is gone (a lost or foreign disk); silently
+re-allocating would present a zeroed impostor as the data-bearing leg, so it is a hard
+resource error that feeds `err_epoch` and the replacement flows (raid1: spare-switch —
+§10.4 does it automatically after `leg_unhealthy`; RedundNone: effectively delete-SP).
+**The agent always trusts its own bits over the flag** — the disk is authoritative
+([D13] spirit); the etcd flag is a gate, never evidence. The existing
+ext-count-mismatch error is unchanged. Rows that refuse the exports report every
+above-the-side resource as `RES_STATUS_PROVISIONING` with details `"side provisioning"`;
+`ERROR` stays confined to `side_dev_info`. `SideInfo.zeroed_ext_cnt` /
+`total_ext_cnt` are filled on every reply and every Check round; equal counts (and
+`total > 0`) ⇒ fully zeroed.
+
+**Zeroing goroutine rules** (the dn twin of the DN8/DN13 registries):
+
+* Registry keyed by the side tuple; single-flight per side; created on demand by any
+  converge (startup reconcile included) that finds zeroing needed; sides zero in
+  parallel (no global cap in v1 — the fast-WZ assumption).
+* Each batch: a fresh trace id; the `blkdiscard` runs **lock-free** and goes through
+  the normal OsClient under the standard §7 timeouts — unlike the CN11 leg probe IO it
+  is a *killable child process*, so no semaphore carve-out is needed; the table update
+  afterwards takes the node-read plus the side's object lock.
+* Batch failure/timeout: the killed command's output goes into `side_dev_info`
+  `RES_STATUS_ERROR` details, and the next successful batch clears it back to
+  `PROVISIONING`; the retry is paced by `DnZeroRetryInterval` = 5 seconds — never a hot
+  loop. Partial zeros are harmless: the batch's bits stay unset and the batch is redone.
+* Cancellation: side teardown (the pointer is removed), process exit and
+  `CancelMigration` **cancel the goroutine and wait for it** before removing the dm
+  device (the child holds it open; removal would otherwise fail EBUSY). Zeroing
+  continues at every `sp_level`, `DISABLE` included (§11.7) — it is bottom-layer
+  provisioning, like the trim it replaced.
+* Process exit: goroutines derive from the agent's root context and are tracked in a
+  WaitGroup the serve loop waits on after `GracefulStop`, so **no orphan `blkdiscard`
+  child ever outlives the agent**.
+* Fail-fast hardware check at the DN base state: `write_zeroes_max_bytes` of the
+  `--disk` device's sysfs queue directory reading `0` means the kernel would fall back
+  to writing zero pages at bulk speed and the assumption cannot hold ⇒
+  `meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"`, which flows into
+  `err_epoch` → capacity-key removal (§5.6, §10.2), taking the unsuitable DN out of
+  allocation. An absent or unreadable attribute is **not** a verdict.
+
+**Probe.** The read-only probes (`GetSideInfo`, `CheckSide`) never allocate and never
+start or stop a goroutine: a missing record ⇒ `RES_STATUS_MISSING` while the flag is
+`false` and `RES_STATUS_ERROR "record missing"` once it is `true`; incomplete bits ⇒
+`RES_STATUS_PROVISIONING` with details `"zeroing {k}/{n}"` while the flag is `false`
+and `RES_STATUS_ERROR "not zeroed"` once it is `true`; a table that does not match the
+record's runs ⇒ `RES_STATUS_ERROR`.
 
 ### 9.5 Live-state reporting
 
 `ResInfo{res_name, status, details, epoch}` with `ResStatus`: `UNKNOWN`(no answer from
 the node — set by *workers*, never by the agent itself), `MISSING`(agent hasn't created
-it), `ERROR`(tried and failed; `details` = why / command output), `OK`. `epoch` = unix
+it), `ERROR`(tried and failed; `details` = why / command output — *needs
+intervention*), `OK`, `PROVISIONING`(deliberately not created / being prepared —
+**healthy, not ready, no action needed**). `epoch` = unix
 seconds of the last status change. The `revision` returned next to an `*Info`
 (`Syncup*`, `Check*`, `Get*Info` replies) = last fully applied revision. Map keys in
 `SideInfo`/`CntlrInfo` are the obvious owner ids (`cn_id` for a side's per-CN export
@@ -1646,9 +1836,20 @@ stack; td_id, slice_id, grp_id, leg_id, ns_id, ss_id, clone_id, xfer_id in `Cntl
 with `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin volumes).
 dm-clone `details`
 strings carry the raw `dmsetup status` line so hydration progress is visible through
-`Inspect*`. `CntlrInfo.leg_id_to_leg` reflects the §3.6 health-check block IO: a leg
-whose probe write/read fails (or times out per the nvme `fast_io_fail_tmo`) is reported
-`RES_STATUS_ERROR` with the IO error in `details`.
+`Inspect*`. `CntlrInfo.leg_id_to_leg` reflects the §3.6 health check: on the primary, the
+block-probe IO — a leg whose probe write/read fails (or stays in flight past the
+probe's stall bound) is reported `RES_STATUS_ERROR` with the IO error in `details`;
+on a standby, transport liveness + expected ana_state (§3.6, `cnagent.md` CN11).
+
+`RES_STATUS_PROVISIONING` **never** sets `err_epoch` (§10.2/§10.3) and never counts as
+a bad status for the capacity keys of §5.6: it marks a resource excluded from the
+*effective* desired state while a side of its backing chain is still zeroing (§9.4,
+[D15]). Only the deferred resources carry it — a serving thin pool keeps reporting `OK`
+with its raw `dmsetup status` details even while a grow is deferred, so the §10.4
+auto-grow keeps parsing them. `SideInfo` additionally reports `zeroed_ext_cnt` and
+`total_ext_cnt` on every reply and every Check round; `zeroed_ext_cnt ==
+total_ext_cnt > 0` on a side whose synced `provisioned` was `false` is the sp-worker's
+flip condition (§10.3).
 
 ### 9.6 Bitmap push protocol (`PushMigrBitmap` / `PushCloneBitmap`)
 
@@ -1762,9 +1963,11 @@ object's live state cheaply instead of polling `Get*Info`:
   * `show_info = true` ⇒ the agent always fills the complete current `*Info` (§9.5);
   * `show_info = false` ⇒ the `*Info` is filled only when something changed since the
     previous reply on this stream — a leg became unhealthy, a thin pool crossed its
-    low water mark, a resource flipped between `RES_STATUS_OK` and `RES_STATUS_ERROR` —
-    and is left unset otherwise. The first reply on a fresh stream always carries the
-    full `*Info`.
+    low water mark, a resource changed status at all (including
+    `RES_STATUS_PROVISIONING` → `RES_STATUS_OK`), or a side's `zeroed_ext_cnt` advanced
+    (§9.4: the sp-worker's flip rule of §10.3 reads those counters, so their progress
+    **is** a change and needs no blanket carve-out) — and is left unset otherwise. The
+    first reply on a fresh stream always carries the full `*Info`.
 * **Revision check.** A reply whose `revision` differs from the request's means the
   agent has not applied the revision the worker believes current (or does not know the
   object at all: `agent_reply.code != 0`); the worker re-issues the object's `Syncup*`.
@@ -1801,10 +2004,13 @@ details are pushed by the sp role) and call `SyncupDn` (resp. `SyncupCn`) at tha
 node disappear. On a `delete`: stop syncing/health-checking the node and close its
 `Check*` stream. Additionally keep a `CheckDn`/`CheckCn` stream (§9.7) open to every
 owned node, one request per `health_check_conf.dn_interval`/`cn_interval` seconds
-(§9.7): on a broken stream, a missed reply or a bad
-status set `DnConf.err_epoch`/`CnConf.err_epoch` = now (if 0) in an STM; clear to 0 on
+(§9.7): on a broken stream, a missed reply or a `RES_STATUS_ERROR` entry
+set `DnConf.err_epoch`/`CnConf.err_epoch` = now (if 0) in an STM; clear to 0 on
 recovery; on a `revision` mismatch re-issue `SyncupDn`/`SyncupCn`. The same STM maintains the node's capacity key per §5.6 (unhealthy ⇒ delete, recovered
 ⇒ recreate). `err_epoch`/capacity changes never bump revisions.
+`RES_STATUS_PROVISIONING` is **not** a bad status and never sets `err_epoch` or removes
+a capacity key ([D15], §9.5); a DN whose `meta_info` reports
+`"disk lacks Write Zeroes"` (§9.4) is a plain `ERROR` and does lose its capacity key.
 
 ### 10.3 sp role
 
@@ -1815,7 +2021,7 @@ slices, tds, subsystems, clones, xfers, migrs, bitmaps) and fan out `SyncupSide`
 **every side** of the SP and `SyncupCntlr` to **every cntlr**, with the new revision —
 each request always carries the full desired state (§9.1). Resolve each side's DN and
 each cntlr's CN by reading `DnConf`/`CnConf` at the record's endpoint
-(`Side.addr_port` / `Cntlr.cn_addr_port` — those keys are endpoint-addressed, §5.3):
+(`Side.addr_port` / `Cntlr.addr_port` — those keys are endpoint-addressed, §5.3):
 that yields the `dn_id`/`cn_id` the `Syncup*` requests and the
 `migr_src_conf.dst_dn_id`/`migr_dst_conf.src_dn_id` fields carry (cacheable per
 round; a moved node re-resolves on its next `DnRev`/`CnRev` event, §5.5). Bitmap chunks travel over
@@ -1828,7 +2034,17 @@ ascending `bm_idx`. The `Syncup*` replies and, continuously, the `CheckSide`/
 feed health: set/clear `err_epoch` on
 `Cntlr`, `Leg`, `Side` records accordingly (STM, no rev bump) — in particular a
 failing §3.6 health-check block turns into `Leg.err_epoch` (and `Side.err_epoch` when
-the side path itself is the failing part).
+the side path itself is the failing part). `RES_STATUS_PROVISIONING` entries never set
+`err_epoch` on any of the three ([D15], §9.5).
+
+**Provisioning gate ([D15], §9.4).** The sp-worker fills `SideConf.provisioned` from
+the etcd `Side.provisioned`, and `MigrSrcConf.dst_provisioned` from the migration's
+**dst** side's flag. **Flip rule**: on any `SyncupSide`/`CheckSide` reply where the
+synced `provisioned` was `false` and `zeroed_ext_cnt == total_ext_cnt > 0`, the worker
+sets `Side.provisioned = true` in an STM and bumps `SpRev` once (several sides of one
+SP MAY batch into one STM). The normal watch fan-out then re-syncs the sides (now
+exporting) and the cntlrs (now connecting). There are no long gRPC deadlines and no
+Check-round exemptions — every RPC stays short.
 
 ### 10.4 Automatic reactions (`EventThreshold`, thin-pool auto-grow)
 
@@ -1848,6 +2064,9 @@ manual RPC:
   `CreateCntlr` on a fresh CN with the same `cntlid_slot`.
 * `side_unhealthy` (600 s): a side stays unhealthy ⇒ start an internal migration of its
   leg to a fresh DN (§8.11); a pre-existing healthy migration of that leg is left alone.
+  The reaction is **gated on `Side.provisioned == true`** — migrating off a
+  never-provisioned side is meaningless, and a side still zeroing reports
+  `RES_STATUS_PROVISIONING`, which never sets `err_epoch` in the first place ([D15]).
 * `leg_unhealthy` (1200 s): a leg stays unhealthy ⇒ if the group has a spare, perform an
   internal `SwitchSpareLeg` (§8.12 — the spare is only now `mdadm --add`-ed and
   rebuilt); otherwise create a spare on a fresh DN first, then switch.
@@ -1860,7 +2079,13 @@ manual RPC:
   `ext_cnt` — grow by the original allocation unit); when its **metadata** usage
   exceeds the same percentage, an internal `GrowSlice(is_meta = true)` (ladder-sized,
   §8.5). One grow per pool at a time: no second grow starts while the previous one is
-  not yet visible in the reported usage. `low_water_mark_pct > 100` disables this
+  not yet visible in the reported usage. A grow whose new group still contains a
+  provisioning leg is **deferred on the CN**: the concat and the pool keep their old,
+  effective size and keep reporting `OK` at that size with their raw `dmsetup status`
+  details, while only the deferred group's own rows report `RES_STATUS_PROVISIONING`;
+  the grow completes by itself when the leg clears, and the "one grow per pool at a
+  time" rule is unaffected because the serving pool's usage details keep flowing (§9.4,
+  §9.5, [D15]). `low_water_mark_pct > 100` disables this
   automation (§7); operators then grow manually.
 
 The worker never deletes user data on its own; every automatic action above only
@@ -1894,6 +2119,19 @@ everything it has seen):
    for an in-flight clone — after the §11.5 recovery if the clone state was lost).
 4. Move all namespaces from `inaccessible` to `optimized`.
 
+**Host-visible errors when the old primary is alive but CP-unreachable
+([D16]).** The common failover — a dead CN — is clean from the host's side:
+its paths drop, IO queues, and the new primary's `optimized` flip releases it.
+An old primary that keeps running while only its **control-plane**
+connectivity is lost cannot apply the syncup that demotes it: its host-facing
+namespaces stay in the `optimized` ANA group while the sides fence its data
+paths underneath ([D16] in §11.1.1 explains why that is still write-safe).
+Its md arrays then fail, and the errors nvmet returns on the
+still-`optimized` path are target-internal (DNR), not path errors — host
+multipath does **not** retry them on the new primary's path, so applications
+can see IO errors until the old primary reconnects to the CP and applies its
+demotion, or is stopped. Accepted for v1 and recorded in [D16].
+
 #### 11.1.1 "Make sure all groups are available"
 
 Example: an SP with 2 slices, each slice 1 meta + 2 data groups, `RedundMdRaid1`
@@ -1903,7 +2141,10 @@ bitmap/failfast/data-offset options):
 
 1. Both legs available:
    1. Neither has an md superblock ⇒ `mdadm --create` (with `--assume-clean` only when
-      both legs are freshly trimmed).
+      **neither leg carries an md superblock**, which after the §9.4 zeroing is exactly
+      the freshly-provisioned case — the old wording said "freshly trimmed", a claim
+      `blkdiscard` never funded because discard does not imply zeros; the zeroout does,
+      and the superblock check is the evidence the CN actually has, [D15]).
    2. Exactly one has a superblock ⇒ `mdadm --assemble` with that leg, then
       `mdadm --add` the other.
    3. Both have superblocks ⇒ `mdadm --assemble` with both, then `mdadm --detail`; if
@@ -1920,6 +2161,22 @@ During a migration the leg has a src and a dst side whose states pair as
 makes the leg available. The §3.6 health-check block is the ongoing liveness probe on
 top of this: an available leg whose probe IO fails is reported unhealthy and feeds
 §10.4. Spare legs never participate in assembly (§8.12).
+
+**Why unordered fan-out is write-safe ([D16]).** The sp-worker pushes the
+failover's `SyncupSide`/`SyncupCntlr` calls with no cross-side ordering, so
+mid-failover the old primary can still hold a live path to one leg while the
+new primary already owns another. Two mechanisms make that harmless, and both
+are load-bearing: (a) each side's flip is **atomic within one DN converge** —
+the old primary's dm-linear reloads onto dm-error in the same pass that puts
+the new primary's onto the side device — so a single leg never has two
+writers; and (b) across the legs of a group, **md's own arbitration**
+decides: a leg whose superblock still claims a clean full array cannot be
+started degraded on its own (case 2's assemble-without-`--run` refuses when
+the survivor's Array State does not account for the missing members), and
+once both legs are reachable the event counts pick the newer one and resync
+overwrites the stale leg. dnv adds no fencing epoch of its own in v1, so (b)
+is an explicit dependency on mdadm semantics; the integration suite MUST
+re-cover it whenever the deployed mdadm version changes.
 
 **sides** — on a `SyncupSide` (highest revision) showing a changed primary. One
 converge pass, no waits and no suspensions ([D12]):
@@ -2001,8 +2258,29 @@ wrappers are untouched by the switch.*
 
 Starting a migration resembles a failover; the leg temporarily owns two sides.
 
+**Phase 0 — the destination provisions first.** `CreateMigration` writes the dst `Side`
+with `provisioned = false` (§8.11), so the dst DN runs only the §9.4 protocol: allocate
+runs, build `DnSideName`, zero it batch by batch. No per-CN stacks, no metadata slot,
+no `nvme connect`, no dm-clone; the `migr_dst_info.*` rows report
+`RES_STATUS_PROVISIONING`.
+
+For the **src** side, `migr_src_conf.dst_provisioned = false` is normative and means:
+**behave exactly as if `migr_src_conf` were absent** — keep serving normally, no fence,
+no suspension, no migr-src export — differing only in reporting the would-be
+`migr_src_info.*` rows as `RES_STATUS_PROVISIONING`. Without this gate the src would
+fence the primary's path at migration start and the leg would have **no serving path
+for the whole zeroing window**.
+
+When the sp-worker flips the dst side (§10.3), the next fan-out carries
+`side_conf.provisioned = true` on the dst and `migr_src_conf.dst_provisioned = true` on
+the src, and both roles run the sequences below unchanged; the dst's connect retry of
+step 3 absorbs any cross-side ordering. The cost is added **migration-start latency** —
+one whole-side zeroing pass (seconds under the fast-Write-Zeroes assumption of §9.4)
+before any data moves. `CancelMigration` during the zeroing window cancels the zeroing
+goroutine and waits for it before the dm devices are removed (§9.4).
+
 **src side** (driven by its `SyncupSide` carrying `migr_src_conf` = `migr_id`,
-`dst_side_id`, `dst_dn_id`):
+`dst_side_id`, `dst_dn_id`, `dst_provisioned = true`):
 
 1. Move every per-CN subsystem's namespace to `inaccessible` (all cntlrs).
 2. Retire every per-CN dm-linear, in two phases ([D12]):
@@ -2078,7 +2356,8 @@ moving ss/ns from `sp1` to `sp2`:
   the transfer's `XferNqn`, `src_ns_idx = ori_ns_idx`, the source geometry
   `src_slice_cnt`/`src_stripe_size`/`src_block_size` = sp1's slice count / raid0 stripe
   / pool block size, `dst_td_name`, `auto_resume = true`) — the sp2 primary then:
-  (1) connect to the targets, (2) create `CnCloneMetaName`, (3) create
+  (1) connect to the targets, (2) allocate arena units and create the metadata wrapper
+  `CnCloneMetaDmName` ([D14]), (3) create
   `CnCloneFinalName`, (4) reload the ns's `CnNsDevName` onto it and resume, (5) origin
   namespace → `optimized`. Hosts flip to sp2 transparently.
 * Optional bitmap fast-path: per sp1 slice `GetThinDeviceBitmap` (paged) →
@@ -2130,22 +2409,29 @@ each side's address mapping. Consumers:
 
 Wire vs local conventions: every Gateway/etcd bitmap (`Get*Bitmap`, `Append*`,
 `CloneBitmap`, `MigrBitmap`) is **1 = unwritten/skippable**; thin-pool metadata and the
-formulas above use **written/copied = 1**. Invert exactly once at the boundary.
+formulas above use **written/copied = 1**. Invert exactly once at the boundary. Bit
+addressing is **LSB-first within each byte** in *both* conventions: bit *i* is
+`bitmap[i/8] & (1 << (i%8))`, and the trailing pad bits of the last byte are `0` (§8.13).
+Only the *meaning* of a set bit is inverted at the boundary, never the bit order.
 
 ### 11.5 Clone crash recovery (destination-bitmap rebuild)
 
 Clone progress durability does **not** rely on the src bitmaps in etcd; it relies on
 the **destination thin-pool bitmaps**. The dst td starts empty [D3], and dm-clone
 hydrates in region = `block_size` units, so after any crash "block mapped in a dst
-thin pool" ⇔ "block already copied". The volatile clone metadata LV (tmpfs, §3.2) is
+thin pool" ⇔ "block already copied". The volatile clone metadata — arena units under
+the wrapper `CnCloneMetaDmName` (tmpfs + loop, §3.2 step 2) — is
 therefore rebuildable. Whenever the primary (re)builds a clone whose dm-clone metadata
-is missing — CN reboot, failover to a cntlr that never ran it, tmpfs loss — it MUST:
+is missing or unusable — CN reboot, failover to a cntlr that never ran it, tmpfs loss,
+or a metadata-wrapper probe mismatch (wrong length, or a table backed by a stale loop
+path after a tmpfs remount, [D14]) — it MUST:
 
 1. Suspend the dm-linear `CnNsDevName` of every namespace backed by the td (or make
    sure none is created / pointing anywhere live yet).
 2. Read the **dst bitmaps**: the mapping bitmap of the dst td from every thin pool of
    the SP (per slice, *mapped = 1 = copied*).
-3. Create the dm-clone with **hydration disabled** and a fresh metadata LV.
+3. Create the dm-clone with **hydration disabled** and a freshly allocated, freshly
+   hole-punched metadata wrapper ([D14]).
 4. `blkdiscard` every dm-clone region whose bits are 1 in the dst bitmaps (§11.4,
    B-side only) — marking those regions "already hydrated".
 5. Resume those `CnNsDevName`s; enable background hydration.
@@ -2169,7 +2455,8 @@ finalization (§8.9/§8.10).
 
 Levels gate agent behavior top-down for disaster recovery: each step removes one more
 fragile layer until `SP_LEVEL_DISABLE` leaves only the bottom storage layer — on a
-DN, each side's data device `DnSideName` and its [D13] extent record. Agents treat the level as
+DN, each side's data device `DnSideName` and its [D13] extent record. Side zeroing
+(§9.4) is part of that bottom layer and keeps running at `SP_LEVEL_DISABLE`. Agents treat the level as
 part of desired state (it rides in every `SyncupSide`/`SyncupCntlr`): raising it tears
 layers down, lowering it rebuilds them.
 
@@ -2262,29 +2549,42 @@ the §4.6 state files live. `dnvctl` subcommand sketch:
 ## Appendix A — command-pattern crib sheet
 
 Agents converge with stock tooling; the exact invocations below are normative patterns
-(placeholders in `{}`). Probing uses `--reportformat json` for LVM, `mdadm --detail`,
-`dmsetup status/table`, `nvme list-subsys -o json`, and configfs reads for nvmet.
+(placeholders in `{}`). Probing uses `mdadm --detail`, `dmsetup status/table/ls`,
+`losetup --associated`, sysfs walks under `/sys/class/nvme*`, and configfs reads for
+nvmet.
 
 **[D13] DN disk metadata:** there are no shell commands here. The dn agent reads and
 writes the header block, the two volume-table slots and the dm-clone metadata slots
 directly on the `--disk` device through `OsClient.ReadBlock`/`WriteBlock` (buffered
 pread/pwrite + `fdatasync`; see `osclient.md` §4.5). Never `dd` — the lab's uutils dd
 0.8.0 silently mishandles `iflag=`/`oflag=direct`. The only shell command in the side
-provisioning path is the §9.4 trim:
+provisioning path is the §9.4 zeroing (the old whole-device `blkdiscard --force` trim
+is superseded — `--zeroout` zeroes, discard did not):
 
 ```shell
-blkdiscard --force {DmPath(DnSideName)}
+blkdiscard --zeroout --offset {done_ext × extent_size} \
+  --length {min(DnZeroBatchExtCnt, remaining) × extent_size} {DmPath(DnSideName)}
+# one batch per command, in order, through the dm-linear; each successful batch's
+# zeroed_bits are persisted before the next one starts (§9.4, [D15]).
+# Fail-fast precondition: the disk's queue/write_zeroes_max_bytes must not read 0.
 ```
 
-**CN clone VG (tmpfs-backed):**
+**CN clone-metadata arena (tmpfs + one loop device; no LVM, [D14]):**
 
 ```shell
-mount -t tmpfs -o size=2G tmpfs {CnTmpfsPath}
-truncate --size {DefaultCloneVgSize} {CnTmpFilePath}
-losetup --find --show {CnTmpFilePath}          # → {loopdev}
-pvcreate {loopdev}
-vgcreate --physicalextentsize {DefaultCloneVgExtSize}B {CnCloneVgName} {loopdev}
-lvcreate --name {CnCloneMetaName} --size {meta_size}B {CnCloneVgName}
+mount -t tmpfs -o size={DefaultCnTmpfsSize} tmpfs {CnTmpfsPath}
+truncate --size {CnCloneMetaAreaSize} {CnTmpFilePath}
+losetup --find --show {CnTmpFilePath}            # first converge → {loopdev}
+losetup --associated {CnTmpFilePath}             # every later converge: re-learn {loopdev}
+# per clone, on allocate — recycled-unit guard, hole-punch only, NEVER --zeroout:
+blkdiscard --offset {unit_start × CnCloneMetaUnit} \
+           --length {unit_count × CnCloneMetaUnit} {loopdev}
+dmsetup create {CnCloneMetaDmName} --table \
+  "0 {unit_count × CnCloneMetaUnit / 512} linear {loopdev_majmin} {unit_start × CnCloneMetaUnit / 512}"
+# {loopdev} is the path losetup reports (/dev/loopN); {loopdev_majmin} is its major:minor,
+# which is what a dm table names and what `dmsetup table` reads back.
+# registry read-back (the dm tables ARE the allocation table):
+dmsetup ls | grep '^dnv-{cluster}-{cn}-b-' ; dmsetup table {CnCloneMetaDmName}
 ```
 
 **md-raid1** (`{data_offset_k} = meta_blocks × block_size / 1024`, §3.6; every member
@@ -2334,14 +2634,19 @@ thin-pool:       0 {sectors} thin-pool {meta_dev} {data_dev} {block_sectors} {lo
   messages: create_thin {dev_id} | create_snap {dev_id} {ori_id} | delete {dev_id}
 thin:            0 {sectors} thin {pool_dev} {dev_id}
 clone:           0 {sectors} clone {meta_dev} {dest_dev} {src_dev} {region_sectors} \
-                   2 no_hydration …     # then: dmsetup message {dev} 0 enable_hydration
+                   2 no_hydration no_discard_passdown \
+                   4 hydration_threshold {t} hydration_batch_size {b}
+                   # then: dmsetup message {dev} 0 enable_hydration
   knobs: dmsetup message {dev} 0 hydration_threshold {n} / hydration_batch_size {n}
   status: dmsetup status {dev}   # "clone" line → hydrated/total regions (§9.5 details)
+  # Both features are mandatory on every dnv dm-clone — cn clone and dn migration alike
+  # — because `blkdiscard` must stay metadata-only ([D7], §9.6, §11.4, §11.5).
 suspend/resume/reload: dmsetup suspend|resume {name} ; dmsetup reload {name} --table "…"
 multi-target table (--table is single-line only, so it travels on stdin):
   printf '0 {len0} linear {dev} {off0}\n0 {len1} linear {dev} {off1}\n' | dmsetup create {name}
   # same for `dmsetup reload {name}`; used for the side device DnSideName ([D13])
 discard hydrated-marking: blkdiscard --offset {r×region} --length {region} {clone_dev}
+  # metadata-only: no_discard_passdown keeps this off the destination device ([D7])
 ```
 
 **nvmet (configfs, both node kinds — one port per node):**
@@ -2377,9 +2682,46 @@ echo {ana_grpid} > .../namespaces/{nsid}/ana_grpid
 ```shell
 nvme connect --transport {tr_type} --traddr {tr_addr} --trsvcid {tr_svc_id} \
   --nqn {subsys_nqn} --hostnqn {CnHostNqn|DnHostNqn} \
-  --fast-io-fail-tmo {DefaultNvmeFastIoFailTmo} --ctrl-loss-tmo -1
+  --hostid {NvmeHostId(hostnqn)} \
+  --fast_io_fail_tmo {DefaultNvmeFastIoFailTmo} --ctrl-loss-tmo -1
 nvme disconnect --nqn {subsys_nqn}
 ```
+
+Two spellings here are load-bearing and must not be "tidied":
+
+- `--fast_io_fail_tmo` carries **underscores**. nvme-cli defines that one
+  option as `OPT_INT("fast_io_fail_tmo", 'F', …)` and its argconfig
+  `getopt_long` table takes the name verbatim, so `--fast-io-fail-tmo` is
+  rejected with `unrecognized option`. Every neighbouring option
+  (`--ctrl-loss-tmo`, `--reconnect-delay`, `--keep-alive-tmo`) really is
+  dashed.
+- `--hostid` is always passed, derived from the hostnqn as 16 bytes of
+  `sha256("dnv-hostid:{hostnqn}")` rendered RFC-4122-shaped
+  (`common.NvmeHostId`, the `DnNsIdentity` idiom). The kernel keeps a strict
+  1:1 hostnqn↔hostid mapping (`nvmf_host_add` rejects a second hostnqn under
+  a known hostid with `EINVAL`, "found same hostid … but different
+  hostnqn"), and nvme-cli fills an omitted `--hostid` from the node-wide
+  `/etc/nvme/hostid`. dnv picks a hostnqn per identity, so an implicit
+  hostid makes every connect hostage to whatever claimed that file first: an
+  unrelated NVMe-oF mount under `/etc/nvme/hostnqn` is enough to fail dnv's
+  first connect, and two dnv identities on one node collide with each other.
+
+**Reading host state** — one subsystem's namespace device, controller
+liveness and per-path ANA state are read from **sysfs**, never from
+`nvme list-subsys -o json`:
+
+```shell
+/sys/class/nvme-subsystem/{subsys}/subsysnqn     # keys the lookup
+/sys/class/nvme-subsystem/{subsys}/{nvmeXnY}     # the multipath ns device
+/sys/class/nvme/{nvmeX}/{address,state,transport}
+/sys/class/nvme/{nvmeX}/{nvmeXcYnZ}/ana_state    # the only place ANA lives
+```
+
+`nvme list-subsys -o json` lists **no namespaces at all** (nvme-cli 2.16,
+with or without `--verbose`) — a subsystem entry is just Name, NQN and
+Paths — and no `ANAState` unless given a namespace block device, which for
+an all-inaccessible namespace answers with an empty list indistinguishable
+from "not connected".
 
 **Id calculators (Go):**
 
@@ -2437,7 +2779,17 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 * **[D7] Push-bitmap durability.** Every received `Push*Bitmap` chunk is persisted as
   its own file under `LocalMigrBmPath`/`LocalCloneBmPath` and the applied sets reported
   in `bm_info`/`bm_info_list` are derived from the files, so agent restarts never force
-  a re-push and a rebuilt dm-clone can re-apply src bitmaps locally (§9.6, §11.5). The
+  a re-push and a rebuilt dm-clone can re-apply src bitmaps locally (§9.6, §11.5).
+  Both dm-clone features — `no_hydration` **and** `no_discard_passdown` — are mandatory
+  on **every** dnv dm-clone (cn clone and dn migration alike, Appendix A) because
+  `blkdiscard` must stay metadata-only: with passdown enabled dm-clone also remaps the
+  discard to the destination device, and passdown is on by default whenever the
+  destination's discard granularity is ≤ one region — which both a raid0-over-thin (cn)
+  and a dm-linear over a raw disk (dn) satisfy. Without it the idempotent re-apply this
+  decision assumes (and §9.1's "re-`blkdiscard`ing an already-hydrated region is a
+  no-op") would destroy acknowledged writes: a chunk read from the CN thin metadata
+  *before* a host write hydrated region *r* can arrive *after* it, and the resulting
+  discard would reach the destination. The
   accepted gap: a clone chunk grown by `AppendCloneBitmap` after its last push is
   re-delivered only while the pushing worker keeps its in-memory length memo — src
   bitmaps never affect correctness, so a missed tail only costs some avoidable copying.
@@ -2447,7 +2799,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   cost extra copying, never correctness (§9.6, §11.5).
 * **[D9] `creation_epoch` in `cluster_id`.** Hashing only the name made `cluster_id` a
   pure function of a user-chosen string: a cluster deleted and recreated under the same
-  name reused the whole key space and every derived node-local name (`getShortId`, dm/LV
+  name reused the whole key space and every derived node-local name (`getShortId`, dm
   names, NQNs), so any leftover etcd key or leftover device from the old incarnation was
   silently adopted by the new one. Mixing in a gateway-stamped `creation_epoch`
   (`UnixNano`) makes each incarnation a distinct id, at the cost of one `ClusterConf`
@@ -2494,8 +2846,23 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   over it. The §11.1 side failover has no window at all — it reloads onto dm-error
   directly, and its old 300 s grace sleep is deleted with the suspension it protected.
   The residual exposure is external tooling — udev, `blkid`, an operator's `lsblk` —
-  reading a source's linears during those 60 s; nothing in the dn agent itself scans
-  block devices any more ([D13] removed the LVM commands that did).
+  reading a source's linears during those 60 s; no dnv agent scans block devices any
+  more ([D13] removed the dn agent's LVM commands and [D14] the cn agent's).
+
+  One residual is recorded but not mechanised: a **transfer** origin's ns-dev
+  suspension (§8.10, §11.3) is **unbounded** — unlike this migration window it has no
+  `SuspendSeconds` floor or ceiling — so external scanners that touch it still block in
+  D state for as long as the transfer runs. The agents' own exposure to that ended with
+  [D14] (no more LVM scans on the CN either; `cnagent.md` CN16). The operational blast
+  radius deserves stating plainly (update_02.md U5): a transfer hydrating a large td
+  runs for hours, and for that whole time any block-device walk on the CN — a udev
+  worker, `blkid`, `lsblk`, a monitoring or backup agent — that opens the suspended
+  ns-dev wedges unkillably until the transfer ends. Operators SHOULD keep scanners off
+  dnv devices on CNs while transfers run (the spirit of the Appendix A udev guard). A
+  bounded alternative was considered and left undecided: after a grace window, reload
+  the origin ns-dev onto its dm-error the way this fence does — hosts already queue
+  against the `inaccessible` ANA state, and the xfer path never maps the ns-dev. Note
+  only; no mechanism change was decided.
 * **[D13] The DN carries a self-describing dnv disk format; LVM is gone from the dn
   agent.** LVM left for three measured reasons. (a) Its label scan reads every block
   device on the node, so any dnv device in a bad state takes the whole node's LVM down
@@ -2521,6 +2888,72 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   unconfirmed disk rejects every mutation, because a failed `SyncupDn` does not stop the
   `SyncupSide` calls that follow it (§9.1). Changing any layout constant later is a
   header-version bump, not a tweak.
+* **[D14] LVM is gone from the CN too; the clone-metadata arena is a slot allocator.**
+  The CN clone VG had reintroduced on the CN exactly the failure class [D13](a) evicted
+  from the DN: a bare `vgs`/`lvs` label scan reads every block device on the node, and
+  on a CN that includes suspended transfer-origin ns-devs (lab-measured to wedge LVM in
+  unkillable D-state `exit_aio`; `ignore_suspended_devices` / `global_filter` do not
+  help), error targets, md members and pathless multipath legs — and the cn agent ran
+  those scans on every converge and every Check round. Replacement (§3.2 step 2, §4.5,
+  Appendix A): one tmpfs-backed sparse 1 GiB file (`CnTmpFilePath`,
+  `CnCloneMetaAreaSize`) on **one** loop device — re-learned every converge with
+  `losetup --associated`, never persisted, because loop names are unpredictable and a
+  per-clone loop sprawl is unwanted — carved into 256 `CnCloneMetaUnit` = 4 MiB units
+  and handed out first-fit in **contiguous** runs to wrapper dm-linears
+  `CnCloneMetaDmName` (CN dm kind `b`, `cnagent.md` §2.1; the wrapper exists because
+  dm-clone reads its superblock from sector 0 and takes no offset, the same reason
+  `DnMigrMetaDmName` does). **The kernel's dm tables are the allocation registry** —
+  each wrapper's `0 {len} linear {loopdev_majmin} {offset_sectors}` records its own allocation,
+  and the arena is volatile *together with* the dm state (a reboot clears both, an agent
+  restart preserves both) — so there is no on-file allocation table and none of [D13]'s
+  header/CRC/A-B machinery is needed. Every allocation hole-punches its range with plain
+  `blkdiscard` first, because a freed unit still holds the previous clone's valid
+  dm-clone superblock and hole-punch gives guaranteed zeros by *file* semantics (no
+  device DLFEAT involved) while releasing the tmpfs pages; `--zeroout` is **forbidden**
+  there because it would materialize up to the whole arena in RAM. Rationale = the
+  [D13](a) label-scan class eliminated rather than mitigated, one less dependency
+  (lvm2), and CN naming as deterministic as everything else. Arena exhaustion is the old
+  `lvcreate`-ENOSPC equivalent (`RES_STATUS_ERROR` on the clone's resources); orphaned
+  kind-`b` wrappers are removed by reconcile, which frees their units; a wrapper whose
+  length or backing loop path no longer matches the currently probed loop device is
+  `RES_STATUS_ERROR` and is repaired by the §11.5 clone rebuild.
+* **[D15] Whole-side zeroing behind a `provisioned` gate; `RES_STATUS_PROVISIONING`.**
+  dnv is multi-tenant, so a new side must never expose a previous tenant's bytes. The
+  §9.4 trim protocol could not deliver that: `blkdiscard` does not imply zeros (the
+  kernel dropped `discard_zeroes_data` in 4.12; NVMe DLFEAT read-zeroes is optional).
+  Nor was it enough for correctness — a recycled meta-group extent can carry a valid
+  thin-pool metadata superblock a fresh pool would adopt, and a stale md superblock puts
+  §11.1.1 in the wrong assembly case with no `--zero-superblock` escape. Every side is
+  therefore fully zeroed with `blkdiscard --zeroout` before its first export, with
+  per-extent progress in `zeroed_bits` on the authoritative volume table ([D13]), gated
+  by the CP-visible `Side.provisioned` flag that the sp-worker flips when the agent
+  reports `zeroed_ext_cnt == total_ext_cnt > 0` (§9.4, §10.3). Resources deferred while
+  a side underneath them zeroes report the new `RES_STATUS_PROVISIONING` — *healthy, not
+  ready, no action needed* — which **never** sets `err_epoch`; `ERROR` keeps meaning
+  *needs intervention*, which is why a missing record at `provisioned = true` (data loss
+  on a lost or foreign disk) stays `ERROR` and feeds §10.4 rather than looking
+  transitional. The zeroing runs as a background, lock-free, batched goroutine under the
+  ordinary §7 timeouts, on the standing assumption that DN disks have fast Write Zeroes
+  (checked fail-fast against the disk's `write_zeroes_max_bytes`); a synchronous
+  whole-side zeroing inside one `SyncupSide` was rejected because a node-read holder plus
+  one queued `SyncupDn` writer would freeze the whole DN agent. Two things this finally
+  funds honestly: §11.1.1's `--assume-clean` and the fresh-thin-pool metadata assumption.
+* **[D16] Failover fencing has no epoch; safety = per-side atomic flip + md
+  arbitration.** A failover's only cross-node coordination is the revisioned,
+  unordered fan-out of §10.3. Correctness rests on two things (§11.1.1): each
+  DN converges its side's old-primary→dm-error and new-primary→side-device
+  reloads in one pass, so one leg never has two writers; and mdadm's assembly
+  rules arbitrate across legs — a stale leg whose superblock claims a clean
+  full array will not start degraded alone, and event counts plus resync
+  direction repair divergence once both legs return. md behavior is therefore
+  a load-bearing dependency, pinned by the integration suite. The accepted
+  cost is the alive-but-CP-partitioned old primary of §11.1: fenced at the
+  DNs but still advertising `optimized`, it returns DNR internal errors that
+  host multipath does not fail over from, so applications can see EIO until
+  it re-syncs or is stopped. A v2 that wants to close both edges adds a
+  fencing epoch checked on the data path (NVMe reservations, or a
+  per-revision gate at the side exports) — not more ordering in the worker,
+  which cannot reach a partitioned node anyway.
 * **[D10] Id-keyed revision keys.** `DnRev`/`CnRev`/`SpRev` are keyed by
   `dn_id`/`cn_id`/`sp_id`, not by the `addr_port`/`sp_name` that keys the matching
   `DnConf`/`CnConf`/`SpConf`; the mutable handle moved into the value. The key is then
@@ -2534,4 +2967,122 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   change because reaching `SpRev` from an `sp_id` alone would require knowing the SP's
   `shard_code`, which only `SpConf` — reached by name — carries.
 
+## Appendix C — Amendments
+
+Recorded for traceability; the edits are already applied. Companion documents record
+their own edits to this file in their §5 sections.
+
+* `update_01.md` U1 — Appendix A's dm-clone pattern spells out
+  `2 no_hydration no_discard_passdown`, and [D7] records that both features are
+  mandatory on **every** dnv dm-clone (cn clone and dn migration alike) because
+  `blkdiscard` must stay metadata-only. §9.1's "re-`blkdiscard` is a no-op" sentence now
+  names the feature it depends on.
+* `update_01.md` U3 — LVM leaves the CN. §1, §2, §3 preamble, §3.1, §3.2 step 2, §3.6,
+  §4 preamble, §4.1, §4.2, §4.5 (retitled; `CnCloneVgName`/`CnCloneMetaName`/
+  `CnCloneMetaPath` deleted), §5.2, §8.9, §9.3, §11.3, §11.5, Appendix A and [D9]/[D12]
+  now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
+  carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
+  **[D14]**.
+* `update_01.md` U4 — the §9.4 trim protocol is replaced by whole-side zeroing behind
+  the `provisioned` gate; §3.1, §8.4, §8.5, §8.11, §8.12, §9.2, §9.5, §9.7, §10.2-§10.4,
+  §11.1.1, §11.2, §11.7 and Appendix A follow; new status `RES_STATUS_PROVISIONING` and
+  new decision **[D15]**. The §8/§10 items specify worker and gateway behavior that is
+  not implemented yet — this document is their spec.
+* `update_01.md` U5 — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
+  §4.2's stale "name it like a dm kind if desired" line is corrected); §8.13 and §11.4
+  pin the LSB-first wire bitmap bit order; [D12] records the unbounded transfer-origin
+  suspension residual.
+* `update_02.md` U1 — §8.7 gains the snapshot point-in-time rule (quiesce the
+  origin td's raid0 around the per-slice `create_snap` sequence; `cnagent.md`
+  CN14 is the agent-side spec).
+* `update_02.md` U3 — §11.1/§11.1.1 document the failover safety argument and
+  the alive-but-CP-partitioned old primary's host-visible error window; new
+  decision **[D16]**.
+* `update_02.md` U4 — §8.9/§8.11 record that clone/migration admission does
+  not check the per-CN arena / per-DN clone-metadata slot budgets, and the
+  per-DN ceiling (≤ 24 destination roles) is stated for the first time
+  outside a code comment (`dnagent.md` DN13).
+* `update_02.md` U5 — the [D12] transfer-origin residual now carries its
+  operational blast radius and the considered-but-undecided bounded
+  alternative.
+* `update_02.md` U6/U7 — new Appendix D (v1 assumptions and known limits);
+  the three `Cntlr` field references that carried a stale `cn_` prefix on
+  `addr_port` now use the schema's field name (×3).
+
 <!-- end of design_v001.md -->
+
+### Integration-run fixes (first on-hardware run of the U1-U5 tree)
+
+Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
+against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
+execution of either suite since `update_01.md` was applied. All five were
+real agent defects, not harness problems; every one is now covered by a unit
+test that fails without the fix.
+
+* **IR1 — `nvme connect --fast_io_fail_tmo`** (Appendix A, §4.2 leg connect). The
+  option is spelled with underscores in nvme-cli; `--fast-io-fail-tmo` is rejected
+  outright with `unrecognized option`, so no dnv-internal connection could ever be
+  made. Appendix A now records the spelling and why it must not be "tidied".
+* **IR2 — every dnv connect passes `--hostid`** (Appendix A, §4.2). New helper
+  `common.NvmeHostId(hostnqn)` = 16 bytes of `sha256("dnv-hostid:{hostnqn}")`,
+  RFC-4122-shaped, the `DnNsIdentity` idiom. The kernel keeps a 1:1
+  hostnqn↔hostid mapping and nvme-cli fills an omitted `--hostid` from the
+  node-wide `/etc/nvme/hostid`, so an implicit id fails `EINVAL` as soon as any
+  other identity on the node — another dnv role, or an unrelated NVMe-oF mount
+  under `/etc/nvme/hostnqn` — holds it.
+* **IR3 — nvme host state is read from sysfs** (Appendix A, new "Reading host
+  state" block). `nvme list-subsys -o json` lists no namespaces at all and no
+  `ANAState`, so the §11.2 destination could never find its migration source's
+  block device. Both roles now walk `/sys/class/nvme-subsystem` +
+  `/sys/class/nvme`, which is what the cn role already did for legs.
+* **IR5 — namespace identity is compared canonically** (§3.1, Appendix A). nvmet
+  reads `device_uuid`/`device_nguid` back dash-separated and lower-cased whatever
+  form was written, while `DnNsIdentity` yields the uuid dashed and the nguid
+  bare. A byte-wise compare made every converge disable, rewrite and re-enable a
+  healthy namespace, and every probe report it `RES_STATUS_ERROR`.
+
+## Appendix D — v1 assumptions and known limits (update_02.md U6)
+
+Recorded so that scale, recovery and security expectations are explicit
+rather than discovered. None of these is a defect in the mechanisms above;
+each is a boundary v1 accepts, with the intended direction noted where one
+exists.
+
+* **One primary per SP is the volume throughput ceiling.** Every td of an SP
+  is served by its single primary cntlr; slices shard *within* that CN, never
+  across CNs. The aggregate bandwidth of one volume is one CN's. Scale-out is
+  by storage pool — spread SPs (and so their primaries) across CNs.
+* **Revision granularity is the SP.** Any `SpRev` bump re-fans the complete
+  desired state to every side and every cntlr of the SP (§9.1 full sync,
+  §10.3). During initial provisioning each side's `provisioned` flip is
+  itself a bump, so a large SP's bring-up costs O(sides × (sides + cntlrs))
+  syncups; the §10.3 allowance to batch several flips into one STM is the
+  intended mitigation. Steady state is one fan-out per user mutation.
+* **The agent node lock has head-of-line blocking.** A pending node write
+  (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
+  slowest in-flight object converge. Converges are bounded per command (§7),
+  but on a node where many commands run to their timeouts, one sick object
+  can delay every other object's converge and Check round by up to a whole
+  converge pass. Accepted: object locks keep steady-state concurrency, and
+  the §9.4 zeroing loop's try-acquire rule keeps the one long-running
+  background writer out of that queue.
+* **No thin-metadata repair path is specified.** Pool metadata is redundant
+  at the block layer (meta groups can be RedundMdRaid1), but there is no
+  `thin_check`-on-activate or `thin_repair` flow for a pool whose dm-thin
+  metadata is corrupt. Until an update specifies one, a pool-metadata
+  `RES_STATUS_ERROR` is an operator-intervention event (activate read-only,
+  `thin_repair` onto fresh space by hand).
+* **The fabric is trusted.** gRPC is plaintext (grpc.md §4), etcd access is
+  whatever the deployment configures, and data-plane access control is
+  hostnqn allow-lists — a spoofable identifier. NVMe in-band authentication
+  and TLS are out of scope for v1. The [D15] multi-tenant guarantee is about
+  *stored bytes* (no tenant ever reads another's stale blocks); it does not
+  defend against an attacker on the storage network. Deploy on an isolated,
+  trusted fabric.
+* **QoS is deferred** — the §3.2 step 4 open issue, restated here for
+  completeness: agents accept and persist `qos_ratio` and enforce nothing
+  (`cnagent.md` CN6).
+* **Snapshot creation is not atomic across a primary crash.** With
+  update_02.md U1 a snapshot is point-in-time against live IO, but a crash
+  between two slices' `create_snap` messages still leaves a torn snapshot
+  (§8.7); delete and re-create it.
