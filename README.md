@@ -3,7 +3,8 @@
 A distributed NVMe-oF block storage system. `doc/architecture.md` is the
 design; `doc/layout.md` fixes the repository layout; `doc/log.md`,
 `doc/osclient.md` and `doc/grpc.md` are the normative specs of the shared
-components.
+components; `doc/dnv-worker.md` is the normative spec of `dnv-worker`, `model/`
+and `etcdutil/`, and carries the worker integration-test plan.
 
 Module: `github.com/distributed-nvme/distributed-nvme`.
 
@@ -46,6 +47,19 @@ files are committed, so an ordinary build or test never requires protoc.
   `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
   commands and file/proto/block I/O plus the §4.5.1 raw probe helpers), and
   `interceptor.go` (the four gRPC interceptors).
+* `etcdutil/` — the one and only door to etcd (`dnv-worker.md` §3, `log.md`
+  §5.3): typed `Get`/`Put`/`Delete`/`Range`/`RangeKeys`/`WatchTyped` and the
+  two STM runners, with the protobuf (un)marshaling and the `log.md` records
+  inside.
+* `model/` — the architecture §5 etcd data model as Go (`dnv-worker.md` §4):
+  key formats and parsers, `cluster_id`, the §5.6 capacity keys, the §6
+  candidate scans and the internal §8/§10.4 mutations that the worker uses now
+  and the gateway will reuse.
+* `worker/` — `dnv-worker.md` §6-§11: the heartbeat/grace/ticket vote layer and
+  its shard ownership, the per-shard revision watchers, the per-object
+  `Check*` loops with their `Syncup*` and `Push*Bitmap` calls, the `err_epoch`
+  health bookkeeping, the `provisioned`/`created` flips and the four automatic
+  reactions.
 * `agent/` — the shared dn/cn agent mechanism of `dnagent.md` §2:
   reconcile-then-serve bootstrap, local store, revision gate, lock
   hierarchy, `ResInfo` tracking, dm/nvmet/nvme-host wrappers, bitmap-chunk
@@ -59,12 +73,16 @@ files are committed, so an ordinary build or test never requires protoc.
   clones and transfers, the CN11 leg health probers, thin-metadata bitmap
   reads.
 * `cmd/dnv-agent` — the cobra/viper `dn`/`cn` binary (`dnagent.md` §3).
+* `cmd/dnv-worker` — the cobra/viper root command of `dnv-worker.md` §5:
+  `--etcd-endpoints`, `--roles`, the two vote timers and `--etcd-dial-timeout`,
+  env prefix `DNV_WORKER_`; it builds the `etcdutil` client and hands off to
+  `worker.Run`.
 * `integtest/` — the on-hardware suites of `dnagent_integtest.md` and
   `cnagent_integtest.md` (`dnagent_test.sh`, `cnagent_test.sh` and their
   gRPC drivers); both have passed against the two lab VMs.
 
-Not yet implemented: `etcdutil/`, `gateway/`, `worker/`, `cdc/`, `ctl/` and
-their binaries — `doc/architecture.md` §§5-8, §10, §12 and §13 are their
-spec. `doc/update_02.md` records the post-review fixes, all applied;
+Not yet implemented: `gateway/`, `cdc/`, `ctl/` and their binaries —
+`doc/architecture.md` §§7-8, §12 and §13 are their spec.
+`doc/update_02.md` records the post-review fixes, all applied;
 `doc/update_03.md` records two findings from implementing them — one applied,
 one open.

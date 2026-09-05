@@ -4,3 +4,10 @@ mockclient.go
 mockutils.go
 *.drawio.bkp
 bin/
+# Stray cross-builds of the integtest drivers at the repo root: `go build
+# ./integtest/workerctl/...` drops the binary here, and the `bin/` rule above
+# does not cover it (dnv-worker.md §14.2 puts them in integtest/bin/).
+/workerctl
+/fakeagent
+/dnagentctl
+/cnagentctl

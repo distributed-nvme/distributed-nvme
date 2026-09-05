@@ -73,7 +73,7 @@ environment variables; see §13):
 | binary       | role |
 |--------------|------|
 | `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, and the `Get*Bm` bitmap reads (the worker never calls `Get*Info` — it watches through `Check*`, §9.7/§10.2). |
-| `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow). |
+| `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow, leg repair). Normative spec: `dnv-worker.md`. |
 | `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local device-mapper / mdadm / nvmet state (and, on a DN, the [D13] on-disk extent metadata; no LVM anywhere — [D13] removed it from the DN, [D14] from the CN); persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
 | `dnv-cdc`    | NVMe-oF Central Discovery Controller. Watches the `cdc` keys and serves discovery + AENs to hosts. |
 | `dnvctl`     | CLI over the Gateway. Also carries the userspace copier of §11.4. |
@@ -775,7 +775,7 @@ separator, no text formatting. Consequences that the rest of this document relie
 | `Migration`   | `{p} migration {cluster_id} {sp_id} {migr_name}` | |
 | `MigrBitmap`  | `{p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}` | bm_idx = append sequence 0… |
 | `SpName`      | `{p} sp_id_to_name {cluster_id} {sp_id}` | reverse lookup for admin/log analysis; still needed because `SpRev` — which also carries `sp_name` — can only be addressed with the SP's `shard_code` [D10] |
-| (worker registry) | `{p} worker {role} {worker_uuid}` | lease-bound, value empty; defined by this doc, not protobuf (§10.1) |
+| `WorkerReg` | `{p} worker {role} {seed}` | worker registry; value = the writer's heartbeat `epoch` (unix seconds, informational — liveness is judged by the observer's own clock); refreshed every `DefaultVoteWorkerInterval`, **no lease**; deleted by its owner on shutdown or by peers once committed dead (§10.1, `dnv-worker.md` §6) |
 
 ### 5.4 Globals: id allocation + shard buckets
 
@@ -992,6 +992,12 @@ capacity keys maintained per §5.6; reverse on delete.
 | `health_check_conf.dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval` (s) | 1 | 3600 | 5 (`{Min,Max,Default}HealthCheckInterval`) |
 | list `count` | 1 | 1024 | 64 |
 
+* `EventThreshold.leg_unhealthy` MUST be greater than
+  `EventThreshold.side_unhealthy` after the defaults above are resolved
+  (`INVALID_ARGUMENT` otherwise): the §10.4 leg repair fires on the side
+  threshold when the DN itself looks dead and on the leg threshold when only
+  the cntlr's path is bad, so the leg threshold is the longer wait by
+  construction (`dnv-worker.md` §11.5).
 * `QosRatio.bytes_per_iops` / `bytes_per_bps` are deliberately **not**
   range-checked: `0` means "that limit is unset" (§3.2 step 4); any non-zero value
   is accepted as-is.
@@ -1675,7 +1681,7 @@ spare defers only itself — spares never assemble (§11.1.1) — and reports
 `spare_leg_list`, DN bookkeeping back, bump `SpRev`. Reply `leg_id`.
 
 **SwitchSpareLeg** — the only way a spare becomes active; invoked by users or by the
-dn-worker reaction of §10.4. Errors: `NOT_FOUND` ids not in the group's lists.
+sp-worker's leg repair of §10.4 (`dnv-worker.md` §11.5). Errors: `NOT_FOUND` ids not in the group's lists.
 Action: STM swap: `spare_leg_id` moves to `leg_list` (taking the active role),
 `target_leg_id` moves to `spare_leg_list`; bump `SpRev`. The primary then:
 `mdadm --fail`/`--remove` the target if the array still lists it, `mdadm --add
@@ -2045,13 +2051,31 @@ object's live state cheaply instead of polling `Get*Info`:
 
 ### 10.1 Membership and shard ownership
 
-Each `dnv-worker` instance, per role it carries, registers
-`{p} worker {role} {worker_uuid}` bound to an etcd lease and watches the registry.
-Shard-code ownership uses rendezvous (HRW) hashing: for shard `s`, owner =
-`argmax over live workers w of fnv64a(worker_uuid ∥ role ∥ s)` — deterministic on every
-worker, no coordinator, and adding/removing a worker only moves ~1/n of the shards
-(matching the "third worker takes ~1/3" behavior). A worker acts only on shards it
-currently owns and re-evaluates on every membership change.
+Membership is heartbeat-based; `dnv-worker.md` §6 is the normative specification and
+[D17] the decision record — this section is the summary. Each `dnv-worker` process
+generates one random **seed** (a v4 uuid) per incarnation and, for every role it
+carries, keeps the key `{p} worker {role} {seed}` refreshed with a `WorkerReg{epoch}`
+value every `DefaultVoteWorkerInterval` (10 s). Every worker watches the three registry
+prefixes. A registration whose put has not been observed for 2 × interval is *dead*, one
+that is being refreshed is *live* — judged by the observer's **own monotonic clock**
+since the put it last saw, never by comparing the stored epoch with local time. Every
+observed transition (appear, disappear, reappear) starts that registration's own
+`DefaultVoteWorkerGraceTime` (60 s) timer; if the transition still holds when the timer
+fires, the change is committed into the observer's **effective membership** and shard
+ownership is recomputed — a flapping worker never becomes effective and never blocks
+others. A worker applies the same rule to its own registration, so it drives nothing
+during its first grace window, and every observer deletes the key of a registration it
+has committed dead (there is no lease to expire it).
+
+Shard ownership: per role, for shard `s`, each effective member `w` holds
+`vote_ticket = sha256(fmt.Sprintf("%s-%s-%02x", seed, role, s))`; the member with the
+largest ticket (32-byte `bytes.Compare`) owns `s`. Deterministic on every worker, no
+coordinator, and a membership change moves only the shards whose winner changed
+(~1/n — the "third worker takes ~1/3" behavior). A worker acts only on shards it
+currently owns, creates and stops its per-shard workers gracefully on every effective
+change, and **fences** itself — stops driving everything and rejoins as a fresh
+identity — when its own heartbeat cannot reach etcd for 2 × interval, when its own
+puts stop being echoed by its watch, or when it sees its own key deleted by a peer.
 
 ### 10.2 dn / cn roles
 
@@ -2159,7 +2183,10 @@ thin-pool auto-grow driven by `DmPoolConf.low_water_mark_pct`. Threshold compari
 are `now − err_epoch ≥ threshold` with the SP's `event_threshold`
 (0-valued fields fall back to the §7 defaults). All actions are ordinary STM mutations
 that bump `SpRev`, so the data-plane choreography is the same as for the equivalent
-manual RPC:
+manual RPC. The sp-worker evaluates them once per SP per health round, applies at most
+one per pass in the priority failover → auto-grow → cntlr replacement → leg repair, and
+suppresses all of them for a deleting SP, at `sp_level ≥ SP_LEVEL_NO_THINPOOL`, and for
+disabled cntlrs (`dnv-worker.md` §11):
 
 * `primary_unhealthy` (5 s): the primary cntlr is unhealthy ⇒ pick the healthy, enabled
   cntlr with the smallest `cntlr_id`, flip the `primary` booleans. This *is* the
@@ -2167,14 +2194,26 @@ manual RPC:
 * `cntlr_unhealthy` (600 s): a (non-primary, or already-failed-over) cntlr stays
   unhealthy ⇒ replace it: internal `DeleteCntlr` (skipping the enabled check) + internal
   `CreateCntlr` on a fresh CN with the same `cntlid_slot`.
-* `side_unhealthy` (600 s): a side stays unhealthy ⇒ start an internal migration of its
-  leg to a fresh DN (§8.11); a pre-existing healthy migration of that leg is left alone.
-  The reaction is **gated on `Side.provisioned == true`** — migrating off a
-  never-provisioned side is meaningless, and a side still zeroing reports
-  `RES_STATUS_PROVISIONING`, which never sets `err_epoch` in the first place ([D15]).
-* `leg_unhealthy` (1200 s): a leg stays unhealthy ⇒ if the group has a spare, perform an
-  internal `SwitchSpareLeg` (§8.12 — the spare is only now `mdadm --add`-ed and
-  rebuilt); otherwise create a spare on a fresh DN first, then switch.
+* `side_unhealthy` (600 s) and `leg_unhealthy` (1200 s) — **leg repair**, one procedure
+  with two triggers (`dnv-worker.md` §11.5). The sp-worker believes a leg needs replacing
+  when either (1) the leg has been unhealthy from the cntlr's perspective for
+  `leg_unhealthy` — the primary reports it has no healthy path, which may be a CN↔DN
+  connectivity problem, hence the longer wait — or (2) the leg is unhealthy from the
+  cntlr's perspective **and** its side has been unhealthy for `side_unhealthy` — the side
+  reports an error or the worker cannot talk to the DN, so the DN itself is probably
+  dead, hence the shorter wait (§7 requires `leg_unhealthy > side_unhealthy`). Repair: if
+  the group already has a **ready** spare (`Side.provisioned == true` and the primary
+  reports its leg `RES_STATUS_OK`), perform an internal `SwitchSpareLeg` (§8.12 — the
+  spare is only now `mdadm --add`-ed and rebuilt from the healthy leg); otherwise create
+  a spare on a fresh DN first (internal `CreateSpareLeg`, black list = the DNs of every
+  leg and spare of the group) and switch on a later pass once it is ready. The replaced
+  leg stays parked in `spare_leg_list` for the operator; `RedundNone` groups have no
+  spare and are never repaired automatically; a leg with two sides (a migration in
+  flight) is left alone. The older rule — an internal migration of the leg off an
+  unhealthy side — is withdrawn: every condition that sets `Side.err_epoch` also prevents
+  the source DN from serving the migration, so it could not succeed as an automatic
+  action; `CreateMigration` remains the operator's tool for moving data off a
+  degraded-but-readable DN.
 * `DmPoolConf.low_water_mark_pct` (not an `EventThreshold` field) — **thin-pool
   auto-grow**, the sp-worker's task. The agent reports every slice pool's data and
   metadata usage (used/total blocks from `dmsetup status`, carried in the pool
@@ -2628,7 +2667,7 @@ dnv-gateway --grpc-network tcp --grpc-address 192.168.0.20:29527 \
   --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:2379
 
 dnv-worker --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:2379 \
-  --roles dn,cn,sp
+  --roles dn,cn,sp --vote-interval 10 --vote-grace-time 60 --etcd-dial-timeout 5
 
 dnv-agent dn --grpc-network tcp --grpc-address 192.168.0.20:29528 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
@@ -2643,7 +2682,9 @@ dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7
 dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f
 ```
 
-Every flag is also settable via config file and environment (viper). The agent's
+Every flag is also settable via config file and environment (viper). The worker's
+flags are specified in `dnv-worker.md` §5 (`--roles` defaults to all three; the vote
+timers default to `DefaultVoteWorkerInterval`/`DefaultVoteWorkerGraceTime`). The agent's
 `--tr-*` flags define the node's single nvmet port (`NvmeTrConf`), mirrored into
 `DnConf`/`CnConf` at creation; `--local-store` sets the `localStorPrefix` under which
 the §4.6 state files live. `dnvctl` subcommand sketch:
@@ -3071,6 +3112,29 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   value it just received (§5.5, §10.2, §10.3). `SpName` (`sp_id_to_name`) survives the
   change because reaching `SpRev` from an `sp_id` alone would require knowing the SP's
   `shard_code`, which only `SpConf` — reached by name — carries.
+* **[D17] Worker membership by heartbeat, grace windows and sha256 tickets; no lease.**
+  §10.1 originally bound each worker registration to an etcd lease and derived ownership
+  by HRW over `fnv64a`. `dnv-worker.md` replaces both: a worker refreshes
+  `{p} worker {role} {seed}` every `DefaultVoteWorkerInterval`; observers judge liveness
+  by their own monotonic clock since the last put they saw (2 × interval ⇒ dead); every
+  observed transition must hold for `DefaultVoteWorkerGraceTime` before it changes the
+  observer's effective membership; ownership is the largest `sha256(seed-role-shard)`
+  among effective members. Why not the lease: a lease expiry is a single server-side
+  event with no notion of "stable" — a worker flapping at the keep-alive boundary
+  reshuffles ownership on every flap, and a newly started worker takes its shards
+  instantly while the old owners still hold them. The explicit scheme makes appear,
+  disappear and reappear first-class, testable transitions with one damping rule, keeps
+  a dead worker's last heartbeat visible to operators, and depends on no lease keep-alive
+  semantics. Why observer-local time rather than the stored epoch: comparing a writer's
+  wall clock with a reader's makes correctness depend on NTP — a clock running ahead
+  would let one worker claim every shard while the others keep theirs, undetected; the
+  epoch in the value is therefore informational. The costs, all accepted: a rescan needs
+  2 × interval before it can declare anyone dead; a fresh worker drives nothing for its
+  first grace window; ownership changes overlap or gap by a few seconds across workers
+  (safe because every `Syncup*` is idempotent under the agents' revision gate and every
+  etcd reaction is STM-guarded); and dead keys are garbage-collected by their observers
+  instead of expiring — which is also what lets a worker detect that the fleet has given
+  up on it (it sees its own key deleted) and rejoin as a fresh identity.
 
 ## Appendix C — Amendments
 
@@ -3119,6 +3183,15 @@ their own edits to this file in their §5 sections.
   snapshot pre-pass owns every snapshot message; §9.5 names the rows the flip reads;
   Appendix D updated. The §8/§10 items specify gateway and worker behaviour that is
   not implemented yet — this document is their spec.
+* `dnv-worker.md` — §10.1 replaced by the heartbeat/grace/ticket membership (new
+  decision **[D17]**); the §5.3 registry row becomes the `WorkerReg` message; §10.4's
+  `side_unhealthy` migration is withdrawn and both `side_unhealthy` and `leg_unhealthy`
+  now trigger the one leg-repair procedure (create spare → switch, old leg parked); §7
+  requires `leg_unhealthy > side_unhealthy`; §8.12 attributes the spare switch to the
+  sp-worker; §13 shows the worker's flags; Appendix D gains the worker's limits.
+  `dnv-worker.md` is the normative spec of `worker/`, `model/`, `etcdutil/` and
+  `cmd/dnv-worker`; the `WorkerReg` schema addition is applied with `make gen` at
+  implementation time.
 
 <!-- end of design_v001.md -->
 
@@ -3206,3 +3279,18 @@ exists.
   supersedes the older behaviour, which would silently hand the live `dev_id`
   a fresh, empty volume, and it belongs next to the "no thin-metadata repair
   path" limit above: pool-metadata loss is an operator-intervention event.
+* **Worker membership tolerates, but does not repair, a partitioned observer.** A
+  worker whose registry watch drops a peer's events while its own heartbeats still
+  succeed sees that peer go stale and, after the grace window, claims its shards;
+  correct peers see nothing wrong. The double-driving is bounded — the victim sees
+  its key deleted, fences and rejoins as a fresh identity, and every agent-side
+  effect is idempotent — but not prevented ([D17], `dnv-worker.md` Appendix B).
+* **Undriven windows are part of the membership design.** A fresh worker drives
+  nothing for its first `DefaultVoteWorkerGraceTime`; a crashed worker's shards are
+  undriven for 2 × `DefaultVoteWorkerInterval` + the grace window (80 s with the
+  defaults); a fenced worker's shards until the peers commit it dead. Revision keys
+  are durable, so nothing is lost — convergence is delayed, not skipped.
+* **A group's spare list can fill with parked legs.** Every leg repair parks the
+  replaced leg in `spare_leg_list` and `MaxSpareLegPerGrp` = 2, so after two repairs
+  of one group the worker can only log `reaction skipped` until an operator runs
+  `DeleteSpareLeg` (`dnv-worker.md` §11.5).

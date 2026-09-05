@@ -19,8 +19,11 @@ design inputs are `architecture.md`, `schema.proto`, `constants.go` and
   `github.com/spf13/viper` (flags/config/env per `architecture.md` §13) and
   `github.com/spf13/cobra` (the `dnv-agent` and `dnvctl` subcommand trees,
   `dnagent.md` §3) — the last two entered `go.mod` with `cmd/dnv-agent`.
-  Planned — it enters `go.mod` when `etcdutil/` lands (§4):
-  `go.etcd.io/etcd/client/v3`.
+  `go.etcd.io/etcd/client/v3` (the v3.6 line, incl. `concurrency`) entered
+  `go.mod` with `etcdutil/` (§4, `dnv-worker.md` §3), and brought
+  `go.etcd.io/etcd/api/v3` (`rpctypes`, for EU3's `ErrCompacted` report) and
+  `go.uber.org/zap` (only `zap.NewNop()`, EU1's silenced client logger) with
+  it as unavoidable direct imports.
 
 Library packages sit directly under the module root (no `pkg/` or
 `internal/` prefix), so the file paths used by the component specs —
@@ -47,7 +50,8 @@ distributed-nvme/                      # repo root = module root
 │   ├── osclient.md
 │   ├── grpc.md
 │   ├── dnagent.md                     # dnv-agent: agent/ (shared), agent/dnagent/, cmd/dnv-agent
-│   └── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
+│   ├── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
+│   └── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -59,8 +63,14 @@ distributed-nvme/                      # repo root = module root
 │   ├── osclient.go                    # per osclient.md (+ the exported raw block helpers of §4.5.1)
 │   ├── osclient_fake.go               # per osclient.md §6
 │   └── interceptor.go                 # per grpc.md
-├── etcdutil/                          # central etcd helpers of log.md §5.3
-│   └── etcdutil.go                    # Get/Put/Delete/Range/Watch + STM wrappers, logging inside
+├── etcdutil/                          # central etcd helpers of log.md §5.3 (dnv-worker.md §3)
+│   └── etcdutil.go                    # typed Get/Put/Delete/Range/RangeKeys/WatchTyped + STM runners, logging inside
+├── model/                             # the §5 etcd data model as Go (dnv-worker.md §4)
+│   ├── keys.go                        # §5.3 key formats, prefixes, parsers; §5.2 cluster_id
+│   ├── stm.go                         # the typed SP snapshot loader
+│   ├── capacity.go                    # §5.6 capacity-key maintenance
+│   ├── alloc.go                       # §6.3/§6.4 candidate scans
+│   └── ops.go                         # the internal §8/§10.4 mutations shared by gateway and worker
 ├── gateway/                           # Gateway service implementation
 │   ├── server.go                      # grpc.Server bootstrap + interceptor wiring
 │   ├── cluster.go                     # §8.1   (one file per §8 RPC group:)
@@ -77,14 +87,17 @@ distributed-nvme/                      # repo root = module root
 │   ├── bitmap.go                      # §8.13
 │   ├── alloc.go                       # §6 bins / candidate scans
 │   └── validate.go                    # §7 common validation
-├── worker/
-│   ├── membership.go                  # §10.1 registry + HRW shard ownership
-│   ├── dnrole.go                      # §10.2 (dn)
-│   ├── cnrole.go                      # §10.2 (cn)
-│   ├── sprole.go                      # §10.3
-│   ├── bmpush.go                      # §9.6 worker side (Push*Bitmap calls, bm_idx bookkeeping)
-│   ├── check.go                       # §9.7 Check* streams (one per owned object)
-│   └── health.go                      # err_epoch / capacity-key maintenance, §10.4 reactions
+├── worker/                            # dnv-worker.md §6-§11
+│   ├── vote.go                        # §6 vote worker: registry, heartbeat, grace timers, tickets, shard-worker lifecycle
+│   ├── shard.go                       # §7 shard worker: scan+watch of one rev prefix, revision-worker lifecycle
+│   ├── revision.go                    # §8.1 per-object loop: Check stream, rounds, syncup trigger, conn cache
+│   ├── dnrole.go                      # §8.2 SyncupDn builder + node health
+│   ├── cnrole.go                      # §8.3 SyncupCn builder + node health
+│   ├── sprole.go                      # §8.4 SP snapshot, fan-out, provisioned/created flips
+│   ├── clusterconf.go                 # §8.5 ClusterConf cache
+│   ├── health.go                      # §9 err_epoch bookkeeping (through model)
+│   ├── bmpush.go                      # §10 Push*Bitmap calls, bm_idx bookkeeping
+│   └── reaction.go                    # §11 automatic reactions
 ├── agent/                             # shared dn/cn mechanism (dnagent.md §2)
 │   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring
 │   ├── store.go                       # local store helper (Local*Path files, load-on-start)
@@ -116,6 +129,13 @@ distributed-nvme/                      # repo root = module root
 ├── ctl/
 │   ├── root.go                        # dnvctl command tree (§13): dn.go, cn.go, sp.go, vol.go, …
 │   └── copier.go                      # §11.4 userspace copier
+├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14
+│   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
+│   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
+│   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
+│   ├── workerctl/main.go              # the etcd driver that plays the gateway
+│   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
+│   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
 └── cmd/
     ├── dnv-gateway/main.go
     ├── dnv-worker/main.go
@@ -143,13 +163,15 @@ client is linked only into the binaries that use it (§3).
 |---|---|---|
 | `pb` | — | generated code only; imports grpc/protobuf runtimes |
 | `common` | — | stdlib, `x/sync`, `protobuf`, `grpc`. MUST NOT import `pb`, the etcd client, or viper — it stays the leaf. (`PbToLogValue`, `OsClient`, and the interceptors all operate on the generic `proto.Message`; `_test.go` files in `common` MAY import `pb` for fixtures.) |
-| `etcdutil` | `common` | `go.etcd.io/etcd/client/v3` (incl. `concurrency`). Takes `proto.Message` parameters; MUST NOT import `pb`. |
-| `gateway` | `common`, `pb`, `etcdutil` | grpc server + client (dials agents) |
-| `worker` | `common`, `pb`, `etcdutil` | grpc client only |
+| `etcdutil` | `common` | `go.etcd.io/etcd/client/v3` (incl. `concurrency`). Takes `proto.Message` parameters; MUST NOT import `pb` (`_test.go` files in `etcdutil` MAY import `pb` for fixtures, as in `common`: EU7's tests need some concrete `proto.Message`). |
+| `model` | `common`, `pb`, `etcdutil` | the §5 data model as Go (`dnv-worker.md` §4): key formats, `cluster_id`, capacity keys, the §6 allocator, the internal §8/§10.4 mutations. No gRPC; never dials an agent; MUST NOT import `gateway`, `worker`, `agent`, `cdc`, `ctl`. |
+| `gateway` | `common`, `pb`, `etcdutil`, `model` | grpc server + client (dials agents) |
+| `worker` | `common`, `pb`, `etcdutil`, `model` | grpc client only (dials agents); `dnv-worker.md` |
 | `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
-| `cdc` | `common`, `pb`, `etcdutil` | serves NVMe-oF discovery, not gRPC |
+| `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | grpc client to the Gateway; **no etcd** |
 | `cmd/*` | the matching top-level package + `common` | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
+| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway) | test drivers only, never linked into a `cmd/` binary |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import
@@ -201,6 +223,11 @@ Because every main imports `common` (at least transitively), the `init()` in
   share `agent` for the server bootstrap, `--local-store` handling and the
   single `common.NewLimitedOsClient(...)` instance (the CN11 leg probers
   deliberately bypass that instance — `osclient.md` §4.5.1).
+* `cmd/dnv-worker/main.go` — a cobra root command without subcommands
+  (`dnv-worker.md` §5): `--etcd-endpoints`, `--roles`, `--vote-interval`,
+  `--vote-grace-time`, `--etcd-dial-timeout`, `--config`; env prefix
+  `DNV_WORKER_`; builds the `etcdutil` client and hands off to `worker.Run`,
+  which owns the vote worker and the `ClusterConf` cache.
 * Interceptor wiring per binary follows the table in `grpc.md` (gateway:
   server + client; worker: client; agents: server; dnvctl: client; cdc:
   none).
@@ -215,10 +242,12 @@ Each step compiles and passes its tests before the next begins:
    errors; where it disagrees with `architecture.md` §4, §4 wins), then
    `common/log.go`, `common/osclient.go` + `osclient_fake.go`,
    `common/interceptor.go` per their specs, with the spec test lists.
-3. `etcdutil/` (needs `common`; test against an embedded or dockerized etcd).
+3. `etcdutil/` and `model/` (`dnv-worker.md` §3-§4; their tests run against a real
+   `etcd` binary when one is on `PATH` or named by `ETCD_BIN`, and skip otherwise).
 4. `gateway/` (§§6–8) + `cmd/dnv-gateway`.
 5. `agent/` + `dnagent/` + `cnagent/` (§9, §11) + `cmd/dnv-agent`.
-6. `worker/` (§10, §9.6) + `cmd/dnv-worker`.
+6. `worker/` (`dnv-worker.md` §6-§11) + `cmd/dnv-worker`, then the `dnv-worker.md`
+   §14 suite against the lab server.
 7. `cdc/` (§12) + `cmd/dnv-cdc`.
 8. `ctl/` (§13, §11.4) + `cmd/dnvctl`.
 
@@ -229,7 +258,8 @@ Each step compiles and passes its tests before the next begins:
 3. `grep go_package pb/schema.proto` finds the §4 option; the generated files
    exist and are committed; the proto has no `package` statement.
 4. Imports obey §3 — in particular
-   `go list -deps ./cmd/dnv-agent ./cmd/dnvctl | grep etcd` finds nothing.
+   `go list -deps ./cmd/dnv-agent ./cmd/dnvctl | grep etcd` finds nothing, and
+   `model` imports none of `gateway`, `worker`, `agent`, `cdc`, `ctl`.
 5. `common/` contains exactly the six files of §2 (plus tests), package name
    `common`.
 6. All five binaries build into `bin/` via `make build`, and `bin/` is listed
@@ -264,3 +294,12 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   (cobra/viper in §1, the `agent/` split, this document listed in the `doc/`
   tree, `agent/lvm.go` deleted with the dn LVM removal) and `cnagent.md` §5
   (the `doc/` tree entry, the `agent/cnagent/` split).
+* `dnv-worker.md` — the §1 dependency note names the v3.6 etcd client line; §2 gains
+  `doc/dnv-worker.md`, the new `model/` package, the `worker/` file split of
+  `dnv-worker.md` §1 (`vote.go`, `shard.go`, `revision.go`, `dnrole.go`, `cnrole.go`,
+  `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` — replacing
+  `membership.go`/`check.go`) and the `integtest/` tree; §3 gains the `model` row (and
+  lets `gateway`, `worker`, `cdc` import it) plus the `integtest/*` row; §5 gains the
+  `cmd/dnv-worker` bullet; §6 steps 3 and 6 and §7 item 4 follow. Package boundaries
+  are otherwise unchanged: `common` and `pb` stay leaves, agents and `dnvctl` still
+  never link the etcd client.

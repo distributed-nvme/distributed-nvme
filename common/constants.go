@@ -218,4 +218,23 @@ const (
 	// onto the side's data ([D12]). It is a floor, not a deadline: the
 	// reload happens on the first converge at or after it.
 	SuspendSeconds = 60
+
+	// dnv-worker (dnv-worker.md §2.1).
+	//
+	// Seconds between two refreshes of a worker's registry key (VW2); a
+	// registration not refreshed for 2 × this is dead (VW3).
+	DefaultVoteWorkerInterval = 10
+	// Seconds an observed membership transition must hold before it is
+	// committed into the effective membership (VW5).
+	DefaultVoteWorkerGraceTime = 60
+	// Per-call deadlines of the worker's agent RPCs (RW5, BM3).
+	DefaultWorkerSyncupTimeout = 60
+	DefaultWorkerPushTimeout   = 60
+	// etcd client: dial, and per plain operation / per STM attempt (EU1, EU5).
+	DefaultEtcdDialTimeout = 5
+	DefaultEtcdOpTimeout   = 10
+
+	WorkerRoleDn = "dn"
+	WorkerRoleCn = "cn"
+	WorkerRoleSp = "sp"
 )

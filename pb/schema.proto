@@ -463,6 +463,14 @@ message SpName {
     string sp_name = 1;
 }
 
+// {dnv_prefix} worker {role} {seed}
+message WorkerReg {
+    // The writer's unix seconds at the put. Informational: liveness is judged
+    // by the observer's own clock since the put it last saw (dnv-worker.md
+    // VW3/VW4), never by comparing this with local time.
+    uint64 epoch = 1;
+}
+
 message CreateClusterRequest {
     string cluster_name = 1;
     QosRatio qos_ratio = 2;
