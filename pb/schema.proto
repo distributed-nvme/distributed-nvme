@@ -398,6 +398,12 @@ message ThinDevice {
     uint32 dev_id = 2;
     uint32 ori_id = 3;
     uint64 size = 4;
+    // created is set exactly once by the sp-worker, when a cntlr has
+    // reported this td's thin volume RES_STATUS_OK in every slice of the SP
+    // (§10.3); it is never cleared. It gates snapshot creation and origin
+    // deletion (§8.7) and tells the cn agent that the ids exist in every
+    // slice pool, so no pool message is ever sent for this td again (CN14).
+    bool created = 5;
 }
 
 // {dnv_prefix} subsystem {cluster_id} {sp_id} {nqn}

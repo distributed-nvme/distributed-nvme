@@ -226,6 +226,15 @@ func defaultSubsys(suspended bool) map[string]*pb.Subsystem {
 	}
 }
 
+// subsysForTd is defaultSubsys with the namespace pointed at another td, so a
+// fixture whose td_list omits testTd — a snapshot whose origin the gateway
+// has let go (ThinDeviceCreated.md U2-S2) — still describes a coherent cntlr.
+func subsysForTd(tdId uint64) map[string]*pb.Subsystem {
+	subsys := defaultSubsys(false)
+	subsys[testNqn].NsList[0].TdId = tdId
+	return subsys
+}
+
 // sliceOf is one slice's meta/data group pair. The fixture's first slice and
 // the second one twoSlices adds are the same shape with different ids.
 func sliceOf(
@@ -356,6 +365,25 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 	}
 }
 
+// cnSyncup drives one SyncupCn: withCntlr false is the CN21 teardown of the
+// fixture's only cntlr, true re-introduces its pointer.
+func cnSyncup(
+	t *testing.T,
+	srv *CnAgentServer,
+	revision uint64,
+	withCntlr bool,
+) {
+	t.Helper()
+	reply, err := srv.SyncupCn(context.Background(), cnReq(revision,
+		withCntlr))
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupCn rejected: %v", reply.GetAgentReply())
+	}
+}
+
 // syncupBoth brings the CN base state up and converges one cntlr.
 func syncupBoth(
 	t *testing.T,
@@ -450,6 +478,36 @@ func assertOk(t *testing.T, info *pb.ResInfo, label string) {
 	if info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
 		t.Fatalf("%s: status %v, details %q",
 			label, info.GetStatus(), info.GetDetails())
+	}
+}
+
+// assertErrorDetails is the row a failed converge leaves: RES_STATUS_ERROR
+// whose details carry the node's own output, so an operator reads what the
+// kernel said and not a paraphrase (§9.5).
+func assertErrorDetails(
+	t *testing.T,
+	info *pb.ResInfo,
+	want string,
+	label string,
+) {
+	t.Helper()
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(info.GetDetails(), want) {
+		t.Fatalf("%s: status %v, details %q, want ERROR containing %q",
+			label, info.GetStatus(), info.GetDetails(), want)
+	}
+}
+
+// assertOnlyPersisted is SH16: an equal-revision re-apply of a fully built
+// cntlr issues no mutating command, and persisting the request is the one
+// write SH5 mandates.
+func assertOnlyPersisted(t *testing.T, node *fakeNode) {
+	t.Helper()
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto ") {
+			continue
+		}
+		t.Fatalf("an equal-revision re-apply mutated: %q", call)
 	}
 }
 

@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,9 +22,17 @@ import (
 
 // snapTds is the U1 fixture's td_list: a live origin (dev_id 1) and the
 // snapshot taken of it. ori_id is the *origin's dev_id*, never its td_id.
+//
+// The origin carries `created` because that is the only shape the gateway can
+// produce: `CreateThinDevice` refuses a snapshot whose origin is not
+// materialized in every slice pool (ThinDeviceCreated.md U2-S1), so a
+// td_list holding a snapshot always holds a created origin — or no origin at
+// all. It changes nothing in the tests below, whose origin is built by the
+// preceding revision-2 converge and therefore never messaged again either
+// way; it is what keeps the fixture honest.
 func snapTds() []*pb.ThinDevice {
 	return []*pb.ThinDevice{
-		{TdId: testTd, DevId: 1, Size: testTdSize},
+		{TdId: testTd, DevId: 1, Size: testTdSize, Created: true},
 		{TdId: testSnapTd, DevId: 2, OriId: 1, Size: testTdSize},
 	}
 }
@@ -91,7 +100,8 @@ func TestSnapshotQuiescesOriginRaid0(t *testing.T) {
 	}
 	// Exactly one message per slice. indexOfCall and assertOrder both stop at
 	// the first match, so only a count catches a second create_snap emitted
-	// after the resume — which is what a broken snapDone handoff produces.
+	// after the resume — which no path can now produce, because ensureThin
+	// never messages a td with ori_id != 0 (U4-S1).
 	for _, sliceId := range []uint64{testSlice, testSlice2} {
 		if n := len(node.callsMatching(snapMessage(srv, sliceId))); n != 1 {
 			t.Fatalf("slice %#x: %d create_snap calls, want exactly 1",
@@ -146,8 +156,11 @@ func TestSnapshotResumesRaid0AfterAFailedMessage(t *testing.T) {
 // converge round the worker drives.
 func TestSnapshotReapplySuspendsNothing(t *testing.T) {
 	srv, node := newTestServer(t)
-	o := reqOpts{revision: 2, primary: true, twoSlices: true, tds: snapTds()}
-	syncupBoth(t, srv, o)
+	// The origin is built by the revision-2 converge syncupSnapshot runs and
+	// only then does the snapshot join td_list — the two-pass shape every
+	// other test here uses, and the only one the gateway produces (U2-S1).
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
+	syncupSnapshot(t, srv, node, o)
 
 	node.Reset()
 	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(o)); err != nil {
@@ -155,37 +168,7 @@ func TestSnapshotReapplySuspendsNothing(t *testing.T) {
 	}
 	assertNoCall(t, node, "cmd dmsetup suspend")
 	assertNoCall(t, node, "create_snap")
-	for _, call := range node.Mutations() {
-		// Persisting the request is the one write SH5 mandates.
-		if strings.HasPrefix(call, "writeproto ") {
-			continue
-		}
-		t.Fatalf("an equal-revision re-apply mutated: %q", call)
-	}
-}
-
-// TestSnapshotWithoutAnOriginStillMessages is U1-T2 case 4: ori_id names a
-// dev_id no td of the plan carries — the origin was deleted from td_list.
-// There is no dnv IO path to quiesce, so no raid0 is suspended, and the
-// messages still go out exactly as they did before U1.
-func TestSnapshotWithoutAnOriginStillMessages(t *testing.T) {
-	srv, node := newTestServer(t)
-	orphan := []*pb.ThinDevice{
-		{TdId: testTd, DevId: 1, Size: testTdSize},
-		{TdId: testSnapTd, DevId: 2, OriId: 7, Size: testTdSize},
-	}
-	reply := syncupSnapshot(t, srv, node, reqOpts{
-		revision: 3, primary: true, twoSlices: true, tds: orphan})
-
-	assertNoCall(t, node, "cmd dmsetup suspend")
-	assertOrder(t, node,
-		"cmd dmsetup message "+poolNameOf(srv, testSlice)+
-			" 0 create_snap 2 7",
-		"cmd dmsetup message "+poolNameOf(srv, testSlice2)+
-			" 0 create_snap 2 7",
-	)
-	assertOk(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
-		GetSliceIdToDmThin()[testSlice], "orphan snap thin slice 0")
+	assertOnlyPersisted(t, node)
 }
 
 // TestPlainThinNeverQuiescesARaid0 is U1-T2 case 5: an ordinary td is
@@ -209,34 +192,234 @@ func TestPlainThinNeverQuiescesARaid0(t *testing.T) {
 	assertNoCall(t, node, "create_snap")
 }
 
-// TestFreshSnapshotMessagesAfterTheOriginsCreateThin pins the one thing the
-// recorded-call fake cannot check for itself: dm-thin rejects a `create_snap`
-// whose origin dev_id the pool does not hold. On a pass that creates the
-// origin *and* its snapshot, the origin's `create_thin` is still ahead in the
-// td loop, so the pre-pass must decline those slices and leave them to the
-// lazy path — which is what keeps the two messages in the only order the
-// kernel accepts. Nothing is quiesced: the origin's stack does not exist yet,
-// so there is no live IO to tear.
-func TestFreshSnapshotMessagesAfterTheOriginsCreateThin(t *testing.T) {
-	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, twoSlices: true, tds: snapTds()})
+// TestSnapshotMessagesWithoutTheOriginDevice is U4-T1, the fresh-primary
+// shape and the reason the pre-pass's origin-device filter could go. The
+// origin's ids are in every slice pool — the control plane says so with
+// `created` — but *this* cntlr has just been rebuilt, so no dm device of
+// either td exists when the pre-pass runs. It must message anyway: declining
+// here (as the pre-U4 filter did) would hand the slice to a lazy path that no
+// longer exists and lose the snapshot outright.
+//
+// Nothing is quiesced, because nothing is live yet, and no `create_thin` is
+// sent for the created origin (U4-S2) — the bare `dmsetup create` re-attaches
+// the id the CN21 teardown left in the pool metadata.
+func TestSnapshotMessagesWithoutTheOriginDevice(t *testing.T) {
+	// U4-S4: td_list order carries no meaning any more. Both orders must
+	// record the same messages, the same absence of suspends and the same
+	// device creations. Not a literal call-for-call multiset: the fake hands
+	// out minor numbers in creation order, so the two runs' raid0 tables
+	// cite different ones.
+	reversed := []*pb.ThinDevice{snapTds()[1], snapTds()[0]}
+	for _, tc := range []struct {
+		name string
+		tds  []*pb.ThinDevice
+	}{
+		{"origin first", snapTds()},
+		{"snapshot first", reversed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			// Revision 2 builds the origin alone; its create_thin is what
+			// puts dev_id 1 in both pools.
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, twoSlices: true})
+			// CN21: the teardown removes every device and sends no `delete`,
+			// so the pool metadata on the DN legs keeps dev_id 1.
+			cnSyncup(t, srv, 3, false)
+			cnSyncup(t, srv, 4, true)
 
-	for _, sliceId := range []uint64{testSlice, testSlice2} {
-		assertOrder(t, node,
-			"cmd dmsetup message "+poolNameOf(srv, sliceId)+
-				" 0 create_thin 1",
-			snapMessage(srv, sliceId),
-		)
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(
+				reqOpts{revision: 4, primary: true, twoSlices: true,
+					tds: tc.tds}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			}
+
+			assertNoCall(t, node, "cmd dmsetup suspend")
+			assertNoCall(t, node, "0 create_thin ")
+			for _, sliceId := range []uint64{testSlice, testSlice2} {
+				if n := len(node.callsMatching(
+					snapMessage(srv, sliceId))); n != 1 {
+					t.Fatalf("slice %#x: %d create_snap calls, want exactly 1",
+						sliceId, n)
+				}
+				for _, tdId := range []uint64{testTd, testSnapTd} {
+					assertOrder(t, node, "cmd dmsetup create "+
+						thinNameOf(srv, tdId, sliceId))
+				}
+			}
+			info := reply.GetCntlrInfo()
+			for _, tdId := range []uint64{testTd, testSnapTd} {
+				for _, sliceId := range []uint64{testSlice, testSlice2} {
+					assertOk(t, info.GetTdIdToThinInfo()[tdId].
+						GetSliceIdToDmThin()[sliceId],
+						fmt.Sprintf("thin td %#x slice %#x", tdId, sliceId))
+				}
+			}
+		})
 	}
-	assertNoCall(t, node, "cmd dmsetup suspend "+raid0Name(srv, testTd))
+}
+
+// TestCreatedTdIsNeverMessaged is U4-T2: the plain-td half of U4-S1's first
+// row. `created` is the control plane's word that dev_id 1 is in every slice
+// pool, so a fresh primary attaches it with a bare `dmsetup create` and sends
+// nothing. The CN9 order test (§6 test 5) still sees create_thin because its
+// tds are `created = false`.
+func TestCreatedTdIsNeverMessaged(t *testing.T) {
+	srv, node := newTestServer(t)
+	node.holdThinIds(poolName(srv), 1)
+	o := reqOpts{revision: 2, primary: true, tds: []*pb.ThinDevice{
+		{TdId: testTd, DevId: 1, Size: testTdSize, Created: true}}}
+	reply := syncupBoth(t, srv, o)
+
+	assertNoCall(t, node, "0 create_thin ")
+	assertOrder(t, node, "cmd dmsetup create "+thinName(srv, testTd))
+	assertOk(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice], "created thin")
+
+	// SH16: an equal-revision re-apply of a fully built cntlr mutates nothing.
+	node.Reset()
+	if _, err := srv.SyncupCntlr(
+		context.Background(), cntlrReq(o)); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	assertOnlyPersisted(t, node)
+}
+
+// TestCreatedSnapshotIsNeverMessaged is U4-T3: the same rule for a snapshot.
+// Both ids are in the pool, so the pre-pass has nothing to claim — no
+// `create_snap`, and therefore no quiesce of an origin that is not even
+// carrying IO yet. The second case drops the origin from td_list entirely:
+// U2 lets it be deleted once every snapshot of it is created, and that
+// changes nothing here, because there is nothing to message and nothing to
+// quiesce either way.
+func TestCreatedSnapshotIsNeverMessaged(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tds    []*pb.ThinDevice
+		subsys map[string]*pb.Subsystem
+		want   []uint64
+	}{
+		{
+			name: "origin in td_list",
+			tds: []*pb.ThinDevice{
+				{TdId: testTd, DevId: 1, Size: testTdSize, Created: true},
+				{TdId: testSnapTd, DevId: 2, OriId: 1, Size: testTdSize,
+					Created: true},
+			},
+			want: []uint64{testTd, testSnapTd},
+		},
+		{
+			name: "origin deleted",
+			tds: []*pb.ThinDevice{
+				{TdId: testSnapTd, DevId: 2, OriId: 1, Size: testTdSize,
+					Created: true},
+			},
+			subsys: subsysForTd(testSnapTd),
+			want:   []uint64{testSnapTd},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			node.holdThinIds(poolNameOf(srv, testSlice), 1, 2)
+			node.holdThinIds(poolNameOf(srv, testSlice2), 1, 2)
+			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				twoSlices: true, tds: tc.tds, subsys: tc.subsys})
+
+			assertNoCall(t, node, "0 create_snap ")
+			assertNoCall(t, node, "0 create_thin ")
+			assertNoCall(t, node, "cmd dmsetup suspend")
+			info := reply.GetCntlrInfo()
+			for _, tdId := range tc.want {
+				for _, sliceId := range []uint64{testSlice, testSlice2} {
+					assertOrder(t, node, "cmd dmsetup create "+
+						thinNameOf(srv, tdId, sliceId))
+					assertOk(t, info.GetTdIdToThinInfo()[tdId].
+						GetSliceIdToDmThin()[sliceId],
+						fmt.Sprintf("thin td %#x slice %#x", tdId, sliceId))
+				}
+			}
+		})
+	}
+}
+
+// TestCreatedTdWithAMissingIdIsAnError is U4-T4, the price U4-S2 deliberately
+// pays. A created td whose id a pool no longer holds cannot be repaired by a
+// message — a `create_thin` would hand the live dev_id a fresh, empty volume
+// — so the failing `dmsetup create` is reported as it happened and left
+// there. No converge, at any revision, self-heals it.
+func TestCreatedTdWithAMissingIdIsAnError(t *testing.T) {
+	srv, node := newTestServer(t)
+	o := reqOpts{revision: 2, primary: true, tds: []*pb.ThinDevice{
+		{TdId: testTd, DevId: 1, Size: testTdSize, Created: true}}}
+	reply := syncupBoth(t, srv, o)
+
+	assertNoCall(t, node, "0 create_thin ")
+	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice], "No data available", "lost thin id")
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	assertNoCall(t, node, "0 create_thin ")
+	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testTd].
+		GetSliceIdToDmThin()[testSlice], "No data available",
+		"lost thin id, second converge")
+}
+
+// TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing is U4-T5, R11: the
+// origin guarantee is the gateway's to keep and the agent does not re-check
+// it. A `create_snap` whose origin the pool lacks fails at the message, the
+// `dmsetup create` behind it fails too, and the row says so — with the td
+// still `created = false`, which is exactly what makes the next converge try
+// again.
+func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
+	srv, node := newTestServer(t)
+	o := reqOpts{revision: 2, primary: true, subsys: subsysForTd(testSnapTd),
+		tds: []*pb.ThinDevice{
+			{TdId: testSnapTd, DevId: 2, OriId: 7, Size: testTdSize}}}
+	message := "cmd dmsetup message " + poolName(srv) + " 0 create_snap 2 7"
+	reply := syncupBoth(t, srv, o)
+
+	assertNoCall(t, node, "cmd dmsetup suspend")
+	if n := len(node.callsMatching(message)); n != 1 {
+		t.Fatalf("%d create_snap calls, want exactly 1", n)
+	}
+	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+		GetSliceIdToDmThin()[testSlice], "No data available", "orphan snap")
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if n := len(node.callsMatching(message)); n != 1 {
+		t.Fatalf("the retry sent %d create_snap calls, want exactly 1", n)
+	}
+	assertErrorDetails(t, reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
+		GetSliceIdToDmThin()[testSlice], "No data available",
+		"orphan snap, second converge")
 }
 
 // TestSnapshotWithADeferredSliceStillMessagesTheReadyOne pins that the
 // message loop is gated on poolReady and never on tdPlan.deferred, which is
 // plan-global (anySliceDeferred, U4): with one slice still provisioning the
-// origin has no raid0 to quiesce, but the ready slice's create_snap must
-// still go out. Dropping it would lose the snapshot outright.
+// ready slice's create_snap must still go out. Dropping it would lose the
+// snapshot outright.
+//
+// U4-S3 also drops the pre-pass's `origin.deferred` early return, and this
+// fixture is where that shows: the origin's raid0 was built by the
+// revision-2 converge and is still live, so it is quiesced around the one
+// message it is possible to send. Before U4 the deferred plan sent the
+// caller down ensureThin's lazy path, which bracketed only the per-slice
+// origin thin. Quiescing the live raid0 is the U1 rule applied honestly, so
+// the assertion is the bracket, not its absence.
 func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 	srv, node := newTestServer(t)
 	// unprovisionedDataLeg defers the *first* slice only; the second one
@@ -250,16 +433,25 @@ func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 			strings.Join(node.Calls(), "\n"))
 	}
 	assertNoCall(t, node, snapMessage(srv, testSlice))
-	assertNoCall(t, node, "cmd dmsetup suspend "+raid0Name(srv, testTd))
+	origin := raid0Name(srv, testTd)
+	assertOrder(t, node,
+		"cmd dmsetup suspend "+origin,
+		snapMessage(srv, testSlice2),
+		"cmd dmsetup resume "+origin,
+	)
+	if node.dms[origin].suspended {
+		t.Fatalf("a deferred slice left the origin raid0 suspended")
+	}
 }
 
-// TestSnapshotClaimsASliceEvenWhenItsMessageFailed pins the snapDone handoff
-// (U1 step 5): the pre-pass claims a slice *before* sending, so a message
-// that failed is not re-sent by ensureThin's lazy path later in the same
-// pass. Re-sending would put that slice's create_snap after the raid0 resume
-// — dating its snapshot from after host IO restarted, which is the very tear
-// U1 exists to prevent. The one-shot failCmd is what makes the retry
-// observable: failCmdAlways would fail the retry identically.
+// TestSnapshotClaimsASliceEvenWhenItsMessageFailed pins "exactly one
+// create_snap per slice, none after the raid0 resume". Before U4 a handoff
+// map carried that property; it now holds by construction, because ensureThin
+// never messages a td with ori_id != 0 (U4-S1) and the pre-pass is the only
+// caller of createSnapId. A re-send would put that slice's create_snap after
+// the resume — dating its snapshot from after host IO restarted, which is the
+// very tear U1 exists to prevent. The one-shot failCmd is what makes such a
+// retry observable: failCmdAlways would fail it identically.
 func TestSnapshotClaimsASliceEvenWhenItsMessageFailed(t *testing.T) {
 	srv, node := newTestServer(t)
 	node.failCmd["message "+poolNameOf(srv, testSlice2)+" 0 create_snap"] =

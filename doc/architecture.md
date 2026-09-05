@@ -92,7 +92,7 @@ environment variables; see §13):
 | **group** | A contiguous chunk of pool space inside a slice. Each slice has ≥1 **meta group** (backs the thin-pool metadata device) and ≥1 **data group** (backs the thin-pool data device). `GrowSlice` appends groups. A group is either a single leg (RedundNone) or an md-raid1 over its legs (RedundMdRaid1). Every leg of a group reserves a small **meta region** at its start (md superblock + write-intent bitmap + health block, §3.6); only the remaining **data region** feeds the pool. |
 | **leg** | One replica of a group. Backed by exactly one **side** normally, two sides while that leg is being migrated. Groups may also carry **spare legs** (`MaxSpareLegPerGrp` = 2) — connected and health-checked, but not md members until a switch (§8.12). |
 | **side** | The DN-resident part of a leg: one side device `DnSideName` (a dm-linear over the side's [D13] extent runs) plus, per cntlr, a dm-error + dm-linear + nvmet subsystem exported to that cntlr's CN. Figs `000DiskNode`, `010Side` (§3.1). |
-| **thin device (td)** | A user volume: one dm-thin volume per slice + one raid0 (dm striped) across the per-slice thin volumes on the primary. Snapshots are thin devices with `ori_id` set. |
+| **thin device (td)** | A user volume: one dm-thin volume per slice + one raid0 (dm striped) across the per-slice thin volumes on the primary. Snapshots are thin devices with `ori_id` set. `created` marks a td whose thin volume the primary has reported `OK` in every slice (§10.3); only a created td can be snapshotted, and an origin cannot be deleted while a snapshot of it is uncreated (§8.7). |
 | **subsystem (ss) / namespace (ns)** | The host-facing NVMe-oF objects. A namespace binds an `ns_idx` (NSID) of a subsystem to a thin device. Fig. `060VirtualVolume` (§3.5). |
 | **clone** | Pull-copy of an external NVMe-oF namespace into a local thin device via dm-clone, on the primary cntlr. Fig. `090Clone` (§8.9). |
 | **transfer (xfer)** | The source-side counterpart of a clone: exports a local namespace's raid0 over a dedicated subsystem so another SP (possibly another cluster) can clone from it. Fig. `100Transfer` (§8.10). Clone + transfer = cross-SP live migration of a volume (§11.3). |
@@ -421,7 +421,9 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
    `DefaultPoolLowWatermarkPct` = 50; `> 100` ⇒ the agent passes `low_water_mark = 0`
    — no dm events — as the value only means "auto-grow off", §10.4).
 4. **Per thin device × slice**: a dm-thin volume `CnThinDevName`, created with pool
-   message `create_thin {dev_id}` or `create_snap {dev_id} {ori_id}`, virtual size =
+   message `create_thin {dev_id}` or `create_snap {dev_id} {ori_id}` — sent only while
+   `ThinDevice.created == false`; a created td's volume is attached with a bare
+   `dmsetup create` (`cnagent.md` CN14, `ThinDeviceCreated.md` U4) — virtual size =
    `ThinDevice.size / slice_cnt`.
 5. **Per thin device**: a dm-striped raid0 `CnRaid0Name` across its per-slice thin
    volumes (slice order = `slice_idx`), chunk = `DmRaid0Conf.stripe_size`; a dm-error
@@ -1291,15 +1293,18 @@ Inspect RPCs are the way to watch clone/migration hydration before
 
 **CreateThinDevice** —
 Errors: `ALREADY_EXISTS` td key; `RESOURCE_EXHAUSTED` `len(td_name_list) ≥
-MaxTdCntPerSp`; `NOT_FOUND` `ori_name` set but absent; `INVALID_ARGUMENT` `size == 0` or
+MaxTdCntPerSp`; `NOT_FOUND` `ori_name` set but absent; `FAILED_PRECONDITION` `ori_name`
+set and the origin's `created == false` (checked after `NOT_FOUND`);
+`INVALID_ARGUMENT` `size == 0` or
 `size` not a multiple of `slice_cnt × DmRaid0Conf.stripe_size` (dm-striped needs equal,
 chunk-aligned members; sizes SHOULD also be multiples of `block_size`).
 Defaults: `ori_name = ""` (fresh device, not a snapshot); when `ori_name` is set and
 `size == 0`, `size` = the origin's size (a snapshot may also be created larger).
 Action: STM: `td_id` from `next_id`, `dev_id` from `next_dev_id++`,
-`ori_id` = origin's `dev_id` or 0; write `ThinDevice`, append `td_name_list`, bump
-`SpRev`. Reply `td_id`, `dev_id`. The primary creates one thin volume per slice
-(`create_thin` / `create_snap` pool message) + the raid0/error of §3.3 (namespace
+`ori_id` = origin's `dev_id` or 0; write `ThinDevice` (`created = false`), append
+`td_name_list`, bump `SpRev`. Reply `td_id`, `dev_id`. The primary creates one thin volume per slice
+(a `create_thin` / `create_snap` pool message while `created == false`; a bare
+`dmsetup create` once the flag is set) + the raid0/error of §3.3 (namespace
 devices are per `Namespace` and appear with §8.8).
 
 **Snapshot point-in-time (update_02.md U1).** A td is striped across every
@@ -1317,16 +1322,72 @@ from different instants); a snapshot whose creation raced a primary crash
 SHOULD be deleted and re-created (Appendix D). `cnagent.md` CN14 is the
 agent-side spec.
 
+**Materialization (`ThinDeviceCreated.md` U2/U3).** `ThinDevice.created` is
+written `false` here and set `true` exactly once by the sp-worker, when a cntlr
+has reported that td's thin volume `RES_STATUS_OK` in **every** slice of the SP
+(§10.3). It is never cleared: a pool holds a thin id until the `delete {dev_id}`
+that only the td's own deletion sends, so a later bad row is a health event
+(`err_epoch`), not evidence the id is gone. A td deleted and re-created under the
+same name is a different td — new `td_id`, new `dev_id`, `created = false` — and
+`dev_id`s are never reused, so an old snapshot's `ori_id` can never resolve to it.
+The refusal's details are `origin {ori_name} is not created yet; wait for
+ListThinDevices to report created = true`, and nothing is written — no key, no
+`next_id`/`next_dev_id` consumption, no `SpRev` bump. A snapshot *of a snapshot*
+follows the same rule: the **immediate** origin must be created, and that
+snapshot's own materialization is what later makes it eligible as an origin.
+
+*Snapshot creation is the only gated operation.* `create_snap` is the one
+operation with a kernel-level dependency on the origin's id already being in each
+slice pool. `CreateNamespace`/`UpdateNamespaceDev` on an uncreated td are allowed
+— the ns-dev parks on the td's `CnErrorName` and the namespace stays inaccessible
+until the backing chain exists (`cnagent.md` CN16); `CreateClone` with an uncreated
+destination is allowed ([D3], the destination td is empty by construction);
+`GetThinDeviceBitmap` is not gated, and a slice whose pool does not hold the id yet
+fails in the agent (`thin device {dev_id} not in the metadata snapshot`, CN26),
+which surfaces as `ABORTED` like any other agent RPC failure (§5.9).
+
+*The client's wait primitive* is `ListThinDevices`: poll until the td reads
+`created == true`, then snapshot it. `CreateThinDevice` never blocks (§5.8 keeps
+every RPC short). Typical latency is one fan-out — the `SpRev` bump of
+`CreateThinDevice` sends `SyncupCntlr` to the primary, whose reply already reports
+every slice `OK` in the common case, so the flip lands in the same round; worst
+case is one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7).
+
+*Interaction with `SpLevel` and provisioning.* At an `sp_level` that suppresses
+pools the thin rows read `RES_STATUS_MISSING` / `"sp_level"` (`cnagent.md` CN19),
+so no td of that SP ever flips and every snapshot request is refused until the
+level is restored and a converge reports the rows `OK`. A td created while a slice
+is still provisioning-deferred ([D15]) reads `RES_STATUS_PROVISIONING` in that
+slice and flips when the last slice clears. Both are the intended meaning of "not
+created yet".
+
 **DeleteThinDevice** —
 Errors: `FAILED_PRECONDITION` if the `td_id` is referenced by any `Namespace.td_id` of
 any subsystem of the SP (read `nqn_list` + every `Subsystem` in the same STM — bounded
-by `MaxSsCntPerSp × MaxNsCntPerSs`, cheap) or by any `Clone.dst_td_id`.
+by `MaxSsCntPerSp × MaxNsCntPerSs`, cheap) or by any `Clone.dst_td_id`;
+`FAILED_PRECONDITION` if any td of the SP has `ori_id ==` this td's `dev_id` and
+`created == false` (read `td_name_list` + every `ThinDevice` in the same STM — the
+`ListThinDevices` read set, bounded by `MaxTdCntPerSp`), with details naming the
+blocking snapshot(s). Retire runs before build (`cnagent.md` CN9), so an origin
+leaving `td_list` in the converge that would first materialize its snapshot sends
+`delete {ori dev_id}` before `create_snap` and loses the snapshot for good; the guard
+is what makes that unreachable. Details name the blocking snapshot(s):
+`snapshot {td_name} of {target} is not created yet`. A snapshot with
+`created == true` does **not** block, and because the match is on `dev_id`,
+which is never reused, no stale snapshot can block a same-name recreate. The td
+reads MAY be served as one range under the `{p} thin_device {cluster_id}
+{sp_id} ` prefix where the `etcdutil` STM wrapper supports prefix reads (one
+`etcd range` record, `log.md` §5.3) and per key otherwise; either way they are
+inside the transaction, so a snapshot created concurrently conflicts it
+(§5.8/§5.9 `ABORTED`, the client retries).
 Action: STM: remove from `td_name_list`, delete the key, bump `SpRev`. `dev_id` is never
-reused. Deleting the origin of snapshots is allowed — dm-thin snapshots stay valid. The
+reused. Deleting the origin of snapshots is allowed — dm-thin snapshots stay valid —
+once every snapshot of it is created. The
 primary applies it with a `delete {dev_id}` message per slice pool. Reply `td_id`.
 
 **ListThinDevices** — one STM reads `SpConf` + every td in `td_name_list` into
-`name_to_td`; a missing listed key ⇒ `ABORTED`.
+`name_to_td`; a missing listed key ⇒ `ABORTED`. `name_to_td` carries `created`; it is
+the client's wait primitive before snapshotting.
 
 ### 8.8 Subsystems, namespaces
 
@@ -1833,7 +1894,8 @@ seconds of the last status change. The `revision` returned next to an `*Info`
 (`Syncup*`, `Check*`, `Get*Info` replies) = last fully applied revision. Map keys in
 `SideInfo`/`CntlrInfo` are the obvious owner ids (`cn_id` for a side's per-CN export
 stack; td_id, slice_id, grp_id, leg_id, ns_id, ss_id, clone_id, xfer_id in `CntlrInfo`,
-with `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin volumes).
+with `td_id_to_thin_info[td].slice_id_to_dm_thin` for the per-td × slice thin volumes;
+the sp-worker's `created` flip reads exactly these rows, §10.3).
 dm-clone `details`
 strings carry the raw `dmsetup status` line so hydration progress is visible through
 `Inspect*`. `CntlrInfo.leg_id_to_leg` reflects the §3.6 health check: on the primary, the
@@ -2045,6 +2107,49 @@ sets `Side.provisioned = true` in an STM and bumps `SpRev` once (several sides o
 SP MAY batch into one STM). The normal watch fan-out then re-syncs the sides (now
 exporting) and the cntlrs (now connecting). There are no long gRPC deadlines and no
 Check-round exemptions — every RPC stays short.
+
+**Materialization flip (`ThinDeviceCreated.md` U3).** The sp role already consumes
+every `SyncupCntlrReply` and every `CheckCntlrReply` for `err_epoch` maintenance; the
+`created` flip is one more consumer of the same replies — no new RPC, no polling, no
+timer, and `GetCntlrInfo` replies are not a source. A reply `R` from **any** cntlr of
+SP `S` (thin rows are only ever filled by a cntlr acting as primary, and the ids live
+in the shared pool metadata on the DN legs) **completes** a td `X` of `S` when all four
+hold: (1) `R.agent_reply.code == 0`; (2)
+`R.cntlr_info.td_id_to_thin_info[X.td_id]` exists; (3) the key set of its
+`slice_id_to_dm_thin` equals the SP's slice ids exactly — every slice, no extra, no
+missing; (4) every row's `status == RES_STATUS_OK`. Anything else — no entry (a
+standby, `cnagent.md` CN14 "primary only"), a partial map, any
+`MISSING`/`ERROR`/`PROVISIONING`/`UNKNOWN` row — is "not yet". The reply's `revision`
+is **not** compared with anything: thin ids are monotonic facts about the pool
+metadata, and identity is guarded in the STM below. `show_info = false` Check replies
+suffice, because §9.7 delivers the `*Info` whenever any resource changed status and
+`MISSING → OK` is such a change.
+
+*Candidates* are the tds of `R` that are complete and that the worker's loaded state of
+`S` shows `created == false`. A reply that completes no candidate causes no etcd traffic
+at all. If the candidate set is non-empty the worker runs **one STM**: for each
+candidate re-read `{p} thin_device {cluster_id} {sp_id} {td_name}` and skip it when the
+key is absent (deleted meanwhile), when its `td_id` differs (deleted and re-created
+under the same name), or when `created` is already `true` (another worker or a
+concurrent reply got there first) — otherwise set `created = true` and write the record;
+then, if at least one record was written, bump `SpRev` **once** (the key is id-based and
+is updated, never deleted and re-created, §5.5). Nothing written ⇒ no bump. Several tds
+completed by one reply share the one STM and the one bump, and a pending `provisioned`
+flip of the same SP MAY be folded into the same transaction — the two rules are
+independent and both bump once. The reads and writes log as ordinary `etcd
+get`/`etcd put` records inside the STM (`log.md` §5.3); a retried transaction
+logs them twice, which is expected. Across replies there is no batching window:
+only the primary fills thin rows, so one reply per round per SP is the natural
+unit.
+
+The bump re-fans the SP, which is how `created` reaches the cn agent (`cnagent.md`
+CN14). It cannot loop: the worker reloads the SP on its own bump, and the re-sync's
+reply — reporting the same rows `OK` — finds no candidate. The flip is idempotent and
+observation-driven, so a worker restart or a shard-ownership change (§10.1) needs no
+recovery step: the new owner's first reply on a fresh Check stream carries the complete
+`*Info` and flips whatever is complete and still `false`. Nothing flips for the thin
+rows of a cntlr at a pool-suppressing `sp_level`, of a provisioning-deferred slice, of a
+standby, or of a td whose message or create failed.
 
 ### 10.4 Automatic reactions (`EventThreshold`, thin-pool auto-grow)
 
@@ -3008,6 +3113,12 @@ their own edits to this file in their §5 sections.
 * `update_02.md` U6/U7 — new Appendix D (v1 assumptions and known limits);
   the three `Cntlr` field references that carried a stale `cn_` prefix on
   `addr_port` now use the schema's field name (×3).
+* `ThinDeviceCreated.md` U1-U5 — `ThinDevice` gains `created`; §8.7 gates snapshot
+  creation and origin deletion on it; §10.3 gains the materialization flip; §2, §3.3
+  and `cnagent.md` CN14 record that a created td is never messaged and that the
+  snapshot pre-pass owns every snapshot message; §9.5 names the rows the flip reads;
+  Appendix D updated. The §8/§10 items specify gateway and worker behaviour that is
+  not implemented yet — this document is their spec.
 
 <!-- end of design_v001.md -->
 
@@ -3085,4 +3196,13 @@ exists.
 * **Snapshot creation is not atomic across a primary crash.** With
   update_02.md U1 a snapshot is point-in-time against live IO, but a crash
   between two slices' `create_snap` messages still leaves a torn snapshot
-  (§8.7); delete and re-create it.
+  (§8.7); delete and re-create it. `ThinDevice.created` certifies
+  materialization, not point-in-time consistency: a torn snapshot still flips
+  to `created` once every slice's volume exists.
+* **A created td is never re-created by message.** A td the sp-worker has
+  flipped to `created` is attached with a bare `dmsetup create`; if a pool no
+  longer holds its id the row reads `RES_STATUS_ERROR` on every converge and
+  no message ever re-creates it (`ThinDeviceCreated.md` U4-S2). This
+  supersedes the older behaviour, which would silently hand the live `dev_id`
+  a fresh, empty volume, and it belongs next to the "no thin-metadata repair
+  path" limit above: pool-metadata loss is an operator-intervention event.

@@ -485,8 +485,9 @@ slice_id)` per §9.3.)
 - **Data IO on the host VM**: through the multipath device node
   `/dev/disk/by-id/nvme-uuid.<uuid>`; writes `dd conv=fsync`, verifying
   reads after `sync; echo 3 > drop_caches`; never `iflag=/oflag=` (§4).
-- `mutations()` — the cn twin of the dn suite helper, used by case D: greps
-  a cn-agent log for `dmsetup create|reload|remove|suspend|resume|message`,
+- `mutations([trace])` — the cn twin of the dn suite helper, used by case D
+  and by case B's rebuild stage: greps a cn-agent log — the whole log, or a
+  single converge when a `trace_id` is given — for `dmsetup create|reload|remove|suspend|resume|message`,
   mutating mdadm verbs
   (`--create|--assemble|--add|--fail|--remove|--stop|--zero-superblock`),
   `nvme connect|disconnect`, `blkdiscard`,
@@ -619,7 +620,12 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    blocks 5,6,7 written = 0, bits 4-7 = blocks 8..11 unmapped = 1 ⇒
    0x01 + 0xf0). One-byte window proves the window math end to end.
 6. **Snapshot**: `syncup-cntlr` CN1 (CNREV1++) adding td2 `0xc`
-   (`dev_id 2, ori_id 1`) and ss2/ns2. Assert code 0; `cn-agent.log`
+   (`dev_id 2, ori_id 1`) and ss2/ns2. The origin `0x9` is re-sent with
+   `created = true`: the gateway refuses a snapshot of a td it has not seen
+   materialized in every slice pool (`ThinDeviceCreated.md` U2-S1), so this is
+   the only `td_list` a real worker could publish here, and the snapshot
+   itself is uncreated, which is what puts its `create_snap` inside the
+   quiesce. Assert code 0; `cn-agent.log`
    shows suspend(origin raid0)/suspend(origin thin)/`create_snap 2 1`
    message/resume(origin thin)/resume(origin raid0) in that order, and the
    snapshot's own thin device created only after that last resume (CN14,
@@ -632,7 +638,22 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    block 9 still reads zero; `get-td-bm --td 0xc` unchanged
    (`1effffffffffffff`) while `get-td-bm --td 0x9` now shows bit 9 written
    (`1efdffffffffffff`) — snapshot isolation at the mapping level.
-9. Check rounds; teardown as usual; residue checks.
+9. **Rebuild** (`ThinDeviceCreated.md` U5-S3, R14): the host disconnects both
+   NQNs, then `cn_drop` tears the cntlr down — CN21 sends **no** `delete`, so
+   both thin ids stay in the pool metadata on DN1's legs — and `syncup-cn`
+   re-introduces the pointer (its own stage, because parking the ns-devs onto
+   dm-error is a `dmsetup reload`, i.e. a suspend). Then `syncup-cntlr`
+   (CNREV1++) with `.td_list |= map(.created = true)`, the desired state the
+   sp-worker publishes once both tds have flipped. Assert on that stage's own
+   trace: **no** `dmsetup message … create_thin`, **no** `… create_snap`, no
+   `dmsetup suspend` at all; `mutations()` scoped to the trace shows
+   `dmsetup create` lines and no `dmsetup message`; every thin/pool/namespace
+   row `OK`; and both bitmaps re-read through `get-td-bm` unchanged — `0xc` ⇒
+   `1effffffffffffff`, `0x9` ⇒ `1efdffffffffffff`. The mappings of both tds
+   survived the rebuild, so the bare `dmsetup create` attached the *existing*
+   ids: no empty volume, no data loss. This is the only place a real dm-thin
+   pool proves it.
+10. Check rounds; teardown as usual; residue checks.
 
 ## 13. Case C — `clone_xfer` (§11.3 live move + §11.5 recovery)
 
@@ -888,11 +909,11 @@ records can be pulled from the JSON logs on either VM.
 |---|---|---|
 | `GetCnSize` | setup wait-up | exact `--capacity` echo 1099511627776; liveness |
 | `SyncupCn` | setup + every case | reply code, the four base-state infos (`port`/`tmpfs`/`tmp_file`/`loop_dev`; `clone_vg_info` is `reserved 5` since `update_01.md` U3), declarative cntlr add/remove, stale probe (D) |
-| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list` |
+| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with zero pool messages (B) |
 | `PushCloneBitmap` | C | reply code 0; effects via the stage 4/9 layers |
 | `GetCnInfo` | teardown checks, D | statuses, snapshot equality |
 | `GetCntlrInfo` | S, C polling + recovery, D | pool-status details format, `ParseCloneStatus` hydration, snapshot equality |
-| `GetThinDeviceBm` | B, C | exact bitmaps incl. paging window; the C stage 9 skip proof |
+| `GetThinDeviceBm` | B, C | exact bitmaps incl. paging window; the B rebuild mapping proof; the C stage 9 skip proof |
 | `GetLegBm` | B | data-group span arithmetic; meta-group all-zero rule |
 | `CheckCn` | every case (§9 converge-check convention) | stream round: code 0, revision echo, show_info statuses |
 | `CheckCntlr` | every case (§9) | same |
@@ -1058,3 +1079,13 @@ another document or the harness cites can shift.
   absent on one lab VM; installing it is lab setup, not a suite change.
 - The suite's `smoke` check round caught `cnagent.md` IR5 (the namespace
   identity comparison) on its first run, which is what that stage exists for.
+
+### `ThinDeviceCreated.md`
+
+- **U5** — `req_td` gained the optional `created` argument (default `false`),
+  `assert_absent` was added as `assert_before`'s negative twin, and
+  `mutations()` gained an optional leading `trace_id` filter so a stage can
+  scope it to its own converge (§9 bullet updated). Case B models the
+  gateway's `created` on the origin at the snapshot step (§12 step 6) and
+  gained the drop/rebuild stages (§12 step 9); the former step 9 is now step
+  10.

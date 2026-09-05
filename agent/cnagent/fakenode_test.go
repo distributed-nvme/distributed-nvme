@@ -37,6 +37,14 @@ type fakeNode struct {
 
 	// device-mapper
 	dms map[string]*fakeDm
+	// thinPools is the dm-thin metadata of every pool this node has ever
+	// activated, keyed by the pool's dm name and outliving the dm device
+	// itself: the real metadata lives on the DN legs, so a CN21 teardown —
+	// which removes the pool device and sends no `delete` — leaves every
+	// thin id in place for the next hosting cntlr to attach (CN14, CN21).
+	// A fakeDm's thinIds field aliases this map, so the message handlers
+	// need no separate lookup.
+	thinPools map[string]map[uint32]bool
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
 	// listing is an inherently stale snapshot — another cntlr's retire or
 	// SP_LEVEL_DISABLE teardown runs under the same node *read* lock and can
@@ -141,6 +149,7 @@ func newFakeNode() *fakeNode {
 		devNo:         make(map[string]string),
 		nextMinor:     1,
 		dms:           make(map[string]*fakeDm),
+		thinPools:     make(map[string]map[uint32]bool),
 		arrays:        make(map[string]*fakeArray),
 		superblocks:   make(map[string]bool),
 		assembleDrop:  make(map[string]bool),
@@ -874,9 +883,16 @@ func (f *fakeNode) dmCreate(args []string, stdin string) (string, int) {
 	if _, exists := f.dms[name]; exists {
 		return "", 1
 	}
-	dm := &fakeDm{table: table, readOnly: readOnly, thinIds: map[uint32]bool{}}
+	dm := &fakeDm{
+		table:    table,
+		readOnly: readOnly,
+		thinIds:  f.poolThinIds(name, table),
+	}
 	applyCloneTable(dm, table)
 	if code := f.checkTableDeps(table); code != 0 {
+		return "", code
+	}
+	if code := f.checkThinTable(name, table); code != 0 {
 		return "", code
 	}
 	f.dms[name] = dm
@@ -903,6 +919,91 @@ func (f *fakeNode) dmReload(args []string, stdin string) (string, int) {
 	applyCloneTable(dm, table)
 	f.devSize["/dev/mapper/"+name] = tableSectors(table) * 512
 	return "", 0
+}
+
+// poolThinIds is the thin-id set a freshly activated device carries. For a
+// thin-pool it is the node-level metadata of that pool name, which outlives
+// the dm device: the real thing lives on the DN legs, so a cntlr teardown
+// (CN21, no `delete` messages) and the next `dmsetup create` of the pool find
+// the same ids. Every other target gets its own empty map, which nothing
+// reads.
+func (f *fakeNode) poolThinIds(name, table string) map[uint32]bool {
+	if !isDmTarget(table, "thin-pool") {
+		return map[uint32]bool{}
+	}
+	held, ok := f.thinPools[name]
+	if !ok {
+		held = make(map[uint32]bool)
+		f.thinPools[name] = held
+	}
+	return held
+}
+
+// holdThinIds seeds a pool's dm-thin metadata with ids no cntlr of this node
+// created — the state a fresh primary meets when the control plane has
+// already marked the tds `created` (U4-S2).
+func (f *fakeNode) holdThinIds(pool string, ids ...uint32) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	held, ok := f.thinPools[pool]
+	if !ok {
+		held = make(map[uint32]bool)
+		f.thinPools[pool] = held
+	}
+	for _, id := range ids {
+		held[id] = true
+	}
+}
+
+// isDmTarget reports whether table is a single target of the given type.
+func isDmTarget(table, target string) bool {
+	lines := dmTargets(table)
+	if len(lines) != 1 {
+		return false
+	}
+	fields := strings.Fields(lines[0])
+	return len(fields) > 2 && fields[2] == target
+}
+
+// checkThinTable rejects a `thin` table whose dev_id the pool's metadata does
+// not hold. The kernel does exactly that, and modelling it is what makes
+// U4-S2 observable: a created td is never re-created by message, so a pool
+// that lost the id has to surface as a failing `dmsetup create` — an
+// RES_STATUS_ERROR the worker records — instead of a fresh empty volume
+// quietly taking the dev_id over.
+func (f *fakeNode) checkThinTable(name, table string) int {
+	if !isDmTarget(table, "thin") {
+		return 0
+	}
+	fields := strings.Fields(dmTargets(table)[0])
+	if len(fields) < 5 {
+		return 3
+	}
+	pool := f.dmByDevNo(fields[3])
+	if pool == nil {
+		return 0
+	}
+	devId, err := strconv.ParseUint(fields[4], 10, 32)
+	if err != nil {
+		return 3
+	}
+	if pool.thinIds[uint32(devId)] {
+		return 0
+	}
+	f.dispatchStderr = "device-mapper: reload ioctl on " + name +
+		" failed: No data available"
+	return 1
+}
+
+// dmByDevNo resolves the major:minor a table argument carries back to the dm
+// device it names, or nil when it is not one of this node's dm devices.
+func (f *fakeNode) dmByDevNo(devNo string) *fakeDm {
+	for name, dm := range f.dms {
+		if f.devNo["/dev/mapper/"+name] == devNo {
+			return dm
+		}
+	}
+	return nil
 }
 
 // checkTableDeps rejects a table naming a device number that does not exist —
@@ -989,8 +1090,16 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 		}
 		dm.thinIds[uint32(devId)] = true
 	case strings.HasPrefix(message, "create_snap "):
+		if len(fields) < 3 {
+			return "", 3
+		}
 		devId, _ := strconv.ParseUint(fields[1], 10, 32)
-		if dm.thinIds[uint32(devId)] {
+		oriId, _ := strconv.ParseUint(fields[2], 10, 32)
+		// dm-thin rejects a create_snap whose origin the pool does not hold.
+		// That is the U4-S5/R11 failure mode: the gateway's job is to keep
+		// the origin materialized, and an agent that meets a violated
+		// precondition simply reports the error and retries.
+		if dm.thinIds[uint32(devId)] || !dm.thinIds[uint32(oriId)] {
 			return "", 1
 		}
 		dm.thinIds[uint32(devId)] = true

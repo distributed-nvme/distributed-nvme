@@ -3193,11 +3193,17 @@ func (x *Slice) GetDataGrpList() []*Group {
 
 // {dnv_prefix} thin_device {cluster_id} {sp_id} {td_name}
 type ThinDevice struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TdId          uint64                 `protobuf:"varint,1,opt,name=td_id,json=tdId,proto3" json:"td_id,omitempty"`
-	DevId         uint32                 `protobuf:"varint,2,opt,name=dev_id,json=devId,proto3" json:"dev_id,omitempty"`
-	OriId         uint32                 `protobuf:"varint,3,opt,name=ori_id,json=oriId,proto3" json:"ori_id,omitempty"`
-	Size          uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	TdId  uint64                 `protobuf:"varint,1,opt,name=td_id,json=tdId,proto3" json:"td_id,omitempty"`
+	DevId uint32                 `protobuf:"varint,2,opt,name=dev_id,json=devId,proto3" json:"dev_id,omitempty"`
+	OriId uint32                 `protobuf:"varint,3,opt,name=ori_id,json=oriId,proto3" json:"ori_id,omitempty"`
+	Size  uint64                 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	// created is set exactly once by the sp-worker, when a cntlr has
+	// reported this td's thin volume RES_STATUS_OK in every slice of the SP
+	// (§10.3); it is never cleared. It gates snapshot creation and origin
+	// deletion (§8.7) and tells the cn agent that the ids exist in every
+	// slice pool, so no pool message is ever sent for this td again (CN14).
+	Created       bool `protobuf:"varint,5,opt,name=created,proto3" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3258,6 +3264,13 @@ func (x *ThinDevice) GetSize() uint64 {
 		return x.Size
 	}
 	return 0
+}
+
+func (x *ThinDevice) GetCreated() bool {
+	if x != nil {
+		return x.Created
+	}
+	return false
 }
 
 // {dnv_prefix} subsystem {cluster_id} {sp_id} {nqn}
@@ -14203,13 +14216,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05Slice\x12\x1b\n" +
 	"\tslice_idx\x18\x01 \x01(\rR\bsliceIdx\x12*\n" +
 	"\rmeta_grp_list\x18\x02 \x03(\v2\x06.GroupR\vmetaGrpList\x12*\n" +
-	"\rdata_grp_list\x18\x03 \x03(\v2\x06.GroupR\vdataGrpList\"c\n" +
+	"\rdata_grp_list\x18\x03 \x03(\v2\x06.GroupR\vdataGrpList\"}\n" +
 	"\n" +
 	"ThinDevice\x12\x13\n" +
 	"\x05td_id\x18\x01 \x01(\x04R\x04tdId\x12\x15\n" +
 	"\x06dev_id\x18\x02 \x01(\rR\x05devId\x12\x15\n" +
 	"\x06ori_id\x18\x03 \x01(\rR\x05oriId\x12\x12\n" +
-	"\x04size\x18\x04 \x01(\x04R\x04size\"\x98\x01\n" +
+	"\x04size\x18\x04 \x01(\x04R\x04size\x12\x18\n" +
+	"\acreated\x18\x05 \x01(\bR\acreated\"\x98\x01\n" +
 	"\tSubsystem\x12\x13\n" +
 	"\x05ss_id\x18\x01 \x01(\x04R\x04ssId\x12\x16\n" +
 	"\x06serial\x18\x02 \x01(\tR\x06serial\x12\x14\n" +

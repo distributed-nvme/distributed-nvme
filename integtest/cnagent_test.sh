@@ -525,9 +525,13 @@ req_grp() { # grpid ext_cnt meta_blocks data_blocks leg_json…
 		"$(d16 "$grp")" "$ext" "$meta" "$data" "$(join_json "$@")"
 }
 
-req_td() { # tdid dev_id ori_id
-	printf '{"td_id": "%s", "dev_id": %s, "ori_id": %s, "size": "%s"}' \
-		"$(d16 "$1")" "$2" "$3" "$TD_SIZE"
+# created defaults to false — the state a td is in between CreateThinDevice
+# and the sp-worker's materialization flip (ThinDeviceCreated.md U3). A
+# request carrying `created: true` is the one a real worker publishes after
+# the flip, and the agent then sends no pool message for that td at all.
+req_td() { # tdid dev_id ori_id [created]
+	printf '{"td_id": "%s", "dev_id": %s, "ori_id": %s, "size": "%s", "created": %s}' \
+		"$(d16 "$1")" "$2" "$3" "$TD_SIZE" "${4:-false}"
 }
 
 # req_ns renders one Namespace. nguid is always the uuid with the dashes
@@ -843,8 +847,10 @@ events() {
 
 cn_events() { events "$CN_LOG" "${1:-}"; }
 
-# mutations [log] — every mutating operation in a cn agent log (§9, case D
-# step 5). The CN11 leg health probers left the OsClient in update_01.md U2:
+# mutations [trace] [log] — every mutating operation in a cn agent log (§9,
+# case D step 5). An empty trace means the whole log; naming one scopes the
+# answer to a single converge, which is what lets a stage prove that *its own*
+# syncup mutated nothing but dm devices (`ThinDeviceCreated.md` U5-T1). The CN11 leg health probers left the OsClient in update_01.md U2:
 # they call the raw block-IO syscalls directly and log their own records as
 # `probe write block` / `probe read block direct`, which are not in this grep
 # list by construction. So no path-based exemption is needed any more, and
@@ -857,14 +863,16 @@ cn_events() { events "$CN_LOG" "${1:-}"; }
 # losetup --associated, mdadm --detail|--examine, nvme list-subsys) are
 # expected and deliberately not in the list.
 mutations() {
-	local log=${1:-$CN_LOG}
-	jq -r '
-	    select(.msg == "os write file direct")
+	local trace=${1:-} log=${2:-$CN_LOG}
+	jq -r --arg t "$trace" '
+	    select($t == "" or .trace_id == $t)
+	    | select(.msg == "os write file direct")
 	      | "write file direct " + .path' "$log" 2>/dev/null || true
 	# The verb tests bind .args first: a `[…] | index(.cmd)` would evaluate
 	# .cmd against the literal array, not the record.
-	jq -r '
-	    select(.msg == "os command")
+	jq -r --arg t "$trace" '
+	    select($t == "" or .trace_id == $t)
+	    | select(.msg == "os command")
 	    | (.args // []) as $a
 	    | select(
 	        (.cmd == "dmsetup" and ($a[0] | IN("create","reload","remove",
@@ -877,8 +885,9 @@ mutations() {
 	              "mkdir","rmdir","ln","rm"))
 	      )
 	    | .cmd + " " + ($a | join(" "))' "$log" 2>/dev/null || true
-	jq -r '
-	    select(.msg == "os write block")
+	jq -r --arg t "$trace" '
+	    select($t == "" or .trace_id == $t)
+	    | select(.msg == "os write block")
 	    | .msg + " " + .path' "$log" 2>/dev/null || true
 }
 
@@ -1577,6 +1586,16 @@ assert_before() { # stream regex_first regex_second label
 		die "$4: '$2' is at $first, '$3' at $second — wrong order"
 }
 
+# assert_absent is assert_before's negative twin: the event must not occur
+# anywhere in the stream. It is how a stage proves an omission — a converge
+# that sends *no* pool message (ThinDeviceCreated.md U5-S3) leaves nothing
+# behind for an ordering assertion to anchor on.
+assert_absent() { # stream regex label
+	local at
+	at=$(event_line "$1" "$2")
+	[ -z "$at" ] || die "$3: unexpected event matching '$2' at $at"
+}
+
 # ---------------------------------------------------------------------------
 # Case S — smoke (§10)
 # ---------------------------------------------------------------------------
@@ -1899,7 +1918,7 @@ case_thinbm() {
 	local uuid=44444444-4444-4444-8444-444444444444
 	local snapuuid=55555555-5555-4555-8555-555555555555
 	local req="$WORK/req-thinbm-cn1.json"
-	local out dev snapdev cntlrrev got seq blk
+	local out dev snapdev cntlrrev got seq blk muts
 	diag_cntlr "$cn" "$sp" "$cntlr"
 	dev=$(host_dev "$uuid")
 	snapdev=$(host_dev "$snapuuid")
@@ -1953,7 +1972,13 @@ case_thinbm() {
 	assert_eq "$got" f1 "thinbm paged td bitmap"
 
 	stage snapshot "create_snap needs a quiesced origin (CN14)"
-	req_set "$req" ".td_list += [$(req_td "$B_TD2" 2 1)]
+	# The origin is re-sent with created = true: the gateway refuses a
+	# snapshot of a td it has not seen materialized in every slice pool
+	# (ThinDeviceCreated.md U2-S1), so this is the only td_list a real worker
+	# could publish here. The snapshot itself is uncreated, which is what
+	# still puts its create_snap inside the origin's quiesce below.
+	req_set "$req" ".td_list = [$(req_td "$S_TD" 1 0 true),
+		$(req_td "$B_TD2" 2 1)]
 		| .nqn_to_subsystem[\"$snapnqn\"] = $(req_subsys "$B_SS2" "[]" \
 		"$(req_ns "$B_NS2" 1 "$B_TD2" "$snapuuid" false)")"
 	bump_cn_rev "$cn"
@@ -2015,12 +2040,69 @@ case_thinbm() {
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1efdffffffffffff "thinbm origin bitmap gained block 9"
 
+	stage drop "CN21 tears the cntlr down; the pool metadata keeps both ids"
+	# ThinDeviceCreated.md U5-S3 steps 1-3. The teardown removes every dm
+	# device and sends no `delete`, so both thin ids stay in the pool
+	# metadata on DN1's legs, and SH7 deletes the cntlr's local file — the
+	# next SyncupCntlr is a fresh cntlr at a higher revision. Its own stage,
+	# because parking the ns-devs onto dm-error is a `dmsetup reload` (=
+	# suspend + load + resume) and the rebuild stage below asserts that *it*
+	# suspends nothing.
+	host_disconnect "$hv" "$snapnqn"
+	host_disconnect "$hv" "$nqn"
+	cn_drop "$cn"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
+	assert_cn_info_ok "$out" "thinbm rebuild syncup-cn"
+
+	stage rebuild "a created td is re-attached with no pool message at all"
+	# ThinDeviceCreated.md U5-S3 steps 4-5 / R14: the desired state the
+	# sp-worker publishes once both tds have flipped. The rebuilt cntlr must
+	# re-attach the existing volumes with a bare `dmsetup create` — no
+	# create_thin, no create_snap, nothing to quiesce — and the mappings must
+	# come back intact. This is the only place a real dm-thin pool proves
+	# that a bare create on an existing id works.
+	req_set "$req" '.td_list |= map(.created = true)'
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_thin_ok "$out" "$S_TD" "$S_SLICE" "thinbm rebuild"
+	assert_thin_ok "$out" "$B_TD2" "$S_SLICE" "thinbm rebuild"
+	assert_map_ok "$out" slice_id_to_dm_pool "$S_SLICE" "thinbm rebuild"
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "thinbm rebuild"
+	assert_map_ok "$out" ns_id_to_namespace "$B_NS2" "thinbm rebuild"
+	seq=$(helper "$cn" "cn_events $TRACE")
+	assert_absent "$seq" "^dmsetup message .* create_thin" \
+		"thinbm rebuild: a created td was re-created by message"
+	assert_absent "$seq" "^dmsetup message .* create_snap" \
+		"thinbm rebuild: a created snapshot was re-created by message"
+	assert_absent "$seq" "^dmsetup suspend" \
+		"thinbm rebuild: nothing needed quiescing"
+	# U5-T1, from the other side: scoped to this stage's trace, the converge
+	# activates dm devices and issues no `dmsetup message` at all. The
+	# event stream above already says so; this says it through the §9 helper
+	# every other "what did that converge actually change" assertion uses.
+	muts=$(helper "$cn" "mutations $TRACE")
+	[ -n "$(event_line "$muts" '^dmsetup create ')" ] ||
+		die "thinbm rebuild: the converge activated no dm device"
+	assert_absent "$muts" "^dmsetup message" \
+		"thinbm rebuild: the converge mutated pool metadata"
+	# The mapping proof: both bitmaps read exactly what they read before the
+	# teardown, so the bare `dmsetup create` attached the *existing* ids —
+	# not a fresh, empty volume under the same dev_id.
+	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$B_TD2" \
+		--slice-idx 0 --start-block 0 --block-cnt 0)
+	assert_eq "$got" 1effffffffffffff "thinbm rebuilt snapshot bitmap"
+	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
+		--slice-idx 0 --start-block 0 --block-cnt 0)
+	assert_eq "$got" 1efdffffffffffff "thinbm rebuilt origin bitmap"
+
 	stage check "converge check round"
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
 
 	stage teardown "empty cntlr list, then empty side list"
-	host_disconnect "$hv" "$snapnqn"
-	host_disconnect "$hv" "$nqn"
+	# The two host_disconnects the rebuild stage moved up are harmless
+	# repeats if the host reconnected; nothing here depends on them.
 	cn_drop "$cn"
 	dn_drop "$dn"
 	assert_no_residue "$sp"

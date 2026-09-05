@@ -153,31 +153,37 @@ func (s *CnAgentServer) ensurePool(
 // ---------------------------------------------------------------------------
 
 // ensureThin converges one td's thin volume in one slice. The pool message
-// that creates the thin device id is sent only when the dm device is absent;
-// a message for an id the pool already holds fails harmlessly and the
-// `dmsetup create` that follows is what decides the outcome, which is what
-// makes a crash between the two restart-safe.
+// that creates the thin device id is sent only when the dm device is absent
+// *and* the td is a plain one the control plane has not seen materialized —
+// `!created && ori_id == 0` (U4-S1). Both clauses are re-derivable from the
+// request alone, which is what let the pre-pass handoff map go: every message
+// of an uncreated snapshot belongs to the build() pre-pass, and a created td
+// is never messaged by anyone.
 //
-// snapDone carries the thin names whose `create_snap` the U1 pre-pass of
-// build() already sent inside the origin raid0's quiesce. It is a handoff,
-// never a re-derivable predicate: by the time this runs the origin td's own
-// ensureThin has created the origin thin volume, so any recomputed "was the
-// pre-pass able to claim this slice?" test would answer yes for a slice the
-// pre-pass declined — and that slice's message would be lost outright.
+// `created` means the sp-worker has seen this td's thin volume OK in every
+// slice (§10.3), so the id exists in every slice pool and a bare `dmsetup
+// create` attaches it. When that fails because a pool no longer holds the
+// id, the row reads RES_STATUS_ERROR and no later converge messages either
+// (U4-S2): pool-metadata loss surfaces as an intervention event instead of a
+// fresh, empty volume silently taking over a live dev_id.
+//
+// For an uncreated plain td the old rule stands: a message for an id the
+// pool already holds fails harmlessly and the `dmsetup create` that follows
+// is what decides the outcome, which is what makes a crash between the two
+// restart-safe.
 func (s *CnAgentServer) ensureThin(
 	ctx context.Context,
 	plan *cntlrPlan,
 	tp *tdPlan,
 	sp *slicePlan,
-	snapDone map[string]bool,
 ) error {
 	name := plan.thinName(tp.tdId, sp.sliceId)
 	dev, err := s.dm.Info(ctx, name)
 	if err != nil {
 		return err
 	}
-	if dev == nil && !snapDone[name] {
-		if err := s.createThinId(ctx, plan, tp, sp); err != nil {
+	if dev == nil && !tp.td.GetCreated() && tp.td.GetOriId() == 0 {
+		if err := s.createThinId(ctx, tp, sp); err != nil {
 			slog.ErrorContext(ctx, "thin-pool create message failed",
 				slog.String("pool", sp.poolFinalName),
 				slog.String("thin", name),
@@ -195,23 +201,15 @@ func (s *CnAgentServer) ensureThin(
 		len(args), false)
 }
 
-// createThinId sends `create_thin` — or hands a snapshot td to createSnapId.
-//
-// U1: for a snapshot the build() pre-pass normally owns the message, and
-// suppresses this call through its snapDone set. Reaching createSnapId from
-// here is the fallback for a slice the pre-pass declined — no origin td in
-// the plan, or an origin whose own thin volume does not exist yet — where
-// there is nothing to quiesce, and where staying on this lazy path is what
-// keeps `create_snap` behind the origin's own `create_thin` in the td loop.
+// createThinId sends one slice's `create_thin`. Its only caller is ensureThin
+// and only for an uncreated plain td: an uncreated snapshot's `create_snap`
+// belongs to the build() pre-pass, which is the only caller of createSnapId
+// (U4-S3), and a created td of either kind is never messaged at all (U4-S2).
 func (s *CnAgentServer) createThinId(
 	ctx context.Context,
-	plan *cntlrPlan,
 	tp *tdPlan,
 	sp *slicePlan,
 ) error {
-	if tp.td.GetOriId() != 0 {
-		return s.createSnapId(ctx, plan, tp, sp)
-	}
 	return s.dm.Message(ctx, sp.poolFinalName, 0,
 		fmt.Sprintf("create_thin %d", tp.td.GetDevId()))
 }

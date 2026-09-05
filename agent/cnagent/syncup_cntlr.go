@@ -426,14 +426,17 @@ func (s *CnAgentServer) build(
 	// poolReady, and before the thin loop — only the *messages* belong inside
 	// the window, because a snapshot's content is fixed at message time and
 	// its thin devices are built afterwards by the unchanged loop below.
-	snapDone := make(map[string]bool)
 	if plan.wantPool {
 		// plan.wantPool implies plan.primary, so no role test is needed.
 		for _, tp := range plan.tds {
-			if tp.td.GetOriId() == 0 {
+			// U4-S1: a created snapshot's ids are in every slice pool
+			// already, so there is nothing to message and nothing to
+			// quiesce for it — the thin loop's `dmsetup create` is the
+			// whole job.
+			if tp.td.GetOriId() == 0 || tp.td.GetCreated() {
 				continue
 			}
-			s.snapshotPrePass(ctx, plan, tp, poolReady, snapDone)
+			s.snapshotPrePass(ctx, plan, tp, poolReady)
 		}
 	}
 	for _, tp := range plan.tds {
@@ -458,7 +461,7 @@ func (s *CnAgentServer) build(
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Missing(
 					key, name, "thin pool missing")
 			default:
-				err := s.ensureThin(ctx, plan, tp, sp, snapDone)
+				err := s.ensureThin(ctx, plan, tp, sp)
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.FromErr(
 					key, name, "", err)
 			}
@@ -574,26 +577,18 @@ func (s *CnAgentServer) build(
 // own nested per-slice origin-thin suspend, which is dm-thin's own documented
 // requirement and a separate thing.
 //
-// The names it claims in snapDone are the ones ensureThin must not message
-// again on this pass — including the ones whose message failed, because a
-// failed message is tolerated (the pool may already hold the dev_id after a
-// crashed earlier pass) and the `dmsetup create` that follows is what decides
-// the outcome.
+// It owns *every* message of an uncreated snapshot (U4-S3): ensureThin never
+// messages a td with ori_id != 0, so a slice this pass declines — or one
+// whose message failed — simply waits for the next converge, which is still
+// driven by the same `created == false`. A failed message is tolerated
+// exactly as before: the pool may already hold the dev_id after a crashed
+// earlier pass, and the `dmsetup create` that follows decides the outcome.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,
 	tp *tdPlan,
 	poolReady map[uint64]bool,
-	snapDone map[string]bool,
 ) {
-	// ori_id is the origin's **dev_id**, not its td_id.
-	origin := plan.tdByDevId[tp.td.GetOriId()]
-	if origin == nil || origin.deferred {
-		// The origin left td_list, or U4 defers the plan so no raid0 was
-		// built: there is no dnv IO path to quiesce. Leave every message to
-		// ensureThin's lazy path, exactly as before U1.
-		return
-	}
 	var need []*slicePlan
 	for _, sp := range plan.slices {
 		// poolReady only ever holds an entry for a non-deferred slice under
@@ -606,21 +601,16 @@ func (s *CnAgentServer) snapshotPrePass(
 			continue
 		}
 		// The same trigger ensureThin uses. An Info error means "skip":
-		// ensureThin returns before sending a message for that slice too.
+		// ensureThin fails that slice with the same error anyway.
+		//
+		// U4-S3: there is no second filter on the origin's own thin device.
+		// The gateway refuses a snapshot of an origin that is not materialized
+		// in every slice pool (§8.7), so `create_snap` can no longer be
+		// inverted with the origin's `create_thin` — and whether *this* CN has
+		// built the origin's dm device is irrelevant to a message the pool
+		// metadata answers.
 		dev, err := s.dm.Info(ctx, plan.thinName(tp.tdId, sp.sliceId))
 		if err != nil || dev != nil {
-			continue
-		}
-		// The origin's own thin volume must already exist. dm-thin rejects a
-		// `create_snap` whose origin dev_id the pool does not hold, and on a
-		// pass where both ids are new the origin's `create_thin` is still
-		// ahead of us in the td loop — so claiming such a slice here would
-		// invert the two messages and fail the snapshot for a whole converge.
-		// A slice whose origin thin is absent also carries no host IO, so
-		// there is nothing to tear: the lazy path's ordering is both correct
-		// and sufficient for it.
-		ori, err := s.dm.Info(ctx, plan.thinName(origin.tdId, sp.sliceId))
-		if err != nil || ori == nil {
 			continue
 		}
 		need = append(need, sp)
@@ -630,39 +620,50 @@ func (s *CnAgentServer) snapshotPrePass(
 		// converge round would otherwise stall the origin's host IO.
 		return
 	}
-	if raid0 := s.suspendSnapOrigin(ctx, origin); raid0 != "" {
-		defer func() {
-			// [D12]: the resume runs on every path out of the sequence — a
-			// failed message, a timeout, an early return. It also has to
-			// survive a cancelled RPC ctx, or a client that disconnects
-			// mid-pass leaves the origin's raid0 suspended, stalling its host
-			// IO and wedging in D state any scanner that opens it.
-			rctx := context.WithoutCancel(ctx)
-			if err := s.dm.Resume(rctx, raid0); err != nil {
-				slog.ErrorContext(ctx,
-					"resuming the snapshot origin raid0 failed",
-					slog.String("raid0", raid0),
-					slog.String("error", err.Error()))
-			}
-		}()
+	// ori_id is the origin's **dev_id**, not its td_id. An origin absent from
+	// the plan means there is nothing to quiesce — not that the messages are
+	// somebody else's job. suspendSnapOrigin itself returns "" for an origin
+	// whose raid0 is not live, which covers a fresh primary and a raid0
+	// somebody else holds suspended. A deferred origin is NOT one of those:
+	// the deferred arm of the raid0 loop below suppresses the converge, not
+	// the device, so a raid0 an earlier revision built is still live and is
+	// quiesced like any other.
+	if origin := plan.tdByDevId[tp.td.GetOriId()]; origin != nil {
+		if raid0 := s.suspendSnapOrigin(ctx, origin); raid0 != "" {
+			defer func() {
+				// [D12]: the resume runs on every path out of the sequence —
+				// a failed message, a timeout, an early return. It also has
+				// to survive a cancelled RPC ctx, or a client that
+				// disconnects mid-pass leaves the origin's raid0 suspended,
+				// stalling its host IO and wedging in D state any scanner
+				// that opens it.
+				rctx := context.WithoutCancel(ctx)
+				if err := s.dm.Resume(rctx, raid0); err != nil {
+					slog.ErrorContext(ctx,
+						"resuming the snapshot origin raid0 failed",
+						slog.String("raid0", raid0),
+						slog.String("error", err.Error()))
+				}
+			}()
+		}
 	}
 	for _, sp := range need {
-		name := plan.thinName(tp.tdId, sp.sliceId)
-		snapDone[name] = true
 		if err := s.createSnapId(ctx, plan, tp, sp); err != nil {
 			slog.ErrorContext(ctx, "thin-pool create message failed",
 				slog.String("pool", sp.poolFinalName),
-				slog.String("thin", name),
+				slog.String("thin", plan.thinName(tp.tdId, sp.sliceId)),
 				slog.String("error", err.Error()))
 		}
 	}
 }
 
 // suspendSnapOrigin quiesces the origin td's raid0 and returns its name, or
-// "" when it did not suspend it — no live raid0 (a standby, a deferred or a
-// half-built stack), or one somebody else already holds suspended. "" is the
-// caller's signal that it owns no resume: un-suspending a device another
-// operation is holding would be silently destructive.
+// "" when it did not suspend it — no live raid0 (a standby, or a stack this
+// cntlr has not built yet), or one somebody else already holds suspended.
+// Liveness is the whole test: a td the plan defers keeps whatever raid0 an
+// earlier revision built, and that one is quiesced. "" is the caller's
+// signal that it owns no resume: un-suspending a device another operation is
+// holding would be silently destructive.
 func (s *CnAgentServer) suspendSnapOrigin(
 	ctx context.Context,
 	origin *tdPlan,

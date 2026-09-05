@@ -109,8 +109,12 @@ func TestThinDeviceBitmap(t *testing.T) {
 
 func TestThinDeviceBitmapSharedSubtree(t *testing.T) {
 	srv, node := newTestServer(t)
+	// The gateway only ever publishes a snapshot whose origin is already
+	// materialized (ThinDeviceCreated.md U2-S1), so the origin carries
+	// `created` and its dev_id is in the pool before this cntlr converges.
+	node.holdThinIds(poolName(srv), 1)
 	tds := []*pb.ThinDevice{
-		{TdId: testTd, DevId: 1, Size: testTdSize},
+		{TdId: testTd, DevId: 1, Size: testTdSize, Created: true},
 		{TdId: testSnapTd, DevId: 2, OriId: 1, Size: testTdSize},
 	}
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})

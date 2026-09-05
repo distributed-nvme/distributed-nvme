@@ -659,14 +659,44 @@ CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       the live ones.
 
 CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
-      `CnThinDevName`, virtual size `td.size / slice_cnt`, created by pool
-      message `create_thin {dev_id}` (or `create_snap {dev_id} {ori_id}`
-      when `ori_id != 0`) followed by `dmsetup create` of the `thin` table.
+      `CnThinDevName`, virtual size `td.size / slice_cnt`, attached by
+      `dmsetup create` of the `thin` table — preceded by a pool message only
+      when the control plane has not yet seen the td materialized.
       `create_snap` requires a quiesced origin: when the origin's thin
       volume device is live, the agent suspends it across the message and
       resumes immediately after — a second deliberate, bounded suspension
       beyond [D12]'s window, held only for the duration of one
       `dmsetup message`.
+
+      **Three cases, decided per td by two request fields**
+      (`ThinDeviceCreated.md` U4-S1):
+
+      1. `created == true`, any `ori_id` — **nobody messages**. `dmsetup
+         create` of the `thin` table when the device is absent; the id is
+         known to exist in every slice pool (architecture.md §10.3).
+      2. `created == false`, `ori_id == 0` — **`ensureThin` messages**
+         `create_thin {dev_id}` when the device is absent, then `dmsetup
+         create`. `EEXIST` is tolerated: a crash between the message and the
+         create, or a message a previous primary already sent.
+      3. `created == false`, `ori_id != 0` — **the pre-pass messages, and
+         only it**: `create_snap {dev_id} {ori_id}` per pool-ready slice
+         whose snapshot device is absent, inside the U1 quiesce when the
+         origin's raid0 is live; then the thin loop's `dmsetup create`.
+
+      Both clauses are re-derivable from the request alone, which is why
+      `ensureThin` never messages a td with `ori_id != 0` whatever the
+      pre-pass did, and why no handoff between the two is needed.
+
+      **A created td is never messaged** on any pass — fresh primary after a
+      failover, startup reconcile from the local store (SH1-SH3), a device
+      removed by hand, ever. `ensureThin` reads `dm.Info` and, when the device
+      is absent, runs `dmsetup create` directly. If that fails because the pool
+      does not hold the id, the row reads `RES_STATUS_ERROR` with the dmsetup
+      output in `details`, the worker records `err_epoch`, and **no later
+      converge sends a message either**: pool-metadata loss surfaces as an
+      intervention event (Appendix D) instead of an empty volume under a live
+      `dev_id`, which is what an unconditional `create_thin` would produce.
+      Standby cntlrs build no thin volumes and are unaffected.
 
       **Cross-slice point-in-time (update_02.md U1).** The per-slice
       suspend quiesces one pool's origin only; a striped td
@@ -680,28 +710,56 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       Only the messages sit inside the window — the snapshots' own thin
       *devices* are created after the resume, since the content is fixed at
       message time. The window is bounded by `slice_cnt` messages under the
-      SH15 timeouts. When the origin td's raid0 does not exist (the origin
-      deferred, absent from `td_list`, or `sp_level` suppressing pools)
-      there is no dnv IO path to quiesce and the messages go unquiesced.
+      SH15 timeouts. The trigger is liveness and nothing else: when the
+      origin td's raid0 is not live — never built on this cntlr, already
+      removed, or `sp_level` suppressing pools — there is no dnv IO path to
+      quiesce and the messages go unquiesced. A *deferred* origin is not a
+      case of that: `deferred` suppresses the raid0's converge, not the
+      device, so a raid0 an earlier revision built stays live and is
+      quiesced like any other (`ThinDeviceCreated.md` U4-S3 removed the
+      pre-pass's `origin.deferred` early return; §6 test 19).
 
-      The quiesced sequence claims a slice only when the **origin's own thin
-      volume** in that slice already exists. dm-thin rejects a `create_snap`
-      whose `ori_id` the pool does not hold, and on a pass that creates the
-      origin and its snapshot together the origin's `create_thin` is still
-      ahead in the per-td build order — so claiming such a slice would
-      invert the two messages and fail the snapshot for a whole converge.
-      Those slices keep the lazy per-td path instead, which is both correct
-      (its ordering is the origin's `create_thin` first) and sufficient: a
-      slice whose origin thin volume does not exist yet carries no host IO,
-      so it has no instant to be torn against. The gate on which slices
-      still need a message is the slice's pool readiness, never the td's
-      `deferred` flag — that flag is plan-global (U4's `anySliceDeferred`),
-      and gating messages on it would drop a ready slice's `create_snap`
-      whenever some sibling slice were still provisioning.
+      **The pre-pass owns every message of an uncreated snapshot**
+      (`ThinDeviceCreated.md` U4-S3). Its claim set is every slice with
+      `poolReady` whose snapshot thin device is absent; an `Info` error skips
+      the slice, because `ensureThin` will fail it with the same error. The
+      gate is pool readiness, never the td's `deferred` flag — that flag is
+      plan-global (U4's `anySliceDeferred`), and gating messages on it would
+      drop a ready slice's `create_snap` whenever some sibling slice were
+      still provisioning. There is **no** filter on the origin's own thin
+      device: the gateway refuses a snapshot whose origin is not materialized
+      in every slice pool (architecture.md §8.7), so `create_snap` can no
+      longer be inverted with the origin's `create_thin`, and whether *this*
+      CN has built the origin's dm device is irrelevant to a message the pool
+      metadata answers. The quiesce is `suspendSnapOrigin` when the plan holds
+      the origin, which suspends the raid0 iff it is live — covering a fresh
+      primary, a plan with nothing built yet and a raid0 someone else holds
+      suspended. An origin absent from the plan means there is nothing to
+      quiesce, not that the messages belong to someone else.
+
+      **Order independence.** Neither the thin loop nor the pre-pass depends
+      on the relative position of an origin and its snapshot in `td_list`, and
+      the plan keeps request order with no sort. Same-pass creation of an
+      origin and its snapshot is not a state the gateway can produce.
+
+      **A violated precondition is left to dm-thin.** A `create_snap` whose
+      `ori_id` the pool does not hold fails at the message; the `dmsetup
+      create` behind it fails; the row reads `RES_STATUS_ERROR` with the
+      dmsetup output; the td stays `created == false`, so every converge
+      retries. No detection, no distinct status — the origin guarantee is the
+      gateway's contract to keep, not the agent's to re-check.
 
       Residual: a primary crash between two slices' messages still tears
       the snapshot — delete and re-create a snapshot whose creation raced a
-      crash (architecture.md §8.7, Appendix D).
+      crash (architecture.md §8.7, Appendix D). `created` certifies
+      materialization, not point-in-time consistency: the next primary sends
+      the remaining messages, every row goes `OK`, and the flag flips.
+
+      The persisted `SyncupCntlrRequest` carries `created` too (SH8: apply,
+      then persist). Between a td's materialization and the flip's re-sync the
+      stored copy still says `false`, which is harmless — the devices exist, so
+      nothing messages — and is corrected by the bump's higher-revision
+      request.
 
       A td leaving `td_list` is **deleted**: remove its
       namespaces'/raid0/error devices (they reference it), remove the thin
@@ -961,7 +1019,8 @@ CN21. Used by CN7 (pointer removed), CN2 (orphan file) and CN19's
       flushes through its source on removal); raid0s and per-td errors; thin
       volume devices (no `delete`
       messages — CN14: this is deactivation, the metadata on the legs is
-      the next CN's to find); pools; concats; `mdadm --stop` /
+      the next CN's to find; a created td's volumes are re-attached there
+      without any message, `ThinDeviceCreated.md` U4); pools; concats; `mdadm --stop` /
       `CnGrpName` removal; then the legs, in the one order that is
       deliberately **not** top-down: **cancel the probers, then disconnect
       the legs** (whole-NQN is fine here), **then remove the leg wrappers**.
@@ -1253,6 +1312,14 @@ contradicts them.
   CN16's [D12] residual paragraph now states the transfer-origin
   suspension's operational blast radius and the considered-but-undecided
   bounded alternative (reload onto `CnErrorName` after a grace window).
+* `architecture.md` §2 / §3.3 / §8.7 / §9.5 / §10.3 / Appendix C / Appendix D
+  (`ThinDeviceCreated.md` U1-U4) — the `created` flag and its gateway and
+  worker rules: `CreateThinDevice` refuses a snapshot of an uncreated origin,
+  `DeleteThinDevice` refuses an origin with an uncreated snapshot,
+  `ListThinDevices` is the client's wait primitive, and the sp-worker flips
+  the flag from the thin rows of any cntlr reply. This document's CN14 is the
+  agent-side spec; §8.7/§10.3 are the gateway/worker spec until `gateway/`
+  and `worker/` land.
 
 ## 6. Tests
 
@@ -1281,7 +1348,8 @@ client — no root, no real devices.
 5. **Primary converge order**: one fresh primary pass asserts the CN9 build
    order — connects → wrapper creates → md `--create --run --assume-clean`
    (CN12 case 1) → stdin multi-target concat creates → pool create →
-   `create_thin` messages → thin creates → raid0/error → ns-dev → nvmet
+   `create_thin` messages (for `created = false` tds only) → thin creates →
+   raid0/error → ns-dev → nvmet
    objects → `ana_grpid = 1` writes last.
 6. **Failover**: re-sync to `primary = false` asserts the CN9 retire order —
    every ns `ana_grpid = 3` **before** the ns-dev reloads onto error,
@@ -1384,8 +1452,9 @@ client — no root, no real devices.
     (the constant `"provisioning"` details keeps `proto.Equal` suppressing
     repeats, SH26) and mutates nothing; a resource that is both
     level-suppressed and deferred reports `MISSING`/`"sp_level"`.
-19. **Snapshot point-in-time** (CN14, `update_02.md` U1): on a primary with
-    2+ slices, a live origin td and an absent snapshot td, a converge records
+19. **Snapshot point-in-time** (CN14, `update_02.md` U1, amended by
+    `ThinDeviceCreated.md` U4): on a primary with 2+ slices, a live origin td
+    and an absent snapshot td, a converge records
     `dmsetup suspend {origin CnRaid0Name}` strictly before the first
     `create_snap`, then every needed slice's `create_snap` — each still
     bracketed by its own per-slice origin-thin suspend/resume — before
@@ -1394,23 +1463,58 @@ client — no root, no real devices.
     second slice's `create_snap` still records the raid0 resume: no path out
     of the sequence leaves a device suspended ([D12]). An equal-revision
     re-apply with every snap thin device already present records no suspend
-    and no message at all (SH16). A snapshot whose origin td is absent from
-    the plan (or deferred) records no raid0 suspend and still sends the
-    messages, and a plain `create_thin` td never triggers a raid0 suspend at
-    all. A converge that creates the origin **and** its snapshot in one pass
-    records the origin's `create_thin` strictly before the snapshot's
-    `create_snap`, with no raid0 suspend; and with one slice deferred and one
-    ready, the ready slice's `create_snap` still goes out — the gate is pool
-    readiness, never the plan-global `deferred` flag. Each slice records
-    **exactly one** `create_snap`, none of them after the raid0 resume, even
-    when a slice's message failed: the pre-pass claims the slice before
-    sending, so the lazy path cannot re-send it outside the quiesce (a count
-    is what catches this — every ordering assertion stops at the first
-    match).
+    and no message at all (SH16). A plain `create_thin` td never triggers a
+    raid0 suspend at all. The **fresh-primary** shape (U4-T1): an origin
+    already `created` whose devices this cntlr has just lost to a CN21
+    teardown, plus an uncreated snapshot of it — every slice records
+    `create_snap` exactly once, no `dmsetup suspend` at all (nothing is live
+    to quiesce), no `create_thin` for the created origin, and both tds' thin
+    devices are created and report `OK`; the same `td_list` in the reverse
+    order records the same messages, the same absence of suspends and the
+    same device creations, because `td_list` order carries no meaning. (Not
+    a literal call-for-call multiset: the fake hands out minor numbers in
+    creation order, so the raid0 tables cite different ones.) With one slice deferred and one ready, the ready
+    slice's `create_snap` still goes out — the gate is pool readiness, never
+    the plan-global `deferred` flag — and a live origin raid0 is quiesced
+    around it even then, since the pre-pass no longer returns early for a
+    deferred origin. Each slice records **exactly one** `create_snap`, none
+    of them after the raid0 resume, even when a slice's message failed:
+    `ensureThin` never messages a td with `ori_id != 0`, so nothing can
+    re-send it outside the quiesce (a count is what catches this — every
+    ordering assertion stops at the first match).
+20. **A created td is never messaged** (CN14, U4-T2): a plain td with
+    `created = true` on a fresh cntlr whose pool already holds its `dev_id`
+    records `dmsetup create` of the thin device, no `create_thin`, and a row
+    of `RES_STATUS_OK`; an equal-revision re-apply records no mutation
+    beyond persisting the request (SH16).
+21. **A created snapshot is never messaged** (CN14, U4-T3): origin and
+    snapshot both `created` on a fresh cntlr whose pool holds both ids
+    records no `create_snap`, no `dmsetup suspend`, both tds' devices created
+    and both rows `OK`. Identical with the origin absent from `td_list` —
+    deleted after the snapshot's flip — because there is nothing to message
+    and nothing to quiesce either way.
+22. **A created td whose id the pool lost is an error** (CN14, U4-T4): the
+    same td on a pool that does **not** hold its `dev_id` records no message
+    at all; the `dmsetup create` fails and the row reads `RES_STATUS_ERROR`
+    carrying the node's own output. A second converge at the same revision
+    sends no message either and the row stays `ERROR` — a created td is never
+    re-created by message, so pool-metadata loss does not self-heal into an
+    empty volume.
+23. **An uncreated snapshot retries when the origin id is missing** (CN14,
+    U4-T5, R11): `td_list` holding only a snapshot whose `ori_id` no pool
+    holds records the `create_snap` unquiesced, the `dmsetup create` behind
+    it fails, the row reads `ERROR`, and the next converge sends the message
+    again — the td is still `created = false`.
 
 ## 7. Acceptance checklist
 
 1. `go build ./...`, `go vet ./...`, `go test ./...` pass.
+1b. `grep -rn "snapDone" agent/cnagent/` finds nothing;
+    `grep -rn "createSnapId(" agent/cnagent/*.go` hits its definition and the
+    snapshot pre-pass's call only; and every `s.dm.Message(` site in
+    `agent/cnagent/pool.go` is either `create_thin`/`create_snap` reached only
+    while `created == false` or the deliberately ungated `delete {dev_id}` of
+    a td that left `td_list` (`ThinDeviceCreated.md` U4-T6).
 2. `go list -deps ./cmd/dnv-agent | grep etcd` finds nothing (`layout.md`
    §3).
 3. The §2 additions exist: the §2.1 constants in `common/constants.go`
