@@ -51,7 +51,8 @@ distributed-nvme/                      # repo root = module root
 │   ├── grpc.md
 │   ├── dnagent.md                     # dnv-agent: agent/ (shared), agent/dnagent/, cmd/dnv-agent
 │   ├── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
-│   └── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
+│   ├── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
+│   └── cdc.md                         # dnv-cdc: cdc/, cmd/dnv-cdc + its integration suite
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -124,17 +125,25 @@ distributed-nvme/                      # repo root = module root
 │                                      # thinbm.go (the thin-metadata reader and the §11.4
 │                                      # bitmap math), bitmapread.go (the GetThinDeviceBm /
 │                                      # GetLegBm RPCs), probe.go
-├── cdc/
-│   └── cdc.go                         # §12 discovery controller
+├── cdc/                               # §12 discovery controller (cdc.md §1)
+│   ├── cdc.go                         # Run, the dependencies, the process wiring
+│   ├── watch.go                       # the WV etcd watcher: scan + watch of {p} cdc
+│   ├── view.go                        # the DS view registry: per-host records, GENCTR
+│   ├── logpage.go                     # DS3/DS9 record rendering + log-page snapshots
+│   ├── server.go                      # NP1 listener, one goroutine per connection
+│   ├── conn.go                        # NP4-NP12 admin-queue state machine
+│   └── pdu.go                         # NP2/NP3 NVMe/TCP PDU codec
 ├── ctl/
 │   ├── root.go                        # dnvctl command tree (§13): dn.go, cn.go, sp.go, vol.go, …
 │   └── copier.go                      # §11.4 userspace copier
-├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14
+├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9
 │   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
 │   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
 │   ├── workerctl/main.go              # the etcd driver that plays the gateway
 │   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
+│   ├── cdc_test.sh                    # cdc suite (four servers, real etcd, real nvmet, real hosts)
+│   ├── cdcctl/main.go                 # the etcd driver that plays gateway + worker for CdcEntry keys
 │   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
 └── cmd/
     ├── dnv-gateway/main.go
@@ -171,7 +180,7 @@ client is linked only into the binaries that use it (§3).
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | grpc client to the Gateway; **no etcd** |
 | `cmd/*` | the matching top-level package + `common` | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
-| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway) | test drivers only, never linked into a `cmd/` binary |
+| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import
@@ -228,6 +237,12 @@ Because every main imports `common` (at least transitively), the `init()` in
   `--vote-grace-time`, `--etcd-dial-timeout`, `--config`; env prefix
   `DNV_WORKER_`; builds the `etcdutil` client and hands off to `worker.Run`,
   which owns the vote worker and the `ClusterConf` cache.
+* `cmd/dnv-cdc/main.go` — a cobra root command without subcommands
+  (`cdc.md` §6): `--etcd-endpoints`, `--etcd-dial-timeout`, `--range`,
+  `--tr-type`, `--adr-fam`, `--tr-addr`, `--tr-svc-id`, `--config`; env
+  prefix `DNV_CDC_`; builds the `etcdutil` client and hands off to
+  `cdc.Run`, which owns the watcher, the per-host view registry and the
+  NVMe/TCP listener.
 * Interceptor wiring per binary follows the table in `grpc.md` (gateway:
   server + client; worker: client; agents: server; dnvctl: client; cdc:
   none).
@@ -248,7 +263,8 @@ Each step compiles and passes its tests before the next begins:
 5. `agent/` + `dnagent/` + `cnagent/` (§9, §11) + `cmd/dnv-agent`.
 6. `worker/` (`dnv-worker.md` §6-§11) + `cmd/dnv-worker`, then the `dnv-worker.md`
    §14 suite against the lab server.
-7. `cdc/` (§12) + `cmd/dnv-cdc`.
+7. `cdc/` (§12, `cdc.md`) + `cmd/dnv-cdc`, then the `cdc.md` §9 suite against the
+   four lab servers.
 8. `ctl/` (§13, §11.4) + `cmd/dnvctl`.
 
 ## 7. Acceptance checklist
@@ -290,6 +306,14 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   existing `osclient.go` (`osclient.md` §4.5.1), and §5's `cmd/` wiring records
   that the probers bypass the process's single `LimitedOsClient`. The `common/`
   file count of §7 item 5 is therefore unchanged.
+* `cdc.md` §10 — `dnv-cdc` arrived: the §2 `cdc/` entry became that document's
+  §1 file split (`cdc.go`, `watch.go`, `view.go`, `logpage.go`, `server.go`,
+  `conn.go`, `pdu.go`), the §2 `doc/` tree gained `cdc.md`, the §2 `integtest/`
+  tree gained `cdc_test.sh` and `cdcctl/`, the §3 `integtest/*` row lists
+  `cdcctl` beside `workerctl` as a `model` + `etcdutil` importer, §5 gained the
+  `cmd/dnv-cdc` bullet (viper + cobra root, no subcommands, env prefix
+  `DNV_CDC_`) and §6 step 7 cites `cdc.md`. No package boundary changed: `cdc`
+  already imported `common`, `pb`, `etcdutil` and `model` per §3.
 * Earlier amendments, recorded in their originating documents: `dnagent.md` §5
   (cobra/viper in §1, the `agent/` split, this document listed in the `doc/`
   tree, `agent/lvm.go` deleted with the dn LVM removal) and `cnagent.md` §5

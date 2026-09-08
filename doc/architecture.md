@@ -2646,17 +2646,24 @@ CNs and DNs: slot *s* ⇒ `attr_cntlid_min = 10000 + s×5000`,
 
 ## 12. dnv-cdc
 
-`dnv-cdc --etcd-endpoints … --range 0,1,…` serves the NVMe-oF Central Discovery
-Controller (well-known NQN `nqn.2014-08.org.nvmexpress.discovery`) to hosts. `--range h`
-claims every shard code whose first hex digit is `h` (range `0` = shards `00…0f`, range
-`1` = `10…1f`, …), i.e. it watches the `{p} cdc ` prefix and filters on the
-`{shard_code}` key field. For each `CdcEntry` it advertises discovery log entries
-(`nqn` × every `NvmeTrConf` in `nvme_tr_conf_list`) to hosts whose hostnqn is in
-`allowed_hosts` (empty ⇒ everyone), and emits discovery-log-change AENs on any watched
-change — hosts running `nvme-stas` then connect/disconnect automatically (this is what
-makes `DeleteSubsystem`, `CreateCntlr`, `UpdateCntlrEnabled` transparent to hosts).
-Deploy ≥ 2 instances with complementary ranges; hosts are configured with all cdc
-endpoints.
+`dnv-cdc --etcd-endpoints … --range 0,1,… --tr-type tcp --adr-fam ipv4 --tr-addr …
+--tr-svc-id 8009` serves the NVMe-oF Central Discovery Controller (well-known NQN
+`nqn.2014-08.org.nvmexpress.discovery`) to hosts over the NVMe/TCP endpoint those
+`--tr-*` flags name (`cdc.md` §6; `--tr-type` accepts only `tcp`). `--range h`
+claims every shard code whose first hex digit is `h` (range `0` = shards `00…0f`,
+range `1` = `10…1f`, …), i.e. it watches the `{p} cdc ` prefix and filters on the
+`{shard_code}` key field; `--range` defaults to all sixteen ranges, so a
+single-instance deployment needs no sharding flags. For each `CdcEntry` it
+advertises discovery log entries (`nqn` × every `NvmeTrConf` in
+`nvme_tr_conf_list`) to hosts whose hostnqn is in `allowed_hosts` (empty ⇒
+everyone), and emits a discovery-log-change AEN to exactly those hosts whose
+rendered, filtered log page content actually changes — a change invisible to a host
+both before and after produces neither an AEN nor a generation-counter (GENCTR)
+bump for it, and that counter is per (instance, hostnqn), lasting only while the
+host holds a live connection (`cdc.md` §0 #5/#6). Hosts running `nvme-stas` then
+connect/disconnect automatically (this is what makes `DeleteSubsystem`,
+`CreateCntlr`, `UpdateCntlrEnabled` transparent to hosts). Deploy ≥ 2 instances with
+complementary ranges; hosts are configured with all cdc endpoints.
 
 ---
 
@@ -2678,8 +2685,11 @@ dnv-agent cn --grpc-network tcp --grpc-address 192.168.0.20:29529 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
   --local-store /var/tmp
 
-dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7
-dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f
+dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7 \
+  --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.10 --tr-svc-id 8009
+
+dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f \
+  --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.11 --tr-svc-id 8009
 ```
 
 Every flag is also settable via config file and environment (viper). The worker's

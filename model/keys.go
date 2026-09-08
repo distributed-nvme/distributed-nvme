@@ -604,3 +604,35 @@ func ParseCnCapacityKey(key string) (uint64, string, bool) {
 	}
 	return freeExt, addrPort, true
 }
+
+// ParseCdcEntryKey decodes a CdcEntry key as seen on dnv-cdc's prefix watch
+// (MD2, cdc.md §2.2). Its field order is the key's own and is deliberately
+// NOT the rev keys' order: cluster_id comes BEFORE shard_code, so that the
+// single CdcEntryPrefix watch spans every cluster (DS1) and dnv-cdc decides
+// ownership from the shard code it finds inside each key (DS2, WV2). A
+// malformed key is reported here and skipped by the caller, never guessed at.
+func ParseCdcEntryKey(
+	key string,
+) (cid uint64, shard uint32, spId uint64, ssId uint64, ok bool) {
+	fields, ok := parseFields(key, kindCdcEntry, 6)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	cid, ok = parseId(fields[2])
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	shard, ok = parseShard(fields[3])
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	spId, ok = parseId(fields[4])
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	ssId, ok = parseId(fields[5])
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return cid, shard, spId, ssId, true
+}

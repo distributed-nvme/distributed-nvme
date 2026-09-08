@@ -420,6 +420,150 @@ func TestParseRevKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
+// TestParseCdcEntryKeyRoundTrip round-trips the discovery-entry parser over
+// the edges of every field (MD2, cdc.md §2.2). It is the ground truth for the
+// field ORDER: CdcEntryKey writes cluster_id before shard_code, the opposite
+// of the rev keys, and a parser that swapped the two would still round-trip
+// four uint64s while sharding dnv-cdc on nonsense (DS2).
+func TestParseCdcEntryKeyRoundTrip(t *testing.T) {
+	values := []struct {
+		cid   uint64
+		shard uint32
+		spId  uint64
+		ssId  uint64
+	}{
+		{0, 0, 0, 0},
+		{goldenCid, 4, goldenSpId, 5},
+		{
+			0xffffffffffffffff, 255,
+			0xffffffffffffffff, 0xffffffffffffffff,
+		},
+		{1, 255, 1, 1},
+		{goldenCid, 0, goldenSpId, 0xffffffffffffffff},
+	}
+	for _, v := range values {
+		key := CdcEntryKey(v.cid, v.shard, v.spId, v.ssId)
+		cid, shard, spId, ssId, ok := ParseCdcEntryKey(key)
+		if !ok {
+			t.Errorf("ParseCdcEntryKey(%q) not ok", key)
+			continue
+		}
+		if cid != v.cid || shard != v.shard || spId != v.spId ||
+			ssId != v.ssId {
+			t.Errorf(
+				"ParseCdcEntryKey(%q) = (%#x, %d, %#x, %#x), "+
+					"want (%#x, %d, %#x, %#x)",
+				key, cid, shard, spId, ssId,
+				v.cid, v.shard, v.spId, v.ssId,
+			)
+		}
+	}
+	// The golden key of §5.3, parsed the other way round.
+	golden := "dnv cdc ebada5168620c5fe 04 0000000000000011 " +
+		"0000000000000005"
+	cid, shard, spId, ssId, ok := ParseCdcEntryKey(golden)
+	if !ok || cid != goldenCid || shard != 4 || spId != goldenSpId ||
+		ssId != 5 {
+		t.Errorf(
+			"ParseCdcEntryKey(%q) = (%#x, %d, %#x, %#x, %v)",
+			golden, cid, shard, spId, ssId, ok,
+		)
+	}
+	// A shard code is never mistaken for an id and vice versa: the two
+	// orders share a field count, so only the formats keep them apart.
+	if _, _, _, _, ok := ParseCdcEntryKey(
+		"dnv cdc 04 ebada5168620c5fe 0000000000000011 " +
+			"0000000000000005",
+	); ok {
+		t.Error("ParseCdcEntryKey accepted the rev-key field order")
+	}
+}
+
+// TestParseCdcEntryKeyRejectsMalformed checks that a bad key is skipped,
+// never mis-parsed and never a panic (WV2: dnv-cdc logs cdc entry skipped
+// with reason malformed_key and drops it).
+func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
+	good := CdcEntryKey(goldenCid, 4, goldenSpId, 5)
+	head := "dnv cdc ebada5168620c5fe"
+	tail := "0000000000000011 0000000000000005"
+	bad := []struct {
+		name string
+		key  string
+	}{
+		{"empty", ""},
+		{"prefix only", "dnv "},
+		{"kind only", CdcEntryPrefix()},
+		{"too few fields", head + " 04 0000000000000011"},
+		{"too many fields", good + " extra"},
+		{"wrong prefix", "xxx cdc ebada5168620c5fe 04 " + tail},
+		{"wrong kind", "dnv cdc_entry ebada5168620c5fe 04 " + tail},
+		{"kind prefix only", "dnv cd ebada5168620c5fe 04 " + tail},
+		{"unpadded cid", "dnv cdc ebada5168620c5f 04 " + tail},
+		{"upper-case cid", "dnv cdc EBADA5168620C5FE 04 " + tail},
+		{"non-hex cid", "dnv cdc zzzzzzzzzzzzzzzz 04 " + tail},
+		{"0x cid", "dnv cdc 0xada5168620c5fe 04 " + tail},
+		{"empty cid", "dnv cdc  04 " + tail},
+		{"unpadded shard", head + " 4 " + tail},
+		{"upper-case shard", head + " 0F " + tail},
+		{"non-hex shard", head + " zz " + tail},
+		{"shard out of range", head + " 100 " + tail},
+		{"empty shard", head + "  " + tail},
+		{"unpadded sp id", head + " 04 11 0000000000000005"},
+		{"upper-case sp id", head + " 04 000000000000001A " +
+			"0000000000000005"},
+		{"unpadded ss id", head + " 04 0000000000000011 5"},
+		{"empty ss id", head + " 04 0000000000000011 "},
+		{"0x ss id", head + " 04 0000000000000011 0x0000000000005"},
+		{"tab separated", strings.ReplaceAll(good, " ", "\t")},
+	}
+	for _, tc := range bad {
+		if _, _, _, _, ok := ParseCdcEntryKey(tc.key); ok {
+			t.Errorf(
+				"%s: ParseCdcEntryKey(%q) accepted it", tc.name, tc.key,
+			)
+		}
+	}
+	if _, _, _, _, ok := ParseCdcEntryKey(good); !ok {
+		t.Errorf("ParseCdcEntryKey(%q) rejected a good key", good)
+	}
+	// No parser accepts another kind's key, whatever its field count: a
+	// clone_bitmap key has the same six fields as a cdc one.
+	foreign := []struct {
+		name string
+		key  string
+	}{
+		{"dn_rev", DnRevKey(4, goldenCid, goldenSpId)},
+		{"cn_rev", CnRevKey(4, goldenCid, goldenSpId)},
+		{"sp_rev", SpRevKey(4, goldenCid, goldenSpId)},
+		{
+			"clone_bitmap",
+			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 3),
+		},
+		{
+			"dn_capacity",
+			DnCapacityKey(goldenCid, 2, 4096, goldenDnAddr),
+		},
+		{"cn_capacity", CnCapacityKey(goldenCid, 4096, goldenCnAddr)},
+	}
+	for _, tc := range foreign {
+		if _, _, _, _, ok := ParseCdcEntryKey(tc.key); ok {
+			t.Errorf(
+				"ParseCdcEntryKey accepted a %s key %q", tc.name, tc.key,
+			)
+		}
+	}
+	// ... and the cdc key is equally foreign to the rev parsers.
+	if _, _, _, ok := ParseDnRevKey(good); ok {
+		t.Error("ParseDnRevKey accepted a cdc key")
+	}
+	if _, _, _, ok := ParseSpRevKey(good); ok {
+		t.Error("ParseSpRevKey accepted a cdc key")
+	}
+	if _, ok := ParseBmIdx(good); ok {
+		t.Error("ParseBmIdx accepted a cdc key")
+	}
+}
+
 // TestParseWorkerRegKey round-trips the registration parser and checks its
 // rejections (MD2, VW3).
 func TestParseWorkerRegKey(t *testing.T) {

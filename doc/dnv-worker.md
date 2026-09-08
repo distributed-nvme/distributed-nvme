@@ -311,7 +311,7 @@ MD2. **Keys.** One function per §5.3 key, one per prefix a component scans or
      | `DnConf`/`CnConf` | `DnConfKey(cid, addrPort)`, `CnConfKey(cid, addrPort)` |
      | `DnCapacity` | `DnCapacityKey(cid, binIdx, freeExt, addrPort)` → `{p} dn_capacity {cid} {bin:%01x} {free:%016x} {addr_port}`; `DnCapacityPrefix(cid, binIdx)` |
      | `CnCapacity` | `CnCapacityKey(cid, freeExt, addrPort)`; `CnCapacityPrefix(cid)` |
-     | `CdcEntry` | `CdcEntryKey(cid, shard, spId, ssId)` |
+     | `CdcEntry` | `CdcEntryKey(cid, shard, spId, ssId)`; `CdcEntryPrefix()`; `ParseCdcEntryKey(key) (cid uint64, shard uint32, spId uint64, ssId uint64, ok bool)` — the one prefix and parser pair a worker never uses: dnv-cdc scans and watches the prefix and decodes the keys off it (`cdc.md` §2.2, §4) |
      | `SpConf`, `SpName` | `SpConfKey(cid, spName)`, `SpNameKey(cid, spId)` |
      | `Cntlr`, `Slice` | `CntlrKey(cid, spId, cntlrId)`, `SliceKey(cid, spId, sliceId)` |
      | `ThinDevice`, `Subsystem` | `ThinDeviceKey(cid, spId, tdName)`, `SubsystemKey(cid, spId, nqn)` |

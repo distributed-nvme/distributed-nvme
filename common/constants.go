@@ -237,4 +237,54 @@ const (
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
+
+	// dnv-cdc (cdc.md §2.1).
+	//
+	// NvmeDiscoveryNqn is the well-known discovery subsystem NQN every
+	// host connects to (NP5). It deliberately fails ValidNqnPattern above:
+	// no dnv object may ever be named it.
+	NvmeDiscoveryNqn = "nqn.2014-08.org.nvmexpress.discovery"
+	// The listen endpoint defaults of cmd/dnv-cdc (CM1). Only tcp is
+	// accepted (§0 #2); 8009 is the IANA discovery port.
+	DefaultCdcTrType  = "tcp"
+	DefaultCdcAdrFam  = "ipv4"
+	DefaultCdcTrSvcId = "8009"
+	// CdcAdrFamIpv6 is the other legal --adr-fam value (CM2).
+	CdcAdrFamIpv6 = "ipv6"
+	// CdcRangeAll is the --range default: all sixteen ranges, so a
+	// single-instance deployment needs no sharding flag (§0 #4). Range
+	// digit h owns the sixteen shard codes h0…hf (DS2).
+	CdcRangeAll = "0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f"
+	// CdcMaxAdminSqSize is the admin SQ entry count: CAP.MQES is one less,
+	// Connect's SQSIZE is capped at it (NP4) and it is the ASQSZ of every
+	// discovery log entry (DS3). 32 is NVME_AQ_DEPTH, what the Linux host
+	// asks for.
+	CdcMaxAdminSqSize = 32
+	// CdcAerl is Identify's AERL: up to CdcAerl + 1 outstanding AERs per
+	// connection (NP11).
+	CdcAerl = 3
+	// CdcMaxH2CData is ICResp's MAXH2CDATA and the in-capsule data cap: the
+	// 1024 B Connect data blob is the only host-to-controller data dnv-cdc
+	// ever accepts (NP3). 8192 is NVME_TCP_ADMIN_CCSZ, the host's own admin
+	// capsule budget.
+	CdcMaxH2CData = 8192
+	// The discovery log page geometry (DS9): a header block followed by
+	// fixed-size entries, both as the specs lay them out.
+	CdcDiscLogHeaderSize = 1024
+	CdcDiscLogEntrySize  = 1024
+	// CdcCntlIdMax is the top of the dynamic CNTLID range [1, CdcCntlIdMax]
+	// assigned round-robin at Connect (NP5). 0xffff is the "dynamic
+	// controller" wildcard and 0xfff0…0xfffe are reserved.
+	CdcCntlIdMax = 0xffef
+	// DefaultCdcKeepAliveGraceMs is added to a connection's KATO before it
+	// is reaped (NP10), mirroring nvmet's grace.
+	DefaultCdcKeepAliveGraceMs = 10000
+	// DefaultCdcZeroKatoTmoMs is the idle cutoff of a KATO = 0 connection
+	// (§0 #9) — a one-shot `nvme discover` is not immortal. It mirrors
+	// nvmet's NVMET_DISC_KATO_MS.
+	DefaultCdcZeroKatoTmoMs = 120000
+	// DefaultCdcRescanInterval is the seconds between retries of a failed
+	// etcd scan (WV5). The server keeps answering from the held state
+	// meanwhile (DS10).
+	DefaultCdcRescanInterval = 10
 )
