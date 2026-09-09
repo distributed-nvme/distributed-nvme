@@ -262,8 +262,10 @@ func (o *modelReactionOps) growSlice(
 	cc *pb.ClusterConf,
 	legs []model.Cand,
 ) (uint64, error) {
+	// expectRev 0: the worker holds no client token and converges on what
+	// etcd holds (gateway.md §2.2 #3); only the gateway passes a real one.
 	return model.GrowSlice(
-		ctx, o.cli, cid, shard, spId, spName, sliceId, isMeta,
+		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta,
 		poolTotal, cc, legs,
 	)
 }
@@ -296,7 +298,7 @@ func (o *modelReactionOps) createSpareLeg(
 	cc *pb.ClusterConf,
 ) (uint64, error) {
 	return model.CreateSpareLeg(
-		ctx, o.cli, cid, shard, spId, spName, sliceId, grpId, dn, cc,
+		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, grpId, dn, cc,
 	)
 }
 
@@ -312,7 +314,7 @@ func (o *modelReactionOps) switchSpareLeg(
 	targetLegId uint64,
 ) error {
 	return model.SwitchSpareLeg(
-		ctx, o.cli, cid, shard, spId, spName, sliceId, grpId,
+		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, grpId,
 		spareLegId, targetLegId,
 	)
 }

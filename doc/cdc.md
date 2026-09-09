@@ -111,7 +111,7 @@ kernel's nvmet.
 
 Who writes what it reads: the gateway creates and deletes `CdcEntry` at
 `CreateSubsystem` / `DeleteSubsystem` and rewrites `allowed_hosts` at
-`UpdateSubsystemAllowedHosts`; gateway and worker rewrite `nvme_tr_conf_list`
+`UpdateSubsystemHosts`; gateway and worker rewrite `nvme_tr_conf_list`
 at `CreateCntlr` / `DeleteCntlr` / `UpdateCntlrEnabled` / `ReplaceCntlr`
 (`architecture.md` §8, `dnv-worker.md` §4 MD8). dnv-cdc is the only reader.
 

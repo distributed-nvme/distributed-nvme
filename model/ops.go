@@ -62,16 +62,28 @@ const (
 	opSwitchSpareLeg   = "SwitchSpareLeg"
 )
 
-// reasonCandidateChanged is the one reason string MD5 pins: a pick whose
+// ReasonCandidateChanged is the one reason string MD5 pins: a pick whose
 // capacity key is no longer the one the scan saw. The caller rescans and
 // retries the scan + STM as one unit (architecture.md §8.4 step 2).
-const reasonCandidateChanged = "candidate changed"
+//
+// It is exported for the same reason ReasonStaleRevision is: the gateway calls
+// GrowSlice and CreateSpareLeg from inside its own candidate unit (gateway.md
+// GW9) and must tell "rescan and retry" apart from every other
+// ErrPrecondition, which is a FAILED_PRECONDITION for the client.
+const ReasonCandidateChanged = "candidate changed"
 
 // ReasonGrowPending is the Reason a GrowSlice carries when the AR6 pending
 // rule holds inside its STM. It is exported because worker/reaction.go logs
 // the SAME `reaction skipped reason=` string from its own pre-check, and the
 // §14 suite greps for one string, not two.
 const ReasonGrowPending = "grow_pending"
+
+// ReasonStaleRevision is the Reason the three ops the gateway shares with the
+// worker carry when their expectRev argument does not match the stored
+// SpRev.revision (gateway.md §2.2 #3). The gateway maps exactly this reason to
+// ABORTED "stale revision" (GW7); every other ErrPrecondition reason is a
+// FAILED_PRECONDITION, so the two must be distinguishable by string.
+const ReasonStaleRevision = "stale revision"
 
 // fail builds one precondition failure (MD7).
 func fail(op string, reason string) error {
@@ -95,11 +107,11 @@ func fail(op string, reason string) error {
 // would replace the primary in place while a failover target existed.
 const SpFirstId = uint64(1)
 
-// spNextId is SpConf.next_id with 0 reserved (SpFirstId). next_id is a proto3
+// SpNextId is SpConf.next_id with 0 reserved (SpFirstId). next_id is a proto3
 // uint64, so an SpConf written without it — or one whose counter was reset —
 // reads back as the zero value; clamping here is what keeps a minted id from
 // colliding with the "none" sentinel. Every id an op mints goes through it.
-func spNextId(conf *pb.SpConf) uint64 {
+func SpNextId(conf *pb.SpConf) uint64 {
 	if id := conf.GetNextId(); id >= SpFirstId {
 		return id
 	}
@@ -292,11 +304,43 @@ func loadSpConfForOp(
 	return conf, nil
 }
 
-// bumpSpRev writes the SP's revision key with revision + 1 and the sp_name it
+// checkSpRev is the optimistic-concurrency gate the gateway asks the three
+// shared ops to apply before they touch anything (gateway.md §2.2 #3, §5.5):
+// the stored SpRev.revision MUST equal expectRev. expectRev 0 skips the check
+// entirely, which is what the worker's own internal calls pass — the worker
+// converges on what etcd holds and carries no client token. The gateway never
+// passes 0: a nil or zero request token is short-circuited to ABORTED by the
+// handler itself (GW6), so model never sees one.
+//
+// It runs FIRST inside the op's STM, before every other precondition, so that
+// a stale caller always sees "stale revision" rather than a precondition
+// computed against state it has not read.
+func checkSpRev(
+	s etcdutil.STM,
+	op string,
+	shard uint32,
+	cid uint64,
+	spId uint64,
+	expectRev uint64,
+) error {
+	if expectRev == 0 {
+		return nil
+	}
+	rev := &pb.SpRev{}
+	if !s.Get(SpRevKey(shard, cid, spId), rev) {
+		return fail(op, "sp rev not found")
+	}
+	if rev.GetRevision() != expectRev {
+		return fail(op, ReasonStaleRevision)
+	}
+	return nil
+}
+
+// BumpSpRev writes the SP's revision key with revision + 1 and the sp_name it
 // already holds (§5.5): the key is id-based and therefore stable, so it is
 // rewritten in place and never deleted and re-created — a watcher must see one
 // put, not a delete followed by a put.
-func bumpSpRev(
+func BumpSpRev(
 	s etcdutil.STM,
 	op string,
 	shard uint32,
@@ -313,9 +357,9 @@ func bumpSpRev(
 	return nil
 }
 
-// bumpDnRev bumps one DN's revision key in place (§5.5). The key is addressed
+// BumpDnRev bumps one DN's revision key in place (§5.5). The key is addressed
 // by the shard code and dn_id the DnConf carries.
-func bumpDnRev(
+func BumpDnRev(
 	s etcdutil.STM,
 	op string,
 	cid uint64,
@@ -331,8 +375,8 @@ func bumpDnRev(
 	return nil
 }
 
-// bumpCnRev bumps one CN's revision key in place (§5.5).
-func bumpCnRev(
+// BumpCnRev bumps one CN's revision key in place (§5.5).
+func BumpCnRev(
 	s etcdutil.STM,
 	op string,
 	cid uint64,
@@ -493,7 +537,7 @@ func checkDnPick(
 	}
 	capKey := DnCapacityKey(cid, cand.BinIdx, cand.FreeExt, cand.AddrPort)
 	if !s.Get(capKey, &pb.DnCapacity{}) {
-		return nil, fail(op, reasonCandidateChanged)
+		return nil, fail(op, ReasonCandidateChanged)
 	}
 	return dn, nil
 }
@@ -516,7 +560,7 @@ func chargeDn(
 	newDn.FreeExtCnt -= extCnt
 	s.Put(DnConfKey(cid, addrPort), newDn)
 	MaintainDnCapacity(s, cid, addrPort, cc, dn, newDn)
-	return bumpDnRev(s, op, cid, newDn)
+	return BumpDnRev(s, op, cid, newDn)
 }
 
 // spFootprint is the Σ ext_cnt over ALL groups of ALL slices of the SP — meta
@@ -796,7 +840,7 @@ func FlipProvisioned(
 		for _, sliceId := range touched {
 			s.Put(SliceKey(cid, spId, sliceId), slices[sliceId])
 		}
-		return bumpSpRev(s, opFlipProvisioned, shard, cid, spId)
+		return BumpSpRev(s, opFlipProvisioned, shard, cid, spId)
 	})
 	if err != nil {
 		return nil, err
@@ -857,7 +901,7 @@ func FlipCreated(
 		if len(created) == 0 {
 			return nil
 		}
-		return bumpSpRev(s, opFlipCreated, shard, cid, spId)
+		return BumpSpRev(s, opFlipCreated, shard, cid, spId)
 	})
 	if err != nil {
 		return nil, err
@@ -873,7 +917,7 @@ func FlipCreated(
 // smallest cntlr_id among those that are not primary, not disabled and
 // healthy. It returns 0 when there is none — 0 is the reserved "none" sentinel
 // of every id-valued result here, which is exactly why no id is ever minted
-// below SpFirstId (spNextId). A listed cntlr whose key is missing simply cannot
+// below SpFirstId (SpNextId). A listed cntlr whose key is missing simply cannot
 // be elected.
 func failoverCandidate(
 	s etcdutil.STM,
@@ -968,7 +1012,7 @@ func Failover(
 		fresh.Primary = true
 		s.Put(oldKey, old)
 		s.Put(newKey, fresh)
-		return bumpSpRev(s, opFailover, shard, cid, spId)
+		return BumpSpRev(s, opFailover, shard, cid, spId)
 	})
 }
 
@@ -998,7 +1042,9 @@ func Failover(
 // pre-grow snapshot both find the grow not pending, and the second would
 // append a second group for one breach — twice the DN extents and twice the CN
 // footprint, undoable only by an operator. Their allocator picks are drawn at
-// random, so the MD5 capacity guard does not cover this.
+// random, so the MD5 capacity guard does not cover this. The gateway passes
+// `math.MaxUint64` — a user-driven grow is not gated on the reported usage
+// (architecture.md §8.5, gateway.md §5.4).
 //
 // Effects, all in the one transaction: the Group with one Leg and one
 // unprovisioned Side per pick ([D15]); each picked DN's side pointer, budget,
@@ -1013,6 +1059,7 @@ func GrowSlice(
 	shard uint32,
 	spId uint64,
 	spName string,
+	expectRev uint64,
 	sliceId uint64,
 	isMeta bool,
 	poolTotal uint64,
@@ -1022,6 +1069,11 @@ func GrowSlice(
 	grpId := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		grpId = 0
+		if err := checkSpRev(
+			s, opGrowSlice, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
 		conf, err := loadSpConfForOp(s, opGrowSlice, cid, spName, spId)
 		if err != nil {
 			return err
@@ -1064,7 +1116,7 @@ func GrowSlice(
 		}
 		// Ids are consumed in one run so that a retried attempt, which
 		// re-reads next_id, produces exactly the same ones.
-		nextId := spNextId(conf)
+		nextId := SpNextId(conf)
 		grpId = nextId
 		nextId++
 		grp := &pb.Group{
@@ -1117,7 +1169,7 @@ func GrowSlice(
 		conf.NextId = nextId
 		s.Put(sliceKey, slice)
 		s.Put(SpConfKey(cid, spName), conf)
-		return bumpSpRev(s, opGrowSlice, shard, cid, spId)
+		return BumpSpRev(s, opGrowSlice, shard, cid, spId)
 	})
 	if err != nil {
 		return 0, err
@@ -1272,7 +1324,7 @@ func chargeSpCns(
 		newCn.FreeExtCnt -= charge
 		s.Put(CnConfKey(cid, addrPort), newCn)
 		MaintainCnCapacity(s, cid, addrPort, cn, newCn)
-		if err := bumpCnRev(s, op, cid, newCn); err != nil {
+		if err := BumpCnRev(s, op, cid, newCn); err != nil {
 			return err
 		}
 	}
@@ -1381,7 +1433,7 @@ func ReplaceCntlr(
 		}
 		capKey := CnCapacityKey(cid, newCn.FreeExt, newCn.AddrPort)
 		if !s.Get(capKey, &pb.CnCapacity{}) {
-			return fail(opReplaceCntlr, reasonCandidateChanged)
+			return fail(opReplaceCntlr, ReasonCandidateChanged)
 		}
 		// --- effects ---
 		s.Del(oldKey)
@@ -1392,7 +1444,7 @@ func ReplaceCntlr(
 		if err != nil {
 			return err
 		}
-		newId = spNextId(conf)
+		newId = SpNextId(conf)
 		conf.NextId = newId + 1
 		s.Put(CntlrKey(cid, spId, newId), &pb.Cntlr{
 			AddrPort:   newCn.AddrPort,
@@ -1410,7 +1462,7 @@ func ReplaceCntlr(
 		newCnConf.FreeExtCnt -= footprint
 		s.Put(CnConfKey(cid, newCn.AddrPort), newCnConf)
 		MaintainCnCapacity(s, cid, newCn.AddrPort, cn, newCnConf)
-		if err := bumpCnRev(s, opReplaceCntlr, cid, newCnConf); err != nil {
+		if err := BumpCnRev(s, opReplaceCntlr, cid, newCnConf); err != nil {
 			return err
 		}
 		conf.CntlrIdList = append(
@@ -1424,7 +1476,7 @@ func ReplaceCntlr(
 			return err
 		}
 		s.Put(SpConfKey(cid, spName), conf)
-		return bumpSpRev(s, opReplaceCntlr, shard, cid, spId)
+		return BumpSpRev(s, opReplaceCntlr, shard, cid, spId)
 	})
 	if err != nil {
 		return 0, err
@@ -1457,7 +1509,7 @@ func releaseCn(
 	newCn.FreeExtCnt += footprint
 	s.Put(key, newCn)
 	MaintainCnCapacity(s, cid, addrPort, cn, newCn)
-	return bumpCnRev(s, op, cid, newCn)
+	return BumpCnRev(s, op, cid, newCn)
 }
 
 // removeCntlrPtr drops one (sp_id, cntlr_id) pointer from a CN's list,
@@ -1580,6 +1632,7 @@ func CreateSpareLeg(
 	shard uint32,
 	spId uint64,
 	spName string,
+	expectRev uint64,
 	sliceId uint64,
 	grpId uint64,
 	dn Cand,
@@ -1588,6 +1641,11 @@ func CreateSpareLeg(
 	legId := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		legId = 0
+		if err := checkSpRev(
+			s, opCreateSpareLeg, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
 		conf, err := loadSpConfForOp(s, opCreateSpareLeg, cid, spName, spId)
 		if err != nil {
 			return err
@@ -1622,7 +1680,7 @@ func CreateSpareLeg(
 		if err != nil {
 			return err
 		}
-		nextId := spNextId(conf)
+		nextId := SpNextId(conf)
 		legId = nextId
 		nextId++
 		sideId := nextId
@@ -1649,7 +1707,7 @@ func CreateSpareLeg(
 		conf.NextId = nextId
 		s.Put(sliceKey, slice)
 		s.Put(SpConfKey(cid, spName), conf)
-		return bumpSpRev(s, opCreateSpareLeg, shard, cid, spId)
+		return BumpSpRev(s, opCreateSpareLeg, shard, cid, spId)
 	})
 	if err != nil {
 		return 0, err
@@ -1710,12 +1768,18 @@ func SwitchSpareLeg(
 	shard uint32,
 	spId uint64,
 	spName string,
+	expectRev uint64,
 	sliceId uint64,
 	grpId uint64,
 	spareLegId uint64,
 	targetLegId uint64,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		if err := checkSpRev(
+			s, opSwitchSpareLeg, shard, cid, spId, expectRev,
+		); err != nil {
+			return err
+		}
 		if _, err := loadSpConfForOp(
 			s, opSwitchSpareLeg, cid, spName, spId,
 		); err != nil {
@@ -1755,7 +1819,7 @@ func SwitchSpareLeg(
 			target,
 		)
 		s.Put(sliceKey, slice)
-		return bumpSpRev(s, opSwitchSpareLeg, shard, cid, spId)
+		return BumpSpRev(s, opSwitchSpareLeg, shard, cid, spId)
 	})
 }
 

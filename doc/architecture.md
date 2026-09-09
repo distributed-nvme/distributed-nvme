@@ -1119,9 +1119,10 @@ like `err_epoch` and capacity-key maintenance (§5.5) — it bumps no revision a
 no agent; sides already hosted by the node keep running. Reply `dn_id`.
 
 **InspectDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the agent gRPC fails.
-Action: STM-read `DnConf` for logging ids only; then, outside the STM, call
-`DiskNodeAgent.GetDnInfo` and return its `revision` + `DnInfo`
-(`InspectDiskNodeReply.revision` = the agent's last applied revision, so callers can
+Action: STM-read `DnConf` for the ids (they address the agent request and the log
+line); then, outside the STM, call `DiskNodeAgent.GetDnInfo` and return its
+`revision` + `DnInfo` (`InspectDiskNodeReply.applied_revision` — renamed from
+`revision`, update_04.md U1 — = the agent's last applied revision, so callers can
 diff it against `GetDiskNode`'s desired `DnRev.revision`).
 
 ### 8.3 Controller nodes
@@ -1135,7 +1136,8 @@ differences:
 * **DeleteControllerNode**: `FAILED_PRECONDITION` if `cntlr_ptr_list` not empty.
 * **UpdateControllerNodeDisabled**: as `UpdateDiskNodeDisabled` against `CnConf` /
   `CnCapacity`, with the `cn_rev` token; reply `cn_id`.
-* **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply `revision` + `cn_info`.
+* **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply
+  `applied_revision` + `cn_info` (§8.2's diff semantics, against `CnRev`).
 
 ### 8.4 Storage pools
 
@@ -1252,8 +1254,13 @@ involved DNs (+`DnRev`s) and every cntlr CN's budget (+`CnRev`s), bump `SpRev`. 
 extend the pool-meta/pool-data linear tables and resize the thin pool online — but the
 growth is **deferred on the CN** while the new group still contains a provisioning leg:
 the concat and the pool keep their old, effective size and keep reporting `OK` at that
-size, and the grow completes by itself once the leg clears (§9.4, §10.4). Reply
-`slice_id`, `grp_id`.
+size, and the grow completes by itself once the leg clears (§9.4, §10.4).
+The "one grow per pool at a time" pending rule (§10.4; dnv-worker.md AR6) binds only
+the sp-worker's internal auto-grow, which judges "pending" by the primary's reported
+usage; a user-driven GrowSlice is explicit operator intent, holds no such report and
+is **not** so gated (update_04.md U7 pins it) — stacked grows are absorbed by the
+deferred growth above, though every stacked group's DN extents are charged
+immediately. Reply `slice_id`, `grp_id`.
 
 ### 8.6 Cntlrs
 
@@ -1286,12 +1293,14 @@ last enabled cntlr is allowed but stops IO (dnvctl prints a warning). Reply `cnt
 
 **InspectCntlr** — read the `Cntlr` in an STM for its `addr_port`; outside the STM
 call `ControllerNodeAgent.GetCntlrInfo(cluster_id, cn_id, sp_id, cntlr_id)`; agent
-failure ⇒ `ABORTED`. Reply `revision` + `CntlrInfo`.
+failure ⇒ `ABORTED`. Reply `applied_revision` (the revision of the last Syncup the
+agent applied for this cntlr — diff it against `GetStoragePool`'s desired `SpRev`,
+§8.2's semantics) + `CntlrInfo`.
 
 **InspectSide** — locate the side by scanning the SP's slices in the STM (bounded by
 `MaxSliceCntPerSp × groups × MaxLegPerGrp`), get its DN; outside the STM call
-`DiskNodeAgent.GetSideInfo(cluster_id, dn_id, side_pointer)`. Reply `revision` +
-`SideInfo`. Both
+`DiskNodeAgent.GetSideInfo(cluster_id, dn_id, side_pointer)`. Reply
+`applied_revision` + `SideInfo`. Both
 Inspect RPCs are the way to watch clone/migration hydration before
 `DeleteClone`/`FinishMigration`.
 

@@ -4873,11 +4873,11 @@ func (x *InspectDiskNodeRequest) GetAddrPort() string {
 }
 
 type InspectDiskNodeReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      uint64                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
-	DnInfo        *DnInfo                `protobuf:"bytes,2,opt,name=dn_info,json=dnInfo,proto3" json:"dn_info,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	AppliedRevision uint64                 `protobuf:"varint,1,opt,name=applied_revision,json=appliedRevision,proto3" json:"applied_revision,omitempty"`
+	DnInfo          *DnInfo                `protobuf:"bytes,2,opt,name=dn_info,json=dnInfo,proto3" json:"dn_info,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InspectDiskNodeReply) Reset() {
@@ -4910,9 +4910,9 @@ func (*InspectDiskNodeReply) Descriptor() ([]byte, []int) {
 	return file_pb_schema_proto_rawDescGZIP(), []int{72}
 }
 
-func (x *InspectDiskNodeReply) GetRevision() uint64 {
+func (x *InspectDiskNodeReply) GetAppliedRevision() uint64 {
 	if x != nil {
-		return x.Revision
+		return x.AppliedRevision
 	}
 	return 0
 }
@@ -5537,11 +5537,11 @@ func (x *InspectControllerNodeRequest) GetAddrPort() string {
 }
 
 type InspectControllerNodeReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      uint64                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
-	CnInfo        *CnInfo                `protobuf:"bytes,2,opt,name=cn_info,json=cnInfo,proto3" json:"cn_info,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	AppliedRevision uint64                 `protobuf:"varint,1,opt,name=applied_revision,json=appliedRevision,proto3" json:"applied_revision,omitempty"`
+	CnInfo          *CnInfo                `protobuf:"bytes,2,opt,name=cn_info,json=cnInfo,proto3" json:"cn_info,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InspectControllerNodeReply) Reset() {
@@ -5574,9 +5574,9 @@ func (*InspectControllerNodeReply) Descriptor() ([]byte, []int) {
 	return file_pb_schema_proto_rawDescGZIP(), []int{84}
 }
 
-func (x *InspectControllerNodeReply) GetRevision() uint64 {
+func (x *InspectControllerNodeReply) GetAppliedRevision() uint64 {
 	if x != nil {
-		return x.Revision
+		return x.AppliedRevision
 	}
 	return 0
 }
@@ -6977,11 +6977,11 @@ func (x *InspectCntlrRequest) GetCntlrId() uint64 {
 }
 
 type InspectCntlrReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      uint64                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
-	CntlrInfo     *CntlrInfo             `protobuf:"bytes,2,opt,name=cntlr_info,json=cntlrInfo,proto3" json:"cntlr_info,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	AppliedRevision uint64                 `protobuf:"varint,1,opt,name=applied_revision,json=appliedRevision,proto3" json:"applied_revision,omitempty"`
+	CntlrInfo       *CntlrInfo             `protobuf:"bytes,2,opt,name=cntlr_info,json=cntlrInfo,proto3" json:"cntlr_info,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InspectCntlrReply) Reset() {
@@ -7014,9 +7014,9 @@ func (*InspectCntlrReply) Descriptor() ([]byte, []int) {
 	return file_pb_schema_proto_rawDescGZIP(), []int{108}
 }
 
-func (x *InspectCntlrReply) GetRevision() uint64 {
+func (x *InspectCntlrReply) GetAppliedRevision() uint64 {
 	if x != nil {
-		return x.Revision
+		return x.AppliedRevision
 	}
 	return 0
 }
@@ -7089,11 +7089,11 @@ func (x *InspectSideRequest) GetSideId() uint64 {
 }
 
 type InspectSideReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Revision      uint64                 `protobuf:"varint,1,opt,name=revision,proto3" json:"revision,omitempty"`
-	SideInfo      *SideInfo              `protobuf:"bytes,2,opt,name=side_info,json=sideInfo,proto3" json:"side_info,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	AppliedRevision uint64                 `protobuf:"varint,1,opt,name=applied_revision,json=appliedRevision,proto3" json:"applied_revision,omitempty"`
+	SideInfo        *SideInfo              `protobuf:"bytes,2,opt,name=side_info,json=sideInfo,proto3" json:"side_info,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InspectSideReply) Reset() {
@@ -7126,9 +7126,9 @@ func (*InspectSideReply) Descriptor() ([]byte, []int) {
 	return file_pb_schema_proto_rawDescGZIP(), []int{110}
 }
 
-func (x *InspectSideReply) GetRevision() uint64 {
+func (x *InspectSideReply) GetAppliedRevision() uint64 {
 	if x != nil {
-		return x.Revision
+		return x.AppliedRevision
 	}
 	return 0
 }
@@ -14392,9 +14392,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\"X\n" +
 	"\x16InspectDiskNodeRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
-	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"T\n" +
-	"\x14InspectDiskNodeReply\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\x04R\brevision\x12 \n" +
+	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"c\n" +
+	"\x14InspectDiskNodeReply\x12)\n" +
+	"\x10applied_revision\x18\x01 \x01(\x04R\x0fappliedRevision\x12 \n" +
 	"\adn_info\x18\x02 \x01(\v2\a.DnInfoR\x06dnInfo\"\xc4\x01\n" +
 	"\x1bCreateControllerNodeRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
@@ -14436,9 +14436,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\"^\n" +
 	"\x1cInspectControllerNodeRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
-	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"Z\n" +
-	"\x1aInspectControllerNodeReply\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\x04R\brevision\x12 \n" +
+	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"i\n" +
+	"\x1aInspectControllerNodeReply\x12)\n" +
+	"\x10applied_revision\x18\x01 \x01(\x04R\x0fappliedRevision\x12 \n" +
 	"\acn_info\x18\x02 \x01(\v2\a.CnInfoR\x06cnInfo\"\x9e\x03\n" +
 	"\x18CreateStoragePoolRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
@@ -14548,18 +14548,18 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x13InspectCntlrRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x19\n" +
-	"\bcntlr_id\x18\x03 \x01(\x04R\acntlrId\"Z\n" +
-	"\x11InspectCntlrReply\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\x04R\brevision\x12)\n" +
+	"\bcntlr_id\x18\x03 \x01(\x04R\acntlrId\"i\n" +
+	"\x11InspectCntlrReply\x12)\n" +
+	"\x10applied_revision\x18\x01 \x01(\x04R\x0fappliedRevision\x12)\n" +
 	"\n" +
 	"cntlr_info\x18\x02 \x01(\v2\n" +
 	".CntlrInfoR\tcntlrInfo\"i\n" +
 	"\x12InspectSideRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x17\n" +
-	"\aside_id\x18\x03 \x01(\x04R\x06sideId\"V\n" +
-	"\x10InspectSideReply\x12\x1a\n" +
-	"\brevision\x18\x01 \x01(\x04R\brevision\x12&\n" +
+	"\aside_id\x18\x03 \x01(\x04R\x06sideId\"e\n" +
+	"\x10InspectSideReply\x12)\n" +
+	"\x10applied_revision\x18\x01 \x01(\x04R\x0fappliedRevision\x12&\n" +
 	"\tside_info\x18\x02 \x01(\v2\t.SideInfoR\bsideInfo\"\xbc\x01\n" +
 	"\x17CreateThinDeviceRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +

@@ -200,6 +200,18 @@ func CnConfKey(cid uint64, addrPort string) string {
 	return joinKey(common.DnvPrefix, kindCnConf, idField(cid), addrPort)
 }
 
+// DnConfPrefix is the range prefix of every DN record of one cluster: the
+// ListDiskNodes page range (gateway.md §2.2 #4, GW10). The returned names are
+// the key suffixes after it.
+func DnConfPrefix(cid uint64) string {
+	return prefixOf(common.DnvPrefix, kindDnConf, idField(cid))
+}
+
+// CnConfPrefix is DnConfPrefix's CN twin: the ListControllerNodes page range.
+func CnConfPrefix(cid uint64) string {
+	return prefixOf(common.DnvPrefix, kindCnConf, idField(cid))
+}
+
 // DnCapacityKey is the allocation-index key of one DN (MD2, §5.6). It exists
 // iff the DN is allocatable, and it embeds free_ext_cnt so that a descending
 // range over one bin returns DNs largest-free first (§6.3).
@@ -255,6 +267,12 @@ func CdcEntryPrefix() string {
 // SpConfKey is the key of one SP's configuration (MD2).
 func SpConfKey(cid uint64, spName string) string {
 	return joinKey(common.DnvPrefix, kindSpConf, idField(cid), spName)
+}
+
+// SpConfPrefix is the range prefix of every SP record of one cluster: the
+// ListStoragePools page range (gateway.md §2.2 #4, GW10).
+func SpConfPrefix(cid uint64) string {
+	return prefixOf(common.DnvPrefix, kindSpConf, idField(cid))
 }
 
 // SpNameKey is the key of the sp_id -> sp_name reverse lookup (MD2); it is

@@ -1098,6 +1098,40 @@ func (a *fakeAgent) waitForRound(
 	}
 }
 
+// hangUnary applies behavior.json's `hang` lever to a UNARY request, the way
+// waitForRound applies it to a Check* round.
+//
+// It exists for the dnv-gateway integration suite (gateway.md §10.14 case C
+// step 4): the gateway bounds every agent call by
+// common.DefaultGatewayAgentTimeout, and the only way to prove that bound is a
+// listening agent that never answers — distinct from a closed port, which
+// fails instantly. The dnv-worker suite is unaffected: the worker never calls
+// any of the unary RPCs this guards.
+//
+// The lock is never held while waiting, so one hung request cannot block the
+// rest of the process, and the wait ends as soon as the caller's context does
+// (which is what the gateway's timeout cancels) or the script clears the
+// lever.
+func (a *fakeAgent) hangUnary(ctx context.Context, key string) error {
+	for {
+		a.mu.Lock()
+		a.refreshLocked(ctx)
+		hang := false
+		if ob := a.objBehaviorLocked(key); ob != nil {
+			hang = ob.Hang
+		}
+		a.mu.Unlock()
+		if !hang {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return status.FromContextError(ctx.Err()).Err()
+		case <-time.After(hangPollInterval):
+		}
+	}
+}
+
 // dropStreamError is what drop_stream closes a Check* stream with.
 func dropStreamError() error {
 	return status.Error(codes.Unavailable, "behavior.json drop_stream")
@@ -1111,6 +1145,9 @@ func dropStreamError() error {
 func (a *fakeAgent) GetDnSize(
 	ctx context.Context, req *pb.GetDnSizeRequest,
 ) (*pb.GetDnSizeReply, error) {
+	if err := a.hangUnary(ctx, dnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1202,6 +1239,9 @@ func (a *fakeAgent) PushMigrBitmap(
 func (a *fakeAgent) GetDnInfo(
 	ctx context.Context, req *pb.GetDnInfoRequest,
 ) (*pb.GetDnInfoReply, error) {
+	if err := a.hangUnary(ctx, dnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1216,6 +1256,9 @@ func (a *fakeAgent) GetDnInfo(
 func (a *fakeAgent) GetSideInfo(
 	ctx context.Context, req *pb.GetSideInfoRequest,
 ) (*pb.GetSideInfoReply, error) {
+	if err := a.hangUnary(ctx, sideObjKey(req.GetSidePointer())); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1329,6 +1372,9 @@ func (a *fakeAgent) CheckSide(
 func (a *fakeAgent) GetCnSize(
 	ctx context.Context, req *pb.GetCnSizeRequest,
 ) (*pb.GetCnSizeReply, error) {
+	if err := a.hangUnary(ctx, cnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1418,6 +1464,9 @@ func (a *fakeAgent) PushCloneBitmap(
 func (a *fakeAgent) GetCnInfo(
 	ctx context.Context, req *pb.GetCnInfoRequest,
 ) (*pb.GetCnInfoReply, error) {
+	if err := a.hangUnary(ctx, cnObjKey); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1432,6 +1481,11 @@ func (a *fakeAgent) GetCnInfo(
 func (a *fakeAgent) GetCntlrInfo(
 	ctx context.Context, req *pb.GetCntlrInfoRequest,
 ) (*pb.GetCntlrInfoReply, error) {
+	if err := a.hangUnary(
+		ctx, cntlrObjKey(req.GetCntlrPointer()),
+	); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.refreshLocked(ctx)
@@ -1454,6 +1508,9 @@ func (a *fakeAgent) GetCntlrInfo(
 func (a *fakeAgent) GetThinDeviceBm(
 	ctx context.Context, req *pb.GetThinDeviceBmRequest,
 ) (*pb.GetThinDeviceBmReply, error) {
+	if err := a.hangUnary(ctx, cnObjKey); err != nil {
+		return nil, err
+	}
 	return &pb.GetThinDeviceBmReply{}, nil
 }
 
@@ -1461,6 +1518,9 @@ func (a *fakeAgent) GetThinDeviceBm(
 func (a *fakeAgent) GetLegBm(
 	ctx context.Context, req *pb.GetLegBmRequest,
 ) (*pb.GetLegBmReply, error) {
+	if err := a.hangUnary(ctx, cnObjKey); err != nil {
+		return nil, err
+	}
 	return &pb.GetLegBmReply{}, nil
 }
 

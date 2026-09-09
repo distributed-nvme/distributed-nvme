@@ -34,8 +34,8 @@ func TestSpNextIdReservesZero(t *testing.T) {
 		{name: "past one", conf: &pb.SpConf{NextId: 1000}, want: 1000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := spNextId(tc.conf); got != tc.want {
-				t.Errorf("spNextId: got %d, want %d", got, tc.want)
+			if got := SpNextId(tc.conf); got != tc.want {
+				t.Errorf("SpNextId: got %d, want %d", got, tc.want)
 			}
 		})
 	}
@@ -49,7 +49,7 @@ func TestCreateSpareLegNeverMintsIdZero(t *testing.T) {
 	resetNextId(env, 0)
 
 	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), env.cc,
 	)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestGrowSliceNeverMintsIdZero(t *testing.T) {
 
 	legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
 	grpId, err := GrowSlice(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, false, opsNotPending, env.cc, legs,
 	)
 	if err != nil {

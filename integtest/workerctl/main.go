@@ -1077,6 +1077,8 @@ var commands = []command{
 	{"set-level", cmdSetLevel},
 	{"set-lwm", cmdSetLwm},
 	{"set-free", cmdSetFree},
+	{"set-created", cmdSetCreated},
+	{"set-provisioned", cmdSetProvisioned},
 	{"get", cmdGet},
 	{"get-dn", cmdGetDn},
 	{"get-cn", cmdGetCn},
@@ -3194,6 +3196,127 @@ func cmdSetFree(g *globals, args []string) {
 		"free_ext_cnt": *freeExt,
 		"allocatable":  allocatable,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Playing the worker (gateway.md §2.4)
+// ---------------------------------------------------------------------------
+//
+// These are the ONLY writes the gateway integration suite performs through
+// workerctl (gateway.md §10.9). They exist because two gateway preconditions
+// are gated on a flag only the sp-worker ever sets — CreateThinDevice's
+// snapshot gate on ThinDevice.created (§8.7) and SwitchSpareLeg's gate on
+// Side.provisioned (§9.4) — and that suite deliberately runs no dnv-worker.
+// Both go through the very model op the worker calls, so the state they leave
+// behind is exactly the state a converging worker would have produced,
+// including the single SpRev bump the flip owes (which the suite's rev
+// bookkeeping must count).
+
+// cmdSetCreated flips ThinDevice.created through model.FlipCreated: the
+// materialization the sp-worker performs once a cntlr has reported the td's
+// thin volume RES_STATUS_OK in every slice (§10.3, ThinDeviceCreated.md U3).
+//
+// The td_id comes from the stored record rather than from a flag: FlipCreated
+// takes a TdRef of name AND id precisely so a td deleted and re-created under
+// the same name between the read and the transaction is skipped instead of
+// silently flipped, and a caller that could pass a wrong id would defeat that.
+func cmdSetCreated(g *globals, args []string) {
+	fs := newFlagSet("set-created", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "td_name (required)")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	key := model.ThinDeviceKey(cid, target.spId, *name)
+	td := &pb.ThinDevice{}
+	found, err := cli.Get(ctx, key, td)
+	if err != nil {
+		die("%v", err)
+	}
+	if !found {
+		die("key %q not found", key)
+	}
+
+	flipped, err := model.FlipCreated(
+		ctx, cli, cid, target.shard, target.spId,
+		[]model.TdRef{{Name: *name, TdId: td.GetTdId()}},
+	)
+	if err != nil {
+		die("set-created: %v", err)
+	}
+	emit(map[string]any{
+		"td_name": *name,
+		"td_id":   idHex(td.GetTdId()),
+		"flipped": len(flipped) == 1,
+		"sp_rev":  readSpRev(ctx, cli, cid, target),
+	})
+}
+
+// cmdSetProvisioned flips one Side.provisioned through model.FlipProvisioned:
+// the §9.4 completion the sp-worker records once the dn agent reports the side
+// fully zeroed. The suite pulls it exactly where a gateway precondition
+// demands it — SwitchSpareLeg refuses an unprovisioned spare (§8.12).
+func cmdSetProvisioned(g *globals, args []string) {
+	fs := newFlagSet("set-provisioned", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	var slice, leg, side hexUint
+	fs.Var(&slice, "slice", "slice_id (required)")
+	fs.Var(&leg, "leg", "leg_id (required)")
+	fs.Var(&side, "side", "side_id (required)")
+	fs.Parse(args)
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	ref := model.SideRef{
+		SliceId: uint64(slice),
+		LegId:   uint64(leg),
+		SideId:  uint64(side),
+	}
+	flipped, err := model.FlipProvisioned(
+		ctx, cli, cid, target.shard, target.spId, []model.SideRef{ref},
+	)
+	if err != nil {
+		die("set-provisioned: %v", err)
+	}
+	emit(map[string]any{
+		"slice_id": idHex(ref.SliceId),
+		"leg_id":   idHex(ref.LegId),
+		"side_id":  idHex(ref.SideId),
+		"flipped":  len(flipped) == 1,
+		"sp_rev":   readSpRev(ctx, cli, cid, target),
+	})
+}
+
+// readSpRev reports the SP's revision after a flip, so the caller can refresh
+// the optimistic-concurrency token the flip invalidated without a second
+// round trip through get-rev.
+func readSpRev(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	target spTarget,
+) uint64 {
+	rev := &pb.SpRev{}
+	found, err := cli.Get(
+		ctx, model.SpRevKey(target.shard, cid, target.spId), rev)
+	if err != nil {
+		die("%v", err)
+	}
+	if !found {
+		die("sp_rev of %q not found", target.name)
+	}
+	return rev.GetRevision()
 }
 
 // ---------------------------------------------------------------------------

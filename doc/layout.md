@@ -136,14 +136,16 @@ distributed-nvme/                      # repo root = module root
 ├── ctl/
 │   ├── root.go                        # dnvctl command tree (§13): dn.go, cn.go, sp.go, vol.go, …
 │   └── copier.go                      # §11.4 userspace copier
-├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9
+├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10
 │   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
 │   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
-│   ├── workerctl/main.go              # the etcd driver that plays the gateway
+│   ├── workerctl/main.go              # the etcd driver that plays the gateway (+ the two gateway.md §2.4 worker flips)
 │   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
 │   ├── cdc_test.sh                    # cdc suite (four servers, real etcd, real nvmet, real hosts)
 │   ├── cdcctl/main.go                 # the etcd driver that plays gateway + worker for CdcEntry keys
+│   ├── gateway_test.sh                # gateway suite (one server, real etcd, 3 gateways, fake agents)
+│   ├── gatewayctl/main.go             # the gRPC driver of the gateway suite (one subcommand per RPC + `race`)
 │   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
 └── cmd/
     ├── dnv-gateway/main.go

@@ -12,6 +12,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// noExpectRev is the expectRev the worker's own calls pass to the three ops
+// the gateway shares with it (gateway.md §2.2 #3): 0 skips the SpRev token
+// check, which is what every test below wants unless it is testing the check.
+const noExpectRev = uint64(0)
+
 // ---------------------------------------------------------------------------
 // The MD6 fixture: one SP with two cntlrs and one slice whose meta and data
 // groups are md-raid1 pairs, plus four DNs and three CNs with capacity and
@@ -1263,7 +1268,7 @@ func TestGrowSliceData(t *testing.T) {
 		env.cnRev(opsCnA), env.cnRev(opsCnB),
 	}
 	grpId, err := GrowSlice(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, false, opsNotPending, env.cc, legs,
 	)
 	if err != nil {
@@ -1404,13 +1409,13 @@ func TestGrowSliceData(t *testing.T) {
 	}
 	// The picks are stale now, so the same call is refused (MD5).
 	_, err = GrowSlice(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, false, opsNotPending, env.cc, legs,
 	)
 	precondition := wantPrecondition(t, err, opGrowSlice)
-	if precondition.Reason != reasonCandidateChanged {
+	if precondition.Reason != ReasonCandidateChanged {
 		t.Errorf("Reason: got %q, want %q",
-			precondition.Reason, reasonCandidateChanged)
+			precondition.Reason, ReasonCandidateChanged)
 	}
 }
 
@@ -1448,7 +1453,7 @@ func TestGrowSliceRefusesASecondGrowForOneBreach(t *testing.T) {
 			env := newOpsEnv(t)
 			// The first owner grows.
 			if _, err := GrowSlice(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, tc.isMeta, tc.total, env.cc,
 				[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
 			); err != nil {
@@ -1469,7 +1474,7 @@ func TestGrowSliceRefusesASecondGrowForOneBreach(t *testing.T) {
 			env.putDn("dn-g0:9000", 960, 5, opsDnFree)
 			env.putDn("dn-g1:9000", 961, 5, opsDnFree)
 			_, err := GrowSlice(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, tc.isMeta, tc.total, env.cc,
 				[]Cand{
 					env.dnCand("dn-g0:9000"), env.dnCand("dn-g1:9000"),
@@ -1547,7 +1552,7 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	for step, pair := range pairs {
 		legs := []Cand{env.dnCand(pair[0]), env.dnCand(pair[1])}
 		grpId, err := GrowSlice(
-			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 			opsSliceId, true, opsNotPending, env.cc, legs,
 		)
 		if err != nil {
@@ -1580,7 +1585,7 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	env.putDn("dn-z1:9000", 951, 5, opsDnFree)
 	revBefore := env.spRev()
 	_, err := GrowSlice(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, true, opsNotPending, env.cc,
 		[]Cand{env.dnCand("dn-z0:9000"), env.dnCand("dn-z1:9000")},
 	)
@@ -1611,7 +1616,7 @@ func TestGrowSlicePreconditions(t *testing.T) {
 				env.putDn(opsDnD, 703, 3, opsDnFree-1)
 				return legs
 			},
-			reason: reasonCandidateChanged,
+			reason: ReasonCandidateChanged,
 		},
 		{
 			name: "dn free_ext_cnt too low",
@@ -1679,7 +1684,7 @@ func TestGrowSlicePreconditions(t *testing.T) {
 			revBefore := env.spRev()
 			dnCFree := env.dn(opsDnC).GetFreeExtCnt()
 			_, err := GrowSlice(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, false, opsNotPending, env.cc, legs,
 			)
 			precondition := wantPrecondition(t, err, opGrowSlice)
@@ -1709,7 +1714,7 @@ func TestGrowSlicePreconditions(t *testing.T) {
 		env := newOpsEnv(t)
 		legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
 		_, err := GrowSlice(
-			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 			9999, false, opsNotPending, env.cc, legs,
 		)
 		precondition := wantPrecondition(t, err, opGrowSlice)
@@ -1944,7 +1949,7 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			},
 			oldId:  opsCntlrB,
 			now:    now,
-			reason: reasonCandidateChanged,
+			reason: ReasonCandidateChanged,
 		},
 		{
 			name: "cn free_ext_cnt too low",
@@ -2019,7 +2024,7 @@ func TestCreateSpareLeg(t *testing.T) {
 	env := newOpsEnv(t)
 	before := struct{ spRev, dnCRev uint64 }{env.spRev(), env.dnRev(opsDnC)}
 	legId, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, env.dnCand(opsDnC), env.cc,
 	)
 	if err != nil {
@@ -2077,14 +2082,14 @@ func TestCreateSpareLeg(t *testing.T) {
 	}
 	// A second spare on a different DN fills the list; a third is refused.
 	if _, err := CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, env.dnCand(opsDnD), env.cc,
 	); err != nil {
 		t.Fatalf("CreateSpareLeg second: %v", err)
 	}
 	env.putDn("dn-e:9000", 704, 4, opsDnFree)
 	_, err = CreateSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, env.dnCand("dn-e:9000"), env.cc,
 	)
 	precondition := wantPrecondition(t, err, opCreateSpareLeg)
@@ -2149,7 +2154,7 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 				env.putDn(opsDnC, 702, 2, opsDnFree-1)
 				return cand
 			},
-			reason: reasonCandidateChanged,
+			reason: ReasonCandidateChanged,
 		},
 		{
 			name:  "dn free_ext_cnt too low",
@@ -2179,7 +2184,7 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 				findGroup(env.slice(), opsDataGrpId).GetSpareLegList(),
 			)
 			_, err := CreateSpareLeg(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, tc.grpId, cand, env.cc,
 			)
 			precondition := wantPrecondition(t, err, opCreateSpareLeg)
@@ -2213,7 +2218,7 @@ func TestSwitchSpareLeg(t *testing.T) {
 	}
 	revBefore := env.spRev()
 	if err := SwitchSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, opsSpareLeg, opsDataLegB,
 	); err != nil {
 		t.Fatalf("SwitchSpareLeg: %v", err)
@@ -2247,7 +2252,7 @@ func TestSwitchSpareLeg(t *testing.T) {
 	}
 	// Re-running is refused: the spare is now an active leg.
 	err := SwitchSpareLeg(
-		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, opsSpareLeg, opsDataLegB,
 	)
 	precondition := wantPrecondition(t, err, opSwitchSpareLeg)
@@ -2322,7 +2327,7 @@ func TestSwitchSpareLegPreconditions(t *testing.T) {
 			tc.setup(env)
 			revBefore := env.spRev()
 			err := SwitchSpareLeg(
-				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, tc.grpId, tc.spareId, tc.targetId,
 			)
 			precondition := wantPrecondition(t, err, opSwitchSpareLeg)

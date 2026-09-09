@@ -4,7 +4,8 @@ A distributed NVMe-oF block storage system. `doc/architecture.md` is the
 design; `doc/layout.md` fixes the repository layout; `doc/log.md`,
 `doc/osclient.md` and `doc/grpc.md` are the normative specs of the shared
 components; `doc/dnv-worker.md` is the normative spec of `dnv-worker`, `model/`
-and `etcdutil/`, and carries the worker integration-test plan.
+and `etcdutil/`, `doc/cdc.md` of `dnv-cdc` and `doc/gateway.md` of
+`dnv-gateway`; each carries its own integration-test plan.
 
 Module: `github.com/distributed-nvme/distributed-nvme`.
 
@@ -77,12 +78,23 @@ files are committed, so an ordinary build or test never requires protoc.
   `--etcd-endpoints`, `--roles`, the two vote timers and `--etcd-dial-timeout`,
   env prefix `DNV_WORKER_`; it builds the `etcdutil` client and hands off to
   `worker.Run`.
-* `integtest/` — the on-hardware suites of `dnagent_integtest.md` and
-  `cnagent_integtest.md` (`dnagent_test.sh`, `cnagent_test.sh` and their
-  gRPC drivers); both have passed against the two lab VMs.
+* `cdc/` and `cmd/dnv-cdc` — the discovery controller of `doc/cdc.md`: the
+  etcd watch that holds the `CdcEntry` view, the NVMe/TCP PDU codec and the
+  discovery-log server that answers hosts and fans out AENs.
+* `gateway/` and `cmd/dnv-gateway` — the control-plane API server of
+  `doc/gateway.md`: all 59 RPCs of `service Gateway` over `etcdutil`'s STM
+  machinery, the §6.5 allocation, the §5.5 revision tokens and the ten agent
+  calls behind `Get*Size` / `Inspect*` / `Get*Bitmap`. Stateless and
+  active-active: any instance serves any request.
+* `integtest/` — the on-hardware suites of `dnagent_integtest.md`,
+  `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9 and `gateway.md`
+  §10 (`dnagent_test.sh`, `cnagent_test.sh`, `worker_test.sh`, `cdc_test.sh`,
+  `gateway_test.sh` and their drivers `dnagentctl`, `cnagentctl`, `workerctl`,
+  `cdcctl`, `gatewayctl`, plus the `fakeagent` the worker and gateway suites
+  drive).
 
-Not yet implemented: `gateway/`, `cdc/`, `ctl/` and their binaries —
-`doc/architecture.md` §§7-8, §12 and §13 are their spec.
+Not yet implemented: `ctl/` and `cmd/dnvctl` — `doc/architecture.md` §13 is
+their spec.
 `doc/update_02.md` records the post-review fixes, all applied;
 `doc/update_03.md` records two findings from implementing them — one applied,
 one open.

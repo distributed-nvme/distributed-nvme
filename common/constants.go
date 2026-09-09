@@ -234,6 +234,15 @@ const (
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 
+	// dnv-gateway (gateway.md §2.1).
+	//
+	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
+	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect*, the
+	// Get*Bm bitmap reads), in seconds. Applied with context.WithTimeout
+	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
+	// hung agent and a hung etcd bound an RPC alike.
+	DefaultGatewayAgentTimeout = 10
+
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
