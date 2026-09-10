@@ -95,6 +95,21 @@ type cntlrState struct {
 	// torn down.
 	applied *cntlrPlan
 
+	// pendingSweep marks slices whose pool device THIS incarnation created
+	// but has not yet successfully swept for orphan thin ids (CN14's
+	// activation sweep, update_05.md U3). Keyed by slice_id; in-memory only —
+	// a crash in the window leaves a stray for the pool's next rebuild. The
+	// startup Reconcile's Create branch arms it too; running additionally
+	// requires reqFromRpc.
+	pendingSweep map[uint64]bool
+	// reqFromRpc is true once st.req was delivered by a revision-gated
+	// SyncupCntlr in THIS incarnation. The startup Reconcile converges from
+	// the persisted copy, which converge-then-persist (syncupCntlr saves
+	// after convergeCntlr and only logs a failed Save) lets lag the pool's
+	// true contents — the sweep deletes ids absent from td_list, so it only
+	// ever trusts an RPC-delivered one (update_05.md U3).
+	reqFromRpc bool
+
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no
 	// lock and are cancelled at teardown.
 	probers map[uint64]*legProber
@@ -230,11 +245,15 @@ func (s *CnAgentServer) cntlrKeysOf(clusterId, cnId uint64) []string {
 }
 
 func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
+	// reqFromRpc stays false: a state born here may equally well come from
+	// the startup Reconcile's persisted copy, and only syncupCntlr knows
+	// otherwise (update_05.md U3).
 	return &cntlrState{
-		req:     req,
-		tracker: agent.NewResTracker(),
-		chunks:  make(map[uint64]*agent.ChunkSet),
-		probers: make(map[uint64]*legProber),
+		req:          req,
+		tracker:      agent.NewResTracker(),
+		chunks:       make(map[uint64]*agent.ChunkSet),
+		pendingSweep: make(map[uint64]bool),
+		probers:      make(map[uint64]*legProber),
 	}
 }
 

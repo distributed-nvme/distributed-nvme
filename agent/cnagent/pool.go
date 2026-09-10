@@ -66,7 +66,7 @@ func (s *CnAgentServer) ensureSlice(
 		return false
 	}
 	if err := s.ensurePool(
-		ctx, plan, sp, metaChanged || dataChanged); err != nil {
+		ctx, st, plan, sp, metaChanged || dataChanged); err != nil {
 		info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
 			poolKey, sp.poolFinalName, err.Error())
 		return false
@@ -121,8 +121,19 @@ func (s *CnAgentServer) poolArgs(
 // resized metadata or data device solely in `pool_preresume` — i.e. on a
 // suspend/resume. Without it an operator's metadata grow reports success while
 // the pool keeps running on the old size (CN13).
+//
+// The Create branch — and **only** it — arms CN14's activation sweep
+// (update_05.md U3 point 3): every leak path that skipped a `delete` ends the
+// pool device's life on the cntlr that skipped it, so a stray can only be met
+// where the device comes back, and within one device lifetime this agent is
+// the pool's only writer. The Reload and probe-matched branches arm nothing,
+// which is the whole restart-safety argument: a re-converge on a converged
+// node — case D of the cn suite, CN2/SH16 — must issue zero mutating calls,
+// and a surviving pool device can have grown no strays while its only writer
+// was down.
 func (s *CnAgentServer) ensurePool(
 	ctx context.Context,
+	st *cntlrState,
 	plan *cntlrPlan,
 	sp *slicePlan,
 	concatGrew bool,
@@ -137,7 +148,15 @@ func (s *CnAgentServer) ensurePool(
 		return err
 	}
 	if dev == nil {
-		return s.dm.Create(ctx, sp.poolFinalName, table)
+		if err := s.dm.Create(ctx, sp.poolFinalName, table); err != nil {
+			return err
+		}
+		// Armed on success only: a pool device that never came up has no
+		// metadata to enumerate. The startup reconcile's Create arms exactly
+		// like any other — the reboot deferral lives at the run site, not
+		// here (update_05.md U3 point 4).
+		st.pendingSweep[sp.sliceId] = true
+		return nil
 	}
 	if concatGrew {
 		return s.dm.Reload(ctx, sp.poolFinalName, table)
@@ -253,6 +272,70 @@ func (s *CnAgentServer) createSnapId(
 			slog.String("error", err.Error()))
 	}
 	return messageErr
+}
+
+// The activation sweep's two log records (update_05.md U3). They are named
+// once here because the sweep writes one of them at each of its three exits,
+// and an operator greps for the pair — "did the sweep run, and did it get
+// through" — after every pool re-creation.
+const (
+	msgThinSweep       = "thin id sweep"
+	msgThinSweepFailed = "thin id sweep failed"
+)
+
+// sweepThinIds is CN14's activation sweep (update_05.md U3): enumerate the
+// armed pool's device ids and delete every id no td of td_list owns. Runs at
+// most once per pool-device creation, only under an RPC-delivered request
+// (the call site's reqFromRpc gate); a failure leaves pendingSweep set so a
+// later converge retries.
+//
+// It is correct to delete against this td_list and no other: GateRevision
+// makes an RPC-delivered request the newest desired state this cntlr has ever
+// accepted, dev_ids are never reused (SpConf.next_dev_id), thin ids belong
+// exclusively to tds — clones and transfers own none — and DN-side fencing
+// leaves no other writer, so a pool id absent from it can only belong to a td
+// deleted at or before that revision.
+//
+// deleteThinId is deliberately not reused: it swallows the message error by
+// design (CN14's fire-and-forget retire), while the sweep must see a failure
+// to keep the flag alive for the retry.
+func (s *CnAgentServer) sweepThinIds(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	sp *slicePlan,
+) {
+	// CN25's machinery: reserve_metadata_snap → thin_dump --metadata-snap →
+	// release_metadata_snap, releasing on every path.
+	sb, err := s.dumpThinMetadata(ctx, sp)
+	if err != nil {
+		slog.ErrorContext(ctx, msgThinSweepFailed,
+			slog.String("pool", sp.poolFinalName),
+			slog.String("error", err.Error()))
+		return
+	}
+	var strays []uint32
+	for _, dev := range sb.Devices {
+		if plan.tdByDevId[dev.DevId] == nil {
+			strays = append(strays, dev.DevId)
+		}
+	}
+	for _, devId := range strays {
+		if err := s.dm.Message(ctx, sp.poolFinalName, 0,
+			fmt.Sprintf("delete %d", devId)); err != nil {
+			slog.ErrorContext(ctx, msgThinSweepFailed,
+				slog.String("pool", sp.poolFinalName),
+				slog.Uint64("dev_id", uint64(devId)),
+				slog.String("error", err.Error()))
+			return
+		}
+	}
+	// Only a full pass disarms: anything short of it leaves the slice
+	// sweep-pending for the next converge under an RPC-delivered request.
+	delete(st.pendingSweep, sp.sliceId)
+	slog.InfoContext(ctx, msgThinSweep,
+		slog.String("pool", sp.poolFinalName),
+		slog.Any("deleted", strays))
 }
 
 // deleteThinId is the CN14 **deletion** path — a td that left td_list. A

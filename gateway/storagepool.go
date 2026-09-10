@@ -1063,11 +1063,13 @@ func (s *Server) GrowSlice(
 			}
 			ladder, ok := model.MetaLadderExtCnt(total, extentSize)
 			if !ok {
-				// GW7 and gateway.md §5.4 put the meta ladder cap in the
-				// RESOURCE_EXHAUSTED row; architecture.md §8.5's error list
-				// calls it FAILED_PRECONDITION. GW7 is the single error table
-				// of the component, so it wins.
-				return errExhausted(
+				// The 16 GiB dm-thin metadata cap is the SP's own permanent
+				// ceiling — object state, not exhaustible capacity — so it
+				// is FAILED_PRECONDITION (architecture.md §8.5, gateway.md
+				// GW7; update_05.md U4 resolved the old GW7-vs-§8.5 conflict
+				// this way, and model.GrowSlice's in-STM re-check already
+				// maps there).
+				return errPrecondition(
 					"slice %d has %d meta extents and cannot grow past the "+
 						"16 GiB dm-thin metadata cap",
 					req.GetSliceId(), total)

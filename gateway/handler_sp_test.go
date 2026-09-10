@@ -2009,12 +2009,19 @@ func TestGrowSliceMeta(t *testing.T) {
 	}
 }
 
-// TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND which error
-// table wins where the specs disagree: gateway.md §5.4 and GW7 put "the meta
-// ladder is at the 16 GiB dm-thin metadata cap" in the RESOURCE_EXHAUSTED row,
-// while architecture.md §8.5's error list calls it FAILED_PRECONDITION. GW7 is
-// the single error table of the component, so RESOURCE_EXHAUSTED is what a
-// client sees.
+// TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND the error
+// class update_05.md U4 settled on: the 16 GiB cap is the SP's own permanent
+// structural ceiling — per-object state, not exhaustible capacity — so it is
+// FAILED_PRECONDITION, and model.GrowSlice's in-STM re-check of the same cap
+// already maps there, so before U4 the gateway pre-check (RESOURCE_EXHAUSTED)
+// and the transaction agreed on the client's code only by accident of which
+// won the race.
+//
+// U4 is also which error table wins where the specs disagree: gateway.md §5.4
+// and GW7 put "the meta ladder is at the 16 GiB dm-thin metadata cap" in the
+// RESOURCE_EXHAUSTED row, while architecture.md §8.5's error list calls it
+// FAILED_PRECONDITION — and gateway.md §0 #2's own precedence rule gives §8.5
+// the last word. This test is the pre-check's half of that.
 //
 // The slice's meta total is raised to the cap directly rather than by four
 // real grows: the refusal is decided from the slice alone and returns before
@@ -2037,7 +2044,7 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 		SliceId:     sliceId,
 		IsMeta:      true,
 	})
-	sptWantCode(t, err, codes.ResourceExhausted)
+	sptWantCode(t, err, codes.FailedPrecondition)
 	if got := env.spRev(0, spId); got != 1 {
 		t.Errorf("a refusal bumped sp_rev to %d", got)
 	}

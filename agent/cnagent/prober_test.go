@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -240,6 +241,121 @@ func TestStandbyStartsNoProber(t *testing.T) {
 			strings.HasPrefix(call, "readblockdirect ") {
 			t.Fatalf("a standby ran the block probe: %q", call)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The standby's ana_state verdict (CN11, update_05.md U2)
+// ---------------------------------------------------------------------------
+
+// TestTransportHealthAnaState pins U2 on the pure function: a leg with exactly
+// one desired side fails its row when that side's path is live but
+// unpromotable. `non-optimized` is the standby's healthy steady state and not
+// a fault — the DN grants the optimized group to the primary CN alone, so
+// every other CN's path sits in the non-optimized group over a dm-error
+// backing, which is exactly the shape the redund lab case pins OK (leg rows
+// OK, integtest/cnagent_test.sh:1742-1743; ana `non-optimized`, :1774-1779).
+// `optimized` is the post-flip pre-promote window and passes too. A leg
+// carrying two sides is mid-migration (CN10) and exempt.
+func TestTransportHealthAnaState(t *testing.T) {
+	oneSide := []*pb.Side{sideOf(testDataSide, testIp, testSvcId)}
+	twoSides := []*pb.Side{
+		sideOf(testDataSide, testIp, testSvcId),
+		sideOf(testDataSide+0x100, testIp2, testSvcId2),
+	}
+	// name is what `nvme disconnect --device` takes; the report never reads
+	// it, so any live-looking value does.
+	ctrl := func(name, addr, svcId, state, ana string) ctrlView {
+		return ctrlView{name: name, trAddr: addr, trSvcId: svcId,
+			state: state, anaState: ana}
+	}
+	for _, tc := range []struct {
+		name    string
+		sides   []*pb.Side
+		ctrls   []ctrlView
+		want    pb.ResStatus
+		details string
+	}{
+		{
+			name:  "single-sided optimized",
+			sides: oneSide,
+			ctrls: []ctrlView{ctrl("nvme0", testIp, testSvcId, "live",
+				agent.AnaStateOptimized)},
+			want:    pb.ResStatus_RES_STATUS_OK,
+			details: "live/optimized",
+		},
+		{
+			name:  "single-sided non-optimized",
+			sides: oneSide,
+			ctrls: []ctrlView{ctrl("nvme0", testIp, testSvcId, "live",
+				agent.AnaStateNonOptimized)},
+			want:    pb.ResStatus_RES_STATUS_OK,
+			details: "live/non-optimized",
+		},
+		{
+			name:  "single-sided inaccessible",
+			sides: oneSide,
+			ctrls: []ctrlView{ctrl("nvme0", testIp, testSvcId, "live",
+				agent.AnaStateInaccessible)},
+			want:    pb.ResStatus_RES_STATUS_ERROR,
+			details: "live/inaccessible unpromotable",
+		},
+		{
+			// A state the DN never sets is unpromotable all the same.
+			name:  "single-sided change",
+			sides: oneSide,
+			ctrls: []ctrlView{ctrl("nvme0", testIp, testSvcId, "live",
+				"change")},
+			want:    pb.ResStatus_RES_STATUS_ERROR,
+			details: "live/change unpromotable",
+		},
+		{
+			// CN10: the dst side is inaccessible until the cutover, and only
+			// the DN knows that — the row keeps the live-only check.
+			name:  "two-sided migration",
+			sides: twoSides,
+			ctrls: []ctrlView{
+				ctrl("nvme0", testIp, testSvcId, "live",
+					agent.AnaStateOptimized),
+				ctrl("nvme1", testIp2, testSvcId2, "live",
+					agent.AnaStateInaccessible),
+			},
+			want:    pb.ResStatus_RES_STATUS_OK,
+			details: "live/inaccessible",
+		},
+		{
+			name:  "not live",
+			sides: oneSide,
+			ctrls: []ctrlView{ctrl("nvme0", testIp, testSvcId, "connecting",
+				agent.AnaStateOptimized)},
+			want:    pb.ResStatus_RES_STATUS_ERROR,
+			details: "connecting/optimized",
+		},
+		{
+			name:    "missing controller",
+			sides:   oneSide,
+			ctrls:   nil,
+			want:    pb.ResStatus_RES_STATUS_ERROR,
+			details: testIp + ":" + testSvcId + " missing",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lp := &legPlan{legId: testDataLeg, nqn: testNqn, sides: tc.sides}
+			view := &subsysView{found: true, ctrls: tc.ctrls}
+			status, details := transportHealth(lp, view)
+			if status != tc.want {
+				t.Fatalf("the leg row is %v/%q, want %v",
+					status, details, tc.want)
+			}
+			if !strings.Contains(details, tc.details) {
+				t.Fatalf("the leg row details %q carry no %q",
+					details, tc.details)
+			}
+			if status == pb.ResStatus_RES_STATUS_OK &&
+				strings.Contains(details, "unpromotable") {
+				t.Fatalf("an OK row calls a path unpromotable: %q", details)
+			}
+		})
 	}
 }
 

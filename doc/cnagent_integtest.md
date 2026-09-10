@@ -655,8 +655,14 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    sp-worker publishes once both tds have flipped. Assert on that stage's own
    trace: **no** `dmsetup message … create_thin`, **no** `… create_snap`, no
    `dmsetup suspend` at all; `mutations()` scoped to the trace shows
-   `dmsetup create` lines and no `dmsetup message`; every thin/pool/namespace
-   row `OK`; and both bitmaps re-read through `get-td-bm` unchanged — `0xc` ⇒
+   `dmsetup create` lines and, of `dmsetup message`, exactly the activation
+   sweep's `reserve_metadata_snap`/`release_metadata_snap` pair — no
+   `create_thin`, no `create_snap`, no `delete` (update_05.md U3: the rebuild
+   re-creates the pool device, which is a designed sweep trigger — the drop's
+   CN21 teardown sends no `delete`s, so a td removed while the cntlr was down
+   is healed exactly here, and this rebuild has nothing to sweep); every
+   thin/pool/namespace row `OK`; and both bitmaps re-read through
+   `get-td-bm` unchanged — `0xc` ⇒
    `1effffffffffffff`, `0x9` ⇒ `1efdffffffffffff`. The mappings of both tds
    survived the rebuild, so the bare `dmsetup create` attached the *existing*
    ids: no empty volume, no data loss. This is the only place a real dm-thin
@@ -920,7 +926,7 @@ records can be pulled from the JSON logs on either VM.
 |---|---|---|
 | `GetCnSize` | setup wait-up | exact `--capacity` echo 1099511627776; liveness |
 | `SyncupCn` | setup + every case | reply code, the four base-state infos (`port`/`tmpfs`/`tmp_file`/`loop_dev`; `clone_vg_info` is `reserved 5` since `update_01.md` U3), declarative cntlr add/remove, stale probe (D) |
-| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with zero pool messages (B) |
+| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with no device-set-mutating pool message — only the activation sweep's reserve/release pair (B, update_05.md U3) |
 | `PushCloneBitmap` | C | reply code 0; effects via the stage 4/9 layers |
 | `GetCnInfo` | teardown checks, D | statuses, snapshot equality |
 | `GetCntlrInfo` | S, C polling + recovery, D | pool-status details format, `ParseCloneStatus` hydration, snapshot equality |

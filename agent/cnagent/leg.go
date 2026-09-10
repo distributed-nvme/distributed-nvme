@@ -80,6 +80,11 @@ func (v *subsysView) ctrlOf(trAddr, trSvcId string) *ctrlView {
 // path. A `non-optimized` path means the side currently exports dm-error and
 // cannot be used; a path that is merely `connecting` keeps its last-known ANA
 // state, which is why the controller state gates it.
+//
+// This is deliberately *not* update_05.md U2's rule: this is the primary's
+// assembly-time gate, "is this path usable now", which `non-optimized`
+// rightly fails, while the standby's transportHealth row answers "could this
+// path serve a promote", which `non-optimized` rightly passes.
 func (v *subsysView) available() bool {
 	if v == nil || !v.found {
 		return false
@@ -400,8 +405,22 @@ func (s *CnAgentServer) legInfo(
 	return st.tracker.Set(key, lp.name, transportStatus, transportDetails)
 }
 
-// transportHealth is the standby's leg report: one live controller per desired
-// side, each carrying the ana_state a standby's path is expected to have.
+// transportHealth is the standby's leg report (CN11): one live controller per
+// desired side, and — on a leg with exactly one desired side — an ana_state
+// that could serve a promote (update_05.md U2). The healthy set is
+// `optimized` or `non-optimized`, not `optimized` alone: the DN grants the
+// optimized group to the primary CN alone, so every standby's path sits in
+// the non-optimized group over the side's dm-error backing and that *is* its
+// designed steady state, while `optimized` appears on a standby in the
+// post-flip pre-promote window — this function cannot know the promote phase,
+// so both pass. What fails the row is an *unpromotable* path: `inaccessible`
+// (the DN parked the side or handed it over) or any state the DN never sets
+// (`change`, `persistent-loss`, garbage); err_epoch absorbs a transient read
+// during a cutover's ana_grpid rewrites, and a persistent one correctly ages
+// toward AR8 leg repair. A leg whose side_list holds two sides is
+// mid-migration (CN10) and exempt: its ANA is wrong-by-design for the whole
+// hydration (dst inaccessible until cutover, src after) and the phase is the
+// DN's knowledge, not this CN's, so such a leg keeps the live-only check.
 func transportHealth(
 	lp *legPlan,
 	view *subsysView,
@@ -427,11 +446,26 @@ func transportHealth(
 			ok = false
 			continue
 		}
-		reports = append(reports, fmt.Sprintf("%s:%s %s/%s",
-			tr.GetTrAddr(), tr.GetTrSvcId(), ctrl.state, ctrl.anaState))
-		if ctrl.state != "live" {
+		report := fmt.Sprintf("%s:%s %s/%s",
+			tr.GetTrAddr(), tr.GetTrSvcId(), ctrl.state, ctrl.anaState)
+		switch {
+		case ctrl.state != "live":
+			ok = false
+		case len(lp.sides) == 1 &&
+			ctrl.anaState != agent.AnaStateOptimized &&
+			ctrl.anaState != agent.AnaStateNonOptimized:
+			// U2: a single-sided leg must hold a promotable path.
+			// non-optimized is the standby's designed steady state (the DN
+			// grants optimized to the primary CN alone) and optimized the
+			// pre-promote window, so both pass; inaccessible — or a state
+			// the DN never sets — cannot serve a promote and fails the row.
+			// A two-sided leg (a migration, CN10) is exempt: its ANA is
+			// wrong-by-design for the hydration and the phase is the DN's
+			// knowledge, not this CN's.
+			report += " unpromotable"
 			ok = false
 		}
+		reports = append(reports, report)
 	}
 	details := strings.Join(reports, ",")
 	if !ok {

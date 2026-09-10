@@ -2055,7 +2055,7 @@ case_thinbm() {
 	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
 	assert_cn_info_ok "$out" "thinbm rebuild syncup-cn"
 
-	stage rebuild "a created td is re-attached with no pool message at all"
+	stage rebuild "a created td is re-attached with no device-set message"
 	# ThinDeviceCreated.md U5-S3 steps 4-5 / R14: the desired state the
 	# sp-worker publishes once both tds have flipped. The rebuilt cntlr must
 	# re-attach the existing volumes with a bare `dmsetup create` — no
@@ -2078,15 +2078,20 @@ case_thinbm() {
 		"thinbm rebuild: a created snapshot was re-created by message"
 	assert_absent "$seq" "^dmsetup suspend" \
 		"thinbm rebuild: nothing needed quiescing"
-	# U5-T1, from the other side: scoped to this stage's trace, the converge
-	# activates dm devices and issues no `dmsetup message` at all. The
-	# event stream above already says so; this says it through the §9 helper
-	# every other "what did that converge actually change" assertion uses.
+	# U5-T1 as amended by update_05.md U3: the rebuild re-creates the pool
+	# device, so the activation sweep runs — its reserve/release pair is
+	# the only `dmsetup message` traffic, and nothing changes the device
+	# set (no create_thin, no create_snap, no delete; the bitmap proof
+	# below is what shows the bare creates attached the existing ids).
 	muts=$(helper "$cn" "mutations $TRACE")
 	[ -n "$(event_line "$muts" '^dmsetup create ')" ] ||
 		die "thinbm rebuild: the converge activated no dm device"
-	assert_absent "$muts" "^dmsetup message" \
-		"thinbm rebuild: the converge mutated pool metadata"
+	assert_absent "$muts" "^dmsetup message .* delete" \
+		"thinbm rebuild: the sweep deleted a live id"
+	assert_eq "$(event_cnt "$muts" '^dmsetup message .* reserve_metadata_snap$')" 1 \
+		"thinbm rebuild: one sweep reservation"
+	assert_eq "$(event_cnt "$muts" '^dmsetup message .* release_metadata_snap$')" 1 \
+		"thinbm rebuild: one sweep release"
 	# The mapping proof: both bitmaps read exactly what they read before the
 	# teardown, so the bare `dmsetup create` attached the *existing* ids —
 	# not a fresh, empty volume under the same dev_id.

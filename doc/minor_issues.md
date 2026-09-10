@@ -11,7 +11,9 @@ amendment pass fixed the substantive stale passages (recorded in
 
 The four findings that needed a real doc-or-code **decision** are
 deliberately NOT here — they are decided and specified in `update_05.md`
-(U1–U4, code pending): gateway trace-id minting
+(U1–U4) and implemented: the code landed 2026-09-09, together with the
+companion-document amendments that file's §1 lists. Each is described
+below as it was found: gateway trace-id minting
 (gateway.md §0 #6 claims it; nothing implements it, and
 `cmd/dnv-gateway/main.go:179` / `common/log.go:49` assert it as fact), the
 standby ana_state probe (cnagent.md CN11/CN28 and architecture.md §9.5 claim
@@ -143,11 +145,14 @@ references are `file:line` as of 2026-09-09.
 * **DR13** — §5.4's "bumps SpRev + the leg DNs' revs itself" omits the
   cntlr CNs' `CnRev` bumps (`model/ops.go` `chargeSpCns` → `BumpCnRev`;
   architecture.md §8.5 lists them).
-* **DR14** — §5.4's "§6.5 black-list seed" pre-read (and architecture.md
-  §6.5's "black list starts with all DNs already hosting a leg of that
-  group"): the gateway passes an **empty** seed
+* **DR14** — architecture.md §6.5's "black list starts with all DNs already
+  hosting a leg of that group": the gateway passes an **empty** seed
   (`gateway/storagepool.go:1106-1112`, matching the worker's AR6 rule), and
-  §6.5's sentence is vacuous for a brand-new group. Both phrasings mislead.
+  §6.5's sentence is vacuous for a brand-new group — the phrasing misleads.
+  The gateway.md §5.4 half of this item — its "§6.5 black-list seed"
+  pre-read — is **struck (2026-09-09)**: update_05.md U4 replaced that
+  clause with the request's own black list seeding the §6.5 scan
+  empty-plus-request-entries. The architecture.md §6.5 half stays open.
 * **DR15** — §5.8's "put the chunk at `bm_idx = slice_idx`" reads as
   replace; §8.9 and the code **append** (`gateway/clone.go:526-545`).
 * **DR16** — §10.6's row "CN size | fakeagent default (0)": the fakeagent

@@ -37,6 +37,11 @@ func (s *CnAgentServer) syncupCntlr(
 		st = newCntlrState(req)
 	}
 	st.req = req
+	// U3: this request came through the revision gate, so GateRevision makes
+	// it the newest desired state this cntlr has ever accepted and its
+	// td_list is authoritative — the one copy the activation sweep may
+	// delete against (update_05.md U3 point 4).
+	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
 	info := s.convergeCntlr(ctx, st)
@@ -239,6 +244,10 @@ func (s *CnAgentServer) retire(
 		st.tracker.Drop(resKeyOf(resKeyPoolFmt, sp.sliceId))
 		st.tracker.Drop(resKeyOf(resKeyPoolMetaFmt, sp.sliceId))
 		st.tracker.Drop(resKeyOf(resKeyPoolDataFmt, sp.sliceId))
+		// The pool device's life ends here, so its arming does too: a later
+		// re-creation re-arms on its own Create branch, and dropping the
+		// entry keeps the map from carrying dead slices (update_05.md U3).
+		delete(st.pendingSweep, sp.sliceId)
 	}
 
 	// (8) group devices — `mdadm --stop` for arrays, `dmsetup remove` for
@@ -405,6 +414,24 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			poolReady[sp.sliceId] = s.ensureSlice(ctx, st, plan, sp, info)
+		}
+		// U3: CN14's activation sweep, for every slice whose pool device this
+		// incarnation just created (update_05.md U3 points 2 and 4). A
+		// startup reconcile arms and skips — its persisted request may lag
+		// the pool, and deleting against a lagging td_list would destroy a
+		// live td; the first post-boot SyncupCntlr then finds the flag still
+		// set — its own ensurePool probe-matches the surviving device and
+		// arms nothing — and sweeps with the fresh, revision-gated td_list.
+		// Sweeping here, before the pre-pass and the thin loop below, also
+		// frees the strays' blocks before anything allocates, and a stray can
+		// never collide with a new id (dev_ids are never reused).
+		for _, sp := range plan.slices {
+			if !poolReady[sp.sliceId] {
+				continue
+			}
+			if st.reqFromRpc && st.pendingSweep[sp.sliceId] {
+				s.sweepThinIds(ctx, st, plan, sp)
+			}
 		}
 	} else if plan.primary {
 		for _, sp := range plan.slices {
@@ -857,6 +884,10 @@ func (s *CnAgentServer) teardownCntlrResources(
 		s.removeDm(ctx, sp.poolMetaName)
 		s.removeDm(ctx, sp.poolDataName)
 	}
+	// Every pool device of this cntlr is gone, so no slice is sweep-pending
+	// any more; a re-creation re-arms on its own Create branch (update_05.md
+	// U3).
+	clear(st.pendingSweep)
 	for _, gp := range plan.grps {
 		s.removeGroup(ctx, gp)
 	}

@@ -266,7 +266,12 @@ Two subcommands so the integration suite can play the worker (§0 #12):
   grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()))`;
   `pb.RegisterGatewayServer`; a goroutine doing `<-ctx.Done();
   grpcServer.GracefulStop()`; an Info `"gateway serving"` record with
-  `network`/`address`; then `grpcServer.Serve(lis)`.
+  `network`/`address`; then `grpcServer.Serve(lis)`. The server chain is the
+  gateway-local `ensureTraceId` interceptors followed by the §4 chains: when
+  the incoming metadata carries no `trace_id`, the first interceptor injects
+  `common.NewTraceId()` into the incoming metadata, so §0 #6's mint happens
+  upstream of the shared interceptors and `common/interceptor.go` stays the
+  grpc.md §3 reference verbatim (update_05.md U1).
 * **GW3** Shutdown is `GracefulStop`: in-flight handlers finish (each bounded
   by its client deadline and the 10 s per-STM budget), new requests are
   refused. There is nothing else to drain — no registry key to delete, no
@@ -316,13 +321,17 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | §7 violation, malformed `page_token`, bad enum/oneof | `INVALID_ARGUMENT` |
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
-  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); meta ladder cap; `Append*Bitmap` count caps | `RESOURCE_EXHAUSTED` |
+  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included — update_05.md U4) | `FAILED_PRECONDITION` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `Append*Bitmap` count caps | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; agent gRPC failure where the RPC says so | `ABORTED` |
 
   `model.ErrNotFound` (from `LoadSp`) maps to `NOT_FOUND`;
   `ErrPrecondition{Reason: "candidate changed"}` maps to nothing — see GW9.
+
+  The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
+  freed or extended (extents, candidates, count ceilings);
+  `FAILED_PRECONDITION` is the object's own state forbidding the operation.
 * **GW8 — one STM per RPC** (§5.8). Everything computable beforehand (name
   formatting, group plans, candidate lists, the stamped `creation_epoch`) is
   prepared outside; all reads and writes commit in one `RunSTM`. The closure
@@ -477,9 +486,11 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   map.
 * **GrowSlice** — validate the §8.5 exclusivity (`is_meta==false ⇒
   ext_cnt>0`, `is_meta==true ⇒ ext_cnt==0` ⇒ else `INVALID_ARGUMENT`).
-  Plain pre-reads for planning (slice's current meta total for
-  `model.MetaLadderExtCnt` — cap reached ⇒ `RESOURCE_EXHAUSTED` — and the
-  §6.5 black-list seed); candidate unit; then call the amended
+  Plain pre-reads for planning (the slice's current meta total for
+  `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`,
+  update_05.md U4 — and the request's own black list, which seeds the §6.5
+  scan empty-plus-request-entries, growing only with this group's picks);
+  candidate unit; then call the amended
   `model.GrowSlice(…, expectRev = token)` (§2.2 #3) which re-validates
   in-STM and bumps SpRev + the leg DNs' revs itself. The gateway passes
   `poolTotal = math.MaxUint64`: the AR6 pending rule gates only the worker's

@@ -561,18 +561,27 @@ CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
       outcome; before any completion ⇒ `RES_STATUS_OK`
       `"health probe pending"` when the wrapper exists. A **standby** (and
       spare legs on it) reports the transport probe instead:
-      the sysfs walk of §5 shows a live controller per desired side with the
-      expected ana_state. Probers start when the wrapper converges
-      and are cancelled at teardown; a goroutine wedged in D state on a
-      pathless leg is released by the teardown's own disconnect (deleting
-      the controller errors its queued IO) and is accepted as unreclaimable
-      until then. Because that wedged probe holds an **open fd on the leg
-      wrapper**, the teardown order is cancel the prober → **disconnect the
-      leg** → remove the wrapper (CN21): a `dmsetup remove` issued before the
-      disconnect fails EBUSY. Cancellation is never a join — the direct read
-      is uninterruptible, so waiting for it would hang shutdown forever
-      (§2.2, `dnagent.md` SH27). A wedged prober costs nothing else: it holds
-      no lock (CN1) and no `OsClient` slot (§2.2).
+      the sysfs walk of §5 shows a live controller per desired
+      (provisioned) side and, **for a leg with exactly one desired side**,
+      an `ana_state` of `optimized` or `non-optimized` — `non-optimized` is
+      a standby path's designed steady state (the DN grants the optimized
+      group to the primary CN alone) and `optimized` the pre-promote window
+      after the DN's flip, while `inaccessible`, or any state the DN never
+      sets, cannot serve a promote and reports `RES_STATUS_ERROR`. A leg
+      whose `side_list` holds two sides (a migration, CN10) is checked for
+      liveness only: its ANA is wrong-by-design for the hydration and the
+      phase is the DN's knowledge, not this CN's (update_05.md U2). Probers
+      start when the wrapper converges and are cancelled at teardown; a
+      goroutine wedged in D state on a pathless leg is released by the
+      teardown's own disconnect (deleting the controller errors its queued
+      IO) and is accepted as unreclaimable until then. Because that wedged
+      probe holds an **open fd on the leg wrapper**, the teardown order is
+      cancel the prober → **disconnect the leg** → remove the wrapper
+      (CN21): a `dmsetup remove` issued before the disconnect fails EBUSY.
+      Cancellation is never a join — the direct read is uninterruptible,
+      so waiting for it would hang shutdown forever (§2.2, `dnagent.md`
+      SH27). A wedged prober costs nothing else: it holds no lock (CN1) and
+      no `OsClient` slot (§2.2).
 
 CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
       * RedundNone: the group device is `CnGrpName`, a dm-linear over the
@@ -763,8 +772,33 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
 
       A td leaving `td_list` is **deleted**: remove its
       namespaces'/raid0/error devices (they reference it), remove the thin
-      volume devices, then `delete {dev_id}` message per slice pool. A
-      cntlr teardown (CN21) instead only **deactivates** — it removes the
+      volume devices, then `delete {dev_id}` message per slice pool.
+
+      The message is sent only while this cntlr holds the pool
+      (`plan.wantPool`, and the device present): a standby has no pool
+      device and only the primary may write pool metadata. The fan-outs
+      where that skips every cntlr (demote+delete coalesced into one
+      revision, a delete at a pool-suppressing `sp_level`, a
+      failover+delete race) are healed by the **activation sweep**:
+      creating a slice's pool device arms the sweep, and the first converge
+      whose request arrived by the revision-gated RPC then enumerates the
+      pool's device ids through the CN25 reserve → `thin_dump` → release
+      machinery and deletes every id not in `td_list`'s dev_ids — correct
+      because the RPC request is the newest accepted desired state, dev_ids
+      are never reused and thin ids belong to tds alone. An agent restart
+      under a surviving pool device does not sweep (nothing else writes the
+      pool, and the CN2 zero-mutation reconcile stays intact), and a
+      startup reconcile that *re-creates* the device (a node reboot) arms
+      but does not run it: it converges from the persisted request, which
+      may lag the pool's true contents (the converge runs before the
+      persist and a failed persist is only logged), and deleting against a
+      lagging `td_list` would destroy a live td — the first revision-gated
+      `SyncupCntlr` after boot runs the sweep instead. A sweep failure is
+      logged and retried on later converges until it succeeds once; a stray
+      surviving a crash between creation and sweep, or a failed `delete`
+      message, is collected at the pool's next rebuild (update_05.md U3).
+
+      A cntlr teardown (CN21) instead only **deactivates** — it removes the
       devices and sends no `delete` message, because the pool metadata
       lives on the DN legs and the next hosting CN must find the thin
       volumes intact.
@@ -1083,7 +1117,11 @@ CN25. Both serve the §8.13 gateway reads from a **dm-thin metadata
       The §7 command timeouts bound the dump; a pool whose metadata
       outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails the
       RPC, and the caller falls back to a full copy — bitmaps are an
-      optimization, never a correctness input (§8.9).
+      optimization, never a correctness input (§8.9). The activation sweep
+      of CN14 shares this reservation machinery and its `CmdSoftTimeout`
+      bound — metadata too large to dump inside the bound fails the sweep
+      the same way it fails a bitmap read, and the sweep retries on later
+      converges.
 
 CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
       bitmap of the td's thin volume (`dev_id` looked up in the stored
@@ -1144,7 +1182,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
 | `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: `mdadm --detail` — active (degraded included) ⇒ OK with the state/rebuild line in `details`; RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
-| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary) / transport + ana_state per desired side, from sysfs (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
+| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11, update_05.md U2) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
 | `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here (`update_01.md` U5) |
 | `clone_id_to_dm_clone[c]` | `CnCloneFinalName` | `dmsetup status`; `details` carries the raw status line (§9.5 — hydration progress; `DeleteClone`'s force check reads it). `RES_STATUS_ERROR` `"metadata wrapper missing"` when the arena could not supply the slot (CN18 step 2) |
@@ -1505,6 +1543,51 @@ client — no root, no real devices.
     holds records the `create_snap` unquiesced, the `dmsetup create` behind
     it fails, the row reads `ERROR`, and the next converge sends the message
     again — the td is still `created = false`.
+24. **A standby leg's `ana_state`** (CN11/CN28, `update_05.md` U2,
+    `TestTransportHealthAnaState`): a table over `transportHealth`. On a leg
+    with **one** desired side, a live controller reading `optimized` or
+    `non-optimized` ⇒ `RES_STATUS_OK` (`non-optimized` is the designed
+    steady state, so this is the case that must not regress), while
+    `inaccessible` or a state the DN never sets (`change`) ⇒
+    `RES_STATUS_ERROR` with `"unpromotable"` in `details`. On a leg with
+    **two** sides (a migration, CN10) an `inaccessible` side is still `OK`:
+    ANA is not judged there at all. The pre-existing rows are unchanged — a
+    non-`live` controller and a missing controller are `ERROR` whatever the
+    ana_state — and no `OK` row ever calls a path unpromotable.
+25. **The thin-id activation sweep** (CN14/CN25, `update_05.md` U3;
+    `agent/cnagent/sweep_test.go`, scripted `thin_dump` through
+    `RunCommandFn` exactly as test 14 does, pool messages asserted by
+    `callsMatching` counts). Six cases:
+    * `TestRetireSkipsThinDeleteWithoutPool` — the long-missing CN14 pin and
+      the leak U3 heals: a primary converge holding td X, then one converge
+      that both demotes to standby and drops X ⇒ **zero** `delete` messages
+      and the pool devices removed, with X's dev_id left charged against the
+      pool metadata on the legs.
+    * `TestActivationSweepDeletesStrays` — a standby→primary converge takes
+      the pool Create branch; the scripted dump lists {stray S, the live
+      td's dev_id Y} ⇒ exactly one `delete S`, zero `delete Y`,
+      `reserve_metadata_snap` before `thin_dump --metadata-snap` before
+      `release_metadata_snap` and no leaked reservation. A second identical
+      converge probe-matches the device and runs **no** `thin_dump` (the
+      count stays 1): once per pool-device creation, not per converge.
+    * `TestRestartDoesNotSweep` — a reconcile over an already-existing pool
+      device (probe-matched, no Create) ⇒ zero `thin_dump`, zero
+      `reserve_metadata_snap`, and a baited stray still in the pool: the
+      case-D zero-mutation invariant (CN2/SH16) survives.
+    * `TestSweepFailureRetries` — a scripted `thin_dump` error ⇒ no deletes
+      and converge rows unaffected (the pool row still `OK`); the next
+      converge scripts success and the sweep completes.
+    * `TestSweepSurvivesDeleteFailure` — a scripted dump with a stray whose
+      `delete` message fails ⇒ the slice stays armed and the next converge
+      retries and succeeds.
+    * `TestStartupReconcileDefersSweep` — the data-loss pin: a persisted
+      primary request whose `td_list` holds only td A, no pool device (the
+      reboot shape), and a dump listing {A, B, stray S}. `Reconcile` creates
+      the device and runs **zero** `reserve_metadata_snap`/`thin_dump` calls
+      and zero `delete`s (armed, not run); a later `SyncupCntlr` at a higher
+      revision whose `td_list` holds A and B then runs exactly one
+      `thin_dump`, exactly one `delete S`, and **no** `delete` for B — the
+      id the stale persisted copy had forgotten.
 
 ## 7. Acceptance checklist
 

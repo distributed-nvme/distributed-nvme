@@ -69,14 +69,35 @@ func NewServer(cli *etcdutil.Client) *Server {
 	return &Server{cli: cli}
 }
 
+// serverOptions is the option set Run's grpc.Server is built from, factored
+// out so a test can build a server with exactly the production chain
+// (update_05.md U1, gateway.md §9.5).
+//
+// The trace-id mint is FIRST in both chains, upstream of the shared chain of
+// grpc.md §4, and that order is the whole mechanism: it injects the id into
+// the INCOMING metadata, so common's interceptor adopts it exactly as it
+// adopts a client-supplied one and its own request/reply records — the first
+// records of the request — already carry it. Minting inside the handlers
+// instead would leave those two records, and everything the shared chain
+// logs, id-less.
+func serverOptions() []grpc.ServerOption {
+	return []grpc.ServerOption{
+		grpc.ChainUnaryInterceptor(
+			ensureTraceIdUnary(), common.GrpcUnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(
+			ensureTraceIdStream(), common.GrpcStreamServerInterceptor()),
+	}
+}
+
 // Run serves the Gateway service until ctx is canceled (GW2, GW3).
 //
-// It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying both
-// interceptor chains of grpc.md §4, a goroutine that turns ctx cancellation
-// into GracefulStop, and Serve. Shutdown is GracefulStop and nothing else:
-// in-flight handlers finish (each bounded by its client deadline and the 10 s
-// per-STM budget of EU5), new requests are refused, and there is nothing to
-// drain — no registry key to delete, no background loop to stop (§0 #3).
+// It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying
+// serverOptions' two interceptor chains (grpc.md §4, behind U1's trace-id
+// mint), a goroutine that turns ctx cancellation into GracefulStop, and
+// Serve. Shutdown is GracefulStop and nothing else: in-flight handlers
+// finish (each bounded by its client deadline and the 10 s per-STM budget of
+// EU5), new requests are refused, and there is nothing to drain — no
+// registry key to delete, no background loop to stop (§0 #3).
 //
 // Run closes cli as the last step of its drain, so cmd/dnv-gateway does not
 // (CM3). Startup never fails because etcd is unreachable: etcdutil.New dials
@@ -103,10 +124,7 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	grpcServer := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
-		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
+	grpcServer := grpc.NewServer(serverOptions()...)
 	pb.RegisterGatewayServer(grpcServer, NewServer(cli))
 	go func() {
 		<-ctx.Done()

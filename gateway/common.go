@@ -53,8 +53,11 @@ func errPrecondition(format string, args ...any) error {
 }
 
 // errExhausted is a cardinality ceiling: the Max*CntPerCluster / Max*CntPerSp
-// gates, "too few candidates" (§6.5), the meta ladder cap and the
-// Append*Bitmap count caps.
+// gates, "too few candidates" (§6.5) and the Append*Bitmap count caps. GW7's
+// dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be freed
+// or extended, FAILED_PRECONDITION the object's own state forbidding the
+// operation — which is why the meta ladder cap left this list for
+// errPrecondition (update_05.md U4).
 func errExhausted(format string, args ...any) error {
 	return status.Errorf(codes.ResourceExhausted, format, args...)
 }

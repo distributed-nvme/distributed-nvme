@@ -1253,9 +1253,10 @@ func TestAgentPathForceFalseRefusesUnreachableAgent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // servingCapture records what the innermost server interceptor sees. It is
-// chained AFTER common.GrpcUnaryServerInterceptor, so a trace id here can
-// only have been put into the ctx by that interceptor (T2) — which is how
-// this file proves the chain is wired without asserting on log output.
+// chained AFTER the production chain of serverOptions(), so a trace id here
+// can only have been put into the ctx by common.GrpcUnaryServerInterceptor
+// (T2) — which is how this file proves the chain is wired without asserting
+// on log output.
 type servingCapture struct {
 	mu       sync.Mutex
 	traceIds []string
@@ -1285,35 +1286,51 @@ func (c *servingCapture) seen() ([]string, []string) {
 		append([]string(nil), c.methods...)
 }
 
-// servingBufconn serves one gateway over bufconn with the grpc.md §4 chains
-// Run installs, and returns a client dialed with the matching client chains.
-// bufconn is deliberate: §9.5 is about the interceptors and the status codes,
-// not about sockets, and an in-memory pipe removes every port from the test.
+// servingBufconnServe puts srv behind a bufconn listener built from exactly
+// the production option set — serverOptions(), so U1's trace-id mint and the
+// grpc.md §4 chains under test are the ones Run installs, in the order Run
+// installs them — plus any extra option the caller chains behind them, and
+// returns the dialer that reaches it. bufconn is deliberate: §9.5 is about
+// the interceptors and the status codes, not about sockets, and an in-memory
+// pipe removes every port from the test.
+//
+// The dial is the caller's rather than this helper's because the two callers
+// need opposite clients: §9.5's client carries the mandatory client chains,
+// U1's carries none at all (traceid_test.go).
+func servingBufconnServe(
+	t *testing.T,
+	srv *Server,
+	extra ...grpc.ServerOption,
+) func(context.Context, string) (net.Conn, error) {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	server := grpc.NewServer(append(serverOptions(), extra...)...)
+	pb.RegisterGatewayServer(server, srv)
+	go func() {
+		_ = server.Serve(lis)
+	}()
+	t.Cleanup(func() {
+		server.Stop()
+		_ = lis.Close()
+	})
+	return func(ctx context.Context, _ string) (net.Conn, error) {
+		return lis.DialContext(ctx)
+	}
+}
+
+// servingBufconn serves one gateway over bufconn with the chains Run
+// installs, and returns a client dialed with the matching client chains.
 func servingBufconn(
 	t *testing.T,
 	srv *Server,
 ) (pb.GatewayClient, *servingCapture) {
 	t.Helper()
-	lis := bufconn.Listen(1024 * 1024)
 	capture := &servingCapture{}
-	server := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			common.GrpcUnaryServerInterceptor(),
-			capture.interceptor(),
-		),
-		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),
-	)
-	pb.RegisterGatewayServer(server, srv)
-	go func() {
-		_ = server.Serve(lis)
-	}()
+	dialer := servingBufconnServe(
+		t, srv, grpc.ChainUnaryInterceptor(capture.interceptor()))
 	conn, err := grpc.NewClient(
 		"passthrough:///bufnet",
-		grpc.WithContextDialer(
-			func(ctx context.Context, _ string) (net.Conn, error) {
-				return lis.DialContext(ctx)
-			},
-		),
+		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(common.GrpcUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(common.GrpcStreamClientInterceptor()),
@@ -1321,10 +1338,10 @@ func servingBufconn(
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	// Cleanups run last-in-first-out, so the conn closes before
+	// servingBufconnServe's Stop tears the server down under it.
 	t.Cleanup(func() {
 		_ = conn.Close()
-		server.Stop()
-		_ = lis.Close()
 	})
 	return pb.NewGatewayClient(conn), capture
 }

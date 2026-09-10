@@ -59,7 +59,7 @@ decision, not an assumption.
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
 | R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `vol` subcommands show the field once `ctl/` lands. |
-| R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero pool messages with `created = true`. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
+| R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the update_05.md U3 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
 
 ---
 
@@ -540,7 +540,12 @@ higher revision and the CN8 gate is satisfied by step 3.
 
 **U5-T1** Case B passes end to end on the two-VM lab, including the new
 stage; `mutations()` over the rebuild syncup's trace contains `dmsetup
-create` lines and no `dmsetup message` line.
+create` lines and, of `dmsetup message`, exactly the activation sweep's
+`reserve_metadata_snap`/`release_metadata_snap` pair — no `create_thin`, no
+`create_snap`, no `delete` (update_05.md U3: the rebuild re-creates the pool
+device, a designed sweep trigger — the drop's teardown sent no deletes, so a
+td removed while the cntlr was down is healed exactly here; the bitmap proof
+below is what shows the bare creates attached the existing ids).
 
 ---
 
@@ -692,8 +697,10 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
 3. The six retained snapshot tests still pass unmodified in their
    assertions; U4-T1 through U4-T5 exist and pass.
 4. `integtest/cnagent_test.sh` case B passes with the rebuild step, and the
-   rebuild syncup's `mutations()` output contains no `dmsetup message`
-   (U5-T1).
+   rebuild syncup's `mutations()` output contains, of `dmsetup message`,
+   exactly the activation sweep's `reserve_metadata_snap`/
+   `release_metadata_snap` pair — no `create_thin`, no `create_snap`, no
+   `delete` (U5-T1 as amended by update_05.md U3).
 5. The companion documents carry the §8 amendments, each citing
    `ThinDeviceCreated.md U*n*`. `gateway/` and `worker/` have since landed
    with U2/U3 implemented, and gateway.md §9 / dnv-worker.md §13 — their

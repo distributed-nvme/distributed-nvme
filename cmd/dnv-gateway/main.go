@@ -178,8 +178,8 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// The startup trace id. Every REQUEST gets its own — the server
 	// interceptor adopts the caller's when there is one and gateway.Run's
-	// handlers mint one otherwise (§0 #6, grpc.md T4) — so this id only ever
-	// labels the process's own lifecycle records.
+	// server chain mints one otherwise (gateway/traceid.go; §0 #6, grpc.md
+	// T4) — so this id only ever labels the process's own lifecycle records.
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
 
 	ctx, cancel := context.WithCancel(ctx)
