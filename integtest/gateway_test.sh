@@ -3780,6 +3780,7 @@ case_faults() {
 	local out spId slice dataGrp dataLeg metaLeg srcSide dstSide
 	local primary cntlrId cnAddr cnDir cnId cloneId migrId
 	local dnAddr dnDir dnId spare nonPrimary
+	local forceCloneId forceMigrId forceDstSide forceDnAddr forceDnDir
 
 	# -----------------------------------------------------------------
 	stage 0 "fixture: the cluster, the nodes and a live sp0 with objects"
@@ -4049,7 +4050,11 @@ case_faults() {
 	# dm-clone with regions still unhydrated silently loses every byte that
 	# was never pulled from the source, so an incomplete status line, an
 	# unparseable one and an unreachable agent are all "not proven" — the
-	# same FAILED_PRECONDITION, deliberately.
+	# same FAILED_PRECONDITION, deliberately. force = true is the other half
+	# of the same rule and is proved here too (§10.14 step 5's last clause):
+	# an operator whose agent is never coming back must still be able to
+	# delete the clone and finish the migration, so each RPC is driven twice
+	# against a STOPPED agent — refused unforced, committed forced.
 
 	# --- DeleteClone, on the PRIMARY cntlr's CN.
 	cnDir=$(faults_cn_dir "$cnAddr")
@@ -4090,6 +4095,44 @@ case_faults() {
 		"cl0: it left clone_name_list too"
 	assert_field "$(gw get-sp --sp sp0)" '.sp_conf.clone_name_list | length' \
 		"0" "get-sp read-back agrees the clone is gone"
+
+	# --- DeleteClone with force = true, against the SAME stopped CN.
+	# The other half of §8.9: force is not a shortcut past a proof that
+	# could be waited for, it is the only exit when the proof can never
+	# arrive — a clone whose primary's CN is gone for good. cl0 was spent on
+	# the refusals above, so the override needs a clone of its own; t1 is a
+	# free destination again now that cl0 is deleted.
+	out=$(gw create-clone --sp sp0 --rev "$SP_REV" --name cl-force \
+		--dst-td t1 --src-nqn "$NQN_PREFIX:src0" --src-idx 1 \
+		--src-slices 1 --src-stripe 65536 --src-block 1048576)
+	refresh_rev sp0
+	forceCloneId=$(jq_of "$out" '.clone_id')
+	assert_ne "$forceCloneId" "0" "cl-force: create-clone returned an id"
+	sig_dir "$cnDir" TERM
+	wait_gone "$cnDir" "$WAIT_SHORT"
+	# The pairing is what §10.14 step 5's last clause asks for: in the very
+	# same stopped state, force = false still refuses…
+	assert_no_write "delete-clone of cl-force unforced, the CN stopped" \
+		faults_gwx_out FAILED_PRECONDITION delete-clone --sp sp0 \
+		--rev "$SP_REV" --name cl-force
+	assert_field "$FAULTS_OUT" '.message | test("hydration is unproven")' \
+		"true" "cl-force: unforced, the stopped CN is still unproven"
+	# … and force = true commits anyway, because AG1's GetCntlrInfo is
+	# SKIPPED rather than attempted and forgiven — phase 1 does not even
+	# resolve the primary, so an unreachable CN cannot fail the call.
+	out=$(gw delete-clone --sp sp0 --rev "$SP_REV" --name cl-force --force)
+	assert_field "$out" '.clone_id' "$forceCloneId" \
+		"delete-clone --force returns cl-force's id"
+	refresh_rev sp0
+	out=$(sp_json sp0)
+	# Ground truth, not the reply code: the override must COMMIT.
+	assert_field "$out" '.clones | length' "0" \
+		"cl-force: --force deleted the Clone key with the CN unreachable"
+	assert_field "$out" '.sp_conf.clone_name_list | length' "0" \
+		"cl-force: it left clone_name_list too"
+	start_fake cn "$cnDir" "$cnAddr" "--size 0"
+	wait_until "$WAIT_SHORT" "$cnDir's port to listen again" ports_up \
+		"${cnAddr##*:}"
 
 	# --- FinishMigration, on the DESTINATION side's DN.
 	dnAddr=$(faults_side_addr sp0 "$dstSide")
@@ -4137,6 +4180,55 @@ case_faults() {
 		"m0: it left migr_name_list too"
 	assert_field "$(gw get-sp --sp sp0)" '.sp_conf.migr_name_list | length' \
 		"0" "get-sp read-back agrees the migration is gone"
+
+	# --- FinishMigration with force = true, against the SAME stopped DN.
+	# §8.11's override, for the migration whose destination DN will never
+	# answer again. m0 is spent, so it gets a migration of its own: the leg
+	# m0 just finished on carries exactly one side again — m0's destination —
+	# and §8.11 refuses only a leg that already has two, so that survivor is
+	# a legal source for a second migration.
+	out=$(gw create-migr --sp sp0 --rev "$SP_REV" --name m-force \
+		--src-side "$dstSide")
+	refresh_rev sp0
+	forceMigrId=$(jq_of "$out" '.migr_id')
+	forceDstSide=$(jq_of "$(gw get-migr --sp sp0 --name m-force)" \
+		'.migr.dst_side_id')
+	assert_ne "$forceDstSide" "$dstSide" \
+		"m-force: the destination is a new side"
+	# The gateway picks the destination DN itself (§6.5), so which fake to
+	# stop is only knowable from the stored side.
+	forceDnAddr=$(faults_side_addr sp0 "$forceDstSide")
+	forceDnDir=$(faults_dn_dir "$forceDnAddr")
+	sig_dir "$forceDnDir" TERM
+	wait_gone "$forceDnDir" "$WAIT_SHORT"
+	# Same pairing as the clone above: unforced, the stopped destination
+	# leaves hydration unproven…
+	assert_no_write "finish-migr of m-force unforced, the dst DN stopped" \
+		faults_gwx_out FAILED_PRECONDITION finish-migr --sp sp0 \
+		--rev "$SP_REV" --name m-force
+	assert_field "$FAULTS_OUT" '.message | test("did not report hydration")' \
+		"true" "m-force: unforced, the stopped destination DN is unproven"
+	# … and forced, the GetSideInfo is skipped and the finish commits.
+	out=$(gw finish-migr --sp sp0 --rev "$SP_REV" --name m-force --force)
+	assert_field "$out" '.migr_id' "$forceMigrId" \
+		"finish-migr --force returns m-force's id"
+	refresh_rev sp0
+	out=$(sp_json sp0)
+	# Ground truth again: the src side is gone, the destination stands alone
+	# and the record is deleted, exactly as on the proven path (§8.11).
+	assert_field "$out" \
+		'.slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list | length' \
+		"1" "m-force: --force finished with the destination DN unreachable"
+	assert_field "$out" \
+		'.slices | to_entries[0].value.meta_grp_list[0].leg_list[0].side_list[0].side_id' \
+		"$forceDstSide" "m-force: the survivor is the destination"
+	assert_field "$out" '.migrs | length' "0" \
+		"m-force: the Migration key is gone"
+	assert_field "$out" '.sp_conf.migr_name_list | length' "0" \
+		"m-force: it left migr_name_list too"
+	start_fake dn "$forceDnDir" "$forceDnAddr" "--size $DN_SIZE"
+	wait_until "$WAIT_SHORT" "$forceDnDir's port to listen again" ports_up \
+		"${forceDnAddr##*:}"
 
 	# Leave every fake this case touched exactly as case_reset would: the
 	# next case wipes etcd but a stale behavior file would outlive it.

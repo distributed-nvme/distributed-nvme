@@ -1453,6 +1453,138 @@ func TestSpProvisionedFlipReported(t *testing.T) {
 	}
 }
 
+// TestSpCreatedFlipFromACheckRound is RW19 end to end over the Check stream,
+// on the path a deferred slice takes. Every round asks for NO info at all
+// (RW4 step 2 sends show_info = false); it is the agent that attaches the
+// CntlrInfo whenever a resource changed status (§9.7), and a thin row moving
+// PROVISIONING → OK as the last deferred slice clears ([D15]) is such a
+// change. So the flip has to run off exactly this reply: a worker that waited
+// for a show_info round would leave the td uncreated — and every snapshot of
+// it refused — until some unrelated resource happened to move.
+func TestSpCreatedFlipFromACheckRound(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	var mu sync.Mutex
+	rounds := 0
+	cleared := false
+	asked := false
+	h.cntlrs[spCnA].checkReply = func(
+		req *pb.CheckCntlrRequest,
+	) *pb.CheckCntlrReply {
+		mu.Lock()
+		rounds++
+		asked = asked || req.GetShowInfo()
+		deferred := !cleared
+		mu.Unlock()
+		row := resOk("thin-b")
+		if deferred {
+			row = resStatus("thin-b", pb.ResStatus_RES_STATUS_PROVISIONING)
+		}
+		return &pb.CheckCntlrReply{
+			Revision: req.GetRevision(),
+			CntlrInfo: &pb.CntlrInfo{
+				TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+					spTdOpen: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+						spSliceA: resOk("thin-a"),
+						spSliceB: row,
+					}},
+				},
+			},
+		}
+	}
+	h.start()
+
+	// The negative has to be gated on the deferred reply having been FOLDED
+	// AND OBSERVED, not merely sent: the round loop is sequential — RW4 step
+	// 2 issues the next request only after step 5 processed the previous
+	// reply — so a SECOND round is that evidence, while the arrival of the
+	// first request at the stub says nothing yet about how a PROVISIONING row
+	// was treated. The first round of every child delivers its reply with no
+	// clock advance; the second one needs the round timer.
+	h.advanceUntil("a round after the deferred slice", roundInterval,
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return rounds > 1
+		})
+	if got := len(h.ops.createdCalls()); got != 0 {
+		t.Fatalf("%d FlipCreated calls while a slice is PROVISIONING", got)
+	}
+	mu.Lock()
+	cleared = true
+	mu.Unlock()
+	h.advanceUntil("created flip", roundInterval, func() bool {
+		return len(h.ops.createdCalls()) > 0
+	})
+
+	calls := h.ops.createdCalls()
+	if len(calls[0]) != 1 || calls[0][0].TdId != spTdOpen ||
+		calls[0][0].Name != "td0" {
+		t.Fatalf("flip batch = %v, want the uncreated td", calls[0])
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if asked {
+		t.Fatalf("a round asked for show_info; the flip must not depend on it")
+	}
+}
+
+// TestSpCreatedFlipIgnoresTheReplyRevision is RW19's "the reply's revision is
+// deliberately not compared with anything": a Check reply from a cntlr that
+// still holds an OLDER revision than the one the worker is driving flips every
+// td whose rows it reports complete, and the round then syncs the cntlr up
+// (RW4 step 5) as it would for any mismatch. Thin ids are monotonic facts
+// about the shared pool metadata, so a row that is OK at an older revision
+// stays OK; identity is guarded by the td_id re-read inside the flip's own STM
+// (R3), never by the revision of the reply that reported it.
+func TestSpCreatedFlipIgnoresTheReplyRevision(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	// The syncup the mismatch forces answers with an EMPTY CntlrInfo, which
+	// replaces the stored one (HL5). Without that, its reply would be
+	// observed against the Check reply's info and the flip below could not be
+	// attributed to the older-revision reply alone.
+	h.cntlrs[spCnA].syncupReply = func(
+		req *pb.SyncupCntlrRequest,
+	) *pb.SyncupCntlrReply {
+		return &pb.SyncupCntlrReply{
+			Revision:  req.GetRevision(),
+			CntlrInfo: &pb.CntlrInfo{},
+		}
+	}
+	h.cntlrs[spCnA].checkReply = func(
+		req *pb.CheckCntlrRequest,
+	) *pb.CheckCntlrReply {
+		return &pb.CheckCntlrReply{
+			// One revision behind the SP the coordinator is driving.
+			Revision: testSpRev - 1,
+			CntlrInfo: &pb.CntlrInfo{
+				TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+					spTdOpen: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+						spSliceA: resOk("thin-a"),
+						spSliceB: resOk("thin-b"),
+					}},
+				},
+			},
+		}
+	}
+	h.start()
+
+	waitFor(t, "created flip from the older-revision reply", func() bool {
+		return len(h.ops.createdCalls()) > 0
+	})
+	calls := h.ops.createdCalls()
+	if len(calls[0]) != 1 || calls[0][0].TdId != spTdOpen {
+		t.Fatalf("flip batch = %v, want the uncreated td", calls[0])
+	}
+	waitFor(t, "the syncup the older revision forces", func() bool {
+		return len(h.cntlrs[spCnA].syncups()) > 0
+	})
+	if got := h.cntlrs[spCnA].syncups()[0].GetRevision(); got != testSpRev {
+		t.Fatalf("syncup revision = %d, want the desired %d", got, testSpRev)
+	}
+}
+
 // TestSpLegRowsFromPrimaryOnly checks HL2: the PRIMARY's leg_id_to_leg rows are
 // recorded on the leg's slice, a STANDBY's are logged and never recorded, and
 // the cntlr's own health ignores leg rows entirely.

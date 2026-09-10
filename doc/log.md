@@ -34,8 +34,12 @@ R2. The handler chain is: `TraceIdHandler` (defined below) wrapping
     defaults except `Level` — see R6. (`Level` is the one deliberate deviation
     from "nil options"; it is required to satisfy the per-binary level rule.)
 
-R3. `common`'s `init()` calls `slog.SetDefault(...)` with that chain. Binaries do
-    not build their own loggers.
+R3. `common`'s `init()` calls `slog.SetDefault(...)` with that chain. The dnv
+    binaries of §1 do not build their own loggers. R2 and R3 bind those five
+    binaries only: the `integtest/` drivers are not dnv binaries, and three of
+    them re-install the same handler chain over `os.Stderr` because their
+    stdout carries the command result the suites parse — the carve-out is
+    recorded in `grpc.md` §6.
 
 R4. Every log call uses the context-aware form — `slog.InfoContext`,
     `slog.WarnContext`, `slog.ErrorContext` — and passes the request-scoped
@@ -47,7 +51,9 @@ R5. The trace id is carried in the context under an unexported key and injected
     into every record as attribute `trace_id` by `TraceIdHandler`. Access only
     through the exported helpers `WithTraceId` / `TraceIdFromCtx` (§3). The gRPC
     interceptors (`grpc.md`) move the trace id between context and gRPC
-    metadata; nothing else touches it.
+    metadata; nothing else touches it. On a logger derived with `WithGroup` the
+    attribute is nested inside that group rather than at the top level — see
+    R12 — so a consumer that greps `trace_id` positionally must account for it.
 
 R6. Log levels per binary:
 
@@ -108,7 +114,14 @@ R12. `TraceIdHandler` MUST override `WithAttrs` and `WithGroup` to re-wrap the
      returned inner handler. (Embedding alone forwards these calls to the inner
      handler and returns the *inner* type, so `logger.With(...)` would silently
      drop trace-id injection. This is a bug in the naive example; do not
-     reproduce it.)
+     reproduce it.) Injection happens in `Handle` via `r.AddAttrs`, i.e. as a
+     record attribute rather than a handler attribute, so on a logger derived
+     with `WithGroup(name)` the `trace_id` lands **inside** that group
+     (`{"grp":{"inner":"v","trace_id":"…"}}`) exactly as any other record
+     attribute does. That is slog's own grouping rule, not a defect, and
+     `TestDerivedLoggersKeepTraceId` pins it. dnv's own logging points never
+     open a group, so where a record carries `trace_id` it is at the top
+     level.
 
 ## 3. Constants to add to `constants.go`
 
@@ -129,6 +142,8 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -169,6 +184,17 @@ func TraceIdFromCtx(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	return traceId, true
+}
+
+// NewTraceId mints a new trace id. Entry points create one (dnvctl per CLI
+// invocation, dnv-worker per sync/health round, dnv-gateway for a request
+// that arrived without one); the interceptors never invent one (grpc.md T4).
+func NewTraceId() string {
+	var b [8]byte
+	// crypto/rand.Read never returns an error (it panics on failure since
+	// Go 1.24), so the result is always a full 8 random bytes.
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // ---------------------------------------------------------------------------
@@ -378,10 +404,19 @@ etcd keys in dnv are already human-readable space-joined strings
 | write | `etcd put` | `key`, `value` (`PbToLogValue` of the message being stored), `error?` |
 | delete | `etcd delete` | `key`, `error?` |
 | range scan | `etcd range` | `prefix` (string), `count` (int, keys returned), `error?` — do not dump every value of a range; individual keys of interest are then read/logged via `etcd get` semantics |
-| watch event | `etcd watch event` | `key`, `type` (`put`/`delete`), `value` (`PbToLogValue`, puts only) |
+| watch event | `etcd watch event` | `key`, `type` (`put`/`delete`), `value` (`PbToLogValue`, puts only), `error?` |
 
 * Values are always logged decoded (`PbToLogValue`), never as raw/base64
   protobuf bytes.
+* A put whose value fails to unmarshal still emits its `etcd watch event`
+  record, carrying `error` and **no** `value` — there is no decoded message
+  to render. The unmarshal error then ends that watch *generation*, not the
+  watch: the error names the key itself, the consumer logs it on the way out
+  — each of the four `WatchTyped` consumers with its own record, so grep for
+  all of `cluster conf watch restarting`, `cdc watch restarting`,
+  `rev watch restarting` and `worker reg watch restarting` — and its outer
+  loop rescans and re-opens the watch, so this record is not the only trace
+  of which key broke it.
 * Inside an STM, reads/writes may be re-executed on transaction retry; each
   attempt logs, so duplicate records for retried transactions are expected and
   acceptable.
@@ -416,7 +451,16 @@ Unit tests (`common/log_test.go`):
 Acceptance: `go build ./...` and `go test ./common/...` pass; every binary's
 `main` package imports `common` (directly or transitively); `dnvctl`'s `main()`
 starts with `common.SetLogLevel(slog.LevelWarn)`; a grep for `log.Print`,
-`logrus`, `zap`, `zerolog` over the repo finds nothing.
+`logrus`, `zap`, `zerolog` over the Go sources alone (`--include=*.go`) hits
+exactly three lines, all in `etcdutil/etcdutil.go` — the `go.uber.org/zap`
+import, the comment explaining it, and the `zap.NewNop()` it passes as the
+etcd client's `Logger` — and nothing anywhere else. That logger is being
+*silenced*, not used, precisely so stdout carries one JSON stream and it is
+dnv's, which is R2; `TestStdoutStaysOneJsonRecordPerLine`
+(`etcdutil/etcdutil_test.go`) pins it by re-running the test binary as a child
+that drives the etcd client and asserting every line the child writes to
+stdout parses as one JSON record, dnv's own `etcd get` among them. No dnv
+record comes from anything but `log/slog`.
 
 ## 8. Amendments applied to this document
 

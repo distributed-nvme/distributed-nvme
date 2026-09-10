@@ -469,6 +469,19 @@ subsys_present() {
 	if [ -d "$NVMET/subsystems/$1" ]; then echo yes; else echo no; fi
 }
 
+# host_subsys_present <nqn> — yes/no for the *host* half of the same question:
+# does this node hold a controller for one subsystem NQN, at any address?
+# subsys_present reads configfs, i.e. what this node exports; this reads the
+# nvme driver's own view, i.e. what this node has connected to. It is how the
+# "no `nvme connect` issued yet" clause of §12 step 6c is proved on DNdst,
+# where the gated reply carries no migr_dst_info at all and so cannot show it.
+host_subsys_present() {
+	local n
+	n=$(subsys_json | jq -r --arg nqn "$1" '
+	    [ .. | objects | select(has("NQN") and .NQN == $nqn) ] | length')
+	if [ "${n:-0}" -gt 0 ]; then echo yes; else echo no; fi
+}
+
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
 # The dm-name pattern covers the side device too, now that it is dm kind 4.
@@ -749,12 +762,36 @@ cleanup_all() {
 	for pid in "${pids[@]}"; do wait "$pid" || true; done
 }
 
+# DIAG_SIDES holds "dnidx sp leg side" for every side a migration case has
+# reached so far, so the §17 dump can end with the last get-side-info of every
+# involved side — the one view of a failure that names the migration's own
+# resources (clone, target, per-CN maps) instead of the node's raw dm/nvmet
+# state. The migration cases fill it as they set each side up (a side that does
+# not exist yet has nothing to report), and clear it once the case has torn its
+# sides down again.
+DIAG_SIDES=()
+diag_add_side() { # dnidx sp leg side
+	DIAG_SIDES+=("$1 $2 $3 $4")
+}
+
 diagnostics() {
 	local idx
 	for idx in 1 2; do
 		log ""
 		log "########## vm$idx ##########"
 		helper_ok "$idx" diag >&2
+	done
+	# Every call here is best-effort: diagnostics runs on the failure path
+	# under `set -e`, and a side that is already gone — or an agent that is
+	# wedged and lets the RPC deadline expire — must never replace the real
+	# failure with its own.
+	local entry dn sp leg side
+	for entry in "${DIAG_SIDES[@]}"; do
+		read -r dn sp leg side <<<"$entry"
+		log ""
+		log "########## dn$dn get-side-info $sp/$leg/$side ##########"
+		ctl "$dn" get-side-info --sp "$sp" --leg "$leg" --side "$side" >&2 ||
+			true
 	done
 }
 
@@ -911,10 +948,21 @@ assert_no_residue() { # sp
 # wait_zeroed blocks until a side's background zeroing goroutine has zeroed
 # every logical extent (§9.4). `ctl` adds no --timeout for this subcommand, so
 # the one below is wait-zeroed's own polling budget, not an RPC deadline.
-wait_zeroed() { # dnidx sp leg side
-	local idx=$1
-	ctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
-		--interval 0.5 --timeout "$ZERO_TIMEOUT" >/dev/null
+#
+# The optional fifth argument is the ext_cnt the request asked for, and turns
+# the wait into the exact "⇒ N/N" of §9 phase (b) and §10/§12: the driver's own
+# loop exits on `total != 0 && zeroed >= total`, which a side allocated with
+# the wrong number of extents also satisfies. Callers that have no --ext-cnt to
+# compare against omit it and keep the driver's weaker guard.
+wait_zeroed() { # dnidx sp leg side [ext_cnt]
+	local idx=$1 want=${5:-} out zdone ztotal
+	out=$(ctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
+		--interval 0.5 --timeout "$ZERO_TIMEOUT")
+	[ -n "$want" ] || return 0
+	zdone=$(jq_of "$out" '.zeroed // 0')
+	ztotal=$(jq_of "$out" '.total // 0')
+	assert_eq "$zdone/$ztotal" "$((want))/$((want))" \
+		"side $2/$3/$4 zeroed/total extents after wait-zeroed"
 }
 
 # sync_side_cns lists every CN id one syncup-side request names — the primary
@@ -939,6 +987,29 @@ sync_side_cns() { # syncup-side flags…
 	done
 }
 
+# sync_side_ext_cnt prints the --ext-cnt one syncup-side request asks for, by
+# the same flag scan as sync_side_cns (both spellings). It is what makes the
+# §9 phase-(b)/(c) equality checkable from the helper: the expected extent
+# count is the caller's own flag, not a constant this file could drift from.
+# Nothing is printed when the request carries no --ext-cnt, and every check
+# built on it degrades to the driver's own guard rather than failing.
+sync_side_ext_cnt() { # syncup-side flags…
+	local arg want=""
+	for arg in "$@"; do
+		if [ -n "$want" ]; then
+			printf '%s\n' "$arg"
+			return 0
+		fi
+		case "$arg" in
+		--ext-cnt) want=ext ;;
+		--ext-cnt=*)
+			printf '%s\n' "${arg#*=}"
+			return 0
+			;;
+		esac
+	done
+}
+
 # sync_side_2phase performs the two-phase side provisioning the sp-worker
 # performs in production (update_01.md U4). Phase 1 syncs the side with
 # --provisioned=false: allocate the extent runs, build DnSideName, start the
@@ -954,7 +1025,7 @@ sync_side_cns() { # syncup-side flags…
 SYNC_SIDE_REPLY=""
 sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	local idx=$1 rev1=$2 rev2=$3 sp=$4 leg=$5 side=$6 out
-	local cns cn key field left
+	local cns cn key field left ext sample zdone ztotal
 	shift 6
 	out=$(ctl "$idx" syncup-side --revision "$rev1" \
 		--sp "$sp" --leg "$leg" --side "$side" --provisioned=false "$@")
@@ -987,9 +1058,38 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 	left=$(helper "$idx" "export_dms $(hex16 "$sp") $(hex16 "$side")")
 	[ -z "$left" ] ||
 		die "provisioning $sp/$leg/$side: export dm devices exist at provisioned=false: $left"
-	wait_zeroed "$idx" "$sp" "$leg" "$side"
+	# The exact §9 phase (b)/(c) equality, zeroed == total == ext_cnt, asserted
+	# on both the wait's last sample and the flip's reply: a side allocated
+	# with the wrong number of extents zeroes all of them and would satisfy
+	# every `zeroed >= total` check on the way. Hard, not tolerant.
+	ext=$(sync_side_ext_cnt "$@")
+	# The §9 provisioning-window sample: one get-side-info before the wait, to
+	# record whether this run ever observed the side mid-zeroing. Purely an
+	# observation and never an assertion — with 64 MiB extents a batch is
+	# 640 MiB and loop maps Write Zeroes onto `fallocate`, so the window is
+	# normally already closed by the time this samples, exactly like the §12
+	# grace-window and read-through probes. A failed call degrades to a miss
+	# for the same reason: this must not be able to fail the suite (the next
+	# line's wait-zeroed is where a real problem surfaces).
+	sample=$(ctl "$idx" get-side-info --sp "$sp" --leg "$leg" --side "$side" ||
+		true)
+	[ -n "$sample" ] || sample="{}"
+	zdone=$(jq_of "$sample" '.side_info.zeroed_ext_cnt // "0"')
+	ztotal=$(jq_of "$sample" '.side_info.total_ext_cnt // "0"')
+	if [ "$ztotal" -gt 0 ] && [ "$zdone" -lt "$ztotal" ]; then
+		log "provisioning $sp/$leg/$side: provisioning window HIT ($zdone/$ztotal zeroed)"
+	else
+		log "provisioning $sp/$leg/$side: WARNING provisioning window missed ($zdone/$ztotal zeroed)"
+	fi
+	wait_zeroed "$idx" "$sp" "$leg" "$side" "$ext"
 	SYNC_SIDE_REPLY=$(ctl "$idx" syncup-side --revision "$rev2" \
 		--sp "$sp" --leg "$leg" --side "$side" --provisioned=true "$@")
+	if [ -n "$ext" ]; then
+		zdone=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.zeroed_ext_cnt // "0"')
+		ztotal=$(jq_of "$SYNC_SIDE_REPLY" '.side_info.total_ext_cnt // "0"')
+		assert_eq "$zdone/$ztotal" "$((ext))/$((ext))" \
+			"provisioning $sp/$leg/$side: zeroed/total extents at provisioned=true"
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1272,6 +1372,20 @@ migr_declare_dst() { # m revision sp_level
 		# assert_not_ok, so a PROVISIONING dst cannot satisfy it (ruling R4.35).
 		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
+		# §12 step 6c's other half: "no `nvme connect` issued yet". The clone
+		# and the connection to the source's :3: subsystem are built by the
+		# same step 11 converge, so a destination that connected while it was
+		# still gated would be pulling data from a source whose bitmap chunks
+		# may not all have landed — the race the staged flow exists to avoid.
+		# The suppressed migr_dst_info cannot show it, so it is read off the
+		# DNdst *host*: the agent connects as DnHostNqn(cluster, DNdst), so its
+		# own node is where the controller would appear.
+		local srcnqn
+		srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[${MSRCDN[$m]}]}" \
+			"$SP" "${MID[$m]}")
+		assert_eq "$(helper "${MDSTDN[$m]}" \
+			"host_subsys_present '$srcnqn'")" no \
+			"migr $m: the gated dst already connected to $srcnqn"
 	else
 		assert_ok "$out" ".side_info.migr_dst_info.target_info.status" \
 			"migr $m dst target"
@@ -1343,7 +1457,9 @@ migr_provision_dst() { # m revision
 		"export_dms $(hex16 "$SP") $(hex16 "${MDSTSIDE[$m]}")")
 	[ -z "$left" ] ||
 		die "migr $m dst has export dm devices before it is provisioned: $left"
-	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
+	# §12 step 6b's "⇒ 2/2": the exact equality against the --ext-cnt 2 this
+	# request asked for, not merely "every extent it happened to allocate".
+	wait_zeroed "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}" 2
 }
 
 migr_connect_dst() { # m
@@ -1369,7 +1485,7 @@ migr_connect_dst() { # m
 # destination zeroing window — which is exactly what this stage proves it does
 # not do.
 migr_gate_src() { # m revision
-	local m=$1 rev=$2 out nqn susp
+	local m=$1 rev=$2 out nqn susp dev
 	out=$(ctl "${MSRCDN[$m]}" syncup-side --revision "$rev" \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MSRCSIDE[$m]}" \
 		--ext-cnt 2 --cntlid-slot 0 --primary-cn "${MCN[$m]}" \
@@ -1394,6 +1510,15 @@ migr_gate_src() { # m revision
 	assert_eq "$(cn_ana_state "${MCNVM[$m]}" "$SP" "${MLEG[$m]}" \
 		"${MCN[$m]}" "${MSRCDN[$m]}")" optimized \
 		"migr $m: the gated src keeps serving"
+	# …and serving means data, not just an ANA state: an optimized path over a
+	# per-CN linear that had been reloaded onto its dm-error would still read
+	# optimized here and return EIO. §12 step 8b therefore reads 1 MiB through
+	# the CN device, the same production path stage 0 wrote through. Preceded
+	# by a cache drop so the read reaches the media (§9, and never iflag=).
+	dev=$(ns_by_id "$SP" "${MLEG[$m]}")
+	drop_caches "${MCNVM[$m]}"
+	assert_eq "$(helper "${MCNVM[$m]}" "read_probe '$dev'")" ok \
+		"migr $m: a 1 MiB read through the gated src must still succeed"
 }
 
 migr_cutover_src() { # m revision
@@ -1512,6 +1637,9 @@ REPLY_DIR=""
 run_migration_cases() {
 	local m out pids rev1 rev2 prov1 prov2 dn
 	REPLY_DIR=$(mktemp -d)
+	# A fresh case starts with no sides for the §17 dump to report; the sides
+	# below are registered as each stage creates them.
+	DIAG_SIDES=()
 
 	stage stage0dn "both DNs learn all four side pointers"
 	for dn in 1 2; do
@@ -1523,6 +1651,12 @@ run_migration_cases() {
 	done
 
 	stage stage0src "both source sides provision and come up (concurrently)"
+	# The sides exist from here on, so register them for the §17 dump — in the
+	# parent shell, like the revisions below, because a DIAG_SIDES entry
+	# appended inside a background job would be appended to a copy.
+	for m in 1 2; do
+		diag_add_side "${MSRCDN[$m]}" "$SP" "${MLEG[$m]}" "${MSRCSIDE[$m]}"
+	done
 	# Two revisions per source: the §9.4 phase-1 sync and the worker's flip.
 	# Both are minted here, in the parent shell, because bump_rev inside a
 	# background job would increment a copy (§9).
@@ -1556,6 +1690,9 @@ run_migration_cases() {
 	done
 
 	stage stage1prov "the destinations provision first (U4): zero, then gate"
+	for m in 1 2; do
+		diag_add_side "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
+	done
 	bump_rev "${MDSTDN[1]}"
 	prov1=${REV[${MDSTDN[1]}]}
 	bump_rev "${MDSTDN[2]}"
@@ -1707,6 +1844,8 @@ run_migration_cases() {
 	for m in 1 2; do
 		sshv_ok "${MCNVM[$m]}" "rm -f $WORK/pattern-$m.bin"
 	done
+	# The sides are gone, so a later case's §17 dump must not ask for them.
+	DIAG_SIDES=()
 	rm -rf "$REPLY_DIR"
 }
 

@@ -122,9 +122,13 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
       only §8.5's exclusivity signal (a data grow states one, a meta grow
       must not); sizes are recomputed from the stored first data group or
       the meta ladder (§5.4).
-    * **D-F** — GrowSlice's DN black list starts as the request's own and
-      grows only with the legs of the group being grown — the same rule the
-      worker's AR6 scan applies (§5.4).
+    * **D-F** — GrowSlice's DN black list is the request's own and nothing
+      else; the gateway never appends to it, because one scan-and-pick round
+      serves the whole new group and the §6.3 `LocList` rule already leaves
+      the candidate list with one entry per DN and per location, so the
+      group's legs land on distinct DNs anyway. The worker's AR6 auto-grow
+      draws from the same kind of list and reaches the same distinctness by
+      black-listing each pick as it goes (§5.4).
     * **D-G** — DeleteTransfer's finalize skips a vanished origin
       subsystem/`ns_idx` instead of failing: the transfer is being deleted
       either way, and the RPC must stay able to complete (§5.9).
@@ -322,7 +326,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included — update_05.md U4) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `Append*Bitmap` count caps | `RESOURCE_EXHAUSTED` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `Append*Bitmap` count caps; a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; agent gRPC failure where the RPC says so | `ABORTED` |
 
@@ -332,6 +336,16 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
   freed or extended (extents, candidates, count ceilings);
   `FAILED_PRECONDITION` is the object's own state forbidding the operation.
+  A `GrowSlice` capacity shortfall sits on both sides, on either half of the
+  allocation. A CN-budget shortfall is `RESOURCE_EXHAUSTED` when §5.4's
+  pre-check sees it, but `FAILED_PRECONDITION` when it only appears in the
+  deciding STM, where `model.chargeSpCns` can refuse solely as an
+  `ErrPrecondition` (§5.4). A leg DN short of free extents is likewise
+  `RESOURCE_EXHAUSTED` when the §6.5 scan skips it and the pick comes up
+  short (the "too few candidates" row above), but `FAILED_PRECONDITION`
+  (`model.checkDnPick`, reason `"dn free_ext_cnt too low"`) when only the
+  STM sees it — that check precedes the capacity-key test, so it is not
+  swallowed by `ReasonCandidateChanged`.
 * **GW8 — one STM per RPC** (§5.8). Everything computable beforehand (name
   formatting, group plans, candidate lists, the stamped `creation_epoch`) is
   prepared outside; all reads and writes commit in one `RunSTM`. The closure
@@ -486,16 +500,30 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   map.
 * **GrowSlice** — validate the §8.5 exclusivity (`is_meta==false ⇒
   ext_cnt>0`, `is_meta==true ⇒ ext_cnt==0` ⇒ else `INVALID_ARGUMENT`).
-  Plain pre-reads for planning (the slice's current meta total for
+  A `Snapshot` pre-read for planning (the slice's current meta total for
   `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`,
-  update_05.md U4 — and the request's own black list, which seeds the §6.5
-  scan empty-plus-request-entries, growing only with this group's picks);
-  candidate unit; then call the amended
-  `model.GrowSlice(…, expectRev = token)` (§2.2 #3) which re-validates
-  in-STM and bumps SpRev + the leg DNs' revs itself. The gateway passes
-  `poolTotal = math.MaxUint64`: the AR6 pending rule gates only the worker's
-  auto-grow, never a user-driven grow (architecture.md §8.5; update_04.md U7
-  pins it). Map
+  update_05.md U4 — and the request's own black list, which is the entire
+  seed of the §6.5 scan (D-F): one scan-and-pick round serves the group and
+  nothing is ever appended to it, the legs still landing on distinct DNs
+  because the §6.3 `LocList` rule already left one candidate per DN and per
+  location); then a second `Snapshot`, the CN-budget pre-check
+  (`growSliceCnBudget`), over the SP's cntlrs and their CnConfs at one store
+  revision — every cntlr stacks the new group, so every one of their CNs
+  needs the new group's ext count free (the size D-E recomputes, never the
+  request's `ext_cnt`), and a shortfall is §8.5's `RESOURCE_EXHAUSTED`,
+  named with the CN that is short; a cntlr or CnConf key gone under the
+  snapshot is skipped, not raised, because this only gives the common case
+  its documented code and the STM re-reads all of it; candidate unit; then
+  call the amended `model.GrowSlice(…, expectRev = token)` (§2.2 #3) which
+  re-validates in-STM and bumps SpRev, the leg DNs' revs and — via
+  `chargeSpCns`, which charges the CN of every cntlr — those CNs' `CnRev`s
+  itself (architecture.md §8.5). A CN that loses its budget in the window
+  after the pre-check is therefore still refused, but by `chargeSpCns` as an
+  `ErrPrecondition`, so the caller sees `FAILED_PRECONDITION` instead: the
+  pre-check is deliberately the generous one, since only the STM decides.
+  The gateway passes `poolTotal = math.MaxUint64`: the AR6 pending rule
+  gates only the worker's auto-grow, never a user-driven grow
+  (architecture.md §8.5; update_04.md U7 pins it). Map
   `ReasonStaleRevision` ⇒ `ABORTED`, other `ErrPrecondition` ⇒
   `FAILED_PRECONDITION`. Reply `slice_id, grp_id`.
 
@@ -591,7 +619,11 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   #16.)
 * **DeleteClone** — two-phase (AG4). Phase 1 STM (read-only): resolve; clone
   (`NOT_FOUND`); when `force == false` also resolve the **primary** cntlr's
-  `addr_port` + `cn_id`. Between phases, `force == false` calls
+  `addr_port` + `cn_id` — an SP with no primary cntlr ⇒
+  `FAILED_PRECONDITION`, since there is nobody to prove hydration with and a
+  promotion makes the retry succeed (`force == true` skips the lookup
+  entirely: no agent call follows, which is what lets force delete a clone
+  whose cntlr is unreachable). Between phases, `force == false` calls
   `GetCntlrInfo`; incomplete hydration **or an unreachable agent** ⇒
   `FAILED_PRECONDITION` (§8.9). Phase 2 STM (deciding): full re-resolution +
   token check (GW6 — any interleaved mutation bumped `SpRev`, so the token
@@ -603,8 +635,13 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   `src_tr_conf_list`; `BumpSpRev`. Reply `clone_id`.
 * **AppendCloneBitmap** — validate `bitmap` non-empty; STM: resolve; token;
   clone; `slice_idx < src_slice_cnt` and `< MaxCloneBmCnt` ⇒ else
-  `INVALID_ARGUMENT`; put the chunk at `bm_idx = slice_idx`;
-  `bm_cnt = max(bm_cnt, slice_idx+1)`; `BumpSpRev`. Reply `clone_id`.
+  `INVALID_ARGUMENT`; **append** the bytes to the chunk at
+  `bm_idx = slice_idx` (created if absent, the zero value of the read) —
+  §8.9's action, because the caller pages one source slice's bitmap through
+  `GetThinDeviceBitmap` and the concatenation of those pages IS that slice's
+  bitmap (§9.6), so a replace would keep only the last page and place its
+  bits at block 0; `bm_cnt = max(bm_cnt, slice_idx+1)`; `BumpSpRev`. Reply
+  `clone_id`.
 
 ### 5.9 Transfers (§8.10)
 
@@ -663,7 +700,10 @@ slice containing the group by scanning the SP's slices in a plain snapshot
 
 ### 5.12 Bitmap reads (§8.13)
 
-Both are read-only two-phase: one STM resolves, then one agent call.
+Both are read-only two-phase: one STM resolves, then one agent call. Both
+address the SP through its **primary** cntlr, so an SP with none ⇒
+`FAILED_PRECONDITION`: there is no controller to ask, and a promotion makes
+the retry succeed, which is what a precondition means.
 
 * **GetThinDeviceBitmap** — STM: resolve; td by name → `td_id`; the
   **primary** cntlr → its `addr_port` and (via `CnConfKey`) `cn_id`;
@@ -758,11 +798,15 @@ The other 49 RPCs never leave etcd.
   (every server/client request/reply, trace id included) and by `etcdutil`
   (every get/put/delete/range, once per STM attempt — duplicates on retry
   are expected and acceptable).
-* **LG2** Records owned by this component, all Info, all via the ctx forms:
+* **LG2** Records owned by this component, all via the ctx forms:
   `"gateway starting"` (`grpc_network`, `grpc_address`, `etcd_endpoints`) and
-  `"gateway stopping"` from `gateway.Run`; `"gateway serving"` (`network`,
-  `address`) just before `Serve`; `"signal received"` / `"second signal,
-  exiting without a clean drain"` from `main`'s `watchSignals`.
+  `"gateway stopping"` from `gateway.Run`, with `"etcd client close failed"`
+  (`error`) between them when GW2's deferred `cli.Close` fails; `"gateway
+  serving"` (`network`, `address`) just before `Serve`; `"signal received"` /
+  `"second signal, exiting without a clean drain"` from `main`'s
+  `watchSignals`. Info except two **Warn**s: the failed close, and the second
+  signal — giving up the drain abandons in-flight RPCs, so it is not a
+  routine event.
 * **LG3** Protobuf in any gateway-authored record goes through
   `common.PbToLogValue` (R10); `bytes` fields (the bitmaps) therefore log as
   `"<N bytes>"` only.
@@ -864,7 +908,7 @@ $WORK/bin/etcd --name dnv-gw-it --data-dir $WORK/etcd \
   --listen-peer-urls http://127.0.0.1:15380 --initial-advertise-peer-urls http://127.0.0.1:15380 \
   --initial-cluster dnv-gw-it=http://127.0.0.1:15380
 $WORK/bin/fakeagent dn --grpc-address 127.0.0.1:2982<i> --dir $WORK/dn<i> --size 68719476736
-$WORK/bin/fakeagent cn --grpc-address 127.0.0.1:2983<j> --dir $WORK/cn<j>
+$WORK/bin/fakeagent cn --grpc-address 127.0.0.1:2983<j> --dir $WORK/cn<j> --size 0
 $WORK/bin/dnv-gateway --grpc-network tcp --grpc-address 127.0.0.1:2981<k> \
   --etcd-endpoints 127.0.0.1:15379
 ```
@@ -913,13 +957,13 @@ fake → truncate logs → start gw0..2 → ping all three.
 | constant | value | why |
 |---|---|---|
 | DN `--size` | 68719476736 (64 GiB) | 64 extents at the default 1 GiB `extent_size`; small exact numbers for free-count asserts |
-| CN size | fakeagent default (0) | 0 ⇒ `DefaultCnCap` 4 TiB ⇒ 4096 extents; never a constraint |
+| CN size | `--size 0`, passed explicitly | the fakeagent's own default is 1 TiB, so the suite asks for 0: `GetCnSize` 0 ⇒ `DefaultCnCap` 4 TiB ⇒ 4096 extents; never a constraint |
 | SP shape | `cntlr_cnt=2 slice_cnt=1 init_ext_cnt=2`, raid1 (defaults otherwise) | 1 slice = meta grp (1 ext × 2 legs) + data grp (2 ext × 2 legs) = 6 extents on 4 distinct DNs — fits 4 fakes with room for migration/spare picks |
 | per-SP extent cost | 6 | derived above; A's 10 SPs cost 60 of the 256 DN extents |
 | `PAR_CLIENTS` | 10 | Q-settled parallel width (case A waves) |
 | `RACE_N` | 8 | contention fan-in (case B) |
 | `WAIT_SHORT` | 5 s | process/port readiness polls |
-| `RETRY_BUDGET` | 20 | per-job stale-token retries in `race --retry-stale` jobs |
+| `RETRY_BUDGET` | 20 | per-job stale-token retries, passed to `race` as `--retry-budget`, spent by `retry_stale` jobs |
 | `td size` | 67108864 (64 MiB) | multiple of `slice_cnt × stripe_size` (1 × 64 KiB) |
 
 ### 10.7 Setup phase (after start-cleanup)
@@ -972,14 +1016,23 @@ token, which the B4 stage uses):
 
 **`race`** — the barrier runner for cases A/B. Reads jobs as JSON lines on
 stdin: `{"op": "<subcommand>", "params": {…flag names…}, "gateway":
-"host:port"?, "retry_stale": bool?}`; `--targets a,b,c` round-robins jobs
-without an explicit gateway. All jobs are prepared, then released
-simultaneously (one `sync.WaitGroup` barrier), each with the global timeout.
-`retry_stale: true` makes a job that fails `ABORTED` with "stale revision"
-re-fetch its SP token via `GetStoragePool` and retry, at most
-`--retry-budget` (default 20) times — the documented client protocol,
-exercised end-to-end. Output: one JSON array ordered by input index,
-`{"idx":n,"op":…,"code":"UPPER_SNAKE","reply":{…}|"message":"…"}`. Exit 0
+"host:port"?, "retry_stale": bool?, "expect": "<CODE>"?}`; `--targets
+a,b,c` round-robins jobs without an explicit gateway. All jobs are prepared,
+then released simultaneously (one `sync.WaitGroup` barrier), each with the
+global timeout. `retry_stale: true` makes a job that fails `ABORTED` with
+"stale revision" re-fetch its SP token via `GetStoragePool` and retry, at
+most `--retry-budget` (default 20) times — the documented client protocol,
+exercised end-to-end. `expect` is accepted and overrides the global
+`--expect` in that job's own copy of the globals — each job gets one, so a
+per-job gateway or expectation never leaks into its neighbours — but on this
+path nothing ever reads it back: only the one-RPC subcommands compare an
+outcome against `--expect`, so a per-job `expect` has no observable effect at
+all, on the reported code or the exit rule. `race` measures, the script
+asserts. Output: one JSON array ordered by input index,
+`{"idx":n,"op":…,"code":"UPPER_SNAKE","reply":{…}|"message":"…","tries":n}`,
+where `tries` is how many attempts the job took — 1 unless `retry_stale`
+made it re-fetch, so a convergence loop that is not converging shows up as a
+max at the retry budget (case B step 6) instead of as a timeout. Exit 0
 when every job executed (whatever its code); non-zero only on harness
 failure. The script counts codes with jq and asserts the etcd outcome
 separately.
@@ -1029,9 +1082,12 @@ path. Steps (each = one `stage`):
    itgw"`: `creation_epoch != 0`, confs verbatim; three globals
    `next_id 1`, 256-zero buckets; `get-cluster` read-back agrees; second
    `create-cluster itgw` → `ALREADY_EXISTS`.
-2. Pagination: create clusters `pg0..pg4`; `list-clusters --count 2` three
-   pages (2+2+2 names incl. itgw, then empty token); bad `--page-token '!!'`
-   → `INVALID_ARGUMENT`; delete `pg0..pg4` (reply cid echoes).
+2. Pagination: create clusters `pg0..pg4`; `list-clusters --count 2` walks
+   the six names (incl. itgw) as 2+2+2 — three **full** pages, and per GW10
+   a full page always returns a non-empty token, so the empty token costs a
+   fourth, empty call, which is what the script asserts; bad
+   `--page-token '!!'` → `INVALID_ARGUMENT`; delete `pg0..pg4` (reply cid
+   echoes).
 3. `create-dn` ×4 (rack0..3) → dn_ids 1..4; per DN: `DnConf`
    (`total_ext_cnt 64 free 64`, tr conf, location), `dn_rev` revision 1, one
    `dn_capacity` key (bin of 64 free), fakeagent `state.json` untouched but
@@ -1057,7 +1113,10 @@ path. Steps (each = one `stage`):
    2. `get-sp` read-back deep-equals; `find-sp-names --ids 1,99` → `{1:
    sp0}` only.
 7. `grow-slice --meta` → grp per the ladder (+1 ext); `grow-slice --ext 2` →
-   new data grp; DN accounting + `sp_rev` advances each time.
+   new data grp; DN accounting + `sp_rev` advances each time, and so does
+   every cntlr's CN: the footprint each cntlr reserves goes 3 → 4 → 6, so
+   per-CN `free 4096−footprint` with `cn_rev` 3 then 4, while a CN carrying
+   no cntlr of this SP is untouched at rev 1.
 8. `set-sp-level READONLY` then back; `set-cntlid-slots 0,1,2`; each bumps
    `sp_rev` by 1.
 9. `create-td t0 size 64MiB` → `td_id`, `dev_id 1`, `created false`;

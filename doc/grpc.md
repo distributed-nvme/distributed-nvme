@@ -382,7 +382,7 @@ func (s *loggingServerStream) SendMsg(m any) error {
 }
 ```
 
-## 4. Wiring (every binary MUST use both chain options on every dnv connection/server)
+## 4. Wiring (every dnv binary MUST use both chain options on every dnv connection/server)
 
 Client connections (dnvctl → gateway; gateway/worker → agents):
 
@@ -412,6 +412,10 @@ grpcServer := grpc.NewServer(
 | dnv-agent dn / cn | its `DiskNodeAgent` / `ControllerNodeAgent` server | — |
 | dnvctl | — | its connection to the gateway (mints a trace id per invocation, T4) |
 | dnv-cdc | — | — (talks only to etcd; excluded, see §1) |
+
+Those five dnv binaries (`log.md` §1) are the whole of the rule. The
+`integtest/` drivers are not dnv components; §6 records the conventions they
+follow instead.
 
 ## 5. Example output
 
@@ -468,10 +472,42 @@ Unit tests (`common/interceptor_test.go`) using
    attribute and no `data` attribute.
 
 Acceptance: `go test ./common/...` passes; every `grpc.NewClient` /
-`grpc.NewServer` call site in the repo (except the etcd client) uses the chain
-options of §4; a manual end-to-end run shows one `trace_id` value flowing
-dnvctl → gateway → agent across `grpc client request`, `grpc server request`,
-`os command` and `etcd put` records.
+`grpc.NewServer` call site reachable from the five `cmd/` binaries (except the
+etcd client) uses the chain options of §4 — today `gateway/server.go`,
+`gateway/common.go`, `worker/conn.go` and `agent/agent.go`; a manual
+end-to-end run shows one `trace_id` value flowing dnvctl → gateway → agent
+across `grpc client request`, `grpc server request`, `os command` and
+`etcd put` records.
+
+The `integtest/` drivers are scoped out of that grep on purpose; the two
+conventions they follow are recorded here so the carve-out does not live only
+in their code comments:
+
+* `gatewayctl`, `cnagentctl` and `dnagentctl` dial **without** the client
+  interceptors. A driver is not a dnv component, and its own request/reply
+  records would only duplicate what the gateway or agent it calls already
+  logs — the suites read the daemon's log, not the driver's. Each instead
+  passes its `--trace-id` as plain outgoing metadata
+  (`metadata.AppendToOutgoingContext` with `common.TraceIdMetadataKey`), which
+  is all T2 needs on the far side, so the T3 chain the suites assert holds
+  unchanged. `integtest/fakeagent` does install both server interceptors of
+  §4: it stands in for an agent, and its `agent.log` is the record the suites
+  read for what the worker sent — `worker_test.sh` matches `grpc server *`
+  records only, never the worker's own client-side ones, which carry the same
+  payloads (§5 prints one such pair).
+* `gatewayctl`, `workerctl` and `cdcctl` replace `common`'s default logger
+  with the same `TraceIdHandler` over a `slog.NewJSONHandler(os.Stderr, nil)`,
+  because their **stdout** is reserved for the command's own result — one JSON
+  document for some subcommands, one line per key or record for others — which
+  the suites parse with `jq` or line by line. None of the three logs on its
+  own account: the redirect moves the `etcd *` records `etcdutil` emits under
+  `workerctl` and `cdcctl`, and under `gatewayctl`, which calls nothing that
+  logs, it is purely defensive. `log.md` R2's stdout rule and R3's
+  default-logger rule bind the five dnv binaries its §1 lists, and a driver is
+  not one of them. `integtest/fakeagent` logs far more than the three and
+  keeps the stdout default instead: it has no result to reserve stdout for, so
+  `common`'s `init()` chain stays in place and the suite captures its records
+  as `agent.log`.
 
 ## 7. Amendments applied to this document
 

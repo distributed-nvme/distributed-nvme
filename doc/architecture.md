@@ -944,9 +944,14 @@ duplicate-location CNs, plus CNs already hosting a cntlr of the same SP.
 * **CreateStoragePool — CNs.** `CandExtCnt` = sum of `ext_cnt` over **all** groups of the
   SP; `RequiredCnt = 1`, `CnCandCnt = cn_batch_size`; repeat `cntlr_cnt` times, random
   pick, black-list the pick.
-* **GrowSlice**: like the DN flow for exactly one group (black list starts with all DNs
-  already hosting a leg of that group, so the new group still spreads; other groups' DNs
-  are allowed). Meta-group sizes follow the §8.5 ladder.
+* **GrowSlice**: like the DN flow for exactly one group — the new one. Its black list is
+  seeded with the request's own `NodeSelector.black_list` and nothing else, and the
+  gateway never appends to it: one scan-and-pick round serves the whole group, so a
+  brand-new group normally scans against an empty list, and its legs still land on
+  distinct DNs because the §6.3 `LocList` rule already left the candidate list they are
+  drawn from with one entry per DN and per location. DNs already carrying another group
+  of the slice or SP stay allowed on purpose — a grow spreads the new group, it does
+  not avoid the slice's existing ones. Meta-group sizes follow the §8.5 ladder.
 * **CreateMigration**: one DN, `CandExtCnt` = the group's `ext_cnt`; black list starts
   with the DNs (and thus locations) of every leg/side of the group.
 * **CreateSpareLeg**: one DN, same black-list seeding as CreateMigration.
@@ -1239,7 +1244,11 @@ Errors: `NOT_FOUND` `slice_id` not in `SpConf.slice_id_list`; `INVALID_ARGUMENT`
 `is_meta == false` and `ext_cnt == 0`, or `is_meta == true` and `ext_cnt != 0` (meta
 sizes are computed, see below); `FAILED_PRECONDITION` `is_meta == true` and the slice's
 meta total is already at the 16 GiB cap; `RESOURCE_EXHAUSTED` when no DN candidates
-(§6.5) or when any cntlr's CN has `free_ext_cnt` below the new group's `ext_cnt`.
+(§6.5) or when any cntlr's CN has `free_ext_cnt` below the new group's `ext_cnt`. That
+last code is the gateway's pre-check answer (gateway.md §5.4, GW7): a CN whose budget
+falls short only between that pre-check and the deciding STM is refused in-STM by
+`chargeSpCns`, which can only fail as a precondition, so the caller sees
+`FAILED_PRECONDITION` for the same shortfall.
 Meta ladder: the sizes of a slice's meta groups are fixed by rule, not by the caller —
 the first meta group (created with the SP) is **1 extent**; each further meta grow adds
 `1, 2, 4, 8, …` extents (the additions double, i.e. the new group's `ext_cnt` equals
@@ -1788,7 +1797,7 @@ concatenation (§9.6, §11.4).
 |---|---|
 | `GetCnSize` | Return the capacity budget in bytes this CN is willing to host (0 = "use the default"); typically from local config. |
 | `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, the 1 GiB sparse backing file, the single loop device — re-learned via `losetup --associated`, never persisted — and the single nvmet port; there is no VG, [D14]); accept and persist `qos_ratio` (enforcement is deferred until the §3.2 step 4 open issue is decided — the agent programs no limit, `cnagent.md` CN6); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
-| `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
+| `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
 | `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
 | `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
 | `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
@@ -1996,7 +2005,25 @@ readers, not because bitmaps are inherently huge.)
    (not built yet, or suppressed by `sp_level`), the file still counts as applied —
    the agent re-applies every local chunk whenever it (re)creates the owning dm-clone.
 3. **Reply.** The `Push*BitmapReply` carries only `AgentReply`; a `code = 0` reply is
-   the acknowledgement the worker waits for before pushing the next part.
+   the acknowledgement the worker waits for before pushing the next part. A chunk whose
+   persist **failed** is acked `code = 0` too — both agents log the error and reply OK:
+   the ack only releases the next part, and a chunk whose index was **not yet applied**
+   stays out of the applied set — that set is derived from the files present (§9.1) — so
+   the object's next `Syncup*` reply reports the index as missing and the worker
+   re-pushes it. Nothing else schedules that re-push, and the failed persist does not
+   schedule the `Syncup*` either: unlike the `code != 0` case of the worker side's
+   step 6 above, a `code = 0` ack raises no re-sync request, and the object's periodic
+   rounds are `Check*` rounds (§9.7), whose replies carry no applied set. So the chunk
+   waits for whatever re-issues the object's `Syncup*` anyway — a revision bump, or a
+   `Check*` round the agent rejects or answers with another revision — with no timer
+   and no push-side retry of its own; until then its regions are copied instead of
+   skipped, which costs only the optional bitmap fast path of §8.9/§8.11. The one case
+   that does not heal even that way, once the `Syncup*` comes, is a failed persist of
+   a *grown* clone chunk [D8]: the index is already in the applied set with its
+   shorter payload, and the `code = 0` ack also refreshes the worker's per-chunk memo,
+   so the agent keeps the shorter version until that chunk grows again — the same
+   bounded, correctness-neutral loss [D8] already accepts (migration chunks are
+   immutable, so the DN side never hits it).
 4. **Restart / rebuild.** On start the agent reloads every `Local*BmPath` file under
    its prefix and re-applies the chunks once the owning dm-clone is (re)built (agent
    restart, §11.5 clone rebuild, `sp_level` lowering) — re-application is idempotent.
@@ -2008,10 +2035,13 @@ readers, not because bitmaps are inherently huge.)
 
 **Grown clone chunks [D8].** `AppendCloneBitmap` may append more bytes to a `bm_idx`
 that was already pushed and acknowledged. The worker therefore keeps an in-memory
-memo of the byte length it last pushed per `(clone_id, bm_idx)` and
-re-pushes a chunk whose etcd value grew past that length; the agent overwrites the
-stored file and re-applies whenever a received payload differs from it. If the worker
-changes (crash, shard re-ownership) the memo is lost, and a chunk that grows afterwards
+memo per `(clone_id, bm_idx)` of the etcd `mod_revision` of the chunk it last pushed
+(dnv-worker.md BM5, the normative rule for the implementation: an append is a `Put`
+on the chunk key, so a growth shows up in the revision the worker's keys-only scan of
+the chunk keys already carries, and needs no chunk value to detect) and re-pushes a
+chunk whose `mod_revision` advanced past it; the agent overwrites the stored file and
+re-applies whenever a received payload differs from it. If the worker changes (crash,
+shard re-ownership) the memo is lost, and a chunk that grows afterwards
 while staying in the acknowledged set may keep its shorter version at the agent —
 accepted: src bitmaps are a pure optimization that never affects correctness (§8.9,
 §11.5); the only cost is copying some regions that could have been skipped. Migration
@@ -2694,7 +2724,7 @@ dnv-agent dn --grpc-network tcp --grpc-address 192.168.0.20:29528 \
 
 dnv-agent cn --grpc-network tcp --grpc-address 192.168.0.20:29529 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
-  --local-store /var/tmp
+  --local-store /var/tmp --capacity 8796093022208
 
 dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.10 --tr-svc-id 8009
@@ -2708,7 +2738,11 @@ flags are specified in `dnv-worker.md` §5 (`--roles` defaults to all three; the
 timers default to `DefaultVoteWorkerInterval`/`DefaultVoteWorkerGraceTime`). The agent's
 `--tr-*` flags define the node's single nvmet port (`NvmeTrConf`), mirrored into
 `DnConf`/`CnConf` at creation; `--local-store` sets the `localStorPrefix` under which
-the §4.6 state files live. `dnvctl` subcommand sketch:
+the §4.6 state files live. `--capacity` is cn-only (a DN's size is read off its
+`--disk`): it is the byte budget `GetCnSize` replies verbatim, i.e. the per-node input
+to the §6.1 CN extent count, whose divisor `extent_size` is the cluster-wide
+`dn_bin_conf.extent_size` instead. Its default **0** means "no opinion", which
+makes the control plane substitute `DefaultCnCap` (4 TiB). `dnvctl` subcommand sketch:
 `dnvctl dn|cn|sp|vol create|…`, plus the §11.4 copier.
 
 ---
@@ -2960,7 +2994,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   *before* a host write hydrated region *r* can arrive *after* it, and the resulting
   discard would reach the destination. The
   accepted gap: a clone chunk grown by `AppendCloneBitmap` after its last push is
-  re-delivered only while the pushing worker keeps its in-memory length memo — src
+  re-delivered only while the pushing worker keeps its in-memory revision memo — src
   bitmaps never affect correctness, so a missed tail only costs some avoidable copying.
 * **[D8] Grown clone chunks.** `AppendCloneBitmap` may grow an already-acknowledged
   `bm_idx`; the worker re-pushes when it observes growth, and a worker change can

@@ -1475,7 +1475,7 @@ declare -A SIDE_PROVISIONED=()
 # it provisioned at a fresh revision. Every later converge of the same side goes
 # straight to phase 2.
 dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
-	local idx=$1 out extra=() key="$1:$2:$3:$4" cn field
+	local idx=$1 out extra=() key="$1:$2:$3:$4" cn field zeroed total
 	[ -z "${7:-}" ] || extra=(--standby-cn "$7")
 	if [ -z "${SIDE_PROVISIONED[$key]:-}" ]; then
 		bump_dn_rev "$idx"
@@ -1498,6 +1498,31 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 					"dn$idx sp $2 leg $3 must not export at provisioned=false: $field[$cn]"
 			done
 		done
+		# The §9 provisioning window, observed and never asserted (the dn
+		# suite's §9 twin): phase 1 only *starts* the background zeroing
+		# goroutine, so a sample taken here normally still catches the side
+		# mid-flight, which is what makes the gate assertions above a reading
+		# of a genuinely closed gate rather than of an already-finished one.
+		# With 64 MiB extents on a loop device the kernel maps Write Zeroes
+		# onto fallocate, so a whole side can also finish before this line
+		# runs: a miss is timing, not a fault, and the hard proof stays the
+		# wait-zeroed below plus the phase-2 OK statuses. A failed call
+		# degrades to a miss for the same reason — under `set -euo pipefail`
+		# an unguarded one-shot RPC would turn a transient dial error into a
+		# suite abort, and this helper runs on every first converge of every
+		# side. get-side-info prints the reply before it checks the reply
+		# code, so only a call that never reached the agent leaves nothing to
+		# read.
+		out=$(dnctl "$idx" get-side-info --sp "$2" --leg "$3" --side "$4" ||
+			true)
+		[ -n "$out" ] || out="{}"
+		zeroed=$(jq_of "$out" '.side_info.zeroed_ext_cnt // "0"')
+		total=$(jq_of "$out" '.side_info.total_ext_cnt // "0"')
+		if [ "$total" -gt 0 ] && [ "$zeroed" -lt "$total" ]; then
+			log "dn$idx sp $2 leg $3: provisioning window HIT ($zeroed/$total zeroed)"
+		else
+			log "dn$idx sp $2 leg $3: WARNING provisioning window missed ($zeroed/$total)"
+		fi
 		dnctl "$idx" wait-zeroed --sp "$2" --leg "$3" --side "$4" \
 			--interval 0.5 --timeout "$ZERO_TIMEOUT" >/dev/null
 		SIDE_PROVISIONED[$key]=1
@@ -2137,6 +2162,7 @@ case_clone_xfer() {
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
+	local idx
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -2317,6 +2343,27 @@ case_clone_xfer() {
 		"clone_xfer read-through of MiB 31"
 
 	stage wipe "stage 6: CN2 loses its kernel state and rebuilds (§11.5)"
+	# §13 stage 6 "log which": the §11.5 recovery contract covers both a clone
+	# that was still hydrating when its CN lost its kernel state and one that
+	# had already finished, and which of the two this run wiped decides what
+	# the rebuilt clone has left to copy. It is recorded, never asserted — the
+	# race is the loop device's speed — and the sample is taken as late as
+	# possible, immediately before the kill. A missing or unparseable status is
+	# logged too rather than failing the suite: nothing below depends on it.
+	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
+		--clone "$C_CLONE" --sample-only) || sample=""
+	case "$sample" in
+	[0-9]*/[0-9]*)
+		if [ "${sample%%/*}" -lt "${sample##*/}" ]; then
+			log "clone_xfer: hydration was still running at wipe time ($sample)"
+		else
+			log "clone_xfer: hydration had already finished at wipe time ($sample)"
+		fi
+		;;
+	*)
+		log "clone_xfer: WARNING no hydration sample before the wipe"
+		;;
+	esac
 	assert_eq "$(helper 2 "kill_role cn")" stopped "clone_xfer: cn2 stopped"
 	sshv 2 "mv $CN_LOG $WORK/cn-agent.pre-wipe.log"
 	helper 2 "wipe_cn $(hex16 "${CNID[2]}")"
@@ -2428,6 +2475,24 @@ case_clone_xfer() {
 	cn_drop 2
 	dn_drop 1
 	dn_drop 2
+	# The §13 stage 10 base-state probe, case S's teardown probe run on both
+	# CNs: with its cntlr gone each CN must hold no dm device and no
+	# host-facing subsystem of its own, and the arena must be empty again —
+	# the kind-b tables *are* the allocation registry (update_01.md U3), so
+	# reading them by name is what reports a leaked clone unit as an arena
+	# leak instead of as one more anonymous dm device. The four §3.2 base
+	# resources must still probe OK afterwards, because a teardown that took
+	# the port, the tmpfs or the loop arena with it would satisfy every
+	# residue check above and still leave the CN unable to serve the next SP.
+	for idx in 1 2; do
+		got=$(helper "$idx" "cn_residue $(hex16 "${CNID[$idx]}")")
+		[ -z "$got" ] || die "clone_xfer: vm$idx still holds cn objects: $got"
+		got=$(helper "$idx" "clone_meta_wrappers $(hex16 "${CNID[$idx]}")")
+		[ -z "$got" ] ||
+			die "clone_xfer: vm$idx's arena still holds wrappers: $got"
+		out=$(cnctl "$idx" get-cn-info)
+		assert_cn_info_ok "$out" "clone_xfer cn$idx base state after teardown"
+	done
 	assert_no_residue "$sp1"
 	assert_no_residue "$sp2"
 	sshv_ok "$hv" "rm -f $WORK/pattern-c.bin $WORK/probe-c.bin"

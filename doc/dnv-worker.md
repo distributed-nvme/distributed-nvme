@@ -173,7 +173,8 @@ const (
 	// Per-call deadlines of the worker's agent RPCs (RW5, BM3).
 	DefaultWorkerSyncupTimeout = 60
 	DefaultWorkerPushTimeout   = 60
-	// etcd client: dial, and per plain operation / per STM attempt (EU1, EU5).
+	// etcd client: dial, and per plain operation / per whole
+	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 
@@ -236,7 +237,9 @@ EU2. **Typed plain operations.** All take a ctx, log per the `log.md` §5.3
      | `Put(ctx, key, msg)` | write | `etcd put` — `key`, `value`, `error?` |
      | `Delete(ctx, key)` | delete; deleting an absent key is not an error | `etcd delete` — `key`, `error?` |
      | `Range(ctx, prefix) ([]KV, rev int64, err)` | prefix scan, `KV{Key string; Value []byte}` in key order, `rev` = the store revision the scan was served at | `etcd range` — `prefix`, `count`, `error?` (values are **not** dumped) |
+     | `RangeDesc(ctx, prefix, limit int64) ([]KV, rev, err)` | prefix scan in **descending** key order, at most `limit` keys (`≤ 0` ⇒ no limit): the capacity keys embed `free_ext_cnt` in `FreeSpaceFmt`, so descending key order is largest-free-first, which is the MD5 allocator's walk | `etcd range` — `prefix`, `count` |
      | `RangeKeys(ctx, prefix) ([]KeyRev, rev, err)` | keys-only prefix scan (`clientv3.WithKeysOnly`); `KeyRev{Key string; ModRev int64}` — the key and its `mod_revision`, which BM5 memoizes | `etcd range` — `prefix`, `count` |
+     | `RangeKeysAtRev(ctx, prefix, rev) ([]KeyRev, err)` | `RangeKeys` pinned to one store revision (`clientv3.WithRev`), for MD3's bitmap-index scans, which must be served at the revision the SP snapshot was read at; a `rev` the store has compacted away is an error, never silently served from a newer one | `etcd range` — `prefix`, `count` |
      | `Decode(ctx, kv KV, msg) error` | unmarshal one scanned value | `etcd get` — `key`, `found = true`, `value` — so every value a caller actually reads is logged individually, as §5.3 requires |
 
 EU3. **Typed watch.** `WatchTyped(ctx, prefix string, fromRev int64, newMsg
@@ -247,30 +250,64 @@ EU3. **Typed watch.** `WatchTyped(ctx, prefix string, fromRev int64, newMsg
      watch event` with `key`, `type` and, for puts, the decoded `value`. The
      etcd client reconnects transparently; a watch cancelled by the server
      with `ErrCompacted` is reported once on the error channel and both
-     channels close — the caller rescans (SW4, VW3). When `ctx` ends both
-     channels close without an error. There is no untyped watch: every dnv
-     prefix holds one message type.
+     channels close — the caller rescans (SW4, VW3), which `IsCompacted(err)
+     bool` lets it recognize without importing `rpctypes` itself. When `ctx`
+     ends both channels close without an error. There is no untyped watch:
+     every dnv prefix holds one message type.
 
 EU4. **STM.** Two runners over `concurrency.NewSTM` with
      `WithIsolation(concurrency.SerializableSnapshot)`:
 
      * `RunSTM(ctx, func(s STM) error) error` — read/write; the etcd client
-       retries on conflict until `ctx` ends.
+       retries on conflict until `ctx` ends or the transaction's EU5 budget
+       is exhausted, which in the ordinary case is the earlier of the two —
+       a worker's `ctx` lives as long as the worker does.
      * `Snapshot(ctx, func(s STM) error) error` — read-only: all reads are
-       served at one store revision; the commit is a no-op. Used for every
-       multi-key load (MD3, AR1).
+       served at one store revision; the commit is a no-op. It serves a
+       multi-key load that has no use for the revision itself; a load that
+       does need it — every one in the worker (MD3, AR1) — goes through
+       `SnapshotRev` below.
+
+     A third runner, `SnapshotRev(ctx, func(s STM) error) (rev int64, err
+     error)`, is `Snapshot` that also **reports** the store revision its
+     reads were served at: `concurrency.STM` pins that revision at its first
+     read but keeps it private, and MD3 needs exactly that number to run its
+     bitmap scans (`RangeKeysAtRev`) at the snapshot's own revision, so
+     `SnapshotRev` pins it itself — first read linearizable, every later read
+     `WithRev` — instead of going through `concurrency.NewSTM`. Its callback
+     runs exactly once, a read-only load having no write set to conflict on,
+     and a `Put`/`Del` inside it is a programming error that fails the load.
 
      `STM` is the typed view: `Get(key, msg proto.Message) (found bool)`,
      `Put(key, msg)`, `Del(key)`, `Rev(key) int64`. Each call logs the §5.3
      record of its kind (`etcd get` / `etcd put` / `etcd delete`); a retried
      transaction logs twice, which `log.md` accepts. A callback that returns
      `*ErrPrecondition` (MD7) aborts the transaction **without** commit and
-     without retry, and `RunSTM` returns that error unchanged.
+     without retry, and `RunSTM` returns that error unchanged. Any callback
+     error ends the attempt before the commit txn is issued; what marks one a
+     deliberate, non-fatal abort that must reach the caller as it is, is that
+     it wraps the sentinel `ErrNoCommit` — which is what
+     `model.ErrPrecondition.Unwrap()` returns, so `etcdutil` states the
+     contract without importing `model` (`layout.md` §3).
 
-EU5. **Timeouts.** Every plain operation and every STM attempt runs under
-     `DefaultEtcdOpTimeout` seconds (`--etcd-op-timeout` is deliberately not a
-     flag); a shorter caller ctx wins. `New` uses `DefaultEtcdDialTimeout`
-     unless the caller passes another value (`--etcd-dial-timeout`, CM1).
+EU5. **Timeouts.** Every plain operation runs under `DefaultEtcdOpTimeout`
+     seconds (`--etcd-op-timeout` is deliberately not a flag); a shorter
+     caller ctx wins. A transaction is budgeted as a **whole**, every EU4
+     conflict retry included, and not per attempt: `concurrency.NewSTM` owns
+     its retry loop and fixes its abort ctx at construction, so
+     `etcdutil/etcdutil.go` has no way to express a per-attempt deadline, and
+     re-running the transaction under a fresh budget would not terminate
+     while etcd is unreachable — a budget expiry caused by contention is
+     indistinguishable from one caused by a dead etcd. Under sustained
+     contention on one key a transaction can therefore exhaust the budget
+     across its attempts and fail while the caller's ctx is still alive; for
+     the worker that is benign, its retry cadence being its own round (RW12)
+     and every mutation re-validating its preconditions on the next pass
+     (MD7, AR2), and a caller with no round of its own is left to decide
+     what to do with the failure (EU6). A read-only load is budgeted the
+     same way, as one operation rather than one per key read. `New` uses
+     `DefaultEtcdDialTimeout` unless the caller passes another value
+     (`--etcd-dial-timeout`, CM1).
 
 EU6. **Errors.** Connection, timeout and (de)serialization errors are
      returned wrapped, never retried inside the helpers (the STM conflict
@@ -328,8 +365,8 @@ MD2. **Keys.** One function per §5.3 key, one per prefix a component scans or
      (`dnv sp_id_to_name ebada5168620c5fe 0000000000000011`).
 
 MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
-     error)` reads, in **one** `Snapshot` (EU4), everything the sp role fans
-     out or reacts on:
+     error)` reads, in **one** `SnapshotRev` (EU4), everything the sp role
+     fans out or reacts on:
 
      ```go
      type SpState struct {
@@ -354,9 +391,10 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      reported in `SpState.Missing` and logged by the caller; the load still
      succeeds. Bitmap **values** are never loaded here — pushes read one chunk
      at a time (BM3). Bitmap indexes come from a keys-only scan
-     (`RangeKeys`) performed **outside** the STM at the same store revision
-     (`clientv3.WithRev(state.Rev)`): the STM cannot range, and the indexes
-     only ever grow (§8.9/§8.11), so a slightly newer view is harmless.
+     (`RangeKeysAtRev`, EU2) performed **outside** the STM at the same store
+     revision (`clientv3.WithRev(state.Rev)`): the STM cannot range, and the
+     indexes only ever grow (§8.9/§8.11), so a slightly newer view is
+     harmless.
 
 MD4. **Capacity keys** (`architecture.md` §5.6, §6.2). `DnBinIdx(freeExt
      uint64, conf *pb.DnBinConf) (bin uint32, ok bool)` (`ok = false` below
@@ -614,7 +652,12 @@ VW8. A worker MUST **fence** itself when any of these holds, checked on
      incarnation: nothing is driven until one full grace window after the
      new seed's first successful put. There is no "resume with the old
      seed" path — a worker that lost etcd for the dead threshold is a new
-     worker, exactly like a restart.
+     worker, exactly like a restart. A fence whose new seed cannot be minted
+     (VW1) tears nothing down and is instead **remembered** and retried on
+     every following heartbeat tick, ahead of the checks above
+     (`worker/vote.go`): (a) and (b) are conditions that would fire again by
+     themselves, but (c) is an event whose delete has already been consumed,
+     so a fence dropped there would be lost for good.
 
 ### 6.6 Tickets and ownership
 
@@ -714,7 +757,11 @@ RW4. **Round**, every `interval` seconds (RW9):
         false}`;
      3. wait for the reply at most `interval` seconds (RW8);
      4. no reply, or a stream error ⇒ close the stream; health "unreachable"
-        (§9);
+        (§9) — except for a round abandoned under RW6, and for a round the
+        graceful stop of RW11 cut short, each of which drops its stream the
+        same way but carries no health verdict: a cancelled stop ctx is not
+        a sick agent, and the verdict would start the §11 threshold clock on
+        a healthy object;
      5. reply ⇒ process its `*Info` if present (§9; sp: RW18/RW19); then if
         `agent_reply.code != 0` **or** `reply.revision != desired.revision`
         ⇒ issue `Syncup*` (RW5) — this is also how the first sync after a
@@ -738,7 +785,16 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      that arrives while a syncup is in flight is applied when it returns.
 
 RW6. **Immediate syncup.** A desired change from the parent triggers a
-     `Syncup*` at once, without waiting for the round.
+     `Syncup*` at once, without waiting for the round. A change that arrives
+     while a round waits for its reply (RW4 step 3) is applied there and
+     then, because that reply may be a whole `interval` away (RW9): the round
+     is **abandoned** — its reply would answer the request built from the
+     superseded revision — and its stream is dropped with it: RW4 step 4
+     never reuses a stream across a round that ended without a reply, and an
+     abandoned round is such a round. The next round opens a fresh stream,
+     which §9.7 answers with the complete `*Info` again. An abandoned round
+     carries **no** health verdict (`worker/revision.go`): nothing was
+     observed about the agent, the round was only overtaken.
 
 RW7. **Connections.** A process-wide cache `addr_port → *grpc.ClientConn`
      (`grpc.NewClient`, `insecure.NewCredentials()`, both client
@@ -806,13 +862,28 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       spare legs' sides included — and one per cntlr `(sp_id, cntlr_id)`.
       New → start; gone → stop (RW11); a child whose endpoint changed is
       restarted at the new one; every remaining child receives its new
-      request as a desired change (RW6). That is the fan-out: unordered
-      across sides and cntlrs by design ([D16]). `ErrNotFound` from `LoadSp`
-      means the SP is being deleted: log, keep the children until the
-      `SpRev` delete arrives (the agents tear down through the pointer
-      lists). An endpoint without a `DnConf`/`CnConf` leaves that child
-      idle; the coordinator re-resolves idle children every
-      `cntlr_interval` seconds.
+      request as a desired change (RW6). A child whose **request** changed
+      while the `SpRev` revision did not — a re-resolution tick that altered
+      a standby list — is restarted too, because RW3's coalescing sees the
+      unchanged revision and would otherwise swallow the change and leave
+      the child driving a stale request until the next bump
+      (`worker/sprole.go`). That is the fan-out: unordered across sides and
+      cntlrs by design ([D16]). `ErrNotFound` from `LoadSp` means the SP is
+      being deleted: log, keep the children until the `SpRev` delete arrives
+      (the agents tear down through the pointer lists). An endpoint without a
+      `DnConf`/`CnConf` leaves that child idle; the coordinator re-resolves
+      idle children every `cntlr_interval` seconds. When the object that
+      cannot be resolved is a **cntlr** — its `Cntlr` record is missing (MD3)
+      or its `CnConf` is absent — **every side child** of the SP is left
+      idle, not just that cntlr's own: RW15's `primary_cn_id` /
+      `standby_id_list` must name every cntlr of the SP, and a `side_conf`
+      built from a shrunken set makes every DN of the SP tear the missing
+      CN's dm-error, dm-linear, subsystem and namespace down
+      (`worker/sprole.go`). The **other** cntlr children are unaffected —
+      RW16's request carries no peer's `cn_id`, so on the cntlr side the
+      effect stays confined to that cntlr's own child, left idle by the rule
+      above — and the primary's leg rows are still placed on their slice
+      (HL2).
 
 RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       side_pointer{sp_id, leg_id, side_id}, revision = SpRev.revision,
@@ -956,12 +1027,16 @@ BM4. **Targets.** Migration chunks go only to the destination side's DN;
      `bm_info_list` is ignored. After a failover the new primary's syncup
      reply reports an empty/partial set and the pushes follow it there.
 
-BM5. **Grown clone chunks ([D8]).** The child memoizes, per `(clone_id,
-     bm_idx)`, the etcd `mod_revision` of the chunk it last pushed
-     (`CloneBmIdx` carries it, MD3); a chunk whose `mod_revision` advanced is
-     re-pushed even though the agent acknowledges its index. The memo is
-     in-memory and lost on a handoff — accepted by [D8]. Migration chunks
-     are immutable and need no memo.
+BM5. **Grown clone chunks ([D8]).** The child memoizes, per `(res_id,
+     bm_idx)` — the `res_id` being the `clone_id` here, the `migr_id` for a
+     migration — the etcd `mod_revision` of the chunk it last pushed
+     (`CloneBmIdx` / `MigrBmIdx` carry it, MD3); a chunk whose `mod_revision`
+     advanced is re-pushed even though the agent acknowledges its index. The
+     memo is in-memory and lost on a handoff — accepted by [D8]. Migration
+     chunks are immutable, so nothing can make the rule re-push one;
+     `worker/bmpush.go` implements BM1–BM6 once for both kinds and therefore
+     memoizes migration chunks too, where the `mod_revision` comparison is
+     inert.
 
 BM6. **Failure.** A push that fails (gRPC error, timeout) or is rejected
      (`code != 0`: stale revision, or the introducing syncup not applied yet)
@@ -980,8 +1055,8 @@ Everything here is the worker's job; agents only report.
 
 AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      `cntlr_interval` seconds (its own ticker). A pass starts with a fresh
-     `Snapshot` (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the SP
-     — the records the reactions read, and the ones this worker itself
+     `SnapshotRev` (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the
+     SP — the records the reactions read, and the ones this worker itself
      writes the `err_epoch`s into — plus the in-memory latest `CntlrInfo` of
      the **primary** cntlr (pool usage, spare readiness) and `now` (unix
      seconds).

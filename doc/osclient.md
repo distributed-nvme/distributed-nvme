@@ -20,14 +20,16 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
 * Consumers: primarily `dnv-agent` (dn/cn) for `dmsetup`/`mdadm`/`nvme`/
   nvmet-configfs work and for persisting the `Local*Path` protobuf state files;
   `dnvctl`'s copier may use it too. **All** OS command execution and disk file
-  I/O in the codebase goes through an `OsClient` — never call `os/exec` or
+  I/O in production code goes through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile` directly outside this file. This is what makes
   the logging rules of `log.md` R8.1/R8.2 enforceable and makes every consumer
   unit-testable via `FakeOsClient`. There is exactly **one** sanctioned
-  exception, recorded in §4.5.1: the CN11 leg-health probers call the
-  package-level helpers `common.WriteBlockAt` / `common.ReadBlockDirectAt`
-  directly — outside the semaphore, never under a lock — and log their own
-  records (`update_01.md` U2).
+  exception in production code, recorded in §4.5.1: the CN11 leg-health
+  probers call the package-level helpers `common.WriteBlockAt` /
+  `common.ReadBlockDirectAt` directly — outside the semaphore, never under a
+  lock — and log their own records (`update_01.md` U2). Test fixtures that
+  spawn a helper process for their own package are outside the rule, not
+  exceptions to it; §8 lists the four that exist.
 * Dependencies: `golang.org/x/sync/semaphore`, `google.golang.org/protobuf`.
   Go ≥ 1.20 for `exec.Cmd.Cancel`/`WaitDelay`; the module itself pins
   `go 1.26.5` in `go.mod`.
@@ -938,8 +940,17 @@ available):
     belongs to the `OsClient` wrapper alone).
 
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;
-`DefaultOsClientLimit` exists in `constants.go`; repo-wide grep shows no
-`os/exec` usage outside `common/osclient.go`;
+`DefaultOsClientLimit` exists in `constants.go`; a repo-wide grep for
+`os/exec` that excludes `*_test.go` shows no usage outside
+`common/osclient.go` — the four excluded hits are the etcd test fixtures
+(`gateway`, `worker` and `model`'s `etcdenv_test.go` plus
+`etcdutil/etcdutil_test.go`), which start and stop a real `etcd` binary for
+their package's tests; `etcdutil_test.go` additionally re-runs the test binary
+itself, as the child of `TestStdoutStaysOneJsonRecordPerLine`, so that the
+production client's stdout can be observed from outside (the pin for `log.md`
+§7's `etcdutil/etcdutil.go` carve-out). No production code path spawns any of
+them, so routing them through an `OsClient` would buy neither the §1 logging
+nor the `FakeOsClient` testability the rule exists for;
 `grep -rn "ReadBlockDirect" common/` hits only the exported helper
 `ReadBlockDirectAt` (and its test) — the `OsClient` interface,
 `LimitedOsClient` and `FakeOsClient` no longer carry the method

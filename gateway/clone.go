@@ -469,10 +469,13 @@ func (s *Server) UpdateCloneTrConf(
 // the SOURCE bitmap, addressed by the source slice it describes.
 //
 // `bm_idx` is the source `slice_idx` and not an append sequence, so a chunk
-// is addressed and re-writable rather than immutable: a caller that pages the
-// source bitmap and re-sends a slice replaces that slice's chunk. `bm_cnt` is
-// therefore a high-water mark (max, never +1) — it is what DeleteClone
-// deletes the chunk keys from, and lowering it would orphan them.
+// is addressed rather than allocated: a caller that pages one source slice's
+// bitmap sends every page under that slice's own index, and each page is
+// appended to the chunk already there (the STM below; a page is never a
+// replacement, or paging would keep only the last one). Re-addressing the
+// same slice is therefore what makes `bm_cnt` a high-water mark (max, never
+// +1) — it is what DeleteClone deletes the chunk keys from, and lowering it
+// would orphan them.
 //
 // Both bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of GW7's
 // Append*Bitmap row: that row is AppendMigrationBitmap's `bm_cnt ≥

@@ -91,7 +91,7 @@ bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
   identities on top of its own dn agent's `DnHostNqn`; leaving the node-wide
   `/etc/nvme/hostid` implicit makes the second identity's connect fail
   `EINVAL` ("found same hostid … but different hostnqn").
-- Agents run as root (LVM/dm/configfs/nvme all need it):
+- Agents run as root (dm/configfs/nvme all need it):
   `ssh <vm> sudo ...` for every remote command.
 
 Per-VM layout (all under `WORK=/var/tmp/dnv-integtest`):
@@ -106,15 +106,33 @@ Per-VM layout (all under `WORK=/var/tmp/dnv-integtest`):
   pattern-*.bin   # test data files (migration cases, on the CN-role VM)
 ```
 
+The VM-side helper the script runs for the per-case dm/nvmet/ANA state
+queries and for the cleanup itself lives **outside** `$WORK`, at
+`/var/tmp/dnv-integtest-helper.sh`. Not every VM-side command goes through
+it: §4's preflight probes, `nvme connect` and the data IO are plain `ssh`
+one-liners. It is re-shipped by `scp` at the start of every run
+(`--cleanup-only` included), so a stale copy never matters, and §16's
+`rm -rf $WORK` deliberately leaves it on the VMs — it is the file that runs
+that cleanup.
+
 Agent launch line (VM1 shown; VM2 identical with its own IP):
 
 ```
-nohup $WORK/dnv-agent dn \
+setsid nohup $WORK/dnv-agent dn \
   --grpc-network tcp --grpc-address <ip1>:29528 \
   --tr-type tcp --adr-fam ipv4 --tr-addr <ip1> --tr-svc-id 4200 \
   --local-store $WORK/store \
-  --disk <loopdev> > $WORK/agent.log 2>&1 &
+  --disk <loopdev> >> $WORK/agent.log 2>&1 < /dev/null &
 ```
+
+`setsid` puts the agent in its own session so the exiting ssh command cannot
+signal it with the channel's process group, and `< /dev/null` keeps it off
+the ssh stdin, which the command would otherwise stay open on. The redirect
+**appends**, which is what makes §15 step 2's "move the previous log aside
+first" load-bearing: case D is the one case that relaunches an agent, and
+its step 5 asserts the *post*-restart log holds no mutating operation, so
+without the `mv` the re-opened file would still carry every pre-restart
+`dmsetup create` and `nvme connect` and fail that assertion.
 
 Notes: there is no extent-size flag (extent size arrives in
 `SyncupDnRequest.extent_size`); logging is JSON on stdout only; shutdown is
@@ -133,10 +151,18 @@ use `conv=fsync`; reads that must hit the media are preceded by
 `sync; echo 3 > /proc/sys/vm/drop_caches`. Offsets use block-unit
 `bs=1M skip=N count=N` only. Do not "fix" this back to direct IO.
 
-Preflight (fail fast with a `missing: <what> on <vm>` message; installs
-nothing). The driver half runs first; the per-VM half runs **after** the
-start-of-run cleanup, since the port check is only meaningful once a crashed
-prior run's agents are gone:
+Preflight (fail fast; installs nothing). A missing tool or missing
+passwordless sudo dies with `missing: <what> on <vm>`, the form that names
+what to install; the capability checks — free space, punch-hole, the free
+ports and §7 step 3's deferred Write-Zeroes probe — instead name the VM and
+the value measured (`vm1: /dev/loop0 reports write_zeroes_max_bytes=0`),
+because there is nothing to install and the number is what the operator has
+to act on. Neither form is universal: the driver-side build steps die with
+their own text (`make build failed`), and the nvmet-configfs and
+`nvme_core.multipath` equality checks below print the generic form
+`<what> on vm<n>: got '<x>', want '<y>'`. The driver half runs first; the
+per-VM half runs **after** the start-of-run cleanup, since the port check
+is only meaningful once a crashed prior run's agents are gone:
 
 - driver: `go`, `ssh`, `scp`, `sha256sum`, and a jq (a system `jq`, else the
   drop-in `gojq` built into the gitignored `integtest/bin/` with the Go
@@ -146,10 +172,17 @@ prior run's agents are gone:
   - binaries: `dmsetup`, `nvme`, `losetup`, `blkdiscard`, `lsblk`, `dd`,
     `fallocate`, `sha256sum`, `cmp`, `pkill`, `jq`, `timeout`. No `lvm`: the
     dn agent runs no LVM command ([D13]).
-  - `modprobe` (ignore errors, then verify): `nvmet`, `nvmet_tcp`,
-    `nvme_tcp`, `nvme_fabrics`, `dm_clone`, `loop`; verify
+  - `modprobe` (errors ignored, and **not** verified per module): `nvmet`,
+    `nvmet_tcp`, `nvme_tcp`, `nvme_fabrics`, `dm_clone`, `loop`; then verify
     `/sys/kernel/config/nvmet` exists (mount configfs if absent) — the agent
-    hardcodes that path and neither mounts nor modprobes.
+    hardcodes that path and neither mounts nor modprobes. That check is not
+    a per-module check either: it says only that `nvmet` is live, however it
+    got there (module, built in, or already loaded). The other five are
+    never verified, so one that failed to load surfaces later, at the first
+    command that needs it — an `nvme connect`, a dm-clone create — with that
+    command's own message. The next bullet's `/sys/module/nvme_core` read is
+    the one exception, and it covers only `nvme_core`: if that is neither
+    loaded nor built in, the `cat` fails and the preflight dies there.
   - `/sys/module/nvme_core/parameters/multipath` == `Y` (case A's standby
     assertions and the migration multipath merge depend on it).
   - `df /var/tmp` ≥ 3 GiB free; `/var/tmp` filesystem supports punch-hole
@@ -162,13 +195,14 @@ prior run's agents are gone:
     `fallocate -l 2G`-preallocated and the worst per-case draw is 4 extents =
     256 MiB per VM.
   - Write Zeroes on the loop device: once §7 step 3 has created it, assert
-    `/sys/block/<loop>/queue/write_zeroes_max_bytes` is non-zero. `0` means
-    the kernel would fall back to writing zero pages at bulk speed, breaking
-    `update_01.md` U4's fast-Write-Zeroes assumption; DN5 then reports
-    `meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"` and §7 step 7's
-    assertion fails with a much less obvious message. This one per-VM check
-    necessarily runs inside §7 rather than in the pre-setup preflight block —
-    the device does not exist yet — but it fails the run the same way.
+    `/sys/class/block/<loop>/queue/write_zeroes_max_bytes` is non-zero. `0`
+    means the kernel would fall back to writing zero pages at bulk speed,
+    breaking `update_01.md` U4's fast-Write-Zeroes assumption; DN5 then
+    reports `meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"` and §7
+    step 7's assertion fails with a much less obvious message. This one
+    per-VM check necessarily runs inside §7 rather than in the pre-setup
+    preflight block — the device does not exist yet — but it fails the run
+    the same way, with the capability form of the message above.
   - ports 29528 and 4200 not listening (`ss -ltn`).
 
 ## 5. Identity plan and naming
@@ -259,8 +293,10 @@ Per VM, in order:
 2. `fallocate -l 2G $WORK/backing.img`
 3. `LOOP=$(losetup --find --show $WORK/backing.img)` (script records it);
    immediately after it, the deferred §4 preflight item — assert
-   `/sys/block/$(basename $LOOP)/queue/write_zeroes_max_bytes != 0`, failing
-   the run with the same `missing: <what> on <vm>` message
+   `/sys/class/block/$(basename $LOOP)/queue/write_zeroes_max_bytes != 0`,
+   failing the run with `vm<n>: <loop> reports write_zeroes_max_bytes=0`
+   (§4: the `missing:` form would misname a lab capability as an
+   uninstalled binary)
 4. `scp bin/dnv-agent` (built once on the driver:
    `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build` — pure-Go tree, static)
 5. launch the agent (§3 command line), as root, via nohup
@@ -290,10 +326,18 @@ Plaintext gRPC (`insecure.NewCredentials()`), **no server reflection exists**
 Global flags: `--addr <ip:29528>` (required), `--cluster`, `--dn`,
 `--trace-id <s>` (sent as gRPC metadata key `trace_id`; the script passes
 `it-<case>-<step>` so records correlate across driver and both agent logs),
-`--timeout <sec>` (default 10). All id flags accept `0x` hex. Every reply is
-printed as protojson on stdout (the script parses with `jq`). Exit non-zero
-on gRPC error **or** `agent_reply.code != 0` (except where the script
-explicitly expects a code, e.g. the case D stale probe: `--expect-code 1`).
+`--timeout <sec>` (default 10). The script's `ctl` wrapper raises it to 60 s
+for `syncup-dn` and `syncup-side`: one converge pass runs dozens of OS
+commands under their own 3 s soft / 5 s kill budgets (§6), and in §12 each
+DN plays src for one leg and dst for the other, so a converge pass runs
+while that same node is serving the other migration's hydration and
+NVMe-oF traffic. The 10 s default is sized for the read-only RPCs; the
+syncups get the much larger budget. The wrapper places the flag *before* the
+caller's arguments, so an explicit per-call `--timeout` still wins. All id
+flags accept `0x` hex. Every reply is printed as protojson on stdout
+(the script parses with `jq`). Exit non-zero on gRPC error **or**
+`agent_reply.code != 0` (except where the script explicitly expects a
+code, e.g. the case D stale probe: `--expect-code 1`).
 
 Subcommands:
 
@@ -301,13 +345,13 @@ Subcommands:
 |---|---|---|
 | `get-dn-size` | `--wait <sec>` | retry until success within wait |
 | `syncup-dn` | `--revision`, `--extent-size`, repeated `--side sp:leg:side` | full desired side list every call (declarative) |
-| `syncup-side` | `--revision`, `--sp --leg --side`, `--ext-cnt`, `--cntlid-slot`, `--primary-cn`, repeated `--standby-cn`, `--sp-level readwrite\|no_migration`, `--provisioned` (bool, **default false** — the proto zero value and the gateway's default for a new `Side`; every steady-state call must pass it, §9), optional `--migr-src migr:dstSide:dstDn` (+ `--dst-provisioned`, bool, default false), optional `--migr-dst migr:srcSide:srcDn --src-traddr <ip> --src-trsvcid 4200 --block-size --meta-blocks --hydr-threshold --hydr-batch --bm-cnt` | src_nvme_tr_conf is always `tcp/ipv4`; `side_conf.provisioned` and, with `--migr-src`, `migr_src_conf.dst_provisioned` are sent verbatim — the script plays the worker's flip (§9). Both bools MUST be written `--flag=true` / `--flag=false`: Go's `flag` package never consumes the next token for a bool, so `--provisioned true` parses as `--provisioned=true` plus a positional and silently drops every later flag |
+| `syncup-side` | `--revision`, `--sp --leg --side`, `--ext-cnt`, `--cntlid-slot`, `--primary-cn`, repeated `--standby-cn`, `--sp-level readwrite\|no_migration` (the parser takes all eight `SpLevel` names, so the flag stays usable if a later case needs another level; this suite sends only these two, §19), `--provisioned` (bool, **default false** — the proto zero value and the gateway's default for a new `Side`; every steady-state call must pass it, §9), optional `--migr-src migr:dstSide:dstDn` (+ `--dst-provisioned`, bool, default false), optional `--migr-dst migr:srcSide:srcDn --src-traddr <ip> --src-trsvcid 4200 --block-size --meta-blocks --hydr-threshold --hydr-batch --bm-cnt` | src_nvme_tr_conf is always `tcp/ipv4`; `side_conf.provisioned` and, with `--migr-src`, `migr_src_conf.dst_provisioned` are sent verbatim — the script plays the worker's flip (§9). Both bools MUST be written `--flag=true` / `--flag=false`: Go's `flag` package never consumes the next token for a bool, so `--provisioned true` parses as `--provisioned=true` plus a positional and silently drops every later flag |
 | `push-migr-bm` | `--revision`, `--sp --leg --side`, `--migr`, `--bm-idx`, `--bitmap-hex` | revision = side's current revision (gates, never advances) |
 | `get-dn-info` / `get-side-info` | (`--sp --leg --side`) | `get-side-info` prints the reply as protojson on **stdout** (unchanged — case D deep-equals it) plus a `dnagentctl: zeroed <k>/<n>` progress line on **stderr**, from `side_info.{zeroed_ext_cnt,total_ext_cnt}` |
 | `check-dn` / `check-side` | `--revision`, `--show-info` (+ side ptr) | opens the bidi stream, one request/reply round, closes |
-| `wait-hydrated` | side ptr, `--interval 0.5`, `--timeout 120`, `--min-first <n>` | polls `GetSideInfo`, parses `migr_dst_info.dm_clone_info.details` with `agent.ParseCloneStatus`; `--min-first` asserts the first sample's hydrated ≥ n; exits when hydrated == total |
+| `wait-hydrated` | side ptr, `--interval 0.5`, `--timeout 120`, `--min-first <n>` | polls `GetSideInfo`, parses `migr_dst_info.dm_clone_info.details` with `agent.ParseCloneStatus`; `--min-first` asserts the first sample's hydrated ≥ n; logs each sample to stderr and exits when hydrated == total, printing `{"first_hydrated":k,"first_total":n,"hydrated":n,"samples":s,"total":n}` on stdout — the `first_*` pair is the §14 layer-3 skip jump, kept in the exit line so a run log carries it even when nobody watched stderr |
 | `wait-zeroed` | side ptr, `--interval 0.5`, `--timeout 120` | polls `GetSideInfo`, reads `side_info.zeroed_ext_cnt`/`total_ext_cnt`, logs each sample to stderr; exits when `zeroed == total > 0` (the `> 0` guard matters: before the allocation record exists `total_ext_cnt` is 0 and `zeroed >= total` would trivially succeed), printing `{"zeroed":n,"total":n,"samples":k}` on stdout; fails fast on `side_dev_info.status == RES_STATUS_ERROR`. Binds its globals with `withTimeout = false` and spends `--timeout` as its own polling budget, exactly like `wait-hydrated` |
-| `ns-id` | `--sp --leg` | prints uuid/nguid/serial via `common.DnNsIdentity` for CN device lookup |
+| `ns-id` | `--sp --leg` | prints uuid/nguid/serial via `common.DnNsIdentity` for CN device lookup, plus `by_id` = `/dev/disk/by-id/nvme-uuid.<uuid>` ready to use — the script reads that field and never assembles the path itself, so the by-id convention lives in one place |
 | `host-id` | `--hostnqn <nqn>` | prints `common.NvmeHostId(nqn)`; local, no gRPC. Every emulated `nvme connect` passes it as `--hostid` (§3) |
 
 ## 9. Conventions
@@ -323,14 +367,23 @@ Subcommands:
   script).** Since `update_01.md` U4 a side is exported only when the
   request carries `provisioned = true` **and** every extent's `zeroed_bits`
   bit is set. There is no worker in this suite, so every `syncup-side` that
-  *creates* a side is issued twice, wrapped in the `sync_side_2phase()`
-  helper:
+  *creates* a side is issued twice: through the `sync_side_2phase()` helper,
+  or — for §12's two migration destinations — through the equivalent pair
+  `migr_provision_dst()` (phases a and b) and `migr_declare_dst()` (c):
   (a) `--provisioned=false` — the agent allocates the extent runs, builds
       `DnSideName` and starts the background zeroing goroutine. Assert
       `side_dev_info.status == RES_STATUS_PROVISIONING` with details
       `zeroing k/n`; every `cn_id_to_dm_error/linear/nvmeof[<cn>]` entry
       present and `RES_STATUS_PROVISIONING`; **no** `:2:` subsystem in
-      configfs yet; `zeroed_ext_cnt < total_ext_cnt` logged tolerantly (see
+      configfs yet; and, kernel-side, **no dm device of kind 0 or 1 for that
+      side** (helper `export_dms`, the per-CN dm-error/dm-linear pair) — the
+      reply's statuses say the agent believes it exported nothing, this says
+      the node agrees. Kind 4, the side device, is deliberately not matched:
+      building it is exactly what phase (a) does. The pattern is scoped to
+      the one side rather than the whole `sp`, because cases A and B/C
+      provision the sides of a pool one after another and a pool-wide
+      pattern would match a sibling side's already-live export and fail a
+      correct run. `zeroed_ext_cnt < total_ext_cnt` logged tolerantly (see
       the window note below).
   (b) `wait-zeroed` until `zeroed_ext_cnt == total_ext_cnt`.
   (c) `REV<dn>++` (the per-DN `REV[dn]` counter of the Revisions bullet)
@@ -376,7 +429,8 @@ Subcommands:
    primary CN 0x21, no standbys, `sp_level readwrite`,
    `--provisioned=false` — assert code 0, `side_dev_info` PROVISIONING,
    `cn_id_to_dm_error/linear/nvmeof[0x21]` all PROVISIONING, and no `:2:`
-   subsystem yet; (b) `wait-zeroed` ⇒ 1/1; (c) REV1++ and re-send with
+   subsystem and no kind-0/1 dm device for the side yet (the §9 phase-(a)
+   gate proof); (b) `wait-zeroed` ⇒ 1/1; (c) REV1++ and re-send with
    `--provisioned=true` — assert code 0, `side_dev_info` OK,
    `cn_id_to_dm_error/linear/nvmeof[0x21]` all OK.
 3. VM2 (as CN 0x21): `nvme connect -t tcp -a <ip1> -s 4200 -n <SideToCnNqn>
@@ -394,7 +448,7 @@ Subcommands:
    devices at all (the side device is dm kind 4, so the one pattern covers
    it) and no `:2:` subsystem in configfs.
 
-Success: all assertions pass; proves build/ship/launch, gRPC, LVM/dm/nvmet
+Success: all assertions pass; proves build/ship/launch, gRPC, dm/nvmet
 plumbing, CN connect and the IO path — before the bigger cases run.
 
 ## 11. Case A — `sides` (multiple sides → multiple CNs)
@@ -470,8 +524,8 @@ the clone or connecting, so chunks can be pushed first)*
      meta_blocks 3, dm_clone_conf{1,1}, bm_cnt (C: 2, B: 0)}`. Assert:
      `side_dev_info` PROVISIONING, the §9 phase-(a) gate proof for the one
      CN this request names (`cn_id_to_dm_error`, `cn_id_to_dm_linear` and
-     `cn_id_to_nvmeof` all PROVISIONING, and no `:2:` subsystem in configfs
-     on DNdst),
+     `cn_id_to_nvmeof` all PROVISIONING, no `:2:` subsystem in configfs on
+     DNdst, and no kind-0/1 dm device for S2),
      `migr_dst_info.dm_clone_info` **absent** — `assert_gated`, i.e. the
      field is omitted or `MISSING`, never `PROVISIONING` and never `OK`.
      Two gates coincide on this request and the **level wins**:
@@ -614,7 +668,7 @@ in parallel)**
     post-migration **write** probe: write 1 MiB at `bs=1M seek=5`,
     readback equal — the migrated side is live and writable.
 19. Case teardown: CN disconnects; `syncup-dn` both DNs back to empty lists;
-    assert no case LVs/dm/subsystems remain; `check-dn` rounds.
+    assert no case dm devices or subsystems remain; `check-dn` rounds.
 
 ## 13. Case B — `migr_full` specifics
 
@@ -714,8 +768,14 @@ by `sp_level no_migration`.
    equal-revision `syncup-side` re-send on DN2 (`bm_idx_list == [0]`).
 2. Restart both agents: `pkill -x dnv-agent`; wait for exit;
    `mv agent.log agent.pre-restart.log`; relaunch (§3); `get-dn-size --wait`.
-   The kernel-side state (nvmet, dm, LVM, the CN's connection) is
-   untouched — only the agent process dies.
+   The kernel-side state (nvmet, dm, the CN's connection) is
+   untouched — only the agent process dies. The wait for exit is bounded
+   (`pgrep -x dnv-agent`, up to 5 s) and its outcome is **printed, not
+   asserted** (`stopped` / `STILL_RUNNING`): it is a diagnostic line for the
+   run log, and one worth reading, since an agent that outlived the SIGTERM
+   keeps the gRPC port, the relaunched process then exits on the bind, and
+   every later step of this case is answered by the old, never-restarted
+   agent — which would pass the reconcile assertions while proving nothing.
 3. **Data-plane continuity**: while the agents are down and again after
    restart, the CN's read of its 4 MiB test data still succeeds (the data
    path does not depend on the agent process).
@@ -766,17 +826,36 @@ load-bearing:
    briefly busy, which the step 4 retry sweep already absorbs).
 2. Host-side `nvme disconnect` of every `nqn.2024-01.io.dnv:2:*` connection
    (CN roles) — nvmet controllers must die before nvmet teardown.
-3. nvmet configfs teardown, inside-out: unlink
-   `ports/1/subsystems/*`; per subsystem: `echo 0 > namespaces/1/enable`,
-   `rmdir namespaces/1`, unlink `allowed_hosts/*`, `rmdir` the subsystem;
-   `rmdir hosts/*`; `rmdir ports/1/ana_groups/{2,3}`; `rmdir ports/1`.
-   (Namespaces must be disabled before their backing dm devices can go;
-   a port with live host connections wedges — hence step 2 first.)
+3. nvmet configfs teardown of the side exports, inside-out and scoped to the
+   `:2:` subsystems: unlink them from `ports/1/subsystems/`; per subsystem
+   `echo 0 > namespaces/1/enable`, `rmdir namespaces/1`, unlink
+   `allowed_hosts/*`, `rmdir` the subsystem. (Namespaces must be disabled
+   before their backing dm devices can go; a port with live host connections
+   wedges — hence step 2 first.) The migration-source (`:3:`) subsystems are
+   deliberately left up here and come down in step 4, after the dm-clones.
+   Note that the `:3:` export a node owns is *not* the source of that node's
+   own clone: the `:3:` NQN carries the *source* DN's id (§5), so a
+   destination side connects to the peer's export, not its own
+   (dnagent.md §4.6). In cases B/C each DN is source for one leg and
+   destination for the other, so the clone a node removes in its own step 4
+   flushes over the connection to the *other* node's `:3:` export. Deferring
+   this node's `:3:` teardown past its own clones therefore protects the
+   peer's clone, and it does so only because `cleanup_all` runs the two VMs
+   concurrently — which is also why that function keeps the window in which
+   one node's nvmet teardown can kill the other's migration-source
+   connection as short as it can. The port-level objects follow:
+   `rmdir hosts/nqn.2024-01.io.dnv:*` (prefix-scoped like the subsystem
+   loops above, so a foreign host directory is left alone),
+   `rmdir ports/1/ana_groups/{2,3}` and `rmdir ports/1` run at the end of
+   step 4.
 4. dm removal, top-down with a retry sweep: pass 1 removes `dnv-*-1-*`
    (per-CN linears) then `dnv-*-3-*` (clones — **while the migration nvme
    connection is still up**: a clone flushes to its source on remove and
-   blocks otherwise); then `nvme disconnect` every `nqn...:3:*`
-   (migration connections); pass 2 removes `dnv-*-5-*` (the clone-metadata
+   blocks otherwise); then `nvme disconnect` every `nqn...:3:*` this node is
+   a *host* of (its controllers to the peer's migration sources) and drop
+   this node's *own* `nqn...:3:*` subsystems the same inside-out way as
+   step 3 — two disjoint sets on any one VM, since the NQN carries the dn id
+   of the node exporting it; pass 2 removes `dnv-*-5-*` (the clone-metadata
    wrappers the clones sat on), `dnv-*-2-*`, `dnv-*-0-*` and finally
    `dnv-*-4-*` (the side devices everything above was stacked on), then
    retries anything still busy.
@@ -786,7 +865,9 @@ load-bearing:
    when its `format_uuid` matches the header's, so the slots are inert
    without it ([D13]). There is no LVM step — the DN has no VGs.
 6. `losetup -j $WORK/backing.img` → `losetup -d` each; `rm -rf $WORK`
-   (removes store dir, logs, binary, backing file).
+   (removes store dir, logs, binary, backing file). The §3 helper is outside
+   `$WORK` and stays on the VMs — it is the script running this cleanup, and
+   every run re-ships it anyway.
 
 The script additionally resumes every suspended `dnv-*` dm device before
 step 2 and again before the loop devices are unformatted (`resume_suspended`).
@@ -875,7 +956,7 @@ another document or the harness cites can shift.
   `blkdiscard --zeroout` in `DnZeroBatchExtCnt = 10` extent batches paced by
   `DnZeroRetryInterval = 5` seconds; §4 and §7 step 3 add the DN5
   Write-Zeroes fail-fast check
-  (`/sys/block/<loop>/queue/write_zeroes_max_bytes != 0`, run inside setup
+  (`/sys/class/block/<loop>/queue/write_zeroes_max_bytes != 0`, run inside setup
   because the per-VM preflight block precedes the `losetup`); §8 gives
   `dnagentctl` a `--provisioned` flag on `syncup-side`, a
   `--dst-provisioned` flag alongside `--migr-src`, a `zeroed/total` **stderr**

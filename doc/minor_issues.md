@@ -1,8 +1,10 @@
 # minor_issues.md — minor doc/code debt from the 2026-09-09 verification
 
-Status: **tracking ledger** — none of these items change behavior or block
-work. This file holds the residue of the 2026-09-09 full doc-vs-code
-verification (all sixteen `doc/` files against the tree, builds/vet/gofmt/
+Status: **applied and struck in full, 2026-09-10** — kept as a tracking
+ledger because its ids are append-only and cited elsewhere. None of these
+items changed behavior or blocked work. This file holds the residue of the
+2026-09-09 full doc-vs-code verification (all sixteen `doc/` files against
+the tree, builds/vet/gofmt/
 unit suites green, update_04.md U1–U7 confirmed applied) after the same-day
 amendment pass fixed the substantive stale passages (recorded in
 `layout.md` §8; the edits touched `architecture.md`, `dnagent.md`,
@@ -35,9 +37,74 @@ applying it and striking it here with a date, or by folding it into an
 `update_0N.md`. Doc references use section/rule ids (stable); code
 references are `file:line` as of 2026-09-09.
 
+**The 2026-09-10 sweep.** Every item below is struck: the eleven `MT*` tests
+and suite probes are written, and every `DR*` and `UB*` amendment is in its
+document. The ids and their original text stay — they record the finding as
+it was found, not the fix — and each section below records where its items
+landed and the one sub-item that was not written. Verification:
+`go build ./...`, `go vet ./...`, `gofmt -l .` and `go test ./...` clean,
+the last with a real `etcd` on `ETCD_BIN` so the `etcdutil`, `model`,
+`gateway` and `worker` suites ran rather than skipped; and the three
+on-hardware suites the new probes touch — `dnagent_test.sh`,
+`cnagent_test.sh`, `gateway_test.sh` — pass against the lab. All three were
+run at the pre-sweep commit first and passed there, so the runs bracket the
+change: a failure afterwards would have been attributable to it.
+
+The amendments went in under four rounds of adversarial re-reading against
+the code, which is worth recording because the failure those rounds kept
+catching was not the missing edit but the *plausible* one — a new sentence
+that reads correctly and misstates what the code does. Most of what they
+killed were false universals ("the only other unfence"; "every caller is a
+worker"; "step 4 runs only on a create") and half-applied corrections, where
+the rule was fixed and the same false claim survived in an acceptance grep, a
+quoted code block or an implementation-notes entry. Two survivors were in
+code comments rather than in prose, and were corrected with the sweep:
+`common/constants.go` still budgeted `DefaultEtcdOpTimeout` per STM
+*attempt* (DR1), and `gateway/clone.go`'s `AppendCloneBitmap` header still
+called a chunk re-writable where the STM below it appends (DR15).
+
+**Left open on purpose.** The `ruling R3.6` cited by four `agent/cnagent/`
+comments (`clone.go`, `clonemeta.go`, `syncup_cntlr.go` and one test) still
+names no committed document. UB10's new `cnagent.md` sentence records the
+behavior one of those comments guards, but honoring the id itself would mean
+inventing a rule number, so the citations are left dangling rather than
+retargeted at a guess.
+
 ---
 
 ## 1. MT — doc-promised tests and suite probes never written
+
+**Struck (2026-09-10)**, MT11 in part. Where each landed: MT1 →
+`TestDisableLevelKeepsZeroing` (`agent/dnagent/dnagent_test.go`, beside
+`TestSpLevels`); MT2 → `gateway_test.sh` case C stage 5, which now spends a
+second clone (`cl-force`) and a second migration (`m-force`) on the
+stopped-agent `--force` path, each paired with the unforced refusal taken in
+the *same* stopped state, and each asserted against etcd ground truth rather
+than the reply code; MT3 → the tolerant window sample in `sync_side_2phase`;
+MT4 → `sync_side_ext_cnt` feeding `wait_zeroed`'s optional expected count,
+asserted hard on both the wait's last sample and the phase-2 reply; MT5 →
+the `host_subsys_present` VM helper, asserted on DNdst inside
+`migr_declare_dst`; MT6 → the 1 MiB read through the CN device in
+`migr_gate_src`; MT7 → `DIAG_SIDES`/`diag_add_side`, dumped best-effort by
+`diagnostics`; MT8 → the same tolerant sample in the cn suite's `dn_side`;
+MT9 → the hydration sample logged immediately before case C's wipe; MT10 →
+case C's post-teardown `cn_residue` / `clone_meta_wrappers` / `get-cn-info`
+probe, run on both CNs the way case S runs it on one.
+
+MT11 is struck for U2-T5 (`TestThinDeviceSameNameRecreateTakesFreshIds`,
+`gateway/`), U3-T5 (`TestSpCreatedFlipFromACheckRound`) and U3-T6
+(`TestSpCreatedFlipIgnoresTheReplyRevision`, both `worker/`). **U2-T6 stays
+open**, and is the one item this sweep did not close: its literal "inject a
+concurrent create between the STM's read and its commit" has nowhere to
+inject — `etcdutil.Client.run` hands the callback straight to
+`concurrency.NewSTM`, so no hook exists between the callback's last read and
+the commit txn — and the outcome it describes is unreachable through a real
+concurrent `CreateThinDevice` anyway, because a create bumps `SpRev` and the
+retried delete is refused by GW6's token check before the snapshot guard is
+ever consulted. Closing it needs either a test-only seam in `run` or a writer
+that reaches the guard without bumping `SpRev`; neither is worth a production
+seam for what `ThinDeviceCreated.md` §9 item 5 already calls optional
+hardening over structural coverage.
 
 * **MT1** — `dnagent.md` §6 test 21, second clause: a side re-synced at
   `SP_LEVEL_DISABLE` while `zeroed_bits` are still incomplete keeps issuing
@@ -81,6 +148,15 @@ references are `file:line` as of 2026-09-09.
   (`show_info = false` reply; an older-revision reply).
 
 ## 2. DR — minor doc drift (code is right; amend the doc)
+
+**All struck (2026-09-10)**: DR1–DR37 are amended into their documents —
+DR34–DR37 being four more of the same kind that the sweep itself turned up,
+listed at the end of this section. DR14 went in as its remaining half only —
+the `gateway.md` §5.4 half was
+already struck 2026-09-09 by update_05.md U4, and this sweep took the
+`architecture.md` §6.5 one. DR5 landed in all three of its carriers
+(`architecture.md` §9.6, `dnagent.md` DN15, `cnagent.md` CN22), and DR26/UB20
+in both of theirs (`grpc.md` §6 and `log.md` R5/R12).
 
 **dnv-worker.md**
 
@@ -241,7 +317,44 @@ references are `file:line` as of 2026-09-09.
 * **DR33** — §3's launch line `> $WORK/agent.log 2>&1 &` vs the script's
   `setsid nohup … >> … < /dev/null &` (append matters for case D).
 
+**Found by the 2026-09-10 sweep** (not by the 2026-09-09 verification), while
+re-reading each amended passage against the code. All four are the same shape
+as the items above — the code is right — and all four are **struck
+(2026-09-10)** with the rest. Code references here are `file:line` as of
+2026-09-10.
+
+* **DR34** — `dnagent.md` CM2's `--disk` row called the device "the raw block
+  device that becomes the DN VG", and the CM4 `main.go` sketch spelled its
+  flag help "raw block device for the DN VG". Nothing creates a VG: the
+  shipped help is "raw block device that carries the dnv disk format"
+  (`cmd/dnv-agent/main.go:61-62`) and `agent/dnagent/diskmeta.go` writes the
+  [D13] format onto it. The same document already said so in §2.1, in §5 and
+  in its own §7 acceptance grep — the correction had reached the prose and
+  missed the table and the code block. Two more carriers of the same removed
+  LVM: DN11's "the side LV" and DN10's dm-error "sized like the LV", where
+  the device is `DnSideName`, the multi-target dm-linear DN9 itself
+  describes.
+* **DR35** — `dnagent_integtest.md` carried the same surviving LVM claims
+  after the same correction landed in its §4 tool list ("No `lvm`") and §5.
+* **DR36** — `gateway.md` §10.6's `RETRY_BUDGET` row cited a
+  `race --retry-stale` flag that exists nowhere: `race`'s globals are
+  `--gateway --cluster --trace-id --timeout --expect --retry-budget`
+  (`integtest/gatewayctl/main.go:307-320`) and `retry_stale` is a per-job
+  JSON field. §10.8 spells both correctly — the surviving half of an
+  otherwise-right pair.
+* **DR37** — `cdc.md` §9.3's launch block redirects with `>` where the suite
+  uses `>>` (`integtest/cdc_test.sh:402` for cdc, `:1659` for etcd). Not
+  cosmetic: §9.9's per-case reset truncates the four logs and case H's
+  restart assertions count *past* a pre-kill baseline, so a relaunch that
+  truncated would drive those counters below their baselines and time out
+  every mid-case restart assertion.
+
 ## 3. UB — sound but undocumented behavior (add a doc sentence)
+
+**All struck (2026-09-10)**: UB1–UB20 are documented next to the rules that
+should have carried them. UB10 is the only one that leaves anything behind —
+the code comment it came from still cites the uncommitted `ruling R3.6`; see
+the note at the top of this file.
 
 **worker**
 

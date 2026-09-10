@@ -110,29 +110,47 @@ the dn suite's directory, so the suites never share debris):
   dnv-agent         # scp'd binary (one binary, both roles)
   dn-agent.log      # nohup'd dn stdout (JSON log records)
   cn-agent.log      # nohup'd cn stdout
-  req-*.json        # generated SyncupCntlr protojson requests (§8)
   pattern-*.bin     # test data files (on the host-role VM)
 ```
+
+The driver keeps a directory of the same path locally, holding only the §8
+request files (`req-<case>-cn<n>.json`): `cnagentctl` runs on the driver and
+reads them there, so they are never copied to a VM.
 
 Agent launch lines (VM1 shown; VM2 identical with its own IP):
 
 ```
-nohup $WORK/dnv-agent dn \
+setsid nohup $WORK/dnv-agent dn \
   --grpc-network tcp --grpc-address <ip1>:29528 \
   --tr-type tcp --adr-fam ipv4 --tr-addr <ip1> --tr-svc-id 4200 \
   --local-store $WORK/dn-store \
-  --disk <loopdev> > $WORK/dn-agent.log 2>&1 &
+  --disk <loopdev> >> $WORK/dn-agent.log 2>&1 < /dev/null &
 
-nohup $WORK/dnv-agent cn \
+setsid nohup $WORK/dnv-agent cn \
   --grpc-network tcp --grpc-address <ip1>:29529 \
   --tr-type tcp --adr-fam ipv4 --tr-addr <ip1> --tr-svc-id 4200 \
   --local-store $WORK/cn-store \
-  --capacity 1099511627776 > $WORK/cn-agent.log 2>&1 &
+  --capacity 1099511627776 >> $WORK/cn-agent.log 2>&1 < /dev/null &
 ```
+
+Both lines follow the dn suite's form for the same reasons (§3 there):
+`setsid` puts the agent in its own session so the exiting ssh command cannot
+signal it with the channel's process group, and `< /dev/null` keeps it off
+the ssh stdin. The redirect **appends**, which is what makes the `mv` before
+every relaunch load-bearing — §14 step 2's `cn-agent.pre-restart.log` and
+§13 stage 6's `cn-agent.pre-wipe.log`: case D step 5 asserts the
+*post*-restart log holds no mutating operation, and stage 6 reads the §11.5
+recovery order out of the fresh log, so without the move the re-opened file
+would still carry every earlier `dmsetup create` and `nvme connect`.
 
 **Process control gotcha:** both processes are named `dnv-agent`, so the dn
 suite's `pkill -x dnv-agent` would kill both. This suite always uses
 `pkill -f 'dnv-agent dn'` / `pkill -f 'dnv-agent cn'` to address one role.
+The kill helper escalates: SIGTERM, then up to 5 s of `pgrep` polling, then
+SIGKILL, and it reports the process as still running if even that fails —
+a stop that silently left an agent alive would have the old process racing
+the relaunched one for the same store and the same kernel objects, so the
+stage must fail instead.
 
 ## 4. Assumptions and preflight checks
 
@@ -146,10 +164,13 @@ Preflight (fail fast, installs nothing; driver half first, per-VM half after
 the start-of-run cleanup; one per-VM item — the loop device's
 `write_zeroes_max_bytes` — necessarily runs later, inside §7 setup right
 after `losetup`, because it needs the device to exist, and fails the run with
-the same `missing: <what> on <vm>` message):
+its own message, `vm<n>: <loop> reports write_zeroes_max_bytes=0`, rather
+than the `missing: <what> on <vm>` form the sudo and binary checks use:
+nothing is absent there, a present device lacks a capability):
 
-- driver: `go`, `ssh`, `scp`, `sha256sum`, jq (system `jq` or the gitignored
-  `gojq` fallback); repo builds (`make build`).
+- driver: `go`, `ssh`, `scp`, `sha256sum`, jq (a system `jq` is used as-is;
+  without one, the gitignored `gojq` fallback is built at the pinned
+  `github.com/itchyny/gojq/cmd/gojq@v0.12.17`); repo builds (`make build`).
 - per VM, via `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new`:
   - `sudo -n true`.
   - binaries: everything the dn suite checks (`dmsetup`, `nvme`, `losetup`,
@@ -185,14 +206,17 @@ the same `missing: <what> on <vm>` message):
     has no CN-side preflight for it and simply reports the clone
     `RES_STATUS_ERROR` with the `blkdiscard` output if the kernel refuses.
   - Write Zeroes on the DN backing loop: once §7 step 3 has created it,
-    assert `/sys/block/<loop>/queue/write_zeroes_max_bytes` is non-zero. `0`
-    means the kernel would fall back to writing zero pages at bulk speed, so
-    `update_01.md` U4's fast-Write-Zeroes assumption cannot hold and DN5
-    fails the node fast (`meta_info = RES_STATUS_ERROR "disk lacks Write
-    Zeroes"`), which would surface as a confusing §7 step 6 failure instead
-    of a clear preflight message. This is the same underlying capability the
-    punch-hole probe tests (loop maps WRITE_ZEROES onto `fallocate` on the
-    backing file), asserted directly on the device the dn agent reads.
+    assert `/sys/class/block/<loop>/queue/write_zeroes_max_bytes` is
+    non-zero — `/sys/class/block`, not `/sys/block`, because that is the
+    directory `agent.Dm.WriteZeroesMaxBytes` reads, so the suite and the
+    agent consult the very same file. `0` means the kernel would fall back
+    to writing zero pages at bulk speed, so `update_01.md` U4's
+    fast-Write-Zeroes assumption cannot hold and DN5 fails the node fast
+    (`meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"`), which would
+    surface as a confusing §7 step 6 failure instead of a clear preflight
+    message. This is the same underlying capability the punch-hole probe
+    tests (loop maps WRITE_ZEROES onto `fallocate` on the backing file),
+    asserted directly on the device the dn agent reads.
   - ports 29528, 29529 and 4200 not listening (`ss -ltn`).
 
 ## 5. Identity plan and naming
@@ -306,8 +330,10 @@ Per VM, in order:
 3. `fallocate -l 2G $WORK/backing.img`;
    `LOOP=$(losetup --find --show $WORK/backing.img)`; immediately after the
    `losetup`, run the deferred §4 preflight item — assert
-   `/sys/block/$(basename $LOOP)/queue/write_zeroes_max_bytes != 0`, failing
-   the run with the same `missing:` message as the rest of preflight.
+   `/sys/class/block/$(basename $LOOP)/queue/write_zeroes_max_bytes != 0`
+   (the file the agent itself reads), failing the run with
+   `vm<n>: <loop> reports write_zeroes_max_bytes=0` — a capability report,
+   not the `missing:` form of the absent-tool checks.
 4. `scp bin/dnv-agent` (built once on the driver:
    `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build`)
 5. launch **both** agents (§3 command lines), as root, via nohup
@@ -336,7 +362,11 @@ rationale and conventions as `dnagentctl`: global flags `--addr` (the cn
 endpoint `<ip>:29529`), `--cluster`, `--cn`, `--trace-id` (metadata key
 `trace_id`, script passes `it-<case>-<step>`), `--timeout` (default 10),
 `0x` hex accepted on id flags, protojson replies on stdout, non-zero exit on
-gRPC error **or** `agent_reply.code != 0` unless `--expect-code N`.
+gRPC error **or** `agent_reply.code != 0` unless `--expect-code N`. The
+script raises that deadline for the converge RPCs, which do real kernel work
+under one lock: 60 s for `syncup-dn`/`syncup-side` (the dn suite's value) and
+180 s for `syncup-cn`/`syncup-cntlr`, since a CN converge can create two md
+arrays, a thin pool and a dm-clone in one call.
 
 Subcommands:
 
@@ -356,12 +386,14 @@ Subcommands:
 
 **The `--req` protojson file.** `SyncupCntlrRequest` is too deep for flags;
 the script writes each request as a heredoc-generated JSON file
-(`$WORK/req-<case>-<step>.json` on the driver, passed locally — cnagentctl
-runs on the driver) and edits between steps only the fields that change
-(`revision`, `sp_level`, `cntlr.primary`, `clone_list`/`xfer_list`,
-`ns_list[].suspended`). protojson accepts original snake_case field names,
-64-bit integers as decimal strings, and enum value names; the script keeps
-a `d16()` hex→decimal helper next to the dn suite's `hex16`. The complete
+(`$WORK/req-<case>-cn<n>.json` on the driver, passed locally — cnagentctl
+runs on the driver — one file per CN for the whole case, not one per step,
+so the file always mirrors that CN's current desired state) and edits
+between steps only the fields that change (`revision`, `sp_level`,
+`cntlr.primary`, `clone_list`/`xfer_list`, `ns_list[].suspended`).
+protojson accepts original snake_case field names, 64-bit integers as
+decimal strings, and enum value names; the script keeps a `d16()`
+hex→decimal helper next to the dn suite's `hex16`. The complete
 case S request, on CN1 with everything at `<ip1>` (revision 3: the setup
 baseline `syncup-cn` used 1, case S's pointer-introducing `syncup-cn` used
 2 — one monotonic counter per CN, §9):
@@ -451,7 +483,10 @@ slice_id)` per §9.3.)
       `side_dev_info` reports `RES_STATUS_PROVISIONING` with details
       `zeroing k/n` and every `cn_id_to_dm_error/linear/nvmeof` entry reports
       `RES_STATUS_PROVISIONING` — **not** OK, and not absent;
-  (b) `dnagentctl wait-zeroed` until `zeroed_ext_cnt == total_ext_cnt`;
+  (b) `dnagentctl wait-zeroed` until `zeroed_ext_cnt == total_ext_cnt`,
+      polled every 0.5 s with a 120 s budget — orders of magnitude above the
+      sub-second `fallocate` path below, because the budget only has to cover
+      a side that hit `DnZeroRetryInterval` (5 s) retries;
   (c) `DNREV<dn>++` (the `DNREV[dn]` counter of the Revisions bullet) and
       re-send the identical request with
       `--provisioned=true` (the flip), after which `side_dev_info` and every
@@ -481,7 +516,11 @@ slice_id)` per §9.3.)
 - **Failover script order** (case A step 4; the safe serialization of the
   §11.1 revision fan-out): demote the old primary (`syncup-cntlr`
   `primary=false`) → flip every side (`syncup-side` with the new
-  `primary_cn_id`) → promote the new primary. Host IO is quiesced from
+  `primary_cn_id`) → **wait for the new primary's path to every one of the
+  SP's legs to report ANA `optimized`** → promote the new primary. That
+  barrier is not cosmetic: the flip is asynchronous, and a promote that
+  arrives while a leg is still `non-optimized` finds that member
+  unavailable and fails the md assembly (§11.1.1). Host IO is quiesced from
   before the demote until the new primary's path reports `optimized` —
   between those points the namespace can have no serving path, and
   ANA-inaccessible paths queue IO and have no `/dev` node.
@@ -532,7 +571,11 @@ slice_id)` per §9.3.)
    `td_id_to_{raid0,dm_error}[0x9]`, thin `[0x9][0x2]`,
    `ns_id_to_{namespace,dm_linear}[0xb]`, `ss_id_to_subsystem[0xa]` all
    OK. On VM1: `dmsetup ls` shows the kind-9/a devices; configfs
-   `attr_allow_any_host == 1` for the ss (empty `allowed_hosts`).
+   `attr_allow_any_host == 1` for the ss, and its `allowed_hosts/` directory
+   is separately asserted empty — the request sends an empty `allowed_hosts`
+   list, which the agent converges into allow-any with no host links, and the
+   two assertions are the two halves of that translation (case A sends the
+   host NQN instead, and its step 2 asserts the directory holds exactly it).
 3. Host (VM2): `nvme connect -t tcp -a <ip1> -s 4200 -n …:s:vol1 --hostid
    <cnagentctl host-id> --hostnqn
    nqn.2024-01.io.dnv-it:host:0`; wait for
@@ -548,11 +591,19 @@ slice_id)` per §9.3.)
 6. Teardown: host disconnect (`-n`, both paths of the NQN are dying
    anyway); `syncup-cn` CN1 (CNREV1++) with an **empty cntlr list** →
    declarative cntlr teardown (CN7/CN21); `syncup-dn` DN1 (DNREV1++) empty
-   side list. Assert on VM1: no `dnv-*-0000000000000011-*` dm devices (that
-   one pattern covers the kind-`b` clone-metadata wrappers too — the
-   allocator's units are free again exactly when the wrappers are gone), no
-   `dnv-it` subsystem in configfs, and the base state still probes OK via
-   `get-cn-info`.
+   side list. Assert on VM1, in this order: no `dnv-*-0000000000000011-*` dm
+   devices (that one pattern covers the kind-`b` clone-metadata wrappers too
+   — the allocator's units are free again exactly when the wrappers are
+   gone) and no `dnv-it` subsystem in configfs — that configfs half is what
+   proves the host-facing `dnv-it:*` subsystems are gone, the per-SP residue
+   check of §11 step 7 matching subsystems by sp id and so unable to see
+   them. The kind-`b` list is then asserted empty a second time on its own,
+   because it is the only allocation registry there is (`update_01.md` U3:
+   no on-file table), so reading it by name reports a leaked clone unit as
+   an arena leak rather than as one more anonymous dm device. The base state
+   then still probes OK via `get-cn-info`, and last comes the per-SP residue
+   check of §11 step 7, run over both VMs. Case C runs the same sweep on
+   both its CNs (§13 stage 10).
 
 Success proves: both ctl binaries, both agents, pointer gating, the full
 §3.3 primary stack on real devices, host IO, declarative teardown.
@@ -574,7 +625,13 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    legs connected (`nvme list-subsys` on VM2 shows the four side paths,
    ana `non-optimized`), **no** md arrays, ns-dev table = error, ns
    `ana_grpid` inaccessible; configfs `allowed_hosts/` of the ss contains
-   exactly the host NQN on both CNs.
+   exactly the host NQN on both CNs. "ns-dev table = error" is shorthand:
+   the agent never gives an ns-dev an `error` target, it repoints the
+   ns-dev's own table at the td's `CnErrorName` device (CN16 rule 1) — a
+   dm-linear on this `readwrite` standby, since only rule 6's readonly level
+   wraps the backing in dm-flakey (step 6) — so the assertion compares the
+   ns-dev's backing devno with the kind-5 dm-error's, the state CN16
+   actually prescribes.
 3. Host (VM2): connect the ss at **both** CN ports; one multipath device,
    CN1 path `optimized`, CN2 path `inaccessible`. Write 8 MiB pattern,
    sha, drop caches, read back.
@@ -601,8 +658,13 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    `optimized`. Back to `readwrite` (CNREV2++): write succeeds again.
 7. `check-cn`/`check-cntlr` rounds on both CNs; teardown: host disconnect,
    empty cntlr lists both CNs, empty side lists both DNs; assert no
-   `0x3b1` residue (dm, md — `mdadm --detail --scan` lists no `dnv-*`
-   array — or subsystems).
+   `0x3b1` residue on either VM — dm devices of the SP, md arrays
+   (`mdadm --detail --scan` lists no `dnv-*` array), and those nvmet
+   subsystems whose NQN carries the sp id, i.e. the `:2:`/`:3:`/`:4:` ones,
+   which is what the check matches on. The host-facing `dnv-it:*`
+   subsystems are named by the request (§5) and carry no id, so no per-SP
+   check can see them; the per-CN sweep of §10 step 6 — run by case S and
+   by case C on both its CNs — is what does.
 
 ## 12. Case B — `thinbm` (snapshots and bitmap reads)
 
@@ -637,9 +699,15 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    shows suspend(origin raid0)/suspend(origin thin)/`create_snap 2 1`
    message/resume(origin thin)/resume(origin raid0) in that order, and the
    snapshot's own thin device created only after that last resume (CN14,
-   `update_02.md` U1). This SP has one slice, so the log is the only
-   on-hardware evidence of the bracket; the cross-slice point-in-time
-   property is asserted in the unit tests (`cnagent.md` §6 test 19).
+   `update_02.md` U1). What the script actually anchors is each of those
+   four events against the `create_snap` message alone — both suspends
+   before it, both resumes after it, the snapshot create after the raid0
+   resume — since that is the property the message depends on; the pairwise
+   raid0↔thin nesting is left to the unit tests, which drive a two-slice SP
+   and compare recorded call indices directly. This SP has one slice, so
+   the log is the only on-hardware evidence of the bracket; the nesting and
+   the cross-slice point-in-time property are asserted in the unit tests
+   (`cnagent.md` §6 test 19).
 7. Host connects `…:b:snap1`; reads blocks {0,5,6,7} of the snapshot ⇒
    sha-equal to the four pattern blocks; block 3 reads zero.
 8. Host writes a new pattern block to the **origin** at `seek=9`; snapshot
@@ -667,7 +735,8 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    survived the rebuild, so the bare `dmsetup create` attached the *existing*
    ids: no empty volume, no data loss. This is the only place a real dm-thin
    pool proves it.
-10. Check rounds; teardown as usual; residue checks.
+10. Check rounds; teardown as usual; residue checks (§11 step 7's scope: dm,
+    md and the id-carrying subsystems of `0x3c1`).
 
 ## 13. Case C — `clone_xfer` (§11.3 live move + §11.5 recovery)
 
@@ -726,9 +795,15 @@ over it, builds the dm-clone `no_hydration` with that wrapper as its
 metadata device, applies the chunk, enables hydration, reloads the ns-dev
 onto the clone and — the `auto_resume` override, with the stored
 `suspended` still `true` — moves the ns to `optimized`. Assert:
-`clone_id_to_{target,dm_clone,meta}` OK and `clone_id_to_meta[0xc].res_name`
-is that kind-`b` name (CN28 now probes it with `dmsetup table`, not `lvs`);
-the dm-clone's own live `dmsetup table` matches
+`clone_id_to_{target,dm_clone,meta}` OK, and that the kind-`b` wrapper of
+that name is `live` on VM2 and that its `dmsetup table` opens with a linear
+target, `0 <len> linear <maj:min> <off>` — the on-VM form of
+`clone_id_to_meta[0xc].res_name`, taken in place of the reply field because
+the table, not the name, is the allocation record (CN28 now probes it with
+`dmsetup table`, not `lvs`). That grep is satisfied by the first matching
+line and never compares `<maj:min>` against the arena loop's devno, so it
+pins the shape of the allocation record and not the device it was carved
+from; the dm-clone's own live `dmsetup table` matches
 `' 2 no_hydration no_discard_passdown( |$)'` — the exact `update_01.md` U1
 feature pair, asserted here against a real kernel and not only in the
 `cnagent.md` §6 unit tests. The pinned regex is safe even after
@@ -764,29 +839,47 @@ sample (hydration may or may not have finished by now — the recovery
 contract covers both; log which): `pkill -f 'dnv-agent cn'` on VM2 (the dn agent
 keeps running), `mv cn-agent.log cn-agent.pre-wipe.log`, then wipe CN2's
 kernel state to simulate a CN reboot: remove sp2's host-facing subsystem
-from configfs (inside-out), `dmsetup remove` kinds 6 then 7 (the clone —
-**while its `:4:` source connection is still up**, it flushes through it),
-disconnect the `:4:` and sp2 `:2:` connections, remove kinds 5,4,3,2,1,0,a,9
-and then kind `b` (the clone-metadata wrapper the dm-clone sat on — it must
-go before the loop device can be detached), `losetup -d` the arena loop +
-`umount` the tmpfs (the clone's metadata is now genuinely gone, arena and
-allocation registry together — the tmpfs-volatility this recovery exists
-for; since `update_01.md` U3 the registry *is* the kernel's dm tables, so
-removing the wrappers and the tmpfs in one sweep leaves nothing stale
-behind). The shared port and the dn objects stay (co-location artifact,
-§3 — a real reboot would take them too and `EnsurePort` would simply
-recreate them). `$WORK/cn-store` is untouched. Relaunch the cn agent;
-`get-cn-size --wait`. Assert the reconcile rebuilt everything from the
-store: `get-cntlr-info` all OK; the fresh `cn-agent.log` shows the §11.5
-order — `reserve_metadata_snap` → `thin_dump` → `release_metadata_snap`,
-then the arena-unit `blkdiscard` + `dmsetup create` of the fresh kind-`b`
-wrapper, then the dst-bitmap `blkdiscard`s (on the `dnv-*-7-*` dm-clone) and
-the re-applied src chunk **before** the
-`enable_hydration` message; equal-rev re-send still reports
-`bm_idx_list [0]` (chunk files survived). Host: the wipe killed the sp2
-controller with DNR (it will not reconnect) — disconnect it **by device**
-(`nvme disconnect -d`, never `-n`: the NQN is shared with the live sp1
-path) and reconnect; wait `optimized` again.
+from configfs (inside-out), `dmsetup remove` kinds 6 and 8, then 7 (the
+clone — **while its `:4:` source connection is still up**, it flushes
+through it), disconnect the `:4:` and sp2 `:2:` connections, remove kinds
+5,4,3,2,1,0,a,9 and then kind `b` (the clone-metadata wrapper the dm-clone
+sat on — it must go before the loop device can be detached), `mdadm --stop`
+every `dnv-` array, `losetup -d` the arena loop + `umount` the tmpfs (the
+clone's metadata is now genuinely gone, arena and allocation registry
+together — the tmpfs-volatility this recovery exists for; since
+`update_01.md` U3 the registry *is* the kernel's dm tables, so removing the
+wrappers and the tmpfs in one sweep leaves nothing stale behind). The
+shared port and the dn objects stay (co-location artifact, §3 — a real
+reboot would take them too and `EnsurePort` would simply recreate them).
+Kind 8 and the `mdadm --stop` find nothing on this RedundNone,
+transfer-free CN: the wipe walks §16's full kind sweep, in the same kind
+order (the `mdadm --stop` and the `:2:` disconnect sit at different points
+in it), so that it stays a faithful reboot of *any* CN rather than a
+hand-picked list that would silently stop matching if a later case gave CN2
+an xfer or a raid1 group. One thing it deliberately does not copy from §16:
+it disconnects the `:4:` controllers but leaves the node's *own* `:4:` xfer
+subsystems in configfs, next to the shared port they hang off — so a CN2
+that did carry an xfer would keep that export across the wipe, where §16
+also `rmdir`s it. `$WORK/cn-store` is untouched. Relaunch the cn
+agent; `get-cn-size --wait 120` — the listener opens only after the startup
+reconcile returns, and here that reconcile is the whole §11.5 recovery
+(reconnect, re-read the destination bitmaps, re-apply the chunk), so the
+wait-up budget is the recovery's, not a process start's. Assert the
+reconcile rebuilt everything from the store: `get-cntlr-info` all OK; the
+fresh `cn-agent.log` shows the §11.5 order — `reserve_metadata_snap` →
+`thin_dump` → `release_metadata_snap`, then the arena-unit `blkdiscard` +
+`dmsetup create` of the fresh kind-`b` wrapper, then the dst-bitmap
+`blkdiscard`s (on the `dnv-*-7-*` dm-clone) and the re-applied src chunk
+**before** the `enable_hydration` message; equal-rev re-send still reports
+`bm_idx_list [0]` (chunk files survived). Of that order the recovery stage
+re-asserts a subset — the reserve/dump/release sequence, that the *first*
+`blkdiscard` on the dm-clone precedes `enable_hydration`, and that exactly
+one kind-`b` wrapper exists for this CN — because the reconcile mints its
+own trace id and its per-`blkdiscard` arithmetic is already pinned on
+stage 4's converge, whose trace can be isolated. Host: the wipe killed the
+sp2 controller with DNR (it will not reconnect) — disconnect it **by
+device** (`nvme disconnect -d`, never `-n`: the NQN is shared with the live
+sp1 path) and reconnect; wait `optimized` again.
 
 **Stage 7 — completion.** `wait-hydrated` to 64/64 (timeout 120 s).
 
@@ -810,8 +903,14 @@ unmapped. Then a write probe at `seek=40`, readback equal — the moved
 volume is live and writable.
 
 **Stage 10 — teardown**: host disconnects (by NQN now — every path is
-going), empty cntlr and side lists everywhere, residue checks on both VMs,
-`check-cn` rounds.
+going), empty cntlr and side lists everywhere, then §10 step 6's per-CN
+sweep on **both** CNs — no dm device and no host-facing `dnv-it:*`
+subsystem left of either CN's own, an empty kind-`b` arena, and the §3.2
+base resources still probing OK via `get-cn-info`, because a teardown that
+took the port, the tmpfs or the loop arena with it would satisfy every
+residue check and still leave the CN unable to serve the next SP; and last
+the residue checks on both VMs for `0x3d1` and `0x3d2` (§11 step 7's scope:
+dm, md and the id-carrying subsystems). `check-cn` rounds.
 
 ## 14. Case D — `restart`
 
@@ -825,7 +924,11 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    `leg_id_to_leg[].details` — the CN11 prober restarts and re-stamps its
    timestamps).
 2. Restart both cn agents: `pkill -f 'dnv-agent cn'`; wait for exit; `mv
-   cn-agent.log cn-agent.pre-restart.log`; relaunch; `get-cn-size --wait`.
+   cn-agent.log cn-agent.pre-restart.log`; relaunch; `get-cn-size --wait 60`
+   — the listener opens only after the startup reconcile returns, so the
+   budget covers a reconcile that re-probes two md arrays, a pool and four
+   legs, not just the process start (§13 stage 6 needs 120 for the same
+   reason, its reconcile being a full clone recovery).
    Kernel state (md, dm, pools, nvmet, leg and host connections) is
    untouched; the dn agents never stop.
 3. **Data-plane continuity**: while the cn agents are down and again after
@@ -856,7 +959,8 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    intentional negative call: only the stale *rejection* proves the
    revision survived the restart.
 7. Teardown as usual (host disconnect, empty lists everywhere, residue
-   checks).
+   checks for `0x3e1` — §11 step 7's scope: dm, md and the id-carrying
+   subsystems).
 
 ## 15. (reserved)
 
@@ -883,24 +987,31 @@ across **both** VMs (a clone on one VM holds a source on the other):
    `dnv-it:*` subsystems (frees the ns-devs below).
 5. cn dm pass 1: remove kinds `6` (ns-dev) and `8` (xfer-final), then `7`
    (dm-clones — **while their `:4:` source connections are still up**;
-   a clone flushes through its source on remove and blocks otherwise), then
-   kind `b` (the clone-metadata wrappers the dm-clones sat on; removing them
-   frees their arena units and unbusies the loop device for step 9).
+   a clone flushes through its source on remove and blocks otherwise).
 6. Disconnect `:4:` connections; then remove the `:4:` xfer subsystems.
 7. cn dm pass 2: kinds `5`, `4`, `3`, `2`, `1`, `0`; `mdadm --stop` every
-   array whose `mdadm --detail --scan` name starts `dnv-`; kinds `a`, `9`.
+   array whose `mdadm --detail --scan` name starts `dnv-`; kinds `a`, `9`;
+   last kind `b`, the clone-metadata wrappers the pass-1 dm-clones sat on —
+   they cannot go before their clones do, and removing them frees their
+   arena units and unbusies the loop device for step 9. §13 stage 6's wipe
+   reuses this kind order, though it stops the arrays after kind `b` rather
+   than mid-pass and disconnects `:2:` ahead of the pass rather than after
+   it (step 8).
 8. Disconnect `:2:` (leg) connections.
 9. cn tmpfs/arena: `losetup -d` every loop backed under
    `/tmp/dnv-tmpfs/`, `umount` the `/tmp/dnv-tmpfs/*` mounts, `rmdir` them.
    No LVM step — `update_01.md` U3 removed the clone VG; the kind-`b`
-   wrappers went in step 5, which is what makes `losetup -d` succeed here
-   (a surviving wrapper holds the loop device EBUSY).
-10. `resume_suspended` again, then the dn suite's §16 steps: nvmet
-    teardown inside-out (remaining `:2:`/`:3:` subsystems, hosts,
-    `ana_groups/{2,3}`, the shared port), dn dm kinds `1`,`3` →
-    disconnect `:3:` → `5`,`2`,`0`,`4` with a retry sweep, zero the
-    disk-format header (`dd … conv=fsync`, no `oflag=`) + `wipefs`,
-    `losetup -d` the backing loops.
+   wrappers went at the end of step 7, which is what makes `losetup -d`
+   succeed here (a surviving wrapper holds the loop device EBUSY).
+10. `resume_suspended` again, then the dn suite's §16 steps in that suite's
+    own order: the remaining `:2:` subsystems inside-out, dn dm kinds
+    `1`,`3` → disconnect `:3:` → the `:3:` subsystems inside-out (deferred
+    past the dm-clones, which flush over the *peer's* `:3:` export on
+    removal — `dnagent_integtest.md` §16 step 4) → `5`,`2`,`0`,`4` with a
+    retry sweep, then the port-level objects (`hosts/*`,
+    `ana_groups/{2,3}`, the shared port), zero the disk-format header
+    (`dd … conv=fsync`, no `oflag=`) + `wipefs`, `losetup -d` the backing
+    loops.
 11. `rm -rf $WORK`; `rm -f /etc/udev/rules.d/63-dnv-md.rules` +
     `udevadm control --reload`.
 
@@ -990,12 +1101,12 @@ another document or the harness cites can shift.
   4/6/8 assert kind-`b` wrappers instead of LVs, and the stage-4
   `blkdiscard` count is now scoped by target device because the allocator's
   recycled-unit guard adds a second `blkdiscard` (on the loop device, plain,
-  never `--zeroout`); §16 step 5 removes kind `b` after the dm-clones and
-  step 9 loses `vgchange`; §17 no longer dumps `lvs`; Appendix A's
-  volatile-VG bullet became the volatile-arena bullet. Rationale: the
-  [D13](a) label-scan class (a bare `vgs`/`lvs` scanning a CN's suspended
-  transfer-origin ns-devs wedges LVM in unkillable D state) plus
-  deterministic naming.
+  never `--zeroout`); §16 removes kind `b` at the end of dm pass 2, once the
+  dm-clones of pass 1 have released it, and step 9 loses `vgchange`; §17 no
+  longer dumps `lvs`; Appendix A's volatile-VG bullet became the
+  volatile-arena bullet. Rationale: the [D13](a) label-scan class (a bare
+  `vgs`/`lvs` scanning a CN's suspended transfer-origin ns-devs wedges LVM
+  in unkillable D state) plus deterministic naming.
 - **U4-T6 (`update_01.md` U4, new decision [D15])** — whole-side zeroing
   behind a `provisioned` gate: every DN side is fully written with
   `blkdiscard --zeroout` before its first export, tracked per extent in the
@@ -1082,8 +1193,13 @@ another document or the harness cites can shift.
   rather than forcing (`cnagent.md` CN12), and no case here depends on a
   degraded start.
 - **dm-flakey `<num_features>` counts the feature name** — the readonly
-  table is `… flakey <dev> 0 0 1 1 error_writes`; case A's readonly stage
-  greps for exactly that shape.
+  table is `… flakey <dev> 0 0 1 1 error_writes`. Case A's readonly stage
+  greps the live ns-dev table for `flakey` and for `error_writes` as two
+  independent substrings (the looser form §11 step 6 states), because
+  dm-flakey prints its feature arguments back in a kernel-version-dependent
+  order: the agent's own ns-dev probe (`nsDevTableMatches` in `td.go`)
+  compares the four positional arguments and merely requires `error_writes`
+  to be present somewhere after them, for exactly that reason.
 
 ### Integration-run fixes (first on-hardware run)
 

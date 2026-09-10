@@ -945,6 +945,79 @@ func TestDeleteThinDeviceHappyPath(t *testing.T) {
 	}
 }
 
+// TestThinDeviceSameNameRecreateTakesFreshIds walks §8.7's same-name recreate:
+// a td created, deleted and created again under the SAME name is a DIFFERENT
+// device — a fresh td_id and the next dev_id, `created` false again — because
+// a delete returns nothing to either counter (§5.4) and the sp-worker's flip
+// is a fact about the pool metadata of THAT dev_id.
+//
+// The last step is why the delete guard matches on dev_id: a snapshot record
+// left over from the dead device names a dev_id nothing carries any more, so
+// it can never block deleting its namesake, and a guard written against
+// ori_name or td_id would refuse this delete for ever.
+func TestThinDeviceSameNameRecreateTakesFreshIds(t *testing.T) {
+	env := newVolEnv(t)
+	create := func() *pb.CreateThinDeviceReply {
+		t.Helper()
+		reply, err := env.srv.CreateThinDevice(
+			env.ctx, &pb.CreateThinDeviceRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				TdName:      "a",
+				Size:        volTdSize,
+			})
+		if err != nil {
+			t.Fatalf("CreateThinDevice a: %v", err)
+		}
+		return reply
+	}
+	del := func() error {
+		t.Helper()
+		_, err := env.srv.DeleteThinDevice(
+			env.ctx, &pb.DeleteThinDeviceRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				TdName:      "a",
+			})
+		return err
+	}
+	first := create()
+	if first.GetTdId() != volNextId || first.GetDevId() != 1 {
+		t.Fatalf("first a: got td_id %d dev_id %d, want %d and 1",
+			first.GetTdId(), first.GetDevId(), volNextId)
+	}
+	if err := del(); err != nil {
+		t.Fatalf("DeleteThinDevice a: %v", err)
+	}
+	second := create()
+	if second.GetTdId() != volNextId+1 || second.GetDevId() != 2 {
+		t.Fatalf("recreated a: got td_id %d dev_id %d, want %d and 2",
+			second.GetTdId(), second.GetDevId(), volNextId+1)
+	}
+	want := &pb.ThinDevice{TdId: volNextId + 1, DevId: 2, Size: volTdSize}
+	if got := env.td("a"); !proto.Equal(got, want) {
+		t.Errorf("recreated a: got %v, want %v", got, want)
+	}
+
+	// A snapshot of the DEAD device: ori_id 1 is the first a's dev_id, which
+	// the recreated a does not carry.
+	env.putTd("snap-of-the-dead-a", 902, 9, 1, false)
+	if err := del(); err != nil {
+		t.Fatalf("delete the recreated a: %v", err)
+	}
+	if env.exists(
+		model.ThinDeviceKey(env.cid, volSpId, "a"), &pb.ThinDevice{},
+	) {
+		t.Errorf("the recreated row must be gone")
+	}
+	if got := env.td("snap-of-the-dead-a"); got.GetOriId() != 1 ||
+		got.GetCreated() {
+		t.Errorf("the leftover snapshot must be untouched: got %v", got)
+	}
+}
+
 // TestListThinDevicesReadsWholeMap pins §8.7's wait primitive: one Snapshot
 // over the SpConf and every td it lists, so the map a client polls `created`
 // through can never be a torn read.

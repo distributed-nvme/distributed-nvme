@@ -469,12 +469,14 @@ SH21. Implements the agent side of §9.6: persist the received
       `BitmapInfo.bm_idx_list` is always derived from the files present.
 
 SH22. The §11.4 math skeleton lives here: chunk reassembly (concatenated —
-      migration — or self-positioned — clone), the single
-      wire-convention inversion (**wire 1 = unwritten/skippable**; invert
-      exactly once at this boundary), and the fully-skippable-region →
-      `blkdiscard` range computation. Role packages supply only the
-      positioning parameters (the dn shifts by the leg's `meta_blocks` first,
-      §9.6).
+      migration — or self-positioned — clone) and the fully-skippable-region →
+      `blkdiscard` range computation. The single wire-convention inversion
+      (**wire 1 = unwritten/skippable**) is *not* here: the one place that
+      reads the "written/copied = 1" side of the convention is the thin-pool
+      metadata reader in `agent/cnagent/thinbm.go`, so that is where it
+      inverts, exactly once, and every chunk reaching this file is already in
+      wire convention. Role packages supply only the positioning parameters
+      (the dn shifts by the leg's `meta_blocks` first, §9.6).
 
 SH23. Migration chunks are interpretable only as a contiguous prefix from
       `bm_idx = 0`; the apply computation uses the longest contiguous prefix
@@ -517,7 +519,7 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
 | `--grpc-address` | required | required | — | gRPC endpoint; the CP stores it as `DnConf`/`CnConf` `addr_port` |
 | `--tr-type` / `--adr-fam` / `--tr-addr` / `--tr-svc-id` | required | required | — | the node's single nvmet port (`NvmeTrConf`), mirrored into `DnConf`/`CnConf` at creation |
 | `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` | `localStorPrefix` of `common.NewNameFmt` (§4.6 state files) |
-| `--disk` | required | — | — | the raw block device that becomes the DN VG |
+| `--disk` | required | — | — | the raw block device that carries the dnv disk format ([D13]; §4.1 `diskmeta.go`) |
 | `--capacity` | — | ✓ | 0 | capacity budget in bytes this CN is willing to host; `GetCnSize` replies it verbatim, 0 = "use the CP default" (added by `cnagent.md` §3) |
 | `--config` | ✓ | ✓ | — | optional viper config file |
 
@@ -554,7 +556,8 @@ func main() {
 func newDnCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "dn", RunE: runDn}
 	addCommonFlags(cmd)               // CM2 shared rows
-	cmd.Flags().String("disk", "", "raw block device for the DN VG")
+	cmd.Flags().String("disk", "",
+		"raw block device that carries the dnv disk format (required)")
 	cmd.MarkFlagRequired("disk")
 	return cmd
 }
@@ -621,7 +624,15 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      from the stored request — a converge that finds not-yet-zeroed extents
      (re)starts that side's DN9 zeroing goroutine, which is how provisioning
      resumes after a restart. Then re-apply every `migr-bm-*` chunk (SH21-
-     SH23). All under the node write lock, with the SH2 trace id.
+     SH23) — except the orphans, which are **deleted** here: a chunk whose
+     side is no longer in the store, and a chunk whose `migr_id` no longer
+     matches that side's stored `migr_dst_conf`. Every other deletion — with
+     the side that owns them (DN6, SH7), and on a destination's `migr_id`
+     change (DN13) — names the files from the side's in-memory chunk set,
+     keyed by the one `migr_id` that set is tracking, so a file this process
+     never loaded is invisible to all of them and a restart is the only
+     place that can collect it. All under the node write lock, with the SH2
+     trace id.
 
 ### 4.4 `GetDnSize`
 
@@ -693,18 +704,22 @@ DN6. Diff `side_pointer_list` against the local `side-*` files (§9.1 full
      sync). A pointer in the request without local state needs nothing yet —
      resources come with its first `SyncupSide`; the persisted request is
      what makes the pointer *known*. A local side file whose pointer left the
-     list is torn down **top-down**, and two things happen *before* its first
-     step: its DN9 zeroing goroutine is cancelled **and waited for** (a
-     running `blkdiscard --zeroout` child holds `DnSideName` open, so
-     `dmsetup remove` would fail EBUSY), and every fenced per-CN dm-linear is
-     resumed (DN12). Then: nvmet port-link/ns/subsystem(s)
-     (including a migration-source export), the per-CN
-     `DnLinearName`/`DnErrorName` pair and `DnMigrSrcName`, the dm-clone
-     `DnMigrFinalName`, then `nvme disconnect` of a migration-destination
-     connection and its retry loop, the `DnMigrMetaDmName` wrapper and the
-     release of its metadata slot, the `DnSideName` device and the release of
-     its extent record; then delete its `side-*` and `migr-bm-*` files and
-     `DropObj` its lock (SH7).
+     list is torn down **top-down**, and *before* its first step every fenced
+     per-CN dm-linear is resumed (DN12). The nvmet port-link/ns/subsystem(s)
+     (including a migration-source export) go first; then the DN8
+     connect-retry registration is dropped and the DN9 zeroing goroutine is
+     cancelled **and waited for** — a running `blkdiscard --zeroout` child
+     holds `DnSideName` open, so what its position has to guarantee is that
+     it precedes every `dmsetup remove`, not that it precedes the exports,
+     which do not touch that fd. Then the dm devices, each ahead of the ones
+     it maps onto: the per-CN `DnLinearName`, the dm-clone
+     `DnMigrFinalName`, `nvme disconnect` of a migration-destination
+     connection (after the clone, because pulling the source out from under a
+     live dm-clone strands in-flight hydration IO), `DnMigrSrcName`, the
+     per-CN `DnErrorName`, the `DnMigrMetaDmName` wrapper and the release of
+     its metadata slot, the `DnSideName` device and the release of its extent
+     record; then delete its `side-*` and `migr-bm-*` files and `DropObj` its
+     lock (SH7).
 
      The per-CN dm-linears go **before** the dm-clone, and the dm-clone
      before the wrapper and the side device, because each of those is a
@@ -914,7 +929,7 @@ DN10. **Per-CN export stacks.** They converge **only** with DN9's gate open —
       side stays on `side_dev_info` alone — duplicating one cause across every
       per-CN row would multiply `err_epoch` churn. With the gate open, for
       `primary_cn_id` and every `standby_id_list` entry:
-      `DnErrorName` (dm-error sized like the LV),
+      `DnErrorName` (dm-error sized like `DnSideName`),
       `DnLinearName` (table → the side device for the primary CN, the
       dm-error for standbys), nvmet subsystem `SideToCnNqn(cluster, sp, leg, cn)` on the
       node port with `allowed_hosts = [CnHostNqn(cluster, cn)]`,
@@ -953,7 +968,7 @@ DN11. **`sp_level` gating** (`architecture.md` §11.7; numeric comparisons —
       only. The DN could not fail writes even if it wanted to: md superblock
       and bitmap writes, resync, failover assembly and the §3.6 health-check
       block writes must keep flowing at every read-only level. Per-CN
-      dm-linears and the side LV are therefore always writeable, whatever the
+      dm-linears and `DnSideName` are therefore always writeable, whatever the
       level. `SP_LEVEL_READONLY` is enforced solely on the CN's user-facing
       namespaces, by reloading each `CnNsDevName` onto a dm-flakey
       `error_writes` table (reads pass, writes error).
@@ -993,7 +1008,7 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       way DN8 arms the connect retry — and every converge is idempotent, so
       an early one simply stays in phase 1.
 
-      Three rules keep the suspension bounded, which is what makes it safe:
+      Four rules keep the suspension bounded, which is what makes it safe:
       * A side whose linears are suspended but whose window start is unknown
         — an agent restart mid-window — is treated as **elapsed**, and phase 2
         runs on the first converge. Restarting never opens a second window.
@@ -1002,6 +1017,25 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       * `teardownSide` resumes every fenced linear **before** its first step,
         because disabling an nvmet namespace closes its backing device and
         `dmsetup remove` does not succeed on a suspended one.
+      * A converge that stops at the side-device gate — *any* DN9 outcome
+        short of ready: still provisioning (zeroing, or zeroed and not yet
+        released by the CP), or a side-device fault (an unreadable disk,
+        `"record missing"`, `"not zeroed"`, a refused allocation, a table or
+        probe that would not converge) — skips the whole per-CN stack, but
+        never the fence: inside the window it re-arms the timer; past it, it
+        finishes phase 2 itself. Nothing else would end the window there: the
+        timer nils itself before converging, the only other unfences are the
+        two above and neither applies while the source role and the side are
+        still wanted, the agent's one periodic converge — DN8's connect
+        retry, armed only while a destination role's connect is failing —
+        would take this same gate, and a `CheckSide` round neither converges
+        nor bumps a revision. One transient probe failure would otherwise
+        leave the linears suspended, queueing bios with no timeout, until the
+        worker next happened to re-sync the side.
+        Running phase 2 under that gate is safe: the dm-error and the
+        dm-linear are the devices the fence itself suspended, not something
+        built on top of the side, and retiring them only moves the side
+        further from exporting data.
 
       While the window is open the per-CN `dm_linear_info` is
       `RES_STATUS_OK` with `details = "suspended (migration cutover grace
@@ -1061,6 +1095,16 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       converge every `DnMigrConnectRetryInterval` seconds under the DN1
       locks, until success or teardown.
 
+      **Chunks of a previous migration on the same side are quarantined.**
+      The side records the `migr_id` its stored chunks belong to, and a
+      destination converge whose `migr_id` differs drops them — files
+      included — before step (2); a push naming another `migr_id` never gets
+      that far (DN15). Migration ids are never reused, so a mismatch is proof
+      the chunks describe a different copy, and applying them would
+      `blkdiscard` regions this migration never copied, leaving the
+      destination serving its own zeroed extents where the source's data
+      should be.
+
       **The clone-metadata area is per DN, and it is a real ceiling
       (update_02.md U4).** `DnCloneMetaSize` (192 MiB = 48 `DnCloneMetaUnit`
       slots) is one region of the disk shared by every destination role this
@@ -1091,8 +1135,13 @@ DN15. Gate: the side file must exist and its
       fully-skippable regions of `DnMigrFinalName`. If the dm-clone does not
       currently exist — not built yet, suppressed by `sp_level`, or still
       behind DN13's provisioning gate — the file still counts as applied;
-      chunks are re-applied whenever the dm-clone is (re)created. Reply
-      `agent_reply` only.
+      chunks are re-applied whenever the dm-clone is (re)created. A **failed
+      persist is still acked code 0**, with the error logged and neither the
+      recompute nor the `blkdiscard` attempted (§9.6): not persisted is not
+      applied, so the chunk stays out of the applied set — SH21 derives that
+      set from the files present — the next `SyncupSide` reply's
+      `bm_info.bm_idx_list` omits the index, and the worker pushes it again
+      on a later round. Reply `agent_reply` only.
 
 ### 4.8 `GetDnInfo` / `GetSideInfo`
 
@@ -1499,15 +1548,17 @@ test that fails without the fix.
   `/sys/class/nvme` instead of `nvme list-subsys -o json`, which carries neither
   the namespace device nor `ANAState`. Without it a migration destination
   reported `"controller has no namespace"` forever.
-* **IR4 (DN6)** — the dm-clone is retired **after** the per-CN dm layer, not
-  before it. DN6's prose listed the dm-clone ahead of the per-CN
-  `DnLinearName`/`DnErrorName` pair (the code always had it right for a full
-  side teardown); the §11.2 *finish* path really did remove it first, hit EBUSY
-  and leaked the clone, its metadata wrapper and the side device under them —
-  unrecoverable by any later empty side list. DN6 now states the layering rule
-  and the finish carve-out, and the retirement is idempotent: a pass that cannot
-  remove the clone keeps the applied `migr_dst_conf` so the next converge
-  retries, rather than continuing on to disconnect a live clone's source.
+* **IR4 (DN6)** — the dm-clone is retired **after** the per-CN dm-linears,
+  not before them. DN6's prose listed the dm-clone ahead of the per-CN
+  `DnLinearName` (the code always had it right for a full side teardown; the
+  per-CN `DnErrorName` goes after the clone, because nothing maps onto a
+  dm-error once its linear is gone); the §11.2 *finish* path really did remove
+  it first, hit EBUSY and leaked the clone, its metadata wrapper and the side
+  device under them — unrecoverable by any later empty side list. DN6 now
+  states the layering rule and the finish carve-out, and the retirement is
+  idempotent: a pass that cannot remove the clone keeps the applied
+  `migr_dst_conf` so the next converge retries, rather than continuing on to
+  disconnect a live clone's source.
 * **IR5 (SH17)** — `device_uuid`/`device_nguid` are compared through the shared
   `agent.SameNsId` (strip `-`, fold case), never byte-wise. SH17's "tolerate
   normalized read-back" rule now names both cases it covers.

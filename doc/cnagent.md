@@ -308,20 +308,36 @@ CN1. Lock mapping (instantiates SH10-SH13): `SyncupCn` and the startup
 
 ### 4.3 Startup reconcile
 
-CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`). For
-     each `cn-*` file: re-run the SyncupCn converge (§4.5 step CN5) from the
-     stored request. Then each `cntlr-*` file: if its pointer is absent from
-     the stored `SyncupCnRequest.cntlr_pointer_list`, tear the cntlr down
-     (CN21) — it was removed mid-teardown; otherwise re-run the SyncupCntlr
+CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
+     load every `cn-*` and `cntlr-*` request into memory first. Then reload
+     every `clone-bm-*` chunk into the owning cntlr's `ChunkSet`s (SH21) —
+     **before** any converge runs, so that a dm-clone the converge (re)builds
+     re-applies in the same pass every chunk the node already holds (CN18
+     step 4). Loading them afterwards would lose none of them — a chunk in
+     memory is advertised as applied by the next reply's `bm_idx_list`
+     (CN20), so the worker's BM2 diff would not push it again — but their
+     `blkdiscard`s would then wait for the next event that re-applies the
+     whole set: a create of that dm-clone, a converge reload of its table
+     onto a changed length, devno or region size (step 4 runs on both —
+     the converge treats a reload exactly as a create), or another
+     chunk's own push (CN22). Until then the clone re-copies regions it
+     never needed to. A chunk file whose cntlr is not among the loaded
+     `cntlr-*` requests, or whose `clone_id` is absent from that cntlr's
+     stored `clone_list`, is an orphan — its cntlr or clone was deleted
+     while the chunk file survived (SH7) — and is deleted here, because
+     it names an owner no later pass will ever look for. Then, for each
+     `cn-*` request: re-run the SyncupCn converge (§4.5 step CN5). Then
+     each `cntlr-*` request: if its pointer is absent from the stored
+     `SyncupCnRequest.cntlr_pointer_list`, tear the cntlr down (CN21) —
+     it was removed mid-teardown; otherwise re-run the SyncupCntlr
      converge (§4.6) from the stored request — which, per CN18, runs the
      §11.5 recovery for any clone whose **metadata wrapper** is gone (a reboot
      clears the tmpfs, the loop device and every kind-`b` wrapper together —
      the arena is volatile *with* the kernel's dm state — so the reconcile
      starts from an empty arena; a plain agent restart preserves both and the
-     converge is a no-op re-apply). Then reload every
-     `clone-bm-*` chunk into the owning cntlr's `ChunkSet`s (SH21; the
-     converge already re-applied them wherever a dm-clone was (re)built).
-     Finally **sweep the arena**: a kind-`b` wrapper (prefix
+     converge is a no-op re-apply). Finally, **after** every converge — so a
+     clone that was just (re)built already holds its wrapper and is never
+     mistaken for an orphan — **sweep the arena**: a kind-`b` wrapper (prefix
      `CnCloneMetaDmPrefix`) whose clone appears in no stored `cntlr-*` desired
      state is an orphan and is removed, which frees its units for the next
      allocation. The sweep compares against a name set built from every stored
@@ -348,7 +364,20 @@ CN4. Gate the revision (SH8) against the stored `SyncupCnRequest`.
 CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
      probe-first (SH16), building `CnInfo` as it goes:
      * **tmpfs** at `CnTmpfsPath(cluster_id, cn_id)`: probe with
-       `findmnt --noheadings {path}`; absent ⇒ `mkdir -p` the mountpoint and
+       `findmnt --noheadings --output FSTYPE --target {path}` — a non-zero
+       exit means "nothing mounted there", not a failure, and the reported
+       type is what lets the converge insist the mount is a tmpfs — followed
+       by a second `findmnt --noheadings --output TARGET --mountpoint {path}`.
+       The second call exists because `--target` resolves to the *closest
+       enclosing* mountpoint, so a path that merely lives under another mount
+       would answer that mount's type; `--mountpoint` matches only when the
+       path is itself the mountpoint. A mount of the wrong type is an `ERROR`
+       on `tmpfs_info`, so what the second call actually saves is the case
+       where the *enclosing* mount is itself a tmpfs: the arena lives under
+       `DefaultTmpfsPrefix` = `/tmp/dnv-tmpfs`, so a `/tmp` on tmpfs would
+       answer for it, the `mount` would be skipped, and the arena would share
+       that filesystem instead of getting its own `DefaultCnTmpfsSize`.
+       Absent ⇒ `mkdir -p` the mountpoint and
        `mount -t tmpfs -o size={DefaultCnTmpfsSize} tmpfs {path}`.
      * **backing file** `CnTmpFilePath`: probe `stat --format %s`; absent ⇒
        `truncate --size {CnCloneMetaAreaSize} {path}` (sparse — tmpfs pages
@@ -369,7 +398,19 @@ CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
        wrapper's table `0 {len} linear {loop maj:min} {offset_sectors}`
        records its own allocation (the name comes from `dmsetup ls`, the
        major:minor only from `dmsetup table` — `ls` formatting varies across
-       versions). That is why the CN needs none of the dn's
+       versions). The `ls` list is a snapshot that is stale the instant it is
+       printed — a `SyncupCntlr` holds only the node *read* lock, so another
+       cntlr's retire or `SP_LEVEL_DISABLE` teardown can remove a wrapper
+       between the `ls` and its `table` — so a name whose `table` fails is
+       **dropped** when the wrapper has meanwhile vanished: it claims no
+       units, and failing the CN-wide enumeration would flip unrelated
+       cntlrs' healthy clones to `RES_STATUS_ERROR`, which feeds `err_epoch`.
+       The absence is *confirmed* with `dmsetup info` first, never assumed: a
+       `table` failure on a wrapper that is still there stays fatal, because
+       reporting a live wrapper's units as free would let the next allocation
+       hole-punch a serving dm-clone's superblock — the one thing CN18's
+       discard-before-create order exists to prevent. Reconstructing the used
+       map from those tables is why the CN needs none of the dn's
        header/CRC/A-B machinery: the arena is volatile *together with* the
        kernel's dm state (`architecture.md` §3.2) — a reboot clears both, an
        agent restart preserves both — so the kernel's dm tables **are** the
@@ -660,12 +701,25 @@ CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       not-yet-grown pool is `RES_STATUS_OK` and not a mismatch, and the grow
       completes on the converge that follows the last leg's provisioning —
       out-of-order provisioning of two appended groups simply waits for the
-      earlier one. The **serving**
-      pool's `slice_id_to_dm_pool` row keeps reporting `RES_STATUS_OK` with
-      its raw `dmsetup status` line throughout — the §10.4 auto-grow parses
-      that line, and a `PROVISIONING` pool row would silently switch
-      auto-grow off. `PROVISIONING` marks only the deferred resources, never
-      the live ones.
+      earlier one. The **serving** pool's `slice_id_to_dm_pool` row keeps
+      reporting `RES_STATUS_OK` with its raw `dmsetup status` line
+      throughout — the §10.4 auto-grow parses that line, and a
+      `PROVISIONING` pool row would silently switch auto-grow off.
+      `PROVISIONING` marks only the deferred resources, never the live ones.
+      A concat may only ever grow, and the agent **enforces** that rather
+      than trusting the plan: when the live table totals more sectors than
+      the desired one, `ensureDmMulti` refuses the reload, and the refusal
+      is reported the way any unbuildable concat is — `refusing to shrink
+      the concat from {live} to {desired} sectors` as an `ERROR` on
+      `slice_id_to_meta`/`slice_id_to_data`, `"pool concat missing"` on
+      `slice_id_to_dm_pool` — because the target list is the physical layout
+      of every block the pool above has already allocated: reloading a
+      shorter one remaps live pool data, after which dm-thin either refuses
+      the resume and leaves the pool suspended or accepts it and serves the
+      wrong device. That shape can only mean the effective state lost a
+      group that is already serving, which the U4 deferral is never allowed
+      to produce, so the refusal leaves the live concat untouched for the
+      §10.4 reactions or an operator to repair the group.
 
 CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       `CnThinDevName`, virtual size `td.size / slice_cnt`, attached by
@@ -904,9 +958,23 @@ CN17. **Transfers** (`xfer.go`; both roles, fig. `100Transfer`). Per
       the record; one namespace `nsid = ori_ns_idx`, `uuid`/`nguid` = the
       origin namespace's, `device_path` = the xfer device; ANA optimized on
       the primary, inaccessible on standbys. The origin namespace's own
-      retirement is CN16's effective-suspend rule. A transfer whose origin td
-      is provisioning-deferred (CN9) is deferred with it: its three rows
-      report `RES_STATUS_PROVISIONING` and its namespace stays
+      retirement is CN16's effective-suspend rule. A cntlr that keeps the
+      transfer device but stops serving it — demoted to standby, or
+      `SP_LEVEL_NO_THINPOOL ≤ sp_level < SP_LEVEL_DISABLE`, or the origin td
+      provisioning-deferred — reloads the live `CnXferFinalName` onto an
+      error table of its own size before the retire touches anything under
+      it, because a linear still mapping the origin td's raid0 holds it open
+      and the raid0's removal would fail EBUSY (CN19's `NO_THINPOOL` row). At
+      `SP_LEVEL_DISABLE` there is nothing to demote: the transfer device is
+      removed outright with every other cntlr-scoped object (CN19's `DISABLE`
+      row, the CN21 order). When the *new* plan cannot size that table — the
+      origin namespace is not in it at all, or it is but its td left
+      `td_list` in the same request, which leaves the namespace's size
+      unknown — the size comes from the **previous** plan's transfer instead;
+      without that fallback the demotion would be skipped and the departing
+      raid0 never released. A transfer whose origin td is
+      provisioning-deferred (CN9) is deferred with it: its three rows report
+      `RES_STATUS_PROVISIONING` and its namespace stays
       `AnaGrpIdInaccessible` — mapping a linear over a raid0 that does not
       exist yet would only produce an `ERROR` and an `err_epoch`.
 
@@ -948,7 +1016,19 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          §4.2 `cloneMetaMu`: two cntlrs of the same CN converge concurrently
          under the node *read* lock, and two enumerations could otherwise
          pick the same free run and — because the two `dmsetup create`s use
-         different names — silently share one metadata range.
+         different names — silently share one metadata range. **Removing** a
+         kind-`b` wrapper belongs in that same critical section, for the same
+         reason: the registry being the kernel's dm tables, a removal is a
+         mutation of it — the units are free the moment the table is gone —
+         and a retire that deleted a wrapper in the middle of another cntlr's
+         enumerate → discard → create would both invalidate that enumeration
+         and free a run under it. So the paths that remove a wrapper from
+         *outside* the allocator — the clone teardown below and the CN21
+         cntlr teardown — take `cloneMetaMu` around that `dmsetup remove`,
+         while the two that already hold it (this allocation's
+         mismatched-wrapper removal, and CN2's arena sweep) remove directly:
+         the mutex is a leaf, held across those OS calls and never
+         re-entered.
          **Before** creating a *newly chosen* range, punch it on the loop
          device: `blkdiscard --offset {off} --length {len} {loopdev}`. That
          is the recycled-unit guard, because a freed unit still holds the
@@ -1087,7 +1167,24 @@ CN22. Gate: the cntlr file must exist and its stored `clone_list` must
       `CnCloneFinalName`. If the dm-clone does not currently exist (standby,
       not built yet, level-suppressed), the file still counts as applied;
       chunks are re-applied whenever the dm-clone is (re)created (CN18 step
-      4). Reply `agent_reply` only.
+      4). A **failed persist** is logged and still acked code 0, with neither
+      the fold nor the `blkdiscard` attempted. For an index the node does
+      not hold yet that heals itself: the chunk stays out of the applied
+      set, so it stays out of the clone's `BitmapInfo.bm_idx_list` (CN20)
+      and the worker's BM2 diff pushes it again. That diff is the whole
+      recovery, and it is eventual rather than prompt: a code-0 ack leaves
+      the worker's BM6 flag down, and `bm_info_list` rides no `CheckCntlr`
+      reply, so the re-push waits for whatever next makes the worker issue a
+      `SyncupCntlr` (RW4 step 5) — a revision change, a round this cntlr
+      rejects or answers with another revision, or another chunk's push
+      failure raising BM6. A failed persist of a **grown** chunk ([D8],
+      architecture.md §9.6) is the one case that does not heal that way: the
+      index is already in the applied set with the shorter payload, so
+      `bm_idx_list` keeps advertising it, and the code-0 ack also refreshes
+      the worker's BM5 memo — the node keeps the shorter version until
+      `AppendCloneBitmap` grows that chunk again, the same bounded,
+      correctness-neutral loss [D8] already accepts. Reply `agent_reply`
+      only.
 
 ### 4.9 `GetCnInfo` / `GetCntlrInfo`
 
@@ -1132,8 +1229,11 @@ CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
       inverts exactly once (§11.4). **Wire encoding (normative,
       `update_01.md` U5)**: bits are LSB-first within each byte — bit *k* is
       `bitmap[k/8] & (1 << (k%8))` — the reply is `ceil(bit_cnt / 8)` bytes
-      and every trailing pad bit is 0. That is what `agent/bitmap.go`
-      implements and what `cnagent_integtest.md` asserts in hex.
+      and every trailing pad bit is 0. `agent/bitmap.go` states that
+      convention for the whole agent (SH22); the reply itself is built by
+      `agent/cnagent/thinbm.go`'s own bit helpers, which is also where the
+      inversion above happens — and it is what `cnagent_integtest.md`
+      asserts in hex.
 
 CN27. `GetLegBm`: locate the leg's group and slice in the stored
       `id_to_slice`. A **meta**-group leg replies all-zero (nothing
@@ -1236,7 +1336,9 @@ contradicts them.
   same section documents as non-binding for host IO.
 * `layout.md` — `doc/` tree lists this document; the `agent/cnagent/`
   recommended file split updated to §4.1 (adds `plan.go`, `lvm.go`,
-  `thinbm.go`).
+  `thinbm.go`). `lvm.go` is the pre-`update_01.md` name: the U3 bullet below
+  renames it `clonemeta.go` when LVM leaves the CN, and §4.1 lists the
+  current split.
 * `cnagent.md` CN12/CN28 — leg availability and the standby leg report are
   probed from **sysfs**, not from `nvme list-subsys`. Measured: `nvme
   list-subsys -o json` emits no `ANAState` unless it is given a namespace
@@ -1361,9 +1463,18 @@ contradicts them.
 
 ## 6. Tests
 
-Unit tests use `common.FakeOsClient` (scripted fns recording every call)
-and, for RPC-level tests, `bufconn` with the generated `ControllerNodeAgent`
-client — no root, no real devices.
+Unit tests use `common.FakeOsClient` (scripted fns recording every call) —
+no root, no real devices. RPC-level tests call the `CnAgentServer` methods
+in-process instead of dialing a `bufconn` client: everything these tests
+assert (the CN1 lock mapping, the recorded OS calls, the in-memory mirrors)
+lives below the generated stubs, and a real client would only add a
+transport that `common`'s own interceptor tests already cover. The
+`CheckCn`/`CheckCntlr` tests go one level further down still: rather than
+supply a server-stream argument they call the unexported per-round helpers
+(`checkCnRound`/`checkCntlrRound`) and thread `lastSent` by hand, because
+every CN24 assertion — the reply codes, the rule for when the info rides
+along, the CN1 locks — lives in the round, while the `Recv`/`Send` loop
+around it is the SH24-SH26 shape with nothing cn-specific in it.
 
 1. **Fresh SyncupCn**: scripted empty probes; assert the CN5 sequence
    (`findmnt`/`mkdir`/`mount`, `truncate --size {CnCloneMetaAreaSize}`,

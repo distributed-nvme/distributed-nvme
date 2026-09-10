@@ -1426,6 +1426,108 @@ func TestSpLevels(t *testing.T) {
 	}
 }
 
+// A side re-synced at SP_LEVEL_DISABLE while its bits are still incomplete
+// keeps issuing its zeroing batches (DN11, §6 test 21). §9.4 provisioning sits
+// *below* the level ladder — exactly as the trim it replaced did — which is why
+// convergeSide runs ensureSideDev, and with it startZeroing, before the
+// !plan.wantDm early return: the level takes the layers that serve IO away, not
+// the work that makes the side safe to serve at all, so a side disabled
+// mid-zeroing is fully zeroed by the time the level comes back down instead of
+// starting over. The invariants of the level itself are unchanged by the
+// unfinished bits: the per-CN dm stacks and the exports go, the side device and
+// its allocation record stay.
+func TestDisableLevelKeepsZeroing(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	sideDevPath := nf.DmPath(sideDevName)
+	nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+
+	// The side starts in the steady state, so the teardown below has real
+	// exports and dm-linears to remove; then its record is re-allocated behind
+	// the agent's back, which is what leaves the bits incomplete under a
+	// request that still says provisioned = true (row 5 of the U4 matrix — the
+	// flag is not what keeps the goroutine, the bits are).
+	syncupBoth(t, srv, 1, testSide)
+	clearZeroed(t, srv, node)
+
+	// The second batch parks inside its child, so the loop cannot run out of
+	// work while the assertions below look at it: "still zeroing" is then a
+	// fact about the side rather than a race against the goroutine.
+	batch1 := "cmd blkdiscard --zeroout --offset " + strconv.FormatUint(
+		common.DnZeroBatchExtCnt*testExtentSize, 10)
+	node.blockCmd(batch1)
+	t.Cleanup(func() { node.releaseCmd(batch1) })
+
+	node.Reset()
+	reply, err := srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_DISABLE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	// The agent trusts its own bits over the flag at every level.
+	if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != tagNotZeroed {
+		t.Errorf("side_dev = %v/%q, want ERROR/%q",
+			got.GetStatus(), got.GetDetails(), tagNotZeroed)
+	}
+
+	// The DISABLE invariants.
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+		if _, ok := node.dms[linName]; ok {
+			t.Errorf("SP_LEVEL_DISABLE kept the dm-linear of cn %d", cnId)
+		}
+	}
+	if node.dirs[agent.NvmetRoot+"/subsystems/"+nqn] {
+		t.Error("SP_LEVEL_DISABLE kept the subsystem")
+	}
+	if _, ok := node.dms[sideDevName]; !ok {
+		t.Error("SP_LEVEL_DISABLE removed the side device")
+	}
+	if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); !ok {
+		t.Error("SP_LEVEL_DISABLE freed the allocation record")
+	}
+
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	srv.mu.Lock()
+	zeroing := st.zeroing
+	srv.mu.Unlock()
+	if !zeroing {
+		t.Fatal("SP_LEVEL_DISABLE dropped the zeroing goroutine")
+	}
+	// And it is *issuing batches*, not merely registered: the first one lands,
+	// bits and all, with the side sitting at DISABLE.
+	if !waitFor(t, 5*time.Second, func() bool {
+		rec, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide)
+		return ok && sideZeroedCnt(rec) == common.DnZeroBatchExtCnt
+	}) {
+		t.Fatal("no zeroing batch landed at SP_LEVEL_DISABLE")
+	}
+	// The parked batch is released and the side runs to fully zeroed: three
+	// batches at exactly the byte ranges an enabled side would use, every one
+	// of them recorded after the Reset above and so issued at DISABLE.
+	node.releaseCmd(batch1)
+	waitZeroed(t, srv, testSide)
+	assertOrder(t, node, zerooutBatches(sideDevPath, testExtCnt)...)
+
+	// Provisioning is bottom-layer work, so finishing it rebuilds nothing the
+	// level forbids — the side is ready, and still disabled.
+	if node.hasCall("cmd mkdir -p " + agent.NvmetRoot + "/subsystems/") {
+		t.Error("a disabled side was exported while it finished zeroing")
+	}
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+		if _, ok := node.dms[linName]; ok {
+			t.Errorf("zeroing rebuilt the dm-linear of cn %d at DISABLE", cnId)
+		}
+	}
+}
+
 // TestReadOnlyLevelIsNoOpOnDn pins [P1]/[D11]: SP_LEVEL_READONLY — and every
 // CN-only level below SP_LEVEL_NO_MIGRATION — has no DN-side behavior at all.
 // Read-only is enforced on the CN's user-facing namespaces; the DN cannot

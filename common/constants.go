@@ -230,7 +230,8 @@ const (
 	// Per-call deadlines of the worker's agent RPCs (RW5, BM3).
 	DefaultWorkerSyncupTimeout = 60
 	DefaultWorkerPushTimeout   = 60
-	// etcd client: dial, and per plain operation / per STM attempt (EU1, EU5).
+	// etcd client: dial, and per plain operation / per whole
+	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 
