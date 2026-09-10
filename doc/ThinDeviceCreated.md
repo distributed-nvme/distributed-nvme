@@ -1,8 +1,11 @@
 # ThinDeviceCreated.md — `ThinDevice.created` (dnv)
 
-Status: **normative** — applied. U1, U4 and U5 are implemented; U2 and U3
-are specified but not implemented, because `gateway/` and `worker/` do not
-exist yet (§9 item 5), so `architecture.md` §8.7/§10.3 carry their text. §10
+Status: **normative** — applied, in full. U1, U4 and U5 were implemented
+first; U2 and U3 have since landed with `gateway/` and `worker/`
+(`gateway/thindevice.go`, `worker/sprole.go` + `model.FlipCreated`).
+`gateway.md` §5.6/§9 and `dnv-worker.md` RW19/§13 are now the normative
+gateway/worker spec and test inventories of record for U2/U3, re-scoping the
+U2-T/U3-T lists below (§9 item 5). §10
 records where the implementation had to depart from this document. This
 document is the complete spec of
 one change: a `created` flag on `ThinDevice` that records when every slice
@@ -25,8 +28,9 @@ per-td × slice thin volumes), §5.5 (revision keys and the sync fan-out),
 `provisioned` flip), [D12], [D15], Appendix D; `cnagent.md` CN9 (pass
 structure), CN14 (thin volumes, the `update_02.md` U1 snapshot pre-pass),
 CN21 (teardown deactivates, never deletes), §6 test 19; `layout.md` §2
-(`gateway/thindevice.go`, `worker/sprole.go`, `worker/check.go`,
-`agent/cnagent/pool.go`, `agent/cnagent/syncup_cntlr.go`).
+(`gateway/thindevice.go`, `worker/sprole.go`, `worker/revision.go` — the
+Check-stream consumer; the worker landed without a `check.go`,
+`layout.md` §8 — `agent/cnagent/pool.go`, `agent/cnagent/syncup_cntlr.go`).
 
 Conventions: "the origin" is the td whose `dev_id` a snapshot's `ori_id`
 names; "materialized" means the td's thin volume id exists in every slice
@@ -119,11 +123,15 @@ persisted `SyncupCntlrRequest` (§9.1 local store) therefore carries it too.
 **U1-S2 (semantics).**
 
 * Written `false` by `CreateThinDevice` (U2). Set `true` by the sp-worker
-  flip (U3). Never written by anything else; never cleared (R2).
+  flip (U3). Never written by anything else in a dnv binary; never cleared
+  (R2). (The gateway integration suite's `workerctl set-created` plays the
+  sp-worker on a lab where no dnv-worker runs — gateway.md §2.4/§10.9 —
+  through the same `model.FlipCreated` STM, identity guard included, so R2's
+  monotonicity holds there too.)
 * proto3 default: a record without the field reads `false`, which is the
   correct meaning for any td whose materialization has not been observed.
-  There are no deployments to migrate (the gateway and worker are not yet
-  implemented), so no migration step exists; a future reader that meets an
+  There are no deployments to migrate, so no migration step exists; a
+  future reader that meets an
   old record simply waits for the next Check round to flip it.
 * Same-name recreate (R3): `DeleteThinDevice` deletes the key, a later
   `CreateThinDevice` with the same `td_name` writes a new record with new
@@ -205,7 +213,8 @@ still provisioning-deferred ([D15]) reads `RES_STATUS_PROVISIONING` in that
 slice and flips when the last slice clears. Both are the intended meaning of
 "not created yet".
 
-**Tests (gateway, spec until `gateway/` lands; `gateway/thindevice.go`).**
+**Tests (gateway; landed in `gateway/handler_vol_test.go` — gateway.md §9
+is the inventory of record and re-scoped this list, §9 item 5).**
 
 * **U2-T1** `CreateThinDevice` without `ori_name` writes `created = false`
   and bumps `SpRev` once; `ListThinDevices` reads it back `false`.
@@ -291,8 +300,14 @@ finds no candidate. Two workers or two replies racing on one td meet at step
 Several tds completed by one reply share the one STM and the one bump (R6);
 the worker MAY also fold a pending `provisioned` flip of the same SP into
 the same transaction — the two rules are independent and both bump once.
-Across replies there is no batching window: only the primary fills thin
-rows, so one reply per round per SP is the natural unit.
+(The implementation does not take the MAY: the two flips run as two
+consecutive STMs.) Replies do not get one STM each either: the sp worker
+drains every report pending on its channel at that moment — across replies
+and across cntlrs — and folds all their candidates into the one
+`FlipCreated` call. Only the primary fills thin rows, so one reply per
+round per SP remains the common case; the fold is at most one STM and one
+bump regardless, and the flag is monotonic, so the batching is
+observationally equivalent.
 
 **U3-S4 Ownership and restarts.** The flip is idempotent and driven by
 observation, so a worker restart or a shard-ownership change (§10.1) needs
@@ -306,8 +321,10 @@ carries the complete `*Info` (§9.7) and flips whatever is complete and still
 create failed (`ERROR`). `RES_STATUS_PROVISIONING` keeps its [D15] meaning:
 healthy, not ready, no `err_epoch`, and — here — not created.
 
-**Tests (worker, spec until `worker/` lands; `worker/sprole.go`,
-`worker/check.go`).**
+**Tests (worker; landed in `worker/sprole_test.go` (`TestSpCompletedTds`,
+`TestSpFlipBatchesOneStm`, …) and `model/ops_test.go` — dnv-worker.md §13
+is the inventory of record and re-scoped this list, §9 item 5. The Check
+stream is consumed in `worker/revision.go`; no `worker/check.go` exists.)**
 
 * **U3-T1** A reply with `agent_reply.code == 0` whose `ThinInfo` for td
   `X` holds every slice id `OK` ⇒ one STM: `X.created = true`, `SpRev`
@@ -678,9 +695,14 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    rebuild syncup's `mutations()` output contains no `dmsetup message`
    (U5-T1).
 5. The companion documents carry the §8 amendments, each citing
-   `ThinDeviceCreated.md U*n*`, and §8.7/§10.3 of `architecture.md` are the
-   gateway/worker spec for U2/U3 until `gateway/` and `worker/` land, at
-   which point U2-T1..T6 and U3-T1..T7 become their unit tests.
+   `ThinDeviceCreated.md U*n*`. `gateway/` and `worker/` have since landed
+   with U2/U3 implemented, and gateway.md §9 / dnv-worker.md §13 — their
+   unit-test inventories of record — re-scoped the U2-T/U3-T lists: most
+   scenarios exist under different names, while U2-T5's literal
+   same-name-recreate sequence, U2-T6's injected mid-STM race and
+   U3-T5/T6's check-round-to-flip paths are covered structurally (GW8/EU4's
+   serializable STM; `completedTds` takes no revision and every reply is
+   observed) rather than by dedicated tests.
 
 ---
 

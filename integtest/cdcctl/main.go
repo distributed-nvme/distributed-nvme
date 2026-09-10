@@ -29,7 +29,7 @@
 //     for ssA — reads back as an explicit [] instead of vanishing from the
 //     document.
 //   - Ids accept decimal or 0x hex; --shard is always read as HEX (§9.5
-//     spreads the entry set over 00, 07, 08, 3c, 81 and ff).
+//     spreads the entry set over 00, 07, 3c, 80, ff and 81).
 //
 // Exit codes: 0 on success, 1 on any error (with a message on stderr), 2 on a
 // usage error.

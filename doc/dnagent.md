@@ -644,10 +644,13 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        itself does not carry (the extent count is that size minus
        `DnDataOffset`, divided by the **header's** `extent_size`).
      * **the [D13] disk format.** Read the header block. Magic absent ⇒ the
-       disk is blank: write the header (a fresh `format_uuid` from
-       `crypto/rand`, the request's `cluster_id`/`dn_id`/`extent_size`, and
-       the three layout offsets) and then slot A with an empty table at
-       `seq` 1. Magic present but version or CRC wrong ⇒ **error**, and every
+       disk is blank: write slot A with an empty table at `seq` 1 **first**,
+       then the header (a fresh `format_uuid` from `crypto/rand`, the
+       request's `cluster_id`/`dn_id`/`extent_size`, and the three layout
+       offsets) — slot-A-before-header makes "a valid header implies at
+       least one valid table slot" an invariant, so a crash between the two
+       writes leaves an inert slot rather than a header with no table.
+       Magic present but version or CRC wrong ⇒ **error**, and every
        later operation errors too — a corrupt header is never formatted over.
        Magic present and valid ⇒ verify `cluster_id`/`dn_id`/`extent_size`
        match; a mismatch is the error
@@ -1304,8 +1307,9 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
 `DiskNodeAgent` client — no root, no real devices.
 
 1. **Fresh SyncupDn**: scripted empty probes; assert the DN5 sequence
-   (`readblock` of the header, `writeblock` of the header, `writeblock` of
-   table slot A, then the port attrs, `mkdir ana_groups/2`+`3`, the three
+   (`readblock` of the header, `writeblock` of table slot A, `writeblock`
+   of the header — DN5's slot-A-first order — then the port attrs,
+   `mkdir ana_groups/2`+`3`, the three
    one-time `ana_state` writes) and the `WriteProto` to `LocalDnPath`
    afterwards (SH5). No LVM string (`pvcreate`/`vgcreate`/`lvcreate`/…)
    appears anywhere in the recorded calls.
@@ -1381,8 +1385,11 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     formatted disk); identity mismatch refused; corrupt-header refusal; A/B
     slot alternation across three saves; a torn newest slot falling back to
     the older one; a stale slot rejected after a re-format because of
-    `format_uuid`; both slots invalid ⇒ empty table at seq 0 and recovery on
-    the next save; a failed save not committing in memory; allocation
+    `format_uuid`; both slots invalid under a valid header ⇒ a hard
+    "corrupt volume table" refusal with no allocation and zero writes (DN5's
+    slot-A-first order makes a valid header imply a valid slot, so this is
+    corruption, never a fresh-format crash); a failed save not committing in
+    memory; allocation
     contiguity, the fragmentation fallback, the ext-count-mismatch error,
     `SetSideZeroed` range setting (a partial range, an idempotent re-set that
     issues no write, a range outside the record rejected) and

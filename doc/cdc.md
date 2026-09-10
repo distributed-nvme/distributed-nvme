@@ -609,7 +609,7 @@ Aborts with a message on the first failure:
 * **Clusters** (fabricated ids, §0 #13; no `ClusterConf` exists or is
   needed): per case — S `0xcdc1`, M `0xcdc2`, L `0xcdc3`, T `0xcdc4`,
   H `0xcdc5`; the cross-cluster assertions use a second id = case id +
-  `0x1000` (M: `0x1cdc2`).
+  `0x10000` (M: `0x1cdc2` — the prepended `1` nibble).
 * **Shard codes**: `00`, `07` (low half), `3c` (low interior), `80`, `ff`
   (high-half edges), `81` (high interior, the cross-cluster entry). The high
   half starts at `80` because DS2 gives range digit `h` the codes `h0…hf`: an

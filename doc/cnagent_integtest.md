@@ -427,8 +427,16 @@ slice_id)` per §9.3.)
   dn agents (dn suite convention) and `CNREV1`/`CNREV2` for the cn agents —
   incremented before every state-changing syncup on that node; both
   `SyncupCn` and `SyncupCntlr` on one CN share its counter, mirroring the
-  single `CnRev` of §5.5. Equal-revision re-sends are legal full re-applies
-  and are used deliberately (fetching `bm_info_list`, case D idempotency).
+  single `CnRev` of §5.5. The agent, however, stores what each RPC last
+  applied **separately** and gates each RPC against its own stored value,
+  so the script also records `CNSYNC1`/`CNSYNC2` — the counter value the
+  last `SyncupCn` carried. That, not the counter, is what a `check-cn`
+  round echoes back and what the case D stale probe must undercut: right
+  after a `syncup-cntlr`, `CNREV - 1` equals the value the last `SyncupCn`
+  stored, so a `syncup-cn` at `CNREV - 1` would be an equal-revision
+  re-apply (code 0), not a rejection. Equal-revision re-sends are legal
+  full re-applies and are used deliberately (fetching `bm_info_list`, case
+  D idempotency).
 - **Ordering**: `syncup-cn` introduces a cntlr pointer before its first
   `syncup-cntlr` (else `code 2`); a side pointer likewise via `syncup-dn`
   (dn suite rule). The DN sides of a case are converged before the cn
@@ -835,9 +843,12 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    claim, not an accident. (Only the cn agents are restarted here; the dn
    logs are covered by the same rule in `dnagent_integtest.md` §15.)
 6. **Revision persistence probe**: `syncup-cn` CN1 with `revision
-   CNREV1-1` and `--expect-code 1` (`ReplyCodeStaleRevision`, a normal
-   reply, not a gRPC error) — the one intentional negative call: only the
-   stale *rejection* proves the revision survived the restart.
+   CNSYNC1-1` — one below the revision the last `SyncupCn` stored; NOT
+   `CNREV1-1`, which after the cntlr converge equals the stored `SyncupCn`
+   revision and would re-apply with code 0 (§9) — and `--expect-code 1`
+   (`ReplyCodeStaleRevision`, a normal reply, not a gRPC error) — the one
+   intentional negative call: only the stale *rejection* proves the
+   revision survived the restart.
 7. Teardown as usual (host disconnect, empty lists everywhere, residue
    checks).
 

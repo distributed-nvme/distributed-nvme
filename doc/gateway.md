@@ -103,6 +103,38 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
 17. **UpdateCntlrEnabled / Update*Disabled idempotency**: when the stored flag
     already equals the requested one the handler performs no write and no
     revision bump, and replies OK (the token is still checked first).
+18. **Brief decision ids.** Code comments cite decisions `D-A`…`D-J` from
+    the implementation brief. `D-A`/`D-B` were superseded and pinned by
+    `update_04.md` (U2–U6 / U7); the rest are recorded here so the ids
+    resolve from a committed document:
+    * **D-C** — the `bdev_conf` CreateStoragePool STORES is the member-wise
+      merge of the request over `ClusterConf.bdev_conf`: a member wins
+      unless left at the proto3 zero that means "unset"; the redund KIND is
+      a oneof choice (request's, else the cluster's, else `redund_none`),
+      and a kind chosen by both merges member-wise inside. The merge is
+      stored, not re-resolved at read time, so an SP's geometry is immutable
+      under later cluster-default edits (§5.4).
+    * **D-D** — CreateStoragePool plans, scans and mints in one fixed order
+      (per slice the 1-extent META group then the DATA group; cntlr ids
+      first, in pick order), so a retried candidate unit reproduces exactly
+      the same write set (§5.4).
+    * **D-E** — GrowSlice's `req.ext_cnt` never reaches the model: it is
+      only §8.5's exclusivity signal (a data grow states one, a meta grow
+      must not); sizes are recomputed from the stored first data group or
+      the meta ladder (§5.4).
+    * **D-F** — GrowSlice's DN black list starts as the request's own and
+      grows only with the legs of the group being grown — the same rule the
+      worker's AR6 scan applies (§5.4).
+    * **D-G** — DeleteTransfer's finalize skips a vanished origin
+      subsystem/`ns_idx` instead of failing: the transfer is being deleted
+      either way, and the RPC must stay able to complete (§5.9).
+    * **D-H** — CreateThinDevice `size == 0` is legal exactly when
+      `ori_name` is set: a snapshot inherits its origin's size (§5.6).
+    * **D-I** — a migration destination side's cntlid slot is the first
+      `cntlid_slot_list` entry that differs from the source side's; a list
+      offering no second value refuses `FAILED_PRECONDITION` (§5.10,
+      architecture.md §11.8).
+    * **D-J** — bitmaps are opaque to the gateway; = GW14.
 
 ---
 
@@ -321,6 +353,16 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   `Max*CntPerCluster` gate is `sum(bucket)` before increment. Deletion
   decrements the bucket, never reuses ids. Per-SP ids via `model.SpNextId`;
   thin-device `dev_id` from `SpConf.next_dev_id++` (`ori_id = 0` = none).
+* **GW14 — bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM in
+  both directions: `AppendCloneBitmap` stores what the request carries
+  (§5.8), `PushMigrationBitmap` forwards the stored bytes (§5.10), and the
+  §5.12 reads reply the agent's bytes. The wire convention — 1 =
+  unmapped/never-written, LSB-first — is produced and consumed by the
+  agents (architecture.md §11.4's single inversion at the agent boundary);
+  the gateway never inspects, converts or trims a bit, so it can never
+  disagree with the agents about the convention. (There is no GW13: the
+  implementation brief's numbering is kept because this id is already cited
+  from code.)
 
 ---
 

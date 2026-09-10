@@ -3,9 +3,9 @@
 Status: **resolved** (2026-09-09) — decided in `update_04.md`: I1 for
 architecture.md §8.2's reading, with the reply field renamed
 `applied_revision` (U1–U6); I2 as implemented, now stated by both specs and
-pinned (U7). The companion documents are amended; the code changes are
-specified in `update_04.md` and pending, so the "What the code does today"
-sections below stay accurate until U1–U7 land.
+pinned (U7). The companion documents are amended and the code changes
+(U1–U7) have landed, so the "What the code does today" sections below
+describe the pre-update_04 state and are kept verbatim as its record.
 Both items were found while implementing `doc/gateway.md`
 (the 59 RPCs of `gateway/`, `cmd/dnv-gateway/`, `integtest/gatewayctl/` and
 `integtest/gateway_test.sh`). Neither blocked the implementation: each was

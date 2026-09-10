@@ -387,20 +387,25 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      `architecture.md` §8/§10 assign to the equivalent RPC. `now` is the
      caller's unix seconds; thresholds are resolved inside from
      `SpConf.event_threshold` with the §7 defaults. `shard`/`spId` address
-     the `SpRev` key; `spName` the `SpConf`.
+     the `SpRev` key; `spName` the `SpConf`. Three ops — `GrowSlice`,
+     `CreateSpareLeg`, `SwitchSpareLeg` — also take `expectRev` (added by
+     gateway.md §2.2 #3): when non-zero the STM re-checks `SpRev.revision ==
+     expectRev` first (`ErrPrecondition` "stale revision" on mismatch); `0`
+     skips the check. The gateway passes its request token; this worker's
+     reaction path passes 0.
 
      | op | preconditions (re-validated in the STM) | effects |
      |---|---|---|
      | `SetDnErrEpoch(cid, addrPort, epoch, cc)` / `SetCnErrEpoch` | record exists | if `epoch != 0`: set only when the stored value is 0 (the threshold clock never restarts); if `epoch == 0`: clear. `Maintain*Capacity(old, new)`. **No rev bump** (§5.5). No write when unchanged |
      | `SetCntlrErrEpoch(cid, spId, cntlrId, epoch)` | record exists | same set/clear rule on `Cntlr`; no bump |
      | `SetLegErrEpoch(cid, spId, sliceId, legId, epoch)` / `SetSideErrEpoch(..., sideId, epoch)` | slice exists, leg/side found in any group's `leg_list`/`spare_leg_list` | same rule on the embedded record; rewrite the `Slice`; no bump |
-     | `FlipProvisioned(cid, shard, spId, sides []SideRef) (n int)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff `n > 0` (§10.3) |
-     | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (n int)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff `n > 0` |
+     | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
+     | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`, `old.err_epoch != 0`, `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
-     | `GrowSlice(cid, shard, spId, spName, sliceId, isMeta, cc, legs []Cand) (grpId)` | SP checks as above; slice exists; meta ladder not at the 16 GiB cap; every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size` (defaults resolved); ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
+     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4, update_04.md U7); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size` (defaults resolved); ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
-     | `CreateSpareLeg(cid, shard, spId, spName, sliceId, grpId, dn Cand) (legId)` | SP checks; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
-     | `SwitchSpareLeg(cid, shard, spId, spName, sliceId, grpId, spareLegId, targetLegId)` | SP checks; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
+     | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
+     | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
 
 MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
      returned from inside the STM callback, it aborts without commit (EU4).
@@ -547,12 +552,24 @@ VW5. Per registration the observer also keeps `effective ∈ {member,
      nonmember}` (initially `nonmember`) and at most one **pending** grace
      timer with a target state. On every observed transition of key `k`:
      cancel `k`'s pending timer; let `target = member` if `k` is now observed
-     live, else `nonmember`; if `target ≠ effective(k)` start a new timer of
-     `--vote-grace-time` seconds with that target, otherwise do nothing.
-     When a timer fires, its target is **committed** (VW6). A registration
-     that flaps faster than the grace time therefore never changes anybody's
-     effective membership, and never delays the commit of any other
-     registration.
+     live, else `nonmember`; start a new timer of `--vote-grace-time`
+     seconds with that target — on **every** transition, even when `target`
+     already equals `effective(k)`. The always-arm rule is what VW7's
+     never-became-effective disappear case relies on: a worker that appears
+     and dies inside its own grace window must still get a commit, because
+     the commit's VW6 garbage collection is the only thing that ever removes
+     a dead key ([D17], no lease) — a target-≠-effective guard here would
+     leak that key and its tracking entry forever. When a timer fires, its
+     target is **committed** (VW6); a commit whose target already equals the
+     committed state changes no membership, logs nothing and recomputes no
+     ownership — it is a no-op apart from the VW6 collection. A registration
+     that flaps faster than the grace time therefore still never changes
+     anybody's effective membership, and never delays the commit of any
+     other registration. One commit is never a collection: a nonmember
+     target for the observer's **own** still-heartbeating key takes VW8's
+     fence exit instead of deleting a live worker's registration (reachable
+     when the grace window closes before the next heartbeat tick's VW8
+     check — a grace time below the dead threshold, legal per CM3).
 
 VW6. **Commit** of `(k, target)`: set `effective(k) = target`; log
      `membership committed`; if `target == nonmember`: issue a best-effort
@@ -978,10 +995,21 @@ AR2. **One action per SP per pass**, evaluated in this priority; the first
 
      Every action is a `model` op that re-validates its preconditions inside
      its STM (MD6/MD7); success logs `reaction applied` and the resulting
-     `SpRev` bump re-fans the SP (RW14), so the next pass sees the new state;
-     `ErrPrecondition` or no candidate logs `reaction skipped` and the pass
-     ends. Two owners overlapping on one SP (§0 item 4) cannot apply an
-     action twice: the second STM fails its precondition.
+     `SpRev` bump re-fans the SP (RW14), so the next pass sees the new state.
+     The invariant is **at most one applied action per SP per pass**; a
+     `reaction skipped` that means "not applicable here, keep looking" does
+     not end the pass. The pass continues past: AR5's no-failover-candidate
+     (AR7's sole-primary variant, §0 item 16, is defined as "AR5 found
+     none" and would otherwise be unreachable); AR6's `grow_pending`,
+     `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
+     grow deferred on the CN, the §8.5 ceiling — and must not disable
+     AR7/AR8 for the duration); and AR8's `leg_has_two_sides` and
+     `spare_list_full`, which move the scan to the next candidate leg.
+     Everything else ends the pass as before: every `ErrPrecondition`, every
+     empty allocator scan, every transient op failure, and AR8 step 2's wait
+     for a pending spare (which clears itself within one provisioning). Two
+     owners overlapping on one SP (§0 item 4) cannot apply an action twice:
+     the second STM fails its precondition.
 
 AR3. **Suppression.** No reaction runs for an SP with `deleting == true` or
      `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
@@ -1003,7 +1031,8 @@ AR4. **Thresholds.** `now − err_epoch ≥ T` with `T` the SP's
 AR5. When the primary cntlr has `err_epoch != 0` and `now − err_epoch ≥
      primary_unhealthy`: candidate = the cntlr with the smallest `cntlr_id`
      among those with `primary == false`, `disabled == false`, `err_epoch ==
-     0`; none ⇒ `reaction skipped` (`no candidate`); else
+     0`; none ⇒ `reaction skipped` (`no candidate`) and the pass continues
+     (AR2); else
      `model.Failover(old, candidate)`. This is the §11.1 failover trigger;
      the data-plane choreography is the agents'.
 
@@ -1689,8 +1718,13 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    no longer lists `w2` (the VW6 delete); `owners` exact over `w1 w3 w4`.
 6. **`SIGTERM w4`**: its log ends with `worker stopping`; `list-workers`
    drops it at once; the others commit `nonmember` within `VOTE_GRACE + 2`
-   s — measurably sooner than step 5's 10 s (the script compares the two
-   commit latencies: `SIGTERM` < 8 s, `SIGKILL` ≥ 9 s); `owners` exact over
+   s — measurably sooner than step 5 (the script compares the two commit
+   latencies against DERIVED bounds: `SIGTERM` < `VOTE_GRACE + 2` = 8 s;
+   `SIGKILL`, measured from the signal, falls in `[VOTE_INTERVAL +
+   VOTE_GRACE, 2·VOTE_INTERVAL + VOTE_GRACE]` = [8, 10] s, because the
+   dead-detection window depends on where the kill lands in the victim's
+   heartbeat cycle; and the ordering `SIGTERM < SIGKILL`, which is what the
+   step actually proves); `owners` exact over
    `w1 w3`.
 7. **`SIGSTOP w3`**: within 4 + `WAIT_SHORT` s `w1` observes it dead, within
    `WAIT_MEMBERSHIP` commits it and owns all 256 shards per role. **`SIGCONT

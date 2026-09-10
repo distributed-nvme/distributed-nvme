@@ -356,9 +356,12 @@ Subcommands:
   that means "must be ERROR" compares against `RES_STATUS_ERROR` explicitly,
   and the genuinely two-valued phase-(a) checks use
   `assert_provisioning_or_ok` — never `assert_not_ok`.
-- **Converge check**: after each case reaches steady state, one `check-dn`
-  and one `check-side` round with `--show-info` asserts reply code 0,
-  matching revision, and all expected `ResInfo.status == RES_STATUS_OK`.
+- **Converge check**: after a case reaches steady state — cases S and A run
+  both rounds, the B/C teardown runs `check-dn` only, and case D proves its
+  steady state by the §15 snapshot diff instead of check rounds (§18) — one
+  `check-dn` and/or one `check-side` round with `--show-info` asserts reply
+  code 0, matching revision, and all expected `ResInfo.status ==
+  RES_STATUS_OK`.
   Check rounds only ever run at steady state, i.e. after the phase-(c) flip,
   so `RES_STATUS_PROVISIONING` must never appear in one.
 - **Data IO on CNs**: writes `dd conv=fsync`, reads after
@@ -379,7 +382,9 @@ Subcommands:
 3. VM2 (as CN 0x21): `nvme connect -t tcp -a <ip1> -s 4200 -n <SideToCnNqn>
    --hostnqn <CnHostNqn(0x21)> --hostid <host-id of that hostnqn>`; wait for
    `/dev/disk/by-id/nvme-uuid.<uuid>` (uuid from `dnagentctl ns-id`);
-   `nvme list-subsys -o json` shows the path `live optimized`.
+   the path shows `live` in `nvme list-subsys -o json` and `optimized` in
+   the path's sysfs `ana_state` (list-subsys carries no ANA state on
+   nvme-cli 2.16, so ANA is always read from sysfs).
 4. IO: write 4 MiB from a local urandom file (`dd bs=1M count=4 conv=fsync`),
    `sync`, drop caches, read back, sha256 equal.
 5. `check-dn` + `check-side` rounds (§9).
@@ -400,8 +405,9 @@ Layout (§5): 4 legs; sides 0x11,0x12 on DN1 (primary CN 0x21, standby CN
 (one per side per CN with `allowed_hosts` = exactly that CN's hostnqn).
 
 1. `syncup-dn` per DN (its two side pointers), then 4 × `syncup-side` in
-   the §9 two-phase form (the four `wait-zeroed`s run as background jobs
-   joined with `wait`, like the §12 lockstep pairs). Assert every
+   the §9 two-phase form, one side after another — the §9 helper's
+   per-side bookkeeping relies on sequential provisioning; only the §12
+   lockstep pairs run concurrently. Assert every
    `cn_id_to_*` map entry PROVISIONING after phase (a) and OK after phase
    (c), for both CN ids.
 2. Connects — the multi-CN matrix, 8 `nvme connect`s total:
@@ -428,10 +434,11 @@ Layout (§5): 4 legs; sides 0x11,0x12 on DN1 (primary CN 0x21, standby CN
 
 Both cases run **two concurrent migrations in opposite directions**
 (DN1→DN2 and DN2→DN1, §5), advanced stage-by-stage in lockstep; within each
-stage the two per-migration `dnagentctl` calls run as background jobs joined
-with `wait`, so the same agent handles overlapping side converges (locks
-exercised) while each DN simultaneously plays src for one leg and dst for
-the other.
+converge/poll stage the two per-migration `dnagentctl` calls run as
+background jobs joined with `wait`, so the same agent handles overlapping
+side converges (locks exercised) while each DN simultaneously plays src for
+one leg and dst for the other. (The bitmap-push stage is the exception:
+its per-chunk `push-migr-bm` calls run sequentially.)
 
 Per migration (leg L: src side S1 slot 0 on DNsrc, dst side S2 slot 1 on
 DNdst, migr M, primary CN C hosted on the *other* VM from DNsrc):
@@ -535,7 +542,8 @@ also has no /dev node)*
    that from here until the window closes, an *external* block-device scan on
    DNsrc (udev, `blkid`, an operator's `lsblk`) would block in D state — the
    bounded window is the whole mitigation.
-10. CN VM: poll `nvme list-subsys` — src path ana_state → `inaccessible`.
+10. CN VM: poll the src path's sysfs `ana_state` → `inaccessible`
+    (liveness via `nvme list-subsys`; ANA from sysfs, as in §10 step 3).
 
 **Stage 3 — enable dst (the concurrency point: both migrations' enables run
 in parallel)**
@@ -812,8 +820,8 @@ JSON logs on either VM.
 | `PushMigrBitmap` | C, D | reply code 0; effects via §14 layers |
 | `GetDnInfo` | teardown checks, D | statuses, snapshot equality |
 | `GetSideInfo` | B/C polling, D | dm_clone status parsing, snapshot equality; `zeroed_ext_cnt`/`total_ext_cnt` (polled by `wait-zeroed`) |
-| `CheckDn` | S, A, B/C teardown, D | stream round: code 0, revision echo, show_info statuses |
-| `CheckSide` | S, A, D | same |
+| `CheckDn` | S, A, B/C teardown | stream round: code 0, revision echo, show_info statuses |
+| `CheckSide` | S, A | same (case D proves steady state by the §15 snapshot diff instead of check rounds) |
 
 ## 19. Out of scope (v1)
 

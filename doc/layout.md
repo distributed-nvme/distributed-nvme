@@ -52,7 +52,16 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnagent.md                     # dnv-agent: agent/ (shared), agent/dnagent/, cmd/dnv-agent
 │   ├── cnagent.md                     # dnv-agent cn: agent/cnagent/ (builds on dnagent.md §2/§3)
 │   ├── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
-│   └── cdc.md                         # dnv-cdc: cdc/, cmd/dnv-cdc + its integration suite
+│   ├── cdc.md                         # dnv-cdc: cdc/, cmd/dnv-cdc + its integration suite
+│   ├── gateway.md                     # Gateway: gateway/, cmd/dnv-gateway + its integration suite
+│   ├── dnagent_integtest.md           # the on-hardware dn agent suite
+│   ├── cnagent_integtest.md           # the on-hardware cn agent suite
+│   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
+│   ├── dependencies.md                # direct-dependency ledger (must match go.mod)
+│   ├── minor_issues.md                # minor doc/code debt ledger (2026-09-09 verification)
+│   ├── issue_03.md                    # resolved issue record (history)
+│   ├── update_04.md                   # applied amendment record (history)
+│   └── update_05.md                   # decided amendment spec (code pending)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -329,3 +338,11 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   `cmd/dnv-worker` bullet; §6 steps 3 and 6 and §7 item 4 follow. Package boundaries
   are otherwise unchanged: `common` and `pb` stay leaves, agents and `dnvctl` still
   never link the etcd client.
+* Housekeeping (2026-09-09): the §2 `doc/` tree caught up with the files
+  that arrived after the amendments above — `gateway.md` (whose suite the §2
+  `integtest/` tree and the §3 `integtest/*` row already reflected),
+  the two on-hardware suite specs `dnagent_integtest.md` /
+  `cnagent_integtest.md`, `ThinDeviceCreated.md`, `dependencies.md`, and the
+  resolved `issue_03.md` / `update_04.md` records; `minor_issues.md`, the
+  minor-debt ledger produced by the same verification, entered the tree the
+  same day. No package boundary or path changed.

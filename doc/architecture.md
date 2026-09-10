@@ -2171,9 +2171,11 @@ completed by one reply share the one STM and the one bump, and a pending `provis
 flip of the same SP MAY be folded into the same transaction — the two rules are
 independent and both bump once. The reads and writes log as ordinary `etcd
 get`/`etcd put` records inside the STM (`log.md` §5.3); a retried transaction
-logs them twice, which is expected. Across replies there is no batching window:
-only the primary fills thin rows, so one reply per round per SP is the natural
-unit.
+logs them twice, which is expected. Replies do not get one STM each: the sp
+worker drains every report pending on its channel at that moment — across
+replies and across cntlrs — and folds all their candidates into the one STM.
+Only the primary fills thin rows, so one reply per round per SP remains the
+common case, and the fold is at most one STM and one bump regardless.
 
 The bump re-fans the SP, which is how `created` reaches the cn agent (`cnagent.md`
 CN14). It cannot loop: the worker reloads the SP on its own bump, and the re-sync's
@@ -2783,7 +2785,9 @@ mdadm --assemble /dev/md/{CnMdDevName} --name {CnMdArrayName} {leg_devs...}
 mdadm /dev/md/{CnMdDevName} --add --failfast {leg_dev}
 mdadm /dev/md/{CnMdDevName} --fail {leg_dev} ; mdadm /dev/md/{CnMdDevName} --remove {leg_dev}
 mdadm --stop /dev/md/{CnMdDevName}
-mdadm --zero-superblock {leg_dev}        # only on explicit teardown of a leg
+# `mdadm --zero-superblock` is deliberately NEVER run (cnagent.md CN12): a leg
+# only ever leaves an array into the spare list — where its stale superblock
+# makes a later re-add cheap — or out of existence together with its side.
 ```
 
 **device-mapper** (`dmsetup create {name} --table "…"`; sizes in 512 B sectors):
