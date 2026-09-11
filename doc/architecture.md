@@ -76,7 +76,7 @@ environment variables; see §13):
 | `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow, leg repair). Normative spec: `dnv-worker.md`. |
 | `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local device-mapper / mdadm / nvmet state (and, on a DN, the [D13] on-disk extent metadata; no LVM anywhere — [D13] removed it from the DN, [D14] from the CN); persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
 | `dnv-cdc`    | NVMe-oF Central Discovery Controller. Watches the `cdc` keys and serves discovery + AENs to hosts. |
-| `dnvctl`     | CLI over the Gateway. Also carries the userspace copier of §11.4. |
+| `dnvctl`     | CLI over the Gateway — `dnvctl.md`. (The §11.4 userspace copier is future work outside dnvctl v1.) |
 
 ## 2. Terminology and object model
 
@@ -813,12 +813,20 @@ creation) **plus the mutable handle the watching worker needs**: `DnRev.addr_por
 * `err_epoch` and capacity-key maintenance never bump revisions (they only gate CP
   scheduling). Every SpConf/sub-object mutation listed in §8 bumps `SpRev` unless the
   RPC spec says otherwise.
-* The request-side `DnRev`/`CnRev`/`SpRev` fields are optimistic-concurrency tokens: the
-  STM MUST assert `stored.revision == request.revision` and fail the RPC with `ABORTED`
-  ("stale revision") on mismatch. Only `revision` participates — the `addr_port`/
+* The request-side `DnRev`/`CnRev`/`SpRev` fields are optimistic-concurrency tokens, and
+  the check is **presence-based** (amended 2026-09-11; it previously read as an
+  unconditional MUST). **When the request carries the token message**, the STM MUST
+  assert `stored.revision == request.revision` and fail the RPC with `ABORTED`
+  ("stale revision") on mismatch. **When the message is absent**, the STM skips the
+  assertion and the mutation proceeds ungated — a client omits the token precisely to opt
+  out, per request; the residual lost-update exposure is risks_and_gaps.md RK8. Presence,
+  not value, selects the two modes: a stored revision starts at 1 and only grows, so a
+  message present with `revision: 0` is a real token that can never match and is always
+  refused. Only `revision` participates — the `addr_port`/
   `sp_name` a client echoes back from `Get*` inside that message is **ignored** on the
-  request path (it is never a way to rename or relocate anything); the RPC still names
-  its target by `addr_port`/`sp_name` in its own top-level field. `Get*` returns the
+  request path (it is never a way to rename or relocate anything), and a message carrying
+  only that echo is therefore a present zero token, refused like any other; the RPC still
+  names its target by `addr_port`/`sp_name` in its own top-level field. `Get*` returns the
   current token.
 * The handle in the value is a copy of the authoritative one (`DnConf`/`CnConf` are
   keyed by `addr_port`, `SpConf` by `sp_name`). No v001 RPC changes a node's `addr_port`
@@ -1045,8 +1053,9 @@ capacity keys maintained per §5.6; reverse on delete.
 
 Format follows the project convention: **Errors / Defaults / Action**. Errors common to
 every RPC and therefore not repeated: `INVALID_ARGUMENT` for any §7 violation on any
-supplied field; `ABORTED` per §5.9; `ABORTED` "stale revision" whenever the request's
-`DnRev`/`CnRev`/`SpRev` token mismatches the stored one (§5.5). Default
+supplied field; `ABORTED` per §5.9; `ABORTED` "stale revision" whenever the request
+**carries** a `DnRev`/`CnRev`/`SpRev` token whose revision mismatches the stored one —
+omitting the token message skips that check entirely (§5.5). Default
 `cluster_name = DefaultClusterName = "default"` for every RPC that takes one. Every RPC
 except `CreateCluster` and `ListClusters` starts by reading
 `{p} cluster_conf {cluster_name}` (`NOT_FOUND` if absent) — not only as an existence
@@ -1327,7 +1336,9 @@ Action: STM set `Cntlr.disabled = !request.enabled`; on disable remove / on enab
 append the CN's `nvme_tr_conf` in every `CdcEntry`; bump `SpRev`. Idempotent. A
 disabled cntlr leaves primary eligibility and its namespaces go ANA-inaccessible;
 disabling the current primary triggers the §10.4 primary re-election; disabling the
-last enabled cntlr is allowed but stops IO (dnvctl prints a warning). Reply `cntlr_id`,
+last enabled cntlr is allowed but stops IO (no warning in v1: dnvctl issues no RPC the
+operator did not type, so it cannot pre-read to detect the case — dnvctl.md §0 #10 defers
+the warning until the gateway carries the hint in a reply). Reply `cntlr_id`,
 `enabled`.
 
 **InspectCntlr** — read the `Cntlr` in an STM for its `addr_port`; outside the STM
@@ -2806,8 +2817,9 @@ the §4.6 state files live. `--capacity` is cn-only (a DN's size is read off its
 `--disk`): it is the byte budget `GetCnSize` replies verbatim, i.e. the per-node input
 to the §6.1 CN extent count, whose divisor `extent_size` is the cluster-wide
 `dn_bin_conf.extent_size` instead. Its default **0** means "no opinion", which
-makes the control plane substitute `DefaultCnCap` (4 TiB). `dnvctl` subcommand sketch:
-`dnvctl dn|cn|sp|vol create|…`, plus the §11.4 copier.
+makes the control plane substitute `DefaultCnCap` (4 TiB). `dnvctl` is specified
+in `dnvctl.md` (a noun-grouped tree over the 59 §8 RPCs; the §11.4 userspace
+copier is future work outside dnvctl v1).
 
 ---
 

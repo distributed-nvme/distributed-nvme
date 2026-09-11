@@ -605,7 +605,7 @@ func (s *Server) DeleteStoragePool(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		spId = 0
 		sc, err := openSpFlags(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision(), false)
+			req.GetSpRev(), false)
 		if err != nil {
 			return err
 		}
@@ -829,7 +829,7 @@ func (s *Server) UpdateStoragePoolCntlidSlotList(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		spId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -910,7 +910,7 @@ func (s *Server) UpdateStoragePoolLevel(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		spId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -1015,20 +1015,25 @@ func (s *Server) GrowSlice(
 	); err != nil {
 		return nil, err
 	}
-	token := req.GetSpRev().GetRevision()
+	token := req.GetSpRev()
 	var grpId uint64
 	err := candidateUnit(ctx, func() error {
 		grpId = 0
 		// The planning pre-read is ONE read-only snapshot (§5.8) opened with
 		// openSp, so the token is checked before any other state check
-		// (GW6): a stale client sees ABORTED "stale revision" and never a
-		// NOT_FOUND computed against a slice list it has not read.
+		// (GW6): a client that sent a stale one sees ABORTED "stale
+		// revision" and never a NOT_FOUND computed against a slice list it
+		// has not read.
 		//
-		// That check is also what keeps a 0 out of model.checkSpRev, which
-		// reads 0 as "skip the check entirely" — the worker's mode
-		// (gateway.md §2.2 #3). A live SpRev starts at 1, so a token of 0 is
-		// a client that sent none, and it has to be refused HERE or the grow
-		// would commit with no optimistic-concurrency gate at all (§0 #7).
+		// GW6 is presence-based (§0 #7), and the two layers agree by
+		// construction: a request that carried NO token passes nil here, is
+		// let through unchecked, and then reaches model.GrowSlice below as
+		// expectRev 0 — which model.checkSpRev reads as "skip the check
+		// entirely", the worker's mode (gateway.md §2.2 #3). Such a grow
+		// commits with no optimistic-concurrency gate, which is exactly what
+		// omitting the token asks for. A token that is merely
+		// present-with-0 is a different thing: a live SpRev starts at 1, so
+		// openSp refuses it HERE and it never reaches the model.
 		var cid uint64
 		var cc *pb.ClusterConf
 		var conf *pb.SpConf

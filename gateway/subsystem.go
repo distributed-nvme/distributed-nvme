@@ -150,7 +150,7 @@ func (s *Server) CreateSubsystem(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		ssId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func (s *Server) DeleteSubsystem(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		ssId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -329,7 +329,7 @@ func (s *Server) UpdateSubsystemHosts(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		ssId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -397,7 +397,7 @@ func (s *Server) CreateNamespace(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -482,7 +482,7 @@ func (s *Server) DeleteNamespace(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -540,7 +540,7 @@ func (s *Server) UpdateNamespaceDev(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -594,7 +594,7 @@ func (s *Server) UpdateNamespaceSuspended(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

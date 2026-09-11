@@ -90,7 +90,7 @@ func (s *Server) CreateTransfer(
 		// reply the previous attempt's value (GW8).
 		xferId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -180,7 +180,7 @@ func (s *Server) DeleteTransfer(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		xferId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -300,7 +300,7 @@ func (s *Server) UpdateTransferHosts(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		xferId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

@@ -220,13 +220,13 @@ func (s *Server) CreateMigration(
 	)
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		// openSp, not openSpRead: this is a MUTATOR's planning read, so
-		// GW6 wants the token checked before any other state check — a stale
-		// client must see ABORTED "stale revision", never a NOT_FOUND or a
-		// FAILED_PRECONDITION computed against a slice list it has not read.
-		// The deciding STM checks it again (AG4); this one only fixes which
-		// refusal a stale caller is given.
+		// GW6 wants the token — when one was sent — checked before any other
+		// state check: a stale client must see ABORTED "stale revision",
+		// never a NOT_FOUND or a FAILED_PRECONDITION computed against a slice
+		// list it has not read. The deciding STM checks it again (AG4); this
+		// one only fixes which refusal a stale caller is given.
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -269,7 +269,7 @@ func (s *Server) CreateMigration(
 		return s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 			migrId = 0
 			sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-				req.GetSpRev().GetRevision())
+				req.GetSpRev())
 			if err != nil {
 				return err
 			}
@@ -373,8 +373,10 @@ func (s *Server) CreateMigration(
 // resolves what the call needs, the GetSideInfo happens strictly between the
 // transactions (AG1), and the deciding STM re-runs the whole resolution plus
 // the token check. Nothing from phase 1 is trusted in phase 2: any interleaved
-// mutation bumped SpRev, so the token subsumes the staleness of everything
-// phase 1 saw.
+// mutation bumped SpRev, so a token that was sent subsumes the staleness of
+// everything phase 1 saw. A caller that sent none gets the re-resolution but
+// not that subsumption — GW6 is presence-based (§0 #7), so an interleaved
+// mutation stays invisible to it.
 //
 // An unreachable agent is FAILED_PRECONDITION, not ABORTED (AG3): the caller
 // cannot prove hydration is done, which is exactly the precondition §8.11
@@ -478,7 +480,7 @@ func (s *Server) FinishMigration(
 	err = s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		migrId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -559,7 +561,7 @@ func (s *Server) CancelMigration(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		migrId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -670,7 +672,7 @@ func (s *Server) AppendMigrationBitmap(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		migrId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

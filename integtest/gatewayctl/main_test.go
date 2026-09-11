@@ -413,8 +413,11 @@ func TestCreateSpRequest(t *testing.T) {
 }
 
 // TestSpRevTokenIsAlwaysPresent pins §0 #7 as the driver sees it: an omitted
-// --rev sends the ZERO token, not an absent message, and zero can never match
-// a stored revision that starts at 1. Case B step 4 asserts exactly that.
+// --rev sends the ZERO token, not an absent message, and a PRESENT zero can
+// never match a stored revision that starts at 1. Since GW6 became
+// presence-based this is what keeps case B step 4 a refusal — an absent
+// message would be waved through — so this test guards the whole B4 stage,
+// not just a marshalling detail.
 func TestSpRevTokenIsAlwaysPresent(t *testing.T) {
 	req := runArgv(t, "create-td",
 		"--sp", "sp0", "--name", "t0", "--size", "67108864",

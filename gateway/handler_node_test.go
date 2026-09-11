@@ -178,6 +178,27 @@ func hnodeWantKeys(t *testing.T, got []string, want []string, label string) {
 	}
 }
 
+// hnodeDnShard is the shard_code the create drew for one DN (§5.4).
+//
+// A rev key is id-keyed UNDER a shard code (§5.1), and that code is the
+// allocator's draw rather than anything derivable from the dn_id — so a test
+// that needs the rev key of a node it registered reads it back off the conf the
+// create wrote, exactly the way every handler forms the key.
+func hnodeDnShard(t *testing.T, s *Server, cid uint64, addrPort string) uint32 {
+	t.Helper()
+	dn := &pb.DnConf{}
+	hnodeGet(t, s, model.DnConfKey(cid, addrPort), dn)
+	return dn.GetShardCode()
+}
+
+// hnodeCnShard is hnodeDnShard for a controller node.
+func hnodeCnShard(t *testing.T, s *Server, cid uint64, addrPort string) uint32 {
+	t.Helper()
+	cn := &pb.CnConf{}
+	hnodeGet(t, s, model.CnConfKey(cid, addrPort), cn)
+	return cn.GetShardCode()
+}
+
 // ---------------------------------------------------------------------------
 // §8.1 CreateCluster
 // ---------------------------------------------------------------------------
@@ -968,9 +989,13 @@ func TestListDiskNodesPagesAndRejectsABadToken(t *testing.T) {
 // keep running — and makes no agent call.
 //
 // The second half is §0 #17: a request that asks for the flag the node already
-// carries writes NOTHING. The token is still checked first, so the no-op is not
-// a way for a stale client to get an OK; what it must not do is move a single
-// mod_revision, and both the rev key and the capacity key are asserted for that.
+// carries writes NOTHING. Every call below sends the current token, so GW6's
+// comparison runs and passes on each of them, and the no-op is not a way for a
+// client holding a STALE token to get an OK — a client that sends no token at
+// all is a different case, and is not judged on staleness at all
+// (TestNodeMutatorsRunWithNoTokenAtAll). What the no-op must not do is move a
+// single mod_revision, and both the rev key and the capacity key are asserted
+// for that.
 func TestUpdateDiskNodeDisabledMovesOnlyTheCapacityKey(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1664,13 +1689,40 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 // GW6 across both node kinds
 // ---------------------------------------------------------------------------
 
-// TestNodeMutatorsRefuseAStaleOrMissingToken pins GW6 and §0 #7 on all four
-// token-taking node RPCs at once: the token is read as
-// req.GetXRev().GetRevision(), so an omitted message reads 0 — and since a
-// stored revision starts at 1 and only grows, 0 can never match. Both rows are
-// therefore the same refusal, which is exactly the property that makes the
-// nil-token case safe: there is no way to reach a mutation without a token.
-func TestNodeMutatorsRefuseAStaleOrMissingToken(t *testing.T) {
+// TestNodeMutatorsRefuseAPresentStaleToken pins the refusal half of GW6 and
+// §0 #7 on all four token-taking node RPCs at once: when the request CARRIES a
+// token message, the stored revision must equal the one inside it EXACTLY, and
+// anything else is ABORTED "stale revision" — decided before the mutator looks
+// at any other precondition.
+//
+// Every row here is a PRESENT token, and the three shapes are chosen to say
+// that presence alone is what arms the comparison, not the value found inside:
+//
+//   - "a token from the future" is the ordinary stale client, holding a
+//     revision the store has not reached.
+//   - "an empty token message" is the sharpest discriminator in the file. It is
+//     the message that differs from no message at all only by BEING THERE: no
+//     addr_port, no revision, so the comparison runs against 0. A stored
+//     revision seeds at 1 and only grows, so 0 can never match and the row is
+//     ABORTED. Were the check keyed on the value 0 rather than on presence,
+//     this row would sail through, and so would the half-filled token below:
+//     a client bug would buy a silent unguarded write instead of a refusal.
+//   - "a token message with no revision" is the same discriminator wearing the
+//     shape a real client would send by accident: it echoes the addr_port back
+//     and leaves `revision` unset. The echoed addr_port does not save it,
+//     because only `revision` participates in the comparison.
+//
+// Drop the message entirely and the comparison is SKIPPED instead — that is
+// TestNodeMutatorsRunWithNoTokenAtAll's subject, and it is why this test's
+// fixture can still end on "nothing was written": every row below is a
+// refusal, so nothing below reaches a Put.
+//
+// The handlers are called in process (§9.3), so `dn_rev: &pb.DnRev{}` reaches
+// them exactly as present-and-empty. That is also what the wire does: a proto3
+// message field set to an empty message is emitted as a zero-length field and
+// decodes back to a non-nil message, so presence survives a round trip and a
+// real client can express both cases.
+func TestNodeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 	cluster := hnodeName("tok")
@@ -1741,16 +1793,28 @@ func TestNodeMutatorsRefuseAStaleOrMissingToken(t *testing.T) {
 			dnRev *pb.DnRev
 			cnRev *pb.CnRev
 		}{
-			{label: "no token at all"},
 			{
 				label: "a token from the future",
 				dnRev: &pb.DnRev{Revision: 2},
 				cnRev: &pb.CnRev{Revision: 2},
 			},
 			{
-				// The addr_port a client echoes back inside the token message
-				// is ignored: only `revision` participates, so a message that
-				// carries everything BUT the revision reads 0 like a nil one.
+				// Present and completely empty: the one input that is
+				// byte-for-byte what a nil token would carry, and differs from
+				// it only by existing. It is ABORTED, which is the positive
+				// statement that GW6 reads PRESENCE — a check keyed on the
+				// value 0 could not tell this row from a nil token, and would
+				// have to let one of the two through wrongly.
+				label: "an empty token message",
+				dnRev: &pb.DnRev{},
+				cnRev: &pb.CnRev{},
+			},
+			{
+				// The same discriminator in the shape a client reaches by
+				// accident, filling in the identity it knows and leaving the
+				// revision unset. The addr_port it echoes back is ignored —
+				// only `revision` participates — so the comparison runs
+				// against 0 and no stored revision can ever equal it.
 				label: "a token message with no revision",
 				dnRev: &pb.DnRev{AddrPort: dnAddr},
 				cnRev: &pb.CnRev{AddrPort: cnAddr},
@@ -1776,5 +1840,305 @@ func TestNodeMutatorsRefuseAStaleOrMissingToken(t *testing.T) {
 	}
 	if got := cnTok(t, s, cluster, cnAddr); got != 1 {
 		t.Errorf("cn_rev: got %d, want 1", got)
+	}
+}
+
+// TestNodeMutatorsRunWithNoTokenAtAll is the other half of GW6's presence rule
+// (§0 #7) on the same four node RPCs: a request that carries NO token message
+// skips the revision comparison entirely and is judged only on its own
+// preconditions. The mutator RUNS.
+//
+// Every assertion here is positive — the call returns OK AND the node's state
+// actually moved — because the interesting way for this to regress is not a
+// refusal but a silent no-op: a handler that returned OK while writing nothing
+// would satisfy "no error" and betray every caller that used the bypass.
+//
+// What "moved" means is different per RPC, and §5.5 is why:
+//
+//   - The two Update*Disabled RPCs rewrite the conf and maintain the §5.6
+//     capacity key but bump NO revision (§8.2 and §8.3 exempt them; the agent
+//     is never told). So the evidence is the stored `disabled` flag and the
+//     capacity index, asserted while the rev key is asserted NOT to have moved.
+//   - The two Delete* RPCs take the rev key away together with the conf and the
+//     capacity key, so there is no revision left to inspect. The evidence is the
+//     whole key set gone in one commit plus the bucket entry released in the
+//     global, with next_id still growing (§5.4).
+//
+// Neither shape can show GW6's bump-on-success half; on these four RPCs there
+// is no bump to see, and that clause is the SP-scoped mutators' to pin.
+//
+// Four nodes, two per kind: a delete removes the very keys the update's
+// assertions read, and the refusal test's cluster cannot be borrowed for any of
+// it, because a mutator that is let through WRITES and that test ends by
+// asserting nothing did.
+func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	cluster := hnodeName("notok")
+	cid := mustCluster(t, s, cluster)
+	dnUpd := fakeAddrPort(t, "dn")
+	dnDel := fakeAddrPort(t, "dn")
+	cnUpd := fakeAddrPort(t, "cn")
+	cnDel := fakeAddrPort(t, "cn")
+	dnUpdId := mustDn(t, s, cluster, dnUpd, "rack-1", 16<<30)
+	dnDelId := mustDn(t, s, cluster, dnDel, "rack-1", 16<<30)
+	cnUpdId := mustCn(t, s, cluster, cnUpd, "rack-1", 8<<30)
+	cnDelId := mustCn(t, s, cluster, cnDel, "rack-1", 8<<30)
+
+	dnUpdShard := hnodeDnShard(t, s, cid, dnUpd)
+	dnDelShard := hnodeDnShard(t, s, cid, dnDel)
+	cnUpdShard := hnodeCnShard(t, s, cid, cnUpd)
+	cnDelShard := hnodeCnShard(t, s, cid, cnDel)
+	dnUpdRevKey := model.DnRevKey(dnUpdShard, cid, dnUpdId)
+	cnUpdRevKey := model.CnRevKey(cnUpdShard, cid, cnUpdId)
+	dnUpdCap := model.DnCapacityKey(cid, 1, 16, dnUpd)
+	dnDelCap := model.DnCapacityKey(cid, 1, 16, dnDel)
+	cnUpdCap := model.CnCapacityKey(cid, 8, cnUpd)
+	cnDelCap := model.CnCapacityKey(cid, 8, cnDel)
+
+	// The four capacity keys are asserted as a set before anything is bypassed,
+	// so that a later "this key is gone" reads as a change this test caused
+	// rather than as a key string it got wrong.
+	hnodeWantKeys(
+		t, hnodeDnCapacityKeys(t, s, cid), []string{dnUpdCap, dnDelCap},
+		"the DN capacity index of the fixture")
+	hnodeWantKeys(
+		t, hnodeCnCapacityKeys(t, s, cid), []string{cnUpdCap, cnDelCap},
+		"the CN capacity index of the fixture")
+	dnRevBefore := hnodeModRev(t, s, dnUpdRevKey)
+	cnRevBefore := hnodeModRev(t, s, cnUpdRevKey)
+
+	// UpdateDiskNodeDisabled, no DnRev at all: OK, and the flag is stored.
+	updDn, err := s.UpdateDiskNodeDisabled(
+		ctx, &pb.UpdateDiskNodeDisabledRequest{
+			ClusterName: cluster,
+			AddrPort:    dnUpd,
+			Disabled:    true,
+		})
+	wantCode(t, err, codes.OK, "UpdateDiskNodeDisabled with no token")
+	if updDn.GetDnId() != dnUpdId {
+		t.Errorf("dn_id: got %d, want %d", updDn.GetDnId(), dnUpdId)
+	}
+	dn := &pb.DnConf{}
+	hnodeGet(t, s, model.DnConfKey(cid, dnUpd), dn)
+	if !dn.GetDisabled() {
+		t.Errorf(
+			"UpdateDiskNodeDisabled with no token returned OK without " +
+				"storing disabled: the bypass must run the mutator, not " +
+				"turn it into a no-op")
+	}
+	hnodeWantKeys(
+		t, hnodeDnCapacityKeys(t, s, cid), []string{dnDelCap},
+		"the DN capacity index after a token-less disable")
+	if got := hnodeModRev(t, s, dnUpdRevKey); got != dnRevBefore {
+		t.Errorf(
+			"dn_rev was bumped: %d -> %d; §8.2 exempts this RPC whether or "+
+				"not a token was sent", dnRevBefore, got)
+	}
+	if got := dnTok(t, s, cluster, dnUpd); got != 1 {
+		t.Errorf("dn_rev revision: got %d, want 1", got)
+	}
+
+	// UpdateControllerNodeDisabled, no CnRev at all: the §8.3 mirror.
+	updCn, err := s.UpdateControllerNodeDisabled(
+		ctx, &pb.UpdateControllerNodeDisabledRequest{
+			ClusterName: cluster,
+			AddrPort:    cnUpd,
+			Disabled:    true,
+		})
+	wantCode(t, err, codes.OK, "UpdateControllerNodeDisabled with no token")
+	if updCn.GetCnId() != cnUpdId {
+		t.Errorf("cn_id: got %d, want %d", updCn.GetCnId(), cnUpdId)
+	}
+	cn := &pb.CnConf{}
+	hnodeGet(t, s, model.CnConfKey(cid, cnUpd), cn)
+	if !cn.GetDisabled() {
+		t.Errorf(
+			"UpdateControllerNodeDisabled with no token returned OK " +
+				"without storing disabled")
+	}
+	hnodeWantKeys(
+		t, hnodeCnCapacityKeys(t, s, cid), []string{cnDelCap},
+		"the CN capacity index after a token-less disable")
+	if got := hnodeModRev(t, s, cnUpdRevKey); got != cnRevBefore {
+		t.Errorf(
+			"cn_rev was bumped: %d -> %d; §8.3 exempts this RPC whether or "+
+				"not a token was sent", cnRevBefore, got)
+	}
+	if got := cnTok(t, s, cluster, cnUpd); got != 1 {
+		t.Errorf("cn_rev revision: got %d, want 1", got)
+	}
+
+	// DeleteDiskNode, no DnRev at all: the node goes, rev key included.
+	delDn, err := s.DeleteDiskNode(ctx, &pb.DeleteDiskNodeRequest{
+		ClusterName: cluster,
+		AddrPort:    dnDel,
+	})
+	wantCode(t, err, codes.OK, "DeleteDiskNode with no token")
+	if delDn.GetDnId() != dnDelId {
+		t.Errorf("dn_id: got %d, want %d", delDn.GetDnId(), dnDelId)
+	}
+	for _, key := range []string{
+		model.DnConfKey(cid, dnDel),
+		model.DnRevKey(dnDelShard, cid, dnDelId),
+		dnDelCap,
+	} {
+		if hnodeExists(t, s, key) {
+			t.Errorf("key %q survived a token-less DeleteDiskNode", key)
+		}
+	}
+	dnGlobal := &pb.DnGlobal{}
+	hnodeGet(t, s, model.DnGlobalKey(cid), dnGlobal)
+	hnodeWantProto(t, dnGlobal, &pb.DnGlobal{
+		NextId:      3,
+		ShardBucket: hnodeBucket(dnUpdShard),
+	}, "dn_global after a token-less delete")
+
+	// DeleteControllerNode, no CnRev at all: the §8.3 mirror.
+	delCn, err := s.DeleteControllerNode(
+		ctx, &pb.DeleteControllerNodeRequest{
+			ClusterName: cluster,
+			AddrPort:    cnDel,
+		})
+	wantCode(t, err, codes.OK, "DeleteControllerNode with no token")
+	if delCn.GetCnId() != cnDelId {
+		t.Errorf("cn_id: got %d, want %d", delCn.GetCnId(), cnDelId)
+	}
+	for _, key := range []string{
+		model.CnConfKey(cid, cnDel),
+		model.CnRevKey(cnDelShard, cid, cnDelId),
+		cnDelCap,
+	} {
+		if hnodeExists(t, s, key) {
+			t.Errorf("key %q survived a token-less DeleteControllerNode", key)
+		}
+	}
+	cnGlobal := &pb.CnGlobal{}
+	hnodeGet(t, s, model.CnGlobalKey(cid), cnGlobal)
+	hnodeWantProto(t, cnGlobal, &pb.CnGlobal{
+		NextId:      3,
+		ShardBucket: hnodeBucket(cnUpdShard),
+	}, "cn_global after a token-less delete")
+
+	// The two nodes this test did NOT name are untouched: a bypass is scoped to
+	// the object the request addresses, exactly like a checked mutation.
+	if !hnodeExists(t, s, model.DnConfKey(cid, dnUpd)) {
+		t.Errorf("the token-less delete took the wrong disk node")
+	}
+	if !hnodeExists(t, s, model.CnConfKey(cid, cnUpd)) {
+		t.Errorf("the token-less delete took the wrong controller node")
+	}
+}
+
+// TestNodeMutatorsStillReadTheRevKeyWithNoToken pins the limit of the bypass:
+// skipping the COMPARISON is not skipping the READ. GW6 reads the rev key on
+// every one of these four RPCs whether or not a token came with the request,
+// and §5.9 makes a missing invariant key ABORTED — so a token-less request
+// against a node whose rev key has vanished is still refused, and refused with
+// the "<x>_rev key %q is missing" sentence rather than with "stale revision".
+//
+// That distinction is the whole point of the row: "no token" must mean "no
+// optimistic-concurrency gate", never "no §5.1 invariant". Keeping the key in
+// the STM's read set is also what makes a skipped check no weaker than a
+// checked one against a DELETE of the object racing the same transaction.
+//
+// The rev keys are removed behind the handlers' backs, which is the only way to
+// reach the state — no RPC leaves a conf without its rev key.
+func TestNodeMutatorsStillReadTheRevKeyWithNoToken(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	cluster := hnodeName("norev")
+	cid := mustCluster(t, s, cluster)
+	cli := newTestClient(t)
+	dnAddr := fakeAddrPort(t, "dn")
+	cnAddr := fakeAddrPort(t, "cn")
+	dnId := mustDn(t, s, cluster, dnAddr, "rack-1", 16<<30)
+	cnId := mustCn(t, s, cluster, cnAddr, "rack-1", 8<<30)
+	dnRevKey := model.DnRevKey(hnodeDnShard(t, s, cid, dnAddr), cid, dnId)
+	cnRevKey := model.CnRevKey(hnodeCnShard(t, s, cid, cnAddr), cid, cnId)
+	if err := cli.Delete(ctx, dnRevKey); err != nil {
+		t.Fatalf("Delete %s: %v", dnRevKey, err)
+	}
+	if err := cli.Delete(ctx, cnRevKey); err != nil {
+		t.Fatalf("Delete %s: %v", cnRevKey, err)
+	}
+	dnConfRev := hnodeModRev(t, s, model.DnConfKey(cid, dnAddr))
+	cnConfRev := hnodeModRev(t, s, model.CnConfKey(cid, cnAddr))
+
+	for _, tc := range []struct {
+		label string
+		want  string
+		call  func() error
+	}{
+		{
+			label: "DeleteDiskNode",
+			want:  fmt.Sprintf("dn_rev key %q is missing", dnRevKey),
+			call: func() error {
+				_, err := s.DeleteDiskNode(ctx, &pb.DeleteDiskNodeRequest{
+					ClusterName: cluster,
+					AddrPort:    dnAddr,
+				})
+				return err
+			},
+		},
+		{
+			label: "UpdateDiskNodeDisabled",
+			want:  fmt.Sprintf("dn_rev key %q is missing", dnRevKey),
+			call: func() error {
+				_, err := s.UpdateDiskNodeDisabled(
+					ctx, &pb.UpdateDiskNodeDisabledRequest{
+						ClusterName: cluster,
+						AddrPort:    dnAddr,
+						Disabled:    true,
+					})
+				return err
+			},
+		},
+		{
+			label: "DeleteControllerNode",
+			want:  fmt.Sprintf("cn_rev key %q is missing", cnRevKey),
+			call: func() error {
+				_, err := s.DeleteControllerNode(
+					ctx, &pb.DeleteControllerNodeRequest{
+						ClusterName: cluster,
+						AddrPort:    cnAddr,
+					})
+				return err
+			},
+		},
+		{
+			label: "UpdateControllerNodeDisabled",
+			want:  fmt.Sprintf("cn_rev key %q is missing", cnRevKey),
+			call: func() error {
+				_, err := s.UpdateControllerNodeDisabled(
+					ctx, &pb.UpdateControllerNodeDisabledRequest{
+						ClusterName: cluster,
+						AddrPort:    cnAddr,
+						Disabled:    true,
+					})
+				return err
+			},
+		},
+	} {
+		label := tc.label + " with no token, rev key gone"
+		err := tc.call()
+		wantCode(t, err, codes.Aborted, label)
+		hnodeWantMsg(t, err, tc.want, label)
+		// And it is NOT the stale-revision refusal: there was no token to be
+		// stale against, and reporting one would send an operator looking for
+		// a concurrent writer instead of for the missing key.
+		if strings.Contains(err.Error(), msgStaleRevision) {
+			t.Errorf("%s: %v reports a stale revision, want the missing key",
+				label, err)
+		}
+	}
+
+	// The confs are still there: every row above returned before any Put, and
+	// an error out of the STM closure aborts the transaction uncommitted.
+	if got := hnodeModRev(t, s, model.DnConfKey(cid, dnAddr)); got != dnConfRev {
+		t.Errorf("dn_conf was rewritten by a refused mutator")
+	}
+	if got := hnodeModRev(t, s, model.CnConfKey(cid, cnAddr)); got != cnConfRev {
+		t.Errorf("cn_conf was rewritten by a refused mutator")
 	}
 }

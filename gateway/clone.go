@@ -97,7 +97,7 @@ func (s *Server) CreateClone(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -167,9 +167,11 @@ func (s *Server) CreateClone(
 }
 
 // clonePhase1 is what DeleteClone's read-only phase carries into its agent
-// call. AG4 makes every field a hint and nothing more: phase 2 re-resolves
-// all of it and re-checks the token, so an interleaved mutation turns into
-// ABORTED rather than into a decision taken on stale facts.
+// call. AG4 makes every field a hint and nothing more: phase 2 re-resolves all
+// of it and re-checks the token, so for a token-carrying caller an interleaved
+// mutation turns into ABORTED rather than into a decision taken on stale
+// facts. A token-less caller keeps the re-resolution but not that guarantee
+// (GW6 is presence-based, §0 #7).
 type clonePhase1 struct {
 	ClusterId uint64
 	SpId      uint64
@@ -270,7 +272,7 @@ func (s *Server) DeleteClone(
 	err = s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -445,7 +447,7 @@ func (s *Server) UpdateCloneTrConf(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -508,7 +510,7 @@ func (s *Server) AppendCloneBitmap(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

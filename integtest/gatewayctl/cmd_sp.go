@@ -11,8 +11,12 @@
 // spells its token `--rev <n>` as a hexUint and sends
 // `SpRev{Revision: n}` with sp_name left empty, because the handler matches
 // on the revision alone. An omitted `--rev` therefore sends a zero token
-// deliberately rather than "no token" — that is the nil/zero-token refusal
-// the §10.13 B4 stage asserts.
+// deliberately rather than "no token" — and since GW6 became presence-based
+// (gateway.md §0 #7) that choice is load-bearing, not incidental: a PRESENT
+// zero token is still refused, while an absent message would now be waved
+// through unchecked. This driver never sends an absent one, which is what
+// keeps the §10.13 B4 stage a refusal. dnvctl deliberately does the opposite
+// (dnvctl.md §4) — do not port this pattern there.
 
 package main
 

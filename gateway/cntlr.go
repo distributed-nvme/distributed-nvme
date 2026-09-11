@@ -162,10 +162,13 @@ func planCreateCntlr(
 // tracked in a separate list: the Cntlr records are the only place a slot is
 // stored, so they cannot disagree with anything (§11.8).
 //
-// The exclusion list the scan was given cannot go stale in a way that
-// matters: every cntlr of one SP is created under that SP's revision token
-// (GW6), so two CreateCntlrs on the same SP are serialized and the loser is
-// ABORTED before it can put a second cntlr of the SP on one CN.
+// The exclusion list the scan was given cannot go stale in a way that matters
+// for a TOKEN-CARRYING caller: two such CreateCntlrs on the same SP are
+// serialized by GW6 and the loser is ABORTED before it can put a second cntlr
+// of the SP on one CN. GW6 is presence-based (§0 #7), so two token-LESS
+// CreateCntlrs are not serialized by the token; the anti-affinity they get is
+// only what the in-STM slot/placement checks below enforce. Omitting the token
+// is opting out of the optimistic-concurrency gate, here as everywhere.
 func (s *Server) CreateCntlr(
 	ctx context.Context,
 	req *pb.CreateCntlrRequest,
@@ -206,7 +209,7 @@ func (s *Server) CreateCntlr(
 			// must not reply the previous attempt's value (GW8).
 			cntlrId = 0
 			sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-				req.GetSpRev().GetRevision())
+				req.GetSpRev())
 			if err != nil {
 				return err
 			}
@@ -327,7 +330,7 @@ func (s *Server) DeleteCntlr(
 	}
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -388,13 +391,15 @@ func (s *Server) DeleteCntlr(
 // SP's CdcEntries at the same instant (§8.8) — a host that discovers a
 // disabled controller finds only inaccessible paths there. Enabling puts the
 // address back. Disabling the last enabled cntlr is allowed and stops IO;
-// that is the operator's call to make, and dnvctl warns about it.
+// that is the operator's call to make. dnvctl does NOT warn about it in v1: the
+// warning would need a pre-read, and dnvctl issues no RPC the operator did not
+// type (dnvctl.md §0 #10). It is deferred until this reply carries the hint.
 //
 // A request that asks for the state already stored writes NOTHING and bumps
 // NOTHING (§0 #17): a no-op that bumped SpRev would invalidate every client's
-// token and make every agent re-sync for a change that did not happen. The
-// token is still checked first (GW6), so a stale client hears ABORTED rather
-// than a misleading OK.
+// token and make every agent re-sync for a change that did not happen. A token
+// that was sent is still checked first (GW6), so a stale client hears ABORTED
+// rather than a misleading OK.
 func (s *Server) UpdateCntlrEnabled(
 	ctx context.Context,
 	req *pb.UpdateCntlrEnabledRequest,
@@ -409,7 +414,7 @@ func (s *Server) UpdateCntlrEnabled(
 	}
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

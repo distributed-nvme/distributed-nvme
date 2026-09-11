@@ -43,20 +43,23 @@ const (
 // the cluster and the SP, check the token, then locate the group by id across
 // every slice of the SP (GW5 → GW6, in that order).
 //
-// The token is checked by openSp BEFORE the group is looked up, so a stale
-// client always sees ABORTED "stale revision" and never a NOT_FOUND computed
-// against a slice list it has not read. That check is also what keeps a 0 out
-// of model.checkSpRev, which reads 0 as "skip the check entirely" (the
-// worker's mode, gateway.md §2.2 #3): a live SpRev starts at 1, so a token of
-// 0 is a client that sent none and openSp has already refused it (§0 #7).
+// The token is checked by openSp BEFORE the group is looked up, so a client
+// that sent a stale one always sees ABORTED "stale revision" and never a
+// NOT_FOUND computed against a slice list it has not read. tok is the token
+// MESSAGE: GW6 is presence-based, so a nil tok is a client that deliberately
+// sent none and openSp lets it through unchecked (§0 #7). That same absence
+// then reaches model.checkSpRev as expectRev 0, which reads 0 as "skip the
+// check entirely" (gateway.md §2.2 #3) — the two layers agree, because a live
+// SpRev starts at 1 and a token that is merely present-with-0 has already been
+// refused above.
 func openGrpForSpareLeg(
 	stm etcdutil.STM,
 	clusterName string,
 	spName string,
-	token uint64,
+	tok *pb.SpRev,
 	grpId uint64,
 ) (*spScope, sliceLocation, error) {
-	sc, err := openSp(stm, clusterName, spName, token)
+	sc, err := openSp(stm, clusterName, spName, tok)
 	if err != nil {
 		return nil, sliceLocation{}, err
 	}
@@ -85,7 +88,7 @@ func (s *Server) snapshotGrpForSpareLeg(
 	ctx context.Context,
 	clusterName string,
 	spName string,
-	token uint64,
+	tok *pb.SpRev,
 	grpId uint64,
 ) (*spScope, sliceLocation, error) {
 	var sc *spScope
@@ -93,7 +96,7 @@ func (s *Server) snapshotGrpForSpareLeg(
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		var err error
 		sc, loc, err = openGrpForSpareLeg(
-			stm, clusterName, spName, token, grpId)
+			stm, clusterName, spName, tok, grpId)
 		return err
 	})
 	if err != nil {
@@ -181,7 +184,7 @@ func (s *Server) CreateSpareLeg(
 	}
 	sc, loc, err := s.snapshotGrpForSpareLeg(
 		ctx, req.GetClusterName(), req.GetSpName(),
-		req.GetSpRev().GetRevision(), req.GetGrpId(),
+		req.GetSpRev(), req.GetGrpId(),
 	)
 	if err != nil {
 		return nil, err
@@ -273,7 +276,7 @@ func (s *Server) DeleteSpareLeg(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		sc, loc, err := openGrpForSpareLeg(
 			stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision(), req.GetGrpId(),
+			req.GetSpRev(), req.GetGrpId(),
 		)
 		if err != nil {
 			return err
@@ -342,7 +345,7 @@ func (s *Server) SwitchSpareLeg(
 	}
 	sc, loc, err := s.snapshotGrpForSpareLeg(
 		ctx, req.GetClusterName(), req.GetSpName(),
-		req.GetSpRev().GetRevision(), req.GetGrpId(),
+		req.GetSpRev(), req.GetGrpId(),
 	)
 	if err != nil {
 		return nil, err

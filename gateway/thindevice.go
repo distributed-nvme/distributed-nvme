@@ -99,7 +99,7 @@ func (s *Server) CreateThinDevice(
 		tdId = 0
 		devId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}
@@ -217,7 +217,7 @@ func (s *Server) DeleteThinDevice(
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		tdId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev().GetRevision())
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

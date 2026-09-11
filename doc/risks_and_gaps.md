@@ -6,8 +6,11 @@ named here behaves as its owning spec says — nothing below is a defect in
 the sense of the update_0N ledgers; each is a boundary the design accepts,
 with the accepting decision cited. Companions: architecture.md Appendix D
 (v1 assumptions and known limits), decisions [D12]/[D15]/[D16]/[D17].
-Item ids `RK1`–`RK6`, append-only once cited. Written 2026-09-10, from the
-second full doc-vs-code verification and its design review.
+Item ids `RK1`–`RK8`, append-only once cited — a closed item keeps its id and
+is marked CLOSED in place, never deleted or renumbered. RK1–RK6 written
+2026-09-10, from the second full doc-vs-code verification and its design
+review; RK7 added 2026-09-11 with `dnvctl.md` and closed the same day by the
+presence-based GW6 change, which opened RK8 in its place.
 
 ---
 
@@ -200,3 +203,77 @@ deliberate non-goals until the single-primary model itself is revisited.
   Recorded as a deliberate v1 omission alongside the Appendix D security
   posture (trusted fabric, plaintext gRPC, deployment-configured etcd
   access, spoofable hostnqn allow-lists — deploy on an isolated fabric).
+
+---
+
+## RK7 — a dnvctl mutator without `--rev` fails until the gateway's token check becomes presence-based — **CLOSED 2026-09-11**
+
+**CLOSED the same day it was opened**, by the gateway change it prescribed.
+GW6 is now presence-based: an absent token message skips the revision check,
+a present one is compared strictly as before (`gateway/common.go`
+`checkSpToken`/`checkDnToken`/`checkCnToken` now take the token *message* and
+compare only `if tok != nil`). A dnvctl mutator without `--rev` therefore
+succeeds. gateway.md §0 #7 and GW6, and architecture.md §5.5, were amended
+with the change; the unit tests that pinned the old rule were reworked to pin
+the new one. The residual exposure the closure creates is **RK8** below —
+this entry is kept, per the append-only rule, for the record of what the
+window was.
+
+**What it was.** `dnvctl.md` §0 #9 made `--rev` an optional pass-through: an
+omitted flag sends no token message, on the assumption that the gateway would
+skip the GW6 revision check when the token is absent. The gateway then did
+the opposite by design — an absent token read as revision 0, which never
+matched a stored revision (they seed at 1 and only grow), so every token-less
+mutator failed `ABORTED "stale revision"`.
+
+**Blast radius while open.** Operator friction only: the 34 token-carrying
+mutators required the `dn|cn|sp get` → `--rev` two-step; no state was at risk
+(the check failed closed), and scripts written against the assumed semantics
+failed loudly with ABORTED, never silently. Added 2026-09-11 with
+`dnvctl.md` §0 #9; closed the same day.
+
+---
+
+## RK8 — a token-less mutator has no optimistic-concurrency gate
+
+**What.** GW6 is presence-based (gateway.md §0 #7, architecture.md §5.5): a
+mutator whose request omits the `DnRev`/`CnRev`/`SpRev` message runs with no
+revision check at all. Two such requests racing on one object are serialized
+only by etcd's STM and by whatever in-STM preconditions the RPC itself
+carries — the last writer wins, and neither client is told its view was
+stale. This is the deliberate cost of closing RK7, not a defect: omitting the
+token *is* the opt-out, chosen per request.
+
+**Blast radius.** Lost updates on concurrently mutated objects, confined to
+callers that chose not to send a token. Two consequences are worth naming
+individually:
+
+* **AG4's two-phase safety argument weakens for these callers**
+  (gateway.md AG4, §5.8 DeleteClone, §5.11 FinishMigration). A two-phase RPC
+  still re-resolves everything in its deciding STM, but without a token an
+  interleaved mutation it never observed stays invisible; the "exactly as
+  safe as a one-STM RPC" claim holds only for token-carrying requests.
+* **`CreateCntlr`'s anti-affinity premise weakens** (`gateway/cntlr.go`): two
+  token-carrying `CreateCntlr`s on one SP are serialized by the token, two
+  token-less ones are not, and the exclusion list they scanned can go stale
+  between the scan and the commit. What still protects them is the in-STM
+  slot/placement check, not the token.
+
+Nothing here can corrupt an invariant key or produce a partial write: the STM
+is still all-or-nothing, resolution still runs, and every other precondition
+still applies. The exposure is exactly "a mutation computed against a view
+that moved".
+
+**Operator guidance.** For anything concurrent, anything scripted against a
+shared SP, and every destructive mutator, do the two-step: `dnvctl sp get`
+(or `dn get` / `cn get`) and pass the returned `--rev`. Reserve the
+token-less form for interactive, single-operator work. `--rev 0` remains the
+deliberate always-stale probe — a *present* zero token — and is never a way
+to skip the check.
+
+**Direction.** If the ungated path proves too easy to reach by accident, the
+cheap next step is a gateway-side policy flag making the token mandatory for
+some or all mutators (refusing a token-less mutator with
+`INVALID_ARGUMENT`), rather than reverting to the RK7 semantics — the two are
+distinguishable precisely because presence, not value, is the discriminator.
+Added 2026-09-11 with the RK7 closure.

@@ -184,6 +184,8 @@ func (s *Server) CreateDiskNode(
 // be stopped (§8.2). The occupancy check is `side_ptr_list`, and it runs
 // AFTER the token check (GW6) so an operator working from a stale
 // GetDiskNode is told its view is stale, not told about sides it never saw.
+// An operator who sent no token has opted out of that ordering (GW6 is
+// presence-based, §0 #7) and is told about the sides directly.
 func (s *Server) DeleteDiskNode(
 	ctx context.Context,
 	req *pb.DeleteDiskNodeRequest,
@@ -209,7 +211,7 @@ func (s *Server) DeleteDiskNode(
 			return errNotFound("disk node %q not found", req.GetAddrPort())
 		}
 		if _, err := checkDnToken(
-			stm, cid, dn, req.GetDnRev().GetRevision(),
+			stm, cid, dn, req.GetDnRev(),
 		); err != nil {
 			return err
 		}
@@ -356,9 +358,9 @@ func (s *Server) ListDiskNodes(
 // why the whole mutation is one DnConf write plus MaintainDnCapacity.
 //
 // When the stored flag already equals the requested one the handler writes
-// nothing at all (§0 #17): the token has still been checked first, so a stale
-// client is refused rather than silently told its no-op succeeded, and a
-// genuine repeat costs one empty transaction.
+// nothing at all (§0 #17): a token that was sent has still been checked first,
+// so a stale client is refused rather than silently told its no-op succeeded,
+// and a genuine repeat costs one empty transaction.
 func (s *Server) UpdateDiskNodeDisabled(
 	ctx context.Context,
 	req *pb.UpdateDiskNodeDisabledRequest,
@@ -384,7 +386,7 @@ func (s *Server) UpdateDiskNodeDisabled(
 			return errNotFound("disk node %q not found", req.GetAddrPort())
 		}
 		if _, err := checkDnToken(
-			stm, cid, dn, req.GetDnRev().GetRevision(),
+			stm, cid, dn, req.GetDnRev(),
 		); err != nil {
 			return err
 		}

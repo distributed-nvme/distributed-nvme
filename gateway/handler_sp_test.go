@@ -413,6 +413,11 @@ func sptWantCode(t *testing.T, err error, want codes.Code) {
 
 // sptWantStale asserts GW6's token refusal: ABORTED carrying the one sentence
 // §0 #7 fixes, which the integration suite greps for.
+//
+// It is the assertion for a request that SENT a token and was compared against
+// the stored revision. GW6 is presence-based, so a request that sent no token
+// message was never compared and never produces this sentence — that path is
+// asserted positively, by what the mutator went on to do.
 func sptWantStale(t *testing.T, err error) {
 	t.Helper()
 	sptWantCode(t, err, codes.Aborted)
@@ -1369,9 +1374,20 @@ func (e *sptEnv) reserveCn(
 
 // TestDeleteStoragePoolRefusals pins §8.4's preconditions: the five name lists
 // are the whole gate — a thin device, subsystem, clone, transfer or migration
-// the user made must be removed first — and a stale or missing token is
-// refused before any of them is even looked at (GW6). Every refusal writes
-// nothing.
+// the user made must be removed first — and a token that was SENT and does not
+// match the stored revision is refused before any of them is even looked at
+// (GW6). Every refusal writes nothing.
+//
+// GW6 is presence-based (§0 #7), so "does not match" covers more than an
+// outdated revision. The last two rows are the discriminators that say so: a
+// message that is present but carries revision 0 — what &pb.SpRev{} gives, and
+// what a client that filled in only the echoed sp_name gives — is a real token
+// and is compared like any other, and it can never match, because an SpRev is
+// created at 1 and only grows. It is the MESSAGE's presence that selects the
+// comparison, never the value 0.
+//
+// A request that sends no message at all is not refused here at all: that is
+// TestDeleteStoragePoolWithoutAToken, which asserts what it does instead.
 func TestDeleteStoragePoolRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1395,9 +1411,12 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 			c.MigrNameList = []string{"m0"}
 		}, &pb.SpRev{Revision: 1}, codes.FailedPrecondition},
 		{"stale token", nil, &pb.SpRev{Revision: 2}, codes.Aborted},
-		// §0 #7: a nil token message reads as 0, and a stored revision
-		// starts at 1, so it can never match.
-		{"no token", nil, nil, codes.Aborted},
+		// The two discriminators of the presence rule (§0 #7): both of these
+		// requests DO carry a token message, so both are compared, and a
+		// revision of 0 matches no live SP.
+		{"token carrying revision 0", nil, &pb.SpRev{}, codes.Aborted},
+		{"token carrying only the sp_name", nil,
+			&pb.SpRev{SpName: sptSpName}, codes.Aborted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -1415,6 +1434,15 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 					SpRev:       tc.rev,
 				})
 			sptWantCode(t, err, tc.want)
+			// Every ABORTED row of this table is GW6's token refusal: the
+			// held-object rows are FAILED_PRECONDITION, and §5.9's other
+			// ABORTED needs a lost invariant key, which this fixture does not
+			// have (that one is TestReleasePathsAbortOnALostConfKey). So each
+			// token row also pins the exact sentence, which is what tells a
+			// stale client to re-read rather than to give up.
+			if tc.want == codes.Aborted {
+				sptWantStale(t, err)
+			}
 			after := env.dump()
 			if len(before) != len(after) {
 				t.Fatalf("a refusal changed the key set: %d -> %d",
@@ -1427,6 +1455,110 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDeleteStoragePoolWithoutAToken is the positive half of GW6's presence
+// rule (§0 #7) for §8.4: a request that carries NO SpRev message skips the
+// revision comparison and is then judged by exactly the same preconditions as
+// any other request. Omitting the token opts out of optimistic concurrency; it
+// does not opt out of the five name lists, and it is not itself a refusal.
+//
+// Both halves are pinned, because either one alone would pass a broken check:
+// a gateway that refused the token-less request would fail the second subtest,
+// and one that let it skip the name lists as well as the token would fail the
+// first. Each subtest builds its own SP, so the teardown that commits cannot
+// reach the fixture the other one reads.
+//
+// The sp_rev key is still READ on the way through — it is a §5.1 invariant key
+// whose absence is ABORTED either way — but a teardown deletes it along with
+// the rest of the SP, so the bypass shows up here as the write set, not as a
+// bump. TestGrowSliceWithoutAToken pins the bump.
+func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
+	t.Run("the name lists still refuse it", func(t *testing.T) {
+		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+		env.createSp(sptSmallSpec(sptSpName))
+		conf := env.spConf(sptSpName)
+		conf.TdNameList = []string{"td0"}
+		mustPut(t, env.cli, model.SpConfKey(env.cid, sptSpName), conf)
+		before := env.dump()
+		_, err := env.srv.DeleteStoragePool(
+			env.ctx, &pb.DeleteStoragePoolRequest{
+				ClusterName: env.name,
+				SpName:      sptSpName,
+				// No SpRev at all: the field under test is its absence.
+			})
+		// FAILED_PRECONDITION, not ABORTED: the request reached the gate it
+		// was always meant to be judged by.
+		sptWantCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(status.Convert(err).Message(), "thin device") {
+			t.Errorf("the message must name what the SP still holds: %q",
+				status.Convert(err).Message())
+		}
+		after := env.dump()
+		if len(before) != len(after) {
+			t.Fatalf("a refusal changed the key set: %d -> %d",
+				len(before), len(after))
+		}
+		for key, value := range before {
+			if !bytes.Equal(value, after[key]) {
+				t.Errorf("a refusal rewrote %q", key)
+			}
+		}
+	})
+
+	t.Run("an otherwise clean teardown commits", func(t *testing.T) {
+		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+		spId := env.createSp(sptSmallSpec(sptSpName))
+		conf := env.spConf(sptSpName)
+		cnAddr := env.cntlr(spId, conf.GetCntlrIdList()[0]).GetAddrPort()
+		// The sides are walked BEFORE the teardown: they are read through the
+		// slice keys the teardown deletes.
+		sides := env.walkSides(conf)
+		reply, err := env.srv.DeleteStoragePool(
+			env.ctx, &pb.DeleteStoragePoolRequest{
+				ClusterName: env.name,
+				SpName:      sptSpName,
+			})
+		if err != nil {
+			t.Fatalf("DeleteStoragePool without a token: %v", err)
+		}
+		if reply.GetSpId() != spId {
+			t.Errorf("sp_id: got %d, want %d", reply.GetSpId(), spId)
+		}
+		for _, key := range []string{
+			model.SpConfKey(env.cid, sptSpName),
+			model.SpRevKey(conf.GetShardCode(), env.cid, spId),
+			model.SpNameKey(env.cid, spId),
+		} {
+			if env.exists(key) {
+				t.Errorf("%q survived a token-less teardown", key)
+			}
+		}
+		// The ledgers ran too, so this was the whole RPC and not some early
+		// exit that happened to report OK (§5.6).
+		for _, walk := range sides {
+			dn := env.dnConf(walk.AddrPort)
+			if dn.GetFreeExtCnt() != sptDnFree {
+				t.Errorf("dn %q: free_ext_cnt %d, want its charge back (%d)",
+					walk.AddrPort, dn.GetFreeExtCnt(), sptDnFree)
+			}
+			if len(dn.GetSidePtrList()) != 0 {
+				t.Errorf("dn %q: side_ptr_list %v",
+					walk.AddrPort, dn.GetSidePtrList())
+			}
+		}
+		cn := env.cnConf(cnAddr)
+		if cn.GetFreeExtCnt() != sptCnFree {
+			t.Errorf("cn %q: free_ext_cnt %d, want the footprint back (%d)",
+				cnAddr, cn.GetFreeExtCnt(), sptCnFree)
+		}
+		if len(cn.GetCntlrPtrList()) != 0 {
+			t.Errorf("cn %q: cntlr_ptr_list %v", cnAddr, cn.GetCntlrPtrList())
+		}
+		if bucketSum(env.spGlobal().GetShardBucket()) != 0 {
+			t.Errorf("the SP's bucket slot was not released")
+		}
+	})
 }
 
 // TestDeleteStoragePoolUnknown pins the NOT_FOUND rows of §8.4: an SP name
@@ -2142,8 +2274,21 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 
 // TestGrowSliceRefusals pins §8.5's refusals: the ext_cnt / is_meta
 // exclusivity of §7, a slice_id the SP does not list, and GW6's token check —
-// which openSp runs BEFORE the slice lookup, so a stale client hears "stale
-// revision" and never a NOT_FOUND computed against a list it has not read.
+// which openSp runs BEFORE the slice lookup, so a client whose token does not
+// match hears "stale revision" and never a NOT_FOUND computed against a list
+// it has not read.
+//
+// Every row here SENDS a token, because that is the only thing GW6 compares
+// (§0 #7). The last two are its discriminators: a message carrying revision 0,
+// and one carrying only the echoed sp_name, are both present and are both
+// compared, and neither can match an SpRev that was created at 1 and only
+// grows — 0 is a value the check refuses, not a way to switch the check off.
+// The request that switches it off carries no message at all and is let
+// through: TestGrowSliceWithoutAToken.
+//
+// One SP serves the whole table, which is sound only because every row is a
+// refusal that leaves sp_rev exactly where it found it — the assertion each
+// subtest ends on.
 func TestGrowSliceRefusals(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -2164,7 +2309,10 @@ func TestGrowSliceRefusals(t *testing.T) {
 			&pb.SpRev{Revision: 1}, codes.NotFound},
 		{"stale token", sliceId, 4, false,
 			&pb.SpRev{Revision: 9}, codes.Aborted},
-		{"no token", sliceId, 4, false, nil, codes.Aborted},
+		{"token carrying revision 0", sliceId, 4, false,
+			&pb.SpRev{}, codes.Aborted},
+		{"token carrying only the sp_name", sliceId, 4, false,
+			&pb.SpRev{SpName: sptSpName}, codes.Aborted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
@@ -2176,10 +2324,114 @@ func TestGrowSliceRefusals(t *testing.T) {
 				IsMeta:      tc.isMeta,
 			})
 			sptWantCode(t, err, tc.want)
+			// ABORTED can only be GW6 here — the other two refusals are
+			// INVALID_ARGUMENT and NOT_FOUND — so the token rows pin the
+			// exact sentence, which openSp produces before the slice is
+			// looked at.
+			if tc.want == codes.Aborted {
+				sptWantStale(t, err)
+			}
 			if got := env.spRev(0, spId); got != 1 {
 				t.Errorf("a refusal bumped sp_rev to %d", got)
 			}
 		})
+	}
+}
+
+// TestGrowSliceWithoutAToken pins GW6's presence rule (§0 #7) on the one RPC
+// in this file where it has to hold in TWO places at once. GrowSlice is
+// model-backed: the handler checks the token through openSp, and then
+// model.GrowSlice re-checks it inside its own transaction through
+// model.checkSpRev — which is handed req.GetSpRev().GetRevision(), and that is
+// 0 for a request that sent no message. The two layers agree only because 0 is
+// exactly model.checkSpRev's "skip the check", the mode the worker's own
+// internal calls use (gateway.md §2.2 #3). A token-less grow that got past
+// openSp and was then refused by the model would be an ABORTED no client could
+// act on, so the assertion here is end to end: it must actually commit.
+//
+// Skipping the comparison never skips the BUMP. The grow advances sp_rev like
+// any other, because every other client's token is judged against what the
+// store holds — a mutator that wrote without bumping would leave every one of
+// them holding a token that still matched and a view that no longer did. The
+// last request proves the direction of that: the client that still held
+// revision 1 while the two token-less grows ran is now refused.
+func TestGrowSliceWithoutAToken(t *testing.T) {
+	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+	spId := env.createSp(sptDefaultSpec(sptSpName))
+	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
+	cnRevBefore := make(map[string]uint64)
+	for _, cntlrId := range env.spConf(sptSpName).GetCntlrIdList() {
+		addrPort := env.cntlr(spId, cntlrId).GetAddrPort()
+		cnRevBefore[addrPort] = env.cnRev(addrPort)
+	}
+	// Two grows, neither carrying a token: the bypass is a property of each
+	// request, not a one-shot the first grow uses up. The second is also the
+	// grow AR6's pending rule would refuse if the gateway passed a real
+	// poolTotal (see TestGrowSliceConsecutiveDataGrows), so it is the one
+	// worth repeating.
+	for round := 1; round <= 2; round++ {
+		reply, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			// No SpRev at all: the field under test is its absence.
+			SliceId: sliceId,
+			ExtCnt:  1, // the exclusivity signal, not the size (D-E)
+		})
+		if err != nil {
+			t.Fatalf("token-less GrowSlice %d: %v", round, err)
+		}
+		if reply.GetSliceId() != sliceId {
+			t.Errorf("slice_id: got %d, want %d",
+				reply.GetSliceId(), sliceId)
+		}
+		slice := env.slice(spId, sliceId)
+		if len(slice.GetDataGrpList()) != 1+round {
+			t.Fatalf("after grow %d: %d data groups, want %d",
+				round, len(slice.GetDataGrpList()), 1+round)
+		}
+		grp := slice.GetDataGrpList()[round]
+		if grp.GetGrpId() != reply.GetGrpId() {
+			t.Errorf("grp_id: reply %d, stored %d",
+				reply.GetGrpId(), grp.GetGrpId())
+		}
+		if grp.GetExtCnt() != sptInitExt {
+			t.Errorf("grp %d: ext_cnt %d, want the allocation unit %d",
+				grp.GetGrpId(), grp.GetExtCnt(), sptInitExt)
+		}
+		// One bump per grow, the model's own (§5.5): the skipped comparison
+		// leaves the revision sequence untouched.
+		if got := env.spRev(0, spId); got != uint64(round)+1 {
+			t.Errorf("after grow %d: sp_rev %d, want %d",
+				round, got, round+1)
+		}
+	}
+	// The ledgers ran for both grows, so these were whole transactions and
+	// not an early exit that reported OK (§6.5: every cntlr's CN stacks the
+	// new group).
+	for addrPort, was := range cnRevBefore {
+		cn := env.cnConf(addrPort)
+		want := sptCnFree - sptFootprint - 2*sptInitExt
+		if cn.GetFreeExtCnt() != want {
+			t.Errorf("cn %q: free_ext_cnt %d, want %d",
+				addrPort, cn.GetFreeExtCnt(), want)
+		}
+		if got := env.cnRev(addrPort); got != was+2 {
+			t.Errorf("cn %q: revision %d, want %d (one bump per grow)",
+				addrPort, got, was+2)
+		}
+	}
+	// A token is still a token: the client that held revision 1 across those
+	// two bumps is refused, with the sentence that tells it to re-read.
+	_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		SpRev:       &pb.SpRev{Revision: 1},
+		SliceId:     sliceId,
+		ExtCnt:      1,
+	})
+	sptWantStale(t, err)
+	if got := env.spRev(0, spId); got != 3 {
+		t.Errorf("a refusal moved sp_rev to %d", got)
 	}
 }
 
@@ -2302,9 +2554,17 @@ func TestCreateCntlr(t *testing.T) {
 
 // TestCreateCntlrRefusals pins §8.6's refusals, all of which write nothing:
 // a cntlid_slot outside [0, 8), one the SP's cntlid_slot_list does not name,
-// one another cntlr of the SP already holds, a stale token, and the
-// MaxCntlrCntPerSp ceiling — which is RESOURCE_EXHAUSTED and is checked before
-// the slot rules, so an SP already at the ceiling reports the ceiling.
+// one another cntlr of the SP already holds, a token that was sent and does
+// not match, and the MaxCntlrCntPerSp ceiling — which is RESOURCE_EXHAUSTED
+// and is checked before the slot rules, so an SP already at the ceiling
+// reports the ceiling.
+//
+// The three token rows all SEND one, which is the only case GW6 compares (§0
+// #7). Two of them are the discriminators for that: a message carrying
+// revision 0, and one carrying only the echoed sp_name, are present and are
+// therefore compared, and they match no SpRev, since those are created at 1
+// and only grow. Sending nothing is the case that is NOT compared, and it is
+// asserted for what it goes on to do in TestCreateCntlrWithoutAToken.
 func TestCreateCntlrRefusals(t *testing.T) {
 	t.Run("slot rules and token", func(t *testing.T) {
 		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -2328,7 +2588,9 @@ func TestCreateCntlrRefusals(t *testing.T) {
 			{"slot already used", 0,
 				&pb.SpRev{Revision: 1}, codes.InvalidArgument},
 			{"stale token", 2, &pb.SpRev{Revision: 9}, codes.Aborted},
-			{"no token", 2, nil, codes.Aborted},
+			{"token carrying revision 0", 2, &pb.SpRev{}, codes.Aborted},
+			{"token carrying only the sp_name", 2,
+				&pb.SpRev{SpName: sptSpName}, codes.Aborted},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				before := env.dump()
@@ -2340,6 +2602,12 @@ func TestCreateCntlrRefusals(t *testing.T) {
 						CntlidSlot:  tc.slot,
 					})
 				sptWantCode(t, err, tc.want)
+				// The slot rows are INVALID_ARGUMENT, so an ABORTED here is
+				// GW6's and nothing else: the token rows pin its sentence
+				// too, whole.
+				if tc.want == codes.Aborted {
+					sptWantStale(t, err)
+				}
 				if got := env.spRev(0, spId); got != 1 {
 					t.Errorf("a refusal bumped sp_rev to %d", got)
 				}
@@ -2435,6 +2703,103 @@ func TestCreateCntlrRefusals(t *testing.T) {
 				t.Errorf("a refusal bumped sp_rev to %d", got)
 			}
 		})
+}
+
+// TestCreateCntlrWithoutAToken is the positive half of GW6's presence rule (§0
+// #7) for CreateCntlr: a request that carries no SpRev message is not
+// compared against the stored revision and is judged by §8.6's own gates
+// instead — openSp runs first, so everything after it is reached exactly as it
+// would be by a request whose token matched.
+//
+// The refused request comes first and on purpose: it is what separates "GW6
+// was skipped" from "the RPC stopped checking things". A slot another cntlr
+// already holds is still INVALID_ARGUMENT, and still writes nothing, so the
+// SP the second request then mutates is the same one the fixture built.
+//
+// The create that follows commits the whole §8.6 write set and bumps SpRev,
+// and the last request shows what that bump is worth: a client still holding
+// the pre-bump token is refused, so a token-less mutator does not quietly
+// leave stale clients thinking they are current.
+func TestCreateCntlrWithoutAToken(t *testing.T) {
+	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+	spId := env.createSp(sptSpec{
+		name:     sptSpName,
+		cntlrCnt: sptCntlrCnt,
+		sliceCnt: 1,
+		initExt:  1,
+		slots:    []uint32{0, 1, 2},
+	})
+	// One meta and one data extent, which is what each cntlr's CN reserves.
+	const footprint = uint64(2)
+	before := env.dump()
+	oldAddrs := make(map[string]bool)
+	for _, cntlrId := range env.spConf(sptSpName).GetCntlrIdList() {
+		oldAddrs[env.cntlr(spId, cntlrId).GetAddrPort()] = true
+	}
+	_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		// No SpRev at all: the field under test is its absence.
+		CntlidSlot: 0, // already held by the SP's first cntlr
+	})
+	sptWantCode(t, err, codes.InvalidArgument)
+	after := env.dump()
+	if len(before) != len(after) {
+		t.Fatalf("a refusal changed the key set: %d -> %d",
+			len(before), len(after))
+	}
+	for key, value := range before {
+		if !bytes.Equal(value, after[key]) {
+			t.Errorf("a refusal rewrote %q", key)
+		}
+	}
+	if got := env.spRev(0, spId); got != 1 {
+		t.Fatalf("a refusal bumped sp_rev to %d", got)
+	}
+
+	reply, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		CntlidSlot:  2,
+	})
+	if err != nil {
+		t.Fatalf("token-less CreateCntlr: %v", err)
+	}
+	cntlrId := reply.GetCntlrId()
+	list := env.spConf(sptSpName).GetCntlrIdList()
+	if len(list) != sptCntlrCnt+1 || list[sptCntlrCnt] != cntlrId {
+		t.Fatalf("cntlr_id_list: got %v, want %d appended", list, cntlrId)
+	}
+	cntlr := env.cntlr(spId, cntlrId)
+	if cntlr.GetCntlidSlot() != 2 {
+		t.Errorf("cntlid_slot: got %d, want 2", cntlr.GetCntlidSlot())
+	}
+	if cntlr.GetPrimary() || cntlr.GetDisabled() {
+		t.Errorf("a new cntlr is an enabled standby: %v", cntlr)
+	}
+	if oldAddrs[cntlr.GetAddrPort()] {
+		t.Errorf("two cntlrs of one SP on CN %q", cntlr.GetAddrPort())
+	}
+	// The CN ledger ran, so this was the whole RPC (§6.5).
+	cn := env.cnConf(cntlr.GetAddrPort())
+	if cn.GetFreeExtCnt() != sptCnFree-footprint {
+		t.Errorf("cn %q: free_ext_cnt %d, want %d", cntlr.GetAddrPort(),
+			cn.GetFreeExtCnt(), sptCnFree-footprint)
+	}
+	if got := env.cnRev(cntlr.GetAddrPort()); got != 2 {
+		t.Errorf("cn %q: revision %d, want exactly one bump to 2",
+			cntlr.GetAddrPort(), got)
+	}
+	if got := env.spRev(0, spId); got != 2 {
+		t.Errorf("sp_rev: got %d, want exactly one bump to 2", got)
+	}
+	_, err = env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		SpRev:       &pb.SpRev{Revision: 1},
+		CntlidSlot:  1,
+	})
+	sptWantStale(t, err)
 }
 
 // TestDeleteCntlr pins §8.6's DeleteCntlr: it refuses the primary and refuses
@@ -2606,8 +2971,21 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 // TestUpdateCntlrEnabledNoWrite pins §0 #17: a request that asks for the state
 // already stored writes NOTHING and bumps NOTHING — a no-op that bumped SpRev
 // would invalidate every client's token and make every agent re-sync for a
-// change that did not happen — while the token is still checked FIRST (GW6),
-// so a stale client hears ABORTED rather than a misleading OK.
+// change that did not happen. It pins it across all three of GW6's cases,
+// because every one of them lands on this same no-op.
+//
+// A token that matches is compared and passes. A token that is present and
+// does NOT match is refused first, before the flag is even read, so a stale
+// client hears ABORTED rather than a misleading OK — and that holds for a
+// message carrying revision 0, or one carrying only the echoed sp_name,
+// exactly as it holds for an outdated one: presence selects the comparison,
+// the value never switches it off (§0 #7). A request carrying no message at
+// all skips the comparison and reaches the flag, where §0 #17 answers it OK —
+// the bypass lets a mutator through to its own preconditions, it does not make
+// it write.
+//
+// All five requests are therefore no-writes, which is what lets one `before`
+// dump taken at the top still describe the store at the bottom.
 func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -2629,6 +3007,46 @@ func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 	if reply.GetCntlrId() != standbyId || !reply.GetEnabled() {
 		t.Errorf("reply: got %v", reply)
 	}
+	// A token that IS sent is compared before the flag is read (GW6), and
+	// every one of these three is present, so every one of them is refused —
+	// including the two that carry no usable revision, which is what makes
+	// this a test of PRESENCE rather than of the value 0.
+	for _, tc := range []struct {
+		name string
+		rev  *pb.SpRev
+	}{
+		{"outdated revision", &pb.SpRev{Revision: 9}},
+		{"revision 0", &pb.SpRev{}},
+		{"only the echoed sp_name", &pb.SpRev{SpName: sptSpName}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := env.srv.UpdateCntlrEnabled(
+				env.ctx, &pb.UpdateCntlrEnabledRequest{
+					ClusterName: env.name,
+					SpName:      sptSpName,
+					SpRev:       tc.rev,
+					CntlrId:     standbyId,
+					Enabled:     true,
+				})
+			sptWantStale(t, err)
+		})
+	}
+	// No token at all: nothing is compared, the request reaches the flag, and
+	// §0 #17 answers the no-op exactly as it answered the one that came with
+	// a matching token — same OK, same reply, same nothing written.
+	reply, err = env.srv.UpdateCntlrEnabled(
+		env.ctx, &pb.UpdateCntlrEnabledRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			CntlrId:     standbyId,
+			Enabled:     true,
+		})
+	if err != nil {
+		t.Fatalf("token-less UpdateCntlrEnabled no-op: %v", err)
+	}
+	if reply.GetCntlrId() != standbyId || !reply.GetEnabled() {
+		t.Errorf("reply: got %v", reply)
+	}
 	after := env.dump()
 	if len(before) != len(after) {
 		t.Fatalf("the no-op changed the key set: %d -> %d",
@@ -2642,22 +3060,63 @@ func TestUpdateCntlrEnabledNoWrite(t *testing.T) {
 	if rev := env.spRev(0, spId); rev != 1 {
 		t.Errorf("sp_rev: got %d, want 1 — a no-op bumps nothing", rev)
 	}
-	// GW6 still runs first: the token is checked before the flag is read.
+}
+
+// TestUpdateCntlrEnabledWithoutAToken is the other half of the token-less
+// path: TestUpdateCntlrEnabledNoWrite shows one reaching the flag and finding
+// nothing to do, and this shows one reaching the flag and doing the work. A
+// bypass that only ever produced no-ops would pass that test while writing
+// nothing anywhere, which is not the rule §0 #7 states.
+//
+// So the §8.8 side effect is pinned with it: the disable takes the cntlr's CN
+// out of the SP's CdcEntry at the same instant its namespaces go
+// ANA-inaccessible, and SpRev bumps once — a token-less mutation is a full
+// mutation, visible to every agent and every other client.
+func TestUpdateCntlrEnabledWithoutAToken(t *testing.T) {
+	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+	spId := env.createSp(sptDefaultSpec(sptSpName))
+	env.addSubsystem(spId)
+	conf := env.spConf(sptSpName)
+	primaryAddr := env.cntlr(spId, conf.GetCntlrIdList()[0]).GetAddrPort()
+	standbyId := conf.GetCntlrIdList()[1]
+
+	reply, err := env.srv.UpdateCntlrEnabled(
+		env.ctx, &pb.UpdateCntlrEnabledRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			// No SpRev at all: the field under test is its absence.
+			CntlrId: standbyId,
+			Enabled: false,
+		})
+	if err != nil {
+		t.Fatalf("token-less UpdateCntlrEnabled: %v", err)
+	}
+	if reply.GetCntlrId() != standbyId || reply.GetEnabled() {
+		t.Errorf("reply: got %v", reply)
+	}
+	if !env.cntlr(spId, standbyId).GetDisabled() {
+		t.Errorf("cntlr %d is still enabled", standbyId)
+	}
+	got := sptTrAddrs(env.cdcEntry(0, spId, sptSsId).GetNvmeTrConfList())
+	if fmt.Sprint(got) != fmt.Sprint([]string{primaryAddr}) {
+		t.Errorf("cdc entry after the disable: got %v, want [%q]",
+			got, primaryAddr)
+	}
+	if rev := env.spRev(0, spId); rev != 2 {
+		t.Errorf("sp_rev: got %d, want exactly one bump to 2", rev)
+	}
+	// And the bump counts against everyone: the client that held revision 1
+	// while this ran is refused, sentence and all.
 	_, err = env.srv.UpdateCntlrEnabled(
 		env.ctx, &pb.UpdateCntlrEnabledRequest{
 			ClusterName: env.name,
 			SpName:      sptSpName,
-			SpRev:       &pb.SpRev{Revision: 9},
+			SpRev:       &pb.SpRev{Revision: 1},
 			CntlrId:     standbyId,
 			Enabled:     true,
 		})
 	sptWantStale(t, err)
-	_, err = env.srv.UpdateCntlrEnabled(
-		env.ctx, &pb.UpdateCntlrEnabledRequest{
-			ClusterName: env.name,
-			SpName:      sptSpName,
-			CntlrId:     standbyId,
-			Enabled:     true,
-		})
-	sptWantStale(t, err)
+	if !env.cntlr(spId, standbyId).GetDisabled() {
+		t.Errorf("a refusal re-enabled cntlr %d", standbyId)
+	}
 }

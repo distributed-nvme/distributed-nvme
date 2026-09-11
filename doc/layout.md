@@ -142,9 +142,10 @@ distributed-nvme/                      # repo root = module root
 │   ├── conn.go                        # NP4-NP12 admin-queue state machine
 │   └── pdu.go                         # NP2/NP3 NVMe/TCP PDU codec
 ├── ctl/
-│   ├── root.go                        # dnvctl command tree (§13): dn.go, cn.go, sp.go, vol.go, …
-│   └── copier.go                      # §11.4 userspace copier
-├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10
+│   ├── root.go                        # dnvctl root: globals, dial, emit (dnvctl.md §2-§3)
+│   └── cluster.go, dn.go, cn.go, sp.go, cntlr.go, td.go, ss.go, ns.go, clone.go, xfer.go, migr.go, spare.go
+│                                      # one noun group each (dnvctl.md §5); the §11.4 copier is future work outside dnvctl
+├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7
 │   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
 │   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
@@ -154,6 +155,8 @@ distributed-nvme/                      # repo root = module root
 │   ├── cdcctl/main.go                 # the etcd driver that plays gateway + worker for CdcEntry keys
 │   ├── gateway_test.sh                # gateway suite (one server, real etcd, 3 gateways, fake agents)
 │   ├── gatewayctl/main.go             # the gRPC driver of the gateway suite (one subcommand per RPC + `race`)
+│   ├── dnvctl_test.sh                 # dnvctl suite (one VM, no sudo: the real CLI against a fake gateway)
+│   ├── fakegateway/main.go            # all 59 Gateway methods behind a behavior file (dnvctl.md §7.5)
 │   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
 └── cmd/
     ├── dnv-gateway/main.go
@@ -275,7 +278,8 @@ Each step compiles and passes its tests before the next begins:
    §14 suite against the lab server.
 7. `cdc/` (§12, `cdc.md`) + `cmd/dnv-cdc`, then the `cdc.md` §9 suite against the
    four lab servers.
-8. `ctl/` (§13, §11.4) + `cmd/dnvctl`.
+8. `ctl/` + `cmd/dnvctl` (`dnvctl.md`), then the `dnvctl.md` §7 suite against
+   one lab VM (the §11.4 copier is future work outside dnvctl).
 
 ## 7. Acceptance checklist
 

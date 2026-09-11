@@ -28,7 +28,7 @@ Terminology:
 |---|---|
 | handler | one gRPC method of `service Gateway`, implemented on the `gateway.Server` |
 | resolution | the in-STM reads that turn `cluster_name` (and `sp_name`) into `cid` (and `SpConf`), per architecture.md §5.8 |
-| token check | asserting `stored.revision == request token revision` (GW6) |
+| token check | asserting `stored.revision == request token revision`, when the request carries the token message at all (GW6) |
 | deciding STM | the STM that commits a mutation; for two-phase RPCs (AG4) it is the second one |
 | candidate unit | one "scan outside + STM commit" round of an allocating RPC (GW9) |
 | plays the worker | the integration suite writing a worker-owned flip (`created`/`provisioned`) through `workerctl` so a gateway precondition can be exercised without running dnv-worker |
@@ -40,9 +40,9 @@ Terminology:
 Decisions fixed before writing this spec; the body cites them as "§0 #n".
 
 1. **Scope**: this document covers `gateway/` and `cmd/dnv-gateway` only.
-   `dnvctl` / `ctl/` is a separate component with its own future document; the
-   integration test drives the gateway with a dedicated test client, not
-   dnvctl.
+   `dnvctl` / `ctl/` is a separate component with its own document
+   (`dnvctl.md`); the integration test drives the gateway with a dedicated
+   test client, not dnvctl.
 2. **Division of authority**: architecture.md §8 keeps RPC semantics; this
    document specifies the implementation mapping (files, helpers, STM shapes,
    error mapping, agent-call mechanics) and does not duplicate §8's
@@ -63,13 +63,32 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
    (§2.1) and happens strictly outside any STM (architecture.md §5.8).
 6. **Trace ids**: the gateway mints a trace id for a request that arrived
    without one (grpc.md T4's MAY is exercised).
-7. **Token semantics**: the token revision is read as
-   `req.GetSpRev().GetRevision()` (respectively `DnRev`/`CnRev`) — a nil
-   message therefore reads as `0`. The stored revision starts at 1 and only
-   grows, so an omitted token can never match and always fails `ABORTED`
-   ("stale revision"). No "skip when absent" mode exists on the public API;
-   clients obtain tokens from the `Get*` RPCs. This is §5.5's MUST applied
-   verbatim, with no new rule.
+7. **Token semantics — presence-based** (amended 2026-09-11; the original
+   entry read the token as `req.GetSpRev().GetRevision()`, which folded an
+   absent message into a `0` that could never match, so an omitted token
+   always failed `ABORTED`). The handler now reads the token **message**,
+   `req.GetSpRev()` (respectively `DnRev`/`CnRev`), and **presence**, not
+   value, selects the mode:
+   * message **absent** ⇒ the revision comparison is **skipped**. The mutator
+     runs with no optimistic-concurrency gate, which is what omitting the
+     token asks for. Everything else is unchanged: the rev key is still read
+     (a missing one is still `ABORTED`), the other preconditions still apply,
+     and a successful mutation still bumps.
+   * message **present** ⇒ strict equality against the stored revision, as
+     before. Because a stored revision starts at 1 and only grows, a message
+     carrying `revision: 0` — or carrying only the echoed
+     `addr_port`/`sp_name` — can never match and is always `ABORTED`
+     ("stale revision"). That is what keeps the deliberate always-stale probe
+     available, and it is why presence and not the value 0 is the
+     discriminator.
+
+   Clients still obtain tokens from the `Get*` RPCs, and an operator who
+   wants the gate MUST send one; omitting it is opting out, per request. This
+   **relaxes** architecture.md §5.5's MUST, which is amended to match: the
+   assertion is required only when the request carries the message. The cost
+   of the relaxation — a token-less mutator can lose an update, and the AG4
+   two-phase safety argument no longer covers it — is recorded as RK8 in
+   risks_and_gaps.md.
 8. **Candidate retry**: `model.ErrPrecondition` with reason
    `"candidate changed"` is never surfaced; the handler re-runs the whole
    candidate unit (scan + STM) until the request context ends (GW9).
@@ -102,7 +121,8 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
     not in v1).
 17. **UpdateCntlrEnabled / Update*Disabled idempotency**: when the stored flag
     already equals the requested one the handler performs no write and no
-    revision bump, and replies OK (the token is still checked first).
+    revision bump, and replies OK (a token the request carried is still
+    checked first, §0 #7).
 18. **Brief decision ids.** Code comments cite decisions `D-A`…`D-J` from
     the implementation brief. `D-A` was later reversed (the `Inspect*`
     replies carry the agent's applied revision — §5.2/§5.5) and `D-B` stands
@@ -227,9 +247,13 @@ change. Each change is mechanical and the worker keeps compiling:
    `SpRev.revision`: `0` skips the check (the worker's internal calls pass 0),
    any other value must match or the op fails
    `ErrPrecondition{Reason: ReasonStaleRevision}`. Export
-   `const ReasonStaleRevision = "stale revision"`. The gateway always passes
-   the client token (with nil ⇒ 0 the gateway short-circuits to `ABORTED`
-   itself per GW6, so `model` never sees a gateway call with 0).
+   `const ReasonStaleRevision = "stale revision"`. The gateway passes the
+   client token's revision, which is 0 exactly when the request carried no
+   token message — and 0 means "skip" here just as it does at the handler,
+   so the two layers agree by construction (amended 2026-09-11 with §0 #7;
+   the entry previously said the gateway short-circuits nil to `ABORTED` so
+   `model` never sees a gateway call with 0). A token that is merely
+   *present* with revision 0 never reaches `model`: GW6 refuses it first.
 4. Add to `model/keys.go`: `DnConfPrefix(cid uint64) string`,
    `CnConfPrefix(cid uint64) string`, `SpConfPrefix(cid uint64) string` — the
    `List*` range prefixes (the per-key builders exist; the prefixes do not).
@@ -313,13 +337,21 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   storage pools) use plain reads, not an STM (§5.7): one `Get` of ClusterConf
   for the cid, then `Range`. `ListThinDevices`, `ListSubsystems` and the
   single-object `Get*` RPCs are one-STM consistency reads (§5.6–§5.8).
-* **GW6 — token check.** Immediately after resolution and before any other
-  state check, a mutator reads its rev key (`SpRevKey(shard, cid, spId)` etc.)
-  and asserts `stored.revision == req.Get<X>Rev().GetRevision()`; mismatch —
-  including the nil-token 0 — ⇒ `ABORTED` with message `stale revision`
-  (§0 #7). Checking the token first means a stale client always sees
-  `ABORTED`, never a misleading precondition error computed against state it
-  has not read. The echoed `addr_port`/`sp_name` inside the token message is
+* **GW6 — token check, presence-based.** Immediately after resolution and
+  before any other state check, a mutator reads its rev key
+  (`SpRevKey(shard, cid, spId)` etc.). It then asserts
+  `stored.revision == req.Get<X>Rev().GetRevision()` **only when
+  `req.Get<X>Rev() != nil`**; a mismatch ⇒ `ABORTED` with message
+  `stale revision` (§0 #7). A request that carries no token message skips the
+  comparison and proceeds. The rev key is read either way — it is a §5.1
+  invariant key whose absence is §5.9's `ABORTED`, the bump helpers rely on
+  it having been read, and keeping it in the read set leaves a skipped check
+  no weaker than a checked one against a concurrent delete. A present message
+  carrying `revision: 0` is a real token, not an omission, and is always
+  `ABORTED`. Checking the token first means a client that sent a stale one
+  always sees `ABORTED`, never a misleading precondition error computed
+  against state it has not read; a client that sent none has waived that
+  ordering and meets its other preconditions directly. The echoed `addr_port`/`sp_name` inside the token message is
   ignored (§5.5). Every mutation that changes agent-visible desired state
   bumps the matching revision exactly once in the same STM
   (`model.BumpSpRev`/`BumpDnRev`/`BumpCnRev`); `Update*Disabled` and
@@ -638,8 +670,9 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   whose cntlr is unreachable). Between phases, `force == false` calls
   `GetCntlrInfo`; incomplete hydration **or an unreachable agent** ⇒
   `FAILED_PRECONDITION` (§8.9). Phase 2 STM (deciding): full re-resolution +
-  token check (GW6 — any interleaved mutation bumped `SpRev`, so the token
-  subsumes staleness of phase 1); delete the Clone, its `CloneBitmap` chunks
+  token check (GW6 — any interleaved mutation bumped `SpRev`, so a token the
+  request carried subsumes staleness of phase 1; a token-less request gets
+  the re-resolution only, AG4/RK8); delete the Clone, its `CloneBitmap` chunks
   (`CloneBitmapKey` for idx `0..bm_cnt-1` — point deletes, the STM has no
   range), the list entry; set `suspended = false` on every namespace whose
   `td_id == dst_td_id` (architecture.md §8.9 — the dst namespaces resume with
@@ -766,9 +799,13 @@ the retry succeed, which is what a precondition means.
   `Get*Info` / `Get*Bm` beyond what their replies define.
 * **AG4 — two-phase rule.** Any handler with a mid-flight agent call re-runs
   **full resolution and the token check** in its deciding STM. No facts from
-  phase 1 are trusted in phase 2 except as hints; the token check makes any
-  interleaved mutation visible as `ABORTED` ("stale revision"). This is what
-  keeps a two-phase RPC exactly as safe as a one-STM RPC.
+  phase 1 are trusted in phase 2 except as hints; for a request that carries
+  a token, the token check makes any interleaved mutation visible as
+  `ABORTED` ("stale revision"), which is what keeps such a two-phase RPC
+  exactly as safe as a one-STM RPC. A **token-less** request keeps the full
+  re-resolution but not that visibility — GW6 is presence-based (§0 #7), so
+  an interleaved mutation it did not observe stays invisible to it. That is
+  the AG4 half of RK8.
 
 The complete call matrix:
 
@@ -852,7 +889,9 @@ The other 49 RPCs never leave etcd.
 3. **Handler tests** against the real etcd through a `Server` constructed
    directly: per resource group, the happy path asserting **exact** etcd
    state via `etcdutil` reads (keys, ids, buckets, capacity keys, rev values)
-   and the reply; plus, at minimum: token mismatch and nil-token ⇒ `ABORTED`;
+   and the reply; plus, at minimum: token mismatch ⇒ `ABORTED`, a *present*
+   zero token ⇒ `ABORTED` (the presence discriminator), an *absent* token ⇒
+   the check is skipped and the mutator runs (§0 #7);
    name collision ⇒ `ALREADY_EXISTS` with nothing written; each
    `FAILED_PRECONDITION` of §5 with nothing written; `CreateCluster`
    collision-guard branch; `DeleteCluster` bucket-sum gate; pagination
@@ -1233,7 +1272,8 @@ exact global invariants — the settled definition of parallel correctness
 4. Stale probes (sequential): `set-sp-level` with the pre-step-3 token →
    `ABORTED`, bracketed no-write; with the fresh token → OK. `create-td`
    duplicate name, fresh token → `ALREADY_EXISTS`, no-write
-   (`next_dev_id` unchanged). `--rev 0` (nil token) → `ABORTED`.
+   (`next_dev_id` unchanged). `--rev 0` (a *present* zero token — gatewayctl
+   never sends an absent message, §10.8) → `ABORTED`.
 5. `create-ss` + `create-ns`; `race`: 2 jobs, same token —
    `set-ns-suspended` vs `delete-ns` → exactly one OK, one `ABORTED`; the
    script branches on which won and asserts etcd matches it exactly (ns gone

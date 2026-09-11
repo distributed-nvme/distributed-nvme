@@ -93,5 +93,5 @@ files are committed, so an ordinary build or test never requires protoc.
   `cdcctl`, `gatewayctl`, plus the `fakeagent` the worker and gateway suites
   drive).
 
-Not yet implemented: `ctl/` and `cmd/dnvctl` — `doc/architecture.md` §13 is
-their spec.
+Not yet implemented: `ctl/` and `cmd/dnvctl` — `doc/dnvctl.md` is their
+spec.

@@ -276,7 +276,8 @@ func (o *modelReactionOps) growSlice(
 	legs []model.Cand,
 ) (uint64, error) {
 	// expectRev 0: the worker holds no client token and converges on what
-	// etcd holds (gateway.md §2.2 #3); only the gateway passes a real one.
+	// etcd holds (gateway.md §2.2 #3). The gateway passes a real one only
+	// when its caller sent one — GW6 is presence-based — and 0 otherwise.
 	return model.GrowSlice(
 		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta,
 		poolTotal, cc, legs,

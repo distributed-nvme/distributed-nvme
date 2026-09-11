@@ -73,8 +73,9 @@ func errAborted(format string, args ...any) error {
 // integration suite matches on it, so it is a constant (§0 #7, GW6).
 const msgStaleRevision = "stale revision"
 
-// errStale is the ABORTED of GW6: the request token — including the 0 a nil
-// token reads as — does not equal the stored revision.
+// errStale is the ABORTED of GW6: the request carried a token message and its
+// revision does not equal the stored one. A request that carries NO token
+// message never reaches here — the check is skipped entirely (§0 #7).
 func errStale() error {
 	return status.Error(codes.Aborted, msgStaleRevision)
 }
@@ -216,8 +217,8 @@ func resolveSp(
 }
 
 // spScope is what an SP-scoped handler resolves once and then carries: the
-// cluster it lives in, the SP record, and — for a mutator — the SpRev whose
-// token has already been checked.
+// cluster it lives in, the SP record, and — for a mutator — the stored SpRev,
+// which GW6 has read and, when the request carried a token, matched.
 type spScope struct {
 	Cid  uint64
 	Cc   *pb.ClusterConf
@@ -233,16 +234,16 @@ func (sc *spScope) SpId() uint64 { return sc.Conf.GetSpId() }
 func (sc *spScope) Shard() uint32 { return sc.Conf.GetShardCode() }
 
 // openSp is the resolve-then-check-the-token opening of every SP-scoped
-// mutator (GW5 + GW6, in that order). token is
-// req.GetSpRev().GetRevision(), so a nil token message reads as 0 and can
-// never match a stored revision that starts at 1 (§0 #7).
+// mutator (GW5 + GW6, in that order). tok is req.GetSpRev() — the MESSAGE, not
+// its revision — because GW6 is presence-based: a request that omitted the
+// message passes nil here and its revision check is skipped (§0 #7).
 func openSp(
 	s etcdutil.STM,
 	clusterName string,
 	spName string,
-	token uint64,
+	tok *pb.SpRev,
 ) (*spScope, error) {
-	return openSpFlags(s, clusterName, spName, token, true)
+	return openSpFlags(s, clusterName, spName, tok, true)
 }
 
 // openSpRead is openSp without a token: the opening of every SP-scoped
@@ -269,7 +270,7 @@ func openSpFlags(
 	s etcdutil.STM,
 	clusterName string,
 	spName string,
-	token uint64,
+	tok *pb.SpRev,
 	rejectDeleting bool,
 ) (*spScope, error) {
 	cid, cc, err := resolveCluster(s, clusterName)
@@ -280,7 +281,7 @@ func openSpFlags(
 	if err != nil {
 		return nil, err
 	}
-	rev, err := checkSpToken(s, cid, conf, token)
+	rev, err := checkSpToken(s, cid, conf, tok)
 	if err != nil {
 		return nil, err
 	}
@@ -291,69 +292,86 @@ func openSpFlags(
 // Token checks and revision bumps (GW6, §5.5)
 // ---------------------------------------------------------------------------
 //
-// The token check runs immediately after resolution and before any other state
+// The token check is PRESENCE-BASED (§0 #7). A request that carries a token
+// message is checked immediately after resolution and before any other state
 // check, so a stale client always sees ABORTED "stale revision" and never a
-// precondition error computed against state it has not read. The
-// addr_port / sp_name a client echoes back inside the token message is
-// ignored: only `revision` participates.
+// precondition error computed against state it has not read. A request that
+// carries NO token message skips the comparison and proceeds with no
+// optimistic-concurrency gate — the caller has opted out of it.
+//
+// The rev key is read either way: it is a §5.1 invariant key whose absence is
+// §5.9's ABORTED, the bump helpers below rely on it having been read, and
+// keeping it in the STM's read set makes a skipped check no weaker against a
+// concurrent DELETE of the object than a checked one.
+//
+// Presence, not value, is what selects the two modes: a message that is
+// present but carries revision 0 (or carries only the echoed
+// addr_port / sp_name) is a REAL token that can never match a stored revision
+// — those seed at 1 and only grow — and is therefore always ABORTED. The
+// addr_port / sp_name a client echoes back inside the message stays ignored:
+// only `revision` participates.
 
-// checkSpToken asserts the stored SpRev.revision equals want (GW6).
+// checkSpToken asserts the stored SpRev.revision equals the request token's,
+// when the request carried one (GW6). A nil tok skips the comparison.
 func checkSpToken(
 	s etcdutil.STM,
 	cid uint64,
 	conf *pb.SpConf,
-	want uint64,
+	tok *pb.SpRev,
 ) (*pb.SpRev, error) {
 	key := model.SpRevKey(conf.GetShardCode(), cid, conf.GetSpId())
 	rev := &pb.SpRev{}
 	if !s.Get(key, rev) {
 		return nil, errAborted("sp_rev key %q is missing", key)
 	}
-	if rev.GetRevision() != want {
+	if tok != nil && rev.GetRevision() != tok.GetRevision() {
 		return nil, errStale()
 	}
 	return rev, nil
 }
 
-// checkDnToken asserts the stored DnRev.revision equals want (GW6).
+// checkDnToken asserts the stored DnRev.revision equals the request token's,
+// when the request carried one (GW6). A nil tok skips the comparison.
 func checkDnToken(
 	s etcdutil.STM,
 	cid uint64,
 	dn *pb.DnConf,
-	want uint64,
+	tok *pb.DnRev,
 ) (*pb.DnRev, error) {
 	key := model.DnRevKey(dn.GetShardCode(), cid, dn.GetDnId())
 	rev := &pb.DnRev{}
 	if !s.Get(key, rev) {
 		return nil, errAborted("dn_rev key %q is missing", key)
 	}
-	if rev.GetRevision() != want {
+	if tok != nil && rev.GetRevision() != tok.GetRevision() {
 		return nil, errStale()
 	}
 	return rev, nil
 }
 
-// checkCnToken asserts the stored CnRev.revision equals want (GW6).
+// checkCnToken asserts the stored CnRev.revision equals the request token's,
+// when the request carried one (GW6). A nil tok skips the comparison.
 func checkCnToken(
 	s etcdutil.STM,
 	cid uint64,
 	cn *pb.CnConf,
-	want uint64,
+	tok *pb.CnRev,
 ) (*pb.CnRev, error) {
 	key := model.CnRevKey(cn.GetShardCode(), cid, cn.GetCnId())
 	rev := &pb.CnRev{}
 	if !s.Get(key, rev) {
 		return nil, errAborted("cn_rev key %q is missing", key)
 	}
-	if rev.GetRevision() != want {
+	if tok != nil && rev.GetRevision() != tok.GetRevision() {
 		return nil, errStale()
 	}
 	return rev, nil
 }
 
-// bumpSp bumps the SP's revision once (§5.5). The key has already been read
-// and matched by GW6's token check, so a failure here can only mean the key
-// vanished inside the same transaction, which is §5.9's ABORTED.
+// bumpSp bumps the SP's revision once (§5.5). The key has already been READ by
+// GW6's token check — which reads it whether or not it compares it — so a
+// failure here can only mean the key vanished inside the same transaction,
+// which is §5.9's ABORTED.
 func bumpSp(s etcdutil.STM, op string, sc *spScope) error {
 	err := model.BumpSpRev(s, op, sc.Shard(), sc.Cid, sc.SpId())
 	if err != nil {

@@ -223,7 +223,9 @@ func (s *Server) CreateControllerNode(
 // be stopped (§8.2). The occupancy check is `cntlr_ptr_list` — the CN mirror
 // of §8.2's `side_ptr_list` — and it runs AFTER the token check (GW6) so an
 // operator working from a stale GetControllerNode is told its view is stale,
-// not told about cntlrs it never saw.
+// not told about cntlrs it never saw. An operator who sent no token has opted
+// out of that ordering (GW6 is presence-based, §0 #7) and is told about the
+// cntlrs directly.
 func (s *Server) DeleteControllerNode(
 	ctx context.Context,
 	req *pb.DeleteControllerNodeRequest,
@@ -250,7 +252,7 @@ func (s *Server) DeleteControllerNode(
 				"controller node %q not found", req.GetAddrPort())
 		}
 		if _, err := checkCnToken(
-			stm, cid, cn, req.GetCnRev().GetRevision(),
+			stm, cid, cn, req.GetCnRev(),
 		); err != nil {
 			return err
 		}
@@ -399,9 +401,9 @@ func (s *Server) ListControllerNodes(
 // why the whole mutation is one CnConf write plus MaintainCnCapacity.
 //
 // When the stored flag already equals the requested one the handler writes
-// nothing at all (§0 #17): the token has still been checked first, so a stale
-// client is refused rather than silently told its no-op succeeded, and a
-// genuine repeat costs one empty transaction.
+// nothing at all (§0 #17): a token that was sent has still been checked first,
+// so a stale client is refused rather than silently told its no-op succeeded,
+// and a genuine repeat costs one empty transaction.
 func (s *Server) UpdateControllerNodeDisabled(
 	ctx context.Context,
 	req *pb.UpdateControllerNodeDisabledRequest,
@@ -428,7 +430,7 @@ func (s *Server) UpdateControllerNodeDisabled(
 				"controller node %q not found", req.GetAddrPort())
 		}
 		if _, err := checkCnToken(
-			stm, cid, cn, req.GetCnRev().GetRevision(),
+			stm, cid, cn, req.GetCnRev(),
 		); err != nil {
 			return err
 		}

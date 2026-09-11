@@ -439,7 +439,9 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      `CreateSpareLeg`, `SwitchSpareLeg` — also take `expectRev` (added by
      gateway.md §2.2 #3): when non-zero the STM re-checks `SpRev.revision ==
      expectRev` first (`ErrPrecondition` "stale revision" on mismatch); `0`
-     skips the check. The gateway passes its request token; this worker's
+     skips the check. The gateway passes its request token when the request
+     carried one and 0 when it did not — GW6 is presence-based, so the skip
+     at this layer is the same opt-out as the skip at that one; this worker's
      reaction path passes 0.
 
      | op | preconditions (re-validated in the STM) | effects |

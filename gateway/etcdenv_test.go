@@ -736,7 +736,11 @@ func mustCn(
 	return reply.GetCnId()
 }
 
-// spTok is the SpRev token an SP-scoped mutator has to send right now (GW6).
+// spTok is the revision an SP-scoped mutator has to put in its SpRev message
+// right now — when it sends one at all. GW6 is presence-based: a request that
+// carries no SpRev skips the comparison, and one that carries an SpRev is held
+// to exact equality against this number, so a token built out of anything else
+// (0 included) is ABORTED "stale revision".
 //
 // The three tok helpers read through the Get* RPCs rather than off the rev
 // key, because that is the only way a client ever learns a token: a test that
@@ -752,7 +756,8 @@ func spTok(t *testing.T, s *Server, cluster string, spName string) uint64 {
 	return reply.GetSpRev().GetRevision()
 }
 
-// dnTok is the DnRev token a DN-scoped mutator has to send right now (GW6).
+// dnTok is spTok for a DN: the revision a DnRev message has to carry to pass
+// GW6, for the requests that carry one.
 func dnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	t.Helper()
 	reply, err := s.GetDiskNode(context.Background(),
@@ -763,7 +768,8 @@ func dnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	return reply.GetDnRev().GetRevision()
 }
 
-// cnTok is the CnRev token a CN-scoped mutator has to send right now (GW6).
+// cnTok is spTok for a CN: the revision a CnRev message has to carry to pass
+// GW6, for the requests that carry one.
 func cnTok(t *testing.T, s *Server, cluster string, addrPort string) uint64 {
 	t.Helper()
 	reply, err := s.GetControllerNode(context.Background(),
@@ -997,8 +1003,11 @@ func TestFixtureBuildsACluster(t *testing.T) {
 // TestFixtureCodeMapping is wantCode against one refusal of every GW7 class
 // the fixture RPCs can raise, which pins both the helper and the mapping the
 // rest of the package will assert with it. Each row also proves the §0 #17 /
-// GW6 ordering it belongs to: the stale-token row sends the nil token, which
-// reads 0 and can never match a stored revision that starts at 1.
+// GW6 ordering it belongs to: the ABORTED row sends a dn_rev message that is
+// PRESENT and one ahead of the stored revision, because GW6 compares only the
+// token a request actually carries. A request that sends no dn_rev at all
+// skips the comparison instead of being refused, and is covered — as a
+// success — by TestFixtureAbsentTokenSkipsTheRevisionCheck.
 func TestFixtureCodeMapping(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1007,10 +1016,15 @@ func TestFixtureCodeMapping(t *testing.T) {
 	dnAddr := fakeAddrPort(t, "dn")
 	mustDn(t, s, name, dnAddr, "rack-1", 100<<30)
 
+	// wantMsg, where a row sets it, is the exact status message: the ABORTED
+	// row is GW6's, and "stale revision" (§0 #7) is the whole of what a token
+	// mismatch is allowed to say, so the row asserts the sentence and not only
+	// the class.
 	for _, tc := range []struct {
-		label string
-		call  func() error
-		want  codes.Code
+		label   string
+		call    func() error
+		want    codes.Code
+		wantMsg string
 	}{
 		{
 			label: "cluster_name that breaks ValidStrPattern",
@@ -1054,17 +1068,26 @@ func TestFixtureCodeMapping(t *testing.T) {
 			want: codes.NotFound,
 		},
 		{
-			label: "UpdateDiskNodeDisabled with no dn_rev at all",
+			label: "UpdateDiskNodeDisabled with a present, stale dn_rev",
 			call: func() error {
 				_, err := s.UpdateDiskNodeDisabled(
 					ctx, &pb.UpdateDiskNodeDisabledRequest{
 						ClusterName: name,
 						AddrPort:    dnAddr,
 						Disabled:    true,
+						// One ahead of what GetDiskNode hands out right
+						// now: GW6 tests a present token for equality, so
+						// a revision on either side of the stored one is
+						// the same ABORTED "stale revision".
+						DnRev: &pb.DnRev{
+							AddrPort: dnAddr,
+							Revision: dnTok(t, s, name, dnAddr) + 1,
+						},
 					})
 				return err
 			},
-			want: codes.Aborted,
+			want:    codes.Aborted,
+			wantMsg: msgStaleRevision,
 		},
 		{
 			label: "DeleteCluster while the cluster still holds a DN",
@@ -1077,12 +1100,19 @@ func TestFixtureCodeMapping(t *testing.T) {
 			want: codes.FailedPrecondition,
 		},
 	} {
-		wantCode(t, tc.call(), tc.want, tc.label)
+		err := tc.call()
+		wantCode(t, err, tc.want, tc.label)
+		if tc.wantMsg != "" {
+			if got := status.Convert(err).Message(); got != tc.wantMsg {
+				t.Errorf("%s: message %q, want %q",
+					tc.label, got, tc.wantMsg)
+			}
+		}
 	}
 
 	// The refusals above wrote nothing: the DN is still there, still enabled
-	// and still on revision 1. GW6 says a refused mutator returns before any
-	// Put, and an aborted STM commits nothing.
+	// and still on revision 1. GW6 says a mutator whose present token missed
+	// returns before any Put, and an aborted STM commits nothing.
 	dn := &pb.DnConf{}
 	found, err := s.cli.Get(ctx, model.DnConfKey(
 		model.ClusterId(name, testClusterEpoch(t, s, name)), dnAddr), dn)
@@ -1097,6 +1127,143 @@ func TestFixtureCodeMapping(t *testing.T) {
 	}
 	if got := dnTok(t, s, name, dnAddr); got != 1 {
 		t.Errorf("dnTok after refusals: got %d, want 1", got)
+	}
+}
+
+// TestFixtureAbsentTokenSkipsTheRevisionCheck is the other half of GW6 as the
+// fixture sees it: the check is keyed on the token MESSAGE being present, not
+// on the value it carries.
+//
+//   - No dn_rev in the request at all: the comparison is skipped, and
+//     UpdateDiskNodeDisabled is judged only by its own preconditions — so it
+//     succeeds, flips the flag and drops the capacity key (§5.6), while the
+//     stored DnRev stays where it was, because Update*Disabled is one of the
+//     mutations §5.5 exempts from the bump.
+//   - A dn_rev message that IS there but carries revision 0 — whether written
+//     out as &pb.DnRev{} or as the echoed addr_port with the revision field
+//     left at its zero value — is a real token, not an omission, and is
+//     ABORTED "stale revision": stored revisions seed at 1 and only grow, so
+//     0 matches nothing. These two rows are what separates "presence" from
+//     "non-zero"; a check that had merely been relaxed to skip on 0 would let
+//     them through.
+//   - A present token that does match is unchanged: it goes through.
+//
+// It builds its own cluster and DN because the bypass really mutates: sharing
+// TestFixtureCodeMapping's fixture would leave that test's "the refusals wrote
+// nothing" assertions reading a DN somebody else disabled.
+func TestFixtureAbsentTokenSkipsTheRevisionCheck(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	name := fmt.Sprintf("gw6-presence-%d", testSeq.Add(1))
+	cid := mustCluster(t, s, name)
+	dnAddr := fakeAddrPort(t, "dn")
+	dnId := mustDn(t, s, name, dnAddr, "rack-1", 100<<30)
+
+	cc := &pb.ClusterConf{}
+	if found, err := s.cli.Get(
+		ctx, model.ClusterConfKey(name), cc,
+	); err != nil || !found {
+		t.Fatalf("cluster_conf %q: found %v, err %v", name, found, err)
+	}
+	binIdx, ok := model.DnBinIdx(100, cc.GetDnBinConf())
+	if !ok {
+		t.Fatalf("a 100-extent DN must fall in a bin")
+	}
+	capKey := model.DnCapacityKey(cid, binIdx, 100, dnAddr)
+
+	// The discriminators first, while the DN is still untouched: a present
+	// token can only be refused against the revision the fixture stamped.
+	for _, tc := range []struct {
+		label string
+		tok   *pb.DnRev
+	}{
+		{label: "an empty dn_rev message", tok: &pb.DnRev{}},
+		{
+			label: "a dn_rev that echoes only addr_port",
+			tok:   &pb.DnRev{AddrPort: dnAddr},
+		},
+	} {
+		_, err := s.UpdateDiskNodeDisabled(
+			ctx, &pb.UpdateDiskNodeDisabledRequest{
+				ClusterName: name,
+				AddrPort:    dnAddr,
+				Disabled:    true,
+				DnRev:       tc.tok,
+			})
+		wantCode(t, err, codes.Aborted, tc.label)
+		if got := status.Convert(err).Message(); got != msgStaleRevision {
+			t.Errorf("%s: message %q, want %q",
+				tc.label, got, msgStaleRevision)
+		}
+	}
+	dn := &pb.DnConf{}
+	if found, err := s.cli.Get(
+		ctx, model.DnConfKey(cid, dnAddr), dn,
+	); err != nil || !found {
+		t.Fatalf("dn_conf after the refusals: found %v, err %v", found, err)
+	}
+	if dn.GetDisabled() {
+		t.Fatalf("a present revision-0 token must not have written")
+	}
+
+	// Now the bypass. Same request minus the dn_rev field: OK, and the reply
+	// still names the node it mutated.
+	reply, err := s.UpdateDiskNodeDisabled(
+		ctx, &pb.UpdateDiskNodeDisabledRequest{
+			ClusterName: name,
+			AddrPort:    dnAddr,
+			Disabled:    true,
+		})
+	wantCode(t, err, codes.OK, "UpdateDiskNodeDisabled with no dn_rev at all")
+	if reply.GetDnId() != dnId {
+		t.Errorf("reply dn_id: got %d, want %d", reply.GetDnId(), dnId)
+	}
+	dn = &pb.DnConf{}
+	if found, err := s.cli.Get(
+		ctx, model.DnConfKey(cid, dnAddr), dn,
+	); err != nil || !found {
+		t.Fatalf("dn_conf after the bypass: found %v, err %v", found, err)
+	}
+	if !dn.GetDisabled() {
+		t.Errorf("the tokenless UpdateDiskNodeDisabled must have written")
+	}
+	// A disabled DN implies no capacity key (§5.6), so MaintainDnCapacity
+	// deleting it is the second, independent witness that the mutation ran.
+	if found, err := s.cli.Get(
+		ctx, capKey, &pb.DnCapacity{},
+	); err != nil {
+		t.Fatalf("Get dn_capacity: %v", err)
+	} else if found {
+		t.Errorf("dn_capacity %s survived the disable", capKey)
+	}
+	// Skipping the comparison is not bumping: Update*Disabled never bumps
+	// (§5.5), so the token GetDiskNode hands out is still the fixture's 1.
+	if got := dnTok(t, s, name, dnAddr); got != 1 {
+		t.Errorf("dnTok after the tokenless disable: got %d, want 1", got)
+	}
+
+	// And presence still works the moment the value is right: the token the
+	// node is actually on re-enables it.
+	if _, err := s.UpdateDiskNodeDisabled(
+		ctx, &pb.UpdateDiskNodeDisabledRequest{
+			ClusterName: name,
+			AddrPort:    dnAddr,
+			Disabled:    false,
+			DnRev: &pb.DnRev{
+				AddrPort: dnAddr,
+				Revision: dnTok(t, s, name, dnAddr),
+			},
+		}); err != nil {
+		t.Fatalf("UpdateDiskNodeDisabled with the matching dn_rev: %v", err)
+	}
+	dn = &pb.DnConf{}
+	if found, err := s.cli.Get(
+		ctx, model.DnConfKey(cid, dnAddr), dn,
+	); err != nil || !found {
+		t.Fatalf("dn_conf after the re-enable: found %v, err %v", found, err)
+	}
+	if dn.GetDisabled() {
+		t.Errorf("the matching-token UpdateDiskNodeDisabled must have written")
 	}
 }
 

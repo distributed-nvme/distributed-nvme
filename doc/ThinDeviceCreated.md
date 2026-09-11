@@ -58,7 +58,7 @@ decision, not an assumption.
 | R10 | The snapshot pre-pass owns every message of an uncreated snapshot; the lazy `createSnapId` fallback and the `snapDone` handoff are removed; `td_list` order carries no meaning. | With the origin guaranteed materialized (R7/R8), same-pass origin-then-snapshot ordering can no longer occur, which was the only reason for both. |
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
-| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `vol` subcommands show the field once `ctl/` lands. |
+| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `td list` shows the field once `ctl/` lands (`dnvctl.md` §5.6). |
 | R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the CN14 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
 
 ---
@@ -714,8 +714,12 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    `TestSpCreatedFlipIgnoresTheReplyRevision`). Only U2-T6's injected
    mid-STM race remains covered structurally (GW8/EU4's serializable STM):
    `etcdutil.Client.run` has no seam to inject it through, and the outcome
-   is unreachable anyway — a real concurrent create bumps `SpRev`, so GW6's
-   token check refuses the retry first.
+   is unreachable anyway for a token-carrying create — a real concurrent
+   create bumps `SpRev`, so GW6's token check refuses the retry first. Since
+   GW6 became presence-based (gateway.md §0 #7), a *token-less*
+   `CreateThinDevice` does reach that race; it is then serialized by the
+   serializable STM alone, which is what the structural coverage above
+   asserts, and the residual exposure is risks_and_gaps.md RK8.
 
 ---
 

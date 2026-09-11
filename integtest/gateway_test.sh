@@ -2727,7 +2727,7 @@ case_parallel() {
 	# -------------------------------------------------------------------
 	# The first token-carrying wave. Each job gets ITS OWN SP's token, read
 	# here in the parent shell one `get-sp` at a time and baked into the job
-	# line — §0 #7: a missing or wrong token can never match, so a wave built
+	# line — §0 #7: a wrong token can never match, so a wave built
 	# from one shared token would be nine ABORTEDs. The tokens are sent as
 	# JSON strings, not numbers: race's params decode through float64 and a
 	# uint64 token has no business going near a float.
@@ -3304,10 +3304,13 @@ case_contention() {
 	assert_field "$(sp_json sp0)" '.sp_conf.next_dev_id' "$devIdNow" \
 		"step 4: next_dev_id after the duplicate refusal"
 
-	# (d) The nil token. gatewayctl sends --rev 0 as a real zero rather than as
-	# "no token" on purpose (§10.8), and GW6 folds the nil case into the same
-	# mismatch: ABORTED, not INVALID_ARGUMENT.
-	assert_no_write "step 4: create-td with the nil token" \
+	# (d) The zero token. gatewayctl sends --rev 0 as a real zero rather than
+	# as "no token" on purpose (§10.8), and that is what makes this probe a
+	# refusal: GW6 is presence-based (§0 #7), so a PRESENT zero is compared
+	# and can never match a stored revision that starts at 1 — ABORTED, not
+	# INVALID_ARGUMENT — while an ABSENT message would be waved through
+	# unchecked. This driver cannot send an absent one.
+	assert_no_write "step 4: create-td with the zero token" \
 		gwx ABORTED create-td --sp sp0 --rev 0 --name tnil --size "$TD_SIZE"
 	assert_eq "$(jq_of "$(sp_json sp0)" '.tds | keys | @json')" \
 		"[\"$winner\"]" "step 4: tds after both refusals"

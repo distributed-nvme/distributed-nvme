@@ -385,7 +385,9 @@ func (e *volEnv) spRev() uint64 {
 	return rev.GetRevision()
 }
 
-// token is the SpRev message a mutator must carry right now (§5.5, §0 #7).
+// token is the SpRev message a mutator has to carry to be let through right
+// now: GW6 compares only `revision`, and only when the message is there at all,
+// so this is the one value a present token may hold (§5.5, §0 #7).
 func (e *volEnv) token() *pb.SpRev {
 	e.t.Helper()
 	return &pb.SpRev{Revision: e.spRev()}
@@ -3245,7 +3247,11 @@ func TestSwitchSpareLegUnknownIds(t *testing.T) {
 
 // volSeedTokenFixture writes one of every object the token cases address,
 // directly rather than through the RPCs, so that the SP's revision is still 1
-// and every case can be run against the same environment.
+// when the first case runs and every case's token arithmetic starts from the
+// same number. Sharing ONE seeded environment across all of them is a luxury
+// only the refusal test below has: a refused mutator writes nothing (EU4),
+// whereas a mutator whose revision check was skipped runs and mutates, which is
+// why the bypass test seeds a fresh environment per case.
 func volSeedTokenFixture(env *volEnv) {
 	env.t.Helper()
 	env.putTd("vol", 900, 7, 0, true)
@@ -3267,17 +3273,42 @@ func volSeedTokenFixture(env *volEnv) {
 	env.putSpConf(conf)
 }
 
-// TestVolumeMutatorsRequireTheToken is GW6 and §0 #7 over every SP-scoped
-// mutator of §8.7–§8.12: the stored revision starts at 1 and only grows, so a
-// nil token — which reads as 0 — can never match and is the same ABORTED
-// "stale revision" as a token that is merely out of date. The check runs
-// immediately after resolution and before every other state check, so none of
-// these cases may see a NOT_FOUND or a FAILED_PRECONDITION instead.
-func TestVolumeMutatorsRequireTheToken(t *testing.T) {
-	cases := []struct {
-		name string
-		call func(env *volEnv, rev *pb.SpRev) error
-	}{
+// volTokenCase is one SP-scoped mutator of §8.7–§8.12 as the two GW6 tests
+// below drive it: once with present tokens that cannot match the stored
+// revision (refused, every one of them), and once with no token message at all
+// (the revision comparison is skipped and the mutator is judged only by its own
+// preconditions).
+type volTokenCase struct {
+	// name is the RPC, and the subtest's name in both tests.
+	name string
+	// call issues the RPC with rev as its sp_rev field. A nil rev is a
+	// request that carries NO token message — the case GW6 now lets
+	// through — and not a token whose revision happens to be 0.
+	call func(env *volEnv, rev *pb.SpRev) error
+	// bypassCode is what the RPC returns against volSeedTokenFixture once
+	// the revision comparison has been skipped: codes.OK for the mutators
+	// the fixture lets run cleanly, and the mutator's OWN refusal for the
+	// ones whose other preconditions the fixture does not satisfy. Naming it
+	// per case is what makes the bypass test positive evidence rather than
+	// "some error came back".
+	bypassCode codes.Code
+	// bypassMsg is the sentence that accompanies a non-OK bypassCode, held
+	// exactly: it names the precondition that did the refusing. The code
+	// alone would not be enough — FinishMigration's precondition answers
+	// ABORTED, the same code GW6 refuses with — so the message is what
+	// separates a mutator's own verdict from a revision check that never
+	// should have run.
+	bypassMsg string
+}
+
+// volTokenCases is the mutator list both GW6 tests run: every SP-scoped
+// mutator of §8.7–§8.12, each written against the state volSeedTokenFixture
+// seeds — one shared seeding for the refusal test, a fresh one per case for the
+// bypass test. The two tests share this one list on purpose: a mutator added to
+// the API is then either covered by both or by neither, and the strict half can
+// never quietly outgrow the bypass half.
+func volTokenCases() []volTokenCase {
+	return []volTokenCase{
 		{
 			name: "CreateThinDevice",
 			call: func(env *volEnv, rev *pb.SpRev) error {
@@ -3288,6 +3319,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "DeleteThinDevice",
@@ -3299,6 +3331,11 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// The seeded td backs the seeded namespace, so §8.7's in-use gate
+			// refuses it — a check that lives far behind the revision one.
+			bypassCode: codes.FailedPrecondition,
+			bypassMsg: fmt.Sprintf(
+				"thin device vol backs namespace 1 of subsystem %s", volNqn),
 		},
 		{
 			name: "CreateSubsystem",
@@ -3310,6 +3347,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "DeleteSubsystem",
@@ -3321,6 +3359,11 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// The seeded subsystem still holds its namespace, which is §8.8's
+			// own refusal and not the revision check's.
+			bypassCode: codes.FailedPrecondition,
+			bypassMsg: fmt.Sprintf(
+				"subsystem %q still holds 1 namespaces", volNqn),
 		},
 		{
 			name: "UpdateSubsystemHosts",
@@ -3333,6 +3376,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "CreateNamespace",
@@ -3344,6 +3388,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "DeleteNamespace",
@@ -3355,6 +3400,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "UpdateNamespaceDev",
@@ -3366,6 +3412,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "UpdateNamespaceSuspended",
@@ -3377,6 +3424,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "CreateClone",
@@ -3392,6 +3440,11 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// The seeded td is already clone-a's destination, and §8.9 allows
+			// one clone per thin device.
+			bypassCode: codes.FailedPrecondition,
+			bypassMsg: "thin device \"vol\" is already the destination " +
+				"of clone \"clone-a\"",
 		},
 		{
 			name: "DeleteClone",
@@ -3403,6 +3456,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "UpdateCloneTrConf",
@@ -3415,6 +3469,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "AppendCloneBitmap",
@@ -3427,6 +3482,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "CreateTransfer",
@@ -3439,6 +3495,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "DeleteTransfer",
@@ -3450,6 +3507,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "UpdateTransferHosts",
@@ -3462,6 +3520,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "CreateMigration",
@@ -3475,6 +3534,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "FinishMigration",
@@ -3486,6 +3546,15 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// The seeded migration names the two sides of the fixture's data
+			// group, which are in DIFFERENT legs, so §8.11's finish refuses it.
+			// This is the one bypass refusal that is itself ABORTED, and it is
+			// why both tests compare the MESSAGE and not only the code: an
+			// ABORTED here is a real precondition talking, not GW6.
+			bypassCode: codes.Aborted,
+			bypassMsg: fmt.Sprintf(
+				"migration %q sides %d and %d are not in one leg",
+				"migr-a", volDataSideA, volDataSideB),
 		},
 		{
 			name: "CancelMigration",
@@ -3497,6 +3566,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "AppendMigrationBitmap",
@@ -3508,6 +3578,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "CreateSpareLeg",
@@ -3520,6 +3591,7 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			bypassCode: codes.OK,
 		},
 		{
 			name: "DeleteSpareLeg",
@@ -3531,6 +3603,12 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// leg_a is an ACTIVE leg of the group, never a spare, so §8.12's
+			// lookup in spare_leg_list misses it.
+			bypassCode: codes.NotFound,
+			bypassMsg: fmt.Sprintf(
+				"spare leg %d not found in group %d",
+				volDataLegA, volDataGrpId),
 		},
 		{
 			name: "SwitchSpareLeg",
@@ -3543,19 +3621,57 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 					})
 				return err
 			},
+			// Spare id 1 is nothing the fixture ever wrote, so §8.12's lookup
+			// in spare_leg_list misses it.
+			bypassCode: codes.NotFound,
+			bypassMsg: fmt.Sprintf(
+				"spare leg 1 not found in group %d", volDataGrpId),
 		},
 	}
+}
+
+// TestVolumeMutatorsRefuseAPresentStaleToken is GW6 and §0 #7 over every
+// SP-scoped mutator of §8.7–§8.12, for the half of the rule that refuses: a
+// request that DOES carry a token message is held to strict equality with the
+// stored revision, and every value that is not it — a revision left far behind,
+// the proto zero value, and a message that echoes only the sp_name handle —
+// is the same ABORTED "stale revision".
+//
+// The last two rows are the discriminators. Stored revisions seed at 1 and only
+// grow, so 0 can never match; they are here to prove that what GW6 keys on is
+// the PRESENCE of the message and not the value 0, because they travel the same
+// zero revision as the absent-token requests of the test below and are refused
+// where those are let through. The second of them also pins that the echoed
+// sp_name does not participate: only `revision` is compared.
+//
+// The check runs immediately after resolution and before every other state
+// check, so none of these cases may see a NOT_FOUND or a FAILED_PRECONDITION
+// computed against state the client has not read — which is also why all of
+// them can share one environment: a refused mutator writes nothing (EU4), so
+// the closing assertion is that the whole fixture, revision included, is
+// exactly as volSeedTokenFixture left it.
+func TestVolumeMutatorsRefuseAPresentStaleToken(t *testing.T) {
 	env := newVolEnv(t)
 	volSeedTokenFixture(env)
 	before := env.spConf()
 	beforeRev := env.spRev()
-	for _, tc := range cases {
+	for _, tc := range volTokenCases() {
 		for _, token := range []struct {
 			name string
 			rev  *pb.SpRev
 		}{
-			{name: "nil token", rev: nil},
-			{name: "stale token", rev: &pb.SpRev{Revision: beforeRev + 99}},
+			{
+				name: "stale token",
+				rev:  &pb.SpRev{Revision: beforeRev + 99},
+			},
+			{
+				name: "present but zero token",
+				rev:  &pb.SpRev{},
+			},
+			{
+				name: "present without a revision",
+				rev:  &pb.SpRev{SpName: volSpName},
+			},
 		} {
 			t.Run(tc.name+"/"+token.name, func(t *testing.T) {
 				msg := volWantCode(t, tc.call(env, token.rev), codes.Aborted)
@@ -3567,4 +3683,62 @@ func TestVolumeMutatorsRequireTheToken(t *testing.T) {
 		}
 	}
 	env.wantUntouched(before, beforeRev)
+}
+
+// TestVolumeMutatorsWithoutATokenSkipTheCheck is the other half of GW6: a
+// request that carries NO token message at all has its revision comparison
+// skipped, and the mutator then runs on its other preconditions alone. That is
+// a bypass, not a refusal, so it is asserted positively — for each mutator,
+// exactly the outcome its own §8 rules produce against volSeedTokenFixture:
+// a clean run and a single §5.5 bump for the seventeen the fixture satisfies,
+// and that mutator's OWN code and sentence for the six it does not. What may
+// never come back is ABORTED "stale revision"; FinishMigration's case shows why
+// the message and not only the code has to be compared, since its precondition
+// speaks ABORTED too.
+//
+// Each case gets a FRESH environment, which is the price of the new rule: these
+// calls MUTATE. Sharing one fixture the way the refusal test above does would
+// let CreateThinDevice's write decide what DeleteThinDevice sees and let
+// DeleteClone's success turn the next case's lookup into a NOT_FOUND.
+func TestVolumeMutatorsWithoutATokenSkipTheCheck(t *testing.T) {
+	for _, tc := range volTokenCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			volSeedTokenFixture(env)
+			before := env.spConf()
+			beforeRev := env.spRev()
+			err := tc.call(env, nil)
+			// The one sentence no case may produce, checked before the
+			// per-case expectation so that a GW6 regression is reported as
+			// itself rather than as whichever code it displaced.
+			if st, ok := status.FromError(err); ok &&
+				st.Code() == codes.Aborted &&
+				st.Message() == msgStaleRevision {
+				t.Fatalf("got ABORTED %q, but the request carried no token "+
+					"for GW6 to compare it against", msgStaleRevision)
+			}
+			if tc.bypassCode == codes.OK {
+				if err != nil {
+					t.Fatalf("an absent token must not refuse: %v", err)
+				}
+				// The bump is what makes the success load-bearing here: the
+				// mutator ran to the end of its transaction, wrote, and told
+				// the workers so (§5.5). WHAT it wrote is pinned by that
+				// mutator's own test above; this one owns the revision.
+				if got := env.spRev(); got != beforeRev+1 {
+					t.Errorf("sp_rev: got %d, want %d "+
+						"(a bypassed mutator still bumps exactly once)",
+						got, beforeRev+1)
+				}
+				return
+			}
+			if msg := volWantCode(t, err, tc.bypassCode); msg != tc.bypassMsg {
+				t.Errorf("message: got %q, want %q", msg, tc.bypassMsg)
+			}
+			// The mutator's own refusal is still a refusal: EU4 rolls the
+			// transaction back whole, so nothing moved and — unlike the
+			// successes above — the revision did not bump either.
+			env.wantUntouched(before, beforeRev)
+		})
+	}
 }

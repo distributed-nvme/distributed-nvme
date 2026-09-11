@@ -308,9 +308,12 @@ func loadSpConfForOp(
 // shared ops to apply before they touch anything (gateway.md §2.2 #3, §5.5):
 // the stored SpRev.revision MUST equal expectRev. expectRev 0 skips the check
 // entirely, which is what the worker's own internal calls pass — the worker
-// converges on what etcd holds and carries no client token. The gateway never
-// passes 0: a nil or zero request token is short-circuited to ABORTED by the
-// handler itself (GW6), so model never sees one.
+// converges on what etcd holds and carries no client token. The gateway passes
+// 0 for the same reason: GW6 is presence-based, so a request that carried no
+// token message is unchecked at the handler and unchecked here too. A request
+// that DID carry one is never 0 by the time it reaches this function — a
+// present-but-zero token can never match a stored revision (they seed at 1)
+// and the handler has already refused it with ABORTED (GW6).
 //
 // It runs FIRST inside the op's STM, before every other precondition, so that
 // a stale caller always sees "stale revision" rather than a precondition
