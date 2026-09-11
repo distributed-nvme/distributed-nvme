@@ -92,9 +92,9 @@ type agentpathFake struct {
 	cnInfo *pb.CnInfo
 	// agentRev is the `revision` the agent's own Get*Info reply carries —
 	// the number every Inspect* reply must carry back as its
-	// `applied_revision` (update_04.md U2–U4). It is deliberately different
-	// from every revision written to etcd, so a handler that regressed to
-	// the stored one fails.
+	// `applied_revision` (architecture.md §8.2/§8.6). It is deliberately
+	// different from every revision written to etcd, so a handler that
+	// regressed to the stored one fails.
 	agentRev uint64
 	// cntlrInfo and sideInfo are what GetCntlrInfo / GetSideInfo report.
 	cntlrInfo *pb.CntlrInfo
@@ -175,7 +175,7 @@ func (f *agentpathFake) setSizes(dnSize uint64, cnSize uint64) {
 
 // setInfos fixes what the two node info probes report, together with the
 // revision the agent claims — which every Inspect* reply of the gateway must
-// echo as its `applied_revision` (update_04.md U2–U4).
+// echo as its `applied_revision` (architecture.md §8.2/§8.6).
 func (f *agentpathFake) setInfos(
 	dnInfo *pb.DnInfo,
 	cnInfo *pb.CnInfo,
@@ -654,12 +654,11 @@ func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 	}
 }
 
-// TestAgentPathInspectRepliesTheAppliedRevision pins update_04.md U2–U4: an
-// Inspect* reply's `applied_revision` is the one the agent's own reply
-// carries — its last applied revision — never the one stored in an etcd rev
-// key. The rev keys are hand-written to a value the agent does not report, so
-// a handler that regressed to the stored revision — issue_03.md I1's interim
-// reading — fails here.
+// TestAgentPathInspectRepliesTheAppliedRevision pins architecture.md
+// §8.2/§8.6: an Inspect* reply's `applied_revision` is the one the agent's
+// own reply carries — its last applied revision — never the one stored in an
+// etcd rev key. The rev keys are hand-written to a value the agent does not
+// report, so a handler that regressed to the stored revision fails here.
 //
 // The *Info message travels with it: both fields are the agent's, verbatim,
 // because the whole point of Inspect* is one coherent live snapshot the
@@ -1287,7 +1286,7 @@ func (c *servingCapture) seen() ([]string, []string) {
 }
 
 // servingBufconnServe puts srv behind a bufconn listener built from exactly
-// the production option set — serverOptions(), so U1's trace-id mint and the
+// the production option set — serverOptions(), so the trace-id mint and the
 // grpc.md §4 chains under test are the ones Run installs, in the order Run
 // installs them — plus any extra option the caller chains behind them, and
 // returns the dialer that reaches it. bufconn is deliberate: §9.5 is about
@@ -1296,7 +1295,7 @@ func (c *servingCapture) seen() ([]string, []string) {
 //
 // The dial is the caller's rather than this helper's because the two callers
 // need opposite clients: §9.5's client carries the mandatory client chains,
-// U1's carries none at all (traceid_test.go).
+// the trace-id mint's test carries none at all (traceid_test.go).
 func servingBufconnServe(
 	t *testing.T,
 	srv *Server,

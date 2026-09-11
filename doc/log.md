@@ -361,8 +361,8 @@ and may hold arbitrary tenant bytes.
 
 Two block-IO records are emitted **outside** `LimitedOsClient`, by the cn
 agent's `directLegProbeIO` (`agent/cnagent`), because the CN11 leg health
-probers deliberately bypass the OsClient semaphore (`osclient.md` §4.5.1,
-`update_01.md` U2). Their `msg` strings are normative here like every other:
+probers deliberately bypass the OsClient semaphore (`osclient.md` §4.5.1).
+Their `msg` strings are normative here like every other:
 
 | event | msg | required attrs |
 |---|---|---|
@@ -468,7 +468,7 @@ Recorded for traceability; the edits are already applied. Appended rather than
 inserted because §2, §3, §5.1 and §5.3 are cited by number from `osclient.md`,
 `grpc.md` and `layout.md`.
 
-* `update_01.md` U2 — §5.1 gained the two prober-emitted records
+* The probe-IO carve-out (`osclient.md` §4.5.1) — §5.1 gained the two prober-emitted records
   `probe write block` and `probe read block direct`, in their own table. They
   are emitted by `agent/cnagent`'s `directLegProbeIO`, **not** by an `OsClient`
   method: the CN11 leg health probers call `common.WriteBlockAt` /

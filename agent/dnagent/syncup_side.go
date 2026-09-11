@@ -172,7 +172,7 @@ const (
 // in the record because zeroed is a property of the side's *allocation*, not
 // of the disk extent.
 //
-// The six rows of update_01.md's matrix (request provisioned × local state):
+// The six rows of the §9.4 converge matrix (request provisioned × local state):
 //
 //	false / absent   allocate (bits 0), build the linear, start the goroutine
 //	false / partial  ensure the linear, keep the goroutine
@@ -772,7 +772,7 @@ func (s *DnAgentServer) teardownForbidden(
 			// The cutover was cancelled or finished: the window is over and
 			// the linears go back to their normal targets, resumed. They are
 			// resumed here rather than left to ensureCnDm, which a pass that
-			// takes the U4 gate never reaches — and nothing else would ever
+			// takes the [D15] gate never reaches — and nothing else would ever
 			// resume them ([D12]).
 			s.clearFence(st)
 			s.unfenceLinears(ctx, st, plan)

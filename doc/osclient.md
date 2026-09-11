@@ -27,7 +27,7 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
   exception in production code, recorded in §4.5.1: the CN11 leg-health
   probers call the package-level helpers `common.WriteBlockAt` /
   `common.ReadBlockDirectAt` directly — outside the semaphore, never under a
-  lock — and log their own records (`update_01.md` U2). Test fixtures that
+  lock — and log their own records. Test fixtures that
   spawn a helper process for their own package are outside the rule, not
   exceptions to it; §8 lists the four that exist.
 * Dependencies: `golang.org/x/sync/semaphore`, `google.golang.org/protobuf`.
@@ -118,7 +118,7 @@ type OsClient interface {
 abbreviated above for readability. Signatures are exact and MUST NOT change.
 The *method set* has changed twice by recorded amendment: `WriteFileDirect` was
 added by `dnagent.md` §5, and `ReadBlockDirect` was **removed** by
-`update_01.md` U2 — its only caller, the CN11 leg prober, now calls the
+the probe-IO carve-out — its only caller, the CN11 leg prober, now calls the
 package-level helper of §4.5.1 outside the semaphore. §9 records both.)
 
 ## 3. The `constants.go` constant
@@ -244,7 +244,7 @@ methods.
 
 ### 4.5.1 Exported raw helpers and the probe-IO carve-out
 
-`update_01.md` U2 removed `ReadBlockDirect` from the `OsClient` interface — the
+The probe-IO carve-out removed `ReadBlockDirect` from the `OsClient` interface — the
 CN11 leg-health prober was its only caller, and a prober must never hold a
 semaphore slot (below). The two raw bodies are exported from
 `common/osclient.go` as plain package-level functions instead. They take no
@@ -294,7 +294,7 @@ sanctioned direct-syscall path in dnv:
   ctx is checked once before the call and otherwise only carries the CN2
   per-attempt trace id into the records below), and **nothing ever waits for a
   prober to finish** — cancel and move on, never cancel-and-wait. (Contrast
-  `update_01.md` U4's dn zeroing goroutines, which *are* waited for: their
+  the dn §9.4 zeroing goroutines, which *are* waited for: their
   `blkdiscard` is a killable child process, not a blocked syscall.)
 * *It must never run under a lock.* CN1 already keeps the probers out of the
   lock hierarchy; a wedged probe under the node or object lock would freeze
@@ -306,10 +306,10 @@ sanctioned direct-syscall path in dnv:
   including the `nvme disconnect` that is the only documented release mechanism
   for those very probes, and the mdadm/dm commands the §10.4 self-healing
   needs. Deadlock by construction; hence the helpers, not a second OsClient and
-  not a probe budget (`update_01.md` §8 rejects both).
+  not a probe budget (both were considered and rejected).
 * *Who may call them.* Only the cn agent's lock-free prober goroutines
-  (`cnagent.md` CN1/CN11), through the small fakeable probe-IO dependency U2
-  defines alongside `healthcheck.go`. These two helpers are the only block-IO
+  (`cnagent.md` CN1/CN11), through the small fakeable probe-IO dependency
+  defined alongside `healthcheck.go`. These two helpers are the only block-IO
   syscalls any package outside `common` may call; every other caller — the dn
   `diskmeta.go` header/volume-table path above all — keeps using the `OsClient`
   methods of §4.5.
@@ -355,7 +355,7 @@ grepped for `os write block` **and** `os read block direct` records, and needed
 a `-9-` path exemption to tolerate the continuous health probes. With these
 messages the probe records fall out of that grep **by construction**, so the
 exemption is deleted and the grep list keeps `os write block` alone — no agent
-emits `os read block direct` any more (`update_01.md` U2-T5). `os write block`
+emits `os read block direct` any more (`cnagent_integtest.md` §20 U2-T5). `os write block`
 survives unchanged as the
 dn agent's `diskmeta.go` record, so a `probe …` record and an `os …` record can
 never be confused for one another.
@@ -777,7 +777,7 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 Semantically complete like §5 (the committed file additionally carries a
 short header comment this listing omits). Exported (not `_test.go`) so
 agent/worker/gateway tests in other packages can reuse it. Unset function fields default to success. There is no
-`ReadBlockDirectFn`: the probe read left the interface with `update_01.md` U2,
+`ReadBlockDirectFn`: the probe read left the interface (§4.5.1),
 and probe IO is faked through the cn agent's own probe-IO dependency
 (`cnagent.md` §4.2 / §6 test 15), not through this double.
 
@@ -959,8 +959,8 @@ them, so routing them through an `OsClient` would buy neither the §1 logging
 nor the `FakeOsClient` testability the rule exists for;
 `grep -rn "ReadBlockDirect" common/` hits only the exported helper
 `ReadBlockDirectAt` (and its test) — the `OsClient` interface,
-`LimitedOsClient` and `FakeOsClient` no longer carry the method
-(`update_01.md` §7 item 3); `grep -rn "os read block direct" .` finds nothing
+`LimitedOsClient` and `FakeOsClient` no longer carry the method;
+`grep -rn "os read block direct" .` finds nothing
 outside historical documents.
 
 ## 9. Amendments applied to this document
@@ -969,7 +969,7 @@ Recorded for traceability; the edits are already applied. Unlike the
 "amendments applied to companion documents" sections of `dnagent.md` §5 and
 `cnagent.md` §5, this one records edits made **to this document**.
 
-* `update_01.md` U2 (U2-T4) — **`ReadBlockDirect` removed** from the `OsClient`
+* The probe-IO carve-out (suite amendment U2-T4) — **`ReadBlockDirect` removed** from the `OsClient`
   interface (§2), from `LimitedOsClient` (§5) and from `FakeOsClient` (§6). Its
   two raw bodies are exported instead as the package-level helpers
   `common.WriteBlockAt` / `common.ReadBlockDirectAt`, which take no `ctx`, no
@@ -991,9 +991,9 @@ Recorded for traceability; the edits are already applied. Unlike the
   emitted by nothing, `integtest/cnagent_test.sh` drops it from that `jq`
   clause too, which is what makes §8's `grep -rn "os read block direct" .`
   acceptance line true outside this and the other narrative documents.
-* `update_01.md` U3 — LVM is gone from the whole repo (the CN clone-metadata
+* LVM removal — LVM is gone from the whole repo (the CN clone-metadata
   arena became a slot allocator over one loop device, `architecture.md` [D14]),
   so §1's consumer list and §3's rationale no longer name it.
 * Earlier amendments, recorded in their originating documents: `dnagent.md` §5
   added `WriteFileDirect` (`os write file direct`); `cnagent.md` §5 added
-  `ReadBlockDirect`, which U2 above has now removed again.
+  `ReadBlockDirect`, which the carve-out above has now removed again.

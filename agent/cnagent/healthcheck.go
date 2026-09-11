@@ -17,7 +17,7 @@ import (
 // liveness instead (leg.go, transportHealth).
 //
 // Probers take **no** lock (CN1) and do **not** use the process OsClient: they
-// call the raw block-IO helpers through LegProbeIO (update_01.md U2), because a
+// call the raw block-IO helpers through LegProbeIO (osclient.md §4.5.1), because a
 // blocked probe must not hold one of the OsClient's DefaultOsClientLimit
 // semaphore slots. Their IO can block far past every command timeout — a leg
 // with no serving path queues IO indefinitely — and nothing that holds a lock
@@ -30,7 +30,7 @@ const (
 )
 
 // LegProbeIO is the CN11 probers' block-IO dependency. It deliberately does
-// NOT go through the process's LimitedOsClient (update_01.md U2): that client
+// NOT go through the process's LimitedOsClient (osclient.md §4.5.1): that client
 // is a DefaultOsClientLimit-slot semaphore held across the blocking syscall,
 // and a probe of a pathless leg (ctrl_loss_tmo = -1 ⇒ IO queues forever)
 // would wedge in D state holding a slot. One dead DN can back many legs of one
@@ -171,8 +171,8 @@ func (s *CnAgentServer) startLegProber(
 // primary→standby flip, a leg leaving the desired state, a level at or above
 // SP_LEVEL_NO_SIDE, or a teardown. A goroutine wedged in D state on a pathless
 // leg is released by the teardown's own disconnect (deleting the controller
-// errors its queued IO) — which the CN21 order now guarantees runs before the
-// wrapper removal (removeLeg, update_01.md U2 spec 4) — and is accepted as
+// errors its queued IO) — which the CN21 order guarantees runs before the
+// wrapper removal (removeLeg) — and is accepted as
 // unreclaimable until then (CN11).
 func (s *CnAgentServer) stopLegProbers(
 	st *cntlrState,
@@ -230,7 +230,7 @@ func (s *CnAgentServer) runLegProbe(
 	prober.begin(s.now())
 	payload := healthBlockPayload(cnId, s.now().UnixNano())
 	// The two records of a round are `probe write block` and `probe read block
-	// direct`, emitted by the LegProbeIO itself (update_01.md U2).
+	// direct`, emitted by the LegProbeIO itself (osclient.md §4.5.1).
 	err := s.probeIO.Write(attemptCtx, prober.path, prober.offset, payload)
 	if err == nil {
 		_, err = s.probeIO.ReadDirect(attemptCtx, prober.path,

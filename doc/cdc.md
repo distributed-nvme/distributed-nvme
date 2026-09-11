@@ -995,7 +995,8 @@ expiry on hardware; AERL exhaustion on hardware; referrals.
 
 ## 10. Amendments to companion documents
 
-**Applied.** They were recorded here first, the `update_02.md` pattern, and
+**Applied.** They were recorded here first — the recorded-then-edited-in
+amendment pattern — and
 edited into the companion documents when implementation started;
 `layout.md` §8 records its own half.
 

@@ -72,7 +72,7 @@ RAID1_EXT2_DATA=125
 DN_SYNCUP_TIMEOUT=60
 CN_SYNCUP_TIMEOUT=180
 
-# Polling budget of `dnagentctl wait-zeroed` (update_01.md U4). With 64 MiB
+# Polling budget of `dnagentctl wait-zeroed` (the §9.4 protocol). With 64 MiB
 # extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
 # so a 1-2 extent side finishes in well under a second; the budget only has to
 # cover a stalled retry loop (DnZeroRetryInterval = 5 s).
@@ -176,7 +176,7 @@ assert_not_ok() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a DN side may legally hold
-# at provisioned = false (update_01.md U4's converge matrix rows 2 and 3):
+# at provisioned = false (the §9.4 converge matrix rows 2 and 3):
 # PROVISIONING while the background zeroing goroutine still has extents to go,
 # and OK once every bit is set. Zeroing 64-128 MiB on a loop device is a
 # `fallocate`, so which of the two a phase-1 reply carries is a genuine race —
@@ -190,7 +190,7 @@ assert_provisioning_or_ok() { # json path label
 	esac
 }
 
-# assert_provisioning is the exact form, for the rows update_01.md pins to
+# assert_provisioning is the exact form, for the rows the matrix pins to
 # PROVISIONING with no race: the resources a deferred side or leg deliberately
 # does not create. RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok and trips every assert_all_ok — naming it
@@ -229,7 +229,7 @@ assert_thin_ok() { # json td slice label
 # assert_cn_info_ok covers the four §3.2 base-state resources of CnInfo. The
 # fifth — the old clone-VG row — went away with LVM: the clone-metadata arena
 # is now the loop device itself (loop_dev_info) plus the kind-b wrapper dm
-# tables, and the proto field is `reserved 5` (update_01.md U3 spec 5).
+# tables, and the proto field is `reserved 5` ([D14]).
 assert_cn_info_ok() { # json label
 	local field
 	for field in port_info tmpfs_info tmp_file_info loop_dev_info; do
@@ -388,7 +388,7 @@ xfer_nqn() { # cluster sp xfer
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")"
 }
 
-# clone_meta_dm mirrors common.CnCloneMetaDmName (update_01.md U3 spec 1): the
+# clone_meta_dm mirrors common.CnCloneMetaDmName (CN18): the
 # kind-b dm-linear wrapper that carries one dm-clone's metadata, allocated out
 # of the loop-device arena. It replaced the clone VG's metadata LV, and with it
 # the doubled-dash `dnv--clone--vg-*` gotcha — a wrapper is created by the
@@ -505,7 +505,7 @@ req_cntlr() { # cnidx cntlid_slot primary
 # already run the two-phase §9.4 provisioning before any CN sees the side, so
 # the desired state the sp-worker would publish at this point already carries
 # its flip. Without the flag every leg would be provisioning-deferred and no
-# case would build anything at all (update_01.md U4, ruling R4.34).
+# case would build anything at all.
 req_side() { # sideid dnidx
 	printf '{"side_id": "%s", "addr_port": "%s:%s", "cntlid_slot": 0, "nvme_tr_conf": %s, "provisioned": true}' \
 		"$(d16 "$1")" "${IP[$2]}" "$DN_GRPC_PORT" "$(req_tr "${IP[$2]}")"
@@ -850,13 +850,13 @@ cn_events() { events "$CN_LOG" "${1:-}"; }
 # mutations [trace] [log] — every mutating operation in a cn agent log (§9,
 # case D step 5). An empty trace means the whole log; naming one scopes the
 # answer to a single converge, which is what lets a stage prove that *its own*
-# syncup mutated nothing but dm devices (`ThinDeviceCreated.md` U5-T1). The CN11 leg health probers left the OsClient in update_01.md U2:
+# syncup mutated nothing but dm devices (`ThinDeviceCreated.md` U5-T1). The CN11 leg health probers do not use the OsClient (osclient.md §4.5.1):
 # they call the raw block-IO syscalls directly and log their own records as
 # `probe write block` / `probe read block direct`, which are not in this grep
 # list by construction. So no path-based exemption is needed any more, and
 # `os write block` — the one block-IO msg an OsClient still emits
 # (common/osclient.go:335) — is a mutation without qualification. There is no
-# read-side msg left to grep for: U2 deleted `OsClient.ReadBlockDirect` and
+# read-side msg left to grep for: the probe-IO carve-out deleted `OsClient.ReadBlockDirect` and
 # its log record outright, and the package-level `ReadBlockDirectAt` that
 # replaced it logs nothing at all (osclient.md §4.5.1, §8 acceptance).
 # Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
@@ -896,7 +896,7 @@ mutations() {
 # residue <sp16> — everything either agent still holds for one storage pool: dm
 # devices, md arrays and nvmet subsystems. The teardown assertions require empty
 # output. The dm pattern's [0-9a-f] kind digit already covers the kind-b
-# clone-metadata wrappers that replaced the clone VG's LVs (update_01.md U3), so
+# clone-metadata wrappers that replaced the clone VG's LVs ([D14]), so
 # a leaked arena allocation is caught here for free.
 residue() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
@@ -959,7 +959,7 @@ dm_kind_names() {
 }
 
 # clone_meta_wrappers [cn16] — the kind-b clone-metadata dm-linears, which are
-# the arena's allocation registry itself (update_01.md U3 spec 3: there is no
+# the arena's allocation registry itself (CN18: there is no
 # on-file allocation table, the dm tables are it). Empty output means every
 # unit of the arena is free.
 clone_meta_wrappers() { dm_kind_names b "${1:-}"; }
@@ -970,7 +970,7 @@ clone_meta_wrappers() { dm_kind_names b "${1:-}"; }
 # reads a suspended device (`dmsetup remove`, disabling the nvmet namespace
 # above it, and above all a block-device scan) blocks in uninterruptible D
 # state and wedges the node until reboot. The pattern is deliberately looser
-# than agent_dm_names' so it also sweeps up debris a pre-U3 run left behind on
+# than agent_dm_names' so it also sweeps up debris an older pre-arena run left behind on
 # a shared lab VM — including LVM's own doubled-dash nodes (dnv--clone--vg-*),
 # which no current run can produce.
 resume_suspended() {
@@ -1079,8 +1079,8 @@ loop_devs() {
 # flushes through its source on removal and blocks without it.
 #
 # Kind b (the clone-metadata wrappers that replaced the clone VG) joins the dm
-# passes rather than getting a teardown of its own (update_01.md U3, ruling
-# R5.7). It must come after kind 7: the dm-clone holds its wrapper open, and a
+# passes rather than getting a teardown of its own.
+# It must come after kind 7: the dm-clone holds its wrapper open, and a
 # wrapper left behind holds the loop device open, wedging tmpfs_teardown's
 # `losetup -d` with EBUSY.
 wipe_cn() { # <cn16>
@@ -1137,7 +1137,7 @@ cleanup_phase2() { # <cn16> <dn16>
 	dm_remove_kind 9 "$cn16"
 	# The clone-metadata wrappers, after their dm-clones went in phase 1: a
 	# leftover kind-b holds the loop device open and wedges the `losetup -d`
-	# below with EBUSY (update_01.md U3, ruling R5.7).
+	# below with EBUSY.
 	dm_remove_kind b "$cn16"
 	disconnect_prefix "$NQN_PREFIX:2:"
 
@@ -1326,7 +1326,7 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		# No LVM binaries: U3 removed LVM from the CN entirely. thin_dump stays
+		# No LVM binaries: [D14] removed LVM from the CN entirely. thin_dump stays
 		# — it is the §12 thin-metadata oracle, not an LVM command.
 		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm truncate stat findmnt thin_dump; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
@@ -1397,7 +1397,7 @@ setup() {
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
-		# The §4 preflight item of update_01.md U4, deferred to here because
+		# The §4 fast-Write-Zeroes preflight item, deferred to here because
 		# the device only exists now (preflight_vms runs before setup). The
 		# §9.4 zeroing assumes fast Write Zeroes; a loop device maps
 		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
@@ -1461,7 +1461,7 @@ dn_pointers() { # dnidx sp:leg:side…
 # not tidiness: cases A and D call dn_side again at the failover flip to move
 # the primary, and re-converging an already-serving side with
 # provisioned = false is a perfectly legal request that the converge matrix
-# answers with "no exports" (update_01.md U4 row 3) — i.e. it would retract the
+# answers with "no exports" (§9.4 matrix row 3) — i.e. it would retract the
 # live export stacks in the middle of a failover. Phase 1 therefore runs
 # exactly once per side. Each case resets the map.
 declare -A SIDE_PROVISIONED=()
@@ -1469,7 +1469,7 @@ declare -A SIDE_PROVISIONED=()
 # dn_side converges one side: the DN-side backing every CN leg connects to.
 #
 # The first converge of a side is two-phase, this script playing the sp-worker's
-# flip rule (update_01.md U4): sync it unprovisioned — which allocates the
+# flip rule (§10.3): sync it unprovisioned — which allocates the
 # extent runs, builds DnSideName and starts the background zeroing goroutine,
 # and exports nothing — wait for every logical extent to be zeroed, then re-sync
 # it provisioned at a fresh revision. Every later converge of the same side goes
@@ -1773,7 +1773,7 @@ case_redund() {
 	stage assert "primary md state, standby shape, host isolation"
 	# CN12 case 1: neither member carries an md superblock — which after the
 	# §9.4 whole-side zeroing is exactly the freshly-provisioned case
-	# (update_01.md U4 replaced the old trim) — so the arrays are created,
+	# ([D15] replaced the old trim) — so the arrays are created,
 	# never assembled.
 	seq=$(helper 1 "cn_events $cntrace")
 	assert_eq "$(event_cnt "$seq" '^mdadm --create .*--run .*--assume-clean')" 2 \
@@ -2022,7 +2022,7 @@ case_thinbm() {
 	assert_before "$seq" "^dmsetup message $pool 0 create_snap 2 1\$" \
 		"^dmsetup resume $orithin\$" \
 		"thinbm: the origin resumes right after create_snap"
-	# update_02.md U1: the per-slice suspend above stays, nested inside one
+	# CN14's quiesce: the per-slice suspend above stays, nested inside one
 	# quiesce of the origin td's raid0 that spans every slice's message. This
 	# SP has one slice, so the log is the only on-hardware evidence of the
 	# bracket; the cross-slice property is a unit test (cnagent.md §6 test 19).
@@ -2030,13 +2030,13 @@ case_thinbm() {
 	snapthin=$(cn_dm_name 3 "$cn" "$sp" "$B_TD2" "$S_SLICE")
 	assert_before "$seq" "^dmsetup suspend $oriraid0\$" \
 		"^dmsetup message $pool 0 create_snap 2 1\$" \
-		"thinbm: the origin raid0 is quiesced across create_snap (U1)"
+		"thinbm: the origin raid0 is quiesced across create_snap (CN14)"
 	assert_before "$seq" "^dmsetup message $pool 0 create_snap 2 1\$" \
 		"^dmsetup resume $oriraid0\$" \
-		"thinbm: the origin raid0 resumes after the messages (U1)"
+		"thinbm: the origin raid0 resumes after the messages (CN14)"
 	assert_before "$seq" "^dmsetup resume $oriraid0\$" \
 		"^dmsetup create $snapthin( |\$)" \
-		"thinbm: the snapshot thin device is created after the resume (U1)"
+		"thinbm: the snapshot thin device is created after the resume (CN14)"
 
 	stage snapio "the snapshot carries the origin's blocks and nothing else"
 	host_connect "$hv" "$cn" "$snapnqn"
@@ -2103,7 +2103,7 @@ case_thinbm() {
 		"thinbm rebuild: a created snapshot was re-created by message"
 	assert_absent "$seq" "^dmsetup suspend" \
 		"thinbm rebuild: nothing needed quiescing"
-	# U5-T1 as amended by update_05.md U3: the rebuild re-creates the pool
+	# U5-T1 (ThinDeviceCreated.md): the rebuild re-creates the pool
 	# device, so the activation sweep runs — its reserve/release pair is
 	# the only `dmsetup message` traffic, and nothing changes the device
 	# set (no create_thin, no create_snap, no delete; the bitmap proof
@@ -2145,7 +2145,7 @@ case_thinbm() {
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
 # bits 32..63 = 1 = skippable ⇒ exactly one 32 MiB blkdiscard at offset 32 MiB
-# **on the clone device**. Since update_01.md U3 the same trace also carries an
+# **on the clone device**. The same trace also carries an
 # earlier, unrelated blkdiscard on the arena loop device (the allocator's
 # recycled-unit hole punch), so every assertion here is scoped by target.
 
@@ -2263,8 +2263,8 @@ case_clone_xfer() {
 	assert_map_ok "$out" clone_id_to_dm_clone "$C_CLONE" clone_xfer
 	assert_map_ok "$out" clone_id_to_meta "$C_CLONE" clone_xfer
 	seq=$(helper 2 "cn_events $TRACE")
-	# Two different blkdiscards now share the verb in one trace (update_01.md
-	# U3), so every anchor below is scoped by target device: the allocator's
+	# Two different blkdiscards share the verb in one trace,
+	# so every anchor below is scoped by target device: the allocator's
 	# arena hole punch on the loop device comes *first*, and the clone's
 	# hydration marking on /dev/mapper/{clone} after it.
 	#
@@ -2297,7 +2297,7 @@ case_clone_xfer() {
 	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer: hydration is enabled after the chunk (CN18 step 5)"
-	# The wrapper's table IS the allocation record (update_01.md U3 spec 3):
+	# The wrapper's table IS the allocation record (CN18):
 	# a single linear over the arena loop device, whose offset and length are
 	# the units the allocator handed out.
 	assert_eq "$(helper 2 "dm_state $metadm")" live \
@@ -2305,7 +2305,7 @@ case_clone_xfer() {
 	got=$(helper 2 "dm_table $metadm")
 	printf '%s\n' "$got" | grep -qE '^0 [0-9]+ linear [0-9]+:[0-9]+ [0-9]+$' ||
 		die "clone_xfer: the clone-meta wrapper is not a single linear: $got"
-	# U1: every dnv dm-clone carries no_discard_passdown, without exception —
+	# CN18 step 3: every dnv dm-clone carries no_discard_passdown, without exception —
 	# it is what keeps the hydration blkdiscard above metadata-only instead of
 	# also erasing the destination.
 	#
@@ -2384,8 +2384,7 @@ case_clone_xfer() {
 		'^dmsetup message .* 0 release_metadata_snap$' \
 		"clone_xfer recovery: the snapshot is always released"
 	# Scoped to the clone device, because the rebuild re-allocates an arena
-	# unit and so emits its own earlier blkdiscard on the loop device
-	# (update_01.md U3, ruling R5.5).
+	# unit and so emits its own earlier blkdiscard on the loop device.
 	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer recovery: every bitmap lands before hydration"
@@ -2430,7 +2429,7 @@ case_clone_xfer() {
 	nsdev2=$(cn_dm_name 6 2 "$sp2" "$S_NS")
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
-	# CN18 teardown order (update_01.md U3 spec 3): the dm-clone goes first,
+	# CN18 teardown order: the dm-clone goes first,
 	# then its metadata wrapper — whose removal is what frees the arena units
 	# again — and only then the source connection.
 	assert_before "$seq" "^dmsetup remove $clonedm\$" \
@@ -2478,7 +2477,7 @@ case_clone_xfer() {
 	# The §13 stage 10 base-state probe, case S's teardown probe run on both
 	# CNs: with its cntlr gone each CN must hold no dm device and no
 	# host-facing subsystem of its own, and the arena must be empty again —
-	# the kind-b tables *are* the allocation registry (update_01.md U3), so
+	# the kind-b tables *are* the allocation registry (CN18), so
 	# reading them by name is what reports a leaked clone unit as an arena
 	# leak instead of as one more anonymous dm device. The four §3.2 base
 	# resources must still probe OK afterwards, because a teardown that took

@@ -492,7 +492,7 @@ func (d *DiskMeta) describeLocked() string {
 
 // provisioningSideCntLocked counts the sides whose §9.4 zeroing has not
 // finished — the meta_info half of the per-side "zeroing k/n" detail
-// (update_01.md U4). It is appended to Describe rather than folded into
+// (DN18). It is appended to Describe rather than folded into
 // sides=%d so an operator can tell "this DN carries 12 sides" from "3 of them
 // are still being provisioned" at a glance.
 func (d *DiskMeta) provisioningSideCntLocked() uint64 {
@@ -678,7 +678,7 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 }
 
 // ---------------------------------------------------------------------------
-// zeroed_bits — the §9.4 side-provisioning bitmap (update_01.md U4)
+// zeroed_bits — the §9.4 side-provisioning bitmap ([D15])
 //
 // **Logical extent i** is the i-th extent of the concatenation of the record's
 // run_list, i.e. bytes [i, i+1) x extent_size of the side's DnSideName
@@ -781,10 +781,10 @@ func (d *DiskMeta) AllocSide(
 	// zeroed_bits is left empty on purpose (ruling R4.5): proto3 does not
 	// serialize an empty bytes field, out-of-range bits read as 0, and
 	// BitmapSetRange grows the slice on the first batch — so an absent field
-	// is exactly update_01.md's "persist the record with zeroed_bits all 0",
+	// is exactly the §9.4 protocol's "persist the record with zeroed_bits all 0",
 	// at no cost in every slot write that follows.
 	//
-	// This literal is also where the U4 invariant is enforced: **zeroed is a
+	// This literal is also where the [D15] invariant is enforced: **zeroed is a
 	// property of the side's ALLOCATION, not of the disk extent**. Extents
 	// freed and reallocated to a new side start all-not-zeroed again, whatever
 	// happened to them before, because this constructor is the only code that
@@ -807,7 +807,7 @@ func (d *DiskMeta) AllocSide(
 }
 
 // SetSideZeroed marks logical extents [fromExt, toExt) of a side as zeroed —
-// step 3 of the §9.4 provisioning protocol (update_01.md U4), run once per
+// step 3 of the §9.4 provisioning protocol, run once per
 // completed batch. The range is half-open, and persisting it *after* the
 // `blkdiscard --zeroout` returned is what makes an interrupted batch simply
 // re-run: its bits stay 0, so the next pass redoes it rather than leaving a

@@ -455,10 +455,10 @@ func (s *Server) UpdateControllerNodeDisabled(
 // (§9.3) — for diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `cn_info` both
-// come from the GetCnInfo reply (architecture.md §8.3; update_04.md U3
-// reversed issue_03.md I1's interim stored-revision reading), so the pair
-// is one coherent agent snapshot and a caller can diff `applied_revision`
-// against the desired-state token GetControllerNode hands out.
+// come from the GetCnInfo reply (architecture.md §8.3, deliberately not the
+// stored rev key), so the pair is one coherent agent snapshot and a caller
+// can diff `applied_revision` against the desired-state token
+// GetControllerNode hands out.
 //
 // The Snapshot resolves the cluster itself, so the agent request's cluster_id
 // comes from it rather than from a second plain pre-read: the read is already

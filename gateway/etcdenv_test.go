@@ -467,9 +467,9 @@ func (f *fakeDnServer) GetDnInfo(
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
 	// The revision the agent reports is the one every Inspect* reply MUST
-	// carry back to the client (update_04.md U2); it is a distinctive number
-	// here so that a handler which regressed to the stored rev key would be
-	// caught.
+	// carry back to the client (architecture.md §8.2); it is a distinctive
+	// number here so that a handler which regressed to the stored rev key
+	// would be caught.
 	return &pb.GetDnInfoReply{
 		Revision: fakeAgentRevision,
 		DnInfo:   f.agent.dnInfo,
@@ -565,10 +565,10 @@ func (f *fakeCnServer) GetLegBm(
 }
 
 // fakeAgentRevision is the `revision` every fake *Info reply carries, and —
-// update_04.md U2/U3 — the number every Inspect* reply MUST carry back as its
-// `applied_revision`. A rev key starts at 1 and is bumped one at a time, so a
-// value no plausible bump sequence reaches makes a handler that regressed to
-// the stored revision unmistakable.
+// architecture.md §8.2/§8.6 — the number every Inspect* reply MUST carry back
+// as its `applied_revision`. A rev key starts at 1 and is bumped one at a
+// time, so a value no plausible bump sequence reaches makes a handler that
+// regressed to the stored revision unmistakable.
 const fakeAgentRevision = uint64(0xfa5e)
 
 // fakeAddrPort returns an addr_port a fake agent can bind and the gateway can

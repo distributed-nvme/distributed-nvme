@@ -178,7 +178,7 @@ nothing is absent there, a present device lacks a capability):
     `jq`, `timeout`) **plus** `mdadm`, `truncate`, `stat`, `findmnt` and
     `thin_dump` (thin-provisioning-tools — `GetThinDeviceBm`/`GetLegBm` and
     the §11.5 recovery shell out to it). **No LVM binary**: since
-    `update_01.md` U3 ([D14]) the cn agent runs no LVM command either, so the
+    [D14] the cn agent runs no LVM command either, so the
     dn suite's "no `lvm`" rule ([D13]) is now repo-wide — the clone-metadata
     arena is a slot allocator of kind-`b` dm-linears over one loop device.
   - `modprobe` (ignore errors, then verify): `nvmet`, `nvmet_tcp`,
@@ -194,9 +194,9 @@ nothing is absent there, a present device lacks a capability):
     md assembly; fail preflight rather than debug that later.
   - `df /var/tmp` ≥ 3 GiB free; punch-hole probe (`fallocate -p`) — the CN
     clone-metadata allocator hole-punches every recycled unit range on the
-    tmpfs-backed arena file (`update_01.md` U3: plain `blkdiscard`, never
+    tmpfs-backed arena file (CN18: plain `blkdiscard`, never
     `--zeroout`), DN side provisioning writes zeros through the loop
-    (`update_01.md` U4) and the case C never-copied verification all rely on
+    (§9.4) and the case C never-copied verification all rely on
     discard/Write-Zeroes reaching the backing file; `MemAvailable` ≥ 1.5 GiB
     (the 2 GiB tmpfs mount is lazily allocated and the 1 GiB
     `CnCloneMetaAreaSize` arena file is sparse, so real usage is a few MiB —
@@ -210,7 +210,7 @@ nothing is absent there, a present device lacks a capability):
     non-zero — `/sys/class/block`, not `/sys/block`, because that is the
     directory `agent.Dm.WriteZeroesMaxBytes` reads, so the suite and the
     agent consult the very same file. `0` means the kernel would fall back
-    to writing zero pages at bulk speed, so `update_01.md` U4's
+    to writing zero pages at bulk speed, so the §9.4
     fast-Write-Zeroes assumption cannot hold and DN5 fails the node fast
     (`meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"`), which would
     surface as a confusing §7 step 6 failure instead of a clear preflight
@@ -255,7 +255,7 @@ case S:
   `getShortId`).
 - clone-metadata wrapper (kind `b`, `common.CnCloneMetaDmName`):
   `dnv-{cluster}-{cn}-b-{sp}-{clone}` — a dm-linear carved out of the single
-  CN loop device by the `update_01.md` U3 slot allocator; its dm table
+  CN loop device by the CN18 slot allocator; its dm table
   (`0 {len} linear {loopdev} {offset_sectors}`) **is** the allocation
   registry, so `dmsetup table` of this name is the only thing to grep. Case
   C's is
@@ -348,7 +348,7 @@ Per VM, in order:
    code 0 and `cn_info.{port,tmpfs,tmp_file,loop_dev}_info.status ==
    RES_STATUS_OK` — the §3.2 base state (tmpfs, sparse arena file, loop,
    shared port) converged on both VMs before any case runs. There is no
-   fifth base-state info: `update_01.md` U3 deleted `CnInfo.clone_vg_info`
+   fifth base-state info: [D14] deleted `CnInfo.clone_vg_info`
    (`reserved 5`), because `loop_dev_info` already covers the arena and
    per-clone metadata health lives in `CntlrInfo.clone_id_to_meta`.
 
@@ -474,7 +474,7 @@ slice_id)` per §9.3.)
   (dn suite rule). The DN sides of a case are converged before the cn
   primary, so legs have optimized paths when md assembles (§11.1.1).
 - **Two-phase DN side setup (the worker's `provisioned` flip, played by the
-  script).** Since `update_01.md` U4 a side is exported only when the
+  script).** A side is exported only when the
   request carries `provisioned = true` **and** every extent's `zeroed_bits`
   bit is set, so every `dnagentctl syncup-side` that *creates* a side is
   issued twice:
@@ -500,8 +500,8 @@ slice_id)` per §9.3.)
   *later* call for that side — re-sends, the case A failover flip — must
   keep `--provisioned=true`. That memoization is load-bearing, not an
   optimization: a blind two-phase re-run at the failover flip would send
-  `--provisioned=false` and retract live exports mid-failover (matrix row 3
-  of `update_01.md` §9.4 makes that a legal instruction to retire them, not
+  `--provisioned=false` and retract live exports mid-failover (row 3
+  of the §9.4 converge matrix makes that a legal instruction to retire them, not
   a no-op). `RES_STATUS_PROVISIONING` never sets `err_epoch`; it means
   *healthy, not ready, no action*. With 64 MiB extents on loop devices a
   `DnZeroBatchExtCnt = 10` batch is 640 MiB and loop maps Write Zeroes onto
@@ -544,12 +544,12 @@ slice_id)` per §9.3.)
   `nvme connect|disconnect`, `blkdiscard`,
   `mount|umount|losetup|truncate`, configfs `mkdir|rmdir|ln|rm`, and every
   `os write file direct` **and** `os write block` record. No path-based
-  exemption is needed any more: since `update_01.md` U2 the CN11 leg health
+  exemption is needed: the CN11 leg health
   probers bypass the `OsClient` entirely and log their own records under the
   msgs `probe write block` / `probe read block direct`, which are not in
   this grep list **by construction** — the `-9-`-path exemption that used to
   carve those continuous probes out of `os write block` /
-  `os read block direct` is therefore deleted, not repointed. After U2
+  `os read block direct` is therefore deleted, not repointed. With the carve-out
   `healthcheck.go` is no longer a block-IO caller at all, so a converged CN
   emits zero `os write block` records and the msg can simply be listed.
   Probe commands (`lsblk`, `dmsetup info|table|status|ls`, `ls`, `findmnt`,
@@ -557,7 +557,7 @@ slice_id)` per §9.3.)
   `nvme list-subsys`) are expected and deliberately not in the list; the LVM
   verbs that used to appear on both halves of this list
   (`pvcreate|vgcreate|lvcreate|lvremove` mutating, `vgs|lvs` probing) are
-  gone with `update_01.md` U3.
+  gone with [D14].
 
 ## 10. Case S — `smoke`
 
@@ -604,7 +604,7 @@ slice_id)` per §9.3.)
    proves the host-facing `dnv-it:*` subsystems are gone, the per-SP residue
    check of §11 step 7 matching subsystems by sp id and so unable to see
    them. The kind-`b` list is then asserted empty a second time on its own,
-   because it is the only allocation registry there is (`update_01.md` U3:
+   because it is the only allocation registry there is (CN18:
    no on-file table), so reading it by name reports a leaked clone unit as
    an arena leak rather than as one more anonymous dm device. The base state
    then still probes OK via `get-cn-info`, and last comes the per-SP residue
@@ -623,7 +623,7 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    `primary=false` (same request otherwise).
 2. Assertions — primary (VM1): `/proc/mdstat` shows both arrays up
    (`[UU]`); `cn-agent.log` shows `mdadm --create … --run --assume-clean`
-   for both groups (CN12 case 1 — **fresh zeroed legs**: `update_01.md` U4
+   for both groups (CN12 case 1 — **fresh zeroed legs**: §9.4 provisioning
    writes zeros over the whole side with `blkdiscard --zeroout` before its
    first export, which is what genuinely funds `--assume-clean`; the old
    trim never did) and never `--assemble`; `md-name` cross-checks the device
@@ -707,8 +707,8 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    quiesce. Assert code 0; `cn-agent.log`
    shows suspend(origin raid0)/suspend(origin thin)/`create_snap 2 1`
    message/resume(origin thin)/resume(origin raid0) in that order, and the
-   snapshot's own thin device created only after that last resume (CN14,
-   `update_02.md` U1). What the script actually anchors is each of those
+   snapshot's own thin device created only after that last resume (CN14).
+   What the script actually anchors is each of those
    four events against the `create_snap` message alone — both suspends
    before it, both resumes after it, the snapshot create after the raid0
    resume — since that is the property the message depends on; the pairwise
@@ -734,7 +734,7 @@ the §9 two-phase sequence), host = VM2, connected to `…:b:vol1`.
    `dmsetup suspend` at all; `mutations()` scoped to the trace shows
    `dmsetup create` lines and, of `dmsetup message`, exactly the activation
    sweep's `reserve_metadata_snap`/`release_metadata_snap` pair — no
-   `create_thin`, no `create_snap`, no `delete` (update_05.md U3: the rebuild
+   `create_thin`, no `create_snap`, no `delete` (CN14: the rebuild
    re-creates the pool device, which is a designed sweep trigger — the drop's
    CN21 teardown sends no `delete`s, so a td removed while the cntlr was down
    is healed exactly here, and this rebuild has nothing to sweep); every
@@ -797,7 +797,7 @@ equal-revision `syncup-cntlr` re-send purely to read the reply: assert
 (CNREV2++). In this one converge the agent connects to the xfer, allocates
 `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)` contiguous 4 MiB units
 from the loop arena, `blkdiscard`s exactly that range **on the loop device**
-(the `update_01.md` U3 recycled-unit guard — plain discard, never
+(the CN18 recycled-unit guard — plain discard, never
 `--zeroout`), creates the kind-`b` wrapper
 `dnv-0000000000000001-0000000000000012-b-00000000000003d2-000000000000000c`
 over it, builds the dm-clone `no_hydration` with that wrapper as its
@@ -813,7 +813,7 @@ the table, not the name, is the allocation record (CN28 now probes it with
 line and never compares `<maj:min>` against the arena loop's devno, so it
 pins the shape of the allocation record and not the device it was carved
 from; the dm-clone's own live `dmsetup table` matches
-`' 2 no_hydration no_discard_passdown( |$)'` — the exact `update_01.md` U1
+`' 2 no_hydration no_discard_passdown( |$)'` — the exact mandatory
 feature pair, asserted here against a real kernel and not only in the
 `cnagent.md` §6 unit tests. The pinned regex is safe even after
 `enable_hydration`: `dmsetup table` (`STATUSTYPE_TABLE`) reprints the
@@ -824,11 +824,11 @@ the `dnv-*-7-*` device** with `--offset 33554432 --length 33554432` (skip
 bits 32..63 → one coalesced 32 MiB range at 32 MiB — the log-arithmetic
 proof that geometry and inversion are right), ordered after the clone create
 and before the `enable_hydration` message. Scoping that count by target
-device is load-bearing since U3: the same converge also logs a `blkdiscard`
+device is load-bearing with the CN18 arena: the same converge also logs a `blkdiscard`
 against the **loop device** (the arena unit range), ordered *before* the
 `dmsetup create` of the kind-`b` wrapper — assert exactly one of those too —
 so an unscoped "exactly one `blkdiscard`" grep would now fail. Neither ever
-carries `--zeroout` (`update_01.md` §7 item 5: on a CN, `blkdiscard
+carries `--zeroout` (on a CN, `blkdiscard
 --zeroout` must never appear at all). Host: sp2 path `optimized`, sp1
 stays `inaccessible`; IO resumes (the §11.3 flip).
 
@@ -855,8 +855,8 @@ through it), disconnect the `:4:` and sp2 `:2:` connections, remove kinds
 sat on — it must go before the loop device can be detached), `mdadm --stop`
 every `dnv-` array, `losetup -d` the arena loop + `umount` the tmpfs (the
 clone's metadata is now genuinely gone, arena and allocation registry
-together — the tmpfs-volatility this recovery exists for; since
-`update_01.md` U3 the registry *is* the kernel's dm tables, so removing the
+together — the tmpfs-volatility this recovery exists for; the
+registry *is* the kernel's dm tables (CN18), so removing the
 wrappers and the tmpfs in one sweep leaves nothing stale behind). The
 shared port and the dn objects stay (co-location artifact, §3 — a real
 reboot would take them too and `EnsurePort` would simply recreate them).
@@ -957,7 +957,7 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    dm/md/nvme/configfs mutation, no `os write file direct` and no
    `os write block`, on a converged node. The CN11 probers' own
    `probe write block` / `probe read block direct` records are outside that
-   list by construction (§9, `update_01.md` U2) and keep flowing throughout.
+   list by construction (§9) and keep flowing throughout.
    The DN sides were fully zeroed during setup (§9 phase (b)), so the dn
    agents' zeroing registries find nothing to do on their own reconciles and
    emit no `blkdiscard` either; that is a precondition of the mutation-free
@@ -987,7 +987,7 @@ across **both** VMs (a clone on one VM holds a source on the other):
 1. `pkill -f 'dnv-agent cn'`, then `pkill -f 'dnv-agent dn'` (kills the
    retry loops and probers with the agents).
 2. `resume_suspended` — every suspended dm device matching `dnv*`
-   (one flat prefix since `update_01.md` U3 removed LVM's doubled-dash
+   (one flat prefix — [D14] removed LVM's doubled-dash
    nodes). Load-bearing, not
    defensive: a transfer's origin ns-dev is **deliberately suspended**
    (CN16), and the dn cutover window may hold linears suspended; a
@@ -1012,7 +1012,7 @@ across **both** VMs (a clone on one VM holds a source on the other):
 8. Disconnect `:2:` (leg) connections.
 9. cn tmpfs/arena: `losetup -d` every loop backed under
    `/tmp/dnv-tmpfs/`, `umount` the `/tmp/dnv-tmpfs/*` mounts, `rmdir` them.
-   No LVM step — `update_01.md` U3 removed the clone VG; the kind-`b`
+   No LVM step — [D14] removed the clone VG; the kind-`b`
    wrappers went at the end of step 7, which is what makes `losetup -d`
    succeed here (a surviving wrapper holds the loop device EBUSY).
 10. `resume_suspended` again, then the dn suite's §16 steps in that suite's
@@ -1034,7 +1034,7 @@ cleanup runs it unconditionally before setup.
 
 On any failure, before exiting, dump to the driver console: last 120 lines
 of all four agent logs; `dmsetup ls` + `dmsetup table` + `dmsetup status`
-(which since `update_01.md` U3 already shows every kind-`b` wrapper and its
+(which already shows every kind-`b` wrapper and its
 backing offset — the allocation registry itself, so there is no LVM report
 left to dump); `cat /proc/mdstat` + `mdadm --detail --scan`; `losetup -a`;
 `findmnt | grep dnv-tmpfs`; `ls -R
@@ -1048,8 +1048,8 @@ records can be pulled from the JSON logs on either VM.
 | RPC | exercised by | asserted |
 |---|---|---|
 | `GetCnSize` | setup wait-up | exact `--capacity` echo 1099511627776; liveness |
-| `SyncupCn` | setup + every case | reply code, the four base-state infos (`port`/`tmpfs`/`tmp_file`/`loop_dev`; `clone_vg_info` is `reserved 5` since `update_01.md` U3), declarative cntlr add/remove, stale probe (D) |
-| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with no device-set-mutating pool message — only the activation sweep's reserve/release pair (B, update_05.md U3) |
+| `SyncupCn` | setup + every case | reply code, the four base-state infos (`port`/`tmpfs`/`tmp_file`/`loop_dev`; `clone_vg_info` is `reserved 5`, [D14]), declarative cntlr add/remove, stale probe (D) |
+| `SyncupCntlr` | S, A, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with no device-set-mutating pool message — only the activation sweep's reserve/release pair (B, CN14) |
 | `PushCloneBitmap` | C | reply code 0; effects via the stage 4/9 layers |
 | `GetCnInfo` | teardown checks, D | statuses, snapshot equality |
 | `GetCntlrInfo` | S, C polling + recovery, D | pool-status details format, `ParseCloneStatus` hydration, snapshot equality |
@@ -1071,27 +1071,28 @@ values other than `READWRITE`/`READONLY`/`NO_CLONE`-as-gate; `slice_cnt >
 multiple namespaces per subsystem; snapshots of snapshots;
 `UpdateNamespaceDev` repoints; **namespace or subsystem deletion short of a
 full cntlr teardown** (no case drops an entry from `ns_list` or
-`nqn_to_subsystem`, so the park-before-nvmet-removal order of CN9 —
-`update_06.md` U4 — is unit-tested instead, `cnagent.md` §6 test 26);
+`nqn_to_subsystem`, so the park-before-nvmet-removal order of CN9
+is unit-tested instead, `cnagent.md` §6 test 26);
 cntlid-slot exhaustion; dnv-cdc/host auto-discovery; TLS/auth;
 performance/soak; fault injection; **CN-side
 provisioning deferral** (a group whose `leg_list` holds an unprovisioned leg
 is skipped and reports `RES_STATUS_PROVISIONING`, together with the CN16 ANA
 conjunct that keeps its namespace `inaccessible`) — every side here is fully
 provisioned by §9's two-phase setup before its cntlr converges, so the
-deferral paths are covered by the `cnagent.md` §6 unit tests instead
-(`update_01.md` U4 "cn unit"); likewise clone-metadata arena exhaustion,
-whose `RES_STATUS_ERROR` pair is the old `lvcreate`-ENOSPC path (U3).
+deferral paths are covered by the `cnagent.md` §6 unit tests instead;
+likewise clone-metadata arena exhaustion,
+whose `RES_STATUS_ERROR` pair is the old `lvcreate`-ENOSPC path (CN18).
 Listed so later additions extend this file rather than reshaping it.
 
 ## 20. Amendments
 
-Recorded for traceability (`update_01.md` "Conventions"); the edits are
+Recorded for traceability; the `U*-T*` ids are this suite's amendment ids
+from the since-retired design-review ledgers. The edits are
 already applied above. Appended, never inserted, so no section number
 another document or the harness cites can shift.
 
-- **U2-T5 (`update_01.md` U2)** — §9 `mutations()` lost the `-9-`-path
-  exemption for `os write block` / `os read block direct`. U2 takes the CN11
+- **U2-T5 (the probe-IO carve-out)** — §9 `mutations()` lost the `-9-`-path
+  exemption for `os write block` / `os read block direct`. The carve-out takes the CN11
   leg health probers out of the `LimitedOsClient` (they call the exported
   `common.WriteBlockAt` / `common.ReadBlockDirectAt` directly, so a probe
   wedged on a pathless leg can no longer starve the 32-slot semaphore) and
@@ -1101,7 +1102,7 @@ another document or the harness cites can shift.
   `OsClient` interface entirely and `healthcheck.go` was the cn agent's only
   block-IO caller, so a converged CN now emits zero `os write block` records
   and the msg is simply listed (§14 step 5).
-- **U3-T5 (`update_01.md` U3, new decision [D14])** — LVM left the CN. The
+- **U3-T5 ([D14])** — LVM left the CN. The
   clone-metadata arena is now a slot allocator: one tmpfs-backed sparse file
   (`CnCloneMetaAreaSize`, 1 GiB) on one loop device, carved into
   `CnCloneMetaUnit` (4 MiB) units by kind-`b` dm-linears named
@@ -1123,7 +1124,7 @@ another document or the harness cites can shift.
   volatile-arena bullet. Rationale: the [D13](a) label-scan class (a bare
   `vgs`/`lvs` scanning a CN's suspended transfer-origin ns-devs wedges LVM
   in unkillable D state) plus deterministic naming.
-- **U4-T6 (`update_01.md` U4, new decision [D15])** — whole-side zeroing
+- **U4-T6 ([D15])** — whole-side zeroing
   behind a `provisioned` gate: every DN side is fully written with
   `blkdiscard --zeroout` before its first export, tracked per extent in the
   volume table's `zeroed_bits`. This suite has no worker, so §9 gains the
@@ -1144,7 +1145,7 @@ another document or the harness cites can shift.
   dropped `discard_zeroes_data` in 4.12; NVMe DLFEAT read-zeroes is
   optional), so the old trim could leak a previous tenant's bytes and could
   hand a fresh thin pool a stale superblock.
-- **U1-T4 (`update_01.md` U1)** — every dnv dm-clone table carries
+- **U1-T4 (dm-clone features)** — every dnv dm-clone table carries
   `2 no_hydration no_discard_passdown`, without exception, so a hydration or
   §11.4 skip `blkdiscard` stays metadata-only instead of also reaching the
   destination. §13 stage 4's assertion list therefore pins the CN clone's
@@ -1156,12 +1157,13 @@ another document or the harness cites can shift.
   (`STATUSTYPE_INFO`) recomputes the live flags; the converge never reloads
   a dm-clone on feature drift either. `dnagent_integtest.md` §12 step 11 and
   its §20 U1-T4 entry carry the twin assertion for the dn migration clone.
-- **`update_06.md` U4** — a namespace removed from `ns_list` (a whole removed
+- **Park-before-remove for removed namespaces** — a namespace removed from
+  `ns_list` (a whole removed
   subsystem's included) is now parked on its td's `CnErrorName` before the
   nvmet removal, as CN9 always said. **The suite is unchanged**: no case
   drops a host-facing namespace or subsystem short of a full cntlr teardown —
-  the xfer/clone stages only flip `suspended` and *add* a snapshot ss — so U4
-  changes no event any stage asserts. Both `mutations()` consumers stay green.
+  the xfer/clone stages only flip `suspended` and *add* a snapshot ss — so the
+  change alters no event any stage asserts. Both `mutations()` consumers stay green.
   The case B rebuild stage, the suite's one verb-set assertion over that
   helper, deletes nothing. The case D restart stage (§14 step 5) is the
   stricter one — it demands the post-restart mutation set be **empty**, so a
@@ -1197,12 +1199,12 @@ another document or the harness cites can shift.
   (`architecture.md` §3.2) — case C's wipe removes it on purpose (arena
   file, loop device and every kind-`b` wrapper) and §11.5 rebuilds from the
   destination thin-pool bitmaps; nothing in cleanup tries to preserve it.
-  Since `update_01.md` U3 the allocation registry is the set of kind-`b` dm
-  tables themselves, so arena and registry are volatile *together*: a reboot
+  The allocation registry is the set of kind-`b` dm
+  tables themselves (CN18), so arena and registry are volatile *together*: a reboot
   clears both, an agent restart preserves both. That equivalence is exactly
   why the CN allocator needs no on-file allocation table.
 - **A fresh thin pool needs zeroed metadata, and gets it from the DN side
-  provisioning protocol** (§9.4, rewritten by `update_01.md` U4) — the whole
+  provisioning protocol** (§9.4) — the whole
   side is written with `blkdiscard --zeroout` before its first export, which
   is a real guarantee rather than the old trim's hope that discard reads back
   as zeros (the kernel dropped `discard_zeroes_data` in 4.12; NVMe DLFEAT
@@ -1210,7 +1212,7 @@ another document or the harness cites can shift.
   `--assume-clean` and that keeps a recycled meta-group extent from handing
   a fresh pool a previous SP's valid thin-metadata superblock. If a pool ever
   reports a metadata corruption on first create, suspect a side exported
-  before its `zeroed_bits` completed — which the U4 converge matrix makes an
+  before its `zeroed_bits` completed — which the §9.4 converge matrix makes an
   `ERROR` rather than a silent export — before suspecting dm-thin.
 - **udev vs md**: the stock incremental-assembly rule would grab dnv raid
   members before the agent does; the §7 mask (`63-dnv-md.rules`, matching
@@ -1244,7 +1246,7 @@ another document or the harness cites can shift.
 
 ### `ThinDeviceCreated.md`
 
-- **U5** — `req_td` gained the optional `created` argument (default `false`),
+- **U5 (consistency fixes)** — `req_td` gained the optional `created` argument (default `false`),
   `assert_absent` was added as `assert_before`'s negative twin, and
   `mutations()` gained an optional leading `trace_id` filter so a stage can
   scope it to its own converge (§9 bullet updated). Case B models the

@@ -49,7 +49,7 @@ HYDR_BATCH=1
 # Per-RPC deadline for the converge RPCs (see ctl).
 SYNCUP_TIMEOUT=60
 
-# Polling budget of `dnagentctl wait-zeroed` (update_01.md U4). With 64 MiB
+# Polling budget of `dnagentctl wait-zeroed` (the §9.4 protocol). With 64 MiB
 # extents on a loop device the kernel maps REQ_OP_WRITE_ZEROES onto fallocate,
 # so a 1-2 extent side finishes in well under a second; the budget only has to
 # cover a stalled retry loop (DnZeroRetryInterval = 5 s).
@@ -129,7 +129,7 @@ assert_not_ok() {
 }
 
 # assert_gated is assert_not_ok's strict twin (ruling R4.35).
-# RES_STATUS_PROVISIONING (update_01.md U4) is a *healthy* status, so it
+# RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok: every "this must not be built" check would
 # silently start accepting a side that never provisioned. Where the expectation
 # is "deliberately not created", name the two statuses that mean it — the field
@@ -145,7 +145,7 @@ assert_gated() {
 }
 
 # assert_provisioning_or_ok accepts the two statuses a side may legally hold at
-# provisioned = false (update_01.md U4's converge matrix rows 2 and 3):
+# provisioned = false (the §9.4 converge matrix rows 2 and 3):
 # PROVISIONING while the background goroutine still has extents to zero, and OK
 # once every bit is set. Zeroing 64-128 MiB on a loop device is a `fallocate`,
 # so which of the two a phase-1 reply carries is a genuine race — do not pick
@@ -159,7 +159,7 @@ assert_provisioning_or_ok() {
 	esac
 }
 
-# assert_provisioning is the exact form, for the rows update_01.md pins to
+# assert_provisioning is the exact form, for the rows the matrix pins to
 # PROVISIONING with no race: the resources a deferred side deliberately does
 # not create.
 assert_provisioning() {
@@ -463,7 +463,7 @@ read_probe() {
 allowed_host_cnt() { ls "$NVMET/subsystems/$1/allowed_hosts" 2>/dev/null | wc -l; }
 
 # subsys_present <nqn> — yes/no, so a "this export must NOT exist" assertion
-# (the dst_provisioned = false equivalence proof of update_01.md U4) does not
+# (the dst_provisioned = false equivalence proof, §11.2) does not
 # have to parse `residue`.
 subsys_present() {
 	if [ -d "$NVMET/subsystems/$1" ]; then echo yes; else echo no; fi
@@ -494,7 +494,7 @@ residue() {
 # export_dms <sp16> <side16> — the per-CN *export stack* one side currently
 # has on this node: the dm-error (kind 0, DnErrorName) and the dm-linear
 # (kind 1, DnLinearName), which are the only two dm kinds that exist per CN.
-# It is the kernel-side half of the update_01.md U4 gate — nothing is exported
+# It is the kernel-side half of the §9.4 provisioning gate — nothing is exported
 # before the side is fully zeroed — so it deliberately does NOT match kind 4
 # (DnSideName): the side device is exactly what phase (a) is supposed to
 # build, and `residue` would report it. See common/name_fmt.go:11-15 for the
@@ -519,7 +519,7 @@ fenced_linears() {
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-1-$1-.*:.-s" || true
 }
 
-# clone_table <clone dm name> — the live dm-clone table, so U1's feature pair
+# clone_table <clone dm name> — the live dm-clone table, so the mandatory feature pair
 # can be asserted against a real kernel and not only in the unit tests.
 clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 
@@ -886,7 +886,7 @@ setup() {
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
-		# The §4 preflight item of update_01.md U4, deferred to here because
+		# The §4 fast-Write-Zeroes preflight item, deferred to here because
 		# the device only exists now (preflight_vms runs before setup). The
 		# §9.4 zeroing assumes fast Write Zeroes; a loop device maps
 		# REQ_OP_WRITE_ZEROES onto fallocate, so a 0 here means the kernel
@@ -1011,7 +1011,7 @@ sync_side_ext_cnt() { # syncup-side flags…
 }
 
 # sync_side_2phase performs the two-phase side provisioning the sp-worker
-# performs in production (update_01.md U4). Phase 1 syncs the side with
+# performs in production (§9.4). Phase 1 syncs the side with
 # --provisioned=false: allocate the extent runs, build DnSideName, start the
 # zeroing goroutine — and export nothing. wait_zeroed then blocks until every
 # extent is zeroed, and phase 2 re-sends the identical request at a fresh
@@ -1348,7 +1348,7 @@ migr_prep_data() { # m
 # calls provably identical apart from it.
 #
 # The destination has already been provisioned by migr_provision_dst, so every
-# call here carries --provisioned=true (update_01.md U4): re-sending false
+# call here carries --provisioned=true: re-sending false
 # would retract the export stacks a later stage relies on.
 migr_declare_dst() { # m revision sp_level
 	local m=$1 rev=$2 level=$3 out
@@ -1391,8 +1391,8 @@ migr_declare_dst() { # m revision sp_level
 			"migr $m dst target"
 		assert_ok "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m dst clone"
-		# U1: every dnv dm-clone carries no_discard_passdown, without
-		# exception. The dn migration clone is the call site U1 fixed, and
+		# DN13 step 4: every dnv dm-clone carries no_discard_passdown, without
+		# exception. The dn migration clone is the call site the rule fixed, and
 		# without the feature the §11.4 "mark this region hydrated"
 		# blkdiscard would also reach the destination side device and destroy
 		# an acknowledged write.
@@ -1420,7 +1420,7 @@ migr_declare_dst() { # m revision sp_level
 	fi
 }
 
-# migr_provision_dst is the dst half of update_01.md U4's migration rule: the
+# migr_provision_dst is the dst half of the §11.2 migration provisioning rule: the
 # destination side provisions FIRST, under the ordinary §9.4 protocol — the
 # dm-linear and the zeroing goroutine only, no per-CN stacks, no connect and no
 # dm-clone. The request is byte-for-byte migr_declare_dst's gated one except
@@ -1473,7 +1473,7 @@ migr_connect_dst() { # m
 	assert_eq "$state" inaccessible "migr $m dst path before cutover"
 }
 
-# migr_gate_src is the dst_provisioned = false half of update_01.md U4's
+# migr_gate_src is the dst_provisioned = false half of the §11.2
 # migration rule, and it runs before the cutover: the request is byte-for-byte
 # migr_cutover_src's except --dst-provisioned=false, which the spec declares
 # **exactly equivalent** to migr_src_conf being absent. The source keeps
@@ -1689,7 +1689,7 @@ run_migration_cases() {
 		PAT_SHA_HEAD[m]=$(sha_range "${MCNVM[$m]}" "$WORK/pattern-$m.bin" 64)
 	done
 
-	stage stage1prov "the destinations provision first (U4): zero, then gate"
+	stage stage1prov "the destinations provision first (§9.4): zero, then gate"
 	for m in 1 2; do
 		diag_add_side "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
 	done
@@ -1940,8 +1940,8 @@ case_migr_bitmap() {
 		got=$(sha_range "$vm" "$dev" 64)
 		assert_eq "$got" "${PAT_SHA_HEAD[$m]}" "migr $m first 64 MiB"
 		# Layer 1b: the skipped half reads zero even though the source holds
-		# random data there — the agent skipped it, it did not copy it. Since
-		# U4 those zeros are *guaranteed* by the destination's §9.4
+		# random data there — the agent skipped it, it did not copy it.
+		# Those zeros are *guaranteed* by the destination's §9.4
 		# `blkdiscard --zeroout` provisioning rather than hoped for from
 		# discard-reads-zeros, which was never a hardware guarantee ([D15]).
 		sshv "$vm" "dd if=$dev of=$WORK/tail-$m.bin bs=1M skip=64 count=64 status=none"
@@ -2119,7 +2119,7 @@ case_restart() {
 		--bm-cnt 1)
 	assert_ok "$out" ".side_info.side_dev_info.status" "restart re-apply side2"
 	# The post-restart log covers the startup reconcile and these re-applies.
-	# Since U4 this is also the §9.4 resume-at-k net: `blkdiscard` is in
+	# This is also the §9.4 resume-at-k net: `blkdiscard` is in
 	# mutations()' verb list, so a reconcile that re-zeroes an already-complete
 	# side — the resume logic reading its bits wrong — fails the case here.
 	for idx in 1 2; do

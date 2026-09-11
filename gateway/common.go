@@ -57,7 +57,7 @@ func errPrecondition(format string, args ...any) error {
 // dividing line: RESOURCE_EXHAUSTED is capacity or quota that could be freed
 // or extended, FAILED_PRECONDITION the object's own state forbidding the
 // operation — which is why the meta ladder cap left this list for
-// errPrecondition (update_05.md U4).
+// errPrecondition.
 func errExhausted(format string, args ...any) error {
 	return status.Errorf(codes.ResourceExhausted, format, args...)
 }

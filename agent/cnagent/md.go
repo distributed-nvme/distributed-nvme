@@ -177,7 +177,7 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // members (§8.12) — they stay connected, wrapped and probed.
 //
 // A provisioning-deferred group never gets here: the build phase reports it
-// PROVISIONING and skips it (U4). The leg-count check below is kept explicit
+// PROVISIONING and skips it ([D15]). The leg-count check below is kept explicit
 // all the same, so gp.legs[0] can never be indexed on an empty member list
 // whatever a future caller does.
 func (s *CnAgentServer) ensureGroup(
@@ -246,7 +246,7 @@ func (s *CnAgentServer) assembleGroup(
 		// probed. A side is never exported before the §9.4 whole-side zeroing
 		// has written zeros over all of it and its `provisioned` gate has
 		// opened ([D15]), the effective desired state defers any group whose
-		// legs are still provisioning (U4), and ids are never reused — so a
+		// legs are still provisioning ([D15]), and ids are never reused — so a
 		// superblock-free leg can only be a freshly zeroed side. But that
 		// argument covers the legs actually examined. An unavailable member
 		// may be the one carrying the group's data (its DN rebooting, its
@@ -364,7 +364,7 @@ func (s *CnAgentServer) removeGroup(ctx context.Context, gp *grpPlan) {
 // active array (degraded included) is OK with its state line in details; for
 // RedundNone the dm table decides.
 //
-// Like ensureGroup it is only ever reached for a non-deferred group (U4), and
+// Like ensureGroup it is only ever reached for a non-deferred group ([D15]), and
 // like ensureGroup it states the leg-count invariant rather than trusting the
 // caller with an unguarded gp.legs[0].
 func (s *CnAgentServer) probeGroup(

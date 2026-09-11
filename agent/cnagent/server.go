@@ -25,7 +25,7 @@ type CnAgentServer struct {
 	pb.UnimplementedControllerNodeAgentServer
 
 	oc      common.OsClient
-	probeIO LegProbeIO // CN11 probe IO — deliberately NOT via oc (update_01.md U2)
+	probeIO LegProbeIO // CN11 probe IO — deliberately NOT via oc (osclient.md §4.5.1)
 	nf      *common.NameFmt
 	cmd     *agent.Cmd
 	store   *agent.Store
@@ -97,7 +97,7 @@ type cntlrState struct {
 
 	// pendingSweep marks slices whose pool device THIS incarnation created
 	// but has not yet successfully swept for orphan thin ids (CN14's
-	// activation sweep, update_05.md U3). Keyed by slice_id; in-memory only —
+	// activation sweep). Keyed by slice_id; in-memory only —
 	// a crash in the window leaves a stray for the pool's next rebuild. The
 	// startup Reconcile's Create branch arms it too; running additionally
 	// requires reqFromRpc.
@@ -107,7 +107,7 @@ type cntlrState struct {
 	// the persisted copy, which converge-then-persist (syncupCntlr saves
 	// after convergeCntlr and only logs a failed Save) lets lag the pool's
 	// true contents — the sweep deletes ids absent from td_list, so it only
-	// ever trusts an RPC-delivered one (update_05.md U3).
+	// ever trusts an RPC-delivered one (CN14).
 	reqFromRpc bool
 
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no
@@ -133,7 +133,7 @@ func NewCnAgentServer(
 	return &CnAgentServer{
 		oc: oc,
 		// The probers get the direct-syscall implementation, never a wrapper
-		// over oc (update_01.md U2); tests swap the field after construction,
+		// over oc (osclient.md §4.5.1); tests swap the field after construction,
 		// which is why the constructor's signature is unchanged.
 		probeIO:  directLegProbeIO{},
 		nf:       nf,
@@ -247,7 +247,7 @@ func (s *CnAgentServer) cntlrKeysOf(clusterId, cnId uint64) []string {
 func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 	// reqFromRpc stays false: a state born here may equally well come from
 	// the startup Reconcile's persisted copy, and only syncupCntlr knows
-	// otherwise (update_05.md U3).
+	// otherwise.
 	return &cntlrState{
 		req:          req,
 		tracker:      agent.NewResTracker(),

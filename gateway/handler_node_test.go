@@ -1144,12 +1144,11 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 	}
 }
 
-// TestInspectDiskNodeRepliesTheAppliedRevision pins update_04.md U2: the
-// reply's `applied_revision` is the one the agent's GetDnInfo reply carries —
-// its last applied revision — NOT the DnRev stored in etcd, which is what
-// architecture.md §8.2 and gateway.md §5.2 specify. The fake answers with a
-// value no bump sequence reaches, so a handler that regressed to the stored
-// revision would be unmistakable.
+// TestInspectDiskNodeRepliesTheAppliedRevision pins architecture.md §8.2 and
+// gateway.md §5.2: the reply's `applied_revision` is the one the agent's
+// GetDnInfo reply carries — its last applied revision — NOT the DnRev stored
+// in etcd. The fake answers with a value no bump sequence reaches, so a
+// handler that regressed to the stored revision would be unmistakable.
 func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1195,7 +1194,7 @@ func TestInspectDiskNodeRepliesTheAppliedRevision(t *testing.T) {
 	}
 
 	// A bumped rev key must not move the reply: the store is not the source
-	// (U2), the agent's reply is.
+	// (§8.2), the agent's reply is.
 	mustPut(t, newTestClient(t), model.DnRevKey(0, cid, 1), &pb.DnRev{
 		AddrPort: addr,
 		Revision: 5,
@@ -1595,9 +1594,10 @@ func TestDeleteControllerNodeReleasesTheShard(t *testing.T) {
 	}
 }
 
-// TestInspectControllerNodeRepliesTheAppliedRevision is update_04.md U3 on
-// the CN side: the reply's `applied_revision` is the one the agent's
-// GetCnInfo reply carries, never the CnRev the store holds.
+// TestInspectControllerNodeRepliesTheAppliedRevision is
+// TestInspectDiskNodeRepliesTheAppliedRevision on the CN side
+// (architecture.md §8.3): the reply's `applied_revision` is the one the
+// agent's GetCnInfo reply carries, never the CnRev the store holds.
 func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -1643,7 +1643,7 @@ func TestInspectControllerNodeRepliesTheAppliedRevision(t *testing.T) {
 	}
 
 	// A bumped rev key must not move the reply: the store is not the source
-	// (U3), the agent's reply is.
+	// (§8.3), the agent's reply is.
 	mustPut(t, newTestClient(t), model.CnRevKey(0, cid, 1), &pb.CnRev{
 		AddrPort: addr,
 		Revision: 5,

@@ -50,7 +50,7 @@ reader — is **not** promoted into `agent`: by the same
 split rule, a wrapper with a single role is role code and lives in
 `agent/cnagent/` (`md.go`, `clonemeta.go`, `thinbm.go`, §4.1). There is **no
 LVM anywhere in dnv**: [D14] removed the clone VG, LVM's last user, in favour
-of the §2.1 kind-`b` wrapper linears (`update_01.md` U3). Agents never talk
+of the §2.1 kind-`b` wrapper linears. Agents never talk
 to etcd (`layout.md` §3); acceptance re-checks it. The gRPC server carries
 the **server** interceptors of `grpc.md` §4; unlike the dn role, the cn
 agent's outbound connections are still only `nvme connect` — never gRPC.
@@ -103,7 +103,7 @@ The following enter the existing files `common/constants.go` and
 
 `CnCloneMetaAreaSize` is the rename of the old `DefaultCloneVgSize` (same
 1 GiB); `DefaultCloneVgPrefix`, `DefaultCloneVgExtSize` and the
-`NameFmt.cloneVgPrefix` field they fed are **deleted** (`update_01.md` U3).
+`NameFmt.cloneVgPrefix` field they fed are **deleted** ([D14]).
 
 and in `common/name_fmt.go`, three new dm kinds `9`, `a` and `b` in the CN
 namespace of §4.1/§4.2 (methods on `NameFmt`, formats normative):
@@ -141,8 +141,7 @@ any cross-**component** contract — nothing outside the cn agent ever
 addresses these three devices. For kind `b` the name is more than
 convenience: the kind-`b` **tables are the allocation registry** (CN5, CN18),
 so the prefix+kind filter of `dmsetup ls` must be unambiguous.
-`architecture.md` §4.1 points here for the CN kinds `9`/`a`/`b`
-(`update_01.md` U5).
+`architecture.md` §4.1 points here for the CN kinds `9`/`a`/`b`.
 
 ### 2.2 Leg-probe IO leaves the `OsClient` (osclient.md §4.5.1 amendment)
 
@@ -158,7 +157,7 @@ probes would starve every OS operation on the node — **including the teardown
 `nvme disconnect` that is the documented release mechanism for a wedged
 probe** (CN11, CN21) and the mdadm/dm commands §10.4 self-healing needs. CN1
 kept the probers out of the *lock* hierarchy; this rule completes the
-carve-out for the *semaphore* (`update_01.md` U2).
+carve-out for the *semaphore*.
 
 The CN11 probers therefore do **not** go through the process's
 `LimitedOsClient`. They call the raw block-IO syscalls directly, through two
@@ -212,7 +211,7 @@ set shrinks (post-`FinishMigration`), the cn agent must disconnect only the
 dead side's controller: `nvmehost.go` gains
 `DisconnectDevice(ctx, dev string)` = `nvme disconnect --device {dev}`, with
 the controller device found by the §5 **sysfs walk**, never by
-`nvme list-subsys` (`update_01.md` U5): match
+`nvme list-subsys`: match
 `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` against the leg NQN, then
 for each `nvme{N}` controller entry inside that subsystem directory read
 `/sys/class/nvme/{ctrl}/address` and parse it as comma-separated `key=value`
@@ -458,7 +457,7 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
      namespace to `inaccessible` — which the standby shape already does, so
      `disabled` never needs its own mechanism).
 
-     **Effective desired state (the provisioning gate, `update_01.md` U4).**
+     **Effective desired state (the provisioning gate, [D15]).**
      Before either phase the agent derives an *effective* desired state from
      the raw one, and both converges and probes against it. A resource
      present in the raw desired state but excluded from the effective one
@@ -621,7 +620,7 @@ CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
       sets, cannot serve a promote and reports `RES_STATUS_ERROR`. A leg
       whose `side_list` holds two sides (a migration, CN10) is checked for
       liveness only: its ANA is wrong-by-design for the hydration and the
-      phase is the DN's knowledge, not this CN's (update_05.md U2). Probers
+      phase is the DN's knowledge, not this CN's. Probers
       start when the wrapper converges and are cancelled at teardown; a
       goroutine wedged in D state on a pathless leg is released by the
       teardown's own disconnect (deleting the controller errors its queued
@@ -733,7 +732,7 @@ CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       shorter one remaps live pool data, after which dm-thin either refuses
       the resume and leaves the pool suspended or accepts it and serves the
       wrong device. That shape can only mean the effective state lost a
-      group that is already serving, which the U4 deferral is never allowed
+      group that is already serving, which the provisioning deferral is never allowed
       to produce, so the refusal leaves the live concat untouched for the
       §10.4 reactions or an operator to repair the group.
 
@@ -759,7 +758,7 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
          create, or a message a previous primary already sent.
       3. `created == false`, `ori_id != 0` — **the pre-pass messages, and
          only it**: `create_snap {dev_id} {ori_id}` per pool-ready slice
-         whose snapshot device is absent, inside the U1 quiesce when the
+         whose snapshot device is absent, inside the CN14 quiesce when the
          origin's raid0 is live; then the thin loop's `dmsetup create`.
 
       Both clauses are re-derivable from the request alone, which is why
@@ -777,7 +776,7 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       `dev_id`, which is what an unconditional `create_thin` would produce.
       Standby cntlrs build no thin volumes and are unaffected.
 
-      **Cross-slice point-in-time (update_02.md U1).** The per-slice
+      **Cross-slice point-in-time.** The per-slice
       suspend quiesces one pool's origin only; a striped td
       snapshots atomically only if no host write lands between two slices'
       messages. When any slice still needs this td's `create_snap` and the
@@ -803,7 +802,7 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       `poolReady` whose snapshot thin device is absent; an `Info` error skips
       the slice, because `ensureThin` will fail it with the same error. The
       gate is pool readiness, never the td's `deferred` flag — that flag is
-      plan-global (U4's `anySliceDeferred`), and gating messages on it would
+      plan-global (the deferral's `anySliceDeferred`), and gating messages on it would
       drop a ready slice's `create_snap` whenever some sibling slice were
       still provisioning. There is **no** filter on the origin's own thin
       device: the gateway refuses a snapshot whose origin is not materialized
@@ -866,7 +865,7 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       `SyncupCntlr` after boot runs the sweep instead. A sweep failure is
       logged and retried on later converges until it succeeds once; a stray
       surviving a crash between creation and sweep, or a failed `delete`
-      message, is collected at the pool's next rebuild (update_05.md U3).
+      message, is collected at the pool's next rebuild.
 
       A cntlr teardown (CN21) instead only **deactivates** — it removes the
       devices and sends no `delete` message, because the pool metadata
@@ -885,7 +884,7 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       order (first match wins; `sp_level` per CN19):
       0. the td is provisioning-deferred (CN9, [D15] — a side under it is
          still zeroing) ⇒ table → the td's `CnErrorName` (the ns-dev and
-         the nvmet namespace exist throughout, U4 — this is the "rule 0"
+         the nvmet namespace exist throughout, [D15] — this is the "rule 0"
          the code comments cite);
       1. standby or disabled cntlr ⇒ table → the td's `CnErrorName`;
       2. `sp_level ≥ SP_LEVEL_NO_THINPOOL` ⇒ → `CnErrorName`;
@@ -900,7 +899,7 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
          reads pass, writes error ([D11]).
 
       Rules 3-4 and the `auto_resume` override below combine into one flip
-      worth stating out loud (`update_01.md` U5). An `auto_resume` clone's
+      worth stating out loud. An `auto_resume` clone's
       destination namespace is stored `suspended = true`, which on its own
       would leave it `inaccessible` and its host **queueing**; the override
       makes it serve, so *below* `SP_LEVEL_NO_CLONE` it is already
@@ -927,7 +926,7 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       then ANA per the rule below. This is the third and last deliberate
       suspension in dnv; every teardown path resumes (via reload onto
       dm-error) before it disables or removes anything above (CN21).
-      **Residual ([D12], `update_01.md` U5, `update_02.md` U5)**: a transfer
+      **Residual ([D12])**: a transfer
       origin's ns-dev suspension is bounded only by the transfer's own
       lifetime — **unbounded** in agent terms — and any external scanner that
       touches the suspended device (udev, `blkid`, an operator's `lsblk` or
@@ -953,7 +952,7 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       primary ∧ not disabled ∧ not effectively suspended **∧ its backing
       chain is not provisioning-deferred** (CN9); else
       `AnaGrpIdInaccessible` (single `ana_grpid` writes, SH19). The last
-      conjunct (`update_01.md` U4) is what makes initial provisioning
+      conjunct is what makes initial provisioning
       painless for hosts: while the td's legs are still zeroing, the
       namespace stays `inaccessible` and hosts **queue** on the path instead
       of eating IO errors from an error-backed ns-dev; it flips to
@@ -1172,8 +1171,8 @@ CN21. Used by CN7 (pointer removed), CN2 (orphan file) and CN19's
       the legs** (whole-NQN is fine here), **then remove the leg wrappers**.
       A wedged prober holds an open fd on the wrapper, so removing the
       wrapper first fails EBUSY; the disconnect errors the queued IO, the
-      prober's fd closes, and the removal then succeeds (§2.2, CN11,
-      `update_01.md` U2). Cancel the connect-retry registration too; then the
+      prober's fd closes, and the removal then succeeds (§2.2, CN11).
+      Cancel the connect-retry registration too; then the
       file deletions of SH7.
 
 ### 4.8 `PushCloneBitmap`
@@ -1258,8 +1257,8 @@ CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
       `[start_block, start_block + block_cnt)` (`block_cnt = 0` ⇒ through
       `td.size / slice_cnt / block_size`); reply bit *k* = **1 iff
       unmapped** — thin metadata answers mapped = written and this boundary
-      inverts exactly once (§11.4). **Wire encoding (normative,
-      `update_01.md` U5)**: bits are LSB-first within each byte — bit *k* is
+      inverts exactly once (§11.4). **Wire encoding
+      (normative)**: bits are LSB-first within each byte — bit *k* is
       `bitmap[k/8] & (1 << (k%8))` — the reply is `ceil(bit_cnt / 8)` bytes
       and every trailing pad bit is 0. `agent/bitmap.go` states that
       convention for the whole agent (SH22); the reply itself is built by
@@ -1305,7 +1304,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `CnInfo.port_info` | `"{NvmetPortId}"` | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
 | `CnInfo.tmpfs_info` | the `CnTmpfsPath` | `findmnt` shows a tmpfs mounted there |
 | `CnInfo.tmp_file_info` | the `CnTmpFilePath` | `stat` size = `CnCloneMetaAreaSize` |
-| `CnInfo.loop_dev_info` | the `CnTmpFilePath` | `losetup --associated` lists exactly one loop device — this row covers the whole arena; `CnInfo.clone_vg_info` (field 5) is deleted with the clone VG (`reserved 5;`, `update_01.md` U3) and per-clone metadata health lives in `clone_id_to_meta` |
+| `CnInfo.loop_dev_info` | the `CnTmpFilePath` | `losetup --associated` lists exactly one loop device — this row covers the whole arena; `CnInfo.clone_vg_info` (field 5) is deleted with the clone VG (`reserved 5;`, [D14]) and per-clone metadata health lives in `clone_id_to_meta` |
 | `ss_id_to_subsystem[ss]` | the subsystem NQN | configfs: present, cntlid range, serial/model (trimmed, SH17), allowed-hosts exactly as desired |
 | `ns_id_to_namespace[ns]` | `"{nqn}/{ns_idx}"` | nvmet ns enabled, `device_path`, `uuid`/`nguid` (compared through `agent.SameNsId` — configfs reads both back dash-separated and lower-cased whichever form was written, so a byte-wise compare fails a healthy namespace forever; `dnagent.md` SH17), `ana_grpid` as CN16 desires — `3` while the backing chain is provisioning-deferred (CN9), and the row itself is `RES_STATUS_PROVISIONING` then |
 | `ns_id_to_dm_linear[ns]` | `CnNsDevName` | `dmsetup table` matches the CN16 backing (flakey line included); an effectively suspended ns-dev is expected suspended (`dmsetup info`) and reports `RES_STATUS_OK`, `details = "suspended"`; a provisioning-deferred one reports `RES_STATUS_PROVISIONING` over its permanent dm-error |
@@ -1314,9 +1313,9 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
 | `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: `mdadm --detail` — active (degraded included) ⇒ OK with the state/rebuild line in `details`; RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
-| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11, update_05.md U2) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
+| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
-| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here (`update_01.md` U5) |
+| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here |
 | `clone_id_to_dm_clone[c]` | `CnCloneFinalName` | `dmsetup status`; `details` carries the raw status line (§9.5 — hydration progress; `DeleteClone`'s force check reads it). `RES_STATUS_ERROR` `"metadata wrapper missing"` when the arena could not supply the slot (CN18 step 2) |
 | `clone_id_to_meta[c]` | `CnCloneMetaDmName` | `dmsetup table` of the kind-`b` wrapper: present, length = the CN18-computed unit count × `CnCloneMetaUnit` / 512 sectors, and the table's backing device equals the **currently probed** loop path; any mismatch (e.g. a tmpfs remounted under a live agent) ⇒ `RES_STATUS_ERROR`, whose repair path is the §11.5 clone rebuild (CN18 step 2) |
 
@@ -1331,11 +1330,12 @@ CN29. Error capture (§9.1): a failed command marks that resource
 ## 5. Amendments applied to companion documents
 
 Recorded for traceability; the edits are already applied. Bullets tagged
-`update_01.md` U*n* apply the September 2026 design-review decisions of
-`doc/update_01.md`; they supersede anything earlier in this list that
+"design-review U*n*" apply the September 2026 design-review decisions
+(items U1–U5 of that pass's since-retired ledger; a second pass added
+U1–U7); they supersede anything earlier in this list that
 contradicts them.
 
-* `osclient.md` §4.5.1 (`update_01.md` U2) — `ReadBlockDirect` is **removed**
+* `osclient.md` §4.5.1 (design-review U2) — `ReadBlockDirect` is **removed**
   from the `OsClient` interface, `LimitedOsClient` and `FakeOsClient`; the raw
   helpers are exported instead as `common.WriteBlockAt` /
   `common.ReadBlockDirectAt`, and the recorded carve-out says probe IO is the
@@ -1351,7 +1351,7 @@ contradicts them.
   NQN, so the cn agent must be able to disconnect a single dead path
   (CN10) without killing the live one. The controller device is located by
   the §5 sysfs walk (`/sys/class/nvme/{ctrl}/address` parsed as `key=value`
-  pairs), never by `nvme list-subsys` (`update_01.md` U5).
+  pairs), never by `nvme list-subsys` (design-review U5).
 * `dnagent.md` §3 CM2 — the flag table gains the cn-only `--capacity` row
   (§3 above); `GetCnSize` replies it verbatim.
 * `architecture.md` §3.6 + §9.5 — the [D6] health-**block** probe is run by
@@ -1368,7 +1368,7 @@ contradicts them.
   same section documents as non-binding for host IO.
 * `layout.md` — `doc/` tree lists this document; the `agent/cnagent/`
   recommended file split updated to §4.1 (adds `plan.go`, `lvm.go`,
-  `thinbm.go`). `lvm.go` is the pre-`update_01.md` name: the U3 bullet below
+  `thinbm.go`). `lvm.go` is the pre-design-review name: the design-review U3 bullet below
   renames it `clonemeta.go` when LVM leaves the CN, and §4.1 lists the
   current split.
 * `cnagent.md` CN12/CN28 — leg availability and the standby leg report are
@@ -1394,7 +1394,7 @@ contradicts them.
   destroy any host write that landed on a hydrated region while `auto_resume`
   let the namespace serve. `agent.CloneTable` gained the corresponding
   parameter and **both** call sites now pass `noDiscardPassdown = true`
-  (`update_01.md` U1): `2 no_hydration no_discard_passdown` is mandatory on
+  (design-review U1): `2 no_hydration no_discard_passdown` is mandatory on
   **every** dnv dm-clone — the cn clone and the dn migration clone alike —
   because `blkdiscard` must stay a metadata-only "mark this region hydrated"
   primitive on both (§9.6, §11.4, §11.5, [D7]). The dn hazard is *after* the
@@ -1405,7 +1405,7 @@ contradicts them.
   *r* — with passdown that discard would reach the dst side device and destroy
   an acknowledged write. This replaces the earlier "the dn migration keeps the
   default it was validated with".
-* `common/constants.go` / `common/name_fmt.go` (`update_01.md` U3) — the §2.1
+* `common/constants.go` / `common/name_fmt.go` (design-review U3) — the §2.1
   additions (`DefaultCnTmpfsSize`, `CnLegProbe*`, `LegHealth*`,
   `CnConnectRetryInterval`, `CnCloneMetaAreaSize`, `CnCloneMetaUnit`;
   `CnLegName`, `CnGrpName`, `CnCloneMetaDmName`, `CnCloneMetaDmPrefix`) land
@@ -1414,7 +1414,7 @@ contradicts them.
   `DefaultCloneVgPrefix`, `DefaultCloneVgExtSize`, `CnCloneVgName`,
   `CnCloneMetaName` and `CnCloneMetaPath` are deleted.
 * `cnagent.md` §2.2 / §4.1 / §4.2 / CN1 / CN11 / CN21 / §6 test 15 / §7 items
-  5 and 7 (`update_01.md` U2) — the CN11 leg probers leave the `OsClient`:
+  5 and 7 (design-review U2) — the CN11 leg probers leave the `OsClient`:
   direct syscalls through the fakeable `LegProbeIO`, self-logged as
   `probe write block` / `probe read block direct`, no semaphore slot. A probe
   of a pathless leg queues IO forever by design, and holding one of
@@ -1429,7 +1429,7 @@ contradicts them.
   the semaphore half as structural and single flight as a property of
   `legProbeLoop`'s inline round, rather than implying an assertion for each.
 * `cnagent.md` §1 / §2.1 / §4.1 / §4.2 / CN2 / CN5 / CN18 / CN19 / CN21 /
-  CN28 / §6 tests 1, 3 and 9 / §7 items 3 and 6 (`update_01.md` U3) — **LVM
+  CN28 / §6 tests 1, 3 and 9 / §7 items 3 and 6 (design-review U3) — **LVM
   leaves the CN.** The clone VG is replaced by a slot allocator over the
   single loop device: dm kind `b` (`CnCloneMetaDmName` →
   `dnv-{cluster}-{cn}-b-{sp}-{clone}`), `CnCloneMetaUnit`-sized contiguous
@@ -1446,7 +1446,7 @@ contradicts them.
   every cntlr on it (fewer for large tds at small block sizes), a bound
   `MaxCloneCntPerSp` = 64 neither expresses nor protects.
 * `cnagent.md` CN9 / CN10 / CN11 / CN12 / CN13 / CN16 / CN17 / CN18 / CN19 /
-  CN27 / CN28 / CN29 / §6 / §7 (`update_01.md` U4) — **side provisioning.**
+  CN27 / CN28 / CN29 / §6 / §7 (design-review U4) — **side provisioning.**
   Every side is fully zeroed (`blkdiscard --zeroout`, per-extent
   `zeroed_bits`) before its first export, gated by `Side.provisioned`
   (`dnagent.md` DN9). The cn therefore converges and probes an **effective**
@@ -1466,7 +1466,7 @@ contradicts them.
   raw desired state and has no effective group left, because an empty concat
   is an error (`"concat has no segments"`) and not a shape.
 * `cnagent.md` §2.3 / §4.2 / CN16 / CN19 / CN26 / CN27 / CN28
-  (`update_01.md` U5) — consistency fixes: `DisconnectDevice` and the
+  (design-review U5) — consistency fixes: `DisconnectDevice` and the
   `clone_id_to_target` probe are the sysfs walk, not `nvme list-subsys -o
   json` (which is what the code always did); the LSB-first, zero-padded wire
   bitmap encoding is pinned in CN26/CN27; the §4.2 struct sketch lists `oc`,
@@ -1477,7 +1477,7 @@ contradicts them.
   residual (an unbounded transfer-origin suspension blocks external scanners
   in D state, while the agent's own exposure ended with [D14]) is recorded —
   note only, no mechanism change.
-* `cnagent.md` CN14 + CN16 (`update_02.md` U1/U5) — CN14 gains the
+* `cnagent.md` CN14 + CN16 (second-pass U1/U5) — CN14 gains the
   cross-slice point-in-time rule for `create_snap`: quiesce the origin td's
   raid0 around the whole per-slice message sequence (implemented; §6 test
   item 19 carries the assertions);
@@ -1515,7 +1515,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    one-time `ana_state` writes) and the `WriteProto` to `LocalCnPath`
    afterwards (SH5). No `io.max` write and no cgroup path appears anywhere
    in the recorded calls (CN6), and **no LVM command appears at all** — the
-   arena needs none (U3).
+   arena needs none (CN18).
 2. **Revision gate**: lower ⇒ `ReplyCodeStaleRevision` and zero mutating
    calls; equal ⇒ full idempotent pass; higher ⇒ apply + persist. Same for
    `SyncupCntlr`; `SyncupCntlr` for a pointer `SyncupCn` has not introduced
@@ -1601,7 +1601,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     stall reporting after `CnLegProbeStallSeconds`, `Write` offset =
     `meta_blocks × block_size − 4096`, `ReadDirect` read-back of the same
     range, primary-only (a standby converge starts no prober), and — the
-    central U2 property — a probe scripted to **block indefinitely** does not
+    central carve-out property — a probe scripted to **block indefinitely** does not
     delay a concurrent converge: with a prober parked inside its `Write`
     half, a full `SyncupCntlr` on the same server completes inside a deadline
     and is seen driving the node (its `dmsetup` calls are recorded) while
@@ -1635,7 +1635,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     (the constant `"provisioning"` details keeps `proto.Equal` suppressing
     repeats, SH26) and mutates nothing; a resource that is both
     level-suppressed and deferred reports `MISSING`/`"sp_level"`.
-19. **Snapshot point-in-time** (CN14, `update_02.md` U1, amended by
+19. **Snapshot point-in-time** (CN14, amended by
     `ThinDeviceCreated.md` U4): on a primary with 2+ slices, a live origin td
     and an absent snapshot td, a converge records
     `dmsetup suspend {origin CnRaid0Name}` strictly before the first
@@ -1688,7 +1688,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     holds records the `create_snap` unquiesced, the `dmsetup create` behind
     it fails, the row reads `ERROR`, and the next converge sends the message
     again — the td is still `created = false`.
-24. **A standby leg's `ana_state`** (CN11/CN28, `update_05.md` U2,
+24. **A standby leg's `ana_state`** (CN11/CN28,
     `TestTransportHealthAnaState`): a table over `transportHealth`. On a leg
     with **one** desired side, a live controller reading `optimized` or
     `non-optimized` ⇒ `RES_STATUS_OK` (`non-optimized` is the designed
@@ -1699,12 +1699,12 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     ANA is not judged there at all. The pre-existing rows are unchanged — a
     non-`live` controller and a missing controller are `ERROR` whatever the
     ana_state — and no `OK` row ever calls a path unpromotable.
-25. **The thin-id activation sweep** (CN14/CN25, `update_05.md` U3;
+25. **The thin-id activation sweep** (CN14/CN25;
     `agent/cnagent/sweep_test.go`, scripted `thin_dump` through
     `RunCommandFn` exactly as test 14 does, pool messages asserted by
     `callsMatching` counts). Six cases:
     * `TestRetireSkipsThinDeleteWithoutPool` — the long-missing CN14 pin and
-      the leak U3 heals: a primary converge holding td X, then one converge
+      the leak the sweep heals: a primary converge holding td X, then one converge
       that both demotes to standby and drops X ⇒ **zero** `delete` messages
       and the pool devices removed, with X's dev_id left charged against the
       pool metadata on the legs.
@@ -1734,7 +1734,6 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
       `thin_dump`, exactly one `delete S`, and **no** `delete` for B — the
       id the stale persisted copy had forgotten.
 26. **A removed namespace is parked before its nvmet objects** (CN9/CN21,
-    `update_06.md` U4,
     `TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval`): a primary
     serving one `suspended = true` namespace, then a converge that drops it
     from `ns_list`. The ns-dev's reload onto the td's `CnErrorName` and the
@@ -1781,7 +1780,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    entirely ([D13]/[D14]), superseding the old cn-only exemption and
    dnagent.md acceptance 6. And `grep -rn "zeroout" agent/cnagent/` finds
    nothing: the clone-metadata arena uses a plain `blkdiscard` hole punch,
-   while `--zeroout` belongs only to the dn side-provisioning path (U3/U4).
+   while `--zeroout` belongs only to the dn side-provisioning path (CN18/§9.4).
 7. A manual run of the §13 example starts `dnv-agent cn`, serves
    `GetCnSize`, and a `SyncupCn`/`SyncupCntlr`/`CheckCntlr` round-trip
    shows one trace id across its `grpc server request`, `os command` and
@@ -1791,15 +1790,14 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    `os command` framing, because the prober issues its IO directly (§2.2).
 8. A `SyncupCntlr` whose legs are all `provisioned = false` issues zero
    `nvme connect`, `mdadm` and `dmsetup create` calls, and every affected
-   `ResInfo` is `RES_STATUS_PROVISIONING` — never `RES_STATUS_ERROR` (U4).
-9. §5 cites `update_01.md` for every change this update made
-   (`update_01.md` §7 item 7).
+   `ResInfo` is `RES_STATUS_PROVISIONING` — never `RES_STATUS_ERROR`.
+9. §5 records every change the design-review pass made.
 
-### Integration-run fixes (first on-hardware run of the U1-U5 tree)
+### Integration-run fixes (first on-hardware run of the amended tree)
 
 Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
 against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
-execution of either suite since `update_01.md` was applied. All five were
+execution of either suite since the design-review pass was applied. All five were
 real agent defects, not harness problems; every one is now covered by a unit
 test that fails without the fix.
 

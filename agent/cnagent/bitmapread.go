@@ -128,7 +128,7 @@ func (s *CnAgentServer) GetLegBm(
 	}
 	gp := lp.grp
 	if lp.provisioning || !gp.effective() {
-		// U4: a group that is not in the *effective* list is not in the
+		// [D15]: a group that is not in the *effective* list is not in the
 		// pool-data concat at all, so it has no span to report — and that is
 		// not only the deferred group itself but every group after it in the
 		// list, because deferral is a prefix cut (effectiveGrps). Saying so

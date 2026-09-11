@@ -29,7 +29,7 @@ const (
 	// testExtCnt is deliberately larger than common.DnZeroBatchExtCnt (10), so
 	// every side in this package provisions in three §9.4 batches — 10, 10, 5.
 	// A fixture equal to the batch size would zero the whole side in one
-	// command and hide every multi-batch offset bug (update_01.md U4).
+	// command and hide every multi-batch offset bug.
 	testExtCnt    = uint64(25)
 	testBlockSize = uint64(1 << 20)
 	testMigrId    = uint64(0x21)
@@ -108,8 +108,8 @@ func dnReq(revision uint64, sideIds ...uint64) *pb.SyncupDnRequest {
 }
 
 // sideReq is a *steady-state* request: side_conf.provisioned is true, which is
-// what the sp-worker sets once the side has finished zeroing (update_01.md
-// U4's flip rule). Almost every test wants that shape, so a side is brought
+// what the sp-worker sets once the side has finished zeroing (the §10.3
+// flip rule). Almost every test wants that shape, so a side is brought
 // there through syncupSideTwoPhase / syncupBoth rather than by hand.
 func sideReq(
 	revision uint64,
@@ -134,7 +134,7 @@ func sideReq(
 	}
 }
 
-// unprovisionedSideReq is phase 1 of the U4 flow: a freshly created side whose
+// unprovisionedSideReq is phase 1 of the [D15] flow: a freshly created side whose
 // flag the CP has not flipped yet. The agent allocates its extents, builds the
 // aggregate dm-linear and zeroes it — and exports nothing.
 func unprovisionedSideReq(
@@ -500,7 +500,7 @@ func TestSideProvisioningProtocol(t *testing.T) {
 		t.Fatalf("SyncupDn: %v", err)
 	}
 	node.Reset()
-	// Phase 1 of the U4 flow: the CP has not flipped the flag yet.
+	// Phase 1 of the [D15] flow: the CP has not flipped the flag yet.
 	reply, err := srv.SyncupSide(ctx, unprovisionedSideReq(
 		1, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
 	if err != nil {
@@ -612,7 +612,7 @@ func zerooutBatches(sideDevPath string, extCnt uint64) []string {
 	return out
 }
 
-// The converge matrix of update_01.md U4, one sub-test per row.
+// The §9.4 converge matrix, one sub-test per row.
 func TestSideProvisioningMatrix(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
@@ -971,7 +971,7 @@ func TestZeroingResumesAfterRestart(t *testing.T) {
 // drained by a bare cancel just as fast as by cancel-and-wait, so a test built
 // on those passes with the `<-done` deleted and with the stop moved after the
 // removal. Here the removal must not appear until the child returns
-// (doc/dnagent.md §6 test 19, update_01.md U4).
+// (doc/dnagent.md §6 test 19).
 func TestZeroingCancelledBeforeDeviceRemoval(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1252,7 +1252,7 @@ func clearRecord(t *testing.T, srv *DnAgentServer, node *fakeNode) {
 // "somebody re-allocated the side behind our back" — and makes the server
 // re-read the disk. It goes through a second, separately verified DiskMeta so
 // it exercises the same API the agent does, and it is the invariant in
-// action: a re-allocated record starts all-not-zeroed (update_01.md U4).
+// action: a re-allocated record starts all-not-zeroed ([D15]).
 func clearZeroed(t *testing.T, srv *DnAgentServer, node *fakeNode) {
 	t.Helper()
 	ctx := context.Background()
@@ -1447,7 +1447,7 @@ func TestDisableLevelKeepsZeroing(t *testing.T) {
 	// The side starts in the steady state, so the teardown below has real
 	// exports and dm-linears to remove; then its record is re-allocated behind
 	// the agent's back, which is what leaves the bits incomplete under a
-	// request that still says provisioned = true (row 5 of the U4 matrix — the
+	// request that still says provisioned = true (row 5 of the §9.4 converge matrix — the
 	// flag is not what keeps the goroutine, the bits are).
 	syncupBoth(t, srv, 1, testSide)
 	clearZeroed(t, srv, node)

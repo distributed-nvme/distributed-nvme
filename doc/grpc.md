@@ -517,7 +517,7 @@ Recorded for traceability; the edits are already applied. Appended rather than
 inserted because §2, §3 and §4 are cited by number from `log.md` and
 `layout.md`.
 
-* `update_01.md` U4 — the §5 `CheckDn` sample's `meta_info.details` gained the
+* Side provisioning ([D15]) — the §5 `CheckDn` sample's `meta_info.details` gained the
   trailing ` provisioning=0` field. `DiskMeta.Describe()` now renders
   `seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d`,
   the appended count being the sides whose §9.4 zeroing has not finished

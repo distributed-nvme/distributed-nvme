@@ -265,8 +265,8 @@ func (s *DnAgentServer) ensureDmClone(
 		return false, err
 	}
 	conf := plan.migrDst.GetDmCloneConf()
-	// no_discard_passdown is mandatory on every dnv dm-clone (update_01.md
-	// U1): `blkdiscard` on a dm-clone is this design's metadata-only "mark
+	// no_discard_passdown is mandatory on every dnv dm-clone (DN13 step
+	// 4): `blkdiscard` on a dm-clone is this design's metadata-only "mark
 	// this region hydrated" primitive (§9.6, §11.4, §11.5), and dm-clone
 	// turns passdown on by default whenever the destination's discard
 	// granularity is no larger than a region — which a dm-linear over a raw

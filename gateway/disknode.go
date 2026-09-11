@@ -410,10 +410,10 @@ func (s *Server) UpdateDiskNodeDisabled(
 // agent currently sees it, for diagnostics.
 //
 // The reply is the agent's, whole: `applied_revision` and `dn_info` both
-// come from the GetDnInfo reply (architecture.md §8.2; update_04.md U2
-// reversed issue_03.md I1's interim stored-revision reading), so the pair
-// is one coherent agent snapshot and a caller can diff `applied_revision`
-// against the desired-state token GetDiskNode hands out.
+// come from the GetDnInfo reply (architecture.md §8.2, deliberately not the
+// stored rev key), so the pair is one coherent agent snapshot and a caller
+// can diff `applied_revision` against the desired-state token GetDiskNode
+// hands out.
 //
 // The Snapshot resolves the cluster itself, so the agent request's cluster_id
 // comes from it rather than from a second plain pre-read: the read is already

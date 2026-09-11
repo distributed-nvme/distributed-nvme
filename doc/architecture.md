@@ -1148,8 +1148,8 @@ no agent; sides already hosted by the node keep running. Reply `dn_id`.
 **InspectDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the agent gRPC fails.
 Action: STM-read `DnConf` for the ids (they address the agent request and the log
 line); then, outside the STM, call `DiskNodeAgent.GetDnInfo` and return its
-`revision` + `DnInfo` (`InspectDiskNodeReply.applied_revision` — renamed from
-`revision`, update_04.md U1 — = the agent's last applied revision, so callers can
+`revision` + `DnInfo` (`InspectDiskNodeReply.applied_revision` = the agent's
+last applied revision, so callers can
 diff it against `GetDiskNode`'s desired `DnRev.revision`).
 
 ### 8.3 Controller nodes
@@ -1297,7 +1297,7 @@ size, and the grow completes by itself once the leg clears (§9.4, §10.4).
 The "one grow per pool at a time" pending rule (§10.4; dnv-worker.md AR6) binds only
 the sp-worker's internal auto-grow, which judges "pending" by the primary's reported
 usage; a user-driven GrowSlice is explicit operator intent, holds no such report and
-is **not** so gated (update_04.md U7 pins it) — stacked grows are absorbed by the
+is **not** so gated (gateway.md §5.4 names the argument) — stacked grows are absorbed by the
 deferred growth above, though every stacked group's DN extents are charged
 immediately. Reply `slice_id`, `grp_id`.
 
@@ -1361,7 +1361,7 @@ Action: STM: `td_id` from `next_id`, `dev_id` from `next_dev_id++`,
 `dmsetup create` once the flag is set) + the raid0/error of §3.3 (namespace
 devices are per `Namespace` and appear with §8.8).
 
-**Snapshot point-in-time (update_02.md U1).** A td is striped across every
+**Snapshot point-in-time.** A td is striped across every
 slice, so a snapshot is crash-consistent only if all `slice_cnt` `create_snap`
 messages capture one instant. The primary therefore quiesces the **origin
 td's raid0** (`CnRaid0Name`) around the whole per-slice sequence: suspend the
@@ -1553,7 +1553,7 @@ resume the device and move the td's namespace(s) to ANA `optimized` — i.e. ste
 §11.3's destination list. After a CN reboot the primary rebuilds the clone by the
 §11.5 recovery procedure before letting any IO through.
 
-Admission note (update_02.md U4): the checks above gate `MaxCloneCntPerSp`
+Admission note: the checks above gate `MaxCloneCntPerSp`
 only. The binding ceiling is the primary CN's clone-metadata arena — 256
 `CnCloneMetaUnit` units per **CN**, shared by every clone of every cntlr on
 that CN (≥ 2 units per clone ⇒ at most 128 concurrent clones per CN, far
@@ -1677,7 +1677,7 @@ provisions (§9.4) before any migration machinery starts; until the sp-worker fl
 `migr_src_conf.dst_provisioned = false` keeps the src side serving untouched (§11.2).
 Data-plane choreography: §11.2.
 
-Admission note (update_02.md U4): the DN candidate scan covers **extents**
+Admission note: the DN candidate scan covers **extents**
 only. The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` = 48
 `DnCloneMetaUnit` slots per **DN**, shared by every destination role the node
 hosts across every SP — is not part of admission: each migration costs
@@ -3081,7 +3081,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   `BLK_OPEN_READ | BLK_OPEN_WRITE`, so an export's top device fails
   `echo 1 > namespaces/1/enable` with `EACCES` when it is read-only; and a read-only
   flag below the top is bypassed entirely by device-mapper remapping — both measured
-  on the lab kernel (`dnagent_issue_00.md` issue 1). Nor can the DN fail writes as a
+  on the lab kernel. Nor can the DN fail writes as a
   substitute: md superblock/bitmap writes, resync, failover assembly and the §3.6
   health-check probe must keep flowing at every read-only level. Consequently the DN
   has **no** read-only behavior at all — every level below `SP_LEVEL_NO_MIGRATION`
@@ -3105,8 +3105,8 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   load-bearing rather than advisory. A suspended dm target queues bios forever with no
   timeout and no error path, so (a) any block-device scanner that touches it blocks in
   uninterruptible D state — `exit_aio` then makes that task unkillable and the node
-  needs a reboot — and (b) `dmsetup remove` on it does not succeed
-  (`dnagent_issue_00.md` issue 2). The agent therefore: never suspends anywhere except
+  needs a reboot — and (b) `dmsetup remove` on it does not succeed —
+  both measured on the lab kernel. The agent therefore: never suspends anywhere except
   this one window; never lets a device outlive it, including across an agent restart
   (a linear found suspended with no recorded start is retired at once rather than
   starting a second window); and resumes a fenced linear before any teardown step runs
@@ -3121,7 +3121,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   `SuspendSeconds` floor or ceiling — so external scanners that touch it still block in
   D state for as long as the transfer runs. The agents' own exposure to that ended with
   [D14] (no more LVM scans on the CN either; `cnagent.md` CN16). The operational blast
-  radius deserves stating plainly (update_02.md U5): a transfer hydrating a large td
+  radius deserves stating plainly: a transfer hydrating a large td
   runs for hours, and for that whole time any block-device walk on the CN — a udev
   worker, `blkid`, `lsblk`, a monitoring or backup agent — that opens the suspended
   ns-dev wedges unkillably until the transfer ends. Operators SHOULD keep scanners off
@@ -3133,7 +3133,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 * **[D13] The DN carries a self-describing dnv disk format; LVM is gone from the dn
   agent.** LVM left for three measured reasons. (a) Its label scan reads every block
   device on the node, so any dnv device in a bad state takes the whole node's LVM down
-  with it — `dnagent_issue_00.md` issue 2 is one instance of that class, and [D12]
+  with it — the suspended-device wedge above is one instance of that class, and [D12]
   removes only that instance. (b) The old layout needed `devices/scan_lvs = 1` in
   `/etc/lvm/lvm.conf` because the per-DN migration VG sat on a *logical volume*
   (`migr-pv`); depending on host LVM configuration for correctness is a deployment
@@ -3260,45 +3260,45 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 ## Appendix C — Amendments
 
 Recorded for traceability; the edits are already applied. Companion documents record
-their own edits to this file in their §5 sections. The `update_01.md`–`update_03.md`
-ledgers themselves have been retired from `doc/` (fully applied); their U-item ids
-stay citable — resolve them through the entries below and the companion documents'
-own amendment sections.
+their own edits to this file in their §5 sections. The pre-implementation
+amendment ledgers themselves have been retired from `doc/` (fully applied);
+the entries below and the companion documents'
+own amendment sections are the surviving record.
 
-* `update_01.md` U1 — Appendix A's dm-clone pattern spells out
+* dm-clone features — Appendix A's dm-clone pattern spells out
   `2 no_hydration no_discard_passdown`, and [D7] records that both features are
   mandatory on **every** dnv dm-clone (cn clone and dn migration alike) because
   `blkdiscard` must stay metadata-only. §9.1's "re-`blkdiscard` is a no-op" sentence now
   names the feature it depends on.
-* `update_01.md` U3 — LVM leaves the CN. §1, §2, §3 preamble, §3.1, §3.2 step 2, §3.6,
+* [D14] LVM removal — LVM leaves the CN. §1, §2, §3 preamble, §3.1, §3.2 step 2, §3.6,
   §4 preamble, §4.1, §4.2, §4.5 (retitled; `CnCloneVgName`/`CnCloneMetaName`/
   `CnCloneMetaPath` deleted), §5.2, §8.9, §9.3, §11.3, §11.5, Appendix A and [D9]/[D12]
   now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
   carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
   **[D14]**.
-* `update_01.md` U4 — the §9.4 trim protocol is replaced by whole-side zeroing behind
+* [D15] side provisioning — the §9.4 trim protocol is replaced by whole-side zeroing behind
   the `provisioned` gate; §3.1, §8.4, §8.5, §8.11, §8.12, §9.2, §9.5, §9.7, §10.2-§10.4,
   §11.1.1, §11.2, §11.7 and Appendix A follow; new status `RES_STATUS_PROVISIONING` and
   new decision **[D15]**. The §8/§10 items specify worker and gateway behavior that is
   not implemented yet — this document is their spec.
-* `update_01.md` U5 — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
+* Consistency fixes — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
   §4.2's stale "name it like a dm kind if desired" line is corrected); §8.13 and §11.4
   pin the LSB-first wire bitmap bit order; [D12] records the unbounded transfer-origin
   suspension residual.
-* `update_02.md` U1 — §8.7 gains the snapshot point-in-time rule (quiesce the
+* Snapshot point-in-time — §8.7 gains the rule (quiesce the
   origin td's raid0 around the per-slice `create_snap` sequence; `cnagent.md`
   CN14 is the agent-side spec).
-* `update_02.md` U3 — §11.1/§11.1.1 document the failover safety argument and
+* [D16] failover safety — §11.1/§11.1.1 document the failover safety argument and
   the alive-but-CP-partitioned old primary's host-visible error window; new
   decision **[D16]**.
-* `update_02.md` U4 — §8.9/§8.11 record that clone/migration admission does
+* Admission notes — §8.9/§8.11 record that clone/migration admission does
   not check the per-CN arena / per-DN clone-metadata slot budgets, and the
   per-DN ceiling (≤ 24 destination roles) is stated for the first time
   outside a code comment (`dnagent.md` DN13).
-* `update_02.md` U5 — the [D12] transfer-origin residual now carries its
+* [D12] blast radius — the [D12] transfer-origin residual now carries its
   operational blast radius and the considered-but-undecided bounded
   alternative.
-* `update_02.md` U6/U7 — new Appendix D (v1 assumptions and known limits);
+* Appendix D and field-name fixes — new Appendix D (v1 assumptions and known limits);
   the three `Cntlr` field references that carried a stale `cn_` prefix on
   `addr_port` now use the schema's field name (×3).
 * `ThinDeviceCreated.md` U1-U5 — `ThinDevice` gains `created`; §8.7 gates snapshot
@@ -3323,7 +3323,7 @@ own amendment sections.
 
 Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
 against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
-execution of either suite since `update_01.md` was applied. All five were
+execution of either suite since the first amendment pass was applied. All five were
 real agent defects, not harness problems; every one is now covered by a unit
 test that fails without the fix.
 
@@ -3349,7 +3349,7 @@ test that fails without the fix.
   bare. A byte-wise compare made every converge disable, rewrite and re-enable a
   healthy namespace, and every probe report it `RES_STATUS_ERROR`.
 
-## Appendix D — v1 assumptions and known limits (update_02.md U6)
+## Appendix D — v1 assumptions and known limits
 
 Recorded so that scale, recovery and security expectations are explicit
 rather than discovered. None of these is a defect in the mechanisms above;
@@ -3391,7 +3391,7 @@ exists.
   completeness: agents accept and persist `qos_ratio` and enforce nothing
   (`cnagent.md` CN6).
 * **Snapshot creation is not atomic across a primary crash.** With
-  update_02.md U1 a snapshot is point-in-time against live IO, but a crash
+  §8.7's quiesce a snapshot is point-in-time against live IO, but a crash
   between two slices' `create_snap` messages still leaves a torn snapshot
   (§8.7); delete and re-create it. `ThinDevice.created` certifies
   materialization, not point-in-time consistency: a torn snapshot still flips

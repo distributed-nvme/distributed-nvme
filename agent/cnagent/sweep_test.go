@@ -10,7 +10,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// CN14's thin-id activation sweep (update_05.md U3)
+// CN14's thin-id activation sweep
 // ---------------------------------------------------------------------------
 
 // The fixture's three dev_ids. None is a prefix of another, so a `delete N`
@@ -52,7 +52,7 @@ func callCnt(node *fakeNode, fragment string) int {
 }
 
 // sweepPending reports the in-memory arming of one slice — the flag a failed
-// sweep must leave behind for the next converge (update_05.md U3).
+// sweep must leave behind for the next converge (CN14).
 func sweepPending(srv *CnAgentServer, sliceId uint64) bool {
 	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
 	if st == nil {
@@ -86,7 +86,7 @@ func syncupCntlrAt(
 }
 
 // TestRetireSkipsThinDeleteWithoutPool is the long-missing CN14 pin, and the
-// leak update_05.md U3 exists to heal: the per-td `delete` is gated on
+// leak the activation sweep exists to heal: the per-td `delete` is gated on
 // plan.wantPool, so the one fan-out that both removes the td and takes the
 // pool away — a demote coalesced with a delete (RW3) — sends nothing, and
 // afterwards no cntlr's st.applied remembers the td at all. The gate itself is
@@ -180,7 +180,7 @@ func TestActivationSweepDeletesStrays(t *testing.T) {
 
 	// A second, identical converge probe-matches the pool device, so it arms
 	// nothing and enumerates nothing: the sweep is once per pool-device
-	// creation, not once per converge (§0 U3 point 2).
+	// creation, not once per converge (CN14).
 	syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true, tds: tds})
 	if n := callCnt(node, "cmd thin_dump"); n != 1 {
 		t.Fatalf("%d thin_dump calls over two converges, want exactly 1", n)
@@ -190,7 +190,8 @@ func TestActivationSweepDeletesStrays(t *testing.T) {
 	}
 }
 
-// TestRestartDoesNotSweep is §0 U3 point 3: an agent restart under a surviving
+// TestRestartDoesNotSweep pins CN14's restart rule: an agent restart under a
+// surviving
 // pool device must not sweep. No stray can have appeared while the only writer
 // was down, and the CN2/SH16 invariant — a re-converge on a converged node
 // issues zero mutating calls, the cn suite's case D — depends on it. Only the
@@ -311,7 +312,8 @@ func TestSweepSurvivesDeleteFailure(t *testing.T) {
 	}
 }
 
-// TestStartupReconcileDefersSweep is §0 U3 point 4, the data-loss pin. The
+// TestStartupReconcileDefersSweep is CN14's startup-deferral data-loss pin.
+// The
 // startup reconcile converges from the persisted request, and
 // converge-then-persist (syncupCntlr saves after convergeCntlr and only logs a
 // failed Save; a crash in the same window has the same effect) lets that copy
@@ -320,7 +322,8 @@ func TestSweepSurvivesDeleteFailure(t *testing.T) {
 // RES_STATUS_ERROR — data loss, where the same staleness without a sweep is
 // merely a td left unbuilt until the next sync. So the startup Create arms
 // only; the first revision-gated SyncupCntlr sweeps, with the fresh td_list,
-// keeping the reboot heal-point of point 2.
+// keeping the reboot as a heal point — the re-created pool is still swept,
+// just at the first post-boot sync.
 func TestStartupReconcileDefersSweep(t *testing.T) {
 	srv, node := newTestServer(t)
 	pool := poolName(srv)

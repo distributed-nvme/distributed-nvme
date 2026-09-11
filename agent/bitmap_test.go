@@ -3,7 +3,7 @@ package agent
 import "testing"
 
 // ---------------------------------------------------------------------------
-// Explicit-bit-count bitmap helpers (update_01.md U4, §9.4 zeroed_bits)
+// Explicit-bit-count bitmap helpers (§9.4 zeroed_bits)
 // ---------------------------------------------------------------------------
 
 func TestBitmapByteLen(t *testing.T) {

@@ -46,7 +46,7 @@ type DnAgentServer struct {
 
 	// bg tracks every background goroutine that owns a child process, so
 	// agent.Serve can join them after GracefulStop and no orphan
-	// `blkdiscard --zeroout` ever outlives the agent (§9.4, update_01.md U4).
+	// `blkdiscard --zeroout` ever outlives the agent (§9.4, SH27).
 	bg sync.WaitGroup
 
 	// mu guards the in-memory mirrors of the local store below. It is a
@@ -63,7 +63,7 @@ type DnAgentServer struct {
 
 // WaitBackground joins every dn background goroutine. cmd/dnv-agent passes it
 // to agent.Serve, which cancels rootCtx and calls it after GracefulStop has
-// drained the last RPC (update_01.md U4, ruling R4.13).
+// drained the last RPC (SH27).
 func (s *DnAgentServer) WaitBackground() {
 	s.bg.Wait()
 }

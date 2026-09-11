@@ -116,8 +116,8 @@ func (s *DnAgentServer) probeSideDev(
 		return sideDevFailed
 	}
 	// The counters are filled on every round, whatever the outcome below is:
-	// they are what the worker's provisioned-flip rule reads (update_01.md
-	// U4). They come from the record, never from the request — the disk is
+	// they are what the worker's provisioned-flip rule reads
+	// (§10.3). They come from the record, never from the request — the disk is
 	// authoritative ([D13]).
 	zeroed, total := sideZeroedCnt(rec), sideExtCnt(rec)
 	info.ZeroedExtCnt, info.TotalExtCnt = zeroed, total

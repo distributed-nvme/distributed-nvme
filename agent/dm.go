@@ -232,7 +232,7 @@ func (d *Dm) BlkDiscardRange(
 }
 
 // BlkZeroout writes zeros over one byte range of a device — the §9.4 side
-// provisioning primitive ([D15], update_01.md U4). Unlike BlkDiscardRange (a
+// provisioning primitive ([D15]). Unlike BlkDiscardRange (a
 // metadata-only "mark hydrated" hint) this is a *guaranteed* zero write:
 // discard-reads-zeros is not a hardware guarantee (the kernel dropped
 // discard_zeroes_data in 4.12, NVMe DLFEAT read-zeroes is optional) and dnv is
@@ -240,7 +240,7 @@ func (d *Dm) BlkDiscardRange(
 //
 // It must never be pointed at the CN clone-metadata arena: that arena is a
 // sparse tmpfs file and --zeroout would materialize it in RAM, which is why
-// the CN allocator uses the plain hole-punch discard instead (update_01.md U3).
+// the CN allocator uses the plain hole-punch discard instead (CN18).
 //
 // --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
 // keeps meaning dm-clone hydration marking only.
@@ -383,7 +383,7 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 // discard granularity no larger than a region, and then *also* remaps the
 // discard to the destination — which would unmap exactly the blocks the
 // destination already owns. Every dnv caller therefore passes true, with no
-// exceptions (update_01.md U1): on the cn clone because the §9.6 chunk pushes
+// exceptions: on the cn clone because the §9.6 chunk pushes
 // mark regions hydrated, and on the dn migration because after the §11.2
 // cutover host IO flows through the dst dm-clone, so a chunk whose bits were
 // read from the CN thin metadata *before* a host write can arrive afterwards

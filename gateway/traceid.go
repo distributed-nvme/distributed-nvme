@@ -9,13 +9,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// This file is update_05.md U1. gateway.md §0 #6 has always said the gateway
-// is one of grpc.md T4's entry points — the one that mints a trace id for a
-// request that arrived without one — and cmd/dnv-gateway/main.go and
-// common/log.go both assert it as fact, but nothing implemented it: the
-// shared server interceptor only ADOPTS an incoming id, so an id-less client
-// produced gateway/etcd/agent log chains with no `trace_id` at all and
-// forwarded none to the agents it called.
+// This file is the gateway's trace-id mint. gateway.md §0 #6 says the
+// gateway is one of grpc.md T4's entry points — the one that mints a trace
+// id for a request that arrived without one — while the shared server
+// interceptor only ADOPTS an incoming id: without this mint an id-less
+// client would produce gateway/etcd/agent log chains with no `trace_id` at
+// all and forward none to the agents the gateway calls.
 //
 // The mint lives here, gateway-local, and not in common/interceptor.go
 // because that file is a byte-for-byte copy of grpc.md §3's reference listing
@@ -28,8 +27,7 @@ import (
 // into the metadata — not the ctx value — upstream of the shared chain is
 // deliberate: common's interceptor then adopts it exactly as "a request that
 // arrived with one", its own request/reply records carry the id, and
-// common/interceptor.go stays the grpc.md §3 reference verbatim
-// (update_05.md U1).
+// common/interceptor.go stays the grpc.md §3 reference verbatim.
 func ensureTraceIdCtx(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if ok {
@@ -47,7 +45,7 @@ func ensureTraceIdCtx(ctx context.Context) context.Context {
 
 // ensureTraceIdUnary is the unary half: every unary handler — and therefore
 // every interceptor chained behind this one — runs under a ctx whose incoming
-// metadata carries a trace id (update_05.md U1).
+// metadata carries a trace id.
 func ensureTraceIdUnary() grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,

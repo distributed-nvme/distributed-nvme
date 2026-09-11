@@ -19,7 +19,7 @@ import (
 // Agent lifecycle (SH1-SH3)
 // ---------------------------------------------------------------------------
 
-// update_01.md U4 "Process exit": the role server tracks its background
+// SH27 "Background tasks and process exit": the role server tracks its background
 // goroutines in a WaitGroup and `agent.Serve` waits for them before returning,
 // so **no orphan `blkdiscard` child ever outlives the agent**. `reconcile`
 // already starts those goroutines (a dn Reconcile arms one zeroing loop per
@@ -47,7 +47,7 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 		// already started the zeroing goroutines.
 		{"listener failure", "127.0.0.1:999999", nil},
 		// reconcile itself fails after starting some of them — convergeSide
-		// arms the goroutine before the loop's later error (U4 §9.4).
+		// arms the goroutine before the loop's later error (§9.4).
 		{"reconcile failure", "127.0.0.1:0", errors.New("reconcile failed")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,7 +238,7 @@ func TestResTrackerEpoch(t *testing.T) {
 		pb.ResStatus_RES_STATUS_MISSING {
 		t.Errorf("status = %v, want MISSING", got)
 	}
-	// PROVISIONING is the fourth outcome (update_01.md U4): healthy, not
+	// PROVISIONING is the fourth outcome: healthy, not
 	// ready, no action needed. It is an ordinary status change, so it moves
 	// the epoch exactly like the other three — what makes it special is that
 	// the *worker* never turns it into err_epoch (§9.5).
@@ -439,7 +439,7 @@ func TestTableBuilders(t *testing.T) {
 	}
 	// Builder-level coverage of the single-feature rendering: the derived
 	// `<#feature args>` count must still come out as 1. No dnv call site
-	// passes this combination any more — after update_01.md U1 both dm-clones
+	// passes this combination any more — both dm-clones
 	// pass noDiscardPassdown = true (the case below).
 	got := CloneTable(
 		2048, "253:1", "253:2", "259:0", 2048, true, false, 1, 2)
@@ -453,7 +453,7 @@ func TestTableBuilders(t *testing.T) {
 		"0 2048 clone 253:1 253:2 259:0 2048 0 0" {
 		t.Errorf("bare clone table = %q", got)
 	}
-	// The dnv form, used by both role packages after update_01.md U1:
+	// The dnv form, used by both role packages:
 	// `blkdiscard` must stay a metadata-only "mark hydrated" primitive, so
 	// every dnv dm-clone disables discard passdown (cnagent.md CN18 step 3).
 	if got := CloneTable(
@@ -523,7 +523,7 @@ func TestAnaStateOf(t *testing.T) {
 
 // fakeSysfs is a tiny read-only tree: `ls -1 <dir>` lists the direct children
 // of a registered directory, ReadFile serves a registered file. It also pins
-// update_02.md U2: every read of the SH20 walk must arrive with an SH15
+// the rule that every read of the SH20 walk must arrive with an SH15
 // deadline on its ctx, so a stalled /sys/class/nvme* read can never hold a
 // converge — and through the node lock, a whole node's RPC surface — open.
 type fakeSysfs struct {
@@ -631,7 +631,7 @@ func TestListSubsysReadsSysfs(t *testing.T) {
 		t.Error("an empty sysfs reported the subsystem as present")
 	}
 
-	// update_02.md U2: every sysfs read of the walk is SH15-bounded, exactly
+	// Every sysfs read of the walk is SH15-bounded, exactly
 	// like every command and every configfs attribute. Reverting the cmdCtx
 	// in readTrimmed fails here. The per-suffix guard keeps the assertion
 	// from going vacuous if a later fixture stops exercising one attribute.
@@ -660,8 +660,8 @@ func anySuffix(paths []string, suffix string) bool {
 // (s)uspended, (r)ead-only, read-(w)rite". Reading suspended or read-only at
 // the wrong offset silently reports every device as resumed and writeable,
 // which would defeat the [D12] resume-convergence branch and the read-only
-// reload branch alike. The strings below are real captures
-// (dnagent_issue_00.md issues 1 and 2).
+// reload branch alike. The strings below are real captures from the lab
+// kernel.
 func TestDmInfoAttrPositions(t *testing.T) {
 	for _, tc := range []struct {
 		attr      string

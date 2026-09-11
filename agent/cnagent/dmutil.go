@@ -163,9 +163,9 @@ func (s *CnAgentServer) ensureDmMulti(
 		// then either refuses the resume and leaves the pool suspended, or
 		// accepts it and serves the wrong device. A desired state shorter than
 		// the live table therefore never means "reload"; it means the
-		// effective state lost a group that is already serving, which U4's
-		// deferral is not allowed to do (it holds *new* groups out until they
-		// are ready, update_01.md U4 / architecture.md §8.5). Report it so the
+		// effective state lost a group that is already serving, which the
+		// provisioning deferral is not allowed to do (it holds *new* groups
+		// out until they are ready, architecture.md §8.5). Report it so the
 		// §10.4 reactions or an operator repair the group instead.
 		if live, desired := liveConcatSectors(targets),
 			wantConcatSectors(want); live > desired {

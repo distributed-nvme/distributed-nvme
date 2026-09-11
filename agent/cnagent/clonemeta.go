@@ -15,7 +15,7 @@ import (
 
 // CloneMeta wraps the CN base-state tooling of Appendix A — the tmpfs mount,
 // its sparse backing file and the single loop device — plus the clone-metadata
-// slot allocator that replaced the clone VG ([D14], update_01.md U3). No LVM
+// slot allocator that replaced the clone VG ([D14]). No LVM
 // runs anywhere in dnv any more: the bare `vgs`/`lvs` label scan touched every
 // block device on the node, including the suspended transfer-origin ns-devs
 // that wedge LVM in unkillable D state, which is the [D13](a) class the dn
@@ -122,7 +122,7 @@ func (c *CloneMeta) Truncate(
 // "no loop" would make ensureLoopDev attach a second loop to the arena file,
 // which nothing ever detaches — every later pass then fails with "2 loop
 // devices …, want 1" and no clone metadata can be allocated or probed on this
-// CN (update_01.md U3: a *single* loop device; §8 rejects loop sprawl).
+// CN (CN18: a *single* loop device; §8 rejects loop sprawl).
 func (c *CloneMeta) LoopDevices(
 	ctx context.Context,
 	path string,
@@ -205,7 +205,7 @@ const cnCloneMetaUnitSectors = common.CnCloneMetaUnit / agent.SectorSize
 // data_block_size, where region_cnt dominates (a 1 TiB td at the 64 KiB
 // minimum block size costs 5 units). Nothing gates the clone count against
 // this; exhaustion is reported as RES_STATUS_ERROR on the clone's rows, the
-// lvcreate-ENOSPC equivalent (update_01.md U3 spec 3), and retiring any clone
+// lvcreate-ENOSPC equivalent (CN18), and retiring any clone
 // on the CN frees its run again.
 func cloneMetaUnits(regionCnt uint64) uint64 {
 	bytes := uint64(4*1024*1024) + regionCnt
@@ -233,7 +233,7 @@ type cloneMetaSlot struct {
 
 // cloneMetaArena is one pass's view of the arena: the loop device it currently
 // lives on and every kind-`b` wrapper of this CN. It is re-probed once per
-// converge or probe pass and never persisted (update_01.md U3) — loop names
+// converge or probe pass and never persisted — loop names
 // are kernel-assigned and a tmpfs remount can change them under a live agent.
 type cloneMetaArena struct {
 	loopDev   string // e.g. "/dev/loop0"
@@ -321,7 +321,7 @@ func parseCloneMetaSlot(name string, targets []agent.DmTarget) cloneMetaSlot {
 // guaranteed zeros by file semantics (no device DLFEAT involved) and frees the
 // tmpfs pages; the zeroing variant of `blkdiscard` is forbidden here — it
 // would materialize up to the whole arena in RAM and defeat the sparse-file
-// design (update_01.md U3, §8).
+// design (§8).
 //
 // The caller holds cloneMetaMu across the enumeration that produced used and
 // this call: the registry is the kernel's dm table set, and two cntlrs of the
@@ -462,7 +462,7 @@ func (s *CnAgentServer) cloneMetaArena(
 
 // planArena resolves the arena once per converge or probe pass and caches it
 // on the plan, so a cntlr with N clones still issues one `losetup` and one
-// `dmsetup ls` (update_01.md U3: the loop device is re-learned every pass and
+// `dmsetup ls` (CN18: the loop device is re-learned every pass and
 // the probe compares against the *currently probed* one). The cache lives
 // exactly as long as the pass — the plan kept in cntlrState.applied is only
 // ever consulted for the retire diff, which names devices and probes nothing.
@@ -496,7 +496,7 @@ func cloneMetaSlotStatus(
 			"table is not the desired linear target"
 	}
 	// The raw table length, never the rounded unit count: "table length
-	// matches the computed size" (update_01.md U3 spec 3) is the check, and
+	// matches the computed size" (CN28) is the check, and
 	// every length dnv itself writes is a whole multiple of a unit, so a
 	// length that is not is rejected here too.
 	if slot.sectors != cp.metaSectors {

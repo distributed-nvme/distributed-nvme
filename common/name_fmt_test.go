@@ -87,7 +87,7 @@ func TestDmNames(t *testing.T) {
 		"dnv-"+c+"-0000000000000005-8-0000000000000011-0000000000000051")
 	// The three cn kinds added by cnagent.md §2.1: the [D1] leg wrapper,
 	// the RedundNone group device, and the kind-`b` clone-metadata wrapper
-	// that replaced the clone-VG metadata LV (update_01.md U3).
+	// that replaced the clone-VG metadata LV ([D14]).
 	checkName(t, "CnLegName",
 		nf.CnLegName(testCluster, testCn, testSp, testLeg),
 		"dnv-"+c+"-0000000000000005-9-0000000000000011-0000000000000015")
@@ -195,7 +195,7 @@ func TestNqns(t *testing.T) {
 	}
 }
 
-// §4.5 tmpfs / file names. LVM is gone from dnv entirely (update_01.md U3):
+// §4.5 tmpfs / file names. LVM is gone from dnv entirely ([D13]/[D14]):
 // the DN carries the [D13] disk format, and the CN's clone-metadata arena is a
 // slot allocator over one loop device whose kind-`b` wrapper tables are its
 // registry, so the clone-VG and metadata-LV names are gone with it.
@@ -211,7 +211,7 @@ func TestTmpfsAndFileNames(t *testing.T) {
 }
 
 // The CN clone-metadata arena must divide into whole units, and the tmpfs must
-// hold a fully materialized arena with slack (update_01.md U3 spec 2/3). The
+// hold a fully materialized arena with slack (CN18's layout rule). The
 // dn twin of this layout assertion is diskmeta_test.go's DnCloneMeta* check.
 func TestCloneMetaArenaConstants(t *testing.T) {
 	if CnCloneMetaAreaSize%CnCloneMetaUnit != 0 {

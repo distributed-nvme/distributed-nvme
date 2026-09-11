@@ -196,7 +196,7 @@ message CnInfo {
     ResInfo tmpfs_info = 2;
     ResInfo tmp_file_info = 3;
     ResInfo loop_dev_info = 4;
-    reserved 5;  // was: ResInfo clone_vg_info (update_01.md U3)
+    reserved 5;  // was: ResInfo clone_vg_info (deleted with the clone VG, [D14])
 }
 
 message SideInfo {
@@ -1557,7 +1557,7 @@ message DnDiskTable {
     message SideRecord {
         uint64 sp_id = 1;
         uint64 side_id = 2;
-        reserved 3;                       // was: bool trimmed (update_01.md U4)
+        reserved 3;                       // was: bool trimmed (replaced by zeroed_bits, [D15])
         repeated ExtentRun run_list = 4;  // ordered; concat = side device
         bytes zeroed_bits = 5;            // bit i = logical extent i zeroed;
                                           // LSB-first per agent/bitmap.go

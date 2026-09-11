@@ -58,11 +58,6 @@ distributed-nvme/                      # repo root = module root
 │   ├── cnagent_integtest.md           # the on-hardware cn agent suite
 │   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
 │   ├── dependencies.md                # direct-dependency ledger (must match go.mod)
-│   ├── minor_issues.md                # minor doc/code debt ledger (2026-09-09 verification)
-│   ├── issue_03.md                    # resolved issue record (history)
-│   ├── update_04.md                   # applied amendment record (history)
-│   ├── update_05.md                   # applied amendment record (history)
-│   ├── update_06.md                   # applied amendment record (history)
 │   └── risks_and_gaps.md              # ranked v1 risks / operational gaps (informational)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
@@ -304,17 +299,18 @@ Recorded for traceability; the edits are already applied. Unlike the
 appended rather than inserted because §2, §3, §4 and §7 are cited by number
 from `cnagent.md`, `dnagent.md` and this file itself.
 
-* `update_01.md` U3 (U3-T4) — LVM is gone from the CN as well as the DN, so the
+* [D14] LVM removal (suite amendment U3-T4) — LVM is gone from the CN as well as the DN, so the
   §2 `agent/cnagent/` list loses `lvm.go` ("the clone VG — the one LVM user
   left") and gains `clonemeta.go`: the CN base-state wrappers plus the
   clone-metadata slot allocator over the single loop device, whose kind-`b`
   wrapper dm-linears are their own allocation registry (`cnagent.md` §4.1,
   `architecture.md` [D14]).
-* `update_01.md` U4 (U4-T2) — the §2 `agent/dnagent/` list gains `zeroing.go`,
+* [D15] side provisioning (suite amendment U4-T2) — the §2 `agent/dnagent/` list gains `zeroing.go`,
   the background side-provisioning goroutine of `architecture.md` §9.4
   ([D15]). No package boundary changed: it is a new file in an existing
   package.
-* `update_01.md` U2 (U2-T2/U2-T4) — the cn probers' block IO left the
+* The probe-IO carve-out (suite amendments U2-T2/U2-T4) — the cn probers'
+  block IO left the
   `OsClient`. The probe-IO dependency lives in the already-listed
   `healthcheck.go` (no new file), so the §2 note only names it; `common/`
   gained the exported raw helpers `WriteBlockAt`/`ReadBlockDirectAt` inside the
@@ -347,13 +343,15 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   `integtest/` tree and the §3 `integtest/*` row already reflected),
   the two on-hardware suite specs `dnagent_integtest.md` /
   `cnagent_integtest.md`, `ThinDeviceCreated.md`, `dependencies.md`, and the
-  resolved `issue_03.md` / `update_04.md` records; `minor_issues.md`, the
-  minor-debt ledger produced by the same verification, entered the tree the
-  same day. No package boundary or path changed.
+  then-current resolved-issue and applied-amendment records; the minor-debt
+  ledger the same verification produced entered the tree the
+  same day (records and ledger all removed
+  2026-09-10, below). No package boundary or path changed.
 * Second doc-amendment pass (2026-09-10, after the second full doc-vs-code
-  verification): `update_06.md` (five decided code fixes) and
+  verification): an amendment record deciding five code fixes (removed
+  2026-09-10, below) and
   `risks_and_gaps.md` (ranked v1 risks, informational) entered the §2 tree;
-  `update_05.md`'s annotation moved to applied/history; the §2 `worker/`
+  the §2 `worker/`
   tree gained `worker.go` and `conn.go` (matching dnv-worker.md §1's
   amended table — the file list above predates them). The pass also fixed
   stale or imprecise passages across `architecture.md`, `gateway.md`,
@@ -361,20 +359,26 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   `cdc.md`, `grpc.md`, `log.md`, `osclient.md`, `dependencies.md` and both
   integtest specs, plus eight stale code comments; each document's own
   amendments section is not extended for these (they correct drift, not
-  decisions — `update_06.md` and the verification record are the
+  decisions — the amendment and verification records were the
   provenance). No package boundary or path changed.
-* `update_06.md` implementation pass (2026-09-10, the same day it was
-  decided): all five code fixes landed with their tests — U1
-  (`worker/reaction.go`, `model/ops.go`), U2 (`agent/dnagent/fence.go`),
-  U3 (`model/alloc.go`, `gateway/alloc.go` +
+* Amendment implementation pass (2026-09-10, the same day the five fixes
+  were decided): all five landed with their tests — the disabled-primary
+  failover trigger (`worker/reaction.go`, `model/ops.go`), the
+  adopted-fence gate backstop (`agent/dnagent/fence.go`),
+  failure-domain-aware repair placement (`model/alloc.go`,
+  `gateway/alloc.go` +
   `migration.go`/`spareleg.go`/`storagepool.go`, `worker/reaction.go`),
-  U4 (`agent/cnagent/syncup_cntlr.go`) and U5 (`gateway/alloc.go`) — so
-  `update_06.md`'s §2 annotation moved to applied/history the way
-  `update_05.md`'s had. The file carries its own "Amended 2026-09-10 by the
-  implementation pass" note for the corrections implementation forced,
-  chiefly U3's tier-2 trigger (bound in the draft to the oversampled scan
-  width `candCnt` rather than the `requiredCnt` its own Decision prose
-  named) and the two §6 companion edits that had landed carrying it —
-  `architecture.md` §6.5 and `dnv-worker.md` §4 MD5, both re-amended the
-  same day (`update_06.md` amendment (e)). No file entered or left the
+  park-before-remove for removed namespaces
+  (`agent/cnagent/syncup_cntlr.go`) and the allocator-ledger invariant
+  errors (`gateway/alloc.go`). Implementation forced corrections to two
+  companion edits that had landed carrying a superseded tier-2 trigger for
+  the placement rule — `architecture.md` §6.5 and `dnv-worker.md` §4 MD5,
+  both re-amended the
+  same day. No file entered or left the
   tree, and no package boundary or path changed.
+* Housekeeping (2026-09-10): the four resolved-issue / applied-amendment
+  history records and the fully struck minor-debt ledger left the §2 `doc/`
+  tree — every decision and finding they carried is
+  stated by the normative documents and pinned by the tests those documents
+  name, and the remaining doc and code-comment citations of the records
+  were retargeted to those documents. No package boundary or path changed.

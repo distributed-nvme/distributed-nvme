@@ -91,7 +91,7 @@ const (
 	// file (CnTmpFilePath) on the CN tmpfs, attached to a single loop
 	// device, carved into fixed units by the CN slot allocator whose
 	// registry is the kind-`b` wrapper dm tables themselves. No LVM
-	// (update_01.md U3).
+	// ([D14]).
 	// CnCloneMetaAreaSize is the `truncate` size of that file — and so the
 	// arena the slot allocator carves, 256 units. CnCloneMetaUnit is the
 	// allocation granularity, the cn twin of DnCloneMetaUnit; it is
@@ -171,7 +171,7 @@ const (
 	// nvme connect (dnagent.md DN8).
 	DnMigrConnectRetryInterval = 5
 
-	// Side provisioning ([D15], update_01.md U4, architecture.md §9.4,
+	// Side provisioning ([D15], architecture.md §9.4,
 	// dnagent.md DN9): the background zeroing goroutine zeroes
 	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
 	// command, through the side's dm-linear, and persists that batch's
@@ -188,7 +188,7 @@ const (
 	// a fully materialized arena plus slack never hits ENOSPC on the mount.
 	// The file itself is sparse: pages appear as dm-clone writes metadata
 	// and are released again by the allocator's hole-punch discard
-	// (update_01.md U3).
+	// (CN18).
 	DefaultCnTmpfsSize = 2 * 1024 * 1024 * 1024
 
 	// Seconds between two §3.6 leg health-probe rounds on a primary

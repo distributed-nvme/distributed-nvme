@@ -385,7 +385,7 @@ func cmdSyncupSide(args []string) {
 	// zero and the value the gateway writes for a brand new side, so every
 	// steady-state call site must pass them explicitly. Go's flag package never
 	// consumes the following argument for a bool, so callers must always write
-	// --provisioned=true, never --provisioned true (update_01.md U4).
+	// --provisioned=true, never --provisioned true.
 	provisioned := fs.Bool("provisioned", false,
 		"side_conf.provisioned — the CP's export gate; false means "+
 			"allocate and zero only, no per-CN export stacks")
@@ -557,7 +557,7 @@ func cmdGetSideInfo(args []string) {
 	emit(reply)
 	// The §9.4 provisioning counters as one human line on **stderr**: stdout
 	// stays exactly one protojson line, because case D diffs it (§8) and every
-	// caller parses it with jq (update_01.md U4).
+	// caller parses it with jq.
 	fmt.Fprintf(os.Stderr, "dnagentctl: zeroed %d/%d\n",
 		reply.GetSideInfo().GetZeroedExtCnt(),
 		reply.GetSideInfo().GetTotalExtCnt())
@@ -727,7 +727,7 @@ func cmdWaitHydrated(args []string) {
 }
 
 // cmdWaitZeroed polls GetSideInfo until the side reports every logical extent
-// zeroed (update_01.md U4, the §9.4 provisioning protocol). It is the script's
+// zeroed (the §9.4 provisioning protocol). It is the script's
 // stand-in for the sp-worker's flip rule: once it returns, the caller re-sends
 // the same SyncupSide at a fresh revision with --provisioned=true.
 //

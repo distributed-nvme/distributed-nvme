@@ -695,7 +695,7 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	// region hydrated" discard are recorded in separate lists: a
 	// migration-dst side zeroes its own dm-linear while the dm-clone above it
 	// takes hydration discards, and one shared list would make either
-	// assertion meaningless (update_01.md U4).
+	// assertion meaningless.
 	if contains(args, "--zeroout") {
 		dm.zeroouts = append(dm.zeroouts,
 			strings.Join(args[:len(args)-1], " "))
@@ -936,7 +936,7 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		// The kernel prints back the features that are still in force, in
 		// table order, with a derived count: a dnv dm-clone starts at
 		// `2 no_hydration no_discard_passdown` and drops to
-		// `1 no_discard_passdown` once hydration is enabled (update_01.md U1).
+		// `1 no_discard_passdown` once hydration is enabled.
 		var names []string
 		if dm.noHydration {
 			names = append(names, "no_hydration")

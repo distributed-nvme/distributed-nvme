@@ -10,7 +10,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// U1 — a snapshot is point-in-time across slices (update_02.md U1-T2)
+// A snapshot is point-in-time across slices (CN14's quiesce)
 // ---------------------------------------------------------------------------
 //
 // A td is a dm-striped raid0 across one thin volume per slice (§3.3), so a
@@ -20,7 +20,7 @@ import (
 // worse than crash-consistent. The primary therefore suspends the origin td's
 // raid0 around the whole per-slice message sequence (CN14).
 
-// snapTds is the U1 fixture's td_list: a live origin (dev_id 1) and the
+// snapTds is the quiesce fixture's td_list: a live origin (dev_id 1) and the
 // snapshot taken of it. ori_id is the *origin's dev_id*, never its td_id.
 //
 // The origin carries `created` because that is the only shape the gateway can
@@ -45,7 +45,7 @@ func snapMessage(srv *CnAgentServer, sliceId uint64) string {
 
 // syncupSnapshot converges the origin alone, then applies o with the snapshot
 // added. The two passes are the point: only after the first one is the
-// origin's stack live, which is the state the U1 quiesce exists for.
+// origin's stack live, which is the state the CN14 quiesce exists for.
 func syncupSnapshot(
 	t *testing.T,
 	srv *CnAgentServer,
@@ -409,7 +409,7 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 
 // TestSnapshotWithADeferredSliceStillMessagesTheReadyOne pins that the
 // message loop is gated on poolReady and never on tdPlan.deferred, which is
-// plan-global (anySliceDeferred, U4): with one slice still provisioning the
+// plan-global (anySliceDeferred, [D15]): with one slice still provisioning the
 // ready slice's create_snap must still go out. Dropping it would lose the
 // snapshot outright.
 //
@@ -418,7 +418,7 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 // revision-2 converge and is still live, so it is quiesced around the one
 // message it is possible to send. Before U4 the deferred plan sent the
 // caller down ensureThin's lazy path, which bracketed only the per-slice
-// origin thin. Quiescing the live raid0 is the U1 rule applied honestly, so
+// origin thin. Quiescing the live raid0 is the CN14 quiesce applied honestly, so
 // the assertion is the bracket, not its absence.
 func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -450,7 +450,7 @@ func TestSnapshotWithADeferredSliceStillMessagesTheReadyOne(t *testing.T) {
 // never messages a td with ori_id != 0 (U4-S1) and the pre-pass is the only
 // caller of createSnapId. A re-send would put that slice's create_snap after
 // the resume — dating its snapshot from after host IO restarted, which is the
-// very tear U1 exists to prevent. The one-shot failCmd is what makes such a
+// very tear the quiesce exists to prevent. The one-shot failCmd is what makes such a
 // retry observable: failCmdAlways would fail it identically.
 func TestSnapshotClaimsASliceEvenWhenItsMessageFailed(t *testing.T) {
 	srv, node := newTestServer(t)

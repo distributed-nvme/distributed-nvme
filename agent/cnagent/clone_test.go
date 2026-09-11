@@ -162,7 +162,7 @@ func TestCloneBuild(t *testing.T) {
 	// Exactly one coalesced hydration discard: skip bits 32..63 → 32 MiB at
 	// 32 MiB. The arena hole-punch is the other `blkdiscard` of this pass and
 	// is counted separately — the two are on different devices and mean
-	// completely different things (update_01.md U3 §4.3).
+	// completely different things.
 	discards := node.callsMatching("cmd blkdiscard --offset 33554432")
 	if len(discards) != 1 {
 		t.Fatalf("want 1 blkdiscard, got %d: %v", len(discards), discards)
@@ -706,7 +706,7 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 // `dmsetup table` of that name. Failing the whole CN-wide enumeration on it
 // flipped a healthy, serving clone of an unrelated cntlr to RES_STATUS_ERROR,
 // and ERROR — unlike PROVISIONING — feeds err_epoch and the §10.2/§10.4
-// reactions ([D14], update_01.md U3 spec 3).
+// reactions ([D14]).
 func TestWrapperEnumerationSurvivesAVanishedWrapper(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -813,7 +813,7 @@ func TestCloneWrapperRemovalTakesTheArenaLock(t *testing.T) {
 }
 
 // TestWrapperLengthIsComparedRaw: CN28 checks "table length matches the
-// computed size" (update_01.md U3 spec 3). Comparing a unit count rounded down
+// computed size". Comparing a unit count rounded down
 // from that length instead made the check fail *open* over a whole unit's
 // worth of lengths — the one malformed-table case that reported OK.
 func TestWrapperLengthIsComparedRaw(t *testing.T) {

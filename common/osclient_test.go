@@ -646,12 +646,12 @@ func TestWriteFileDirect(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md §4.5.1,
-// update_01.md U2): exported, unlogged, semaphore-free
+// Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md §4.5.1):
+// exported, unlogged, semaphore-free
 // ---------------------------------------------------------------------------
 
-// TestReadBlockDirectAt covers the exported raw helpers of osclient.md §4.5.1
-// (update_01.md U2): the write + O_DIRECT read-back the §3.6 leg health probe
+// TestReadBlockDirectAt covers the exported raw helpers of osclient.md
+// §4.5.1: the write + O_DIRECT read-back the §3.6 leg health probe
 // needs, now package functions outside the OsClient. t.TempDir() may sit on
 // tmpfs, which rejects O_DIRECT outright, so the round trip is skipped with a
 // diagnostic there — the alignment rejection and the log silence are checked
@@ -715,7 +715,7 @@ func TestReadBlockDirectAt(t *testing.T) {
 
 	// The raw helpers are silent by construction: they hold no semaphore
 	// slot and emit no record, which is why every direct caller MUST log its
-	// own (update_01.md U2 spec 1-2 — the prober's "probe write block" /
+	// own (osclient.md §4.5.1 — the prober's "probe write block" /
 	// "probe read block direct").
 	if recs := capture.records(t); len(recs) != 0 {
 		t.Errorf("the raw helpers logged %d records: %s",

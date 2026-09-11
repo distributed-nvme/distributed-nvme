@@ -26,7 +26,7 @@ const bitsPerByte = 8
 // by construction (chunks are byte-aligned, §11.4). It must never be used as
 // the bit count of a bitmap whose logical length is not a multiple of 8 — a
 // side's zeroed_bits, say: there it would count the trailing pad bits and
-// report a 10-extent side as 16-extent (update_01.md U4).
+// report a 10-extent side as 16-extent.
 func BitmapBitCount(bitmap []byte) uint64 {
 	return uint64(len(bitmap)) * bitsPerByte
 }
@@ -41,7 +41,7 @@ func BitmapBit(bitmap []byte, idx uint64) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Explicit-bit-count helpers (update_01.md U4).
+// Explicit-bit-count helpers (§9.4 side provisioning).
 //
 // The §9.4 side-provisioning bitmap (DnDiskTable.SideRecord.zeroed_bits, bit i
 // = logical extent i is zeroed) uses the same LSB-first encoding as the wire

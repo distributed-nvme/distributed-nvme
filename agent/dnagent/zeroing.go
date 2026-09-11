@@ -15,7 +15,7 @@ import (
 // NVMe DLFEAT read-zeroes is optional), so every side is fully zeroed with
 // `blkdiscard --zeroout` before its first export, tracked per logical extent
 // in the side's on-disk allocation record and gated by the CP-visible
-// `provisioned` flag ([D15], update_01.md U4).
+// `provisioned` flag ([D15]).
 //
 // The work is a goroutine rather than part of the RPC because a whole side is
 // minutes of IO: a node-read holder plus one queued SyncupDn writer would
@@ -122,7 +122,8 @@ func (s *DnAgentServer) deregisterZeroing(st *sideState, done chan struct{}) {
 // time, until every bit is set or the ctx is done.
 //
 // Each batch is one traceable operation (SH2). The `blkdiscard --zeroout` runs
-// **lock-free** under the ordinary SH15 timeouts — unlike U2's probe IO it is a
+// **lock-free** under the ordinary SH15 timeouts — unlike the probers' block
+// IO it is a
 // killable child process, so holding an OsClient semaphore slot is bounded by
 // CmdHardTimeout and needs no carve-out — and only the volume-table update
 // afterwards takes node-read plus the side's object lock.

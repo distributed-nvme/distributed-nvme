@@ -45,7 +45,7 @@ func withClock(srv *CnAgentServer) *fakeClock {
 	return clock
 }
 
-// probeLogCapture reads back the records CN11 emits for itself since U2 — the
+// probeLogCapture reads back the records CN11 emits for itself — the
 // prober is now the only cn code that logs its own block IO, so the msgs and
 // attrs have to be pinned here (log.md §5.1). The buffer is mutex-guarded
 // because slog.Default is process-wide and other goroutines may be logging.
@@ -245,10 +245,10 @@ func TestStandbyStartsNoProber(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The standby's ana_state verdict (CN11, update_05.md U2)
+// The standby's ana_state verdict (CN11)
 // ---------------------------------------------------------------------------
 
-// TestTransportHealthAnaState pins U2 on the pure function: a leg with exactly
+// TestTransportHealthAnaState pins CN11 on the pure function: a leg with exactly
 // one desired side fails its row when that side's path is live but
 // unpromotable. `non-optimized` is the standby's healthy steady state and not
 // a fault — the DN grants the optimized group to the primary CN alone, so
@@ -360,7 +360,7 @@ func TestTransportHealthAnaState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The LegProbeIO dependency (update_01.md U2)
+// The LegProbeIO dependency (osclient.md §4.5.1)
 // ---------------------------------------------------------------------------
 
 // TestFakeProbeIoDefaultsAndOverrides pins the double's FakeOsClient-style
@@ -415,8 +415,8 @@ func TestFakeProbeIoDefaultsAndOverrides(t *testing.T) {
 //
 // The double is installed **before** the converge that starts the probers:
 // `srv.probeIO` is read by every live prober goroutine, so assigning it after
-// syncupBoth is an unsynchronised write to a field two goroutines are reading
-// (update_01.md U2). The counters are mutex-guarded for the same reason — the
+// syncupBoth is an unsynchronised write to a field two goroutines are reading.
+// The counters are mutex-guarded for the same reason — the
 // leg's own loop may fire a round of its own on the fake clock.
 func TestLegProbeUsesTheProbeIo(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -467,12 +467,12 @@ func TestLegProbeUsesTheProbeIo(t *testing.T) {
 	}
 }
 
-// TestWedgedProbeDoesNotBlockAConverge is the central U2 property (§6 test
+// TestWedgedProbeDoesNotBlockAConverge is the central carve-out property (§6 test
 // 15): a probe that never returns must not delay anything else on the node.
 // A leg with no serving path queues IO forever (ctrl_loss_tmo = -1), so this
 // is the ordinary failure mode, not an exotic one — and the design's answer is
 // that a hung probe is harmless: its IO does not go through the process's
-// DefaultOsClientLimit semaphore (update_01.md U2), and CN1 forbids holding
+// DefaultOsClientLimit semaphore (osclient.md §4.5.1), and CN1 forbids holding
 // any lock across it. This test pins the second half, which is the one a unit
 // test can observe: a full SyncupCntlr — leg wrappers, arrays, pools, nvmet —
 // completes while a probe of the same server's own leg is parked mid-write.
@@ -598,8 +598,7 @@ func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 }
 
 // TestDirectProbeIoShortCircuitsOnCancel: a cancelled prober starts no IO and
-// logs nothing — the fast fail the OsClient's semaphore acquire used to give
-// (update_01.md U2, ruling R0.2).
+// logs nothing — the fast fail the OsClient's semaphore acquire used to give.
 func TestDirectProbeIoShortCircuitsOnCancel(t *testing.T) {
 	capture := captureProbeLogs(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -670,7 +669,7 @@ func TestLegUnavailableWhenNotOptimized(t *testing.T) {
 	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("a group with no available leg reports %v", info.GetStatus())
 	}
-	// update_02.md U2: the whole walk this test drives — subsysnqn, nsid,
+	// SH15: the whole walk this test drives — subsysnqn, nsid,
 	// address, state, ana_state — runs under the SH15 soft timeout. Reverting
 	// the agent.CmdCtx in leg.go's readSysfs fails here.
 	assertSysfsDeadlines(t, node)

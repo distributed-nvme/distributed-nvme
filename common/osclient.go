@@ -28,7 +28,7 @@ import (
 // log.md R8.1/R8.2 enforceable, and every consumer unit-testable through
 // FakeOsClient.
 //
-// One carve-out is recorded (update_01.md U2, osclient.md §4.5.1): the CN11
+// One carve-out is recorded (osclient.md §4.5.1): the CN11
 // leg health prober calls the raw helpers WriteBlockAt / ReadBlockDirectAt
 // directly, because its IO may block indefinitely by design — a pathless leg
 // queues IO forever — and must never hold one of the LimitedOsClient's
@@ -345,7 +345,7 @@ func (c *LimitedOsClient) WriteBlock(
 // It is the raw helper behind OsClient.WriteBlock. It takes no context, does
 // no logging and holds no semaphore slot, so a caller that uses it directly
 // MUST emit its own log record. The only sanctioned direct caller is the CN11
-// leg health prober (update_01.md U2, osclient.md §4.5.1): its IO may block
+// leg health prober (osclient.md §4.5.1): its IO may block
 // for as long as the device queues IO, and it must never occupy an OsClient
 // slot — nor run under a lock — while it does (cnagent.md CN1/CN11).
 func WriteBlockAt(path string, offset uint64, data []byte) error {
@@ -378,7 +378,7 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 // Like WriteBlockAt it takes no context, does no logging and holds no OsClient
 // semaphore slot; the caller logs. It may block for as long as the device
 // queues IO — a pathless nvme multipath leg queues forever — which is
-// precisely why update_01.md U2 took it out of the OsClient: a wedged probe
+// precisely why it lives outside the OsClient: a wedged probe
 // must not consume one of the DefaultOsClientLimit slots the node's teardown
 // commands need. The only sanctioned direct caller is the CN11 leg health
 // prober, and it must never run under a lock (osclient.md §4.5.1,

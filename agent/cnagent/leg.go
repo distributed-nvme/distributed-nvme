@@ -81,10 +81,11 @@ func (v *subsysView) ctrlOf(trAddr, trSvcId string) *ctrlView {
 // cannot be used; a path that is merely `connecting` keeps its last-known ANA
 // state, which is why the controller state gates it.
 //
-// This is deliberately *not* update_05.md U2's rule: this is the primary's
-// assembly-time gate, "is this path usable now", which `non-optimized`
-// rightly fails, while the standby's transportHealth row answers "could this
-// path serve a promote", which `non-optimized` rightly passes.
+// This is deliberately *not* transportHealth's CN11 rule: this is the
+// primary's assembly-time gate, "is this path usable now", which
+// `non-optimized` rightly fails, while the standby's transportHealth row
+// answers "could this path serve a promote", which `non-optimized` rightly
+// passes.
 func (v *subsysView) available() bool {
 	if v == nil || !v.found {
 		return false
@@ -206,7 +207,7 @@ func (s *CnAgentServer) listDir(
 // readSysfs reads one sysfs attribute under the §7 soft timeout (SH15). This
 // walk calls the OsClient directly rather than through an `agent` OS wrapper,
 // so the bound every other OS touch gets for free has to be applied here
-// explicitly (update_02.md U2): the /sys/class/nvme* tree can stall while a
+// explicitly (SH15): the /sys/class/nvme* tree can stall while a
 // controller is mid-reset or being torn down, which is exactly when the walk
 // runs. listDir above is already bounded, through cmd.Run.
 func (s *CnAgentServer) readSysfs(
@@ -237,7 +238,7 @@ func (s *CnAgentServer) ensureLegs(
 	retryNeeded := false
 	for _, lp := range plan.legs {
 		if lp.provisioning {
-			// U4: every side is still zeroing, so the DN exports nothing —
+			// [D15]: every side is still zeroing, so the DN exports nothing —
 			// there is no subsystem to connect to, no multipath namespace to
 			// wrap and no device to probe. Deliberate, healthy, no action.
 			// available is set explicitly rather than left at its zero value,
@@ -280,7 +281,7 @@ func (s *CnAgentServer) ensureLeg(
 	connected := false
 	for _, side := range lp.sides {
 		if !side.GetProvisioned() {
-			// U4: this side is still zeroing, so the DN has not built its
+			// [D15]: this side is still zeroing, so the DN has not built its
 			// per-CN export stack and a connect could only fail. The
 			// provisioned sides of the same leg connect normally — that is
 			// what keeps a migrating leg serving through its src side while
@@ -336,7 +337,7 @@ func (s *CnAgentServer) disconnectDeadPaths(
 	}
 	for _, ctrl := range view.ctrls {
 		wanted := false
-		// An unprovisioned side stays "wanted" (U4): it was never connected,
+		// An unprovisioned side stays "wanted" ([D15]): it was never connected,
 		// so it cannot own a controller here — and were one to exist it would
 		// be this leg's, never a dead path to retire.
 		for _, side := range lp.sides {
@@ -407,7 +408,7 @@ func (s *CnAgentServer) legInfo(
 
 // transportHealth is the standby's leg report (CN11): one live controller per
 // desired side, and — on a leg with exactly one desired side — an ana_state
-// that could serve a promote (update_05.md U2). The healthy set is
+// that could serve a promote. The healthy set is
 // `optimized` or `non-optimized`, not `optimized` alone: the DN grants the
 // optimized group to the primary CN alone, so every standby's path sits in
 // the non-optimized group over the side's dm-error backing and that *is* its
@@ -433,7 +434,7 @@ func transportHealth(
 	for _, side := range lp.sides {
 		tr := side.GetNvmeTrConf()
 		if !side.GetProvisioned() {
-			// U4: nothing is exported for this side yet, so its missing
+			// [D15]: nothing is exported for this side yet, so its missing
 			// controller is the desired state and not a fault.
 			reports = append(reports, fmt.Sprintf("%s:%s %s",
 				tr.GetTrAddr(), tr.GetTrSvcId(), detailsProvisioning))
@@ -454,7 +455,7 @@ func transportHealth(
 		case len(lp.sides) == 1 &&
 			ctrl.anaState != agent.AnaStateOptimized &&
 			ctrl.anaState != agent.AnaStateNonOptimized:
-			// U2: a single-sided leg must hold a promotable path.
+			// CN11: a single-sided leg must hold a promotable path.
 			// non-optimized is the standby's designed steady state (the DN
 			// grants optimized to the primary CN alone) and optimized the
 			// pre-promote window, so both pass; inaccessible — or a state
@@ -475,7 +476,7 @@ func transportHealth(
 }
 
 // removeLeg tears one leg down: the connection first, then the wrapper
-// (update_01.md U2 spec 4, CN21). A probe wedged on a pathless leg holds an
+// (CN21). A probe wedged on a pathless leg holds an
 // open fd on the wrapper, so `dmsetup remove` before the disconnect fails
 // EBUSY; deleting the controllers errors the queued IO, the fd closes, and the
 // removal then succeeds. A whole-NQN disconnect is fine here — every path of

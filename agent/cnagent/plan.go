@@ -43,9 +43,10 @@ const (
 const (
 	detailsSpLevel   = "sp_level"
 	detailsSuspended = "suspended"
-	// detailsProvisioning is what a resource deferred by U4 reports: the sides
+	// detailsProvisioning is what a provisioning-deferred resource reports:
+	// the sides
 	// under it have provisioned = false, so nothing is exported yet and
-	// nothing is wrong (update_01.md U4). It carries no progress counter on
+	// nothing is wrong (the CN9 provisioning gate). It carries no progress counter on
 	// purpose — the dn's "zeroing k/n" advances, and a details string that
 	// changed every round would defeat the proto.Equal suppression of the CN24
 	// check stream.
@@ -145,7 +146,7 @@ type cntlrPlan struct {
 	levelClone bool
 
 	// anyDeferred is true when any group or slice of this cntlr is
-	// provisioning-deferred (U4): the pass-level summary of how far the
+	// provisioning-deferred ([D15]): the pass-level summary of how far the
 	// effective desired state falls short of the raw one. The td rule
 	// deliberately does NOT use it — one deferred group of a many-group slice
 	// leaves the pool serving at its effective size (a GrowSlice whose new
@@ -175,7 +176,7 @@ type slicePlan struct {
 	metaGrps []*grpPlan
 	dataGrps []*grpPlan
 
-	// effMetaGrps / effDataGrps are the *effective* group lists (U4): each
+	// effMetaGrps / effDataGrps are the *effective* group lists ([D15]): each
 	// list truncated at its first deferred group (effectiveGrps), never
 	// filtered. They are what the pool concats are built from and probed
 	// against, and what metaSectors / dataSectors / dataBlocks are summed over
@@ -188,7 +189,7 @@ type slicePlan struct {
 	// — the initial CreateStoragePool shape, where every leg is provisioning.
 	// Nothing is built for it: no concat, no thin-pool, no thin volume. Group
 	// deferral alone would not do, because an empty concat is an error
-	// (dmutil.go's "concat has no segments"), and U4 promises PROVISIONING
+	// (dmutil.go's "concat has no segments"), and [D15] promises PROVISIONING
 	// throughout with no err_epoch.
 	deferred bool
 
@@ -215,7 +216,7 @@ type grpPlan struct {
 	legs   []*legPlan // leg_list, ascending leg_idx — the md members
 	spares []*legPlan // spare_leg_list; connected and probed, never members
 
-	// deferred is the U4 group gate: some leg of leg_list is provisioning, so
+	// deferred is the [D15] group gate: some leg of leg_list is provisioning, so
 	// the group builds no md array and no CnGrpName, and is left out of the
 	// pool concats and of the pool sizing. A provisioning *spare* never defers
 	// a group — spares are not members (§8.12).
@@ -246,7 +247,7 @@ type legPlan struct {
 	grp   *grpPlan
 	spare bool
 	sides []*pb.Side
-	// provisioning is the U4 leg gate: every side of side_list has
+	// provisioning is the [D15] leg gate: every side of side_list has
 	// provisioned = false, so the DN exports nothing — no connect is issued
 	// and no wrapper is built. A mid-migration leg whose src side is
 	// provisioned and whose dst side is not keeps serving and is NOT
@@ -304,7 +305,7 @@ type nsPlan struct {
 	flakey      bool
 	anaGrpId    int
 	// deferred mirrors td.deferred: the fourth conjunct of the CN16 ANA rule
-	// as amended by U4. The ns-dev and the nvmet namespace still exist — over
+	// as amended by [D15]. The ns-dev and the nvmet namespace still exist — over
 	// the td's permanent dm-error — but nothing under them can serve, so the
 	// namespace stays inaccessible and both rows report PROVISIONING.
 	deferred bool
@@ -328,7 +329,7 @@ type clonePlan struct {
 	metaSectors   uint64
 
 	// deferred means the destination td's backing chain is
-	// provisioning-deferred (U4): its raid0 does not exist, so the clone
+	// provisioning-deferred ([D15]): its raid0 does not exist, so the clone
 	// allocates no metadata slot, builds no dm-clone and connects to no
 	// source — the cn mirror of the dn's "no metadata slot, no dm-clone" for a
 	// still-zeroing migration destination.
@@ -345,7 +346,7 @@ type xferPlan struct {
 	// nothing in this request, which is an error of the xfer's own
 	// resources and never of the pass (CN29).
 	ori *nsPlan
-	// deferred means the origin's td is provisioning-deferred (U4): its raid0
+	// deferred means the origin's td is provisioning-deferred ([D15]): its raid0
 	// does not exist, so the transfer device carries an error table like a
 	// standby's and its namespace stays inaccessible — never an optimized path
 	// over a device that is not there.
@@ -404,7 +405,7 @@ func newCntlrPlan(
 		level >= pb.SpLevel_SP_LEVEL_READONLY
 
 	p.buildSlices()
-	// U4: the effective desired state is computed between the two, because
+	// [D15]: the effective desired state is computed between the two, because
 	// buildTds (tdPlan.deferred), buildClones, buildSubsystems (the CN16 ANA
 	// rule) and buildXfers all read it.
 	p.computeEffective()
@@ -441,7 +442,7 @@ func (p *cntlrPlan) buildSlices() {
 		return p.slices[i].sliceId < p.slices[j].sliceId
 	})
 	// The concat sizes are summed by computeEffective, over the *effective*
-	// group lists (U4).
+	// group lists ([D15]).
 	for _, sp := range p.slices {
 		sp.metaGrps = p.buildGrps(sp, sp.slice.GetMetaGrpList(), true)
 		sp.dataGrps = p.buildGrps(sp, sp.slice.GetDataGrpList(), false)
@@ -530,7 +531,7 @@ func (p *cntlrPlan) buildLegs(
 	return out
 }
 
-// computeEffective is the U4 effective-desired-state pass. The raw desired
+// computeEffective is the [D15] effective-desired-state pass. The raw desired
 // state names resources whose DN sides are still being zeroed (§9.4): such a
 // side exports nothing at all, so anything built on top of it could only fail.
 // The plan therefore carries both shapes — the raw one for the report, the
@@ -582,7 +583,7 @@ func (p *cntlrPlan) computeEffective() {
 	}
 }
 
-// legProvisioning is the U4 leg predicate. An empty side_list is deliberately
+// legProvisioning is the [D15] leg predicate. An empty side_list is deliberately
 // *not* provisioning: a leg with no side is a malformed request, and CN10's
 // existing "no multipath namespace" error must keep saying so rather than
 // turning into a healthy PROVISIONING row.
@@ -606,7 +607,7 @@ func legProvisioning(sides []*pb.Side) bool {
 // deferred one's offsets, and re-inserting the target when that group finally
 // cleared would move every pool-data block dm-thin had allocated meanwhile —
 // silent corruption reported as OK. Truncating instead is exactly what
-// update_01.md U4 ("a not-yet-grown concat/pool is OK, not a mismatch; the
+// CN28 ("a not-yet-grown concat/pool is OK, not a mismatch; the
 // grow completes when the group clears") and architecture.md §8.5 ("the concat
 // and the pool keep their old, effective size") describe, and it is what makes
 // the surviving groups' concat offsets — and so dataGrpSpanStart's CN27
@@ -627,7 +628,7 @@ func effectiveGrps(grps []*grpPlan) []*grpPlan {
 }
 
 // effective reports whether a group is still one of its slice's concat
-// targets. It is not the negation of gp.deferred: U4's deferral is a prefix
+// targets. It is not the negation of gp.deferred: [D15]'s deferral is a prefix
 // cut (effectiveGrps), so a group of its own is undeferred yet out of the
 // effective state whenever an earlier group of the same list is deferred.
 func (gp *grpPlan) effective() bool {
@@ -655,7 +656,7 @@ func (p *cntlrPlan) anySliceDeferred() bool {
 }
 
 // deferredFromErr reports one converged resource that may be
-// provisioning-deferred (U4): a real failure still wins — a fault is a fault
+// provisioning-deferred ([D15]): a real failure still wins — a fault is a fault
 // whatever the sides underneath are doing — while a deferred resource that
 // converged without error is PROVISIONING rather than OK.
 func deferredFromErr(
@@ -721,7 +722,7 @@ func (p *cntlrPlan) buildClones() {
 				p.clusterId, p.cnId, p.spId, clone.GetCloneId()),
 		}
 		cp.metaDmPath = p.nf.DmPath(cp.metaDmName)
-		// U4: a clone whose destination td is missing entirely stays the CN18
+		// [D15]: a clone whose destination td is missing entirely stays the CN18
 		// error below; one whose destination is merely still provisioning is
 		// deferred.
 		cp.deferred = cp.dstTd == nil || cp.dstTd.deferred
@@ -771,7 +772,7 @@ func (p *cntlrPlan) buildSubsystems() {
 			np.suspended = p.effectiveSuspend(ns)
 			np.backingName, np.flakey = p.nsBacking(np)
 			np.anaGrpId = common.AnaGrpIdInaccessible
-			// CN16 as amended by U4: optimized iff primary ∧ not disabled
+			// CN16 as amended by [D15]: optimized iff primary ∧ not disabled
 			// (folded into p.primary) ∧ not effectively suspended ∧ the
 			// backing chain is not provisioning-deferred. During initial
 			// provisioning hosts queue on an inaccessible path instead of
@@ -824,7 +825,7 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 	if np.td == nil {
 		return "", false
 	}
-	// 0. U4: the backing chain is provisioning-deferred — neither the raid0
+	// 0. [D15]: the backing chain is provisioning-deferred — neither the raid0
 	// nor a clone over it exists yet. The ns-dev is built on the td's
 	// permanent dm-error, and the ANA rule above keeps the namespace
 	// inaccessible, so a host queues rather than erroring.
@@ -861,7 +862,7 @@ func (p *cntlrPlan) buildXfers() {
 		}
 		if xp.ori != nil {
 			xp.sectors = xp.ori.sectors
-			// U4: the origin's raid0 does not exist while its backing chain
+			// [D15]: the origin's raid0 does not exist while its backing chain
 			// provisions, so the transfer device carries an error table and
 			// its namespace stays inaccessible.
 			xp.deferred = xp.ori.deferred
@@ -933,7 +934,7 @@ func (p *cntlrPlan) blockSectors() uint64 {
 
 // dataGrpSpanStart is the CN27 arithmetic: a data group's first pool-data
 // block is the summed data_blocks of the groups before it in data_grp_list.
-// The walk is over the *effective* list (U4), which is the live pool-data
+// The walk is over the *effective* list ([D15]), which is the live pool-data
 // table: a group at or after the first provisioning-deferred one is no concat
 // target at all and is reported not-found, so no caller is ever handed the
 // span of a region that is another group's — or that does not exist yet.

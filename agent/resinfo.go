@@ -75,10 +75,10 @@ func (t *ResTracker) Err(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_ERROR, details)
 }
 
-// Provisioning is the U4 outcome: the resource is deliberately not created
+// Provisioning is the [D15] outcome: the resource is deliberately not created
 // yet, because the sides underneath it are still being zeroed (§9.4). It
 // means healthy / not ready / no action needed, and — unlike ERROR — never
-// feeds err_epoch (architecture.md §9.5, §10.2-§10.4, update_01.md U4).
+// feeds err_epoch (architecture.md §9.5, §10.2-§10.4).
 func (t *ResTracker) Provisioning(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_PROVISIONING, details)
 }

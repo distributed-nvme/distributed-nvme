@@ -54,7 +54,7 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ctx := context.Background()
 	// A migration destination is a freshly allocated side: its very first
-	// SyncupSide already carries migr_dst_conf. Under U4 that side provisions
+	// SyncupSide already carries migr_dst_conf. Under [D15] that side provisions
 	// first — linear and zeroing only, no metadata slot, no connect, no
 	// dm-clone — and only then does the worker flip its flag (§11.2).
 	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
@@ -103,7 +103,7 @@ func TestMigrationDestinationSequence(t *testing.T) {
 		t.Errorf("dm-clone table %q does not use meta %s / dest %s",
 			node.dms[cloneName].table, metaNo, destNo)
 	}
-	// Every dnv dm-clone carries both features (update_01.md U1). The dn
+	// Every dnv dm-clone carries both features (DN13 step 4). The dn
 	// hazard is after the §11.2 cutover: a skip-bitmap chunk `blkdiscard`ing
 	// a region the host already hydrated must stay metadata-only.
 	create := node.callsMatching("cmd dmsetup create " + cloneName)
@@ -151,7 +151,7 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	}
 }
 
-// §11.2 under U4: a migration destination provisions before it does anything
+// §11.2 under [D15]: a migration destination provisions before it does anything
 // else — the aggregate dm-linear and the zeroing, and nothing above it: no
 // clone-metadata slot, no connect, no dm-clone. Its migr_dst_info rows report
 // PROVISIONING throughout.
@@ -1156,7 +1156,7 @@ func TestFenceClearedWhenTheSourceRoleEnds(t *testing.T) {
 // breakSideDev makes the side device unreadable the way one transient
 // `dmsetup info` failure does: Dm.Info collapses a failed probe into "the
 // device is absent", so the converge tries to re-create it, fails, and returns
-// sideDevFailed — the DN9 side-device gate (update_01.md U4), taken by a side
+// sideDevFailed — the DN9 side-device gate, taken by a side
 // that is in fact serving.
 func breakSideDev(node *fakeNode, sideDevName string) {
 	node.mu.Lock()
@@ -1383,8 +1383,8 @@ func TestFenceWindowSurvivesAnUnrelatedAgentRestart(t *testing.T) {
 // inside the window *and* a first converge that cannot get past the side
 // device. DN12 rule 1 makes the adopted fence elapsed, rule 4 makes the DN9
 // gate skip everything above the side device but never the fence — so the
-// gate backstop has to finish phase 2 for a window this process never started
-// (update_06.md U2).
+// gate backstop has to finish phase 2 for a window this process never
+// started.
 func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)

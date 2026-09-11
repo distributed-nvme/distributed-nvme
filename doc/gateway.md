@@ -104,9 +104,10 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
     already equals the requested one the handler performs no write and no
     revision bump, and replies OK (the token is still checked first).
 18. **Brief decision ids.** Code comments cite decisions `D-A`…`D-J` from
-    the implementation brief. `D-A`/`D-B` were superseded and pinned by
-    `update_04.md` (U2–U6 / U7); the rest are recorded here so the ids
-    resolve from a committed document:
+    the implementation brief. `D-A` was later reversed (the `Inspect*`
+    replies carry the agent's applied revision — §5.2/§5.5) and `D-B` stands
+    as §5.4's `poolTotal = math.MaxUint64`, both pinned by unit tests; the
+    rest are recorded here so the ids resolve from a committed document:
     * **D-C** — the `bdev_conf` CreateStoragePool STORES is the member-wise
       merge of the request over `ClusterConf.bdev_conf`: a member wins
       unless left at the proto3 zero that means "unset"; the redund KIND is
@@ -235,9 +236,9 @@ change. Each change is mechanical and the worker keeps compiling:
 
 ### 2.3 Schema
 
-No `pb/schema.proto` change (update_04.md U1 later renames the four
-`Inspect*Reply.revision` fields to `applied_revision` — still no new message,
-RPC or key kind) and **no new etcd key kind**: the gateway writes
+No `pb/schema.proto` change beyond the four `Inspect*Reply` fields' later
+rename from `revision` to `applied_revision` (same field numbers — still no
+new message, RPC or key kind) and **no new etcd key kind**: the gateway writes
 only the §5.1 kinds that already exist (`cluster_conf`, the three globals,
 `dn_conf`/`cn_conf`, `dn_capacity`/`cn_capacity`, `dn_rev`/`cn_rev`/`sp_rev`,
 `sp_conf`, `sp_id_to_name`, `cntlr`, `slice`, `thin_device`, `subsystem`,
@@ -281,7 +282,7 @@ Two subcommands so the integration suite can play the worker (§0 #12):
   the incoming metadata carries no `trace_id`, the first interceptor injects
   `common.NewTraceId()` into the incoming metadata, so §0 #6's mint happens
   upstream of the shared interceptors and `common/interceptor.go` stays the
-  grpc.md §3 reference verbatim (update_05.md U1).
+  grpc.md §3 reference verbatim.
 * **GW3** Shutdown is `GracefulStop`: in-flight handlers finish (each bounded
   by its client deadline and the 10 s per-STM budget), new requests are
   refused. There is nothing else to drain — no registry key to delete, no
@@ -331,7 +332,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | §7 violation, malformed `page_token`, bad enum/oneof | `INVALID_ARGUMENT` |
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
-  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included — update_05.md U4) | `FAILED_PRECONDITION` |
+  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
   | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap (AppendCloneBitmap's index bounds are an invalid request ⇒ `INVALID_ARGUMENT`, checked in-STM per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; agent gRPC failure where the RPC says so | `ABORTED` |
@@ -456,8 +457,8 @@ stay in the cited architecture.md section; nothing below overrides them.
   token calls GetDiskNode); **after** the STM call
   `GetDnInfo(cluster_id, dn_id)`; agent failure ⇒ `ABORTED`. Reply
   `{applied_revision, dn_info}`, both from the agent's reply
-  (architecture.md §8.2; update_04.md U1–U2 — reverses issue_03.md I1's
-  interim stored-revision reading).
+  (architecture.md §8.2 — deliberately the agent's applied revision, never
+  the stored rev key).
 
 ### 5.3 Controller nodes (§8.3)
 
@@ -512,8 +513,8 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 * **GrowSlice** — validate the §8.5 exclusivity (`is_meta==false ⇒
   ext_cnt>0`, `is_meta==true ⇒ ext_cnt==0` ⇒ else `INVALID_ARGUMENT`).
   A `Snapshot` pre-read for planning (the slice's current meta total for
-  `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`,
-  update_05.md U4 — and the request's own black list, which is the entire
+  `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`, GW7's
+  object-state class — and the request's own black list, which is the entire
   seed of the §6.5 scan (D-F): one scan-and-pick round serves the group and
   nothing is ever appended to it, the legs still landing on distinct DNs
   because the §6.3 `LocList` rule already left one candidate per DN and per
@@ -534,7 +535,7 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   pre-check is deliberately the generous one, since only the STM decides.
   The gateway passes `poolTotal = math.MaxUint64`: the AR6 pending rule
   gates only the worker's auto-grow, never a user-driven grow
-  (architecture.md §8.5; update_04.md U7 pins it). Map
+  (architecture.md §8.5; `TestGrowSliceConsecutiveDataGrows` pins it). Map
   `ReasonStaleRevision` ⇒ `ABORTED`, other `ErrPrecondition` ⇒
   `FAILED_PRECONDITION`. Reply `slice_id, grp_id`.
 
@@ -558,14 +559,14 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   `cntlr_id, enabled`.
 * **InspectCntlr** — STM: resolve; Cntlr by id (`NOT_FOUND`), keep its
   `addr_port` and the CnConf's `cn_id` (read `CnConfKey(cid, addr)` in the
-  same STM; no SpRev read — update_04.md U4); after the STM
+  same STM; deliberately no SpRev read); after the STM
   `GetCntlrInfo(cluster_id, cn_id, sp_id, cntlr_id)` at that addr; failure ⇒
   `ABORTED`. Reply `{applied_revision, cntlr_info}`, both from the agent's
   reply (architecture.md §8.6).
 * **InspectSide** — STM: resolve; find the side by scanning the SP's slices
   (bounded, §8.6) for `side_id` (`NOT_FOUND`), keep its DN `addr_port` +
-  `dn_id` (via `DnConfKey`) + the side pointer (no SpRev read — update_04.md
-  U4); after the STM `GetSideInfo(cluster_id, dn_id, side pointer)`; failure
+  `dn_id` (via `DnConfKey`) + the side pointer (deliberately no SpRev
+  read); after the STM `GetSideInfo(cluster_id, dn_id, side pointer)`; failure
   ⇒ `ABORTED`. Reply `{applied_revision, side_info}`, both from the agent's
   reply.
 
@@ -868,7 +869,7 @@ The other 49 RPCs never leave etcd.
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`
    `applied_revision` + info pass-through, both from the agent's reply
-   (update_04.md U5); timeout path (a hanging fake ⇒ `ABORTED` within the
+   (never the stored rev keys); timeout path (a hanging fake ⇒ `ABORTED` within the
    budget); `DeleteClone`/`FinishMigration` force=false refusal on
    unreachable agent (`FAILED_PRECONDITION`); trace id visible at the fake
    (T3).
@@ -1129,7 +1130,7 @@ path. Steps (each = one `stage`):
    fake's `state.json` (its §14.9 operator-edit path) with a distinctive
    applied revision (7) and re-inspect → `applied_revision 7` + the seeded
    DnInfo, both passed through verbatim while the stored `dn_rev` is still
-   1; `inspect-cn` likewise (update_04.md U6).
+   1; `inspect-cn` likewise.
 5. `set-dn-disabled dn3 true` → capacity key **gone**, `dn_rev` **still 1**,
    `DnConf.disabled true`; repeat (idempotent, still rev 1); re-enable →
    capacity key back. Same once for a CN.
@@ -1186,7 +1187,7 @@ path. Steps (each = one `stage`):
     passes through verbatim (hex-printed); `inspect-cntlr`/`inspect-side` →
     `applied_revision` = the distinctive revision (7) seeded into the fake's
     hand-written object state — ≠ the current `sp_rev`, proving the store is
-    not the source — + fake info (update_04.md U6).
+    not the source — + fake info.
 17. Reverse teardown: delete ns → ss → tds (t1 then t0 — snapshot-child
     gate observed) → `delete-sp` (lists empty; full accounting restored:
     every DN back to 64 free, CNs 4096, capacity keys back, `Σbucket` 0 for

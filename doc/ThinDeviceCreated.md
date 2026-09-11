@@ -11,7 +11,7 @@ document is the complete spec of
 one change: a `created` flag on `ThinDevice` that records when every slice
 pool of an SP holds the td's thin volume, the gateway rules that gate on it,
 the sp-worker rule that sets it, and the `dnv-agent cn` simplification it
-funds. It is written in the shape of `update_01.md`/`update_02.md`: numbered
+funds. It is written in the repo's amendment-record shape: numbered
 items U1-U5, each with its own test list (U*n*-T*m*), followed by the exact
 amendments the companion documents receive when the change is implemented.
 `schema.proto`, `architecture.md`, `cnagent.md`, `cnagent_integtest.md` and
@@ -26,7 +26,7 @@ per-td × slice thin volumes), §5.5 (revision keys and the sync fan-out),
 §5.8 (STM discipline), §8.7 (thin devices), §9.1 (agent rules), §9.5
 (live-state reporting), §9.7 (Check streams), §10.3 (sp role, the
 `provisioned` flip), [D12], [D15], Appendix D; `cnagent.md` CN9 (pass
-structure), CN14 (thin volumes, the `update_02.md` U1 snapshot pre-pass),
+structure), CN14 (thin volumes, the snapshot pre-pass),
 CN21 (teardown deactivates, never deletes), §6 test 19; `layout.md` §2
 (`gateway/thindevice.go`, `worker/sprole.go`, `worker/revision.go` — the
 Check-stream consumer; the worker landed without a `check.go`,
@@ -47,7 +47,7 @@ decision, not an assumption.
 | # | decision | why |
 |---|---|---|
 | R1 | Field name `created`, `bool created = 5` on `ThinDevice`. | The next free field number; `ThinDevice` already rides in `td_list` and `name_to_td`, so no other message changes. |
-| R2 | `created` is **monotonic**: set once by the sp-worker, never cleared. | A pool holds a thin id until a `delete {dev_id}` reaches it — sent by the td's own deletion or, when CN14's pool-presence gate skipped that fan-out's message (a demotion or pool suppression coalesced with the delete), by the CN14 activation sweep at the pool device's next re-creation (update_05.md U3); a later bad row is a health event (`err_epoch`), not evidence the id is gone. |
+| R2 | `created` is **monotonic**: set once by the sp-worker, never cleared. | A pool holds a thin id until a `delete {dev_id}` reaches it — sent by the td's own deletion or, when CN14's pool-presence gate skipped that fan-out's message (a demotion or pool suppression coalesced with the delete), by the CN14 activation sweep at the pool device's next re-creation; a later bad row is a health event (`err_epoch`), not evidence the id is gone. |
 | R3 | A td deleted and recreated under the same name is a **different td**: new `td_id` (from `next_id`), new `dev_id` (from `next_dev_id`), `created = false`. | ids are never reused (§8.7); the key is rewritten, not updated. |
 | R4 | Flip predicate: `agent_reply.code == 0`, and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
@@ -59,7 +59,7 @@ decision, not an assumption.
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
 | R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `vol` subcommands show the field once `ctl/` lands. |
-| R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the update_05.md U3 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
+| R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the CN14 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
 
 ---
 
@@ -69,7 +69,7 @@ Snapshot creation (`create_snap {dev_id} {ori_id}`) needs the origin's id
 in each slice pool's metadata. Today nothing in the control plane knows
 whether that is so: `CreateThinDevice` with `ori_name` succeeds the moment
 the origin *record* exists, and the cn agent copes by ordering — the
-`update_02.md` U1 pre-pass declines any slice whose origin thin device is
+CN14 snapshot pre-pass declines any slice whose origin thin device is
 absent on this CN and hands it to the lazy per-td path, which relies on the
 origin preceding the snapshot in `td_list` (cnagent.md CN14, §6 test 19).
 Three consequences:
@@ -364,7 +364,7 @@ retire phase, CN15-CN21 and the standby shape are untouched.
 |---|---|---|---|
 | `true` | any | nobody | `dmsetup create` of the `thin` table when the device is absent; the id is known to exist in every slice pool (U3). |
 | `false` | `0` | `ensureThin` | `create_thin {dev_id}` when the device is absent, then `dmsetup create` — as today (`EEXIST` tolerated: a crash between the message and the create, or a message a previous primary already sent). |
-| `false` | `≠ 0` | the pre-pass, only | `create_snap {dev_id} {ori_id}` per pool-ready slice whose snapshot device is absent, inside the `update_02.md` U1 quiesce when the origin's raid0 is live; then the thin loop's `dmsetup create`. |
+| `false` | `≠ 0` | the pre-pass, only | `create_snap {dev_id} {ori_id}` per pool-ready slice whose snapshot device is absent, inside the CN14 quiesce when the origin's raid0 is live; then the thin loop's `dmsetup create`. |
 
 `ensureThin` therefore never messages a td with `ori_id != 0`, whatever the
 pre-pass did: the predicate is re-derivable from the request alone, which is
@@ -542,7 +542,7 @@ higher revision and the CN8 gate is satisfied by step 3.
 stage; `mutations()` over the rebuild syncup's trace contains `dmsetup
 create` lines and, of `dmsetup message`, exactly the activation sweep's
 `reserve_metadata_snap`/`release_metadata_snap` pair — no `create_thin`, no
-`create_snap`, no `delete` (update_05.md U3: the rebuild re-creates the pool
+`create_snap`, no `delete` (CN14: the rebuild re-creates the pool
 device, a designed sweep trigger — the drop's teardown sent no deletes, so a
 td removed while the cntlr was down is healed exactly here; the bitmap proof
 below is what shows the bare creates attached the existing ids).
@@ -700,13 +700,13 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    rebuild syncup's `mutations()` output contains, of `dmsetup message`,
    exactly the activation sweep's `reserve_metadata_snap`/
    `release_metadata_snap` pair — no `create_thin`, no `create_snap`, no
-   `delete` (U5-T1 as amended by update_05.md U3).
+   `delete` (U5-T1's device-set-mutating scope).
 5. The companion documents carry the §8 amendments, each citing
    `ThinDeviceCreated.md U*n*`. `gateway/` and `worker/` have since landed
    with U2/U3 implemented, and gateway.md §9 / dnv-worker.md §13 — their
    unit-test inventories of record — re-scoped the U2-T/U3-T lists: most
-   scenarios exist under different names, and the 2026-09-10 minor_issues
-   MT11 sweep added dedicated tests for three that had been structural-only
+   scenarios exist under different names, and the 2026-09-10 debt
+   sweep added dedicated tests for three that had been structural-only
    — U2-T5's same-name-recreate sequence
    (`gateway/handler_vol_test.go` `TestThinDeviceSameNameRecreateTakesFreshIds`)
    and U3-T5/T6's check-round-to-flip paths (`worker/sprole_test.go`
@@ -715,7 +715,7 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    mid-STM race remains covered structurally (GW8/EU4's serializable STM):
    `etcdutil.Client.run` has no seam to inject it through, and the outcome
    is unreachable anyway — a real concurrent create bumps `SpRev`, so GW6's
-   token check refuses the retry first (minor_issues.md MT11).
+   token check refuses the retry first.
 
 ---
 

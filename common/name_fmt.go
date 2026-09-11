@@ -420,7 +420,7 @@ func (nf *NameFmt) CnTmpFilePath(
 // the single loop device over CnTmpFilePath, and the dm-clone target reads its
 // metadata device from sector 0 and takes no offset argument, so the slot needs
 // a dm-linear of its own — exactly the reason DnMigrMetaDmName exists on the dn
-// side (update_01.md U3). The wrapper's own table is the allocator's registry:
+// side. The wrapper's own table is the allocator's registry:
 // there is no on-file allocation table.
 func (nf *NameFmt) CnCloneMetaDmName(
 	clusterId uint64,
@@ -441,7 +441,7 @@ func (nf *NameFmt) CnCloneMetaDmName(
 
 // CnCloneMetaDmPrefix is the `dmsetup ls` filter that enumerates this CN's
 // clone-metadata wrappers. Because the dm tables ARE the allocator's registry
-// (update_01.md U3), rebuilding the used-unit map means listing every kind-`b`
+// (CN18), rebuilding the used-unit map means listing every kind-`b`
 // device of this cluster and cn — so the prefix has to be built from the same
 // nf.dmPrefix and the same kind constant as CnCloneMetaDmName, never from an
 // ad-hoc literal in the role package.

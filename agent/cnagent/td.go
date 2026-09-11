@@ -283,7 +283,7 @@ func (s *CnAgentServer) ensureSubsystem(
 		err := s.ensureNamespaceObject(ctx, np)
 		// The namespace object of a provisioning-deferred backing chain is
 		// created and correct, but it is inaccessible and no host can do IO
-		// through it — PROVISIONING, not OK (U4). The subsystem row above is
+		// through it — PROVISIONING, not OK ([D15]). The subsystem row above is
 		// untouched: the subsystem itself is fully converged.
 		info.NsIdToNamespace[np.nsId] = deferredFromErr(
 			st.tracker, np.deferred,

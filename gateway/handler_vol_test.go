@@ -634,8 +634,8 @@ func volTwoDomainEnv(t *testing.T) *volEnv {
 
 // volTier1DrawCnt is how often the two tier-1 assertions below re-run against a
 // FRESH fixture. At the gateway the §6.5 requiredCnt is observed only through
-// the pick, and PickRandom draws uniformly, so the exact regression
-// update_06.md amendment (a) names — handing FindDnCandidatesAntiAffine the
+// the pick, and PickRandom draws uniformly, so the exact regression the
+// requiredCnt trigger exists to refuse — handing FindDnCandidatesAntiAffine the
 // oversampled scan width (Legs × dn_batch_size) where the DNs to place belong
 // — does not turn the assertion red on its own: it drags tier 1's single find
 // into tier 2, which merges the same-domain DN behind it, and a one-of-two

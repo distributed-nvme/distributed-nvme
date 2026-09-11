@@ -47,7 +47,7 @@ build is policy and belongs in `dnagent`/`cnagent`.
 plumbing the other three sit on), `bitmap.go` (§2.9), plus colocated
 `_test.go` files.
 There is no `lvm.go`: **no** dnv agent runs any LVM command at all — [D13]
-took LVM off the dn, [D14] took it off the cn too (`update_01.md` U3). This is the `layout.md` §2 recommended split; package
+took LVM off the dn, [D14] took it off the cn too. This is the `layout.md` §2 recommended split; package
 boundaries are binding, file names are not.
 
 ### 2.2 Additions to `common`
@@ -138,7 +138,7 @@ SH3. Reconcile returns an error only for **fatal** conditions (the local-store
      prefix unreadable); per-resource failures are captured as
      `RES_STATUS_ERROR` (§2.7) and never abort startup.
 
-SH27. **Background tasks and process exit** (added by `update_01.md` U4;
+SH27. **Background tasks and process exit** (added by amendment;
       numbered last because SH rules are append-only — SH1-SH26 are cited
       from code comments and must not shift). A role server MAY run
       goroutines outside any RPC: the DN8 migration-connect retry (so
@@ -190,7 +190,7 @@ parameter and the derived task ctx are SH27's):
 // Policy — which dm tables, md arrays and nvmet objects to build and when —
 // lives in the role packages agent/dnagent and agent/cnagent. No LVs: [D14]
 // removed the clone VG, LVM's last user, so no LVM runs anywhere in dnv
-// (update_01.md U3, cnagent.md §1).
+// (cnagent.md §1).
 package agent
 
 import (
@@ -210,11 +210,11 @@ import (
 // waitBackground (may be nil) is joined after GracefulStop has drained every
 // RPC, so no background goroutine — and, more to the point, no child process
 // one of them owns, such as the §9.4 zeroing `blkdiscard` — outlives the
-// agent (update_01.md U4). Only a role whose background work holds a
+// agent (dnagent.md SH27). Only a role whose background work holds a
 // long-running child passes one: the dn passes its WaitGroup join, the cn
 // passes nil because its CN11 probers are stopped by cancellation and never
 // joined (a wedged pread is uninterruptible, so waiting would hang shutdown
-// forever — the very starvation U2 exists to prevent).
+// forever — the very starvation the probe-IO carve-out exists to prevent).
 //
 // The cancel-then-join pair is deferred, so *every* return path takes it, not
 // just the one through grpcServer.Serve: reconcile has already armed the
@@ -368,7 +368,7 @@ SH14. A per-object in-memory tracker turns probe outcomes into
       §9.5: `epoch` = unix seconds of the last **status** change (a `details`
       change alone does not bump it); the agent emits
       `MISSING`/`ERROR`/`OK`/`PROVISIONING` and never `UNKNOWN`
-      (worker-only). `RES_STATUS_PROVISIONING` (`update_01.md` U4) means
+      (worker-only). `RES_STATUS_PROVISIONING` means
       *deliberately not created yet, healthy, no action needed*: it is what a
       resource waiting behind DN9's provisioning gate reports, and unlike
       `RES_STATUS_ERROR` it never feeds `err_epoch` (§9.5, §10.2-§10.4).
@@ -390,7 +390,7 @@ SH15. Every wrapper call wraps its ctx with
       `ReadBlock`/`WriteBlock` calls of the [D13] metadata path too. A role
       package that calls the `OsClient` directly instead of through a
       wrapper — the `cnagent.md` CN12 sysfs leg walk — takes the same bound
-      from the exported `agent.CmdCtx` (`update_02.md` U2).
+      from the exported `agent.CmdCtx`.
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
       state and mutates only differences; an equal-revision re-apply on a
@@ -405,7 +405,7 @@ SH17. Probing follows the Appendix A conventions: `dmsetup status`/`dmsetup
       device, controller liveness and ANA state alike (SH20,
       `cnagent.md` CN12/CN28) — configfs **reads** for nvmet, and
       `ReadBlock` of the disk header for the DN's [D13] metadata. No LVM
-      report is probed anywhere any more ([D14], `update_01.md` U3). Probe
+      report is probed anywhere any more ([D14]). Probe
       reads MUST tolerate padded/
       normalized read-back; compare canonically, never byte-wise:
 
@@ -456,7 +456,7 @@ SH20. `nvmehost.go`: `Connect` always passes
       namespaces at all and no `ANAState` without a namespace block device
       argument (`cnagent.md` CN12/CN28, which reads the same tree for legs).
       Every read of that walk carries the SH15 soft timeout like any other
-      OS touch (`update_02.md` U2): unlike most of sysfs, `/sys/class/nvme*`
+      OS touch: unlike most of sysfs, `/sys/class/nvme*`
       can stall while a controller is mid-reset or being torn down, which is
       exactly when these probes run, and no converge — nor, through the
       DN1/CN1 locks, a whole node's RPC surface — may be held on one. The
@@ -467,7 +467,7 @@ SH20. `nvmehost.go`: `Connect` always passes
       NQN whose other paths must live — the two sides of a migrating leg
       share a subsystem NQN ([D1]), so the cn agent cannot use `--nqn` to
       drop a dead side. The controller device is found by the **sysfs walk**,
-      never by `list-subsys` (`update_01.md` U5): the
+      never by `list-subsys`: the
       `/sys/class/nvme-subsystem/nvme-subsys*` directory whose `subsysnqn`
       equals the NQN holds the `nvme{N}` controller entries, and one is
       selected by reading `/sys/class/nvme/{ctrl}/address` and parsing it as
@@ -697,7 +697,7 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        that disk's volume table anyway.
      * `EnsurePort` (SH19: port `NvmetPortId` from the `--tr-*` flags + the
        three fixed ANA groups).
-     * **the Write Zeroes fail-fast** (`update_01.md` U4). DN9 zeroes whole
+     * **the Write Zeroes fail-fast**. DN9 zeroes whole
        sides with `blkdiscard --zeroout` under the ordinary SH15 timeouts,
        which only holds on hardware whose Write Zeroes is offloaded; a
        kernel that has to emulate it writes zero pages at bulk speed and no
@@ -809,7 +809,7 @@ DN8. **Gating.** The pointer MUST be present in the stored
 DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      `(sp_id, side_id)` in the volume table. An existing record whose extent
      total disagrees with `side_conf.ext_cnt` is an error (resize is out of
-     scope) — unchanged by `update_01.md` U4.
+     scope).
 
      **Allocation is permitted only while `side_conf.provisioned` is
      `false`.** At `false` with no record: allocate `side_conf.ext_cnt`
@@ -831,7 +831,7 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      for `r.count*extent_size` bytes (both /512 for the table).
 
      Then the §9.4 protocol — **whole-side zeroing behind a `provisioned`
-     gate**, which replaced the trim flag (`update_01.md` U4: `blkdiscard` is
+     gate**, which replaced the trim flag ([D15]: `blkdiscard` is
      not a zero guarantee — the kernel dropped `discard_zeroes_data` in 4.12
      and NVMe DLFEAT read-zeroes is optional — so the trim funded neither
      dnv's multi-tenant "no tenant ever reads another tenant's bytes"
@@ -1010,7 +1010,7 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       of absent. Without the gate the source
       would fence the primary's path the moment the migration was created and
       the leg would have **no serving path for the whole zeroing window**
-      (`update_01.md` U4). When the worker flips the destination side, the
+      (§11.2). When the worker flips the destination side, the
       next fan-out carries `dst_provisioned = true` and the sequence above
       runs unchanged; the destination's connect retry (DN13) absorbs any
       cross-side ordering.
@@ -1088,8 +1088,8 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       (4) dm-clone `DnMigrFinalName` (meta = the step-2 wrapper, dest = the
       side device, source = the nvme device, region size = `block_size`,
       features **`2 no_hydration no_discard_passdown`** — both are mandatory
-      on **every** dnv dm-clone, dn and cn alike (`update_01.md` U1,
-      `cnagent.md` CN18 step 3), because §9.6/§11.4 use `blkdiscard` on a
+      on **every** dnv dm-clone, dn and cn alike (`cnagent.md` CN18 step 3),
+      because §9.6/§11.4 use `blkdiscard` on a
       dm-clone as the metadata-only "mark this region hydrated" primitive:
       dm-clone turns discard passdown on by default whenever the
       destination's discard granularity is no larger than one region — a
@@ -1131,8 +1131,8 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       destination serving its own zeroed extents where the source's data
       should be.
 
-      **The clone-metadata area is per DN, and it is a real ceiling
-      (update_02.md U4).** `DnCloneMetaSize` (192 MiB = 48 `DnCloneMetaUnit`
+      **The clone-metadata area is per DN, and it is a real ceiling.**
+      `DnCloneMetaSize` (192 MiB = 48 `DnCloneMetaUnit`
       slots) is one region of the disk shared by every destination role this
       node hosts, across every SP on it. A migration costs
       `ceil((4 MiB + region_cnt bytes) / DnCloneMetaUnit)` slots with
@@ -1189,7 +1189,7 @@ DN17. Instantiate the SH24-SH26 loop with the §4.10 probes; one round takes
 DN18. Probe map (all via SH17 conventions; `res_name` and probe per
       resource). `RES_STATUS_PROVISIONING` rows are **healthy**: the resource
       is deliberately not created yet, no action is needed, and the worker
-      never turns one into an `err_epoch` (§9.5, `update_01.md` U4);
+      never turns one into an `err_epoch` (§9.5);
       `RES_STATUS_ERROR` keeps meaning *needs intervention*.
 
 | `ResInfo` | `res_name` | probe |
@@ -1246,7 +1246,7 @@ Recorded for traceability; the edits are already applied.
   block-device scanner that touches it in unkillable D state, makes
   `dmsetup remove` fail, and defers writes that then replay at resume —
   possibly after hydration already copied that region
-  (`dnagent_issue_00.md` issue 2). `Dm.Reload` lost its `keepSuspended`
+  (measured on the lab kernel). `Dm.Reload` lost its `keepSuspended`
   parameter, `sidePlan.linearSuspended` is gone, a migration source's per-CN
   dm-linears (the primary's included) now sit on their dm-error, and the
   §11.1 failover grace sleep and its constant are deleted.
@@ -1265,7 +1265,7 @@ Recorded for traceability; the edits are already applied.
   deleted, `agent/dnagent/diskmeta.go` added, `DnInfo` becomes
   `{disk,meta,port}_info` and `SideInfo.lv_info` becomes `side_dev_info`.
   `GetDnSize` now reports the data area, so the §6.1 formula lost its
-  `migr-pv` subtraction. Motivated by `dnagent_issue_00.md` issue 2's failure
+  `migr-pv` subtraction. Motivated by the measured failure
   class (an LVM scan that touches a bad dnv device wedges the node) and by the
   `scan_lvs = 1` host prerequisite the old migration VG needed.
 * `architecture.md` §11.2 + `[D12]`, `dnagent.md` §2.2/DN12/DN18 — the
@@ -1285,14 +1285,14 @@ Recorded for traceability; the edits are already applied.
   "every user-facing namespace is read-only: reads served, writes fail with
   an IO error", enforced **on the CN only** by a dm-flakey `error_writes`
   table over the namespace's normal backing. The previous LV-permission gate
-  is deleted: `dnagent_issue_00.md` issue 1 measured that a read-only flag
+  is deleted: lab measurement showed that a read-only flag
   below the top of a stack does not stop dm-remapped writes, and the DN must
   keep serving md metadata/resync and §3.6 health-check writes anyway. The
   level therefore has **no** DN-side behavior, and clone/migration hydration
   is no longer paused at it — hydration is infrastructure IO, not user IO.
   `agent/lvm.go` lost `LvSetPermission`, `LvEntry.ReadOnly` and
   `lvAttrReadOnly`.
-* `dnagent.md` DN13 step (4) + §6 test 12 (`update_01.md` U1) — the dn
+* `dnagent.md` DN13 step (4) + §6 test 12 (dm-clone features) — the dn
   migration dm-clone now passes **both** feature flags,
   `2 no_hydration no_discard_passdown`, exactly like the cn clone dm-clone
   (`cnagent.md` CN18 step 3); every dnv dm-clone carries the pair, with no
@@ -1307,12 +1307,12 @@ Recorded for traceability; the edits are already applied.
   trimmed, never serves host IO before the cutover") argued about the wrong
   window. `agent.CloneTable`'s `noDiscardPassdown` is now `true` at both call
   sites.
-* `dnagent.md` §2.1/SH17/§7 item 6 (`update_01.md` U3) — LVM left the **cn**
+* `dnagent.md` §2.1/SH17/§7 item 6 ([D14]) — LVM left the **cn**
   too ([D14]: the clone VG became a slot allocator over one loop device with
   kind-`b` wrapper linears), so this document's dn-only statements are
   generalized: no dnv agent runs any LVM command, SH17 lists no LVM report
   option, and the acceptance grep is repo-wide instead of `agent/ cmd/`.
-* `dnagent.md` SH20 + `cnagent.md` §2.3 (`update_01.md` U5) —
+* `dnagent.md` SH20 + `cnagent.md` §2.3 —
   `DisconnectDevice`'s controller device is located by the **sysfs walk**
   (`/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to match the NQN, its
   `nvme{N}` entries as the controllers, `/sys/class/nvme/{ctrl}/address`
@@ -1322,7 +1322,7 @@ Recorded for traceability; the edits are already applied.
   `ANAState` without a namespace device argument and answers an
   all-`inaccessible` namespace with an empty subsystem list.
 * `dnagent.md` §2.3 SH27 + the `Serve` reference implementation + CM4/§4.2
-  (`update_01.md` U4) — background tasks became part of the specified
+  — background tasks became part of the specified
   lifecycle: every role-server goroutine derives from `rootCtx` (which `Serve`
   now derives from its own ctx and cancels before returning) and mints a fresh
   trace id per attempt, and every goroutine that owns a **child process** is
@@ -1334,7 +1334,7 @@ Recorded for traceability; the edits are already applied.
   (`blkdiscard --zeroout`), which orphaned would keep writing to a device the
   agent no longer manages.
 * `dnagent.md` §2.2/SH14/DN2/DN5/DN6/DN9/DN10/DN11/DN12/DN13/DN14/DN15/DN16/
-  DN18 + §6 + §7 (`update_01.md` U4) — **the §9.4 trim protocol is replaced by
+  DN18 + §6 + §7 ([D15]) — **the §9.4 trim protocol is replaced by
   whole-side zeroing behind a `provisioned` gate.** `blkdiscard` is not a zero
   guarantee (the kernel dropped `discard_zeroes_data` in 4.12; NVMe DLFEAT
   read-zeroes is optional), so the trim funded neither dnv's multi-tenant "no
@@ -1361,7 +1361,7 @@ Recorded for traceability; the edits are already applied.
   `DnZeroBatchExtCnt = 10` and `DnZeroRetryInterval = 5`, and DN5 gained the
   `write_zeroes_max_bytes` fail-fast that keeps the fast-Write-Zeroes hardware
   assumption honest.
-* `dnagent.md` DN18 + §2.3 + DN13 + SH15/SH20 (`update_02.md` U2/U4/U7) — the
+* `dnagent.md` DN18 + §2.3 + DN13 + SH15/SH20 — the
   `migr_dst_info.target_info` probe row now names the SH20 sysfs walk (the
   IR3 amendment had corrected SH17/SH20 but left the old
   `nvme list-subsys -o json` wording in the DN18 table); the §2.3
@@ -1370,7 +1370,7 @@ Recorded for traceability; the edits are already applied.
   reconcile or listen error also winds the background down before Serve
   returns); DN13 records the per-DN clone-metadata slot ceiling (≤ 24
   destination roles); and SH15/SH20 record that the nvme-host sysfs reads
-  carry the SH15 soft timeout like every other OS touch — `update_02.md` U2
+  carry the SH15 soft timeout like every other OS touch — the amendment
   closed that gap, wrapping `agent/nvmehost.go` `readTrimmed` through
   `cmdCtx` and the `agent/cnagent/leg.go` sysfs walk through the newly
   exported `agent.CmdCtx`.
@@ -1446,14 +1446,14 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     fence **adopted** across a restart settles even when the converge that
     adopts it stops at the DN9 gate: every per-CN linear is reloaded onto its
     dm-error and resumed, and no timer is armed for a window that is already
-    elapsed (`update_06.md` U2). The production default is pinned at
+    elapsed. The production default is pinned at
     `common.SuspendSeconds` = 60.
 12. **Migration endpoints**: the destination sequence asserts the 8 KiB
     zeroing `writeblock` at the slot offset **before** the record's slot
     write, the wrapper `dmsetup create`, that the dm-clone's meta/dest devices
     resolve to the wrapper and the side device, and that the created table
     carries **`2 no_hydration no_discard_passdown`** — the dn role package's
-    copy of the assertion the cn package already makes (`update_01.md` U1);
+    copy of the assertion the cn package already makes;
     teardown asserts
     clone removal → disconnect → wrapper removal → the `FreeCloneMeta` slot
     write → side-device removal. The source sequence asserts
@@ -1544,31 +1544,31 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
 5. `cmd/dnv-agent` wires **server** interceptors only (`grpc.md` §4 table);
    `grep -F "per exported namespace" doc/architecture.md` finds nothing
    (the [D4] amendment is applied).
-6. `grep -rnE "pvcreate|vgcreate|lvcreate|lvchange|lvremove|\\blvs\\b|\\bvgs\\b|\\bpvs\\b" agent/ cmd/ common/` finds nothing outside comments and test-guard string literals — **repo-wide**: no dnv agent runs any LVM command ([D13], [D14]; `update_01.md` U3 superseded the dn-only rule).
+6. `grep -rnE "pvcreate|vgcreate|lvcreate|lvchange|lvremove|\\blvs\\b|\\bvgs\\b|\\bpvs\\b" agent/ cmd/ common/` finds nothing outside comments and test-guard string literals — **repo-wide**: no dnv agent runs any LVM command ([D13], [D14]).
 7. A manual run of the §13 example starts `dnv-agent dn`, serves
    `GetDnSize`, and a `SyncupDn`/`SyncupSide`/`CheckSide` round-trip shows
    one trace id across `grpc server request`, `os command` and
    `os write file direct` records.
 8. `grep -rn "trimmed" pb/schema.proto agent/` finds only the `reserved 3;`
    comment in `DnDiskTable.SideRecord`: the trim flag is gone and DN9's
-   zeroing protocol replaced it (`update_01.md` U4).
+   zeroing protocol replaced it ([D15]).
 9. `grep -rn "zeroout" agent/` hits only the DN9 zeroing path — never the
    DN13 clone-metadata slot preparation, which stays a plain `WriteBlock` of
    zeros, and never the CN clone-metadata arena, whose recycle guard is a
-   plain `blkdiscard` hole punch (`update_01.md` U3/U4).
+   plain `blkdiscard` hole punch (CN18).
 10. Both `agent.CloneTable` call sites pass `noDiscardPassdown = true`, and a
     test in `agent/dnagent` asserts the dn table's
-    `2 no_hydration no_discard_passdown` (`update_01.md` U1).
+    `2 no_hydration no_discard_passdown`.
 11. `agent.Serve` takes a `waitBackground func()` and calls it after
     `GracefulStop` (SH27); the dn passes `srv.WaitBackground` and the cn
     `nil`; a shutdown test shows no zeroing goroutine and no `blkdiscard`
     child surviving `Serve`'s return.
 
-### Integration-run fixes (first on-hardware run of the U1-U5 tree)
+### Integration-run fixes (first on-hardware run of the amended tree)
 
 Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
 against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
-execution of either suite since `update_01.md` was applied. All five were
+execution of either suite since the first amendment pass was applied. All five were
 real agent defects, not harness problems; every one is now covered by a unit
 test that fails without the fix.
 

@@ -40,7 +40,7 @@ func (s *CnAgentServer) ensureClone(
 		return false
 	}
 	if cp.deferred {
-		// U4: the destination td's raid0 does not exist yet, so there is
+		// [D15]: the destination td's raid0 does not exist yet, so there is
 		// nothing to clone onto — no metadata slot, no dm-clone and no source
 		// connection, the cn mirror of a still-zeroing migration destination.
 		s.reportCloneDeferred(st, cp, info)
@@ -102,7 +102,7 @@ func (s *CnAgentServer) ensureClone(
 		// Only now, with nothing mapping it, may a mismatched wrapper be
 		// replaced — and a *matching* one is left strictly alone: allocating
 		// is what hole-punches the slot, and re-punching a live slot would
-		// wipe a valid dm-clone superblock (update_01.md U3).
+		// wipe a valid dm-clone superblock (CN18).
 		if !metaOk {
 			if err := s.ensureCloneMeta(ctx, plan, cp); err != nil {
 				info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(

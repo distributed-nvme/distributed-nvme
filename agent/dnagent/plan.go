@@ -23,7 +23,7 @@ const (
 
 // details strings of the §9.4 side-provisioning protocol. The bits themselves
 // live in the side's on-disk allocation record ([D13]); these are only what a
-// side reports about them (update_01.md U4).
+// side reports about them.
 const (
 	// zeroingDetailsFmt is the RES_STATUS_PROVISIONING progress detail: k of
 	// n logical extents zeroed. PROVISIONING means healthy / not ready / no
@@ -73,7 +73,7 @@ type sidePlan struct {
 	provisioned bool
 	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
 	// says the destination has not provisioned yet. In that case migrSrc above
-	// is nil, because update_01.md makes `dst_provisioned = false` **exactly
+	// is nil, because `dst_provisioned = false` is **exactly
 	// equivalent** to "no migr_src_conf at all" (§11.2): fencing at migration
 	// start would leave the leg with no serving path for the whole zeroing
 	// window. The only visible difference is that the would-be migr_src_info

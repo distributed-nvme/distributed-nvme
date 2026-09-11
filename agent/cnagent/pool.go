@@ -18,7 +18,7 @@ import (
 // already starts at its leg's data region and an md array starts at its
 // data-offset, so every segment sits at offset 0 of its group device.
 //
-// Callers pass the slice's **effective** group list (U4): a group whose legs
+// Callers pass the slice's **effective** group list ([D15]): a group whose legs
 // are still provisioning has no device, so it is not a target yet and the
 // concat grows into it on the pass where it clears.
 func poolSegments(grps []*grpPlan) []dmSegment {
@@ -39,7 +39,7 @@ func poolSegments(grps []*grpPlan) []dmSegment {
 // pool message is involved.
 //
 // A grown group whose sides are still provisioning is simply not in the
-// effective lists yet (U4): the concats and the pool keep their old size, the
+// effective lists yet ([D15]): the concats and the pool keep their old size, the
 // serving pool keeps reporting OK with its raw `dmsetup status` details — the
 // §10.4 auto-grow parses them, so PROVISIONING must never reach this row — and
 // the reload happens on the pass where the group clears.
@@ -122,8 +122,8 @@ func (s *CnAgentServer) poolArgs(
 // suspend/resume. Without it an operator's metadata grow reports success while
 // the pool keeps running on the old size (CN13).
 //
-// The Create branch — and **only** it — arms CN14's activation sweep
-// (update_05.md U3 point 3): every leak path that skipped a `delete` ends the
+// The Create branch — and **only** it — arms CN14's activation sweep:
+// every leak path that skipped a `delete` ends the
 // pool device's life on the cntlr that skipped it, so a stray can only be met
 // where the device comes back, and within one device lifetime this agent is
 // the pool's only writer. The Reload and probe-matched branches arm nothing,
@@ -154,7 +154,7 @@ func (s *CnAgentServer) ensurePool(
 		// Armed on success only: a pool device that never came up has no
 		// metadata to enumerate. The startup reconcile's Create arms exactly
 		// like any other — the reboot deferral lives at the run site, not
-		// here (update_05.md U3 point 4).
+		// here.
 		st.pendingSweep[sp.sliceId] = true
 		return nil
 	}
@@ -238,7 +238,7 @@ func (s *CnAgentServer) createThinId(
 // suspends it across the message and resumes immediately after. That is a
 // second deliberate, bounded suspension beyond [D12]'s window, held only for
 // the duration of one `dmsetup message`, and it stays nested *inside* the
-// origin raid0 quiesce U1 wraps around the whole per-slice sequence.
+// origin raid0 quiesce (CN14) wraps around the whole per-slice sequence.
 func (s *CnAgentServer) createSnapId(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -274,7 +274,7 @@ func (s *CnAgentServer) createSnapId(
 	return messageErr
 }
 
-// The activation sweep's two log records (update_05.md U3). They are named
+// The activation sweep's two log records (CN14). They are named
 // once here because the sweep writes one of them at each of its three exits,
 // and an operator greps for the pair — "did the sweep run, and did it get
 // through" — after every pool re-creation.
@@ -283,7 +283,7 @@ const (
 	msgThinSweepFailed = "thin id sweep failed"
 )
 
-// sweepThinIds is CN14's activation sweep (update_05.md U3): enumerate the
+// sweepThinIds is CN14's activation sweep: enumerate the
 // armed pool's device ids and delete every id no td of td_list owns. Runs at
 // most once per pool-device creation, only under an RPC-delivered request
 // (the call site's reqFromRpc gate); a failure leaves pendingSweep set so a

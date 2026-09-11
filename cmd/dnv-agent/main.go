@@ -158,7 +158,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 		},
 		// The dn owns background goroutines with long-running children — the
 		// §9.4 zeroing loop's `blkdiscard --zeroout` — so shutdown joins them
-		// and no orphan child outlives the agent (update_01.md U4).
+		// and no orphan child outlives the agent (dnagent.md SH27).
 		srv.WaitBackground)
 }
 
@@ -192,6 +192,6 @@ func runCn(cmd *cobra.Command, args []string) error {
 		// The cn passes nil: its CN11 leg probers are stopped by cancelling
 		// rootCtx and are deliberately never joined — a probe wedged in an
 		// uninterruptible pread would hang shutdown forever, which is the very
-		// starvation U2 exists to prevent (ruling R4.13).
+		// starvation the probe-IO carve-out exists to prevent.
 		nil)
 }

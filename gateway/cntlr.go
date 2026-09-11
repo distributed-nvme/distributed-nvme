@@ -456,8 +456,8 @@ func (s *Server) UpdateCntlrEnabled(
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
 // the last SyncupCntlr the agent applied for this cntlr) and `cntlr_info`
-// both come from the GetCntlrInfo reply (architecture.md §8.6;
-// update_04.md U4) — diff `applied_revision` against the SpRev token
+// both come from the GetCntlrInfo reply (architecture.md §8.6) — diff
+// `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.
 //
 // The agent's reply is passed through as it comes: only a transport failure
@@ -560,8 +560,8 @@ func (s *Server) InspectCntlr(
 //
 // The reply is the agent's, whole: `applied_revision` (the revision of
 // the last SyncupSide the agent applied for this side) and `side_info`
-// both come from the GetSideInfo reply (architecture.md §8.6;
-// update_04.md U4) — diff `applied_revision` against the SpRev token
+// both come from the GetSideInfo reply (architecture.md §8.6) — diff
+// `applied_revision` against the SpRev token
 // GetStoragePool hands out to see how far the agent lags desired state.
 // The agent's SideInfo is passed through exactly as InspectCntlr passes
 // its CntlrInfo (AG3).

@@ -95,6 +95,3 @@ files are committed, so an ordinary build or test never requires protoc.
 
 Not yet implemented: `ctl/` and `cmd/dnvctl` — `doc/architecture.md` §13 is
 their spec.
-`doc/update_02.md` records the post-review fixes, all applied;
-`doc/update_03.md` records two findings from implementing them — one applied,
-one open.

@@ -133,7 +133,7 @@ func TestCloneRecoveryWhenOnlyTheDmCloneVanished(t *testing.T) {
 	// A wrapper that is present and matches is reused as-is: "allocate"
 	// strictly means "a new unit range was chosen", so the surviving slot is
 	// never re-created and — decisively — never re-hole-punched, which would
-	// wipe the valid dm-clone superblock it carries (update_01.md U3).
+	// wipe the valid dm-clone superblock it carries (CN18).
 	assertNoCall(t, node, "cmd dmsetup create "+cloneMetaName(srv, testClone))
 	assertNoCall(t, node, "cmd blkdiscard --offset 0 --length 8388608 "+loop)
 }

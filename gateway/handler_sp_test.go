@@ -1449,8 +1449,9 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 	sptWantCode(t, err, codes.NotFound)
 }
 
-// TestReleasePathsAbortOnALostConfKey pins update_06.md U5 on the widest
-// release path there is. A dn_conf or cn_conf the ledgers reach through a
+// TestReleasePathsAbortOnALostConfKey pins the allocator ledgers' error
+// class on the widest release path there is. A dn_conf or cn_conf the
+// ledgers reach through a
 // stored Side or Cntlr is named by no request, so GW7 makes its absence a lost
 // invariant key — §5.9's ABORTED — and never the NOT_FOUND of an object the
 // caller asked for. The store is untouched either way: both ledgers read
@@ -1462,8 +1463,8 @@ func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
 		// key hands back both the invariant key to lose and the addr_port it
 		// belongs to: only the closure knows that addr, and §5's error text
 		// quotes it, so want is the format and the whole rendered sentence is
-		// what gets pinned (update_06.md:19 — the quoted strings are
-		// normative, not just their heads).
+		// what gets pinned (the ledger error strings are normative, not just
+		// their heads).
 		key  func(env *sptEnv, conf *pb.SpConf) (string, string)
 		want string
 	}{
@@ -1990,13 +1991,13 @@ func TestGrowSliceData(t *testing.T) {
 }
 
 // TestGrowSliceConsecutiveDataGrows pins gateway.md §5.4's poolTotal
-// argument (update_04.md U7): the gateway passes math.MaxUint64, so AR6's
-// pending rule — a WORKER convergence guard judged by the primary's
+// argument (architecture.md §8.5): the gateway passes math.MaxUint64, so
+// AR6's pending rule — a WORKER convergence guard judged by the primary's
 // reported usage — never refuses a user-driven grow. The discriminator is
 // the SECOND grow of a kind: per kind the first is never pending
 // (len(grps) < 2), so a gateway that passed a real total (0 being what
 // "no report" naively becomes) would refuse it FAILED_PRECONDITION
-// "grow_pending" — issue_03.md I2's measured table.
+// "grow_pending".
 func TestGrowSliceConsecutiveDataGrows(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -2094,19 +2095,13 @@ func TestGrowSliceMeta(t *testing.T) {
 	}
 }
 
-// TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND the error
-// class update_05.md U4 settled on: the 16 GiB cap is the SP's own permanent
-// structural ceiling — per-object state, not exhaustible capacity — so it is
-// FAILED_PRECONDITION, and model.GrowSlice's in-STM re-check of the same cap
-// already maps there, so before U4 the gateway pre-check (RESOURCE_EXHAUSTED)
-// and the transaction agreed on the client's code only by accident of which
-// won the race.
-//
-// U4 is also which error table wins where the specs disagree: gateway.md §5.4
-// and GW7 put "the meta ladder is at the 16 GiB dm-thin metadata cap" in the
-// RESOURCE_EXHAUSTED row, while architecture.md §8.5's error list calls it
-// FAILED_PRECONDITION — and gateway.md §0 #2's own precedence rule gives §8.5
-// the last word. This test is the pre-check's half of that.
+// TestGrowSliceMetaLadderCap pins the meta ladder's ceiling AND its error
+// class (architecture.md §8.5, gateway.md GW7): the 16 GiB cap is the SP's
+// own permanent structural ceiling — per-object state, not exhaustible
+// capacity — so it is FAILED_PRECONDITION, never RESOURCE_EXHAUSTED.
+// model.GrowSlice's in-STM re-check of the same cap maps there too, so the
+// gateway pre-check and the transaction agree on the client's code no matter
+// which wins the race; this test is the pre-check's half of that.
 //
 // The slice's meta total is raised to the cap directly rather than by four
 // real grows: the refusal is decided from the slice alone and returns before

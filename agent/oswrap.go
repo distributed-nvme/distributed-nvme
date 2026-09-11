@@ -88,7 +88,7 @@ func (b *osBase) runOk(
 // and clone-metadata tooling of `clonemeta.go` (tmpfs, `truncate`, `losetup`,
 // `blkdiscard`) and the thin-provisioning-tools reader (`thinbm.go`), i.e. the
 // `cnagent.md` §4.1 file list. There is no LVM in that list, and none anywhere
-// else in dnv: [D14] removed the clone VG, LVM's last user (update_01.md U3).
+// else in dnv: [D14] removed the clone VG, LVM's last user.
 // By the §1 split rule those wrappers stay role code, but they still owe the
 // SH15 soft-timeout discipline and the DN19 error capture, which is exactly
 // what this type carries.

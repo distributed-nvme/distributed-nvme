@@ -734,8 +734,7 @@ func TestDiskMetaFreeIsIdempotent(t *testing.T) {
 }
 
 // The §9.4 batch setter: half-open ranges, an idempotent re-set that writes
-// nothing, and progress that survives the A/B slot round trip
-// (update_01.md U4).
+// nothing, and progress that survives the A/B slot round trip.
 func TestDiskMetaSetSideZeroed(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()
@@ -753,7 +752,7 @@ func TestDiskMetaSetSideZeroed(t *testing.T) {
 			from, count, ok)
 	}
 	// meta_info carries the same fact per node: provisioning= counts the sides
-	// whose bits are INCOMPLETE, not the sides (update_01.md U4, DN18). An
+	// whose bits are INCOMPLETE, not the sides (DN18). An
 	// operator reading it on a fully provisioned DN must see 0.
 	if got := meta.Describe(); !strings.Contains(got, "provisioning=1") {
 		t.Errorf("Describe() = %q, want provisioning=1 while the side is "+
@@ -837,7 +836,7 @@ func TestDiskMetaSetSideZeroed(t *testing.T) {
 		t.Error("the zeroed bits did not survive a reload")
 	}
 
-	// The U4 invariant: zeroed is a property of the side's ALLOCATION, not of
+	// The [D15] invariant: zeroed is a property of the side's ALLOCATION, not of
 	// the disk extent. Freeing and re-allocating the same ids hands back the
 	// same extents with a record that starts all-not-zeroed again.
 	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
@@ -858,7 +857,7 @@ func TestDiskMetaSetSideZeroed(t *testing.T) {
 
 // The on-disk encoding of zeroed_bits: LSB-first, trailing pad bits 0, and a
 // bit count that is the side's extent total rather than len(bits)*8 — a
-// 10-extent side must never look 16-extent (ruling R4.6, U5 item 3).
+// 10-extent side must never look 16-extent .
 func TestDiskMetaZeroedBitsEncoding(t *testing.T) {
 	meta, _ := formatted(t)
 	ctx := context.Background()

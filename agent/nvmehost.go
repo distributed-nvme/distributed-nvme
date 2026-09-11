@@ -152,7 +152,8 @@ func (h *NvmeHost) listDir(ctx context.Context, path string) []string {
 // readTrimmed reads one sysfs attribute under the §7 soft timeout (SH15).
 // Unlike most of sysfs, the /sys/class/nvme* tree can stall while a controller
 // is mid-reset or being torn down, which is exactly when this walk runs
-// (update_02.md U2). A timeout reads as "absent", like any other failure.
+// (SH15 applies to every read of it). A timeout reads as "absent", like any
+// other failure.
 func (h *NvmeHost) readTrimmed(ctx context.Context, path string) (string, bool) {
 	cctx, cancel := cmdCtx(ctx)
 	defer cancel()

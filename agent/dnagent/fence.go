@@ -35,7 +35,7 @@ import (
 // timeout and no error path, so anything that reads it — a udev worker, an
 // operator's lsblk, any block-device scan — blocks in uninterruptible D
 // state; `exit_aio` then makes that task unkillable and the node needs a
-// reboot (dnagent_issue_00.md issue 2). Nothing in the dn agent scans block
+// reboot. Nothing in the dn agent scans block
 // devices any more ([D13] removed the LVM commands that did), so the exposure
 // is external tooling during the window. Keeping the window bounded, and
 // never letting a device outlive it, is what makes the trade acceptable.
@@ -71,7 +71,7 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 // on the first converge" hold under the DN9 gate too: a restart-adopted fence
 // has no fenceAt, so reading that field alone would let an agent restart plus
 // one unreadable side device leave the per-CN linears suspended past [D12]'s
-// bound (update_06.md U2).
+// bound.
 func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,7 +118,7 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 }
 
 // settleFence is the fence bookkeeping of a converge that took the DN9
-// side-device gate (update_01.md U4 — syncup_side.go's `state != sideDevReady`
+// side-device gate (syncup_side.go's `state != sideDevReady`
 // fork) and so never reached ensureCnDm.
 //
 // Without it the window can end with the per-CN dm-linears still suspended and

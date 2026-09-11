@@ -55,7 +55,7 @@ func loadClone(
 // stays a documented-unverifiable contract ([D3]). And the ceiling that
 // actually binds is the primary CN's clone-metadata arena, shared by every
 // clone of every cntlr on that CN, not MaxCloneCntPerSp; v1 does not track
-// it (§0 #16, update_02.md U4), so an over-committed clone is created
+// it (§0 #16, architecture.md §8.9's admission note), so an over-committed clone is created
 // normally and reports RES_STATUS_ERROR until arena units free up.
 func (s *Server) CreateClone(
 	ctx context.Context,

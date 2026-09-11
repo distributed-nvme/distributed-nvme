@@ -37,10 +37,10 @@ func (s *CnAgentServer) syncupCntlr(
 		st = newCntlrState(req)
 	}
 	st.req = req
-	// U3: this request came through the revision gate, so GateRevision makes
+	// This request came through the revision gate, so GateRevision makes
 	// it the newest desired state this cntlr has ever accepted and its
 	// td_list is authoritative — the one copy the activation sweep may
-	// delete against (update_05.md U3 point 4).
+	// delete against (CN14).
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
@@ -134,7 +134,7 @@ func (s *CnAgentServer) retire(
 	}
 
 	// (1) Every namespace leaving service moves to the inaccessible group.
-	// update_01.md U4 needs no case of its own here: a provisioning-deferred
+	// The provisioning deferral needs no case of its own here: a provisioning-deferred
 	// namespace's anaGrpId is already inaccessible (CN16's fourth conjunct),
 	// so this loop parks it on the very first converge of a fresh SP.
 	for _, np := range plan.namespaces {
@@ -155,10 +155,10 @@ func (s *CnAgentServer) retire(
 	}
 
 	// (2) Every ns-dev that must stop serving is reloaded onto its dm-error —
-	// the survivors the loop below selects and, since update_06.md U4, every
-	// removed namespace's as well.
+	// the survivors the loop below selects and every removed namespace's as
+	// well (CN9).
 	// A provisioning-deferred namespace is covered by the same test, because
-	// CN16 rule 0 makes its backing the td's errorName (update_01.md U4).
+	// CN16 rule 0 makes its backing the td's errorName.
 	// The reload's internal suspend is what flushes the in-flight IO. A
 	// namespace whose *old* td is leaving `td_list` is parked too, even when
 	// its new backing is a live raid0: its table still maps the departing
@@ -262,7 +262,7 @@ func (s *CnAgentServer) retire(
 		st.tracker.Drop(resKeyOf(resKeyPoolDataFmt, sp.sliceId))
 		// The pool device's life ends here, so its arming does too: a later
 		// re-creation re-arms on its own Create branch, and dropping the
-		// entry keeps the map from carrying dead slices (update_05.md U3).
+		// entry keeps the map from carrying dead slices.
 		delete(st.pendingSweep, sp.sliceId)
 	}
 
@@ -274,12 +274,12 @@ func (s *CnAgentServer) retire(
 	}
 
 	// (9) probers, then the outbound disconnects, then the leg wrappers, last
-	// — the CN21 order of update_01.md U2 spec 4 (removeLeg).
+	// — the CN21 order (removeLeg).
 	wantedProbers := make(map[uint64]struct{})
 	if plan.primary && plan.wantLeg {
 		for _, lp := range plan.legs {
 			if lp.provisioning {
-				continue // U4: no wrapper to probe, so no prober
+				continue // [D15]: no wrapper to probe, so no prober
 			}
 			wantedProbers[lp.legId] = struct{}{}
 		}
@@ -398,7 +398,7 @@ func (s *CnAgentServer) build(
 	if plan.wantGrp {
 		for _, gp := range plan.grps {
 			if gp.deferred {
-				// U4: a leg of leg_list is still provisioning, so there is no
+				// [D15]: a leg of leg_list is still provisioning, so there is no
 				// md array and no CnGrpName to build, and the group is not a
 				// pool concat target either.
 				info.GrpIdToMdRaid[gp.grpId] = st.tracker.Provisioning(
@@ -422,7 +422,7 @@ func (s *CnAgentServer) build(
 	if plan.wantPool {
 		for _, sp := range plan.slices {
 			if sp.deferred {
-				// U4: every group on one side of this slice is deferred — the
+				// [D15]: every group on one side of this slice is deferred — the
 				// initial CreateStoragePool shape. Nothing is built, and
 				// nothing is wrong: an empty concat would be an error, and
 				// PROVISIONING must never feed err_epoch.
@@ -431,8 +431,8 @@ func (s *CnAgentServer) build(
 			}
 			poolReady[sp.sliceId] = s.ensureSlice(ctx, st, plan, sp, info)
 		}
-		// U3: CN14's activation sweep, for every slice whose pool device this
-		// incarnation just created (update_05.md U3 points 2 and 4). A
+		// CN14's activation sweep, for every slice whose pool device this
+		// incarnation just created. A
 		// startup reconcile arms and skips — its persisted request may lag
 		// the pool, and deleting against a lagging td_list would destroy a
 		// live td; the first post-boot SyncupCntlr then finds the flag still
@@ -462,7 +462,7 @@ func (s *CnAgentServer) build(
 				detailsSpLevel)
 		}
 	}
-	// U1: the snapshot-message pre-pass. Every needed slice's `create_snap`
+	// CN14: the snapshot-message pre-pass. Every needed slice's `create_snap`
 	// goes out inside ONE suspension of the origin td's raid0, so the
 	// per-slice snapshots all describe the same instant instead of one per
 	// message. It has to sit exactly here: after the loop that fills
@@ -497,7 +497,7 @@ func (s *CnAgentServer) build(
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Missing(
 					key, name, detailsSpLevel)
 			case sp.deferred:
-				// U4: no pool, so no thin volume in this slice.
+				// [D15]: no pool, so no thin volume in this slice.
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Provisioning(
 					key, name, detailsProvisioning)
 			case !poolReady[sp.sliceId]:
@@ -525,7 +525,7 @@ func (s *CnAgentServer) build(
 		}
 		switch {
 		case plan.wantPool && tp.deferred:
-			// U4: a slice's thin volume does not exist, so the stripe cannot
+			// [D15]: a slice's thin volume does not exist, so the stripe cannot
 			// be assembled. The dm-error above is built all the same — it is
 			// what backs the td's ns-devs meanwhile (CN16).
 			info.TdIdToRaid0[tp.tdId] = st.tracker.Provisioning(
@@ -566,7 +566,7 @@ func (s *CnAgentServer) build(
 			err := s.ensureNsDev(ctx, np)
 			// A deferred namespace is built exactly as the effective plan
 			// wants it — on the td's dm-error — but nothing under it can
-			// serve, so it reports PROVISIONING rather than OK (U4).
+			// serve, so it reports PROVISIONING rather than OK ([D15]).
 			info.NsIdToDmLinear[np.nsId] = deferredFromErr(
 				st.tracker, np.deferred,
 				resKeyOf(resKeyNsDevFmt, np.nsId), np.devName,
@@ -613,7 +613,7 @@ func (s *CnAgentServer) build(
 }
 
 // snapshotPrePass sends one snapshot td's per-slice `create_snap` messages
-// inside a single quiesce of the origin td's raid0 (CN14, update_02.md U1).
+// inside a single quiesce of the origin td's raid0 (CN14).
 // Suspending the raid0 flushes every in-flight host write and holds new ones
 // for the duration of the messages, which is what makes the per-slice
 // snapshots point-in-time with respect to each other; each message keeps its
@@ -757,7 +757,7 @@ func (s *CnAgentServer) reportSuppressed(
 }
 
 // reportSliceDeferred fills the three pool rows of a provisioning-deferred
-// slice, shared by the converge pass and the probe (U4). A *serving* slice
+// slice, shared by the converge pass and the probe ([D15]). A *serving* slice
 // never comes here: its dm_pool row must keep carrying the raw `dmsetup
 // status` line the §10.4 auto-grow parses.
 func (s *CnAgentServer) reportSliceDeferred(
@@ -785,7 +785,7 @@ func nsDevDetails(np *nsPlan) string {
 }
 
 // reportCloneDeferred fills the three rows of a clone whose destination td is
-// provisioning-deferred (U4), shared by the converge pass and the probe.
+// provisioning-deferred ([D15]), shared by the converge pass and the probe.
 func (s *CnAgentServer) reportCloneDeferred(
 	st *cntlrState,
 	cp *clonePlan,
@@ -854,8 +854,8 @@ func (s *CnAgentServer) teardownCntlr(
 // teardownCntlrResources removes every cntlr-scoped resource, strictly
 // top-down, and leaves the local store alone. CN21 adds the file deletion on
 // top; the SP_LEVEL_DISABLE row of CN19 uses it bare, because there the
-// desired state must persist. The tail is the CN21 leg order of update_01.md
-// U2 spec 4: cancel the probers, disconnect, then remove the wrappers
+// desired state must persist. The tail is the CN21 leg order:
+// cancel the probers, disconnect, then remove the wrappers
 // (removeLeg).
 func (s *CnAgentServer) teardownCntlrResources(
 	ctx context.Context,
@@ -901,8 +901,7 @@ func (s *CnAgentServer) teardownCntlrResources(
 		s.removeDm(ctx, sp.poolDataName)
 	}
 	// Every pool device of this cntlr is gone, so no slice is sweep-pending
-	// any more; a re-creation re-arms on its own Create branch (update_05.md
-	// U3).
+	// any more; a re-creation re-arms on its own Create branch.
 	clear(st.pendingSweep)
 	for _, gp := range plan.grps {
 		s.removeGroup(ctx, gp)

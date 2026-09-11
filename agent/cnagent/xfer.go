@@ -15,7 +15,7 @@ import (
 
 // xferServed reports whether this cntlr backs the transfer device with real
 // data. A standby exports a plain dm-error table of the same size, and so does
-// a primary once the level suppresses thin pools — or, per U4, one whose origin
+// a primary once the level suppresses thin pools — or, per [D15], one whose origin
 // td is still provisioning-deferred and therefore has no raid0 to map.
 func (p *cntlrPlan) xferServed(xp *xferPlan) bool {
 	return p.primary && p.level < pb.SpLevel_SP_LEVEL_NO_THINPOOL &&
@@ -24,7 +24,7 @@ func (p *cntlrPlan) xferServed(xp *xferPlan) bool {
 
 // xferAnaGrpId is optimized on the serving primary and inaccessible
 // everywhere else — the transfer has no suspend state of its own. A deferred
-// transfer stays inaccessible for the CN16 reason (U4): promoting a path over
+// transfer stays inaccessible for the CN16 reason ([D15]): promoting a path over
 // an error table would hand the destination IO errors instead of a queue.
 func (p *cntlrPlan) xferAnaGrpId(xp *xferPlan) int {
 	if p.primary && p.wantAny && !xp.deferred {
@@ -98,7 +98,7 @@ func (s *CnAgentServer) ensureXfer(
 	} else {
 		err = s.ensureDmError(ctx, xp.finalName, xp.sectors)
 	}
-	// A deferred transfer's three rows report PROVISIONING (U4): the devices
+	// A deferred transfer's three rows report PROVISIONING ([D15]): the devices
 	// are exactly what the effective desired state wants, and none of them can
 	// carry data until the origin's chain clears.
 	info.XferIdToDmLinear[xp.xferId] = deferredFromErr(

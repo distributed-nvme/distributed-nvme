@@ -1393,7 +1393,7 @@ case_smoke() {
 	# is the truthful live state of the node, not a failure of the call (AG3),
 	# and the reply's applied_revision is the agent's — the revision of the
 	# last applied Syncup*, 0 for a fake that has applied nothing
-	# (update_04.md U2/U3), never the stored rev key.
+	# (architecture.md §8.2/§8.3), never the stored rev key.
 	out=$(gw inspect-dn --addr "$(dn_addr 0)")
 	assert_field "$out" '.applied_revision' "0" \
 		"inspect-dn applied_revision of an unsynced fake"
@@ -2299,8 +2299,8 @@ EOF
         "revision":"7",
         "side_conf":{"ext_cnt":"1","primary_cn_id":"$primaryCnId"}}}}}
 EOF
-	# update_04.md U4: the reply's applied_revision is the agent's own last
-	# applied revision for the object, passed through with the info. The
+	# architecture.md §8.6: the reply's applied_revision is the agent's own
+	# last applied revision for the object, passed through with the info. The
 	# seeded 7 is distinctive — the stored sp_rev is far past 7 by this
 	# stage, so a handler that regressed to the store cannot pass.
 	out=$(gw inspect-cntlr --sp sp0 --id "$primaryId")

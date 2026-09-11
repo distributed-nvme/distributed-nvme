@@ -13,7 +13,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is update_05.md U1's test: the gateway mints a trace id for a
+// This file is gateway/traceid.go's test: the gateway mints a trace id for a
 // request that arrives without one, and that id is the one its outbound agent
 // call carries.
 //
@@ -118,11 +118,11 @@ func traceIdIsMinted(s string) bool {
 	return true
 }
 
-// TestServerMintsTraceIdWhenAbsent pins update_05.md U1 / gateway.md §0 #6:
-// a request that arrives with no trace_id metadata still gets one, and the
-// agent call the handler makes carries it. Before U1 the fake saw no trace-id
+// TestServerMintsTraceIdWhenAbsent pins gateway.md §0 #6: a request that
+// arrives with no trace_id metadata still gets one, and the agent call the
+// handler makes carries it. Without the mint the fake would see no trace-id
 // metadata at all here, because the shared server interceptor only adopts an
-// incoming id and there was none to adopt.
+// incoming id and there would be none to adopt.
 func TestServerMintsTraceIdWhenAbsent(t *testing.T) {
 	fx := traceIdSetup(t)
 

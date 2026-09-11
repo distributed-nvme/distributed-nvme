@@ -982,7 +982,7 @@ func (s *Server) FindStoragePoolNames(
 // same inputs: the slice's first data group, or the meta ladder.
 //
 // poolTotal is math.MaxUint64 (gateway.md §5.4, architecture.md §8.5;
-// update_04.md U7 pins it). model.GrowSlice re-applies AR6's
+// TestGrowSliceConsecutiveDataGrows pins it). model.GrowSlice re-applies AR6's
 // pending rule, which exists so that a WORKER cannot issue a second grow
 // before the primary has reported the first; a user-driven GrowSlice is
 // explicit operator intent, and the gateway holds no pool report to judge
@@ -1069,9 +1069,8 @@ func (s *Server) GrowSlice(
 				// The 16 GiB dm-thin metadata cap is the SP's own permanent
 				// ceiling — object state, not exhaustible capacity — so it
 				// is FAILED_PRECONDITION (architecture.md §8.5, gateway.md
-				// GW7; update_05.md U4 resolved the old GW7-vs-§8.5 conflict
-				// this way, and model.GrowSlice's in-STM re-check already
-				// maps there).
+				// GW7; model.GrowSlice's in-STM re-check of the same cap
+				// already maps there).
 				return errPrecondition(
 					"slice %d has %d meta extents and cannot grow past the "+
 						"16 GiB dm-thin metadata cap",

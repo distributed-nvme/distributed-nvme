@@ -170,7 +170,7 @@ func (s *Server) CreateThinDevice(
 			OriId: origin.GetDevId(),
 			Size:  size,
 			// Always false: materialization is the sp-worker's write (§10.3,
-			// U2/U3), and this RPC has no way to know whether every slice
+			// ThinDeviceCreated.md U2/U3), and this RPC has no way to know whether every slice
 			// pool already holds the id.
 			Created: false,
 		})

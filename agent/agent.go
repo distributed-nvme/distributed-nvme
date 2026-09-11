@@ -4,7 +4,7 @@
 // Policy — which dm tables, md arrays and nvmet objects to build and when —
 // lives in the role packages agent/dnagent and agent/cnagent. No LVs: [D14]
 // removed the clone VG, LVM's last user, so no LVM runs anywhere in dnv
-// (update_01.md U3, cnagent.md §1).
+// (cnagent.md §1).
 package agent
 
 import (
@@ -24,11 +24,11 @@ import (
 // waitBackground (may be nil) is joined after GracefulStop has drained every
 // RPC, so no background goroutine — and, more to the point, no child process
 // one of them owns, such as the §9.4 zeroing `blkdiscard` — outlives the
-// agent (update_01.md U4). Only a role whose background work holds a
+// agent (dnagent.md SH27). Only a role whose background work holds a
 // long-running child passes one: the dn passes its WaitGroup join, the cn
 // passes nil because its CN11 probers are stopped by cancellation and never
 // joined (a wedged pread is uninterruptible, so waiting would hang shutdown
-// forever — the very starvation U2 exists to prevent).
+// forever — the very starvation the probe-IO carve-out exists to prevent).
 //
 // The cancel-then-join pair is deferred, so *every* return path takes it, not
 // just the one through grpcServer.Serve: reconcile has already armed the

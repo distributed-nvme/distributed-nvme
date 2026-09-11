@@ -71,7 +71,7 @@ func NewServer(cli *etcdutil.Client) *Server {
 
 // serverOptions is the option set Run's grpc.Server is built from, factored
 // out so a test can build a server with exactly the production chain
-// (update_05.md U1, gateway.md §9.5).
+// (gateway.md §9.5).
 //
 // The trace-id mint is FIRST in both chains, upstream of the shared chain of
 // grpc.md §4, and that order is the whole mechanism: it injects the id into
@@ -92,7 +92,7 @@ func serverOptions() []grpc.ServerOption {
 // Run serves the Gateway service until ctx is canceled (GW2, GW3).
 //
 // It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying
-// serverOptions' two interceptor chains (grpc.md §4, behind U1's trace-id
+// serverOptions' two interceptor chains (grpc.md §4, behind the trace-id
 // mint), a goroutine that turns ctx cancellation into GracefulStop, and
 // Serve. Shutdown is GracefulStop and nothing else: in-flight handlers
 // finish (each bounded by its client deadline and the 10 s per-STM budget of

@@ -24,7 +24,7 @@ func (s *CnAgentServer) probeCntlr(
 	// transport liveness and ana_state per desired side on a standby.
 	for _, lp := range plan.legs {
 		key := resKeyOf(resKeyLegFmt, lp.legId)
-		// CN19's suppression is evaluated first and wins over U4's deferral:
+		// CN19's suppression is evaluated first and wins over [D15]'s deferral:
 		// the operator has said the resource must not exist, which is a
 		// stronger statement than "it is coming".
 		if !plan.wantLeg {
@@ -76,7 +76,7 @@ func (s *CnAgentServer) probeCntlr(
 			s.reportSliceDeferred(st, sp, info)
 			continue
 		}
-		// The concats are compared against the *effective* group lists (U4):
+		// The concats are compared against the *effective* group lists ([D15]):
 		// a pool that has not grown into a still-provisioning group is OK at
 		// its current size, not a mismatch.
 		status, details := s.probeDmConcat(
@@ -189,7 +189,7 @@ func (s *CnAgentServer) probeCntlr(
 			continue
 		}
 		// A clone whose dst is merely still provisioning is deferred and
-		// builds nothing (U4).
+		// builds nothing ([D15]).
 		if cp.deferred {
 			s.reportCloneDeferred(st, cp, info)
 			continue
@@ -268,7 +268,7 @@ func (s *CnAgentServer) probeCntlr(
 		info.SsIdToSubsystem[ssp.ssId] = t.Set(
 			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, status, details)
 		for _, np := range ssp.namespaces {
-			// np.anaGrpId already carries U4's fourth conjunct, so a deferred
+			// np.anaGrpId already carries [D15]'s fourth conjunct, so a deferred
 			// namespace matches at ana_grpid = 3 and is healthy — it is only
 			// not yet ready, which is what PROVISIONING says.
 			nsStatus, nsDetails := s.probeNamespaceObject(

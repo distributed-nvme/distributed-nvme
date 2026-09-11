@@ -91,8 +91,7 @@ func sideTrConf(addr, svcId string) *pb.NvmeTrConf {
 // the suite goes through it, because it is also what keeps the CN11 probers
 // off the real syscalls: Reconcile starts them for a stored primary and the
 // loop fires on its own ticker, so a server left with the production
-// directLegProbeIO would eventually open /dev/mapper/dnv-… for real
-// (update_01.md U2).
+// directLegProbeIO would eventually open /dev/mapper/dnv-… for real.
 func newCnServer(node *fakeNode) *CnAgentServer {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewCnAgentServer(node.osClient(), nf,
@@ -107,7 +106,7 @@ func newCnServer(node *fakeNode) *CnAgentServer {
 // CN10/CN18 connect retry hangs off that — so a server rooted at
 // context.Background() leaks a 5 s-ticker prober per leg past the end of the
 // test that made it, and those goroutines then race the next test's fields
-// (update_01.md U2 "stopped gracefully when the agent exits"; contract R2.1 —
+// (CN11: probers are stopped gracefully when the agent exits —
 // cancel, do not join). t.Context() is cancelled when the test returns, before
 // its cleanups run.
 func reconcileForTest(t *testing.T, srv *CnAgentServer) {
@@ -148,7 +147,7 @@ func legOf(legId uint64, sides ...*pb.Side) *pb.Leg {
 	return &pb.Leg{LegId: legId, LegIdx: 0, SideList: sides}
 }
 
-// sideOf builds a side in the steady state every pre-U4 test means: its
+// sideOf builds a side in the steady state every pre-provisioning-gate test means: its
 // §9.4 zeroing finished and the worker flipped the gate, so the DN exports it
 // and the CN converges the whole stack over it. Without the explicit flag
 // proto3's default would make every existing fixture provisioning-deferred.
@@ -162,7 +161,7 @@ func sideOf(sideId uint64, addr, svcId string) *pb.Side {
 	}
 }
 
-// unprovisionedSideOf is sideOf's U4 twin: a side whose DN is still zeroing
+// unprovisionedSideOf is sideOf's [D15] twin: a side whose DN is still zeroing
 // it, so nothing is exported for it yet.
 func unprovisionedSideOf(sideId uint64, addr, svcId string) *pb.Side {
 	side := sideOf(sideId, addr, svcId)
@@ -189,7 +188,7 @@ type reqOpts struct {
 	twoLegs bool
 	// unprovisionedDataLeg makes every side of the data group's leg
 	// provisioned = false, which defers the group and — since it is the
-	// slice's only data group — the whole slice (U4).
+	// slice's only data group — the whole slice ([D15]).
 	unprovisionedDataLeg bool
 	// unprovisionedSpare gives the data group a spare leg whose sides are
 	// unprovisioned. A spare defers only itself.
@@ -200,7 +199,7 @@ type reqOpts struct {
 	unprovisionedExtraSide bool
 	// twoSlices gives the SP a second slice, so a td's raid0 really stripes
 	// across two thin volumes and a snapshot has more than one instant to be
-	// torn between (update_02.md U1).
+	// torn between (CN14's quiesce).
 	twoSlices bool
 }
 
@@ -444,7 +443,7 @@ func assertNoCall(t *testing.T, node *fakeNode, fragment string) {
 	}
 }
 
-// assertSysfsDeadlines is the update_02.md U2 regression guard: no read of
+// assertSysfsDeadlines is the SH15 regression guard: no read of
 // the CN10 sysfs leg walk may reach the OsClient on a deadline-less ctx
 // (SH15). The per-attribute guard keeps it from going vacuous if a later
 // fixture change stops exercising one of the five reads.
@@ -511,7 +510,7 @@ func assertOnlyPersisted(t *testing.T, node *fakeNode) {
 	}
 }
 
-// assertProvisioning is assertOk's U4 twin: the resource is deliberately not
+// assertProvisioning is assertOk's [D15] twin: the resource is deliberately not
 // created yet and the row must say so with the fixed details string — never
 // with a progress counter, which would re-send CntlrInfo on every check round.
 func assertProvisioning(t *testing.T, info *pb.ResInfo, label string) {
@@ -527,7 +526,7 @@ func assertProvisioning(t *testing.T, info *pb.ResInfo, label string) {
 }
 
 // assertMissingSpLevel is the CN19 row: the operator's level says the resource
-// must not exist, which is a stronger statement than U4's "it is coming" — so
+// must not exist, which is a stronger statement than [D15]'s "it is coming" — so
 // a resource that is both level-suppressed and provisioning-deferred reports
 // MISSING/"sp_level", never PROVISIONING.
 func assertMissingSpLevel(t *testing.T, info *pb.ResInfo, label string) {
@@ -673,7 +672,7 @@ func TestFreshSyncupCn(t *testing.T) {
 // a single timed-out probe attach a *second* loop to the arena file, and from
 // then on every pass reports "2 loop devices …, want 1": no clone metadata
 // can be allocated or probed on the CN until an operator runs `losetup -d`
-// (update_01.md U3 Decision: a **single** loop device, re-learned every
+// (CN18: a **single** loop device, re-learned every
 // converge; §8 rejects loop sprawl outright).
 func TestFailedLosetupNeverAttachesASecondLoop(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1240,7 +1239,7 @@ func TestUpdateNamespaceDevIsOneReload(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.26 — park before remove (CN9/CN21, update_06.md U4)
+// §6.26 — park before remove (CN9/CN21)
 // ---------------------------------------------------------------------------
 
 // TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN9's retire
@@ -1273,7 +1272,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 	// serving data. The pin is on the recorded `--table` of the reload itself
 	// — `node.dms[nsDevName]` is gone by the time a sub-case asserts, the
 	// removal being the very thing under test — and it names the td's
-	// `CnErrorName` (update_06.md §4), the same device TestStandbyConverge
+	// `CnErrorName` (CN9), the same device TestStandbyConverge
 	// pins a live ns-dev against.
 	assertParkedOnError := func(t *testing.T, srv *CnAgentServer,
 		node *fakeNode) {
@@ -1473,7 +1472,7 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 		"cmd rm -f "+srv.nf.LocalCntlrPath(
 			testCluster, testCn, testSp, testCntlr),
 	)
-	// CN21 (update_01.md U2 spec 4): one leg disconnects *before* its wrapper
+	// CN21: one leg disconnects *before* its wrapper
 	// is removed — a probe wedged on a pathless leg holds an open fd on the
 	// wrapper, and only the disconnect errors its queued IO.
 	metaNqn := srv.nf.SideToCnNqn(testCluster, testSp, testMetaLeg, testCn)
@@ -1686,7 +1685,7 @@ func TestGetInfoUnknownObject(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.17 — U4 provisioning deferral (update_01.md U4, [D15])
+// §6.17 — provisioning deferral ([D15])
 //
 // A side that has not finished its §9.4 zeroing exports nothing, so every
 // resource stacked on it is left out of the *effective* desired state: it is
@@ -1702,7 +1701,7 @@ func grownDataGrp(req *pb.SyncupCntlrRequest, provisioned bool) {
 }
 
 // grownDataGrp3 appends a *third* data group — a second GrowSlice on top of
-// the second one, which is what makes the out-of-order clearing of U4's
+// the second one, which is what makes the out-of-order clearing of [D15]'s
 // deferral observable.
 func grownDataGrp3(req *pb.SyncupCntlrRequest, provisioned bool) {
 	appendDataGrp(req, testDataGrp3, testDataLeg3, testDataSide3, provisioned)
@@ -1897,7 +1896,7 @@ func concatDevNos(t *testing.T, node *fakeNode, name string) []string {
 	return out
 }
 
-// TestOutOfOrderGrowDefersEveryLaterGroup is the U4 prefix rule: deferral cuts
+// TestOutOfOrderGrowDefersEveryLaterGroup is the [D15] prefix rule: deferral cuts
 // a group list at the *first* deferred group instead of filtering deferred
 // groups out of the middle. Two GrowSlice appends whose sides finish zeroing
 // out of order are the reachable trigger — no spare and no worker involved.
@@ -1906,7 +1905,7 @@ func concatDevNos(t *testing.T, node *fakeNode, name string) []string {
 // concat offset, so every pool-data block dm-thin allocated in that window
 // would physically move the moment the earlier group cleared and the target
 // was re-inserted in the middle: silent corruption, reported OK by design.
-// update_01.md U4 ("a not-yet-grown concat/pool is OK, not a mismatch; the
+// CN28 ("a not-yet-grown concat/pool is OK, not a mismatch; the
 // grow completes when the group clears") and architecture.md §8.5 ("the concat
 // and the pool keep their old, effective size") both describe a prefix.
 func TestOutOfOrderGrowDefersEveryLaterGroup(t *testing.T) {
@@ -1986,7 +1985,7 @@ func TestOutOfOrderGrowDefersEveryLaterGroup(t *testing.T) {
 }
 
 // TestConcatNeverShrinksWhenALiveGroupDefers is the other direction of the
-// same rule: U4's deferral holds a *new* group out of the concat until it is
+// same rule: [D15]'s deferral holds a *new* group out of the concat until it is
 // ready — it may never take a serving one out. A live group whose leg_list
 // gains an all-unprovisioned leg (§8.12's spare switch onto a fresh DN) must
 // not shorten the pool-data concat under a live thin-pool: the concat's target
@@ -2032,7 +2031,7 @@ func TestConcatNeverShrinksWhenALiveGroupDefers(t *testing.T) {
 	}
 }
 
-// TestDeferredTdNamespaceIsInaccessible is the CN16 conjunct U4 adds: while
+// TestDeferredTdNamespaceIsInaccessible is the CN16 conjunct [D15] adds: while
 // the backing chain provisions, the ns-dev sits on the td's dm-error and its
 // namespace stays in the inaccessible group, so a host queues instead of
 // eating IO errors.

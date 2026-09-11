@@ -37,8 +37,8 @@ up" as an incident step: stop the old `dnv-agent` (or the node) promptly;
 until then expect application EIO on hosts that keep using the stale path.
 Monitor for the signature: a cntlr that etcd says is no longer primary
 whose CN still answers on the data network. `UpdateCntlrEnabled(false)` on a
-reachable-but-suspect primary is the planned-failover tool (`update_06.md` U1,
-`architecture.md` §8.6: a `disabled` primary is itself a failover trigger, with
+reachable-but-suspect primary is the planned-failover tool
+(`architecture.md` §8.6: a `disabled` primary is itself a failover trigger, with
 no threshold wait); it does not help against a genuinely CP-partitioned node,
 which cannot converge the disable either.
 

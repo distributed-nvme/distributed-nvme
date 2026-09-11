@@ -26,7 +26,7 @@ type fakeNode struct {
 
 	calls []string
 	// sysfsNoDeadline records every /sys read that arrived on a ctx carrying
-	// no deadline. update_02.md U2: the leg walk's sysfs reads are
+	// no deadline. The leg walk's sysfs reads are
 	// SH15-bounded like every other OS touch, so this must stay empty.
 	sysfsNoDeadline []string
 
@@ -50,7 +50,7 @@ type fakeNode struct {
 	// SP_LEVEL_DISABLE teardown runs under the same node *read* lock and can
 	// remove a wrapper between the `ls` and the `dmsetup table` of that one
 	// name — and this is how the suite reproduces that window deterministically
-	// ([D14], update_01.md U3 spec 3).
+	// ([D14]).
 	lsGhosts []string
 
 	// md arrays, keyed by the /dev/md/{name} path
@@ -174,7 +174,7 @@ func newFakeNode() *fakeNode {
 }
 
 // osClient is the cn role's OsClient double. The block-IO halves are NOT wired
-// here any more: the CN11 probe left the OsClient (update_01.md U2), so the
+// here any more: the CN11 probe does not use the OsClient (osclient.md §4.5.1), so the
 // only cn caller of WriteBlock/ReadBlockDirect is the LegProbeIO double below.
 // ReadBlockFn stays connected so that a buffered read — which the probe must
 // never issue — is still recorded rather than silently succeeding.
@@ -218,7 +218,7 @@ func (f *fakeProbeIO) ReadDirect(
 }
 
 // probeIO routes the CN11 prober's block IO into the same recorder the
-// OsClient halves used, so the call assertions are unchanged by U2. Every test
+// OsClient halves used, so the call assertions are unchanged by the carve-out. Every test
 // server gets one: with the real directLegProbeIO a fired round would open
 // /dev/mapper/dnv-… on the machine running the suite.
 func (f *fakeNode) probeIO() *fakeProbeIO {
@@ -248,7 +248,7 @@ func (f *fakeNode) Reset() {
 	f.calls = nil
 }
 
-// SysfsNoDeadline is the update_02.md U2 evidence: the sysfs paths read on a
+// SysfsNoDeadline is the SH15 evidence: the sysfs paths read on a
 // ctx with no SH15 deadline. Assertions live in cnagent_test.go, so that the
 // fake never touches *testing.T from the prober goroutines calling into it.
 func (f *fakeNode) SysfsNoDeadline() []string {
@@ -321,7 +321,7 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 	defer f.mu.Unlock()
 	f.record("read %s", path)
 	if _, ok := ctx.Deadline(); !ok && strings.HasPrefix(path, "/sys/") {
-		// update_02.md U2 (SH15). The local store under --local-store is a
+		// SH15. The local store under --local-store is a
 		// plain-file path and is deliberately not covered by the prefix.
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
 	}
@@ -402,7 +402,7 @@ func (f *fakeNode) writeProto(
 
 // readBlock / writeBlock / readBlockDirect model the CN11 health probe: the
 // leg wrapper accepts a 4 KiB write at the health offset and reads it back.
-// The last two are reached through fakeProbeIO, not the OsClient (U2).
+// The last two are reached through fakeProbeIO, not the OsClient (osclient.md §4.5.1).
 func (f *fakeNode) readBlock(
 	ctx context.Context, path string, offset uint64, length uint64,
 ) ([]byte, error) {
