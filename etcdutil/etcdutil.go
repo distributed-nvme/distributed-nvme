@@ -615,12 +615,12 @@ func (v *stmView) Rev(key string) int64 {
 // run is the shared body of RunSTM and Snapshot. readOnly makes the attempt
 // end before its commit (see Snapshot).
 //
-// DELIBERATE DEVIATION from EU5's literal wording, documented here because it
-// is the one place code and spec disagree. EU5 budgets each STM *attempt* with
-// common.DefaultEtcdOpTimeout and EU4 lets the conflict retry run until the
-// caller's ctx ends. concurrency.NewSTM owns its retry loop and fixes its abort
-// ctx at construction, so a per-attempt deadline cannot be expressed through
-// it; the budget here bounds the WHOLE transaction, every retry included.
+// EU5 (as amended) budgets the WHOLE transaction with
+// common.DefaultEtcdOpTimeout — every EU4 conflict retry included, never per
+// attempt. concurrency.NewSTM owns its retry loop and fixes its abort ctx at
+// construction, so a per-attempt deadline could not be expressed through it
+// anyway; the whole-transaction bound is the specified behavior, not an
+// approximation of a per-attempt one.
 //
 // The alternative — re-running NewSTM under a fresh budget whenever the old one
 // expired — was tried and rejected: a budget expiry caused by contention is

@@ -143,7 +143,7 @@ Packages and files (`layout.md` §2/§3 as amended by §15):
 |---|---|---|
 | `etcdutil` | `etcdutil.go` | `common` — takes `proto.Message`, never imports `pb` |
 | `model` | `keys.go`, `stm.go`, `capacity.go`, `alloc.go`, `ops.go` | `common`, `pb`, `etcdutil` |
-| `worker` | `vote.go`, `shard.go`, `revision.go`, `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` | `common`, `pb`, `etcdutil`, `model` |
+| `worker` | `worker.go` (`Run`/`Config` and the worker-lifecycle §12 msg constants; the flip/bitmap/reaction msgs live beside their emitters in `sprole.go`/`bmpush.go`/`reaction.go`), `vote.go`, `shard.go`, `revision.go`, `conn.go` (the RW7 connection cache), `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` | `common`, `pb`, `etcdutil`, `model` |
 | `cmd/dnv-worker` | `main.go` | `worker`, `common` (+ cobra, viper) |
 
 Out of scope here: the gateway (request validation, the public RPCs, the
@@ -497,7 +497,9 @@ CM3. **Validation.** `--etcd-endpoints` non-empty; `--roles` a non-empty,
 
 CM4. **Startup.** Install the default JSON logger (`common` `init`), mint a
      startup trace id, build the `etcdutil` client (EU1), then `worker.Run(ctx,
-     client, Config{Roles, VoteInterval, GraceTime})`. `Run` starts the
+     client, Config{Endpoints, Roles, VoteInterval, GraceTime})` (`Endpoints`
+     feeds the §12 `worker starting` record's `endpoints` attribute). `Run`
+     starts the
      `ClusterConf` cache (§8.5) and the vote worker (§6) and blocks until
      `ctx` ends. Startup never fails because etcd is unreachable: the vote
      layer stays fenced (VW8) and retries every interval, logging each
@@ -734,10 +736,14 @@ SW6. **Multi-cluster.** Keys of every cluster share the shard prefix; the
 
 RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
      per side and per cntlr (sp role). The goroutine alone owns the object's
-     `Check*` stream, its in-memory state and every RPC to the agent about
-     that object, which is what makes `architecture.md` §9.1's "one
-     `Syncup*` at a time per object" and §9.7's "one stream per object" hold
-     by construction.
+     `Check*` stream, its `Syncup*` calls and the loop's own state, which is
+     what makes `architecture.md` §9.1's "one `Syncup*` at a time per
+     object" and §9.7's "one stream per object" hold by construction. Two
+     deliberate carve-outs share the object: the `Push*Bitmap` calls run on
+     the §10 pusher's own goroutines (BM3 — one in flight per
+     migration/clone, concurrently with this loop), and `lastInfo` is
+     published by the stream's pump goroutine under a mutex so the sp
+     coordinator can snapshot it (AR1).
 
 RW2. **State**: `desired` (the revision to reach plus the inputs the request
      is built from), `synced` (the last revision the agent acknowledged —
@@ -989,8 +995,13 @@ HL5. `show_info = false` streams carry an `*Info` only when something
      changed; the worker evaluates health on the latest known info, and a
      reply with neither info nor error is a clean round.
 
-HL6. **No cross-role writes.** The sp role never touches `DnConf`/`CnConf`;
-     the dn/cn roles never touch SP records. An unreachable DN is therefore
+HL6. **No cross-role health writes.** The sp role's health bookkeeping — this
+     section's err_epoch writers — never touches `DnConf`/`CnConf` (it writes
+     `Cntlr`/`Leg`/`Side` only), and the dn/cn roles never touch SP records.
+     (The sp role's §11 *reactions* do rewrite `DnConf`/`CnConf` through the
+     model ops — GrowSlice charges DNs and every cntlr CN, CreateSpareLeg
+     charges its one DN, ReplaceCntlr rewrites two `CnConf`s — but that is
+     allocation bookkeeping, not health.) An unreachable DN is therefore
      marked on `DnConf` by its dn-role owner and on the `Side` records of its
      sides by each sp-role owner, independently.
 

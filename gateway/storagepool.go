@@ -1101,10 +1101,13 @@ func (s *Server) GrowSlice(
 		if err := s.growSliceCnBudget(ctx, cid, conf, extCnt); err != nil {
 			return err
 		}
-		// D-F: the black list starts as the request's own and grows only with
-		// the legs of THIS group, so the new group spreads over distinct DNs
-		// while another group's DNs stay allowed — the same rule
-		// worker/reaction.go runGrow applies.
+		// D-F: the black list is the request's own and nothing is ever
+		// appended to it — one scan-and-pick round serves the whole group
+		// (§6.5): the scan keeps one candidate per DN and per location, and
+		// the random pick draws the group's legs as distinct entries from it,
+		// so the new group spreads over distinct DNs while another group's
+		// DNs stay allowed. (worker/reaction.go runGrow reaches the same
+		// spread its own way, via pickDistinct.)
 		picks, err := pickDns(
 			ctx, s.cli, cid, cc,
 			dnPickPlan{

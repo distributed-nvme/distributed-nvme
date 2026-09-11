@@ -42,8 +42,10 @@ build is policy and belongs in `dnagent`/`cnagent`.
 ### 2.1 Files
 
 `agent.go` (bootstrap, §2.3), `store.go` (§2.4), `revision.go` (§2.5),
-`locks.go` (§2.6), `resinfo.go` (§2.7), `dm.go`/`nvmet.go`/`nvmehost.go`
-(OS wrappers, §2.8), `bitmap.go` (§2.9), plus colocated `_test.go` files.
+`locks.go` (§2.6), `resinfo.go` (§2.7), `oswrap.go`/`dm.go`/`nvmet.go`/
+`nvmehost.go` (OS wrappers, §2.8 — `oswrap.go` is the shared command/configfs
+plumbing the other three sit on), `bitmap.go` (§2.9), plus colocated
+`_test.go` files.
 There is no `lvm.go`: **no** dnv agent runs any LVM command at all — [D13]
 took LVM off the dn, [D14] took it off the cn too (`update_01.md` U3). This is the `layout.md` §2 recommended split; package
 boundaries are binding, file names are not.
@@ -139,7 +141,9 @@ SH3. Reconcile returns an error only for **fatal** conditions (the local-store
 SH27. **Background tasks and process exit** (added by `update_01.md` U4;
       numbered last because SH rules are append-only — SH1-SH26 are cited
       from code comments and must not shift). A role server MAY run
-      goroutines outside any RPC: the DN8 migration-connect retry, the DN12
+      goroutines outside any RPC: the DN8 migration-connect retry (so
+      nicknamed for the DN8-gated converge it re-runs; the retry loop itself
+      is specified in DN13), the DN12
       fence timer, the DN9 side-zeroing workers, the cn's connect retry and
       the CN11 leg probers. Every one of them derives its ctx from the
       server's **`rootCtx`** — the process-lifetime ctx captured at
@@ -166,6 +170,15 @@ SH27. **Background tasks and process exit** (added by `update_01.md` U4;
       a device open are additionally cancelled **and waited for** at teardown,
       before the resources they hold are removed (DN6, DN9): a live child
       keeps an fd on the dm device and `dmsetup remove` would fail EBUSY.
+
+      One deliberate carve-out from "every goroutine that owns one": the
+      DN12 fence timer's `AfterFunc` callback — which runs a full side
+      converge and so can spawn children — is **not** enrolled, because the
+      timer can fire after `WaitBackground` has returned and a `wg.Add`
+      after `wg.Wait` panics (the enrollment sites record this). It is
+      benign: the callback derives from `rootCtx`, which `Serve` cancels
+      before the join, so a post-join firing finds every OS call refused by
+      a dead ctx and spawns nothing.
 
 Reference implementation — `agent/agent.go` (complete; the `waitBackground`
 parameter and the derived task ctx are SH27's):
@@ -586,7 +599,10 @@ func runDn(cmd *cobra.Command, args []string) error {
 `server.go` (the `DnAgentServer` type, lock mapping, RPC entry points),
 `diskmeta.go` (the [D13] on-disk format: header, A/B volume-table slots,
 extent and clone-metadata allocators), `syncup_dn.go`, `syncup_side.go`,
-`migr.go` (the §11.2 source/destination choreography), `zeroing.go` (the DN9
+`plan.go` (the per-side desired-state plan derived from the request),
+`migr.go` (the §11.2 source/destination choreography and the DN13
+connect-retry registry), `fence.go` (the DN12 two-phase fence: window
+bookkeeping, timer, adoption, settle), `zeroing.go` (the DN9
 side-provisioning registry and its `blkdiscard --zeroout` batches),
 `push_migr_bm.go`,
 `check.go`, `probe.go` (DnInfo/SideInfo probing). Colocated `_test.go` files.
@@ -915,9 +931,10 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      * `SideInfo.zeroed_ext_cnt` / `total_ext_cnt` are filled on every reply
        and every Check round (DN14, DN16, DN18). `total_ext_cnt` is never
        omitted: it comes from the record, or from `side_conf.ext_cnt` when
-       there is no record yet. Equality is what the worker's flip rule watches
-       — guarded by `> 0`, so "no record at all" (both zero) never reads as
-       done.
+       there is no record yet — so "no record" reads `0/ext_cnt`, never
+       equal counts. Equality is what the worker's flip rule watches,
+       guarded by `> 0`, which also keeps the degenerate `0/0` of a
+       zero-`ext_cnt` request from reading as done.
 
 DN10. **Per-CN export stacks.** They converge **only** with DN9's gate open —
       `side_conf.provisioned = true` and every `zeroed_bits` bit set. While it
@@ -1088,7 +1105,16 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       `dm_clone_conf`); (5) reload the primary CN's dm-linear onto the
       dm-clone, move its namespace to `AnaGrpIdOptimized`, the standbys' to
       `AnaGrpIdNonOptimized`; re-apply all locally present bitmap chunks
-      (SH21). "Retrying until success" (§11.2) is implemented without
+      (SH21). The numbering above follows §11.2's logical steps; the
+      implemented converge order differs without changing any end state
+      (§4.6 builds bottom-up, pinned by §6 test 12's slot → connect → clone
+      → linear → ana_grpid): `ensureMigrDst` runs steps (2)-(4) **before**
+      the per-CN stacks converge, so on a pass where the connect succeeds
+      the per-CN dm-linears are *created* directly on the dm-clone and the
+      primary's namespace goes straight to `AnaGrpIdOptimized` — step (1)'s
+      dm-error/`AnaGrpIdInaccessible` shape and step (5)'s *reload* occur
+      only while the connect is still retrying across passes.
+      "Retrying until success" (§11.2) is implemented without
       blocking the RPC: a converge pass attempts the connect **once**; on
       failure it records `target_info = RES_STATUS_ERROR` and registers the
       side in a background retry registry that re-runs the destination

@@ -62,7 +62,8 @@ func ensureTraceIdUnary() grpc.UnaryServerInterceptor {
 // ensureTraceIdStream is the stream half. A stream carries its ctx on the
 // grpc.ServerStream rather than as an argument, so the id is delivered by
 // wrapping the stream and overriding Context() — the same shape common's
-// client stream wrapper uses (common/interceptor.go:226-228).
+// server stream wrapper uses (`loggingServerStream.Context` in
+// common/interceptor.go).
 //
 // `service Gateway` has no streaming RPC today (gateway.md §3 is 59 unary
 // calls), so this half never runs; it is wired for symmetry with the shared

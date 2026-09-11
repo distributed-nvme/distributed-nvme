@@ -331,7 +331,10 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      `SyncupCnRequest.cntlr_pointer_list`, tear the cntlr down (CN21) —
      it was removed mid-teardown; otherwise re-run the SyncupCntlr
      converge (§4.6) from the stored request — which, per CN18, runs the
-     §11.5 recovery for any clone whose **metadata wrapper** is gone (a reboot
+     §11.5 recovery for any clone whose **dm-clone or metadata wrapper** is
+     gone or mismatched — recovery keys off missing dm-clone *metadata*, not
+     off the wrapper alone (`TestCloneRecoveryWhenOnlyTheDmCloneVanished`) —
+     (a reboot
      clears the tmpfs, the loop device and every kind-`b` wrapper together —
      the arena is volatile *with* the kernel's dm state — so the reconcile
      starts from an empty arena; a plain agent restart preserves both and the
@@ -536,7 +539,12 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
        their `CnErrorName`s (`Dm.Reload`'s internal suspend flushes the
        in-flight IO — this **is** §11.1 old_primary steps 1-3, in the listed
        order), then remove nvmet objects that must go entirely, then dm
-       devices top-down, `mdadm --stop`, and outbound disconnects last.
+       devices top-down with `mdadm --stop`, and the **leg** disconnects
+       last. One outbound disconnect deliberately runs earlier: a removed
+       clone's source connection is dropped in the clone's own retire step,
+       right after its dm-clone and metadata wrapper are removed (CN18/CN21
+       — the dm-clone flushes through its source on removal, so the
+       disconnect must directly follow it, mid-retire).
      * **Build phase, bottom-up** — legs (CN10) → groups (CN12) → per-slice
        pools (CN13) → thin volumes (CN14) → raid0/error (CN15) → clones
        (CN18) → transfers (CN17) → ns-devs + host-facing nvmet (CN16) → ANA
@@ -635,7 +643,13 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         `--homehost any`), members = the leg wrappers of `leg_list` (never
         `spare_leg_list`, §8.12). Assembly instantiates §11.1.1 by probing
         each available member for an md superblock (`mdadm --examine`):
-        1. No member has one ⇒ `mdadm --create … --run --assume-clean`.
+        1. No member has one ⇒ `mdadm --create … --run --assume-clean` —
+           but **only when every `leg_list` member is available and was
+           probed**: with any member missing, the group is simply
+           unavailable this pass ("only k of n legs available and none
+           carries a superblock"), because creating over a subset would mint
+           a fresh array while an absent leg may carry the real one (pinned
+           by `TestGroupNeverCreatesOverASubsetOfLegs`).
            `--assume-clean` is **always** correct here: a side is never
            exported before the §9.4 **provisioning** protocol has zeroed it
            whole (`blkdiscard --zeroout` per batch of extents, tracked in the
@@ -867,6 +881,10 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       namespace's own dm-linear `CnNsDevName(cluster, cn, sp, ns_id)`
       (§3.3 step 5) with a **backing state machine**, evaluated in this
       order (first match wins; `sp_level` per CN19):
+      0. the td is provisioning-deferred (CN9, [D15] — a side under it is
+         still zeroing) ⇒ table → the td's `CnErrorName` (the ns-dev and
+         the nvmet namespace exist throughout, U4 — this is the "rule 0"
+         the code comments cite);
       1. standby or disabled cntlr ⇒ table → the td's `CnErrorName`;
       2. `sp_level ≥ SP_LEVEL_NO_THINPOOL` ⇒ → `CnErrorName`;
       3. a clone targets the td (`clone_list` entry with
@@ -1065,10 +1083,13 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          then `hydration_threshold`/`hydration_batch_size` messages from
          `dm_clone_conf`.
       4. Apply every locally present bitmap chunk (CN22 math) — and, when
-         this build is a **§11.5 recovery** (the metadata wrapper did not
-         survive: a CN reboot takes the tmpfs, the loop device and every
-         kind-`b` wrapper together; or a failover to a CN that never ran the
-         clone), first the **dst** bitmaps: with every affected ns-dev still parked
+         this build is a **§11.5 recovery** (the dm-clone's metadata is
+         missing or unusable: a CN reboot takes the tmpfs, the loop device
+         and every kind-`b` wrapper together; a failover to a CN that never
+         ran the clone; or the dm-clone device itself vanished while a
+         healthy wrapper stayed behind —
+         `TestCloneRecoveryWhenOnlyTheDmCloneVanished`), first the **dst**
+         bitmaps: with every affected ns-dev still parked
          on `CnErrorName` (retire phase / initial state — nothing serves
          the td yet), read the td's mapping bitmap from every slice pool
          (the CN25 machinery, B-side of §11.4) and `blkdiscard` every
@@ -1082,15 +1103,24 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          fresh converge simply creates them in CN16 with the clone backing
          (rule 4). With `auto_resume = false` the namespaces stay
          effectively suspended until `UpdateNamespaceSuspended`.
-      Teardown of a clone (left `clone_list`, or level-suppressed), strictly:
-      ns-devs back onto the raid0 (rule CN16/5) → remove the dm-clone
+      Teardown of a clone (left `clone_list`, or role/level-suppressed),
+      strictly: ns-devs back onto whatever CN16 now wants for the td — the
+      raid0 while this cntlr still serves it (rule 5), its `CnErrorName`
+      otherwise (a standby; a still-listed but level-suppressed clone at
+      `sp_level ≥ NO_CLONE`, rule 3; or `sp_level ≥ NO_THINPOOL`, rule 2 —
+      a clone *gone from the list* parks nothing by itself) → remove the dm-clone
       (**before** its source connection dies — dm-clone flushes through the
       source on removal and blocks without it) → remove the metadata wrapper
       `CnCloneMetaDmName` (its units are free again the moment the wrapper is
       gone: the next registry enumeration simply no longer sees them, and
       nothing is written) → disconnect the source subsystem (`--nqn` is safe
-      here: every path of it is being retired) → delete the clone's
-      `clone-bm-*` files (SH7). A clone whose dst td is
+      here: every path of it is being retired) → and, **only for a clone that
+      actually left `clone_list`**, delete the clone's `clone-bm-*` files
+      (SH7): a clone the role or the level merely suppresses keeps them
+      applied-by-file (CN19, CN22 — deleting them on every standby converge
+      would make the worker re-push them forever, and a promoted standby's
+      §11.5 rebuild would have nothing to skip with;
+      `TestSuppressedCloneKeepsItsChunks`). A clone whose dst td is
       provisioning-deferred (CN9) is never built in the first place: no
       metadata slot, no dm-clone, no source connect, and its three rows report
       `RES_STATUS_PROVISIONING`.
@@ -1494,12 +1524,14 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
 4. **Standby converge**: legs connected + wrappers built + per-td errors +
    ns-devs on error + subsystems with every ns `ana_grpid = 3`; **no**
    mdadm, pool, thin, raid0 or clone command appears.
-5. **Primary converge order**: one fresh primary pass asserts the CN9 build
-   order — connects → wrapper creates → md `--create --run --assume-clean`
-   (CN12 case 1) → stdin multi-target concat creates → pool create →
+5. **Primary converge order**: one fresh primary pass (a RedundNone
+   fixture) asserts the CN9 build order — connects → wrapper creates →
+   RedundNone group linears (`CnGrpName`) → stdin multi-target concat
+   creates → pool create →
    `create_thin` messages (for `created = false` tds only) → thin creates →
    raid0/error → ns-dev → nvmet
-   objects → `ana_grpid = 1` writes last.
+   objects → `ana_grpid = 1` writes last. (The md-raid1 create order and
+   flags are pinned by tests 6-7's RedundMdRaid1 fixtures.)
 6. **Failover**: re-sync to `primary = false` asserts the CN9 retire order —
    every ns `ana_grpid = 3` **before** the ns-dev reloads onto error,
    before pool/thin/raid0 removal and `mdadm --stop`, with **no**

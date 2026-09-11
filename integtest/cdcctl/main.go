@@ -341,7 +341,8 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 
 // clusterId returns the cluster id of the invocation. Unlike workerctl's, it
 // reads nothing: the id is fabricated per case (§9.5 — S 0xcdc1 … H 0xcdc5,
-// plus case id + 0x1000 for the cross-cluster entry) and no ClusterConf exists
+// plus case id + 0x10000 for the cross-cluster entry, the prepended `1`
+// nibble) and no ClusterConf exists
 // to derive it from (§0 #13). Zero stands for "not given": no case uses it,
 // and a missing --cluster would otherwise write into a cluster id of 0, where
 // dnv-cdc would happily serve the entry and only the later `del` would fail.
@@ -464,7 +465,7 @@ func cmdPing(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdPut writes one CdcEntry at model.CdcEntryKey (§9.6) — what the gateway
-// does at CreateSubsystem / UpdateSubsystemAllowedHosts and the worker at
+// does at CreateSubsystem / UpdateSubsystemHosts and the worker at
 // CreateCntlr / ReplaceCntlr (§1), reduced to the one key dnv-cdc reads.
 //
 // It is ONE plain Put, not a read-modify-write: the stored value is the whole
@@ -585,7 +586,7 @@ func cmdDel(g *globals, args []string) {
 // It deliberately ignores --cluster, even though the flag is global and a
 // `ctl` wrapper may carry one: a reset must leave the prefix EMPTY. Narrowing
 // it to one cluster would silently leave the second-cluster entry of §9.5
-// (ssF, in case id + 0x1000) behind, and the next case would start with a
+// (ssF, in case id + 0x10000) behind, and the next case would start with a
 // stray entry that its own discover grid does not expect.
 func cmdWipe(g *globals, args []string) {
 	fs := newFlagSet("wipe", g)

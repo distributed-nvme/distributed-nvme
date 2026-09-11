@@ -839,12 +839,13 @@ func (v *voteWorker) onTimer(msg timerMsg) {
 // transition implies — member when the registration is now observed live,
 // nonmember otherwise.
 //
-// VW5 and VW7 contradict each other here and VW7 wins. VW5 says to start the
-// timer only "if target != effective ..., otherwise do nothing"; VW7 says the
-// disappear of a key that never became effective "starts a disappear timer
-// whose commit is a no-op except for the VW6 garbage collection". Taking VW5
-// literally leaves the registration of a worker that appeared and died inside
-// its own grace window with no timer, hence no commit, hence no VW6 Delete —
+// VW5 (as amended) mandates arming the grace timer on EVERY observed
+// transition — even when target already equals effective(k) — and VW7 relies
+// on it: the disappear of a key that never became effective "starts a
+// disappear timer whose commit is a no-op except for the VW6 garbage
+// collection". Arming only on target != effective would leave the
+// registration of a worker that appeared and died inside its own grace
+// window with no timer, hence no commit, hence no VW6 Delete —
 // and VW6's collection is the ONLY thing that ever removes a key whose owner
 // is gone, because there is no lease ([D17]). The key would leak in etcd for
 // good and every observer would keep a tracking entry for it for good, once

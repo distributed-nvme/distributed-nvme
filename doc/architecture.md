@@ -72,7 +72,7 @@ environment variables; see §13):
 
 | binary       | role |
 |--------------|------|
-| `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, and the `Get*Bm` bitmap reads (the worker never calls `Get*Info` — it watches through `Check*`, §9.7/§10.2). |
+| `dnv-gateway`| Serves the `Gateway` gRPC service to users/CLI. Reads and writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*` and behind the `force = false` hydration checks of `DeleteClone`/`FinishMigration` (§8.9/§8.11), and the `Get*Bm` bitmap reads (the worker never calls `Get*Info` — it watches through `Check*`, §9.7/§10.2). |
 | `dnv-worker` | One binary, roles `dn`, `cn`, `sp` (any subset per instance). Watches revision keys in etcd, shards work by shard code, drives agents via the unary `SyncupDn`, `SyncupSide`, `SyncupCn`, `SyncupCntlr`, `PushCloneBitmap`, `PushMigrBitmap` (§9.6) and watches them through the `CheckDn`/`CheckSide`/`CheckCn`/`CheckCntlr` streams (§9.7). Also performs health checking and the automatic reactions of §10.4 (primary election, replacements, thin-pool auto-grow, leg repair). Normative spec: `dnv-worker.md`. |
 | `dnv-agent dn` / `dnv-agent cn` | Runs on every DN / CN. Serves `DiskNodeAgent` / `ControllerNodeAgent`. Owns the local device-mapper / mdadm / nvmet state (and, on a DN, the [D13] on-disk extent metadata; no LVM anywhere — [D13] removed it from the DN, [D14] from the CN); persists the last applied request per object (and every received bitmap chunk) as protobuf files under `Local*Path` (§9.1, §9.6). |
 | `dnv-cdc`    | NVMe-oF Central Discovery Controller. Watches the `cdc` keys and serves discovery + AENs to hosts. |
@@ -171,7 +171,8 @@ Per DN, once (created by the dn agent at first `SyncupDn`):
    all constants in `constants.go`:
    * `DnHeaderOffset = 0`, `DnHeaderSize = 4096` — a self-describing header block
      (magic `DNVDISK1`, version, a CRC32, and a `DnDiskHeader` carrying `cluster_id`,
-     `dn_id`, `extent_size`, a random `format_uuid` and the three layout offsets).
+     `dn_id`, `extent_size`, a random 64-bit `format_uuid` and the three layout
+     fields `data_offset`, `clone_meta_offset`, `clone_meta_size`).
    * `DnTableSlotAOffset = 4 MiB` / `DnTableSlotBOffset = 20 MiB`, each
      `DnTableSlotSize = 16 MiB` — the two alternating **volume-table** slots (magic
      `DNVTABL1`, the header's `format_uuid`, a monotonic `seq`, a CRC32 and a
@@ -737,7 +738,9 @@ The epoch is appended to the raw name bytes as exactly 8 **big-endian** bytes �
 separator, no text formatting. Consequences that the rest of this document relies on:
 
 * **`cluster_id` is not computable from a request alone.** `{p} cluster_conf
-  {cluster_name}` is the only name-keyed message; every other key is `cluster_id`-keyed.
+  {cluster_name}` is the only name-keyed message; every other cluster-scoped key is
+  `cluster_id`-keyed (`WorkerReg`, §5.3, is the one cluster-independent key and
+  carries neither).
   So any RPC beyond `CreateCluster`/`ListClusters` must first read `ClusterConf` to learn
   `creation_epoch`, derive `cluster_id`, and only then build its keys (§5.8, §8 preamble).
 * **Delete + recreate under the same name yields a fresh `cluster_id`,** hence a fresh
@@ -870,7 +873,8 @@ candidate lists) to keep transactions short. `cluster_id` is **not** among them:
 read is the first step **inside** the STM and every other key of the RPC is formatted
 from the `cluster_id` derived there. Doing it in-STM also makes the transaction fail
 correctly when the cluster is concurrently deleted or recreated. Network calls to agents
-(GetDnSize/GetCnSize, Inspect*, bitmap reads) MUST happen **outside** (before/after) the
+(GetDnSize/GetCnSize, the `Get*Info` behind `Inspect*` and behind the §8.9/§8.11
+`force = false` hydration checks, bitmap reads) MUST happen **outside** (before/after) the
 STM; when such a call needs `cluster_id`, do a plain pre-read of `ClusterConf` for it and
 let the in-STM read stay authoritative.
 
@@ -1241,9 +1245,13 @@ used by admin tooling and log analysis, since keys and device names carry `sp_id
 ### 8.5 GrowSlice
 
 Errors: `NOT_FOUND` `slice_id` not in `SpConf.slice_id_list`; `INVALID_ARGUMENT`
-`is_meta == false` and `ext_cnt == 0`, or `is_meta == true` and `ext_cnt != 0` (meta
-sizes are computed, see below); `FAILED_PRECONDITION` `is_meta == true` and the slice's
-meta total is already at the 16 GiB cap; `RESOURCE_EXHAUSTED` when no DN candidates
+`is_meta == false` and `ext_cnt == 0`, or `is_meta == true` and `ext_cnt != 0` (the
+request's `ext_cnt` is only this data/meta **exclusivity signal** — group sizes are
+computed, see below); `FAILED_PRECONDITION` `is_meta == true` and the slice's
+meta total is already at the 16 GiB cap, or `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the
+model op refuses with "sp level suppresses reactions" — pools are suppressed at
+those levels, so there is nothing to grow; the same gate guards §8.12's
+CreateSpareLeg/SwitchSpareLeg); `RESOURCE_EXHAUSTED` when no DN candidates
 (§6.5) or when any cntlr's CN has `free_ext_cnt` below the new group's `ext_cnt`. That
 last code is the gateway's pre-check answer (gateway.md §5.4, GW7): a CN whose budget
 falls short only between that pre-check and the deciding STM is refused in-STM by
@@ -1255,8 +1263,12 @@ the first meta group (created with the SP) is **1 extent**; each further meta gr
 the slice's current meta total in extents), stopping once the total meta size reaches
 **16 GiB** (with 1 GiB extents the totals run 1 → 2 → 4 → 8 → 16). 16 GiB is the
 dm-thin metadata ceiling, so further meta growth is refused.
-Action: allocate legs for one new group (`is_meta` selects the list; `ext_cnt` for meta
-computed per the ladder); compute `meta_blocks`/`data_blocks` (§3.6); in the STM append
+Action: allocate legs for one new group. `is_meta` selects the list, and the new
+group's size is always computed, never taken from the request: a **data** grow
+appends a group of the slice's **first data group's** `ext_cnt` — the original
+allocation unit, exactly like the §10.4 auto-grow (gateway.md D-E, pinned by
+`TestGrowSliceData`) — and a **meta** grow's `ext_cnt` comes from the ladder.
+Compute `meta_blocks`/`data_blocks` (§3.6); in the STM append
 `Group{grp_id, ext_cnt, meta_blocks, data_blocks, legs+sides}` to the slice (every new
 `Side` written `provisioned = false`, [D15]), update the
 involved DNs (+`DnRev`s) and every cntlr CN's budget (+`CnRev`s), bump `SpRev`. Agents
@@ -1349,8 +1361,11 @@ agent-side spec.
 **Materialization (`ThinDeviceCreated.md` U2/U3).** `ThinDevice.created` is
 written `false` here and set `true` exactly once by the sp-worker, when a cntlr
 has reported that td's thin volume `RES_STATUS_OK` in **every** slice of the SP
-(§10.3). It is never cleared: a pool holds a thin id until the `delete {dev_id}`
-that only the td's own deletion sends, so a later bad row is a health event
+(§10.3). It is never cleared: a pool holds a thin id until a `delete {dev_id}`
+reaches it — sent by the td's own deletion or, when that fan-out also demoted the
+applying cntlr (or suppressed its pool) so CN14's pool-presence gate skipped the
+message, by the CN14 **activation sweep** at the next re-creation of the pool
+device. Either way a later bad row is a health event
 (`err_epoch`), not evidence the id is gone. A td deleted and re-created under the
 same name is a different td — new `td_id`, new `dev_id`, `created = false` — and
 `dev_id`s are never reused, so an old snapshot's `ori_id` can never resolve to it.
@@ -1628,9 +1643,11 @@ bump `SpRev`. Agents drop the xfer subsystem + dm devices. Reply `xfer_id`.
 ### 8.11 Migrations (fig. `080Migration`, §11.2)
 
 **CreateMigration** —
-Errors: `NOT_FOUND` `src_side_id` not found in any leg of the SP; `RESOURCE_EXHAUSTED`
-at `MaxMigrCntPerSp` or no DN candidate (§6.5); `FAILED_PRECONDITION` the owning leg
-already has 2 sides (a migration is already running on it).
+Errors: `ALREADY_EXISTS` migration key; `NOT_FOUND` `src_side_id` not found in any leg
+of the SP; `RESOURCE_EXHAUSTED` at `MaxMigrCntPerSp` or no DN candidate (§6.5);
+`FAILED_PRECONDITION` the owning leg already has 2 sides (a migration is already
+running on it), or `cntlid_slot_list` holds no slot different from the src side's
+(§11.8 — such an SP cannot migrate this leg at all; gateway.md D-I).
 Action: allocate one DN; STM: `migr_id` + `dst_side_id` from `next_id`; append a new
 `Side` to the leg's `side_list` (`cntlid_slot` = a slot from `cntlid_slot_list`
 different from the src side's — the only slot constraint sides have, §11.8;
@@ -1686,7 +1703,9 @@ fully-skippable dm-clone regions.
 ### 8.12 Spare legs
 
 **CreateSpareLeg** — Errors: `NOT_FOUND` `grp_id` not in the SP; `INVALID_ARGUMENT` the
-group is RedundNone; `RESOURCE_EXHAUSTED` at `MaxSpareLegPerGrp` or no DN (§6.5).
+group is RedundNone; `RESOURCE_EXHAUSTED` at `MaxSpareLegPerGrp` or no DN (§6.5);
+`FAILED_PRECONDITION` at `sp_level ≥ SP_LEVEL_NO_THINPOOL` ("sp level suppresses
+reactions", §8.5).
 Action: STM: new `Leg{leg_id, leg_idx = next unused idx in the group, one Side}`
 (that `Side` written `provisioned = false`, [D15]) appended to `spare_leg_list`; DN
 bookkeeping + `DnRev`; bump `SpRev`. Every cntlr
@@ -1699,7 +1718,11 @@ spare defers only itself — spares never assemble (§11.1.1) — and reports
 `spare_leg_list`, DN bookkeeping back, bump `SpRev`. Reply `leg_id`.
 
 **SwitchSpareLeg** — the only way a spare becomes active; invoked by users or by the
-sp-worker's leg repair of §10.4 (`dnv-worker.md` §11.5). Errors: `NOT_FOUND` ids not in the group's lists.
+sp-worker's leg repair of §10.4 (`dnv-worker.md` §11.5). Errors: `NOT_FOUND` ids not
+in the group's lists; `FAILED_PRECONDITION` when the spare's side is not yet
+`provisioned` ("spare side is not provisioned" — an unzeroed spare must never become
+an md member, [D15]) or at `sp_level ≥ SP_LEVEL_NO_THINPOOL` ("sp level suppresses
+reactions", §8.5).
 Action: STM swap: `spare_leg_id` moves to `leg_list` (taking the active role),
 `target_leg_id` moves to `spare_leg_list`; bump `SpRev`. The primary then:
 `mdadm --fail`/`--remove` the target if the array still lists it, `mdadm --add
@@ -2063,7 +2086,9 @@ object's live state cheaply instead of polling `Get*Info`:
   `DefaultHealthCheckInterval` = 5, bounds `[MinHealthCheckInterval,
   MaxHealthCheckInterval]` = [1, 3600], §7).
 * **Request:** the object ids (`cluster_id` + `dn_id`/`cn_id`, plus `side_pointer` /
-  `cntlr_pointer`), `revision` = the revision the worker last synced to the agent, and
+  `cntlr_pointer`), `revision` = the worker's current **desired** revision for the
+  object (`dnv-worker.md` RW4 — the agents ignore this request field; the mismatch
+  check below is the worker comparing the *reply's* revision against desired), and
   `show_info`.
 * **Reply:** `agent_reply`, `revision` = the agent's last fully applied revision for the
   object, and the `*Info`:
@@ -2270,7 +2295,14 @@ disabled cntlrs (`dnv-worker.md` §11):
   details, while only the deferred group's own rows report `RES_STATUS_PROVISIONING`;
   the grow completes by itself when the leg clears, and the "one grow per pool at a
   time" rule is unaffected because the serving pool's usage details keep flowing (§9.4,
-  §9.5, [D15]). `low_water_mark_pct > 100` disables this
+  §9.5, [D15]). Auto-grow is **best-effort** — a grow can find no DN candidates, and
+  nothing reserves space ahead — so a pool's data space can run out before a grow
+  lands. The agent writes no feature arguments to the thin-pool table (`cnagent.md`
+  CN13), so an exhausted pool behaves as dm-thin's default `queue_if_no_space`: IO
+  needing a new block queues for the kernel's `no_space_timeout` (a dm-thin module
+  parameter, 60 s by default) and then fails with EIO, while already-provisioned
+  blocks keep serving; operators SHOULD alert on pool usage well before 100 %
+  (`risks_and_gaps.md` RK4). `low_water_mark_pct > 100` disables this
   automation (§7); operators then grow manually.
 
 The worker never deletes user data on its own; every automatic action above only
@@ -2551,8 +2583,18 @@ moving ss/ns from `sp1` to `sp2`:
   while IO runs (§11.5).
 * When hydration completes: `DeleteTransfer(force=false)` on sp1 (retires the source:
   `suspended = true`) and `DeleteClone` on sp2 (`suspended = false`, ns now backed by
-  the local raid0). To abort instead: `DeleteClone(force=true)` on sp2 and
-  `DeleteTransfer(force=true)` on sp1.
+  the local raid0). To abort instead: **first retire the sp2 namespace**
+  (`DeleteNamespace` — not merely suspend it, because `DeleteClone` unconditionally
+  sets `suspended = false` on the dst td's namespaces, §8.9, which would resume it
+  `optimized` over the partial copy and hand the host a second, divergent path);
+  then `DeleteClone(force=true)` on sp2 and `DeleteTransfer(force=true)` on sp1
+  (sp1 resumes serving; the sp2 td and its partial bytes remain until deleted).
+  **Aborting after the cutover discards every write served through sp2**: with
+  `auto_resume` the sp2 namespace became the serving path at `CreateClone`, its
+  writes live only on the abandoned sp2 td, and sp1 resumes from its retained
+  copy, which stopped receiving writes at `CreateTransfer(auto_suspend)` — so an
+  abort is lossless only while nothing has written via sp2
+  (`risks_and_gaps.md` RK3).
 
 ### 11.4 raid0 bitmap math
 
@@ -3196,7 +3238,10 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 ## Appendix C — Amendments
 
 Recorded for traceability; the edits are already applied. Companion documents record
-their own edits to this file in their §5 sections.
+their own edits to this file in their §5 sections. The `update_01.md`–`update_03.md`
+ledgers themselves have been retired from `doc/` (fully applied); their U-item ids
+stay citable — resolve them through the entries below and the companion documents'
+own amendment sections.
 
 * `update_01.md` U1 — Appendix A's dm-clone pattern spells out
   `2 no_hydration no_discard_passdown`, and [D7] records that both features are

@@ -480,8 +480,12 @@ slice_id)` per §9.3.)
   issued twice:
   (a) `--provisioned=false` — the dn agent allocates the extent runs, builds
       `DnSideName` and starts the background zeroing goroutine;
-      `side_dev_info` reports `RES_STATUS_PROVISIONING` with details
-      `zeroing k/n` and every `cn_id_to_dm_error/linear/nvmeof` entry reports
+      `side_dev_info` reports `RES_STATUS_PROVISIONING` — or already
+      `RES_STATUS_OK` when the goroutine won the race
+      (`assert_provisioning_or_ok`, the genuinely two-valued phase-(a) check
+      the Status-assertions bullet below blesses; the `zeroing k/n` details
+      string is not asserted) — and every
+      `cn_id_to_dm_error/linear/nvmeof` entry reports
       `RES_STATUS_PROVISIONING` — **not** OK, and not absent;
   (b) `dnagentctl wait-zeroed` until `zeroed_ext_cnt == total_ext_cnt`,
       polled every 0.5 s with a 120 s budget — orders of magnitude above the
@@ -562,8 +566,8 @@ slice_id)` per §9.3.)
    side `ext_cnt 2`, slot 0, `primary_cn_id 0x11`, no standbys,
    `readwrite`), i.e. the §9 two-phase sequence
    (`--provisioned=false` → `wait-zeroed` → DNREV1++ → `--provisioned=true`).
-   Assert code 0; after phase (a) both sides report `PROVISIONING`, after
-   phase (c) both report OK.
+   Assert code 0; after phase (a) each side reports `PROVISIONING`-or-OK
+   (§9(a)'s two-valued race), after phase (c) both report OK.
 2. CN side: `syncup-cn` CN1 (CNREV1++) with cntlr `(0x3a1, 0x1)`;
    `syncup-cntlr` CN1 with the §8 request (CNREV1++). Assert code 0 and,
    in `cntlr_info`: `leg_id_to_leg[0x4,0x7]`, `grp_id_to_md_raid[0x3,0x6]`
@@ -580,7 +584,9 @@ slice_id)` per §9.3.)
    <cnagentctl host-id> --hostnqn
    nqn.2024-01.io.dnv-it:host:0`; wait for
    `/dev/disk/by-id/nvme-uuid.11111111-…`; `nvme list-subsys` shows the
-   path `live optimized`.
+   path `live`, and per-path sysfs `ana_state` reads `optimized`
+   (list-subsys carries no ANA state — the dn suite's §10.3 note; the
+   helper walks `/sys/class/nvme`).
 4. IO: write 4 MiB from a urandom pattern file, sync, drop caches, read
    back, sha256 equal — host → CN thin/raid0 stack → DN side, end to end.
 5. `check-cn` + `check-cntlr` rounds (§9); one `get-cntlr-info` asserting
@@ -623,7 +629,10 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    trim never did) and never `--assemble`; `md-name` cross-checks the device
    names. Standby (VM2):
    legs connected (`nvme list-subsys` on VM2 shows the four side paths,
-   ana `non-optimized`), **no** md arrays, ns-dev table = error, ns
+   ana `non-optimized` read from per-path sysfs), **no** md arrays
+   (asserted as: `/proc/mdstat` holds no `[UU]` line — no assembled
+   two-member array; the sp-scoped md residue check at teardown is the
+   exhaustive proof), ns-dev table = error, ns
    `ana_grpid` inaccessible; configfs `allowed_hosts/` of the ss contains
    exactly the host NQN on both CNs. "ns-dev table = error" is shorthand:
    the agent never gives an ns-dev an `error` target, it repoints the
@@ -910,7 +919,10 @@ base resources still probing OK via `get-cn-info`, because a teardown that
 took the port, the tmpfs or the loop arena with it would satisfy every
 residue check and still leave the CN unable to serve the next SP; and last
 the residue checks on both VMs for `0x3d1` and `0x3d2` (§11 step 7's scope:
-dm, md and the id-carrying subsystems). `check-cn` rounds.
+dm, md and the id-carrying subsystems). (This case's §18 check rounds —
+`check-cn` **and** `check-cntlr`, on both CNs — run in their own
+pre-teardown `check` stage, at steady state per §9, never after this
+teardown.)
 
 ## 14. Case D — `restart`
 

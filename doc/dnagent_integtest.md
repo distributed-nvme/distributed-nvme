@@ -372,8 +372,12 @@ Subcommands:
   `migr_provision_dst()` (phases a and b) and `migr_declare_dst()` (c):
   (a) `--provisioned=false` — the agent allocates the extent runs, builds
       `DnSideName` and starts the background zeroing goroutine. Assert
-      `side_dev_info.status == RES_STATUS_PROVISIONING` with details
-      `zeroing k/n`; every `cn_id_to_dm_error/linear/nvmeof[<cn>]` entry
+      `side_dev_info.status` is `RES_STATUS_PROVISIONING` **or already
+      `RES_STATUS_OK`** (`assert_provisioning_or_ok` — which of the two a
+      phase-(a) reply carries is a genuine race against the zeroing
+      goroutine, the two-valued case the Status-assertions bullet below
+      blesses; the `zeroing k/n` details string is not asserted); every
+      `cn_id_to_dm_error/linear/nvmeof[<cn>]` entry
       present and `RES_STATUS_PROVISIONING`; **no** `:2:` subsystem in
       configfs yet; and, kernel-side, **no dm device of kind 0 or 1 for that
       side** (helper `export_dms`, the per-CN dm-error/dm-linear pair) — the
@@ -388,7 +392,10 @@ Subcommands:
   (b) `wait-zeroed` until `zeroed_ext_cnt == total_ext_cnt`.
   (c) `REV<dn>++` (the per-DN `REV[dn]` counter of the Revisions bullet)
       and re-send the identical request with
-      `--provisioned=true` (the flip). Assert everything `RES_STATUS_OK` and
+      `--provisioned=true` (the flip). Assert the case's listed rows
+      `RES_STATUS_OK` — cases S and A check every per-CN map entry; later
+      stages check the subset their own step names (the §12 sources:
+      `side_dev_info` + `cn_id_to_nvmeof`; case D likewise) — and
       `zeroed_ext_cnt == total_ext_cnt == ext_cnt`.
   Every *later* `syncup-side` for that side — re-sends, migration stages,
   the finish step — **must keep `--provisioned=true`**: a request that drops
@@ -427,8 +434,8 @@ Subcommands:
 1. `syncup-dn` DN1 (REV1++) with side `(0xa1, 0x1, 0x11)`; assert code 0.
 2. `syncup-side` DN1 side 0x11, §9 two-phase: (a) `ext_cnt 1`, slot 0,
    primary CN 0x21, no standbys, `sp_level readwrite`,
-   `--provisioned=false` — assert code 0, `side_dev_info` PROVISIONING,
-   `cn_id_to_dm_error/linear/nvmeof[0x21]` all PROVISIONING, and no `:2:`
+   `--provisioned=false` — assert code 0, `side_dev_info` PROVISIONING-or-OK
+   (§9(a)), `cn_id_to_dm_error/linear/nvmeof[0x21]` all PROVISIONING, and no `:2:`
    subsystem and no kind-0/1 dm device for the side yet (the §9 phase-(a)
    gate proof); (b) `wait-zeroed` ⇒ 1/1; (c) REV1++ and re-send with
    `--provisioned=true` — assert code 0, `side_dev_info` OK,
@@ -522,7 +529,7 @@ the clone or connecting, so chunks can be pushed first)*
      `migr_dst_conf{migr_id M, src_side_id S1, src_dn_id DNsrc,
      src_nvme_tr_conf{tcp,ipv4,<ip_src>,"4200"}, block_size 1048576,
      meta_blocks 3, dm_clone_conf{1,1}, bm_cnt (C: 2, B: 0)}`. Assert:
-     `side_dev_info` PROVISIONING, the §9 phase-(a) gate proof for the one
+     `side_dev_info` PROVISIONING-or-OK (§9(a)), the §9 phase-(a) gate proof for the one
      CN this request names (`cn_id_to_dm_error`, `cn_id_to_dm_linear` and
      `cn_id_to_nvmeof` all PROVISIONING, no `:2:` subsystem in configfs on
      DNdst, and no kind-0/1 dm device for S2),
@@ -900,7 +907,7 @@ JSON logs on either VM.
 | `SyncupSide` | S, A, B, C, D | side_info statuses, per-CN maps, migr confs, gated→enabled transition, equal-rev idempotency; the two-phase `provisioned` gate (§9) and the `dst_provisioned = false` equivalence probe (§12 step 8b) |
 | `PushMigrBitmap` | C, D | reply code 0; effects via §14 layers |
 | `GetDnInfo` | teardown checks, D | statuses, snapshot equality |
-| `GetSideInfo` | B/C polling, D | dm_clone status parsing, snapshot equality; `zeroed_ext_cnt`/`total_ext_cnt` (polled by `wait-zeroed`) |
+| `GetSideInfo` | every case (the §9 two-phase helper samples it and `wait-zeroed` polls it on each first side converge), B/C hydration polling, D | dm_clone status parsing, snapshot equality; `zeroed_ext_cnt`/`total_ext_cnt` (polled by `wait-zeroed`) |
 | `CheckDn` | S, A, B/C teardown | stream round: code 0, revision echo, show_info statuses |
 | `CheckSide` | S, A | same (case D proves steady state by the §15 snapshot diff instead of check rounds) |
 

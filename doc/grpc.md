@@ -461,8 +461,10 @@ Unit tests (`common/interceptor_test.go`) using
 4. **Log records**: install a capturing handler (JSONHandler over a
    `bytes.Buffer` wrapped in `TraceIdHandler`, as in `log.md` §7) around a
    unary call and a two-round `CheckDn` stream exchange; assert the exact
-   `msg` strings of L2 appear in order, each with `method`, `data` and
-   `trace_id`; assert no record is emitted for the terminating `io.EOF`.
+   `msg` strings of L2 appear in order, each with `method` and `trace_id`,
+   and with `data` on every request/reply record — the three stream
+   open/close records carry no `data` (L4), and the test asserts its absence
+   there; assert no record is emitted for the terminating `io.EOF`.
 5. **Bytes redaction**: send a `PushMigrBitmapRequest` with a 4-byte bitmap
    through the (unary) `PushMigrBitmap`; assert the captured
    `grpc client request` / `grpc server request` records contain

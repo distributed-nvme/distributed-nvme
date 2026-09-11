@@ -17,12 +17,13 @@ import (
 // into leg_list, so a spare is pre-connected capacity and nothing more.
 //
 // All three requests address a group by grp_id and carry NO slice id, so each
-// handler must first find the slice that holds the group. That scan is a
-// plain snapshot (§5.11): it plans, it does not decide. Everything it read is
-// read again by the STM that writes — CreateSpareLeg's and SwitchSpareLeg's
-// inside the model op, DeleteSpareLeg's inside the gateway's own
-// transaction — so a group that moved, a token that went stale or a spare
-// list that filled up between the two is caught where it matters.
+// handler must first find the slice that holds the group. CreateSpareLeg and
+// SwitchSpareLeg locate it in a plain snapshot (§5.11) that plans but does
+// not decide — everything it read is read again inside the model op's own
+// STM; DeleteSpareLeg has no snapshot at all — its locate runs directly
+// inside the gateway's one deciding transaction. Either way a group that
+// moved, a token that went stale or a spare list that filled up between plan
+// and decision is caught where it matters.
 //
 // Two of the three are model ops the sp-worker's §10.4 leg repair already
 // drives (§0 #4: reused, never duplicated); DeleteSpareLeg is the gateway's

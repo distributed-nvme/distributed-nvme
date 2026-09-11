@@ -121,10 +121,10 @@ added by `dnagent.md` §5, and `ReadBlockDirect` was **removed** by
 `update_01.md` U2 — its only caller, the CN11 leg prober, now calls the
 package-level helper of §4.5.1 outside the semaphore. §9 records both.)
 
-## 3. Constant to add to `constants.go`
+## 3. The `constants.go` constant
 
-`DefaultOsClientLimit` does **not** exist yet in `constants.go`; add it to the
-existing `const` block:
+`DefaultOsClientLimit` lives in the existing `const` block of `constants.go`
+(§8's acceptance list checks it), exactly as this document specified it:
 
 ```go
 	// Default cap on the number of in-flight OsClient operations
@@ -374,7 +374,12 @@ Notes:
   through the one `ctx.Err()` check the prober makes *before* calling a helper
   — an attempt cancelled there emits no record at all.
 
-## 5. Reference implementation — `common/osclient.go` (core, complete)
+## 5. Reference implementation — `common/osclient.go` (core)
+
+Semantically complete: every declaration below exists in the committed file
+with the same signature and behavior. The file is authoritative for comment
+text and declaration order, which have drifted cosmetically from this
+listing (unlike `grpc.md` §3 / `log.md` §4, whose byte-identity is pinned).
 
 ```go
 package common
@@ -767,10 +772,11 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 }
 ```
 
-## 6. Test double — `common/osclient_fake.go` (complete)
+## 6. Test double — `common/osclient_fake.go`
 
-Exported (not `_test.go`) so agent/worker/gateway tests in other packages can
-reuse it. Unset function fields default to success. There is no
+Semantically complete like §5 (the committed file additionally carries a
+short header comment this listing omits). Exported (not `_test.go`) so
+agent/worker/gateway tests in other packages can reuse it. Unset function fields default to success. There is no
 `ReadBlockDirectFn`: the probe read left the interface with `update_01.md` U2,
 and probe IO is faked through the cn agent's own probe-IO dependency
 (`cnagent.md` §4.2 / §6 test 15), not through this double.

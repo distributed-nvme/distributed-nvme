@@ -146,7 +146,9 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
 
 `dnv-gateway` "serves the `Gateway` gRPC service to users/CLI. Reads and
 writes etcd. Calls agents only for `GetDnSize`/`GetCnSize`, the `Get*Info`
-behind its `Inspect*`, and the `Get*Bm` bitmap reads" (architecture.md §2).
+behind its `Inspect*` and behind the `force = false` hydration checks of
+`DeleteClone`/`FinishMigration` (§8.9/§8.11), and the `Get*Bm` bitmap
+reads" (architecture.md §1's binary table).
 It is one of the three co-located control-plane processes (gateway, worker,
 cdc) that any number of CP servers may run.
 
@@ -210,7 +212,9 @@ The bodies stay exactly what they are; only visibility and three signatures
 change. Each change is mechanical and the worker keeps compiling:
 
 1. Export `spNextId` as `SpNextId(conf *pb.SpConf) uint64` — the per-SP id
-   mint (returns the id, advances `conf.NextId`, clamps to `SpFirstId`).
+   read (returns `conf.NextId` clamped to `SpFirstId`; it mutates nothing —
+   every caller advances and persists `conf.NextId` itself, as the model ops
+   and the gateway's `spIdMinter` do).
 2. Export the SpRev bump as
    `BumpSpRev(s etcdutil.STM, op string, shard uint32, cid, spId uint64) error`
    (rev key missing ⇒ the existing precondition-style failure). Add
@@ -266,8 +270,10 @@ Two subcommands so the integration suite can play the worker (§0 #12):
   its first record and `"gateway stopping"` on the way out, closes `cli` as
   the last step of its drain (so `main` does not — CM3), and serves exactly
   like `agent/agent.go Serve`: `net.Listen(cfg.GrpcNetwork, cfg.GrpcAddress)`;
-  `grpc.NewServer(grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
-  grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()))`;
+  `grpc.NewServer(serverOptions()...)` — where `serverOptions` chains the
+  gateway-local `ensureTraceIdUnary()` / `ensureTraceIdStream()` FIRST and
+  `common.GrpcUnaryServerInterceptor()` / `common.GrpcStreamServerInterceptor()`
+  behind them;
   `pb.RegisterGatewayServer`; a goroutine doing `<-ctx.Done();
   grpcServer.GracefulStop()`; an Info `"gateway serving"` record with
   `network`/`address`; then `grpcServer.Serve(lis)`. The server chain is the
@@ -326,7 +332,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included — update_05.md U4) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `Append*Bitmap` count caps; a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap (AppendCloneBitmap's index bounds are an invalid request ⇒ `INVALID_ARGUMENT`, checked in-STM per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; agent gRPC failure where the RPC says so | `ABORTED` |
 
@@ -345,7 +351,12 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   short (the "too few candidates" row above), but `FAILED_PRECONDITION`
   (`model.checkDnPick`, reason `"dn free_ext_cnt too low"`) when only the
   STM sees it — that check precedes the capacity-key test, so it is not
-  swallowed by `ReasonCandidateChanged`.
+  swallowed by `ReasonCandidateChanged`. The same ordering means a pick
+  whose DN was **deleted or disabled** between scan and STM surfaces on the
+  model paths (`GrowSlice`, `CreateSpareLeg`) as `FAILED_PRECONDITION`
+  (`"dn not found"` / `"dn not allocatable"`) rather than a GW9 re-scan;
+  only the gateway-ledger paths treat every vanished pick as
+  candidate-changed and re-scan.
 * **GW8 — one STM per RPC** (§5.8). Everything computable beforehand (name
   formatting, group plans, candidate lists, the stamped `creation_epoch`) is
   prepared outside; all reads and writes commit in one `RunSTM`. The closure
@@ -629,7 +640,10 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   token check (GW6 — any interleaved mutation bumped `SpRev`, so the token
   subsumes staleness of phase 1); delete the Clone, its `CloneBitmap` chunks
   (`CloneBitmapKey` for idx `0..bm_cnt-1` — point deletes, the STM has no
-  range), the list entry; `BumpSpRev`. Reply `clone_id`.
+  range), the list entry; set `suspended = false` on every namespace whose
+  `td_id == dst_td_id` (architecture.md §8.9 — the dst namespaces resume with
+  the data now local, the §5.9 DeleteTransfer twin of this write);
+  `BumpSpRev`. Reply `clone_id`.
 * **GetClone** — one STM read. Reply the Clone.
 * **UpdateCloneTrConf** — STM: resolve; token; clone; replace
   `src_tr_conf_list`; `BumpSpRev`. Reply `clone_id`.
@@ -682,9 +696,11 @@ own — no CdcEntry involvement). Replies `xfer_id`.
 
 ### 5.11 Spare legs (§8.12)
 
-The requests carry `grp_id` but no slice id: each handler first locates the
-slice containing the group by scanning the SP's slices in a plain snapshot
-(the model op re-verifies in its own STM).
+The requests carry `grp_id` but no slice id, so each handler must locate the
+slice containing the group. CreateSpareLeg and SwitchSpareLeg do it by
+scanning the SP's slices in a plain snapshot (the model op re-verifies in its
+own STM); DeleteSpareLeg has no snapshot — its locate runs directly inside
+its one deciding STM below.
 
 * **CreateSpareLeg** — group is RedundNone ⇒ `INVALID_ARGUMENT`; candidate
   unit for one DN (black list = the group's leg/side DNs); call the amended

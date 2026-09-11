@@ -8,9 +8,10 @@ Current (must match `go.mod`):
 * github.com/spf13/cobra
 * github.com/spf13/viper
 * go.etcd.io/etcd/client/v3 v3.6.14 — the v3.6 line; entered `go.mod` with
-  `etcdutil/` (`layout.md` §3, `dnv-worker.md` §3) and linked into
-  `cmd/dnv-worker` only (`layout.md` §7 item 4). The worker integration suite
-  runs an etcd server of the same minor.
+  `etcdutil/` (`layout.md` §3, `dnv-worker.md` §3) and linked into the three
+  etcd-facing binaries `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc`;
+  the agents and `dnvctl` stay etcd-free (`layout.md` §7 item 4). The worker
+  integration suite runs an etcd server of the same minor.
 * go.etcd.io/etcd/api/v3 — the same version; `v3rpc/rpctypes` for the
   `ErrCompacted` report of `dnv-worker.md` EU3; arrives with the client and
   cannot be avoided.

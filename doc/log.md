@@ -78,7 +78,7 @@ R7. Attributes are always built with the strongly-typed constructors:
     `PbToLogValue` output.
 
 R8. The following events MUST be logged at **Info** level, with the exact `msg`
-    strings and required attributes listed in §6:
+    strings and required attributes listed in §5:
     1. every OS command execution (stdin, stdout, stderr, exit code) —
        implemented once inside `LimitedOsClient` (`osclient.md`);
     2. every file read/write (full path; string data truncated to the first
@@ -89,7 +89,7 @@ R8. The following events MUST be logged at **Info** level, with the exact `msg`
        the interceptors (`grpc.md`);
     4. every etcd read/write (human-readable key, value decoded from protobuf
        and rendered as JSON — never raw protobuf binary) — implemented in a
-       small set of central etcd helper functions (§6.4).
+       small set of central etcd helper functions (§5.3).
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error). When the

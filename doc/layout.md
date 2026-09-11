@@ -61,7 +61,9 @@ distributed-nvme/                      # repo root = module root
 │   ├── minor_issues.md                # minor doc/code debt ledger (2026-09-09 verification)
 │   ├── issue_03.md                    # resolved issue record (history)
 │   ├── update_04.md                   # applied amendment record (history)
-│   └── update_05.md                   # decided amendment spec (code pending)
+│   ├── update_05.md                   # applied amendment record (history)
+│   ├── update_06.md                   # decided amendment spec (code pending)
+│   └── risks_and_gaps.md              # ranked v1 risks / operational gaps (informational)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -98,9 +100,11 @@ distributed-nvme/                      # repo root = module root
 │   ├── alloc.go                       # §6 bins / candidate scans
 │   └── validate.go                    # §7 common validation
 ├── worker/                            # dnv-worker.md §6-§11
+│   ├── worker.go                      # Run/Config, deps, seed mint, the worker-lifecycle §12 msg constants
 │   ├── vote.go                        # §6 vote worker: registry, heartbeat, grace timers, tickets, shard-worker lifecycle
 │   ├── shard.go                       # §7 shard worker: scan+watch of one rev prefix, revision-worker lifecycle
-│   ├── revision.go                    # §8.1 per-object loop: Check stream, rounds, syncup trigger, conn cache
+│   ├── revision.go                    # §8.1 per-object loop: Check stream, rounds, syncup trigger
+│   ├── conn.go                        # the RW7 refcounted agent-connection cache
 │   ├── dnrole.go                      # §8.2 SyncupDn builder + node health
 │   ├── cnrole.go                      # §8.3 SyncupCn builder + node health
 │   ├── sprole.go                      # §8.4 SP snapshot, fan-out, provisioned/created flips
@@ -346,3 +350,16 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   resolved `issue_03.md` / `update_04.md` records; `minor_issues.md`, the
   minor-debt ledger produced by the same verification, entered the tree the
   same day. No package boundary or path changed.
+* Second doc-amendment pass (2026-09-10, after the second full doc-vs-code
+  verification): `update_06.md` (five decided code fixes, pending) and
+  `risks_and_gaps.md` (ranked v1 risks, informational) entered the §2 tree;
+  `update_05.md`'s annotation moved to applied/history; the §2 `worker/`
+  tree gained `worker.go` and `conn.go` (matching dnv-worker.md §1's
+  amended table — the file list above predates them). The pass also fixed
+  stale or imprecise passages across `architecture.md`, `gateway.md`,
+  `dnv-worker.md`, `cnagent.md`, `dnagent.md`, `ThinDeviceCreated.md`,
+  `cdc.md`, `grpc.md`, `log.md`, `osclient.md`, `dependencies.md` and both
+  integtest specs, plus eight stale code comments; each document's own
+  amendments section is not extended for these (they correct drift, not
+  decisions — `update_06.md` and the verification record are the
+  provenance). No package boundary or path changed.

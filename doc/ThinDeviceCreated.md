@@ -47,7 +47,7 @@ decision, not an assumption.
 | # | decision | why |
 |---|---|---|
 | R1 | Field name `created`, `bool created = 5` on `ThinDevice`. | The next free field number; `ThinDevice` already rides in `td_list` and `name_to_td`, so no other message changes. |
-| R2 | `created` is **monotonic**: set once by the sp-worker, never cleared. | A pool holds a thin id until `delete {dev_id}`, which only the td's own deletion sends; a later bad row is a health event (`err_epoch`), not evidence the id is gone. |
+| R2 | `created` is **monotonic**: set once by the sp-worker, never cleared. | A pool holds a thin id until a `delete {dev_id}` reaches it — sent by the td's own deletion or, when CN14's pool-presence gate skipped that fan-out's message (a demotion or pool suppression coalesced with the delete), by the CN14 activation sweep at the pool device's next re-creation (update_05.md U3); a later bad row is a health event (`err_epoch`), not evidence the id is gone. |
 | R3 | A td deleted and recreated under the same name is a **different td**: new `td_id` (from `next_id`), new `dev_id` (from `next_dev_id`), `created = false`. | ids are never reused (§8.7); the key is rewritten, not updated. |
 | R4 | Flip predicate: `agent_reply.code == 0`, and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
@@ -705,11 +705,17 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    `ThinDeviceCreated.md U*n*`. `gateway/` and `worker/` have since landed
    with U2/U3 implemented, and gateway.md §9 / dnv-worker.md §13 — their
    unit-test inventories of record — re-scoped the U2-T/U3-T lists: most
-   scenarios exist under different names, while U2-T5's literal
-   same-name-recreate sequence, U2-T6's injected mid-STM race and
-   U3-T5/T6's check-round-to-flip paths are covered structurally (GW8/EU4's
-   serializable STM; `completedTds` takes no revision and every reply is
-   observed) rather than by dedicated tests.
+   scenarios exist under different names, and the 2026-09-10 minor_issues
+   MT11 sweep added dedicated tests for three that had been structural-only
+   — U2-T5's same-name-recreate sequence
+   (`gateway/handler_vol_test.go` `TestThinDeviceSameNameRecreateTakesFreshIds`)
+   and U3-T5/T6's check-round-to-flip paths (`worker/sprole_test.go`
+   `TestSpCreatedFlipFromACheckRound` /
+   `TestSpCreatedFlipIgnoresTheReplyRevision`). Only U2-T6's injected
+   mid-STM race remains covered structurally (GW8/EU4's serializable STM):
+   `etcdutil.Client.run` has no seam to inject it through, and the outcome
+   is unreachable anyway — a real concurrent create bumps `SpRev`, so GW6's
+   token check refuses the retry first (minor_issues.md MT11).
 
 ---
 
@@ -753,9 +759,10 @@ the origin `created`, and `TestThinDeviceBitmapSharedSubtree` — not in either
 **N4 — the `cnagent.md` §7 grep in §8 matches nothing and is wrong on
 substance.** `grep -rn "dmsetup message" agent/cnagent/pool.go` hits one
 comment; the call sites are `s.dm.Message(`. And `deleteThinId` is
-deliberately *not* gated on `created` (R2: only the td's own deletion sends
-`delete {dev_id}`). The acceptance item as written into `cnagent.md` §7 uses
-the working grep and says so.
+deliberately *not* gated on `created` (R2: `delete {dev_id}` comes from the
+td's own deletion — or from the U3 activation sweep when that fan-out's
+message was gate-skipped — never from the flag). The acceptance item as
+written into `cnagent.md` §7 uses the working grep and says so.
 
 **N5 — §8 missed two sentences that stated the old unconditional rule.**
 `architecture.md` §8.7 ("The primary creates one thin volume per slice

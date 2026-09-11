@@ -113,7 +113,10 @@ Who writes what it reads: the gateway creates and deletes `CdcEntry` at
 `CreateSubsystem` / `DeleteSubsystem` and rewrites `allowed_hosts` at
 `UpdateSubsystemHosts`; gateway and worker rewrite `nvme_tr_conf_list`
 at `CreateCntlr` / `DeleteCntlr` / `UpdateCntlrEnabled` / `ReplaceCntlr`
-(`architecture.md` §8, `dnv-worker.md` §4 MD8). dnv-cdc is the only reader.
+(`architecture.md` §8, `dnv-worker.md` §4 MD8). dnv-cdc is the only *serving*
+consumer; the gateway and worker also read entries inside their own
+read-modify-write STMs (the `allowed_hosts` and `nvme_tr_conf_list` rewrites
+above), but nothing else ever renders them to a host.
 
 One process, three parts:
 
@@ -151,6 +154,7 @@ Reading order for an implementer: §2 → §3 → §4 → §5 → §6 → §7 �
 | `NvmeDiscoveryNqn` | `nqn.2014-08.org.nvmexpress.discovery` | the well-known discovery subsystem NQN (NP5) |
 | `DefaultCdcTrType` | `tcp` | the only accepted `--tr-type` (§0 #2) |
 | `DefaultCdcAdrFam` | `ipv4` | default `--adr-fam` |
+| `CdcAdrFamIpv6` | `ipv6` | the other accepted `--adr-fam` value (CM1/CM2) |
 | `DefaultCdcTrSvcId` | `8009` | default `--tr-svc-id` — the standard discovery port |
 | `CdcRangeAll` | `0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f` | the `--range` default (§0 #4) |
 | `CdcMaxAdminSqSize` | 32 | admin SQ entries; CAP.MQES = 31; Connect SQSIZE cap (NP4); ASQSZ in every log entry (DS3) |
@@ -249,8 +253,12 @@ and its key schema already exist.
 ## 4. The etcd watcher [WV]
 
 The `shard.go` skeleton of `dnv-worker.md` §7, minus per-key workers: one
-goroutine owns the entry map and the view registry; every mutation of served
-state happens on it.
+goroutine owns the entry map, and the view registry is serialized under one
+mutex — entry mutations and impact fan-out run on the watcher goroutine,
+while host-state attach/detach (a connection materializing or dropping its
+view) runs on connection goroutines under that same mutex (`view.go` states
+the rule as Go expresses it). The serialization invariant is what matters:
+no served state is ever mutated concurrently.
 
 * **WV1 — scan then watch.** `Range(CdcEntryPrefix())` → build the owned
   entry map → `WatchTyped` from `rev + 1` with `newMsg = &pb.CdcEntry{}` →
@@ -634,7 +642,10 @@ Aborts with a message on the first failure:
    what the DLPEs say, disconnect what they stop saying" differ across stas
    1.x/2.x; the implementation pins them for the lab's version and the
    preflight asserts that version.
-6. Driver box: `jq` (all log/JSON parsing is local, `ssh cat … | jq`).
+6. Driver box: `jq` — or the Go toolchain: a missing `jq` does not abort,
+   the runner builds the `gojq` drop-in into `integtest/bin/` and uses it,
+   aborting only if that build fails too (all log/JSON parsing is local,
+   `ssh cat … | jq`).
 7. The kernel hostnqn/hostid 1:1 rule: every `nvme` invocation that passes
    `-q`/`--hostnqn` also passes the matching `-I`/`--hostid` (the lab trap:
    an implicit hostid with an explicit foreign hostnqn fails `EINVAL`).
@@ -817,8 +828,12 @@ remove dnv-cdc-it-*`. Modules stay loaded.
    `nvme list-subsys` shows ssA live at `<ip2>:14420`.
 4. Read 4 KiB from the device (`dd` without `iflag=`, lab rule), compare
    to zeros (`cmp` against `/dev/zero` head) — the dm-zero data path.
-5. cdc0 log: `host connected` with H1; disconnect ssA on h1 → `host
-   disconnected` `reason=closed`.
+5. cdc0 log: `host connected` with H1 and `host disconnected`
+   `reason=closed` — both records come from the transient **discovery**
+   connections steps 2-3 already made (a one-shot discover / connect-all
+   opens and closes a discovery connection; the assert runs before the next
+   sentence's disconnect). Then disconnect ssA on h1 — a *data*-subsystem
+   disconnect touches only s2's nvmet and produces no cdc record.
 6. `del` ssA; discover against cdc0 → {}.
 
 Proves: build, launch, scan/watch, per-range serving, a real host connect,
@@ -898,8 +913,8 @@ Cluster `0xcdc4` (ssF in `0x1cdc4`). `put` ssA, ssB, ssC, ssD, ssE
    json` on the discovery subsystem NQN filtered by traddr `<ip1>`); cdc
    logs show `host connected` for both hostnqns on all four instances.
 2. Data connections appear with **no manual nvme commands**: h1 → uuids
-   {1,2,4,5}, h2 → {1,3,4,6}, ssD with two paths on both, within
-   `WAIT_STAS`.
+   {1,2,4,5}, h2 → {1,3,4,6}, ssD with two paths on both, each device node
+   within `WAIT_CONN` (§9.9's budget for device nodes).
 3. Auto-connect: `put` ssX (shard `05`, H2, port4) → h2 gains uuid 7; h1
    unchanged (after h2's positive + settle).
 4. Re-point (the ReplaceCntlr shape): `cdc_target.sh link sse 4`; rewrite
@@ -927,7 +942,8 @@ convergence (h1 {1}, h2 {1,3}).
 1. `SIGKILL` cdc0 (its pid file). stas loses one discovery connection and
    keeps three.
 2. `put` ssB (shard `07`, H1, port2) — the low half is now served by cdc1
-   alone: h1 auto-connects uuid 2 within `WAIT_STAS`. One-shot discover
+   alone: h1 auto-connects uuid 2 within `WAIT_CONN` (§9.9's device-node
+   budget). One-shot discover
    against cdc1 (H1) shows {A,B} while cdc0 is down.
 3. Restart cdc0; wait its `cdc scan complete`; discover H1 against cdc0 =
    against cdc1, the same §9.9 triple set and non-empty (two failed
