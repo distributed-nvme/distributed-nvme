@@ -1240,6 +1240,117 @@ func TestUpdateNamespaceDevIsOneReload(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// §6.26 — park before remove (CN9/CN21, update_06.md U4)
+// ---------------------------------------------------------------------------
+
+// TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN9's retire
+// order for a namespace that *leaves* the desired state. The fixture's
+// namespace is stored `suspended = true` (§11.6), which is the state CN21's
+// rationale is about: a suspended device blocks both the nvmet disable above
+// it and its own removal. Parking it — the reload onto the td's `CnErrorName`,
+// whose internal resume is the whole point — therefore has to precede the
+// nvmet removal, not follow it inside `removeDm`.
+func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
+	// Converge A: a primary serving one deliberately suspended namespace. Its
+	// ana_grpid is already `3` (CN16), so converge B rewrites nothing there
+	// and the park is the first thing it does to the ns-dev.
+	convergeA := func(t *testing.T) (*CnAgentServer, *fakeNode) {
+		t.Helper()
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{
+			revision: 2, primary: true, suspended: true})
+		dev := node.dms[nsDevName(srv, testNs)]
+		if dev == nil || !dev.suspended {
+			t.Fatalf("the ns-dev did not end suspended (CN16)")
+		}
+		node.Reset()
+		return srv, node
+	}
+	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
+	// assertParkedOnError pins the park's *target*, which an ordering
+	// assertion on the reload's command prefix does not: a reload onto the
+	// wrong backing device satisfies the order and still leaves the ns-dev
+	// serving data. The pin is on the recorded `--table` of the reload itself
+	// — `node.dms[nsDevName]` is gone by the time a sub-case asserts, the
+	// removal being the very thing under test — and it names the td's
+	// `CnErrorName` (update_06.md §4), the same device TestStandbyConverge
+	// pins a live ns-dev against.
+	assertParkedOnError := func(t *testing.T, srv *CnAgentServer,
+		node *fakeNode) {
+		t.Helper()
+		errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+		if errNo == "" {
+			t.Fatalf("the td's dm-error is gone: nothing to park onto")
+		}
+		reloads := node.callsMatching(
+			"cmd dmsetup reload " + nsDevName(srv, testNs))
+		if len(reloads) == 0 {
+			t.Fatalf("the ns-dev was never parked:\n%s",
+				strings.Join(node.Calls(), "\n"))
+		}
+		for _, reload := range reloads {
+			if !strings.Contains(reload, "linear "+errNo) {
+				t.Fatalf("park is not onto the td's dm-error %s: %q",
+					errNo, reload)
+			}
+		}
+	}
+
+	t.Run("namespace leaves ns_list", func(t *testing.T) {
+		srv, node := convergeA(t)
+		subsys := defaultSubsys(false)
+		subsys[testNqn].NsList = nil
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true, subsys: subsys})); err != nil {
+			t.Fatalf("remove namespace: %v", err)
+		}
+		assertOrder(t, node,
+			"cmd dmsetup reload "+nsDevName(srv, testNs),
+			"cmd dmsetup resume "+nsDevName(srv, testNs),
+			"writedirect "+nsPath+"/enable=0",
+			"cmd rmdir "+nsPath,
+			"cmd dmsetup remove "+nsDevName(srv, testNs),
+		)
+		assertParkedOnError(t, srv, node)
+		// One park call, not one per retire step: an ordering assertion stops
+		// at its first match and cannot see a second one. The count is over
+		// `parkNsDev`'s own `dmsetup table` probe, which every call makes
+		// before it decides anything — counting reloads would prove nothing,
+		// because `parkNsDev` is idempotent (td.go: already linear over the
+		// errorName and resumed returns *before* `Reload`) and so a second
+		// park emits no dmsetup command at all. `dmsetup info` is no counter
+		// either: `removeDm` probes the same device below. It says nothing
+		// about any other ns-dev — this fixture removes exactly one.
+		parks := node.callsMatching(
+			"cmd dmsetup table " + nsDevName(srv, testNs))
+		if len(parks) != 1 {
+			t.Fatalf("want exactly one ns-dev park, got %d:\n%s",
+				len(parks), strings.Join(parks, "\n"))
+		}
+	})
+
+	t.Run("subsystem leaves nqn_to_subsystem", func(t *testing.T) {
+		srv, node := convergeA(t)
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true,
+			subsys: map[string]*pb.Subsystem{}})); err != nil {
+			t.Fatalf("remove subsystem: %v", err)
+		}
+		// removeExport tears the whole subsystem down (port link, ns disable,
+		// rmdir ns, allowed hosts, rmdir subsystem), so the park has to be
+		// ahead of *its* ns disable too.
+		assertOrder(t, node,
+			"cmd dmsetup reload "+nsDevName(srv, testNs),
+			"cmd dmsetup resume "+nsDevName(srv, testNs),
+			"writedirect "+nsPath+"/enable=0",
+			"cmd rmdir "+agent.NvmetRoot+"/subsystems/"+testNqn,
+			"cmd dmsetup remove "+nsDevName(srv, testNs),
+		)
+		assertParkedOnError(t, srv, node)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // §6.11 — the sp_level ladder (CN19)
 // ---------------------------------------------------------------------------
 

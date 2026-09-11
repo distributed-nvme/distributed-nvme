@@ -1,7 +1,7 @@
 # update_06.md — disabled-primary failover, fence adoption at the gate, failure-domain-aware repair placement, park-before-remove for namespaces, and ledger invariant errors
 
-Status: **decided (2026-09-10); the code changes below are NOT yet applied —
-this file is their implementation spec.** It resolves the five code-side
+Status: **decided (2026-09-10); companion documents amended; the code
+changes below are APPLIED (2026-09-10).** It resolves the five code-side
 findings of the 2026-09-10 second full doc-vs-code verification. All five
 were decided **fix the code**; the current normative text is already right
 everywhere except the §6 companion edits listed per item, which MUST land in
@@ -11,6 +11,180 @@ document's own sections; `file:line` references are against the 2026-09-10
 tree (commit `dd32bd0` plus that day's doc-amendment pass) — re-locate by
 the quoted code if they have drifted. Implementation order is free except
 that each U-item lands atomically with its §6 edits and its tests.
+
+Amended 2026-09-10 by the implementation pass, as the U-items landed:
+**(a)** U3's §3 Code 2 helper gained a `requiredCnt int` parameter and its
+tier-2 trigger became `len(tier1) < requiredCnt`. As drafted it fired tier 2
+"when it returns fewer than `candCnt`", but `candCnt` is the **oversampled
+scan width** — `gateway/alloc.go` `pickDns` passes `plan.Legs ×
+dn_batch_size`, the worker's AR8 scan passes `dn_batch_size`, and
+`common/constants.go:29` sets `DefaultAllocDnBatchSize = 16` — while
+`FindDnCandidates` returns at most one candidate per location. Under the
+drafted reading tier 1's result is discarded wholesale in any cluster with
+fewer than ~16 out-of-domain failure domains, U3's anti-affinity is inert in
+every realistic deployment, and §3's OWN normative gateway test
+("`CreateSpareLeg` picks the distinct-location DN") is unsatisfiable at the
+default batch. §3's Decision prose already said "fewer candidates than
+required" and architecture.md §6.5 already distinguishes `DnCandCnt =
+RequiredCnt × dn_batch_size` from `RequiredCnt`, so this is the signature
+catching up with the rule both documents had already stated. What landed:
+
+    // FindDnCandidatesAntiAffine is FindDnCandidates with the two-tier
+    // location rule of §6.5: tier 1 excludes excludeLocs; when it yields
+    // fewer than requiredCnt — the DNs the caller must actually place, not
+    // the oversampled scan width candCnt — tier 2 rescans without the
+    // location exclusion and its candidates are merged behind tier 1's. The
+    // bool reports whether tier 2 was used.
+    func FindDnCandidatesAntiAffine(
+        ctx context.Context, cli *etcdutil.Client, cid uint64,
+        cc *pb.ClusterConf, candExt uint64, candCnt int, requiredCnt int,
+        black, white, excludeLocs []string,
+    ) ([]Cand, bool, error)
+
+`requiredCnt` is `plan.Legs` at the gateway and `1` at the worker. Tier 2
+**merges behind** tier 1 rather than replacing it: tier 2 walks
+free-count-descending and stops at `candCnt`, and the group's own excluded
+domains usually hold the fullest DNs, so a plain replace can drop a
+distinct-domain candidate tier 1 had already found. §3's Code 2 block and
+Tests bullets below are rewritten to this signature — a ledger whose body
+still specified the superseded one is the half-applied correction this
+project keeps hitting.
+**(b)** §3 Code 3's closing sentence ("the worker's AR8 path reads the same
+confs through its `etcdutil` client before the scan") was corrected to the
+snapshot the code actually uses: a new `grpLocations(state, grp)` in
+`worker/reaction.go` resolves every `grpAddrs` addr_port through
+`SpState.DnByAddr`. It is the same data, read the same way, at no extra
+cost: MD3 loads one `DnConf` per side `addr_port` of the SP into `DnByAddr`
+in the STM that opens the pass (`model/stm.go:246-253`), and `stm.go`'s
+`sideAddrs` walk (:113-144) covers `leg_list` **and** `spare_leg_list` of
+every group — exactly the set `grpDnAddrs` names — so the locations still
+come through the worker's own etcdutil client, still before the scan, with
+no second round trip. dnv-worker.md §11.5 was already amended to the
+snapshot wording (:1233-1235); §3 Code 3 now agrees with it.
+**(c)** §7.2's U5 acceptance grep was over-broad and is rescoped to the
+ledger file. It demanded `grep -rn "disk node %q not found" gateway/` hit
+nothing, but that literal legitimately survives at four **request-named**
+sites in `gateway/disknode.go` — `DeleteDiskNode` (:209), `GetDiskNode`
+(:282), `UpdateDiskNodeDisabled` (:384) and `InspectDiskNode` (:444), each
+on `req.GetAddrPort()` — which GW7 requires to stay `NOT_FOUND` and which
+`integtest/gateway_test.sh:3686` pins (`gwx NOT_FOUND get-dn`).
+`gateway/controllernode.go`'s four `"controller node %q not found"` sites
+(:250, :324, :428, :491) are the CN twin, equally untouched and equally
+correct. U5 only ever concerned the two allocator ledgers of
+`gateway/alloc.go` (:195, :336), which now return `errAborted`; a verifier
+running the drafted clause literally would have recorded U5 as unapplied, or
+"fixed" `disknode.go` and broken the public API.
+**(d)** §3's Tests bullets describe the U3 tests but, unlike U1/U2/U4/U5,
+named none, so the seven names that landed are recorded here and in the
+bullets themselves: `model/alloc_test.go`
+`TestFindDnCandidatesExcludeLocs` (tier 1 inside the base scan, plus the
+nil/empty-exclusion identity), `TestFindDnCandidatesAntiAffine` (both tiers
+and the nil-exclusion no-second-scan case),
+`TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt` (the (a) trigger: tier
+1 short of `candCnt` but holding `requiredCnt` does NOT fall through, and
+`requiredCnt + 1` does) and `TestFindDnCandidatesAntiAffineMergesTier1`
+(tier 1's find stays at the head of a `candCnt`-truncated tier-2 list);
+`gateway/handler_vol_test.go`
+`TestCreateSpareLegPrefersAnotherFailureDomain` and
+`TestCreateMigrationPrefersAnotherFailureDomain`; `worker/reaction_test.go`
+`TestReactionSpareCreateExcludesGroupLocations`. These seven are normative
+from here on, on the same footing as the other items' names.
+**(e)** Two of §3's own §6 companion edits had landed carrying the
+**superseded** (a) trigger; both were re-amended to it the same day
+(2026-09-10), in the fix wave that this note asked for, and this is the
+record of it. architecture.md §6.5's CreateMigration bullet read "when tier
+1 yields fewer candidates than `DnCandCnt`", where the rule is
+`RequiredCnt` — the very distinction the same §6.5 list draws at :947-949
+(`DnCandCnt = RequiredCnt × AllocConf.dn_batch_size`); it now reads "when
+tier 1 yields fewer candidates than `RequiredCnt` — the DNs the operation
+must actually place, never the oversampled `DnCandCnt`", with the
+merged-behind clause (:964-977). dnv-worker.md §4 MD5's allocator row
+quoted `FindDnCandidatesAntiAffine(…, black, white, excludeLocs []string)`
+with "fewer than `candCnt` ⇒ tier 2", i.e. both the drafted signature and
+the drafted trigger; it now quotes the landed
+`FindDnCandidatesAntiAffine(…, candCnt, requiredCnt int, black, white,
+excludeLocs []string) ([]Cand, bool, error)` and "fewer than `requiredCnt`
+— the DNs the caller must actually place, never the oversampled `candCnt`",
+merge included (:413-423). gateway.md §5.10/§5.11 and dnv-worker.md §11.5
+had said only "when tier 1 comes up short", which was never wrong; the same
+wave sharpened all three to name the one DN each path places and to deny
+the `DnCandCnt`/`candCnt` reading outright (gateway.md :675-680, :710-714;
+dnv-worker.md :1231-1238). No carrier of the superseded trigger survives
+outside this file, which quotes it deliberately: both drafted phrases —
+"fewer than `candCnt`" and "fewer candidates than `DnCandCnt`" — grep to
+nothing under doc/ once this file is filtered out, per §7.2's convention.
+U3 is applied whole, code and companions alike. The U-item texts below are
+the amended, authoritative versions.
+**(f)** Final read-through of this file against the finished tree
+(2026-09-10, after both fix waves). Everything §1-§5 specifies is applied;
+these are the facts the body did not yet carry, each verified in the tree
+rather than inferred from the waves.
+*§3's Code 1 and Code 4 landed at one granularity coarser than drafted,
+with the same effect.* Code 1's "the only callers" is the pre-change
+inventory: `FindDnCandidates` now has **no** non-test caller outside
+`model/alloc.go` itself, because `FindDnCandidatesAntiAffine` wraps it for
+both tiers, and Code 4's three call sites reach it through two switch
+points — `gateway/alloc.go` `pickDns` and `worker/reaction.go`
+`modelReactionOps.findDnCandidates`. The wrapper is therefore the single
+entry point for all six DN allocation paths, the three §3 deliberately
+leaves on the plain scan included: CreateStoragePool, GrowSlice and the AR6
+grow pass an empty `ExcludeLocs`, and on an empty exclusion the helper
+returns tier 1 unchanged and skips a tier 2 that would only repeat it — so
+their behavior is identical to the direct call they had before.
+*One wrong cross-reference, corrected in place.* §3 Code 3 sourced
+`location` immutability to architecture.md `§5.5`, which is "Revision keys
+and the sync fan-out" and says nothing about it. The rule lives in **§8.2**
+(Disk nodes): `location = addr_port` as the CreateDiskNode default, with
+`UpdateDiskNodeDisabled` the only later DN mutator — which is what
+architecture.md §6.5, gateway.md §5.10 and `grpDnLocations`' own comment all
+cite. The pointer is fixed below; the argument it supports is unchanged.
+*Names.* (d)'s seven U3 names are all present exactly as written. One
+landed test was still unnamed here, and is normative from now on like the
+others: U1's model coverage is `model/ops_test.go`
+`TestFailoverDisabledPrimary` — a **healthy** disabled old primary fails
+over with `now` equal to the fixture epoch (no threshold waited), the old
+cntlr keeps `err_epoch == 0` and keeps `disabled`, and `SpRev` bumps once —
+with the two refusals as rows of `TestFailoverPreconditions` ("old cntlr is
+healthy and enabled", "primary_unhealthy not reached"). §1's Tests bullet
+names it below. The two tests this file sited with an "or" landed in the
+first-named file for U2 (`agent/dnagent/migr_test.go`) and in the
+alternative for U5: `gateway/handler_sp_test.go`, not
+`handler_node_test.go`. U4's, sited only by package, landed in
+`agent/cnagent/cnagent_test.go`.
+*The §3 gateway pair is deterministic by fixture, not by luck.* Its
+`volTwoDomainEnv` does two things and both are load-bearing: it relocates
+dn-c into dn-a's failure domain **and** gives it `volDnCFree = volDnFree ×
+2`, so the §6.3 descending capacity walk reaches dn-c *first* and a
+placement on dn-d can only be the location rule's doing, never the index
+order's. With dn-a and dn-b black-listed, tier 1 hands `PickRandom` a
+one-entry list — which is what makes "picks the distinct-location DN" an
+exact assertion rather than a probable one. §3's Tests bullet now says so.
+*U1's integration step is no longer outstanding.* §1's SHOULD landed as
+`integtest/worker_test.sh` stage 11 and dnv-worker.md §14 case D step 11,
+so §7.3's `worker_test.sh` line now covers a new stage and not only a
+regression re-run. One ordering fact is load-bearing and both carriers
+state it: step 10's disabled standby is the SP's only other cntlr, so its
+behavior row is cleared and its `err_epoch` waited back to 0 **while it is
+still disabled** — enabled and still unhealthy, AR7 would replace it before
+this step could elect it.
+*`TestReactionDisabledCntlrIsHandsOff` needed no adjustment* — the
+conditional edit §1's third Tests bullet allowed for. No fixture of it
+disables the *primary*; it pins only the standby rule the new trigger
+leaves alone, and it is unmodified in the diff.
+*U4's suite verdict held.* `integtest/cnagent_test.sh` is untouched, as §4
+predicted; what landed in cnagent_integtest.md is the record of the gap —
+its §19 out-of-scope entry and its §20 amendment, both pointing at
+cnagent.md §6 test 26 — and not the MAY stage.
+*§7.2's greps all pass as written* against this tree, with the file-scope
+fix (c) made: the `"old cntlr is healthy"` literal survives only under
+`opReplaceCntlr` (`model/ops.go`) and its two `TestReplaceCntlrPreconditions`
+pins.
+*§4's "every removed namespace" is a universal its own Code paragraph
+narrows*, and the companion edit inherited the unqualified form. The landed
+loop skips `np.td == nil` — a namespace that never had a backing td has no
+`CnErrorName` to park on and keeps `removeDm`'s resume as its backstop — so
+cnagent.md CN9 now carries that carve-out in the sentence itself. Read §4's
+Decision with its Code paragraph, which always stated the guard.
 
 Conventions for the implementer: run `make build vet test` after each item
 (`go test` needs a real etcd for the STM suites — set
@@ -89,10 +263,11 @@ is itself the AR5 trigger".
   eligible id) with no err_epoch set anywhere; a second sub-case with every
   other cntlr disabled or unhealthy ⇒ `reaction skipped` (`no candidate`)
   and the pass continues to the next reaction (AR2's continue list).
-* `model/ops_test.go`: `Failover` succeeds for a disabled healthy old
-  primary (flips both `primary` booleans, bumps once); still refuses an
-  enabled healthy old (`"old cntlr is healthy and enabled"`); still refuses
-  an enabled unhealthy old below the threshold.
+* `model/ops_test.go` `TestFailoverDisabledPrimary` (named by amendment
+  (f)): `Failover` succeeds for a disabled healthy old primary (flips both
+  `primary` booleans, bumps once); `TestFailoverPreconditions` still refuses
+  an enabled healthy old (`"old cntlr is healthy and enabled"`) and still
+  refuses an enabled unhealthy old below the threshold.
 * Re-read `TestReactionDisabledCntlrIsHandsOff` (:753): it pins that a
   disabled **standby** is not a candidate (`reasonNoCandidate`) — that
   behavior is unchanged and the test must keep passing as written; adjust
@@ -196,25 +371,42 @@ deliberately unchanged.
    op a matching parameter; the CreateStoragePool/GrowSlice `pickDns` call
    sites (`gateway/storagepool.go:363`, `:1111`) and the worker's AR6 grow
    scan leave it empty.
-2. `model` gains the shared two-tier helper:
+2. `model` gains the shared two-tier helper. The trigger is `requiredCnt` —
+   the DNs the caller must place — and **not** `candCnt`, the oversampled
+   scan width; see amendment (a) above for why the drafted `candCnt` trigger
+   was wrong:
    ```go
    // FindDnCandidatesAntiAffine is FindDnCandidates with the two-tier
-   // location rule of §6.5: tier 1 excludes excludeLocs; when it returns
-   // fewer than candCnt, tier 2 rescans without the exclusion. The bool
-   // reports whether tier 2 was used.
-   func FindDnCandidatesAntiAffine(ctx, cli, cid, cc, candExt uint64,
-       candCnt int, black, white, excludeLocs []string,
+   // location rule of §6.5: tier 1 excludes excludeLocs; when it yields
+   // fewer than requiredCnt — the DNs the caller must actually place, not
+   // the oversampled scan width candCnt — tier 2 rescans without the
+   // location exclusion and its candidates are merged behind tier 1's. The
+   // bool reports whether tier 2 was used.
+   func FindDnCandidatesAntiAffine(
+       ctx context.Context, cli *etcdutil.Client, cid uint64,
+       cc *pb.ClusterConf, candExt uint64, candCnt int, requiredCnt int,
+       black, white, excludeLocs []string,
    ) ([]Cand, bool, error)
    ```
+   `requiredCnt` is `plan.Legs` at the gateway's `pickDns` and `1` at the
+   worker's AR8 scan. Tier 2 **merges behind** tier 1 rather than replacing
+   it: tier 2 walks free-count-descending and stops at `candCnt`, and the
+   group's own excluded domains usually hold the fullest DNs, so a plain
+   replace can drop a distinct-domain candidate tier 1 had already found.
 3. Locations of the group: a new `gateway/alloc.go` helper
    `grpDnLocations(ctx, cli, cid, grp) ([]string, error)` — one plain
    (non-STM) `DnConf` read per distinct addr_port from `grpDnAddrs`
    (which already covers active and spare legs alike, `alloc.go:464-494`).
    Plain pre-STM reads are sound because `location`
-   is immutable in v1 (no RPC updates it, §5.5); a DN whose conf is gone
-   contributes no location (it is black-listed by address anyway). The
-   worker's AR8 path reads the same confs through its `etcdutil` client
-   before the scan.
+   is immutable in v1 — no RPC updates it: **§8.2** defaults it at
+   CreateDiskNode and `UpdateDiskNodeDisabled` is the only later DN mutator
+   (the drafted `§5.5` pointer was wrong, amendment (f)); a DN whose conf
+   is gone contributes no location (it is black-listed by address anyway). The
+   worker's AR8 path takes the same locations out of the pass's own
+   snapshot — a `grpLocations(state, grp)` helper in `worker/reaction.go`
+   resolving each `grpAddrs` addr_port through `SpState.DnByAddr` — which is
+   the same data through the same client and still before the scan (see
+   amendment (b) above).
 4. Switch the three call sites to `FindDnCandidatesAntiAffine` with
    `excludeLocs = grpDnLocations(...)`: `gateway/migration.go:248`,
    `gateway/spareleg.go:210` (the `pickDns` calls), and the worker's
@@ -226,16 +418,33 @@ deliberately unchanged.
 
 **Tests.**
 
-* `model/alloc_test.go`: `excludeLocs` drops a same-location candidate in
-  tier 1; `FindDnCandidatesAntiAffine` falls back and returns it (with
-  `tier2 == true`) when no other-location DN qualifies; `nil` excludeLocs
-  is byte-identical to today's behavior.
-* `gateway/handler_vol_test.go` (or the migration/spareleg handler suites):
-  with two spare-capable DNs — one sharing a leg's location, one not —
-  `CreateSpareLeg` picks the distinct-location DN; delete that DN and the
-  same request now places on the shared-location one (tier 2), never
-  `RESOURCE_EXHAUSTED`. Mirror for `CreateMigration`.
-* `worker/reaction_test.go`: the AR8 spare-create scan passes the group's
+* `model/alloc_test.go` `TestFindDnCandidatesExcludeLocs`: `excludeLocs`
+  drops a same-location candidate in tier 1, and `nil`/empty excludeLocs is
+  byte-identical to today's behavior.
+* `model/alloc_test.go` `TestFindDnCandidatesAntiAffine`: the fallback
+  returning the same-location DN with `tier2 == true` when no
+  other-location DN qualifies, and `nil` excludeLocs running the plain scan
+  with no second scan.
+* `model/alloc_test.go` `TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt`:
+  tier 1 short of `candCnt` but holding `requiredCnt` stays tier 1
+  (`tier2 == false`) — an oversampled `candCnt` must never drag the scan
+  into tier 2 — while `requiredCnt + 1` does fire it.
+* `model/alloc_test.go` `TestFindDnCandidatesAntiAffineMergesTier1`: tier 1's
+  distinct-domain find stays at the head of a `candCnt`-truncated tier-2
+  list, which a replacing tier 2 would have dropped.
+* `gateway/handler_vol_test.go`
+  `TestCreateSpareLegPrefersAnotherFailureDomain` and
+  `TestCreateMigrationPrefersAnotherFailureDomain`: with two spare-capable
+  DNs — one sharing a leg's location, one not — `CreateSpareLeg` picks the
+  distinct-location DN; delete that DN and the same request now places on
+  the shared-location one (tier 2), never `RESOURCE_EXHAUSTED`. Both run at
+  the default `dn_batch_size`, which is what the (a) trigger fix makes
+  satisfiable. The shared-location DN also carries **twice** the free
+  extents of any other, so the §6.3 descending walk reaches it first and the
+  distinct-location pick cannot be an artifact of index order (amendment
+  (f)).
+* `worker/reaction_test.go` `TestReactionSpareCreateExcludesGroupLocations`:
+  the AR8 spare-create scan passes the group's
   locations (fixture DNs in two named locations; assert the pick).
 
 **§6 edits with this item** (the doc currently *overpromises* strict
@@ -375,9 +584,14 @@ etcd client, call `DeleteStoragePool`, assert `codes.Aborted` (not
    ReplaceCntlr's own precondition (`model/ops.go` under `opReplaceCntlr`,
    plus its `ops_test.go` pins) — the opFailover carrier and its test pin
    now read `healthy and enabled`;
-   `grep -rn "disk node %q not found" gateway/` hits nothing;
+   `grep -n "disk node %q not found" gateway/alloc.go` hits nothing (scope
+   it to the ledger file — the same literal legitimately survives at the
+   four request-named sites of `gateway/disknode.go`, and
+   `"controller node %q not found"` at `controllernode.go`'s four, all of
+   which GW7 requires to stay `NOT_FOUND`; see amendment (c) above);
    `grep -n "fenceRestarted" agent/dnagent/fence.go` shows the extended
    `fenceStarted`; `grep -rn "and thus locations" doc/` hits nothing.
 3. Suites, on the lab of record: `cnagent_test.sh` (U4), `dnagent_test.sh`
    (unchanged, regression), `gateway_test.sh` (U3/U5), `worker_test.sh`
-   (U1). Each U-item's commit message cites its id.
+   (U1 — its stage 11 is new, amendment (f)). Each U-item's commit message
+   cites its id.

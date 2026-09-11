@@ -62,7 +62,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── issue_03.md                    # resolved issue record (history)
 │   ├── update_04.md                   # applied amendment record (history)
 │   ├── update_05.md                   # applied amendment record (history)
-│   ├── update_06.md                   # decided amendment spec (code pending)
+│   ├── update_06.md                   # applied amendment record (history)
 │   └── risks_and_gaps.md              # ranked v1 risks / operational gaps (informational)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
@@ -351,7 +351,7 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   minor-debt ledger produced by the same verification, entered the tree the
   same day. No package boundary or path changed.
 * Second doc-amendment pass (2026-09-10, after the second full doc-vs-code
-  verification): `update_06.md` (five decided code fixes, pending) and
+  verification): `update_06.md` (five decided code fixes) and
   `risks_and_gaps.md` (ranked v1 risks, informational) entered the §2 tree;
   `update_05.md`'s annotation moved to applied/history; the §2 `worker/`
   tree gained `worker.go` and `conn.go` (matching dnv-worker.md §1's
@@ -363,3 +363,18 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   amendments section is not extended for these (they correct drift, not
   decisions — `update_06.md` and the verification record are the
   provenance). No package boundary or path changed.
+* `update_06.md` implementation pass (2026-09-10, the same day it was
+  decided): all five code fixes landed with their tests — U1
+  (`worker/reaction.go`, `model/ops.go`), U2 (`agent/dnagent/fence.go`),
+  U3 (`model/alloc.go`, `gateway/alloc.go` +
+  `migration.go`/`spareleg.go`/`storagepool.go`, `worker/reaction.go`),
+  U4 (`agent/cnagent/syncup_cntlr.go`) and U5 (`gateway/alloc.go`) — so
+  `update_06.md`'s §2 annotation moved to applied/history the way
+  `update_05.md`'s had. The file carries its own "Amended 2026-09-10 by the
+  implementation pass" note for the corrections implementation forced,
+  chiefly U3's tier-2 trigger (bound in the draft to the oversampled scan
+  width `candCnt` rather than the `requiredCnt` its own Decision prose
+  named) and the two §6 companion edits that had landed carrying it —
+  `architecture.md` §6.5 and `dnv-worker.md` §4 MD5, both re-amended the
+  same day (`update_06.md` amendment (e)). No file entered or left the
+  tree, and no package boundary or path changed.

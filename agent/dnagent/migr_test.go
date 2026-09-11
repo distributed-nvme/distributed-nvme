@@ -1156,7 +1156,8 @@ func TestFenceClearedWhenTheSourceRoleEnds(t *testing.T) {
 // breakSideDev makes the side device unreadable the way one transient
 // `dmsetup info` failure does: Dm.Info collapses a failed probe into "the
 // device is absent", so the converge tries to re-create it, fails, and returns
-// sideDevFailed — the U4 gate, taken by a side that is in fact serving.
+// sideDevFailed — the DN9 side-device gate (update_01.md U4), taken by a side
+// that is in fact serving.
 func breakSideDev(node *fakeNode, sideDevName string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
@@ -1192,7 +1193,7 @@ func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 	}
 
 	// The side device goes unreadable before the timer fires, so the converge
-	// that ends the window takes the U4 gate.
+	// that ends the window takes the DN9 gate.
 	breakSideDev(node, sideDevName)
 
 	if !waitFor(t, 5*time.Second, func() bool {
@@ -1202,6 +1203,15 @@ func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 	}) {
 		t.Fatal("the grace window ended with the per-CN dm-linears still " +
 			"suspended and nothing left to re-arm")
+	}
+	// Same proof as in TestFenceAdoptedSettlesAtTheGate, counted rather than
+	// looked up: syncupBoth's create is already on the record, so a second one
+	// is what says the converge that ended the window found the side device
+	// unreadable instead of simply converging past it.
+	if n := len(node.callsMatching(
+		"cmd dmsetup create " + sideDevName)); n < 2 {
+		t.Errorf("the converge that ended the window never took the DN9 "+
+			"gate: %d side-device creates, want 2", n)
 	}
 	node.mu.Lock()
 	table := node.dms[linName].table
@@ -1214,7 +1224,7 @@ func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 
 // The same for the other half of the bookkeeping: when the source role ends,
 // the linears go back into service from teardownForbidden itself, rather than
-// from an ensureCnDm the U4 gate may never let run.
+// from an ensureCnDm the DN9 gate may never let run.
 func TestFenceClearedOnARoleEndWithABrokenSideDevice(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1366,5 +1376,87 @@ func TestFenceWindowSurvivesAnUnrelatedAgentRestart(t *testing.T) {
 	if !strings.Contains(table, sideNo) {
 		t.Errorf("phase 1 moved the primary's table off the side device: %q",
 			table)
+	}
+}
+
+// The conjunction the two restart tests above leave open: an agent restart
+// inside the window *and* a first converge that cannot get past the side
+// device. DN12 rule 1 makes the adopted fence elapsed, rule 4 makes the DN9
+// gate skip everything above the side device but never the fence — so the
+// gate backstop has to finish phase 2 for a window this process never started
+// (update_06.md U2).
+func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	stbName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn1)
+	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+	stbErrNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn1))]
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	for _, name := range []string{linName, stbName} {
+		if !node.dms[name].suspended {
+			t.Fatalf("the cutover did not suspend %s", name)
+		}
+	}
+
+	// The kernel state survives the restart; the side device goes unreadable
+	// before the restarted agent converges, so its first pass takes the gate.
+	breakSideDev(node, sideDevName)
+	node.Reset()
+	restarted := NewDnAgentServer(node.osClient(),
+		common.NewNameFmt(common.DefaultLocalStorPrefix),
+		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+	restarted.fenceWait = time.Hour
+	if err := restarted.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// Every mutation asserted below is also produced by the gate-OPEN path
+	// through ensureCnDm, so the pass has to be proved gated or this test
+	// silently degenerates into TestFenceNotRestartedAcrossAnAgentRestart.
+	// A `dmsetup create` of the side device is attempted only when Dm.Info
+	// collapsed breakSideDev's injected probe failure into "absent", and it
+	// can only fail — the device is in fact there — so the converge returned
+	// sideDevFailed and took the DN9 gate.
+	if !node.hasCall("cmd dmsetup create " + sideDevName) {
+		t.Fatalf("the converge never took the DN9 gate, so it proves nothing "+
+			"about the adopted fence:\n%s", strings.Join(node.Calls(), "\n"))
+	}
+
+	// The same mutation set the elapsed-window case produces: the primary's
+	// linear reloaded onto its dm-error, every per-CN linear resumed.
+	if !node.hasCall("cmd dmsetup reload " + linName) {
+		t.Fatalf("the gated pass left the adopted fence in phase 1:\n%s",
+			strings.Join(node.Calls(), "\n"))
+	}
+	for _, want := range []struct {
+		name  string
+		devNo string
+	}{{linName, errNo}, {stbName, stbErrNo}} {
+		if node.dms[want.name].suspended {
+			t.Errorf("%s outlived the adopted window suspended", want.name)
+		}
+		if !strings.Contains(node.dms[want.name].table, want.devNo) {
+			t.Errorf("%s was resumed without being fenced onto its dm-error: %q",
+				want.name, node.dms[want.name].table)
+		}
+	}
+	// An adopted window is elapsed, never running, so there is nothing to wait
+	// for: a timer here would take its deadline from a zero fenceAt.
+	st := restarted.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	if restarted.inFence(st) {
+		t.Error("the adopted fence reported a running window")
+	}
+	if st.fenceTimer != nil {
+		t.Error("the gated pass armed a timer for an adopted fence")
 	}
 }

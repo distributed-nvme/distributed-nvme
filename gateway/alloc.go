@@ -11,7 +11,7 @@ import (
 )
 
 // This file is the §6.5 half of the gateway: the per-operation candidate
-// compositions that run OUTSIDE every STM (model.FindDnCandidates /
+// compositions that run OUTSIDE every STM (model.FindDnCandidatesAntiAffine /
 // FindCnCandidates + PickRandom), the in-STM re-validation of a pick that
 // makes a scan outside a transaction safe (GW9), and the DN/CN bookkeeping
 // ledgers that keep "one write and one revision bump per node per STM" (§5.5)
@@ -36,10 +36,13 @@ func isMdRaid1(bdev *pb.BdevConf) bool {
 }
 
 // dnPickPlan is one group's DN allocation request: how many extents each leg
-// needs and how many legs the group has.
+// needs, how many legs the group has, and the failure domains tier 1 of the
+// §6.5 scan keeps out. ExcludeLocs is empty for the operations §6.5 leaves on
+// the plain scan (CreateStoragePool, GrowSlice).
 type dnPickPlan struct {
-	ExtCnt uint64
-	Legs   int
+	ExtCnt      uint64
+	Legs        int
+	ExcludeLocs []string
 }
 
 // pickDns draws Legs distinct DNs for one group (§6.5): scan
@@ -49,8 +52,12 @@ type dnPickPlan struct {
 // black is the growing exclusion list — the request's NodeSelector black list
 // plus every DN already picked in this operation — which is what puts every
 // leg of one group (and, for CreateStoragePool, every leg of the whole SP) on
-// a distinct DN. Too few candidates is RESOURCE_EXHAUSTED, never a partial
-// allocation.
+// a distinct DN. plan.ExcludeLocs is the two-tier half of the same rule: tier
+// 1 keeps the candidates out of the group's existing failure domains and tier
+// 2 rescans without that exclusion when tier 1 yields fewer than plan.Legs —
+// the DNs this group must actually place, never the oversampled scan width —
+// so a cluster with too few domains still places rather than refusing. Too few
+// candidates is RESOURCE_EXHAUSTED, never a partial allocation.
 func pickDns(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -62,12 +69,16 @@ func pickDns(
 	what string,
 ) ([]model.Cand, error) {
 	batch := int(model.ResolveAllocConf(cc.GetAllocConf()).GetDnBatchSize())
-	cands, err := model.FindDnCandidates(
+	// The tier bool is deliberately dropped: a tier-2 placement is visible in
+	// the stored topology, and §8's LG table gains no record for it.
+	cands, _, err := model.FindDnCandidatesAntiAffine(
 		ctx, cli, cid, cc,
 		plan.ExtCnt,
 		plan.Legs*batch,
+		plan.Legs,
 		append(append([]string(nil), selector.GetBlackList()...), black...),
 		selector.GetWhiteList(),
+		plan.ExcludeLocs,
 	)
 	if err != nil {
 		return nil, errAborted("%v", err)
@@ -158,7 +169,7 @@ func newDnLedger(s etcdutil.STM, cid uint64, cc *pb.ClusterConf) *dnLedger {
 
 // tryGet reads one DN, caching both the record as stored and the copy being
 // mutated, and reports whether it exists. Callers that address a DN through a
-// stored Side use get, which turns absence into NOT_FOUND; verifyPick uses
+// stored Side use get, which turns absence into ABORTED; verifyPick uses
 // this form, because for a PICK absence is not an error at all — it is a
 // candidate that moved (GW9).
 func (l *dnLedger) tryGet(addrPort string) (*pb.DnConf, bool) {
@@ -181,7 +192,9 @@ func (l *dnLedger) tryGet(addrPort string) (*pb.DnConf, bool) {
 func (l *dnLedger) get(addrPort string) (*pb.DnConf, error) {
 	dn, found := l.tryGet(addrPort)
 	if !found {
-		return nil, errNotFound("disk node %q not found", addrPort)
+		// GW7: NOT_FOUND is for an object the REQUEST named; a DN named only
+		// by a stored Side is a lost invariant key — §5.9's ABORTED.
+		return nil, errAborted("dn_conf for %q is missing", addrPort)
 	}
 	return dn, nil
 }
@@ -316,10 +329,13 @@ func (l *cnLedger) tryGet(addrPort string) (*pb.CnConf, bool) {
 	return l.cur[addrPort], true
 }
 
+// get is dnLedger.get's CN twin, with the same GW7 reading of an absence.
 func (l *cnLedger) get(addrPort string) (*pb.CnConf, error) {
 	cn, found := l.tryGet(addrPort)
 	if !found {
-		return nil, errNotFound("controller node %q not found", addrPort)
+		// GW7: a CN named only by a stored Cntlr is not an object the request
+		// named, so its absence is a lost invariant key — §5.9's ABORTED.
+		return nil, errAborted("cn_conf for %q is missing", addrPort)
 	}
 	return cn, nil
 }
@@ -491,6 +507,45 @@ func grpDnAddrs(grp *pb.Group) []string {
 		}
 	}
 	return addrs
+}
+
+// grpDnLocations is the failure domain of every DN grpDnAddrs names: the tier-1
+// exclusion of CreateMigration and CreateSpareLeg (§6.5), which is about
+// LOCATIONS and not merely about the DNs the black list already holds.
+//
+// One plain DnConf read per DISTINCT addr_port, outside every STM like the
+// capacity scan it feeds. Reading them before the transaction is sound because
+// `location` is immutable in v1 — CreateDiskNode defaults it to addr_port and
+// UpdateDiskNodeDisabled is the only later DN mutator (§8.2) — so a location
+// read here cannot have gone stale by the time the op re-validates the pick,
+// which is also why that re-validation stays address-based. A DN whose conf is
+// gone contributes no location: it is black-listed by address anyway, and
+// inventing one would exclude a domain nothing occupies.
+func grpDnLocations(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	grp *pb.Group,
+) ([]string, error) {
+	addrs := grpDnAddrs(grp)
+	locs := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addrPort := range addrs {
+		if _, ok := seen[addrPort]; ok {
+			continue
+		}
+		seen[addrPort] = struct{}{}
+		dn := &pb.DnConf{}
+		found, err := cli.Get(ctx, model.DnConfKey(cid, addrPort), dn)
+		if err != nil {
+			return nil, errAborted("%v", err)
+		}
+		if !found {
+			continue
+		}
+		locs = append(locs, dn.GetLocation())
+	}
+	return locs, nil
 }
 
 // sliceLocation is where a slice walk found something: the slice, its id and

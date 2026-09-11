@@ -356,13 +356,16 @@ func (s *Server) CreateStoragePool(
 		// §6.5 DN scan, in decision D-D's group order. The black list starts
 		// as the request's own (pickDns folds dn_selector.black_list in) and
 		// grows with every pick, so every leg of the WHOLE SP lands on a
-		// distinct DN — not merely every leg of one group.
+		// distinct DN — not merely every leg of one group. ExcludeLocs stays
+		// empty: §6.5 leaves CreateStoragePool out of the two-tier rule, an SP
+		// being created has no failure domains to keep out of yet, and the
+		// scan's own one-DN-per-location rule already spreads each group.
 		dnPicks := make([][]model.Cand, 0, len(plans))
 		var dnBlack []string
 		for _, plan := range plans {
 			picks, err := pickDns(
 				ctx, s.cli, scanCid, scanCc,
-				dnPickPlan{ExtCnt: plan.ExtCnt, Legs: legs},
+				dnPickPlan{ExtCnt: plan.ExtCnt, Legs: legs, ExcludeLocs: nil},
 				req.GetDnSelector(), dnBlack, "create storage pool")
 			if err != nil {
 				return err
@@ -1107,12 +1110,16 @@ func (s *Server) GrowSlice(
 		// the random pick draws the group's legs as distinct entries from it,
 		// so the new group spreads over distinct DNs while another group's
 		// DNs stay allowed. (worker/reaction.go runGrow reaches the same
-		// spread its own way, via pickDistinct.)
+		// spread its own way, via pickDistinct.) ExcludeLocs stays empty for
+		// the same reason: §6.5 leaves GrowSlice out of the two-tier rule — a
+		// grow spreads the NEW group, it does not avoid the slice's existing
+		// failure domains.
 		picks, err := pickDns(
 			ctx, s.cli, cid, cc,
 			dnPickPlan{
-				ExtCnt: extCnt,
-				Legs:   legCntOf(spBdevConf(conf)),
+				ExtCnt:      extCnt,
+				Legs:        legCntOf(spBdevConf(conf)),
+				ExcludeLocs: nil,
 			},
 			req.GetDnSelector(), nil, "grow slice")
 		if err != nil {

@@ -123,13 +123,19 @@ const thinMetaBlockSize = uint64(4096)
 // modelReactionOps, which does nothing but call model.
 type reactionOps interface {
 	// findDnCandidates is MD5 for a side allocation (AR6 step, AR8 step 3).
+	// excludeLocs is §6.5's tier-1 exclusion: the failure domains AR8 keeps
+	// the spare out of, empty for the AR6 grow. requiredCnt is how many DNs
+	// the caller must actually place — the §6.5 tier-2 trigger, and never the
+	// oversampled candCnt.
 	findDnCandidates(
 		ctx context.Context,
 		cid uint64,
 		cc *pb.ClusterConf,
 		candExt uint64,
 		candCnt int,
+		requiredCnt int,
 		black []string,
+		excludeLocs []string,
 	) ([]model.Cand, error)
 	// findCnCandidates is MD5 for a cntlr allocation (AR7).
 	findCnCandidates(
@@ -215,11 +221,18 @@ func (o *modelReactionOps) findDnCandidates(
 	cc *pb.ClusterConf,
 	candExt uint64,
 	candCnt int,
+	requiredCnt int,
 	black []string,
+	excludeLocs []string,
 ) ([]model.Cand, error) {
-	return model.FindDnCandidates(
-		ctx, o.cli, cid, cc, candExt, candCnt, black, nil,
+	// The tier bool is dropped: a tier-2 placement is visible in the stored
+	// topology and §12's LG table gains no record for it. An empty excludeLocs
+	// — the AR6 grow — makes this the plain scan.
+	cands, _, err := model.FindDnCandidatesAntiAffine(
+		ctx, o.cli, cid, cc, candExt, candCnt, requiredCnt,
+		black, nil, excludeLocs,
 	)
+	return cands, err
 }
 
 func (o *modelReactionOps) findCnCandidates(
@@ -512,7 +525,15 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	if p.primary == nil {
 		return false
 	}
-	if !reached(p.now, p.primary.GetErrEpoch(), p.th.GetPrimaryUnhealthy()) {
+	// AR5 has two triggers. A `disabled` primary is one in its own right
+	// (architecture.md §8.6: "disabling the current primary triggers the
+	// §10.4 primary re-election") and fires immediately — disabling is
+	// explicit operator intent and the disabled primary has already stopped
+	// serving — so no threshold is waited out. Only an enabled primary has
+	// to have been unhealthy for primary_unhealthy. The candidate rule is
+	// unchanged (failoverEligible): a disabled cntlr is never elected.
+	if !p.primary.GetDisabled() &&
+		!reached(p.now, p.primary.GetErrEpoch(), p.th.GetPrimaryUnhealthy()) {
 		return false
 	}
 	if p.failoverCand == 0 {
@@ -742,9 +763,10 @@ func (w *spWorker) runGrow(
 	// AR6: the black list starts empty — a new group may perfectly well land
 	// on a DN that already carries another group of this SP — and grows as
 	// the picks are drawn, so the legs of the ONE new group land on distinct
-	// DNs.
+	// DNs. The location exclusion is empty for the same reason (§6.5 leaves
+	// the grow on the plain scan).
 	cands, err := w.reactor().ops.findDnCandidates(
-		ctx, w.cid, p.cc, extCnt, legs*batch, nil,
+		ctx, w.cid, p.cc, extCnt, legs*batch, legs, nil, nil,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, kind, err, sliceAttr)
@@ -1150,8 +1172,11 @@ func (w *spWorker) switchSpare(
 }
 
 // createSpare runs AR8 step 3: a spare on a FRESH DN, black-listing the DNs of
-// every leg and every spare of the group so the replacement never shares the
-// failure domain it exists to replace.
+// every leg and every spare of the group and, as §6.5's tier 1, excluding
+// their LOCATIONS too, so the replacement does not share the failure domain it
+// exists to replace. Tier 2 — model's rescan without the location exclusion
+// when tier 1 yields fewer than the ONE DN this step places — is what still
+// repairs a group in a cluster with no second domain to offer.
 func (w *spWorker) createSpare(
 	ctx context.Context,
 	p *spPass,
@@ -1162,8 +1187,8 @@ func (w *spWorker) createSpare(
 		model.ResolveAllocConf(p.cc.GetAllocConf()).GetDnBatchSize(),
 	)
 	cands, err := w.reactor().ops.findDnCandidates(
-		ctx, w.cid, p.cc, target.grp.GetExtCnt(), batch,
-		grpAddrs(target.grp),
+		ctx, w.cid, p.cc, target.grp.GetExtCnt(), batch, 1,
+		grpAddrs(target.grp), grpLocations(p.state, target.grp),
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionSpareCreate, err, ids...)
@@ -1189,6 +1214,26 @@ func (w *spWorker) createSpare(
 		)...,
 	)
 	return true
+}
+
+// grpLocations is AR8's tier-1 exclusion (§6.5): the failure domain of every
+// DN grpAddrs names, resolved through the pass's OWN snapshot of the node
+// records — MD3 reads one DnConf per side addr_port of the SP, spare legs
+// included, in the same transaction as the slices — so the locations come out
+// of the state the pass already decided on and cost no further read. A DN
+// missing from that snapshot contributes no location; it is black-listed by
+// address anyway.
+//
+// With the default `location = addr_port` this excludes exactly the
+// black-listed DNs' own domains, so AR8 behaves as it always has.
+func grpLocations(state *model.SpState, grp *pb.Group) []string {
+	var locs []string
+	for _, addrPort := range grpAddrs(grp) {
+		if dn, ok := state.DnByAddr[addrPort]; ok {
+			locs = append(locs, dn.GetLocation())
+		}
+	}
+	return locs
 }
 
 // grpAddrs is AR8's black list: the DN of every side of every leg and every

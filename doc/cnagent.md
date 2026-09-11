@@ -535,8 +535,10 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
      * **Retire phase, top-down** — for every resource that the new desired
        state (level-adjusted, CN19) no longer wants: first rewrite the
        `ana_grpid` of every namespace leaving service to
-       `AnaGrpIdInaccessible`, then reload the affected `CnNsDevName`s onto
-       their `CnErrorName`s (`Dm.Reload`'s internal suspend flushes the
+       `AnaGrpIdInaccessible`, then reload the affected `CnNsDevName`s — the
+       survivors that must stop serving *and every removed namespace's*
+       (one that never had a backing td has no `CnErrorName` to park on, and
+       keeps `removeDm`'s resume as its backstop) — onto their `CnErrorName`s (`Dm.Reload`'s internal suspend flushes the
        in-flight IO — this **is** §11.1 old_primary steps 1-3, in the listed
        order), then remove nvmet objects that must go entirely, then dm
        devices top-down with `mdadm --stop`, and the **leg** disconnects
@@ -1731,6 +1733,21 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
       revision whose `td_list` holds A and B then runs exactly one
       `thin_dump`, exactly one `delete S`, and **no** `delete` for B — the
       id the stale persisted copy had forgotten.
+26. **A removed namespace is parked before its nvmet objects** (CN9/CN21,
+    `update_06.md` U4,
+    `TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval`): a primary
+    serving one `suspended = true` namespace, then a converge that drops it
+    from `ns_list`. The ns-dev's reload onto the td's `CnErrorName` and the
+    resume inside it are recorded **before** that nsid's `enable = 0` and
+    `rmdir`, which are recorded before the ns-dev's own `dmsetup remove`; and
+    exactly **one** park of that ns-dev, since an ordering assertion stops at
+    its first match and cannot see a second one. The count is over
+    `parkNsDev`'s own `dmsetup table` probe, which every call makes before it
+    decides anything — counting *reloads* would prove nothing, because
+    `parkNsDev` is idempotent (already linear over the `CnErrorName` and
+    resumed returns before the reload) and so a repeat park emits no `dmsetup`
+    command at all. A second sub-case drops the whole subsystem and asserts
+    the same park-first order around `RemoveSubsystem`.
 
 ## 7. Acceptance checklist
 

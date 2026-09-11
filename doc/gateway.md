@@ -365,9 +365,9 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   closure-captured variables that the closure itself (re)assigns.
 * **GW9 — candidate unit retry.** Allocating RPCs (`CreateStoragePool`,
   `GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateSpareLeg`) loop:
-  scan candidates outside (`model.FindDnCandidates` / `FindCnCandidates` +
-  `PickRandom`), run the STM which re-reads each pick's exact capacity key
-  (`Cand.BinIdx/FreeExt/AddrPort`) and fails
+  scan candidates outside (`model.FindDnCandidatesAntiAffine` /
+  `FindCnCandidates` + `PickRandom`), run the STM which re-reads each pick's
+  exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
   `ErrPrecondition{"candidate changed"}` when one is gone; on that error —
   and only that error — re-scan and retry until `ctx` ends (then `ABORTED`).
 * **GW10 — pagination** (§5.7). `page_token` =
@@ -672,11 +672,16 @@ own — no CdcEntry involvement). Replies `xfer_id`.
 * **CreateMigration** — locate `src_side_id` by slice scan (`NOT_FOUND`); its
   leg already has 2 sides ⇒ `FAILED_PRECONDITION`; candidate unit for one DN
   (`CandExtCnt` = the group's `ext_cnt`; black list seeded with the DNs of
-  every leg/side of the group). STM: resolve; token; re-verify topology +
-  capacity key; mint `migr_id` and `dst_side_id`; append the new `Side` to
-  the leg per §8.11 (`provisioned: false`, `cntlid_slot` ≠ the src side's);
-  dst-DN bookkeeping + `BumpDnRev`; put `Migration`; `BumpSpRev`. Reply
-  `migr_id`.
+  every leg/side of the group, and §6.5's two tiers applied — tier 1 also
+  excludes those DNs' `location`s, read once before the unit through
+  `grpDnLocations` because a location never changes (§8.2); tier 2 rescans
+  without the location exclusion when tier 1 yields fewer than the **one DN**
+  this RPC places — never when it merely falls short of the oversampled
+  `DnCandCnt` — and its candidates are merged behind tier 1's). STM: resolve;
+  token; re-verify topology + capacity key; mint `migr_id` and `dst_side_id`;
+  append the new `Side` to the leg per §8.11 (`provisioned: false`,
+  `cntlid_slot` ≠ the src side's); dst-DN bookkeeping + `BumpDnRev`; put
+  `Migration`; `BumpSpRev`. Reply `migr_id`.
 * **FinishMigration** — two-phase like DeleteClone: `force == false` resolves
   the **destination** side's DN in phase 1, calls `GetSideInfo` between
   phases, judges hydration from `migr_dst_info.dm_clone_info`; incomplete or
@@ -703,9 +708,12 @@ own STM); DeleteSpareLeg has no snapshot — its locate runs directly inside
 its one deciding STM below.
 
 * **CreateSpareLeg** — group is RedundNone ⇒ `INVALID_ARGUMENT`; candidate
-  unit for one DN (black list = the group's leg/side DNs); call the amended
-  `model.CreateSpareLeg(…, expectRev = token)`. Reply `leg_id`. (The spare's
-  side is written `provisioned: false`.)
+  unit for one DN (black list = the group's leg/side DNs, under the same
+  §6.5 two-tier rule as CreateMigration: tier 1 excludes their `location`s
+  too, and tier 2 drops that exclusion — when tier 1 offers nothing for the
+  one DN this RPC places — rather than leave the group unrepaired);
+  call the amended `model.CreateSpareLeg(…, expectRev = token)`. Reply
+  `leg_id`. (The spare's side is written `provisioned: false`.)
 * **DeleteSpareLeg** — STM: resolve; token; group + spare leg by id
   (`NOT_FOUND`); remove it from `spare_leg_list`, release its DN
   (+`BumpDnRev`); `BumpSpRev`. Reply `leg_id`.
@@ -849,7 +857,13 @@ The other 49 RPCs never leave etcd.
    collision-guard branch; `DeleteCluster` bucket-sum gate; pagination
    round-trip incl. bad token; `Update*` idempotent no-write (§0 #17);
    `FindStoragePoolNames` unknown-id omission; per-SP id and `dev_id`
-   sequences; `DeleteStoragePool` full-teardown accounting.
+   sequences; `DeleteStoragePool` full-teardown accounting; §6.5's two-tier
+   placement — a spare leg and a migration destination each land on the DN
+   in the other failure domain, and still land (never `RESOURCE_EXHAUSTED`)
+   once that DN is gone and the group's own domain is all that is left; a
+   release path whose `dn_conf`/`cn_conf` invariant key is missing ⇒
+   `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
+   nothing torn down.
 4. **Agent-path tests**: an in-process fake implementing the generated
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`

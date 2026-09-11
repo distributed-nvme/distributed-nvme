@@ -944,10 +944,11 @@ func failoverCandidate(
 }
 
 // Failover moves the primary role from oldId to newId (MD6, AR5, §10.4): the
-// old primary has been unhealthy for primary_unhealthy seconds and the new one
-// is the healthy, enabled, non-primary cntlr with the smallest cntlr_id. Both
-// primary booleans flip in one STM and SpRev is bumped once; the data-plane
-// choreography is §11.1's and belongs to the agents.
+// old primary has been unhealthy for primary_unhealthy seconds — or is
+// `disabled`, which triggers on its own and immediately (§8.6) — and the new
+// one is the healthy, enabled, non-primary cntlr with the smallest cntlr_id.
+// Both primary booleans flip in one STM and SpRev is bumped once; the
+// data-plane choreography is §11.1's and belongs to the agents.
 //
 // Every precondition is re-validated here, election included: two owners
 // overlapping on one SP (§0 item 4) cannot both apply it, because the second
@@ -980,14 +981,19 @@ func Failover(
 		if !old.GetPrimary() {
 			return fail(opFailover, "old cntlr is not primary")
 		}
-		if old.GetErrEpoch() == 0 {
-			return fail(opFailover, "old cntlr is healthy")
-		}
-		if !thresholdReached(
-			now, old.GetErrEpoch(),
-			uint64(threshold.GetPrimaryUnhealthy()),
-		) {
-			return fail(opFailover, "primary_unhealthy not reached")
+		// The in-STM re-validation mirrors AR5's two triggers: a `disabled`
+		// primary is a trigger in its own right (§8.6), with no threshold
+		// wait, so only an enabled one is held to primary_unhealthy.
+		if !old.GetDisabled() {
+			if old.GetErrEpoch() == 0 {
+				return fail(opFailover, "old cntlr is healthy and enabled")
+			}
+			if !thresholdReached(
+				now, old.GetErrEpoch(),
+				uint64(threshold.GetPrimaryUnhealthy()),
+			) {
+				return fail(opFailover, "primary_unhealthy not reached")
+			}
 		}
 		newKey := CntlrKey(cid, spId, newId)
 		fresh := &pb.Cntlr{}
@@ -1622,9 +1628,15 @@ func appendTrConf(
 // The group is addressed by grp_id across BOTH the meta and the data list of
 // the slice, and it must be a RedundMdRaid1 group — a RedundNone group has no
 // redundancy to repair (AR8). The DN must not already carry a leg or a spare
-// of this group, or the spare would share the failure domain it is meant to
-// replace. No §3.6 geometry is computed: the spare joins an existing Group and
-// inherits its ext_cnt, meta_blocks and data_blocks unchanged.
+// of this group: that in-STM check is ADDRESS-based on purpose (grpHostsAddr
+// below), and it is not the failure-domain rule. A domain is excluded before
+// this op is ever called, by §6.5's tier 1 in the caller's pre-STM scan —
+// which tier 2 relaxes when the cluster has no second domain to offer, so a
+// legitimate spare can land in an occupied domain and this check must still
+// accept it. Re-checking the location here would buy nothing anyway: location
+// is immutable in v1 (architecture.md §8.2), so what the scan read cannot have
+// gone stale. No §3.6 geometry is computed: the spare joins an existing Group
+// and inherits its ext_cnt, meta_blocks and data_blocks unchanged.
 func CreateSpareLeg(
 	ctx context.Context,
 	cli *etcdutil.Client,

@@ -228,7 +228,13 @@ in both of theirs (`grpc.md` §6 and `log.md` R5/R12).
   The gateway.md §5.4 half of this item — its "§6.5 black-list seed"
   pre-read — is **struck (2026-09-09)**: update_05.md U4 replaced that
   clause with the request's own black list seeding the §6.5 scan
-  empty-plus-request-entries. The architecture.md §6.5 half stays open.
+  empty-plus-request-entries. The architecture.md §6.5 half is **struck
+  (2026-09-10)**: the GrowSlice bullet now says its black list "is seeded
+  with the request's own `NodeSelector.black_list` and nothing else, and the
+  gateway never appends to it", and attributes the legs' distinct DNs to the
+  §6.3 `LocList` rule rather than to a seed (`gateway/storagepool.go`'s
+  GrowSlice carries the same D-F comment) — outside this ledger line the
+  quoted sentence survives nowhere in `doc/`.
 * **DR15** — §5.8's "put the chunk at `bm_idx = slice_idx`" reads as
   replace; §8.9 and the code **append** (`gateway/clone.go:526-545`).
 * **DR16** — §10.6's row "CN size | fakeagent default (0)": the fakeagent

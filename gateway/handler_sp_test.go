@@ -1449,6 +1449,91 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 	sptWantCode(t, err, codes.NotFound)
 }
 
+// TestReleasePathsAbortOnALostConfKey pins update_06.md U5 on the widest
+// release path there is. A dn_conf or cn_conf the ledgers reach through a
+// stored Side or Cntlr is named by no request, so GW7 makes its absence a lost
+// invariant key — §5.9's ABORTED — and never the NOT_FOUND of an object the
+// caller asked for. The store is untouched either way: both ledgers read
+// before §8.4 stages its first Del and an error out of the closure commits
+// nothing (GW6), so the SP whose teardown aborted is still whole.
+func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// key hands back both the invariant key to lose and the addr_port it
+		// belongs to: only the closure knows that addr, and §5's error text
+		// quotes it, so want is the format and the whole rendered sentence is
+		// what gets pinned (update_06.md:19 — the quoted strings are
+		// normative, not just their heads).
+		key  func(env *sptEnv, conf *pb.SpConf) (string, string)
+		want string
+	}{
+		{"a side's dn_conf", func(
+			env *sptEnv, conf *pb.SpConf,
+		) (string, string) {
+			addr := env.walkSides(conf)[0].AddrPort
+			return model.DnConfKey(env.cid, addr), addr
+		}, "dn_conf for %q is missing"},
+		{"a cntlr's cn_conf", func(
+			env *sptEnv, conf *pb.SpConf,
+		) (string, string) {
+			cntlr := env.cntlr(conf.GetSpId(), conf.GetCntlrIdList()[0])
+			return model.CnConfKey(env.cid, cntlr.GetAddrPort()),
+				cntlr.GetAddrPort()
+		}, "cn_conf for %q is missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+			spId := env.createSp(sptDefaultSpec(sptSpName))
+			conf := env.spConf(sptSpName)
+			lostKey, addr := tc.key(env, conf)
+			// Only a corrupted store is ever in this state, so the key goes
+			// out through the raw client: no RPC deletes a node an SP uses.
+			if err := env.cli.Delete(env.ctx, lostKey); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			before := env.dump()
+			_, err := env.srv.DeleteStoragePool(
+				env.ctx, &pb.DeleteStoragePoolRequest{
+					ClusterName: env.name,
+					SpName:      sptSpName,
+					SpRev:       &pb.SpRev{Revision: 1},
+				})
+			sptWantCode(t, err, codes.Aborted)
+			// The ledger's ABORTED, not GW6's token refusal — the other way
+			// this RPC produces the same code. Pinned whole, the way
+			// sptWantStale pins msgStaleRevision.
+			want := fmt.Sprintf(tc.want, addr)
+			if msg := status.Convert(err).Message(); msg != want {
+				t.Errorf("want %q, got %q", want, msg)
+			}
+			after := env.dump()
+			if len(before) != len(after) {
+				t.Fatalf("the aborted teardown changed the key set: %d -> %d",
+					len(before), len(after))
+			}
+			for key, value := range before {
+				if !bytes.Equal(value, after[key]) {
+					t.Errorf("the aborted teardown rewrote %q", key)
+				}
+			}
+			// Read back through their own types what a partial teardown
+			// would have taken: §8.4 deletes the cntlrs, the slices and the
+			// SP's three keys after both ledgers have read, and the token is
+			// unconsumed because nothing committed (§5.5).
+			env.spConf(sptSpName)
+			for _, cntlrId := range conf.GetCntlrIdList() {
+				env.cntlr(spId, cntlrId)
+			}
+			for _, sliceId := range conf.GetSliceIdList() {
+				env.slice(spId, sliceId)
+			}
+			if got := env.spRev(conf.GetShardCode(), spId); got != 1 {
+				t.Errorf("sp_rev: got %d, want 1", got)
+			}
+		})
+	}
+}
+
 // TestDeletingStoragePoolRefusesOtherMutators pins resolveSp's rejectDeleting
 // gate (§8 preamble): an SP whose teardown has begun accepts no further
 // changes, and DeleteStoragePool is the ONE mutator that must still proceed —

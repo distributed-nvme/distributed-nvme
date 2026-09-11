@@ -1069,8 +1069,12 @@ values other than `READWRITE`/`READONLY`/`NO_CLONE`-as-gate; `slice_cnt >
 1` (real striping — the concat/span math is unit-tested per `cnagent.md`
 §6.14, and one slice keeps every bitmap assertion exactly computable);
 multiple namespaces per subsystem; snapshots of snapshots;
-`UpdateNamespaceDev` repoints; cntlid-slot exhaustion; dnv-cdc/host
-auto-discovery; TLS/auth; performance/soak; fault injection; **CN-side
+`UpdateNamespaceDev` repoints; **namespace or subsystem deletion short of a
+full cntlr teardown** (no case drops an entry from `ns_list` or
+`nqn_to_subsystem`, so the park-before-nvmet-removal order of CN9 —
+`update_06.md` U4 — is unit-tested instead, `cnagent.md` §6 test 26);
+cntlid-slot exhaustion; dnv-cdc/host auto-discovery; TLS/auth;
+performance/soak; fault injection; **CN-side
 provisioning deferral** (a group whose `leg_list` holds an unprovisioned leg
 is skipped and reports `RES_STATUS_PROVISIONING`, together with the CN16 ANA
 conjunct that keeps its namespace `inaccessible`) — every side here is fully
@@ -1152,6 +1156,19 @@ another document or the harness cites can shift.
   (`STATUSTYPE_INFO`) recomputes the live flags; the converge never reloads
   a dm-clone on feature drift either. `dnagent_integtest.md` §12 step 11 and
   its §20 U1-T4 entry carry the twin assertion for the dn migration clone.
+- **`update_06.md` U4** — a namespace removed from `ns_list` (a whole removed
+  subsystem's included) is now parked on its td's `CnErrorName` before the
+  nvmet removal, as CN9 always said. **The suite is unchanged**: no case
+  drops a host-facing namespace or subsystem short of a full cntlr teardown —
+  the xfer/clone stages only flip `suspended` and *add* a snapshot ss — so U4
+  changes no event any stage asserts. Both `mutations()` consumers stay green.
+  The case B rebuild stage, the suite's one verb-set assertion over that
+  helper, deletes nothing. The case D restart stage (§14 step 5) is the
+  stricter one — it demands the post-restart mutation set be **empty**, so a
+  stray park would fail it — and it is safe for a stronger reason than "no
+  removal is asserted": its re-applies resend the *same* request, so
+  `removedNamespaces(old, plan)` is empty and the new loop emits nothing at
+  all. §19 records the gap, and `cnagent.md` §6 test 26 is the coverage.
 
 ## Appendix A — lab gotchas baked into this plan
 

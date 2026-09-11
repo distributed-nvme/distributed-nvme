@@ -1442,8 +1442,12 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     elapsed they are reloaded onto their dm-errors and resumed. A timer ends
     the window unattended; cancelling the role, tearing the side down, and
     restarting the agent all end it without leaving anything suspended, and a
-    teardown inside the window resumes before it disables any namespace. The
-    production default is pinned at `common.SuspendSeconds` = 60.
+    teardown inside the window resumes before it disables any namespace. A
+    fence **adopted** across a restart settles even when the converge that
+    adopts it stops at the DN9 gate: every per-CN linear is reloaded onto its
+    dm-error and resumed, and no timer is armed for a window that is already
+    elapsed (`update_06.md` U2). The production default is pinned at
+    `common.SuspendSeconds` = 60.
 12. **Migration endpoints**: the destination sequence asserts the 8 KiB
     zeroing `writeblock` at the slot offset **before** the record's slot
     write, the wrapper `dmsetup create`, that the dm-clone's meta/dest devices

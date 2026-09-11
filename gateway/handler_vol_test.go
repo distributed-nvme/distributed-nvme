@@ -563,6 +563,90 @@ func volDnSelector(addrPort string) *pb.NodeSelector {
 	return &pb.NodeSelector{WhiteList: []string{addrPort}}
 }
 
+// relocateDn moves one DN into another failure domain. Both copies have to
+// move: the DnConf the §6.5 location exclusion reads, and the copy the
+// capacity-key value carries so that the scan needs no point read ([D5]).
+func (e *volEnv) relocateDn(addrPort string, location string) {
+	e.t.Helper()
+	dn := e.dn(addrPort)
+	dn.Location = location
+	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
+	mustPut(e.t, e.cli, e.dnCapKey(addrPort, dn.GetFreeExtCnt()),
+		&pb.DnCapacity{Location: location})
+}
+
+// setDnFree rewrites one DN's free_ext_cnt and moves its capacity key with it
+// (§5.6). It is how a test decides which candidate the scan sees FIRST: one
+// bin is one descending range over free counts (§6.3), so the emptier DN can
+// only be reached past the fuller one.
+func (e *volEnv) setDnFree(addrPort string, freeExt uint64) {
+	e.t.Helper()
+	dn := e.dn(addrPort)
+	oldKey := e.dnCapKey(addrPort, dn.GetFreeExtCnt())
+	dn.FreeExtCnt = freeExt
+	mustPut(e.t, e.cli, model.DnConfKey(e.cid, addrPort), dn)
+	if err := e.cli.Delete(e.ctx, oldKey); err != nil {
+		e.t.Fatalf("Delete %s: %v", oldKey, err)
+	}
+	mustPut(e.t, e.cli, e.dnCapKey(addrPort, freeExt),
+		&pb.DnCapacity{Location: dn.GetLocation()})
+}
+
+// dropDn leaves the cluster without that DN as an allocator sees it: no
+// capacity key, so it is no candidate, and no conf, so it contributes no
+// location either (§6.5).
+func (e *volEnv) dropDn(addrPort string) {
+	e.t.Helper()
+	dn := e.dn(addrPort)
+	for _, key := range []string{
+		model.DnConfKey(e.cid, addrPort),
+		e.dnCapKey(addrPort, dn.GetFreeExtCnt()),
+	} {
+		if err := e.cli.Delete(e.ctx, key); err != nil {
+			e.t.Fatalf("Delete %s: %v", key, err)
+		}
+	}
+}
+
+// volDnCFree is what volTwoDomainEnv leaves dn-c holding: more than any other
+// DN, so the descending scan reaches it FIRST and a placement on dn-d can only
+// be the location rule's doing, never the index order's.
+const volDnCFree = volDnFree * 2
+
+// volTwoDomainEnv is the §6.5 two-tier fixture: dn-c joins dn-a's failure
+// domain — dn-a carries a side of every group — so dn-d is the only candidate
+// in a domain of its own, and dn-c is the one the scan would otherwise hand
+// back first.
+//
+// The default dn_batch_size (16) is left alone on purpose: the tier-2 trigger
+// is RequiredCnt — one DN for both of these RPCs — and not the oversampled
+// candCnt, so tier 1 finding its single candidate is enough to settle the
+// placement. That single candidate is also what makes the assertion exact:
+// dn-a and dn-b are black-listed, dn-c shares dn-a's domain, so PickRandom
+// draws dn-d out of a one-entry list.
+func volTwoDomainEnv(t *testing.T) *volEnv {
+	t.Helper()
+	env := newVolEnv(t)
+	env.relocateDn(volDnC, volDnA)
+	env.setDnFree(volDnC, volDnCFree)
+	return env
+}
+
+// volTier1DrawCnt is how often the two tier-1 assertions below re-run against a
+// FRESH fixture. At the gateway the §6.5 requiredCnt is observed only through
+// the pick, and PickRandom draws uniformly, so the exact regression
+// update_06.md amendment (a) names — handing FindDnCandidatesAntiAffine the
+// oversampled scan width (Legs × dn_batch_size) where the DNs to place belong
+// — does not turn the assertion red on its own: it drags tier 1's single find
+// into tier 2, which merges the same-domain DN behind it, and a one-of-two
+// draw then lands on the right DN half the time. Every repeat is an
+// independent draw against its own cluster, so twelve of them leave that
+// regression 2^-12 of a chance to stay green, at about half a second per test.
+//
+// The tier-2 assertions need no repeat: with dn-d dropped the scan has exactly
+// one candidate and the draw is forced.
+const volTier1DrawCnt = 12
+
 // ---------------------------------------------------------------------------
 // §8.7 CreateThinDevice
 // ---------------------------------------------------------------------------
@@ -2339,6 +2423,72 @@ func TestCreateMigrationChargesDestination(t *testing.T) {
 	}
 }
 
+// volMigrationDst runs CreateMigration on the data group with NO NodeSelector
+// at all — the allocator's own rule is what the caller wants to see — and
+// returns the addr_port the destination side landed on.
+func volMigrationDst(env *volEnv) (string, error) {
+	env.t.Helper()
+	if _, err := env.srv.CreateMigration(
+		env.ctx, &pb.CreateMigrationRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			MigrName:    "migr-a",
+			SrcSideId:   volDataSideA,
+			DmCloneConf: &pb.DmCloneConf{HydrationThreshold: 2},
+		}); err != nil {
+		return "", err
+	}
+	leg := activeLegOf(volGrpOf(env.t, env.slice(), volDataGrpId), volDataLegA)
+	if leg == nil || len(leg.GetSideList()) != 2 {
+		env.t.Fatalf("leg %d must own two sides: %v", volDataLegA, leg)
+	}
+	return leg.GetSideList()[1].GetAddrPort(), nil
+}
+
+// TestCreateMigrationPrefersAnotherFailureDomain pins §6.5's two tiers on
+// §8.11's destination scan: tier 1 keeps the destination out of the failure
+// domains the group already occupies — dn-c is excluded although no side of
+// the group is on it, because it shares dn-a's domain — and when no other
+// domain is left tier 2 places the destination there anyway. A migration that
+// cannot leave the domain is still a migration; refusing it is not the answer.
+func TestCreateMigrationPrefersAnotherFailureDomain(t *testing.T) {
+	t.Run("tier 1 leaves the group's domains", func(t *testing.T) {
+		// One draw proves nothing here — see volTier1DrawCnt.
+		for draw := 0; draw < volTier1DrawCnt; draw++ {
+			env := volTwoDomainEnv(t)
+			got, err := volMigrationDst(env)
+			if err != nil {
+				t.Fatalf("CreateMigration: %v", err)
+			}
+			if got != volDnD {
+				t.Fatalf(
+					"draw %d: destination on %s, want %s (dn-c is in "+
+						"dn-a's domain, and tier 2 must not have run)",
+					draw, got, volDnD)
+			}
+		}
+	})
+
+	t.Run("tier 2 places in an occupied domain", func(t *testing.T) {
+		env := volTwoDomainEnv(t)
+		env.dropDn(volDnD)
+		got, err := volMigrationDst(env)
+		if err != nil {
+			t.Fatalf("CreateMigration: %v (tier 2 must place, never "+
+				"RESOURCE_EXHAUSTED)", err)
+		}
+		if got != volDnC {
+			t.Errorf("destination on %s, want %s", got, volDnC)
+		}
+		if got := env.dn(volDnC).GetFreeExtCnt(); got !=
+			volDnCFree-volDataExtCnt {
+			t.Errorf("dn-c free_ext_cnt: got %d, want %d",
+				got, volDnCFree-volDataExtCnt)
+		}
+	})
+}
+
 // TestCancelMigrationIsTheExactMirror pins §8.11's rollback: whatever
 // CreateMigration charged is returned, the destination side leaves the leg and
 // the record and EVERY bitmap chunk go with it — while the source side, which
@@ -2745,6 +2895,70 @@ func TestCreateSpareLegAppendsStandbyCapacity(t *testing.T) {
 	if rev := env.spRev(); rev != 2 {
 		t.Errorf("sp_rev: got %d, want 2", rev)
 	}
+}
+
+// volSpareLegDst runs CreateSpareLeg on the data group with NO NodeSelector at
+// all and returns the addr_port the spare's single side landed on.
+func volSpareLegDst(env *volEnv) (string, error) {
+	env.t.Helper()
+	if _, err := env.srv.CreateSpareLeg(
+		env.ctx, &pb.CreateSpareLegRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			GrpId:       volDataGrpId,
+		}); err != nil {
+		return "", err
+	}
+	grp := volGrpOf(env.t, env.slice(), volDataGrpId)
+	if len(grp.GetSpareLegList()) != 1 ||
+		len(grp.GetSpareLegList()[0].GetSideList()) != 1 {
+		env.t.Fatalf("spare_leg_list = %v", grp.GetSpareLegList())
+	}
+	return grp.GetSpareLegList()[0].GetSideList()[0].GetAddrPort(), nil
+}
+
+// TestCreateSpareLegPrefersAnotherFailureDomain pins §6.5's two tiers on
+// §8.12's scan: a spare in the failure domain of the leg it exists to replace
+// dies with it, so tier 1 excludes the group's domains — dn-c is skipped for
+// sharing dn-a's, not for carrying a side — while tier 2 still creates the
+// spare when the cluster has no other domain to offer, because no spare at all
+// is the worse outcome.
+func TestCreateSpareLegPrefersAnotherFailureDomain(t *testing.T) {
+	t.Run("tier 1 avoids the group's domains", func(t *testing.T) {
+		// One draw proves nothing here — see volTier1DrawCnt.
+		for draw := 0; draw < volTier1DrawCnt; draw++ {
+			env := volTwoDomainEnv(t)
+			got, err := volSpareLegDst(env)
+			if err != nil {
+				t.Fatalf("CreateSpareLeg: %v", err)
+			}
+			if got != volDnD {
+				t.Fatalf(
+					"draw %d: spare on %s, want %s (dn-c is in dn-a's "+
+						"domain, and tier 2 must not have run)",
+					draw, got, volDnD)
+			}
+		}
+	})
+
+	t.Run("tier 2 places in an occupied domain", func(t *testing.T) {
+		env := volTwoDomainEnv(t)
+		env.dropDn(volDnD)
+		got, err := volSpareLegDst(env)
+		if err != nil {
+			t.Fatalf("CreateSpareLeg: %v (tier 2 must place, never "+
+				"RESOURCE_EXHAUSTED)", err)
+		}
+		if got != volDnC {
+			t.Errorf("spare on %s, want %s", got, volDnC)
+		}
+		if got := env.dn(volDnC).GetFreeExtCnt(); got !=
+			volDnCFree-volDataExtCnt {
+			t.Errorf("dn-c free_ext_cnt: got %d, want %d",
+				got, volDnCFree-volDataExtCnt)
+		}
+	})
 }
 
 // TestCreateSpareLegRefusals pins the three §8.12 pre-checks that give this

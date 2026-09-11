@@ -95,7 +95,8 @@ Appendix B carries the cross-component one as **[D17]**.
     pool's reported total is still no larger than the total implied by the
     slice's groups *before* the newest one — a memo reconstructed from facts.
 15. **Disabled cntlrs are hands-off** (AR3): never failed over to, never
-    replaced. Reactions are suppressed for `deleting` SPs and at
+    replaced — but a disabled *primary* is itself the AR5 failover trigger
+    (§8.6). Reactions are suppressed for `deleting` SPs and at
     `sp_level ≥ SP_LEVEL_NO_THINPOOL`.
 16. **Sole-cntlr SPs are repaired** (AR7): a primary with no failover
     candidate is replaced by a new primary on a fresh CN with the same
@@ -410,9 +411,18 @@ MD4. **Capacity keys** (`architecture.md` §5.6, §6.2). `DnBinIdx(freeExt
      which is what makes the delete target exact.
 
 MD5. **Allocator** (§6.3/§6.4 verbatim). `FindDnCandidates(ctx, cli, cid,
-     cc, candExt uint64, candCnt int, black, white []string) ([]Cand, error)`
-     and `FindCnCandidates(ctx, cli, cid, candExt, candCnt, black, white,
-     spCnAddrs []string)`; `Cand{AddrPort, Location string; FreeExt uint64;
+     cc, candExt uint64, candCnt int, black, white, excludeLocs []string)
+     ([]Cand, error)` — `excludeLocs` seeds the `LocList`, so the caller's
+     own failure domains are excluded before the walk starts —
+     `FindDnCandidatesAntiAffine(…, candCnt, requiredCnt int, black, white,
+     excludeLocs []string) ([]Cand, bool, error)`, the §6.5 two-tier rule
+     (tier 1 with the exclusion; tier 2 rescans without it when tier 1 yields
+     fewer than `requiredCnt` — the DNs the caller must actually place, never
+     the oversampled `candCnt` — and its candidates are merged **behind**
+     tier 1's, so a distinct-domain DN tier 1 found is never dropped; the bool
+     reports whether tier 2 ran), and `FindCnCandidates(ctx, cli, cid,
+     candExt, candCnt, black, white, spCnAddrs []string)`;
+     `Cand{AddrPort, Location string; FreeExt uint64;
      BinIdx uint32}`; `PickRandom(cands, n)`. The scans are plain descending
      `Range`s **outside** any STM. Because the picked node's free count is
      part of its capacity key, every op of MD6 re-validates a pick by
@@ -439,7 +449,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `SetLegErrEpoch(cid, spId, sliceId, legId, epoch)` / `SetSideErrEpoch(..., sideId, epoch)` | slice exists, leg/side found in any group's `leg_list`/`spare_leg_list` | same rule on the embedded record; rewrite the `Slice`; no bump |
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
-     | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`, `old.err_epoch != 0`, `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
+     | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4, update_04.md U7); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size` (defaults resolved); ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
@@ -460,10 +470,13 @@ MD8. **Gateway reuse (non-normative).** The public RPCs of `architecture.md`
 MD9. **Tests.** Key golden strings (the §5.1 example, every prefix ending in
      a space, round-trip of every parser); `ClusterId` against a fixed
      vector; `DnBinIdx`/allocatable tables; and, against the EU7 etcd binary
-     (skipped without one): the allocator's bin walk, location dedupe and
-     black/white lists; each MD6 op's happy path, every listed precondition
-     as an `ErrPrecondition`, revision bumps counted exactly, and the
-     candidate-changed retry.
+     (skipped without one): the allocator's bin walk, location dedupe,
+     black/white lists, the `excludeLocs` seeding of §6.5 tier 1 and the
+     two-tier helper (tier 1 alone; the tier-2 rescan merged **behind** it;
+     and the trigger itself — a tier 1 short of `candCnt` but not of
+     `requiredCnt` must NOT fall through); each MD6 op's happy path, every
+     listed precondition as an `ErrPrecondition`, revision bumps counted
+     exactly, and the candidate-changed retry.
 
 ---
 
@@ -1099,11 +1112,12 @@ AR2. **One action per SP per pass**, evaluated in this priority; the first
 
 AR3. **Suppression.** No reaction runs for an SP with `deleting == true` or
      `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
-     §11.7, where an operator is in charge). A **disabled** cntlr is never
-     failed over *to* and never replaced: disabling is the operator's
-     hands-off signal, and §10.4's "skipping the enabled check" is read as
-     skipping the public `disabled == true` precondition of `DeleteCntlr`,
-     not as replacing disabled cntlrs.
+     §11.7, where an operator is in charge). A **disabled** cntlr is never a
+     candidate, replaced or repaired — but a disabled *primary* is itself the
+     AR5 failover trigger (§8.6). Disabling is the operator's hands-off
+     signal, and §10.4's "skipping the enabled check" is read as skipping the
+     public `disabled == true` precondition of `DeleteCntlr`, not as replacing
+     disabled cntlrs.
 
 AR4. **Thresholds.** `now − err_epoch ≥ T` with `T` the SP's
      `event_threshold` field, `0` ⇒ the §7 default (`DefaultPrimaryUnhealthy`
@@ -1114,13 +1128,20 @@ AR4. **Thresholds.** `now − err_epoch ≥ T` with `T` the SP's
 
 ### 11.2 Failover
 
-AR5. When the primary cntlr has `err_epoch != 0` and `now − err_epoch ≥
-     primary_unhealthy`: candidate = the cntlr with the smallest `cntlr_id`
-     among those with `primary == false`, `disabled == false`, `err_epoch ==
-     0`; none ⇒ `reaction skipped` (`no candidate`) and the pass continues
-     (AR2); else
+AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
+     err_epoch ≥ primary_unhealthy`: candidate = the cntlr with the smallest
+     `cntlr_id` among those with `primary == false`, `disabled == false`,
+     `err_epoch == 0`; none ⇒ `reaction skipped` (`no candidate`) and the pass
+     continues (AR2); else
      `model.Failover(old, candidate)`. This is the §11.1 failover trigger;
-     the data-plane choreography is the agents'.
+     the data-plane choreography is the agents'. The `disabled` trigger waits
+     out no threshold: disabling is explicit operator intent and the disabled
+     primary has already stopped serving (§8.6). The candidate-skip
+     bookkeeping is unchanged by that trigger (`update_06.md` §1), so it is
+     deliberately **not** edge-triggered: a `disabled` primary with no
+     eligible candidate re-emits `reaction skipped` / `no candidate` once per
+     pass, for as long as it takes an operator to enable a standby or add a
+     cntlr.
 
 ### 11.3 Thin-pool auto-grow
 
@@ -1151,8 +1172,10 @@ AR6. Per slice, from the primary's `slice_id_to_dm_pool[slice_id]` row,
      status line on every pass, so a worker restart or a handoff cannot
      issue a second grow; a grow deferred on the CN ([D15]) stays pending the
      same way, because its totals have not moved. Candidates:
-     `FindDnCandidates(candExt = ext_cnt, candCnt = legs × dn_batch_size,
-     black = ∅)` where `legs` = 1 (`RedundNone`) or 2 (`RedundMdRaid1`),
+     `FindDnCandidatesAntiAffine(candExt = ext_cnt, candCnt = legs ×
+     dn_batch_size, requiredCnt = legs, black = ∅, excludeLocs = ∅ — §6.5
+     leaves the grow on the plain scan, so tier 2 never runs)` where
+     `legs` = 1 (`RedundNone`) or 2 (`RedundMdRaid1`),
      picked randomly with the growing black list so the legs land on
      distinct DNs; fewer than `legs` candidates, or a cntlr's CN below the
      budget (checked in the op), ⇒ `reaction skipped`.
@@ -1205,11 +1228,16 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         have `err_epoch == 0` and that is not ready yet (provisioning, or
         not yet reported `OK`) ⇒ wait for it;
      3. else `len(spare_leg_list) < MaxSpareLegPerGrp` ⇒ internal
-        `CreateSpareLeg` on a fresh DN: `FindDnCandidates(candExt =
-        group.ext_cnt, candCnt = dn_batch_size, black = the DNs of every leg
-        and spare of the group)`, pick one; the new side provisions (§9.4),
-        RW18 flips it, the cntlrs connect to it, and a later pass finds it
-        ready;
+        `CreateSpareLeg` on a fresh DN: `FindDnCandidatesAntiAffine(candExt =
+        group.ext_cnt, candCnt = dn_batch_size, requiredCnt = 1, black = the
+        DNs of every leg and spare of the group)`; tier 1 also excludes their
+        `location`s — taken from the pass's own `SpState.DnByAddr`, a DN
+        missing from it contributing none — and a tier-2 rescan without the
+        location exclusion runs when tier 1 offers none of the **one** DN
+        this step places, never when it merely falls short of `candCnt`
+        (`architecture.md` §6.5), so a cluster with one failure domain still
+        repairs; pick one; the new side provisions (§9.4), RW18 flips it, the
+        cntlrs connect to it, and a later pass finds it ready;
      4. else `reaction skipped` (`spare_list_full`): after two repairs of one
         group the list holds two parked legs, and only `DeleteSpareLeg` by an
         operator frees a slot (Appendix B).
@@ -1284,12 +1312,16 @@ does).
   standby leg rows ignored.
 * **bmpush.go** — ascending order, one in flight, target rules, the
   `mod_revision` memo, failure ⇒ `resyncWanted`.
-* **reaction.go** — priority and one-per-pass; every suppression; the AR6
-  parser on a real status line and on garbage; the pending rule before and
-  after a grow becomes visible (data and meta units); AR7's sole-primary
-  variant and old-CN black list; AR8 cases 1 and 2, the readiness and
-  pending-spare rules, two-sides skip, `RedundNone` skip,
-  `spare_list_full`.
+* **reaction.go** — priority and one-per-pass; every suppression; AR5's two
+  triggers (an unhealthy primary past `primary_unhealthy`, and a `disabled`
+  primary with no threshold wait — `TestReactionDisabledPrimaryFailsOver`);
+  the AR6 parser on a real status line and on garbage; the pending rule
+  before and after a grow becomes visible (data and meta units); AR7's
+  sole-primary variant and old-CN black list; AR8 cases 1 and 2, the
+  readiness and pending-spare rules, two-sides skip, `RedundNone` skip,
+  `spare_list_full`, and the spare-create scan's tier-1 exclusion of the
+  group's `location`s at `requiredCnt = 1`
+  (`TestReactionSpareCreateExcludesGroupLocations`).
 * **clusterconf.go** — key→id derivation, defaults resolution, delete.
 
 ---
@@ -1314,7 +1346,7 @@ failure the worker is specified to handle; error paths of etcd itself
 | A | `revision` | bumps, a moved endpoint without a delete, stale/unknown replies, a deleted rev key |
 | B | `health` | `err_epoch` set/cleared with the capacity keys; hang, kill, `PROVISIONING`, the sp-object table |
 | C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, push failure ⇒ resync, primary change |
-| D | `reaction` | failover, cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression |
+| D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression |
 | E | `vote` | exact single ownership, join (~¼ moves, the rest stable), `SIGKILL`, `SIGTERM`, `SIGSTOP`/`SIGCONT` with the self-fence, attribution by trace id |
 | F | `handoff` | a killed owner's shards are re-driven at the same revision; a flip mid-handoff happens once |
 
@@ -1782,6 +1814,16 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
     `assert_none_for 5` no failover; `set-level 0` ⇒ failover within
     `WAIT_SHORT`. `set-cntlr --disabled=true` on a standby, fail it ⇒
     `assert_none_for 6` no replacement.
+11. **Disabled primary** (AR5's other trigger, §8.6). Step 10's disabled
+    standby is the SP's only other cntlr, so it is made electable again
+    first: clear its row and wait `err_epoch` back to 0 **while it is still
+    disabled** (enabled and unhealthy, AR7 would replace it before this step
+    could use it), then `set-cntlr --disabled=false`. Now `set-cntlr
+    --disabled=true` on the **primary** ⇒ within `WAIT_SHORT` — one pass,
+    with no threshold added to it: `reaction applied kind=failover`; the
+    standby `primary true`, the disabled cntlr `primary false`; `err_epoch
+    0` on both, so the flag is the only trigger the failover can have come
+    from; a `SyncupCntlr` with `cntlr.primary true` at the new primary's CN.
 
 **E — `vote`**
 

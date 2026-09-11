@@ -17,12 +17,15 @@ import (
 // Finish/Cancel the leg owns TWO sides, the source and the destination, both
 // exporting the same NQN so every CN sees them as two paths of one multipath
 // namespace. Every rule below follows from that — the destination must land on
-// a disk node no leg of the group already uses (otherwise the migration would
-// not leave the failure domain it is repairing), it must take a cntlid slot
-// the source does not hold (otherwise the two controllers a CN aggregates
-// could pick the same CNTLID and the kernel would refuse the second path,
-// §11.8), and exactly one of the two sides survives: Finish keeps the
-// destination, Cancel keeps the source.
+// a disk node no leg of the group already uses and, whenever the cluster has
+// one to offer, in a failure domain the group does not already occupy either
+// (a destination in the domain the migration was meant to leave repairs
+// nothing; §6.5's two tiers: the domain exclusion yields rather than refuse
+// the migration altogether), it must take a cntlid slot the source does not
+// hold (otherwise the two controllers a CN aggregates could pick the same
+// CNTLID and the kernel would refuse the second path, §11.8), and exactly one
+// of the two sides survives: Finish keeps the destination, Cancel keeps the
+// source.
 
 // The op names the ledger flushes and the bump helpers cite; they are the RPC
 // names so a log record names something greppable. GetMigration writes
@@ -203,15 +206,17 @@ func (s *Server) CreateMigration(
 		return nil, err
 	}
 	// The plan: which cluster to scan, how big the destination must be, and
-	// which disk nodes it must avoid. grpDnAddrs names every DN the group
-	// already occupies through an active or a spare leg, so seeding the black
-	// list with it is what keeps the destination out of the failure domain
-	// the migration is meant to leave (§6.5).
+	// which disk nodes — and failure domains — it must avoid. grpDnAddrs names
+	// every DN the group already occupies through an active or a spare leg and
+	// seeds the black list; grpDnLocations turns the same set into §6.5's
+	// tier-1 exclusion, so the destination leaves the failure domain the
+	// migration is meant to leave, and a cluster with no other domain still
+	// places through tier 2 rather than refusing.
 	var (
-		planCid   uint64
-		planCc    *pb.ClusterConf
-		planExt   uint64
-		planBlack []string
+		planCid uint64
+		planCc  *pb.ClusterConf
+		planExt uint64
+		planGrp *pb.Group
 	)
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		// openSp, not openSpRead: this is a MUTATOR's planning read, so
@@ -237,17 +242,24 @@ func (s *Server) CreateMigration(
 		planCid = sc.Cid
 		planCc = sc.Cc
 		planExt = loc.Grp.GetExtCnt()
-		planBlack = grpDnAddrs(loc.Grp)
+		planGrp = loc.Grp
 		return nil
 	})
 	if err != nil {
 		return nil, mapStmErr(err)
 	}
+	planBlack := grpDnAddrs(planGrp)
+	// Outside the snapshot, and once for the whole candidate unit: a location
+	// cannot change under either (§8.2).
+	planLocs, err := grpDnLocations(ctx, s.cli, planCid, planGrp)
+	if err != nil {
+		return nil, err
+	}
 	var migrId uint64
 	err = candidateUnit(ctx, func() error {
 		picks, err := pickDns(
 			ctx, s.cli, planCid, planCc,
-			dnPickPlan{ExtCnt: planExt, Legs: 1},
+			dnPickPlan{ExtCnt: planExt, Legs: 1, ExcludeLocs: planLocs},
 			req.GetDnSelector(), planBlack, "migration destination",
 		)
 		if err != nil {

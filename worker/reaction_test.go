@@ -207,11 +207,13 @@ type reactionCall struct {
 
 // candQuery is one allocator scan a pass ran.
 type candQuery struct {
-	kind    string
-	candExt uint64
-	candCnt int
-	black   []string
-	spCn    []string
+	kind        string
+	candExt     uint64
+	candCnt     int
+	requiredCnt int
+	black       []string
+	excludeLocs []string
+	spCn        []string
 }
 
 // fakeReactionOps is the §13 stand-in for model: canned candidates, a canned
@@ -251,11 +253,14 @@ func (o *fakeReactionOps) findDnCandidates(
 	cc *pb.ClusterConf,
 	candExt uint64,
 	candCnt int,
+	requiredCnt int,
 	black []string,
+	excludeLocs []string,
 ) ([]model.Cand, error) {
 	o.mu.Lock()
 	o.queries = append(o.queries, candQuery{
-		kind: "dn", candExt: candExt, candCnt: candCnt, black: black,
+		kind: "dn", candExt: candExt, candCnt: candCnt,
+		requiredCnt: requiredCnt, black: black, excludeLocs: excludeLocs,
 	})
 	cands, err := o.dnCands, o.scanErr
 	o.mu.Unlock()
@@ -775,6 +780,67 @@ func TestReactionDisabledCntlrIsHandsOff(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AR5 — the failover triggers
+// ---------------------------------------------------------------------------
+
+// TestReactionDisabledPrimaryFailsOver pins AR5's second trigger: `disabled`
+// on the PRIMARY fires on its own and immediately (architecture.md §8.6 —
+// "disabling the current primary triggers the §10.4 primary re-election"),
+// with no threshold to wait out. AR3's hands-off rule is unchanged in the
+// other direction: a disabled cntlr is still never a candidate.
+func TestReactionDisabledPrimaryFailsOver(t *testing.T) {
+	t.Run("healthy disabled primary", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrB {
+			t.Fatalf("failover %d -> %d", calls[0].oldId, calls[0].newId)
+		}
+		h.wantApplied(reactionFailover)
+		h.wantNoSkip()
+		for _, cntlrId := range sortedIds(h.state.Conf.GetCntlrIdList()) {
+			if got := h.state.Cntlrs[cntlrId].GetErrEpoch(); got != 0 {
+				t.Fatalf(
+					"cntlr %d err_epoch = %d; the trigger is the disabled "+
+						"flag alone", cntlrId, got,
+				)
+			}
+		}
+	})
+
+	// The no-candidate skip still does not end the pass (AR2's continue
+	// list): with every other cntlr ineligible — disabled, or unhealthy —
+	// the disabled primary stays put and the next reaction runs.
+	for _, tc := range []struct {
+		name   string
+		mutate func(h *reactHarness, cntlr *pb.Cntlr)
+	}{
+		{"other disabled", func(h *reactHarness, cntlr *pb.Cntlr) {
+			cntlr.Disabled = true
+		}},
+		{"other unhealthy", func(h *reactHarness, cntlr *pb.Cntlr) {
+			cntlr.ErrEpoch = h.ago(10)
+		}},
+	} {
+		t.Run("no candidate, "+tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			h.state.Cntlrs[reactCntlrA].Disabled = true
+			tc.mutate(h, h.state.Cntlrs[reactCntlrB])
+			// AR6 is armed so that the continuation is observable.
+			total := reactDataBlocks(t, 2)
+			h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+				poolLine(1, 1000, total, total))
+			h.dnCands(reactDnC, reactDnD)
+			h.pass()
+			h.wantSkipped(reactionFailover, reasonNoCandidate)
+			h.wantOps("grow")
+			h.wantApplied(reactionGrowData)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // AR6 — the `dmsetup status` parser
 // ---------------------------------------------------------------------------
 
@@ -944,6 +1010,9 @@ func TestReactionDataGrowPending(t *testing.T) {
 	}
 	if query.candCnt != 2*common.DefaultAllocDnBatchSize {
 		t.Fatalf("candCnt = %d", query.candCnt)
+	}
+	if query.requiredCnt != 2 {
+		t.Fatalf("requiredCnt = %d, want one per leg", query.requiredCnt)
 	}
 	if len(query.black) != 0 {
 		t.Fatalf("black = %v, want empty", query.black)
@@ -1636,6 +1705,71 @@ func TestReactionParkedLegIsNeverRepaired(t *testing.T) {
 	h.wantOps()
 	h.wantApplied()
 	h.wantNoSkip()
+}
+
+// TestReactionSpareCreateExcludesGroupLocations pins AR8 step 3's tier-1
+// exclusion (§6.5): the scan carries the DNs of every leg and spare of the
+// group AND their locations, read from the pass's own snapshot of the node
+// records (MD3) rather than from a second etcd round-trip.
+func TestReactionSpareCreateExcludesGroupLocations(t *testing.T) {
+	build := func(t *testing.T, locA string, locB string) *reactHarness {
+		t.Helper()
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.state.DnByAddr[reactDnA] = &pb.DnConf{Location: locA}
+		h.state.DnByAddr[reactDnB] = &pb.DnConf{Location: locB}
+		h.dnCands(reactDnD)
+		return h
+	}
+	wantScan := func(t *testing.T, h *reactHarness, wantLocs []string) {
+		t.Helper()
+		queries := h.rops.allQueries()
+		if len(queries) != 1 || queries[0].kind != "dn" {
+			t.Fatalf("queries = %+v", queries)
+		}
+		wantBlack := []string{reactDnA, reactDnB}
+		if fmt.Sprint(queries[0].black) != fmt.Sprint(wantBlack) {
+			t.Errorf("black = %v, want %v", queries[0].black, wantBlack)
+		}
+		if fmt.Sprint(queries[0].excludeLocs) != fmt.Sprint(wantLocs) {
+			t.Errorf("exclude_locs = %v, want %v",
+				queries[0].excludeLocs, wantLocs)
+		}
+		// The tier-2 trigger is the ONE DN this step places, never the
+		// oversampled candCnt: with dn_batch_size = 16 no realistic cluster
+		// fills a batch out of one domain each, and tier 1 would be discarded
+		// every time (§6.5).
+		if queries[0].requiredCnt != 1 {
+			t.Errorf("required_cnt = %d, want 1", queries[0].requiredCnt)
+		}
+	}
+
+	t.Run("two named locations", func(t *testing.T) {
+		h := build(t, "rack-left", "rack-right")
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].legs[0].AddrPort != reactDnD {
+			t.Fatalf("spare on %s", calls[0].legs[0].AddrPort)
+		}
+		wantScan(t, h, []string{"rack-left", "rack-right"})
+	})
+
+	t.Run("a missing dn_conf contributes no location", func(t *testing.T) {
+		h := build(t, "rack-left", "rack-right")
+		delete(h.state.DnByAddr, reactDnB)
+		h.pass()
+		h.wantOps("create_spare")
+		wantScan(t, h, []string{"rack-left"})
+	})
+
+	t.Run("the default location is the addr_port", func(t *testing.T) {
+		// The §8.2 default makes the exclusion degenerate to the DN black
+		// list, which is AR8's behavior before the two tiers existed.
+		h := build(t, reactDnA, reactDnB)
+		h.pass()
+		h.wantOps("create_spare")
+		wantScan(t, h, []string{reactDnA, reactDnB})
+	})
 }
 
 // TestReactionSpareCreateNoCandidate pins AR8 step 3's empty scan.

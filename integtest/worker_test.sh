@@ -2534,6 +2534,52 @@ EOF
 	replaces=$(reaction_cnt replace_cntlr)
 	assert_none_for 6 "a replacement of the disabled standby" \
 		reaction_ge $((replaces + 1)) replace_cntlr
+
+	stage 11 "AR5 disabled primary: the flag alone is the trigger (§8.6)"
+	# Step 10 leaves sp0 with the step-3 replacement as a healthy primary and
+	# ONE other cntlr: the cntlr it demoted, now disabled and still unhealthy.
+	# AR5's candidate rule is unchanged — a disabled or unhealthy cntlr is
+	# never ELECTED — so that standby has to be healthy and enabled again
+	# before a disabled primary has anywhere to go.
+	#
+	# The order is load-bearing for the same reason step 10's is, in reverse:
+	# cn 1 has had a budget since then, so a standby that is enabled while
+	# still past the 4 s cntlr threshold is replaced by AR7 on the next pass.
+	# Clearing its row and waiting err_epoch back to 0 FIRST keeps AR3's
+	# hands-off protection on it until there is nothing left to replace.
+	local standby_id=$prim_id standby_dir=$prim_dir
+	clear_behavior "$standby_dir"
+	wait_until "$WAIT_SHORT" "C$standby_id err_epoch cleared" \
+		cntlr_epoch_clear sp0 "$standby_id"
+	ctl set-cntlr --sp sp0 --id "$standby_id" --disabled=false
+	local dis dis_id standby_syncups
+	dis=$(sp_primary sp0)
+	dis_id=${dis%% *}
+	log "  sp0's primary is cntlr $dis_id; C$standby_id is the enabled healthy standby"
+	standby_syncups=$(reqs "$standby_dir" SyncupCntlr '.cntlr.primary == true')
+	failovers=$(reaction_cnt failover)
+	# The disable is the §14.8 driver's direct etcd write — what the gateway's
+	# UpdateCntlrEnabled does to the store: `disabled` plus one SpRev bump,
+	# which is what wakes the sp-worker. Nothing here is unhealthy, so the
+	# err_epoch trigger cannot fire at ANY threshold and the flag is the only
+	# thing a failover can come from; the two err_epoch assertions below are
+	# that proof in the stored state. A pass runs every cntlr_interval (1 s),
+	# so one pass fits inside WAIT_SHORT with no threshold added to it — the
+	# 2 s that step 2 had to budget for.
+	ctl set-cntlr --sp sp0 --id "$dis_id" --disabled=true
+	wait_until "$WAIT_SHORT" "reaction applied kind=failover within one pass" \
+		reaction_ge $((failovers + 1)) failover
+	wait_until "$WAIT_SHORT" "C$standby_id primary true" \
+		cntlr_is_primary sp0 "$standby_id"
+	assert_eq "$(cntlr_field sp0 "$dis_id" primary)" false \
+		"the disabled cntlr's primary flag after the failover"
+	assert_eq "$(cntlr_field sp0 "$dis_id" err_epoch)" 0 \
+		"the disabled primary's err_epoch (no threshold was waited out)"
+	assert_eq "$(cntlr_field sp0 "$standby_id" err_epoch)" 0 \
+		"the new primary's err_epoch"
+	wait_until "$WAIT_SHORT" "$standby_dir: SyncupCntlr with cntlr.primary true" \
+		req_ge $((standby_syncups + 1)) "$standby_dir" SyncupCntlr \
+		'.cntlr.primary == true'
 }
 
 reaction_skip_ge() { # <n> <kind> <reason>

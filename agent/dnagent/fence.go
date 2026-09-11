@@ -62,13 +62,20 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 	return time.Since(st.fenceAt) < s.fenceWait
 }
 
-// fenceStarted reports whether a window was ever started for this side,
-// elapsed or not. It is the guard settleFence needs: beginFence would *start*
-// one, which a converge that builds nothing must never do.
+// fenceStarted reports whether a window was ever started for this side — or
+// adopted, already elapsed, from a previous process. It is the guard
+// settleFence needs: beginFence would *start* one, which a converge that
+// builds nothing must never do.
+//
+// The adopted arm is what makes DN12's "treated as elapsed, and phase 2 runs
+// on the first converge" hold under the DN9 gate too: a restart-adopted fence
+// has no fenceAt, so reading that field alone would let an agent restart plus
+// one unreadable side device leave the per-CN linears suspended past [D12]'s
+// bound (update_06.md U2).
 func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !st.fenceAt.IsZero()
+	return !st.fenceAt.IsZero() || st.fenceRestarted
 }
 
 // inFence reports whether a window is currently running, without starting
@@ -110,9 +117,9 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 	s.mu.Unlock()
 }
 
-// settleFence is the fence bookkeeping of a converge that took the U4 gate
-// (syncup_side.go's `state != sideDevReady` fork) and so never reached
-// ensureCnDm.
+// settleFence is the fence bookkeeping of a converge that took the DN9
+// side-device gate (update_01.md U4 — syncup_side.go's `state != sideDevReady`
+// fork) and so never reached ensureCnDm.
 //
 // Without it the window can end with the per-CN dm-linears still suspended and
 // nothing left to re-arm: the timer nils itself before it converges
@@ -124,7 +131,7 @@ func (s *DnAgentServer) armFenceTimer(st *sideState, plan *sidePlan) {
 // [D12]'s bound is the safety property, not a best effort.
 //
 // Inside the window it only re-arms the timer. Once the window has elapsed it
-// finishes phase 2 itself. That is safe under the U4 gate: the dm-error and
+// finishes phase 2 itself. That is safe under the DN9 gate: the dm-error and
 // the dm-linear are the devices the fence suspended, not something built on
 // top of the side, and retiring them only moves the side *further* from
 // exporting data — which is exactly what the end of the window is for.

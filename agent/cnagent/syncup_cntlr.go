@@ -134,9 +134,9 @@ func (s *CnAgentServer) retire(
 	}
 
 	// (1) Every namespace leaving service moves to the inaccessible group.
-	// U4 needs no case of its own here: a provisioning-deferred namespace's
-	// anaGrpId is already inaccessible (CN16's fourth conjunct), so this loop
-	// parks it on the very first converge of a fresh SP.
+	// update_01.md U4 needs no case of its own here: a provisioning-deferred
+	// namespace's anaGrpId is already inaccessible (CN16's fourth conjunct),
+	// so this loop parks it on the very first converge of a fresh SP.
 	for _, np := range plan.namespaces {
 		if np.anaGrpId == common.AnaGrpIdInaccessible {
 			s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
@@ -154,10 +154,12 @@ func (s *CnAgentServer) retire(
 		s.setAnaLogged(ctx, xp.nqn, int(xp.xfer.GetOriNsIdx()))
 	}
 
-	// (2) Every ns-dev that must stop serving is reloaded onto its dm-error.
+	// (2) Every ns-dev that must stop serving is reloaded onto its dm-error —
+	// the survivors the loop below selects and, since update_06.md U4, every
+	// removed namespace's as well.
 	// A provisioning-deferred namespace is covered by the same test, because
-	// CN16 rule 0 makes its backing the td's errorName (U4). The reload's
-	// internal suspend is what flushes the in-flight IO. A
+	// CN16 rule 0 makes its backing the td's errorName (update_01.md U4).
+	// The reload's internal suspend is what flushes the in-flight IO. A
 	// namespace whose *old* td is leaving `td_list` is parked too, even when
 	// its new backing is a live raid0: its table still maps the departing
 	// td's raid0, and the removal below would fail EBUSY behind it.
@@ -166,6 +168,20 @@ func (s *CnAgentServer) retire(
 			mapsRemovedTd(old, plan, np) {
 			s.parkNsDevLogged(ctx, np)
 		}
+	}
+	// A namespace leaving `ns_list` is parked here rather than in step (3):
+	// CN9 puts the reload before the nvmet removal, and CN21's rationale —
+	// a suspended device blocks the nvmet disable above it — applies to a
+	// removed namespace exactly as it does to a surviving one (§11.6 suspend,
+	// a transfer origin). `np` is the *old* plan's, and its td's
+	// `CnErrorName` still exists: td teardown is step (6) of this same phase.
+	// A namespace that never had a backing td has no dm-error to park on, and
+	// keeps `removeDm`'s own resume below as its backstop.
+	for _, np := range removedNamespaces(old, plan) {
+		if np.td == nil {
+			continue
+		}
+		s.parkNsDevLogged(ctx, np)
 	}
 
 	// (3) nvmet objects that must go entirely, then the ns-devs under them.

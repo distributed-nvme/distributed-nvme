@@ -1126,6 +1126,40 @@ func TestFailover(t *testing.T) {
 	wantPrecondition(t, err, opFailover)
 }
 
+// TestFailoverDisabledPrimary pins AR5's second trigger in the STM: a
+// `disabled` primary fails over on its own (§8.6), so a HEALTHY one moves the
+// role with no threshold to wait out.
+func TestFailoverDisabledPrimary(t *testing.T) {
+	env := newOpsEnv(t)
+	old := env.cntlr(opsCntlrA)
+	old.Disabled = true
+	mustPut(env.t, env.cli, CntlrKey(env.cid, opsSpId, opsCntlrA), old)
+	revBefore := env.spRev()
+	// now == the fixture's own epoch: nothing has been unhealthy for any
+	// length of time, and the op still applies.
+	if err := Failover(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrA, opsCntlrB, 1000,
+	); err != nil {
+		t.Fatalf("Failover: %v", err)
+	}
+	if env.cntlr(opsCntlrA).GetPrimary() {
+		t.Errorf("the disabled old primary must be demoted")
+	}
+	if !env.cntlr(opsCntlrB).GetPrimary() {
+		t.Errorf("the new primary must be promoted")
+	}
+	if got := env.cntlr(opsCntlrA).GetErrEpoch(); got != 0 {
+		t.Errorf("failover must not invent an err_epoch: got %d", got)
+	}
+	if !env.cntlr(opsCntlrA).GetDisabled() {
+		t.Errorf("failover must not re-enable the old cntlr")
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d", got, revBefore+1)
+	}
+}
+
 func TestFailoverPreconditions(t *testing.T) {
 	now := uint64(1000 + common.DefaultPrimaryUnhealthy)
 	for _, tc := range []struct {
@@ -1142,7 +1176,7 @@ func TestFailoverPreconditions(t *testing.T) {
 			oldId:  opsCntlrA,
 			newId:  opsCntlrB,
 			now:    now,
-			reason: "old cntlr is healthy",
+			reason: "old cntlr is healthy and enabled",
 		},
 		{
 			name:   "threshold not reached",

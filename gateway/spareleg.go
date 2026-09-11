@@ -144,8 +144,10 @@ func removeSpareLeg(list []*pb.Leg, legId uint64) []*pb.Leg {
 
 // CreateSpareLeg is architecture.md §8.12's CreateSpareLeg: one more Leg in
 // the group's spare_leg_list, carrying one Side on a DN the group does not
-// already occupy — a spare that shared a DN with the leg it exists to replace
-// would share the failure domain too (§6.5).
+// already occupy and, whenever the cluster has one to offer, in a failure
+// domain it does not already occupy either — a spare in the domain of the leg
+// it exists to replace dies with it (§6.5's two tiers: the domain exclusion
+// yields rather than refuse the spare altogether).
 //
 // It is a GW9 candidate unit around model.CreateSpareLeg (§0 #4): the DN scan
 // is a range query and therefore runs outside every transaction, and the pick
@@ -204,12 +206,19 @@ func (s *Server) CreateSpareLeg(
 	// for exactly one more copy of the group's ext_cnt.
 	extCnt := loc.Grp.GetExtCnt()
 	what := fmt.Sprintf("spare leg for group %d", req.GetGrpId())
+	// §6.5 tier 1: the group's failure DOMAINS, not merely its DNs. Read once
+	// for the whole candidate unit, outside every transaction, because a
+	// location is immutable in v1 (§8.2).
+	excludeLocs, err := grpDnLocations(ctx, s.cli, sc.Cid, loc.Grp)
+	if err != nil {
+		return nil, err
+	}
 	var legId uint64
 	err = candidateUnit(ctx, func() error {
 		legId = 0
 		picks, err := pickDns(
 			ctx, s.cli, sc.Cid, sc.Cc,
-			dnPickPlan{ExtCnt: extCnt, Legs: 1},
+			dnPickPlan{ExtCnt: extCnt, Legs: 1, ExcludeLocs: excludeLocs},
 			req.GetDnSelector(), grpDnAddrs(loc.Grp), what,
 		)
 		if err != nil {

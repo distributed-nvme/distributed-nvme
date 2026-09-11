@@ -912,11 +912,13 @@ cluster has plenty of space in aggregate.
 ### 6.3 Finding DN candidates
 
 Input: `CandExtCnt` (needed free extents per candidate), `CandCnt` (how many wanted),
-plus `BlackList`/`WhiteList` of `addr_port`s from the `NodeSelector` (empty white list =
-all DNs; black list always excludes, even if white-listed). Health, flags, fullness and
-side-count eligibility are already enforced by key presence (§5.6).
+`BlackList`/`WhiteList` of `addr_port`s from the `NodeSelector` (empty white list =
+all DNs; black list always excludes, even if white-listed), plus `ExcludeLocs`, the
+`location`s the caller already occupies. Health, flags, fullness and side-count
+eligibility are already enforced by key presence (§5.6).
 
-1. Start `LocList = []`, `DnList = []`.
+1. Start `LocList = ExcludeLocs` (empty for every operation §6.5 leaves on the plain
+   scan), `DnList = []`.
 2. Pick the smallest bin `b` whose range can hold `CandExtCnt` (skip bins with
    `level_{b+1} ≤ CandExtCnt`). For `b … 3`: range-scan
    `{p} dn_capacity {cluster_id} {b} ` **descending** (largest free first); for each DN:
@@ -926,13 +928,16 @@ side-count eligibility are already enforced by key presence (§5.6).
 3. After bin 3, return whatever was collected (the caller decides whether it is enough).
 
 The `LocList` rule gives location anti-affinity for free: two legs of one group can never
-land in the same failure domain in one allocation round.
+land in the same failure domain in one allocation round. Seeding it with `ExcludeLocs` is
+how §6.5's **tier 1** extends the same rule across rounds — a black list of `addr_port`s
+excludes DNs and not their domains — and **tier 2** is this scan with `ExcludeLocs` empty.
 
 ### 6.4 Finding CN candidates
 
-Same as §6.3 but there are no bins: one descending scan over
-`{p} cn_capacity {cluster_id} `; skip black-listed / non-white-listed /
-duplicate-location CNs, plus CNs already hosting a cntlr of the same SP.
+Same as §6.3 but there are no bins and no `ExcludeLocs` (no operation of §6.5 asks a CN
+scan for the two tiers): one descending scan over `{p} cn_capacity {cluster_id} `; skip
+black-listed / non-white-listed / duplicate-location CNs, plus CNs already hosting a
+cntlr of the same SP.
 
 ### 6.5 Per-operation allocation
 
@@ -957,8 +962,21 @@ duplicate-location CNs, plus CNs already hosting a cntlr of the same SP.
   of the slice or SP stay allowed on purpose — a grow spreads the new group, it does
   not avoid the slice's existing ones. Meta-group sizes follow the §8.5 ladder.
 * **CreateMigration**: one DN, `CandExtCnt` = the group's `ext_cnt`; black list starts
-  with the DNs (and thus locations) of every leg/side of the group.
-* **CreateSpareLeg**: one DN, same black-list seeding as CreateMigration.
+  with the DNs of every leg/side of the group. Placement is **two-tier**, because a
+  black list of `addr_port`s excludes DNs and not failure domains: **tier 1** scans with
+  the `location`s of those same DNs excluded as well (they seed `LocList`, so a DN
+  merely *sharing* a domain with a leg is skipped too); when tier 1 yields fewer
+  candidates than `RequiredCnt` — the DNs the operation must actually place, never the
+  oversampled `DnCandCnt` — **tier 2** rescans without the location exclusion (the black
+  list still applies), so a cluster with too few domains places the destination instead
+  of refusing. Tier 2's candidates are **merged behind** tier 1's rather than replacing
+  them, so a distinct-domain DN tier 1 did find is never dropped by a tier-2 scan that
+  fills `DnCandCnt` out of the excluded domains. The resulting same-domain placement is
+  visible in the stored topology; it is not logged separately. The locations are read
+  before the STM, which is sound because `location` is immutable (§8.2), and the in-STM
+  re-validation of the pick stays address-based.
+* **CreateSpareLeg**: one DN, same black-list seeding and the same two tiers as
+  CreateMigration.
 * **CreateCntlr**: one CN, `CandExtCnt` = sum of all group `ext_cnt`s of the SP.
 
 Free-extent bookkeeping in the same STM as the pick: each leg's DN
@@ -2244,7 +2262,8 @@ standby, or of a td whose message or create failed.
 ### 10.4 Automatic reactions (`EventThreshold`, thin-pool auto-grow)
 
 Two families of automation, both the **dnv-worker's** job (agents only report): the
-`EventThreshold` reactions, triggered when any threshold is breached, and the
+`EventThreshold` reactions, triggered when any threshold is breached — except failover,
+which a `disabled` primary also triggers with no threshold wait at all (§8.6) — and the
 thin-pool auto-grow driven by `DmPoolConf.low_water_mark_pct`. Threshold comparisons
 are `now − err_epoch ≥ threshold` with the SP's `event_threshold`
 (0-valued fields fall back to the §7 defaults). All actions are ordinary STM mutations
@@ -2252,9 +2271,11 @@ that bump `SpRev`, so the data-plane choreography is the same as for the equival
 manual RPC. The sp-worker evaluates them once per SP per health round, applies at most
 one per pass in the priority failover → auto-grow → cntlr replacement → leg repair, and
 suppresses all of them for a deleting SP, at `sp_level ≥ SP_LEVEL_NO_THINPOOL`, and for
-disabled cntlrs (`dnv-worker.md` §11):
+disabled cntlrs (`dnv-worker.md` §11) — a disabled cntlr is never a candidate, replaced
+or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6):
 
-* `primary_unhealthy` (5 s): the primary cntlr is unhealthy ⇒ pick the healthy, enabled
+* `primary_unhealthy` (5 s): the primary cntlr is unhealthy — or the primary is
+  `disabled` (§8.6), with no threshold wait — ⇒ pick the healthy, enabled
   cntlr with the smallest `cntlr_id`, flip the `primary` booleans. This *is* the
   failover trigger of §11.1.
 * `cntlr_unhealthy` (600 s): a (non-primary, or already-failed-over) cntlr stays
@@ -2272,11 +2293,12 @@ disabled cntlrs (`dnv-worker.md` §11):
   reports its leg `RES_STATUS_OK`), perform an internal `SwitchSpareLeg` (§8.12 — the
   spare is only now `mdadm --add`-ed and rebuilt from the healthy leg); otherwise create
   a spare on a fresh DN first (internal `CreateSpareLeg`, black list = the DNs of every
-  leg and spare of the group) and switch on a later pass once it is ready. The replaced
-  leg stays parked in `spare_leg_list` for the operator; `RedundNone` groups have no
-  spare and are never repaired automatically; a leg with two sides (a migration in
-  flight) is left alone. The older rule — an internal migration of the leg off an
-  unhealthy side — is withdrawn: every condition that sets `Side.err_epoch` also prevents
+  leg and spare of the group, whose `location`s §6.5's tier 1 excludes as well) and
+  switch on a later pass once it is ready. The replaced leg stays parked in
+  `spare_leg_list` for the operator; `RedundNone` groups have no spare and are never
+  repaired automatically; a leg with two sides (a migration in flight) is left alone.
+  The older rule — an internal migration of the leg off an unhealthy side — is
+  withdrawn: every condition that sets `Side.err_epoch` also prevents
   the source DN from serving the migration, so it could not succeed as an automatic
   action; `CreateMigration` remains the operator's tool for moving data off a
   degraded-but-readable DN.
