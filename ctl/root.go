@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -679,17 +678,4 @@ func dmCloneConfOf() *pb.DmCloneConf {
 		HydrationThreshold: threshold,
 		HydrationBatchSize: batch,
 	}
-}
-
-// InstallStderrLogging points slog at stderr, because stdout is reserved for
-// the one result document (CT7). The level travels explicitly: building the
-// handler with a nil options argument would drop common's LevelVar and leave
-// the process logging at Info, which would defeat main's SetLogLevel — the
-// three integtest drivers have exactly that latent bug, and dnvctl must not
-// inherit it.
-func InstallStderrLogging(level slog.Level) {
-	slog.SetDefault(slog.New(&common.TraceIdHandler{
-		Handler: slog.NewJSONHandler(
-			os.Stderr, &slog.HandlerOptions{Level: level}),
-	}))
 }

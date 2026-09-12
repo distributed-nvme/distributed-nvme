@@ -44,7 +44,7 @@ files are committed, so an ordinary build or test never requires protoc.
 * `common/` — complete per its specs: `constants.go` and `name_fmt.go` (the
   architecture §4/§7 constants and the deterministic dm/md/NQN/local-store
   name formats, `DnNsIdentity`, `NvmeHostId`), `log.go` (`log/slog` JSON
-  logging on stdout, trace ids on the context, `PbToLogValue`,
+  logging on stderr, trace ids on the context, `PbToLogValue`,
   `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
   commands and file/proto/block I/O plus the §4.5.1 raw probe helpers), and
   `interceptor.go` (the four gRPC interceptors).

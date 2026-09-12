@@ -108,8 +108,8 @@ the dn suite's directory, so the suites never share debris):
   dn-store/         # dn agent --local-store (must pre-exist)
   cn-store/         # cn agent --local-store (must pre-exist)
   dnv-agent         # scp'd binary (one binary, both roles)
-  dn-agent.log      # nohup'd dn stdout (JSON log records)
-  cn-agent.log      # nohup'd cn stdout
+  dn-agent.log      # dn stdout+stderr merged (JSON log records, on stderr)
+  cn-agent.log      # cn stdout+stderr merged
   pattern-*.bin     # test data files (on the host-role VM)
 ```
 

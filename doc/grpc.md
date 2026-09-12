@@ -475,15 +475,17 @@ Unit tests (`common/interceptor_test.go`) using
 
 Acceptance: `go test ./common/...` passes; every `grpc.NewClient` /
 `grpc.NewServer` call site reachable from the five `cmd/` binaries (except the
-etcd client) uses the chain options of §4 — today `gateway/server.go`,
-`gateway/common.go`, `worker/conn.go` and `agent/agent.go`; a manual
-end-to-end run shows one `trace_id` value flowing dnvctl → gateway → agent
-across `grpc client request`, `grpc server request`, `os command` and
-`etcd put` records.
+etcd client) uses the chain options of §4 — today five of them:
+`gateway/server.go` (through `serverOptions`), `gateway/common.go`,
+`worker/conn.go`, `agent/agent.go` and `ctl/root.go`'s `dial`, which is
+dnvctl's connection to the gateway; a manual end-to-end run shows one
+`trace_id` value flowing dnvctl → gateway → agent across
+`grpc client request`, `grpc server request`, `os command` and `etcd put`
+records.
 
-The `integtest/` drivers are scoped out of that grep on purpose; the two
-conventions they follow are recorded here so the carve-out does not live only
-in their code comments:
+The `integtest/` drivers are scoped out of that grep on purpose; what they do
+instead is recorded here, so that the one carve-out left does not live only in
+`gatewayctl`'s code comment:
 
 * `gatewayctl`, `cnagentctl` and `dnagentctl` dial **without** the client
   interceptors. A driver is not a dnv component, and its own request/reply
@@ -497,19 +499,32 @@ in their code comments:
   read for what the worker sent — `worker_test.sh` matches `grpc server *`
   records only, never the worker's own client-side ones, which carry the same
   payloads (§5 prints one such pair).
-* `gatewayctl`, `workerctl` and `cdcctl` replace `common`'s default logger
-  with the same `TraceIdHandler` over a `slog.NewJSONHandler(os.Stderr, nil)`,
-  because their **stdout** is reserved for the command's own result — one JSON
-  document for some subcommands, one line per key or record for others — which
-  the suites parse with `jq` or line by line. None of the three logs on its
-  own account: the redirect moves the `etcd *` records `etcdutil` emits under
-  `workerctl` and `cdcctl`, and under `gatewayctl`, which calls nothing that
-  logs, it is purely defensive. `log.md` R2's stdout rule and R3's
-  default-logger rule bind the five dnv binaries its §1 lists, and a driver is
-  not one of them. `integtest/fakeagent` logs far more than the three and
-  keeps the stdout default instead: it has no result to reserve stdout for, so
-  `common`'s `init()` chain stays in place and the suite captures its records
-  as `agent.log`.
+* None of the five drivers installs a logger of its own: each inherits
+  `common`'s `init()` chain, which already puts the JSON records on **stderr**
+  (`log.md` R2, R3). That inheritance is what keeps a driver's **stdout** the
+  result channel — one JSON document per invocation for most subcommands, one
+  line per key or entry for the listing ones (`workerctl list-keys` and
+  `list-workers`, `cdcctl list`), and a plain line or two for the handful that
+  print a derived value instead (`host-id` on both agent drivers,
+  `cnagentctl`'s hex `get-td-bm` / `get-leg-bm`, `wait-hydrated
+  --sample-only`) — which the suites parse with `jq`, read line by line, or
+  capture whole. `gatewayctl`, `workerctl` and `cdcctl` used to re-install a
+  `TraceIdHandler` of their own over a `slog.NewJSONHandler(os.Stderr, nil)` —
+  nil options, so it pinned the level at Info and dropped `common`'s
+  `LevelVar`; with the default already there that carve-out is gone, and none
+  of the three logs on its own account anyway — the only log records reaching
+  stderr are the `etcd *` ones `etcdutil` emits under `workerctl` and
+  `cdcctl`, while `gatewayctl` calls nothing that logs; each driver's `die`
+  and usage diagnostics share the stream as plain text. `dnagentctl` and
+  `cnagentctl` never call `slog` (neither imports `log/slog`), and the suites
+  read their stdout with no redirect at all — a plain command substitution, or
+  a pipe into `jq`: before the default moved, that was safe only by the
+  accident that the two never log; it is now safe structurally.
+  `integtest/fakeagent` inherits the same default and, as a daemon emitting an
+  interceptor record per gRPC message, logs far more than a one-shot driver;
+  its records still reach `agent.log` because the launcher merges both streams
+  (`>> …/agent.log 2>&1`), so the file the suite reads holds what it held
+  before.
 
 ## 7. Amendments applied to this document
 
@@ -522,3 +537,11 @@ inserted because §2, §3 and §4 are cited by number from `log.md` and
   `seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d`,
   the appended count being the sides whose §9.4 zeroing has not finished
   (`dnagent.md` DN18). Sample values only; no interceptor behaviour changed.
+* The default logger moved to stderr (`log.md` R2) — §6's second driver bullet
+  no longer records a logging carve-out. `gatewayctl`, `workerctl` and
+  `cdcctl` deleted the handler chain they used to re-install, so nothing
+  outside `common`'s `init()` and the unit tests calls `slog.SetDefault`; the
+  bullet now says what each driver inherits and why its stdout stays the
+  result channel. §6's acceptance inventory gained the fifth §4 call site it
+  had been missing, `ctl/root.go`'s `dial` — the dnvctl → gateway connection
+  §4's table already lists. No interceptor behaviour changed.

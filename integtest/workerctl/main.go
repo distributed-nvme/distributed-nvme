@@ -19,8 +19,8 @@
 //     a read, the ids and revisions it assigned for a mutation — except
 //     list-keys (one key per line) and list-workers (one object per line).
 //   - The log.md §5.3 records etcdutil emits ("etcd get", "etcd put", …) go to
-//     STDERR, not to the process-wide stdout handler common/log.go installs,
-//     so that they never interleave with the JSON the script pipes into jq.
+//     STDERR, where common/log.go's init() handler puts every record, so that
+//     they never interleave with the JSON the script pipes into jq.
 //     They carry --trace-id, so a failing run still correlates every write of
 //     the driver with the test stage that made it.
 //   - protojson is emitted with EmitUnpopulated, so that the fields the §14.11
@@ -41,7 +41,6 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
-	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -1092,11 +1091,10 @@ var commands = []command{
 }
 
 func main() {
-	// The etcdutil records belong on stderr: stdout is one JSON document per
-	// invocation, which the script pipes into jq.
-	slog.SetDefault(slog.New(&common.TraceIdHandler{
-		Handler: slog.NewJSONHandler(os.Stderr, nil),
-	}))
+	// No logger setup: common's init() already puts the JSON records on
+	// stderr, which is what keeps this driver's stdout the result channel —
+	// one JSON document per invocation for most subcommands, one line per key
+	// for list-keys — that the script pipes into jq or reads line by line.
 	g := newGlobals()
 	top := flag.NewFlagSet("workerctl", flag.ExitOnError)
 	g.bind(top)

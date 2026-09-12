@@ -29,17 +29,28 @@ R1. Use the standard library `log/slog` only. No third-party logging libraries.
     *results* to the user is CLI output, not logging, and is exempt).
 
 R2. The handler chain is: `TraceIdHandler` (defined below) wrapping
-    `slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})`.
-    All logs go to **stdout** as JSON. All handler options stay at their
-    defaults except `Level` — see R6. (`Level` is the one deliberate deviation
-    from "nil options"; it is required to satisfy the per-binary level rule.)
+    `slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})`.
+    All logs go to **stderr** as JSON. The stream is the kubernetes
+    convention — klog defaults to stderr, `kubectl` keeps stdout for the
+    result a script pipes — and what it buys is that **stdout is the payload
+    channel** of every dnv binary: dnvctl's one result document (`dnvctl.md`
+    CT7), and nothing from a running daemon (cobra's own `--help` text is
+    all four ever put there). A consumer that reads stdout alone therefore
+    gets the result and never a log record.
+    All handler options stay at their defaults except `Level` — see R6.
+    (`Level` is the one deliberate deviation from "nil options"; it is
+    required to satisfy the per-binary level rule.)
 
 R3. `common`'s `init()` calls `slog.SetDefault(...)` with that chain. The dnv
-    binaries of §1 do not build their own loggers. R2 and R3 bind those five
-    binaries only: the `integtest/` drivers are not dnv binaries, and three of
-    them re-install the same handler chain over `os.Stderr` because their
-    stdout carries the command result the suites parse — the carve-out is
-    recorded in `grpc.md` §6.
+    binaries of §1 do not build their own loggers — literally: that `init()`
+    holds the only `slog.SetDefault` call in the repository outside
+    `_test.go` files. `dnvctl` was the last binary to need one and no longer
+    does: the chain's handler holds `logLevel` (a `*slog.LevelVar`), so
+    `SetLogLevel` (R6) still bites after `init()` has run, which is precisely
+    what a second handler built around a static level would throw away.
+    The `integtest/` drivers are not dnv binaries, and they build no logger
+    either: they inherit this stderr default, which is exactly what keeps
+    their stdout the result channel the suites parse — see `grpc.md` §6.
 
 R4. Every log call uses the context-aware form — `slog.InfoContext`,
     `slog.WarnContext`, `slog.ErrorContext` — and passes the request-scoped
@@ -235,9 +246,17 @@ func SetLogLevel(l slog.Level) {
 	logLevel.Set(l)
 }
 
+// init installs the one handler chain every dnv binary logs through. The
+// stream is STDERR, the kubernetes convention: klog defaults to stderr, and
+// kubectl reserves stdout for the result a script pipes. Applied here it means
+// stdout is the payload channel of every dnv binary — dnvctl's one result
+// document, and nothing from a running daemon (cobra's own --help text is all
+// four ever put there) — so a log record can never be mistaken for output.
+// The handler holds logLevel (a *slog.LevelVar) rather than a fixed level, so
+// SetLogLevel keeps biting after init.
 func init() {
 	baseHandler := slog.NewJSONHandler(
-		os.Stdout,
+		os.Stderr,
 		&slog.HandlerOptions{Level: logLevel},
 	)
 	slog.SetDefault(slog.New(&TraceIdHandler{Handler: baseHandler}))
@@ -447,6 +466,16 @@ Unit tests (`common/log_test.go`):
    omitted like any proto3 zero), repeated fields as arrays, and map fields
    with stringified keys.
 6. `SetLogLevel(slog.LevelWarn)` suppresses Info records.
+7. The stream `init()` chose (`TestDefaultLoggerWritesStderr`, R2 and R3
+   together): a child process re-run from the test binary logs through the
+   untouched default logger after `SetLogLevel(slog.LevelWarn)`; its stdout
+   comes back **empty**, its stderr carries the Warn record with its
+   `trace_id`, the Info record is gone, and every stderr line parses as one
+   JSON record. The subprocess is not ceremony — short of `dup2`-ing over
+   the descriptor itself it is the only faithful observer, because
+   `slog.NewJSONHandler` captured the `*os.File` at package-init time and
+   reassigning the `os.Stdout` / `os.Stderr` package variables in-process
+   cannot reach it.
 
 Acceptance: `go build ./...` and `go test ./common/...` pass; every binary's
 `main` package imports `common` (directly or transitively); `dnvctl`'s `main()`
@@ -455,12 +484,13 @@ starts with `common.SetLogLevel(slog.LevelWarn)`; a grep for `log.Print`,
 exactly three lines, all in `etcdutil/etcdutil.go` — the `go.uber.org/zap`
 import, the comment explaining it, and the `zap.NewNop()` it passes as the
 etcd client's `Logger` — and nothing anywhere else. That logger is being
-*silenced*, not used, precisely so stdout carries one JSON stream and it is
-dnv's, which is R2; `TestStdoutStaysOneJsonRecordPerLine`
-(`etcdutil/etcdutil_test.go`) pins it by re-running the test binary as a child
-that drives the etcd client and asserting every line the child writes to
-stdout parses as one JSON record, dnv's own `etcd get` among them. No dnv
-record comes from anything but `log/slog`.
+*silenced*, not used, precisely so stderr carries one JSON stream and it is
+dnv's, which is R2; `TestStderrStaysOneJsonRecordPerLine`
+(`etcdutil/etcdutil_test.go`) pins it from both sides by re-running the test
+binary as a child that drives the etcd client: the child's stdout must come
+back empty, and every line it writes to stderr must parse as one JSON record,
+dnv's own `etcd get` among them. No dnv record comes from anything but
+`log/slog`.
 
 ## 8. Amendments applied to this document
 
@@ -476,3 +506,17 @@ inserted because §2, §3, §5.1 and §5.3 are cited by number from `osclient.md
   (`osclient.md` §4.5.1). `ReadBlockDirect` left the `OsClient` interface in
   the same change; §5.1 never had a row for it, so nothing was removed, and the
   `os read block` / `os write block` rows are unchanged.
+* The log stream moved from stdout to **stderr** — R2 names `os.Stderr` and
+  gives the reason, and §4's listing tracks the doc comment `init()` now
+  carries. R3's three-driver carve-out went with it: `integtest/workerctl`,
+  `gatewayctl` and `cdcctl` no longer re-install the chain over `os.Stderr`,
+  they inherit it, and `ctl.InstallStderrLogging` — the last per-binary
+  logger, whose handler froze a `slog.Level` at construction instead of
+  tracking `logLevel` — is deleted, leaving `dnvctl`'s `main()` at
+  `common.SetLogLevel(slog.LevelWarn)` plus `ctl.Execute()`. dnvctl's
+  observable contract is unchanged (Warn records on stderr, the one result
+  document on stdout), and no suite assertion moved either: every daemon
+  launcher in `integtest/*.sh` redirects with `>> <log> 2>&1`, merging both
+  streams into the same file as before. §7 follows the pin renamed for the
+  move, `TestStderrStaysOneJsonRecordPerLine`, and adds the new one,
+  `TestDefaultLoggerWritesStderr`.

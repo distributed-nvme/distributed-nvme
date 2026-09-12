@@ -38,7 +38,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -509,11 +508,9 @@ func lookup(name string) (command, bool) {
 }
 
 func main() {
-	// The slog records belong on stderr: stdout is one JSON document per
-	// invocation, which the script pipes into jq.
-	slog.SetDefault(slog.New(&common.TraceIdHandler{
-		Handler: slog.NewJSONHandler(os.Stderr, nil),
-	}))
+	// No logger setup: common's init() already puts the JSON records on
+	// stderr, which is what keeps this driver's stdout the result channel: one
+	// JSON document per invocation, which the script pipes into jq.
 	g := newGlobals()
 	top := flag.NewFlagSet("gatewayctl", flag.ExitOnError)
 	g.bind(top)

@@ -95,9 +95,17 @@ func SetLogLevel(l slog.Level) {
 	logLevel.Set(l)
 }
 
+// init installs the one handler chain every dnv binary logs through. The
+// stream is STDERR, the kubernetes convention: klog defaults to stderr, and
+// kubectl reserves stdout for the result a script pipes. Applied here it means
+// stdout is the payload channel of every dnv binary — dnvctl's one result
+// document, and nothing from a running daemon (cobra's own --help text is all
+// four ever put there) — so a log record can never be mistaken for output.
+// The handler holds logLevel (a *slog.LevelVar) rather than a fixed level, so
+// SetLogLevel keeps biting after init.
 func init() {
 	baseHandler := slog.NewJSONHandler(
-		os.Stdout,
+		os.Stderr,
 		&slog.HandlerOptions{Level: logLevel},
 	)
 	slog.SetDefault(slog.New(&TraceIdHandler{Handler: baseHandler}))

@@ -5,7 +5,7 @@
 // interceptors of doc/grpc.md §4, so `agent.log` carries one `grpc server
 // request`/`reply`/`recv`/`send` record per message with the caller's trace
 // id — the suite's evidence of what the worker sent and which worker sent it
-// (RW10). The JSON log goes to stdout through common's default logger; the
+// (RW10). The JSON log goes to stderr through common's default logger; the
 // script redirects it into `agent.log`.
 //
 // Two files in --dir drive and record the fake:

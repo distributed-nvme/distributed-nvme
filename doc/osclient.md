@@ -948,13 +948,15 @@ available):
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;
 `DefaultOsClientLimit` exists in `constants.go`; a repo-wide grep for
 `os/exec` that excludes `*_test.go` shows no usage outside
-`common/osclient.go` — the four excluded hits are the etcd test fixtures
+`common/osclient.go` — the five excluded hits are the four etcd test fixtures
 (`gateway`, `worker` and `model`'s `etcdenv_test.go` plus
 `etcdutil/etcdutil_test.go`), which start and stop a real `etcd` binary for
-their package's tests; `etcdutil_test.go` additionally re-runs the test binary
-itself, as the child of `TestStdoutStaysOneJsonRecordPerLine`, so that the
-production client's stdout can be observed from outside (the pin for `log.md`
-§7's `etcdutil/etcdutil.go` carve-out). No production code path spawns any of
+their package's tests, and `common/log_test.go`, which re-runs the test binary
+itself as the child of `TestDefaultLoggerWritesStderr`. `etcdutil_test.go`
+likewise re-runs the test binary itself, as the child of
+`TestStderrStaysOneJsonRecordPerLine`, which asserts from outside that the
+child's stdout stayed empty and that every line of its stderr parses as one
+JSON record (the pin for `log.md` §7's `etcdutil/etcdutil.go` carve-out). No production code path spawns any of
 them, so routing them through an `OsClient` would buy neither the §1 logging
 nor the `FakeOsClient` testability the rule exists for;
 `grep -rn "ReadBlockDirect" common/` hits only the exported helper

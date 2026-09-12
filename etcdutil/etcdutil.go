@@ -66,7 +66,7 @@ func New(
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: dialTimeout,
-		// Silence the etcd client's own zap logger: stdout carries one JSON
+		// Silence the etcd client's own zap logger: stderr carries one JSON
 		// record per line (log.md R2) and the integration suite parses it.
 		Logger: zap.NewNop(),
 	})

@@ -16,5 +16,5 @@ Current (must match `go.mod`):
   `ErrCompacted` report of `dnv-worker.md` EU3; arrives with the client and
   cannot be avoided.
 * go.uber.org/zap — only for `zap.NewNop()`, the silenced etcd client logger of
-  EU1, which keeps the JSON stdout log one record per line; arrives with the
+  EU1, which keeps the JSON stderr log one record per line; arrives with the
   client and cannot be avoided.

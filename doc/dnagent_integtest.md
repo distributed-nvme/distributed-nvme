@@ -102,7 +102,7 @@ Per-VM layout (all under `WORK=/var/tmp/dnv-integtest`):
   store/          # --local-store (must exist BEFORE agent start; agent
                   # will not create it and fails startup reconcile without it)
   dnv-agent       # scp'd binary
-  agent.log       # nohup'd stdout (JSON log records)
+  agent.log       # stdout+stderr merged (JSON log records, on stderr)
   pattern-*.bin   # test data files (migration cases, on the CN-role VM)
 ```
 
@@ -135,7 +135,7 @@ without the `mv` the re-opened file would still carry every pre-restart
 `dmsetup create` and `nvme connect` and fail that assertion.
 
 Notes: there is no extent-size flag (extent size arrives in
-`SyncupDnRequest.extent_size`); logging is JSON on stdout only; shutdown is
+`SyncupDnRequest.extent_size`); logging is JSON on stderr only; shutdown is
 SIGTERM (graceful). Kill in cleanup with `pkill -x dnv-agent`.
 
 ## 4. Assumptions and preflight checks

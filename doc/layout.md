@@ -236,8 +236,8 @@ nothing internal.
 Each `main.go` is thin: parse flags/config/env with viper (`architecture.md`
 §13), construct the dependencies, hand off to the matching library package.
 Because every main imports `common` (at least transitively), the `init()` in
-`common/log.go` installs the default JSON logger before `main` runs
-(`log.md` R3). Specifics:
+`common/log.go` installs the default JSON logger (on stderr) before `main`
+runs (`log.md` R3). Specifics:
 
 * `cmd/dnvctl/main.go` — first statement:
   `common.SetLogLevel(slog.LevelWarn)` (`log.md` R6).

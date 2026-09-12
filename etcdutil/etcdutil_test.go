@@ -28,9 +28,9 @@ import (
 // A real etcd server, shared by every test that needs one (EU7)
 // ---------------------------------------------------------------------------
 
-// stdoutChildEnv puts the re-executed test binary into the child mode of
-// TestStdoutStaysOneJsonRecordPerLine.
-const stdoutChildEnv = "DNV_ETCDUTIL_STDOUT_CHILD"
+// stderrChildEnv puts the re-executed test binary into the child mode of
+// TestStderrStaysOneJsonRecordPerLine.
+const stderrChildEnv = "DNV_ETCDUTIL_STDERR_CHILD"
 
 // testEndpoint is the client URL of the etcd started by TestMain, empty when
 // no etcd binary was found.
@@ -105,7 +105,7 @@ func startEtcd(bin string) (string, func(), error) {
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)
-	// The suite parses stdout as JSON records: etcd's own output goes
+	// The suite parses stderr as JSON records: etcd's own output goes
 	// nowhere.
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -151,10 +151,12 @@ func waitForEtcd(endpoint string) error {
 }
 
 func TestMain(m *testing.M) {
-	if os.Getenv(stdoutChildEnv) == "1" {
-		// The child of TestStdoutStaysOneJsonRecordPerLine: it must not
+	if os.Getenv(stderrChildEnv) == "1" {
+		// The child of TestStderrStaysOneJsonRecordPerLine: it must not
 		// start an etcd, and must print nothing but our own JSON records.
-		runStdoutChild()
+		// It exits before m.Run, which is what keeps the framework's own
+		// "PASS"/"ok" lines off the stdout the parent asserts is empty.
+		runStderrChild()
 		os.Exit(0)
 	}
 	if bin := findEtcdBin(); bin != "" {
@@ -1040,13 +1042,14 @@ func TestPlainOpErrorsAreWrappedAndLogged(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// EU1 — the etcd client must not write anything to stdout (log.md R2)
+// EU1 — the etcd client must not write anything of its own (log.md R2)
 // ---------------------------------------------------------------------------
 
-// runStdoutChild is the child mode of the test below: it exercises a client
+// runStderrChild is the child mode of the test below: it exercises a client
 // against a dead endpoint with the process default logger, so that everything
-// reaching stdout is either our own JSON record or a bug.
-func runStdoutChild() {
+// reaching stderr is either our own JSON record or a bug — and stdout, the
+// payload channel, stays empty.
+func runStderrChild() {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	cli, err := New(ctx, []string{"127.0.0.1:1"}, 100*time.Millisecond)
@@ -1063,14 +1066,21 @@ func runStdoutChild() {
 	_ = cli.Close()
 }
 
-func TestStdoutStaysOneJsonRecordPerLine(t *testing.T) {
-	cmd := exec.Command(os.Args[0], "-test.run=TestStdoutStaysOneJsonRecordPerLine")
-	cmd.Env = append(os.Environ(), stdoutChildEnv+"=1")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("child: %v", err)
+func TestStderrStaysOneJsonRecordPerLine(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestStderrStaysOneJsonRecordPerLine")
+	cmd.Env = append(os.Environ(), stderrChildEnv+"=1")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child: %v (stderr %q)", err, errBuf.String())
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if outBuf.Len() != 0 {
+		t.Fatalf("the child wrote %q to stdout, which is the payload "+
+			"channel and must stay empty", outBuf.String())
+	}
+	out := errBuf.String()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
 	sawGet := false
 	for _, line := range lines {
 		if line == "" {
@@ -1078,7 +1088,7 @@ func TestStdoutStaysOneJsonRecordPerLine(t *testing.T) {
 		}
 		rec := make(map[string]any)
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("non-JSON line on stdout: %q", line)
+			t.Fatalf("non-JSON line on stderr: %q", line)
 		}
 		if rec["msg"] == "etcd get" {
 			sawGet = true

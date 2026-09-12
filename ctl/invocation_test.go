@@ -1,7 +1,6 @@
 // The invocation model (dnvctl.md §2): the parts of CT2/CT9 that are neither
 // a request field nor a rendered document — the per-invocation deadline, the
-// one connection and its close, the viper config file, and the stderr logger
-// cmd/dnvctl/main.go installs.
+// one connection and its close, and the viper config file.
 //
 // These sit under CT-T2/CT-T5 rather than having a tag of their own, but they
 // are where a defect would be invisible to every other test in the package:
@@ -12,14 +11,12 @@ package ctl
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -155,38 +152,4 @@ func TestConfigFile(t *testing.T) {
 			t.Errorf("stdout = %q, want empty", res.stdout)
 		}
 	})
-}
-
-// TestInstallStderrLogging is CT7: what survives the level goes to STDERR,
-// because stdout is reserved for the one result document, and the level
-// travels explicitly — building the handler with a nil options argument would
-// drop common's LevelVar and leave the process logging at Info, which is the
-// latent bug root.go's comment says the three integtest drivers have.
-func TestInstallStderrLogging(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	stdout, stderr := captureOutput(t, func() {
-		InstallStderrLogging(slog.LevelWarn)
-		slog.Info("info record")
-		slog.WarnContext(
-			common.WithTraceId(context.Background(), "trace-abc"),
-			"warn record")
-	})
-
-	if stdout != "" {
-		t.Errorf("logging wrote %q to stdout, which is reserved for the "+
-			"result document (CT7)", stdout)
-	}
-	if strings.Contains(stderr, "info record") {
-		t.Errorf("an Info record survived level Warn: %q", stderr)
-	}
-	if !strings.Contains(stderr, "warn record") {
-		t.Errorf("stderr = %q, want the Warn record", stderr)
-	}
-	// common.TraceIdHandler must wrap the JSON handler, or a dnvctl warning
-	// would be unjoinable to the gateway's log for the same invocation.
-	if !strings.Contains(stderr, `"trace_id":"trace-abc"`) {
-		t.Errorf("stderr = %q, want the trace id attribute", stderr)
-	}
 }

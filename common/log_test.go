@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -391,6 +393,85 @@ func TestSetLogLevelSuppressesInfo(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("captured %v, want %v", got, want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The stream init() chose (log.md §7, R2, R3)
+// ---------------------------------------------------------------------------
+//
+// Neither a bytes.Buffer nor a swap of the os.Stdout/os.Stderr package
+// variables can observe the handler init() built: slog.NewJSONHandler holds
+// the *os.File it was given at package-init time and writes to that file
+// descriptor forever. Short of dup2-ing over that descriptor, the only
+// faithful observer is a second process, so this pin re-runs the test binary
+// in the child mode below — the same idiom etcdutil's one-record-per-line test
+// uses.
+
+// stderrChildEnv puts the re-executed test binary into the child mode of
+// TestDefaultLoggerWritesStderr.
+const stderrChildEnv = "DNV_COMMON_STDERR_CHILD"
+
+// TestMain runs that child when the environment selects it. The child exits
+// BEFORE m.Run, which is what keeps the framework's own "PASS"/"ok" lines off
+// the stdout the parent asserts is empty.
+func TestMain(m *testing.M) {
+	if os.Getenv(stderrChildEnv) == "1" {
+		runStderrChild()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// runStderrChild logs through the process default logger — the one init()
+// installed, untouched — at the level dnvctl's main() sets.
+func runStderrChild() {
+	SetLogLevel(slog.LevelWarn) // what dnvctl's main() does
+	slog.Info("info record")
+	slog.WarnContext(
+		WithTraceId(context.Background(), "trace-abc"),
+		"warn record",
+	)
+}
+
+// TestDefaultLoggerWritesStderr is R2 and R3 together: the chain common's
+// init() installs writes JSON to STDERR, honors SetLogLevel, keeps the trace
+// id attribute, and leaves stdout — the payload channel — completely empty.
+func TestDefaultLoggerWritesStderr(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestDefaultLoggerWritesStderr")
+	cmd.Env = append(os.Environ(), stderrChildEnv+"=1")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("child: %v (stderr %q)", err, errBuf.String())
+	}
+
+	if outBuf.Len() != 0 {
+		t.Errorf("the default logger wrote %q to stdout, which is the "+
+			"payload channel (R2)", outBuf.String())
+	}
+	stderr := errBuf.String()
+	if strings.Contains(stderr, "info record") {
+		t.Errorf("an Info record survived SetLogLevel(Warn): %q", stderr)
+	}
+	if !strings.Contains(stderr, "warn record") {
+		t.Errorf("stderr = %q, want the Warn record", stderr)
+	}
+	// TraceIdHandler must wrap the JSON handler, or a record would be
+	// unjoinable to the rest of its invocation.
+	if !strings.Contains(stderr, `"trace_id":"trace-abc"`) {
+		t.Errorf("stderr = %q, want the trace id attribute", stderr)
+	}
+	// R2's shape: one JSON record per line, nothing else on the stream.
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if line == "" {
+			continue
+		}
+		rec := make(map[string]any)
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("non-JSON line on stderr: %q", line)
 		}
 	}
 }

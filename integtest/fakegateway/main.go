@@ -3,7 +3,7 @@
 // service on a plaintext listener behind the real server interceptors of
 // doc/grpc.md §4, so `fakegateway.log` carries one `grpc server
 // request`/`reply` record per call with the caller's trace id — the suite's
-// evidence of what dnvctl put on the wire (§7.7). The JSON log goes to stdout
+// evidence of what dnvctl put on the wire (§7.7). The JSON log goes to stderr
 // through common's default logger; the script redirects it into
 // `fakegateway.log`.
 //

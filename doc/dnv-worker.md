@@ -532,7 +532,7 @@ CM5. **Shutdown.** `SIGINT`/`SIGTERM` cancel `ctx`; `Run` then, in order:
      with status 1. Deleting before draining means the successor can start
      while a last syncup finishes — the accepted overlap of §0 item 4.
 
-CM6. **Logging.** JSON on stdout, Info level by default (`log.md`). The
+CM6. **Logging.** JSON on stderr, Info level by default (`log.md`). The
      `worker starting` record carries `roles`, `seed`, `endpoints`,
      `vote_interval`, `grace_time`; `worker stopping` carries `seed`. Every
      round, syncup, push, flip and reaction runs under a trace id minted per
@@ -1422,19 +1422,22 @@ bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@192.168.10.2
   cn0/ … cn2/     agent.log  behavior.json  state.json           # one dir per fake CN
 ```
 
-Launch lines (all `nohup … &` over ssh; stdout is the JSON log):
+Launch lines (all `nohup … &` over ssh; the JSON log is on stderr, so the
+`2>&1` in each line is what puts it in the file, and the `>>` is what lets a
+relaunched process append rather than reset the offset the case baselined
+from):
 
 ```
 $WORK/bin/etcd --name dnv-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:12379 --advertise-client-urls http://127.0.0.1:12379 \
   --listen-peer-urls http://127.0.0.1:12380 --initial-advertise-peer-urls http://127.0.0.1:12380 \
-  --initial-cluster dnv-it=http://127.0.0.1:12380 > $WORK/etcd/etcd.log 2>&1 &
+  --initial-cluster dnv-it=http://127.0.0.1:12380 >> $WORK/etcd/etcd.log 2>&1 &
 
 $WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:12379 --roles dn,cn,sp \
-  --vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE > $WORK/w1/worker.log 2>&1 &
+  --vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE >> $WORK/w1/worker.log 2>&1 &
 
-$WORK/bin/fakeagent dn --grpc-address <ip>:29600 --dir $WORK/dn0 > $WORK/dn0/agent.log 2>&1 &
-$WORK/bin/fakeagent cn --grpc-address <ip>:29700 --dir $WORK/cn0 > $WORK/cn0/agent.log 2>&1 &
+$WORK/bin/fakeagent dn --grpc-address <ip>:29600 --dir $WORK/dn0 >> $WORK/dn0/agent.log 2>&1 &
+$WORK/bin/fakeagent cn --grpc-address <ip>:29700 --dir $WORK/cn0 >> $WORK/cn0/agent.log 2>&1 &
 ```
 
 Process control: the three workers share one command line, so the script

@@ -603,10 +603,11 @@ s2:  cdc_target.sh                        (all real state is kernel state)
 h*:  uevents.log  stas-backup/            (captures, saved original confs)
 ```
 
-* Launch lines (`nohup … &` over ssh; stdout is the JSON log). The redirect
-  is `>>`, so a relaunched instance appends: §9.9's per-case reset is the
-  only thing that truncates a `cdc.log`, and a mid-case restart's records
-  land past the baseline that case counted from.
+* Launch lines (`nohup … &` over ssh; the JSON log is on stderr, which the
+  `2>&1` in each line merges into the file). The redirect is `>>`, so a
+  relaunched instance appends: §9.9's per-case reset is the only thing that
+  truncates a `cdc.log`, and a mid-case restart's records land past the
+  baseline that case counted from.
 
 ```
 $WORK/bin/etcd --name dnv-cdc-it --data-dir $WORK/etcd \

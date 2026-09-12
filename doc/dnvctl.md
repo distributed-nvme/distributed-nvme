@@ -122,16 +122,31 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
   (layout.md §7 item 4, dependencies.md). dnvctl's only server-side dependency
   is `pb` + `common`.
 * **CT7 — log level Warn, logs to stderr.** `cmd/dnvctl/main.go`'s first
-  statement is `common.SetLogLevel(slog.LevelWarn)` (log.md R6, layout.md).
-  `ctl/` installs `common.TraceIdHandler` over
-  `slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})` (nil
-  options would pin the handler at Info and spill every §4 client-interceptor
-  record onto stderr) — stdout is reserved for command
-  results (the grpc.md §6 driver rule, applied to the real CLI for the same
-  reason). Because every §4 client-interceptor record is Info, dnvctl's own
-  gRPC logging is silenced by design (log.md: "this is intended").
+  statement is `common.SetLogLevel(slog.LevelWarn)` (log.md R6, layout.md),
+  and that is the whole of dnvctl's logging setup: `ctl/` installs no
+  logger of its own, because `common`'s `init()` already puts every record
+  on stderr as JSON (log.md R2/R3). Leaving it there is what keeps the
+  level **live** rather than baked in — the handler `init()` builds holds
+  `logLevel`, a `*slog.LevelVar`, so `SetLogLevel` still bites after the
+  handler exists — and it leaves stdout reserved for the one result
+  document (§3.1). Because every §4 client-interceptor record is Info,
+  dnvctl's own gRPC logging is silenced by design (log.md: "this is
+  intended").
+
+  **Amended 2026-09-11:** CT7 used to require a `ctl.InstallStderrLogging`
+  helper that re-installed the chain over `os.Stderr` at a fixed level,
+  because `common`'s handler then wrote to stdout. With that handler moved
+  to stderr the helper had nothing left to do; it and its call are deleted,
+  and dnvctl — log.md R3's last exception to "the dnv binaries of §1 do not
+  build their own loggers" — is no longer one. The observable contract is
+  unchanged: Warn, records on stderr, stdout carrying the result document.
+  What improves is the level: the helper baked it into the handler at
+  construction time, while the `LevelVar` tracks every later `SetLogLevel`.
 * **CT4 (part) — `fmt.Print*` only in the result-emit path** (log.md R1's
-  explicit dnvctl exemption); everything else goes through slog.
+  explicit dnvctl exemption); the two §3.2 error lines are the only other
+  direct writes in the package, `fmt.Fprintf` to stderr from `ctl/root.go`'s
+  `Execute`. `ctl/` calls slog nowhere at all: the records CT7's Warn level
+  silences are the §4 client interceptors'.
 
 ## 2. Invocation model
 
@@ -205,7 +220,9 @@ renders `bytes` as base64): `td get-bm` and `td get-leg-bm` print
 {"bitmap_hex":"<lowercase hex, no 0x>","byte_cnt":<n>}
 ```
 
-Nothing else is ever printed to stdout. There is no quiet/verbose mode.
+Nothing else is ever printed to stdout on an RPC path; cobra's stock `help`
+and `completion` (§0 #3) write their text there too. There is no
+quiet/verbose mode.
 
 ### 3.2 Errors and exit codes — CT5
 
@@ -497,8 +514,13 @@ scp'd to `$WORK/bin` and `chmod 0755`.
 `service Gateway` methods (all unary) behind the mandatory §4 server
 interceptors (`grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor())`
 + the stream twin, installed even though unused — same rule as fakeagent: the
-JSON log on stdout is the suite's record). Startup record
-`"fakegateway started"` with `grpc_address`, `dir`.
+JSON log is the suite's record). The fake installs no logger of its own, so
+its records go where `common`'s `init()` puts them — stderr — and it
+prints nothing on stdout at all. §7.8's `remote_start` redirects with
+`>> fakegateway.log 2>&1`, merging both streams, so the file the §7.7
+assertions read holds the same records as when the chain wrote to stdout;
+no assertion in this suite depends on which stream carried them. Startup
+record `"fakegateway started"` with `grpc_address`, `dir`.
 
 **Request recording (always first).** On every call, before any behavior is
 applied, the fake bumps the method's count and stores the request, then writes
@@ -765,8 +787,11 @@ Recorded for traceability; the edits are applied with this document.
   what the bypass costs — a token-less mutator has no optimistic-concurrency
   gate. Id range in the preamble extended to RK8.
 
-Deliberately **not** amended: `doc/grpc.md` (its dnvctl rows were already
-correct).
+Deliberately **not** amended when this document landed: `doc/grpc.md` — its
+§4 wiring rows for dnvctl were already correct. Its §6 acceptance inventory of
+§4 construction sites was not: it named four and omitted `ctl/root.go`'s
+`dial`, which the 2026-09-11 stderr-logging change added while rewriting §6's
+driver-logging bullet (grpc.md §6, §7).
 
 Amended after all, once the code landed: `gateway/cntlr.go`'s comment and
 architecture.md §8.6 both asserted in the present tense that "dnvctl warns"
