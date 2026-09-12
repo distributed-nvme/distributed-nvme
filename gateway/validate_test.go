@@ -273,13 +273,17 @@ func TestValidateHosts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Bounded numerics and the "zero means unset" rule (§7 table, GW11)
+// Bounded numerics and the "zero means unset" rule (§7 table)
 // ---------------------------------------------------------------------------
 
-// TestValidateBound pins the rule the whole numeric half of §7 rests on: a
-// proto3 zero is "unset" and selects the Default* at USE time, so zero is
-// ALWAYS accepted here even when the minimum is 1, and only a non-zero value
-// outside [min, max] is refused. Nothing in validate.go rewrites the value.
+// TestValidateBound pins the rule the whole numeric half of §7 rests on: on
+// the REQUEST side a proto3 zero is "unset" and asks for the Default*, so zero
+// is ALWAYS accepted here even when the minimum is 1, and only a non-zero
+// value outside [min, max] is refused. Nothing in validate.go rewrites the
+// value; the handler substitutes the default afterwards, once, and stores the
+// concrete result. The model's stored-conf validators have no such escape
+// hatch — a zero there is corruption — which is exactly why this side has to
+// keep accepting one.
 func TestValidateBound(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -302,10 +306,17 @@ func TestValidateBound(t *testing.T) {
 	}
 }
 
-// TestValidateDnBinConf pins the dn_bin_conf.extent_size row: [64 MiB, 1 TiB],
-// zero unset. The four bin shifts are deliberately NOT range-checked — they
-// are resolved into a consistent ladder by model.ResolveDnBinConf — so a wild
-// shift must still be accepted here.
+// TestValidateDnBinConf pins the dn_bin_conf.extent_size row — [64 MiB, 1 TiB],
+// zero unset — and the §6.2 shift ladder, which is all-or-nothing.
+//
+// All four shifts zero is the proto3 "unset" that asks for the 0/4/8/12
+// default and is accepted; any other set must already BE a ladder
+// 0 <= bin0 < bin1 < bin2 < bin3 <= 63. The stored ladder is what every
+// capacity key in the cluster is written under for the cluster's whole life
+// (§7: nothing resolves it again on read), so an operator who asks for a
+// ladder that is not one has to be told here — quietly substituting the
+// default would hand them a cluster binned differently from the one they
+// asked for, and there is no UpdateCluster RPC to correct it with.
 func TestValidateDnBinConf(t *testing.T) {
 	cases := []struct {
 		name string
@@ -335,11 +346,49 @@ func TestValidateDnBinConf(t *testing.T) {
 			codes.InvalidArgument,
 		},
 		{
-			"absurd shifts are not this file's business",
+			// The all-zero set the "empty" and "nil" rows above also carry,
+			// spelled out beside an explicit ladder so the two arms of the
+			// rule sit next to each other: this one asks for the default.
+			"the all-zero ladder asks for the default",
+			&pb.DnBinConf{
+				ExtentSize: common.DefaultDnExtSize,
+				Bin0Shift:  0, Bin1Shift: 0, Bin2Shift: 0, Bin3Shift: 0,
+			},
+			codes.OK,
+		},
+		{
+			"an explicit increasing ladder",
+			&pb.DnBinConf{
+				Bin0Shift: 1, Bin1Shift: 5, Bin2Shift: 9, Bin3Shift: 63,
+			},
+			codes.OK,
+		},
+		{
+			// bin0 above bin1 and bin2 below both: not a ladder in any
+			// reading, and the stored bins would be nonsense rather than
+			// merely unusual.
+			"absurd shifts are refused",
 			&pb.DnBinConf{
 				Bin0Shift: 99, Bin1Shift: 1, Bin2Shift: 0, Bin3Shift: 7,
 			},
-			codes.OK,
+			codes.InvalidArgument,
+		},
+		{
+			// Increasing, but bin3 past the 63 a uint64 level can be shifted
+			// by: the ladder's top rung has to stay expressible.
+			"bin3_shift above 63",
+			&pb.DnBinConf{
+				Bin0Shift: 0, Bin1Shift: 4, Bin2Shift: 8, Bin3Shift: 64,
+			},
+			codes.InvalidArgument,
+		},
+		{
+			// Three of four set is still "not all zero", so the whole set is
+			// held to the ladder and a zero bin3 fails it. There is no
+			// shift-by-shift defaulting to fall back on.
+			"a partially set ladder",
+			&pb.DnBinConf{Bin0Shift: 0, Bin1Shift: 4, Bin2Shift: 8},
+			codes.InvalidArgument,
 		},
 	}
 	for _, item := range cases {

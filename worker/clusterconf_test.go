@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -68,27 +70,39 @@ func TestConfCacheKeyToIdDerivation(t *testing.T) {
 	}
 }
 
-// TestConfCacheResolvesDefaults checks the RW21 defaults: the four intervals
-// (0 => 5, clamped to [1, 3600]), extent_size (0 => DefaultDnExtSize), the
-// dn_bin_conf shifts, and qos_ratio exactly as stored.
-func TestConfCacheResolvesDefaults(t *testing.T) {
+// TestConfCacheReturnsTheConfAsStored is the mirror image of the resolution
+// the cache used to do: §7 makes the gateway resolve every defaultable member
+// at WRITE time, so RW21 hands a reader the stored bytes and changes nothing.
+//
+// Three of the members below are values the cache's old resolver WOULD have
+// rewritten on the way out — a dn_interval of 100000 (it clamped to 3600),
+// absent side and cntlr intervals (it substituted 5), no dn_bin_conf at all
+// (it substituted the 0/4/8/12 ladder and DefaultDnExtSize). The fourth, a
+// low_water_mark_pct above 100, is the one value NOTHING ever rewrites, on
+// either path: §7 gives it a meaning, "never grow this pool automatically".
+// Every one of them comes back untouched. That is not a detail: it is what
+// makes an INVALID stored conf reach a reader at all, and therefore what makes
+// the refusals in revision.go, reaction.go, sprole.go and health.go
+// expressible.
+func TestConfCacheReturnsTheConfAsStored(t *testing.T) {
 	h := newConfHarness(t)
-	const name = "defaults"
+	const name = "asstored"
 	const epoch = uint64(42)
 	cid := model.ClusterId(name, epoch)
-	qos := &pb.QosRatio{Strict: true, BytesPerIops: 4096}
+	stored := &pb.ClusterConf{
+		CreationEpoch: epoch,
+		QosRatio:      &pb.QosRatio{Strict: true, BytesPerIops: 4096},
+		HealthCheckConf: &pb.HealthCheckConf{
+			DnInterval: 100000,
+			CnInterval: 7,
+		},
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{LowWaterMarkPct: 150},
+		},
+	}
 
 	err := h.store.Put(
-		context.Background(),
-		model.ClusterConfKey(name),
-		&pb.ClusterConf{
-			CreationEpoch: epoch,
-			QosRatio:      qos,
-			HealthCheckConf: &pb.HealthCheckConf{
-				DnInterval: 0,
-				CnInterval: 100000,
-			},
-		},
+		context.Background(), model.ClusterConfKey(name), stored,
 	)
 	if err != nil {
 		t.Fatalf("put: %v", err)
@@ -98,33 +112,57 @@ func TestConfCacheResolvesDefaults(t *testing.T) {
 		return ok
 	})
 	cc, _ := h.cache.get(cid)
-	hc := cc.GetHealthCheckConf()
-	if hc.GetDnInterval() != common.DefaultHealthCheckInterval {
-		t.Fatalf("dn_interval = %d, want %d",
-			hc.GetDnInterval(), common.DefaultHealthCheckInterval)
+	if !proto.Equal(cc, stored) {
+		t.Fatalf("cached conf =\n%v\nwant the stored\n%v", cc, stored)
 	}
-	if hc.GetCnInterval() != common.MaxHealthCheckInterval {
-		t.Fatalf("cn_interval = %d, want the %d clamp",
-			hc.GetCnInterval(), common.MaxHealthCheckInterval)
+	// Spelled out for the three members a resolver would have been most
+	// tempted by, so a reintroduced read-time default cannot hide behind a
+	// message-level comparison someone later loosens.
+	if got := cc.GetHealthCheckConf().GetDnInterval(); got != 100000 {
+		t.Fatalf("dn_interval = %d, want the stored 100000 unclamped", got)
 	}
-	if hc.GetSideInterval() != common.DefaultHealthCheckInterval ||
-		hc.GetCntlrInterval() != common.DefaultHealthCheckInterval {
-		t.Fatalf("side/cntlr intervals = %d/%d, want the default",
-			hc.GetSideInterval(), hc.GetCntlrInterval())
+	if cc.GetDnBinConf() != nil {
+		t.Fatalf("dn_bin_conf = %v, want the stored absence", cc.GetDnBinConf())
 	}
-	bin := cc.GetDnBinConf()
-	if bin.GetExtentSize() != common.DefaultDnExtSize {
-		t.Fatalf("extent_size = %d, want %d",
-			bin.GetExtentSize(), common.DefaultDnExtSize)
+	if got := cc.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct(); got != 150 {
+		t.Fatalf("low_water_mark_pct = %d, want the stored 150", got)
 	}
-	if bin.GetBin0Shift() != common.DefaultDnBin0Shift ||
-		bin.GetBin3Shift() != common.DefaultDnBin3Shift {
-		t.Fatalf("bin shifts = %d..%d, want the defaults",
-			bin.GetBin0Shift(), bin.GetBin3Shift())
+	// A conf like this is exactly what model.ValidateClusterConf exists to
+	// refuse: the cache caches it, the readers reject it (§7).
+	if err := model.ValidateClusterConf(cc); err == nil {
+		t.Fatalf("an unresolved stored conf validated")
 	}
-	if !cc.GetQosRatio().GetStrict() ||
-		cc.GetQosRatio().GetBytesPerIops() != 4096 {
-		t.Fatalf("qos_ratio = %v, want it as stored", cc.GetQosRatio())
+}
+
+// TestConfCacheKeepsAnInvalidConf pins the cache's deliberate non-drop: an
+// unusable conf stays in the cache, because dropping it would make a cluster
+// whose conf went bad look exactly like a deleted one to every reader and send
+// an operator chasing a phantom deletion (clusterconf.go, §7).
+func TestConfCacheKeepsAnInvalidConf(t *testing.T) {
+	h := newConfHarness(t)
+	const name = "corrupt"
+	const epoch = uint64(43)
+	cid := model.ClusterId(name, epoch)
+
+	// A ladder-less DnBinConf: valid protobuf, impossible from CreateCluster.
+	bad := testClusterConf(func(cc *pb.ClusterConf) {
+		cc.CreationEpoch = epoch
+		cc.DnBinConf = nil
+	})
+	err := h.store.Put(context.Background(), model.ClusterConfKey(name), bad)
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	waitFor(t, "cluster cached", func() bool {
+		_, ok := h.cache.get(cid)
+		return ok
+	})
+	cc, ok := h.cache.get(cid)
+	if !ok {
+		t.Fatalf("the cache dropped an invalid conf")
+	}
+	if err := model.ValidateClusterConf(cc); err == nil {
+		t.Fatalf("the cache repaired the conf it was given")
 	}
 }
 

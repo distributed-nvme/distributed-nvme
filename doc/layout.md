@@ -112,9 +112,11 @@ distributed-nvme/                      # repo root = module root
 │   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring
 │   ├── store.go                       # local store helper (Local*Path files, load-on-start)
 │   ├── revision.go                    # §9.1 revision gate + reply codes
+│   ├── conf.go                        # §7 stored-conf validators, the agent-side copy (dnagent.md §2.1)
 │   ├── locks.go                       # node/object lock hierarchy (dnagent.md §2.6)
 │   ├── resinfo.go                     # ResInfo/status-epoch tracker (§9.5)
 │   ├── bitmap.go                      # §9.6 chunk store + §11.4 math skeleton
+│   ├── oswrap.go                      # the shared command/configfs plumbing under the three wrappers below
 │   ├── dm.go                          # dmsetup wrapper + table builders, blkdiscard, lsblk
 │   ├── nvmet.go                       # nvmet configfs wrapper, fixed ANA groups [D4]
 │   ├── nvmehost.go                    # nvme connect/disconnect/list-subsys wrapper

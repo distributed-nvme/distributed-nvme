@@ -253,17 +253,22 @@ func (m *healthMonitor) observe(
 
 // errNoClusterConf is why a DN health write is skipped while its cluster is
 // absent from the RW21 cache. MD4 derives the DnCapacity key's bin index from
-// dn_bin_conf, so a write with no conf would resolve the DEFAULT 0/4/8/12
-// shifts: the real key would never be deleted and a duplicate would be written
-// at the wrong bin, which §6.3's bin scan would then hand out as an allocation
-// candidate for a DN HL1 has just flagged unhealthy.
+// dn_bin_conf, so a write with no usable conf would have to invent a ladder:
+// the real key would never be deleted and a duplicate would be written at the
+// wrong bin, which §6.3's bin scan would then hand out as an allocation
+// candidate for a DN HL1 has just flagged unhealthy. An UNUSABLE stored conf
+// is refused the same way and for exactly the same reason (§7).
 var errNoClusterConf = errors.New("cluster conf missing")
 
-// newDnMonitor builds the health monitor of one DN (HL1). The resolved cluster
-// conf the capacity key maintenance needs (MD4) is read per write rather than
-// captured, because a cluster conf change must reach the next write — and a
-// conf that has been deleted between the loop's RW9 gate and this write makes
-// the write wait for the next round (RW12) rather than guess defaults.
+// newDnMonitor builds the health monitor of one DN (HL1). The cluster conf the
+// capacity key maintenance needs (MD4) is read per write rather than captured,
+// because a cluster conf change must reach the next write — and a conf that
+// has been deleted, or that cannot be used, between the loop's RW9 gate and
+// this write makes the write wait for the next round (RW12) rather than guess.
+// It re-validates rather than trusting the loop's gate because it is not
+// COVERED by one: the gate checked the conf the round was built from, while
+// this closure uses a conf re-read from the cache per write, which the watch
+// goroutine may have replaced in between.
 func newDnMonitor(
 	d *deps,
 	cid uint64,
@@ -281,6 +286,11 @@ func newDnMonitor(
 			if !ok {
 				return fmt.Errorf(
 					"dn err_epoch cluster %016x: %w", cid, errNoClusterConf,
+				)
+			}
+			if err := model.ValidateClusterConf(cc); err != nil {
+				return fmt.Errorf(
+					"dn err_epoch cluster %016x: %w", cid, err,
 				)
 			}
 			return d.health.setDnErrEpoch(ctx, cid, addrPort(), epoch, cc)

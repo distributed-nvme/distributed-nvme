@@ -62,7 +62,8 @@ func TestFindDnCandidatesBinWalk(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
 	cid := testCid(t)
-	// Default bins: levels 1 / 16 / 256 / 4096.
+	// The stored 0/4/8/12 ladder gives levels 1 / 16 / 256 / 4096, which is
+	// what the bin indexes below are computed under.
 	putDnCap(t, cli, cid, 0, 10, "dn-a:9000", "r0")
 	putDnCap(t, cli, cid, 1, 30, "dn-c:9000", "r2")
 	putDnCap(t, cli, cid, 1, 20, "dn-b:9000", "r1")
@@ -70,7 +71,7 @@ func TestFindDnCandidatesBinWalk(t *testing.T) {
 	putDnCap(t, cli, cid, 2, 300, "dn-e:9000", "r4")
 	putDnCap(t, cli, cid, 3, 5000, "dn-f:9000", "r5")
 
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 	cands, err := FindDnCandidates(ctx, cli, cid, cc, 20, 10, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("FindDnCandidates: %v", err)
@@ -132,7 +133,7 @@ func TestFindDnCandidatesLocationDedupe(t *testing.T) {
 	putDnCap(t, cli, cid, 2, 300, "dn-d:9000", "rack0")
 
 	cands, err := FindDnCandidates(
-		ctx, cli, cid, &pb.ClusterConf{}, 20, 10, nil, nil, nil,
+		ctx, cli, cid, testClusterConf(), 20, 10, nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindDnCandidates: %v", err)
@@ -153,7 +154,7 @@ func TestFindDnCandidatesLists(t *testing.T) {
 	putDnCap(t, cli, cid, 1, 40, "dn-a:9000", "r0")
 	putDnCap(t, cli, cid, 1, 30, "dn-b:9000", "r1")
 	putDnCap(t, cli, cid, 1, 20, "dn-c:9000", "r2")
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 
 	cands, err := FindDnCandidates(
 		ctx, cli, cid, cc, 20, 10, []string{"dn-a:9000"}, nil, nil,
@@ -222,7 +223,7 @@ func TestFindDnCandidatesExcludeLocs(t *testing.T) {
 	ctx := context.Background()
 	cid := testCid(t)
 	antiAffineFixture(t, cli, cid)
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 	black := []string{"dn-a:9000"}
 
 	cands, err := FindDnCandidates(ctx, cli, cid, cc, 20, 10, black, nil, nil)
@@ -271,7 +272,7 @@ func TestFindDnCandidatesAntiAffine(t *testing.T) {
 	ctx := context.Background()
 	cid := testCid(t)
 	antiAffineFixture(t, cli, cid)
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 	black := []string{"dn-a:9000"}
 
 	// Tier 1 has what was asked for: the other-domain DN, and no fallback.
@@ -337,7 +338,7 @@ func TestFindDnCandidatesAntiAffineTriggerIsRequiredCnt(t *testing.T) {
 	ctx := context.Background()
 	cid := testCid(t)
 	antiAffineFixture(t, cli, cid)
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 
 	cands, tier2, err := FindDnCandidatesAntiAffine(
 		ctx, cli, cid, cc, 20, 10, 1,
@@ -383,7 +384,7 @@ func TestFindDnCandidatesAntiAffineMergesTier1(t *testing.T) {
 	putDnCap(t, cli, cid, 1, 35, "dn-e:9000", "rack2")
 	putDnCap(t, cli, cid, 1, 30, "dn-b:9000", "rack0")
 	putDnCap(t, cli, cid, 1, 20, "dn-c:9000", "rack1")
-	cc := &pb.ClusterConf{}
+	cc := testClusterConf()
 
 	cands, tier2, err := FindDnCandidatesAntiAffine(
 		ctx, cli, cid, cc, 20, 2, 2,

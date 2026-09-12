@@ -2,8 +2,8 @@
 
 Status: **informational, non-normative.** This file ranks the residual
 risks of the v1 design for operators and for v2 planning. Every mechanism
-named here behaves as its owning spec says — nothing below is a defect in
-the sense of the update_0N ledgers; each is a boundary the design accepts,
+named here behaves as its owning spec says — nothing below is a defect
+against any of those specs; each is a boundary the design accepts,
 with the accepting decision cited. Companions: architecture.md Appendix D
 (v1 assumptions and known limits), decisions [D12]/[D15]/[D16]/[D17].
 Item ids `RK1`–`RK8`, append-only once cited — a closed item keeps its id and

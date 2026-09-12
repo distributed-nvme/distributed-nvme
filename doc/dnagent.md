@@ -42,10 +42,31 @@ build is policy and belongs in `dnagent`/`cnagent`.
 ### 2.1 Files
 
 `agent.go` (bootstrap, §2.3), `store.go` (§2.4), `revision.go` (§2.5),
-`locks.go` (§2.6), `resinfo.go` (§2.7), `oswrap.go`/`dm.go`/`nvmet.go`/
+`conf.go` (the stored-conf validators, below; the rejection they build is
+SH9), `locks.go` (§2.6),
+`resinfo.go` (§2.7), `oswrap.go`/`dm.go`/`nvmet.go`/
 `nvmehost.go` (OS wrappers, §2.8 — `oswrap.go` is the shared command/configfs
 plumbing the other three sit on), `bitmap.go` (§2.9), plus colocated
 `_test.go` files.
+
+`conf.go` is a **deliberate second copy** of `model`'s stored-conf rules.
+`layout.md` §3 forbids the agent packages from importing `model`, which
+links the etcd client, so `agent.ValidateBdevConf` and
+`agent.ValidateExtentSize` restate the presence checks of
+`model.ValidateBdevConf` and `model.ValidateClusterConf` with
+**byte-identical error strings** — the same `"invalid stored conf: "`
+prefix and the same proto field names — and `agent.InvalidConfReply` turns
+one into the SH9 rejection. Identical by construction is the point: one
+grep finds every refusal across the control plane and both agents.
+`agent/conf_test.go` and `model/capacity_test.go` pin the same five strings
+string-exactly, one on each side, so a change made to one copy and not the
+other goes red; §6 test 23 and `cnagent.md` §6 test 27 assert them once
+more through the two roles that reply with them. Both validators check
+**presence only** — the §7 range checks
+belong to the gateway, which sees the request that set the value — and
+`low_water_mark_pct` is checked for zero alone, because a value above 100
+is the legal "never grow this pool automatically" setting.
+
 There is no `lvm.go`: **no** dnv agent runs any LVM command at all — [D13]
 took LVM off the dn, [D14] took it off the cn too. This is the `layout.md` §2 recommended split; package
 boundaries are binding, file names are not.
@@ -73,6 +94,12 @@ The following enter the existing files `common/constants.go` and
 	// readability and tests.
 	ReplyCodeStaleRevision = 1
 	ReplyCodeUnknownObject = 2
+	// ReplyCodeInvalidConf refuses a request whose conf carries a value the
+	// control plane cannot have written — a proto3 zero where §7 requires a
+	// concrete geometry. The object is known and the revision is current; it
+	// is the conf that is unusable, which is why it is neither of the two
+	// above.
+	ReplyCodeInvalidConf = 3
 
 	// Seconds between background retries of a pending migration-destination
 	// nvme connect (dnagent.md DN8).
@@ -285,8 +312,9 @@ SH4. The store holds exactly what `architecture.md` §9.1/§4.6 prescribes: the
 SH5. A `Syncup*Request` is persisted **after** its converge pass completes.
      Per-resource `RES_STATUS_ERROR` outcomes do not block persistence — the
      errors travel in the `*Info` and the worker's health loop drives repair
-     (equal-revision re-syncs re-apply idempotently). Protocol rejections
-     (stale revision, unknown pointer) never reach persistence.
+     (equal-revision re-syncs re-apply idempotently). Protocol rejections —
+     stale revision, unknown pointer, invalid stored conf (SH9) — never
+     reach persistence.
 
 SH6. Enumeration on startup: `RunCommand(ctx, "ls", []string{"-1", prefix},
      "")`, filtering by the role's `Local*Path` kind prefixes (dn: `dn-`,
@@ -320,10 +348,16 @@ func GateRevision(stored uint64, incoming uint64) *pb.AgentReply {
 ```
 
 SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a `details`
-     string naming the missing pointer/id. Both rejection kinds return a
+     string naming the missing pointer/id. A request whose conf carries a
+     value the control plane cannot have written is rejected with
+     `ReplyCodeInvalidConf` and the §2.1 validator's message (DN4,
+     `cnagent.md` CN8): the object is known and the revision is current, so
+     it is neither of the other two, and `details` names the proto field
+     rather than an id. All three rejection kinds return a
      normal gRPC reply (`AgentReply.code != 0`), never a gRPC error status —
      only `GetDnSize`/`GetCnSize` and `Get*Bm` report failure through the
-     status (§9.1).
+     status (§9.1). A rejected request is never persisted (SH5), whichever
+     kind it is.
 
 ### 2.6 Concurrency — `locks.go`
 
@@ -637,8 +671,26 @@ DN1. Lock mapping (instantiates SH10-SH13): `SyncupDn` and the startup
 ### 4.3 Startup reconcile
 
 DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
-     converge (§4.5 steps 2-3) from the stored request. Then each `side-*`
-     file: if its pointer is absent from the stored
+     converge (§4.5 steps 2-3) from the stored request — **unless** its
+     `extent_size` is 0, which only a build older than DN4's conf gate can
+     have persisted. Such a file is skipped exactly like an unreadable one,
+     and for the same reason: a zero extent size is not a geometry any
+     converge may run on, and it must not reach the in-memory DN set.
+     Loading it would not corrupt the disk — DN5's `EnsureFormatted` cannot
+     confirm this disk against a zero (a formatted one answers `"foreign
+     disk: …"`, a blank one `"extent_size is 0"`), so every later mutation
+     refuses and nothing is allocated — but it would bury the conf fault
+     under an identity error on every side of that DN instead of one record
+     naming the field. The skip is not free — with no DN state in memory,
+     that node's `side-*` files take the pointer-absent branch below and are
+     torn down (DN6): their exports, dm devices and store files go, but
+     their extent **records stay**, because freeing one mutates the volume
+     table and DN5's identity check never ran here; the DN6 orphan sweep
+     stays silent for the same reason (it needs a confirmed disk). Those
+     records are reclaimed only once a DN with a concrete `extent_size` is
+     synced again. There is no compat shim: a cluster whose stored conf carries
+     zeros is refused loudly everywhere and has to be recreated. Then each
+     `side-*` file: if its pointer is absent from the stored
      `SyncupDnRequest.side_pointer_list`, tear the side down (DN6) — it was
      removed mid-teardown; otherwise re-run the SyncupSide converge (§4.6)
      from the stored request — a converge that finds not-yet-zeroed extents
@@ -666,7 +718,26 @@ DN3. `lsblk --bytes --nodeps --noheadings --output SIZE {--disk}`; reply the
 
 ### 4.5 `SyncupDn`
 
-DN4. Gate the revision (SH8) against the stored `SyncupDnRequest`.
+DN4. Gate the revision (SH8) against the stored `SyncupDnRequest`. Then,
+     still with **zero** side effects, the §7 **conf gate**:
+     `agent.ValidateExtentSize(req.extent_size)` (§2.1) refuses a 0 with
+     `ReplyCodeInvalidConf` and the message
+     `"invalid stored conf: dn_bin_conf.extent_size is zero"`, echoing the
+     **stored** revision so the worker sees the request was not accepted,
+     and writing one `Error` record (msg `"invalid stored conf"`) naming
+     the cluster and the dn. `extent_size` is what this disk's [D13] header
+     is formatted with and what every side's runs are carved out of, so a
+     value this node substituted would be one the rest of the cluster does
+     not share; the control plane resolves it when it *writes* the
+     `ClusterConf`, and a zero arriving here is refused rather than
+     replaced. Placement is load-bearing: the gate sits **before** the
+     request becomes the desired state, so nothing is converged, no dm
+     device is removed, no volume-table block is written and no local-store
+     file is touched. After the assignment it would instead persist the
+     zero and let the next startup reconcile converge it. (DN5's
+     header-identity guard is unchanged and is not this gate: it refuses a
+     disk formatted for another cluster/dn/extent_size, which is a disk
+     fact, not a conf fact.)
 
 DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
      probe-first (SH16), building `DnInfo` as it goes:
@@ -1532,6 +1603,18 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     allocates, builds the linear and zeroes, and issues **no** metadata-slot
     write, **no** `nvme connect` and **no** dm-clone create, with
     `migr_dst_info.*` `RES_STATUS_PROVISIONING`.
+23. **A zero conf member is refused** (DN4, §2.1): a `SyncupDn` whose
+    `extent_size` is 0 replies `ReplyCodeInvalidConf` with the **stored**
+    revision and the exact string
+    `"invalid stored conf: dn_bin_conf.extent_size is zero"`, and records
+    **no** `writeblock`, no `dmsetup` or configfs call and no `WriteProto`
+    to `LocalDnPath` — the disk is never read for identity against a
+    guessed extent size, and the zero never becomes desired state. A
+    `Reconcile` over a `dn-*` file carrying that zero skips it exactly like
+    an unreadable one (DN2). The string is asserted verbatim here and, for
+    `model.ValidateClusterConf`, in `model/capacity_test.go`; the two
+    assertions together are what keep the two copies of the rule in step
+    (§2.1).
 
 ## 7. Acceptance checklist
 

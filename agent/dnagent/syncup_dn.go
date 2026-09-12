@@ -49,6 +49,14 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 				slog.String("error", err.Error()))
 			continue
 		}
+		// §7: a file an older build persisted with a zero extent size is
+		// LOADED, and refused below by convergeDn, rather than skipped here.
+		// Skipping it would drop the DN record, and the side loop further down
+		// reads a missing DN as "this side left its parent's list" and tears
+		// every one of them down — exports, dm devices and local state. A conf
+		// fault must not destroy resources, so the record is kept exactly as
+		// the restart found it and convergeDn is the single place that reports
+		// it, once per pass.
 		s.putDn(dnKey(req.GetClusterId(), req.GetDnId()), &dnState{
 			req:     req,
 			tracker: agent.NewResTracker(),
@@ -118,6 +126,14 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			s.teardownSide(ctx, key, st)
 			continue
 		}
+		if agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
+			// §7: the parent's conf is unusable, which is NOT the same thing
+			// as this side having left its parent's list. Every run of this
+			// side is carved out of that extent size, so nothing here may be
+			// converged — and nothing may be torn down either. convergeDn
+			// above already recorded the refusal for this DN.
+			continue
+		}
 		s.convergeSide(ctx, st, dn.req.GetExtentSize())
 	}
 	// DN2: the dm-clone may have survived the restart, so re-apply every
@@ -126,6 +142,11 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		st := s.getSide(key)
 		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
 		if dn == nil {
+			continue
+		}
+		if agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
+			// §7, as in the converge loop above: a chunk's offset is computed
+			// from the extent size, so an unusable one applies nothing.
 			continue
 		}
 		s.applyMigrBitmaps(ctx, st, dn.req.GetExtentSize())
@@ -352,6 +373,12 @@ func pointerKnown(req *pb.SyncupDnRequest, ptr *pb.SidePointer) bool {
 	return false
 }
 
+// msgInvalidStoredConf is the §7 refusal record: a conf member the control
+// plane cannot have written reached this agent, and the converge it would have
+// driven did not happen. The string is shared with the cn role and with
+// dnv-worker's own refusal so one grep finds every one of them.
+const msgInvalidStoredConf = "invalid stored conf"
+
 // syncupDn implements DN4-DN7. The node write lock is held by the caller.
 func (s *DnAgentServer) syncupDn(
 	ctx context.Context,
@@ -365,6 +392,24 @@ func (s *DnAgentServer) syncupDn(
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupDnReply{AgentReply: reject, Revision: stored}
+	}
+	// §7: extent_size is what this disk's [D13] header is formatted with and
+	// what every side's run is carved out of, so a zero is refused rather
+	// than replaced with a constant the rest of the cluster does not share.
+	// This is the last point with literally zero side effects: the request
+	// has not become the desired state, nothing has been converged, no dm
+	// device removed, no volume-table block written and no local-store file
+	// touched. Putting it after st.req = req would persist the zero and let
+	// the next Reconcile converge it.
+	if err := agent.ValidateExtentSize(req.GetExtentSize()); err != nil {
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("dn_id", req.GetDnId()),
+			slog.String("error", err.Error()))
+		return &pb.SyncupDnReply{
+			AgentReply: agent.InvalidConfReply("%v", err),
+			Revision:   stored,
+		}
 	}
 	if st == nil {
 		st = &dnState{tracker: agent.NewResTracker()}
@@ -399,6 +444,22 @@ func (s *DnAgentServer) convergeDn(
 	req := st.req
 	t := st.tracker
 	info := &pb.DnInfo{}
+
+	// §7: the entrance that does not come through syncupDn's gate is the
+	// startup Reconcile, which converges from a file an older build may have
+	// persisted with a zero. extent_size is what this disk's [D13] header is
+	// formatted and verified against, so a zero must not reach EnsureFormatted
+	// at all — it would report an identity mismatch naming the disk rather
+	// than the field that is actually wrong. Nothing is mutated on the way
+	// out: the meta row carries the reason and the port is left as found.
+	if err := agent.ValidateExtentSize(req.GetExtentSize()); err != nil {
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("dn_id", req.GetDnId()),
+			slog.String("error", err.Error()))
+		info.MetaInfo = t.Err(resKeyMeta, s.disk, err.Error())
+		return info
+	}
 
 	size, err := s.dm.DiskSize(ctx, s.disk)
 	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", err)

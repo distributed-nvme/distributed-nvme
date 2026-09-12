@@ -23,11 +23,18 @@ import (
 // remembers the name -> id mapping, which is what lets a delete — whose event
 // carries no value — find the entry to drop.
 //
-// Readers get an immutable, defaults-resolved snapshot (model.ResolveClusterConf):
-// the four health-check intervals (0 => 5, clamped to [1, 3600]), extent_size
-// (0 => DefaultDnExtSize) and the dn_bin_conf shifts, with qos_ratio as
-// stored. A cluster absent from the cache makes its revision workers idle
-// (RW9, SW6) — the worker never guesses defaults for an unknown cluster.
+// Readers get the conf EXACTLY AS STORED, in an immutable per-decode message
+// they may hold for as long as they like. The cache resolves nothing: the
+// gateway made every defaultable member concrete when it wrote the key, so a
+// reader that finds a zero has found corruption, and it refuses that object's
+// pass with one Error record rather than guessing a value the rest of the
+// cluster may not agree with (model.ValidateClusterConf).
+//
+// An INVALID conf is still cached, deliberately. Dropping it here would make a
+// cluster whose conf went bad indistinguishable from a deleted one, and send
+// the operator chasing a phantom deletion instead of the field that is wrong.
+// A cluster absent from the cache makes its revision workers idle (RW9, SW6) —
+// the worker never guesses defaults for an unknown cluster either.
 type confCache struct {
 	deps *deps
 
@@ -45,9 +52,12 @@ func newConfCache(d *deps) *confCache {
 	}
 }
 
-// get returns the resolved snapshot of one cluster's configuration (RW9). The
-// returned message is never mutated by the cache, so callers may hold it for
-// as long as they like.
+// get returns one cluster's configuration as stored (RW9). The returned
+// message is never mutated by the cache, so callers may hold it for as long as
+// they like — and they validate it before use, because the cache does not:
+// each of the four readers has a different way to refuse (idle the loop, keep
+// the tick cadence, skip the pass, fail the health write), and a validating
+// get() would either hide that or log it four times.
 func (c *confCache) get(cid uint64) (*pb.ClusterConf, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -141,7 +151,7 @@ func (c *confCache) applyScan(ctx context.Context, kvs []etcdutil.KV) {
 			continue
 		}
 		cid := model.ClusterId(name, cc.GetCreationEpoch())
-		entries[cid] = model.ResolveClusterConf(cc)
+		entries[cid] = cc
 		names[name] = cid
 	}
 	c.mu.Lock()
@@ -183,7 +193,7 @@ func (c *confCache) applyEvent(ctx context.Context, event etcdutil.Event) {
 	if old, known := c.names[name]; known && old != cid {
 		delete(c.entries, old)
 	}
-	c.entries[cid] = model.ResolveClusterConf(cc)
+	c.entries[cid] = cc
 	c.names[name] = cid
 	c.mu.Unlock()
 }

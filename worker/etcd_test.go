@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -37,7 +39,7 @@ func TestHealthWritesThroughModel(t *testing.T) {
 	d := newTestDeps(testConfig(common.WorkerRoleDn), newFakeStore(), clk)
 	d.cli = cli
 	d.health = &modelHealthWriter{cli: cli}
-	d.conf.entries[cid] = model.ResolveClusterConf(&pb.ClusterConf{})
+	d.conf.entries[cid] = testClusterConf()
 
 	owner := newDnMonitor(d, cid, 11, func() string { return addr })
 	// A second owner of the same DN, the accepted overlap of §0 item 4.
@@ -75,7 +77,8 @@ func TestHealthWritesThroughModel(t *testing.T) {
 }
 
 // TestConfCacheAgainstEtcd runs the RW21 cache over the real client: scan,
-// watch, key -> id derivation and delete.
+// watch, key -> id derivation, delete, and the §7 rule that the value a reader
+// gets is the value that was written — no default is applied on the way out.
 func TestConfCacheAgainstEtcd(t *testing.T) {
 	cli := newTestClient(t)
 	captureLogs(t)
@@ -103,11 +106,15 @@ func TestConfCacheAgainstEtcd(t *testing.T) {
 		<-done
 	})
 
-	err := cli.Put(ctx, key, &pb.ClusterConf{
+	// Deliberately NOT a conf the gateway could have written: no
+	// health_check_conf at all. It comes back exactly as it went in, over the
+	// real client and the real decode path, because §7 moved every default to
+	// the write side and the cache resolves nothing.
+	stored := &pb.ClusterConf{
 		CreationEpoch: epoch,
 		QosRatio:      &pb.QosRatio{BytesPerIops: 512},
-	})
-	if err != nil {
+	}
+	if err := cli.Put(ctx, key, stored); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	waitFor(t, "cluster cached", func() bool {
@@ -115,9 +122,12 @@ func TestConfCacheAgainstEtcd(t *testing.T) {
 		return ok
 	})
 	cc, _ := cache.get(cid)
-	if cc.GetHealthCheckConf().GetDnInterval() !=
-		common.DefaultHealthCheckInterval {
-		t.Fatalf("dn_interval = %d", cc.GetHealthCheckConf().GetDnInterval())
+	if !proto.Equal(cc, stored) {
+		t.Fatalf("cached conf =\n%v\nwant the stored\n%v", cc, stored)
+	}
+	if cc.GetHealthCheckConf() != nil {
+		t.Fatalf("health_check_conf = %v, want the stored absence",
+			cc.GetHealthCheckConf())
 	}
 	if cc.GetQosRatio().GetBytesPerIops() != 512 {
 		t.Fatalf("qos_ratio = %v", cc.GetQosRatio())

@@ -153,8 +153,13 @@ func (s *Server) CreateControllerNode(
 		}
 		// §6.1: counts round down. extent_size is cluster-wide and shared
 		// with the DNs, which is what makes a cntlr's reservation on this
-		// node comparable to the group ext_cnts it covers (§8.4, §8.6).
-		extentSize := model.ResolveDnBinConf(cc.GetDnBinConf()).GetExtentSize()
+		// node comparable to the group ext_cnts it covers (§8.4, §8.6). It is
+		// read as stored (§7), so the stored conf is validated before this
+		// divides by it.
+		if err := model.ValidateClusterConf(cc); err != nil {
+			return errAborted("%v", err)
+		}
+		extentSize := cc.GetDnBinConf().GetExtentSize()
 		totalExtCnt := budget / extentSize
 		if totalExtCnt < 1 {
 			return errInvalid(

@@ -623,6 +623,102 @@ func (c *logCapture) msgOrder(msgs ...string) []string {
 }
 
 // ---------------------------------------------------------------------------
+// Stored-conf fixtures (architecture.md §7)
+// ---------------------------------------------------------------------------
+
+// Defaults are resolved on the WRITE path: CreateCluster stores a ClusterConf
+// whose every defaultable member is already concrete, and CreateStoragePool
+// does the same for an SP's bdev_conf. Nothing in worker/ substitutes a member
+// of either conf on the way back out — the RW21 cache hands a reader the conf
+// exactly as stored, and each reader validates it (model.ValidateClusterConf /
+// ValidateBdevConf) and refuses what it cannot use.
+//
+// So a fixture that leaves a defaultable member at its proto3 zero no longer
+// describes a cluster the gateway could have created: it describes a corrupt
+// one, and the loops in this package now refuse it. The two builders below are
+// this package's ONE source of a usable stored conf — before the write-time
+// rule there were seven private ones, which is exactly why half the suite
+// broke when read-time resolution went away.
+//
+// They are written out literally rather than run through model.Resolve*, so a
+// test sees the bytes the worker is actually handed, and so an invalid-conf
+// test can be written as "the builder's result with one member cleared".
+
+// testBlockSize is the fixture SP's stored dm_pool_conf.data_block_size, and
+// is deliberately NOT common.DefaultDmPoolDataBlockSize (1 MiB): it is the one
+// bdev_conf member a worker request carries as a NUMBER rather than inside the
+// verbatim bdev_conf, so a request that substituted the §7 default instead of
+// forwarding the stored value has to read as a different number somewhere. It
+// is a legal dm-thin data block size (a multiple of 64 KiB, inside the §7
+// bounds), so model.ValidateBdevConf accepts the fixture.
+const testBlockSize = uint64(4) << 20
+
+// testBdevConf is the concrete SP geometry CreateStoragePool stores: every
+// member a value the write path resolved, spelled out. All but the data block
+// size are the §7 defaults written down; that one is testBlockSize (see it).
+func testBdevConf() *pb.BdevConf {
+	return &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize:   testBlockSize,
+			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+		},
+		DmRaid0Conf: &pb.DmRaid0Conf{
+			StripeSize: common.DefaultDmRaid0StripeSize,
+		},
+		RedundConf: &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{
+					BitmapChunkBlockCnt: common.DefaultChunkBlockCnt,
+				},
+			},
+		},
+	}
+}
+
+// testClusterConf is a concrete ClusterConf as CreateCluster stores it: the
+// extent size, the 0/4/8/12 bin ladder, both batch sizes, the four
+// health-check intervals and a bdev_conf, every one of them a value the
+// gateway resolved at write time. Most of them are written as the
+// common.Default* constants, because that is what the WRITE path resolves them
+// from for a request that asked for nothing — nothing re-derives them here.
+//
+// A fixture that names a constant cannot tell a reader that FORWARDED it from
+// one that SUBSTITUTED it, so the members a test asserts on that way carry a
+// deliberately non-default value instead: testBdevConf's data block size here,
+// and the extent size and both batch sizes in reactClusterConf (reaction_test).
+//
+// Each edit runs on the finished message, which is how a test names the one
+// member it cares about, or clears one to build the invalid stored conf a
+// refusal test needs.
+func testClusterConf(edits ...func(*pb.ClusterConf)) *pb.ClusterConf {
+	cc := &pb.ClusterConf{
+		CreationEpoch: 1,
+		BdevConf:      testBdevConf(),
+		DnBinConf: &pb.DnBinConf{
+			ExtentSize: common.DefaultDnExtSize,
+			Bin0Shift:  common.DefaultDnBin0Shift,
+			Bin1Shift:  common.DefaultDnBin1Shift,
+			Bin2Shift:  common.DefaultDnBin2Shift,
+			Bin3Shift:  common.DefaultDnBin3Shift,
+		},
+		AllocConf: &pb.AllocConf{
+			DnBatchSize: common.DefaultAllocDnBatchSize,
+			CnBatchSize: common.DefaultAllocCnBatchSize,
+		},
+		HealthCheckConf: &pb.HealthCheckConf{
+			DnInterval:    common.DefaultHealthCheckInterval,
+			CnInterval:    common.DefaultHealthCheckInterval,
+			SideInterval:  common.DefaultHealthCheckInterval,
+			CntlrInterval: common.DefaultHealthCheckInterval,
+		},
+	}
+	for _, edit := range edits {
+		edit(cc)
+	}
+	return cc
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 

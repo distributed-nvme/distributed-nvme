@@ -43,6 +43,7 @@ const (
 	msgRevisionWorkerStopped = "revision worker stopped"
 
 	msgClusterConfMissing = "cluster conf missing"
+	msgInvalidStoredConf  = "invalid stored conf"
 
 	msgSyncupResult   = "syncup result"
 	msgSyncupRejected = "syncup rejected"

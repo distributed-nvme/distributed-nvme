@@ -309,7 +309,10 @@ func (s *Server) CreateMigration(
 			// the scan was run for: it is what the destination must actually
 			// hold, and a pick too small for it fails the verify below.
 			extCnt := loc.Grp.GetExtCnt()
-			ledger := newDnLedger(stm, sc.Cid, sc.Cc)
+			ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
+			if err != nil {
+				return err
+			}
 			dn, err := ledger.verifyPick(cand, extCnt)
 			if err != nil {
 				return err
@@ -511,7 +514,10 @@ func (s *Server) FinishMigration(
 		// which is what makes the src agent tear the side down on its next
 		// syncup. One flush = one DnConf write, one capacity key, one DnRev
 		// bump (§5.5, §5.6).
-		ledger := newDnLedger(stm, sc.Cid, sc.Cc)
+		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
+		if err != nil {
+			return err
+		}
 		if err := ledger.release(
 			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
 			loc.Grp.GetExtCnt(),
@@ -583,7 +589,10 @@ func (s *Server) CancelMigration(
 		// The destination's extents return to its DN and its pointer goes,
 		// which is the whole rollback: the source side was never touched, so
 		// it needs nothing done to it here (§8.11).
-		ledger := newDnLedger(stm, sc.Cid, sc.Cc)
+		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
+		if err != nil {
+			return err
+		}
 		if err := ledger.release(
 			loc.Side.GetAddrPort(), sc.SpId(), loc.Side.GetSideId(),
 			loc.Grp.GetExtCnt(),

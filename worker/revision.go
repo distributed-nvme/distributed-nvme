@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -99,10 +100,12 @@ type objDriver interface {
 	unreachable(ctx context.Context)
 }
 
-// roundPeriod turns a resolved health-check interval into the round period
-// (RW9, RW8). The RW21 cache always resolves a zero to
-// common.DefaultHealthCheckInterval; the guard here is what keeps a conf that
-// somehow arrived unresolved from turning the round into a hot loop.
+// roundPeriod turns a stored health-check interval into the round period
+// (RW9, RW8). A zero cannot reach it: the pass gate in run() refuses an
+// invalid stored conf before the interval is ever read, and the gateway wrote
+// a concrete value in the first place. The guard is kept only so that a bug
+// upstream of it degrades into a slow loop rather than a hot one — it is a
+// backstop against spinning, never a default anything is computed with.
 func roundPeriod(seconds uint32) time.Duration {
 	if seconds == 0 {
 		seconds = common.DefaultHealthCheckInterval
@@ -159,6 +162,10 @@ type revWorker struct {
 	conn         *grpc.ClientConn
 	connAddr     string
 	idleLogged   bool
+	// confRefused memoizes the stored-conf error last logged, so a steady
+	// invalid conf costs one Error record rather than one per round, and a
+	// conf that changes from one invalid value to another still reports.
+	confRefused string
 }
 
 // streamState is one open Check* stream plus the goroutine that turns its
@@ -271,7 +278,27 @@ func (w *revWorker) run() {
 			}
 			continue
 		}
+		if err := model.ValidateClusterConf(cc); err != nil {
+			// §7: the gateway stores concrete values, so a zero or an
+			// out-of-range member here is corruption or foreign data, and
+			// this object's pass is refused rather than computed with a
+			// guessed geometry. The refusal reaches nothing: round() is
+			// skipped, so no stream is opened, no Syncup* is sent and no
+			// err_epoch is written, and wait() is passed a nil cc so a
+			// revision bump arriving meanwhile is recorded (RW3) without
+			// sending anything either. It retries every round, like the
+			// unknown-cluster arm above, because an operator recreating the
+			// cluster is what fixes it.
+			w.refuseConf(err)
+			if !w.wait(
+				common.DefaultHealthCheckInterval*time.Second, nil,
+			) {
+				return
+			}
+			continue
+		}
 		w.idleLogged = false
+		w.confRefused = ""
 		interval := w.driver.interval(cc)
 		w.round(cc, interval)
 		if !w.wait(interval, cc) {
@@ -595,8 +622,7 @@ func (w *revWorker) releaseConn() {
 // idle is the RW9 idle state: no stream, no syncup, and exactly one
 // "cluster conf missing" record per idle period — not one per retry.
 func (w *revWorker) idle() {
-	w.dropStream()
-	w.releaseConn()
+	w.quiesce()
 	if w.idleLogged {
 		return
 	}
@@ -604,6 +630,28 @@ func (w *revWorker) idle() {
 	slog.InfoContext(w.ctx, msgClusterConfMissing,
 		slog.Uint64("cluster_id", w.cid),
 	)
+}
+
+// refuseConf is idle's twin for a cluster whose stored conf cannot be used
+// (§7): the same quiesced state — stream dropped, RW7 connection reference
+// released — but its own record, so the §14 grep for "cluster conf missing"
+// keeps meaning "the cluster is not in the cache" and nothing else.
+func (w *revWorker) refuseConf(err error) {
+	w.quiesce()
+	w.idleLogged = false
+	if w.confRefused == err.Error() {
+		return
+	}
+	w.confRefused = err.Error()
+	attrs := append(w.lifecycleAttrs(), slog.String("error", err.Error()))
+	slog.ErrorContext(w.ctx, msgInvalidStoredConf, attrs...)
+}
+
+// quiesce is the half idle and refuseConf share: the object drives nothing
+// until its next round.
+func (w *revWorker) quiesce() {
+	w.dropStream()
+	w.releaseConn()
 }
 
 // cleanup is the graceful-stop tail of RW11.

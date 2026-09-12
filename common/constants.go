@@ -121,6 +121,12 @@ const (
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
 
+	// DefaultCloneThreshold/DefaultCloneBatchSize are written down for
+	// symmetry with the migration pair, but nothing reads them: a clone's
+	// DmCloneConf is stored as sent and forwarded to the cn agent untouched,
+	// so a zero there leaves the dm-clone target's own default in place
+	// (model/ops.go, ResolveEventThreshold's note). Only the migration pair
+	// is resolved, by worker/sprole.go's migrCloneConf.
 	MaxCloneThreshold     = 8
 	DefaultCloneThreshold = 1
 	MaxCloneBatchSize     = 4
@@ -166,6 +172,12 @@ const (
 	// readability and tests.
 	ReplyCodeStaleRevision = 1
 	ReplyCodeUnknownObject = 2
+	// ReplyCodeInvalidConf refuses a request whose conf carries a value the
+	// control plane cannot have written — a proto3 zero where §7 requires a
+	// concrete geometry. The object is known and the revision is current; it
+	// is the conf that is unusable, which is why it is neither of the two
+	// above.
+	ReplyCodeInvalidConf = 3
 
 	// Seconds between background retries of a pending migration-destination
 	// nvme connect (dnagent.md DN8).

@@ -15,10 +15,13 @@ import (
 // taken, a size that must divide the SP's stripe — is not here; it happens
 // inside the RPC's STM.
 //
-// The rule for bounded numerics is §7's: a proto3 zero means "unset" and
-// selects the default at USE time (GW11), so zero is always accepted here and
-// only a non-zero value outside [Min, Max] is refused. Nothing in this file
-// rewrites a request; stored messages keep what the user sent.
+// The rule for bounded numerics is §7's: a proto3 zero means "unset" and asks
+// for the default, so zero is always accepted here and only a non-zero value
+// outside [Min, Max] is refused. Nothing in this file rewrites a request — the
+// handler resolves an accepted request into the concrete message it stores
+// (model.ResolveClusterConf, model.ResolveBdevConf), which is why validation
+// must run FIRST: after resolution every member is non-zero and every bound
+// check below would be a tautology.
 
 var (
 	// validStr is common.ValidStrPattern: the character set every dnv name
@@ -96,7 +99,9 @@ func validateHosts(field string, hosts []string) error {
 }
 
 // validateBound refuses a non-zero value outside [min, max]. A zero is the
-// proto3 "unset" that selects the default at use time (§7, GW11).
+// proto3 "unset" that asks for the default (§7); the handler substitutes it
+// once, at write time, and the stored value is never zero. model's
+// stored-conf validators deliberately have no such escape hatch.
 func validateBound(field string, value uint64, min uint64, max uint64) error {
 	if value == 0 {
 		return nil
@@ -157,13 +162,39 @@ func validateTrConfList(field string, list []*pb.NvmeTrConf) error {
 	return nil
 }
 
-// validateDnBinConf checks the §7 bounds of a DnBinConf. Only extent_size is
-// bounded; the four shifts are resolved as a consistent ladder by
-// model.ResolveDnBinConf and are never rejected here.
+// validateDnBinConf checks a DnBinConf against §7: extent_size's bounds, and
+// the §6.2 shift ladder.
+//
+// The four shifts are all-or-nothing. All four zero is the proto3 "unset" that
+// asks for the 0/4/8/12 default, and is accepted. Any other set must already
+// BE a ladder — 0 <= bin0 < bin1 < bin2 < bin3 <= 63 — because the stored
+// ladder is what every capacity key in the cluster is written under, for the
+// life of the cluster, and quietly replacing an operator's ladder with the
+// default would give them a cluster binned differently from the one they
+// asked for. This is the only place a REQUEST's ladder can be refused:
+// model.ResolveDnBinConf replaces any non-ladder with 0/4/8/12 as a whole, so
+// a bad set that got past here would be STORED as the default, and
+// model.ValidateClusterConf — which refuses a non-ladder on the read side —
+// would never see it.
 func validateDnBinConf(conf *pb.DnBinConf) error {
-	return validateBound(
+	if err := validateBound(
 		"dn_bin_conf.extent_size", conf.GetExtentSize(),
-		common.MinDnExtSize, common.MaxDnExtSize)
+		common.MinDnExtSize, common.MaxDnExtSize,
+	); err != nil {
+		return err
+	}
+	bin0, bin1 := conf.GetBin0Shift(), conf.GetBin1Shift()
+	bin2, bin3 := conf.GetBin2Shift(), conf.GetBin3Shift()
+	if bin0 == 0 && bin1 == 0 && bin2 == 0 && bin3 == 0 {
+		return nil
+	}
+	if !(bin0 < bin1 && bin1 < bin2 && bin2 < bin3 && bin3 <= 63) {
+		return errInvalid(
+			"dn_bin_conf shifts %d/%d/%d/%d are not a ladder "+
+				"0 <= bin0_shift < bin1_shift < bin2_shift < bin3_shift <= 63",
+			bin0, bin1, bin2, bin3)
+	}
+	return nil
 }
 
 // validateAllocConf checks the two batch sizes.

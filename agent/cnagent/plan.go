@@ -904,13 +904,20 @@ func (p *cntlrPlan) hostNqn() string {
 
 // lowWaterMark is the dm thin-pool's event threshold (CN13): the pool fires
 // when its usage passes low_water_mark_pct, so the mark itself is the
-// complementary count of free blocks. pct = 0 selects the default; pct > 100
-// means "auto-grow off" and passes 0 — no dm events at all.
+// complementary count of free blocks.
+//
+// pct > 100 means "auto-grow off" and passes 0 — no dm events at all. pct = 0
+// is INVALID and does not reach here: the control plane resolves it to the §7
+// default when it writes the conf, and both paths that reach this arithmetic
+// sit behind an agent.ValidateBdevConf gate. poolArgs is this method's only
+// caller, and poolArgs runs only from ensurePool (the converge, gated in
+// syncupCntlr and convergeCntlr) and from probePool (the probe, gated in
+// probeCntlr). The other plan builders — teardownCntlr, PushCloneBitmap and
+// the CN25 bitmap reads — compute no mark at all. This agent has no default of
+// its own to apply, which is the point: a mark it invented would be one the
+// pool was not sized for.
 func (p *cntlrPlan) lowWaterMark(dataBlocks uint64) uint64 {
 	pct := p.lowWaterPct
-	if pct == 0 {
-		pct = common.DefaultPoolLowWatermarkPct
-	}
 	if pct > 100 {
 		return 0
 	}

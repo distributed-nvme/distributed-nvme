@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -23,6 +24,15 @@ const (
 	reactExtentSize  = uint64(64) << 20
 	reactBlockSize   = uint64(1) << 20
 	reactChunkBlocks = uint64(128)
+
+	// The cluster's stored alloc_conf. Both are deliberately NOT
+	// common.DefaultAllocDnBatchSize / DefaultAllocCnBatchSize (16 and 16) and
+	// are deliberately DIFFERENT from each other: a scan that substituted the
+	// constant, or that read the wrong one of the two members, would ask for a
+	// different number than the assertions below name. They are untyped so
+	// they compare against the int candCnt of a recorded query.
+	reactDnBatch = 5
+	reactCnBatch = 3
 
 	reactSliceId = uint64(10)
 	reactMetaGrp = uint64(20)
@@ -55,31 +65,37 @@ const (
 	reactSpRevision = uint64(77)
 )
 
-// reactBdevConf is the fixture's SP-wide geometry.
+// reactBdevConf is the fixture's SP-wide geometry: the concrete bdev_conf
+// CreateStoragePool stores (testBdevConf), with the pool block size and bitmap
+// chunk count spelled out from the constants above so the §3.6 arithmetic in
+// this file and the stored conf can never drift apart. Every member is
+// concrete because §7 resolves them on the write path — a zero anywhere in
+// here is what model.ValidateBdevConf refuses.
 func reactBdevConf() *pb.BdevConf {
-	return &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{
-			DataBlockSize:   reactBlockSize,
-			LowWaterMarkPct: 50,
-		},
-		RedundConf: &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{
-					BitmapChunkBlockCnt: reactChunkBlocks,
-				},
+	conf := testBdevConf()
+	conf.DmPoolConf.DataBlockSize = reactBlockSize
+	conf.RedundConf = &pb.RedundConf{
+		RedunKind: &pb.RedundConf_RedundMdRaid1{
+			RedundMdRaid1: &pb.RedundMdRaid1{
+				BitmapChunkBlockCnt: reactChunkBlocks,
 			},
 		},
 	}
+	return conf
 }
 
-// reactClusterConf is the cluster the fixture SP lives in: 64 MiB extents and
-// the default batch sizes.
+// reactClusterConf is the cluster the fixture SP lives in: the stored conf of
+// testClusterConf with 64 MiB extents and an alloc_conf of its own, so the
+// batch sizes the candidate scans below assert on can only have come from this
+// message. Both values are inside the §7 bounds [1, 1024], so the pass gate
+// (model.ValidateClusterConf) accepts the fixture.
 func reactClusterConf() *pb.ClusterConf {
-	return &pb.ClusterConf{
-		CreationEpoch: 1,
-		DnBinConf:     &pb.DnBinConf{ExtentSize: reactExtentSize},
-		BdevConf:      reactBdevConf(),
-	}
+	return testClusterConf(func(cc *pb.ClusterConf) {
+		cc.DnBinConf.ExtentSize = reactExtentSize
+		cc.BdevConf = reactBdevConf()
+		cc.AllocConf.DnBatchSize = reactDnBatch
+		cc.AllocConf.CnBatchSize = reactCnBatch
+	})
 }
 
 // reactGroup builds one group with the real §3.6 block counts of extCnt
@@ -403,9 +419,8 @@ func newReactHarness(t *testing.T, state *model.SpState) *reactHarness {
 	clk := newFakeClock()
 	store := newFakeStore()
 	d := newTestDeps(testConfig(common.WorkerRoleSp), store, clk)
-	d.conf.mu.Lock()
-	d.conf.entries[testCid] = model.ResolveClusterConf(reactClusterConf())
-	d.conf.mu.Unlock()
+	// As stored: the cache resolves nothing (§7), and neither does this.
+	setCachedConf(d, testCid, reactClusterConf())
 	store.seed(t, model.SpRevKey(testShard, testCid, testSpId), &pb.SpRev{
 		Revision: reactSpRevision,
 		SpName:   testSpName,
@@ -937,22 +952,27 @@ func TestReactionBadPoolLineLoggedOncePerChange(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestReactionGrowOnlyForOkPool pins AR6's "an ERROR / PROVISIONING / absent
-// pool is never grown", and the lwm > 100 kill switch.
+// pool is never grown", and the two readings of low_water_mark_pct that are
+// left now that §7 resolves it at write time: above 100 is the kill switch and
+// grows nothing quietly, zero is a conf CreateStoragePool could not have
+// written and is REFUSED — the pass gate stops before any reaction, where
+// tryGrow used to substitute 50 and grow.
 func TestReactionGrowOnlyForOkPool(t *testing.T) {
 	total := reactDataBlocks(t, 2)
 	breach := poolLine(1, 1000, total, total)
 	cases := []struct {
-		name   string
-		status pb.ResStatus
-		lwm    uint32
-		grow   bool
+		name    string
+		status  pb.ResStatus
+		lwm     uint32
+		grow    bool
+		refused bool
 	}{
-		{"ok", pb.ResStatus_RES_STATUS_OK, 50, true},
-		{"error", pb.ResStatus_RES_STATUS_ERROR, 50, false},
-		{"provisioning", pb.ResStatus_RES_STATUS_PROVISIONING, 50, false},
-		{"missing", pb.ResStatus_RES_STATUS_MISSING, 50, false},
-		{"lwm default", pb.ResStatus_RES_STATUS_OK, 0, true},
-		{"lwm off", pb.ResStatus_RES_STATUS_OK, 101, false},
+		{"ok", pb.ResStatus_RES_STATUS_OK, 50, true, false},
+		{"error", pb.ResStatus_RES_STATUS_ERROR, 50, false, false},
+		{"provisioning", pb.ResStatus_RES_STATUS_PROVISIONING, 50, false, false},
+		{"missing", pb.ResStatus_RES_STATUS_MISSING, 50, false, false},
+		{"lwm zero is refused", pb.ResStatus_RES_STATUS_OK, 0, false, true},
+		{"lwm off", pb.ResStatus_RES_STATUS_OK, 101, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -963,9 +983,19 @@ func TestReactionGrowOnlyForOkPool(t *testing.T) {
 			h.pass()
 			if tc.grow {
 				h.wantOps("grow")
-				return
+			} else {
+				h.wantOps()
 			}
-			h.wantOps()
+			got := len(h.logs.withMsg(msgInvalidStoredConf))
+			want := 0
+			if tc.refused {
+				want = 1
+			}
+			if got != want {
+				// "auto-grow off" above all must stay silent: it is an
+				// operator's setting, not a corrupt conf.
+				t.Fatalf("%d invalid stored conf records, want %d", got, want)
+			}
 		})
 	}
 }
@@ -1008,8 +1038,11 @@ func TestReactionDataGrowPending(t *testing.T) {
 	if query.kind != "dn" || query.candExt != 2 {
 		t.Fatalf("scan = %+v, want ext_cnt 2 of the first data group", query)
 	}
-	if query.candCnt != 2*common.DefaultAllocDnBatchSize {
-		t.Fatalf("candCnt = %d", query.candCnt)
+	// One batch per leg of the cluster's STORED alloc_conf.dn_batch_size (§7).
+	// The fixture's value is not the §7 default, so a scan that substituted
+	// the constant would ask for 32 here.
+	if query.candCnt != 2*reactDnBatch {
+		t.Fatalf("candCnt = %d, want two stored dn_batch_size", query.candCnt)
 	}
 	if query.requiredCnt != 2 {
 		t.Fatalf("requiredCnt = %d, want one per leg", query.requiredCnt)
@@ -1130,8 +1163,8 @@ func TestReactionGrowNeedsOneCandidatePerLeg(t *testing.T) {
 		if len(calls[0].legs) != 1 {
 			t.Fatalf("legs = %v, want one", calls[0].legs)
 		}
-		if q := h.rops.allQueries()[0]; q.candCnt != common.DefaultAllocDnBatchSize {
-			t.Fatalf("candCnt = %d, want one batch", q.candCnt)
+		if q := h.rops.allQueries()[0]; q.candCnt != reactDnBatch {
+			t.Fatalf("candCnt = %d, want one stored dn_batch_size", q.candCnt)
 		}
 	})
 }
@@ -1277,8 +1310,11 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 	if query.candExt != 3 {
 		t.Fatalf("candExt = %d, want the SP footprint 3", query.candExt)
 	}
-	if query.candCnt != common.DefaultAllocCnBatchSize {
-		t.Fatalf("candCnt = %d", query.candCnt)
+	// The cluster's STORED alloc_conf.cn_batch_size (§7). The fixture stores a
+	// different value in each of the two batch-size members, so this also pins
+	// WHICH one a cn scan reads.
+	if query.candCnt != reactCnBatch {
+		t.Fatalf("candCnt = %d, want the stored cn_batch_size", query.candCnt)
 	}
 	if len(query.black) != 1 || query.black[0] != reactCnB {
 		t.Fatalf("black = %v, want the old cntlr's cn", query.black)
@@ -1382,8 +1418,11 @@ func TestReactionLegRepairCase1(t *testing.T) {
 		if query.candExt != 2 {
 			t.Fatalf("candExt = %d, want the group's ext_cnt", query.candExt)
 		}
-		if query.candCnt != common.DefaultAllocDnBatchSize {
-			t.Fatalf("candCnt = %d", query.candCnt)
+		// The cluster's STORED alloc_conf.dn_batch_size (§7), which is not the
+		// constant a substitution would produce.
+		if query.candCnt != reactDnBatch {
+			t.Fatalf("candCnt = %d, want the stored dn_batch_size",
+				query.candCnt)
 		}
 		wantBlack := map[string]bool{reactDnA: true, reactDnB: true}
 		if len(query.black) != 2 {
@@ -1797,6 +1836,79 @@ func TestReactionPassNeedsClusterConf(t *testing.T) {
 	h.pass()
 	h.wantOps()
 	h.wantApplied()
+}
+
+// TestReactionPassRefusesAnInvalidConf checks the §7 pass gate. Both stored
+// confs are needed and both are checked before the pass is built: every
+// allocating reaction computes with the cluster's extent_size and batch sizes,
+// and AR6 reads low_water_mark_pct and data_block_size straight off the SP's
+// own bdev_conf. Either one unusable makes the pass a complete no-op — no
+// candidate scan, no model op, no `reaction applied` and no `reaction skipped`
+// — with one Error record naming the field.
+//
+// The fixture is set up to WANT a reaction (an unhealthy primary, a breached
+// pool), so a pass that did nothing because there was nothing to do could not
+// be mistaken for a pass that refused.
+func TestReactionPassRefusesAnInvalidConf(t *testing.T) {
+	cases := []struct {
+		name    string
+		corrupt func(h *reactHarness)
+		field   string
+	}{
+		{
+			name: "cluster conf without a bin ladder",
+			corrupt: func(h *reactHarness) {
+				cc := reactClusterConf()
+				cc.DnBinConf = nil
+				setCachedConf(h.deps, testCid, cc)
+			},
+			field: "dn_bin_conf",
+		},
+		{
+			name: "sp bdev_conf without a pool block size",
+			corrupt: func(h *reactHarness) {
+				h.state.Conf.BdevConf.DmPoolConf.DataBlockSize = 0
+			},
+			field: "data_block_size",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			total := reactDataBlocks(t, 2)
+			h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+				poolLine(1, 1000, total, total))
+			h.dnCands(reactDnC, reactDnD)
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(10)
+			tc.corrupt(h)
+			h.pass()
+
+			h.wantOps()
+			h.wantApplied()
+			if got := len(h.rops.allQueries()); got != 0 {
+				t.Fatalf("%d candidate scans on a refused pass", got)
+			}
+			if got := len(h.logs.withMsg(msgReactionSkipped)); got != 0 {
+				t.Fatalf("a refused pass logged a skip: it never got that far")
+			}
+			recs := h.logs.withMsg(msgInvalidStoredConf)
+			if len(recs) != 1 {
+				t.Fatalf("%d invalid stored conf records, want 1", len(recs))
+			}
+			if err, _ := recs[0]["error"].(string); !strings.Contains(
+				err, tc.field,
+			) {
+				t.Fatalf("error = %q, want %s named", err, tc.field)
+			}
+			// The memo holds across ticks: a steady bad conf costs one record,
+			// not one per pass.
+			h.pass()
+			h.pass()
+			if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {
+				t.Fatalf("%d records over three passes, want 1", got)
+			}
+		})
+	}
 }
 
 // TestReactionPassLoadFailure checks the two load outcomes of AR1: a deleted

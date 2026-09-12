@@ -894,14 +894,12 @@ func spBdevConf(conf *pb.SpConf) *pb.BdevConf {
 }
 
 // spStripeSize is the SP's dm-raid0 stripe, the unit CreateThinDevice sizes
-// against (§8.7). Resolution order is §7's: the SP's stored conf, then the
-// constant.
+// against (§8.7): the SP's stored conf and nothing else. CreateStoragePool
+// resolved it (§7), so there is no constant rung left here — a caller
+// validates the stored bdev_conf instead of sizing a thin device against a
+// stripe nobody chose.
 func spStripeSize(conf *pb.SpConf) uint64 {
-	size := spBdevConf(conf).GetDmRaid0Conf().GetStripeSize()
-	if size == 0 {
-		size = common.DefaultDmRaid0StripeSize
-	}
-	return size
+	return spBdevConf(conf).GetDmRaid0Conf().GetStripeSize()
 }
 
 // spSliceCnt is how many slices the SP has, which bounds every slice_idx a

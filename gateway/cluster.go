@@ -36,9 +36,18 @@ import (
 // is re-evaluated inside every attempt rather than hoisted out.
 //
 // ClusterConf is write-once (§8.1: no UpdateCluster* RPC exists, deliberately),
-// so validateClusterConfInput is the only validation its members will ever
-// get, and the request's messages are stored verbatim — GW11 resolves defaults
-// at use time, never at write time.
+// so this is the only chance its members ever get to be made concrete, and
+// both halves happen here in this order: validateClusterConfInput bounds the
+// RAW request — where a proto3 zero still means "give me the default" and a
+// non-zero value outside its range is refused — and model.ResolveClusterConf
+// then turns the accepted request into the concrete message that is stored.
+// The order is load-bearing: resolving first would replace every omitted
+// member with a constant and make the bound checks tautologies.
+//
+// Nothing downstream resolves again. A zero read back out of this key is
+// corruption, and the worker and the agents refuse it rather than guessing —
+// which is what makes a cluster's extent size and bin ladder immutable
+// facts rather than whatever the reading binary's constants happen to say.
 func (s *Server) CreateCluster(
 	ctx context.Context,
 	req *pb.CreateClusterRequest,
@@ -48,14 +57,16 @@ func (s *Server) CreateCluster(
 	}
 	name := clusterNameOf(req.GetClusterName())
 	creationEpoch := uint64(time.Now().UnixNano())
-	conf := &pb.ClusterConf{
+	// Built once, outside the STM, like creation_epoch above (GW8): an
+	// internal retry of this attempt must rewrite byte-identical keys.
+	conf := model.ResolveClusterConf(&pb.ClusterConf{
 		CreationEpoch:   creationEpoch,
 		QosRatio:        req.GetQosRatio(),
 		BdevConf:        req.GetBdevConf(),
 		DnBinConf:       req.GetDnBinConf(),
 		AllocConf:       req.GetAllocConf(),
 		HealthCheckConf: req.GetHealthCheckConf(),
-	}
+	})
 	var cid uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cid = 0

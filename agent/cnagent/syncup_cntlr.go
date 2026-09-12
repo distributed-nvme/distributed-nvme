@@ -9,6 +9,12 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
+// msgInvalidStoredConf is the §7 refusal record: a conf member the control
+// plane cannot have written reached this agent, and the converge it would have
+// driven did not happen. The string is shared with the dn role and with
+// dnv-worker's own refusal so one grep finds every one of them.
+const msgInvalidStoredConf = "invalid stored conf"
+
 // syncupCntlr implements CN8-CN20. The node read lock and this cntlr's object
 // lock are held by the caller.
 func (s *CnAgentServer) syncupCntlr(
@@ -32,6 +38,29 @@ func (s *CnAgentServer) syncupCntlr(
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
+	}
+	// §7: the control plane stores concrete geometry, so a zero member here
+	// is a conf this agent must not build against — data_block_size and
+	// stripe_size become the dm thin-pool's and raid0's own arguments, and
+	// bitmap_chunk_block_cnt the md bitmap's. This is the last point with
+	// literally zero side effects: refusing here skips the desired-state
+	// promotion below, the whole converge (whose retire phase alone rewrites
+	// ANA states, reloads ns-dev linears and removes dm devices) and the
+	// local-store Save, so a bad request cannot even be replayed by the next
+	// Reconcile. The stored revision is echoed back, not the request's, so
+	// the worker sees the request was not accepted.
+	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+		ptr := req.GetCntlrPointer()
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("cn_id", req.GetCnId()),
+			slog.Uint64("sp_id", ptr.GetSpId()),
+			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
+			slog.String("error", err.Error()))
+		return &pb.SyncupCntlrReply{
+			AgentReply: agent.InvalidConfReply("%v", err),
+			Revision:   stored,
+		}
 	}
 	if st == nil {
 		st = newCntlrState(req)
@@ -74,6 +103,22 @@ func (s *CnAgentServer) convergeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 ) *pb.CntlrInfo {
+	// The same §7 refusal as syncupCntlr's, for the two entrances that do not
+	// come through it: the startup Reconcile, which converges from a file an
+	// older build may have persisted with zeros, and the background connect
+	// retry, which re-enters with the request it already holds. Refusing
+	// before newCntlrPlan leaves st.applied untouched, so a later teardown
+	// still plans from the last shape this agent actually built.
+	if err := agent.ValidateBdevConf(st.req.GetBdevConf()); err != nil {
+		ptr := st.req.GetCntlrPointer()
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", st.req.GetClusterId()),
+			slog.Uint64("cn_id", st.req.GetCnId()),
+			slog.Uint64("sp_id", ptr.GetSpId()),
+			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
+			slog.String("error", err.Error()))
+		return newCntlrInfo()
+	}
 	plan := newCntlrPlan(s.nf, st.req)
 	info := newCntlrInfo()
 	s.retire(ctx, st, plan, info)

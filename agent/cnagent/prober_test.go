@@ -45,24 +45,29 @@ func withClock(srv *CnAgentServer) *fakeClock {
 	return clock
 }
 
-// probeLogCapture reads back the records CN11 emits for itself — the
+// logCapture reads back the records the cn agent emits for itself — the
 // prober is now the only cn code that logs its own block IO, so the msgs and
-// attrs have to be pinned here (log.md §5.1). The buffer is mutex-guarded
+// attrs have to be pinned here (log.md §5.1), and the §7 conf refusal is
+// pinned the same way in conf_test.go. The buffer is mutex-guarded
 // because slog.Default is process-wide and other goroutines may be logging.
-type probeLogCapture struct {
+type logCapture struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
 }
 
-func (c *probeLogCapture) Write(p []byte) (int, error) {
+func (c *logCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.buf.Write(p)
 }
 
-// records decodes every captured JSON line of the two probe msgs; every other
-// record is ignored, so an unrelated goroutine cannot fail these tests.
-func (c *probeLogCapture) records(t *testing.T) []map[string]any {
+// msgRecords decodes every captured JSON line carrying one of the given msgs;
+// every other record is ignored, so an unrelated goroutine cannot fail these
+// tests.
+func (c *logCapture) msgRecords(
+	t *testing.T,
+	msgs ...string,
+) []map[string]any {
 	t.Helper()
 	c.mu.Lock()
 	text := c.buf.String()
@@ -76,15 +81,23 @@ func (c *probeLogCapture) records(t *testing.T) []map[string]any {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("captured line is not JSON: %q: %v", line, err)
 		}
-		if rec["msg"] == "probe write block" ||
-			rec["msg"] == "probe read block direct" {
-			out = append(out, rec)
+		for _, msg := range msgs {
+			if rec["msg"] == msg {
+				out = append(out, rec)
+				break
+			}
 		}
 	}
 	return out
 }
 
-func (c *probeLogCapture) onlyMsg(t *testing.T, msg string) map[string]any {
+// records is msgRecords over the two probe msgs.
+func (c *logCapture) records(t *testing.T) []map[string]any {
+	t.Helper()
+	return c.msgRecords(t, "probe write block", "probe read block direct")
+}
+
+func (c *logCapture) onlyMsg(t *testing.T, msg string) map[string]any {
 	t.Helper()
 	var found []map[string]any
 	for _, rec := range c.records(t) {
@@ -98,12 +111,12 @@ func (c *probeLogCapture) onlyMsg(t *testing.T, msg string) map[string]any {
 	return found[0]
 }
 
-// captureProbeLogs installs a capturing logger as the process default for the
+// captureLogs installs a capturing logger as the process default for the
 // duration of the test, using the production handler chain (log.md R2) so the
 // trace id lands on the record exactly as it does in the agent.
-func captureProbeLogs(t *testing.T) *probeLogCapture {
+func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
-	capture := &probeLogCapture{}
+	capture := &logCapture{}
 	logger := slog.New(&common.TraceIdHandler{
 		Handler: slog.NewJSONHandler(capture, nil),
 	})
@@ -549,7 +562,7 @@ func TestWedgedProbeDoesNotBlockAConverge(t *testing.T) {
 // one per half, msg `probe write block` / `probe read block direct`, carrying
 // the attempt's trace id and the shape of the IO — never the data.
 func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
-	capture := captureProbeLogs(t)
+	capture := captureLogs(t)
 	path := filepath.Join(t.TempDir(), "leg-wrapper")
 	if err := os.WriteFile(path, make([]byte, common.LegHealthBlockSize),
 		0o600); err != nil {
@@ -600,7 +613,7 @@ func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 // TestDirectProbeIoShortCircuitsOnCancel: a cancelled prober starts no IO and
 // logs nothing — the fast fail the OsClient's semaphore acquire used to give.
 func TestDirectProbeIoShortCircuitsOnCancel(t *testing.T) {
-	capture := captureProbeLogs(t)
+	capture := captureLogs(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var io LegProbeIO = directLegProbeIO{}

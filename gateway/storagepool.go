@@ -75,7 +75,10 @@ func spDefaultCntlidSlots() []uint32 {
 }
 
 // spMergeUint64 is one member of decision D-C's merge: the request wins unless
-// it left the member at the proto3 zero that means "unset" (§7, GW11).
+// it left the member at the proto3 zero that means "unset" (§7). A member zero
+// on BOTH sides is settled afterwards, by model.ResolveBdevConf — never here,
+// so that "inherit from the cluster" stays distinguishable from "take the
+// constant".
 func spMergeUint64(reqValue uint64, clusterValue uint64) uint64 {
 	if reqValue != 0 {
 		return reqValue
@@ -102,14 +105,16 @@ func redundKindSet(conf *pb.RedundConf) bool {
 // mergeSpBdevConf is decision D-C: the bdev_conf CreateStoragePool STORES is
 // the member-wise merge of the request over ClusterConf.bdev_conf, plus the
 // one structural default of §8.4 — a redund_conf unset in both is redund_none.
+// The caller passes the result through model.ResolveBdevConf, which settles
+// any member still zero on both sides against the §7 constants; the three
+// rungs (request, cluster, constant) therefore all land in the stored message.
 //
 // The merge is stored rather than re-resolved at read time because an SP's
 // geometry must be immutable: legCntOf, model.GroupBlocks and every thin
 // device sized against the stripe would otherwise move under a live SP the
-// moment someone edited the cluster's defaults. Numeric members left zero in
-// both stay zero — model.GroupBlocks and model.PoolBlockSize resolve them to
-// the same constants everywhere, so a stored zero and a stored default are the
-// same geometry (GW11).
+// moment someone edited the cluster's defaults. That immutability is only real
+// because the stored members are CONCRETE — a stored zero would still float
+// with whatever constant the reading binary carried.
 //
 // bdev_feature_list has no merge: §7 refuses a non-empty one on both the
 // cluster and the SP, so there is never anything to carry over. The chosen
@@ -393,7 +398,11 @@ func (s *Server) CreateStoragePool(
 			if err != nil {
 				return err
 			}
-			bdev := mergeSpBdevConf(req.GetBdevConf(), cc.GetBdevConf())
+			// Resolve AFTER the merge, never before: resolving the request
+			// first would turn every member it omitted into a constant and
+			// destroy inheritance from the cluster.
+			bdev := model.ResolveBdevConf(
+				mergeSpBdevConf(req.GetBdevConf(), cc.GetBdevConf()))
 			if cid != scanCid || legCntOf(bdev) != legs {
 				// The scan planned for another cluster or another leg count;
 				// its picks describe an SP this transaction is not building.
@@ -436,13 +445,20 @@ func (s *Server) CreateStoragePool(
 				cntlrIds[idx] = minter.mint()
 				conf.CntlrIdList = append(conf.CntlrIdList, cntlrIds[idx])
 			}
-			extentSize := model.ResolveDnBinConf(
-				cc.GetDnBinConf()).GetExtentSize()
+			// The cluster's stored extent size, used as stored (§7):
+			// CreateCluster resolved it, and a zero here would be corruption.
+			if err := model.ValidateClusterConf(cc); err != nil {
+				return errAborted("%v", err)
+			}
+			extentSize := cc.GetDnBinConf().GetExtentSize()
 			// Everything below is staged in memory and written only once
 			// every pick has been verified and every budget charged: a
 			// refusal — a moved capacity key above all — must return before
 			// the first Put, not merely before the commit.
-			dnl := newDnLedger(stm, cid, cc)
+			dnl, err := newDnLedger(stm, cid, cc)
+			if err != nil {
+				return err
+			}
 			builtSlices := make([]*pb.Slice, 0, sliceCnt)
 			for sliceIdx := 0; sliceIdx < sliceCnt; sliceIdx++ {
 				// D-D: then per slice its slice_id, then the META group and
@@ -638,7 +654,10 @@ func (s *Server) DeleteStoragePool(
 		// returns it (§6.5). It is computed from the slices as they are NOW,
 		// which is what makes a grown SP release exactly what it charged.
 		footprint := spFootprint(slices)
-		dnl := newDnLedger(stm, sc.Cid, sc.Cc)
+		dnl, err := newDnLedger(stm, sc.Cid, sc.Cc)
+		if err != nil {
+			return err
+		}
 		cnl := newCnLedger(stm, sc.Cid)
 		for _, slice := range slices {
 			for _, grp := range allGroups(slice) {
@@ -1061,8 +1080,17 @@ func (s *Server) GrowSlice(
 		if snapErr != nil {
 			return mapStmErr(snapErr)
 		}
-		extentSize := model.ResolveDnBinConf(
-			cc.GetDnBinConf()).GetExtentSize()
+		// Both confs as stored (§7). Validating before the ladder is what
+		// keeps model.MetaLadderExtCnt's "false" meaning the 16 GiB cap and
+		// nothing else: an unvalidated zero extent size would report the same
+		// false and be reported to the operator as a metadata ceiling.
+		if err := model.ValidateClusterConf(cc); err != nil {
+			return errAborted("%v", err)
+		}
+		if err := model.ValidateBdevConf(conf.GetBdevConf()); err != nil {
+			return errAborted("%v", err)
+		}
+		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt := uint64(0)
 		if req.GetIsMeta() {
 			total := uint64(0)

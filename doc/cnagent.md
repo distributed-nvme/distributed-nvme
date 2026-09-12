@@ -449,7 +449,36 @@ CN7. Diff `cntlr_pointer_list` against the local `cntlr-*` files (§9.1 full
 CN8. **Gating.** The pointer MUST be present in the stored
      `SyncupCnRequest.cntlr_pointer_list` — else `ReplyCodeUnknownObject`
      (`SyncupCn` introduces pointers first, §9.1). Then the SH8 revision
-     gate against the stored `SyncupCntlrRequest`.
+     gate against the stored `SyncupCntlrRequest`. Then, last and still
+     with **zero** side effects, the §7 **conf gate**:
+     `agent.ValidateBdevConf(req.bdev_conf)` (`dnagent.md` §2.1) refuses a
+     request whose `dm_pool_conf.data_block_size`,
+     `dm_pool_conf.low_water_mark_pct` or `dm_raid0_conf.stripe_size` is 0,
+     or whose `redund_conf` selected md-raid1 with a 0
+     `bitmap_chunk_block_cnt`. The control plane resolves all four when it
+     *writes* the conf (§7), so a zero here is a geometry no agent may
+     invent a replacement for — those values become the thin-pool's, the
+     raid0's and the md bitmap's own arguments (CN12, CN13, CN15), and a
+     geometry this node guessed is one the rest of the cluster does not
+     share. The refusal is `ReplyCodeInvalidConf` (`dnagent.md` §2.5)
+     carrying the validator's message, and the reply echoes the **stored**
+     revision, not the request's, so the worker sees that the request was
+     not accepted. One `Error` record, msg `"invalid stored conf"`, names
+     the ids and the field.
+
+     Placement is load-bearing: the gate sits **before** the request
+     becomes this cntlr's desired state, so it skips the desired-state
+     promotion, the whole converge — whose retire phase alone rewrites ANA
+     states, reloads ns-dev linears and removes dm devices — and CN20's
+     local-store persist, which is what keeps a refused request from being
+     replayed by the next startup reconcile. The same check is repeated in
+     the converge itself for the two entrances that do not come through
+     this RPC — the CN2 startup reconcile, which converges from a file an
+     older build may have persisted with zeros, and the CN10/CN18
+     background connect retry, which re-enters with the request it already
+     holds. There it returns an empty `CntlrInfo` and leaves the applied
+     plan untouched, so a later teardown still plans from the last shape
+     this agent actually built.
 
 CN9. **Role and pass structure.** The effective role is **primary** iff
      `cntlr.primary && !cntlr.disabled`; anything else converges the §3.4
@@ -694,9 +723,15 @@ CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       group devices), tables via stdin (Appendix A); then the thin-pool
       `CnPoolFinalName` with `block_sectors = block_size / 512` and
       `low_water_mark` = data-dev blocks × (100 −
-      `dm_pool_conf.low_water_mark_pct`) / 100, where `pct = 0` selects
-      `DefaultPoolLowWatermarkPct` and `pct > 100` passes `0` (no dm
-      events — auto-grow off, §3.3). A fresh pool needs its metadata to
+      `dm_pool_conf.low_water_mark_pct`) / 100. `pct = 0` is **invalid**
+      and never reaches that arithmetic: the control plane resolved an
+      omitted percentage to `DefaultPoolLowWatermarkPct` when it *wrote*
+      the conf (§7), so a zero arriving here is a value no agent may
+      replace, and CN8's conf gate refuses the request before any planning
+      runs. `pct > 100` still means auto-grow off and still passes `0` — no
+      dm events at all (§3.3). Nothing is clamped in either direction: the
+      agent holds no default of its own, and >100 is a legal setting rather
+      than an out-of-range one. A fresh pool needs its metadata to
       read zero, and it does: the §9.4 provisioning protocol **writes** zeros
       over every extent of every side (`blkdiscard --zeroout`) before the
       side is ever exported — the same guarantee that funds CN12's
@@ -1750,6 +1785,22 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     resumed returns before the reload) and so a repeat park emits no `dmsetup`
     command at all. A second sub-case drops the whole subsystem and asserts
     the same park-first order around `RemoveSubsystem`.
+27. **A zero conf member is refused** (CN8, `dnagent.md` §2.1): a
+    `SyncupCntlr` whose `bdev_conf` carries a zero `data_block_size`,
+    `low_water_mark_pct` or `stripe_size`, or a zero
+    `bitmap_chunk_block_cnt` under an md-raid1 `redund_conf`, replies
+    `ReplyCodeInvalidConf` with the **stored** revision, records **zero**
+    mutating calls (no `dmsetup`, `mdadm`, `nvme` or configfs write) and no
+    `WriteProto` to `LocalCntlrPath`, and leaves the applied plan of the
+    previous revision in place. A conf whose `redund_conf` selected
+    `redund_none` is **accepted** with the other three members concrete,
+    because the chunk count is a field of the md-raid1 arm and does not
+    exist at all on the other. A `Reconcile` over a persisted request
+    carrying such a zero converges nothing for that cntlr and records the
+    same refusal without touching the applied plan. The four messages are
+    asserted verbatim; they are the same literals `model/capacity_test.go`
+    asserts for `model.ValidateBdevConf`, and the two assertions together
+    are what keep the two copies of the rule in step (`dnagent.md` §2.1).
 
 ## 7. Acceptance checklist
 
@@ -1795,6 +1846,19 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    `nvme connect`, `mdadm` and `dmsetup create` calls, and every affected
    `ResInfo` is `RES_STATUS_PROVISIONING` — never `RES_STATUS_ERROR`.
 9. §5 records every change the design-review pass made.
+10. Both greps of this item carry `--exclude=*_test.go`, because both are
+    claims about what the shipped agent code contains and the tests of §6
+    test 23 / test 27 and `agent/conf_test.go` deliberately quote the same
+    strings back:
+    `grep -rn --exclude=*_test.go "invalid stored conf" agent/` finds only
+    `agent/conf.go`'s error builder (plus the doc comment above it) and the
+    `msgInvalidStoredConf` constant in each role package — one string
+    reaches every refusal, in both agents and in the worker. Each of the four
+    `ValidateBdevConf` messages in `agent/conf.go` greps byte-identical out
+    of `model/capacity.go` (`dnagent.md` §2.1), and
+    `grep -rnE --exclude=*_test.go "DefaultDmPoolDataBlockSize|DefaultPoolLowWatermarkPct|DefaultDmRaid0StripeSize|DefaultChunkBlockCnt" agent/`
+    finds nothing: the cn agent substitutes no conf default of its own
+    (CN13).
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

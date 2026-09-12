@@ -27,11 +27,15 @@ func dnTestConf() *pb.DnConf {
 }
 
 // TestDnSyncupRequestGolden pins the SyncupDn request of RW13: the DnConf's
-// side pointer list verbatim and the RESOLVED dn_bin_conf's extent_size.
+// side pointer list verbatim and the STORED dn_bin_conf's extent_size. The
+// agent formats every disk header with that number (§3.1), so the request must
+// carry the cluster's own value and never a constant this binary holds.
 func TestDnSyncupRequestGolden(t *testing.T) {
 	conf := dnTestConf()
-	// An empty ClusterConf resolves to the defaults (RW21).
-	cc := model.ResolveClusterConf(&pb.ClusterConf{CreationEpoch: 1})
+	// The stored conf of a cluster created without an explicit extent size:
+	// CreateCluster resolved it to common.DefaultDnExtSize when it wrote the
+	// key (§7), and the request forwards what it finds.
+	cc := testClusterConf()
 	got := dnSyncupRequest(testCid, testDnId, 42, conf, cc)
 	want := &pb.SyncupDnRequest{
 		ClusterId:       testCid,
@@ -44,10 +48,9 @@ func TestDnSyncupRequestGolden(t *testing.T) {
 		t.Fatalf("request =\n%v\nwant\n%v", got, want)
 	}
 
-	// A configured extent size wins over the default.
-	cc = model.ResolveClusterConf(&pb.ClusterConf{
-		CreationEpoch: 1,
-		DnBinConf:     &pb.DnBinConf{ExtentSize: 4 * 1024 * 1024 * 1024},
+	// A cluster stored with an extent size of its own: that is what is sent.
+	cc = testClusterConf(func(cc *pb.ClusterConf) {
+		cc.DnBinConf.ExtentSize = 4 * 1024 * 1024 * 1024
 	})
 	got = dnSyncupRequest(testCid, testDnId, 42, conf, cc)
 	if got.GetExtentSize() != 4*1024*1024*1024 {
@@ -70,8 +73,8 @@ func TestDnCheckRequestGolden(t *testing.T) {
 }
 
 // TestDnRoleSyncupReadsDnConfPerSyncup checks RW13 end to end: the request the
-// agent receives carries the DnConf's pointer list and the cluster's extent
-// size.
+// agent receives carries the DnConf's pointer list and the cluster's stored
+// extent size.
 func TestDnRoleSyncupReadsDnConfPerSyncup(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{

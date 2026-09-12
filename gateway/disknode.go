@@ -116,8 +116,14 @@ func (s *Server) CreateDiskNode(
 			return errExists("disk node %q already exists", req.GetAddrPort())
 		}
 		// §6.1: counts round down, and the agent already reported the data
-		// area only, so nothing further is subtracted here.
-		extentSize := model.ResolveDnBinConf(cc.GetDnBinConf()).GetExtentSize()
+		// area only, so nothing further is subtracted here. extent_size is
+		// read exactly as CreateCluster stored it (§7) — it is what this
+		// node's disk header will be formatted with — so the stored conf is
+		// validated first rather than divided by.
+		if err := model.ValidateClusterConf(cc); err != nil {
+			return errAborted("%v", err)
+		}
+		extentSize := cc.GetDnBinConf().GetExtentSize()
 		totalExtCnt := dnSize / extentSize
 		if totalExtCnt < 1 {
 			return errInvalid(
@@ -225,6 +231,20 @@ func (s *Server) DeleteDiskNode(
 		global := &pb.DnGlobal{}
 		if !stm.Get(globalKey, global) {
 			return errAborted("dn_global key %q is missing", globalKey)
+		}
+		// The last check before the first write, and so the last point at
+		// which this transaction can still return having staged nothing.
+		// MaintainDnCapacity below names the key to delete by shifting the
+		// STORED ladder (§7), so against a conf CreateCluster could not have
+		// written it names a key nothing ever wrote: the delete would miss,
+		// the node's real capacity key would outlive its DnConf, and once the
+		// conf was repaired the §6.5 scan would keep offering free space on a
+		// node that is gone. The check runs after the token and the
+		// side_ptr_list check so an operator still hears about a stale view
+		// or about the sides first — those are answers about the request,
+		// this one is about the store.
+		if err := model.ValidateClusterConf(cc); err != nil {
+			return errAborted("%v", err)
 		}
 		// Deleting the rev key is the event that stops the owning dn-worker
 		// health-checking the node (§5.5); DnConf and the capacity key go
@@ -393,6 +413,17 @@ func (s *Server) UpdateDiskNodeDisabled(
 		dnId = dn.GetDnId()
 		if dn.GetDisabled() == req.GetDisabled() {
 			return nil
+		}
+		// Below the no-op return above, because a request that changes
+		// nothing reaches no capacity-key maintenance and so has nothing to
+		// be wrong about, and above the Put, because a refusal must stage no
+		// write. Flipping the flag moves a capacity key in both directions —
+		// disabling deletes the key the STORED ladder names, enabling writes
+		// it back (§5.6) — so a conf CreateCluster could not have written
+		// would leave a disabled node in the index, or index an enabled one
+		// under a bin its free count does not belong to.
+		if err := model.ValidateClusterConf(cc); err != nil {
+			return errAborted("%v", err)
 		}
 		// dn stays the record as read so MaintainDnCapacity can delete the
 		// exact key it implied; the clone carries the new flag.

@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
-	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -334,14 +334,20 @@ func healthTestDeps(t *testing.T) (*deps, *fakeHealthWriter) {
 	return d, writer
 }
 
-// seedClusterConf installs a resolved ClusterConf in the RW21 cache. Every DN
-// health write needs one: MD4 derives the DnCapacity key's bin index from
-// dn_bin_conf, so newDnMonitor refuses to write without it (HL1).
+// seedClusterConf installs a usable stored ClusterConf in the RW21 cache.
+// Every DN health write needs one: MD4 derives the DnCapacity key's bin index
+// from dn_bin_conf, so newDnMonitor refuses to write without one it can use
+// (HL1, §7).
 func seedClusterConf(d *deps, cid uint64) {
+	setCachedConf(d, cid, testClusterConf())
+}
+
+// setCachedConf installs one conf in the RW21 cache exactly as given, the way
+// the cache itself stores it (§7) — the only way to hand a reader a conf the
+// gateway could not have written.
+func setCachedConf(d *deps, cid uint64, cc *pb.ClusterConf) {
 	d.conf.mu.Lock()
-	d.conf.entries[cid] = model.ResolveClusterConf(&pb.ClusterConf{
-		CreationEpoch: 1,
-	})
+	d.conf.entries[cid] = cc
 	d.conf.mu.Unlock()
 }
 
@@ -444,10 +450,10 @@ func TestHealthWriteFailureIsRetried(t *testing.T) {
 // row: the op maintains the DnCapacity key in the same STM, and MD4 computes
 // that key's bin index from the cluster's dn_bin_conf. A cluster deleted from
 // the RW21 cache between the loop's RW9 gate and this write must NOT be
-// papered over with ResolveDnBinConf's default 0/4/8/12 shifts — that leaves
-// the real key undeleted and writes a duplicate at the wrong bin, which §6.3's
-// bin scan then hands out as an allocation candidate for a DN this very write
-// is flagging unhealthy. The write is skipped and retried next round (RW12).
+// papered over with an invented 0/4/8/12 ladder — that leaves the real key
+// undeleted and writes a duplicate at the wrong bin, which §6.3's bin scan
+// then hands out as an allocation candidate for a DN this very write is
+// flagging unhealthy. The write is skipped and retried next round (RW12).
 func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 	logs := captureLogs(t)
 	d, writer := healthTestDeps(t)
@@ -472,6 +478,61 @@ func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 	if len(writes) != 1 || writes[0].record != healthRecordDn ||
 		writes[0].epoch == 0 {
 		t.Fatalf("writes after the conf came back = %v", writes)
+	}
+}
+
+// TestHealthDnWriteRefusesAnInvalidConf is the §7 twin of the test above, for
+// the conf that is PRESENT but unusable. The two are the same failure: MD4
+// needs a bin ladder, and a cluster whose stored dn_bin_conf has none leaves
+// the monitor with nothing to compute the DnCapacity key from. Guessing
+// the ladder would write the capacity key at a bin the rest of the cluster
+// does not address — the same duplicate-key damage the test above describes,
+// from a cluster that is not even deleted — so the write fails instead.
+//
+// This is not the only worker STM write that takes a ClusterConf — the sp
+// role's model.GrowSlice and model.CreateSpareLeg take one too (reaction.go)
+// — but each of those is handed the p.cc the reaction pass validated before
+// it built the pass, and GrowSlice re-checks both confs at the top of its own
+// STM besides. The monitor's write re-reads the conf from the RW21 cache per
+// write instead of using the snapshot the revision loop validated, so the
+// loop's gate does not cover the value this write uses; that, not uniqueness,
+// is why it validates again (health.go).
+func TestHealthDnWriteRefusesAnInvalidConf(t *testing.T) {
+	logs := captureLogs(t)
+	d, writer := healthTestDeps(t)
+	// Present in the cache, but with the bin ladder CreateCluster always
+	// writes missing: proto3 gives back all-zero shifts, which §6.2 does not
+	// accept as a ladder.
+	setCachedConf(d, 7, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.DnBinConf = nil
+	}))
+	monitor := newDnMonitor(d, 7, 11, func() string { return "dn0:9520" })
+	ctx := context.Background()
+
+	monitor.observe(ctx, healthErrorRow, "disk")
+	if got := writer.all(); len(got) != 0 {
+		t.Fatalf("wrote %v under an unusable stored conf", got)
+	}
+	recs := logs.withMsg("health write failed")
+	if len(recs) != 1 {
+		t.Fatalf("%d health write failed records, want 1", len(recs))
+	}
+	if err, _ := recs[0]["error"].(string); !strings.Contains(
+		err, "invalid stored conf",
+	) {
+		t.Fatalf("error = %q, want the stored-conf refusal", err)
+	}
+	if got := len(logs.withMsg(msgHealthChanged)); got != 0 {
+		t.Fatalf("a refused write logged a health change")
+	}
+	// Nothing was remembered (HL3): a repaired conf makes the next round
+	// write the transition it owed.
+	seedClusterConf(d, 7)
+	monitor.observe(ctx, healthErrorRow, "disk")
+	writes := writer.all()
+	if len(writes) != 1 || writes[0].record != healthRecordDn ||
+		writes[0].epoch == 0 {
+		t.Fatalf("writes after the conf was repaired = %v", writes)
 	}
 }
 

@@ -67,6 +67,14 @@ const (
 	msgSpSidesIdle = "sp sides idle"
 )
 
+// spConfRefusal is the memo that keeps a steady invalid stored conf to one
+// Error record instead of one per tick, keyed on the error text so a conf that
+// changes from one invalid value to another still reports.
+type spConfRefusal struct {
+	bdev string
+	cc   string
+}
+
 // ---------------------------------------------------------------------------
 // The model surface (MD3, MD6)
 // ---------------------------------------------------------------------------
@@ -275,6 +283,10 @@ type spWorker struct {
 	tdRefs    map[uint64]model.TdRef
 	fanWanted bool
 	idleCnt   int
+	// confRefusal memoizes the last stored-conf error the fan-out and the
+	// reaction pass each refused on, so a steady bad conf costs one Error
+	// record rather than one per tick.
+	confRefusal spConfRefusal
 	// react is the §11 half of the coordinator: the model surface of the
 	// automatic reactions and the little memo their log records need
 	// (reaction.go).
@@ -397,7 +409,11 @@ func (w *spWorker) tick() {
 // period.
 func (w *spWorker) tickPeriod() time.Duration {
 	cc, ok := w.deps.conf.get(w.cid)
-	if !ok {
+	// An unusable conf falls back to the same period, and logs NOTHING: this
+	// is a cadence, not a value anything is computed with, and a coordinator
+	// that stopped ticking would stop retrying the fan-out and the reaction
+	// pass forever. Those two are where the refusal is recorded, once.
+	if !ok || model.ValidateClusterConf(cc) != nil {
 		return common.DefaultHealthCheckInterval * time.Second
 	}
 	return roundPeriod(cc.GetHealthCheckConf().GetCntlrInterval())
@@ -454,8 +470,48 @@ func (w *spWorker) fanOut() {
 			slog.Any("keys", state.Missing),
 		)
 	}
+	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
+		// §7: the SP's stored geometry is what every side and cntlr request
+		// is built from. dm_raid0_conf.stripe_size is read on no worker path
+		// at all, and redund_md_raid1.bitmap_chunk_block_cnt only inside
+		// model.GrowSlice's §3.6 geometry; otherwise both travel verbatim
+		// inside the bdev_conf buildCntlrPlans forwards, so this is the one
+		// place the worker can refuse to hand the cn agent a geometry nobody
+		// chose.
+		//
+		// Refusing here builds no request, starts no child and updates no
+		// running one: buildPlan and applyPlan are simply not reached, and
+		// neither is any STM. Children ALREADY running keep driving the plan
+		// built from the last good conf; nothing is torn down, because a conf
+		// that cannot be read is not a reason to stop serving IO.
+		//
+		// fanWanted is set for the same reason msgSpLoadFailed sets it: tick()
+		// only re-enters fanOut when it is, and applyPlan — the only other
+		// thing that would arm a retry, through idleCnt — was not reached. A
+		// repaired conf does arrive as a desired change, but relying on that
+		// alone would leave the coordinator quiet after an operator fixed the
+		// SP by any other route. The memo keeps the retry to one record.
+		w.fanWanted = true
+		w.refuseSpConf(ctx, err)
+		return
+	}
+	w.confRefusal.bdev = ""
 	plan := w.buildPlan(ctx, state)
 	w.applyPlan(plan)
+}
+
+// refuseSpConf records fanOut's refusal, once per distinct error.
+func (w *spWorker) refuseSpConf(ctx context.Context, err error) {
+	if w.confRefusal.bdev == err.Error() {
+		return
+	}
+	w.confRefusal.bdev = err.Error()
+	slog.ErrorContext(ctx, msgInvalidStoredConf,
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+		slog.String("sp_name", w.desired.handle),
+		slog.String("error", err.Error()),
+	)
 }
 
 // buildPlan turns one loaded SP into every request the fan-out sends
@@ -2029,10 +2085,12 @@ func sideOfLeg(leg *pb.Leg, sideId uint64) *pb.Side {
 	return nil
 }
 
-// dataBlockSize resolves the §7 default of the pool's data block size: it is
-// what a migration destination's dm-clone uses as its region size (RW15) and
-// what AR6 converts a meta group's data region with. The rule lives in model,
-// which applies it inside the GrowSlice STM as well.
+// dataBlockSize is the pool's STORED data block size: what a migration
+// destination's dm-clone uses as its region size (RW15) and what AR6 converts
+// a meta group's data region with. It substitutes nothing — CreateStoragePool
+// made the value concrete (§7) and both callers sit behind a ValidateBdevConf
+// gate. It stays a one-line delegation to model so this pre-check and the
+// GrowSlice STM cannot end up meaning different fields.
 func dataBlockSize(bdevConf *pb.BdevConf) uint64 {
 	return model.PoolBlockSize(bdevConf)
 }

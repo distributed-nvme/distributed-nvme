@@ -187,9 +187,18 @@ const (
 
 Derived, never a constant: the **dead threshold** = 2 × the configured vote
 interval; the **round timeout** = the object kind's health-check interval
-(§8.1). The existing `DefaultHealthCheckInterval` = 5 (bounds 1..3600),
-`DefaultDnExtSize`, `DefaultPoolLowWatermarkPct` and the four
-`Default*Unhealthy` thresholds are read through the §8.5 cache and §11.4.
+(§8.1). The existing `DefaultHealthCheckInterval` = 5 (bounds 1..3600) is
+the worker's own fallback cadence — the retry of a missing or unusable
+cluster conf (RW9) and the sp coordinator's tick when one is unusable
+(AR1). `roundPeriod` keeps a zero guard on the same constant, but only as
+a backstop against a hot loop: RW9's gate refuses a zero interval before
+any round can read one, so no round period is ever computed from a
+substituted value. The four `Default*Unhealthy` thresholds are resolved
+from `SpConf.event_threshold` when a pass reads them (AR4).
+`DefaultDnExtSize` and `DefaultPoolLowWatermarkPct` are read on no worker
+code path at all (only as fixture values in the §13 tests): the gateway
+resolves those two at write time (§7), and the worker uses what is stored
+or refuses it (RW9, RW14, AR1).
 
 ### 2.2 `pb/schema.proto` — one added message (applied at implementation time)
 
@@ -402,8 +411,10 @@ MD4. **Capacity keys** (`architecture.md` §5.6, §6.2). `DnBinIdx(freeExt
      `1 << bin0_shift`); `DnAllocatable(dn *pb.DnConf, conf)` and
      `CnAllocatable(cn *pb.CnConf)` implement the presence rule verbatim
      (pointer-list cap, `err_epoch != 0`, `disabled`, free floor).
-     `MaintainDnCapacity(s STM, cid, cc *pb.ClusterConf, old, new
-     *pb.DnConf)` deletes the key implied by `old` (if `old` was allocatable)
+     `MaintainDnCapacity(s STM, cid uint64, addrPort string, cc
+     *pb.ClusterConf, old, new *pb.DnConf)` — `addrPort` is a parameter
+     because a capacity key embeds it and `DnConf`, which is keyed by it,
+     does not carry it — deletes the key implied by `old` (if `old` was allocatable)
      and puts the key implied by `new` (if allocatable; value =
      `DnCapacity{location}`); `MaintainCnCapacity` likewise. Both are
      idempotent and are called by every op that changes an input of the
@@ -452,7 +463,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
-     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size` (defaults resolved); ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
+     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (§7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
@@ -802,8 +813,22 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      roles are independent (VW10) — and stale revision
      (`ReplyCodeStaleRevision`) means the agent holds a revision newer than
      etcd's, which only an etcd restore can cause and is logged at `Error`.
-     A gRPC error is logged and left to the next round. A desired change
-     that arrives while a syncup is in flight is applied when it returns.
+     Invalid conf (`ReplyCodeInvalidConf`) means the agent found a proto3
+     zero where §7 requires a concrete value and converged nothing
+     (`dnagent.md` §2.2). Only `SyncupDn` and `SyncupCntlr` can return it,
+     and the same members are checked on this side first — `extent_size` by
+     RW9's gate, the SP's `bdev_conf` by RW14's — so a request this worker
+     sends should never provoke it; a code 3 from a live agent means the
+     agent's copy of those rules and `model`'s have drifted apart
+     (`dnagent.md` §2.1).
+
+     The handling is uniform in the code and does not enumerate the codes:
+     only `ReplyCodeStaleRevision` raises the record to `Error`, every
+     other value — including one this worker does not know — is `Info`, and
+     in all cases `synced` is left where it was, so RW4 step 5 issues the
+     same `Syncup*` again next round until the reply changes. A gRPC error
+     is logged and left to the next round. A desired change that arrives
+     while a syncup is in flight is applied when it returns.
 
 RW6. **Immediate syncup.** A desired change from the parent triggers a
      `Syncup*` at once, without waiting for the round. A change that arrives
@@ -829,12 +854,27 @@ RW8. **Round timeout** = the object kind's interval: a reply arriving later
      is a missed reply (§9.7). The timer is re-armed *after* each round, so a
      slow round never queues a burst of catch-up rounds.
 
-RW9. **Inputs from the cache** (§8.5): `dn_interval` / `cn_interval` /
-     `side_interval` / `cntlr_interval` (0 ⇒ `DefaultHealthCheckInterval`,
-     clamped to `[MinHealthCheckInterval, MaxHealthCheckInterval]`),
+RW9. **Inputs from the cache** (§8.5), every one used **as stored**:
+     `dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval`
+     (already inside `[MinHealthCheckInterval, MaxHealthCheckInterval]` —
+     `CreateCluster` resolved and clamped them at write time, §7),
      `extent_size`, `qos_ratio`, `dn_bin_conf`. A cluster absent from the
      cache ⇒ the loop **idles**: no stream, no syncup, one `cluster conf
      missing` record, a retry every `DefaultHealthCheckInterval` seconds.
+
+     A cluster whose entry fails `model.ValidateClusterConf` ⇒ the loop
+     **refuses** it: the same quiesced state (stream dropped, RW7
+     connection reference released) on the same retry cadence, but with its
+     own `invalid stored conf` record at `Error` (§12), so that the
+     `cluster conf missing` grep keeps meaning "not in the cache" and
+     nothing else. The gate sits in `revWorker.run` ahead of the round, so
+     one rule covers all four object kinds — dn, cn, sp side and sp cntlr —
+     and the refusal reaches nothing: no stream is opened, no `Syncup*` is
+     sent, no `err_epoch` is written, no STM runs. A desired change that
+     arrives meanwhile is still recorded (RW3) but not sent; the first
+     round after the conf is repaired syncs it. The record is memoized on
+     the error string, so a steady bad conf costs one record and a conf
+     that changes from one invalid value to another still reports.
 
 RW10. **Trace ids.** Every round, syncup, push, flip and reaction runs under
       `common.WithTraceId(ctx, seed[:8] + "-" + common.NewTraceId())`. The
@@ -906,6 +946,26 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       above — and the primary's leg rows are still placed on their slice
       (HL2).
 
+      Between the load and the plan the fan-out validates the SP's stored
+      `bdev_conf` with `model.ValidateBdevConf` (§7). That geometry is what
+      RW16's request carries verbatim and what RW15's migration destination
+      takes its `block_size` from — a plain side request carries none of
+      it. `dm_raid0_conf.stripe_size` is read on no worker path at all, and
+      `redund_md_raid1.bitmap_chunk_block_cnt` only inside
+      `model.GrowSlice`'s §3.6 geometry (MD6), which AR6 drives; otherwise
+      both travel verbatim inside `bdev_conf` to the cn agent, so this is
+      the one place the worker can refuse to hand that agent a geometry
+      nobody chose. A refusal emits one `invalid stored
+      conf` record (§12, once per distinct error) and builds no request,
+      starts no child and updates no running one — `buildPlan` and the
+      child diff are simply not reached. It arms the same fan-out retry a
+      failed `LoadSp` arms, because the tick re-enters the fan-out only
+      when a retry is armed and the child diff — the other thing that arms
+      one, through the idle count — was not reached. What it deliberately
+      does **not** do is stop the children already running: they keep
+      driving the plan built from the last good conf, because a conf that
+      cannot be read is not a reason to stop serving IO.
+
 RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       side_pointer{sp_id, leg_id, side_id}, revision = SpRev.revision,
       side_conf{ext_cnt = group.ext_cnt, cntlid_slot = side.cntlid_slot,
@@ -920,8 +980,11 @@ RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       src_nvme_tr_conf = the src side's nvme_tr_conf, block_size =
       bdev_conf.dm_pool_conf.data_block_size, meta_blocks =
       group.meta_blocks, dm_clone_conf = the migration's, bm_cnt =
-      Migration.bm_cnt}`. Zero-valued conf fields are replaced by their §7
-      defaults before sending.
+      Migration.bm_cnt}`. The migration's `dm_clone_conf` is the one conf
+      still filled in here (`hydration_threshold` / `hydration_batch_size`
+      0 ⇒ their §7 defaults, on a copy — the loaded state is shared with
+      every child). `block_size` and everything else is sent as stored; a
+      zero in the SP's geometry was refused by RW14's gate instead.
 
 RW16. **Cntlr request.** `SyncupCntlrRequest{cluster_id, cn_id,
       cntlr_pointer{sp_id, cntlr_id}, revision, bdev_conf = SpConf.bdev_conf,
@@ -965,11 +1028,22 @@ RW21. One per process: `Range(ClusterConfPrefix())` then `WatchTyped(rev +
       1, ClusterConf)`. Entries are keyed by `ClusterId(name,
       creation_epoch)` — the name is the key suffix, the epoch is in the
       value — and a delete removes the entry. Readers receive an immutable
-      snapshot of the entry, with defaults resolved at read time: the four
-      intervals (0 ⇒ 5, clamped to `[1, 3600]`), `extent_size` (0 ⇒
-      `DefaultDnExtSize`), `dn_bin_conf` shifts (a non-increasing set ⇒ the
-      0/4/8/12 defaults), `qos_ratio` as stored. Watch errors and
-      compaction are handled like SW4.
+      snapshot of the entry **exactly as etcd holds it**: the cache
+      resolves nothing, because `CreateCluster` made every defaultable
+      member concrete when it wrote the key (`architecture.md` §7), so a
+      zero read back here is corruption or foreign data, not an omission.
+      Each reader validates the snapshot with `model.ValidateClusterConf`
+      and **refuses** rather than guessing a geometry the rest of the
+      cluster may not agree with; the cache validates nothing itself,
+      because its four readers refuse differently — idle the loop (RW9),
+      keep the tick cadence and skip the pass (AR1), fail the DN health
+      write (HL1) — and a validating `get` would either hide that or log it
+      four times. An invalid conf is deliberately still **cached**:
+      dropping it would make a cluster whose conf went bad
+      indistinguishable from a deleted one and send the operator chasing a
+      phantom deletion that never happened. A cluster **absent** from the
+      cache is the separate RW9/SW6 idle path, with a record of its own.
+      Watch errors and compaction are handled like SW4.
 
 ---
 
@@ -987,6 +1061,26 @@ HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
      | a clean round: reply in time, `code == 0`, no `ERROR` row in the latest known info | cleared to 0 |
      | `RES_STATUS_PROVISIONING`, `MISSING` | neither set nor clear ([D15]) |
      | `agent_reply.code != 0` | neither set nor clear; triggers a re-sync (RW4) |
+
+     The **DN** write needs a usable `ClusterConf` and re-reads it from the
+     cache per write rather than capturing it: MD4 derives the capacity
+     key's bin index from `dn_bin_conf`, so a conf that is missing from the
+     cache, or that fails `model.ValidateClusterConf`, fails the write and
+     leaves it to the next round (RW12). It re-validates rather than
+     trusting RW9's gate because it is not COVERED by one: that gate
+     checked the conf the round was built from, while this write is the
+     health monitor's, issued against a conf re-read from the cache after
+     the gate ran — one the watch goroutine may have replaced in between. It is not the only
+     worker STM write that takes a `ClusterConf` — the sp role's
+     `GrowSlice` and `CreateSpareLeg` take one too (MD6, HL6) — but those
+     two sit behind AR1's gate, and `GrowSlice` re-checks both confs at the
+     top of its own STM besides. Guessing a ladder here would leave the
+     real capacity key undeleted, and `architecture.md` §6.3's bin scan
+     would go on offering it as an allocation candidate for a DN HL1 has
+     just flagged unhealthy — a DN whose `err_epoch` is set implies no key
+     at all (MD4), so nothing is written in its place. The **CN** write
+     needs no conf at all: CN capacity keys carry no bin index
+     (`architecture.md` §6.4).
 
 HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      `SetLegErrEpoch` / `SetSideErrEpoch`:
@@ -1090,6 +1184,25 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      the **primary** cntlr (pool usage, spare readiness) and `now` (unix
      seconds).
 
+     **Both** stored confs are validated before the pass is built — the
+     cluster's with `model.ValidateClusterConf`, the SP's `bdev_conf` with
+     `model.ValidateBdevConf` (§7). Both, because this pass takes its own
+     fresh snapshot of the SP rather than reusing the fan-out's: AR6 reads
+     `low_water_mark_pct` and `data_block_size` straight off it and sizes a
+     meta grow with the cluster's `extent_size`, while the DN scans of AR6
+     and AR8 walk the bin ladder and every allocating reaction takes its
+     oversampling batch from `alloc_conf`. A
+     failure refuses the pass with one `invalid stored conf` record (§12,
+     once per distinct error) and nothing else happens: no candidate scan,
+     no `model` op, no `reaction applied` and no `reaction skipped`. The
+     ticker keeps running — the pass cadence falls back to
+     `DefaultHealthCheckInterval` on an unusable conf and logs nothing of
+     its own, because a coordinator that stopped ticking would stop
+     retrying the fan-out and the pass forever, and those two are where the
+     refusal is already recorded. A cluster missing from the cache stops
+     the pass the same way, silently: its children log `cluster conf
+     missing` for the idle period (RW9).
+
 AR2. **One action per SP per pass**, evaluated in this priority; the first
      applicable one runs and the pass ends:
      1. primary failover (AR5)
@@ -1157,8 +1270,10 @@ AR6. Per slice, from the primary's `slice_id_to_dm_pool[slice_id]` row,
      <used_meta>/<total_meta> <used_data>/<total_data> …` — metadata counts
      in dm-thin's fixed 4 KiB metadata blocks, data counts in the pool's
      `data_block_size`. An unparsable line is skipped and logged once per
-     change. With `lwm = dm_pool_conf.low_water_mark_pct` (0 ⇒
-     `DefaultPoolLowWatermarkPct`; `> 100` ⇒ auto-grow off):
+     change. With `lwm = dm_pool_conf.low_water_mark_pct` **as stored**
+     (`> 100` ⇒ auto-grow off, the one value that is a meaning rather than
+     a default; a `0` never reaches here — `CreateStoragePool` resolved it
+     at write time and AR1's gate refuses one that did, §7):
 
      * **data grow** when `used_data × 100 > lwm × total_data`: internal
        `GrowSlice(is_meta = false)` with `ext_cnt` = the slice's first data
@@ -1271,6 +1386,7 @@ parses them.
 | `worker stopping` | `seed` | CM5 |
 | `revision worker started` / `revision worker stopped` | `role`, `shard`, `cluster_id`, `id` (+ `side_pointer`/`cntlr_pointer` for sp children) | SW3, RW11 |
 | `cluster conf missing` | `cluster_id` | RW9 (once per idle period) |
+| `invalid stored conf` | `Error`. From a revision worker: `role`, `shard`, `cluster_id`, `id` (+ `side_pointer`/`cntlr_pointer` for sp children), `error`. From the sp coordinator (both its gates): `cluster_id`, `sp_id`, `sp_name`, `error` | RW9 (the loop's conf gate), RW14 (the fan-out's `bdev_conf` gate), AR1 (the pass gate) — once per distinct error, never once per round |
 | `syncup result` | ids, `revision`, `code`, `error?` | every `Syncup*` reply or failure (RW5) |
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions |
@@ -1307,14 +1423,19 @@ does).
   `code != 0` ⇒ syncup; desired change ⇒ immediate syncup and coalescing
   under an in-flight call; `resyncWanted` ⇒ equal-revision re-send; stop
   lets an in-flight unary finish before closing the stream; connection
-  reference counting; idle without cluster conf.
+  reference counting; idle without cluster conf, and the same quiesced
+  refusal on an invalid one.
 * **dnrole/cnrole/sprole** — golden requests from a fixture `SpState`
   (side/cntlr requests incl. migration src/dst confs, `id_to_slice` keys,
   standby list with a disabled cntlr); child diff on a changed endpoint;
-  RW18/RW19 candidate selection (all four `created` conditions, the
-  partial-map and `PROVISIONING` negatives).
+  the fan-out refusing an invalid SP `bdev_conf` — one `Error` record
+  naming the field, no child started and no `Syncup*` sent, and the next
+  fan-out after a repair starting the children it owed;
+  RW18/RW19 candidate selection (all four `created`
+  conditions, the partial-map and `PROVISIONING` negatives).
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
-  standby leg rows ignored.
+  standby leg rows ignored; the DN `err_epoch` write failing on a missing
+  and on an invalid cluster conf alike.
 * **bmpush.go** — ascending order, one in flight, target rules, the
   `mod_revision` memo, failure ⇒ `resyncWanted`.
 * **reaction.go** — priority and one-per-pass; every suppression; AR5's two
@@ -1326,8 +1447,10 @@ does).
   readiness and pending-spare rules, two-sides skip, `RedundNone` skip,
   `spare_list_full`, and the spare-create scan's tier-1 exclusion of the
   group's `location`s at `requiredCnt = 1`
-  (`TestReactionSpareCreateExcludesGroupLocations`).
-* **clusterconf.go** — key→id derivation, defaults resolution, delete.
+  (`TestReactionSpareCreateExcludesGroupLocations`); the AR1 gate refusing
+  a pass on a missing and on an invalid stored conf.
+* **clusterconf.go** — key→id derivation, the entry handed back exactly as
+  stored, an invalid conf kept in the cache rather than dropped, delete.
 
 ---
 
@@ -1546,7 +1669,19 @@ on any error.
 | `list-workers` | `--role` | seed + epoch per registration |
 
 `workerctl` never dials an agent and never sleeps; it is the gateway's write
-path with explicit placement (§0 item 19).
+path with explicit placement (§0 item 19) — its **resolve-at-write** (§7)
+included, because the worker refuses a conf nobody made concrete (RW9,
+RW14, AR1) and the suite's fixture writer therefore has to be a resolver
+too. `put-cluster` stores `model.ResolveClusterConf(...)`, so the four
+intervals, the batch sizes, the shift ladder and the stripe size that no
+flag sets are concrete in etcd; `put-sp` passes the merged `bdev_conf`
+through `model.ResolveBdevConf` (the redund kind is rebuilt from the group
+flags first, so the merge's constants rung still has to fire) and validates
+the `ClusterConf` before computing any group geometry; `set-lwm` turns
+`--pct 0` into `DefaultPoolLowWatermarkPct` while storing a value above 100
+exactly as given, that being a meaning and not a default. Storing the raw
+literal instead would leave the bin shifts all zero — no flag sets them —
+which is not a ladder (§7), and every case would refuse at its first round.
 
 ### 14.9 The fake agent: `fakeagent`
 
@@ -2026,7 +2161,10 @@ file, in the style of `ThinDeviceCreated.md` §8 and the agents' §5 sections.
    (VW6).
 6. Every `msg` string of §12 appears with the listed attributes in a run of
    the §14 suite; the suite passes end to end on the lab server
-   (`bash integtest/worker_test.sh user@192.168.10.20`).
+   (`bash integtest/worker_test.sh user@192.168.10.20`). The one exception
+   is `invalid stored conf`: `workerctl` resolves every conf it writes
+   (§14.8), so the suite never produces one, and the three gates are
+   covered by the §13 unit tests instead.
 7. Every `grpc.NewClient` in `worker/` uses the `grpc.md` §4 chain options;
    every trace id in an agent log produced by the suite has the
    `{seed8}-{16 hex}` shape (RW10).

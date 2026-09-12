@@ -419,6 +419,21 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// children already log `cluster conf missing` for the idle period.
 		return
 	}
+	// §7: both stored confs are checked before the pass is even built, so an
+	// unusable geometry produces no candidate scan, no model op, and no
+	// `reaction applied` / `reaction skipped` record. Both are needed: this
+	// pass takes its OWN snapshot of the SP (above) rather than reusing the
+	// fan-out's, and tryGrow reads low_water_mark_pct and data_block_size
+	// straight off it.
+	if err := model.ValidateClusterConf(cc); err != nil {
+		w.refuseReactionConf(ctx, err)
+		return
+	}
+	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
+		w.refuseReactionConf(ctx, err)
+		return
+	}
+	w.confRefusal.cc = ""
 	p := w.newPass(state, cc)
 	if w.reactionSuppressed(ctx, p) {
 		return
@@ -431,6 +446,23 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	default:
 		w.tryLegRepair(ctx, p)
 	}
+}
+
+// refuseReactionConf records the pass gate's refusal, once per distinct error.
+// It shares the coordinator's memo with the fan-out's refusal but keeps its
+// own half, so an SP whose bdev_conf is bad reports both the fan-out it did
+// not build and the pass it did not run — once each, not once per tick.
+func (w *spWorker) refuseReactionConf(ctx context.Context, err error) {
+	if w.confRefusal.cc == err.Error() {
+		return
+	}
+	w.confRefusal.cc = err.Error()
+	slog.ErrorContext(ctx, msgInvalidStoredConf,
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+		slog.String("sp_name", w.desired.handle),
+		slog.String("error", err.Error()),
+	)
 }
 
 // newPass indexes one snapshot into everything the four reactions read (AR1).
@@ -673,12 +705,11 @@ func (w *spWorker) parsePoolStatus(
 // long. Only an APPLIED grow, or one of the two skips AR2 makes pass-ending
 // (ErrPrecondition, no candidate), ends the pass.
 func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
+	// The SP's stored percentage, used as stored (§7): a zero is invalid and
+	// the pass gate already refused it, so there is no default arm here.
 	lwm := uint64(
 		p.state.Conf.GetBdevConf().GetDmPoolConf().GetLowWaterMarkPct(),
 	)
-	if lwm == 0 {
-		lwm = common.DefaultPoolLowWatermarkPct
-	}
 	if lwm > 100 {
 		// §7: values above 100 switch the automation off; operators grow
 		// manually.
@@ -748,7 +779,10 @@ func (w *spWorker) runGrow(
 		w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
 		return false
 	}
-	extentSize := model.ResolveDnBinConf(p.cc.GetDnBinConf()).GetExtentSize()
+	// The cluster's stored extent size — the same value model.GrowSlice reads
+	// inside its STM, which is what makes this pre-check ask the allocator
+	// for the ext_cnt the transaction will then demand.
+	extentSize := p.cc.GetDnBinConf().GetExtentSize()
 	extCnt, reason := growExtCnt(slice, isMeta, extentSize)
 	if reason != "" {
 		// meta_ladder_cap and no_data_group are both permanent for this
@@ -758,9 +792,7 @@ func (w *spWorker) runGrow(
 		return false
 	}
 	legs := legCnt(p.state.Conf)
-	batch := int(
-		model.ResolveAllocConf(p.cc.GetAllocConf()).GetDnBatchSize(),
-	)
+	batch := int(p.cc.GetAllocConf().GetDnBatchSize())
 	// AR6: the black list starts empty — a new group may perfectly well land
 	// on a DN that already carries another group of this SP — and grows as
 	// the picks are drawn, so the legs of the ONE new group land on distinct
@@ -863,9 +895,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	// and it is what model.ReplaceCntlr re-computes inside its STM: the scan
 	// has to ask for the same number or the pick would fail there.
 	footprint := spFootprint(p.state)
-	batch := int(
-		model.ResolveAllocConf(p.cc.GetAllocConf()).GetCnBatchSize(),
-	)
+	batch := int(p.cc.GetAllocConf().GetCnBatchSize())
 	// AR7: the old CN is black-listed even when the node itself is healthy —
 	// its cntlr is what failed. The SP's other cntlrs' CNs are excluded by
 	// the §6.4 rule instead, which is spCnAddrs.
@@ -1184,9 +1214,7 @@ func (w *spWorker) createSpare(
 	target *repairTarget,
 	ids []slog.Attr,
 ) bool {
-	batch := int(
-		model.ResolveAllocConf(p.cc.GetAllocConf()).GetDnBatchSize(),
-	)
+	batch := int(p.cc.GetAllocConf().GetDnBatchSize())
 	cands, err := w.reactor().ops.findDnCandidates(
 		ctx, w.cid, p.cc, target.grp.GetExtCnt(), batch, 1,
 		grpAddrs(target.grp), grpLocations(p.state, target.grp),

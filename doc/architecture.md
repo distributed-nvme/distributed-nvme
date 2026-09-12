@@ -421,9 +421,11 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
    blocks × (100 − `DmPoolConf.low_water_mark_pct`) / 100 — i.e. the dm event fires
    exactly when the pool's **usage** exceeds `low_water_mark_pct`%, the condition the
    §10.4 auto-grow acts on; both values from
-   `SyncupCntlrRequest.bdev_conf.dm_pool_conf`; `low_water_mark_pct = 0` ⇒
-   `DefaultPoolLowWatermarkPct` = 50; `> 100` ⇒ the agent passes `low_water_mark = 0`
-   — no dm events — as the value only means "auto-grow off", §10.4).
+   `SyncupCntlrRequest.bdev_conf.dm_pool_conf`; `low_water_mark_pct = 0` is invalid —
+   the control plane stores `DefaultPoolLowWatermarkPct` = 50 instead (§7) and the agent
+   refuses the whole `SyncupCntlr` rather than defaulting it itself (§9.1); `> 100` ⇒
+   the agent passes `low_water_mark = 0` — no dm events — as the value only means
+   "auto-grow off", §10.4).
 4. **Per thin device × slice**: a dm-thin volume `CnThinDevName`, created with pool
    message `create_thin {dev_id}` or `create_snap {dev_id} {ori_id}` — sent only while
    `ThinDevice.created == false`; a created td's volume is attached with a bare
@@ -904,7 +906,9 @@ let the in-STM read stay authoritative.
 The catch-all `ABORTED` covers: STM-client errors (not app logic inside the STM),
 protobuf (de)serialization errors, etcd connection errors — plus the specific `ABORTED`
 cases listed per RPC (missing invariant keys, agent RPC failures where specified, stale
-revision tokens).
+revision tokens). A **stored** conf that fails §7's validation belongs here too: it is
+a lost invariant like a missing key, never `INVALID_ARGUMENT`, because nothing about
+the request is wrong.
 
 ---
 
@@ -929,6 +933,15 @@ bin `b` where `level_b ≤ f < level_{b+1}` (bin3: `f ≥ level3`; `f < level0` 
 §5.6). Bins balance two failure modes: (a) always draining one big DN before touching the
 next, and (b) spreading so thin that no single DN can satisfy a request although the
 cluster has plenty of space in aggregate.
+The ladder is fixed once, at `CreateCluster`: all four shifts zero is the proto3
+"unset" that asks for 0/4/8/12 and is accepted, and any other set must already **be** a
+ladder — an invalid one is `INVALID_ARGUMENT` (§8.1), never silently replaced by the
+defaults, which would hand the operator a cluster binned differently from the one they
+asked for. Every reader afterwards shifts the stored values as they are (§7). §5.6
+forces both halves: a capacity key embeds the bin it was written under and can only be
+deleted by a transaction that computes the same index, so one ladder must hold for the
+life of the cluster — a ladder that moved, which is what a default substituted from the
+running binary would do across an upgrade, would strand every key already in the store.
 
 ### 6.3 Finding DN candidates
 
@@ -1017,8 +1030,13 @@ capacity keys maintained per §5.6; reverse on delete.
   `nqn.2014-08.org.nvmexpress.discovery` can never validate — `CreateSubsystem` needs
   no separate rejection for it.
 * `addr_port` looks like `192.168.0.17:9000` — the gRPC endpoint of the node's agent.
-* Bounded numeric parameters (reject outside `[Min, Max]`, substitute the `Default*`
-  when a proto3 zero is received and a default exists):
+* Bounded numeric parameters. These bounds are checked on the **request**: a non-zero
+  value outside `[Min, Max]` is rejected, while a proto3 zero is always accepted — it
+  means "unset" and asks for the `Default*`, which the create RPC substitutes once and
+  for all (the resolution rule below the table, which also names the two stored messages
+  it exempts). The list `count` row is different: it reaches no create RPC and is stored
+  nowhere — the paged list RPCs resolve it per request, cut one page with it and throw
+  it away (§5.7):
 
 | parameter | min | max | default |
 |---|---|---|---|
@@ -1054,8 +1072,31 @@ capacity keys maintained per §5.6; reverse on delete.
 * `ClusterConf.creation_epoch` is never user input — no request message carries it, it is
   stamped by `CreateCluster` (§8.1) and no range check applies. It is a raw `UnixNano`
   value, not the unix-seconds convention used by `err_epoch`.
-* Default-value resolution order everywhere: request field → the owning SP's stored conf
-  → `ClusterConf` → `constants.go` default → proto3 zero.
+* **Defaults are resolved once, at the create RPC, and the stored conf is concrete.**
+  The rungs are unchanged — request field → the owning SP's stored conf → `ClusterConf`
+  → `constants.go` default, and where a member has no default its proto3 zero stands and
+  keeps meaning "unset" (`qos_ratio`, §3.2) — but a defaultable member is settled on the
+  **write** path and never again: `CreateCluster` resolves a `ClusterConf` (§8.1) and
+  `CreateStoragePool` an SP's `bdev_conf` (§8.4), and the resolved message is what lands
+  in etcd. Order inside that RPC is load-bearing: the bounds above are checked on the
+  **raw** request, where a zero still means "give me the default", and only the accepted
+  request is resolved — resolving first would make every bound check a tautology.
+* A zero read back **out of** etcd is therefore invalid, not "unset". Every reader
+  refuses the object rather than substituting: the gateway with `ABORTED` (§5.9), the
+  worker by skipping that object's pass (one Error record, nothing sent, retried next
+  round, `dnv-worker.md`), an agent by refusing the `Syncup*` (§9.1). Two reasons, both
+  about geometry rather than tidiness: a consumer that forgets to resolve computes with
+  zeros instead of failing, and a stored zero pins the geometry to whatever `Default*`
+  the **reading** binary carries — so changing a constant would re-geometry live storage
+  pools and move the bin ladder every capacity key was written under (§6.2). There is no
+  compatibility shim: a cluster created before this rule may hold zeros, is refused
+  loudly, and must be recreated.
+* Two stored messages are deliberately exempt, because they are policy timers and knobs
+  rather than geometry — nothing is formatted or addressed with them: `EventThreshold`
+  is stored exactly as sent (so an operator reads back what they asked for) and resolved
+  member-wise when read (§10.4), and the `DmCloneConf` hydration pair is stored as sent
+  too — the sp-worker resolves a migration's as it builds the request (§8.11), while a
+  zero in a clone's simply leaves the dm-clone target's own default in place (§8.9).
 * `CmdSoftTimeout` = 3 s / `CmdHardTimeout` = 5 s: agents SIGTERM a shell command at the
   soft timeout and SIGKILL at the hard timeout, reporting `RES_STATUS_ERROR` with the
   command output in `details`.
@@ -1085,16 +1126,22 @@ field is otherwise reserved for a future asynchronous teardown).
 `ClusterConf` first, because it is the RPC that mints `creation_epoch`.
 Errors: `ALREADY_EXISTS` if `{p} cluster_conf {cluster_name}` exists or any of
 `{p} dn_global|cn_global|sp_global {cluster_id}` exists (hash-collision guard); checks
-inside the STM.
-Defaults: §7 tables for every `ClusterConf` member. `creation_epoch` is **not** a request
-field: the gateway stamps it `time.Now().UnixNano()` once, immediately before entering
+inside the STM; `INVALID_ARGUMENT` when `dn_bin_conf`'s shifts are set to anything that
+is not a ladder (§6.2 — all four zero asks for the default and is accepted).
+Defaults: §7 tables for every `ClusterConf` member, applied **here** and stored
+concrete — `ClusterConf` is write-once, so this is the only chance its members ever get
+to be resolved (§7). `creation_epoch` is **not** a request field: the gateway
+stamps it `time.Now().UnixNano()` once, immediately before entering
 the STM, and derives `cluster_id` from it per §5.2. Internal STM retries of that one
 attempt reuse the stamped epoch, so they stay idempotent; a client that retries after a
 failed `CreateCluster` stamps a new epoch and thus targets a different `cluster_id` —
 which is why the collision guard is re-evaluated inside every attempt's STM.
-Action: one STM creates `ClusterConf` (from the request plus the stamped
+Action: bound-check the raw request (§7), then resolve it — in that order, or the bounds
+check nothing — and build the message to store once, outside the STM, like the epoch
+above. One STM creates `ClusterConf` (the **resolved** members plus the stamped
 `creation_epoch`), and `DnGlobal`, `CnGlobal`, `SpGlobal` each with `next_id = 1` and
-`shard_bucket` = 256 zeros. Reply `cluster_id`.
+`shard_bucket` = 256 zeros. Reply `cluster_id`. Nothing downstream resolves again: a
+zero read back out of this key is corruption and is refused, not substituted (§7).
 `ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
 `alloc_conf` and `health_check_conf` can only be set here — no `UpdateCluster*` RPC
 exists, deliberately; changing them means creating a new cluster. (`bdev_conf`
@@ -1201,19 +1248,34 @@ may hold; `cntlid_slot_list` has duplicates, values ≥ `CnCntlidSlotCnt`(8) or 
 entries than `cntlr_cnt`; any §7 violation in `bdev_conf` / `event_threshold`.
 Defaults: `cntlr_cnt = DefaultCntlrCntPerSp`(2); `cntlid_slot_list = [0..7]`;
 `bdev_conf` member-wise from `ClusterConf.bdev_conf` then constants (`redund_conf`
-unset ⇒ `redund_none`, and `dnvctl` defaults it to `redund_md_raid1` on the CLI);
-`event_threshold` member-wise from the §7 defaults.
+unset ⇒ `redund_none`, and `dnvctl` defaults it to `redund_md_raid1` on the CLI). The
+merge itself is unchanged; what is stored is its **result**, every defaultable member
+concrete (§7), which is why resolution runs after the merge and never before it —
+resolving the request first would turn every member it omitted into a constant and
+destroy the inheritance from the cluster, while a member left zero on both sides would
+otherwise float with the reading binary's constants instead of fixing this SP's
+geometry for good.
+`event_threshold` is stored as sent and resolved when read (§7, §10.4).
 Action:
-1. Pre-STM: resolve defaults; plan groups: per slice one **data** group with
-   `ext_cnt = init_ext_cnt` and one **meta** group with `ext_cnt = 1` (§8.5 ladder);
-   compute every group's `meta_blocks`/`data_blocks` per §3.6.
+1. Pre-STM: apply the request-level defaults above (`cntlr_cnt`, `cntlid_slot_list`);
+   plan groups: per slice one **meta** group with `ext_cnt = 1` (the §8.5 ladder's first
+   rung) then one **data** group with `ext_cnt = init_ext_cnt`, in that order — **ext
+   counts only**. The groups' `meta_blocks`/`data_blocks` are not computable yet: §3.6
+   needs the resolved `bdev_conf` and the cluster's stored `extent_size`, which step 2 is
+   the first to hold (§7).
 2. Pre-STM candidate scan + STM commit may be retried as a unit on STM conflict. In the
-   STM: allocate `sp_id`/`shard_code` from `SpGlobal`; run the §6.5 DN and CN picks
-   against the capacity keys; write `SpConf` (`next_id` advanced past all consumed ids,
-   `next_dev_id = 1`, `bdev_conf`, `event_threshold`, `cntlid_slot_list`,
-   `sp_level = SP_LEVEL_READWRITE`, `deleting = false`, id/name lists filled);
-   `SpName`; one `Cntlr` per picked CN, created in pick order (the first created —
-   smallest `cntlr_id` — gets `primary = true`, the rest `primary = false`; all
+   STM, in this order: merge and resolve `bdev_conf` against the `ClusterConf` this
+   transaction read, **before any id is minted** — the pre-STM scan merged only to learn
+   the leg count, and the picks are refused right here if that count or the `cluster_id`
+   moved; the `sp_conf` existence check; allocate `sp_id`/`shard_code` from `SpGlobal`;
+   validate that `ClusterConf` (§7) and compute every group's `meta_blocks`/`data_blocks`
+   per §3.6 from the resolved `bdev_conf` and the cluster's stored `extent_size`; verify
+   every §6.5 DN and CN pick against the capacity key the scan drew it from and charge
+   it; write `SpConf` (`next_id` advanced past all consumed ids, `next_dev_id = 1`,
+   `bdev_conf` (resolved), `event_threshold` (as sent), `cntlid_slot_list`,
+   `sp_level = SP_LEVEL_READWRITE`, `deleting = false`, id/name lists filled); `SpName`;
+   one `Cntlr` per picked CN, created in pick order (the first created — smallest
+   `cntlr_id` — gets `primary = true`, the rest `primary = false`; all
    `disabled = false`; `cntlid_slot` = the next unused entry of `cntlid_slot_list` in
    list order — §11.8 requires all cntlr slots of one SP distinct; `addr_port` +
    `nvme_tr_conf` copied from the CN); one `Slice` per slice
@@ -1309,10 +1371,11 @@ group's size is always computed, never taken from the request: a **data** grow
 appends a group of the slice's **first data group's** `ext_cnt` — the original
 allocation unit, exactly like the §10.4 auto-grow (gateway.md D-E, pinned by
 `TestGrowSliceData`) — and a **meta** grow's `ext_cnt` comes from the ladder.
-Compute `meta_blocks`/`data_blocks` (§3.6); in the STM append
-`Group{grp_id, ext_cnt, meta_blocks, data_blocks, legs+sides}` to the slice (every new
-`Side` written `provisioned = false`, [D15]), update the
-involved DNs (+`DnRev`s) and every cntlr CN's budget (+`CnRev`s), bump `SpRev`. Agents
+In the STM, with the SP's stored `bdev_conf` and the cluster's `extent_size` both
+validated at the top of the transaction (§7), compute `meta_blocks`/`data_blocks` (§3.6)
+and append `Group{grp_id, ext_cnt, meta_blocks, data_blocks, legs+sides}` to the slice
+(every new `Side` written `provisioned = false`, [D15]), update the involved DNs
+(+`DnRev`s) and every cntlr CN's budget (+`CnRev`s), bump `SpRev`. Agents
 extend the pool-meta/pool-data linear tables and resize the thin pool online — but the
 growth is **deferred on the CN** while the new group still contains a provisioning leg:
 the concat and the pool keep their old, effective size and keep reporting `OK` at that
@@ -1816,6 +1879,21 @@ concatenation (§9.6, §11.4).
 * **Revision gate.** A `Syncup*`/`Push*` request with a revision **lower** than the
   stored one is rejected (`AgentReply.code != 0`, `details` explains). Equal revision:
   re-apply idempotently (workers retry). Higher: apply, then persist.
+* **Conf gate.** Agents resolve no conf defaults of their own (§7): a geometry an agent
+  invented is one the rest of the cluster does not share, and dm, md and the on-disk
+  headers would be built against it. A request carrying a value the control plane
+  cannot have written — `SyncupDn.extent_size` zero, or a zero among the three always
+  present defaultable members of `SyncupCntlr.bdev_conf` plus the
+  `bitmap_chunk_block_cnt` that exists only under an md-raid1 `redund_conf` — is refused
+  with its own `AgentReply.code` (`dnagent.md` §2.5) **after** the revision gate and
+  **before** the request becomes the desired state, so nothing converges, nothing is
+  persisted, and the restart reconcile cannot replay it; the reply echoes the revision
+  the agent still holds, so the worker sees the request was not accepted. A persisted
+  file carrying such a value never becomes live either, though the two roles get there
+  differently: the dn agent skips the file at startup exactly like an unreadable one
+  (`dnagent.md` DN2), while the cn agent loads it and refuses it inside the converge
+  instead, so that cntlr builds nothing and its last applied plan stays untouched
+  (`cnagent.md` CN8).
 * **Full sync.** Every `Syncup*` request carries the complete desired state of its
   object — there is no partial mode. `SyncupDn.side_pointer_list` /
   `SyncupCn.cntlr_pointer_list` are authoritative: pointers in the request but not
@@ -2125,9 +2203,10 @@ object's live state cheaply instead of polling `Get*Info`:
   long as it owns the object (§10.1). Rounds are **worker-initiated**: one request per
   health round, exactly one reply per request, never an unsolicited agent message. The
   round interval is the object kind's field of `ClusterConf.health_check_conf`
-  (`dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval`, seconds; `0` ⇒
-  `DefaultHealthCheckInterval` = 5, bounds `[MinHealthCheckInterval,
-  MaxHealthCheckInterval]` = [1, 3600], §7).
+  (`dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval`, seconds; a
+  request's `0` became `DefaultHealthCheckInterval` = 5 at `CreateCluster`, bounds
+  `[MinHealthCheckInterval, MaxHealthCheckInterval]` = [1, 3600], §7 — a **stored** 0
+  is invalid and costs the object its whole round, not a default).
 * **Request:** the object ids (`cluster_id` + `dn_id`/`cn_id`, plus `side_pointer` /
   `cntlr_pointer`), `revision` = the worker's current **desired** revision for the
   object (`dnv-worker.md` RW4 — the agents ignore this request field; the mismatch
@@ -3345,6 +3424,17 @@ own amendment sections are the surviving record.
   `dnv-worker.md` is the normative spec of `worker/`, `model/`, `etcdutil/` and
   `cmd/dnv-worker`; the `WorkerReg` schema addition is applied with `make gen` at
   implementation time.
+* Defaults resolved at write time — §7's substitution rule and its resolution-order
+  bullet are replaced: a create RPC bound-checks the raw request and then resolves it,
+  the stored conf is concrete, and a zero read back out of etcd is invalid and refused
+  (gateway `ABORTED`, worker pass skipped, agent `Syncup*` refused) rather than
+  substituted; `EventThreshold` and the `DmCloneConf` hydration pair are named as the
+  exceptions that stay stored-as-sent. §6.2 gains the create-time rejection of a shift
+  ladder that is not one (all four zero still asks for the default) and the reason —
+  every capacity key is written under the stored ladder; §5.9 counts an invalid stored
+  conf as `ABORTED`; §8.1 stores the resolved `ClusterConf`, §8.4 the resolved merge
+  (merge first, resolve after); §3.3, §9.1 (new conf gate) and §9.7 follow. There is
+  deliberately no compatibility path for a cluster created before the rule.
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 

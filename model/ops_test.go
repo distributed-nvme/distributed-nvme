@@ -93,21 +93,15 @@ func opsTrConf(addrPort string) *pb.NvmeTrConf {
 
 // opsSpConf is the SP the fixture writes; every op reads it back.
 func opsSpConf() *pb.SpConf {
+	// A stored bdev_conf, every member concrete: CreateStoragePool resolved
+	// it once and every op below reads it as written (§7).
+	bdevConf := testRaid1BdevConf(opsBlockSize, common.DefaultChunkBlockCnt)
 	return &pb.SpConf{
-		SpId:      opsSpId,
-		ShardCode: opsShard,
-		NextId:    opsNextId,
-		NextDevId: 1,
-		BdevConf: &pb.BdevConf{
-			DmPoolConf: &pb.DmPoolConf{DataBlockSize: opsBlockSize},
-			RedundConf: &pb.RedundConf{
-				RedunKind: &pb.RedundConf_RedundMdRaid1{
-					RedundMdRaid1: &pb.RedundMdRaid1{
-						BitmapChunkBlockCnt: common.DefaultChunkBlockCnt,
-					},
-				},
-			},
-		},
+		SpId:           opsSpId,
+		ShardCode:      opsShard,
+		NextId:         opsNextId,
+		NextDevId:      1,
+		BdevConf:       bdevConf,
 		EventThreshold: &pb.EventThreshold{},
 		CntlidSlotList: []uint32{opsSlot, 4, 5},
 		SpLevel:        pb.SpLevel_SP_LEVEL_READWRITE,
@@ -181,14 +175,17 @@ func opsSlice() *pb.Slice {
 func newOpsEnv(t *testing.T) *opsEnv {
 	t.Helper()
 	cli := newTestClient(t)
+	// A stored ClusterConf: concrete from CreateCluster on, which is what the
+	// GrowSlice gate requires (§7). Its extent size is named here because the
+	// whole fixture's block arithmetic is written against 1 GiB extents.
+	cc := testClusterConf()
+	cc.DnBinConf.ExtentSize = opsExtSize
 	env := &opsEnv{
 		t:   t,
 		ctx: context.Background(),
 		cli: cli,
 		cid: testCid(t),
-		cc: &pb.ClusterConf{
-			DnBinConf: &pb.DnBinConf{ExtentSize: opsExtSize},
-		},
+		cc:  cc,
 	}
 	cid := env.cid
 	mustPut(t, cli, SpConfKey(cid, opsSpName), opsSpConf())
@@ -527,6 +524,11 @@ func TestErrPreconditionAbortsWithoutCommit(t *testing.T) {
 // Thresholds and geometry (no etcd needed)
 // ---------------------------------------------------------------------------
 
+// TestResolveEventThreshold pins one of the two conf messages still resolved
+// at READ time, deliberately (§7): event_threshold is a policy timer, not
+// geometry — nothing is formatted or addressed with it — so CreateStoragePool
+// stores it verbatim and a stored zero here keeps meaning "the default".
+// (The other is the DmCloneConf hydration pair, resolved in worker/sprole.go.)
 func TestResolveEventThreshold(t *testing.T) {
 	resolved := ResolveEventThreshold(nil)
 	if resolved.GetPrimaryUnhealthy() != common.DefaultPrimaryUnhealthy ||
@@ -573,14 +575,7 @@ func TestThresholdReached(t *testing.T) {
 // TestGroupBlocks pins the §3.6 worked example: a 1 TiB raid1 group with 1 GiB
 // extents, 1 MiB blocks and 128-block bitmap chunks has meta_blocks = 3.
 func TestGroupBlocks(t *testing.T) {
-	raid1 := &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{DataBlockSize: opsBlockSize},
-		RedundConf: &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: 128},
-			},
-		},
-	}
+	raid1 := testRaid1BdevConf(opsBlockSize, 128)
 	metaBlocks, dataBlocks, err := GroupBlocks(1024, opsExtSize, raid1)
 	if err != nil {
 		t.Fatalf("GroupBlocks: %v", err)
@@ -591,28 +586,8 @@ func TestGroupBlocks(t *testing.T) {
 			metaBlocks, dataBlocks, 1024*1024-3,
 		)
 	}
-	// Defaults resolve to exactly the same numbers.
-	bare := &pb.BdevConf{
-		RedundConf: &pb.RedundConf{
-			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{},
-			},
-		},
-	}
-	defMeta, defData, err := GroupBlocks(1024, 0, bare)
-	if err != nil {
-		t.Fatalf("GroupBlocks defaults: %v", err)
-	}
-	if defMeta != metaBlocks || defData != dataBlocks {
-		t.Errorf(
-			"defaults: got meta %d data %d, want %d / %d",
-			defMeta, defData, metaBlocks, dataBlocks,
-		)
-	}
 	// RedundNone keeps only the health block.
-	none := &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{DataBlockSize: opsBlockSize},
-	}
+	none := testBdevConf(opsBlockSize)
 	metaBlocks, dataBlocks, err = GroupBlocks(1, opsExtSize, none)
 	if err != nil {
 		t.Fatalf("GroupBlocks none: %v", err)
@@ -627,11 +602,73 @@ func TestGroupBlocks(t *testing.T) {
 		t.Errorf("ext_cnt 0 must fail")
 	}
 	// A group whose extents cannot even hold the meta region is refused.
-	tiny := &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{DataBlockSize: opsExtSize},
-	}
+	tiny := testBdevConf(opsExtSize)
 	if _, _, err := GroupBlocks(1, opsExtSize, tiny); err == nil {
 		t.Errorf("a one-block group must fail")
+	}
+}
+
+// TestGroupBlocksRefusesAZero is the mirror image of the case this test made
+// until the defaults moved: the three numbers §3.6's arithmetic needs used to
+// be resolved here, so a caller that passed zeros got exactly the geometry of
+// one that passed the constants. They are stored values now, concrete since
+// the create RPC wrote them (§7), and a zero is corruption or foreign data —
+// GroupBlocks refuses it by name instead of guessing a geometry a pool may not
+// have been formatted with.
+func TestGroupBlocksRefusesAZero(t *testing.T) {
+	noBlockSize := testRaid1BdevConf(opsBlockSize, 128)
+	noBlockSize.DmPoolConf.DataBlockSize = 0
+	cases := []struct {
+		name       string
+		extentSize uint64
+		conf       *pb.BdevConf
+		wantErr    string
+	}{
+		{
+			name:       "extent_size zero",
+			extentSize: 0,
+			conf:       testRaid1BdevConf(opsBlockSize, 128),
+			wantErr: "group blocks: invalid stored conf: " +
+				"dn_bin_conf.extent_size is zero",
+		},
+		{
+			name:       "data_block_size zero",
+			extentSize: opsExtSize,
+			conf:       noBlockSize,
+			wantErr: "group blocks: invalid stored conf: " +
+				"bdev_conf.dm_pool_conf.data_block_size is zero",
+		},
+		{
+			name:       "md-raid1 with no bitmap chunk count",
+			extentSize: opsExtSize,
+			conf:       testRaid1BdevConf(opsBlockSize, 0),
+			wantErr: "group blocks: invalid stored conf: " +
+				"bdev_conf.redund_conf.redund_md_raid1." +
+				"bitmap_chunk_block_cnt is zero",
+		},
+	}
+	for _, tc := range cases {
+		_, _, err := GroupBlocks(1024, tc.extentSize, tc.conf)
+		if err == nil || err.Error() != tc.wantErr {
+			t.Errorf("%s: got %v, want %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestPoolBlockSize pins the plain accessor it became (§7): it reports the
+// stored value and substitutes nothing, so a conf that somehow carries a zero
+// reports zero and its caller's ValidateBdevConf gate is what refuses it — a
+// silent 1 MiB here would address a pool in a unit it was never formatted
+// with.
+func TestPoolBlockSize(t *testing.T) {
+	if got := PoolBlockSize(testBdevConf(64 * 1024)); got != 64*1024 {
+		t.Errorf("stored data_block_size: got %d, want %d", got, 64*1024)
+	}
+	if got := PoolBlockSize(&pb.BdevConf{}); got != 0 {
+		t.Errorf("an empty bdev_conf: got %d, want 0", got)
+	}
+	if got := PoolBlockSize(nil); got != 0 {
+		t.Errorf("a nil bdev_conf: got %d, want 0", got)
 	}
 }
 
@@ -661,6 +698,13 @@ func TestMetaLadderExtCnt(t *testing.T) {
 	// With 1 TiB extents the very first meta group is already past the cap.
 	if _, ok := MetaLadderExtCnt(1, common.MaxDnExtSize); ok {
 		t.Errorf("1 TiB extents must cap immediately")
+	}
+	// A zero extent size is no longer defaulted (§7): it is a divide by zero,
+	// so the last-resort guard reports false rather than panicking. Callers
+	// validate the ClusterConf first, which is what keeps this arm
+	// unreachable in production.
+	if extCnt, ok := MetaLadderExtCnt(1, 0); ok || extCnt != 0 {
+		t.Errorf("extent_size 0 gave (%d, %v), want (0, false)", extCnt, ok)
 	}
 }
 
@@ -1756,6 +1800,79 @@ func TestGrowSlicePreconditions(t *testing.T) {
 			t.Errorf("Reason: got %q", precondition.Reason)
 		}
 	})
+}
+
+// TestGrowSliceRefusesAnInvalidStoredConf pins the §7 gate at the top of the
+// GrowSlice STM. Both confs are validated before anything is computed from
+// them — the two zeros below are exactly the two the op used to substitute a
+// constant for — and the refusal is an ErrPrecondition, so the transaction
+// aborts without committing and every key the op would have written is left
+// as it was.
+func TestGrowSliceRefusesAnInvalidStoredConf(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(env *opsEnv)
+		reason string
+	}{
+		{
+			// The pool block size §3.6's geometry and AR6's pending rule are
+			// both expressed in.
+			name: "the sp's stored bdev_conf",
+			setup: func(env *opsEnv) {
+				conf := env.spConf()
+				conf.BdevConf.DmPoolConf.DataBlockSize = 0
+				mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
+			},
+			reason: "invalid stored conf: " +
+				"bdev_conf.dm_pool_conf.data_block_size is zero",
+		},
+		{
+			// The extent size the ladder and every group size are computed
+			// with.
+			name: "the stored cluster conf",
+			setup: func(env *opsEnv) {
+				env.cc.DnBinConf.ExtentSize = 0
+			},
+			reason: "invalid stored conf: dn_bin_conf.extent_size is zero",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
+			tc.setup(env)
+			revBefore := env.spRev()
+			dnCFree := env.dn(opsDnC).GetFreeExtCnt()
+			_, err := GrowSlice(
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				noExpectRev, opsSliceId, false, opsNotPending, env.cc, legs,
+			)
+			precondition := wantPrecondition(t, err, opGrowSlice)
+			if precondition.Reason != tc.reason {
+				t.Errorf(
+					"Reason: got %q, want %q",
+					precondition.Reason, tc.reason,
+				)
+			}
+			slice := env.slice()
+			if len(slice.GetDataGrpList()) != 1 ||
+				len(slice.GetMetaGrpList()) != 1 {
+				t.Errorf(
+					"a group was appended: %d meta, %d data",
+					len(slice.GetMetaGrpList()),
+					len(slice.GetDataGrpList()),
+				)
+			}
+			if got := env.spConf().GetNextId(); got != opsNextId {
+				t.Errorf("next_id: got %d, want %d", got, opsNextId)
+			}
+			if got := env.spRev(); got != revBefore {
+				t.Errorf("SpRev: got %d, want %d", got, revBefore)
+			}
+			if got := env.dn(opsDnC).GetFreeExtCnt(); got != dnCFree {
+				t.Errorf("dn-c free_ext_cnt: got %d, want %d", got, dnCFree)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

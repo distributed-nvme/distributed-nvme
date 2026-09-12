@@ -27,7 +27,7 @@ Terminology:
 | term | meaning |
 |---|---|
 | handler | one gRPC method of `service Gateway`, implemented on the `gateway.Server` |
-| resolution | the in-STM reads that turn `cluster_name` (and `sp_name`) into `cid` (and `SpConf`), per architecture.md §5.8 |
+| resolution | the in-STM reads that turn `cluster_name` (and `sp_name`) into `cid` (and `SpConf`), per architecture.md §5.8 — GW11's resolution of conf DEFAULTS is a different operation, and the text says which it means |
 | token check | asserting `stored.revision == request token revision`, when the request carries the token message at all (GW6) |
 | deciding STM | the STM that commits a mutation; for two-phase RPCs (AG4) it is the second one |
 | candidate unit | one "scan outside + STM commit" round of an allocating RPC (GW9) |
@@ -132,9 +132,14 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
       merge of the request over `ClusterConf.bdev_conf`: a member wins
       unless left at the proto3 zero that means "unset"; the redund KIND is
       a oneof choice (request's, else the cluster's, else `redund_none`),
-      and a kind chosen by both merges member-wise inside. The merge is
-      stored, not re-resolved at read time, so an SP's geometry is immutable
-      under later cluster-default edits (§5.4).
+      and a kind chosen by both merges member-wise inside. The merge then
+      passes through `model.ResolveBdevConf`, which settles any member still
+      zero on both sides against its §7 constant, so all three rungs land in
+      the stored message (GW11). That stored `bdev_conf` is never
+      re-resolved at read time, and an SP's geometry is therefore immutable
+      under later cluster-default edits — immutable only because those stored
+      members are CONCRETE, since a stored zero would still float with
+      whatever constant the reading binary carried (§5.4).
     * **D-D** — CreateStoragePool plans, scans and mints in one fixed order
       (per slice the 1-extent META group then the DATA group; cntlr ids
       first, in pick order), so a retried candidate unit reproduces exactly
@@ -229,8 +234,10 @@ exist already.
 
 ### 2.2 Amendments to `model` (applied at implementation time)
 
-The bodies stay exactly what they are; only visibility and three signatures
-change. Each change is mechanical and the worker keeps compiling:
+Items 1–4 keep their bodies exactly as they are; only visibility and three
+signatures change, each mechanically and with the worker still compiling.
+Item 5 is new code: GW11's write-time resolver and the stored-conf
+validators its read sites refuse with.
 
 1. Export `spNextId` as `SpNextId(conf *pb.SpConf) uint64` — the per-SP id
    read (returns `conf.NextId` clamped to `SpFirstId`; it mutates nothing —
@@ -259,6 +266,26 @@ change. Each change is mechanical and the worker keeps compiling:
 4. Add to `model/keys.go`: `DnConfPrefix(cid uint64) string`,
    `CnConfPrefix(cid uint64) string`, `SpConfPrefix(cid uint64) string` — the
    `List*` range prefixes (the per-key builders exist; the prefixes do not).
+5. Extend `model/capacity.go` with the two families GW11 rests on:
+   `ResolveBdevConf(conf *pb.BdevConf) *pb.BdevConf`, the write-time resolver
+   `CreateStoragePool` stores through — and which `ResolveClusterConf`, until
+   now a helper that carried `bdev_conf` along as stored, applies to a
+   ClusterConf's own `bdev_conf` too — plus the stored-conf validators
+   `ValidateBdevConf(conf *pb.BdevConf) error` and
+   `ValidateClusterConf(cc *pb.ClusterConf) error`, whose every message
+   begins `invalid stored conf: ` and names the proto field.
+   `ValidateBdevConf` checks the four defaultable members for PRESENCE only —
+   the bitmap chunk count solely when the oneof did choose md-raid1, a
+   `redund_none` pool having no bitmap to size; the §7 ranges belong to the
+   request, and `low_water_mark_pct` above 100 is the legal "auto-grow off"
+   setting, never an error. `ValidateClusterConf` adds
+   `dn_bin_conf.extent_size` non-zero — non-zero only, because a DN header
+   may legitimately be formatted at an unusual size — the §6.2 shift ladder,
+   the two batch sizes, the four intervals and `ValidateBdevConf` of
+   `bdev_conf` when the cluster carries one. The ladder predicate is one
+   unexported function shared with `ResolveDnBinConf`, so resolver and
+   validator cannot drift; the all-zero shift set a ClusterConf written
+   without a `dn_bin_conf` would carry is therefore NOT valid stored state.
 
 ### 2.3 Schema
 
@@ -326,9 +353,15 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
 
 * **GW4 — request validation first.** `validate.go` implements the §7 table
   as pure functions (no I/O): string sizes/patterns, NQN rules, bounded
-  numerics with default substitution, `bdev_feature_list` empty, list `count`
-  clamp (0 ⇒ 64, cap 1024). Violations ⇒ `INVALID_ARGUMENT` before any etcd
-  read. State-dependent validation (slot in use, `ns_idx` taken, …) happens
+  numerics — a zero passes as "give me the default", and for every member
+  that ends up in a stored conf substituting that default is GW11's job on
+  the write path, never this one's — and `bdev_feature_list` empty. The list
+  `count` is the one bounded numeric GW11 does not cover, because it reaches
+  no stored message at all: `pageLimit` caps it at 1024 and turns a zero
+  into `DefaultListCnt` 64 per request, and `validatePageArgs` runs it —
+  with the token decode — before a List handler's first etcd read (GW10).
+  Violations ⇒ `INVALID_ARGUMENT` before any etcd read.
+  State-dependent validation (slot in use, `ns_idx` taken, …) happens
   inside the STM.
 * **GW5 — resolution in-STM.** Except `CreateCluster` and `ListClusters`,
   the STM's first read is `model.ClusterConfKey(cluster_name)`
@@ -371,7 +404,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
   | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap (AppendCloneBitmap's index bounds are an invalid request ⇒ `INVALID_ARGUMENT`, checked in-STM per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
-  | everything §5.9: STM-client/conflict-budget/etcd/proto errors; agent gRPC failure where the RPC says so | `ABORTED` |
+  | everything §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
 
   `model.ErrNotFound` (from `LoadSp`) maps to `NOT_FOUND`;
   `ErrPrecondition{Reason: "candidate changed"}` maps to nothing — see GW9.
@@ -414,10 +447,57 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   token. Prefixes: `ClusterConfPrefix()`, `DnConfPrefix(cid)`,
   `CnConfPrefix(cid)`, `SpConfPrefix(cid)`; the returned names are the key
   suffixes after the prefix.
-* **GW11 — defaults resolution** (§7): request field → owning SP's stored
-  conf → `ClusterConf` → `constants.go` default → proto3 zero, via
-  `model.ResolveClusterConf` / `ResolveEventThreshold` and friends. Stored
-  messages keep what the user sent; resolution happens at use time.
+* **GW11 — defaults resolved at WRITE time** (§7). The rungs are unchanged —
+  a member comes from the request, else from the owning `ClusterConf`, else
+  from a `constants.go` constant — but ALL of them are applied by the RPC
+  that writes the conf, so every stored conf anything is formatted or
+  addressed with is concrete in every DEFAULTABLE member and nothing
+  downstream substitutes (the `redund_conf` oneof is a choice and not a
+  default — unset still means `redund_none`, §8.4 — and the two exceptions
+  to the rule, `event_threshold` and the `dm_clone_conf` hydration pair,
+  close it below).
+  `CreateCluster` stores `model.ResolveClusterConf(…)`, which settles
+  `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf` (§5.1);
+  `CreateStoragePool` stores `model.ResolveBdevConf(…)` of D-C's merge
+  (§5.4). A handler that then COMPUTES with a stored member validates it
+  first and REFUSES rather than guessing around a zero:
+  `model.ValidateClusterConf` in `CreateDiskNode` and `CreateControllerNode`
+  (before dividing a reported size by `extent_size`), in
+  `CreateStoragePool` and the `GrowSlice` handler (before any group
+  geometry), and in the §6.5 scans `pickDns`/`pickCn` (where a zero batch
+  size would silently make the scan width zero and turn every allocation
+  into `RESOURCE_EXHAUSTED`); `model.ValidateBdevConf` in `GrowSlice` and in
+  `CreateThinDevice` (before sizing against the stripe). Such a zero is a
+  lost invariant, not a bad request, so every one of those gates is GW7's
+  §5.9 `ABORTED` and never `INVALID_ARGUMENT`. `model.GrowSlice` re-runs
+  both validators inside its own STM and can report that refusal only as an
+  `ErrPrecondition`, which `mapModelErr` renders `FAILED_PRECONDITION`; the
+  handler's pre-check above is what makes that a race rather than the
+  ordinary path, the same asymmetry GW7 records for `chargeSpCns`. Two costs
+  of resolving at use time are what moved it: a consumer that forgets to
+  resolve then computes with zeros in silence —
+  no reader can tell a member the user omitted from one the user chose, and
+  an SP's `bdev_conf` reaches the cn agent as stored — and a stored zero
+  pins geometry to whatever `common.Default*` the RUNNING binary carries, so
+  editing a constant would re-geometry live storage pools and strand every
+  capacity key already written under the old bin ladder. Two consequences an
+  implementer must keep: resolution runs AFTER the GW4 validation of the
+  request — on the raw request a zero still means "give me the default", so
+  resolving first would make every §7 bound check a tautology — and AFTER
+  the member-wise merge in `CreateStoragePool`, never before it, because a
+  resolved request has no member left at the zero that inherits from the
+  cluster. Two conf messages are still resolved when they are READ, and both
+  are stored exactly as sent, because both are policy knobs rather than
+  geometry — nothing is formatted or addressed with either, and an operator
+  reads back what they asked for (architecture.md §7 names the same two).
+  `event_threshold` is resolved member-wise by
+  `model.ResolveEventThreshold`. The `dm_clone_conf` hydration pair is the
+  other: `CreateClone` and `CreateMigration` store the request's message as
+  it arrived (§8.9, §8.11), the sp-worker fills a migration's zeros in with
+  their §7 constants as it builds the side request (`dnv-worker.md` RW15),
+  and a zero in a clone's is simply omitted from the dm-clone table the cn
+  agent writes, leaving the target's own default in place (`cnagent.md`
+  CN18).
 * **GW12 — id minting.** Cluster-scoped ids per §5.4 inside the STM: read the
   global, `id = next_id; next_id += 1`; `shard_code` = index of the smallest
   `shard_bucket` (first on ties), `bucket[shard_code] += 1`; the
@@ -445,15 +525,27 @@ stay in the cited architecture.md section; nothing below overrides them.
 
 ### 5.1 Clusters (§8.1)
 
-* **CreateCluster** — validate confs (§7). Stamp
+* **CreateCluster** — validate confs (§7) on the RAW request, where a zero
+  still asks for the default. One §7 row is a refusal rather than a bound:
+  the `dn_bin_conf` shifts are all-or-nothing — all four zero asks for the
+  0/4/8/12 default and is accepted, any other set that is not
+  `0 ≤ bin0 < bin1 < bin2 < bin3 ≤ 63` is `INVALID_ARGUMENT`, because the
+  stored ladder is what every capacity key of this cluster is written under
+  for the cluster's whole life and an operator handed a silently different
+  ladder has no RPC to correct it (ClusterConf is write-once). Stamp
   `creationEpoch = uint64(time.Now().UnixNano())` **once, outside** the STM
-  (retries of this attempt reuse it; a client retry stamps anew — §8.1). STM:
+  (retries of this attempt reuse it; a client retry stamps anew — §8.1), and
+  build the message to store outside it too, for the same reason: it is
+  `model.ResolveClusterConf` of the request's conf members plus that epoch,
+  so `bdev_conf`, `dn_bin_conf`, `alloc_conf` and `health_check_conf` land
+  concrete and only `qos_ratio` and the epoch pass through as given (GW11;
+  validation first, resolution second — never the other way round). STM:
   `ClusterConfKey(name)` present ⇒ `ALREADY_EXISTS`; compute
   `cid = ClusterId(name, epoch)`; any of `DnGlobalKey(cid)` /
   `CnGlobalKey(cid)` / `SpGlobalKey(cid)` present ⇒ `ALREADY_EXISTS`
-  (hash-collision guard, re-evaluated inside every attempt); put ClusterConf
-  (request fields verbatim + the stamped epoch) and the three globals
-  (`next_id: 1`, `shard_bucket`: `ShardBucketSize` zeros). Reply `cluster_id`.
+  (hash-collision guard, re-evaluated inside every attempt); put that
+  ClusterConf and the three globals (`next_id: 1`, `shard_bucket`:
+  `ShardBucketSize` zeros). Reply `cluster_id`.
 * **DeleteCluster** — STM: resolve; emptiness check is
   `sum(shard_bucket) == 0` on **all three** globals (§5.4 makes the sum the
   live object count, so no range read is needed) ⇒ else
@@ -469,13 +561,15 @@ stay in the cited architecture.md section; nothing below overrides them.
 * **CreateDiskNode** — validate; **pre-STM agent call** (AG1):
   `DiskNodeAgent.GetDnSize` at `addr_port` (`dn_id` 0, logging only) — gRPC
   failure ⇒ `ABORTED`. STM: resolve; `DnConfKey(cid, addr_port)` present ⇒
-  `ALREADY_EXISTS`; `total_ext_cnt = bytes / extent_size` (§6.1, conf
-  resolved in-STM); gate + mint from `DnGlobal` (GW12,
-  `RESOURCE_EXHAUSTED` at `MaxDnCntPerCluster`); put
-  `DnConf{dn_id, shard_code, disabled, nvme_tr_conf, location,
-  total_ext_cnt, free_ext_cnt: total}`; `model.MaintainDnCapacity(s, cid,
-  addr, cc, nil, newDn)`; put `DnRev{addr_port, revision: 1}` at
-  `DnRevKey(shard, cid, dn_id)`; put the global. Reply `dn_id`.
+  `ALREADY_EXISTS`; `model.ValidateClusterConf` on the ClusterConf this STM
+  resolved, then `total_ext_cnt = bytes / extent_size` (§6.1, the stored size
+  used as stored — a zero is refused `ABORTED`, never divided by, GW11);
+  gate + mint from `DnGlobal` (GW12, `RESOURCE_EXHAUSTED` at
+  `MaxDnCntPerCluster`); put `DnConf{dn_id, shard_code, disabled,
+  nvme_tr_conf, location, total_ext_cnt, free_ext_cnt: total}`;
+  `model.MaintainDnCapacity(s, cid, addr, cc, nil, newDn)`; put
+  `DnRev{addr_port, revision: 1}` at `DnRevKey(shard, cid, dn_id)`; put the
+  global. Reply `dn_id`.
 * **DeleteDiskNode** — STM: resolve; `DnConf` by addr (`NOT_FOUND`); token vs
   `DnRev` (GW6); `side_ptr_list` non-empty ⇒ `FAILED_PRECONDITION`; delete
   DnRev, DnConf, capacity key (`MaintainDnCapacity(…, old, nil)`);
@@ -508,24 +602,43 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 
 * **CreateStoragePool** — validate (`cntlid_slot_list`: values < 8, no dupes;
   `cntlr_cnt ≥ 1` and ≤ len(slot list); `slice_cnt`, `init_ext_cnt` ≥ 1;
-  confs per §7). Pre-STM plan: per slice one data group
-  (`ext_cnt = init_ext_cnt`) + one meta group (`ext_cnt = 1`);
-  `model.GroupBlocks` per group. Candidate unit (GW9): scan DNs per group
-  with the §6.5 growing black list (`RequiredCnt` legs per group — RedundNone
-  1, RedundMdRaid1 2 — from `dn_batch_size × RequiredCnt` candidates, random
-  pick, picked DNs black-listed so every leg of the SP lands on a distinct
+  confs per §7). Pre-STM plan (`planSpGroups`), in D-D's order: per slice the
+  meta group (`ext_cnt = 1`) first, then the data group
+  (`ext_cnt = init_ext_cnt`) — ext counts only;
+  `model.GroupBlocks` turns each into `meta_blocks`/`data_blocks` in
+  the STM, where the conf it needs has been read and checked. Candidate unit
+  (GW9): scan DNs per group with the §6.5 growing black list (`RequiredCnt`
+  legs per group — RedundNone 1, RedundMdRaid1 2 — from
+  `dn_batch_size × RequiredCnt` candidates, random pick, picked DNs
+  black-listed so every leg of the SP lands on a distinct
   DN) and CNs (`CandExtCnt = Σ ext_cnt` over all groups, `cntlr_cnt` rounds,
   random pick, black-listed); too few at any point ⇒ `RESOURCE_EXHAUSTED`.
-  STM: resolve; `SpConfKey` present ⇒ `ALREADY_EXISTS`; mint `sp_id`/shard
-  from `SpGlobal` (GW12); re-read every pick's capacity key or fail the unit;
-  mint sub-ids in a fixed order (cntlrs, then per slice meta group then data
-  group, per group legs, per leg its side) from the SpConf being built; put
-  `SpConf` (lists, `next_id`, `next_dev_id: 1`, `deleting: false`), `SpName`,
-  one `Cntlr` per pick (first = `primary`, `cntlid_slot` = next unused slot
-  in list order), one `Slice` per slice (every `Side` `provisioned: false`);
-  per DN: `free_ext_cnt -= group ext`, append `side_ptr_list`,
+  STM, in this order: resolve; build the `bdev_conf` to store as
+  `model.ResolveBdevConf(mergeSpBdevConf(request, cluster))` — merge first so
+  an omitted member still inherits from the cluster, resolve second so what
+  is stored is concrete (D-C, GW11) — and fail the unit right there, before
+  a single other key is read, when this transaction's `cluster_id` or that
+  conf's leg count no longer matches the one the scan drew its picks for;
+  `SpConfKey` present ⇒ `ALREADY_EXISTS`; mint `sp_id`/shard from `SpGlobal`
+  (GW12), then every `cntlr_id` in pick order (D-D);
+  `model.ValidateClusterConf` before the cluster's `extent_size` is used (a
+  zero ⇒ `ABORTED`, GW11); then per slice its `slice_id` and, in plan order,
+  its meta group before its data group — for each, `model.GroupBlocks`
+  against that `extent_size` and the resolved `bdev_conf`, then the `grp_id`
+  and per leg a `leg_id` and its `side_id`, re-reading that leg's pick
+  capacity key as its DN is charged and failing the unit if it moved; then
+  every CN pick likewise. Everything above is staged in memory: a refusal —
+  a moved capacity key above all — returns before the first `Put`, not
+  merely before the commit. The write set is then one `Slice` per slice
+  (every `Side` `provisioned: false`), one `Cntlr` per pick
+  (first = `primary`, `cntlid_slot` = next unused slot in list order),
+  `SpConf` (that `bdev_conf`; `event_threshold` exactly as the request sent
+  it — one of GW11's two read-time exceptions; lists, `next_id`,
+  `next_dev_id: 1`, `deleting: false`), `SpName` and
+  `SpRev{sp_name, revision: 1}`; then per DN:
+  `free_ext_cnt -= group ext`, append `side_ptr_list`,
   `MaintainDnCapacity`, `BumpDnRev` once; per CN likewise with
-  `cntlr_ptr_list` and `BumpCnRev`; put `SpRev{sp_name, revision: 1}`. Reply
+  `cntlr_ptr_list` and `BumpCnRev`; last the updated `SpGlobal`. Reply
   `sp_id`.
 * **DeleteStoragePool** — STM: resolve; token; all five name lists
   (`td/nqn/clone/xfer/migr`) empty ⇒ else `FAILED_PRECONDITION`; delete every
@@ -548,13 +661,19 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   map.
 * **GrowSlice** — validate the §8.5 exclusivity (`is_meta==false ⇒
   ext_cnt>0`, `is_meta==true ⇒ ext_cnt==0` ⇒ else `INVALID_ARGUMENT`).
-  A `Snapshot` pre-read for planning (the slice's current meta total for
+  A `Snapshot` pre-read for planning, whose ClusterConf and SP `bdev_conf`
+  are both validated before anything is sized from them
+  (`model.ValidateClusterConf`, `model.ValidateBdevConf`; a failure ⇒
+  `ABORTED`, GW11) — which is also what keeps `model.MetaLadderExtCnt`'s
+  `false` meaning the 16 GiB cap and nothing else, since an unvalidated zero
+  `extent_size` would report the same `false` and reach the operator as a
+  metadata ceiling. The plan itself is the slice's current meta total for
   `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`, GW7's
   object-state class — and the request's own black list, which is the entire
   seed of the §6.5 scan (D-F): one scan-and-pick round serves the group and
   nothing is ever appended to it, the legs still landing on distinct DNs
   because the §6.3 `LocList` rule already left one candidate per DN and per
-  location); then a second `Snapshot`, the CN-budget pre-check
+  location; then a second `Snapshot`, the CN-budget pre-check
   (`growSliceCnBudget`), over the SP's cntlrs and their CnConfs at one store
   revision — every cntlr stacks the new group, so every one of their CNs
   needs the new group's ext count free (the size D-E recomputes, never the
@@ -609,12 +728,14 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 ### 5.6 Thin devices (§8.7)
 
 * **CreateThinDevice** — validate `size` is a positive multiple of
-  `slice_cnt × stripe_size` (stripe from the SP's resolved
-  `bdev_conf.dm_raid0_conf`; state-dependent, so checked in-STM). STM:
-  resolve; token; `td_name` in `td_name_list` or key present ⇒
-  `ALREADY_EXISTS`; if `ori_name` set: read origin (`NOT_FOUND` if absent),
-  `created == false` ⇒ `FAILED_PRECONDITION` **writing nothing** (no id
-  consumed, no bump — §8.7); mint `td_id = SpNextId`, `dev_id =
+  `slice_cnt × stripe_size` (the stripe as the SP stored it,
+  `bdev_conf.dm_raid0_conf.stripe_size`; state-dependent, so checked in-STM,
+  behind a `model.ValidateBdevConf` of that conf — GW11 — so a zero stripe is
+  `ABORTED` instead of reaching the "has no slice" refusal, which is about
+  `slice_id_list`). STM: resolve; token; `td_name` in `td_name_list` or key
+  present ⇒ `ALREADY_EXISTS`; if `ori_name` set: read origin (`NOT_FOUND` if
+  absent), `created == false` ⇒ `FAILED_PRECONDITION` **writing nothing**
+  (no id consumed, no bump — §8.7); mint `td_id = SpNextId`, `dev_id =
   next_dev_id++`, `ori_id` = origin's `dev_id` or 0; put
   `ThinDevice{…, created: false}`; append `td_name_list`; `BumpSpRev`. Reply
   `td_id, dev_id`.
@@ -888,8 +1009,10 @@ The other 49 RPCs never leave etcd.
    `ETCD_BIN` (misconfigured ⇒ exit 1) else PATH else the etcd-backed tests
    skip; one server for the whole package on an ephemeral port.
 2. **validate.go**: table-driven, no I/O — every §7 row (sizes, patterns,
-   NQN incl. the discovery-NQN impossibility, numeric bounds + default
-   substitution, count clamp, `bdev_feature_list`, level enum).
+   NQN incl. the discovery-NQN impossibility, numeric bounds (a zero passes,
+   asking for the default), count clamp, `bdev_feature_list`, level enum),
+   plus both arms of the `dn_bin_conf` shift rule: all four zero accepted (it
+   asks for 0/4/8/12), any other non-ladder set `INVALID_ARGUMENT` (§5.1).
 3. **Handler tests** against the real etcd through a `Server` constructed
    directly: per resource group, the happy path asserting **exact** etcd
    state via `etcdutil` reads (keys, ids, buckets, capacity keys, rev values)
@@ -900,8 +1023,19 @@ The other 49 RPCs never leave etcd.
    `FAILED_PRECONDITION` of §5 with nothing written; `CreateCluster`
    collision-guard branch; `DeleteCluster` bucket-sum gate; pagination
    round-trip incl. bad token; `Update*` idempotent no-write (§0 #17);
-   `FindStoragePoolNames` unknown-id omission; per-SP id and `dev_id`
-   sequences; `DeleteStoragePool` full-teardown accounting; §6.5's two-tier
+   `FindStoragePoolNames` unknown-id omission; GW11 from both sides — the
+   stored `ClusterConf`/`SpConf.bdev_conf` concrete in every defaultable
+   member, with each rung (request, cluster, constant) a distinct value so a
+   member taken from the wrong one reads differently, and a fixture that
+   plants a sparse stored conf — a `ClusterConf` written back with
+   `dn_bin_conf.extent_size` zeroed, an `SpConf` written back with
+   `bdev_conf.dm_raid0_conf.stripe_size` zeroed — every RPC that computes
+   from one then refusing `ABORTED` with `model`'s message verbatim
+   (`invalid stored conf: ` + the field) and nothing written:
+   `CreateDiskNode`, `CreateControllerNode` on the cluster's, every GW9
+   allocating RPC through the §6.5 scans on it, and `GrowSlice` and
+   `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
+   `DeleteStoragePool` full-teardown accounting; §6.5's two-tier
    placement — a spare leg and a migration destination each land on the DN
    in the other failure domain, and still land (never `RESOURCE_EXHAUSTED`)
    once that DN is gone and the group's own domain is all that is left; a
@@ -1153,9 +1287,18 @@ The full-lifecycle sweep; with §10.13/§10.14 it gives every RPC its happy
 path. Steps (each = one `stage`):
 
 1. `create-cluster itgw` → reply cid; `wctl get --key "dnv cluster_conf
-   itgw"`: `creation_epoch != 0`, confs verbatim; three globals
-   `next_id 1`, 256-zero buckets; `get-cluster` read-back agrees; second
-   `create-cluster itgw` → `ALREADY_EXISTS`.
+   itgw"`: `creation_epoch != 0` and, although the request named none of
+   them, `bdev_conf` / `dn_bin_conf` / `alloc_conf` / `health_check_conf`
+   all **present**, every defaultable member at its §7 constant (GW11
+   resolves on the write path; the exception the probe must allow for is
+   `dn_bin_conf.bin0_shift`, whose constant is itself 0 and which protojson
+   therefore omits from the document — the script reads it as `// 0`, and
+   bins 1/2/3 at 4/8/12 are what prove the ladder was written rather than
+   left unset), while `qos_ratio` and `bdev_conf.redund_conf` — a value no
+   rung defaults and a choice that means `redund_none` unset — stay absent;
+   three globals `next_id 1`, 256-zero buckets; `get-cluster` read-back
+   agrees;
+   second `create-cluster itgw` → `ALREADY_EXISTS`.
 2. Pagination: create clusters `pg0..pg4`; `list-clusters --count 2` walks
    the six names (incl. itgw) as 2+2+2 — three **full** pages, and per GW10
    a full page always returns a non-empty token, so the empty token costs a
@@ -1178,7 +1321,13 @@ path. Steps (each = one `stage`):
    `DnConf.disabled true`; repeat (idempotent, still rev 1); re-enable →
    capacity key back. Same once for a CN.
 6. `create-sp sp0` (§10.6 shape) → sp_id 1; assert the whole §5.4 write set:
-   `SpConf` (id lists, `next_id` = 1 + minted count, `next_dev_id 1`),
+   `SpConf` (id lists, `next_id` = 1 + minted count, `next_dev_id 1`, and a
+   `bdev_conf` concrete in every defaultable member: the three inherited
+   from the cluster through D-C's merge (`data_block_size 1048576`,
+   `low_water_mark_pct 50`, `stripe_size 65536`), plus
+   `redund_md_raid1.bitmap_chunk_block_cnt 128` — the one member no rung
+   above the constant supplied, since `--raid1` chooses the kind and names
+   no count while the cluster carries no `redund_conf` at all (GW11 again)),
    `sp_id_to_name`, `SpRev{sp0, 1}`, 2 cntlrs (ids, slots 0/1, exactly one
    `primary`, addr = a CN), 1 slice (meta grp ext 1 + data grp ext 2, 2 legs
    each, every side `provisioned false`, distinct DN addrs across all 4
@@ -1403,9 +1552,10 @@ dnv); clone-budget enforcement (§0 #16); `deleting`-mediated async teardown
 ## 11. Amendments to companion documents (to apply with the implementation)
 
 * `common/constants.go`: add `DefaultGatewayAgentTimeout` (§2.1).
-* `model`: the four §2.2 items (exports; `expectRev` on the three shared
-  ops + `ReasonStaleRevision`; the three `*ConfPrefix` builders). Worker
-  call sites of the three ops pass `expectRev = 0`.
+* `model`: the five §2.2 items (exports; `expectRev` on the three shared
+  ops + `ReasonStaleRevision`; the three `*ConfPrefix` builders; GW11's
+  `ResolveBdevConf` plus the `Validate*Conf` pair). Worker call sites of the
+  three ops pass `expectRev = 0`.
 * `integtest/workerctl`: `set-created`, `set-provisioned` (§2.4).
 * `doc/cdc.md` §"CdcEntry ownership": rename the RPC it calls
   `UpdateSubsystemAllowedHosts` to the real name **`UpdateSubsystemHosts`**

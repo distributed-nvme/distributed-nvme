@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,6 +33,11 @@ type stubDnAgent struct {
 	checkReqs  []*pb.CheckDnRequest
 	syncupReqs []*pb.SyncupDnRequest
 	streams    int
+	// streamExits counts the CheckDn handlers that have RETURNED. The client
+	// side of a dropped stream is invisible from here — CloseSend and the
+	// context cancel of dropStream are what end the handler — so this is how
+	// a test tells "the stream is gone" from "the stream is idle".
+	streamExits int
 
 	// checkReply builds the reply to one CheckDn request; nil means "say
 	// nothing", which is how a round timeout is produced (RW4 step 3).
@@ -46,6 +52,11 @@ func (s *stubDnAgent) CheckDn(
 	s.mu.Lock()
 	s.streams++
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.streamExits++
+		s.mu.Unlock()
+	}()
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -112,6 +123,14 @@ func (s *stubDnAgent) streamCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.streams
+}
+
+// streamExitCount is how many CheckDn handlers have returned, i.e. how many
+// streams the worker has dropped (or lost).
+func (s *stubDnAgent) streamExitCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamExits
 }
 
 func (s *stubDnAgent) setCheckReply(
@@ -284,16 +303,20 @@ func newRevHarness(t *testing.T) *revHarness {
 	}
 }
 
-// setClusterConf installs a resolved cluster conf in the RW21 cache.
+// setClusterConf installs a cluster conf in the RW21 cache exactly as given.
+// It resolves nothing, mirroring the cache itself (§7) — which is the only
+// reason a test can hand the loop a conf the gateway could not have written
+// and watch it refuse.
 func (h *revHarness) setClusterConf(cid uint64, cc *pb.ClusterConf) {
 	h.deps.conf.mu.Lock()
-	h.deps.conf.entries[cid] = model.ResolveClusterConf(cc)
+	h.deps.conf.entries[cid] = cc
 	h.deps.conf.mu.Unlock()
 }
 
-// defaultConf installs a conf whose four intervals are the 5 s default.
+// defaultConf installs the concrete stored conf of testClusterConf, whose four
+// intervals are the 5 s the gateway resolved them to.
 func (h *revHarness) defaultConf() {
-	h.setClusterConf(testCid, &pb.ClusterConf{CreationEpoch: 1})
+	h.setClusterConf(testCid, testClusterConf())
 }
 
 // advanceUntil steps the fake clock by one round period at a time until cond
@@ -647,6 +670,183 @@ func TestRevisionIdleWithoutClusterConf(t *testing.T) {
 	h.advanceUntil("round after the conf arrives", roundInterval, func() bool {
 		return stub.checkCount() >= 1
 	})
+}
+
+// TestRevisionIdlesOnAnInvalidClusterConf is the §7 twin of the test above,
+// for a cluster that IS in the cache but whose stored conf the gateway could
+// not have written. The loop never leaves the gate — no stream, no syncup, no
+// health write — because the alternative is worse than idling: what such a
+// conf is missing is geometry, the bin ladder MD4 keys capacity by and the
+// extent_size the dn agent formats every disk header with (§3.1), so a round
+// computed from guessed values would commit the cluster to numbers nobody else
+// holds.
+//
+// The bad conf is installed BEFORE the worker starts, so what this test pins
+// is that the gate sits ahead of round(): the worker never dials, never opens
+// a stream and never writes health in the first place. The other half of RW9's
+// quiesced state — a stream and an RW7 reference that an ALREADY RUNNING
+// worker hands back when its conf goes bad — cannot be observed from here,
+// because there is nothing to hand back. The test below, reaching the refusal
+// from a connected state, is where refuseConf's quiesce() is pinned.
+//
+// The record is its own, not "cluster conf missing": §14 greps that string for
+// the absent-cluster case, and an operator who sees it goes looking for a
+// deleted cluster instead of the field that is wrong.
+func TestRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
+	h := newRevHarness(t)
+	stub := &stubDnAgent{}
+	h.fleet.addDn(t, testAddr, stub)
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	// Stored without a dn_bin_conf: proto3 hands the reader the all-zero
+	// shift set, which §6.2 does not accept as a ladder.
+	h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.DnBinConf = nil
+	}))
+	h.startDn(testAddr, 1)
+
+	waitFor(t, "refusal record", func() bool {
+		return len(h.logs.withMsg(msgInvalidStoredConf)) == 1
+	})
+	rec := h.logs.withMsg(msgInvalidStoredConf)[0]
+	if rec["level"] != "ERROR" {
+		t.Fatalf("refusal logged at %v, want ERROR", rec["level"])
+	}
+	if err, _ := rec["error"].(string); !strings.Contains(
+		err, "dn_bin_conf",
+	) {
+		t.Fatalf("error = %q, want the offending field named", err)
+	}
+	// Several more rounds: the memo keeps it at one record per invalid period,
+	// exactly as the idle arm keeps `cluster conf missing` at one.
+	for i := 0; i < 3; i++ {
+		h.clk.advance(common.DefaultHealthCheckInterval * time.Second)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {
+		t.Fatalf("%d invalid stored conf records, want one per refused period",
+			got)
+	}
+	// Not the absent-cluster record: the two must stay distinguishable.
+	if got := len(h.logs.withMsg(msgClusterConfMissing)); got != 0 {
+		t.Fatalf("%d cluster conf missing records, want none: the cluster IS "+
+			"in the cache", got)
+	}
+	if stub.checkCount() != 0 || len(stub.syncups()) != 0 {
+		t.Fatalf("a worker refusing its conf talked to its agent")
+	}
+	if got := len(h.hw.all()); got != 0 {
+		t.Fatalf("a worker refusing its conf wrote health: %v", h.hw.all())
+	}
+	// Nothing was ever dialled, so this says the gate precedes connect(), not
+	// that a held reference was released — see the doc comment.
+	if refs := h.deps.conns.refs(testAddr); refs != 0 {
+		t.Fatalf("a worker refused before its first round holds %d "+
+			"connection references", refs)
+	}
+	// A usable conf is installed: the loop recovers on its next retry.
+	h.defaultConf()
+	h.advanceUntil("round after the conf is repaired", roundInterval,
+		func() bool { return stub.checkCount() >= 1 })
+}
+
+// TestRevisionQuiescesWhenARunningConfGoesBad is the CONNECTED half of the §7
+// refusal: a worker that is already driving its object — one Check stream
+// open over one RW7 connection reference — and whose cluster conf then becomes
+// unusable. RW9's promise for that case is not merely "no new round": it is
+// that the loop gives the stream and the reference BACK, so an operator who
+// corrupted a cluster conf does not leave one idle gRPC connection per object
+// pinned open for as long as it takes to fix it.
+//
+// Every assertion below is therefore about state the cold-start test cannot
+// enter: it asserts refs == 1 and one live stream BEFORE the conf goes bad, so
+// "refs == 0" and "the handler returned" afterwards are statements about
+// refuseConf's quiesce() rather than about a worker that never dialled.
+func TestRevisionQuiescesWhenARunningConfGoesBad(t *testing.T) {
+	h := newRevHarness(t)
+	// An agent that answers every round, holding a revision the worker did
+	// not ask for: the round completes and ends in RW4 step 5's SyncupDn.
+	// That syncup is the test's signal that a round has FINISHED — it is
+	// issued after recv() returned and stopped the round timer — so the fake
+	// clock is only ever advanced while the loop is parked in wait(), and an
+	// advance can never abandon a round in flight and drop its stream.
+	stub := &stubDnAgent{
+		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			return &pb.CheckDnReply{Revision: 0}
+		},
+	}
+	h.fleet.addDn(t, testAddr, stub)
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	h.defaultConf()
+	h.startDn(testAddr, 1)
+
+	// The first round needs no clock: run() drives one before it waits.
+	waitFor(t, "the first round to finish", func() bool {
+		return len(stub.syncups()) >= 1
+	})
+	if refs := h.deps.conns.refs(testAddr); refs != 1 {
+		t.Fatalf("a running worker holds %d connection references, want 1",
+			refs)
+	}
+	if got := stub.streamCount(); got != 1 {
+		t.Fatalf("%d check streams after one round, want 1", got)
+	}
+	if got := stub.streamExitCount(); got != 0 {
+		t.Fatalf("the stream was closed %d times before the conf went bad",
+			got)
+	}
+
+	// The stored conf goes bad UNDER the running worker.
+	h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.DnBinConf = nil
+	}))
+	h.advanceUntil("refusal record", roundInterval, func() bool {
+		return len(h.logs.withMsg(msgInvalidStoredConf)) == 1
+	})
+	// RW9's quiesced state, reached from a connected one: the stream is gone
+	// and the reference is handed back. The agent's CheckDn handler returning
+	// is the observable half of "gone", and refuseConf's dropStream is the
+	// only thing that can have ended it — the exit count was 0 above, RW4 step
+	// 4's other drop is a round that failed, and the guard below says none
+	// did.
+	waitFor(t, "the check stream to be dropped", func() bool {
+		return stub.streamExitCount() == 1
+	})
+	if got := len(h.logs.withMsg("check round failed")); got != 0 {
+		t.Fatalf("%d rounds failed, so the drop above is not necessarily "+
+			"the refusal's", got)
+	}
+	if refs := h.deps.conns.refs(testAddr); refs != 0 {
+		t.Fatalf("a worker refusing its conf holds %d connection references",
+			refs)
+	}
+	// And it drives nothing while refused, with one record per refused
+	// period rather than one per retry.
+	before := stub.checkCount()
+	for i := 0; i < 3; i++ {
+		h.clk.advance(roundInterval)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := stub.checkCount(); got != before {
+		t.Fatalf("a refusing worker sent %d more check requests",
+			got-before)
+	}
+	if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 1 {
+		t.Fatalf("%d invalid stored conf records, want one per refused period",
+			got)
+	}
+
+	// Repaired: the next round acquires the reference again and opens a FRESH
+	// stream, because the refused one was closed rather than parked.
+	h.defaultConf()
+	h.advanceUntil("round after the conf is repaired", roundInterval,
+		func() bool { return stub.checkCount() > before })
+	if got := stub.streamCount(); got != 2 {
+		t.Fatalf("%d streams, want a second one after the refusal", got)
+	}
+	if refs := h.deps.conns.refs(testAddr); refs != 1 {
+		t.Fatalf("a recovered worker holds %d connection references, want 1",
+			refs)
+	}
 }
 
 // TestConnCacheRefCounting checks RW7: one connection per endpoint, reference

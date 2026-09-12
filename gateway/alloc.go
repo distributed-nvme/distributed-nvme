@@ -68,7 +68,13 @@ func pickDns(
 	black []string,
 	what string,
 ) ([]model.Cand, error) {
-	batch := int(model.ResolveAllocConf(cc.GetAllocConf()).GetDnBatchSize())
+	// The cluster's stored batch size (§7). A zero would silently make the
+	// scan width zero and turn every allocation into RESOURCE_EXHAUSTED, so
+	// the stored conf is checked rather than defaulted.
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return nil, errAborted("%v", err)
+	}
+	batch := int(cc.GetAllocConf().GetDnBatchSize())
 	// The tier bool is deliberately dropped: a tier-2 placement is visible in
 	// the stored topology, and §8's LG table gains no record for it.
 	cands, _, err := model.FindDnCandidatesAntiAffine(
@@ -106,7 +112,11 @@ func pickCn(
 	spCnAddrs []string,
 	what string,
 ) (model.Cand, error) {
-	batch := int(model.ResolveAllocConf(cc.GetAllocConf()).GetCnBatchSize())
+	// As in pickDns: the stored batch size, validated rather than defaulted.
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return model.Cand{}, errAborted("%v", err)
+	}
+	batch := int(cc.GetAllocConf().GetCnBatchSize())
 	cands, err := model.FindCnCandidates(
 		ctx, cli, cid,
 		extCnt,
@@ -157,14 +167,42 @@ type dnLedger struct {
 	order []string
 }
 
-func newDnLedger(s etcdutil.STM, cid uint64, cc *pb.ClusterConf) *dnLedger {
+// newDnLedger opens a ledger over the cluster's STORED conf, or refuses that
+// conf (§7, GW11).
+//
+// The gate sits in the constructor rather than in each handler because every
+// DN this ledger writes goes through model.MaintainDnCapacity, which shifts
+// dn_bin_conf as stored. A capacity key embeds the bin index it was written
+// under, and that index comes from the ladder: computed from a conf
+// CreateCluster could not have written, it is a different index, so the key a
+// release means to delete survives — still indexing a free count the node no
+// longer has — and the one it writes lands under a bin its free count does not
+// belong to. There is no right index to compute from such a conf, and guessing
+// one is the resolve-at-read this rule removed (§7), so the ledger refuses
+// with the same errAborted the allocating paths already give (§5.9).
+//
+// Six handlers build a ledger — CreateStoragePool and DeleteStoragePool,
+// DeleteSpareLeg, and CreateMigration, FinishMigration and CancelMigration —
+// and each builds it before staging its first write, so a refusal here returns
+// having written nothing rather than relying on the transaction being
+// abandoned (EU4). Two of the six reach a conf gate before this one anyway
+// (CreateStoragePool's own, CreateMigration's through pickDns); the other four
+// have none, which is what this covers.
+func newDnLedger(
+	s etcdutil.STM,
+	cid uint64,
+	cc *pb.ClusterConf,
+) (*dnLedger, error) {
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return nil, errAborted("%v", err)
+	}
 	return &dnLedger{
 		s:   s,
 		cid: cid,
 		cc:  cc,
 		old: make(map[string]*pb.DnConf),
 		cur: make(map[string]*pb.DnConf),
-	}
+	}, nil
 }
 
 // tryGet reads one DN, caching both the record as stored and the copy being

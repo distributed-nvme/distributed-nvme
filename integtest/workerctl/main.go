@@ -1259,6 +1259,14 @@ func cmdPutCluster(g *globals, args []string) {
 			CntlrInterval: uint32(*cntlrInterval),
 		},
 	}
+	// workerctl plays the gateway for this suite, so it must store what
+	// CreateCluster stores: a FULLY RESOLVED conf (§7). Every member left at
+	// its flag's zero — the batch sizes, the four intervals, the bin shift
+	// ladder, dm_raid0_conf.stripe_size — becomes concrete here, because the
+	// worker now validates the stored conf and refuses to drive an object
+	// whose geometry nobody chose. Writing the raw literal would make every
+	// case in the suite fail at the first round.
+	cc = model.ResolveClusterConf(cc)
 	newGlobal := func() ([]uint32, uint64) {
 		return make([]uint32, common.ShardBucketSize), 1
 	}
@@ -2086,7 +2094,16 @@ func cmdPutSp(g *globals, args []string) {
 			},
 		}
 	}
-	extentSize := model.ResolveDnBinConf(cc.GetDnBinConf()).GetExtentSize()
+	// The gateway's resolve-at-write, mirrored (§7): CreateStoragePool stores
+	// the merge passed through model.ResolveBdevConf, so put-sp does too —
+	// the cluster's bdev_conf is already concrete, but the SP's redund kind
+	// was just rebuilt above and the merge's own constants rung still has to
+	// fire.
+	bdev = model.ResolveBdevConf(bdev)
+	if err := model.ValidateClusterConf(cc); err != nil {
+		die("put-sp: %v", err)
+	}
+	extentSize := cc.GetDnBinConf().GetExtentSize()
 
 	// The §3.6 geometry of every group, computed by model.GroupBlocks — the
 	// one implementation of the formula (MD6).
@@ -3100,6 +3117,15 @@ func cmdSetLwm(g *globals, args []string) {
 	cid, _ := g.clusterId(ctx, cli)
 	target := resolveSp(ctx, cli, cid, *sp)
 
+	// The gateway's rule, mirrored (§7): 0 asks for the default and is
+	// resolved before the write, because the worker refuses a stored 0. A
+	// value above 100 is a MEANING — "never grow automatically" — and is
+	// stored exactly as given.
+	pctValue := uint32(*pct)
+	if pctValue == 0 {
+		pctValue = common.DefaultPoolLowWatermarkPct
+	}
+
 	spRev := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		conf, err := getSpConf(s, cid, target)
@@ -3112,7 +3138,7 @@ func cmdSetLwm(g *globals, args []string) {
 		if conf.BdevConf.DmPoolConf == nil {
 			conf.BdevConf.DmPoolConf = &pb.DmPoolConf{}
 		}
-		conf.BdevConf.DmPoolConf.LowWaterMarkPct = uint32(*pct)
+		conf.BdevConf.DmPoolConf.LowWaterMarkPct = pctValue
 		s.Put(model.SpConfKey(cid, target.name), conf)
 		spRev, err = bumpSpRev(s, cid, conf)
 		return err
@@ -3122,7 +3148,7 @@ func cmdSetLwm(g *globals, args []string) {
 	}
 	emit(map[string]any{
 		"sp_name":            target.name,
-		"low_water_mark_pct": uint32(*pct),
+		"low_water_mark_pct": pctValue,
 		"sp_rev":             spRev,
 	})
 }

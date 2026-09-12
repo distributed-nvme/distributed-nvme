@@ -38,8 +38,15 @@ import (
 const (
 	// sptExtSize / sptBlockSize are the cluster geometry every expected
 	// meta_blocks / data_blocks below is computed from (§3.6).
-	sptExtSize   = uint64(1) << 30
-	sptBlockSize = uint64(1) << 20
+	//
+	// NEITHER is its §7 default (1 GiB and 1 MiB): every handler here reads
+	// both as STORED, and a fixture that stored the constant could not tell a
+	// handler that read the cluster from one that substituted the constant —
+	// the two would agree on every number. Substituting either alone, or both
+	// together, moves the group geometry below: the ladder cap moves with the
+	// extent size too (16 GiB / 2 GiB is 8 extents, not 16).
+	sptExtSize   = uint64(2) << 30
+	sptBlockSize = uint64(4) << 20
 	// sptDnFree / sptCnFree sit in DN bin 1 (levels 1/16/256/4096), so a
 	// charge of a few extents moves the capacity key without moving the bin
 	// — which is what makes "the old key is gone, the new key is there" a
@@ -60,12 +67,16 @@ const (
 	// cntlr's CN reserves for the SP (§8.4, §6.5).
 	sptFootprint = uint64(sptSliceCnt) * (1 + sptInitExt)
 
-	// §3.6 for this geometry: a 1 GiB md-raid1 group is 1024 pool blocks of
-	// which 3 are meta (superblock + one bitmap block + health), and a 4 GiB
-	// one is 4096 blocks with the same 3.
+	// §3.6 for this geometry (2 GiB extents, 4 MiB pool blocks, 128-block
+	// bitmap chunks): the one-extent meta group is 2 GiB / 4 MiB = 512 pool
+	// blocks, of which 3 are meta — the md superblock block, one bitmap block
+	// (256 B of superblock plus ceil(2 GiB / (128 × 4 MiB)) = 4 bits, so one
+	// block) and the health block — leaving 509 for data; the four-extent
+	// data group is 8 GiB / 4 MiB = 2048 blocks with the same 3 (16 bitmap
+	// bits still fit in one block), leaving 2045.
 	sptMetaBlocks  = uint64(3)
-	sptMetaGrpData = uint64(1021)
-	sptDataGrpData = uint64(4093)
+	sptMetaGrpData = uint64(509)
+	sptDataGrpData = uint64(2045)
 )
 
 // sptEnvSeq numbers the cluster each environment gets, so that two tests — and
@@ -99,22 +110,23 @@ func sptTrConf(addrPort string) *pb.NvmeTrConf {
 	}
 }
 
-// sptNewEnv writes the whole fixture and returns it. The ClusterConf carries
-// no redund_conf, so decision D-C's structural default applies unless a
-// request asks for md-raid1: an SP created with no bdev_conf at all is
-// redund_none.
+// sptNewEnv writes the whole fixture and returns it.
+//
+// The ClusterConf is testStoredClusterConf's: exactly what CreateCluster would
+// have stored, every defaultable member concrete (§7), because the RPCs below
+// read it as stored: each one that computes from it — the allocating ones and
+// the delete paths that maintain DN capacity keys alike — refuses a zero
+// instead of substituting. Its bdev_conf carries the data block size, the low
+// water mark and the stripe size, which is what decision D-C's merge inherits
+// from — but no redund_conf, so §8.4's structural default
+// applies unless a request asks for md-raid1: an SP created with no bdev_conf
+// at all is redund_none.
 func sptNewEnv(t *testing.T, dnCnt int, cnCnt int, cnFree uint64) *sptEnv {
 	t.Helper()
 	cli := newTestClient(t)
 	seq := sptEnvSeq.Add(1)
 	name := fmt.Sprintf("spt-%d", seq)
-	cc := &pb.ClusterConf{
-		CreationEpoch: seq,
-		BdevConf: &pb.BdevConf{
-			DmPoolConf: &pb.DmPoolConf{DataBlockSize: sptBlockSize},
-		},
-		DnBinConf: &pb.DnBinConf{ExtentSize: sptExtSize},
-	}
+	cc := testStoredClusterConf(seq, sptExtSize, sptBlockSize)
 	env := &sptEnv{
 		t:    t,
 		ctx:  context.Background(),
@@ -365,8 +377,9 @@ func sptSmallSpec(name string) sptSpec {
 }
 
 // req builds the CreateStoragePoolRequest a spec describes. The
-// event_threshold is deliberately non-default: GW11 says it is stored
-// verbatim, and a zero one could not tell that apart from a dropped field.
+// event_threshold is deliberately non-default: §7 stores it verbatim — it is
+// still resolved at read time, one of the two conf messages that are — and a
+// zero one could not tell that apart from a dropped field.
 func (spec sptSpec) req(clusterName string) *pb.CreateStoragePoolRequest {
 	req := &pb.CreateStoragePoolRequest{
 		ClusterName:    clusterName,
@@ -499,22 +512,38 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 	if conf.GetDeleting() {
 		t.Errorf("deleting must be false on a fresh SP")
 	}
-	// D-C: the request's redund_md_raid1 wins the kind, the cluster's
-	// dm_pool_conf.data_block_size carries over, and members left zero in
-	// both stay zero — model.GroupBlocks resolves them identically.
+	// D-C plus §7: the request's redund_md_raid1 wins the kind, the cluster's
+	// dm_pool_conf members carry over, and every member still zero after the
+	// merge is settled by model.ResolveBdevConf — so the STORED message is
+	// concrete down to the last field. bitmap_chunk_block_cnt is the one the
+	// request itself left at zero inside an md-raid1 it did choose: 128 here
+	// is the constant, and it is written into the SP rather than re-derived by
+	// whatever binary later computes the group's bitmap.
 	wantBdev := &pb.BdevConf{
-		DmPoolConf:  &pb.DmPoolConf{DataBlockSize: sptBlockSize},
-		DmRaid0Conf: &pb.DmRaid0Conf{},
+		DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize:   sptBlockSize,
+			LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+		},
+		DmRaid0Conf: &pb.DmRaid0Conf{
+			StripeSize: common.DefaultDmRaid0StripeSize,
+		},
 		RedundConf: &pb.RedundConf{
 			RedunKind: &pb.RedundConf_RedundMdRaid1{
-				RedundMdRaid1: &pb.RedundMdRaid1{},
+				RedundMdRaid1: &pb.RedundMdRaid1{
+					BitmapChunkBlockCnt: common.DefaultChunkBlockCnt,
+				},
 			},
 		},
 	}
 	if !proto.Equal(conf.GetBdevConf(), wantBdev) {
 		t.Errorf("bdev_conf: got %v, want %v", conf.GetBdevConf(), wantBdev)
 	}
-	// GW11: event_threshold is stored verbatim, defaults resolved at use.
+	// §7: event_threshold is stored VERBATIM and resolved at read time
+	// (model.ResolveEventThreshold) — it is a policy timer, not geometry.
+	// It and the DmCloneConf hydration pair are the two such exemptions. This assertion is the guard that the write-time
+	// resolution above stopped at bdev_conf: a handler that swept
+	// event_threshold up with it would fill in the two members the request
+	// left unset.
 	wantThreshold := &pb.EventThreshold{SideUnhealthy: 3, LegUnhealthy: 9}
 	if !proto.Equal(conf.GetEventThreshold(), wantThreshold) {
 		t.Errorf("event_threshold: got %v", conf.GetEventThreshold())
@@ -695,6 +724,170 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 		global.GetShardBucket()[0] != 1 {
 		t.Errorf("sp_global.shard_bucket: sum %d, [0] %d",
 			bucketSum(global.GetShardBucket()), global.GetShardBucket()[0])
+	}
+}
+
+// sptLiveEnv is a cluster built through the REAL create RPCs — CreateCluster
+// and then CreateDiskNode/CreateControllerNode against fake agents — rather
+// than through sptNewEnv's hand-written ClusterConf.
+//
+// The two bdev_conf tests below need the whole write path, because §7 resolves
+// twice along it: CreateCluster makes the CLUSTER's bdev_conf concrete, and
+// CreateStoragePool merges the request over that result and resolves whatever
+// neither side named. A fixture that wrote the ClusterConf itself would pin
+// only the second half — it would keep passing with the first one deleted,
+// because it would be hand-writing the very message that step produces.
+//
+// It registers exactly the nodes one sptDefaultSpec SP needs: two slices x
+// (meta + data) x two md-raid1 legs is eight sides on eight distinct DNs
+// (§6.5), each in its own location, plus one CN per cntlr.
+type sptLiveEnv struct {
+	srv  *Server
+	name string
+	cid  uint64
+}
+
+func sptNewLiveEnv(t *testing.T, clusterBdev *pb.BdevConf) *sptLiveEnv {
+	t.Helper()
+	srv := newTestServer(t)
+	name := fmt.Sprintf("spt-live-%d", sptEnvSeq.Add(1))
+	reply, err := srv.CreateCluster(
+		context.Background(),
+		&pb.CreateClusterRequest{ClusterName: name, BdevConf: clusterBdev})
+	if err != nil {
+		t.Fatalf("CreateCluster %s: %v", name, err)
+	}
+	// 100 GiB is 100 extents against the default 1 GiB unit, and 1 TiB is the
+	// 1024 a CN budget of that size floors to (§6.1) — both far above this
+	// SP's footprint, so no placement here can fail for capacity.
+	for idx := 0; idx < 2*sptSliceCnt*2; idx++ {
+		addr := fakeAddrPort(t, fmt.Sprintf("livedn%d", idx))
+		mustDn(t, srv, name, addr, fmt.Sprintf("dn-rack-%d", idx), 100<<30)
+	}
+	for idx := 0; idx < sptCntlrCnt; idx++ {
+		addr := fakeAddrPort(t, fmt.Sprintf("livecn%d", idx))
+		mustCn(t, srv, name, addr, fmt.Sprintf("cn-rack-%d", idx), 1<<40)
+	}
+	return &sptLiveEnv{srv: srv, name: name, cid: reply.GetClusterId()}
+}
+
+// createSpBdev runs CreateStoragePool with bdev as the request's bdev_conf and
+// returns the bdev_conf that was STORED.
+func (e *sptLiveEnv) createSpBdev(
+	t *testing.T,
+	bdev *pb.BdevConf,
+) *pb.BdevConf {
+	t.Helper()
+	req := sptDefaultSpec(sptSpName).req(e.name)
+	req.BdevConf = bdev
+	if _, err := e.srv.CreateStoragePool(context.Background(), req); err != nil {
+		t.Fatalf("CreateStoragePool: %v", err)
+	}
+	conf := &pb.SpConf{}
+	found, err := e.srv.cli.Get(
+		context.Background(), model.SpConfKey(e.cid, sptSpName), conf)
+	if err != nil || !found {
+		t.Fatalf("sp_conf: found %v, err %v", found, err)
+	}
+	return conf.GetBdevConf()
+}
+
+// TestCreateStoragePoolResolvesTheMergedBdevConf pins the bottom rung of
+// decision D-C: a member no one asked for anywhere is stored as the §7
+// constant, not as a zero.
+//
+// Neither the cluster request nor the SP request names a single number — the
+// SP's whole bdev_conf is the redundancy CHOICE — so all four members below
+// come from the constants, by way of a ClusterConf that CreateCluster had
+// already made concrete. bitmap_chunk_block_cnt is the one that could have
+// come from nowhere else at all: the cluster has no redund_conf, so it has no
+// chunk count to inherit. Storing these numbers is the point — the group's
+// bitmap and every later capacity sum are computed from them (§3.6), and a
+// zero left here would be re-filled by whatever binary read the SP next.
+func TestCreateStoragePoolResolvesTheMergedBdevConf(t *testing.T) {
+	env := sptNewLiveEnv(t, nil)
+	got := env.createSpBdev(t, &pb.BdevConf{
+		RedundConf: &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{},
+			},
+		},
+	})
+	wantBdev := &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize:   1024 * 1024, // 1 MiB
+			LowWaterMarkPct: 50,
+		},
+		DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 64 * 1024},
+		RedundConf: &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: 128},
+			},
+		},
+	}
+	if !proto.Equal(got, wantBdev) {
+		t.Errorf("bdev_conf: got %v, want %v", got, wantBdev)
+	}
+	// The stored conf is what every later reader is held to: CreateThinDevice
+	// and GrowSlice refuse it rather than resolving it (§7).
+	if err := model.ValidateBdevConf(got); err != nil {
+		t.Errorf("the stored bdev_conf does not validate: %v", err)
+	}
+}
+
+// TestCreateStoragePoolBdevConfMergeRungs pins decision D-C member by member:
+// the request wins every member it set, the cluster wins every member the
+// request left unset, and both land in the SAME stored message.
+//
+// Every number is deliberately neither the other rung's nor the §7 constant,
+// so a member taken from the wrong rung — or resolved BEFORE the merge instead
+// of after it, which would replace everything the request omitted with
+// constants and destroy inheritance wholesale — reads as a different number
+// rather than as a coincidence.
+func TestCreateStoragePoolBdevConfMergeRungs(t *testing.T) {
+	env := sptNewLiveEnv(t, &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize:   2 * 1024 * 1024, // outbid by the request below
+			LowWaterMarkPct: 70,              // the request leaves this unset
+		},
+		DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 32 * 1024}, // and this
+	})
+	got := env.createSpBdev(t, &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{DataBlockSize: 4 * 1024 * 1024},
+		RedundConf: &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: 256},
+			},
+		},
+	})
+	for _, tc := range []struct {
+		field string
+		rung  string
+		got   uint64
+		want  uint64
+	}{
+		{
+			"dm_pool_conf.data_block_size", "the request",
+			got.GetDmPoolConf().GetDataBlockSize(), 4 * 1024 * 1024,
+		},
+		{
+			"dm_pool_conf.low_water_mark_pct", "the cluster",
+			uint64(got.GetDmPoolConf().GetLowWaterMarkPct()), 70,
+		},
+		{
+			"dm_raid0_conf.stripe_size", "the cluster",
+			got.GetDmRaid0Conf().GetStripeSize(), 32 * 1024,
+		},
+		{
+			"redund_md_raid1.bitmap_chunk_block_cnt", "the request",
+			got.GetRedundConf().GetRedundMdRaid1().GetBitmapChunkBlockCnt(),
+			256,
+		},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s: got %d, want %d from %s",
+				tc.field, tc.got, tc.want, tc.rung)
+		}
 	}
 }
 
@@ -2235,18 +2428,20 @@ func TestGrowSliceMeta(t *testing.T) {
 // gateway pre-check and the transaction agree on the client's code no matter
 // which wins the race; this test is the pre-check's half of that.
 //
-// The slice's meta total is raised to the cap directly rather than by four
-// real grows: the refusal is decided from the slice alone and returns before
-// anything is written, so the DN budgets those grows would have spent never
-// enter it.
+// The slice's meta total is raised to the cap directly rather than by the
+// three real grows the 1 → 2 → 4 → 8 ladder would take: the refusal is decided
+// from the slice alone and returns before anything is written, so the DN
+// budgets those grows would have spent never enter it.
 func TestGrowSliceMetaLadderCap(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
 	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
 	slice := env.slice(spId, sliceId)
-	// 16 extents of 1 GiB is exactly the 16 GiB ceiling, and the ladder is
-	// refused once the total has REACHED it.
-	slice.GetMetaGrpList()[0].ExtCnt = 16
+	// The cap is a size, not an ext_cnt: 8 extents of this cluster's stored
+	// 2 GiB is exactly the 16 GiB ceiling, and the ladder is refused once the
+	// total has REACHED it. A handler that read the §7 default extent size
+	// instead would make this 16 GiB look like 8 and grow.
+	slice.GetMetaGrpList()[0].ExtCnt = 8
 	mustPut(t, env.cli, model.SliceKey(env.cid, spId, sliceId), slice)
 	before := env.dump()
 	_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
@@ -2257,6 +2452,19 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 		IsMeta:      true,
 	})
 	sptWantCode(t, err, codes.FailedPrecondition)
+	// WHICH gate refused, not merely that one did: the pre-check's sentence
+	// names the slice and its meta total, while model.GrowSlice's in-STM
+	// re-check says only "meta ladder at the 16 GiB cap". The two map to the
+	// same code on purpose, so the message is the only thing that tells them
+	// apart — and the pre-check can only have fired by measuring 8 extents
+	// against this cluster's STORED 2 GiB, since against the §7 default they
+	// would be 8 GiB and it would have let the grow through to the STM.
+	wantMsg := fmt.Sprintf(
+		"slice %d has 8 meta extents and cannot grow past the 16 GiB "+
+			"dm-thin metadata cap", sliceId)
+	if got := status.Convert(err).Message(); got != wantMsg {
+		t.Errorf("message %q, want the pre-check's %q", got, wantMsg)
+	}
 	if got := env.spRev(0, spId); got != 1 {
 		t.Errorf("a refusal bumped sp_rev to %d", got)
 	}

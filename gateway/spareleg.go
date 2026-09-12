@@ -290,7 +290,10 @@ func (s *Server) DeleteSpareLeg(
 		// The side was charged the group's ext_cnt when it was created, so
 		// that is what returns; the ledger reads each DN once and writes,
 		// re-indexes and bumps it once however many sides a leg carries.
-		ledger := newDnLedger(stm, sc.Cid, sc.Cc)
+		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
+		if err != nil {
+			return err
+		}
 		for _, side := range spare.GetSideList() {
 			err := ledger.release(
 				side.GetAddrPort(), sc.SpId(), side.GetSideId(),

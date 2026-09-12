@@ -371,13 +371,22 @@ func agentpathCreateCluster(
 // subject is a refusal reached before any cluster-level state matters. It
 // stamps its own creation_epoch, so the cluster_id it returns is the one
 // resolveCluster will derive (§5.2).
+//
+// The conf is testStoredClusterConf's — what CreateCluster would have stored,
+// every member concrete (§7) — with the default geometry, since no test here
+// has an opinion about it. A sparse conf would be refused as an invalid stored
+// conf and each of these tests would then be asserting the wrong refusal.
 func agentpathSeedCluster(
 	t *testing.T,
 	cli *etcdutil.Client,
 ) (string, uint64) {
 	t.Helper()
 	name := agentpathName("cluster")
-	conf := &pb.ClusterConf{CreationEpoch: uint64(time.Now().UnixNano())}
+	conf := testStoredClusterConf(
+		uint64(time.Now().UnixNano()),
+		common.DefaultDnExtSize,
+		common.DefaultDmPoolDataBlockSize,
+	)
 	agentpathPut(t, cli, model.ClusterConfKey(name), conf)
 	return name, model.ClusterId(name, conf.GetCreationEpoch())
 }

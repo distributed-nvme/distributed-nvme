@@ -54,8 +54,10 @@ files are committed, so an ordinary build or test never requires protoc.
   inside.
 * `model/` — the architecture §5 etcd data model as Go (`dnv-worker.md` §4):
   key formats and parsers, `cluster_id`, the §5.6 capacity keys, the §6
-  candidate scans and the internal §8/§10.4 mutations that the worker uses now
-  and the gateway will reuse.
+  candidate scans, the §7 conf resolvers and stored-conf validators, and the
+  internal §8/§10.4 mutations: the worker drives all of them, and the gateway
+  reuses `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` behind its own
+  RPCs rather than duplicating their transactions.
 * `worker/` — `dnv-worker.md` §6-§11: the heartbeat/grace/ticket vote layer and
   its shard ownership, the per-shard revision watchers, the per-object
   `Check*` loops with their `Syncup*` and `Push*Bitmap` calls, the `err_epoch`

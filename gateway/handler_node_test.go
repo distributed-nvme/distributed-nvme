@@ -209,10 +209,18 @@ func hnodeCnShard(t *testing.T, s *Server, cid uint64, addrPort string) uint32 {
 // stamped — the reply's id must be exactly the one recomputable from what was
 // stored, or no later RPC could address the cluster's keys at all.
 //
-// The five sub-messages are asserted VERBATIM (GW11): ClusterConf is
-// write-once and defaults are resolved at use time, so a handler that helpfully
-// filled in DefaultDnExtSize here would freeze a default into every DN's disk
-// header for the life of the cluster.
+// The five sub-messages are asserted as the handler RESOLVED them (§7): what
+// the request said where it said anything, and the concrete constant in every
+// member it left unset. Freezing DefaultDnExtSize into the stored conf is the
+// POINT, not a mistake — ClusterConf is write-once, so a concrete extent size
+// is what makes every DN's disk header match the cluster forever, instead of
+// floating with whatever constant the binary that happens to read the conf
+// next was compiled against. The members the request DID set are the other
+// half of the same assertion: resolution fills gaps, it never overrides.
+//
+// This test uses a request with some members set and some unset, so it pins
+// both halves at once; TestCreateClusterResolvesAnEmptyRequest below pins the
+// pure-default column on its own.
 func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
@@ -252,12 +260,38 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 			reply.GetClusterId(), cid)
 	}
 	hnodeWantProto(t, cc, &pb.ClusterConf{
-		CreationEpoch:   epoch,
-		QosRatio:        req.GetQosRatio(),
-		BdevConf:        req.GetBdevConf(),
-		DnBinConf:       req.GetDnBinConf(),
-		AllocConf:       req.GetAllocConf(),
-		HealthCheckConf: req.GetHealthCheckConf(),
+		CreationEpoch: epoch,
+		// Neither member of qos_ratio is defaultable, so it is the one
+		// sub-message resolution passes straight through.
+		QosRatio: req.GetQosRatio(),
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{
+				// The request's, not the 1 MiB constant.
+				DataBlockSize:   2 * 1024 * 1024,
+				LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+			},
+			// The request's, not the 64 KiB constant.
+			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 128 * 1024},
+			// redund_conf stays unset: it is a CHOICE, not a default, and an
+			// unset oneof already means redund_none (§8.4). Resolution never
+			// invents a redundancy kind for a cluster.
+		},
+		DnBinConf: &pb.DnBinConf{
+			// The request's 2 GiB, and the ladder it left entirely unset.
+			ExtentSize: 2 << 30,
+			Bin0Shift:  common.DefaultDnBin0Shift,
+			Bin1Shift:  common.DefaultDnBin1Shift,
+			Bin2Shift:  common.DefaultDnBin2Shift,
+			Bin3Shift:  common.DefaultDnBin3Shift,
+		},
+		// Both batch sizes were asked for, so neither moves.
+		AllocConf: &pb.AllocConf{DnBatchSize: 8, CnBatchSize: 4},
+		HealthCheckConf: &pb.HealthCheckConf{
+			DnInterval:    11,
+			CnInterval:    common.DefaultHealthCheckInterval,
+			SideInterval:  common.DefaultHealthCheckInterval,
+			CntlrInterval: 14,
+		},
 	}, "stored cluster_conf")
 
 	// next_id starts at 1 and the bucket is ShardBucketSize zeros (§5.4). A
@@ -281,6 +315,121 @@ func TestCreateClusterWritesConfAndThreeGlobals(t *testing.T) {
 		NextId:      1,
 		ShardBucket: hnodeZeroBucket(),
 	}, "sp_global")
+}
+
+// TestCreateClusterResolvesAnEmptyRequest is the headline of §7's write-time
+// resolution: a request that asks for nothing stores a ClusterConf with
+// nothing left to ask for.
+//
+// Every defaultable member is asserted as a CONCRETE number rather than
+// against the common.Default* it came from, and deliberately so — the whole
+// reason the resolution moved to the write path is that the stored geometry
+// must stop depending on any constant the binary that reads it next was
+// compiled against, and a want spelled as the constant itself could not tell a
+// changed constant apart from a correct write.
+//
+// cluster_name is the one member the request still carries: it is the key the
+// conf is stored under (§5.2) and the §9.1 etcd is shared, so an omitted name
+// would put every test in this file on the single "default" cluster. Nothing
+// else is set.
+func TestCreateClusterResolvesAnEmptyRequest(t *testing.T) {
+	s := newTestServer(t)
+	name := hnodeName("resolved")
+	_, err := s.CreateCluster(
+		context.Background(), &pb.CreateClusterRequest{ClusterName: name})
+	wantCode(t, err, codes.OK, "CreateCluster with an otherwise empty request")
+
+	cc := &pb.ClusterConf{}
+	hnodeGet(t, s, model.ClusterConfKey(name), cc)
+	if cc.GetCreationEpoch() == 0 {
+		t.Errorf("creation_epoch was not stamped")
+	}
+	hnodeWantProto(t, cc, &pb.ClusterConf{
+		// Stamped by the handler, pinned to the call window by the test
+		// above; this one only has to carry it through.
+		CreationEpoch: cc.GetCreationEpoch(),
+		// qos_ratio has no defaultable member, so an unset one stays unset:
+		// resolution fills in geometry, it does not invent policy.
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{
+				DataBlockSize:   1024 * 1024, // 1 MiB
+				LowWaterMarkPct: 50,
+			},
+			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 64 * 1024},
+			// redund_conf stays unset: an unset oneof already means
+			// redund_none (§8.4), and nothing invents a redundancy kind.
+		},
+		DnBinConf: &pb.DnBinConf{
+			ExtentSize: 1024 * 1024 * 1024, // 1 GiB
+			Bin0Shift:  0,
+			Bin1Shift:  4,
+			Bin2Shift:  8,
+			Bin3Shift:  12,
+		},
+		AllocConf: &pb.AllocConf{DnBatchSize: 16, CnBatchSize: 16},
+		HealthCheckConf: &pb.HealthCheckConf{
+			DnInterval:    5,
+			CnInterval:    5,
+			SideInterval:  5,
+			CntlrInterval: 5,
+		},
+	}, "the cluster_conf stored for an empty request")
+
+	// The other side of the same rule: what CreateCluster writes is exactly
+	// what every later reader demands of it, so the stored conf must satisfy
+	// the check those readers run instead of resolving (§7).
+	if err := model.ValidateClusterConf(cc); err != nil {
+		t.Errorf("the conf CreateCluster stored does not validate: %v", err)
+	}
+}
+
+// TestCreateClusterRefusesANonLadderShiftSet pins the other arm of §6.2's
+// all-or-nothing shift rule at the RPC: a set that is not
+// 0 <= bin0 < bin1 < bin2 < bin3 <= 63 is INVALID_ARGUMENT, and nothing is
+// written.
+//
+// It is refused rather than quietly replaced because the stored ladder is what
+// every capacity key in the cluster is written under for the cluster's whole
+// life — no reader resolves it again (§7) — and ClusterConf is write-once, so
+// an operator handed a silently different ladder has no RPC to correct it
+// with. The all-zero set stays legal: it is proto3's "unset" asking for
+// 0/4/8/12, which TestCreateClusterResolvesAnEmptyRequest pins.
+func TestCreateClusterRefusesANonLadderShiftSet(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		label string
+		conf  *pb.DnBinConf
+	}{
+		{"strictly decreasing", &pb.DnBinConf{
+			Bin0Shift: 12, Bin1Shift: 8, Bin2Shift: 4, Bin3Shift: 0,
+		}},
+		{"two rungs equal", &pb.DnBinConf{
+			Bin0Shift: 0, Bin1Shift: 4, Bin2Shift: 4, Bin3Shift: 12,
+		}},
+		{"the top rung past 63", &pb.DnBinConf{
+			Bin0Shift: 0, Bin1Shift: 4, Bin2Shift: 8, Bin3Shift: 64,
+		}},
+		{
+			// Three rungs set is still "not all zero", so the fourth is held
+			// to the ladder rather than defaulted on its own.
+			"one rung left unset",
+			&pb.DnBinConf{Bin0Shift: 0, Bin1Shift: 4, Bin2Shift: 8},
+		},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			name := hnodeName("ladder")
+			_, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+				ClusterName: name,
+				DnBinConf:   tc.conf,
+			})
+			wantCode(t, err, codes.InvalidArgument, "CreateCluster")
+			hnodeWantMsg(t, err, "are not a ladder", "CreateCluster")
+			if hnodeExists(t, s, model.ClusterConfKey(name)) {
+				t.Errorf("a refused CreateCluster left a cluster_conf behind")
+			}
+		})
+	}
 }
 
 // TestCreateClusterNameCollisionWritesNothing pins the ALREADY_EXISTS of §8.1
@@ -886,6 +1035,54 @@ func TestCreateDiskNodeRefusalsWriteNothing(t *testing.T) {
 	}
 	if got := hnodeModRev(t, s, model.DnGlobalKey(cid)); got != globalRev {
 		t.Errorf("dn_global mod_revision moved: %d -> %d", globalRev, got)
+	}
+}
+
+// TestNodeBudgetsDivideByTheStoredExtentSize is the discriminator the two
+// budget tests above cannot be: they run on mustCluster's cluster, whose
+// extent size the gateway resolved to common.DefaultDnExtSize, so their
+// expected total_ext_cnt is the same number whether §6.1 divided by the value
+// it read from the ClusterConf or by the constant.
+//
+// This cluster asks for 2 GiB extents, so the two are different numbers, and
+// each row states both: a 5 GiB disk node is 2 extents here and would be 5
+// under the default, and a 9 GiB controller-node budget is 4 here and would be
+// 9. Both RPCs floor (§6.1), which is why the sizes are deliberately not
+// multiples of the extent size.
+func TestNodeBudgetsDivideByTheStoredExtentSize(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	cluster := hnodeName("extsize")
+	// Only the extent size is named: an all-zero shift set is what §7 accepts
+	// as "no opinion about the ladder", and CreateCluster resolves it to the
+	// 0/4/8/12 default before storing, so the cluster is concrete throughout.
+	reply, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+		ClusterName: cluster,
+		DnBinConf:   &pb.DnBinConf{ExtentSize: 2 << 30},
+	})
+	if err != nil {
+		t.Fatalf("CreateCluster: %v", err)
+	}
+	cid := reply.GetClusterId()
+
+	dnAddr := fakeAddrPort(t, "extdn")
+	mustDn(t, s, cluster, dnAddr, "rack-1", 5<<30)
+	dn := &pb.DnConf{}
+	hnodeGet(t, s, model.DnConfKey(cid, dnAddr), dn)
+	if dn.GetTotalExtCnt() != 2 || dn.GetFreeExtCnt() != 2 {
+		t.Errorf("dn: %d/%d extents, want 2/2 — 5 GiB over the cluster's "+
+			"stored 2 GiB extent, not over the §7 default",
+			dn.GetTotalExtCnt(), dn.GetFreeExtCnt())
+	}
+
+	cnAddr := fakeAddrPort(t, "extcn")
+	mustCn(t, s, cluster, cnAddr, "rack-1", 9<<30)
+	cn := &pb.CnConf{}
+	hnodeGet(t, s, model.CnConfKey(cid, cnAddr), cn)
+	if cn.GetTotalExtCnt() != 4 || cn.GetFreeExtCnt() != 4 {
+		t.Errorf("cn: %d/%d extents, want 4/4 — 9 GiB over the cluster's "+
+			"stored 2 GiB extent, not over the §7 default",
+			cn.GetTotalExtCnt(), cn.GetFreeExtCnt())
 	}
 }
 

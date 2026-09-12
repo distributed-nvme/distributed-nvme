@@ -1194,14 +1194,41 @@ case_smoke() {
 	# §5.2: cluster_id is derived from name ‖ creation_epoch, so an epoch of 0
 	# would make every cluster of this name share one key prefix.
 	assert_ne "$(jq_of "$cc" '.creation_epoch')" "0" "ClusterConf creation_epoch"
-	# "confs verbatim" (§10.11 step 1): the request carried none of the five
-	# sub-messages, and GW11 resolves defaults at USE time, never at write
-	# time — so every one of them must still be absent in the store.
-	local field
-	for field in qos_ratio bdev_conf dn_bin_conf alloc_conf health_check_conf; do
-		assert_eq "$(jq_of "$cc" ".$field")" "null" \
-			"ClusterConf.$field is stored verbatim (GW11: no write-time defaults)"
+	# "confs resolved" (§10.11 step 1): the request carried none of the five
+	# sub-messages, and GW11 resolves every defaultable member at WRITE time,
+	# so what is in the store is CONCRETE — this is the assertion that would
+	# have caught a storage pool created with a zero geometry. Only qos_ratio,
+	# which is not defaultable, is still absent.
+	assert_eq "$(jq_of "$cc" '.qos_ratio')" "null" \
+		"ClusterConf.qos_ratio is not defaultable and stays absent"
+	local probe field want
+	for probe in \
+		'.bdev_conf.dm_pool_conf.data_block_size|1048576' \
+		'.bdev_conf.dm_pool_conf.low_water_mark_pct|50' \
+		'.bdev_conf.dm_raid0_conf.stripe_size|65536' \
+		'.dn_bin_conf.extent_size|1073741824' \
+		'.dn_bin_conf.bin1_shift|4' \
+		'.dn_bin_conf.bin2_shift|8' \
+		'.dn_bin_conf.bin3_shift|12' \
+		'.alloc_conf.dn_batch_size|16' \
+		'.alloc_conf.cn_batch_size|16' \
+		'.health_check_conf.dn_interval|5' \
+		'.health_check_conf.cn_interval|5' \
+		'.health_check_conf.side_interval|5' \
+		'.health_check_conf.cntlr_interval|5' ; do
+		field=${probe%%|*}
+		want=${probe##*|}
+		assert_eq "$(jq_of "$cc" "$field")" "$want" \
+			"ClusterConf$field is stored resolved (GW11: write-time defaults)"
 	done
+	# bin0_shift's default IS zero, so protojson omits it; the ladder above is
+	# what proves the other three were written rather than left unset.
+	assert_eq "$(jq_of "$cc" '.dn_bin_conf.bin0_shift // 0')" "0" \
+		"ClusterConf.dn_bin_conf.bin0_shift is the ladder's bottom rung"
+	# redund_conf is a CHOICE, not a default: an unset oneof already means
+	# redund_none (§8.4), so resolution must not invent a kind here.
+	assert_eq "$(jq_of "$cc" '.bdev_conf.redund_conf')" "null" \
+		"ClusterConf.bdev_conf.redund_conf stays the unset choice"
 	# §5.4: each global starts at next_id 1 with ShardBucketSize zeros, and the
 	# three buckets are separate slices — they are independent counters and
 	# must never alias.
@@ -1493,6 +1520,24 @@ EOF
 	# The first SP of a fresh cluster draws id 1 (§5.4: next_id starts at 1).
 	assert_eq "$spId" "1" "sp0 sp_id"
 	assert_eq "$SP_REV" "1" "sp0 SpRev starts at 1: it is created, not bumped"
+	# The SP half of stage 1's conf probe (GW11): make_sp sends `--raid1`
+	# and no number at all, so every member below was resolved at WRITE
+	# time — three of them member-wise from the ClusterConf stage 1
+	# probed, and the chunk count from its §7 constant, since the cluster
+	# names no redund_conf to inherit one from. A zero in any of them is
+	# what create-td (stage 9) and grow-slice (stage 7) would refuse as an
+	# invalid stored conf instead of re-defaulting.
+	local spProbe spField spWant
+	for spProbe in \
+		'.dm_pool_conf.data_block_size|1048576' \
+		'.dm_pool_conf.low_water_mark_pct|50' \
+		'.dm_raid0_conf.stripe_size|65536' \
+		'.redund_conf.redund_md_raid1.bitmap_chunk_block_cnt|128' ; do
+		spField=${spProbe%%|*}
+		spWant=${spProbe##*|}
+		assert_eq "$(jq_of "$spOut" ".sp_conf.bdev_conf$spField")" "$spWant" \
+			"sp0 SpConf.bdev_conf$spField is stored resolved (GW11)"
+	done
 	global=$(raw_key "$DNV_PREFIX sp_global $cidHex")
 	assert_field "$global" '.next_id' "2" "SpGlobal next_id after one SP"
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "1" \

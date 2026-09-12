@@ -131,6 +131,21 @@ func SpNextId(conf *pb.SpConf) uint64 {
 // A nil threshold — an SP written without one — resolves to the pure
 // defaults. No upper bound applies: §7 only requires each value to be >= 1,
 // which is what a resolved zero already is.
+//
+// event_threshold is deliberately still resolved at read time, and stored as
+// sent. It is a policy timer, not geometry: nothing is formatted or addressed
+// with it, re-reading it under a newer constant costs at most a differently
+// timed reaction, and CreateStoragePool stores it verbatim so an operator can
+// read back exactly what they asked for. It is one of exactly two messages
+// exempt from resolve-at-write; the other is the DmCloneConf hydration pair,
+// which both of its carriers store as sent but which only one of them ever
+// resolves: worker/sprole.go (migrCloneConf) resolves a MIGRATION's as it
+// builds the SyncupSide request, while a CLONE's is forwarded untouched all
+// the way to the cn agent, where a zero leaves the dm-clone target's own
+// default standing — agent.CloneTable omits the core arg and
+// agent/cnagent/clone.go's ensureHydrationKnobs sends no message for it.
+// Every defaultable GEOMETRY field is resolved by the create RPC instead
+// (model/capacity.go).
 func ResolveEventThreshold(threshold *pb.EventThreshold) *pb.EventThreshold {
 	resolved := &pb.EventThreshold{
 		PrimaryUnhealthy: threshold.GetPrimaryUnhealthy(),
@@ -189,10 +204,10 @@ func ceilDiv(a uint64, b uint64) uint64 {
 //	RedundNone:    meta_blocks = 1                     // health block only
 //	data_blocks        = total_group_blocks − meta_blocks
 //
-// Defaults are resolved here (§7): extentSize 0 => DefaultDnExtSize,
-// dm_pool_conf.data_block_size 0 => DefaultDmPoolDataBlockSize,
-// redund_md_raid1.bitmap_chunk_block_cnt 0 => DefaultChunkBlockCnt. A group
-// whose data region would be empty is an error, not a zero-sized group.
+// Nothing is resolved here (§7): every input is a stored value, concrete since
+// the create RPC wrote it, so a zero is refused rather than replaced — which
+// is also what keeps the three divisions below safe. A group whose data region
+// would be empty is an error, not a zero-sized group.
 func GroupBlocks(
 	extCnt uint64,
 	extentSize uint64,
@@ -202,7 +217,11 @@ func GroupBlocks(
 		return 0, 0, fmt.Errorf("group blocks: ext_cnt is zero")
 	}
 	if extentSize == 0 {
-		extentSize = common.DefaultDnExtSize
+		return 0, 0, fmt.Errorf(
+			"group blocks: %w", invalidConf("dn_bin_conf.extent_size is zero"))
+	}
+	if err := ValidateBdevConf(bdevConf); err != nil {
+		return 0, 0, fmt.Errorf("group blocks: %w", err)
 	}
 	if extCnt > math.MaxUint64/extentSize {
 		return 0, 0, fmt.Errorf(
@@ -211,18 +230,12 @@ func GroupBlocks(
 		)
 	}
 	blockSize := bdevConf.GetDmPoolConf().GetDataBlockSize()
-	if blockSize == 0 {
-		blockSize = common.DefaultDmPoolDataBlockSize
-	}
 	groupSize := extCnt * extentSize
 	totalBlocks := groupSize / blockSize
 	// The health block of §3.6 is the only meta a RedundNone group needs.
 	metaBlocks := uint64(1)
 	if raid1 := bdevConf.GetRedundConf().GetRedundMdRaid1(); raid1 != nil {
 		chunkBlockCnt := raid1.GetBitmapChunkBlockCnt()
-		if chunkBlockCnt == 0 {
-			chunkBlockCnt = common.DefaultChunkBlockCnt
-		}
 		bitmapBits := ceilDiv(groupSize, chunkBlockCnt*blockSize)
 		bitmapBytes := 256 + ceilDiv(bitmapBits, 8)
 		bitmapBlocks := ceilDiv(bitmapBytes, blockSize)
@@ -248,12 +261,17 @@ func GroupBlocks(
 // so it holds for any extent size (with 1 TiB extents the very first meta
 // group is already past it and no meta grow is ever allowed). A slice with no
 // meta group at all also reports false: the ladder has nothing to double.
+//
+// extentSize is the cluster's STORED value and is not resolved here (§7); a
+// zero would be a divide by zero, so it reports false as a last-resort guard.
+// Callers validate the ClusterConf first, which is what keeps that arm
+// unreachable and keeps "false" meaning the 16 GiB cap.
 func MetaLadderExtCnt(currentTotal uint64, extentSize uint64) (uint64, bool) {
 	if currentTotal == 0 {
 		return 0, false
 	}
 	if extentSize == 0 {
-		extentSize = common.DefaultDnExtSize
+		return 0, false
 	}
 	if currentTotal > math.MaxUint64/extentSize {
 		return 0, false
@@ -1087,6 +1105,18 @@ func GrowSlice(
 		if err != nil {
 			return err
 		}
+		// Both confs are validated before anything is computed from them
+		// (§7): every number below — the pending rule's block size, the
+		// ladder's extent size, the group geometry — is a stored value, and
+		// this transaction refuses a zero instead of guessing one. It sits
+		// ahead of the first s.Put by construction, and ErrPrecondition
+		// aborts without committing, so a refusal writes nothing.
+		if err := ValidateBdevConf(conf.GetBdevConf()); err != nil {
+			return fail(opGrowSlice, err.Error())
+		}
+		if err := ValidateClusterConf(cc); err != nil {
+			return fail(opGrowSlice, err.Error())
+		}
 		if !containsId(conf.GetSliceIdList(), sliceId) {
 			return fail(opGrowSlice, "slice not in sp")
 		}
@@ -1102,7 +1132,7 @@ func GrowSlice(
 		) {
 			return fail(opGrowSlice, ReasonGrowPending)
 		}
-		extentSize := ResolveDnBinConf(cc.GetDnBinConf()).GetExtentSize()
+		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt, err := growExtCnt(slice, isMeta, extentSize)
 		if err != nil {
 			return err
@@ -1221,15 +1251,15 @@ func growExtCnt(
 // pool's data_block_size.
 const thinMetaBlockSize = uint64(4096)
 
-// PoolBlockSize resolves the §7 default of a pool's data block size: the unit
-// the thin pool's DATA counts are expressed in, and the one that converts a
-// meta group's data region into dm-thin metadata blocks (AR6, §3.6).
+// PoolBlockSize is a pool's stored data block size: the unit the thin pool's
+// DATA counts are expressed in, and the one that converts a meta group's data
+// region into dm-thin metadata blocks (AR6, §3.6). It substitutes nothing —
+// the value is concrete from CreateStoragePool on, and every caller sits
+// behind a ValidateBdevConf gate — but it stays a named function so the
+// worker's AR6 pre-check and the GrowSlice STM cannot drift apart about which
+// field they mean.
 func PoolBlockSize(bdevConf *pb.BdevConf) uint64 {
-	size := bdevConf.GetDmPoolConf().GetDataBlockSize()
-	if size == 0 {
-		size = common.DefaultDmPoolDataBlockSize
-	}
-	return size
+	return bdevConf.GetDmPoolConf().GetDataBlockSize()
 }
 
 // GrowPending is AR6's stateless pending rule: a grow of a kind is pending

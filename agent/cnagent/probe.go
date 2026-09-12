@@ -3,7 +3,9 @@ package cnagent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -16,6 +18,23 @@ func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
 ) *pb.CntlrInfo {
+	// §7: the same refusal convergeCntlr makes, because this reads the SAME
+	// stored request and every table it would compare against is built from
+	// it — plan.lowWaterMark, plan.blockSectors and plan.stripeSectors are
+	// the pool's and the raid0's own arguments. Probing with a zero would
+	// report a correctly-built pool as needing a reload, which is a worse
+	// answer than refusing. Read-only either way (CN23, SH25): an empty
+	// CntlrInfo is what a cntlr with nothing provable looks like.
+	if err := agent.ValidateBdevConf(st.req.GetBdevConf()); err != nil {
+		ptr := st.req.GetCntlrPointer()
+		slog.ErrorContext(ctx, msgInvalidStoredConf,
+			slog.Uint64("cluster_id", st.req.GetClusterId()),
+			slog.Uint64("cn_id", st.req.GetCnId()),
+			slog.Uint64("sp_id", ptr.GetSpId()),
+			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
+			slog.String("error", err.Error()))
+		return newCntlrInfo()
+	}
 	plan := newCntlrPlan(s.nf, st.req)
 	t := st.tracker
 	info := newCntlrInfo()

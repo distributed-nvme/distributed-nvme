@@ -143,6 +143,13 @@ func (s *Server) CreateThinDevice(
 		if size == 0 {
 			size = origin.GetSize()
 		}
+		// The stripe is the SP's stored one (§7). Checking the stored
+		// bdev_conf separately keeps the two lost-invariant cases apart: a
+		// zero stripe and an empty slice_id_list would otherwise both arrive
+		// at "has no slice", and only one of them is about slices.
+		if err := model.ValidateBdevConf(spBdevConf(sc.Conf)); err != nil {
+			return errAborted("%v", err)
+		}
 		sliceCnt := spSliceCnt(sc.Conf)
 		stripe := spStripeSize(sc.Conf)
 		unit := uint64(sliceCnt) * stripe

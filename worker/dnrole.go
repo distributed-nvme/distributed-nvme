@@ -221,7 +221,11 @@ func (s *dnCheckStream) closeSend() error {
 
 // dnSyncupRequest builds the SyncupDn request of RW13: the side pointer list
 // is DnConf's, authoritative and complete (§9.1), and extent_size is the
-// resolved dn_bin_conf's (RW9).
+// STORED dn_bin_conf's, validated by the loop's pass gate before this is ever
+// built (§7). Nothing here substitutes a default, and it matters more here
+// than anywhere: the dn agent formats every disk header with this number
+// (§3.1), so shipping a zero — or a constant this binary happens to carry —
+// would be a geometry the rest of the cluster does not share.
 func dnSyncupRequest(
 	cid uint64,
 	dnId uint64,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -95,20 +96,10 @@ func spFixture() *model.SpState {
 		Conf: &pb.SpConf{
 			SpId:      testSpId,
 			ShardCode: testShard,
-			BdevConf: &pb.BdevConf{
-				// data_block_size stays 0 so RW15's default resolution is
-				// exercised.
-				DmPoolConf:  &pb.DmPoolConf{LowWaterMarkPct: 50},
-				DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: 65536},
-				RedundConf: &pb.RedundConf{
-					RedunKind: &pb.RedundConf_RedundMdRaid1{
-						RedundMdRaid1: &pb.RedundMdRaid1{
-							BitmapChunkBlockCnt: 128,
-						},
-					},
-				},
-			},
-			SpLevel: pb.SpLevel_SP_LEVEL_READWRITE,
+			// The concrete geometry CreateStoragePool stored (§7): every
+			// member the worker forwards is a value the SP was created with.
+			BdevConf: testBdevConf(),
+			SpLevel:  pb.SpLevel_SP_LEVEL_READWRITE,
 			CntlrIdList: []uint64{
 				spCntlrPrimary, spCntlrStandby, spCntlrDisabled,
 			},
@@ -135,6 +126,12 @@ func spFixture() *model.SpState {
 				Disabled:   true,
 			},
 		},
+		// The groups' meta_blocks / data_blocks are hand-chosen numbers, NOT
+		// what model.GroupBlocks computes for this SP's stored geometry: the
+		// worker only ever forwards a group's stored counts (sprole.go reads
+		// grp.GetMetaBlocks()) and model.GrowSlice recomputes its own inside
+		// its STM, so a fixture whose numbers a recomputation would reproduce
+		// could not tell the two apart.
 		Slices: map[uint64]*pb.Slice{
 			spSliceA: {
 				SliceIdx: 0,
@@ -275,8 +272,10 @@ func spTestWorker(d *deps) *spWorker {
 // TestSpSideRequestGolden pins RW15: one request per side — spare legs
 // included — with the owning group's ext_cnt, the primary's cn_id, the
 // standby list in cntlr_id_list order WITH the disabled cntlr present, and the
-// migration source / destination confs of the two-sided leg, whose zero-valued
-// knobs carry their §7 defaults.
+// migration source / destination confs of the two-sided leg. The destination's
+// block_size is the SP's STORED data_block_size, forwarded (§7); only the
+// dm-clone hydration knobs are still resolved here, because they are a policy
+// timer rather than geometry.
 func TestSpSideRequestGolden(t *testing.T) {
 	captureLogs(t)
 	w := spTestWorker(nil)
@@ -367,8 +366,13 @@ func TestSpSideRequestGolden(t *testing.T) {
 			SrcSideId:     spSideSrc,
 			SrcDnId:       spDnIdB,
 			SrcNvmeTrConf: srcTrConf(),
-			BlockSize:     common.DefaultDmPoolDataBlockSize,
-			MetaBlocks:    5,
+			// The fixture SP's stored dm_pool_conf.data_block_size, forwarded
+			// (RW15). testBlockSize is deliberately not the §7 default, so a
+			// request that substituted the constant would carry 1 MiB here
+			// and this golden would fail. meta_blocks is the fixture group's
+			// own number for the same reason.
+			BlockSize:  testBlockSize,
+			MetaBlocks: 5,
 			DmCloneConf: &pb.DmCloneConf{
 				HydrationThreshold: common.DefaultMigrThreshold,
 				HydrationBatchSize: common.DefaultMigrBatchSize,
@@ -1228,11 +1232,8 @@ func newSpHarness(t *testing.T) *spHarness {
 		sides:  make(map[string]*stubSideAgent),
 		cntlrs: make(map[string]*stubCntlrAgent),
 	}
-	d.conf.mu.Lock()
-	d.conf.entries[testCid] = model.ResolveClusterConf(
-		&pb.ClusterConf{CreationEpoch: 1},
-	)
-	d.conf.mu.Unlock()
+	// As stored: the cache resolves nothing (§7), and neither does this.
+	setCachedConf(d, testCid, testClusterConf())
 	return h
 }
 
@@ -1348,6 +1349,117 @@ func TestSpFanOutStartsOneChildPerObject(t *testing.T) {
 		t.Fatalf("%d child lifecycle records, want 5 sides + 3 cntlrs",
 			pointers)
 	}
+}
+
+// spRefusedFanOut starts a coordinator on an SP whose STORED bdev_conf is one
+// CreateStoragePool could not have written, and returns once the §7 gate in
+// front of RW14 has refused it and the refusal has been shown to reach
+// nothing: no child started, no Syncup* sent to any endpoint.
+//
+// It has to go through the coordinator's real start path — buildPlan alone
+// would happily build requests from the bad conf, because the check sits ahead
+// of it.
+func spRefusedFanOut(t *testing.T) (*spHarness, *spWorker) {
+	t.Helper()
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	// A stripe size of 0: legal protobuf, impossible from CreateStoragePool.
+	bad := spFixture()
+	bad.Conf.BdevConf.DmRaid0Conf.StripeSize = 0
+	h.ops.setState(bad)
+	w := h.start()
+
+	waitFor(t, "refusal record", func() bool {
+		return len(h.logs.withMsg(msgInvalidStoredConf)) == 1
+	})
+	rec := h.logs.withMsg(msgInvalidStoredConf)[0]
+	if rec["level"] != "ERROR" {
+		t.Fatalf("refusal logged at %v, want ERROR", rec["level"])
+	}
+	if err, _ := rec["error"].(string); !strings.Contains(err, "stripe_size") {
+		t.Fatalf("error = %q, want the offending field named", err)
+	}
+	for _, addr := range []string{spDnA, spDnB, spDnC, spDnD} {
+		if got := len(h.sides[addr].syncups()); got != 0 {
+			t.Fatalf("%d side syncups to %s under a refused conf", got, addr)
+		}
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		if got := len(h.cntlrs[addr].syncups()); got != 0 {
+			t.Fatalf("%d cntlr syncups to %s under a refused conf", got, addr)
+		}
+	}
+	for _, rec := range h.logs.withMsg(msgRevisionWorkerStarted) {
+		if _, ok := rec["side_pointer"]; ok {
+			t.Fatalf("a side child was started under a refused conf: %v", rec)
+		}
+		if _, ok := rec["cntlr_pointer"]; ok {
+			t.Fatalf("a cntlr child was started under a refused conf: %v", rec)
+		}
+	}
+	return h, w
+}
+
+// TestSpFanOutRefusesAnInvalidSpConf checks the §7 gate in front of RW14. The
+// SP's stored bdev_conf is what every side and cntlr request is built from,
+// and two of its members are barely read on this side at all:
+// dm_raid0_conf.stripe_size on no worker path whatsoever, and
+// redund_md_raid1.bitmap_chunk_block_cnt only inside model.GrowSlice's §3.6
+// geometry, which re-reads the SP conf from the store in its own STM.
+// Otherwise both just travel through the verbatim bdev_conf the cntlr request
+// forwards. So the fan-out is the one place the worker can refuse to hand the
+// cn agent a geometry nobody chose, and it refuses the whole plan rather than
+// part of it.
+//
+// The two subtests are the two ways OUT of that refusal, and the coordinator
+// reaches them through different code: run()'s desiredCh arm calls fanOut()
+// unconditionally, while tick() re-enters it only when the refusal arm has
+// re-armed fanWanted — applyPlan, the only other thing that arms a retry (via
+// idleCnt), is never reached on that arm. An SP repaired without an SpRev bump
+// — an operator rewriting the stored conf, a rollback — has the ticker and
+// nothing else.
+func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
+	t.Run("recovers on a desired change", func(t *testing.T) {
+		h, w := spRefusedFanOut(t)
+		// The next fan-out — here the one a desired change drives (RW3) —
+		// picks up a repaired conf and starts the children it owed.
+		h.ops.setState(spFixture())
+		w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+		waitFor(t, "fan-out after the conf is repaired", func() bool {
+			return len(h.sides[spDnA].syncups()) > 0 &&
+				len(h.cntlrs[spCnA].syncups()) > 0
+		})
+	})
+
+	t.Run("recovers on the ticker", func(t *testing.T) {
+		h, _ := spRefusedFanOut(t)
+		// Ticks under the STILL-bad conf. The coordinator's two §7 gates
+		// refuse it once each — the fan-out's and the reaction pass's, which
+		// keep separate halves of one memo — and then stay quiet however many
+		// ticks follow.
+		h.advanceUntil("the reaction pass to refuse the same conf",
+			roundInterval, func() bool {
+				return len(h.logs.withMsg(msgInvalidStoredConf)) == 2
+			})
+		for i := 0; i < 3; i++ {
+			h.clk.advance(roundInterval)
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := len(h.logs.withMsg(msgInvalidStoredConf)); got != 2 {
+			t.Fatalf("%d refusal records, want one from the fan-out and one "+
+				"from the reaction pass", got)
+		}
+
+		// The conf is repaired with NO desired change and no report from a
+		// child — there is no child. The ticker's re-entry into fanOut is the
+		// only thing left that can start them.
+		h.ops.setState(spFixture())
+		h.advanceUntil("fan-out after the conf is repaired", roundInterval,
+			func() bool {
+				return len(h.sides[spDnA].syncups()) > 0 &&
+					len(h.cntlrs[spCnA].syncups()) > 0
+			})
+	})
 }
 
 // TestSpChildRestartedOnEndpointChange checks RW14: a child whose endpoint

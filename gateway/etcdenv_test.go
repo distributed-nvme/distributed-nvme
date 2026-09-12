@@ -45,6 +45,7 @@ import (
 //	testCid(t) uint64
 //	mustPut(t, cli, key, msg)
 //	mustCluster(t, s, name) uint64
+//	testStoredClusterConf(epoch, extentSize, poolBlockSize) *pb.ClusterConf
 //	mustDn(t, s, cluster, addr, loc, size) uint64
 //	mustCn(t, s, cluster, addr, loc, size) uint64
 //	spTok(t, s, cluster, spName) uint64
@@ -665,6 +666,63 @@ func mustCluster(t *testing.T, s *Server, name string) uint64 {
 		t.Fatalf("CreateCluster %q: %v", name, err)
 	}
 	return reply.GetClusterId()
+}
+
+// testStoredClusterConf is the ClusterConf a fixture writes STRAIGHT into etcd
+// with mustPut: the message CreateCluster would have STORED, not the request it
+// was handed.
+//
+// Every defaultable member of a stored ClusterConf is concrete (§7): the
+// handler resolves the request once, on the write path, and every reader
+// afterwards refuses a zero through model.ValidateClusterConf rather than
+// substituting one. A fixture that wrote a sparse conf would therefore not be
+// modelling an older gateway — it would be planting corruption, and every RPC
+// that computes from the conf would come back ABORTED "invalid stored conf"
+// (handler_storedconf_test.go). An RPC that never reads it is unaffected, so a
+// sparse fixture would not fail loudly everywhere — it would fail in exactly
+// the handlers a test is usually about.
+//
+// extentSize and poolBlockSize are the two members a fixture actually chooses:
+// the §6.1 allocation unit every ext_cnt is counted in, and the §3.6 pool block
+// every meta_blocks/data_blocks is computed in. Everything else is the concrete
+// value the handler would have resolved. A caller with no opinion passes
+// common.DefaultDnExtSize and common.DefaultDmPoolDataBlockSize — there is no
+// "unset" rung left on this side of the write, so a zero would be a bad conf
+// rather than a request for the default.
+func testStoredClusterConf(
+	epoch uint64,
+	extentSize uint64,
+	poolBlockSize uint64,
+) *pb.ClusterConf {
+	return &pb.ClusterConf{
+		CreationEpoch: epoch,
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{
+				DataBlockSize:   poolBlockSize,
+				LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+			},
+			DmRaid0Conf: &pb.DmRaid0Conf{
+				StripeSize: common.DefaultDmRaid0StripeSize,
+			},
+		},
+		DnBinConf: &pb.DnBinConf{
+			ExtentSize: extentSize,
+			Bin0Shift:  common.DefaultDnBin0Shift,
+			Bin1Shift:  common.DefaultDnBin1Shift,
+			Bin2Shift:  common.DefaultDnBin2Shift,
+			Bin3Shift:  common.DefaultDnBin3Shift,
+		},
+		AllocConf: &pb.AllocConf{
+			DnBatchSize: common.DefaultAllocDnBatchSize,
+			CnBatchSize: common.DefaultAllocCnBatchSize,
+		},
+		HealthCheckConf: &pb.HealthCheckConf{
+			DnInterval:    common.DefaultHealthCheckInterval,
+			CnInterval:    common.DefaultHealthCheckInterval,
+			SideInterval:  common.DefaultHealthCheckInterval,
+			CntlrInterval: common.DefaultHealthCheckInterval,
+		},
+	}
 }
 
 // testTrConf is the transport conf a fixture node is registered with. §8.2

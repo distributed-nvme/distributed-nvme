@@ -82,8 +82,13 @@ const (
 	volCnA = "cn-a:9000"
 	volCnB = "cn-b:9000"
 
-	volExtSize   = uint64(1) << 30
-	volPoolBlock = uint64(1) << 20
+	// The cluster's stored extent size and the SP's stored pool block size.
+	// Like volStripe below, neither is its §7 default (1 GiB and 1 MiB): a
+	// fixture that stored the constant could not tell a handler that READ it
+	// from one that SUBSTITUTED it, since the two would produce the same
+	// number. volSlice's group geometry is §3.6 for these two values.
+	volExtSize   = uint64(4) << 30
+	volPoolBlock = uint64(2) << 20
 	// volStripe is deliberately NOT DefaultDmRaid0StripeSize: the size rule
 	// of §8.7 must be computed from the SP's STORED geometry, so a fixture
 	// that happened to match the constant could not tell the two apart.
@@ -117,6 +122,14 @@ func volTrConf(addrPort string) *pb.NvmeTrConf {
 // volSpConf is the SpConf the fixture writes: an md-raid1 SP with two cntlrs,
 // one slice and no thin device, subsystem, clone, transfer or migration of its
 // own — every test creates exactly the objects its rule needs.
+//
+// Its bdev_conf is concrete in every defaultable member, because that is what
+// CreateStoragePool stores (§7) and what the RPCs below read as stored:
+// CreateThinDevice refuses a zero in it as an invalid stored conf rather than
+// replacing it, and the others simply compute with whatever is there. The
+// stripe is the exception that proves the rule — volStripe is not the constant
+// (see its comment), so an RPC that sized against a default instead of against
+// this message would come out wrong rather than merely unproven.
 func volSpConf() *pb.SpConf {
 	return &pb.SpConf{
 		SpId:      volSpId,
@@ -124,7 +137,10 @@ func volSpConf() *pb.SpConf {
 		NextId:    volNextId,
 		NextDevId: volNextDevId,
 		BdevConf: &pb.BdevConf{
-			DmPoolConf:  &pb.DmPoolConf{DataBlockSize: volPoolBlock},
+			DmPoolConf: &pb.DmPoolConf{
+				DataBlockSize:   volPoolBlock,
+				LowWaterMarkPct: common.DefaultPoolLowWatermarkPct,
+			},
 			DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: volStripe},
 			RedundConf: &pb.RedundConf{
 				RedunKind: &pb.RedundConf_RedundMdRaid1{
@@ -157,6 +173,13 @@ func volSide(sideId uint64, addrPort string) *pb.Side {
 // each an md-raid1 pair on dn-a and dn-b. dn-c and dn-d are therefore the only
 // destinations a migration or a spare leg of either group can land on (§6.5),
 // which is what makes the allocating tests below deterministic.
+//
+// The two groups' block counts are §3.6 for volExtSize / volPoolBlock and the
+// default 128-block bitmap chunk, so the fixture is a world CreateStoragePool
+// could have written: the 1-extent meta group is 4 GiB / 2 MiB = 2048 pool
+// blocks less 3 meta (md superblock block, one bitmap block for the
+// ceil(4 GiB / (128 x 2 MiB)) = 16 bits, health block) = 2045 data, and the
+// 4-extent data group is 16 GiB / 2 MiB = 8192 less the same 3 = 8189.
 func volSlice() *pb.Slice {
 	return &pb.Slice{
 		SliceIdx: 0,
@@ -164,7 +187,7 @@ func volSlice() *pb.Slice {
 			GrpId:      volMetaGrpId,
 			ExtCnt:     volMetaExtCnt,
 			MetaBlocks: 3,
-			DataBlocks: 1021,
+			DataBlocks: 2045,
 			LegList: []*pb.Leg{
 				{
 					LegId:    volMetaLegA,
@@ -182,7 +205,7 @@ func volSlice() *pb.Slice {
 			GrpId:      volDataGrpId,
 			ExtCnt:     volDataExtCnt,
 			MetaBlocks: 3,
-			DataBlocks: 4093,
+			DataBlocks: 8189,
 			LegList: []*pb.Leg{
 				{
 					LegId:    volDataLegA,
@@ -228,10 +251,10 @@ func newVolEnv(t *testing.T) *volEnv {
 		srv:     NewServer(cli),
 		cluster: name,
 		cid:     model.ClusterId(name, epoch),
-		cc: &pb.ClusterConf{
-			CreationEpoch: epoch,
-			DnBinConf:     &pb.DnBinConf{ExtentSize: volExtSize},
-		},
+		// What CreateCluster would have stored, concrete throughout (§7): the
+		// migration and spare-leg RPCs below read the bin ladder and the batch
+		// sizes as stored and refuse a zero.
+		cc: testStoredClusterConf(epoch, volExtSize, volPoolBlock),
 	}
 	mustPut(t, cli, model.ClusterConfKey(name), env.cc)
 	mustPut(t, cli, model.SpConfKey(env.cid, volSpName), volSpConf())

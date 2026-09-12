@@ -49,15 +49,14 @@ func (h *revHarness) startCn(addrPort string, revision uint64) *revWorker {
 }
 
 // TestCnSyncupRequestGolden pins the SyncupCn request of §8.3: the CnConf's
-// cntlr pointer list verbatim and the cluster's qos_ratio AS STORED — unlike
-// the DN's extent_size, qos_ratio has no default resolution (RW21).
+// cntlr pointer list verbatim and the cluster's qos_ratio. qos_ratio is not
+// defaultable at all — CreateCluster stores whatever it was given, including
+// nothing (§7) — so an absent one stays absent here rather than becoming an
+// empty message.
 func TestCnSyncupRequestGolden(t *testing.T) {
 	conf := cnTestConf()
 	qos := &pb.QosRatio{Strict: true, BytesPerIops: 8192, BytesPerBps: 16}
-	cc := model.ResolveClusterConf(&pb.ClusterConf{
-		CreationEpoch: 1,
-		QosRatio:      qos,
-	})
+	cc := testClusterConf(func(cc *pb.ClusterConf) { cc.QosRatio = qos })
 	got := cnSyncupRequest(testCid, testCnId, 21, conf, cc)
 	want := &pb.SyncupCnRequest{
 		ClusterId:        testCid,
@@ -71,7 +70,7 @@ func TestCnSyncupRequestGolden(t *testing.T) {
 	}
 
 	// No qos_ratio stored: none is sent.
-	cc = model.ResolveClusterConf(&pb.ClusterConf{CreationEpoch: 1})
+	cc = testClusterConf()
 	if got := cnSyncupRequest(testCid, testCnId, 21, conf, cc); got.GetQosRatio() != nil {
 		t.Fatalf("qos_ratio = %v, want nil", got.GetQosRatio())
 	}
@@ -101,10 +100,9 @@ func TestCnRoleSyncupReadsCnConf(t *testing.T) {
 		},
 	}
 	h.fleet.addCn(t, testCnAddr, stub)
-	h.setClusterConf(testCid, &pb.ClusterConf{
-		CreationEpoch: 1,
-		QosRatio:      qos,
-	})
+	h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.QosRatio = qos
+	}))
 	h.store.seed(t, model.CnConfKey(testCid, testCnAddr), cnTestConf())
 	h.startCn(testCnAddr, 21)
 
@@ -152,13 +150,10 @@ func TestCnRoleUsesCnInterval(t *testing.T) {
 		},
 	}
 	h.fleet.addCn(t, testCnAddr, stub)
-	h.setClusterConf(testCid, &pb.ClusterConf{
-		CreationEpoch: 1,
-		HealthCheckConf: &pb.HealthCheckConf{
-			DnInterval: 1,
-			CnInterval: 30,
-		},
-	})
+	h.setClusterConf(testCid, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.HealthCheckConf.DnInterval = 1
+		cc.HealthCheckConf.CnInterval = 30
+	}))
 	h.store.seed(t, model.CnConfKey(testCid, testCnAddr), cnTestConf())
 	h.startCn(testCnAddr, 1)
 
