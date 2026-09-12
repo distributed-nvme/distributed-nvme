@@ -4,7 +4,10 @@ Conventions:
 
 * `{p}` is the etcd key prefix `DnvPrefix` = `"dnv"`.
 * All numeric ids are `uint64`, rendered in keys and device names with
-  `IdKeyFmt = "%016x"` (16 lower-case hex digits) unless stated otherwise.
+  `IdKeyFmt = "%016x"` (16 lower-case hex digits) unless stated otherwise
+  (the shard code — §2 — and the thin-device `dev_id`/`ori_id` with their
+  `SpConf.next_dev_id` counter — §5.4, §8.7 — are `uint32`; none of those is
+  rendered into a key or device name).
 * "STM" = software transactional memory, i.e. the Go etcd `clientv3/concurrency` STM.
 * `block_size` unqualified always means the SP's `DmPoolConf.data_block_size`.
 * Figures are Mermaid diagrams embedded in this document, named `000DiskNode` …
@@ -607,9 +610,15 @@ subsystem (§8.10), so the destination clone can pull through any of them.
 
 The `{cluster}` component of every name below is the `cluster_id` (`%016x`), never the
 `cluster_name`. Because `cluster_id` now folds in `ClusterConf.creation_epoch` (§5.2), a
-cluster deleted and recreated under the same name produces a disjoint set of dm/md/
+cluster deleted and recreated under the same name produces a disjoint set of dm-device/
 NQN/local-file names, so a new incarnation never collides with leftovers of the old one
-on a node that was not cleaned up.
+on a node that was not cleaned up. The one cluster-free name is the mdadm superblock
+name `CnMdArrayName` (§4.3): it folds in only `sp_id`, which restarts at 1 per cluster,
+so a recreated cluster can reproduce a superblock name byte-for-byte. The exposure is
+bounded — every create/assemble names its member devices explicitly (§11.1.1,
+Appendix A) and a reused side is [D15]-zeroed before it re-enters an array — but a
+stale array of a previous incarnation on an uncleaned node is not distinguishable by
+its superblock name alone.
 
 ### 4.1 dm-device kinds
 
@@ -745,9 +754,11 @@ separator, no text formatting. Consequences that the rest of this document relie
   `creation_epoch`, derive `cluster_id`, and only then build its keys (§5.8, §8 preamble).
 * **Delete + recreate under the same name yields a fresh `cluster_id`,** hence a fresh
   etcd key space and fresh node-local names — `getShortId` (§4.3), the dm names of
-  §4.2 and the NQNs of §4.4 all fold in `cluster_id`. Leftover keys or leftover
-  node-local objects of a previous incarnation can never be mistaken for the new one,
-  and a re-created cluster never inherits stale agent state.
+  §4.2 and the NQNs of §4.4 all fold in `cluster_id` (the mdadm superblock name
+  `CnMdArrayName` alone does not; §4 records that carve-out). Leftover keys of a
+  previous incarnation can never be mistaken for the new one's, node-local objects
+  are disjoint by name apart from that carve-out, and a re-created cluster never
+  inherits stale agent state.
 * **`creation_epoch` is immutable.** It is not a `CreateClusterRequest` field and no RPC
   updates it; rewriting it in etcd orphans every other key of the cluster.
 
@@ -790,8 +801,10 @@ Creating a DN/CN/SP inside the STM:
    incremental"), which lets agents assume a deleted object never comes back.
 2. `shard_code` = index of the **smallest** bucket value, first index on ties;
    `shard_bucket[shard_code] += 1`. Example: `NextId=18`,
-   `ShardBucket=[52,76,13,17,2,5,2]` ⇒ `DnId=18`, `ShardCode=4`, then `NextId=19`,
-   `ShardBucket=[52,76,13,17,3,5,2]` (real length is always 256).
+   `ShardBucket=[52,76,13,17,2,5,2]` with the remaining 249 slots still zero ⇒
+   `DnId=18`, `ShardCode=7` — the first zero slot (only with every one of the 256
+   slots nonzero would the `2` at index 4 win) — then `NextId=19`,
+   `shard_bucket[7] = 1`.
 3. `sum(shard_bucket)` is the live object count — the `Max*CntPerCluster` check never
    needs a range query. Deletion decrements the bucket.
 
@@ -1012,7 +1025,7 @@ capacity keys maintained per §5.6; reverse on delete.
 | `dn_bin_conf.extent_size` | 64 MiB | 1 TiB | 1 GiB |
 | `alloc_conf.dn_batch_size` / `cn_batch_size` | 1 | 1024 | 16 |
 | `dm_pool_conf.data_block_size` | 64 KiB | 1 GiB | 1 MiB |
-| `dm_pool_conf.low_water_mark_pct` | 1 | 100 | 50 (`DefaultPoolLowWatermarkPct`; `0` selects it). Values > 100 are accepted and switch the §10.4 auto-grow **off** (`schema.proto`); the agent then passes `low_water_mark = 0` to the thin-pool table — no dm events |
+| `dm_pool_conf.low_water_mark_pct` | — | — | 50 (`DefaultPoolLowWatermarkPct`; `0` selects it). Never rejected: values > 100 are accepted and switch the §10.4 auto-grow **off** (`schema.proto`); the agent then passes `low_water_mark = 0` to the thin-pool table — no dm events |
 | `dm_raid0_conf.stripe_size` | 4 KiB | 64 MiB | 64 KiB |
 | `redund_md_raid1.bitmap_chunk_block_cnt` | 1 | 1024 | 128 |
 | (dm region block cnt, same meaning) | 1 | 1024 | 128 |
@@ -1088,8 +1101,9 @@ exists, deliberately; changing them means creating a new cluster. (`bdev_conf`
 defaults can still be overridden per SP at `CreateStoragePool`, §8.4.)
 
 **DeleteCluster** —
-Errors: `NOT_FOUND` cluster; `FAILED_PRECONDITION` if any key exists under
-`{p} dn_conf {cluster_id} `, `{p} cn_conf {cluster_id} ` or `{p} sp_conf {cluster_id} `.
+Errors: `NOT_FOUND` cluster; `FAILED_PRECONDITION` while any DN/CN/SP still exists,
+checked as `sum(shard_bucket) != 0` on `DnGlobal`/`CnGlobal`/`SpGlobal` (§5.4's live
+count — an STM cannot range the `dn_conf`/`cn_conf`/`sp_conf` prefixes).
 Action: one STM reads `ClusterConf` for `creation_epoch`, derives `cluster_id` (§5.2),
 runs the checks above, then deletes `ClusterConf`, `DnGlobal`, `CnGlobal`, `SpGlobal`.
 Reply the deleted `cluster_id` — a subsequent `CreateCluster` with the same name will
@@ -2833,7 +2847,7 @@ nvmet.
 **[D13] DN disk metadata:** there are no shell commands here. The dn agent reads and
 writes the header block, the two volume-table slots and the dm-clone metadata slots
 directly on the `--disk` device through `OsClient.ReadBlock`/`WriteBlock` (buffered
-pread/pwrite + `fdatasync`; see `osclient.md` §4.5). Never `dd` — the lab's uutils dd
+pread/pwrite + `fsync`; see `osclient.md` §4.5). Never `dd` — the lab's uutils dd
 0.8.0 silently mishandles `iflag=`/`oflag=direct`. The only shell command in the side
 provisioning path is the §9.4 zeroing (the old whole-device `blkdiscard --force` trim
 is superseded — `--zeroout` zeroes, discard did not):
@@ -2889,8 +2903,10 @@ unlisted dnv arrays never do), or shadowing the stock rule entirely via
 ```shell
 mdadm --create /dev/md/{CnMdDevName} --name {CnMdArrayName} --level 1 \
   --raid-devices {n} --bitmap internal --bitmap-chunk {bitmap_chunk_k}K \
-  --data-offset {data_offset_k}K --failfast --homehost any --run {leg_devs...} \
-  [--assume-clean]                       # only when §11.1.1 case 1.1 allows it
+  --data-offset {data_offset_k}K --homehost any --run [--assume-clean] \
+  --failfast {leg_devs...}
+  # --assume-clean only when §11.1.1 case 1.1 allows it; --failfast marks the
+  # member devices listed after it
 mdadm --assemble /dev/md/{CnMdDevName} --name {CnMdArrayName} {leg_devs...}
 mdadm /dev/md/{CnMdDevName} --add --failfast {leg_dev}
 mdadm /dev/md/{CnMdDevName} --fail {leg_dev} ; mdadm /dev/md/{CnMdDevName} --remove {leg_dev}
@@ -3291,8 +3307,9 @@ own amendment sections are the surviving record.
 * [D15] side provisioning — the §9.4 trim protocol is replaced by whole-side zeroing behind
   the `provisioned` gate; §3.1, §8.4, §8.5, §8.11, §8.12, §9.2, §9.5, §9.7, §10.2-§10.4,
   §11.1.1, §11.2, §11.7 and Appendix A follow; new status `RES_STATUS_PROVISIONING` and
-  new decision **[D15]**. The §8/§10 items specify worker and gateway behavior that is
-  not implemented yet — this document is their spec.
+  new decision **[D15]**. The §8/§10 worker and gateway items are implemented: the
+  provisioned flip in `worker/sprole.go`, every new Side written unprovisioned,
+  `SwitchSpareLeg`'s not-provisioned refusal, and `agent/dnagent/zeroing.go`.
 * Consistency fixes — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
   §4.2's stale "name it like a dm kind if desired" line is corrected); §8.13 and §11.4
   pin the LSB-first wire bitmap bit order; [D12] records the unbounded transfer-origin
@@ -3317,8 +3334,8 @@ own amendment sections are the surviving record.
   creation and origin deletion on it; §10.3 gains the materialization flip; §2, §3.3
   and `cnagent.md` CN14 record that a created td is never messaged and that the
   snapshot pre-pass owns every snapshot message; §9.5 names the rows the flip reads;
-  Appendix D updated. The §8/§10 items specify gateway and worker behaviour that is
-  not implemented yet — this document is their spec.
+  Appendix D updated. The §8/§10 gateway and worker items are implemented: the §8.7
+  gates in `gateway/thindevice.go` and the materialization flip in `worker/sprole.go`.
 * `dnv-worker.md` — §10.1 replaced by the heartbeat/grace/ticket membership (new
   decision **[D17]**); the §5.3 registry row becomes the `WorkerReg` message; §10.4's
   `side_unhealthy` migration is withdrawn and both `side_unhealthy` and `leg_unhealthy`
@@ -3328,8 +3345,6 @@ own amendment sections are the surviving record.
   `dnv-worker.md` is the normative spec of `worker/`, `model/`, `etcdutil/` and
   `cmd/dnv-worker`; the `WorkerReg` schema addition is applied with `make gen` at
   implementation time.
-
-<!-- end of design_v001.md -->
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 

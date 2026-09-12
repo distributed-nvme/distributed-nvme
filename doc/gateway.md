@@ -239,9 +239,11 @@ change. Each change is mechanical and the worker keeps compiling:
 2. Export the SpRev bump as
    `BumpSpRev(s etcdutil.STM, op string, shard uint32, cid, spId uint64) error`
    (rev key missing ⇒ the existing precondition-style failure). Add
-   `BumpDnRev` / `BumpCnRev` with the same shape if no unexported equivalent
-   exists yet: read the rev key — missing ⇒ error — `revision += 1`, put back
-   **preserving** `addr_port`/`sp_name` (§5.5: rewrite, never delete+recreate).
+   `BumpDnRev(s etcdutil.STM, op string, cid uint64, dn *pb.DnConf)` /
+   `BumpCnRev(…, cn *pb.CnConf)` — same behavior, taking the conf message the
+   caller already holds: read the rev key — missing ⇒ error — `revision += 1`,
+   put back **preserving** `addr_port`/`sp_name` (§5.5: rewrite, never
+   delete+recreate).
 3. `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` gain one parameter
    `expectRev uint64` checked first inside their STM against the stored
    `SpRev.revision`: `0` skips the check (the worker's internal calls pass 0),
@@ -285,7 +287,9 @@ Two subcommands so the integration suite can play the worker (§0 #12):
 
 ## 3. Serving and lifecycle
 
-* **GW1** `gateway.Server` holds exactly one field: the `*etcdutil.Client`.
+* **GW1** `gateway.Server` holds exactly one piece of state — the
+  `*etcdutil.Client` — beside the mandatory `pb.UnimplementedGatewayServer`
+  embed.
   Handlers keep no in-process state, take no locks and impose no concurrency
   limit — all coordination is etcd's. Two requests racing inside one instance
   and across two instances are the same case by construction.

@@ -612,11 +612,15 @@ side-provisioning registry and its `blkdiscard --zeroout` batches),
 ```go
 type DnAgentServer struct {
 	pb.UnimplementedDiskNodeAgentServer
-	oc     common.OsClient
-	nf     *common.NameFmt
-	disk   string          // --disk
-	trType, adrFam, trAddr, trSvcId string // --tr-* (the port)
-	locks  *agent.LockSet  // object key = LocalSidePath id tuple
+	nf    *common.NameFmt
+	store *agent.Store    // the OsClient-backed wrappers — no raw oc field:
+	meta  *DiskMeta       // local store, disk metadata, dm, nvmet, nvme host
+	dm    *agent.Dm
+	nvmet *agent.Nvmet
+	host  *agent.NvmeHost
+	locks *agent.LockSet  // object key = LocalSidePath id tuple
+	disk  string          // --disk
+	port  agent.PortConf  // the four --tr-* flags as one value
 	// per-object resinfo trackers, pending-connect retry registry,
 	// per-side zeroing registry (DN9), and the SH27 background-task
 	// bookkeeping: the rootCtx captured at Reconcile plus a sync.WaitGroup
@@ -1240,7 +1244,7 @@ Recorded for traceability; the edits are already applied.
   `--report-format json` matches no LVM build, whose `getopt_long` table only
   carries `--reportformat`.
 * `architecture.md` §11.1/§11.2 + `dnagent.md` DN12 and [D12]
-  (`dnagent_plan_00.md` [P3]) — fencing is always a table reload onto a
+  (the since-retired `dnagent_plan_00.md`'s [P3]) — fencing is always a table reload onto a
   dm-error target, never a `dmsetup suspend` held across a wait. A suspended
   dm device queues IO forever (no timeout, no error path), which wedges any
   block-device scanner that touches it in unkillable D state, makes
@@ -1252,7 +1256,7 @@ Recorded for traceability; the edits are already applied.
   §11.1 failover grace sleep and its constant are deleted.
 * `architecture.md` §1/§2/§3.1/§4/§6.1/§8.11/§9.2/§9.4/§11.2/Appendix A/[D13],
   `dnagent.md` §2.1/§2.2/§2.8/§4.1/DN3/DN5/DN6/DN9/DN10/DN11/DN12/DN13/DN18,
-  `layout.md` §2 (`dnagent_plan_00.md` [P4]-[P7]) — **LVM is gone from the dn
+  `layout.md` §2 (the retired plan's [P4]-[P7]) — **LVM is gone from the dn
   agent.** The `--disk` device now carries a self-describing dnv format:
   a CRC-protected header block, two alternating CRC-protected volume-table
   slots, a dm-clone metadata slot area, and an extent area at `DnDataOffset`
@@ -1279,9 +1283,9 @@ Recorded for traceability; the edits are already applied.
   (a suspended device wedging any block-device scanner in D state) is
   unchanged and is why the window is bounded, never restarted across an agent
   restart, and always undone before teardown. Requested by the project owner
-  after `dnagent_plan_00.md` [P3] had removed the suspension entirely.
+  after the retired plan's [P3] had removed the suspension entirely.
 * `dnagent.md` DN9/DN11/DN18 + `architecture.md` §8.4/§11.7/[D11]
-  (`dnagent_plan_00.md` [P1]/[P2]) — `SP_LEVEL_READONLY` now means exactly
+  (the retired plan's [P1]/[P2]) — `SP_LEVEL_READONLY` now means exactly
   "every user-facing namespace is read-only: reads served, writes fail with
   an IO error", enforced **on the CN only** by a dm-flakey `error_writes`
   table over the namespace's normal backing. The previous LV-permission gate

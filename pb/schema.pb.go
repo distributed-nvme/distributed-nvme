@@ -3202,7 +3202,9 @@ type ThinDevice struct {
 	// reported this td's thin volume RES_STATUS_OK in every slice of the SP
 	// (§10.3); it is never cleared. It gates snapshot creation and origin
 	// deletion (§8.7) and tells the cn agent that the ids exist in every
-	// slice pool, so no pool message is ever sent for this td again (CN14).
+	// slice pool, so no create_thin/create_snap is ever sent for this td
+	// again (CN14; the delete sent when the td leaves td_list stays
+	// ungated).
 	Created       bool `protobuf:"varint,5,opt,name=created,proto3" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

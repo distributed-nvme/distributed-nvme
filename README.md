@@ -86,12 +86,14 @@ files are committed, so an ordinary build or test never requires protoc.
   machinery, the §6.5 allocation, the §5.5 revision tokens and the ten agent
   calls behind `Get*Size` / `Inspect*` / `Get*Bitmap`. Stateless and
   active-active: any instance serves any request.
+* `ctl/` and `cmd/dnvctl` — the operator CLI of `doc/dnvctl.md`: one noun
+  group per §5 table with every one of the 59 RPCs as a leaf command,
+  presence-based `--rev` tokens, protojson results on stdout and logs on
+  stderr at Warn.
 * `integtest/` — the on-hardware suites of `dnagent_integtest.md`,
-  `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9 and `gateway.md`
-  §10 (`dnagent_test.sh`, `cnagent_test.sh`, `worker_test.sh`, `cdc_test.sh`,
-  `gateway_test.sh` and their drivers `dnagentctl`, `cnagentctl`, `workerctl`,
-  `cdcctl`, `gatewayctl`, plus the `fakeagent` the worker and gateway suites
-  drive).
-
-Not yet implemented: `ctl/` and `cmd/dnvctl` — `doc/dnvctl.md` is their
-spec.
+  `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9, `gateway.md`
+  §10 and `dnvctl.md` §7 (`dnagent_test.sh`, `cnagent_test.sh`,
+  `worker_test.sh`, `cdc_test.sh`, `gateway_test.sh`, `dnvctl_test.sh` and
+  their drivers `dnagentctl`, `cnagentctl`, `workerctl`, `cdcctl`,
+  `gatewayctl`, plus the `fakeagent` the worker and gateway suites drive and
+  the `fakegateway` the dnvctl suite drives).

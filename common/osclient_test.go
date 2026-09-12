@@ -686,7 +686,7 @@ func TestReadBlockDirectAt(t *testing.T) {
 		payload[i] = byte(i)
 	}
 	// WriteBlockAt is the write half of the same probe round: a plain
-	// O_WRONLY open of a pre-sized file, one pwrite, one fdatasync. It never
+	// O_WRONLY open of a pre-sized file, one pwrite, one fsync. It never
 	// creates the target, so a missing path is an error, not an empty file.
 	if err := WriteBlockAt(
 		filepath.Join(t.TempDir(), "absent"), 0, payload); err == nil {

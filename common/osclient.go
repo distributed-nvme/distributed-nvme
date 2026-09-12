@@ -88,7 +88,7 @@ type OsClient interface {
 	// callers use it only for regions no dm table references.
 	ReadBlock(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
 
-	// WriteBlock writes data at byte offset and fdatasyncs the file
+	// WriteBlock writes data at byte offset and fsyncs the file
 	// descriptor before returning.
 	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
 
@@ -251,7 +251,7 @@ func (c *LimitedOsClient) WriteFileDirect(
 }
 
 // ReadBlock / WriteBlock are the raw-device metadata path of
-// architecture.md [D13]: buffered pread/pwrite plus an fdatasync on the write
+// architecture.md [D13]: buffered pread/pwrite plus an fsync on the write
 // side. No O_DIRECT — the regions they touch are never part of any dm table
 // and the agent is their only writer, so page-cache aliasing cannot occur —
 // and never a shell-out to dd, whose uutils build silently mishandles
@@ -337,7 +337,7 @@ func (c *LimitedOsClient) WriteBlock(
 	return err
 }
 
-// WriteBlockAt writes data at byte offset and fdatasyncs before returning: a
+// WriteBlockAt writes data at byte offset and fsyncs before returning: a
 // plain O_WRONLY open (never O_CREATE — the target is a block device, which
 // always exists at full size), one pwrite, one Sync, close. The fd is opened
 // and closed per call; nothing is ever cached.

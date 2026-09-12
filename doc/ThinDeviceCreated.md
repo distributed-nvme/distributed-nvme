@@ -54,11 +54,11 @@ decision, not an assumption.
 | R6 | One STM and one bump **per reply**, covering every td that reply completes (batching allowed). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
 | R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; ns-devs park on `CnErrorName` and clone destinations are empty tds ([D3]). |
 | R8 | `DeleteThinDevice` of an origin is refused while any snapshot of it has `created == false`, found by reading the SP's tds inside the STM (no reverse index). | Retire runs before build (CN9): an origin leaving `td_list` in the converge that first materializes its snapshot sends `delete {ori dev_id}` before `create_snap` and loses the snapshot for good. `ListThinDevices` already reads the same set in one STM. |
-| R9 | The cn agent **uses** the flag: `created == true` means "never send a pool message for this td again". | A failover sends zero pool messages instead of one failing `create_thin`/`create_snap` per td × slice, and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what today's unconditional `create_thin` would do. |
+| R9 | The cn agent **uses** the flag: `created == true` means "never send a `create_thin`/`create_snap` for this td again" (the `delete {dev_id}` a td leaving `td_list` triggers stays ungated — R2/N4). | A failover sends zero device-set-mutating pool messages instead of one failing `create_thin`/`create_snap` per td × slice (the rebuild's only `dmsetup message` traffic is the CN14 sweep's reserve/release pair — R14), and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what today's unconditional `create_thin` would do. |
 | R10 | The snapshot pre-pass owns every message of an uncreated snapshot; the lazy `createSnapId` fallback and the `snapDone` handoff are removed; `td_list` order carries no meaning. | With the origin guaranteed materialized (R7/R8), same-pass origin-then-snapshot ordering can no longer occur, which was the only reason for both. |
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
-| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `td list` shows the field once `ctl/` lands (`dnvctl.md` §5.6). |
+| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `td list` shows the field (`dnvctl.md` §5.6). |
 | R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the CN14 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
 
 ---
@@ -109,7 +109,9 @@ message ThinDevice {
     // reported this td's thin volume RES_STATUS_OK in every slice of the SP
     // (§10.3); it is never cleared. It gates snapshot creation and origin
     // deletion (§8.7) and tells the cn agent that the ids exist in every
-    // slice pool, so no pool message is ever sent for this td again (CN14).
+    // slice pool, so no create_thin/create_snap is ever sent for this td
+    // again (CN14; the delete sent when the td leaves td_list stays
+    // ungated).
     bool created = 5;
 }
 ```
@@ -624,7 +626,8 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
   that a created td is never messaged and that the snapshot pre-pass owns
   every snapshot message; Appendix D updated. The §8/§10 items specify
   gateway and worker behaviour that is not implemented yet — this document
-  is their spec."
+  is their spec." (That status sentence has since been rewritten in place:
+  the §8/§10 items are implemented, and architecture.md's bullet says so.)
 * Appendix D — the **Snapshot creation is not atomic across a primary
   crash** bullet gains: "`ThinDevice.created` certifies materialization,
   not point-in-time consistency: a torn snapshot still flips to `created`
@@ -764,7 +767,7 @@ the origin `created`, and `TestThinDeviceBitmapSharedSubtree` — not in either
 substance.** `grep -rn "dmsetup message" agent/cnagent/pool.go` hits one
 comment; the call sites are `s.dm.Message(`. And `deleteThinId` is
 deliberately *not* gated on `created` (R2: `delete {dev_id}` comes from the
-td's own deletion — or from the U3 activation sweep when that fan-out's
+td's own deletion — or from the CN14 activation sweep when that fan-out's
 message was gate-skipped — never from the flag). The acceptance item as
 written into `cnagent.md` §7 uses the working grep and says so.
 
@@ -773,6 +776,16 @@ written into `cnagent.md` §7 uses the working grep and says so.
 (`create_thin` / `create_snap` pool message)") and `cnagent.md` CN14's *first*
 paragraph both had to be rewritten; §8 lists neither, and CN14 would have
 contradicted its own new table.
+
+**N6 — U5-T1 was unsatisfiable and U5-S3 needs two stages.** `mutations()`
+took only a log path with no trace filter, so over case B's whole log it
+necessarily contains step 6's `create_snap`; it gained an optional leading
+`trace_id` argument (§9 of `cnagent_integtest.md` updated with it). And the
+rebuild cannot be one stage: `cn_drop` parks the ns-devs onto dm-error with a
+`dmsetup reload` — a suspend — which would defeat the stage's own
+`assert_absent … "^dmsetup suspend"`. The teardown and the re-introduction of
+the pointer are a `drop` stage; the converge and its assertions are the
+`rebuild` stage, with its own trace id.
 
 **N7 — "identical call multiset" (U4-T1) is not literally checkable.** The
 recorded-call fake hands out dm minor numbers in creation order, so running the
@@ -788,13 +801,3 @@ not the device, so a raid0 an earlier revision built stays live and is quiesced.
 That is the behaviour N3's test change pins. `cnagent.md` CN14 carried the same
 claim in a paragraph §8 said to keep verbatim; it and the two code comments that
 repeated it now state the liveness rule instead.
-
-**N6 — U5-T1 was unsatisfiable and U5-S3 needs two stages.** `mutations()`
-took only a log path with no trace filter, so over case B's whole log it
-necessarily contains step 6's `create_snap`; it gained an optional leading
-`trace_id` argument (§9 of `cnagent_integtest.md` updated with it). And the
-rebuild cannot be one stage: `cn_drop` parks the ns-devs onto dm-error with a
-`dmsetup reload` — a suspend — which would defeat the stage's own
-`assert_absent … "^dmsetup suspend"`. The teardown and the re-introduction of
-the pointer are a `drop` stage; the converge and its assertions are the
-`rebuild` stage, with its own trace id.

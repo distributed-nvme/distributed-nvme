@@ -668,7 +668,8 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
 7. `check-cn`/`check-cntlr` rounds on both CNs; teardown: host disconnect,
    empty cntlr lists both CNs, empty side lists both DNs; assert no
    `0x3b1` residue on either VM — dm devices of the SP, md arrays
-   (`mdadm --detail --scan` lists no `dnv-*` array), and those nvmet
+   (`mdadm --detail --scan` lists no `dnv-{sp id}-*` array — the check is
+   sp-scoped, like the rest of the residue sweep), and those nvmet
    subsystems whose NQN carries the sp id, i.e. the `:2:`/`:3:`/`:4:` ones,
    which is what the check matches on. The host-facing `dnv-it:*`
    subsystems are named by the request (§5) and carry no id, so no per-SP

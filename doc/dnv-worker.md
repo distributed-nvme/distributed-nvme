@@ -145,7 +145,7 @@ Packages and files (`layout.md` §2/§3 as amended by §15):
 | `etcdutil` | `etcdutil.go` | `common` — takes `proto.Message`, never imports `pb` |
 | `model` | `keys.go`, `stm.go`, `capacity.go`, `alloc.go`, `ops.go` | `common`, `pb`, `etcdutil` |
 | `worker` | `worker.go` (`Run`/`Config` and the worker-lifecycle §12 msg constants; the flip/bitmap/reaction msgs live beside their emitters in `sprole.go`/`bmpush.go`/`reaction.go`), `vote.go`, `shard.go`, `revision.go`, `conn.go` (the RW7 connection cache), `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` | `common`, `pb`, `etcdutil`, `model` |
-| `cmd/dnv-worker` | `main.go` | `worker`, `common` (+ cobra, viper) |
+| `cmd/dnv-worker` | `main.go` | `worker`, `common`, `etcdutil` (CM4: main builds the client `worker.Run` takes) (+ cobra, viper) |
 
 Out of scope here: the gateway (request validation, the public RPCs, the
 `Inspect*`/`Get*Size`/`Get*Bm` agent calls), `dnv-cdc`, `dnvctl`. Where the
@@ -935,8 +935,11 @@ RW17. **Rounds** send `CheckSideRequest{cluster_id, dn_id, side_pointer,
       revision, show_info}` / `CheckCntlrRequest{cluster_id, cn_id,
       cntlr_pointer, revision, show_info}`.
 
-RW18. **Provisioned flip** (§10.3). On any `SyncupSide`/`CheckSide` reply
-      for a side whose **synced** request carried `provisioned = false` and
+RW18. **Provisioned flip** (§10.3). On a `code == 0` `SyncupSide`/`CheckSide`
+      reply (the same gate RW19 spells out) for a side whose driven request
+      (`plan.req` — `provisioned` moves only false→true, so the request being
+      driven and the one last synced cannot disagree here) carried
+      `provisioned = false` and
       whose `side_info.zeroed_ext_cnt == total_ext_cnt > 0`, the child
       reports the side to the coordinator, which runs `model.FlipProvisioned`
       (several sides reported within one round MAY share one STM). The bump

@@ -166,7 +166,7 @@ helpers exported from `common/osclient.go` (recorded in §5, edit applied to
 
 ```go
 	// Raw, unlimited, no ctx, no logging, no cached fd — a fresh open per
-	// call. WriteBlockAt is a buffered pwrite followed by fdatasync;
+	// call. WriteBlockAt is a buffered pwrite followed by fsync;
 	// ReadBlockDirectAt opens O_RDONLY | O_DIRECT with a 4096-aligned
 	// buffer, so offset and length MUST be multiples of 4096 and a short
 	// read is an error.
@@ -195,7 +195,7 @@ to carry the CN2 per-attempt trace id into that record and to fast-fail an
 attempt whose ctx is already done (silently — an operation that never happened
 is not logged); it cannot interrupt a syscall in flight, which is why the raw
 helpers take none. Writes need no direct twin: `WriteBlockAt` ends in
-`fdatasync`, which forces the write to the device and surfaces its error.
+`fsync`, which forces the write to the device and surfaces its error.
 
 **The recorded carve-out**: probe IO is the one sanctioned direct-syscall path
 in dnv; it may block indefinitely by design; it must never run under a lock
@@ -1172,8 +1172,11 @@ CN21. Used by CN7 (pointer removed), CN2 (orphan file) and CN19's
       A wedged prober holds an open fd on the wrapper, so removing the
       wrapper first fails EBUSY; the disconnect errors the queued IO, the
       prober's fd closes, and the removal then succeeds (§2.2, CN11).
-      Cancel the connect-retry registration too; then the
-      file deletions of SH7.
+      (The connect-retry registration is cancelled earlier in the sequence —
+      right after the ns-dev and xfer finals, before the clone retire steps;
+      the placement cannot race the legs, because the retry loop needs the
+      node read lock this teardown's write lock excludes and re-checks the
+      cntlr pointer.) Then the file deletions of SH7.
 
 ### 4.8 `PushCloneBitmap`
 

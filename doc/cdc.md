@@ -169,8 +169,8 @@ Reading order for an implementer: §2 → §3 → §4 → §5 → §6 → §7 �
 
 ### 2.2 Addition to `model/keys.go`
 
-`CdcEntryKey` and `CdcEntryPrefix` exist (`dnv-worker.md` §4 MD2); the parser
-does not yet. Add, with the same style as `ParseDnRevKey`:
+`CdcEntryKey` and `CdcEntryPrefix` exist (`dnv-worker.md` §4 MD2), and so does
+the parser, in the same style as `ParseDnRevKey`:
 
 ```go
 // ParseCdcEntryKey parses "{p} cdc {cid} {shard} {sp_id} {ss_id}" (MD2).
@@ -357,7 +357,7 @@ no served state is ever mutated concurrently.
   buffer the host described. LPO must be dword aligned (nvmet says the same);
   one transfer is bounded at 1 MiB and a larger request is refused with
   invalid field, because a controller has to bound the buffer one command can
-  make it allocate (hosts read the log in 4 KiB chunks, four hundred times
+  make it allocate (hosts read the log in 4 KiB chunks, 256 times
   below it). RAE is accepted and ignored (event clearing is delivery-based,
   §0 #7). Data returns as C2HData followed by a CapsuleResp (the SUCCESS-flag
   shortcut is not used).

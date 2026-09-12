@@ -54,6 +54,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnv-worker.md                  # dnv-worker: worker/, model/, etcdutil/, cmd/dnv-worker + its integration suite
 │   ├── cdc.md                         # dnv-cdc: cdc/, cmd/dnv-cdc + its integration suite
 │   ├── gateway.md                     # Gateway: gateway/, cmd/dnv-gateway + its integration suite
+│   ├── dnvctl.md                      # dnvctl: ctl/, cmd/dnvctl + its integration suite
 │   ├── dnagent_integtest.md           # the on-hardware dn agent suite
 │   ├── cnagent_integtest.md           # the on-hardware cn agent suite
 │   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
@@ -192,7 +193,7 @@ client is linked only into the binaries that use it (§3).
 | `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | grpc client to the Gateway; **no etcd** |
-| `cmd/*` | the matching top-level package + `common` | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
+| `cmd/*` | the matching top-level package + `common` (`cmd/dnv-worker` also `etcdutil`: main builds the client `worker.Run` takes) | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
 | `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the

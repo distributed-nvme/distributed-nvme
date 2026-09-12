@@ -99,7 +99,7 @@ type OsClient interface {
 	// callers use it only for regions no dm table references.
 	ReadBlock(ctx context.Context, path string, offset uint64, length uint64) (data []byte, err error)
 
-	// WriteBlock writes data at byte offset and fdatasyncs the file
+	// WriteBlock writes data at byte offset and fsyncs the file
 	// descriptor before returning.
 	WriteBlock(ctx context.Context, path string, offset uint64, data []byte) (err error)
 
@@ -220,7 +220,7 @@ methods.
   A region inside the device that was never written reads as zeros; that is
   not an error.
 * `WriteBlock`: `os.OpenFile(path, os.O_WRONLY, 0)`, `WriteAt(data, offset)`,
-  `Sync()` (the fdatasync the caller's crash protocol depends on), close. It
+  `Sync()` (the fsync the caller's crash protocol depends on), close. It
   never *creates* a file (no `O_CREATE`); the intended target is a block
   device, which always exists at full size. Against a regular file — tests —
   `WriteAt` past the end extends it, as `pwrite` does. The body is the
@@ -251,7 +251,7 @@ semaphore slot (below). The two raw bodies are exported from
 `ctx`, acquire **no** semaphore slot, and log **nothing**:
 
 ```go
-// WriteBlockAt pwrites data at byte offset and fdatasyncs the file
+// WriteBlockAt pwrites data at byte offset and fsyncs the file
 // descriptor before returning. Buffered IO; a fresh fd per call, never a
 // cached one; never O_CREATE (the target is a block device that already
 // exists at full size).
@@ -283,7 +283,7 @@ sanctioned direct-syscall path in dnv:
   `ReadBlockDirectAt`. The read must bypass the page cache — a buffered read of
   a just-written block would be answered from cache and observe no device IO at
   all, making the read-back vacuous. The write half needs no direct twin: its
-  `fdatasync` already forces the data to the device and surfaces the IO error.
+  `fsync` already forces the data to the device and surfaces the IO error.
 * *It may block indefinitely, by design.* A leg with no serving path
   (`ctrl_loss_tmo = -1`) queues IO forever, so the calling goroutine sits in
   uninterruptible D state until that IO is errored — which happens only when the
@@ -727,7 +727,7 @@ func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error
 }
 
 // readBlockAt is the §4.5 buffered raw-device read behind ReadBlock, and stays
-// unexported. WriteBlockAt is the buffered pwrite + fdatasync behind
+// unexported. WriteBlockAt is the buffered pwrite + fsync behind
 // WriteBlock, and is exported because the §4.5.1 probe write half calls it
 // directly. Neither uses O_DIRECT, and neither ever shells out to dd.
 func readBlockAt(path string, offset uint64, length uint64) ([]byte, error) {
@@ -942,7 +942,7 @@ available):
     interface-level dispatch test for it.
 11. **Exported write helper**: `common.WriteBlockAt` is exercised by item 9
     through `WriteBlock`; assert additionally that calling it directly writes
-    and fdatasyncs without emitting any record (the `os write block` record
+    and fsyncs without emitting any record (the `os write block` record
     belongs to the `OsClient` wrapper alone).
 
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;

@@ -8,11 +8,11 @@
 // --rev. dnvctl sends exactly what was typed and substitutes nothing (CT8):
 // an omitted --rev leaves the field NIL, while `--rev 0` sends a PRESENT
 // message with revision 0. §4 keeps those two distinguishable because the
-// gateway's GW6 check is specified to key on presence; note that a nil token
-// reads as 0 in today's `gateway/common.go` errStale path, so a token-less
-// mutator can still be answered ABORTED "stale revision" until that change
-// lands (risks_and_gaps.md RK7/RK8). Either way the wire content is the
-// operator's to choose.
+// gateway's GW6 check keys on presence: a nil token skips the check entirely,
+// while a present token — 0 included — is compared and refused ABORTED
+// "stale revision" on mismatch (stored revisions seed at 1, so 0 is the
+// always-stale probe; risks_and_gaps.md RK8 records the trade). Either way
+// the wire content is the operator's to choose.
 //
 // `dn get` is the token source an operator reads before either mutator, and
 // it reads etcd. `dn inspect` is the group's only live read: the gateway

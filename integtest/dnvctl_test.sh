@@ -26,7 +26,7 @@
 # "no dm_raid0_conf key" provable rather than asserted; (b) the §4 token trio
 # — absent / `--rev 0` / `--rev 0x1f` — reaches the wire as absent message /
 # present-and-empty / revision 31; (c) replies render per §3.1, with byte-exact
-# goldens for the three §7.10 representatives; (d) failures render per §3.2 and
+# goldens for the four §7.10 representatives; (d) failures render per §3.2 and
 # usage errors issue no RPC at all; (e) trace ids arrive on the wire, minted
 # when not given. Correctness only: the two timing assertions (§7.13) bound a
 # deadline, not a latency.

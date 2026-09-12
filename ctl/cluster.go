@@ -109,11 +109,10 @@ func clusterGetCmd() *cobra.Command {
 // `cluster list --name x` is a usage error rather than a silently dropped
 // value.
 //
-// Count is a uint32 on the wire while pageFlags declares a uint64 flag, so the
-// value is narrowed here through u32Of. A --count above 2^32-1 is therefore
-// truncated rather than rejected; that is a consequence of the shared flag's
-// width, not a validation rule, and it stays well outside any page size an
-// operator would type.
+// Count is a uint32 on the wire and pageFlags declares --count as a Uint32
+// flag, so a --count above 2^32-1 dies as a pflag parse failure (exit 2, no
+// RPC issued) rather than being truncated; u32Of only narrows viper's uint64
+// read, which is lossless for any value the flag accepts.
 func clusterListCmd() *cobra.Command {
 	cmd := leaf("list", "list cluster names (ListClusters)",
 		func() (job, error) {

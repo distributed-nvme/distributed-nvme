@@ -43,7 +43,7 @@ const (
 	// maxLogTransfer bounds one Get Log Page read. MDTS is 0 ("no limit"),
 	// as nvmet reports for discovery, but a controller still has to bound
 	// the buffer it allocates for one command; hosts read the discovery log
-	// in 4 KiB chunks, four hundred times below this.
+	// in 4 KiB chunks, 256 times below this.
 	maxLogTransfer = 1 << 20
 )
 

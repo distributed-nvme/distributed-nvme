@@ -1,7 +1,7 @@
 # dnvctl.md — the dnv operator CLI (`ctl/` + `cmd/dnvctl`) and its integration test
 
-Status: implementation-ready spec, written 2026-09-11 from the design interview;
-nothing under `ctl/` or `cmd/dnvctl/` exists yet. This is the document
+Status: **implemented** — written 2026-09-11 from the design interview and
+landed the same day, with §8's companion amendments applied. This is the document
 `gateway.md` §1 item 1 promised, and it implements the last step of layout.md's
 build-out order. Division of authority: architecture.md §8 keeps RPC semantics
 and validation; grpc.md keeps interceptor/trace rules; log.md keeps logging
@@ -60,9 +60,12 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
     gateway itself carries the hint in a reply. dnvctl also does not
     second-guess values; the gateway's §7 validation is the only validator
     (CT8).
-11. **One dnvctl-side default is kept:** `sp create` defaults the redundancy
-    to `redund_md_raid1` (architecture.md §8.4 "dnvctl defaults it to
-    `redund_md_raid1` on the CLI"). A flag default is not a hidden RPC.
+11. **dnvctl-side flag defaults are kept where a spec or §5 row names them:**
+    `sp create` defaults the redundancy to `redund_md_raid1` (architecture.md
+    §8.4 "dnvctl defaults it to `redund_md_raid1` on the CLI"), the `--tr-*`
+    quartet defaults to tcp/ipv4/127.0.0.1/4420 wherever it appears (§2.1),
+    and the `set-level`/`set-enabled`/`set-suspended` value flags default to
+    their §5 rows' stated values. A flag default is not a hidden RPC.
 12. **The integration test is dnvctl vs a fake gateway** on one VM, in the
     worker/gateway suite pattern: everything scp'd to the target, driven over
     ssh, **no sudo**, house flags `[--only <case>] [--cleanup-only] user@ip`.
@@ -73,8 +76,9 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
     fake models no cluster state.
 14. **Coverage: a 59-RPC sweep** asserting every request proto on the wire,
     plus targeted behavior/error/transport cases; reply-side checks are
-    parse + spot-check everywhere with byte-exact goldens for a representative
-    handful (§7.10).
+    parse-everywhere, with byte-exact goldens for four representatives
+    (§7.10); reply-content assertions beyond those live in the targeted
+    cases.
 
 ## 1. Scope and placement
 
@@ -120,7 +124,9 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
 * **CT7 — log level Warn, logs to stderr.** `cmd/dnvctl/main.go`'s first
   statement is `common.SetLogLevel(slog.LevelWarn)` (log.md R6, layout.md).
   `ctl/` installs `common.TraceIdHandler` over
-  `slog.NewJSONHandler(os.Stderr, nil)` — stdout is reserved for command
+  `slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})` (nil
+  options would pin the handler at Info and spill every §4 client-interceptor
+  record onto stderr) — stdout is reserved for command
   results (the grpc.md §6 driver rule, applied to the real CLI for the same
   reason). Because every §4 client-interceptor record is Info, dnvctl's own
   gRPC logging is silenced by design (log.md: "this is intended").
@@ -229,7 +235,7 @@ Presence semantics — dnvctl sends exactly what was typed:
 * `--rev` **not given** ⇒ the token field is **absent** (nil message).
 * `--rev N` (base-0: `7`, `0x1f`) ⇒ the token message is present with
   `revision = N` and nothing else set (the gateway ignores the token's echo
-  fields; only `revision` participates — `gateway/common.go:296-298`).
+  fields; only `revision` participates — `gateway/common.go:307-312`).
 * `--rev 0` ⇒ the message is present with revision 0 — proto3 message presence
   keeps this distinguishable from omission — and stays the deliberate
   always-stale probe the gateway suite's B4 stage relies on.
@@ -373,7 +379,7 @@ UpdateControllerNodeDisabled (+`cn_rev`), InspectControllerNode. Same flags.
 | command | RPC | flags beyond globals | notes |
 |---|---|---|---|
 | `xfer create` | CreateTransfer | `--name`, `--ori-nqn`, `--ori-idx`, `--hosts`, `--auto-suspend` (+ `--rev`) | |
-| `xfer delete` | DeleteTransfer | `--name`, `--force` (+ `--rev`) | `--force` = the abort path (no origin resume proof) |
+| `xfer delete` | DeleteTransfer | `--name`, `--force` (+ `--rev`) | `--force` = abort (origin left unsuspended for syncup to resume); default finalizes, retiring the origin ns in the same STM |
 | `xfer get` | GetTransfer | `--name` | |
 | `xfer set-hosts` | UpdateTransferHosts | `--name`, `--hosts` (+ `--rev`) | replaces |
 
@@ -474,14 +480,15 @@ and production use (29527/2379 reserved; 295xx/296xx/297xx/298[1-3]x taken).
 
 ### 7.4 Assumptions and preflight
 
-Local (`preflight_driver`): `go ssh scp tar sha256sum date awk sed` present;
+Local (`preflight_driver`): `go ssh scp awk sed grep` present;
 `resolve_jq` (system jq else gojq, the shared idiom); then
 `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build` (produces `bin/dnvctl`) and
-`go build -o integtest/bin/fakegateway ./integtest/fakegateway`. No etcd, no
-downloads. Remote (`preflight_server`, after the start cleanup): passwordless
-ssh; `command -v bash nohup pkill ss df awk sed`; ≥ 1048576 KiB free under
-`/var/tmp`; both `ALL_PORTS` free (`ports_up` with `grep -c`, never `-q` —
-the SIGPIPE/pipefail gotcha). `SSH_OPTS` as in the gateway suite. Binaries are
+`go build -o integtest/bin/fakegateway ./integtest/fakegateway`. No etcd; no
+downloads when a system jq exists (the gojq fallback is a pinned
+`go install`). Remote (`preflight_server`, after the start cleanup):
+passwordless ssh; `command -v bash nohup pkill ss df awk sed`; ≥ 1048576 KiB
+free under `/var/tmp`; both `ALL_PORTS` free (checked inline with `grep -c`,
+never `-q` — the SIGPIPE/pipefail gotcha). `SSH_OPTS` as in the gateway suite. Binaries are
 scp'd to `$WORK/bin` and `chmod 0755`.
 
 ### 7.5 The fake: `integtest/fakegateway`
@@ -537,11 +544,14 @@ $WORK/bin/dnvctl --gateway-address 127.0.0.1:29840 \
   --cluster $CLUSTER --sp $SP --trace-id $TRACE
 ```
 
-wrapped by `ctl()` (the `gw_at` pattern: `printf '%q '` quoting, run via ssh;
-`ctl_ok` captures stdout, asserts exit 0 and empty stderr; `ctl_fail <CODE>`
-captures stderr locally via a temp file, asserts exit 1 and that the single
-stderr line matches `dnvctl: <CODE>: .* (trace_id $TRACE)`; `ctl_usage`
-asserts exit 2 and, via §7.7's counts, that no request reached the fake).
+wrapped by `ctl_prefix`/`ctl_exec` (`printf '%q '` quoting; one framed ssh
+round-trip runs the invocation between two state.json snapshots and brings
+the exit code, stderr and stdout back as separable sections, the raw output
+parked under `$WORK` for the §7.15 dump; `ctl_ok` asserts exit 0, empty
+stderr and parsing stdout; `ctl_fail <CODE>` asserts exit 1 and that the
+single stderr line matches `dnvctl: <CODE>: .* (trace_id $TRACE)`;
+`ctl_usage` asserts exit 2 and, via §7.7's counts, that no request reached
+the fake).
 
 Fixture values (payload only — nothing dials them): DN/CN addr
 `127.0.0.1:29901` / `127.0.0.1:29902`, locations `rack0`/`rack1`;
@@ -554,14 +564,16 @@ Trace ids `it-<case>-<step>` via the house `stage()`.
 
 ### 7.7 Assertion conventions
 
-* `rec()` / `count_recs` over `$WORK/fgw/fakegateway.log` (the
+* `recs()` / `count_recs` over `$WORK/fgw/fakegateway.log` (the
   `fromjson? // empty` torn-line guard) for interceptor records:
   `select(.msg == "grpc server request" and .trace_id == "$TRACE" and
   (.method | endswith("<Rpc>")))`.
-* `last_req <Rpc>` = `jq '.methods["<Rpc>"].last_request'` over
-  `$WORK/fgw/state.json`; `req_count <Rpc>` likewise. Field equality via
-  `jq -e` filters; **uint64 fields compare as strings** (`.sp_rev.revision ==
-  "7"`), protojson's doing.
+* `state_req <Rpc>` = `jq '.methods["<Rpc>"].last_request'` over the
+  state.json snapshots `ctl_exec` brought back; `state_count <Rpc>` likewise.
+  `assert_req` compares the recorded request to the argv-implied one as a
+  whole `jq -e` object equality, and `assert_count_delta` brackets the call
+  with the two snapshots' counters; **uint64 fields compare as strings**
+  (`.sp_rev.revision == "7"`), protojson's doing.
 * `set_behavior` writes behavior.json via the atomic tmp+`mv` ssh idiom;
   every case starts by resetting it to `{}` (`case_reset`).
 * dnvctl stdout must satisfy `jq -e .` (parse) on every `ctl_ok`; goldens
@@ -579,17 +591,18 @@ Trace ids `it-<case>-<step>` via the house `stage()`.
 
 | step | action | asserts |
 |---|---|---|
-| s1 | `ctl_ok cluster list` | exit 0; stdout parses; fake log has the ListClusters request with `trace_id it-smoke-1`; `req_count ListClusters` bumped |
+| s1 | `ctl_ok cluster list` | exit 0; stdout parses; fake log has the ListClusters request with `trace_id it-smoke-1`; the ListClusters count bumped (`assert_count_delta`) |
 | s2 | same but **without** `--trace-id` | the request record's `.trace_id` is non-empty and is not any `it-*` id — the §2.3 mint, observed on the wire |
 | s3 | stderr of s1/s2 | empty: Warn silencing + stdout reservation hold on the success path (CT7) |
 
 ### 7.10 Case A — sweep (`--only sweep`)
 
 59 steps, trace ids `it-sweep-01`…`it-sweep-59`, one per §5 row, in §5 order.
-Uniform per-step assertions: exit 0; stdout parses; `last_req <Rpc>` equals
-the argv-implied request **field for field** (globals included:
-`cluster_name == "itctl"` on the 58, `sp_name == "sp0"` on the 41, token
-`revision == "7"` on the 34); `req_count` bumped exactly once. The table lists
+Uniform per-step assertions: exit 0; stdout parses; `assert_req <Rpc>`: the
+recorded request equals the argv-implied one **as a whole object** (globals
+included: `cluster_name` on the 58 — `"itctl"` except steps 01/02, where
+`--name c1` wins — `sp_name == "sp0"` on the 41, token `revision == "7"` on
+the 34); the RPC's count bumped exactly once (`assert_count_delta`). The table lists
 argv after the global prefix and only the *distinctive* assertions.
 
 | # | argv | distinctive assertions |
@@ -651,14 +664,15 @@ argv after the global prefix and only the *distinctive* assertions.
 
 Reply-side goldens (§0 #14): steps 03 (`cluster get`, empty canned reply —
 pins EmitUnpopulated + key order), 19 (`sp get` with a behavior-injected reply
-carrying a revision — pins uint64-as-string), 33 (the hex map). Everything
-else: parse + one `jq -e` spot-check against the injected/canned reply.
+carrying a revision — pins uint64-as-string), 33 and 34 (the two hex maps).
+Everything else: stdout parses (`ctl_ok`); reply-content checks beyond the
+goldens live in the targeted cases (§7.11), not the sweep.
 
 ### 7.11 Case B — behavior (`--only behavior`)
 
 | step | action | asserts |
 |---|---|---|
-| b1 | `td create --name t0` (no `--rev`) | `last_req CreateThinDevice` has **no `sp_rev` key** — omission = absent message (§4) |
+| b1 | `td create --name t0` (no `--rev`) | `state_req CreateThinDevice` has **no `sp_rev` key** — omission = absent message (§4) |
 | b2 | same with `--rev 0` | `sp_rev` key present, `== {}` (present message, zero revision — the protojson rendering of the always-stale probe) |
 | b3 | same with `--rev 0x1f` | `sp_rev.revision == "31"` — base-0 parse |
 | b4 | `sp create --redund none --rev 7` | `bdev_conf.redund_conf.redund_none` present, no `redund_md_raid1` key |
@@ -678,7 +692,7 @@ trace id):
 | c2 | `DeleteThinDevice` → `ABORTED`, message `stale revision` | `td delete --name t0 --rev 7` | `ABORTED: stale revision` — the §4 failure an operator will actually meet |
 | c3 | `CreateCluster` → `ALREADY_EXISTS` | `cluster create --name c1` | `ALREADY_EXISTS` |
 | c4 | `CreateStoragePool` → `INVALID_ARGUMENT` | `sp create --rev 7` | `INVALID_ARGUMENT` |
-| c5 | *(none)* | `ctl_usage td create --no-such-flag` | exit 2; `req_count CreateThinDevice` unchanged — no RPC on usage errors |
+| c5 | *(none)* | `ctl_usage td create --no-such-flag` | exit 2; the CreateThinDevice count unchanged (`assert_count_delta` 0) — no RPC on usage errors |
 | c6 | *(none)* | `ctl_usage clone append-bm --name cl0 --bm-hex zz --rev 7` | exit 2 (parse failure), count unchanged |
 
 ### 7.13 Case D — transport (`--only transport`)
@@ -730,8 +744,10 @@ gateway's *reaction* to what dnvctl sends.
 
 Recorded for traceability; the edits are applied with this document.
 
-* `README.md` "Not yet implemented" — the spec pointer for `ctl/` +
-  `cmd/dnvctl` becomes **`doc/dnvctl.md`** (was architecture.md §13).
+* `README.md` — the `ctl/` + `cmd/dnvctl` spec pointer becomes
+  **`doc/dnvctl.md`** (was architecture.md §13; the interim "Not yet
+  implemented" paragraph is now a component bullet, and the integtest
+  bullet carries `dnvctl_test.sh`/`fakegateway`).
 * `doc/architecture.md` §1 component table, `dnvctl` row — now points here;
   the §11.4 userspace copier is marked future work outside dnvctl v1 (§0 #3).
 * `doc/architecture.md` §13 — the one-line subcommand sketch is replaced by a

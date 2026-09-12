@@ -113,10 +113,10 @@ func registerCn(root *cobra.Command) {
 		})
 	cnAddrFlag(get.Flags())
 
-	// cn list — ListControllerNodes. The request's `count` is a uint32 while
-	// pageFlags declares --count as a uint64 for the whole CLI, so the read
-	// narrows here; 0 still means "the server's default page size", which
-	// dnvctl does not substitute for (CT8).
+	// cn list — ListControllerNodes. The request's `count` is a uint32 and
+	// pageFlags declares --count as a Uint32 flag, so an out-of-range value
+	// dies at parse time and u32Of's read is lossless; 0 still means "the
+	// server's default page size", which dnvctl does not substitute for (CT8).
 	list := leaf("list", "list controller node addresses",
 		func() (job, error) {
 			cluster := clusterOf()
