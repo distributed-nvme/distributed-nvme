@@ -155,7 +155,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // capacity key from one — the RPCs that take DN capacity as well as the ones
 // that give it back.
 //
-// The thirteen cases are five different gates:
+// The twelve cases are five different gates:
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
@@ -172,11 +172,16 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     RESOURCE_EXHAUSTED. CreateCntlr, CreateSpareLeg and CreateMigration
 //     carry no conf gate of their own (nor does model.CreateSpareLeg), so
 //     those three are the cases that pin the allocator's;
-//   - DeleteStoragePool, DeleteSpareLeg, FinishMigration and CancelMigration
-//     reach newDnLedger's gate: those four are every handler that RELEASES DN
-//     capacity through a ledger and had no conf gate of its own, and all four
-//     are driven here rather than one standing for the rest, so moving any of
-//     them off the shared constructor is caught. The ladder matters most on
+//   - DeleteSpareLeg, FinishMigration and CancelMigration reach newDnLedger's
+//     gate: those three are every handler that RELEASES DN capacity through a
+//     ledger and has no conf gate of its own, and all three are driven here
+//     rather than one standing for the rest, so moving any of them off the
+//     shared constructor is caught. DeleteStoragePool used to be the fourth;
+//     it releases nothing since it became a latch (§3), and the gate its
+//     release moved to — model.DrainSpSlice's, which needs the same ladder for
+//     the same MaintainDnCapacity reason — is pinned by
+//     TestDrainSliceRefusesAnInvalidStoredConf in model/drain_test.go. The
+//     ladder matters most on
 //     these paths: MaintainDnCapacity names the key to delete by shifting the
 //     stored ladder, so a gate-less release deletes a key nothing wrote and
 //     strands the live one — which outlives the DnConf and keeps being
@@ -187,7 +192,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     wrong one.
 //
 // Each gate validates the WHOLE stored conf rather than the member it is
-// about to use, which is why one zeroed member reaches all thirteen. Two are
+// about to use, which is why one zeroed member reaches all twelve. Two are
 // planted in turn: `dn_bin_conf.extent_size`, the §9 fixture's member and the
 // one a gateway that lost its gate would divide by, and
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
@@ -199,7 +204,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // of its two gates produced it. CreateMigration is in the same position once
 // newDnLedger has a gate, and for the same reason: pickDns runs first.
 //
-// The six release cases come FIRST in the list, because scReplay runs the
+// The five release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
 // earlier could place a side on the very disk node DeleteDiskNode is about,
 // and turn its replay into a FAILED_PRECONDITION about sides.
@@ -215,19 +220,16 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	// leg holds exactly one, so §8.11's "a migration is already running on
 	// this leg" precondition cannot stand in for the conf refusal.
 	srcSideId := dataGrp.GetLegList()[0].GetSideList()[0].GetSideId()
-	// What the four ledger cases release, built while the conf is still
+	// What the three ledger cases release, built while the conf is still
 	// healthy, each on an object of its own so that no case's own §8
 	// preconditions can stand in for the conf refusal:
 	//
-	//   - a second SP that holds nothing (DeleteStoragePool);
 	//   - a spare leg on the META group, not the data group the CreateSpareLeg
 	//     case below adds one to, so neither can fill the other's §8.12 slot;
 	//   - a migration on the data group's SECOND leg, which FinishMigration
 	//     ends, leaving leg 0 free for the CreateMigration case;
 	//   - a migration on the meta group's first leg, which CancelMigration
 	//     rolls back.
-	delSpName := "sc-del-pool"
-	env.createSp(sptSmallSpec(delSpName))
 	metaGrp := slice.GetMetaGrpList()[0]
 	metaGrpId := metaGrp.GetGrpId()
 	spareReply, err := env.srv.CreateSpareLeg(env.ctx,
@@ -281,16 +283,6 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	}
 
 	cases := []scCase{
-		{"DeleteStoragePool", func() error {
-			// No SpRev, as in GrowSlice below: GW6 is presence-based, so no
-			// stale-token refusal can stand in for the conf's (§0 #7).
-			_, err := env.srv.DeleteStoragePool(env.ctx,
-				&pb.DeleteStoragePoolRequest{
-					ClusterName: env.name,
-					SpName:      delSpName,
-				})
-			return err
-		}},
 		{"DeleteSpareLeg", func() error {
 			_, err := env.srv.DeleteSpareLeg(env.ctx,
 				&pb.DeleteSpareLegRequest{

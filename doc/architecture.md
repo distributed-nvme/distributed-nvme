@@ -137,7 +137,8 @@ ClusterConf
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
-| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv, §8.9) | 512 |
+| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv, §8.4/§8.9) | 512 |
+| `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
 
 ---
@@ -1118,8 +1119,11 @@ check but because `cluster_id = fnv64a(cluster_name ∥ ClusterConf.creation_epo
 (§5.2) is the prefix of every other key it will touch. An RPC that names an SP then also
 resolves `{p} sp_conf {cluster_id} {sp_name}` (`NOT_FOUND` if absent); both checks are
 implied below and both live inside the RPC's STM (§5.8). All mutating SP RPCs except
-`DeleteStoragePool` fail with `FAILED_PRECONDITION` when `SpConf.deleting == true` (the
-field is otherwise reserved for a future asynchronous teardown).
+`DeleteStoragePool` fail with `FAILED_PRECONDITION` when `SpConf.deleting == true`.
+`DeleteStoragePool` is the one RPC that SETS the flag (§8.4, amended 2026-09-15), and
+the sp-worker's drain (dnv-worker.md §11.6) is what acts on it; no code path anywhere
+ever writes it back to false, so the latch is one-way across restarts of every
+component.
 
 ### 8.1 Clusters
 
@@ -1302,19 +1306,42 @@ ready, no action needed. On the standing fast-Write-Zeroes hardware assumption (
 `Side.provisioned`); the sp-worker flips the flags and the normal watch fan-out brings
 the SP up (§10.3).
 
-**DeleteStoragePool** —
+**DeleteStoragePool** — *amended 2026-09-15: the one-shot teardown became a latch plus
+an asynchronous drain (dnv-worker.md §11.6).*
 Errors: `FAILED_PRECONDITION` if any of `td_name_list`, `nqn_list`, `clone_name_list`,
 `xfer_name_list`, `migr_name_list` is non-empty (user-created objects first; cntlrs,
-slices, groups, legs, sides were created implicitly and are deleted implicitly).
-Action: one STM: read `SpConf`, all `Cntlr`s, all `Slice`s; per side: remove the pointer
-from its DN's `side_ptr_list`, return `group.ext_cnt` to `free_ext_cnt`, maintain the
-`DnCapacity` key (§5.6), bump that `DnRev` once per DN; per cntlr: remove the pointer
-from its CN, return the SP footprint to `free_ext_cnt`, maintain `CnCapacity`, bump
-`CnRev` once per CN; delete every `Cntlr`, `Slice`, `SpName`, `SpRev` (addressed by the
-SP's `shard_code` + `sp_id` from `SpConf`), `SpConf`;
-`SpGlobal.shard_bucket[shard_code] -= 1`. Agents notice the shrunken pointer lists via
-`SyncupDn`/`SyncupCn` and tear the local stacks down; the sp-worker notices the deleted
-`SpRev` and stops dispatching. Reply `sp_id`.
+slices, groups, legs, sides were created implicitly and are deleted implicitly). A
+delete of an SP whose `deleting` is ALREADY true returns OK with no writes and no
+revision bump — the drain is running and a second bump would only invalidate every
+client's token; a stale revision token is still `ABORTED` first.
+Action: one STM: read `SpConf` and `SpRev` (the token check), check the five lists, put
+`SpConf` with `deleting = true`, `BumpSpRev`. Five ops in all, and nothing else is
+written: the SP, its cntlrs, its slices and every extent they charge survive the reply.
+Reply `sp_id`.
+
+The teardown itself is the sp-worker's DRAIN (dnv-worker.md §11.6), which the SP's next
+reaction pass starts — within one `cntlr_interval`, since the latch's `SpRev` bump drives
+the coordinator's fan-out rather than its pass — and which then carries itself from one
+commit to the next: it removes every `Cntlr` in one transaction (returning the SP footprint to each
+CN), then up to `MaxDelGrpPerTxn` groups of one slice per transaction (returning each
+side's `group.ext_cnt` to its DN, maintaining the `DnCapacity` key of §5.6 and bumping
+that `DnRev` once per DN per transaction), deleting the `Slice` key and its
+`slice_id_list` entry together when a slice empties, and finally `SpConf`, `SpName`,
+`SpRev` and `SpGlobal.shard_bucket[shard_code] -= 1`. Agents notice the shrunken pointer
+lists via `SyncupDn`/`SyncupCn` and tear the local stacks down; the sp-worker notices the
+deleted `SpRev` and stops dispatching.
+
+Why not one transaction: the old one-shot was unbounded in the DN dimension — about 532
+writes at the 16-slice maximum shape, over `EtcdMaxTxnOps` — and `GrowSlice` makes a
+slice's group count unbounded, so no single transaction could ever be proven legal. What
+that transaction actually guaranteed was not atomicity but AGREEMENT — DN and CN budgets
+never disagreeing with the keys that describe them — and the drain keeps it by
+construction: every batch releases budget in the SAME transaction that shrinks the
+describing key, so at every commit boundary the keys and the budgets agree exactly.
+Partial teardown is therefore a real, observable state: `GetStoragePool` shows
+`deleting = true` and a shrinking inventory, `CreateStoragePool` keeps failing
+`ALREADY_EXISTS` on the surviving `sp_conf` key until the last transaction commits, and
+an observer polls `GetStoragePool` until `NOT_FOUND`.
 
 **GetStoragePool** — one STM reads `SpConf`, `SpRev`, every `Cntlr` in `cntlr_id_list`
 and every `Slice` in `slice_id_list` (same order) into the reply; a missing listed key ⇒
@@ -1662,9 +1689,11 @@ Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap`
 — a nested point-delete sweep over `src_slice_cnt × bm_cnt` pairs, since an STM cannot
 range and absent pairs delete harmlessly — set
 `suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. That
-sweep is why every etcd serving dnv must run with `--max-txn-ops=512`
-(`EtcdMaxTxnOps`): its worst case is `MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes
-plus a handful of other ops, and etcd's default cap is 128. The
+sweep is one of the two reasons every etcd serving dnv must run with
+`--max-txn-ops=512` (`EtcdMaxTxnOps`): its worst case is
+`MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes plus a handful of other ops, and
+etcd's default cap is 128. The other, and the larger, is the sp drain's D2 batch
+at 486 ops (§8.4). The
 primary reloads those namespaces' `CnNsDevName`s back onto the raid0 (all data now
 local), removes the
 dm-clone first and then its metadata wrapper `CnCloneMetaDmName` (whose arena units
@@ -2432,8 +2461,10 @@ are `now − err_epoch ≥ threshold` with the SP's `event_threshold`
 that bump `SpRev`, so the data-plane choreography is the same as for the equivalent
 manual RPC. The sp-worker evaluates them once per SP per health round, applies at most
 one per pass in the priority failover → auto-grow → cntlr replacement → leg repair, and
-suppresses all of them for a deleting SP, at `sp_level ≥ SP_LEVEL_NO_THINPOOL`, and for
-disabled cntlrs (`dnv-worker.md` §11) — a disabled cntlr is never a candidate, replaced
+suppresses all of them at `sp_level ≥ SP_LEVEL_NO_THINPOOL` and for
+disabled cntlrs (`dnv-worker.md` §11). A pass over a `deleting` SP runs none of them
+either, but not by suppression: since 2026-09-15 it runs one step of that SP's DRAIN
+instead, at any `sp_level` (§8.4, `dnv-worker.md` §11.6) — a disabled cntlr is never a candidate, replaced
 or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6):
 
 * `primary_unhealthy` (5 s): the primary cntlr is unhealthy — or the primary is
@@ -2960,9 +2991,13 @@ dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f \
 ```
 
 **etcd deployment requirement.** Every etcd node serving dnv MUST run with
-`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128 and
-DeleteClone's deciding transaction sweeps up to `MaxSliceCntPerSp × MaxCloneBmCnt`
-= 256 chunk deletes plus the handful of other ops in the same transaction (§8.9).
+`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. Two
+transactions are above it: the sp drain's D2 batch, `6 + 6·MaxDelGrpPerTxn·
+(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 ops at the maximum shape (§8.4,
+dnv-worker.md §11.6 — the larger of the two, and the one the number is sized by),
+and DeleteClone's deciding transaction, which sweeps up to
+`MaxSliceCntPerSp × MaxCloneBmCnt` = 256 chunk deletes plus the handful of other
+ops in the same transaction (§8.9).
 This is not something
 dnv can set from the client side — it is a server flag, so it belongs in the etcd
 deployment alongside the endpoints above.
@@ -3450,6 +3485,20 @@ own amendment sections are the surviving record.
   now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
   carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
   **[D14]**.
+* **sp incremental deletion (2026-09-15)** — `DeleteStoragePool` became a LATCH:
+  it commits `deleting = true` plus one `SpRev` bump and returns, and the sp-worker
+  drains the SP in transactions of a constant size (`dnv-worker.md` §11.6, rules
+  `SPD1`–`SPD14`). The one-shot teardown it replaced was unbounded in the DN
+  dimension (~532 writes at the 16-slice maximum shape, over `EtcdMaxTxnOps`) and
+  `GrowSlice` made a slice's group count unbounded, so no single transaction could
+  be proven legal. §8 preamble (the flag now has a writer), §8.4 (Errors + Action),
+  §2.1 (the two new constants `MaxDelGrpPerTxn` / `MaxAllocLegPerGrp`), §8.9 and
+  §13 (`--max-txn-ops` is now sized by the drain's 486-op batch, not by
+  DeleteClone's 256-key sweep) and §10.4 (a `deleting` SP drains rather than being
+  suppressed) all follow; partial teardown is now an observable state, and what the
+  single transaction really guaranteed — that DN/CN budgets never disagree with the
+  keys describing them — is preserved by every batch releasing budget in the same
+  transaction that shrinks the describing key. New risk-register entry `RK9`.
 * [D15] side provisioning — the §9.4 trim protocol is replaced by whole-side zeroing behind
   the `provisioned` gate; §3.1, §8.4, §8.5, §8.11, §8.12, §9.2, §9.5, §9.7, §10.2-§10.4,
   §11.1.1, §11.2, §11.7 and Appendix A follow; new status `RES_STATUS_PROVISIONING` and

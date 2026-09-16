@@ -5,6 +5,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -23,9 +24,14 @@ import (
 
 // legCntOf is the number of legs one group of this SP has: RedundMdRaid1 two,
 // RedundNone one (§6.5).
+//
+// The md-raid1 arm is common.MaxAllocLegPerGrp and not a literal 2 (SPD1):
+// this is where the allocator's widest group shape is chosen, and the sp-drain
+// batch budget is tripwired against that constant, so a wider shape has to
+// move the constant and fails the budget test instead of a deployment.
 func legCntOf(bdev *pb.BdevConf) int {
 	if bdev.GetRedundConf().GetRedundMdRaid1() != nil {
-		return 2
+		return common.MaxAllocLegPerGrp
 	}
 	return 1
 }

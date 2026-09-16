@@ -96,8 +96,9 @@ Appendix B carries the cross-component one as **[D17]**.
     slice's groups *before* the newest one — a memo reconstructed from facts.
 15. **Disabled cntlrs are hands-off** (AR3): never failed over to, never
     replaced — but a disabled *primary* is itself the AR5 failover trigger
-    (§8.6). Reactions are suppressed for `deleting` SPs and at
-    `sp_level ≥ SP_LEVEL_NO_THINPOOL`.
+    (§8.6). Reactions are suppressed at `sp_level ≥ SP_LEVEL_NO_THINPOOL`.
+    *Amended 2026-09-15:* a `deleting` SP is no longer suppressed — it runs
+    one DRAIN step per pass instead, at any level (§11.6).
 16. **Sole-cntlr SPs are repaired** (AR7): a primary with no failover
     candidate is replaced by a new primary on a fresh CN with the same
     `cntlid_slot`.
@@ -489,6 +490,9 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
+     | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
+     | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (§7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
+     | `FinishSpDelete(cid, shard, spId, spName)` | the drain checks; `cntlr_id_list` and `slice_id_list` both empty; `SpRev` and `SpGlobal` exist | delete `SpConf`, `SpName`, `SpRev`; `SpGlobal.shard_bucket[shard] -= 1`. The ONE op that does not bump `SpRev` — it deletes the key, which is the shard worker's stop signal (§8.4) |
 
 MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
      returned from inside the STM callback, it aborts without commit (EU4).
@@ -1268,9 +1272,13 @@ AR2. **One action per SP per pass**, evaluated in this priority; the first
      owners overlapping on one SP (§0 item 4) cannot apply an action twice:
      the second STM fails its precondition.
 
-AR3. **Suppression.** No reaction runs for an SP with `deleting == true` or
+AR3. **Suppression.** No reaction runs for an SP with
      `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
-     §11.7, where an operator is in charge). A **disabled** cntlr is never a
+     §11.7, where an operator is in charge). *Amended 2026-09-15:* an SP with
+     `deleting == true` used to be suppressed here too; it now runs exactly
+     one DRAIN step per pass and no reaction at all, at ANY `sp_level`,
+     because a doomed SP must drain whatever level an operator left it at
+     (§11.6, SPD6). A **disabled** cntlr is never a
      candidate, replaced or repaired — but a disabled *primary* is itself the
      AR5 failover trigger (§8.6). Disabling is the operator's hands-off
      signal, and §10.4's "skipping the enabled check" is read as skipping the
@@ -1405,7 +1413,174 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
 AR9. **The worker never**: deletes a td, subsystem, clone, transfer,
      migration or spare; touches a `RedundNone` leg; acts on a suppressed SP;
      starts a migration; or runs two reactions in one pass. Every automatic
-     action re-homes redundancy or roles (§10.4).
+     action re-homes redundancy or roles (§10.4). *Amended 2026-09-15:* it
+     does delete the implicit children — cntlrs, slices, groups, legs, sides —
+     of an SP a `DeleteStoragePool` has LATCHED, which is §11.6's drain and
+     not a reaction; the list above is about objects a USER made, and the
+     drain touches none of them (a latched SP has none, by the same
+     five-empty-lists precondition that let it be latched).
+
+### 11.6 The sp drain [SPD]
+
+*Added 2026-09-15. The rule ids are
+that document's and keep its `SPD` prefix rather than taking a new two-letter
+one, so that one id spells the rule in the design, in the code comments
+(`model/drain.go`, `worker/drain.go`) and here.*
+
+`DeleteStoragePool` no longer tears an SP down. It LATCHES it — `deleting =
+true` plus one `BumpSpRev`, five ops, nothing else (architecture.md §8.4,
+gateway.md §5.4) — and the sp coordinator takes it apart in steps whose size
+is a constant. The old one-shot was unbounded in the DN dimension (about 532
+writes at the 16-slice maximum shape, over `EtcdMaxTxnOps`) and `GrowSlice`
+makes a slice's group count unbounded, so no single transaction could ever be
+proven legal.
+
+SPD1. **The allocator's real group shape is a named constant.**
+      `MaxAllocLegPerGrp = 2` is the widest group the allocator builds
+      (`MaxLegPerGrp = 8` is declared and unenforced — `RK9`). It is CITED from
+      all three places that choose a leg count — `gateway/alloc.go` `legCntOf`,
+      `model/ops.go` `legCntOf`, `worker/reaction.go` `legCnt` — and from the
+      SPD14 tripwire, so widening the shape fails a test instead of a
+      deployment.
+
+SPD2. **Load and refuse, never skip.** Each drain op loads the `SpConf` inside
+      its OWN STM and returns an `ErrPrecondition` — never a silent skip —
+      when the `SpConf` is missing, the `sp_id` changed, or `deleting` is
+      false. It is the inverse of `loadSpConfForOp`'s "sp deleting" refusal:
+      normal ops require the flag CLEAR, drain ops require it SET, and both
+      share the load-and-refuse structure. A reconcile loop that reads absence
+      as permission is how the wrong thing gets destroyed: an `SpConf` that is
+      gone, or whose `sp_id` moved because the name was deleted and
+      re-created, describes a DIFFERENT storage pool. (`sp_level` is
+      deliberately not among the three: SPD6.)
+
+SPD3. **The repeat delete is a no-op.** `DeleteStoragePool` on an SP whose
+      `deleting` is already true returns OK with no writes and NO second
+      `SpRev` bump — the drain is running, and a bump would only invalidate
+      every client's token to force a pointless re-resolve. A stale token
+      still ABORTs first.
+
+SPD4. **The check and the latch are atomic.** The five-empty-lists check and
+      the `deleting = true` put share one STM with the reads, and once latched
+      `resolveSp`'s `rejectDeleting` gate refuses every other mutator — so no
+      new child can appear after the check, ever.
+
+SPD5. **The latch is one-way.** No code path in any component writes
+      `deleting = false` on an existing SP. There is no undelete, and the
+      one-way-ness is what makes SPD8's derivation total: a latched SP has
+      exactly one future.
+
+SPD6. **Entry and cadence.** AR3 splits: a pass over an SP with `deleting ==
+      true` runs at most ONE drain step and no reaction, regardless of
+      `sp_level` suppression — "at most", because the gates ahead of the
+      branch still apply: a pass whose `LoadSp` failed, or whose cluster conf
+      is missing or unusable, runs nothing at all and retries on the next
+      tick. (The SP's OWN `bdev_conf` gate is deliberately NOT one of them:
+      the drain reads no geometry, and gating it there would make an SP whose
+      stored `bdev_conf` cannot be read permanently undeletable, the latch
+      being one-way.) The FIRST step comes from the ordinary `cntlr_interval`
+      pass — the latch's `SpRev` bump reaches the coordinator as a desired
+      change, which drives the fan-out, not the pass. After that a committed
+      step ends in `BumpSpRev` (except the last) and schedules the next pass
+      from its own commit, so the drain is its own tick; a step that removed
+      nothing does not schedule one, and is picked up by the tick instead. A
+      FAILED step commits nothing, bumps nothing and is retried on the next
+      tick, forever (RW12, no backoff): there is no terminal-failure state,
+      because a delete that gave up would only strand garbage. Progress is
+      already visible through `GetStoragePool` — `deleting = true` and a
+      shrinking inventory — so no status field and no progress key is added.
+
+SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
+      cntlr, a shape `CreateStoragePool` can never produce. `buildCntlrPlans`
+      yields an empty plan set for it, and `buildSidePlans` leaves every side
+      child IDLE with `sp sides idle reason="no cntlr"` — not RW15's
+      `primary_cn_id = 0`, which `agent/dnagent`'s export list would read as a
+      real CN id and build a dm-error, a dm-linear, a subsystem and a
+      namespace for the CN numbered 0. (An SP that merely has no PRIMARY among
+      cntlrs that do exist keeps RW15's documented behaviour.) The sides are
+      retired through the DN pointer lists as the batches empty them, not
+      through these children.
+
+SPD8. **Step selection.** From the freshly loaded `SpConf` ALONE, first match
+      wins: `cntlr_id_list` non-empty ⇒ **D1** `DrainSpCntlrs`; else
+      `slice_id_list` non-empty ⇒ **D2** `DrainSpSlice` on the LOWEST listed
+      slice id; else **D3** `FinishSpDelete`. Nothing is remembered between
+      steps and there is no progress key — it would be a second copy of the
+      truth that can disagree with the first — so crash, restart and shard
+      handoff all resume through this same derivation. The accepted transient
+      two-owner overlap (§0 item 4) is safe for the usual reason: both owners
+      run the same guarded op against whatever remains, the loser's STM fails
+      its compares, and a step is an idempotent "pop what is still there".
+
+SPD9. **D1 — cntlrs first.** Every cntlr in one transaction, BEFORE any slice
+      work, deliberately inverting the naive slices-first order: every cntlr
+      stacks the WHOLE SP on its CN and the coordinator keeps syncing during
+      the drain, so slices-first would make every CN reload pool concats and
+      disband md arrays on every batch, racing the DN export teardown each
+      time, for stacks nothing will ever use. Cntlrs-first tears each CN stack
+      down exactly once through the pointer diff and frees CN capacity at
+      once; the remainder is pure DN accounting. It skips `DeleteCntlr`'s
+      disabled-first and non-primary preconditions, which exist to protect
+      host IO and discovery: a latched SP has an empty `nqn_list`, hence no
+      subsystems, no `CdcEntry` keys and no host paths.
+
+SPD10/SPD11. **D2 — one slice batch.** Up to `MaxDelGrpPerTxn` groups of ONE
+      slice, popped from the TAIL of `data_grp_list` first and then, if budget
+      remains, from the tail of `meta_grp_list`. A batch MUST NOT touch a
+      second slice even when the first has fewer groups left than the budget.
+      Tail-popping is not a detail: a group's position in its list and a leg's
+      `leg_idx` inside it are the md member order, so no surviving group or
+      leg is ever renumbered. The batch that empties a slice deletes the
+      `Slice` key AND its `slice_id_list` entry in the same transaction —
+      there is no "empty slice" intermediate state, and `model.LoadSp`
+      iterates the id lists, so a dangling id would break every later load.
+
+SPD12. **D3 — the final keys.** `SpConf`, `SpName`, `SpRev` and GW12's
+      deletion half on `SpGlobal`, guarded on both id lists being empty so an
+      owner one step behind cannot skip to the end. It is the one drain STM
+      that does NOT bump `SpRev`: it deletes the key, which is already the
+      shard worker's stop signal, so the drain terminates itself in the
+      transaction that finishes the job. After the commit the name is
+      reusable.
+
+      **A lost sub-object key wedges the drain, deliberately.** D1 refuses when
+      a listed `Cntlr` key is absent and D2 when a listed `Slice` key is; both
+      are the record that says which node reserved what, so without them the
+      release cannot be made exact, and a drain that carried on would
+      under-credit a node silently and for ever. The opposite call is made for
+      a missing `DnConf`/`CnConf`: those are the RECEIVING ledger, there is
+      nothing left to credit, and skipping keeps the SP deletable
+      (`releaseCn`'s stance). The cost of the refusal is that such an SP stays
+      latched — the latch is one-way (SPD5) and nothing else removes the keys —
+      so the drain names the repair on every tick in `sp drain failed`
+      (`reason=cntlr not found` / `slice not found`), and an operator restores
+      the missing key (the §14.8 driver's `put-sp` rewrites the whole SP) to
+      let it finish. That is a louder and more recoverable state than a silent
+      ledger drift, which is why it is the direction chosen.
+
+SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
+      Etcd emptiness MAY outrun physical teardown — an agent that is down
+      keeps its stale stacks until its next syncup, with the DN orphan sweep
+      and the CN wrapper sweep as the crash-window backstops. This is the
+      system's existing convergence contract, not new risk.
+
+      **Budget consistency (what the one-shot really guaranteed).** Partial
+      teardown is now a real, observable state, and what the single
+      transaction actually protected was not atomicity but AGREEMENT: DN and
+      CN budgets must never disagree with the keys that describe them. Every
+      batch releases budget in the SAME transaction that shrinks the
+      describing key, so at every commit boundary the keys and the budgets
+      agree exactly.
+
+      **Transaction budget.** Per D2 batch, with D the distinct DNs it
+      touches: compares `3 + 2D`, success ops `3 + 4D`, total `6 + 6D`, and
+      `D ≤ MaxDelGrpPerTxn × (MaxAllocLegPerGrp + MaxSpareLegPerGrp)` — 80
+      today, so `486 ≤ EtcdMaxTxnOps = 512`. Sides contribute one DN each
+      because a latched SP has no migrations and therefore no two-side legs.
+      D1 (≤ ~100), D3 (≤ 8) and the latch (5) are trivially legal. SPD14 is
+      the tripwire pair that keeps it so: an arithmetic assertion over the
+      NAMED constants (`gateway/txnbudget_test.go`) and a maximum-shape batch
+      committed against a real etcd (`model/drain_test.go`).
 
 ---
 
@@ -1434,6 +1609,9 @@ parses them.
 | `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
 | `reaction applied` | `cluster_id`, `sp_id`, `kind` (`failover`/`grow_data`/`grow_meta`/`replace_cntlr`/`spare_create`/`spare_switch`), ids, `revision` | AR2 |
 | `reaction skipped` | `cluster_id`, `sp_id`, `kind`, `reason` | AR2 |
+| `sp drain step` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs` or `slice`), `cntlr_cnt` for `cntlrs`; `slice_id`, `grp_cnt`, `slice_done` for `slice` | every committed D1 and D2 step (§11.6). D3 emits `sp drained` instead, so `phase=final` never appears here. Non-normative in the §12 sense — it names no decision — but the §14 drain case counts it, because it is the only record that shows a multi-batch drain advancing |
+| `sp drained` | `cluster_id`, `sp_id`, `sp_name` | D3 committed (SPD12): the SP is gone |
+| `sp drain failed` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs`/`slice`/`final`), `slice_id` for `slice`, `reason?` (an `ErrPrecondition`'s), `error` | a drain step that did not commit (SPD6). Retried on the next tick; there is no terminal-failure state |
 
 Plus the `etcd *` records of `etcdutil` (§3) and the `grpc client *`
 records of the interceptors (`grpc.md`) — the latter are what an agent's
@@ -1503,6 +1681,24 @@ does).
   group's `location`s at `requiredCnt = 1`
   (`TestReactionSpareCreateExcludesGroupLocations`); the AR1 gate refusing
   a pass on a missing and on an invalid stored conf.
+* **drain.go** (§11.6) — SPD8's derivation for all four states, the fourth
+  being an SP that is NOT latched, which is what stops a pass from draining a
+  healthy SP; SPD6's "at any sp_level", with an unhealthy primary in the
+  fixture so a pass that fell through to the reactions would show up as a
+  failover; a failed step logging `sp drain failed` with the phase and the
+  `ErrPrecondition`'s reason and being retried unchanged on the next pass; the
+  self-tick armed by a step that PROGRESSED, not armed by an idempotent no-op,
+  and coalesced; SPD7's cntlr-less fan-out leaving every side child idle.
+  In `model`: the batch size and the tail-pop order (data before meta, tail
+  not head); the slice-final STM removing the key and the id list entry
+  together and never separately; per-node accounting (one write, one capacity
+  key move and one rev bump per node per STM, including a DN carrying several
+  sides of one batch and a CN carrying two cntlrs); SPD2's three guards
+  mutation-tested against all three ops in BOTH directions; D3 refusing while
+  any cntlr or slice survives; the deliberate asymmetry between a missing
+  DESCRIBING key (refuse) and a missing RECEIVING ledger (skip); two
+  concurrent drivers converging with exact ledgers; and SPD14's real-etcd
+  ceiling test, one maximum-shape batch against `--max-txn-ops=512`.
 * **clusterconf.go** — key→id derivation, the entry handed back exactly as
   stored, an invalid conf kept in the cache rather than dropped, delete.
 
@@ -1642,12 +1838,14 @@ Preflight (fail fast, install nothing):
 
 The suite brings its own etcd, so it owns etcd's deployment requirements
 too: the §14.3 launch line passes `--max-txn-ops=512` because every etcd
-serving dnv must (`common.EtcdMaxTxnOps`; `DeleteClone` sweeps up to
-`MaxSliceCntPerSp × MaxCloneBmCnt` = 256 chunk keys in one transaction and
-etcd's default cap is 128). The script carries the number as a literal with
-that constant named in a comment — a shell suite cannot import `common`.
-Nothing in the worker's own cases reaches the default cap; the flag is there
-so the suite runs against an etcd configured the way production is.
+serving dnv must (`common.EtcdMaxTxnOps`; the sp drain's D2 batch is 486 ops
+at the maximum shape and `DeleteClone` sweeps up to `MaxSliceCntPerSp ×
+MaxCloneBmCnt` = 256 chunk keys in one transaction, while etcd's default cap
+is 128). The script carries the number as a literal with that constant named
+in a comment — a shell suite cannot import `common`. The worker's own cases
+stay far below the cap — the drain case's SP has four groups, not the 20 a
+maximum batch pops — so the flag is there to run against an etcd configured
+the way production is, not because a case needs it.
 
 ### 14.5 Identity plan
 
@@ -1680,7 +1878,7 @@ so the suite runs against an etcd configured the way production is.
 | `low_water_mark_pct` | 50 (case D sets it per step) | |
 | `extent_size` | 64 MiB (`MinDnExtSize`) | irrelevant to fakes; keeps `GrowSlice` math small |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
-| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below `DeleteClone`'s 256-key chunk sweep |
+| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-op D2 batch and below `DeleteClone`'s 256-key chunk sweep |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which
@@ -1728,6 +1926,8 @@ on any error.
 | `set-level` | `--sp --level N` | `SpConf.sp_level`; bump `SpRev` |
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
 | `set-free` | `dn\|cn --id --free-ext N` | rewrites `free_ext_cnt` + capacity key; no rev bump |
+| `set-deleting` | `--sp` | *added 2026-09-15:* `SpConf.deleting = true` + one `BumpSpRev` — `DeleteStoragePool`'s LATCH (architecture.md §8.4), so a case can drive the §11.6 drain without a gateway. Already latched ⇒ a no-op with no second bump (SPD3). It does NOT apply the five-empty-lists precondition: that gate is the gateway's, and re-implementing a public precondition in a driver is how the two drift apart |
+| `drain-sp` | `--sp [--max-steps N]` | *added 2026-09-15:* SPD8's derivation in a loop over `model.DrainSpCntlrs` / `DrainSpSlice` / `FinishSpDelete`, with no pass and no timer — the stand-in the GATEWAY suite uses, since it runs no worker (gateway.md §2.4). This suite uses it only with `--max-steps 1`, to BUILD a partially drained SP rather than race one; running out of steps is reported in `sp_deleted` and is never fatal |
 | `get` | `--key "<full key>"` | prints the value as protojson, choosing the message type from the key's second field |
 | `get-dn`/`get-cn`/`get-rev`/`get-sp`/`get-cntlr`/`get-slice`/`get-td` | ids | typed reads (`get-sp` = `SpConf` + every `Cntlr` + every `Slice` + every td, one snapshot) |
 | `list-keys` | `--prefix` | keys only |
@@ -2088,6 +2288,41 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
     0` on both, so the flag is the only trigger the failover can have come
     from; a `SyncupCntlr` with `cntlr.primary true` at the new primary's CN.
 
+**G — `drain`** (§11.6; the gateway suite owns the LATCH and stands the drain
+in with `wctl drain-sp`, this case owns the real coordinator)
+
+1. `put-cluster it-drain`; `put-dn 1/2` (free 8), `put-cn 1/2` (free 64);
+   `put-sp sp0` with TWO slices, each a meta group (ext 1) and a data group
+   (ext 2), every leg on one of the two DNs — the smallest shape that proves
+   a batch never spans slices. Each DN is charged 6 extents and each CN the
+   SP's whole 6-extent footprint (§6.5). Within `WAIT_SYNCUP`: `dn0` received
+   `SyncupSide` for `S1` and `cn0` `SyncupCntlr` for `C1`.
+2. `set-deleting sp0` (the workerctl stand-in for `DeleteStoragePool`'s
+   latch, §14.8). Within `WAIT_SYNCUP`: no `sp_conf` key is left. Then
+   `sp_rev`, `sp_id_to_name`, `cntlr` and `slice` are all at 0; every DN is
+   back to free 8 with an empty `side_ptr_list` and every CN to free 64 with
+   an empty `cntlr_ptr_list`; one capacity key per node; `SpGlobal`'s
+   Σ `shard_bucket` is 0 while `next_id` is still 2. The records: exactly one
+   `sp drain step phase=cntlrs`, exactly TWO `phase=slice` (one batch per
+   slice), exactly one `sp drained`, and zero `sp drain failed`.
+3. Resume after a restart. The window a real restart has to hit is
+   sub-second, so it is BUILT rather than raced: with `w1`-`w3` stopped,
+   `put-sp sp1` of the same shape, `set-deleting sp1`, then `drain-sp sp1
+   --max-steps 1` — exactly D1. Assert the partial state (`cntlr` 0, `slice`
+   2, `sp_conf` 1) and that D1 credited the CNs and only the CNs. Start
+   `w1`-`w3`, wait one grace window, re-assert the ownership table; within
+   `WAIT_SYNCUP` `sp1` is gone and every ledger is restored again. The
+   restarted fleet must run NO D1 of its own — the `phase=cntlrs` count is
+   still 1 — which is SPD8's derivation resuming from the `SpConf` alone.
+4. SPD10's batch bound and its pop order, against the real coordinator:
+   `put-sp sp2` with ONE slice of 1 meta + 20 data groups, every group one
+   extent on both DNs (21 extents per DN — which is why this case's nodes are
+   seeded with 64 free and not the 8 the others use). `set-deleting sp2`;
+   within `WAIT_SYNCUP` it is gone, having taken exactly TWO `phase=slice`
+   steps, the first with `grp_cnt = 20` — the whole `MaxDelGrpPerTxn` budget
+   spent on the DATA tail before the meta group is touched at all. Ledgers
+   restored again; `SpGlobal.next_id` is 4.
+
 **E — `vote`**
 
 1. `put-cluster it-vote`; DNs 1..4 on shards `00`, `55`, `aa`, `ff` — so
@@ -2172,6 +2407,7 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | HL1-HL6 | B |
 | BM1-BM6 | C |
 | AR1-AR9 | D |
+| SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
 | MD2-MD6 (through the worker and `workerctl`) | every case; MD6 ops by D |
 | EU1-EU6 | every case |
 | CM1-CM6 | every launch, E (SIGTERM), fleet restarts |

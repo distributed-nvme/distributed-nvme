@@ -1238,12 +1238,24 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDeleteStoragePoolFullTeardown is the accounting counterpart of
-// CreateStoragePool: after a create and a delete the cluster is byte-for-byte
-// where the create found it — every SP key gone, every DN and CN budget,
-// pointer list and capacity key restored, the SpGlobal's bucket slot released
-// — with exactly three deliberate exceptions: next_id never rewinds (GW12: a
-// deleted sp_id must never come back), and each node the two RPCs touched has
-// been bumped exactly twice (§5.5).
+// CreateStoragePool: after a create, a delete and the drain that delete starts,
+// the cluster is byte-for-byte where the create found it — every SP key gone,
+// every DN and CN budget, pointer list and capacity key restored, the
+// SpGlobal's bucket slot released — with exactly three deliberate exceptions:
+// next_id never rewinds (GW12: a deleted sp_id must never come back), and each
+// node the two RPCs touched has been bumped exactly twice (§5.5).
+//
+// The delete now only LATCHES (§3), so sptDrain stands in for the sp
+// coordinator. The property under test is unchanged by that split, and
+// deliberately so: §0 #10 keeps the one-shot's real guarantee — DN and CN
+// budgets never disagree with the keys that describe them — by having every
+// batch release budget in the same transaction that shrinks the describing
+// key, so the END state must still be exactly this.
+//
+// "Bumped exactly twice" survives the split as well. One bump comes from the
+// create; the other is the drain's, and it is one per node because D1 releases
+// every cntlr's CN in ONE transaction and each of this SP's DNs carries a side
+// of exactly one group of one slice, which one D2 batch removes.
 func TestDeleteStoragePoolFullTeardown(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	before := env.dump()
@@ -1270,6 +1282,7 @@ func TestDeleteStoragePoolFullTeardown(t *testing.T) {
 	if reply.GetSpId() != spId {
 		t.Errorf("sp_id: got %d, want %d", reply.GetSpId(), spId)
 	}
+	sptDrain(env, sptSpName)
 	after := env.dump()
 	if len(before) != len(after) {
 		t.Errorf("key count: %d before the SP, %d after its teardown",
@@ -1365,6 +1378,12 @@ func sptRevisionOf(t *testing.T, raw []byte) uint64 {
 // CreateStoragePool can never build such an SP (§6.5 puts every leg on a
 // distinct DN), so the fixture is written by hand: this is exactly the state a
 // GrowSlice reaching back to an already-used DN produces (decision D-F).
+//
+// The property now belongs to model's dnReleaser rather than to the gateway's
+// dnLedger, and the fixture is what makes the test still prove it: both groups
+// sit in ONE slice, so both of the shared DN's sides are released by ONE D2
+// batch — a releaser that wrote per side instead of per node would bump twice
+// inside that single transaction.
 func TestDeleteStoragePoolBumpsASharedNodeOnce(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId, spName := env.putSharedDnSp()
@@ -1384,6 +1403,7 @@ func TestDeleteStoragePoolBumpsASharedNodeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteStoragePool: %v", err)
 	}
+	sptDrain(env, spName)
 	for _, addrPort := range []string{dnA, dnB} {
 		dn := env.dnConf(addrPort)
 		if dn.GetFreeExtCnt() != sptDnFree {
@@ -1663,9 +1683,11 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 // reach the fixture the other one reads.
 //
 // The sp_rev key is still READ on the way through — it is a §5.1 invariant key
-// whose absence is ABORTED either way — but a teardown deletes it along with
-// the rest of the SP, so the bypass shows up here as the write set, not as a
-// bump. TestGrowSliceWithoutAToken pins the bump.
+// whose absence is ABORTED either way — and since the RPC became a latch (§3)
+// a token-less delete bumps it exactly like a token-carrying one; the drain
+// then deletes it at D3. What the second subtest therefore pins is the whole
+// effect of the bypass: the latch commits, and the teardown it starts returns
+// every extent. TestGrowSliceWithoutAToken pins the bump on its own.
 func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
 	t.Run("the name lists still refuse it", func(t *testing.T) {
 		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -1718,6 +1740,7 @@ func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
 		if reply.GetSpId() != spId {
 			t.Errorf("sp_id: got %d, want %d", reply.GetSpId(), spId)
 		}
+		sptDrain(env, sptSpName)
 		for _, key := range []string{
 			model.SpConfKey(env.cid, sptSpName),
 			model.SpRevKey(conf.GetShardCode(), env.cid, spId),
@@ -1774,99 +1797,123 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 	sptWantCode(t, err, codes.NotFound)
 }
 
-// TestReleasePathsAbortOnALostConfKey pins the allocator ledgers' error
-// class on the widest release path there is. A dn_conf or cn_conf the
-// ledgers reach through a
-// stored Side or Cntlr is named by no request, so GW7 makes its absence a lost
-// invariant key — §5.9's ABORTED — and never the NOT_FOUND of an object the
-// caller asked for. The store is untouched either way: both ledgers read
-// before §8.4 stages its first Del and an error out of the closure commits
-// nothing (GW6), so the SP whose teardown aborted is still whole.
+// TestReleasePathsAbortOnALostConfKey pins the allocator ledgers' error class.
+// A dn_conf or cn_conf the ledgers reach through a stored Side or Cntlr is
+// named by no request, so GW7 makes its absence a lost invariant key — §5.9's
+// ABORTED — and never the NOT_FOUND of an object the caller asked for. The
+// store is untouched either way: each ledger reads before its handler stages
+// its first write and an error out of the closure commits nothing (EU4), so the
+// object whose release aborted is still whole.
+//
+// The two rows used to be DeleteStoragePool's, the widest release path there
+// was. It is no longer a release path at all — the sp drain took its ledgers
+// with it (§3) — so each row now drives the widest SURVIVING user of the
+// ledger it is about: DeleteSpareLeg for the DN half, DeleteCntlr for the CN
+// half. The drain's own answer to the same lost key is deliberately the
+// opposite one, and TestDrainToleratesALostNodeRecord in model/drain_test.go
+// pins it: a RECEIVING ledger that is gone has nothing to be credited, and a
+// drain that refused over it could never finish deleting the SP.
 func TestReleasePathsAbortOnALostConfKey(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		// key hands back both the invariant key to lose and the addr_port it
-		// belongs to: only the closure knows that addr, and §5's error text
-		// quotes it, so want is the format and the whole rendered sentence is
-		// what gets pinned (the ledger error strings are normative, not just
-		// their heads).
-		key  func(env *sptEnv, conf *pb.SpConf) (string, string)
-		want string
-	}{
-		{"a side's dn_conf", func(
-			env *sptEnv, conf *pb.SpConf,
-		) (string, string) {
-			addr := env.walkSides(conf)[0].AddrPort
-			return model.DnConfKey(env.cid, addr), addr
-		}, "dn_conf for %q is missing"},
-		{"a cntlr's cn_conf", func(
-			env *sptEnv, conf *pb.SpConf,
-		) (string, string) {
-			cntlr := env.cntlr(conf.GetSpId(), conf.GetCntlrIdList()[0])
-			return model.CnConfKey(env.cid, cntlr.GetAddrPort()),
-				cntlr.GetAddrPort()
-		}, "cn_conf for %q is missing"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
-			spId := env.createSp(sptDefaultSpec(sptSpName))
-			conf := env.spConf(sptSpName)
-			lostKey, addr := tc.key(env, conf)
-			// Only a corrupted store is ever in this state, so the key goes
-			// out through the raw client: no RPC deletes a node an SP uses.
-			if err := env.cli.Delete(env.ctx, lostKey); err != nil {
-				t.Fatalf("Delete: %v", err)
-			}
-			before := env.dump()
-			_, err := env.srv.DeleteStoragePool(
-				env.ctx, &pb.DeleteStoragePoolRequest{
-					ClusterName: env.name,
-					SpName:      sptSpName,
-					SpRev:       &pb.SpRev{Revision: 1},
-				})
-			sptWantCode(t, err, codes.Aborted)
-			// The ledger's ABORTED, not GW6's token refusal — the other way
-			// this RPC produces the same code. Pinned whole, the way
-			// sptWantStale pins msgStaleRevision.
-			want := fmt.Sprintf(tc.want, addr)
-			if msg := status.Convert(err).Message(); msg != want {
-				t.Errorf("want %q, got %q", want, msg)
-			}
-			after := env.dump()
-			if len(before) != len(after) {
-				t.Fatalf("the aborted teardown changed the key set: %d -> %d",
-					len(before), len(after))
-			}
-			for key, value := range before {
-				if !bytes.Equal(value, after[key]) {
-					t.Errorf("the aborted teardown rewrote %q", key)
-				}
-			}
-			// Read back through their own types what a partial teardown
-			// would have taken: §8.4 deletes the cntlrs, the slices and the
-			// SP's three keys after both ledgers have read, and the token is
-			// unconsumed because nothing committed (§5.5).
-			env.spConf(sptSpName)
-			for _, cntlrId := range conf.GetCntlrIdList() {
-				env.cntlr(spId, cntlrId)
-			}
-			for _, sliceId := range conf.GetSliceIdList() {
-				env.slice(spId, sliceId)
-			}
-			if got := env.spRev(conf.GetShardCode(), spId); got != 1 {
-				t.Errorf("sp_rev: got %d, want 1", got)
-			}
+	t.Run("a side's dn_conf", func(t *testing.T) {
+		env := newVolEnv(t)
+		legId := volCreateSpareLeg(env)
+		// Only a corrupted store is ever in this state, so the key goes out
+		// through the raw client: no RPC deletes a node an SP uses.
+		if err := env.cli.Delete(
+			env.ctx, model.DnConfKey(env.cid, volDnC),
+		); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		before := env.spConf()
+		beforeRev := env.spRev()
+		sliceBefore := env.slice()
+		_, err := env.srv.DeleteSpareLeg(env.ctx, &pb.DeleteSpareLegRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       &pb.SpRev{Revision: beforeRev},
+			GrpId:       volDataGrpId,
+			LegId:       legId,
 		})
-	}
+		volWantCode(t, err, codes.Aborted)
+		// The ledger's ABORTED, not GW6's token refusal — the other way this
+		// RPC produces the same code. Pinned whole, the way sptWantStale pins
+		// msgStaleRevision: the ledger error strings are normative, not just
+		// their heads.
+		want := fmt.Sprintf("dn_conf for %q is missing", volDnC)
+		if msg := status.Convert(err).Message(); msg != want {
+			t.Errorf("want %q, got %q", want, msg)
+		}
+		env.wantUntouched(before, beforeRev)
+		if got := env.slice(); !proto.Equal(got, sliceBefore) {
+			t.Errorf("the aborted release moved the slice: %v", got)
+		}
+	})
+
+	t.Run("a cntlr's cn_conf", func(t *testing.T) {
+		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+		spId := env.createSp(sptDefaultSpec(sptSpName))
+		conf := env.spConf(sptSpName)
+		standbyId := conf.GetCntlrIdList()[1]
+		addr := env.cntlr(spId, standbyId).GetAddrPort()
+		// §8.6 refuses to delete an enabled cntlr, so the disable comes first
+		// — while the CnConf is still there, since UpdateCntlrEnabled reads
+		// the CdcEntries and not the node.
+		if _, err := env.srv.UpdateCntlrEnabled(
+			env.ctx, &pb.UpdateCntlrEnabledRequest{
+				ClusterName: env.name,
+				SpName:      sptSpName,
+				SpRev:       &pb.SpRev{Revision: 1},
+				CntlrId:     standbyId,
+				Enabled:     false,
+			}); err != nil {
+			t.Fatalf("UpdateCntlrEnabled: %v", err)
+		}
+		if err := env.cli.Delete(
+			env.ctx, model.CnConfKey(env.cid, addr),
+		); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		before := env.dump()
+		_, err := env.srv.DeleteCntlr(env.ctx, &pb.DeleteCntlrRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			SpRev:       &pb.SpRev{Revision: 2},
+			CntlrId:     standbyId,
+		})
+		sptWantCode(t, err, codes.Aborted)
+		want := fmt.Sprintf("cn_conf for %q is missing", addr)
+		if msg := status.Convert(err).Message(); msg != want {
+			t.Errorf("want %q, got %q", want, msg)
+		}
+		after := env.dump()
+		if len(before) != len(after) {
+			t.Fatalf("the aborted release changed the key set: %d -> %d",
+				len(before), len(after))
+		}
+		for key, value := range before {
+			if !bytes.Equal(value, after[key]) {
+				t.Errorf("the aborted release rewrote %q", key)
+			}
+		}
+		// The cntlr the release aborted over is still listed and still keyed,
+		// and the token is unconsumed because nothing committed (§5.5).
+		env.cntlr(spId, standbyId)
+		if got := env.spRev(conf.GetShardCode(), spId); got != 2 {
+			t.Errorf("sp_rev: got %d, want 2", got)
+		}
+	})
 }
 
 // TestDeletingStoragePoolRefusesOtherMutators pins resolveSp's rejectDeleting
 // gate (§8 preamble): an SP whose teardown has begun accepts no further
 // changes, and DeleteStoragePool is the ONE mutator that must still proceed —
-// refusing the RPC that finishes the teardown would strand the SP.
+// refusing the RPC that starts, and re-confirms, the teardown would strand it.
 //
-// Nothing in v1 ever sets `deleting`, so this is the branch's only exercise
-// (gateway.md §10.18) and the flag is written directly.
+// The flag is still written directly here rather than through the RPC, because
+// what this pins is the GATE and not the latch: a fixture built by
+// DeleteStoragePool would also have bumped SpRev, and every assertion below
+// would then be one revision away from the one the gate is judged at.
+// TestDeleteStoragePoolLatchesOnly is the latch's own test.
 func TestDeletingStoragePoolRefusesOtherMutators(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptSmallSpec(sptSpName))
@@ -1892,7 +1939,9 @@ func TestDeletingStoragePoolRefusesOtherMutators(t *testing.T) {
 	if got := env.spRev(0, spId); got != 1 {
 		t.Errorf("a refusal bumped sp_rev to %d", got)
 	}
-	// The teardown itself still runs: openSpFlags(..., false).
+	// The delete itself still runs: openSpFlags(..., false). On an already
+	// latched SP it is SPD3's no-op — OK, no writes, no second bump — so what
+	// proves it ran is the absence of a refusal, plus the unmoved revision.
 	if _, err := env.srv.DeleteStoragePool(
 		env.ctx, &pb.DeleteStoragePoolRequest{
 			ClusterName: env.name,
@@ -1901,8 +1950,16 @@ func TestDeletingStoragePoolRefusesOtherMutators(t *testing.T) {
 		}); err != nil {
 		t.Fatalf("DeleteStoragePool on a deleting SP: %v", err)
 	}
+	if got := env.spRev(0, spId); got != 1 {
+		t.Errorf("a repeat delete bumped sp_rev to %d", got)
+	}
+	// The SP survives the RPC now: only the drain's D3 removes this key.
+	if !env.exists(model.SpConfKey(env.cid, sptSpName)) {
+		t.Errorf("sp_conf must survive the latch; only D3 removes it")
+	}
+	sptDrain(env, sptSpName)
 	if env.exists(model.SpConfKey(env.cid, sptSpName)) {
-		t.Errorf("sp_conf survived the teardown")
+		t.Errorf("sp_conf survived the drain")
 	}
 }
 

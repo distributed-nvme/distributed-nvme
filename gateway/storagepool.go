@@ -23,9 +23,13 @@ import (
 // against its exact capacity key inside it and the whole unit — scan and
 // commit — is retried when one moved (GW9).
 //
-// The counterpart is DeleteStoragePool, which reverses all of it in one STM:
-// there is no partial teardown state, because a half-deleted SP would leave DN
-// and CN budgets charged for legs no key describes any more.
+// The counterpart is DeleteStoragePool, which no longer reverses any of it
+// itself: it LATCHES the SP (`deleting = true` plus one SpRev bump) and the
+// worker's drain (model/drain.go) takes it apart in bounded steps. Partial
+// teardown is therefore a real, visible state — what the old one-shot really
+// guaranteed was not atomicity but AGREEMENT, that DN and CN budgets never
+// disagree with the keys describing them, and every drain batch preserves that
+// by releasing budget in the same transaction that shrinks the describing key.
 
 // The op names the bump helpers cite, so a log record names something
 // greppable. They are the RPC names verbatim.
@@ -589,22 +593,37 @@ func (s *Server) CreateStoragePool(
 	return &pb.CreateStoragePoolReply{SpId: spId}, nil
 }
 
-// DeleteStoragePool is architecture.md §8.4's DeleteStoragePool.
+// DeleteStoragePool is architecture.md §8.4's DeleteStoragePool, amended by
+// gateway.md §5.4 as amended 2026-09-15: it LATCHES the SP and returns.
 //
 // It is the one mutator that opens an SP with rejectDeleting = false: an SP
 // whose teardown has begun refuses every other change, and refusing the RPC
-// that finishes the teardown would strand it.
+// that starts the teardown would strand it.
 //
 // The five name lists are the whole precondition: cntlrs, slices, groups, legs
 // and sides were created implicitly by CreateStoragePool and are deleted
-// implicitly here, while thin devices, subsystems, clones, transfers and
-// migrations are objects a user made and must remove first.
+// implicitly by the drain, while thin devices, subsystems, clones, transfers
+// and migrations are objects a user made and must remove first. Nothing
+// cascades: by that precondition a deletable SP has no children a user owns, so
+// the "other resources" the drain removes are only the SP's own bookkeeping.
 //
-// One STM tears everything down. There is no partial teardown state, because a
-// half-deleted SP would leave DN and CN budgets charged for legs no key
-// describes any more — and the ledgers are what keep that one write, one
-// capacity-key maintenance and one revision bump per node (§5.5) no matter how
-// many sides of this SP one DN happened to carry.
+// Why a latch and not the one-shot teardown it replaces (§0 #1): that
+// transaction was unbounded in the DN dimension — already about 532 writes at
+// the 16-slice maximum shape, over common.EtcdMaxTxnOps, with no tripwire — and
+// GrowSlice makes a slice's group count unbounded, so no single transaction can
+// ever be proven legal. The worker's drain (model/drain.go) takes it apart in
+// steps whose size is a constant.
+//
+// SPD4 — the emptiness check and the latch share this STM with the reads, so
+// they are atomic, and once latched resolveSp's existing rejectDeleting gate
+// refuses every other mutator: no new child can appear after the check, ever.
+// SPD5 — no code path anywhere writes `deleting = false` on an existing SP; the
+// latch is one-way across restarts of every component.
+//
+// Consequences, stated for the record: CreateStoragePool keeps failing
+// AlreadyExists on the surviving `sp_conf` key until the drain's D3 removes it,
+// so name reuse resumes only then; and this RPC now returns while the SP still
+// exists, so an observer polls GetStoragePool until NOT_FOUND.
 func (s *Server) DeleteStoragePool(
 	ctx context.Context,
 	req *pb.DeleteStoragePoolRequest,
@@ -625,6 +644,15 @@ func (s *Server) DeleteStoragePool(
 		if err != nil {
 			return err
 		}
+		spId = sc.SpId()
+		if sc.Conf.GetDeleting() {
+			// SPD3: a repeat delete is an OK no-op with NO writes. It must not
+			// bump SpRev — the drain is already running, and a bump would only
+			// invalidate every client's token to force a pointless re-resolve.
+			// The GW6 check above has already run, so a stale token still
+			// ABORTs here rather than being answered OK.
+			return nil
+		}
 		held := []struct {
 			what string
 			cnt  int
@@ -642,76 +670,9 @@ func (s *Server) DeleteStoragePool(
 					req.GetSpName(), item.cnt, item.what)
 			}
 		}
-		cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		// Every cntlr reserved the SP's whole footprint, so every one of them
-		// returns it (§6.5). It is computed from the slices as they are NOW,
-		// which is what makes a grown SP release exactly what it charged.
-		footprint := spFootprint(slices)
-		dnl, err := newDnLedger(stm, sc.Cid, sc.Cc)
-		if err != nil {
-			return err
-		}
-		cnl := newCnLedger(stm, sc.Cid)
-		for _, slice := range slices {
-			for _, grp := range allGroups(slice) {
-				// Spare legs occupy a DN exactly like an active one (§8.12),
-				// so allLegs walks both lists.
-				for _, leg := range allLegs(grp) {
-					for _, side := range leg.GetSideList() {
-						err := dnl.release(
-							side.GetAddrPort(), sc.SpId(),
-							side.GetSideId(), grp.GetExtCnt())
-						if err != nil {
-							return err
-						}
-					}
-				}
-			}
-		}
-		for idx, cntlr := range cntlrs {
-			err := cnl.release(cntlr.GetAddrPort(), sc.SpId(),
-				sc.Conf.GetCntlrIdList()[idx], footprint)
-			if err != nil {
-				return err
-			}
-		}
-		globalKey := model.SpGlobalKey(sc.Cid)
-		global := &pb.SpGlobal{}
-		if !stm.Get(globalKey, global) {
-			// Read before the first Del so this refusal, like every other
-			// one, returns without having staged a write.
-			return errAborted("sp_global key %q is missing", globalKey)
-		}
-		for _, cntlrId := range sc.Conf.GetCntlrIdList() {
-			stm.Del(model.CntlrKey(sc.Cid, sc.SpId(), cntlrId))
-		}
-		for _, sliceId := range sc.Conf.GetSliceIdList() {
-			stm.Del(model.SliceKey(sc.Cid, sc.SpId(), sliceId))
-		}
-		stm.Del(model.SpNameKey(sc.Cid, sc.SpId()))
-		// The sp-worker stops dispatching when this key disappears (§10.3).
-		stm.Del(model.SpRevKey(sc.Shard(), sc.Cid, sc.SpId()))
-		stm.Del(model.SpConfKey(sc.Cid, req.GetSpName()))
-		// GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id
-		// must never come back, so agents may assume it never does (§5.4).
-		global.ShardBucket = releaseShard(
-			global.GetShardBucket(), sc.Shard())
-		stm.Put(globalKey, global)
-		if err := dnl.flush(opDeleteStoragePool); err != nil {
-			return err
-		}
-		if err := cnl.flush(opDeleteStoragePool); err != nil {
-			return err
-		}
-		spId = sc.SpId()
-		return nil
+		sc.Conf.Deleting = true
+		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
+		return bumpSp(stm, opDeleteStoragePool, sc)
 	})
 	if err != nil {
 		return nil, mapStmErr(err)

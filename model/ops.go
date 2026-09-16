@@ -119,6 +119,29 @@ func SpNextId(conf *pb.SpConf) uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// Cluster-scoped shard buckets (GW12, architecture.md §5.4)
+// ---------------------------------------------------------------------------
+
+// ReleaseShard is the deletion half of GW12: the deleted object's shard bucket
+// is decremented and its id is never reused. A zero bucket is left alone rather
+// than wrapped around, and a bucket of the wrong length — a global written
+// before ShardBucketSize was what it is, or a hand-edited one — is normalized
+// rather than trusted, exactly as the mint half normalizes it.
+//
+// It lives in model and not in the gateway because FinishSpDelete, the last STM
+// of the sp drain (SPD12), applies it from the WORKER: DeleteCluster's
+// bucket-sum gate is only exact while every writer of a bucket agrees on the
+// rule, so there is one implementation of it.
+func ReleaseShard(bucket []uint32, shard uint32) []uint32 {
+	sized := make([]uint32, common.ShardBucketSize)
+	copy(sized, bucket)
+	if int(shard) < len(sized) && sized[shard] > 0 {
+		sized[shard]--
+	}
+	return sized
+}
+
+// ---------------------------------------------------------------------------
 // Thresholds (MD6, AR4, architecture.md §7)
 // ---------------------------------------------------------------------------
 
@@ -512,10 +535,11 @@ func isMdRaid1(conf *pb.SpConf) bool {
 }
 
 // legCntOf is how many legs one group of the SP has: 2 for RedundMdRaid1, 1
-// for RedundNone (§11.3).
+// for RedundNone (§11.3). The md-raid1 arm cites common.MaxAllocLegPerGrp for
+// gateway/alloc.go legCntOf's reason (SPD1).
 func legCntOf(conf *pb.SpConf) int {
 	if isMdRaid1(conf) {
-		return 2
+		return common.MaxAllocLegPerGrp
 	}
 	return 1
 }

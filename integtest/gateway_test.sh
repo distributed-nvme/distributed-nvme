@@ -55,12 +55,16 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
-# common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4):
-# DeleteClone sweeps a clone's whole src_slice_cnt x bm_cnt chunk rectangle in
-# ONE transaction (MaxSliceCntPerSp x MaxCloneBmCnt = 256 point deletes plus a
-# handful of other ops), and etcd's default cap of 128 would refuse it. The
-# suite is shell and cannot import the constant, so the literal is repeated
-# here; it must track common/constants.go.
+# common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4).
+# Two transactions are above etcd's default cap of 128: the sp drain's D2
+# batch, 486 ops at the maximum shape (dnv-worker.md §11.6 — the larger, and
+# the one the number is sized by), and DeleteClone's sweep of a clone's whole
+# src_slice_cnt x bm_cnt chunk rectangle, MaxSliceCntPerSp x MaxCloneBmCnt =
+# 256 point deletes plus a handful of other ops. Step 13 reaches the second;
+# step 17's `wctl drain-sp` commits batches of the first family but nowhere
+# near its ceiling (sp0 has four groups, not twenty). The suite is shell and
+# cannot import the constant, so the literal is repeated here; it must track
+# common/constants.go.
 ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-gateway-integtest
@@ -242,7 +246,9 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 
 # wctl is the ground-truth reader (§10.9): the raw decoded etcd state, read
 # back by a binary that is NOT the code under test. Its only writes in this
-# suite are set-created and set-provisioned (§2.4).
+# suite are the three worker-role stand-ins of §2.4 — set-created,
+# set-provisioned and (since 2026-09-15) drain-sp, which finishes the teardown
+# `delete-sp` now only latches.
 wctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -2442,19 +2448,62 @@ EOF
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.td_name_list | length')" \
 		"0" "sp0 td_name_list after both deletes"
 	assert_eq "$(key_count thin_device)" "0" "thin_device keys"
+	local sliceId latchRev drainOut
+	sliceId=$(sp_first_slice sp0)
 	out=$(gw delete-sp --sp sp0 --rev "$SP_REV")
 	assert_field "$out" '.sp_id' "$spId" "delete-sp reply sp_id"
-	# §5.4: every key the SP implied is gone, and the whole footprint returns
-	# to the nodes — one write, one capacity key and one revision bump per
-	# node however many sides of this SP it carried.
-	assert_eq "$(key_count sp_conf)" "0" "sp_conf keys after delete-sp"
-	assert_eq "$(key_count sp_rev)" "0" "sp_rev keys after delete-sp"
+	# sp_incremental_deleting.md §3: delete-sp LATCHES and returns. The SP is
+	# still there, flagged, with every key it implies intact — that inventory
+	# shrinking is what an operator watches as progress.
+	refresh_rev sp0
+	latchRev=$SP_REV
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.deleting')" "true" \
+		"sp0 deleting after delete-sp"
+	assert_eq "$(key_count sp_conf)" "1" "sp_conf survives the latch"
+	assert_eq "$(key_count cntlr)" "$SP_CNTLR_CNT" "cntlr keys survive the latch"
+	assert_eq "$(key_count slice)" "$SP_SLICE_CNT" "slice keys survive the latch"
+	# SPD3: a repeat delete is an OK no-op that must NOT bump — the drain is
+	# already running and a bump would only invalidate every client's token.
+	out=$(gw delete-sp --sp sp0 --rev "$SP_REV")
+	assert_field "$out" '.sp_id' "$spId" "repeat delete-sp reply sp_id"
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$latchRev" "a repeat delete-sp must not bump SpRev"
+	# Every other mutator keeps refusing while the drain runs, and the name is
+	# not reusable until the final STM removes sp_conf.
+	assert_no_write "create-sp of a latched name" \
+		gwx ALREADY_EXISTS create-sp --sp sp0 --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" --raid1
+	assert_no_write "set-sp-level on a latched SP" \
+		gwx FAILED_PRECONDITION set-sp-level --sp sp0 --rev "$SP_REV" \
+		--level READONLY
+	assert_no_write "grow-slice on a latched SP" \
+		gwx FAILED_PRECONDITION grow-slice --sp sp0 --rev "$SP_REV" \
+		--slice "$sliceId" --meta
+	# The drain itself is the sp coordinator's, and this suite runs no
+	# dnv-worker: `wctl drain-sp` is the worker-role stand-in, the same kind of
+	# write as `wctl set-provisioned` and `wctl set-created` above. The REAL
+	# coordinator driving a real drain — restart included — is
+	# dnv-worker.md §14's case.
+	drainOut=$(wctl drain-sp --sp sp0)
+	assert_field "$drainOut" '.sp_id' "$(printf '%016x' "$spId")" \
+		"drain-sp echoes the sp_id"
+	assert_eq "$(jq_of "$drainOut" '.steps')" "$((2 + SP_SLICE_CNT))" \
+		"the drain took D1 + one batch per slice + D3"
+	assert_eq "$(jq_of "$drainOut" '.slice_cnt')" "$SP_SLICE_CNT" \
+		"the drain emptied every slice"
+	assert_eq "$(jq_of "$drainOut" '.sp_deleted')" "true" \
+		"the drain reached its final STM"
+	# §5.4 as amended: every key the SP implied is gone, and the whole
+	# footprint returns to the nodes — one write, one capacity key and one
+	# revision bump per node per transaction that touched it.
+	assert_eq "$(key_count sp_conf)" "0" "sp_conf keys after the drain"
+	assert_eq "$(key_count sp_rev)" "0" "sp_rev keys after the drain"
 	assert_eq "$(key_count sp_id_to_name)" "0" "sp_id_to_name keys"
-	assert_eq "$(key_count cntlr)" "0" "cntlr keys after delete-sp"
-	assert_eq "$(key_count slice)" "0" "slice keys after delete-sp"
+	assert_eq "$(key_count cntlr)" "0" "cntlr keys after the drain"
+	assert_eq "$(key_count slice)" "0" "slice keys after the drain"
 	global=$(raw_key "$DNV_PREFIX sp_global $cidHex")
 	assert_eq "$(jq_of "$global" '.shard_bucket | add')" "0" \
-		"SpGlobal Σbucket after delete-sp"
+		"SpGlobal Σbucket after the drain"
 	# GW12: the bucket shrinks, next_id never rewinds — a deleted sp_id must
 	# never come back.
 	assert_field "$global" '.next_id' "2" "SpGlobal next_id never rewinds"
@@ -3016,6 +3065,19 @@ case_parallel() {
 		"delete-sp wave: OK jobs (codes $(parallel_race_codes "$out"))"
 	assert_eq "$(jq_of "$out" '[.[] | .reply.sp_id | tonumber] | sort | @json')" \
 		"$sp_ids" "delete-sp wave: the sp_id set matches step 3's"
+	# Every job LATCHED its SP (§3); the teardown is the sp coordinator's, and
+	# this suite runs none, so the worker-role stand-in finishes each one. The
+	# ten drains are sequential on purpose: what the wave was racing is the
+	# gateway's ten concurrent latches, and the drains would only add a race
+	# model/drain_test.go's TestDrainConcurrentDriversConverge already owns.
+	assert_eq "$(key_count sp_conf)" "$PAR_CLIENTS" \
+		"delete-sp wave: every SP is latched, none removed"
+	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
+		sp=$(parallel_sp "$i")
+		assert_eq "$(jq_of "$(sp_json "$sp")" '.sp_conf.deleting')" "true" \
+			"$sp: deleting after the wave"
+		wctl drain-sp --sp "$sp" >/dev/null
+	done
 
 	# The final audit: state identical to the end of step 2.
 	for i in 0 1 2 3; do
@@ -4101,9 +4163,11 @@ case_faults() {
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
 
 	# The twelfth guard of §10.14 step 3 — an SP-level mutator refused because
-	# the SP is `deleting` — has no probe here on purpose: nothing in v1 ever
-	# sets SpConf.deleting, so resolveSp's rejectDeleting branch is unit-only
-	# and §10.18 records it as such.
+	# the SP is `deleting` — has no probe HERE on purpose, but not for the old
+	# reason: since 2026-09-15 `delete-sp` sets the flag (§5.4), and step 17 of
+	# case S drives the gate for real. It cannot be driven here, because this
+	# stage's sp0 must stay live for the rest of the battery and the latch is
+	# one-way.
 
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 3: sp0's content must not change"
@@ -4843,12 +4907,17 @@ case_restart() {
 			--rev "$SP_REV")
 		# sp_id is a uint64, so protojson renders it as a STRING.
 		assert_field "$out" '.sp_id' "$want_id" "$name: delete-sp reply sp_id"
-		# No refresh_rev here: DeleteStoragePool removes SpRev along with the
-		# rest of the write set, so there is no token left to cache.
+		# No refresh_rev here: the latch bumps SpRev and the drain below
+		# removes the key along with the rest of the SP, so there is no token
+		# left worth caching.
+		# The drain is the sp coordinator's and this suite runs no worker;
+		# `wctl drain-sp` stands in for it exactly as `wctl set-provisioned`
+		# stands in for the RW18 flip.
+		wctl drain-sp --sp "$name" >/dev/null
 	done
 
-	# ② §5.4's delete is one STM that tears everything down, so every kind the
-	# SPs owned must be gone, not merely thinned out.
+	# ② the latch plus its drain reverse everything the create did, so every
+	# kind the SPs owned must be gone, not merely thinned out.
 	assert_eq "$(key_count sp_conf)" "0" "sp_conf keys after the teardown"
 	assert_eq "$(key_count sp_id_to_name)" "0" "sp_id_to_name keys"
 	assert_eq "$(key_count sp_rev)" "0" "sp_rev keys"

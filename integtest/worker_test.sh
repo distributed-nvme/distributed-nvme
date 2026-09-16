@@ -8,8 +8,8 @@
 #   bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@ip
 #
 # Cases (§14.11), in order, each in its own cluster `it-<case>` and each after
-# a fleet restart (§14.10): smoke, revision, health, bitmap, reaction, vote,
-# handoff. Cleanup runs unconditionally at the start and, on success only, at
+# a fleet restart (§14.10): smoke, revision, health, bitmap, reaction, drain,
+# vote, handoff. Cleanup runs unconditionally at the start and, on success only, at
 # the end: a failing run leaves etcd's data, every log and every behavior file
 # in place and dumps the §14.13 diagnostics.
 #
@@ -48,10 +48,13 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # U10 (§14.4/§14.6): every etcd serving dnv MUST run with --max-txn-ops at
-# least this high, because DeleteClone sweeps up to MaxSliceCntPerSp ×
-# MaxCloneBmCnt = 256 clone bitmap chunk keys in one transaction and etcd's
-# default cap is 128. The literal is common.EtcdMaxTxnOps; a shell suite
-# cannot import common, so the two are kept in step by hand.
+# least this high. Two transactions are above etcd's default cap of 128: the
+# sp drain's D2 batch, 486 ops at the maximum shape (§11.6), and DeleteClone's
+# sweep of up to MaxSliceCntPerSp × MaxCloneBmCnt = 256 clone bitmap chunk
+# keys. Case G commits D2 batches, though far below their ceiling — its
+# widest slice has 21 groups' worth of sides, not the 20 x 4 DNs a maximum
+# batch touches. The literal is common.EtcdMaxTxnOps; a shell suite cannot
+# import common, so the two are kept in step by hand.
 ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-worker-integtest
@@ -108,7 +111,7 @@ CLONE_ID=0x30
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it
 
-CASES=(smoke revision health bitmap reaction vote handoff)
+CASES=(smoke revision health bitmap reaction drain vote handoff)
 
 DN_DIRS=(dn0 dn1 dn2 dn3)
 CN_DIRS=(cn0 cn1 cn2)
@@ -2781,6 +2784,206 @@ worker_not_listed() { # <seed>
 	local seeds
 	seeds=$(worker_seeds) || return 1
 	[ "$(printf '%s\n' "$seeds" | grep -cx "$1" || true)" = 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Case G — drain (§14.11 G, dnv-worker.md §11.6): the sp coordinator tears a
+# LATCHED storage pool down in bounded steps
+# ---------------------------------------------------------------------------
+#
+# The gateway suite owns the LATCH — that `delete-sp` writes `deleting = true`,
+# bumps once and returns — and stands the drain in with `wctl drain-sp`, because
+# it runs no dnv-worker. This case is the other half: the REAL sp coordinator,
+# reacting to the flag on its own ticker, running SPD8's derivation to the end.
+
+# key_cnt counts the keys under one prefix, and FAILS LOUDLY when the read
+# itself failed. `grep -c .` prints 0 on empty stdin either way, so a swallowed
+# failure would make "the drain finished" and every post-drain count assertion
+# pass on a dead etcd or a dropped ssh — the exact trap `rlog` and
+# `dn_capacity_gone` already carry comments about. The read is therefore done
+# first, on its own, and its status is checked before anything is counted.
+key_cnt() { # <prefix>
+	local out
+	out=$(ctl list-keys --prefix "$1") || return 1
+	printf '%s' "$out" | grep -c . || true
+}
+
+# drain_finished is the `wait_until` predicate for "the SP is gone". A failed
+# read returns non-zero from key_cnt and leaves the poll running, rather than
+# satisfying it.
+drain_finished() {
+	local cnt
+	cnt=$(key_cnt sp_conf) || return 1
+	[ "$cnt" = 0 ]
+}
+
+# drained_records counts the §7 `sp drained` records across every worker that
+# has run in this case: the drain may finish under a different owner than the
+# one that started it, and either way exactly one final STM commits.
+drained_records() { wcount 'select(.msg == "sp drained")'; }
+drain_step_records() { # <phase>
+	wcount 'select(.msg == "sp drain step") | select(.phase == $p)' --arg p "$1"
+}
+drain_failed_records() { wcount 'select(.msg == "sp drain failed")'; }
+
+# drain_put_sp plants the case fixture: one SP with TWO slices, each a meta and
+# a data group, every leg on one of the two DNs. Two slices is the smallest
+# shape that proves a batch never spans slices (SPD10) — the drain must take one
+# D2 step per slice.
+drain_put_sp() { # <name> <sp id>
+	ctl put-sp --name "$1" --id "$2" --shard 00 --slots 0,1 --level 0 \
+		--thresholds "$THRESHOLDS" --lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false \
+		--slice 1:0 --slice 2:1 \
+		--group 1:1:meta:1:raid1 --group 1:2:data:2:raid1 \
+		--group 2:3:meta:1:raid1 --group 2:4:data:2:raid1 \
+		--leg 1:1:0 --leg 1:2:1 --leg 2:3:0 --leg 2:4:1 \
+		--leg 3:5:0 --leg 3:6:1 --leg 4:7:0 --leg 4:8:1 \
+		--side 1:1:1:0 --side 2:2:2:0 --side 3:3:1:0 --side 4:4:2:0 \
+		--side 5:5:1:0 --side 6:6:2:0 --side 7:7:1:0 --side 8:8:2:0
+}
+
+# drain_assert_restored is the leak check: every extent the SP charged is back,
+# every pointer list is empty, every node carries exactly one capacity key at
+# its full free count, and the cluster's SpGlobal bucket is empty again while
+# next_id never rewinds (GW12).
+drain_assert_restored() { # <free-per-dn> <free-per-cn> <next-id>
+	local free_dn=$1 free_cn=$2 next=$3 i
+	for i in 1 2; do
+		assert_eq "$(dn_free "$i")" "$free_dn" "dn $i free_ext_cnt restored"
+		assert_eq "$(ctl get-dn --id "$i" | "$JQ" -r \
+			'(.side_ptr_list // []) | length')" "0" \
+			"dn $i side_ptr_list emptied"
+		assert_eq "$(cn_free "$i")" "$free_cn" "cn $i free_ext_cnt restored"
+		assert_eq "$(ctl get-cn --id "$i" | "$JQ" -r \
+			'(.cntlr_ptr_list // []) | length')" "0" \
+			"cn $i cntlr_ptr_list emptied"
+	done
+	assert_eq "$(key_cnt dn_capacity)" "2" "one dn_capacity key per DN"
+	assert_eq "$(key_cnt cn_capacity)" "2" "one cn_capacity key per CN"
+	local global
+	# $CID is already the %016x form put-cluster emitted (idHex), not a
+	# decimal: the gateway suite's CID is the other one, and printf-ing this
+	# one is "invalid number".
+	global=$(ctl get --key "$DNV_PREFIX sp_global $CID")
+	assert_eq "$("$JQ" -r '(.shard_bucket // []) | add // 0' <<<"$global")" "0" \
+		"SpGlobal Σ shard_bucket after the drain"
+	assert_field "$global" '.next_id' "$next" "SpGlobal next_id never rewinds"
+}
+
+case_drain() {
+	CASE=drain
+
+	stage 1 "the drain fixture: two DNs, two CNs, sp0 with two slices"
+	new_cluster drain
+	local i
+	# 64 free extents per node, not the 8 the other cases use: step 4 plants a
+	# slice wider than one drain batch, which needs 21 extents per DN.
+	for i in 1 2; do put_dn "$i" 64; done
+	for i in 1 2; do put_cn "$i" 64; done
+	drain_put_sp sp0 1
+	# Each DN carries four sides of 1+2+1+2 = 6 extents; each CN reserves the
+	# SP's whole footprint, also 6 (§6.5).
+	assert_eq "$(dn_free 1)" "58" "dn 1 free after the fixture"
+	assert_eq "$(cn_free 1)" "58" "cn 1 free after the fixture"
+	wait_until "$WAIT_SYNCUP" "dn0: SyncupSide for side 1" \
+		req_ge 1 dn0 SyncupSide '(.side_pointer.side_id | tostring) == "1"'
+	wait_until "$WAIT_SYNCUP" "cn0: SyncupCntlr for cntlr 1" \
+		req_ge 1 cn0 SyncupCntlr '(.cntlr_pointer.cntlr_id | tostring) == "1"'
+
+	stage 2 "the latch, and the coordinator drains sp0 to nothing"
+	local latched
+	latched=$(ctl set-deleting --sp sp0)
+	assert_field "$latched" '.latched' "true" "set-deleting latched sp0"
+	# AR3 splits (SPD6): a latched SP runs the drain instead of nothing at
+	# all, and its own SpRev bumps carry it from step to step with no timer.
+	wait_until "$WAIT_SYNCUP" "sp0 to drain away" drain_finished
+	assert_eq "$(key_cnt sp_rev)" "0" "sp_rev keys after the drain"
+	assert_eq "$(key_cnt sp_id_to_name)" "0" "sp_id_to_name keys after the drain"
+	assert_eq "$(key_cnt cntlr)" "0" "cntlr keys after the drain"
+	assert_eq "$(key_cnt slice)" "0" "slice keys after the drain"
+	drain_assert_restored 64 64 2
+	# The phases, observed: D1 once for every cntlr at once, one D2 batch per
+	# SLICE — never one spanning both — and exactly one final STM.
+	assert_eq "$(drain_step_records cntlrs)" "1" "D1 ran exactly once"
+	assert_eq "$(drain_step_records slice)" "2" \
+		"one D2 batch per slice (a batch never spans slices)"
+	assert_eq "$(drained_records)" "1" "exactly one \`sp drained\` record"
+	assert_eq "$(drain_failed_records)" "0" "no drain step failed"
+
+	stage 3 "a PARTIALLY drained SP resumes after a worker restart"
+	# The window a real restart has to hit is sub-second, so it is built
+	# instead of raced: with no worker running, sp1 is latched and advanced by
+	# exactly ONE step (D1). What the restarted fleet then finds is the state
+	# SPD8 has to resume from — latched, no cntlrs, every slice still there —
+	# and nothing but the SpConf tells it where it is.
+	local w
+	for w in w1 w2 w3; do stop_worker "$w"; done
+	drain_put_sp sp1 2
+	ctl set-deleting --sp sp1 >/dev/null
+	local partial
+	partial=$(ctl drain-sp --sp sp1 --max-steps 1)
+	assert_field "$partial" '.sp_deleted' "false" \
+		"one step must NOT finish a two-slice drain"
+	assert_eq "$(jq_of "$partial" '.cntlr_cnt')" "2" "the one step was D1"
+	assert_eq "$(key_cnt cntlr)" "0" "cntlr keys after the partial drain"
+	assert_eq "$(key_cnt slice)" "2" "slice keys survive the partial drain"
+	assert_eq "$(key_cnt sp_conf)" "1" "sp_conf survives the partial drain"
+	# D1 credited the CNs and nothing else, which is what makes the resume
+	# observable: the DNs are still charged.
+	assert_eq "$(cn_free 1)" "64" "cn 1 credited by the partial drain's D1"
+	assert_eq "$(dn_free 1)" "58" "dn 1 still charged after D1"
+	for w in w1 w2 w3; do start_worker "$w"; done
+	for w in w1 w2 w3; do wait_registered "$w"; done
+	log "  waiting $((VOTE_GRACE + 2))s for the grace window (VW7)"
+	sleep $((VOTE_GRACE + 2))
+	assert_owners 50 w1 w2 w3
+	wait_until "$WAIT_SYNCUP" "sp1 to finish draining after the restart" \
+		drain_finished
+	assert_eq "$(key_cnt slice)" "0" "slice keys after the resumed drain"
+	drain_assert_restored 64 64 3
+	# The restarted fleet re-derived the position from the SpConf alone: it
+	# ran no D1 of its own, because D1 had already committed.
+	assert_eq "$(drain_step_records cntlrs)" "1" \
+		"the resumed drain must not re-run D1"
+	assert_eq "$(drained_records)" "2" "sp1 committed its own final STM"
+	assert_eq "$(drain_failed_records)" "0" "no drain step failed"
+
+	stage 4 "a slice WIDER than one batch drains in two, data groups first"
+	# SPD10's batch bound and its pop order, against the real coordinator: one
+	# slice of 1 meta + 20 data groups, so the first batch spends its whole
+	# MaxDelGrpPerTxn budget on the DATA tail and the second takes the meta
+	# group and finishes the slice. Every group is one extent on both DNs, so
+	# the charge is 21 extents per DN and the arithmetic is the group COUNT.
+	local -a wide=(--group "1:1:meta:1:raid1" --leg "1:1:0" --leg "1:2:1"
+		--side "1:101:1:0" --side "2:102:2:0")
+	local g leg1 leg2
+	for g in $(seq 2 21); do
+		leg1=$((g * 2 - 1))
+		leg2=$((g * 2))
+		wide+=(--group "1:$g:data:1:raid1"
+			--leg "$g:$leg1:0" --leg "$g:$leg2:1"
+			--side "$leg1:$((100 + leg1)):1:0"
+			--side "$leg2:$((100 + leg2)):2:0")
+	done
+	ctl put-sp --name sp2 --id 3 --shard 00 --slots 0,1 --level 0 \
+		--thresholds "$THRESHOLDS" --lwm "$LWM" \
+		--cntlr 1:1:0:true \
+		--slice 1:0 \
+		"${wide[@]}" >/dev/null
+	assert_eq "$(dn_free 1)" "43" "dn 1 free after the wide fixture"
+	local slice_before
+	slice_before=$(drain_step_records slice)
+	ctl set-deleting --sp sp2 >/dev/null
+	wait_until "$WAIT_SYNCUP" "sp2 to drain away" drain_finished
+	assert_eq "$((  $(drain_step_records slice) - slice_before ))" "2" \
+		"a 21-group slice takes exactly two batches"
+	assert_eq "$(wcount 'select(.msg == "sp drain step")
+		| select(.phase == "slice") | select(.grp_cnt == 20)')" "1" \
+		"the first batch spent the whole MaxDelGrpPerTxn budget"
+	assert_eq "$(drained_records)" "3" "sp2 committed its own final STM"
+	assert_eq "$(drain_failed_records)" "0" "no drain step failed"
+	drain_assert_restored 64 64 4
 }
 
 case_vote() {

@@ -335,7 +335,7 @@ UpdateControllerNodeDisabled (+`cn_rev`), InspectControllerNode. Same flags.
 | command | RPC | flags beyond globals | notes |
 |---|---|---|---|
 | `sp create` | CreateStoragePool | `--cntlr-cnt`, `--slice-cnt`, `--init-ext-cnt`, `--slots`, `--redund` (default `raid1`; `raid1`\|`none`), `--bitmap-chunk-blocks`, `--stripe-size`, `--block-size`, `--thr-primary`/`--thr-cntlr`/`--thr-side`/`--thr-leg`, selectorFlags("dn"), selectorFlags("cn") | `bdev_conf` is **always** sent with `redund_conf` set per `--redund` (§0 #11): `raid1` ⇒ `redund_md_raid1{bitmap_chunk_block_cnt}` (0 = CP default), `none` ⇒ `redund_none{}`; `dm_raid0_conf.stripe_size`/`dm_pool_conf.data_block_size` only when non-zero; `event_threshold` only when a `--thr-*` is non-zero; no feature flags (§1.1) |
-| `sp delete` | DeleteStoragePool | (+ `--rev`) | |
+| `sp delete` | DeleteStoragePool | (+ `--rev`) | *2026-09-15:* the RPC LATCHES and returns (architecture.md §8.4), so a successful `sp delete` means "teardown started", not "gone". An operator polls `sp get` until `NOT_FOUND`; while it drains, `sp get` shows `deleting: true` and a shrinking inventory, `sp create` of the same name is `ALREADY_EXISTS`, and every other `sp` mutator is `FAILED_PRECONDITION`. Repeating `sp delete` is an OK no-op. dnvctl adds no `--wait` poller: §0 #10 forbids the hidden RPCs one would issue, and §0 #3 keeps the surface at one command per RPC |
 | `sp get` | GetStoragePool | — | **the SpRev token source** |
 | `sp list` | ListStoragePools | `--count`, `--page-token` | no `sp_name` in the request |
 | `sp set-cntlid-slots` | UpdateStoragePoolCntlidSlotList | `--slots` (+ `--rev`) | an empty list is sent as-is; the gateway refuses |

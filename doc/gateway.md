@@ -237,15 +237,20 @@ DefaultGatewayAgentTimeout = 10
 CloneBmChunkBytes = 1 << 20
 
 // A DEPLOYMENT REQUIREMENT, not a client setting: every etcd serving dnv
-// MUST run with --max-txn-ops=512 or higher. DeleteClone's deciding STM
-// deletes every clone bitmap chunk key in ONE transaction —
-// MaxSliceCntPerSp x MaxCloneBmCnt = 256 point deletes plus a handful of
-// other ops — and etcd's default cap is 128, which would refuse the whole
-// delete (§5.8, §10.4).
+// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128.
+// Two transactions are above it: the sp drain's D2 batch, 486 ops at the
+// maximum shape (dnv-worker.md §11.6 — the larger of the two, and the one
+// this number is sized by), and DeleteClone's deciding STM, which deletes
+// every clone bitmap chunk key in ONE transaction, MaxSliceCntPerSp x
+// MaxCloneBmCnt = 256 point deletes plus a handful of other ops
+// (§5.8, §10.4).
 EtcdMaxTxnOps = 512
 ```
 
-No other constant is added. `DefaultClusterName`, `ShardBucketSize`,
+No other constant is added by this document. (`MaxAllocLegPerGrp` and
+`MaxDelGrpPerTxn` were added on 2026-09-15 by the sp drain, whose owner is
+`dnv-worker.md` §11.6; they appear here only through the `EtcdMaxTxnOps`
+arithmetic above.) `DefaultClusterName`, `ShardBucketSize`,
 `Max*CntPerCluster`, `MaxCloneBmCnt`, `MaxMigrBmCnt` and the §7 bounds all
 exist already. `MaxCloneBmCnt` keeps its name and its value **16**, but it
 counts the chunks ONE source slice's bitmap may be split into
@@ -327,7 +332,7 @@ already exist (`cluster_conf`, the three globals,
 
 ### 2.4 Amendment to `integtest/workerctl` (applied with §10)
 
-Two subcommands so the integration suite can play the worker (§0 #12):
+Three subcommands so the integration suite can play the worker (§0 #12):
 
 * `set-created --sp <name|id> --name <td_name>` — resolves the td, calls
   `model.FlipCreated(ctx, cli, cid, shard, spId, []TdRef{{name, tdId}})`,
@@ -337,6 +342,17 @@ Two subcommands so the integration suite can play the worker (§0 #12):
 * `set-provisioned --sp <name|id> --slice <id> --leg <id> --side <id>` — the
   same through `model.FlipProvisioned` with one `SideRef`; also bumps `SpRev`
   when it wrote.
+* `drain-sp --sp <name|id> [--max-steps N]` *(added 2026-09-15 with the
+  latch, §5.4)* — runs the sp coordinator's drain to completion: SPD8's
+  derivation in a loop over `model.DrainSpCntlrs` / `DrainSpSlice` /
+  `FinishSpDelete`, with no pass and no timer. It emits
+  `{"sp_name":…, "sp_id":…, "steps":…, "cntlr_cnt":…, "grp_cnt":…,
+  "slice_cnt":…, "sp_deleted":<bool>}` (`sp_id` in the `%016x` key spelling,
+  which is what §10.11 step 17 asserts it against).
+  `--max-steps` is a real argument, not only a runaway guard: the worker
+  suite asks for exactly one step to BUILD a partially drained SP rather than
+  race one, so running out is reported in `sp_deleted` and is never fatal.
+  Every step bumps `SpRev` except the last, which deletes the key.
 
 ---
 
@@ -398,6 +414,8 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   prefixes every further key. SP-scoped RPCs then read
   `model.SpConfKey(cid, sp_name)` — absent ⇒ `NOT_FOUND`; mutators (except
   `DeleteStoragePool`) fail `FAILED_PRECONDITION` when `SpConf.deleting`.
+  `DeleteStoragePool` is what SETS that flag (§5.4), so the gate is live from
+  the moment it commits until the drain removes the key.
   The **paged** `List*` RPCs (clusters, disk nodes, controller nodes,
   storage pools) use plain reads, not an STM (§5.7): one `Get` of ClusterConf
   for the cid, then `Range`. `ListThinDevices`, `ListSubsystems` and the
@@ -668,12 +686,29 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   `MaintainDnCapacity`, `BumpDnRev` once; per CN likewise with
   `cntlr_ptr_list` and `BumpCnRev`; last the updated `SpGlobal`. Reply
   `sp_id`.
-* **DeleteStoragePool** — STM: resolve; token; all five name lists
-  (`td/nqn/clone/xfer/migr`) empty ⇒ else `FAILED_PRECONDITION`; delete every
-  Cntlr (reverse CN bookkeeping + `BumpCnRev` once per CN), every Slice
-  (reverse DN bookkeeping per leg/side + `BumpDnRev` once per DN), SpName,
-  SpRev, SpConf; decrement `SpGlobal` bucket. Reply `sp_id`. One STM tears
-  down everything; there is no partial teardown state.
+* **DeleteStoragePool** — *amended 2026-09-15: it LATCHES, and the sp-worker
+  drains (dnv-worker.md §11.6).* STM: `openSpFlags(..., rejectDeleting =
+  false)` — resolve, read `SpRev`, run GW6's token check; if `deleting` is
+  ALREADY true return OK here, with **no writes and no bump** (a repeat delete
+  must not invalidate every client's token to force a pointless re-resolve;
+  the token check has already run, so a stale token still ABORTs first); else
+  all five name lists (`td/nqn/clone/xfer/migr`) empty ⇒ else
+  `FAILED_PRECONDITION`; put `SpConf` with `deleting = true`; `BumpSpRev`.
+  Five ops. Reply `sp_id` — the repeat-delete no-op replies with it too, since
+  the RPC resolved the SP before short-circuiting and `DeleteStoragePoolReply`
+  carries nothing else.
+  The emptiness check and the latch share the STM with the reads, so they are
+  atomic, and once latched `resolveSp`'s existing `rejectDeleting` gate
+  refuses every other mutator — no new child can appear after the check, ever.
+  Nothing else is written: the SP, its cntlrs, its slices and every extent
+  they charge survive the reply, and partial teardown is now a real, visible
+  state (architecture.md §8.4). What the old one-shot really guaranteed was
+  not atomicity but AGREEMENT — DN and CN budgets never disagreeing with the
+  keys that describe them — and every drain batch keeps it by releasing budget
+  in the same transaction that shrinks the describing key. Consequences:
+  `CreateStoragePool` keeps failing `ALREADY_EXISTS` on the surviving
+  `sp_conf` key until the drain's last transaction, so name reuse resumes only
+  then, and an observer polls `GetStoragePool` until `NOT_FOUND`.
 * **GetStoragePool** — one STM: SpConf, SpRev, every listed Cntlr, every
   listed Slice; a missing listed key ⇒ `ABORTED`. Reply all of it (SpRev is
   the token source).
@@ -1099,13 +1134,21 @@ The other 49 RPCs never leave etcd.
    `CreateDiskNode`, `CreateControllerNode` on the cluster's, every GW9
    allocating RPC through the §6.5 scans on it, and `GrowSlice` and
    `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
-   `DeleteStoragePool` full-teardown accounting; §6.5's two-tier
+   `DeleteStoragePool`'s latch (SpConf + SpRev and nothing else, and a repeat
+   delete pinned in BOTH directions: the first must bump, the second must
+   not) plus the full-teardown accounting once the drain has run, driven here
+   through `model`'s three drain ops, and the sp drain's budget tripwire over
+   the named constants; §6.5's two-tier
    placement — a spare leg and a migration destination each land on the DN
    in the other failure domain, and still land (never `RESOURCE_EXHAUSTED`)
    once that DN is gone and the group's own domain is all that is left; a
    release path whose `dn_conf`/`cn_conf` invariant key is missing ⇒
    `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
-   nothing torn down. Clone bitmaps get three of their own: `bm_cnt` as
+   nothing torn down (`DeleteSpareLeg` for the DN half, `DeleteCntlr` for the
+   CN half; `DeleteStoragePool` left that pair on 2026-09-15, releasing
+   nothing itself any more, and the drain's deliberately OPPOSITE answer to
+   the same lost key — skip, because a latched SP must still be deletable —
+   is pinned in `model`). Clone bitmaps get three of their own: `bm_cnt` as
    §5.8's cross-slice high-water, asserted in both mutation directions —
    `(slice 5, bm 0)` ⇒ `1` (kills a `max(bm_cnt, src_slice_idx+1)`
    implementation, which would say 6) and `(slice 0, bm 3)` ⇒ `4` (kills any
@@ -1229,7 +1272,10 @@ That etcd MUST be started with **`--max-txn-ops=512`**
 (`common.EtcdMaxTxnOps`, §2.1 — the suite is shell and cannot import the
 constant, so the literal carries a comment naming it): step 13's
 `delete-clone` sweeps the clone's chunk keys in one transaction, and etcd's
-default cap of 128 would refuse it.
+default cap of 128 would refuse it. Step 17's `wctl drain-sp` commits D2
+batches of the same family, though sp0's four groups are far below the 20 a
+maximum batch pops, so no case here reaches the cap — the flag is what makes
+the suite run against an etcd configured the way production must be.
 etcd readiness is `wait_until WAIT_SHORT` on
 `workerctl --endpoints 127.0.0.1:15379 ping`; each gateway's readiness on
 `gatewayctl --gateway 127.0.0.1:2981<k> ping`.
@@ -1480,10 +1526,15 @@ path. Steps (each = one `stage`):
     hand-written object state — ≠ the current `sp_rev`, proving the store is
     not the source — + fake info.
 17. Reverse teardown: delete ns → ss → tds (t1 then t0 — snapshot-child
-    gate observed) → `delete-sp` (lists empty; full accounting restored:
-    every DN back to 64 free, CNs 4096, capacity keys back, `Σbucket` 0 for
-    sp) → `delete-dn` ×4 / `delete-cn` ×3 → `delete-cluster` → `wctl
-    list-keys --prefix dnv` count 0.
+    gate observed) → `delete-sp`, which LATCHES (§5.4): `deleting` true, the
+    cntlr and slice keys still there, a repeat delete OK with no second bump,
+    and — while latched — `create-sp` of the same name `ALREADY_EXISTS`,
+    `set-sp-level` and `grow-slice` `FAILED_PRECONDITION`. Then `wctl
+    drain-sp` (§2.4) finishes what the coordinator would: D1 + one batch per
+    slice + D3, after which the full accounting is restored — every DN back
+    to 64 free, CNs 4096, capacity keys back, `Σbucket` 0 for sp → `delete-dn`
+    ×4 / `delete-cn` ×3 → `delete-cluster` → `wctl list-keys --prefix dnv`
+    count 0.
 
 Proves: every RPC's happy path writes/removes exactly the specified keys; the
 worker-flip gates behave; trace ids flow end to end.
@@ -1504,8 +1555,11 @@ worker-flip gates behave; trace ids flow end to end.
 5. `race` waves: 10 `create-ss`, then 10 `create-ns` (per-SP, fresh tokens
    between waves) → all OK; 10 CdcEntries.
 6. Reverse `race` waves: 10 `delete-ns`, `delete-ss`, `delete-td`,
-   `delete-sp` → all OK; final state exactly step-2's: frees 64/4096
-   restored, capacity keys back, only cluster+nodes remain.
+   `delete-sp` → all OK; the ten SPs are then all LATCHED and none removed,
+   and `wctl drain-sp` finishes each in turn (sequentially: what the wave
+   races is the ten concurrent latches, and concurrent drains are model's
+   unit test). Final state exactly step-2's: frees 64/4096 restored, capacity
+   keys back, only cluster+nodes remain.
 
 Proves: N clients × M instances on disjoint resources all succeed with
 exact global invariants — the settled definition of parallel correctness
@@ -1554,9 +1608,10 @@ definition of (b).
    `delete-sp` with tds; `delete-ss` with ns; `delete-cntlr` primary, and
    enabled non-primary; snapshot of uncreated origin; `delete-td` referenced
    by ns / by clone dst / by uncreated snapshot child; `create-migr` on a
-   2-side leg; `switch-spare` unprovisioned; SP-level mutator against
-   `deleting` is unit-only (nothing sets `deleting` in v1 — noted in
-   §10.18).
+   2-side leg; `switch-spare` unprovisioned; and — since the 2026-09-15
+   amendment made `delete-sp` a latch (§5.4) — an SP-level mutator against a
+   really latched `deleting` SP, driven in case S's teardown stage rather than
+   here, where the SP must stay live for the rest of the battery.
 4. Agent faults via `behavior.json` (worker-suite knobs) and process
    control: dn0 `hang` → `create-dn` new addr on dn0's port… (a hung
    *listening* agent) → `ABORTED` and wall-clock between
@@ -1589,7 +1644,8 @@ brackets), codes match GW7, agent-call budget is bounded — the settled (c).
    create/delete round-trip through gw1; assert `list-keys` full dump
    contains **only** §5.1 kinds owned by the data — no gateway
    registration/lease/residue of any kind existed or exists.
-6. `delete-sp` ×10 via round-robin; accounting restored.
+6. `delete-sp` ×10 via round-robin, each latch immediately followed by its
+   `wctl drain-sp`; accounting restored.
 
 Proves: crash atomicity, statelessness (nothing to clean, instant rejoin),
 survivors unaffected — the settled (d).
@@ -1636,15 +1692,19 @@ Every RPC appears in ≥ 1 case; S alone covers all 59 happy paths.
 
 Rule coverage: GW6 → B3-6; GW7 → C throughout; GW9 → A3 (implicit) ;
 GW12 → A2/B2; AG2/AG3 → C4-5; AG4 → C5; GW1/§0 #3 → D. Unit-only (§9):
-`SpConf.deleting` gate, `CreateCluster` hash-collision guard branch,
-GW10 token-decode internals, GracefulStop.
+`CreateCluster` hash-collision guard branch, GW10 token-decode internals,
+GracefulStop. (The `SpConf.deleting` gate left this list on 2026-09-15:
+`delete-sp` sets the flag now, so case S drives the gate for real.)
 
 ### 10.19 Out of scope (v1)
 
 Performance/latency/soak; real agents, dnv-worker, dnv-cdc, dnvctl; multi-
 node etcd; etcd outage behavior (unit-level only); TLS/auth (none exists in
-dnv); clone-budget enforcement (§0 #16); `deleting`-mediated async teardown
-(no RPC sets it).
+dnv); clone-budget enforcement (§0 #16). The `deleting`-mediated async
+teardown left this list on 2026-09-15 in HALF: `delete-sp` sets the flag and
+case S asserts the latch, but the drain that consumes it belongs to the
+sp-worker, which this suite does not run — `wctl drain-sp` stands in for it
+(§2.4), and dnv-worker.md §14's drain case owns the real coordinator.
 
 ---
 
@@ -1655,7 +1715,9 @@ dnv); clone-budget enforcement (§0 #16); `deleting`-mediated async teardown
   ops + `ReasonStaleRevision`; the three `*ConfPrefix` builders; GW11's
   `ResolveBdevConf` plus the `Validate*Conf` pair). Worker call sites of the
   three ops pass `expectRev = 0`.
-* `integtest/workerctl`: `set-created`, `set-provisioned` (§2.4).
+* `integtest/workerctl`: `set-created`, `set-provisioned`, and — with the
+  2026-09-15 latch — `drain-sp`, the worker-role stand-in that finishes a
+  teardown this suite's gateway only starts (§2.4, §5.4).
 * `doc/cdc.md` §"CdcEntry ownership": rename the RPC it calls
   `UpdateSubsystemAllowedHosts` to the real name **`UpdateSubsystemHosts`**
   (proto and architecture.md §8.8 agree; cdc.md is the outlier).

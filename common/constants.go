@@ -65,6 +65,30 @@ const (
 	MaxCntlrCntPerCn     = 256
 	MaxLegPerGrp         = 8
 	MaxSpareLegPerGrp    = 2
+	// MaxAllocLegPerGrp is the allocator's ACTUAL maximum legs per group, as
+	// opposed to the aspirational and unenforced MaxLegPerGrp above: every
+	// allocating path picks between 1 leg (RedundNone) and 2 (RedundMdRaid1),
+	// and nothing in v1 builds a wider group.
+	//
+	// SPD1: it is CITED from all three places that make that choice —
+	// gateway/alloc.go legCntOf, model/ops.go legCntOf and worker/reaction.go
+	// legCnt — and from the sp-drain batch budget tripwire
+	// (gateway/txnbudget_test.go TestSpDrainBatchBudget), so that widening the
+	// allocator's group shape without revisiting MaxDelGrpPerTxn fails a test
+	// instead of a deployment.
+	MaxAllocLegPerGrp = 2
+	// MaxDelGrpPerTxn is the most groups ONE sp-drain batch removes from one
+	// slice in a single transaction (SPD10, dnv-worker.md §11.6). It bounds
+	// transaction SIZE, not
+	// rate — strictly sequential batches are the pacing — and it is a package
+	// constant rather than configuration for exactly that reason. The §6
+	// arithmetic it must satisfy is
+	//
+	//	6 + 6 x MaxDelGrpPerTxn x (MaxAllocLegPerGrp + MaxSpareLegPerGrp)
+	//	    <= EtcdMaxTxnOps
+	//
+	// which gateway/txnbudget_test.go asserts from the named constants (SPD14).
+	MaxDelGrpPerTxn = 20
 
 	CnCntlidSlotBase = 10000
 	CnCntlidSlotStep = 5000
@@ -260,10 +284,16 @@ const (
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
-	// etcd serving dnv MUST run with --max-txn-ops=512 or higher. etcd's
-	// default is 128, and DeleteClone's deciding transaction deletes every
-	// clone bitmap chunk key in one transaction — MaxSliceCntPerSp ×
-	// MaxCloneBmCnt = 256 deletes plus a handful of other ops (§8.9, U10).
+	// etcd serving dnv MUST run with --max-txn-ops=512 or higher; etcd's
+	// default is 128. Two transactions are above that default:
+	//
+	//   - the sp drain's D2 batch, 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp +
+	//     MaxSpareLegPerGrp) = 486 ops at the maximum shape (SPD14 — the
+	//     larger of the two, and the one this number is sized by);
+	//   - DeleteClone's deciding transaction, which deletes every clone bitmap
+	//     chunk key at once — MaxSliceCntPerSp × MaxCloneBmCnt = 256 deletes
+	//     plus a handful of other ops (§8.9, U10).
+	//
 	// The test etcd launchers and the integtest suites all pass it from here.
 	EtcdMaxTxnOps = 512
 

@@ -122,3 +122,38 @@ func TestDeleteCloneAtTheChunkCeiling(t *testing.T) {
 		}
 	}
 }
+
+// TestSpDrainBatchBudget is SPD14's arithmetic tripwire: the worst-case D2
+// batch must fit inside the transaction size dnv requires of every etcd.
+//
+// Per §6, with D the number of distinct DNs one batch touches:
+//
+//	compares = 3 + 2D   (SpConf, Slice, SpRev; per DN DnConf + DnRev)
+//	ops      = 3 + 4D   (Slice put/del, SpConf put, SpRev put;
+//	                     per DN DnConf put, capacity del + put, DnRev put)
+//	total    = 6 + 6D,  D <= MaxDelGrpPerTxn x (MaxAllocLegPerGrp +
+//	                                            MaxSpareLegPerGrp)
+//
+// Every constant is NAMED (SPD1): widening the allocator's group shape, the
+// spare ceiling or the batch size past the budget fails here, at once, instead
+// of as an "etcd: too many operations in txn request" out of a drain in the
+// field. Sides contribute one DN each because a deletable SP has no migrations
+// and therefore no two-side legs.
+//
+// TestDrainSpSliceAtTheCeiling in model/drain_test.go is the PROOF this
+// tripwire only approximates: it commits a maximum-shape batch against a real
+// etcd started with --max-txn-ops=common.EtcdMaxTxnOps.
+func TestSpDrainBatchBudget(t *testing.T) {
+	const legs = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
+	const dns = common.MaxDelGrpPerTxn * legs
+	const budget = 6 + 6*dns
+	if budget > common.EtcdMaxTxnOps {
+		t.Errorf(
+			"one sp drain batch is %d ops (6 + 6 x %d groups x (%d legs + %d "+
+				"spares)), over the %d dnv requires etcd to allow: lower "+
+				"MaxDelGrpPerTxn or raise EtcdMaxTxnOps and the --max-txn-ops "+
+				"of every etcd that serves dnv",
+			budget, common.MaxDelGrpPerTxn, common.MaxAllocLegPerGrp,
+			common.MaxSpareLegPerGrp, common.EtcdMaxTxnOps)
+	}
+}

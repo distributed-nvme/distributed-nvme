@@ -271,9 +271,13 @@ type spWorker struct {
 	desiredCh chan desiredState
 	// reportCh carries the children's flip and leg-row reports.
 	reportCh chan spReport
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
+	// drainCh is the sp drain's own tick (§0 #8, drain.go): a committed drain
+	// step that left work behind posts one token here, so the next step runs at
+	// once instead of at the next cntlr_interval. Capacity one, never blocking.
+	drainCh chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	done    chan struct{}
 
 	// Everything below is owned by the run goroutine.
 	desired   desiredState
@@ -313,6 +317,7 @@ func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 		seed:      p.seed,
 		desiredCh: make(chan desiredState, 1),
 		reportCh:  make(chan spReport, 64),
+		drainCh:   make(chan struct{}, 1),
 		ctx:       ctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),
@@ -381,6 +386,10 @@ func (w *spWorker) run() {
 			w.fanOut()
 		case rep := <-w.reportCh:
 			w.handleReports(rep)
+		case <-w.drainCh:
+			// The sp drain's self-tick (drain.go): one more pass, which
+			// re-derives the next step from what the last one left (SPD8).
+			w.reactionPass(newTraceCtx(w.ctx, w.seed))
 		case <-ticker.C:
 			w.tick()
 			if next := w.tickPeriod(); next != period {
@@ -592,7 +601,28 @@ func (w *spWorker) buildPlan(
 		standby = append(standby, cnId)
 	}
 
-	if !cntlrsResolved {
+	// SPD7: an SP with NO cntlr at all is a shape creation can never produce —
+	// CreateStoragePool always makes at least one — but the sp drain's D1 makes
+	// it for every latched SP, between D1 and D3. buildCntlrPlans already
+	// yields an empty map for it; the SIDE half needs its own arm, because
+	// RW15's "primary_cn_id = 0 if none" would otherwise reach the dn agent as
+	// a real CN id: agent/dnagent's cnIdsOf puts the primary at the head of the
+	// export list unconditionally, so an empty cntlr set would have every DN of
+	// the doomed SP BUILD a dm-error, a dm-linear, a subsystem and a namespace
+	// for the CN numbered 0 — new garbage, created while the SP is being torn
+	// down, and outliving the drain if a DN is slow to sweep it.
+	//
+	// The arm is "no cntlr at all", not "no primary": an SP that momentarily
+	// has cntlrs and no primary keeps RW15's documented behaviour exactly
+	// (TestSpSideRequestNoPrimary pins it), because there the zero is one entry
+	// in a list that still names real CNs.
+	//
+	// Leaving the sides idle costs the drain nothing. After D1 the sides are
+	// retired through the DN pointer lists as D2 empties them (§4.4), not
+	// through these children.
+	sideReason := ""
+	switch {
+	case !cntlrsResolved:
 		// RW15 + RW14: rather than shipping half a side_conf — an unresolved
 		// PRIMARY would send primary_cn_id = 0 and drop the real primary from
 		// standby_id_list, and every DN of the SP would tear that CN's
@@ -602,13 +632,20 @@ func (w *spWorker) buildPlan(
 		// cntlr_interval ticker re-resolves (RW14). The CNTLR children are
 		// unaffected: RW16's request carries no peer's cn_id, so an
 		// unresolved endpoint's effect stays confined to its own child.
+		sideReason = "cntlr unresolved"
+	case len(conf.GetCntlrIdList()) == 0:
+		// SPD7. Nothing is unresolved, so no re-resolution is armed: the next
+		// drain step's SpRev bump rebuilds the plan.
+		sideReason = "no cntlr"
+	}
+	if sideReason != "" {
 		slog.InfoContext(ctx, msgSpSidesIdle,
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
-			slog.String("reason", "cntlr unresolved"),
+			slog.String("reason", sideReason),
 		)
 	}
-	w.buildSidePlans(ctx, plan, state, primaryCnId, standby, cntlrsResolved)
+	w.buildSidePlans(ctx, plan, state, primaryCnId, standby, sideReason == "")
 	w.buildCntlrPlans(ctx, plan, state, cnIds)
 	return plan
 }

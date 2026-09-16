@@ -6,11 +6,12 @@ named here behaves as its owning spec says — nothing below is a defect
 against any of those specs; each is a boundary the design accepts,
 with the accepting decision cited. Companions: architecture.md Appendix D
 (v1 assumptions and known limits), decisions [D12]/[D15]/[D16]/[D17].
-Item ids `RK1`–`RK8`, append-only once cited — a closed item keeps its id and
+Item ids `RK1`–`RK9`, append-only once cited — a closed item keeps its id and
 is marked CLOSED in place, never deleted or renumbered. RK1–RK6 written
 2026-09-10, from the second full doc-vs-code verification and its design
 review; RK7 added 2026-09-11 with `dnvctl.md` and closed the same day by the
-presence-based GW6 change, which opened RK8 in its place.
+presence-based GW6 change, which opened RK8 in its place; RK9 added
+2026-09-15 with the sp drain (dnv-worker.md §11.6).
 
 ---
 
@@ -277,3 +278,40 @@ some or all mutators (refusing a token-less mutator with
 `INVALID_ARGUMENT`), rather than reverting to the RK7 semantics — the two are
 distinguishable precisely because presence, not value, is the discriminator.
 Added 2026-09-11 with the RK7 closure.
+
+---
+
+## RK9 — the sp drain's transaction budget is tripwired to a constant the allocator does not enforce
+
+**What.** The sp drain's D2 batch is legal only while
+`6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) ≤ EtcdMaxTxnOps`
+(dnv-worker.md §11.6, SPD14). `MaxAllocLegPerGrp = 2` is the allocator's
+*actual* per-group leg count, not a limit anything checks: the declared
+ceiling is `MaxLegPerGrp = 8`, which no code path enforces and no code path
+reaches — every allocating path picks 1 leg (`RedundNone`) or 2
+(`RedundMdRaid1`). So the budget is sized against what the allocator DOES,
+while the constant that looks like the rule says something four times larger.
+
+**Blast radius.** None at rest, and none on the failure path the coupling was
+designed for: `MaxAllocLegPerGrp` is cited from all three places that choose
+the leg count (`gateway/alloc.go` `legCntOf`, `model/ops.go` `legCntOf`,
+`worker/reaction.go` `legCnt`) and from the tripwire, so widening a group
+shape means moving the constant, and moving it past the budget fails
+`TestSpDrainBatchBudget` at once — before any deployment, and long before an
+"etcd: too many operations in txn request" out of a drain in the field
+(SPD1). The residual risk is a reviewer who widens the shape by adding a
+FOURTH site that does not cite the constant: the tripwire stays green and the
+batch grows past 512 in production.
+
+**Operator guidance.** None — this is a review-time concern, not an
+operational one. A drain that did hit the cap would log `sp drain failed`
+with etcd's own message on every tick and remove nothing, so the SP would
+stay latched and visible rather than half-torn-down.
+
+**Direction.** The honest fix is to make the shape one value rather than two:
+delete `MaxLegPerGrp` and let `MaxAllocLegPerGrp` be the ceiling that both
+describes and bounds, at which point a fourth site cannot disagree with the
+tripwire because there is nothing else to name. Deferred with the drain: the
+rename touches `architecture.md` §2.1's table and every doc sentence that
+cites the 8.
+Added 2026-09-15 with the sp drain.

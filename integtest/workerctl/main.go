@@ -1078,6 +1078,8 @@ var commands = []command{
 	{"set-free", cmdSetFree},
 	{"set-created", cmdSetCreated},
 	{"set-provisioned", cmdSetProvisioned},
+	{"set-deleting", cmdSetDeleting},
+	{"drain-sp", cmdDrainSp},
 	{"get", cmdGet},
 	{"get-dn", cmdGetDn},
 	{"get-cn", cmdGetCn},
@@ -3348,6 +3350,176 @@ func cmdSetProvisioned(g *globals, args []string) {
 		"flipped":  len(flipped) == 1,
 		"sp_rev":   readSpRev(ctx, cli, cid, target),
 	})
+}
+
+// cmdSetDeleting latches an SP the way DeleteStoragePool does
+// (architecture.md §8.4, gateway.md §5.4): `deleting = true` plus ONE SpRev
+// bump, and nothing else.
+//
+// The worker suite runs no gateway, so this is how a case puts an SP into the
+// state the sp coordinator's drain reacts to. It deliberately does NOT apply
+// the five-empty-lists precondition: that gate is the gateway's, the §14 suite
+// plants whatever shape a case needs, and re-implementing a public precondition
+// in a test driver is how the two drift apart.
+func cmdSetDeleting(g *globals, args []string) {
+	fs := newFlagSet("set-deleting", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	fs.Parse(args)
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	spRev := uint64(0)
+	latched := false
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		spRev, latched = 0, false
+		conf, err := getSpConf(s, cid, target)
+		if err != nil {
+			return err
+		}
+		if conf.GetDeleting() {
+			// SPD3's no-op, so that a case can re-run a stage without a second
+			// bump moving every token it holds.
+			spRev = readSpRevIn(s, cid, target)
+			return nil
+		}
+		conf.Deleting = true
+		s.Put(model.SpConfKey(cid, target.name), conf)
+		spRev, err = bumpSpRev(s, cid, conf)
+		latched = true
+		return err
+	})
+	if err != nil {
+		die("set-deleting: %v", err)
+	}
+	emit(map[string]any{
+		"sp_name": target.name,
+		"sp_id":   idHex(target.spId),
+		"latched": latched,
+		"sp_rev":  spRev,
+	})
+}
+
+// cmdDrainSp runs a latched SP's drain to completion: SPD8's derivation in a
+// loop over the three model ops the sp coordinator calls, with no pass and no
+// timer.
+//
+// It is the gateway suite's stand-in for the sp coordinator, which that suite
+// does not run — the same kind of worker-role write as `set-provisioned` and
+// `set-created`, and for the same reason: the gateway's END state after a
+// delete cannot be asserted without SOMEBODY draining, and standing up a whole
+// dnv-worker inside a gateway case would make every other assertion in it
+// depend on a converging fleet.
+//
+// The worker suite drives no drain through this: there the real coordinator
+// does it, which is the point of that case.
+func cmdDrainSp(g *globals, args []string) {
+	fs := newFlagSet("drain-sp", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	// --max-steps is a real argument and not only a runaway guard: a case that
+	// needs a PARTIALLY drained SP — to prove a restarted coordinator resumes
+	// one (SPD8) — asks for exactly as many steps as it wants. Running out is
+	// therefore reported in `sp_deleted`, never fatal; 4096 is above any shape
+	// the §2.1 ceilings allow (1 + MaxSliceCntPerSp x batches + 1).
+	maxSteps := fs.Int("max-steps", 4096,
+		"run at most this many drain steps")
+	fs.Parse(args)
+
+	ctx, done, cli := g.open()
+	defer done()
+	cid, cc := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	steps := 0
+	cntlrs, grps, slices := 0, 0, 0
+	deleted := false
+	// steps is incremented after the switch, not by a post statement, so that
+	// the iteration which commits D3 counts once and still reports
+	// sp_deleted: a budget sized to exactly the number of steps the drain
+	// needs must not report a fully committed drain as unfinished.
+	for steps < *maxSteps {
+		conf := &pb.SpConf{}
+		found, err := cli.Get(ctx, model.SpConfKey(cid, target.name), conf)
+		if err != nil {
+			die("drain-sp: %v", err)
+		}
+		if !found {
+			// Already gone — by an earlier invocation, or by the real
+			// coordinator racing this one. No step ran, so none is counted.
+			deleted = true
+			break
+		}
+		if conf.GetSpId() != target.spId {
+			die("drain-sp: storage pool %q changed its id", target.name)
+		}
+		if !conf.GetDeleting() {
+			die("drain-sp: storage pool %q is not being deleted", target.name)
+		}
+		switch {
+		case len(conf.GetCntlrIdList()) > 0:
+			removed, err := model.DrainSpCntlrs(
+				ctx, cli, cid, target.shard, target.spId, target.name)
+			if err != nil {
+				die("drain-sp: cntlrs: %v", err)
+			}
+			cntlrs += removed
+		case len(conf.GetSliceIdList()) > 0:
+			removed, sliceDone, err := model.DrainSpSlice(
+				ctx, cli, cid, target.shard, target.spId, target.name,
+				lowestId(conf.GetSliceIdList()), cc)
+			if err != nil {
+				die("drain-sp: slice: %v", err)
+			}
+			grps += removed
+			if sliceDone {
+				slices++
+			}
+		default:
+			if err := model.FinishSpDelete(
+				ctx, cli, cid, target.shard, target.spId, target.name,
+			); err != nil {
+				die("drain-sp: final: %v", err)
+			}
+			deleted = true
+		}
+		steps++
+		if deleted {
+			break
+		}
+	}
+	emit(map[string]any{
+		"sp_name":    target.name,
+		"sp_id":      idHex(target.spId),
+		"steps":      steps,
+		"cntlr_cnt":  cntlrs,
+		"grp_cnt":    grps,
+		"slice_cnt":  slices,
+		"sp_deleted": deleted,
+	})
+}
+
+// lowestId is SPD10's target rule: the LOWEST listed id, so that two drivers
+// pick the same one however the list is stored.
+func lowestId(ids []uint64) uint64 {
+	lowest := ids[0]
+	for _, id := range ids[1:] {
+		if id < lowest {
+			lowest = id
+		}
+	}
+	return lowest
+}
+
+// readSpRevIn is readSpRev inside a caller's STM, for the paths that must not
+// issue a second round trip after a decision.
+func readSpRevIn(s etcdutil.STM, cid uint64, target spTarget) uint64 {
+	rev := &pb.SpRev{}
+	if !s.Get(model.SpRevKey(target.shard, cid, target.spId), rev) {
+		return 0
+	}
+	return rev.GetRevision()
 }
 
 // readSpRev reports the SP's revision after a flip, so the caller can refresh

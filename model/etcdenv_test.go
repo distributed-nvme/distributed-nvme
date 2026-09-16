@@ -102,8 +102,10 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
 		// U10: dnv requires --max-txn-ops=common.EtcdMaxTxnOps of every etcd
-		// it runs against; the server's own default is 128, below the 259 ops
-		// DeleteClone's transaction can reach.
+		// it runs against; the server's own default is 128, below both the 259
+		// ops DeleteClone's transaction can reach and the 486 one maximum-shape
+		// sp-drain batch reaches — and THIS package commits that batch, in
+		// TestDrainSpSliceAtTheCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

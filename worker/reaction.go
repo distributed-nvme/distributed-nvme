@@ -99,9 +99,10 @@ const (
 // §14 suite greps; these exist so an operator can see why an SP is not being
 // reacted on at all.
 const (
-	// msgReactionSuppressed is AR3, logged on the transition only: a deleting
-	// SP or one at sp_level >= SP_LEVEL_NO_THINPOOL would otherwise produce
-	// one record per cntlr_interval forever.
+	// msgReactionSuppressed is AR3, logged on the transition only: an SP at
+	// sp_level >= SP_LEVEL_NO_THINPOOL would otherwise produce one record per
+	// cntlr_interval forever. A `deleting` SP is NOT suppressed any more — it
+	// drains (SPD6, drain.go) — so this record no longer has that case.
 	msgReactionSuppressed = "reaction suppressed"
 	// msgPoolStatusUnparsable is AR6's "an unparsable line is skipped and
 	// logged once per change".
@@ -207,6 +208,35 @@ type reactionOps interface {
 		grpId uint64,
 		spareLegId uint64,
 		targetLegId uint64,
+	) error
+	// drainSpCntlrs is the sp drain's D1 (SPD9): every cntlr of a latched SP
+	// in one STM. It returns how many it removed.
+	drainSpCntlrs(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+	) (int, error)
+	// drainSpSlice is one D2 batch (SPD10, SPD11): up to MaxDelGrpPerTxn
+	// groups of ONE slice. It returns how many groups it removed and whether
+	// the slice is gone.
+	drainSpSlice(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		sliceId uint64,
+		cc *pb.ClusterConf,
+	) (int, bool, error)
+	// finishSpDelete is D3 (SPD12): the SP's last keys and the shard bucket.
+	finishSpDelete(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
 	) error
 }
 
@@ -333,6 +363,40 @@ func (o *modelReactionOps) switchSpareLeg(
 	)
 }
 
+func (o *modelReactionOps) drainSpCntlrs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+) (int, error) {
+	return model.DrainSpCntlrs(ctx, o.cli, cid, shard, spId, spName)
+}
+
+func (o *modelReactionOps) drainSpSlice(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	sliceId uint64,
+	cc *pb.ClusterConf,
+) (int, bool, error) {
+	return model.DrainSpSlice(
+		ctx, o.cli, cid, shard, spId, spName, sliceId, cc,
+	)
+}
+
+func (o *modelReactionOps) finishSpDelete(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+) error {
+	return model.FinishSpDelete(ctx, o.cli, cid, shard, spId, spName)
+}
+
 // ---------------------------------------------------------------------------
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
@@ -419,22 +483,37 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		// children already log `cluster conf missing` for the idle period.
 		return
 	}
-	// §7: both stored confs are checked before the pass is even built, so an
-	// unusable geometry produces no candidate scan, no model op, and no
-	// `reaction applied` / `reaction skipped` record. Both are needed: this
-	// pass takes its OWN snapshot of the SP (above) rather than reusing the
-	// fan-out's, and tryGrow reads low_water_mark_pct and data_block_size
-	// straight off it.
+	// §7: the CLUSTER's stored conf is checked before the pass is built, so an
+	// unusable ladder produces no candidate scan and no model op. The drain
+	// needs it too — every D2 batch maintains a DN capacity key, whose bin
+	// index comes from that ladder — so this gate sits ahead of both branches.
 	if err := model.ValidateClusterConf(cc); err != nil {
 		w.refuseReactionConf(ctx, err)
 		return
 	}
+	p := w.newPass(state, cc)
+	if state.Conf.GetDeleting() {
+		// SPD6: AR3 splits. A LATCHED SP runs exactly one drain step and
+		// nothing else — regardless of sp_level suppression, because a doomed
+		// SP must drain at any level. drain.go owns the rest.
+		//
+		// It also runs ahead of the SP's OWN bdev_conf gate below, deliberately:
+		// the drain reads no geometry at all — no block size, no stripe, no
+		// chunk count — and an SP whose stored bdev_conf cannot be read is
+		// exactly the one an operator most wants to be able to delete. Gating
+		// the drain on it would make such an SP permanently undeletable, since
+		// the latch is one-way (SPD5) and nothing else ever removes the keys.
+		w.confRefusal.cc = ""
+		w.drainStep(ctx, p)
+		return
+	}
+	// The SP's own stored geometry, for the reactions: tryGrow reads
+	// low_water_mark_pct and data_block_size straight off it.
 	if err := model.ValidateBdevConf(state.Conf.GetBdevConf()); err != nil {
 		w.refuseReactionConf(ctx, err)
 		return
 	}
 	w.confRefusal.cc = ""
-	p := w.newPass(state, cc)
 	if w.reactionSuppressed(ctx, p) {
 		return
 	}
@@ -517,16 +596,19 @@ func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
 	return child.driver.infoSnapshot()
 }
 
-// reactionSuppressed is AR3: no reaction runs for a deleting SP or at
+// reactionSuppressed is AR3's surviving half: no reaction runs at
 // sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge (§11.7).
 // The record is emitted on the transition only.
+//
+// The `deleting` half of AR3 has moved (SPD6): a latched SP no longer merely
+// suppresses its reactions, it runs the drain of drain.go instead, and
+// reactionPass routes it there before reaching this gate. This function is
+// therefore never called with `deleting` set, and the sp_level test below stays
+// the whole of it.
 func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 	conf := p.state.Conf
 	reason := ""
-	switch {
-	case conf.GetDeleting():
-		reason = "deleting"
-	case conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL:
+	if conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
 		reason = "sp_level"
 	}
 	r := w.reactor()
@@ -1303,10 +1385,11 @@ func isMdRaid1(conf *pb.SpConf) bool {
 }
 
 // legCnt is how many legs one new group of the SP has (AR6): 2 for
-// RedundMdRaid1, 1 for RedundNone.
+// RedundMdRaid1, 1 for RedundNone. The md-raid1 arm cites
+// common.MaxAllocLegPerGrp for gateway/alloc.go legCntOf's reason (SPD1).
 func legCnt(conf *pb.SpConf) int {
 	if isMdRaid1(conf) {
-		return 2
+		return common.MaxAllocLegPerGrp
 	}
 	return 1
 }

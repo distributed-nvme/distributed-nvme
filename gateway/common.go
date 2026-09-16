@@ -197,9 +197,10 @@ func resolveCluster(
 // resolveSp reads the SP an SP-scoped RPC names (GW5).
 //
 // rejectDeleting is true for every mutator except DeleteStoragePool: an SP
-// whose teardown has begun accepts no further changes (§8 preamble). Nothing
-// in v1 ever sets the flag, so the branch is exercised by the unit tests only
-// (§10.18).
+// whose teardown has begun accepts no further changes (§8 preamble).
+// DeleteStoragePool is what SETS the flag (SPD3), so the branch is live from
+// the moment it commits until the worker's drain removes the key — the whole
+// duration of a teardown, not a test-only corner.
 func resolveSp(
 	s etcdutil.STM,
 	cid uint64,
@@ -459,13 +460,13 @@ func mintClusterId(
 // releaseShard is the deletion half of GW12: the object's bucket is
 // decremented and its id is never reused. A zero bucket is left alone rather
 // than wrapped around.
+//
+// The rule itself is model.ReleaseShard, because the sp drain's FinishSpDelete
+// applies it from the worker (SPD12) and DeleteCluster's bucket-sum gate is
+// only exact while both writers agree; this stays as the name GW12's three
+// gateway call sites are read by.
 func releaseShard(bucket []uint32, shard uint32) []uint32 {
-	sized := make([]uint32, common.ShardBucketSize)
-	copy(sized, bucket)
-	if int(shard) < len(sized) && sized[shard] > 0 {
-		sized[shard]--
-	}
-	return sized
+	return model.ReleaseShard(bucket, shard)
 }
 
 // bucketSum is the live object count a global's shard_bucket encodes (§5.4).

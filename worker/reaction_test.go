@@ -242,6 +242,14 @@ type fakeReactionOps struct {
 	opErr   error
 	calls   []reactionCall
 	queries []candQuery
+	// The sp drain's canned returns (drain.go). drainErr is separate from
+	// opErr so a test can fail a drain step without failing every reaction —
+	// the two never run in the same pass (SPD6), and keeping them apart is
+	// what lets a drain test reuse a fixture that sets opErr.
+	drainCntlrCnt int
+	drainGrpCnt   int
+	drainDone     bool
+	drainErr      error
 }
 
 func (o *fakeReactionOps) record(call reactionCall) error {
@@ -392,6 +400,62 @@ func (o *fakeReactionOps) switchSpareLeg(
 		op: "switch_spare", sliceId: sliceId, grpId: grpId,
 		spareLegId: spareLegId, targetLegId: targetLegId,
 	})
+}
+
+// The three sp-drain ops (SPD9/SPD10/SPD12). They record like every other
+// mutation — wantOps() therefore pins the drain's phase order exactly as it
+// pins a reaction's — and report the harness's canned counts.
+
+func (o *fakeReactionOps) drainSpCntlrs(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+) (int, error) {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{op: "drain_cntlrs"})
+	cnt, err := o.drainCntlrCnt, o.drainErr
+	o.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return cnt, nil
+}
+
+func (o *fakeReactionOps) drainSpSlice(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	sliceId uint64,
+	cc *pb.ClusterConf,
+) (int, bool, error) {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{
+		op: "drain_slice", sliceId: sliceId,
+	})
+	cnt, done, err := o.drainGrpCnt, o.drainDone, o.drainErr
+	o.mu.Unlock()
+	if err != nil {
+		return 0, false, err
+	}
+	return cnt, done, nil
+}
+
+func (o *fakeReactionOps) finishSpDelete(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+) error {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{op: "finish_delete"})
+	err := o.drainErr
+	o.mu.Unlock()
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -720,16 +784,19 @@ func TestReactionQuietPassDoesNothing(t *testing.T) {
 // AR3 — suppression
 // ---------------------------------------------------------------------------
 
-// TestReactionSuppressed pins AR3: nothing runs for a deleting SP or at
+// TestReactionSuppressed pins AR3's surviving half: nothing runs at
 // sp_level >= SP_LEVEL_NO_THINPOOL, and the record is emitted once per
 // transition rather than once per pass.
+//
+// `deleting` is deliberately NOT a row here any more. SPD6 split AR3: a latched
+// SP runs the drain instead of nothing at all, at ANY sp_level, and
+// TestDrainRunsAtEverySpLevel in drain_test.go is where that lives.
 func TestReactionSuppressed(t *testing.T) {
 	cases := []struct {
 		name       string
 		mutate     func(conf *pb.SpConf)
 		suppressed bool
 	}{
-		{"deleting", func(c *pb.SpConf) { c.Deleting = true }, true},
 		{"no_thinpool", func(c *pb.SpConf) {
 			c.SpLevel = pb.SpLevel_SP_LEVEL_NO_THINPOOL
 		}, true},
