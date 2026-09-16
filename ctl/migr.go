@@ -10,9 +10,11 @@
 //   - `migr cancel` has no --force. Throwing an unfinished copy away needs no
 //     proof about the copy, so CancelMigrationRequest has no such field —
 //     unlike FinishMigrationRequest, which does.
-//   - `migr append-bm` has no slice index. A migration copies ONE side, so its
-//     chunks are a single sequence numbered by the record's own `bm_cnt`;
-//     AppendCloneBitmap's per-source-slice `slice_idx` has no counterpart here.
+//   - `migr append-bm` has no slice index. A migration copies ONE side, so a
+//     migration `bm_idx` IS an append sequence, numbered by the record's own
+//     `bm_cnt`; AppendCloneBitmap instead addresses a chunk by the pair
+//     (`src_slice_idx`, `bm_idx`), a fixed position inside one source slice's
+//     bitmap, and neither half of that pair has a counterpart here.
 package ctl
 
 import (

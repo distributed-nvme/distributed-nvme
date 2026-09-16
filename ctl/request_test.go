@@ -426,14 +426,20 @@ var sweepRows = []sweepRow{
 			CloneName:   "cl0",
 			SrcTrConf:   []*pb.NvmeTrConf{wantTrConf()},
 		}},
+	// The two indexes are given DISTINCT non-zero values: a chunk is
+	// addressed by the pair, and equal values would let a command that wired
+	// --bm-idx to src_slice_idx (or the reverse) pass.
 	{47, "AppendCloneBitmap",
-		[]string{"clone", "append-bm", "--name", "cl0", "--slice-idx", "0",
+		[]string{"clone", "append-bm", "--name", "cl0",
+			"--src-slice-idx", "1", "--bm-idx", "2",
 			"--bm-hex", "a5", "--rev", "7"},
 		&pb.AppendCloneBitmapRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
 			SpRev:       wantSpRev(itRevValue),
 			CloneName:   "cl0",
+			SrcSliceIdx: 1,
+			BmIdx:       2,
 			Bitmap:      []byte{0xa5},
 		}},
 

@@ -194,8 +194,13 @@ func cloneSetTrCmd() *cobra.Command {
 // source's allocation bitmap, which the primary uses to skip regions the
 // source never allocated.
 //
-// --slice-idx is the source SLICE the chunk describes, not the chunk's own
-// index; the record's bm_cnt is what numbers the chunks.
+// A chunk is addressed by the PAIR --src-slice-idx / --bm-idx, never by either
+// alone: chunk (s, b) holds bytes [b*C, b*C+len) of source slice s's bitmap,
+// C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
+// send them in any order and leave whole chunks unsent; only the PAGES of ONE
+// chunk must arrive in slice-bitmap order, because the gateway appends each
+// page at that chunk's current length. The record's bm_cnt numbers nothing —
+// it is the high-water of bm_idx+1 over every slice.
 //
 // --bm-hex splits the two failure kinds §5.9 insists on: an EMPTY value sends
 // an empty bitmap on purpose, so the gateway's "bitmap must not be empty"
@@ -219,7 +224,8 @@ func cloneAppendBmCmd() *cobra.Command {
 				SpName:      spOf(),
 				SpRev:       rev,
 				CloneName:   strOf("name"),
-				SliceIdx:    u32Of("slice-idx"),
+				SrcSliceIdx: u32Of("src-slice-idx"),
+				BmIdx:       u32Of("bm-idx"),
 				Bitmap:      bitmap,
 			}
 			return func(ctx context.Context, client pb.GatewayClient) (
@@ -230,7 +236,8 @@ func cloneAppendBmCmd() *cobra.Command {
 		})
 	flags := cmd.Flags()
 	flags.String("name", "", "clone_name")
-	flags.Uint32("slice-idx", 0, "slice_idx the chunk describes")
+	flags.Uint32("src-slice-idx", 0, "src_slice_idx the chunk describes")
+	flags.Uint32("bm-idx", 0, "bm_idx, the chunk's index within the slice")
 	flags.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
 	return cmd

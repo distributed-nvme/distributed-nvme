@@ -65,6 +65,16 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
+# not a knob of this suite: the gateway's DeleteClone sweeps a clone's whole
+# src_slice_cnt x bm_cnt chunk rectangle (MaxSliceCntPerSp x MaxCloneBmCnt =
+# 256 point deletes plus a handful of other ops) in ONE transaction, and
+# etcd's default cap of 128 would refuse it. The cdc suite drives no clones,
+# so the flag changes nothing it observes; it is passed anyway so that every
+# dnv etcd launch in the tree is the same launch. The suite is shell and
+# cannot import the constant, so the literal is repeated here; it must track
+# common/constants.go.
+ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-cdc-integtest
 
@@ -1656,6 +1666,7 @@ setup() {
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster dnv-cdc-it=http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster-token dnv-cdc-it" \
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
 		">> $WORK/etcd/etcd.log 2>&1 < /dev/null &" \
 		"echo \$! > $WORK/etcd/pid; cat $WORK/etcd/pid")
 	[ -n "$pid" ] || die "starting etcd produced no pid"

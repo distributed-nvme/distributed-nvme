@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -96,7 +97,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 		SsId: 81, Serial: "s0", Model: "m0",
 	})
 	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
-		CloneId: 91, BmCnt: 3,
+		CloneId: 91, BmCnt: 2,
 	})
 	mustPut(t, cli, TransferKey(cid, fixtureSpId, "xfer0"), &pb.Transfer{
 		XferId: 92,
@@ -104,11 +105,15 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	mustPut(t, cli, MigrationKey(cid, fixtureSpId, "migr0"), &pb.Migration{
 		MigrId: 93, SrcSideId: 62, DstSideId: 63, BmCnt: 2,
 	})
-	for bmIdx := uint32(0); bmIdx < 3; bmIdx++ {
+	// Two chunks of source slice 0 and one of source slice 1: the fixture's
+	// (1, 0) and (0, 0) share a bm_idx and are still two chunks, because a
+	// clone chunk is addressed by the pair (U1). bm_cnt is the high-water of
+	// bm_idx + 1 over all three, hence 2.
+	for _, pair := range [][2]uint32{{0, 0}, {0, 1}, {1, 0}} {
 		mustPut(
 			t, cli,
-			CloneBitmapKey(cid, fixtureSpId, "clone0", bmIdx),
-			&pb.CloneBitmap{Bitmap: []byte{byte(bmIdx), 0xff}},
+			CloneBitmapKey(cid, fixtureSpId, "clone0", pair[0], pair[1]),
+			&pb.CloneBitmap{Bitmap: []byte{byte(pair[0]), byte(pair[1])}},
 		)
 	}
 	for bmIdx := uint32(0); bmIdx < 2; bmIdx++ {
@@ -136,13 +141,36 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	}
 }
 
-// bmIndexes renders a chunk list for comparison.
+// bmIndexes renders a migration chunk list for comparison; a migration chunk
+// names no slice, so its index is its whole address.
 func bmIndexes(chunks []BmChunk) []uint32 {
 	out := make([]uint32, 0, len(chunks))
 	for _, chunk := range chunks {
 		out = append(out, chunk.Idx)
 	}
 	return out
+}
+
+// bmPairs renders a clone chunk list as the (src_slice_idx, bm_idx) addresses
+// it carries (U1).
+func bmPairs(chunks []BmChunk) [][2]uint32 {
+	out := make([][2]uint32, 0, len(chunks))
+	for _, chunk := range chunks {
+		out = append(out, [2]uint32{chunk.SliceIdx, chunk.Idx})
+	}
+	return out
+}
+
+func equalPairs(got [][2]uint32, want [][2]uint32) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func equalUint32s(got []uint32, want []uint32) bool {
@@ -207,18 +235,27 @@ func TestLoadSpHappyPath(t *testing.T) {
 			state.Clones, state.Xfers, state.Migrs,
 		)
 	}
-	if !equalUint32s(
-		bmIndexes(state.CloneBmIdx["clone0"]), []uint32{0, 1, 2},
+	// Three distinct chunks, ascending by pair: (1, 0) is not (0, 0) with
+	// another name, it is the first chunk of another source slice.
+	if !equalPairs(
+		bmPairs(state.CloneBmIdx["clone0"]),
+		[][2]uint32{{0, 0}, {0, 1}, {1, 0}},
 	) {
 		t.Errorf("CloneBmIdx = %v", state.CloneBmIdx)
 	}
 	if !equalUint32s(bmIndexes(state.MigrBmIdx["migr0"]), []uint32{0, 1}) {
 		t.Errorf("MigrBmIdx = %v", state.MigrBmIdx)
 	}
+	for _, chunk := range state.MigrBmIdx["migr0"] {
+		if chunk.SliceIdx != 0 {
+			t.Errorf("migration chunk %d has slice_idx %d, want 0",
+				chunk.Idx, chunk.SliceIdx)
+		}
+	}
 	for _, chunk := range state.CloneBmIdx["clone0"] {
 		if chunk.ModRev <= 0 {
-			t.Errorf("chunk %d has no mod_revision (BM5 memoizes it)",
-				chunk.Idx)
+			t.Errorf("chunk (%d, %d) has no mod_revision (BM5 memoizes it)",
+				chunk.SliceIdx, chunk.Idx)
 		}
 	}
 	// The spare leg's side counts: dn-c is only reachable through
@@ -351,6 +388,50 @@ func TestLoadSpEmptyBitmapIndex(t *testing.T) {
 	}
 	if len(chunks) != 0 {
 		t.Errorf("CloneBmIdx[clone0] = %v, want empty", chunks)
+	}
+}
+
+// TestLoadSpSkipsOldFormatCloneBmKeys is U12's whole compatibility story under
+// test: a key of the superseded one-value-per-source-slice format sits under
+// the very prefix MD3 scans, and the load drops it rather than failing or
+// inventing an address for it. Nothing tolerates it, nothing deletes it.
+func TestLoadSpSkipsOldFormatCloneBmKeys(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	mustPut(t, cli, SpConfKey(cid, fixtureSpName), &pb.SpConf{
+		SpId:          fixtureSpId,
+		CloneNameList: []string{"clone0"},
+	})
+	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
+		CloneId: 1, BmCnt: 1,
+	})
+	mustPut(
+		t, cli,
+		CloneBitmapKey(cid, fixtureSpId, "clone0", 3, 0),
+		&pb.CloneBitmap{Bitmap: []byte{0xff}},
+	)
+	// The superseded key: clone_name followed by ONE index field.
+	mustPut(
+		t, cli,
+		joinKey(
+			common.DnvPrefix, kindCloneBitmap,
+			idField(cid), idField(fixtureSpId), "clone0", bmIdxField(3),
+		),
+		&pb.CloneBitmap{Bitmap: []byte{0xff}},
+	)
+
+	state, err := LoadSp(ctx, cli, cid, fixtureSpName)
+	if err != nil {
+		t.Fatalf("LoadSp: %v", err)
+	}
+	if !equalPairs(
+		bmPairs(state.CloneBmIdx["clone0"]), [][2]uint32{{3, 0}},
+	) {
+		t.Errorf(
+			"CloneBmIdx = %v, want only the pair-addressed chunk",
+			state.CloneBmIdx,
+		)
 	}
 }
 

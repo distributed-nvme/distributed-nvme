@@ -53,10 +53,14 @@ func cloneOfTd(cloneId uint64, srcNqn string, dstTdId uint64) *pb.Clone {
 	return clone
 }
 
-func pushBitmap(
+// pushChunk pushes one chunk of the pair (srcSliceIdx, bmIdx); pushBitmap is
+// the one-slice fixture's chunk (0, 0).
+func pushChunk(
 	t *testing.T,
 	srv *CnAgentServer,
 	revision uint64,
+	srcSliceIdx uint32,
+	bmIdx uint32,
 	bitmap []byte,
 ) {
 	t.Helper()
@@ -67,7 +71,8 @@ func pushBitmap(
 			CntlrPointer: cntlrPtr(),
 			Revision:     revision,
 			CloneId:      testClone,
-			BmIdx:        0,
+			SrcSliceIdx:  srcSliceIdx,
+			BmIdx:        bmIdx,
 			Bitmap:       bitmap,
 		})
 	if err != nil {
@@ -76,6 +81,25 @@ func pushBitmap(
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("PushCloneBitmap rejected: %v", reply.GetAgentReply())
 	}
+}
+
+func pushBitmap(
+	t *testing.T,
+	srv *CnAgentServer,
+	revision uint64,
+	bitmap []byte,
+) {
+	t.Helper()
+	pushChunk(t, srv, revision, 0, 0, bitmap)
+}
+
+// chunkIds flattens a clone's reported applied set into comparable pairs.
+func chunkIds(info *pb.BitmapInfo) [][2]uint32 {
+	out := make([][2]uint32, 0, len(info.GetChunkIdList()))
+	for _, id := range info.GetChunkIdList() {
+		out = append(out, [2]uint32{id.GetSrcSliceIdx(), id.GetBmIdx()})
+	}
+	return out
 }
 
 func hexBytes(t *testing.T, text string) []byte {
@@ -113,7 +137,7 @@ func TestCloneBuild(t *testing.T) {
 	pushBitmap(t, srv, 3, hexBytes(t, testSkipHex))
 	assertNoCall(t, node, "cmd blkdiscard")
 	bmPath := srv.nf.LocalCloneBmPath(
-		testCluster, testCn, testSp, testClone, 0)
+		testCluster, testCn, testSp, testClone, 0, 0)
 	if _, ok := node.protos[bmPath]; !ok {
 		t.Fatalf("the chunk was not persisted at %s", bmPath)
 	}
@@ -185,12 +209,16 @@ func TestCloneBuild(t *testing.T) {
 	assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
 	assertOk(t, info.GetCloneIdToMeta()[testClone], "clone meta")
 
-	// CN20: bm_info_list reports the applied set, derived from the files.
+	// CN20: bm_info_list reports the applied set as chunk_id_list, derived
+	// from the files — bm_idx_list stays unset for a clone.
 	if len(reply.GetBmInfoList()) != 1 ||
 		reply.GetBmInfoList()[0].GetResId() != testClone ||
-		len(reply.GetBmInfoList()[0].GetBmIdxList()) != 1 ||
-		reply.GetBmInfoList()[0].GetBmIdxList()[0] != 0 {
+		len(reply.GetBmInfoList()[0].GetBmIdxList()) != 0 {
 		t.Fatalf("bm_info_list is %v", reply.GetBmInfoList())
+	}
+	if got := chunkIds(reply.GetBmInfoList()[0]); len(got) != 1 ||
+		got[0] != [2]uint32{0, 0} {
+		t.Fatalf("chunk_id_list is %v, want [(0,0)]", got)
 	}
 }
 
@@ -326,7 +354,7 @@ func TestCloneTeardownOrder(t *testing.T) {
 		"cmd dmsetup remove "+cloneMetaName(srv, testClone),
 		"cmd nvme disconnect --nqn "+testSrcNqn,
 		"cmd rm -f "+srv.nf.LocalCloneBmPath(
-			testCluster, testCn, testSp, testClone, 0),
+			testCluster, testCn, testSp, testClone, 0, 0),
 	)
 	// The ns-dev is back on the raid0, all data local.
 	table := node.dms[nsDevName(srv, testNs)].table
@@ -598,21 +626,32 @@ func TestPushCloneBitmapGates(t *testing.T) {
 	}
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: 0x999, BmIdx: 0, Bitmap: []byte{0xff},
+		Revision: 2, CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0,
+		Bitmap: []byte{0xff},
 	}, "unknown clone")
+	// The two indexes bound independently (U4). A valid slice with an
+	// out-of-range bm_idx is rejected on the chunk cap alone...
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: testClone, BmIdx: 1, Bitmap: []byte{0xff},
-	}, "bm_idx >= src_slice_cnt")
-	unknown(&pb.PushCloneBitmapRequest{
-		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: testClone,
+		Revision: 2, CloneId: testClone, SrcSliceIdx: 0,
 		BmIdx: common.MaxCloneBmCnt, Bitmap: []byte{0xff},
 	}, "bm_idx >= MaxCloneBmCnt")
+	// ...and an out-of-range slice is rejected with the chunk index at 0, so
+	// neither bound can stand in for the other. The fixture's src_slice_cnt
+	// is 1, and bm_idx 0 is always legal.
+	unknown(&pb.PushCloneBitmapRequest{
+		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
+		Revision: 2, CloneId: testClone, SrcSliceIdx: 1, BmIdx: 0,
+		Bitmap: []byte{0xff},
+	}, "src_slice_idx >= src_slice_cnt")
+	// A pair that is in range on both axes is accepted, which is what makes
+	// the two rejections above bounds and not blanket refusals.
+	pushChunk(t, srv, 2, 0, common.MaxCloneBmCnt-1, []byte{0xff})
 
 	stale, err := srv.PushCloneBitmap(ctx, &pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 1, CloneId: testClone, BmIdx: 0, Bitmap: []byte{0xff},
+		Revision: 1, CloneId: testClone, SrcSliceIdx: 0, BmIdx: 0,
+		Bitmap: []byte{0xff},
 	})
 	if err != nil {
 		t.Fatalf("stale push: %v", err)
@@ -630,7 +669,7 @@ func TestPushCloneBitmapPersistBeforeApply(t *testing.T) {
 	node.Reset()
 	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
-		testCluster, testCn, testSp, testClone, 0)
+		testCluster, testCn, testSp, testClone, 0, 0)
 	assertOrder(t, node,
 		"writeproto "+bmPath,
 		"cmd blkdiscard --offset 33554432 --length 33554432",
@@ -651,24 +690,38 @@ func TestPushCloneBitmapPersistBeforeApply(t *testing.T) {
 
 // TestPushCloneBitmapSurvivesRestart is SH21: the applied set is derived from
 // the files on disk, so a fresh server over the same store reports it back
-// unchanged and never needs a re-push.
+// unchanged and never needs a re-push. The reload decodes the pair out of the
+// stored request — the file name is only an address.
 func TestPushCloneBitmapSurvivesRestart(t *testing.T) {
 	srv, node := newTestServer(t)
+	clone := cloneOf()
+	clone.SrcSliceCnt = 2
 	syncupBoth(t, srv, reqOpts{
-		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+		revision: 2, primary: true, clones: []*pb.Clone{clone}})
 	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	// A second slice's chunk 1: a pair neither index alone can name.
+	pushChunk(t, srv, 2, 1, 1, []byte{0xff})
+	for _, id := range [][2]uint32{{0, 0}, {1, 1}} {
+		path := srv.nf.LocalCloneBmPath(
+			testCluster, testCn, testSp, testClone, id[0], id[1])
+		if _, ok := node.protos[path]; !ok {
+			t.Fatalf("chunk %v was not persisted at %s", id, path)
+		}
+	}
 
 	fresh := newCnServer(node)
 	reconcileForTest(t, fresh)
 	reply, err := fresh.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}}))
+		revision: 2, primary: true, clones: []*pb.Clone{clone}}))
 	if err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
-	if len(reply.GetBmInfoList()) != 1 ||
-		len(reply.GetBmInfoList()[0].GetBmIdxList()) != 1 {
-		t.Fatalf("the applied set did not survive the restart: %v",
-			reply.GetBmInfoList())
+	if len(reply.GetBmInfoList()) != 1 {
+		t.Fatalf("bm_info_list is %v", reply.GetBmInfoList())
+	}
+	got := chunkIds(reply.GetBmInfoList()[0])
+	if len(got) != 2 || got[0] != [2]uint32{0, 0} || got[1] != [2]uint32{1, 1} {
+		t.Fatalf("the applied set did not survive the restart: %v", got)
 	}
 }
 
@@ -691,8 +744,9 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if len(reply.GetBmInfoList()[0].GetBmIdxList()) != 1 {
-		t.Fatalf("the chunk was not reported applied")
+	if got := chunkIds(reply.GetBmInfoList()[0]); len(got) != 1 ||
+		got[0] != [2]uint32{0, 0} {
+		t.Fatalf("the chunk was not reported applied: %v", got)
 	}
 	if !node.hasCall("cmd blkdiscard --offset 33554432 --length 33554432") {
 		t.Fatalf("the chunk was not re-applied on the rebuild")

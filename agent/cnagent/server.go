@@ -85,9 +85,10 @@ type cntlrState struct {
 	req     *pb.SyncupCntlrRequest
 	tracker *agent.ResTracker
 
-	// chunks mirrors this cntlr's clone-bm-* files, one ChunkSet per clone;
-	// the files stay the source of truth for the applied set (SH21).
-	chunks map[uint64]*agent.ChunkSet
+	// chunks mirrors this cntlr's clone-bm-* files, one CloneChunkSet per
+	// clone keyed by the pair (src_slice_idx, bm_idx); the files stay the
+	// source of truth for the applied set (SH21).
+	chunks map[uint64]*agent.CloneChunkSet
 
 	// applied is the shape of the last converge, so a resource that leaves
 	// the desired state — a td dropped from td_list, a clone deleted, a
@@ -251,17 +252,17 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 	return &cntlrState{
 		req:          req,
 		tracker:      agent.NewResTracker(),
-		chunks:       make(map[uint64]*agent.ChunkSet),
+		chunks:       make(map[uint64]*agent.CloneChunkSet),
 		pendingSweep: make(map[uint64]bool),
 		probers:      make(map[uint64]*legProber),
 	}
 }
 
-// chunkSet returns (creating on first use) the ChunkSet of one clone.
-func (st *cntlrState) chunkSet(cloneId uint64) *agent.ChunkSet {
+// chunkSet returns (creating on first use) the CloneChunkSet of one clone.
+func (st *cntlrState) chunkSet(cloneId uint64) *agent.CloneChunkSet {
 	set, ok := st.chunks[cloneId]
 	if !ok {
-		set = agent.NewChunkSet()
+		set = agent.NewCloneChunkSet()
 		st.chunks[cloneId] = set
 	}
 	return set

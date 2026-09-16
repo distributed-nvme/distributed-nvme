@@ -21,10 +21,12 @@ import (
 //
 // One pusher belongs to one sp child (a side or a cntlr, §8.4) and sequences
 // that child's chunks: one push in flight per migration / clone, ascending
-// bm_idx, the next part only after a code == 0 reply (BM3). Different
-// migrations / clones of one child push independently and may run
-// concurrently toward the same agent, which is what §9.6 step 4 allows and
-// step 3 bounds.
+// (src_slice_idx, bm_idx), the next part only after a code == 0 reply (BM3).
+// That order is load-bearing for a MIGRATION, whose chunks concatenate in
+// bm_idx order; a clone's chunks are self-positioned pairs (§9.6), so the same
+// order is merely deterministic there. Different migrations / clones of one
+// child push independently and may run concurrently toward the same agent,
+// which is what §9.6 step 4 allows and step 3 bounds.
 
 // msgBitmapPushed is the §12 record of one delivered chunk (BM3).
 const msgBitmapPushed = "bitmap pushed"
@@ -51,8 +53,12 @@ type bmPart struct {
 	// name is the migration / clone name, i.e. the etcd key suffix the chunk
 	// value is read at (BM1: values are read one at a time, when pushed).
 	name string
+	// sliceIdx is the SOURCE slice whose bitmap this chunk belongs to for a
+	// clone, and always 0 for a migration, whose one bitmap names no slice.
+	sliceIdx uint32
 	// bmIdx is the chunk index: the append sequence for a migration, the
-	// source slice_idx for a clone (§9.6).
+	// chunk's fixed position WITHIN source slice sliceIdx's bitmap for a
+	// clone (§9.6).
 	bmIdx uint32
 	// revision is the object's SYNCED revision (BM3).
 	revision uint64
@@ -60,9 +66,10 @@ type bmPart struct {
 }
 
 // bmPlan is the work one Syncup* reply's diff produced for ONE migration or
-// clone (BM2): the chunks the agent does not hold — ascending by bm_idx, which
-// is what makes a migration's chunk concatenation interpretable (§9.6) — plus
-// the revision every push of the batch carries.
+// clone (BM2): the chunks the agent does not hold — ascending by
+// (src_slice_idx, bm_idx), which is what makes a migration's chunk
+// concatenation interpretable (§9.6) — plus the revision every push of the
+// batch carries.
 type bmPlan struct {
 	resId    uint64
 	name     string
@@ -70,10 +77,22 @@ type bmPlan struct {
 	parts    []model.BmChunk
 }
 
-// bmMemoKey is the BM5 memo's key: one chunk of one clone / migration.
+// bmMemoKey is the BM5 memo's key: one chunk of one clone / migration, at the
+// (src_slice_idx, bm_idx) pair that addresses it (U7).
 type bmMemoKey struct {
-	resId uint64
-	bmIdx uint32
+	resId    uint64
+	sliceIdx uint32
+	bmIdx    uint32
+}
+
+// memoKeyOf is one chunk's memo key, and the shape missing compares the
+// agent's applied set in.
+func memoKeyOf(resId uint64, chunk model.BmChunk) bmMemoKey {
+	return bmMemoKey{
+		resId:    resId,
+		sliceIdx: chunk.SliceIdx,
+		bmIdx:    chunk.Idx,
+	}
 }
 
 // bmPusherParams is everything a pusher needs at construction. fetch and
@@ -94,11 +113,12 @@ type bmPusherParams struct {
 	idAttr string
 	// ids are the object's own ids, as the §12 records carry them.
 	ids []slog.Attr
-	// fetch reads one chunk's VALUE out of etcd (BM1). It reports found =
-	// false when the key is gone.
+	// fetch reads one chunk's VALUE out of etcd (BM1), at the pair that
+	// addresses it. It reports found = false when the key is gone.
 	fetch func(
 		ctx context.Context,
 		name string,
+		sliceIdx uint32,
 		bmIdx uint32,
 	) ([]byte, bool, error)
 	// deliver issues the kind's Push*Bitmap and returns the AgentReply's
@@ -124,6 +144,7 @@ type bmPusher struct {
 	fetch    func(
 		ctx context.Context,
 		name string,
+		sliceIdx uint32,
 		bmIdx uint32,
 	) ([]byte, bool, error)
 	deliver func(
@@ -143,8 +164,9 @@ type bmPusher struct {
 	// earlier one rather than queueing behind it.
 	running map[uint64]bool
 	next    map[uint64]*bmPlan
-	// memo is BM5: per (res_id, bm_idx) the etcd mod_revision of the chunk
-	// last pushed. In-memory and lost on a handoff, as [D8] accepts.
+	// memo is BM5: per (res_id, src_slice_idx, bm_idx) the etcd mod_revision
+	// of the chunk last pushed. In-memory and lost on a handoff, as [D8]
+	// accepts.
 	memo     map[bmMemoKey]int64
 	conn     *grpc.ClientConn
 	connHeld bool
@@ -174,40 +196,51 @@ func newBmPusher(p bmPusherParams) *bmPusher {
 
 // missing is the BM2 diff of one migration / clone, refined by BM5.
 //
-// chunks are the indexes etcd holds (SpState.MigrBmIdx / CloneBmIdx, MD3) and
-// applied is the agent's acknowledged set (BitmapInfo.bm_idx_list). A chunk
-// the agent does not list is missing. A chunk it does list is re-pushed only
-// when THIS worker pushed it before and its etcd mod_revision has advanced
-// since — AppendCloneBitmap may grow a chunk that keeps its index (BM5).
+// chunks are the chunks etcd holds (SpState.MigrBmIdx / CloneBmIdx, MD3) and
+// applied is the agent's acknowledged set, in the same shape: the pairs of
+// BitmapInfo.chunk_id_list for a clone, BitmapInfo.bm_idx_list at slice 0 for
+// a migration. Both sides are compared by the WHOLE (src_slice_idx, bm_idx)
+// pair, so one bm_idx acknowledged on one source slice says nothing about the
+// same bm_idx on another. A chunk the agent does not list is missing. A chunk
+// it does list is re-pushed only when THIS worker pushed it before and its
+// etcd mod_revision has advanced since — AppendCloneBitmap may grow a chunk
+// that keeps its pair (BM5).
 //
 // architecture.md [D8] describes the same memo by the byte length last
 // pushed; dnv-worker.md BM5 is the normative rule for this implementation and
 // uses the mod_revision, which needs no chunk value to decide.
 //
-// The result is ascending by bm_idx (BM3).
+// The result is ascending (src_slice_idx, bm_idx) lexicographic (BM3, U7):
+// load-bearing for a migration, whose chunks concatenate, and deterministic
+// only for a clone, whose chunks are self-positioned.
 func (p *bmPusher) missing(
 	resId uint64,
 	chunks []model.BmChunk,
-	applied []uint32,
+	applied []model.BmChunk,
 ) []model.BmChunk {
-	have := make(map[uint32]struct{}, len(applied))
-	for _, idx := range applied {
-		have[idx] = struct{}{}
+	have := make(map[bmMemoKey]struct{}, len(applied))
+	for _, chunk := range applied {
+		have[memoKeyOf(resId, chunk)] = struct{}{}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make([]model.BmChunk, 0, len(chunks))
 	for _, chunk := range chunks {
-		if _, ok := have[chunk.Idx]; !ok {
+		if _, ok := have[memoKeyOf(resId, chunk)]; !ok {
 			out = append(out, chunk)
 			continue
 		}
-		pushed, ok := p.memo[bmMemoKey{resId: resId, bmIdx: chunk.Idx}]
+		pushed, ok := p.memo[memoKeyOf(resId, chunk)]
 		if ok && chunk.ModRev > pushed {
 			out = append(out, chunk)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Idx < out[j].Idx })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SliceIdx != out[j].SliceIdx {
+			return out[i].SliceIdx < out[j].SliceIdx
+		}
+		return out[i].Idx < out[j].Idx
+	})
 	return out
 }
 
@@ -291,11 +324,11 @@ func (p *bmPusher) run(plan *bmPlan) {
 	}
 }
 
-// pushPlan delivers one plan's chunks in ascending bm_idx, one at a time
-// (BM3). Every failure aborts the rest of the plan and raises the BM6 flag:
-// the next round's equal-revision Syncup* reply produces a fresh diff, so
-// nothing is lost by giving up here — and nothing would be retried without
-// it, because a diff only ever comes from a Syncup* reply.
+// pushPlan delivers one plan's chunks in ascending (src_slice_idx, bm_idx),
+// one at a time (BM3). Every failure aborts the rest of the plan and raises
+// the BM6 flag: the next round's equal-revision Syncup* reply produces a fresh
+// diff, so nothing is lost by giving up here — and nothing would be retried
+// without it, because a diff only ever comes from a Syncup* reply.
 func (p *bmPusher) pushPlan(plan *bmPlan) {
 	conn, err := p.connect()
 	if err != nil {
@@ -306,7 +339,8 @@ func (p *bmPusher) pushPlan(plan *bmPlan) {
 			p.setFailed()
 			slog.InfoContext(
 				newTraceCtx(p.ctx, p.seed), msgBitmapPushFailed, append(
-					p.attrs(plan.resId, 0), slog.String("error", err.Error()),
+					p.attrs(plan.resId, 0, 0),
+					slog.String("error", err.Error()),
 				)...,
 			)
 		}
@@ -330,14 +364,14 @@ func (p *bmPusher) pushOne(
 	chunk model.BmChunk,
 ) bool {
 	ctx := newTraceCtx(p.ctx, p.seed)
-	bitmap, found, err := p.fetch(ctx, plan.name, chunk.Idx)
+	bitmap, found, err := p.fetch(ctx, plan.name, chunk.SliceIdx, chunk.Idx)
 	if err != nil || !found {
-		// The chunk index came from the coordinator's snapshot, so a value
-		// that cannot be read now is either an etcd failure or a chunk
+		// The chunk's address came from the coordinator's snapshot, so a
+		// value that cannot be read now is either an etcd failure or a chunk
 		// deleted with its object. Both raise the BM6 flag: without it this
 		// child would never diff again until the next revision bump.
 		p.setFailed()
-		attrs := p.attrs(plan.resId, chunk.Idx)
+		attrs := p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx)
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))
 		} else {
@@ -354,6 +388,7 @@ func (p *bmPusher) pushOne(
 	code, details, err := p.deliver(rpcCtx, conn, bmPart{
 		resId:    plan.resId,
 		name:     plan.name,
+		sliceIdx: chunk.SliceIdx,
 		bmIdx:    chunk.Idx,
 		revision: plan.revision,
 		bitmap:   bitmap,
@@ -361,12 +396,12 @@ func (p *bmPusher) pushOne(
 	if err != nil {
 		p.setFailed()
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
-			p.attrs(plan.resId, chunk.Idx),
+			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.String("error", err.Error()),
 		)...)
 		return false
 	}
-	attrs := append(p.attrs(plan.resId, chunk.Idx),
+	attrs := append(p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 		slog.Uint64("code", uint64(code)),
 	)
 	slog.InfoContext(ctx, msgBitmapPushed, attrs...)
@@ -375,7 +410,7 @@ func (p *bmPusher) pushOne(
 		// applied yet (BM6). The §12 record above carries only the code, so
 		// the agent's own explanation is logged next to it.
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
-			p.attrs(plan.resId, chunk.Idx),
+			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.Uint64("code", uint64(code)),
 			slog.String("details", details),
 		)...)
@@ -390,7 +425,7 @@ func (p *bmPusher) pushOne(
 func (p *bmPusher) memoize(resId uint64, chunk model.BmChunk) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.memo[bmMemoKey{resId: resId, bmIdx: chunk.Idx}] = chunk.ModRev
+	p.memo[memoKeyOf(resId, chunk)] = chunk.ModRev
 }
 
 // setFailed raises the BM6 flag.
@@ -423,15 +458,17 @@ func (p *bmPusher) connect() (*grpc.ClientConn, error) {
 }
 
 // attrs are the §12 "bitmap pushed" attributes of one chunk: kind, the
-// object's ids, the resource id and bm_idx.
-func (p *bmPusher) attrs(resId uint64, bmIdx uint32) []any {
-	attrs := make([]any, 0, len(p.ids)+4)
+// object's ids, the resource id and the chunk's address (U7). src_slice_idx
+// is the clone chunk's source slice and always 0 for kind=migr.
+func (p *bmPusher) attrs(resId uint64, sliceIdx uint32, bmIdx uint32) []any {
+	attrs := make([]any, 0, len(p.ids)+5)
 	attrs = append(attrs, slog.String("kind", p.kind))
 	for _, attr := range p.ids {
 		attrs = append(attrs, attr)
 	}
 	return append(attrs,
 		slog.Uint64(p.idAttr, resId),
+		slog.Uint64("src_slice_idx", uint64(sliceIdx)),
 		slog.Uint64("bm_idx", uint64(bmIdx)),
 	)
 }

@@ -131,7 +131,20 @@ const (
 	DefaultCloneThreshold = 1
 	MaxCloneBatchSize     = 4
 	DefaultCloneBatchSize = 1
-	MaxCloneBmCnt         = 16
+	// MaxCloneBmCnt is the number of chunks ONE source slice's bitmap may be
+	// split into: a clone bitmap chunk is addressed (src_slice_idx, bm_idx)
+	// and bm_idx < MaxCloneBmCnt (architecture.md §9.6). It is NOT a cap on
+	// the source slice count — that is MaxSliceCntPerSp, enforced by
+	// CreateClone. 16 chunks × CloneBmChunkBytes = 16 MiB per slice.
+	MaxCloneBmCnt = 16
+	// CloneBmChunkBytes is the fixed capacity of one clone bitmap chunk and
+	// the quantum that positions it: chunk (s, b) holds bytes
+	// [b*CloneBmChunkBytes, b*CloneBmChunkBytes+len) of source slice s's
+	// bitmap. 1 MiB keeps a grown chunk value plus the Clone and rev-bump
+	// puts inside etcd's default ~1.5 MiB request cap, and every
+	// PushCloneBitmap message inside gRPC's default 4 MiB. It is a clone
+	// positioning quantum only — migration appends have no byte cap.
+	CloneBmChunkBytes = 1 << 20
 
 	MaxMigrThreshold     = 8
 	DefaultMigrThreshold = 1
@@ -246,6 +259,13 @@ const (
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
+	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
+	// etcd serving dnv MUST run with --max-txn-ops=512 or higher. etcd's
+	// default is 128, and DeleteClone's deciding transaction deletes every
+	// clone bitmap chunk key in one transaction — MaxSliceCntPerSp ×
+	// MaxCloneBmCnt = 256 deletes plus a handful of other ops (§8.9, U10).
+	// The test etcd launchers and the integtest suites all pass it from here.
+	EtcdMaxTxnOps = 512
 
 	// dnv-gateway (gateway.md §2.1).
 	//

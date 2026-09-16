@@ -259,7 +259,7 @@ func TestReconcileDropsOrphanChunks(t *testing.T) {
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
 	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
-		testCluster, testCn, testSp, testClone, 0)
+		testCluster, testCn, testSp, testClone, 0, 0)
 
 	// The clone is deleted while the agent is down: rewrite the stored
 	// request without it.

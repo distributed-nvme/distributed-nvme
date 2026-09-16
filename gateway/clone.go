@@ -284,12 +284,23 @@ func (s *Server) DeleteClone(
 			return err
 		}
 		stm.Del(model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName()))
-		// An STM cannot range, so the chunks are deleted one by one from the
-		// count the record itself carries — which is exactly what
-		// AppendCloneBitmap maintains it for.
-		for idx := uint32(0); idx < clone.GetBmCnt(); idx++ {
-			stm.Del(model.CloneBitmapKey(
-				sc.Cid, sc.SpId(), req.GetCloneName(), idx))
+		// An STM cannot range, so the chunks are swept pair by pair over the
+		// rectangle the two records carry — src_slice_cnt from CreateClone,
+		// bm_cnt from AppendCloneBitmap's high-water, which is exactly what
+		// that RPC maintains it for. Chunks are sparse (U3), so most pairs of
+		// a real clone are absent and their deletes are harmless.
+		//
+		// Worst case is MaxSliceCntPerSp x MaxCloneBmCnt = 16 x 16 = 256
+		// point deletes plus the handful of other ops in this one atomic
+		// transaction, which is why every etcd serving dnv MUST run with
+		// --max-txn-ops=common.EtcdMaxTxnOps: etcd's default cap is 128 and
+		// would refuse the whole delete (§8.9, U10).
+		sliceCnt, bmCnt := clone.GetSrcSliceCnt(), clone.GetBmCnt()
+		for sliceIdx := uint32(0); sliceIdx < sliceCnt; sliceIdx++ {
+			for bmIdx := uint32(0); bmIdx < bmCnt; bmIdx++ {
+				stm.Del(model.CloneBitmapKey(
+					sc.Cid, sc.SpId(), req.GetCloneName(), sliceIdx, bmIdx))
+			}
 		}
 		sc.Conf.CloneNameList = removeName(
 			sc.Conf.GetCloneNameList(), req.GetCloneName())
@@ -468,22 +479,34 @@ func (s *Server) UpdateCloneTrConf(
 }
 
 // AppendCloneBitmap is architecture.md §8.9's AppendCloneBitmap: one chunk of
-// the SOURCE bitmap, addressed by the source slice it describes.
+// the SOURCE bitmap, addressed by the PAIR (`src_slice_idx`, `bm_idx`).
 //
-// `bm_idx` is the source `slice_idx` and not an append sequence, so a chunk
-// is addressed rather than allocated: a caller that pages one source slice's
-// bitmap sends every page under that slice's own index, and each page is
-// appended to the chunk already there (the STM below; a page is never a
-// replacement, or paging would keep only the last one). Re-addressing the
-// same slice is therefore what makes `bm_cnt` a high-water mark (max, never
-// +1) — it is what DeleteClone deletes the chunk keys from, and lowering it
+// A chunk is addressed rather than allocated: `src_slice_idx` picks the source
+// slice and `bm_idx` fixes the chunk's byte offset within that slice's bitmap
+// at the FIXED quantum common.CloneBmChunkBytes — chunk (s, b) holds the bytes
+// [b*C, b*C+len) of slice s's bitmap, len ≤ C. No chunk's meaning depends on
+// any other chunk's existence or length, so a caller may append to any (s, b)
+// at any time, in any order, and may leave chunks unsent entirely; an absent
+// chunk reads as all-zero (= all-written) and a short chunk's missing tail
+// reads as written, both the safe direction (§9.6). WITHIN one chunk the page
+// lands at the chunk's current length — a page is never a replacement, or
+// paging would keep only the last one (the STM below) — which is why the pages
+// of ONE chunk must arrive in slice-bitmap order.
+//
+// `bm_cnt` is ONE uint32: the high-water of `bm_idx + 1` over ALL appends,
+// across slices, and never derived from `src_slice_idx` — on a fresh clone,
+// appending (slice 5, bm 0) leaves it at 1, not 6. It is what DeleteClone
+// sweeps the chunk keys from, so it is a max and never a +1, and lowering it
 // would orphan them.
 //
-// Both bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of GW7's
-// Append*Bitmap row: that row is AppendMigrationBitmap's `bm_cnt ≥
-// MaxMigrBmCnt`, a ceiling reached by previous appends, whereas these two
-// judge the slice_idx of THIS request against a geometry the clone was
-// created with (§8.9 Errors).
+// The two index bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of
+// GW7's Append*Bitmap row: they judge the indexes of THIS request against a
+// geometry the clone was created with and against a compile-time constant. The
+// chunk-overflow check in the STM IS that row's shape — a ceiling reached by
+// previous appends, exactly like AppendMigrationBitmap's `bm_cnt ≥
+// MaxMigrBmCnt` — and is the one refusal here that is RESOURCE_EXHAUSTED. The
+// stateless page cap is INVALID_ARGUMENT again, because a page longer than a
+// whole chunk fits nowhere, whatever is already stored (§8.9 Errors).
 //
 // The bytes are stored exactly as sent: bitmaps are opaque to the gateway
 // (GW14, [D-J]) — the 1 = never-written, LSB-first convention is the agents'
@@ -506,6 +529,14 @@ func (s *Server) AppendCloneBitmap(
 	if err := validateBitmap(req.GetBitmap()); err != nil {
 		return nil, err
 	}
+	// Judged on this request alone, so it is here and NOT in validateBitmap:
+	// that helper is shared with AppendMigrationBitmap, whose chunks carry no
+	// byte cap of their own, and C is a clone chunk's capacity (§8.9).
+	if len(req.GetBitmap()) > common.CloneBmChunkBytes {
+		return nil, errInvalid(
+			"bitmap is %d bytes, over the %d one clone bitmap chunk holds",
+			len(req.GetBitmap()), common.CloneBmChunkBytes)
+	}
 	var cloneId uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
@@ -518,38 +549,53 @@ func (s *Server) AppendCloneBitmap(
 		if err != nil {
 			return err
 		}
-		sliceIdx := req.GetSliceIdx()
-		if sliceIdx >= clone.GetSrcSliceCnt() {
+		// src_slice_cnt is the whole slice bound: CreateClone already holds it
+		// to MaxSliceCntPerSp (validateCloneGeometry), so a second constant
+		// check here would judge nothing the geometry has not judged already.
+		srcSliceIdx := req.GetSrcSliceIdx()
+		if srcSliceIdx >= clone.GetSrcSliceCnt() {
 			return errInvalid(
-				"slice_idx %d is not below the clone's src_slice_cnt %d",
-				sliceIdx, clone.GetSrcSliceCnt())
+				"src_slice_idx %d is not below the clone's src_slice_cnt %d",
+				srcSliceIdx, clone.GetSrcSliceCnt())
 		}
-		if sliceIdx >= common.MaxCloneBmCnt {
-			return errInvalid("slice_idx %d is not below %d",
-				sliceIdx, common.MaxCloneBmCnt)
+		bmIdx := req.GetBmIdx()
+		if bmIdx >= common.MaxCloneBmCnt {
+			return errInvalid("bm_idx %d is not below %d",
+				bmIdx, common.MaxCloneBmCnt)
 		}
-		// §8.9 Action: "APPEND the bytes to CloneBitmap key
-		// bm_idx = slice_idx (create if absent)". The chunk grows; it is
-		// never replaced. Callers page one source slice's bitmap through
-		// GetThinDeviceBitmap and hand each page here, and the concatenation
-		// of those pages IS the slice's bitmap — bit k of the stored value
-		// covers block k of that slice (§9.6, [D8]). Overwriting would keep
-		// only the last page and place its bits at block 0, which
-		// PushCloneBitmap would then hand the primary as "these low blocks
-		// were never written" and the agent would blkdiscard regions the
-		// source really wrote.
+		// §8.9 Action: "append the bytes to CloneBitmap key
+		// (src_slice_idx, bm_idx) (create if absent)". The chunk grows in
+		// place; it is never replaced. Callers page one source slice's bitmap
+		// through GetThinDeviceBitmap and hand each page here, and the pages
+		// of one chunk concatenate into exactly the bytes [b*C, b*C+len) that
+		// chunk holds of the slice's bitmap (§9.6, [D8]). Overwriting would
+		// keep only the last page and place its bits at the chunk's own
+		// offset, which PushCloneBitmap would then hand the primary as "these
+		// blocks were never written" and the agent would blkdiscard regions
+		// the source really wrote.
 		//
 		// The zero value of the read is what makes "create if absent" fall
 		// out: an absent key decodes to an empty bitmap and the append is the
-		// request's bytes alone.
+		// request's bytes alone. The same read is what the capacity check
+		// needs — C bounds the STORED chunk, not one page — so a chunk that
+		// previous appends already drove to its ceiling is RESOURCE_EXHAUSTED.
 		bmKey := model.CloneBitmapKey(
-			sc.Cid, sc.SpId(), req.GetCloneName(), sliceIdx)
+			sc.Cid, sc.SpId(), req.GetCloneName(), srcSliceIdx, bmIdx)
 		chunk := &pb.CloneBitmap{}
 		stm.Get(bmKey, chunk)
+		if len(chunk.GetBitmap())+len(req.GetBitmap()) >
+			common.CloneBmChunkBytes {
+			return errExhausted(
+				"clone %q chunk (%d, %d) holds %d bytes, %d more would pass "+
+					"the %d one chunk holds",
+				req.GetCloneName(), srcSliceIdx, bmIdx,
+				len(chunk.GetBitmap()), len(req.GetBitmap()),
+				common.CloneBmChunkBytes)
+		}
 		chunk.Bitmap = append(chunk.GetBitmap(), req.GetBitmap()...)
 		stm.Put(bmKey, chunk)
-		if sliceIdx+1 > clone.GetBmCnt() {
-			clone.BmCnt = sliceIdx + 1
+		if bmIdx+1 > clone.GetBmCnt() {
+			clone.BmCnt = bmIdx + 1
 		}
 		stm.Put(model.CloneKey(
 			sc.Cid, sc.SpId(), req.GetCloneName()), clone)

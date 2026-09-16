@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -99,6 +101,10 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
+		// U10: dnv requires --max-txn-ops=common.EtcdMaxTxnOps of every etcd
+		// it runs against; the server's own default is 128, below the 259 ops
+		// DeleteClone's transaction can reach.
+		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)

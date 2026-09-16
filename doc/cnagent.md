@@ -143,6 +143,29 @@ convenience: the kind-`b` **tables are the allocation registry** (CN5, CN18),
 so the prefix+kind filter of `dmsetup ls` must be unambiguous.
 `architecture.md` §4.1 points here for the CN kinds `9`/`a`/`b`.
 
+One existing `common/name_fmt.go` formatter changes **arity**: a clone bitmap
+chunk is addressed by the PAIR `(src_slice_idx, bm_idx)` (architecture.md
+§9.6), so `LocalCloneBmPath` carries two `%02x` segments where it used to
+carry one, and that one used to be the source `slice_idx`:
+
+```go
+func (nf *NameFmt) LocalCloneBmPath(
+	clusterId, cnId, spId, cloneId uint64,
+	srcSliceIdx, bmIdx uint32,
+) string
+	// → {prefix}/clone-bm-{cluster:%016x}-{cn:%016x}-{sp:%016x}-{clone:%016x}-{slice:%02x}-{bm:%02x}
+```
+
+`LocalMigrBmPath` is untouched — migration chunks keep their flat `bm_idx`
+(dnagent.md SH21-SH23). Both clone fields fit two hex digits:
+`src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 16 (enforced by
+`CreateClone`), and `bm_idx < MaxCloneBmCnt` = 16 — a constant that keeps its
+name and value but now caps the chunks of **one** source slice's bitmap, each
+of the fixed capacity `CloneBmChunkBytes` = 1 MiB (the constants themselves
+live in `common/constants.go`; `gateway.md` §2.1 carries them). The file name
+is only an address: the persisted `PushCloneBitmapRequest` **inside** the file
+is what CN2 decodes the pair from.
+
 ### 2.2 Leg-probe IO leaves the `OsClient` (osclient.md §4.5.1 amendment)
 
 The [D6] health probe "reads the block back with O_DIRECT": a buffered read
@@ -280,7 +303,8 @@ type CnAgentServer struct {
 	capacity uint64           // --capacity
 	port     agent.PortConf   // --tr-*
 	// in-memory mirrors of the local store: cn requests, cntlr states
-	// (applied request, ResInfo tracker, per-clone ChunkSets, connect
+	// (applied request, ResInfo tracker, a per-clone agent.CloneChunkSet
+	// keyed by (src_slice_idx, bm_idx), connect
 	// retry registry, leg-prober registry), guarded by a leaf mutex.
 	// rootCtx anchors the CN10/CN18 retry loops and CN11 probers.
 	// cloneMetaMu serializes the CN18 allocator (CN5): the registry is the
@@ -309,19 +333,50 @@ CN1. Lock mapping (instantiates SH10-SH13): `SyncupCn` and the startup
 
 CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      load every `cn-*` and `cntlr-*` request into memory first. Then reload
-     every `clone-bm-*` chunk into the owning cntlr's `ChunkSet`s (SH21) —
-     **before** any converge runs, so that a dm-clone the converge (re)builds
-     re-applies in the same pass every chunk the node already holds (CN18
-     step 4). Loading them afterwards would lose none of them — a chunk in
-     memory is advertised as applied by the next reply's `bm_idx_list`
+     every `clone-bm-*` chunk into the owning cntlr's `agent.CloneChunkSet`s
+     (SH21), keyed by the `(src_slice_idx, bm_idx)` pair the chunk is
+     addressed by — **before** any converge runs, so that a dm-clone the
+     converge (re)builds re-applies in the same pass every chunk the node
+     already holds (CN18 step 4). Owner *and* address come out of the file's
+     **content**: the file is a persisted `PushCloneBitmapRequest`, and its
+     `cluster_id`/`cn_id`/`cntlr_pointer`, its `clone_id` and its
+     `src_slice_idx`/`bm_idx` are what the reload reads. The name carries the
+     same pair (§2.1), but only as an address — nothing here parses it. A
+     file that does not decode is logged and **skipped**; a skipped file is
+     deliberately **not** an orphan and is not deleted — a decode failure
+     says nothing about who owns it, so nothing here may conclude the owner
+     is gone.
+
+     A chunk file written by a **pre-pair** binary does NOT take that path,
+     and the difference is worth stating because it is counter-intuitive.
+     The renumbering moved `bitmap` from field 7 to 8 and gave 7 to `bm_idx`,
+     so an old file's `bitmap` (field 7, wire type 2) collides with the new
+     `bm_idx` (field 7, wire type 0). protobuf-go does not error on a
+     wire-type mismatch: it moves the field to **unknown fields** and carries
+     on. The old file therefore decodes *cleanly* into
+     `{src_slice_idx: <the old bm_idx>, bm_idx: 0, bitmap: <empty>}` — its
+     owner fields (1, 2, 3, 5) never moved, so it is not an orphan either,
+     and it is loaded as an EMPTY chunk at the pair `(old_bm_idx, 0)`.
+     The consequence is bounded and stays on the safe side: an empty chunk is
+     never skippable (`skippable` finds every byte past its zero length), so
+     nothing is wrongly discarded and no data can be lost. What is lost is
+     the optimization at that one pair — `chunk_id_list` advertises it as
+     applied, so BM2 never pushes the real chunk there — and the stale file
+     itself leaks, because `cloneChunkPaths` rebuilds a two-segment name that
+     cannot match its one-segment original. Both persist across restarts.
+     No toleration code exists anywhere, by design (there are no real users
+     and binaries upgrade in lockstep); the operational answer is to clear
+     the CN's `--local-store` when upgrading past this change. Loading them
+     afterwards would lose none of them — a chunk in memory is advertised as
+     applied by the next reply's `chunk_id_list`
      (CN20), so the worker's BM2 diff would not push it again — but their
      `blkdiscard`s would then wait for the next event that re-applies the
      whole set: a create of that dm-clone, a converge reload of its table
      onto a changed length, devno or region size (step 4 runs on both —
      the converge treats a reload exactly as a create), or another
      chunk's own push (CN22). Until then the clone re-copies regions it
-     never needed to. A chunk file whose cntlr is not among the loaded
-     `cntlr-*` requests, or whose `clone_id` is absent from that cntlr's
+     never needed to. A **decoded** chunk file whose cntlr is not among the
+     loaded `cntlr-*` requests, or whose `clone_id` is absent from that cntlr's
      stored `clone_list`, is an orphan — its cntlr or clone was deleted
      while the chunk file survived (SH7) — and is deleted here, because
      it names an owner no later pass will ever look for. Then, for each
@@ -1118,7 +1173,9 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          there;
          then `hydration_threshold`/`hydration_batch_size` messages from
          `dm_clone_conf`.
-      4. Apply every locally present bitmap chunk (CN22 math) — and, when
+      4. Apply every locally present bitmap chunk — the CN22 fold over the
+         `(src_slice_idx, bm_idx)`-addressed chunks this node holds, read in
+         place — and, when
          this build is a **§11.5 recovery** (the dm-clone's metadata is
          missing or unusable: a CN reboot takes the tmpfs, the loop device
          and every kind-`b` wrapper together; a failover to a CN that never
@@ -1182,8 +1239,14 @@ CN19. **`sp_level` gating** (§11.7; numeric comparisons — the enum values
 
 CN20. Persist (SH5); reply `agent_reply`, `revision`, `cntlr_info`,
       `bm_info_list` — one `BitmapInfo{res_id = clone_id}` per `clone_list`
-      entry of the (now-stored) request, `bm_idx_list` derived from the
-      `clone-bm-*` files present (SH21).
+      entry of the (now-stored) request, its `chunk_id_list` derived from the
+      `clone-bm-*` files present (SH21): one `BmChunkId{src_slice_idx,
+      bm_idx}` per chunk this node holds for that clone, ascending by the
+      pair. `bm_idx_list` is left **unset** — that field is the migration
+      applied set (`SyncupSideReply.bm_info`), and a flat index cannot name a
+      pair-addressed chunk. A clone with no chunks reports a `BitmapInfo`
+      with an empty `chunk_id_list`, which is what tells BM2 to push
+      everything etcd holds.
 
 ### 4.7 Cntlr teardown
 
@@ -1216,30 +1279,45 @@ CN21. Used by CN7 (pointer removed), CN2 (orphan file) and CN19's
 ### 4.8 `PushCloneBitmap`
 
 CN22. Gate: the cntlr file must exist and its stored `clone_list` must
-      contain `clone_id`, and `bm_idx` must be `< MaxCloneBmCnt` and
-      `< that clone's src_slice_cnt` (`ReplyCodeUnknownObject` otherwise);
-      revision gate (SH8) against the stored cntlr revision (a push never
-      updates the stored revision). Then SH21 with the clone twists of
-      §9.6: persist the chunk at
-      `LocalCloneBmPath(cluster, cn, sp, clone_id, bm_idx)` —
+      contain `clone_id`, and the chunk's two indexes must each be in range
+      — `src_slice_idx < that clone's src_slice_cnt` **and** `bm_idx <
+      MaxCloneBmCnt` — bounded **independently**, in one
+      `ReplyCodeUnknownObject` naming both indexes and both limits. Neither
+      bound may stand in for the other: `src_slice_cnt` is the clone's own
+      source geometry, `MaxCloneBmCnt` the cap on the chunks of one slice's
+      bitmap, and an in-range `bm_idx` says nothing about `src_slice_idx` or
+      the reverse. Then the revision gate (SH8) against the stored cntlr revision
+      (a push never updates the stored revision). Then SH21 with the clone
+      twists of §9.6: persist the chunk at
+      `LocalCloneBmPath(cluster, cn, sp, clone_id, src_slice_idx, bm_idx)` —
       **overwriting** when the payload differs, because clone chunks may
-      grow ([D8]) — then recompute and apply. Clone chunks are
-      self-positioned per source slice (bm_idx = slice_idx) and carry raid0
-      geometry: `thinbm.go` folds the present chunks into one device-order
-      wire bitmap over the dm-clone's regions — region `r` is skippable iff
-      **every** source bit it covers under the §11.4 address mapping
-      (`src_slice_cnt`, `src_stripe_size`, `src_block_size`, region size =
-      `block_size`) is present **and** set; a bit whose chunk is absent
-      counts as written. The folded bitmap feeds the shared
+      grow in place ([D8]); a byte-identical payload is already persisted and
+      already applied, and is skipped outright — then recompute and apply.
+      Clone chunks are self-positioned by the pair (SH22): chunk `(s, b)`
+      holds bytes `[b·C, b·C + len)` of source slice `s`'s bitmap,
+      `C = CloneBmChunkBytes`, at an offset no other chunk's existence or
+      length can move. They carry raid0 geometry, and `thinbm.go` folds the
+      chunks present **in place** — never through a reassembled per-slice
+      bitmap, which a missing chunk would shift every later chunk inside —
+      into one device-order wire bitmap over the dm-clone's regions: region
+      `r` is skippable iff **every** source bit it covers under the §11.4
+      address mapping (`src_slice_cnt`, `src_stripe_size`, `src_block_size`,
+      region size = `block_size`) reads as set, and bit `k` of slice `s`
+      reads as set only when chunk `b = k/(8·C)` of that slice is present,
+      byte `(k mod 8·C)/8` is within its length, **and** that bit is 1. An
+      absent chunk, the tail of a present-but-short one ([D8]:
+      `AppendCloneBitmap` may still be growing it) and a slice holding no
+      chunks at all therefore all count as written — the safe direction,
+      which can only cost an extra copy. The folded bitmap feeds the shared
       `agent.SkipRanges` with `shiftRegions = 0` (clones have no meta
       region — that shift is the dn's) and is `blkdiscard`ed onto
       `CnCloneFinalName`. If the dm-clone does not currently exist (standby,
       not built yet, level-suppressed), the file still counts as applied;
       chunks are re-applied whenever the dm-clone is (re)created (CN18 step
       4). A **failed persist** is logged and still acked code 0, with neither
-      the fold nor the `blkdiscard` attempted. For an index the node does
+      the fold nor the `blkdiscard` attempted. For a pair the node does
       not hold yet that heals itself: the chunk stays out of the applied
-      set, so it stays out of the clone's `BitmapInfo.bm_idx_list` (CN20)
+      set, so it stays out of the clone's `BitmapInfo.chunk_id_list` (CN20)
       and the worker's BM2 diff pushes it again. That diff is the whole
       recovery, and it is eventual rather than prompt: a code-0 ack leaves
       the worker's BM6 flag down, and `bm_info_list` rides no `CheckCntlr`
@@ -1248,10 +1326,12 @@ CN22. Gate: the cntlr file must exist and its stored `clone_list` must
       rejects or answers with another revision, or another chunk's push
       failure raising BM6. A failed persist of a **grown** chunk ([D8],
       architecture.md §9.6) is the one case that does not heal that way: the
-      index is already in the applied set with the shorter payload, so
-      `bm_idx_list` keeps advertising it, and the code-0 ack also refreshes
-      the worker's BM5 memo — the node keeps the shorter version until
-      `AppendCloneBitmap` grows that chunk again, the same bounded,
+      pair is already in the applied set with the shorter payload, so
+      `chunk_id_list` keeps advertising it, and the code-0 ack also refreshes
+      the worker's BM5 memo — which keys on `(clone_id, src_slice_idx,
+      bm_idx)`, so only that one chunk is affected — and the node keeps the
+      shorter version until `AppendCloneBitmap` grows that chunk again, the
+      same bounded,
       correctness-neutral loss [D8] already accepts. Reply `agent_reply`
       only.
 
@@ -1608,14 +1688,54 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    re-discarded; an arena with no contiguous free run of the required size ⇒
    `clone_id_to_meta` and `clone_id_to_dm_clone` both `RES_STATUS_ERROR`;
    teardown asserts ns-dev reload → clone remove → **wrapper remove** →
-   disconnect, in that order.
-10. **PushCloneBitmap**: persist-before-apply call order; unknown
-    `clone_id` and out-of-range `bm_idx` rejected; a grown chunk overwrites
-    the file and re-applies; the applied set after a simulated restart
-    (fresh server, same fake store) matches; a chunk without a live
-    dm-clone still counts applied; the geometry fold treats an absent
-    slice's bits as written (a region overlapping a missing chunk is never
-    discarded).
+   disconnect, in that order. The fresh build's reply also pins the CN20
+   shape: one `BitmapInfo` for the clone whose `chunk_id_list` is exactly the
+   pushed pair and whose `bm_idx_list` is **empty** — a clone never fills the
+   migration field.
+10. **PushCloneBitmap** (CN22, `agent/cnagent/clone_test.go`):
+    `TestPushCloneBitmapGates` — unknown `clone_id`, and the two index
+    bounds asserted **separately** so neither can stand in for the other: an
+    in-range `src_slice_idx` with `bm_idx = MaxCloneBmCnt` is rejected, an
+    out-of-range `src_slice_idx` with `bm_idx = 0` is rejected, and the pair
+    `(0, MaxCloneBmCnt−1)` — in range on both axes — is accepted, which is
+    what keeps the two rejections bounds rather than blanket refusals;
+    a stale revision is still `ReplyCodeStaleRevision`.
+    `TestPushCloneBitmapPersistBeforeApply` — the `WriteProto` to the
+    two-`%02x` `LocalCloneBmPath` precedes the `blkdiscard`, a grown chunk
+    overwrites the same file and re-applies, a byte-identical re-push writes
+    and discards nothing. `TestPushCloneBitmapSurvivesRestart` — chunks
+    `(0, 0)` and `(1, 1)`, the second a pair neither index alone could name,
+    are persisted under distinct names and a fresh server over the same fake
+    store reports both back in `chunk_id_list`, ascending, with nothing
+    re-pushed. `TestPushCloneBitmapWithoutDmClone` — a chunk pushed while
+    the clone is `SP_LEVEL_NO_CLONE` runs no `blkdiscard`, still reports
+    applied, and is `blkdiscard`ed when the converge builds the dm-clone
+    (CN18 step 4).
+10b. **The clone chunk store and the §11.4 chunk math**
+    (`agent/agent_test.go`, `agent/cnagent/bitmap_test.go`):
+    `TestCloneChunkSetPairKeyed` — `agent.CloneChunkSet` Put/Get/Delete by
+    `CloneChunkKey` and `Ids()` ascending by `(SliceIdx, BmIdx)`, with the
+    same `bm_idx` on two slices held as two chunks that neither shadow nor
+    delete each other, and an absent pair simply absent (a gap is legal);
+    `TestChunkSetContiguousPrefix` is untouched, because `agent.ChunkSet`
+    stays migration-only. `TestFoldRegions` keeps the absent-chunk row (a
+    region overlapping a slice with no chunks is never discarded) and
+    `TestRegionSkippableMatchesTheAddressMapping` still differentially
+    checks the cycle-walking fold against a literal replay of the §11.4
+    mapping. Four cases pin the chunk arithmetic itself:
+    `TestSliceBitmapChunkBoundary` (bit `8C−1` is the last bit of chunk 0
+    and bit `8C` the first of chunk 1, and adding chunk 1 moves nothing in
+    chunk 0), `TestShortChunkTailReadsAsWritten` (a bit inside a present
+    chunk's span but past its length is written, never skippable),
+    `TestAbsentMiddleChunkKeepsLaterChunksInPlace` (chunks 0 and 2 present,
+    1 missing — chunk 2's bits stay at `16C` bits in; this is the case a
+    concatenation model fails, and it fails it in the **unsafe** direction),
+    and `TestChunksOfCutsAtChunkBoundaries` +
+    `TestDstBitmapLongerThanAChunkIsSplit` (the §11.5 recovery builds its
+    per-slice bitmaps locally and must cut them at `C`: wrapping a whole
+    bitmap as chunk 0 would silently stop skipping past the first MiB of
+    bitmap, and the second test checks that through `regionSkippable`, the
+    entry point `foldRegions` actually uses).
 11. **sp_level ladder** (CN19): each level asserts exactly its row —
     `NO_THINPOOL` keeps namespaces exported on error backing;
     `NO_MIGRATION` is a no-op relative to `NO_REDUND`; `NO_SIDE` drops leg
@@ -1817,7 +1937,10 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    (including `CnCloneMetaAreaSize`/`CnCloneMetaUnit`, and **no**
    `DefaultCloneVg*`), `CnLegName`/`CnGrpName`/`CnCloneMetaDmName`/
    `CnCloneMetaDmPrefix` in `common/name_fmt.go` (and no `CnCloneVgName`/
-   `CnCloneMetaName`/`CnCloneMetaPath`), the exported `common.WriteBlockAt` /
+   `CnCloneMetaName`/`CnCloneMetaPath`), `LocalCloneBmPath` taking six
+   arguments — `(cluster, cn, sp, clone, src_slice_idx, bm_idx)` — and
+   formatting two `%02x` segments while `LocalMigrBmPath` keeps its five and
+   its one, the exported `common.WriteBlockAt` /
    `common.ReadBlockDirectAt` helpers with **no** `ReadBlockDirect` on
    `OsClient` or `FakeOsClient`, `DisconnectDevice` on `NvmeHost`. `common/`
    still contains exactly the six files of `layout.md` §2.
@@ -1859,6 +1982,15 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     `grep -rnE --exclude=*_test.go "DefaultDmPoolDataBlockSize|DefaultPoolLowWatermarkPct|DefaultDmRaid0StripeSize|DefaultChunkBlockCnt" agent/`
     finds nothing: the cn agent substitutes no conf default of its own
     (CN13).
+11. Clone chunks are pair-addressed with no migration residue left in the
+    role: `grep -rn --exclude=*_test.go "BmIdxList" agent/cnagent/` finds
+    **nothing** — CN20 fills `chunk_id_list` only — and the lowercase
+    `grep -rn --exclude=*_test.go "bm_idx_list" agent/cnagent/` finds only
+    the doc comment in `push_clone_bm.go` saying why the field stays unset.
+    `grep -rn "ContiguousPrefix\|agent.NewChunkSet" agent/cnagent/` finds
+    nothing at all — concatenation is the migration placement rule (SH23),
+    and applying it to clone chunks would put every chunk past a gap at the
+    wrong offset. `agent.ChunkSet` is reachable only from `agent/dnagent/`.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

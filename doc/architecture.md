@@ -136,7 +136,8 @@ ClusterConf
 | `MaxCloneCntPerSp` | 64 | `MaxXferCntPerSp` | 4 |
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
-| `MaxCloneBmCnt` | 16 | `MaxMigrBmCnt` | 4 |
+| `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
+| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv, §8.9) | 512 |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
 
 ---
@@ -701,8 +702,8 @@ step 2, and every dnv device name is a dm name from §4.2 (kinds `9`/`a`/`b` per
 ### 4.6 Agent local-store paths
 
 The agent's persistent state (§9.1) lives as flat protobuf files under
-`localStorPrefix` (`--local-store`). `{bm_idx}` is formatted with
-`BmIdxFmt = "%02x"`:
+`localStorPrefix` (`--local-store`). `{src_slice_idx}` and `{bm_idx}` are both
+formatted with `BmIdxFmt = "%02x"`:
 
 | function | path | content |
 |---|---|---|
@@ -711,7 +712,7 @@ The agent's persistent state (§9.1) lives as flat protobuf files under
 | `LocalCnPath(cluster,cn)` | `{prefix}/cn-{cluster}-{cn}` | last applied `SyncupCnRequest` |
 | `LocalCntlrPath(cluster,cn,sp,cntlr)` | `{prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr}` | last applied `SyncupCntlrRequest` |
 | `LocalMigrBmPath(cluster,dn,sp,migr,bm_idx)` | `{prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx}` | one received `PushMigrBitmapRequest` chunk (§9.6) |
-| `LocalCloneBmPath(cluster,cn,sp,clone,bm_idx)` | `{prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{bm_idx}` | one received `PushCloneBitmapRequest` chunk (§9.6) |
+| `LocalCloneBmPath(cluster,cn,sp,clone,src_slice_idx,bm_idx)` | `{prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{src_slice_idx}-{bm_idx}` | one received `PushCloneBitmapRequest` chunk (§9.6); a clone chunk is addressed by the PAIR, so the name carries two index segments where the migration name carries one |
 
 ---
 
@@ -786,7 +787,7 @@ separator, no text formatting. Consequences that the rest of this document relie
 | `ThinDevice`  | `{p} thin_device {cluster_id} {sp_id} {td_name}` | |
 | `Subsystem`   | `{p} subsystem {cluster_id} {sp_id} {nqn}` | namespaces embedded |
 | `Clone`       | `{p} clone {cluster_id} {sp_id} {clone_name}` | |
-| `CloneBitmap` | `{p} clone_bitmap {cluster_id} {sp_id} {clone_name} {bm_idx}` | bm_idx = source slice_idx |
+| `CloneBitmap` | `{p} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}` | one chunk of source slice `src_slice_idx`'s bitmap, self-positioned at byte `bm_idx × CloneBmChunkBytes` within it (§9.6); `src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp`, `bm_idx < MaxCloneBmCnt` |
 | `Transfer`    | `{p} transfer {cluster_id} {sp_id} {xfer_name}` | |
 | `Migration`   | `{p} migration {cluster_id} {sp_id} {migr_name}` | |
 | `MigrBitmap`  | `{p} migration_bitmap {cluster_id} {sp_id} {migr_name} {bm_idx}` | bm_idx = append sequence 0… |
@@ -1657,8 +1658,13 @@ Errors: `FAILED_PRECONDITION` when `force = false` and hydration is not complete
 checked outside the STM via `GetCntlrInfo` of the primary
 (`clone_id_to_dm_clone.details` carries the dm-clone status; unreachable agent also ⇒
 `FAILED_PRECONDITION`).
-Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap`, set
-`suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. The
+Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap` chunk
+— a nested point-delete sweep over `src_slice_cnt × bm_cnt` pairs, since an STM cannot
+range and absent pairs delete harmlessly — set
+`suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. That
+sweep is why every etcd serving dnv must run with `--max-txn-ops=512`
+(`EtcdMaxTxnOps`): its worst case is `MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes
+plus a handful of other ops, and etcd's default cap is 128. The
 primary reloads those namespaces' `CnNsDevName`s back onto the raid0 (all data now
 local), removes the
 dm-clone first and then its metadata wrapper `CnCloneMetaDmName` (whose arena units
@@ -1669,16 +1675,37 @@ become free again in the next registry enumeration, [D14]), disconnects the sour
 `SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
 
 **AppendCloneBitmap** —
-Errors: `INVALID_ARGUMENT` `slice_idx ≥ Clone.src_slice_cnt` or `≥ MaxCloneBmCnt`;
-`INVALID_ARGUMENT` empty bitmap.
-Action: STM: append the bytes to `CloneBitmap` key `bm_idx = slice_idx` (create if
-absent), `bm_cnt = max(bm_cnt, slice_idx+1)`, bump `SpRev`. These are the **src
-bitmaps**: bit *k* of source slice `slice_idx` covers `src_block_size` bytes of that
-slice's local address space; **1 = the source never wrote there ⇒ skippable**. They are
-a pure optimization delivered via `PushCloneBitmap` (§9.6) and may be applied at any
-time, even after the dm-clone started serving IO (§11.5); durability never depends on
-them. The chunk-append exists because callers page the source bitmap via
-`GetThinDeviceBitmap` and because etcd values are size-limited.
+Errors: `INVALID_ARGUMENT` empty bitmap; `INVALID_ARGUMENT`
+`len(bitmap) > CloneBmChunkBytes` (stateless, judged on this request alone);
+`INVALID_ARGUMENT` `src_slice_idx ≥ Clone.src_slice_cnt`; `INVALID_ARGUMENT`
+`bm_idx ≥ MaxCloneBmCnt`; `RESOURCE_EXHAUSTED`
+`len(stored) + len(bitmap) > CloneBmChunkBytes` — the chunk's ceiling reached by
+previous appends, the same shape as `AppendMigrationBitmap`'s `bm_cnt` cap.
+Action: STM: append the bytes to `CloneBitmap` key `(src_slice_idx, bm_idx)` (create
+if absent), `bm_cnt = max(bm_cnt, bm_idx+1)`, bump `SpRev`. These are the **src
+bitmaps**: bit *k* of source slice `src_slice_idx` covers `src_block_size` bytes of
+that slice's local address space; **1 = the source never wrote there ⇒ skippable**.
+They are a pure optimization delivered via `PushCloneBitmap` (§9.6) and may be applied
+at any time, even after the dm-clone started serving IO (§11.5); durability never
+depends on them.
+
+A slice's bitmap is split into up to `MaxCloneBmCnt` fixed-capacity chunks of
+`CloneBmChunkBytes` each: chunk `(s, b)` holds bytes `[b·C, b·C+len)` of source slice
+`s`'s bitmap, `len ≤ C`. Positions across chunks are fixed by `bm_idx` alone — no
+chunk's meaning depends on any other chunk's existence or length — so a caller may
+append to any `(s, b)` at any time, in any order, and may leave chunks unsent
+entirely; an absent chunk is semantically all-zero (= all-written) and a short chunk's
+missing tail reads as written, both the safe direction. WITHIN one chunk a page lands
+at the chunk's current length, so the pages of ONE chunk must arrive in slice-bitmap
+order — that is the per-slice append contract scoped down to a chunk, and it exists
+because callers page the source bitmap via `GetThinDeviceBitmap` and because etcd
+values are size-limited. A chunk already pushed and acknowledged may keep growing
+([D8]).
+
+`bm_cnt` is ONE `uint32`: the high-water of `bm_idx + 1` over ALL appends, across
+slices. It is NOT derived from `src_slice_idx` — on a fresh clone, appending
+`(slice 5, bm 0)` leaves `bm_cnt = 1`, not 6 — and it is what DeleteClone sweeps the
+chunk keys from, so it never lowers.
 
 ### 8.10 Transfers (source side of a copy; fig. `100Transfer`)
 
@@ -1844,7 +1871,10 @@ The gateway resolves the primary cntlr's CN in an STM, then (outside) calls the 
 mapping bitmap of the td's thin volume in that slice: bit *k* (for block
 `start_block + k`, block = `block_size`) = **1 iff unmapped/never written**.
 `block_cnt = 0` ⇒ to the end. Callers page through it and feed `AppendCloneBitmap` on
-the destination.
+the destination. A caller that pages in reads aligned to `8·CloneBmChunkBytes`
+source blocks maps each page to its chunk statelessly —
+`bm_idx = start_block / (8·CloneBmChunkBytes)` — which is all it takes to satisfy
+§8.9's within-a-chunk append order without tracking any cursor.
 
 **GetLegBitmap** — inputs `leg_id`, `start_block`, `block_cnt`. Same path via the
 agent's `GetLegBm`; the agent walks the pool metadata of the owning slice, translates
@@ -1917,8 +1947,9 @@ concatenation (§9.6, §11.4).
   resource's `ResInfo{status = RES_STATUS_ERROR, details}` rather than crashing the
   reconcile — the agent always converges as much as it can and reports the rest.
 * **Bitmap durability.** Received `Push*Bitmap` chunks are persisted per chunk under
-  `LocalMigrBmPath`/`LocalCloneBmPath`; the applied-index sets reported through
-  `bm_info`/`bm_info_list` are derived from the files present, so they survive agent
+  `LocalMigrBmPath`/`LocalCloneBmPath`; the applied sets reported through
+  `bm_info.bm_idx_list` / `bm_info_list[…].chunk_id_list` are derived from the files
+  present, so they survive agent
   restarts and the worker does not have to re-push after one. Re-applying a chunk is
   always harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a no-op,
   which holds only because every dnv dm-clone carries `no_discard_passdown` ([D7],
@@ -1941,8 +1972,8 @@ concatenation (§9.6, §11.4).
 |---|---|
 | `GetCnSize` | Return the capacity budget in bytes this CN is willing to host (0 = "use the default"); typically from local config. |
 | `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, the 1 GiB sparse backing file, the single loop device — re-learned via `losetup --associated`, never persisted — and the single nvmet port; there is no VG, [D14]); accept and persist `qos_ratio` (enforcement is deferred until the §3.2 step 4 open issue is decided — the agent programs no limit, `cnagent.md` CN6); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
-| `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap indexes, one `BitmapInfo` per clone, §9.6). |
-| `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
+| `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap chunks, one `BitmapInfo` per clone, its applied set carried as `chunk_id_list` — `(src_slice_idx, bm_idx)` pairs, §9.6; `bm_idx_list` is migrations only). |
+| `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath(…, src_slice_idx, bm_idx)`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
 | `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
 | `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
 | `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
@@ -2089,41 +2120,59 @@ the per-RPC roles:
 
 | | `PushMigrBitmap` (`DiskNodeAgent`) | `PushCloneBitmap` (`ControllerNodeAgent`) |
 |---|---|---|
-| chunk source in etcd | `MigrBitmap` keys, `bm_idx` = append sequence `0 … bm_cnt−1` (≤ `MaxMigrBmCnt` = 4) | `CloneBitmap` keys, `bm_idx` = source `slice_idx` (< `src_slice_cnt` ≤ `MaxCloneBmCnt` = 16) |
-| chunk meaning | chunks **concatenate in `bm_idx` order** into one bitmap over the leg's data region (§8.11); immutable once written | each chunk is a **self-positioned** per-source-slice bitmap (§8.9); `AppendCloneBitmap` may keep growing it |
+| chunk source in etcd | `MigrBitmap` keys, `bm_idx` = append sequence `0 … bm_cnt−1` (≤ `MaxMigrBmCnt` = 4) | `CloneBitmap` keys, addressed by the pair `(src_slice_idx, bm_idx)`: `src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 16, and `bm_idx < MaxCloneBmCnt` = 16 chunks **per slice** |
+| chunk meaning | chunks **concatenate in `bm_idx` order** into one bitmap over the leg's data region (§8.11); immutable once written | each chunk is a **self-positioned** slice of source slice `src_slice_idx`'s bitmap: chunk `(s, b)` holds bytes `[b·C, b·C+len)` of slice `s`'s bitmap, `len ≤ C = CloneBmChunkBytes` (§8.9); `AppendCloneBitmap` may keep growing it within `C` |
 | receiving agent | the DN hosting the migration's **destination** side | the CN hosting the **primary** cntlr (only it runs the dm-clone) |
-| request fields | `side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap` | `cntlr_pointer`, `revision`, `clone_id`, `bm_idx`, `bitmap` |
-| local chunk file | `LocalMigrBmPath(cluster, dn, sp, migr, bm_idx)` | `LocalCloneBmPath(cluster, cn, sp, clone, bm_idx)` |
-| applied-set report | `SyncupSideReply.bm_info` (`BitmapInfo.res_id = migr_id`) | `SyncupCntlrReply.bm_info_list` (one `BitmapInfo` per clone, `res_id = clone_id`) |
+| request fields | `side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap` | `cntlr_pointer`, `revision`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap` |
+| local chunk file | `LocalMigrBmPath(cluster, dn, sp, migr, bm_idx)` | `LocalCloneBmPath(cluster, cn, sp, clone, src_slice_idx, bm_idx)` |
+| applied-set report | `SyncupSideReply.bm_info` (`BitmapInfo.res_id = migr_id`, applied set in `bm_idx_list`) | `SyncupCntlrReply.bm_info_list` (one `BitmapInfo` per clone, `res_id = clone_id`, applied set in `chunk_id_list` as `(src_slice_idx, bm_idx)` pairs) |
 | apply action | shift by the leg's `meta_blocks` (§8.11), then §11.4 → `blkdiscard` on `DnMigrFinalName` | §11.4 → `blkdiscard` on `CnCloneFinalName` |
 
 **Why chunked, why ordered.** A whole bitmap might be too large for one etcd value or
 one gRPC message (`Get*Bitmap` is paged for the same reason), so it is split into
-multiple parts and `bm_idx` fixes each part's position so the receiver can reassemble
-the bitmap correctly. For migration chunks the position is by concatenation: chunk
-*k*'s first bit sits at the summed bit length of chunks `0 … k−1`, so chunk *k* is only
+multiple parts and the key fixes each part's position so the receiver can place it
+correctly. For migration chunks the position is by concatenation: chunk *k*'s first
+bit sits at the summed bit length of chunks `0 … k−1`, so chunk *k* is only
 interpretable once every lower chunk is present — delivery order matters. Clone chunks
-are positioned by `bm_idx = slice_idx` alone and are order-independent among each
-other. (With the defaults the bitmaps are small — a 1 TiB leg at 1 MiB `block_size` is
-2^20 bits = 128 KiB — the chunking exists for the value-size limits and the paged
-readers, not because bitmaps are inherently huge.)
+are positioned by `(src_slice_idx, bm_idx)` alone: `src_slice_idx` picks the source
+slice and `bm_idx` fixes the chunk's byte offset within that slice's bitmap at the
+FIXED quantum `C = CloneBmChunkBytes`, independently of any other chunk's existence or
+length. They are therefore order-independent among each other, gap-tolerant, and
+growable in place; skipping the all-zero chunks of a mostly-written slice is a
+legitimate optimization, not a protocol violation. An absent chunk reads as all-zero
+(= all-written) and a short chunk's missing tail reads as written — always the safe
+direction, a region copied instead of discarded.
+
+`C = 1 MiB` keeps a grown chunk value plus the `Clone` and rev-bump puts inside etcd's
+default ~1.5 MiB request cap and every `PushCloneBitmap` message inside gRPC's default
+4 MiB; 16 chunks × 1 MiB = 16 MiB of bitmap per slice, which is an 8 TiB slice at
+64 KiB source blocks, and at most 256 MiB per clone against etcd's default 2 GiB
+quota. (With the defaults the bitmaps are far smaller — a 1 TiB leg at 1 MiB
+`block_size` is 2^20 bits = 128 KiB — the chunking exists for the value-size limits
+and the paged readers, not because bitmaps are inherently huge.)
 
 **dnv-worker side** (sp role, §10.3):
 
 1. **Learn what is missing from the syncup replies.** Every `SyncupSide` /
-   `SyncupCntlr` reply returns the agent's applied sets as `BitmapInfo.bm_idx_list`:
-   `bm_info` for the migration whose destination is that side, one `bm_info_list`
-   entry per clone. The worker diffs each list against the chunk keys present in etcd;
-   the indexes in etcd but not in `bm_idx_list` are exactly the missed parts still to
-   deliver.
+   `SyncupCntlr` reply returns the agent's applied sets: `bm_info` for the migration
+   whose destination is that side, carried as `bm_idx_list`; one `bm_info_list` entry
+   per clone, carried as `chunk_id_list` of `(src_slice_idx, bm_idx)` pairs. The
+   worker diffs each set against the chunk keys present in etcd; the chunks in etcd
+   but not in the reported set are exactly the missed parts still to deliver. For a
+   clone the diff is over PAIRS — the same `bm_idx` on two different source slices are
+   two distinct chunks.
 2. **Push one part per request.** Each missed part is written as one
    `PushMigrBitmapRequest` / `PushCloneBitmapRequest` carrying the addressing ids
    (`side_pointer` + `migr_id`, resp. `cntlr_pointer` + `clone_id`), the `revision`,
-   the `bm_idx` and the raw chunk bytes.
+   the chunk address (`bm_idx`, resp. `src_slice_idx` + `bm_idx`) and the raw chunk
+   bytes.
 3. **One in flight per migration/clone.** The worker issues the next `Push*Bitmap`
    call for a migration/clone **only after the reply to the previous one has
-   arrived**, and pushes its missed parts in ascending `bm_idx`; together this
-   guarantees the in-order arrival that migration chunk concatenation requires.
+   arrived**, and pushes its missed parts in ascending `bm_idx` for a migration,
+   ascending lexicographic `(src_slice_idx, bm_idx)` for a clone. For migrations that
+   order is load-bearing: it guarantees the in-order arrival chunk concatenation
+   requires. For clones it is deterministic only — self-positioning makes order
+   semantically irrelevant.
 4. **Independence across objects.** Calls for different migrations/clones are
    independent unary calls and MAY run concurrently, also toward the same agent; only
    the per-object ordering of step 3 matters. (Contrast the `Check*` streams of §9.7,
@@ -2131,7 +2180,8 @@ readers, not because bitmaps are inherently huge.)
 5. **Targets.** Migration chunks go only to the destination side's DN; clone chunks go
    only to the CN currently hosting the primary cntlr. After a failover or a
    destination change the new node's syncup reply simply reports an empty/partial
-   `bm_idx_list` and the worker pushes the missing parts there.
+   applied set (`bm_idx_list`, resp. `chunk_id_list`) and the worker pushes the
+   missing parts there.
 6. A reply with `AgentReply.code != 0` (stale revision; unknown `migr_id`/`clone_id`
    because the introducing `SyncupSide`/`SyncupCntlr` has not been applied yet) is not
    fatal: the worker re-pushes the part on its next sync round.
@@ -2145,15 +2195,19 @@ readers, not because bitmaps are inherently huge.)
    the fully-skippable dm-clone regions from **all** locally present chunks of that
    migration/clone (§11.4 math; migrations first shift by the leg's `meta_blocks`,
    §8.11) and apply them to the migration/clone dm-clone by `blkdiscard`ing
-   `DnMigrFinalName` / `CnCloneFinalName`. If the dm-clone does not currently exist
+   `DnMigrFinalName` / `CnCloneFinalName`. A clone's chunks are consumed IN PLACE,
+   with no reassembly buffer: bit *k* of source slice *s* is skippable iff chunk
+   `b = k/(8·C)` of that slice is present, byte `(k mod 8·C)/8` is within its length,
+   and that bit is `1` — absent chunk, short chunk or out-of-range slice all mean
+   "written". If the dm-clone does not currently exist
    (not built yet, or suppressed by `sp_level`), the file still counts as applied —
    the agent re-applies every local chunk whenever it (re)creates the owning dm-clone.
 3. **Reply.** The `Push*BitmapReply` carries only `AgentReply`; a `code = 0` reply is
    the acknowledgement the worker waits for before pushing the next part. A chunk whose
    persist **failed** is acked `code = 0` too — both agents log the error and reply OK:
-   the ack only releases the next part, and a chunk whose index was **not yet applied**
+   the ack only releases the next part, and a chunk that was **not yet applied**
    stays out of the applied set — that set is derived from the files present (§9.1) — so
-   the object's next `Syncup*` reply reports the index as missing and the worker
+   the object's next `Syncup*` reply reports the chunk as missing and the worker
    re-pushes it. Nothing else schedules that re-push, and the failed persist does not
    schedule the `Syncup*` either: unlike the `code != 0` case of the worker side's
    step 6 above, a `code = 0` ack raises no re-sync request, and the object's periodic
@@ -2163,7 +2217,7 @@ readers, not because bitmaps are inherently huge.)
    and no push-side retry of its own; until then its regions are copied instead of
    skipped, which costs only the optional bitmap fast path of §8.9/§8.11. The one case
    that does not heal even that way, once the `Syncup*` comes, is a failed persist of
-   a *grown* clone chunk [D8]: the index is already in the applied set with its
+   a *grown* clone chunk [D8]: the pair is already in the applied set with its
    shorter payload, and the `code = 0` ack also refreshes the worker's per-chunk memo,
    so the agent keeps the shorter version until that chunk grows again — the same
    bounded, correctness-neutral loss [D8] already accepts (migration chunks are
@@ -2177,9 +2231,11 @@ readers, not because bitmaps are inherently huge.)
    disappears from the synced desired state (or via §8.9/§8.11 teardown), the agent
    removes them with the rest of the local state.
 
-**Grown clone chunks [D8].** `AppendCloneBitmap` may append more bytes to a `bm_idx`
-that was already pushed and acknowledged. The worker therefore keeps an in-memory
-memo per `(clone_id, bm_idx)` of the etcd `mod_revision` of the chunk it last pushed
+**Grown clone chunks [D8].** `AppendCloneBitmap` may append more bytes to a chunk
+`(src_slice_idx, bm_idx)` that was already pushed and acknowledged — up to the
+chunk's `CloneBmChunkBytes` ceiling. The worker therefore keeps an in-memory
+memo per `(clone_id, src_slice_idx, bm_idx)` of the etcd `mod_revision` of the chunk
+it last pushed
 (dnv-worker.md BM5, the normative rule for the implementation: an append is a `Put`
 on the chunk key, so a growth shows up in the revision the worker's keys-only scan of
 the chunk keys already carries, and needs no chunk value to detect) and re-pushes a
@@ -2298,9 +2354,11 @@ that yields the `dn_id`/`cn_id` the `Syncup*` requests and the
 `migr_src_conf.dst_dn_id`/`migr_dst_conf.src_dn_id` fields carry (cacheable per
 round; a moved node re-resolves on its next `DnRev`/`CnRev` event, §5.5). Bitmap chunks travel over
 the dedicated `PushCloneBitmap`/`PushMigrBitmap` calls instead (§9.6): the replies'
-`bm_info`/`bm_info_list` tell the worker which chunk indexes each agent already holds,
-and it pushes the missed parts — one call in flight per migration/clone, in
-ascending `bm_idx`. The `Syncup*` replies and, continuously, the `CheckSide`/
+`bm_info`/`bm_info_list` tell the worker which chunks each agent already holds —
+migration indexes in `bm_idx_list`, clone `(src_slice_idx, bm_idx)` pairs in
+`chunk_id_list` — and it pushes the missed parts, one call in flight per
+migration/clone, ascending `bm_idx` resp. ascending lexicographic
+`(src_slice_idx, bm_idx)`. The `Syncup*` replies and, continuously, the `CheckSide`/
 `CheckCntlr` streams the sp-worker keeps open to every side and cntlr of its SPs
 (§9.7; one round per `health_check_conf.side_interval`/`cntlr_interval` seconds)
 feed health: set/clear `err_epoch` on
@@ -2901,6 +2959,14 @@ dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.11 --tr-svc-id 8009
 ```
 
+**etcd deployment requirement.** Every etcd node serving dnv MUST run with
+`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128 and
+DeleteClone's deciding transaction sweeps up to `MaxSliceCntPerSp × MaxCloneBmCnt`
+= 256 chunk deletes plus the handful of other ops in the same transaction (§8.9).
+This is not something
+dnv can set from the client side — it is a server flag, so it belongs in the etcd
+deployment alongside the endpoints above.
+
 Every flag is also settable via config file and environment (viper). The worker's
 flags are specified in `dnv-worker.md` §5 (`--roles` defaults to all three; the vote
 timers default to `DefaultVoteWorkerInterval`/`DefaultVoteWorkerGraceTime`). The agent's
@@ -3168,7 +3234,8 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   re-delivered only while the pushing worker keeps its in-memory revision memo — src
   bitmaps never affect correctness, so a missed tail only costs some avoidable copying.
 * **[D8] Grown clone chunks.** `AppendCloneBitmap` may grow an already-acknowledged
-  `bm_idx`; the worker re-pushes when it observes growth, and a worker change can
+  chunk `(src_slice_idx, bm_idx)` up to its `CloneBmChunkBytes` ceiling; the worker
+  re-pushes when it observes growth, and a worker change can
   leave the shorter version at the agent — accepted, because src bitmaps only ever
   cost extra copying, never correctness (§9.6, §11.5).
 * **[D9] `creation_epoch` in `cluster_id`.** Hashing only the name made `cluster_id` a
@@ -3435,6 +3502,28 @@ own amendment sections are the surviving record.
   conf as `ABORTED`; §8.1 stores the resolved `ClusterConf`, §8.4 the resolved merge
   (merge first, resolve after); §3.3, §9.1 (new conf gate) and §9.7 follow. There is
   deliberately no compatibility path for a cluster created before the rule.
+* Chunked per-slice clone bitmaps — a clone's source bitmap was the one bitmap value
+  in the system whose size was unbounded by chunking (the `CloneBitmap` key's `bm_idx`
+  WAS the source `slice_idx`). It is now split into up to `MaxCloneBmCnt` = 16
+  self-positioned chunks of `CloneBmChunkBytes` = 1 MiB per slice, addressed
+  `(src_slice_idx, bm_idx)`: §2 constants, §4.6 (`LocalCloneBmPath` gains a segment),
+  §5.3 key table, §8.9 (`AppendCloneBitmap`'s five bounds incl. the new
+  `RESOURCE_EXHAUSTED` chunk overflow, `bm_cnt` as a cross-slice high-water of
+  `bm_idx+1`, DeleteClone's nested sweep), §8.13 (the aligned-paging convention),
+  §9.3, §9.6 (whole section), §13 (the new `--max-txn-ops=512` etcd deployment
+  requirement DeleteClone's sweep forces) and **[D8]** now describe the pair.
+  `BitmapInfo` gains `chunk_id_list`, which clones report instead of `bm_idx_list`.
+  Migration bitmaps are untouched, and the proto renumbering is deliberately
+  wire-incompatible with old peers: there is no compatibility path. Old 6-field clone
+  keys in etcd are silently skipped by the existing skip-unparseable path
+  (`ParseCloneBmKey` rejects them on the field count). Old agent chunk files are NOT —
+  the renumbering collides `bitmap` (old field 7, wire type 2) with `bm_idx` (new
+  field 7, wire type 0), and protobuf-go moves a wire-type mismatch to unknown fields
+  instead of erroring, so such a file decodes cleanly as an EMPTY chunk at the pair
+  `(old_bm_idx, 0)`. That is bounded and safe — an empty chunk is never skippable, so
+  nothing is discarded that was written — but it costs the bitmap optimization at that
+  pair and leaks the file. Clear a CN's `--local-store` when upgrading past this
+  change; see `cnagent.md` CN2.
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 

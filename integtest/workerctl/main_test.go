@@ -387,7 +387,9 @@ func TestMessageForKey(t *testing.T) {
 		},
 		{"dnv clone ebada5168620c5fe 0000000000000001 c0", &pb.Clone{}},
 		{
-			"dnv clone_bitmap ebada5168620c5fe 0000000000000001 c0 00",
+			// Seven fields: a clone chunk carries the src_slice_idx and
+			// the bm_idx it is addressed by, both as two hex digits.
+			"dnv clone_bitmap ebada5168620c5fe 0000000000000001 c0 02 01",
 			&pb.CloneBitmap{},
 		},
 		{"dnv transfer ebada5168620c5fe 0000000000000001 x0", &pb.Transfer{}},

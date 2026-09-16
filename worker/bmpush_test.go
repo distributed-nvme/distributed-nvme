@@ -134,7 +134,8 @@ func bmTestDeps(t *testing.T) *deps {
 }
 
 // newTestPusher builds a clone pusher over the recorder, with a fetch that
-// serves one byte per chunk index.
+// serves the chunk's own (src_slice_idx, bm_idx) pair as its two bytes, so a
+// delivery that read the wrong key is visible in the value it carried.
 func newTestPusher(
 	t *testing.T,
 	d *deps,
@@ -149,9 +150,9 @@ func newTestPusher(
 		idAttr:   "clone_id",
 		ids:      []slog.Attr{slog.Uint64("cn_id", spCnIdA)},
 		fetch: func(
-			ctx context.Context, name string, bmIdx uint32,
+			ctx context.Context, name string, sliceIdx uint32, bmIdx uint32,
 		) ([]byte, bool, error) {
-			return []byte{byte(bmIdx)}, true, nil
+			return []byte{byte(sliceIdx), byte(bmIdx)}, true, nil
 		},
 		deliver: rec.deliver,
 	})
@@ -159,45 +160,103 @@ func newTestPusher(
 	return p
 }
 
+// bmAddrs are the delivered chunks' addresses, for the order assertions.
+func bmAddrs(parts []bmPart) [][2]uint32 {
+	out := make([][2]uint32, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, [2]uint32{part.sliceIdx, part.bmIdx})
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // BM2 / BM5 — the diff and the mod_revision memo
 // ---------------------------------------------------------------------------
 
 // TestBmMissingDiff checks BM2: the chunks etcd holds minus the ones the agent
-// acknowledges, ascending by bm_idx; a clone absent from the reply has
-// everything missing.
+// acknowledges, ascending (src_slice_idx, bm_idx); a clone absent from the
+// reply has everything missing. The diff is over the PAIR — one bm_idx names a
+// different chunk on every source slice (U1) — so an acknowledged (0, 1) never
+// satisfies the etcd chunk (2, 1).
 func TestBmMissingDiff(t *testing.T) {
 	captureLogs(t)
 	p := newTestPusher(t, bmTestDeps(t), newPushRecorder())
 	chunks := []model.BmChunk{
-		{Idx: 2, ModRev: 12},
-		{Idx: 0, ModRev: 10},
-		{Idx: 1, ModRev: 11},
+		{SliceIdx: 2, Idx: 1, ModRev: 14},
+		{SliceIdx: 0, Idx: 1, ModRev: 11},
+		{SliceIdx: 1, Idx: 0, ModRev: 12},
+		{SliceIdx: 0, Idx: 0, ModRev: 10},
 	}
+	want := [][2]uint32{{0, 0}, {0, 1}, {1, 0}, {2, 1}}
 	got := p.missing(spCloneId, chunks, nil)
-	if len(got) != 3 || got[0].Idx != 0 || got[1].Idx != 1 ||
-		got[2].Idx != 2 {
-		t.Fatalf("missing = %v, want 0,1,2 ascending", got)
+	if !equalBmAddrs(chunkAddrs(got), want) {
+		t.Fatalf("missing = %v, want %v ascending", chunkAddrs(got), want)
 	}
-	got = p.missing(spCloneId, chunks, []uint32{0, 2})
-	if len(got) != 1 || got[0].Idx != 1 {
-		t.Fatalf("missing = %v, want only 1", got)
+	applied := []model.BmChunk{{SliceIdx: 0, Idx: 0}, {SliceIdx: 0, Idx: 1}}
+	got = p.missing(spCloneId, chunks, applied)
+	want = [][2]uint32{{1, 0}, {2, 1}}
+	if !equalBmAddrs(chunkAddrs(got), want) {
+		t.Fatalf("missing = %v, want %v", chunkAddrs(got), want)
 	}
-	got = p.missing(spCloneId, chunks, []uint32{0, 1, 2})
+	// The whole set acknowledged, pair by pair.
+	got = p.missing(spCloneId, chunks, []model.BmChunk{
+		{SliceIdx: 0, Idx: 0}, {SliceIdx: 0, Idx: 1},
+		{SliceIdx: 1, Idx: 0}, {SliceIdx: 2, Idx: 1},
+	})
 	if len(got) != 0 {
-		t.Fatalf("missing = %v, want none", got)
+		t.Fatalf("missing = %v, want none", chunkAddrs(got))
 	}
+	// A bm_idx-keyed diff would read (0, 1) as covering (2, 1) and never send
+	// source slice 2's chunk at all.
+	got = p.missing(
+		spCloneId,
+		[]model.BmChunk{{SliceIdx: 2, Idx: 1, ModRev: 14}},
+		[]model.BmChunk{{SliceIdx: 0, Idx: 1}},
+	)
+	want = [][2]uint32{{2, 1}}
+	if !equalBmAddrs(chunkAddrs(got), want) {
+		t.Fatalf("missing = %v, want %v: bm_idx 1 on slice 0 is not the "+
+			"chunk (2, 1)", chunkAddrs(got), want)
+	}
+}
+
+// chunkAddrs are the diff's chunk addresses, for the assertions above.
+func chunkAddrs(chunks []model.BmChunk) [][2]uint32 {
+	out := make([][2]uint32, 0, len(chunks))
+	for _, chunk := range chunks {
+		out = append(out, [2]uint32{chunk.SliceIdx, chunk.Idx})
+	}
+	return out
+}
+
+func equalBmAddrs(got [][2]uint32, want [][2]uint32) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i, addr := range got {
+		if addr != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestBmGrownChunkMemo checks BM5: a chunk whose etcd mod_revision advanced
 // past the one this worker last pushed is re-pushed even though the agent
-// acknowledges its index — while a chunk this worker never pushed (a handoff:
-// the memo is in-memory) is left alone.
+// acknowledges it — while a chunk this worker never pushed (a handoff: the
+// memo is in-memory) is left alone. The memo is per (clone_id,
+// src_slice_idx, bm_idx), so growth at one pair moves that pair alone and a
+// growth is judged against what was pushed AT THAT PAIR.
 func TestBmGrownChunkMemo(t *testing.T) {
 	captureLogs(t)
 	rec := newPushRecorder()
 	p := newTestPusher(t, bmTestDeps(t), rec)
-	chunks := []model.BmChunk{{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 11}}
+	// Two chunks that share bm_idx 1 on different source slices, pushed in
+	// that order: the second's mod_revision is the higher one.
+	chunks := []model.BmChunk{
+		{SliceIdx: 0, Idx: 1, ModRev: 10},
+		{SliceIdx: 2, Idx: 1, ModRev: 20},
+	}
 	p.submit(&bmPlan{
 		resId:    spCloneId,
 		name:     spCloneNm,
@@ -207,21 +266,40 @@ func TestBmGrownChunkMemo(t *testing.T) {
 	waitFor(t, "both chunks pushed", func() bool {
 		return len(rec.delivered()) == 2
 	})
+	applied := []model.BmChunk{{SliceIdx: 0, Idx: 1}, {SliceIdx: 2, Idx: 1}}
 
 	// Acknowledged and unchanged: nothing to do.
-	if got := p.missing(spCloneId, chunks, []uint32{0, 1}); len(got) != 0 {
-		t.Fatalf("missing = %v, want none", got)
+	if got := p.missing(spCloneId, chunks, applied); len(got) != 0 {
+		t.Fatalf("missing = %v, want none", chunkAddrs(got))
 	}
-	// AppendCloneBitmap grew chunk 1 (BM5).
-	grown := []model.BmChunk{{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 19}}
-	got := p.missing(spCloneId, grown, []uint32{0, 1})
-	if len(got) != 1 || got[0].Idx != 1 || got[0].ModRev != 19 {
-		t.Fatalf("missing = %v, want the grown chunk 1", got)
+	// AppendCloneBitmap grew the chunk at (2, 1) (BM5, U3): that pair alone
+	// is re-pushed, and (0, 1) — the same bm_idx on another slice — is not.
+	grown := []model.BmChunk{
+		{SliceIdx: 0, Idx: 1, ModRev: 10},
+		{SliceIdx: 2, Idx: 1, ModRev: 21},
+	}
+	got := p.missing(spCloneId, grown, applied)
+	if len(got) != 1 || got[0].SliceIdx != 2 || got[0].Idx != 1 ||
+		got[0].ModRev != 21 {
+		t.Fatalf("missing = %v, want only the grown (2, 1)", chunkAddrs(got))
+	}
+	// The other direction: (0, 1) grows to a revision still BELOW the one
+	// pushed at (2, 1). A memo keyed on bm_idx alone would compare it with
+	// (2, 1)'s 20 and drop a growth the agent never received.
+	grown = []model.BmChunk{
+		{SliceIdx: 0, Idx: 1, ModRev: 15},
+		{SliceIdx: 2, Idx: 1, ModRev: 20},
+	}
+	got = p.missing(spCloneId, grown, applied)
+	if len(got) != 1 || got[0].SliceIdx != 0 || got[0].Idx != 1 ||
+		got[0].ModRev != 15 {
+		t.Fatalf("missing = %v, want only the grown (0, 1)", chunkAddrs(got))
 	}
 	// A chunk this worker never pushed stays acknowledged.
-	other := []model.BmChunk{{Idx: 3, ModRev: 30}}
-	if got := p.missing(spCloneId, other, []uint32{3}); len(got) != 0 {
-		t.Fatalf("missing = %v, want none after a handoff", got)
+	other := []model.BmChunk{{SliceIdx: 1, Idx: 3, ModRev: 30}}
+	got = p.missing(spCloneId, other, []model.BmChunk{{SliceIdx: 1, Idx: 3}})
+	if len(got) != 0 {
+		t.Fatalf("missing = %v, want none after a handoff", chunkAddrs(got))
 	}
 }
 
@@ -230,7 +308,8 @@ func TestBmGrownChunkMemo(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBmAscendingOneInFlight checks BM3: the parts of one object go out in
-// ascending bm_idx, one at a time, each carrying the object's synced revision;
+// ascending (src_slice_idx, bm_idx) — lexicographic ACROSS source slices, not
+// by bm_idx alone — one at a time, each carrying the object's synced revision;
 // a plan submitted while one is running replaces the pending one instead of
 // starting a second runner.
 func TestBmAscendingOneInFlight(t *testing.T) {
@@ -238,9 +317,11 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 	rec := newPushRecorder()
 	rec.gate = make(chan struct{})
 	p := newTestPusher(t, bmTestDeps(t), rec)
-	parts := []model.BmChunk{
-		{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 11}, {Idx: 2, ModRev: 12},
-	}
+	parts := p.missing(spCloneId, []model.BmChunk{
+		{SliceIdx: 1, Idx: 0, ModRev: 12},
+		{SliceIdx: 0, Idx: 1, ModRev: 11},
+		{SliceIdx: 0, Idx: 0, ModRev: 10},
+	}, nil)
 	p.submit(&bmPlan{
 		resId: spCloneId, name: spCloneNm, revision: 7, parts: parts,
 	})
@@ -249,7 +330,7 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 	<-rec.entered
 	p.submit(&bmPlan{
 		resId: spCloneId, name: spCloneNm, revision: 7,
-		parts: []model.BmChunk{{Idx: 3, ModRev: 13}},
+		parts: []model.BmChunk{{SliceIdx: 2, Idx: 0, ModRev: 13}},
 	})
 	close(rec.gate)
 
@@ -259,16 +340,19 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 	if !rec.sequential() {
 		t.Fatalf("two pushes of one clone were in flight at once")
 	}
+	want := [][2]uint32{{0, 0}, {0, 1}, {1, 0}, {2, 0}}
+	if !equalBmAddrs(bmAddrs(rec.delivered()), want) {
+		t.Fatalf("delivered %v, want %v", bmAddrs(rec.delivered()), want)
+	}
 	for i, part := range rec.delivered() {
-		if part.bmIdx != uint32(i) {
-			t.Fatalf("delivered %v, want ascending bm_idx",
-				rec.delivered())
-		}
 		if part.revision != 7 || part.resId != spCloneId {
 			t.Fatalf("part = %+v", part)
 		}
-		if len(part.bitmap) != 1 || part.bitmap[0] != byte(i) {
-			t.Fatalf("part %d carried %v", i, part.bitmap)
+		// The fetch stub serves the pair it was asked for (BM1): a part whose
+		// value does not carry its own address was read at the wrong key.
+		if len(part.bitmap) != 2 || part.bitmap[0] != byte(want[i][0]) ||
+			part.bitmap[1] != byte(want[i][1]) {
+			t.Fatalf("part %v carried %v", want[i], part.bitmap)
 		}
 	}
 }
@@ -309,7 +393,10 @@ func TestBmRejectedPushSetsResync(t *testing.T) {
 	p := newTestPusher(t, bmTestDeps(t), rec)
 	p.submit(&bmPlan{
 		resId: spCloneId, name: spCloneNm, revision: 7,
-		parts: []model.BmChunk{{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 11}},
+		parts: []model.BmChunk{
+			{SliceIdx: 2, Idx: 0, ModRev: 10},
+			{SliceIdx: 2, Idx: 1, ModRev: 11},
+		},
 	})
 	waitFor(t, "the resync flag", func() bool { return p.takeFailed() })
 	if got := len(rec.delivered()); got != 1 {
@@ -330,6 +417,10 @@ func TestBmRejectedPushSetsResync(t *testing.T) {
 	if code, _ := records[0]["code"].(float64); uint32(code) !=
 		common.ReplyCodeStaleRevision {
 		t.Fatalf("code = %v", records[0]["code"])
+	}
+	// The §12 record addresses the chunk by the whole pair (U7).
+	if idx, _ := records[0]["src_slice_idx"].(float64); uint32(idx) != 2 {
+		t.Fatalf("src_slice_idx = %v", records[0]["src_slice_idx"])
 	}
 	if idx, _ := records[0]["bm_idx"].(float64); uint32(idx) != 0 {
 		t.Fatalf("bm_idx = %v", records[0]["bm_idx"])
@@ -423,7 +514,7 @@ func TestBmMissingChunkSetsResync(t *testing.T) {
 		idAttr:   "migr_id",
 		ids:      []slog.Attr{slog.Uint64("dn_id", spDnIdC)},
 		fetch: func(
-			ctx context.Context, name string, bmIdx uint32,
+			ctx context.Context, name string, sliceIdx uint32, bmIdx uint32,
 		) ([]byte, bool, error) {
 			return nil, false, nil
 		},
@@ -512,10 +603,14 @@ func TestBmMigrTargetIsDestinationDn(t *testing.T) {
 func TestBmCloneTargetIsPrimaryCn(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
-	for idx := uint32(0); idx < 2; idx++ {
+	for _, chunk := range spCloneChunks {
 		h.store.seed(t,
-			model.CloneBitmapKey(testCid, testSpId, spCloneNm, idx),
-			&pb.CloneBitmap{Bitmap: []byte{byte(idx)}},
+			model.CloneBitmapKey(
+				testCid, testSpId, spCloneNm, chunk.SliceIdx, chunk.Idx,
+			),
+			&pb.CloneBitmap{Bitmap: []byte{
+				byte(chunk.SliceIdx), byte(chunk.Idx),
+			}},
 		)
 	}
 	// Neither the primary nor the standby holds a chunk: a clone absent from
@@ -533,8 +628,12 @@ func TestBmCloneTargetIsPrimaryCn(t *testing.T) {
 	})
 	pushes := h.cntlrs[spCnA].pushes()
 	for i, push := range pushes[:2] {
-		if push.GetCloneId() != spCloneId || push.GetBmIdx() != uint32(i) {
-			t.Fatalf("push %d = %v", i, push)
+		chunk := spCloneChunks[i]
+		if push.GetCloneId() != spCloneId ||
+			push.GetSrcSliceIdx() != chunk.SliceIdx ||
+			push.GetBmIdx() != chunk.Idx {
+			t.Fatalf("push %d = %v, want the chunk (%d, %d)",
+				i, push, chunk.SliceIdx, chunk.Idx)
 		}
 		if push.GetCnId() != spCnIdA ||
 			push.GetCntlrPointer().GetCntlrId() != spCntlrPrimary {

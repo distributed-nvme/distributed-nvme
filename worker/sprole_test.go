@@ -76,6 +76,16 @@ const (
 	spTdDone = uint64(501)
 )
 
+// spCloneChunks are the fixture clone's bitmap chunks as MD3 reports them: two
+// chunks of two DIFFERENT source slices, so every test that carries a pair
+// around fails when only the bm_idx survives. The second slice is not slice 1,
+// because the chunks are sparse (U3) and nothing derives one index from the
+// other.
+var spCloneChunks = []model.BmChunk{
+	{SliceIdx: 0, Idx: 0, ModRev: 11},
+	{SliceIdx: 2, Idx: 1, ModRev: 12},
+}
+
 // srcTrConf is the source side's transport conf, which RW15 copies into the
 // destination's migr_dst_conf.
 func srcTrConf() *pb.NvmeTrConf {
@@ -225,7 +235,7 @@ func spFixture() *model.SpState {
 			},
 		},
 		CloneBmIdx: map[string][]model.BmChunk{
-			spCloneNm: {{Idx: 0, ModRev: 11}, {Idx: 1, ModRev: 12}},
+			spCloneNm: spCloneChunks,
 		},
 		MigrBmIdx: map[string][]model.BmChunk{
 			spMigrName: {{Idx: 0, ModRev: 21}, {Idx: 1, ModRev: 22}},
@@ -473,9 +483,17 @@ func TestSpCntlrRequestGolden(t *testing.T) {
 	if !proto.Equal(primary.req, want) {
 		t.Fatalf("primary cntlr request =\n%v\nwant\n%v", primary.req, want)
 	}
-	// BM1/BM4: only the primary pushes clone chunks.
-	if len(primary.clones) != 1 || primary.clones[0].id != spCloneId {
+	// BM1/BM4: only the primary pushes clone chunks, addressed by the
+	// (src_slice_idx, bm_idx) pairs the snapshot found in etcd (MD3).
+	if len(primary.clones) != 1 || primary.clones[0].id != spCloneId ||
+		len(primary.clones[0].chunks) != len(spCloneChunks) {
 		t.Fatalf("primary clone plan = %+v", primary.clones)
+	}
+	for i, chunk := range primary.clones[0].chunks {
+		if chunk != spCloneChunks[i] {
+			t.Fatalf("clone chunk %d = %+v, want %+v",
+				i, chunk, spCloneChunks[i])
+		}
 	}
 
 	// The standbys carry the same state; only their own identity differs.
@@ -1819,6 +1837,65 @@ func TestSpMissingSubObjectsLogged(t *testing.T) {
 	}
 	if record["sp_name"] != testSpName {
 		t.Fatalf("sp_name = %v", record["sp_name"])
+	}
+}
+
+// TestSpCloneBitmapWiringCarriesThePair checks the clone half of BM1/BM2 end
+// to end: the chunk value is read at the (src_slice_idx, bm_idx) key of §9.6,
+// the PushCloneBitmap it becomes carries that same pair, and the agent's
+// applied set is its chunk_id_list. bm_idx_list is a migration field — a clone
+// that listed a bm_idx there has acknowledged nothing.
+func TestSpCloneBitmapWiringCarriesThePair(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	for _, chunk := range spCloneChunks {
+		h.store.seed(t,
+			model.CloneBitmapKey(
+				testCid, testSpId, spCloneNm, chunk.SliceIdx, chunk.Idx,
+			),
+			&pb.CloneBitmap{Bitmap: []byte{
+				byte(chunk.SliceIdx), byte(chunk.Idx),
+			}},
+		)
+	}
+	// The primary holds (0, 0) and lists bm_idx 1 in the MIGRATION field: the
+	// pair (2, 1) is the only chunk it has acknowledged nothing about.
+	h.cntlrs[spCnA].syncupReply = func(
+		req *pb.SyncupCntlrRequest,
+	) *pb.SyncupCntlrReply {
+		return &pb.SyncupCntlrReply{
+			Revision: req.GetRevision(),
+			BmInfoList: []*pb.BitmapInfo{{
+				ResId:     spCloneId,
+				BmIdxList: []uint32{1},
+				ChunkIdList: []*pb.BmChunkId{
+					{SrcSliceIdx: 0, BmIdx: 0},
+				},
+			}},
+		}
+	}
+	h.start()
+
+	waitFor(t, "the missing chunk pushed", func() bool {
+		return len(h.cntlrs[spCnA].pushes()) > 0
+	})
+	push := h.cntlrs[spCnA].pushes()[0]
+	if push.GetSrcSliceIdx() != 2 || push.GetBmIdx() != 1 {
+		t.Fatalf("push = %v, want the missing chunk (2, 1)", push)
+	}
+	// The value of the (2, 1) key, i.e. the fetch keyed on the whole pair.
+	if len(push.GetBitmap()) != 2 || push.GetBitmap()[0] != 2 ||
+		push.GetBitmap()[1] != 1 {
+		t.Fatalf("push carried %v, want the (2, 1) chunk's value",
+			push.GetBitmap())
+	}
+	if push.GetCloneId() != spCloneId || push.GetRevision() != testSpRev {
+		t.Fatalf("push = %v", push)
+	}
+	for _, sent := range h.cntlrs[spCnA].pushes() {
+		if sent.GetSrcSliceIdx() == 0 && sent.GetBmIdx() == 0 {
+			t.Fatalf("the chunk_id_list-acknowledged (0, 0) was pushed again")
+		}
 	}
 }
 

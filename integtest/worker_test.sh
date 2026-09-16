@@ -47,6 +47,12 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# U10 (§14.4/§14.6): every etcd serving dnv MUST run with --max-txn-ops at
+# least this high, because DeleteClone sweeps up to MaxSliceCntPerSp ×
+# MaxCloneBmCnt = 256 clone bitmap chunk keys in one transaction and etcd's
+# default cap is 128. The literal is common.EtcdMaxTxnOps; a shell suite
+# cannot import common, so the two are kept in step by hand.
+ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-worker-integtest
 
@@ -995,7 +1001,8 @@ setup() {
 		"--advertise-client-urls http://127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--initial-cluster dnv-it=http://127.0.0.1:$ETCD_PEER_PORT"
+		"--initial-cluster dnv-it=http://127.0.0.1:$ETCD_PEER_PORT" \
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS"
 	wait_until "$WAIT_SHORT" "etcd to answer a workerctl ping" etcd_reachable
 
 	stage fakes "start four fake DNs and three fake CNs with an empty behavior"
@@ -1737,6 +1744,26 @@ push_reply_time() { # <agent> <method> <index from 1>
 		sed -n "${3}p"
 }
 
+# clone_pair prints a jq filter over a PushCloneBitmap request's `.data` that
+# matches exactly one (src_slice_idx, bm_idx) pair — the address of one clone
+# bitmap chunk. Both indexes are dropped from the logged message when they are
+# 0 (common.PbToLogValue renders only populated proto3 fields), so each is
+# defaulted before the comparison, exactly as the migration filters default
+# `.bm_idx`.
+clone_pair() { # <src_slice_idx> <bm_idx>
+	printf '(.src_slice_idx // 0) == %s and (.bm_idx // 0) == %s' "$1" "$2"
+}
+
+# push_clone_req_time prints the timestamp of the FIRST PushCloneBitmap
+# request one fake received at one pair.
+push_clone_req_time() { # <agent> <src_slice_idx> <bm_idx>
+	recsr "$(apath "$1")" \
+		"select(.msg == \"grpc server request\")
+		 | select((.method | split(\"/\") | last) == \"PushCloneBitmap\")
+		 | select(has(\"data\")) | select(.data | $(clone_pair "$2" "$3"))
+		 | .time" | sed -n 1p
+}
+
 case_bitmap() {
 	CASE=bitmap
 
@@ -1760,19 +1787,38 @@ case_bitmap() {
 	# legal target of a migration chunk (BM4) and dn0, the source, gets none.
 	ctl put-migr --sp sp0 --migr "m0:3:1:3" --dst-dn 2 --dst-slot 1
 	ctl put-clone --sp sp0 --name c0 --id "$CLONE_ID" --dst-td td0 --src-slice-cnt 2
-	ctl put-bitmap --sp sp0 --kind clone --name c0 --bm-idx 0 --hex 0102
-	ctl put-bitmap --sp sp0 --kind clone --name c0 --bm-idx 1 --hex 0304
+	# Hold the clone pushes back while the three chunks are seeded: the
+	# §14.9 chunk_id_list lever forces cn0 to report exactly the pairs about
+	# to be written as already applied, so BM2's diff stays empty. Seeded one
+	# at a time without it, each chunk would be pushed as it appeared and the
+	# observed order would be the WRITE order — which says nothing about
+	# BM3's. Stage 3 clears the lever and the whole clone becomes missing at
+	# once, which is what makes the lexicographic order observable.
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0", "0:1", "1:0"]}}}
+EOF
+	# Three chunks at three PAIRS: (0,0) and (0,1) are two chunks of source
+	# slice 0's bitmap, and (1,0) shares bm_idx 0 with (0,0) on another
+	# source slice. bm_cnt ends at 2 — the U5 high-water of bm_idx + 1 across
+	# slices — and is never derived from src_slice_idx.
+	ctl put-bitmap --sp sp0 --kind clone --name c0 --src-slice-idx 0 --bm-idx 0 --hex 0102
+	ctl put-bitmap --sp sp0 --kind clone --name c0 --src-slice-idx 0 --bm-idx 1 --hex 0304
+	local clone_bm_cnt
+	clone_bm_cnt=$(ctl put-bitmap --sp sp0 --kind clone --name c0 \
+		--src-slice-idx 1 --bm-idx 0 --hex 0506 | "$JQ" -r .bm_cnt)
+	assert_eq "$clone_bm_cnt" 2 \
+		"c0 bm_cnt after (0,0), (0,1), (1,0): the bm_idx+1 high-water"
 	# The migration chunks go in LAST, and only once the fixture has gone
 	# quiet: step 2 asserts that the chunk-1 push carries EXACTLY the SpRev of
 	# the put that introduced it (BM3's `revision = synced`), which holds only
-	# while nothing else bumps SpRev behind it. Two things still would here —
-	# put-migr appends the destination side S3 with `provisioned = false`, so
-	# RW18 flips it a round later, and the clone pushes are still in flight —
-	# so both are waited out and SpRev is then required to sit still.
+	# while nothing else bumps SpRev behind it. put-migr appends the
+	# destination side S3 with `provisioned = false`, so RW18 flips it a round
+	# later; that is waited out and SpRev is then required to sit still. The
+	# clone pushes cannot be in flight here — the lever above holds them.
 	wait_until "$WAIT_SYNCUP" "the migration's destination side provisioned" \
 		all_provisioned sp0 1
-	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap bm_idx 1 (the fixture settling)" \
-		req_ge 1 cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "1"'
+	assert_none_for 3 "clone pushes while cn0's applied set is forced" \
+		reqs_gt 0 cn0 PushCloneBitmap
 	local quiet_rev
 	quiet_rev=$(sp_rev 1)
 	assert_none_for 2 "an SpRev bump before the migration chunks are written" \
@@ -1781,6 +1827,14 @@ case_bitmap() {
 	local migr1_rev
 	migr1_rev=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee |
 		"$JQ" -r .sp_rev)
+	# --src-slice-idx addresses a CLONE chunk; a migration's chunks name no
+	# source slice, so a non-zero one with --kind migr is a driver usage
+	# error (§14.8) and writes nothing — it is refused on the flags alone,
+	# before etcd is opened, so it cannot disturb the SpRev step 2 pins.
+	if ctl put-bitmap --sp sp0 --kind migr --name m0 --src-slice-idx 1 \
+		--bm-idx 9 --hex ff >/dev/null 2>&1; then
+		die "put-bitmap --kind migr --src-slice-idx 1: want a usage error"
+	fi
 
 	stage 2 "migration chunks: ordered, one in flight, to the destination only"
 	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 0" \
@@ -1821,12 +1875,58 @@ case_bitmap() {
 		reqs_gt "$pushes" dn1 PushMigrBitmap
 	assert_eq "$(reqs dn0 PushMigrBitmap)" 0 "dn0 (the source): migration pushes"
 
-	stage 3 "clone chunks go to the primary's CN only"
-	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap bm_idx 0" \
-		req_ge 1 cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "0"'
-	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap bm_idx 1" \
-		req_ge 1 cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "1"'
+	stage 3 "clone chunks: one push per PAIR, lexicographic, to the primary only"
+	# Release the lever of stage 1. Clearing behavior.json bumps no revision
+	# and bm_info_list rides only on a SyncupCntlrReply (CheckCntlrReply has
+	# no such field), so the re-fan is what makes the fake report the DERIVED
+	# — still empty — applied set and the whole clone missing in one diff.
+	clear_behavior cn0
+	ctl bump-rev sp --id 1 --shard 00 >/dev/null
+	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap (0,0)" \
+		req_ge 1 cn0 PushCloneBitmap "$(clone_pair 0 0)"
+	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap (0,1)" \
+		req_ge 1 cn0 PushCloneBitmap "$(clone_pair 0 1)"
+	wait_until "$WAIT_SHORT" "cn0: PushCloneBitmap (1,0)" \
+		req_ge 1 cn0 PushCloneBitmap "$(clone_pair 1 0)"
 	assert_eq "$(reqs cn1 PushCloneBitmap)" 0 "cn1 (the standby): clone pushes"
+	# BM3's order for a clone is ascending (src_slice_idx, bm_idx)
+	# LEXICOGRAPHIC. (1,0) after (0,1) is the discriminating pair: an order
+	# taken on bm_idx alone would send (1,0) second, before (0,1).
+	local t00 t01 t10
+	t00=$(push_clone_req_time cn0 0 0)
+	t01=$(push_clone_req_time cn0 0 1)
+	t10=$(push_clone_req_time cn0 1 0)
+	[ -n "$t00" ] && [ -n "$t01" ] && [ -n "$t10" ] ||
+		die "cn0: one of the three clone pushes has no request record"
+	ts_ge "$(ts_epoch "$t01")" "$(ts_epoch "$t00")" ||
+		die "(0,1) ($t01) was pushed before (0,0) ($t00): BM3 wants ascending pairs"
+	ts_ge "$(ts_epoch "$t10")" "$(ts_epoch "$t01")" ||
+		die "(1,0) ($t10) was pushed before (0,1) ($t01): BM3 orders the PAIR, not bm_idx"
+	# The applied set comes back as chunk_id_list — the pair-addressed field —
+	# and NOT as bm_idx_list, which carries migration chunks only. A second
+	# re-fan is what makes it observable, as in step 2, and its diff must be
+	# empty.
+	local clone_pushes
+	clone_pushes=$(reqs cn0 PushCloneBitmap)
+	ctl bump-rev sp --id 1 --shard 00 >/dev/null
+	# Every `// []` below is load-bearing: an unset repeated field is absent
+	# from the logged message (common.PbToLogValue), and iterating a null
+	# would abort the whole jq read rather than fail one record. The replies
+	# of stage 1, before the clone existed, carry no bm_info_list at all.
+	wait_until "$WAIT_SHORT" "cn0: a SyncupCntlr reply listing the three pairs" \
+		reply_ge 1 cn0 SyncupCntlr \
+		'[(.bm_info_list // [])[] | select(.res_id == $c)
+		  | (.chunk_id_list // [])[] | [(.src_slice_idx // 0), (.bm_idx // 0)]]
+		 == [[0, 0], [0, 1], [1, 0]]' --argjson c "$((CLONE_ID))"
+	assert_ge "$(replies cn0 SyncupCntlr \
+		'[(.bm_info_list // [])[] | select(.res_id == $c)
+		  | ((.bm_idx_list // []) | length)] == [0]' \
+		--argjson c "$((CLONE_ID))")" 1 \
+		"cn0: a SyncupCntlr reply leaving the clone's bm_idx_list unset"
+	assert_eq "$(reqs cn0 PushCloneBitmap)" "$clone_pushes" \
+		"clone pushes after a re-fan whose diff is empty"
+	assert_none_for 3 "further clone pushes once the set matches" \
+		reqs_gt "$clone_pushes" cn0 PushCloneBitmap
 
 	stage 4 "a new migration chunk is pushed exactly once, at that revision"
 	pushes=$(reqs dn1 PushMigrBitmap)
@@ -1842,20 +1942,26 @@ case_bitmap() {
 	assert_eq "$(reqs dn1 PushMigrBitmap)" $((pushes + 1)) \
 		"dn1: exactly one new migration push"
 
-	stage 5 "a grown clone chunk is re-pushed ([D8], BM5)"
-	local clone0 clone1
-	clone0=$(reqs cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "0"')
-	clone1=$(reqs cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "1"')
-	ctl put-bitmap --sp sp0 --kind clone --name c0 --bm-idx 0 --hex 0102030405060708
-	wait_until "$WAIT_SHORT" "cn0: a second PushCloneBitmap bm_idx 0, 8 bytes" \
-		req_ge $((clone0 + 1)) cn0 PushCloneBitmap \
-		'(.bm_idx // 0 | tostring) == "0"'
+	stage 5 "a grown clone chunk is re-pushed at the same pair ([D8], BM5)"
+	# The growth stays at the pair (0,0): the memo is per (clone_id,
+	# src_slice_idx, bm_idx), so neither (0,1) — the same slice, another
+	# chunk — nor (1,0) — the same bm_idx, another slice — may move.
+	local clone00 clone01 clone10
+	clone00=$(reqs cn0 PushCloneBitmap "$(clone_pair 0 0)")
+	clone01=$(reqs cn0 PushCloneBitmap "$(clone_pair 0 1)")
+	clone10=$(reqs cn0 PushCloneBitmap "$(clone_pair 1 0)")
+	ctl put-bitmap --sp sp0 --kind clone --name c0 --src-slice-idx 0 --bm-idx 0 \
+		--hex 0102030405060708
+	wait_until "$WAIT_SHORT" "cn0: a second PushCloneBitmap (0,0), 8 bytes" \
+		req_ge $((clone00 + 1)) cn0 PushCloneBitmap "$(clone_pair 0 0)"
 	assert_ge "$(reqs cn0 PushCloneBitmap \
-		'(.bm_idx // 0 | tostring) == "0" and .bitmap == "<8 bytes>"')" 1 \
-		"cn0: the re-pushed chunk 0 carries the new length"
+		"$(clone_pair 0 0) and .bitmap == \"<8 bytes>\"")" 1 \
+		"cn0: the re-pushed chunk (0,0) carries the new length"
 	sleep 2
-	assert_eq "$(reqs cn0 PushCloneBitmap '(.bm_idx // 0 | tostring) == "1"')" "$clone1" \
-		"cn0: chunk 1 was not re-pushed"
+	assert_eq "$(reqs cn0 PushCloneBitmap "$(clone_pair 0 1)")" "$clone01" \
+		"cn0: chunk (0,1) was not re-pushed"
+	assert_eq "$(reqs cn0 PushCloneBitmap "$(clone_pair 1 0)")" "$clone10" \
+		"cn0: chunk (1,0) — the same bm_idx on another slice — was not re-pushed"
 
 	stage 6 "a rejected push arms an equal-revision re-sync (BM6)"
 	set_behavior dn1 <<'EOF'
@@ -1892,11 +1998,12 @@ EOF
 	cn0_before=$(reqs cn0 PushCloneBitmap)
 	ctl set-cntlr --sp sp0 --id 1 --primary=false
 	ctl set-cntlr --sp sp0 --id 2 --primary=true
-	wait_until "$WAIT_SHORT" "cn1: PushCloneBitmap bm_idx 0" \
-		req_ge $((cn1_before + 1)) cn1 PushCloneBitmap \
-		'(.bm_idx // 0 | tostring) == "0"'
-	wait_until "$WAIT_SHORT" "cn1: PushCloneBitmap bm_idx 1" \
-		req_ge 1 cn1 PushCloneBitmap '(.bm_idx // 0 | tostring) == "1"'
+	wait_until "$WAIT_SHORT" "cn1: PushCloneBitmap (0,0)" \
+		req_ge $((cn1_before + 1)) cn1 PushCloneBitmap "$(clone_pair 0 0)"
+	wait_until "$WAIT_SHORT" "cn1: PushCloneBitmap (0,1)" \
+		req_ge 1 cn1 PushCloneBitmap "$(clone_pair 0 1)"
+	wait_until "$WAIT_SHORT" "cn1: PushCloneBitmap (1,0)" \
+		req_ge 1 cn1 PushCloneBitmap "$(clone_pair 1 0)"
 	local cn0_after
 	cn0_after=$(reqs cn0 PushCloneBitmap)
 	assert_between "$cn0_after" "$cn0_before" $((cn0_before + 1)) \

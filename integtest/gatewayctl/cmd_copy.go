@@ -238,19 +238,25 @@ func setupSetCloneTr(fs *flag.FlagSet) job {
 	}
 }
 
-// setupAppendCloneBm drives AppendCloneBitmap: it appends one opaque chunk of
+// setupAppendCloneBm drives AppendCloneBitmap: it appends bytes to ONE chunk of
 // the source's allocation bitmap, which the primary uses to skip regions the
 // source never allocated.
 //
-// --slice-idx is the source SLICE the chunk describes, not the chunk's own
-// index: the record's bm_cnt is what numbers the chunks, and §10.11 step 13
-// asserts it grows by one per call.
+// A chunk is addressed by the PAIR --src-slice-idx / --bm-idx: chunk (s, b)
+// holds the bytes at offset b*CloneBmChunkBytes of source slice s's bitmap, so
+// --bm-idx is the chunk's fixed position WITHIN that one slice and says nothing
+// about any other slice. The record's bm_cnt counts no calls either: it is the
+// high-water of bm_idx + 1 over every slice, which is why §10.11 step 13 asserts
+// it from the indexes it sent rather than from the number of appends.
 func setupAppendCloneBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
 	fs.Var(&rev, "rev", "sp_rev token")
 	cloneName := fs.String("name", "", "clone_name")
-	sliceIdx := fs.Uint("slice-idx", 0, "slice_idx the chunk describes")
+	srcSliceIdx := fs.Uint("src-slice-idx", 0,
+		"src_slice_idx the chunk describes")
+	bmIdx := fs.Uint("bm-idx", 0,
+		"bm_idx, the chunk's index within that slice's bitmap")
 	bmHex := fs.String("bm-hex", "",
 		"bitmap as hex; empty sends an empty bitmap on purpose")
 	return func(
@@ -263,7 +269,8 @@ func setupAppendCloneBm(fs *flag.FlagSet) job {
 			SpName:      *spName,
 			SpRev:       &pb.SpRev{Revision: uint64(rev)},
 			CloneName:   *cloneName,
-			SliceIdx:    uint32(*sliceIdx),
+			SrcSliceIdx: uint32(*srcSliceIdx),
+			BmIdx:       uint32(*bmIdx),
 			Bitmap:      bitmapArg(*bmHex),
 		})
 	}
@@ -375,10 +382,11 @@ func setupGetMigr(fs *flag.FlagSet) job {
 }
 
 // setupAppendMigrBm drives AppendMigrationBitmap. It is AppendCloneBitmap
-// without the slice: a migration copies one side, so the chunks are a single
-// sequence numbered by the record's bm_cnt (§10.11 step 14 appends two and
-// asserts it reaches 2). An empty --bm-hex is again sent as an empty bitmap
-// so the gateway's own refusal is the one under test.
+// without the chunk address: a migration copies one side, so its chunks are a
+// single sequence the record's bm_cnt numbers as they arrive (§10.11 step 14
+// appends two and asserts it reaches 2) — there is no slice to name and no
+// index to choose. An empty --bm-hex is again sent as an empty bitmap so the
+// gateway's own refusal is the one under test.
 func setupAppendMigrBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint

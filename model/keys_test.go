@@ -134,9 +134,9 @@ func TestKeyGoldenStrings(t *testing.T) {
 		},
 		{
 			"CloneBitmapKey",
-			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 3),
+			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 2, 3),
 			"dnv clone_bitmap ebada5168620c5fe 0000000000000011 " +
-				"clone0 03",
+				"clone0 02 03",
 		},
 		{
 			"TransferKey",
@@ -263,7 +263,7 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 		{
 			"clone_bitmap",
 			CloneBitmapPrefix(goldenCid, goldenSpId, "clone0"),
-			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 2),
+			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 1, 2),
 		},
 		{
 			"migration_bitmap",
@@ -527,7 +527,7 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 		t.Errorf("ParseCdcEntryKey(%q) rejected a good key", good)
 	}
 	// No parser accepts another kind's key, whatever its field count: a
-	// clone_bitmap key has the same six fields as a cdc one.
+	// migration_bitmap key has the same six fields as a cdc one.
 	foreign := []struct {
 		name string
 		key  string
@@ -536,8 +536,12 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 		{"cn_rev", CnRevKey(4, goldenCid, goldenSpId)},
 		{"sp_rev", SpRevKey(4, goldenCid, goldenSpId)},
 		{
+			"migration_bitmap",
+			MigrBitmapKey(goldenCid, goldenSpId, "migr0", 3),
+		},
+		{
 			"clone_bitmap",
-			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 3),
+			CloneBitmapKey(goldenCid, goldenSpId, "clone0", 2, 3),
 		},
 		{
 			"dn_capacity",
@@ -561,6 +565,9 @@ func TestParseCdcEntryKeyRejectsMalformed(t *testing.T) {
 	}
 	if _, ok := ParseBmIdx(good); ok {
 		t.Error("ParseBmIdx accepted a cdc key")
+	}
+	if _, _, ok := ParseCloneBmKey(good); ok {
+		t.Error("ParseCloneBmKey accepted a cdc key")
 	}
 }
 
@@ -605,19 +612,68 @@ func TestParseWorkerRegKey(t *testing.T) {
 	}
 }
 
-// TestParseBmIdx round-trips the bitmap-chunk parser over both bitmap kinds
-// and checks its rejections (MD2, MD3).
+// TestParseBmIdx round-trips the migration-bitmap parser and checks its
+// rejections (MD2, MD3). The clone keys it must refuse are its neighbours in
+// the key space, not exotica: MD3 runs it over one prefix only, but a parser
+// that accepted the other kind would hand a clone's chunk to a migration's
+// index.
 func TestParseBmIdx(t *testing.T) {
 	for _, bmIdx := range []uint32{0, 1, 15, 16, 255} {
-		cloneKey := CloneBitmapKey(goldenCid, goldenSpId, "clone0", bmIdx)
-		got, ok := ParseBmIdx(cloneKey)
-		if !ok || got != bmIdx {
-			t.Errorf("ParseBmIdx(%q) = (%d, %v)", cloneKey, got, ok)
-		}
 		migrKey := MigrBitmapKey(goldenCid, goldenSpId, "migr0", bmIdx)
-		got, ok = ParseBmIdx(migrKey)
+		got, ok := ParseBmIdx(migrKey)
 		if !ok || got != bmIdx {
 			t.Errorf("ParseBmIdx(%q) = (%d, %v)", migrKey, got, ok)
+		}
+		cloneKey := CloneBitmapKey(goldenCid, goldenSpId, "clone0", 1, bmIdx)
+		if _, ok := ParseBmIdx(cloneKey); ok {
+			t.Errorf("ParseBmIdx accepted a clone key %q", cloneKey)
+		}
+	}
+	head := "dnv migration_bitmap ebada5168620c5fe 0000000000000011 migr0"
+	bad := []struct {
+		name string
+		key  string
+	}{
+		{"empty", ""},
+		{"too few fields", head},
+		{"too many fields", head + " 03 extra"},
+		{"wrong prefix", "xxx migration_bitmap ebada5168620c5fe " +
+			"0000000000000011 migr0 03"},
+		{"not a bitmap kind", MigrationKey(goldenCid, goldenSpId, "migr0") +
+			" 03"},
+		{"clone bitmap kind", "dnv clone_bitmap ebada5168620c5fe " +
+			"0000000000000011 clone0 03"},
+		{"unpadded index", head + " 3"},
+		{"empty index", head + " "},
+		{"non-hex index", head + " zz"},
+		{"empty name", "dnv migration_bitmap ebada5168620c5fe " +
+			"0000000000000011  03"},
+		{"bad cid", "dnv migration_bitmap zzzz 0000000000000011 migr0 03"},
+		{"bad sp id", "dnv migration_bitmap ebada5168620c5fe 11 migr0 03"},
+	}
+	for _, tc := range bad {
+		if _, ok := ParseBmIdx(tc.key); ok {
+			t.Errorf("%s: ParseBmIdx(%q) accepted it", tc.name, tc.key)
+		}
+	}
+}
+
+// TestParseCloneBmKey round-trips the clone-bitmap parser over the whole pair
+// and checks its rejections (MD2, MD3, U1). The two indexes are rendered alike
+// and adjacent, so the round trip pins their ORDER too: src_slice_idx first.
+func TestParseCloneBmKey(t *testing.T) {
+	for _, srcSliceIdx := range []uint32{0, 1, 15, 255} {
+		for _, bmIdx := range []uint32{0, 1, 15, 255} {
+			key := CloneBitmapKey(
+				goldenCid, goldenSpId, "clone0", srcSliceIdx, bmIdx,
+			)
+			gotSlice, gotBm, ok := ParseCloneBmKey(key)
+			if !ok || gotSlice != srcSliceIdx || gotBm != bmIdx {
+				t.Errorf(
+					"ParseCloneBmKey(%q) = (%d, %d, %v), want (%d, %d)",
+					key, gotSlice, gotBm, ok, srcSliceIdx, bmIdx,
+				)
+			}
 		}
 	}
 	head := "dnv clone_bitmap ebada5168620c5fe 0000000000000011 clone0"
@@ -626,23 +682,32 @@ func TestParseBmIdx(t *testing.T) {
 		key  string
 	}{
 		{"empty", ""},
-		{"too few fields", head},
-		{"too many fields", head + " 03 extra"},
+		// The old one-value-per-source-slice key, left in the store by a
+		// previous format: malformed here, skipped by loadBmIdx (U12).
+		{"six fields", head + " 03"},
+		{"too many fields", head + " 02 03 extra"},
+		{"migration key", MigrBitmapKey(goldenCid, goldenSpId, "migr0", 3)},
+		{"seven-field migration key", "dnv migration_bitmap " +
+			"ebada5168620c5fe 0000000000000011 migr0 02 03"},
 		{"wrong prefix", "xxx clone_bitmap ebada5168620c5fe " +
-			"0000000000000011 clone0 03"},
+			"0000000000000011 clone0 02 03"},
 		{"not a bitmap kind", CloneKey(goldenCid, goldenSpId, "clone0") +
-			" 03"},
-		{"unpadded index", head + " 3"},
-		{"empty index", head + " "},
-		{"non-hex index", head + " zz"},
+			" 02 03"},
+		{"unpadded slice index", head + " 2 03"},
+		{"unpadded bm index", head + " 02 3"},
+		{"empty slice index", head + "  03"},
+		{"empty bm index", head + " 02 "},
+		{"non-hex slice index", head + " zz 03"},
+		{"non-hex bm index", head + " 02 zz"},
+		{"upper-case bm index", head + " 02 0A"},
 		{"empty name", "dnv clone_bitmap ebada5168620c5fe " +
-			"0000000000000011  03"},
-		{"bad cid", "dnv clone_bitmap zzzz 0000000000000011 clone0 03"},
-		{"bad sp id", "dnv clone_bitmap ebada5168620c5fe 11 clone0 03"},
+			"0000000000000011  02 03"},
+		{"bad cid", "dnv clone_bitmap zzzz 0000000000000011 clone0 02 03"},
+		{"bad sp id", "dnv clone_bitmap ebada5168620c5fe 11 clone0 02 03"},
 	}
 	for _, tc := range bad {
-		if _, ok := ParseBmIdx(tc.key); ok {
-			t.Errorf("%s: ParseBmIdx(%q) accepted it", tc.name, tc.key)
+		if _, _, ok := ParseCloneBmKey(tc.key); ok {
+			t.Errorf("%s: ParseCloneBmKey(%q) accepted it", tc.name, tc.key)
 		}
 	}
 }

@@ -389,7 +389,7 @@ UpdateControllerNodeDisabled (+`cn_rev`), InspectControllerNode. Same flags.
 | `clone delete` | DeleteClone | `--name`, `--force` (+ `--rev`) | `--force` skips the CN copy-finished proof |
 | `clone get` | GetClone | `--name` | |
 | `clone set-tr` | UpdateCloneTrConf | `--name`, trConfFlags("src-") (+ `--rev`) | |
-| `clone append-bm` | AppendCloneBitmap | `--name`, `--slice-idx`, `--bm-hex` (+ `--rev`) | empty `--bm-hex` sends an empty bitmap on purpose; a malformed non-empty value is a usage error (exit 2) |
+| `clone append-bm` | AppendCloneBitmap | `--name`, `--src-slice-idx`, `--bm-idx`, `--bm-hex` (+ `--rev`) | a chunk is addressed by the PAIR, never by either index alone: chunk (s, b) is bytes `[b*C, b*C+len)` of source slice s's bitmap, `C = common.CloneBmChunkBytes`, so chunks may be sent in any order and left unsent, while the PAGES of ONE chunk must arrive in order (the gateway appends each at that chunk's current length); empty `--bm-hex` sends an empty bitmap on purpose; a malformed non-empty value is a usage error (exit 2) |
 
 ### 5.10 `xfer` — `ctl/xfer.go`
 
@@ -670,7 +670,7 @@ argv after the global prefix and only the *distinctive* assertions.
 | 44 | `clone delete --name cl0 --force --rev 7` | `force == true` |
 | 45 | `clone get --name cl0` | |
 | 46 | `clone set-tr --name cl0 --src-tr-addr 127.0.0.1 --rev 7` | |
-| 47 | `clone append-bm --name cl0 --slice-idx 0 --bm-hex a5 --rev 7` | `bitmap` b64 of `0xa5` in state.json |
+| 47 | `clone append-bm --name cl0 --src-slice-idx 1 --bm-idx 2 --bm-hex a5 --rev 7` | `src_slice_idx == 1`, `bm_idx == 2` — proto names (§7.5 records with `UseProtoNames`), both non-zero and DISTINCT on purpose: that recording omits a zero field, and equal values would pass a crossed wiring; `bitmap` b64 of `0xa5` in state.json |
 | 48 | `xfer create --name x0 --ori-nqn $NQN --ori-idx 1 --hosts nqn.…:host0 --auto-suspend --rev 7` | |
 | 49 | `xfer delete --name x0 --rev 7` | no `force` key |
 | 50 | `xfer get --name x0` | |

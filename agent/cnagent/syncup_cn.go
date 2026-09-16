@@ -57,10 +57,11 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			ptr.GetSpId(), ptr.GetCntlrId()), newCntlrState(req))
 	}
 
-	// Bitmap chunks name their own cntlr, so the owner is found by decoding
-	// the persisted request. They are loaded **before** the converge, which
-	// is what lets a (re)built dm-clone re-apply them in the same pass
-	// (CN18 step 4).
+	// Bitmap chunks name their own cntlr and their own (src_slice_idx,
+	// bm_idx), so both the owner and the address are decoded from the
+	// persisted request — the file name is only an address, the content is
+	// authoritative. They are loaded **before** the converge, which is what
+	// lets a (re)built dm-clone re-apply them in the same pass (CN18 step 4).
 	var orphans []string
 	for _, path := range files[agent.StoreKindCloneBm] {
 		chunk := &pb.PushCloneBitmapRequest{}
@@ -77,8 +78,10 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			orphans = append(orphans, path)
 			continue
 		}
-		st.chunkSet(chunk.GetCloneId()).Put(
-			chunk.GetBmIdx(), chunk.GetBitmap())
+		st.chunkSet(chunk.GetCloneId()).Put(agent.CloneChunkKey{
+			SliceIdx: chunk.GetSrcSliceIdx(),
+			BmIdx:    chunk.GetBmIdx(),
+		}, chunk.GetBitmap())
 	}
 	if len(orphans) > 0 {
 		if err := s.store.Remove(ctx, orphans...); err != nil {

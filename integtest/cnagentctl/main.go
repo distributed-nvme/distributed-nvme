@@ -371,7 +371,10 @@ func cmdPushCloneBm(args []string) {
 	var revision, clone hexUint
 	fs.Var(&revision, "revision", "the cntlr's current revision (gates only)")
 	fs.Var(&clone, "clone", "clone id")
-	bmIdx := fs.Uint("bm-idx", 0, "chunk index")
+	srcSliceIdx := fs.Uint("src-slice-idx", 0,
+		"src_slice_idx the chunk describes")
+	bmIdx := fs.Uint("bm-idx", 0,
+		"chunk index within that slice's bitmap")
 	bitmapHex := fs.String("bitmap-hex", "", "chunk bytes as hex")
 	fs.Parse(args)
 
@@ -394,6 +397,7 @@ func cmdPushCloneBm(args []string) {
 		CntlrPointer: cntlrPointerOf(sp, cntlr),
 		Revision:     uint64(revision),
 		CloneId:      uint64(clone),
+		SrcSliceIdx:  uint32(*srcSliceIdx),
 		BmIdx:        uint32(*bmIdx),
 		Bitmap:       bitmap,
 	})

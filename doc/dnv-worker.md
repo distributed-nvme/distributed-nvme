@@ -362,9 +362,9 @@ MD2. **Keys.** One function per §5.3 key, one per prefix a component scans or
      | `SpConf`, `SpName` | `SpConfKey(cid, spName)`, `SpNameKey(cid, spId)` |
      | `Cntlr`, `Slice` | `CntlrKey(cid, spId, cntlrId)`, `SliceKey(cid, spId, sliceId)` |
      | `ThinDevice`, `Subsystem` | `ThinDeviceKey(cid, spId, tdName)`, `SubsystemKey(cid, spId, nqn)` |
-     | `Clone`, `CloneBitmap` | `CloneKey(cid, spId, name)`, `CloneBitmapKey(cid, spId, name, bmIdx)` (`BmIdxFmt`), `CloneBitmapPrefix(cid, spId, name)`, `ParseBmIdx(key) (uint32, bool)` |
+     | `Clone`, `CloneBitmap` | `CloneKey(cid, spId, name)`, `CloneBitmapKey(cid, spId, name, srcSliceIdx, bmIdx)` — the 7-field key, BOTH indexes `BmIdxFmt` —, `CloneBitmapPrefix(cid, spId, name)`, `ParseCloneBmKey(key) (srcSliceIdx, bmIdx uint32, ok bool)` |
      | `Transfer` | `TransferKey(cid, spId, name)` |
-     | `Migration`, `MigrBitmap` | `MigrationKey(cid, spId, name)`, `MigrBitmapKey(...)`, `MigrBitmapPrefix(...)` |
+     | `Migration`, `MigrBitmap` | `MigrationKey(cid, spId, name)`, `MigrBitmapKey(...)`, `MigrBitmapPrefix(...)`, `ParseBmIdx(key) (uint32, bool)` — MIGRATION-ONLY (6 fields) |
      | `WorkerReg` | `WorkerRegKey(role, seed)` → `{p} worker {role} {seed}`; `WorkerRegPrefix(role)` → `{p} worker {role} `; `ParseWorkerRegKey(key) (role, seed string, ok bool)` |
 
      `ClusterId(clusterName string, creationEpoch uint64) uint64` is the
@@ -373,6 +373,24 @@ MD2. **Keys.** One function per §5.3 key, one per prefix a component scans or
      `ShardCodeFmt`, `FreeSpaceFmt`, `BinIdxFmt`, `BmIdxFmt`; a key is the
      fields joined by one space. The unit test pins the §5.1 example
      (`dnv sp_id_to_name ebada5168620c5fe 0000000000000011`).
+
+     A clone's skip bitmap is NOT one value per source slice: it is a set of
+     chunks addressed by the PAIR `(src_slice_idx, bm_idx)`. Chunk `(s, b)`
+     holds the bytes `[b·C, b·C+len)` of source slice `s`'s bitmap, `C =
+     common.CloneBmChunkBytes` (1 MiB) and `len ≤ C`, with `s <
+     clone.src_slice_cnt ≤ common.MaxSliceCntPerSp` and `b <
+     common.MaxCloneBmCnt` — 16 chunks **per source slice**, which is what
+     that constant now bounds. A chunk's position is fixed by `b` alone, so
+     chunks are order-independent and gap-tolerant: an absent chunk, and a
+     short chunk's missing tail, read as *written* — the safe direction, the
+     region being copied rather than skipped. A migration's chunks keep their
+     6-field key and their flat append sequence. The two parsers are not
+     interchangeable — `ParseCloneBmKey` takes the 7-field `clone_bitmap` key,
+     `ParseBmIdx` the 6-field `migr_bitmap` one, each rejecting the other's
+     shape — and a `clone_bitmap` key in the superseded 6-field format parses
+     `ok == false` and is skipped by MD3's loader, which is the whole of dnv's
+     handling of the old format: no tolerating or converting code exists
+     anywhere.
 
 MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      error)` reads, in **one** `SnapshotRev` (EU4), everything the sp role
@@ -389,8 +407,8 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      	Clones     map[string]*pb.Clone         // by clone_name
      	Xfers      map[string]*pb.Transfer
      	Migrs      map[string]*pb.Migration
-     	CloneBmIdx map[string][]BmChunk         // chunk indexes present (keys only) + mod_revision
-     	MigrBmIdx  map[string][]BmChunk         // BmChunk{Idx uint32; ModRev int64}
+     	CloneBmIdx map[string][]BmChunk         // the (src_slice_idx, bm_idx) pairs present (keys only) + mod_revision
+     	MigrBmIdx  map[string][]BmChunk         // BmChunk{SliceIdx, Idx uint32; ModRev int64}; SliceIdx is always 0 for a migration chunk
      	DnByAddr   map[string]*pb.DnConf        // every Side.addr_port of the SP
      	CnByAddr   map[string]*pb.CnConf        // every Cntlr.addr_port of the SP
      }
@@ -403,8 +421,12 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      at a time (BM3). Bitmap indexes come from a keys-only scan
      (`RangeKeysAtRev`, EU2) performed **outside** the STM at the same store
      revision (`clientv3.WithRev(state.Rev)`): the STM cannot range, and the
-     indexes only ever grow (§8.9/§8.11), so a slightly newer view is
-     harmless.
+     set of indexes only ever grows (§8.9/§8.11), so a slightly newer view is
+     harmless. One loader serves both prefixes and forks on the key parser
+     (MD2): `ParseCloneBmKey` under a `CloneBitmapPrefix`, `ParseBmIdx` —
+     reported at `SliceIdx = 0` — under a `MigrBitmapPrefix`. A key the
+     prefix's own parser rejects is skipped silently, so one stray key of a
+     superseded format never fails a whole SP load.
 
 MD4. **Capacity keys** (`architecture.md` §5.6, §6.2). `DnBinIdx(freeExt
      uint64, conf *pb.DnBinConf) (bin uint32, ok bool)` (`ok = false` below
@@ -1127,23 +1149,36 @@ children.
 BM1. **Sources.** For a side that is a migration's destination: the
      `MigrBitmap` chunks of that migration, indexes `0 … bm_cnt − 1`. For the
      cntlr that is **primary**: the `CloneBitmap` chunks of every clone of
-     the SP. Chunk indexes come from the snapshot's keys-only scans
-     (`MigrBmIdx` / `CloneBmIdx`, MD3); chunk **values** are read one at a
-     time (`Get`) when pushed.
+     the SP, each addressed by the pair `(src_slice_idx, bm_idx)` (MD2). Chunk
+     addresses come from the snapshot's keys-only scans (`MigrBmIdx` /
+     `CloneBmIdx`, MD3) — a migration chunk's address is its `bm_idx` alone,
+     carried at `SliceIdx = 0`; chunk **values** are read one at a time
+     (`Get`) when pushed, at the key the address names.
 
 BM2. **Diff.** After every `SyncupSide` reply: `missing = MigrBmIdx[migr] −
      bm_info.bm_idx_list` (only when `bm_info.res_id == migr_id`). After
      every `SyncupCntlr` reply on the primary: per `bm_info_list` entry
-     (`res_id = clone_id`), `missing = CloneBmIdx[clone] − bm_idx_list`; a
-     clone absent from the list has everything missing.
+     (`res_id = clone_id`), `missing = CloneBmIdx[clone] −
+     bm_info.chunk_id_list`. A clone reports `chunk_id_list` and leaves
+     `bm_idx_list` unset — that field is migration-only — and both sides are
+     compared by the WHOLE pair, so one `bm_idx` acknowledged on one source
+     slice says nothing about the same `bm_idx` on another. A clone absent
+     from the list, and every pair a listed `chunk_id_list` omits, has
+     everything missing.
 
-BM3. **One in flight per migration/clone, ascending `bm_idx`,** each
+BM3. **One in flight per migration/clone, ascending address,** each
      `PushMigrBitmapRequest{cluster_id, dn_id, side_pointer, revision =
      synced, migr_id, bm_idx, bitmap}` / `PushCloneBitmapRequest{…,
-     cntlr_pointer, clone_id, …}` under `DefaultWorkerPushTimeout`; the next
-     part is sent only after a `code == 0` reply. Different
-     migrations/clones push independently and MAY run concurrently toward
-     one agent (§9.6 step 4); within one object the child sequences them.
+     cntlr_pointer, clone_id, src_slice_idx, bm_idx, bitmap}` under
+     `DefaultWorkerPushTimeout`; the next part is sent only after a `code ==
+     0` reply. The order is ascending `bm_idx` for a migration and ascending
+     `(src_slice_idx, bm_idx)` **lexicographic** for a clone, so that two
+     source slices sharing a `bm_idx` are two ordered chunks and not one. The
+     ordering is LOAD-BEARING FOR MIGRATIONS ONLY, whose chunks concatenate
+     in `bm_idx` order; a clone's chunks are self-positioned pairs, so there
+     the order is deterministic and nothing more. Different migrations/clones
+     push independently and MAY run concurrently toward one agent (§9.6
+     step 4); within one object the child sequences them.
 
 BM4. **Targets.** Migration chunks go only to the destination side's DN;
      clone chunks only to the CN hosting the **primary** cntlr. A standby's
@@ -1151,10 +1186,15 @@ BM4. **Targets.** Migration chunks go only to the destination side's DN;
      reply reports an empty/partial set and the pushes follow it there.
 
 BM5. **Grown clone chunks ([D8]).** The child memoizes, per `(res_id,
-     bm_idx)` — the `res_id` being the `clone_id` here, the `migr_id` for a
-     migration — the etcd `mod_revision` of the chunk it last pushed
+     src_slice_idx, bm_idx)` — the `res_id` being the `clone_id` here, the
+     `migr_id` for a migration, whose `src_slice_idx` is always 0 — the etcd
+     `mod_revision` of the chunk it last pushed
      (`CloneBmIdx` / `MigrBmIdx` carry it, MD3); a chunk whose `mod_revision`
-     advanced is re-pushed even though the agent acknowledges its index. The
+     advanced is re-pushed even though the agent acknowledges its address.
+     `AppendCloneBitmap` grows a chunk in place, at the pair that already
+     addresses it, so the memo must key on the whole pair: judged by `bm_idx`
+     alone it would compare one source slice's growth against another slice's
+     revision and drop a chunk the agent never received. The
      memo is in-memory and lost on a handoff — accepted by [D8]. Migration
      chunks are immutable, so nothing can make the rule re-push one;
      `worker/bmpush.go` implements BM1–BM6 once for both kinds and therefore
@@ -1391,7 +1431,7 @@ parses them.
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
-| `bitmap pushed` | `kind` (`migr`/`clone`), ids, `bm_idx`, `code` | BM3 |
+| `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
 | `reaction applied` | `cluster_id`, `sp_id`, `kind` (`failover`/`grow_data`/`grow_meta`/`replace_cntlr`/`spare_create`/`spare_switch`), ids, `revision` | AR2 |
 | `reaction skipped` | `cluster_id`, `sp_id`, `kind`, `reason` | AR2 |
 
@@ -1432,12 +1472,26 @@ does).
   naming the field, no child started and no `Syncup*` sent, and the next
   fan-out after a repair starting the children it owed;
   RW18/RW19 candidate selection (all four `created`
-  conditions, the partial-map and `PROVISIONING` negatives).
+  conditions, the partial-map and `PROVISIONING` negatives);
+  `TestSpCloneBitmapWiringCarriesThePair` — the clone `fetch` reads the key
+  of the whole pair and `deliver` sets `src_slice_idx` as well as `bm_idx`,
+  the applied set is read from `chunk_id_list`, and a `bm_idx_list` set on a
+  clone's `BitmapInfo` is ignored (BM2).
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
   standby leg rows ignored; the DN `err_epoch` write failing on a missing
   and on an invalid cluster conf alike.
-* **bmpush.go** — ascending order, one in flight, target rules, the
-  `mod_revision` memo, failure ⇒ `resyncWanted`.
+* **bmpush.go** — `TestBmMissingDiff` (BM2 over the whole pair: an
+  acknowledged `(0, 1)` never satisfies etcd's `(2, 1)`),
+  `TestBmAscendingOneInFlight` (ascending `(src_slice_idx, bm_idx)`
+  lexicographic across slices, one push in flight, a plan submitted under a
+  running one replacing the pending one), `TestBmGrownChunkMemo` (the BM5
+  memo per pair: growth at `(2, 1)` re-pushes that pair and not `(0, 1)`,
+  and a growth at `(0, 1)` to a revision still below `(2, 1)`'s is still
+  re-pushed — the mutation direction a `bm_idx`-only memo fails),
+  `TestBmObjectsPushIndependently`, `TestBmMigrTargetIsDestinationDn` /
+  `TestBmCloneTargetIsPrimaryCn` (BM4), `TestBmRejectedPushSetsResync` /
+  `TestBmFailedPushSetsResync` / `TestBmMissingChunkSetsResync` (BM6), and
+  `TestBmPushRecordsCarryATraceId`.
 * **reaction.go** — priority and one-per-pass; every suppression; AR5's two
   triggers (an unhealthy primary past `primary_unhealthy`, and a `disabled`
   primary with no threshold wait — `TestReactionDisabledPrimaryFailsOver`);
@@ -1554,7 +1608,8 @@ from):
 $WORK/bin/etcd --name dnv-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:12379 --advertise-client-urls http://127.0.0.1:12379 \
   --listen-peer-urls http://127.0.0.1:12380 --initial-advertise-peer-urls http://127.0.0.1:12380 \
-  --initial-cluster dnv-it=http://127.0.0.1:12380 >> $WORK/etcd/etcd.log 2>&1 &
+  --initial-cluster dnv-it=http://127.0.0.1:12380 --max-txn-ops=512 \
+  >> $WORK/etcd/etcd.log 2>&1 &
 
 $WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:12379 --roles dn,cn,sp \
   --vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE >> $WORK/w1/worker.log 2>&1 &
@@ -1584,6 +1639,15 @@ Preflight (fail fast, install nothing):
   `bash`, `nohup`, `pkill`, `ss`, `tar`, `df`; the nine ports of §14.3 not
   listening (`ss -ltn`, checked after the start-cleanup); `/var/tmp` with
   ≥ 1 GiB free.
+
+The suite brings its own etcd, so it owns etcd's deployment requirements
+too: the §14.3 launch line passes `--max-txn-ops=512` because every etcd
+serving dnv must (`common.EtcdMaxTxnOps`; `DeleteClone` sweeps up to
+`MaxSliceCntPerSp × MaxCloneBmCnt` = 256 chunk keys in one transaction and
+etcd's default cap is 128). The script carries the number as a literal with
+that constant named in a comment — a shell suite cannot import `common`.
+Nothing in the worker's own cases reaches the default cap; the flag is there
+so the suite runs against an etcd configured the way production is.
 
 ### 14.5 Identity plan
 
@@ -1616,6 +1680,7 @@ Preflight (fail fast, install nothing):
 | `low_water_mark_pct` | 50 (case D sets it per step) | |
 | `extent_size` | 64 MiB (`MinDnExtSize`) | irrelevant to fakes; keeps `GrowSlice` math small |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
+| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below `DeleteClone`'s 256-key chunk sweep |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which
@@ -1658,7 +1723,7 @@ on any error.
 | `del-rev` | `dn\|cn\|sp --id --shard` | deletes the rev key only |
 | `put-sp` | `--name --id --shard --slots 0,1,2 --level N --thresholds p,c,s,l --lwm N --cntlr id:cn_id:slot:primary…  --slice id:idx…  --group slice:grp:meta\|data:ext_cnt:none\|raid1…  --leg grp:leg:idx…  --side leg:side:dn_id:slot…` | `SpConf` (+ `next_id` past every id), `SpName`, every `Cntlr`, every `Slice` (sides `provisioned = false`), `SpRev{revision = 1, sp_name}`; the DN/CN pointer lists, budgets, capacity keys and `DnRev`/`CnRev` bumps — the `CreateStoragePool` STM with explicit placement |
 | `put-td`, `put-ss`, `put-clone`, `put-xfer`, `put-migr` | the message's fields (`--migr name:id:src_side:dst_side` also appends the dst `Side` to the leg) | the record + the `SpConf` list entry; bump `SpRev` |
-| `put-bitmap` | `--kind clone\|migr --name --bm-idx --hex` | the chunk (+ `bm_cnt` on the parent); bump `SpRev` |
+| `put-bitmap` | `--kind clone\|migr --sp --name [--src-slice-idx] --bm-idx --hex` | the chunk (+ `bm_cnt` on the parent); bump `SpRev` |
 | `set-cntlr` | `--sp --id --primary=… --disabled=…` | rewrites the `Cntlr`; bump `SpRev` |
 | `set-level` | `--sp --level N` | `SpConf.sp_level`; bump `SpRev` |
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
@@ -1683,6 +1748,27 @@ exactly as given, that being a meaning and not a default. Storing the raw
 literal instead would leave the bin shifts all zero — no flag sets them —
 which is not a ladder (§7), and every case would refuse at its first round.
 
+`put-bitmap` addresses a **clone** chunk by the PAIR `--src-slice-idx` /
+`--bm-idx` (MD2) and a **migration** chunk by `--bm-idx` alone: a non-zero
+`--src-slice-idx` together with `--kind migr` is a usage error, while `0`
+passes, 0 being the migration convention for a chunk that names no slice.
+Either index of 256 or more is refused, since neither would parse back out
+of its `common.BmIdxFmt` key field. On a clone it raises `bm_cnt` to the
+high-water of `bm_idx + 1` **across** slices and never derives it from
+`src_slice_idx` — seeding `(slice 5, bm 0)` into a fresh clone leaves
+`bm_cnt` 1, not 6, and a chunk below the high-water raises nothing — while a
+migration's `bm_cnt` is still incremented once per newly created chunk,
+where the new index *is* the count. Rewriting an existing chunk raises no
+count but still bumps `SpRev`, which is the [D8]/BM5 driver that §14.11 C's
+grown-chunk step relies on. Its emitted JSON carries `src_slice_idx` next to
+`bm_idx` (`0` for `migr`), plus `bytes`, `created`, `bm_cnt` and `sp_rev`.
+
+`get-sp` prints the chunk addresses `LoadSp` found in the two shapes the
+fakes spell them in (§14.9), so that both sides of an assertion spell a
+chunk the same way: `"clone_bm_idx": {"c0": ["0:0", "0:1", "2:0"]}` —
+DECIMAL `"src_slice_idx:bm_idx"` strings, in ascending pair order — against
+`"migr_bm_idx": {"m0": [0, 1, 2]}`, which stays plain decimal numbers.
+
 ### 14.9 The fake agent: `fakeagent`
 
 `fakeagent dn|cn --grpc-address <ip:port> --dir <dir>`: serves the generated
@@ -1701,10 +1787,18 @@ sent it (RW10). Rules:
   likewise a cntlr absent from the CN's last `SyncupCn` — the real agents'
   ordering rule, which the worker's independent roles must survive (RW5).
 * **`state.json`** in `--dir`: the last applied request and revision per
-  object and the received chunks per migration/clone (index + byte length),
-  written on every apply; loaded at start — a killed and restarted fake
-  replies like a restarted real agent (last revision, `bm_idx_list` from
-  the files), so case B's kill/restart is faithful.
+  object and the received chunks per migration/clone, as a map from the
+  chunk's ADDRESS to its byte length, written on every apply; loaded at
+  start — a killed and restarted fake replies like a restarted real agent
+  (last revision, the applied set derived from the recorded chunks), so case
+  B's kill/restart is faithful. A migration chunk's address is its plain
+  decimal append index (`"2"`); a **clone** chunk's is the decimal,
+  colon-separated pair `"{src_slice_idx}:{bm_idx}"` (e.g. `"2:1"`), so the
+  same `bm_idx` on two source slices is two entries and a chunk that arrives
+  again at the same pair merely overwrites its length — the grown chunk of
+  [D8]/BM5. A clone's derived applied set is reported as `chunk_id_list`,
+  ascending `(src_slice_idx, bm_idx)`, with `bm_idx_list` left unset; a
+  migration's is `bm_idx_list`, ascending, with `chunk_id_list` left unset.
 * **`*Info` shape from the last request**: `SideInfo.cn_id_to_*` has one row
   per `primary_cn_id`/`standby_id_list` entry; `CntlrInfo` maps have one row
   per slice/group/leg/td/ss/ns/clone/xfer of the last `SyncupCntlr`;
@@ -1723,6 +1817,7 @@ sent it (RW10). Rules:
         "rows": {"slice_id_to_dm_pool.3": {"status": "OK",
                  "details": "0 8192 thin-pool 5 40/1024 600/1024 - rw discard_passdown queue_if_no_space - 512"},
                  "leg_id_to_leg.7": {"status": "ERROR", "details": "probe timeout"}},
+        "chunk_id_list": ["0:0", "2:1"],
         "hang": false, "drop_stream": false, "reply_code": 0
       }
     }
@@ -1734,7 +1829,14 @@ sent it (RW10). Rules:
   `total_ext_cnt` (sides; default `total = ext_cnt` of the request and
   `zeroed = total` — instant provisioning), `thin_ok` (cntlr) and
   `thin_missing_slices` (a partial map for the created-flip negative),
-  `bm_idx_list` (override of the derived applied set), `hang` (accept a
+  `bm_idx_list` (override of a MIGRATION's derived applied set),
+  `chunk_id_list` (the same lever for a CLONE: a list of the `"s:b"` pair
+  strings state.json uses, e.g. `["0:0", "2:1"]` — absent means derive from
+  the recorded chunks, present means force, and an empty list `[]` forces
+  "nothing applied", which is how a case makes the worker re-diff a whole
+  clone at once; a malformed entry makes the WHOLE file malformed, exactly
+  like a misspelled status, and the fake logs it and keeps its previous
+  behavior), `hang` (accept a
   `Check*` request and never reply), `drop_stream` (close the `Check*`
   stream on the next request), `reply_code` (force `agent_reply.code` on
   every reply of the object). `Get*Size` replies a configured size,
@@ -1867,24 +1969,42 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    slice, raid1 data group `G1` legs `L1`(`S1` dn 1) `L2`(`S2` dn 2), td
    `td0`. Wait provisioned. `put-migr m0 id 3 src S1 dst S3 on dn 2 slot 1
    bm_cnt 0`; `put-bitmap migr m0 0 <hex>`, `put-bitmap migr m0 1 <hex>`
-   (`bm_cnt 2`). `put-clone c0 dst td0 src_slice_cnt 2`; `put-bitmap clone
-   c0 0 <hex>`, `1 <hex>`.
+   (`bm_cnt 2`) — and `put-bitmap --kind migr --src-slice-idx 1` exits
+   non-zero and writes nothing, a migration chunk naming no source slice
+   (§14.8). `put-clone c0 dst td0 src_slice_cnt 2`, then THREE clone
+   chunks at three pairs — `(0,0)`, `(0,1)`, `(1,0)` — so that two of them
+   share a `bm_idx` on different source slices while one source slice holds
+   two chunks; `bm_cnt` ends at 2, the U5 high-water of `bm_idx + 1`, not 3.
+   cn0's `chunk_id_list` lever (§14.9) is set to exactly those three pairs
+   BEFORE they are seeded, so the clone pushes are held back until step 3
+   releases them: seeded one at a time each chunk would be pushed as it
+   appeared, and the resulting order would be the WRITE order rather than
+   BM3's.
 2. Within `WAIT_SHORT`: dn1 received `PushMigrBitmap bm_idx 0` then `1`,
    the second's `grpc server request` timestamp after the first's `grpc
    server reply` (one in flight, ascending), `revision` = the current
    `SpRev`; the next `SyncupSide` reply carries `bm_info.bm_idx_list [0,1]`
    and `assert_none_for 3` no further pushes. dn0 (the src) received none.
-3. cn0 received `PushCloneBitmap` `0`, `1`; cn1 (standby) none.
+3. Clearing cn0's behavior and bumping `SpRev` makes the whole clone missing
+   at once: cn0 receives one `PushCloneBitmap` per PAIR, and the three
+   `grpc server request` timestamps are ordered `(0,0) ≤ (0,1) ≤ (1,0)` —
+   lexicographic, which a `bm_idx`-only order would get wrong by sending
+   `(1,0)` before `(0,1)`. cn1 (the standby) receives none. A further re-fan
+   then carries the clone's applied set back as
+   `bm_info_list[].chunk_id_list` = `[(0,0), (0,1), (1,0)]` with
+   `bm_idx_list` UNSET (it is migration-only), and `assert_none_for 3` no
+   further pushes.
 4. `put-bitmap migr m0 2 <hex>` ⇒ exactly one new push at dn1, `bm_idx 2`.
-5. `put-bitmap clone c0 0 <longer hex>` ⇒ a second `PushCloneBitmap bm_idx
-   0` at cn0 with the new length (the `mod_revision` memo), no push of `1`.
+5. `put-bitmap clone c0 --src-slice-idx 0 --bm-idx 0 <longer hex>` ⇒ a
+   second `PushCloneBitmap` at the SAME pair `(0,0)` at cn0 carrying the new
+   length (the `mod_revision` memo, BM5), and no push of `(0,1)` or `(1,0)`.
 6. dn1 behavior `side … {reply_code: 1}` and `put-bitmap migr m0 3` ⇒ the
    push is rejected; within 3 rounds an equal-revision `SyncupSide` is
    re-issued (`syncup result` with the same revision twice); clear ⇒ the
    push succeeds.
 7. `set-cntlr --sp 1 --id 1 --primary=false`, `--id 2 --primary=true` ⇒
-   within `WAIT_SHORT` cn1 receives `PushCloneBitmap 0` and `1`; cn0 none
-   after the change.
+   within `WAIT_SHORT` cn1 receives all three pairs; cn0 none after the
+   change.
 
 **D — `reaction`** (thresholds 2/4/3/6; `lwm` set per step)
 

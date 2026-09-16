@@ -106,7 +106,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── sprole.go                      # §8.4 SP snapshot, fan-out, provisioned/created flips
 │   ├── clusterconf.go                 # §8.5 ClusterConf cache
 │   ├── health.go                      # §9 err_epoch bookkeeping (through model)
-│   ├── bmpush.go                      # §10 Push*Bitmap calls, bm_idx bookkeeping
+│   ├── bmpush.go                      # §10 Push*Bitmap calls, chunk-address bookkeeping
 │   └── reaction.go                    # §11 automatic reactions
 ├── agent/                             # shared dn/cn mechanism (dnagent.md §2)
 │   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring

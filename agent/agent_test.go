@@ -371,6 +371,63 @@ func TestChunkSetContiguousPrefix(t *testing.T) {
 	}
 }
 
+// TestCloneChunkSetPairKeyed: clone chunks are addressed by the pair, so the
+// same bm_idx on two source slices is two distinct chunks, and Ids() orders
+// them ascending (SliceIdx, BmIdx) — the deterministic applied set of SH21.
+func TestCloneChunkSetPairKeyed(t *testing.T) {
+	chunks := NewCloneChunkSet()
+	chunks.Put(CloneChunkKey{SliceIdx: 1, BmIdx: 0}, []byte{0x10})
+	chunks.Put(CloneChunkKey{SliceIdx: 0, BmIdx: 2}, []byte{0x02})
+	chunks.Put(CloneChunkKey{SliceIdx: 0, BmIdx: 0}, []byte{0x01})
+
+	if got := chunks.Len(); got != 3 {
+		t.Fatalf("len = %d, want 3", got)
+	}
+	// Same bm_idx, different slice: two chunks, neither shadowing the other.
+	for _, want := range []struct {
+		key  CloneChunkKey
+		byte byte
+	}{
+		{CloneChunkKey{SliceIdx: 0, BmIdx: 0}, 0x01},
+		{CloneChunkKey{SliceIdx: 1, BmIdx: 0}, 0x10},
+		{CloneChunkKey{SliceIdx: 0, BmIdx: 2}, 0x02},
+	} {
+		got, ok := chunks.Get(want.key)
+		if !ok || len(got) != 1 || got[0] != want.byte {
+			t.Fatalf("chunk %v = %v/%v, want [%#x]", want.key, got, ok,
+				want.byte)
+		}
+	}
+	// An absent pair is absent — a gap is legal, not an error.
+	if _, ok := chunks.Get(CloneChunkKey{SliceIdx: 0, BmIdx: 1}); ok {
+		t.Fatal("a chunk that was never put reads as present")
+	}
+
+	want := []CloneChunkKey{{0, 0}, {0, 2}, {1, 0}}
+	got := chunks.Ids()
+	if len(got) != len(want) {
+		t.Fatalf("ids = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ids = %v, want %v", got, want)
+		}
+	}
+
+	chunks.Delete(CloneChunkKey{SliceIdx: 0, BmIdx: 2})
+	if _, ok := chunks.Get(CloneChunkKey{SliceIdx: 0, BmIdx: 2}); ok {
+		t.Fatal("the deleted chunk survived")
+	}
+	if got := chunks.Ids(); len(got) != 2 ||
+		got[0] != (CloneChunkKey{0, 0}) || got[1] != (CloneChunkKey{1, 0}) {
+		t.Fatalf("ids after the delete = %v", got)
+	}
+	// Deleting a pair never touches the same bm_idx on another slice.
+	if _, ok := chunks.Get(CloneChunkKey{SliceIdx: 1, BmIdx: 0}); !ok {
+		t.Fatal("deleting (0,2) lost (1,0)")
+	}
+}
+
 func TestSkipRanges(t *testing.T) {
 	const region = uint64(1 << 20)
 	// Bits 0 and 2 set, shifted past 3 meta blocks ⇒ regions 3 and 5.

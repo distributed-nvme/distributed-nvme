@@ -512,11 +512,16 @@ SH20. `nvmehost.go`: `Connect` always passes
 
 SH21. Implements the agent side of §9.6: persist the received
       `Push*BitmapRequest` verbatim at its `Local*BmPath` (via `WriteProto`)
-      **before** applying; the applied set reported in
-      `BitmapInfo.bm_idx_list` is always derived from the files present.
+      **before** applying; the applied set is always derived from the files
+      present — `BitmapInfo.bm_idx_list` for a migration, keyed by the append
+      index, and `BitmapInfo.chunk_id_list` for a clone, keyed by the
+      `(src_slice_idx, bm_idx)` pair that addresses the chunk. The file name
+      carries that pair too, but only as an address: the persisted request's
+      CONTENT is what the startup reload decodes it from.
 
-SH22. The §11.4 math skeleton lives here: chunk reassembly (concatenated —
-      migration — or self-positioned — clone) and the fully-skippable-region →
+SH22. The §11.4 math skeleton lives here: chunk placement (concatenated —
+      migration — or self-positioned `(src_slice_idx, bm_idx)` chunk of fixed
+      capacity `CloneBmChunkBytes` — clone) and the fully-skippable-region →
       `blkdiscard` range computation. The single wire-convention inversion
       (**wire 1 = unwritten/skippable**) is *not* here: the one place that
       reads the "written/copied = 1" side of the convention is the thin-pool

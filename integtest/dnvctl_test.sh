@@ -1110,11 +1110,19 @@ EOF
 		  \"src_tr_conf\":[{\"tr_type\":\"tcp\",\"adr_fam\":\"ipv4\",
 		    \"tr_addr\":\"127.0.0.1\",\"tr_svc_id\":\"4420\"}]}" \
 		clone set-tr --name cl0 --src-tr-addr 127.0.0.1 --rev 7
+	# A clone bitmap chunk is addressed by the PAIR (src_slice_idx, bm_idx),
+	# so the two indexes are given DISTINCT NON-ZERO values: §7.5 records
+	# without EmitUnpopulated, which would drop a zero index from the
+	# document entirely, and equal values would let a command that wired
+	# --bm-idx to src_slice_idx (or the reverse) pass. Same argv as CT-T2's
+	# row 47 (`ctl/request_test.go`) — the two suites are one contract.
 	sweep_step 47 AppendCloneBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"clone_name\":\"cl0\",
+		  \"src_slice_idx\":1,\"bm_idx\":2,
 		  \"bitmap\":\"$BM_A5_B64\"}" \
-		clone append-bm --name cl0 --slice-idx 0 --bm-hex a5 --rev 7
+		clone append-bm --name cl0 --src-slice-idx 1 --bm-idx 2 \
+		--bm-hex a5 --rev 7
 
 	# --- xfer (§5.10) --------------------------------------------------
 	sweep_step 48 CreateTransfer \

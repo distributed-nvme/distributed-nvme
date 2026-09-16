@@ -131,9 +131,12 @@ func BitmapUnsetRunFrom(
 	return run
 }
 
-// ChunkSet holds the bitmap chunks an agent currently has on disk for one
-// migration/clone. The applied set reported through BitmapInfo.bm_idx_list is
-// always derived from it, so it survives restarts (SH21).
+// ChunkSet holds the migration bitmap chunks an agent currently has on disk
+// for one migration. bm_idx is the append sequence, so the set is
+// interpretable only as a ContiguousPrefix (SH23). The applied set reported
+// through BitmapInfo.bm_idx_list is always derived from it, so it survives
+// restarts (SH21). Clone chunks are addressed by the pair
+// (src_slice_idx, bm_idx) and live in CloneChunkSet below.
 type ChunkSet struct {
 	chunks map[uint32][]byte
 }
@@ -150,7 +153,9 @@ func (c *ChunkSet) Delete(bmIdx uint32) {
 	delete(c.chunks, bmIdx)
 }
 
-// Get is the self-positioned access a clone needs (bm_idx = source slice).
+// Get reads one chunk by its bm_idx. It places nothing: a migration chunk is
+// interpretable only inside the ContiguousPrefix its lower neighbours build
+// (SH23).
 func (c *ChunkSet) Get(bmIdx uint32) ([]byte, bool) {
 	bitmap, ok := c.chunks[bmIdx]
 	return bitmap, ok
@@ -185,6 +190,64 @@ func (c *ChunkSet) ContiguousPrefix() []byte {
 		}
 		out = append(out, chunk...)
 	}
+}
+
+// CloneChunkKey addresses one clone bitmap chunk: the source slice it
+// describes and its index within that slice's bitmap (§9.6).
+type CloneChunkKey struct {
+	SliceIdx uint32
+	BmIdx    uint32
+}
+
+// CloneChunkSet holds the clone bitmap chunks an agent currently has on disk
+// for one clone. Chunk (s, b) carries bytes [b*CloneBmChunkBytes, …) of source
+// slice s's bitmap, so every chunk is **self-positioned** by its key alone
+// (SH22): chunks may arrive in any order, a chunk may be missing entirely, and
+// one may keep growing in place up to its fixed capacity ([D8]). There is
+// deliberately no ContiguousPrefix analogue — concatenating clone chunks would
+// place them at the wrong offsets; the §11.4 fold reads them in place instead.
+// The applied set reported through BitmapInfo.chunk_id_list is always derived
+// from this set, so it survives restarts (SH21).
+type CloneChunkSet struct {
+	chunks map[CloneChunkKey][]byte
+}
+
+func NewCloneChunkSet() *CloneChunkSet {
+	return &CloneChunkSet{chunks: make(map[CloneChunkKey][]byte)}
+}
+
+func (c *CloneChunkSet) Put(key CloneChunkKey, bitmap []byte) {
+	c.chunks[key] = bitmap
+}
+
+func (c *CloneChunkSet) Get(key CloneChunkKey) ([]byte, bool) {
+	bitmap, ok := c.chunks[key]
+	return bitmap, ok
+}
+
+func (c *CloneChunkSet) Delete(key CloneChunkKey) {
+	delete(c.chunks, key)
+}
+
+func (c *CloneChunkSet) Len() int {
+	return len(c.chunks)
+}
+
+// Ids lists every chunk present, ascending by (SliceIdx, BmIdx) — the applied
+// set of SH21. The order is deterministic only: clone chunks are
+// order-independent, so nothing downstream may depend on it for placement.
+func (c *CloneChunkSet) Ids() []CloneChunkKey {
+	out := make([]CloneChunkKey, 0, len(c.chunks))
+	for key := range c.chunks {
+		out = append(out, key)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SliceIdx != out[j].SliceIdx {
+			return out[i].SliceIdx < out[j].SliceIdx
+		}
+		return out[i].BmIdx < out[j].BmIdx
+	})
+	return out
 }
 
 // SkipRange is one contiguous byte range of a dm-clone device that may be

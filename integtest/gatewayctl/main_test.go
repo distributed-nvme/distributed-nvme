@@ -439,17 +439,23 @@ func TestSpRevTokenIsAlwaysPresent(t *testing.T) {
 }
 
 // TestBitmapIsVerbatim pins GW14 on the driver side: --bm-hex reaches the
-// request as raw bytes, so what the suite appends is what etcd stores.
+// request as raw bytes, so what the suite appends is what etcd stores. The two
+// index flags are pinned with it, and with DIFFERENT values, because a chunk is
+// addressed by the (src_slice_idx, bm_idx) pair and a driver that fed one flag
+// to both fields would append to the wrong chunk.
 func TestBitmapIsVerbatim(t *testing.T) {
 	req := runArgv(t, "append-clone-bm",
 		"--sp", "sp0", "--rev", "3", "--name", "cl0",
-		"--slice-idx", "0", "--bm-hex", "ff00ff",
+		"--src-slice-idx", "2", "--bm-idx", "1", "--bm-hex", "ff00ff",
 	).(*pb.AppendCloneBitmapRequest)
 	if !reflect.DeepEqual(req.GetBitmap(), []byte{0xff, 0x00, 0xff}) {
 		t.Errorf("bitmap = %v, want [255 0 255]", req.GetBitmap())
 	}
-	if req.GetSliceIdx() != 0 {
-		t.Errorf("slice_idx = %d, want 0", req.GetSliceIdx())
+	if req.GetSrcSliceIdx() != 2 {
+		t.Errorf("src_slice_idx = %d, want 2", req.GetSrcSliceIdx())
+	}
+	if req.GetBmIdx() != 1 {
+		t.Errorf("bm_idx = %d, want 1", req.GetBmIdx())
 	}
 }
 

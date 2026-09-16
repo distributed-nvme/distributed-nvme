@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -210,6 +211,12 @@ func TestReserveRetriesOnceWhenHeld(t *testing.T) {
 // The §11.4 raid0 fold (CN22)
 // ---------------------------------------------------------------------------
 
+// chunked is one slice's bitmap held as the single chunk 0 — the shape every
+// clone whose bitmap fits in one CloneBmChunkBytes arrives in.
+func chunked(bits ...byte) sliceBitmap {
+	return sliceBitmap{chunks: map[uint32][]byte{0: bits}}
+}
+
 func TestFoldRegions(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -225,8 +232,8 @@ func TestFoldRegions(t *testing.T) {
 				sliceCnt: 1, stripeSize: 65536, blockSize: 1 << 20},
 			regionCnt: 64,
 			region:    1 << 20,
-			slices: []sliceBitmap{{present: true,
-				bits: []byte{0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff}}},
+			slices: []sliceBitmap{
+				chunked(0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff)},
 			want: "00000000ffffffff",
 		},
 		{
@@ -236,8 +243,8 @@ func TestFoldRegions(t *testing.T) {
 			regionCnt: 8,
 			region:    1 << 20,
 			slices: []sliceBitmap{
-				{present: true, bits: []byte{0xff}},
-				{present: false},
+				chunked(0xff),
+				{},
 			},
 			want: "00",
 		},
@@ -248,8 +255,8 @@ func TestFoldRegions(t *testing.T) {
 			regionCnt: 8,
 			region:    1 << 20,
 			slices: []sliceBitmap{
-				{present: true, bits: []byte{0x0f}},
-				{present: true, bits: []byte{0x0f}},
+				chunked(0x0f),
+				chunked(0x0f),
 			},
 			// Region r covers source bits r/2 of both slices (block_size is
 			// 16 stripes, slice_cnt 2 ⇒ 32 chunks per source bit), so the
@@ -334,8 +341,13 @@ func TestRegionSkippableMatchesTheAddressMapping(t *testing.T) {
 						for j := range bits {
 							bits[j] = byte(next())
 						}
-						slices[i] = sliceBitmap{
-							present: next()%8 != 0, bits: bits}
+						// Every bit these geometries reach lives in chunk 0;
+						// one slice in eight has no chunk at all.
+						if next()%8 == 0 {
+							slices[i] = sliceBitmap{}
+							continue
+						}
+						slices[i] = chunked(bits...)
 					}
 					for r := uint64(0); r < 24; r++ {
 						want := regionSkippableNaive(
@@ -351,5 +363,147 @@ func TestRegionSkippableMatchesTheAddressMapping(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The chunk view of a source slice (U8)
+// ---------------------------------------------------------------------------
+
+const testChunkBits = uint64(common.CloneBmChunkBytes) * 8
+
+func assertSkippable(
+	t *testing.T,
+	b sliceBitmap,
+	idx uint64,
+	want bool,
+) {
+	t.Helper()
+	if got := b.skippable(idx); got != want {
+		t.Fatalf("bit %d is skippable=%v, want %v", idx, got, want)
+	}
+}
+
+// TestSliceBitmapChunkBoundary pins the one arithmetic the fold cannot get
+// wrong: bit 8C−1 is the last bit of chunk 0 and bit 8C is the first bit of
+// chunk 1, so a slice whose chunk 0 is full still reads nothing of chunk 1.
+func TestSliceBitmapChunkBoundary(t *testing.T) {
+	full := make([]byte, common.CloneBmChunkBytes)
+	full[len(full)-1] = 0x80 // bit 8C−1, the chunk's very last bit
+	b := sliceBitmap{chunks: map[uint32][]byte{0: full}}
+
+	assertSkippable(t, b, testChunkBits-1, true)
+	assertSkippable(t, b, testChunkBits-2, false)
+	// Chunk 1 is absent, so the first bit past the boundary reads as written
+	// even though the chunk below it is complete.
+	assertSkippable(t, b, testChunkBits, false)
+
+	b.chunks[1] = []byte{0x01}
+	assertSkippable(t, b, testChunkBits, true)
+	assertSkippable(t, b, testChunkBits+1, false)
+	// Adding chunk 1 moved nothing in chunk 0 — positions are fixed by the
+	// chunk index alone.
+	assertSkippable(t, b, testChunkBits-1, true)
+}
+
+// TestShortChunkTailReadsAsWritten: a chunk that AppendCloneBitmap has not
+// finished growing is present but short, and every bit past its length is
+// unknown — which resolves to written ([D8]), never to skippable.
+func TestShortChunkTailReadsAsWritten(t *testing.T) {
+	b := sliceBitmap{chunks: map[uint32][]byte{0: {0xff}}}
+	assertSkippable(t, b, 0, true)
+	assertSkippable(t, b, 7, true)
+	// Byte 1 of a one-byte chunk: within the chunk's span, past its length.
+	assertSkippable(t, b, 8, false)
+	assertSkippable(t, b, testChunkBits-1, false)
+}
+
+// TestAbsentMiddleChunkKeepsLaterChunksInPlace is the case that distinguishes
+// U2's self-positioning from a concatenation model. Chunks 0 and 2 are
+// present and chunk 1 is missing: chunk 2's bits must stay at their own
+// offset, 16C bits in. A concatenation would have slid them down behind chunk
+// 0 — reporting bit 8 as skippable and bit 16C as absent, both wrong, and the
+// first of the two is the unsafe direction (a written region discarded).
+func TestAbsentMiddleChunkKeepsLaterChunksInPlace(t *testing.T) {
+	b := sliceBitmap{chunks: map[uint32][]byte{
+		0: {0xff},
+		2: {0xff},
+	}}
+	assertSkippable(t, b, 0, true)
+	// Not chunk 0's second byte and not chunk 2 slid down behind it.
+	assertSkippable(t, b, 8, false)
+	// The whole of the absent chunk 1 reads as written.
+	assertSkippable(t, b, testChunkBits, false)
+	assertSkippable(t, b, 2*testChunkBits-1, false)
+	// Chunk 2 is exactly where its bm_idx puts it.
+	assertSkippable(t, b, 2*testChunkBits, true)
+	assertSkippable(t, b, 2*testChunkBits+7, true)
+	assertSkippable(t, b, 2*testChunkBits+8, false)
+}
+
+// TestChunksOfCutsAtChunkBoundaries covers the three shapes the §11.5
+// recovery hands chunksOf: shorter than C, exactly C, and one byte past it.
+func TestChunksOfCutsAtChunkBoundaries(t *testing.T) {
+	const size = common.CloneBmChunkBytes
+	for _, tc := range []struct {
+		name    string
+		length  int
+		wantLen []int
+	}{
+		{"shorter than a chunk", 3, []int{3}},
+		{"exactly one chunk", size, []int{size}},
+		{"one byte past a chunk", size + 1, []int{size, 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chunks := chunksOf(make([]byte, tc.length))
+			if len(chunks) != len(tc.wantLen) {
+				t.Fatalf("%d chunks, want %d", len(chunks), len(tc.wantLen))
+			}
+			for idx, want := range tc.wantLen {
+				got, ok := chunks[uint32(idx)]
+				if !ok || len(got) != want {
+					t.Fatalf("chunk %d is %d bytes/%v, want %d bytes",
+						idx, len(got), ok, want)
+				}
+			}
+		})
+	}
+	if got := chunksOf(nil); len(got) != 0 {
+		t.Fatalf("an empty bitmap yielded %d chunks", len(got))
+	}
+}
+
+// TestDstBitmapLongerThanAChunkIsSplit is the §11.5 regression pin: applyDst
+// Bitmaps builds its per-slice bitmaps locally, so it must cut them at C
+// before handing them to the fold. Wrapping the whole bitmap as chunk 0
+// instead leaves every bit past the first MiB addressed to a chunk that does
+// not exist — and unknown reads as written, silently stopping the skip at 1
+// MiB of bitmap on a large slice.
+func TestDstBitmapLongerThanAChunkIsSplit(t *testing.T) {
+	mapped := make([]byte, common.CloneBmChunkBytes+1)
+	for i := range mapped {
+		mapped[i] = 0xff
+	}
+	b := sliceBitmap{chunks: chunksOf(mapped)}
+	assertSkippable(t, b, 0, true)
+	assertSkippable(t, b, testChunkBits-1, true)
+	// The byte past C: only a split bitmap puts it in chunk 1, where the fold
+	// can reach it.
+	assertSkippable(t, b, testChunkBits, true)
+	assertSkippable(t, b, testChunkBits+7, true)
+	assertSkippable(t, b, testChunkBits+8, false)
+
+	// And through regionSkippable, the entry point foldRegions uses: with
+	// stripe = block = region = 1 MiB the region index IS the source bit
+	// index, so region 8C is the first region past the first chunk.
+	g := raid0Geometry{sliceCnt: 1, stripeSize: 1 << 20, blockSize: 1 << 20}
+	slices := []sliceBitmap{b}
+	if !regionSkippable(testChunkBits, 1<<20, g, slices) {
+		t.Fatalf("region %d is not skippable: the bitmap past the first "+
+			"chunk was not reachable", testChunkBits)
+	}
+	if regionSkippable(testChunkBits+8, 1<<20, g, slices) {
+		t.Fatalf("region %d is skippable past the end of the bitmap",
+			testChunkBits+8)
 	}
 }

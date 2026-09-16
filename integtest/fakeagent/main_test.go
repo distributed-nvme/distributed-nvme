@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -103,6 +106,17 @@ func keysOf[V any](m map[uint64]V) []uint64 {
 	return keys
 }
 
+// chunkPairs flattens an applied clone set to the (src_slice_idx, bm_idx)
+// pairs it addresses, in the order reported.
+func chunkPairs(chunkIdList []*pb.BmChunkId) [][2]uint32 {
+	pairs := make([][2]uint32, 0, len(chunkIdList))
+	for _, chunkId := range chunkIdList {
+		pairs = append(pairs,
+			[2]uint32{chunkId.GetSrcSliceIdx(), chunkId.GetBmIdx()})
+	}
+	return pairs
+}
+
 func wantKeys[V any](t *testing.T, name string, m map[uint64]V, want ...uint64) {
 	t.Helper()
 	got := keysOf(m)
@@ -128,7 +142,8 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 	                                  "details": "boom"}}},
 	    "side 1:3:5": {"zeroed_ext_cnt": 0, "total_ext_cnt": 2},
 	    "cntlr 1:1": {"thin_ok": true, "thin_missing_slices": [1, 2],
-	                  "bm_idx_list": [0, 1], "hang": false,
+	                  "bm_idx_list": [0, 1],
+	                  "chunk_id_list": ["2:1", "0:3"], "hang": false,
 	                  "drop_stream": true, "reply_code": 2,
 	                  "rows": {"leg_id_to_leg.7": {"status": "ERROR",
 	                                               "details": "probe timeout"}}}
@@ -174,6 +189,12 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 		[]uint32{0, 1}) {
 		t.Errorf("bm_idx_list = %v", cntlr.BmIdxList)
 	}
+	// chunk_id_list is parsed to pairs once, in the order given: it is a
+	// forced set, not a derived one, so validate does not reorder it.
+	if !slices.Equal(chunkPairs(cntlr.chunkIdList),
+		[][2]uint32{{2, 1}, {0, 3}}) {
+		t.Errorf("chunk_id_list = %v", chunkPairs(cntlr.chunkIdList))
+	}
 }
 
 func TestParseBehaviorMalformed(t *testing.T) {
@@ -187,6 +208,10 @@ func TestParseBehaviorMalformed(t *testing.T) {
 		{"unknown row status",
 			`{"objects": {"dn": {"rows": {"disk_info": {"status": "nope"}}}}}`},
 		{"wrong type", `{"objects": {"dn": {"thin_ok": "yes"}}}`},
+		{"unpaired chunk id",
+			`{"objects": {"cntlr 1:1": {"chunk_id_list": ["1"]}}}`},
+		{"non-decimal chunk id",
+			`{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0x1"]}}}`},
 		{"trailing data", `{} {}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +474,7 @@ func TestGateUnknownPushId(t *testing.T) {
 	cloneReply, err := cnClient.PushCloneBitmap(ctx,
 		&pb.PushCloneBitmapRequest{
 			ClusterId: 1, CnId: 1, CntlrPointer: cPtr, Revision: 1,
-			CloneId: 42, BmIdx: 0, Bitmap: []byte{0x01},
+			CloneId: 42, SrcSliceIdx: 1, BmIdx: 0, Bitmap: []byte{0x01},
 		})
 	if err != nil {
 		t.Fatalf("PushCloneBitmap: %v", err)
@@ -1136,6 +1161,175 @@ func TestStateSurvivesRestart(t *testing.T) {
 		GetCode(); got != common.ReplyCodeStaleRevision {
 		t.Errorf("stale SyncupDn after the restart code = %d, want %d",
 			got, common.ReplyCodeStaleRevision)
+	}
+}
+
+// pushCloneBm pushes one clone chunk at the (src_slice_idx, bm_idx) pair it
+// is addressed by and requires it to be accepted; the payload is `size` bytes,
+// which is what state.json records next to the pair.
+func pushCloneBm(
+	t *testing.T, client pb.ControllerNodeAgentClient,
+	revision, cloneId uint64, srcSliceIdx, bmIdx uint32, size int,
+) {
+	t.Helper()
+	reply, err := client.PushCloneBitmap(context.Background(),
+		&pb.PushCloneBitmapRequest{
+			ClusterId:    1,
+			CnId:         1,
+			CntlrPointer: cntlrPtr(1, 1),
+			Revision:     revision,
+			CloneId:      cloneId,
+			SrcSliceIdx:  srcSliceIdx,
+			BmIdx:        bmIdx,
+			Bitmap:       bytes.Repeat([]byte{0xa5}, size),
+		})
+	if err != nil {
+		t.Fatalf("PushCloneBitmap: %v", err)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Fatalf("PushCloneBitmap (%d, %d) code = %d (%s)",
+			srcSliceIdx, bmIdx, got, reply.GetAgentReply().GetDetails())
+	}
+}
+
+// readStateChunks reads one object's recorded chunks for one migration/clone
+// back off disk, so the tests assert the shape of the artifact the suite's jq
+// reads and not just the in-memory map.
+func readStateChunks(
+	t *testing.T, agent *fakeAgent, objKey string, resId uint64,
+) map[string]uint64 {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(agent.dir, stateFileName))
+	if err != nil {
+		t.Fatalf("reading state.json: %v", err)
+	}
+	parsed := &stateFile{}
+	if err := json.Unmarshal(raw, parsed); err != nil {
+		t.Fatalf("state.json is not readable JSON: %v", err)
+	}
+	obj := parsed.Objects[objKey]
+	if obj == nil {
+		t.Fatalf("state.json has no %q object", objKey)
+	}
+	return obj.Chunks[strconv.FormatUint(resId, 10)]
+}
+
+// TestCloneChunkKeysAndChunkIdList pins the clone half of the §14.9 state.json
+// contract: a clone chunk is recorded under the decimal
+// "{src_slice_idx}:{bm_idx}" pair that addresses it, two source slices sharing
+// a bm_idx are two distinct chunks, a re-push at the same pair only updates
+// the recorded length (the grown chunk of [D8]/BM5), and the derived set rides
+// in chunk_id_list — ascending (src_slice_idx, bm_idx) — never in bm_idx_list,
+// which carries migration chunks alone.
+func TestCloneChunkKeysAndChunkIdList(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+
+	pushCloneBm(t, cnClient, 5, 41, 2, 1, 4)
+	pushCloneBm(t, cnClient, 5, 41, 0, 1, 2)
+	pushCloneBm(t, cnClient, 5, 41, 2, 0, 5)
+	pushCloneBm(t, cnClient, 5, 41, 0, 0, 3)
+	pushCloneBm(t, cnClient, 5, 41, 0, 0, 8)
+
+	chunks := readStateChunks(t, agent, cntlrObjKey(cntlrPtr(1, 1)), 41)
+	want := map[string]uint64{"0:0": 8, "0:1": 2, "2:0": 5, "2:1": 4}
+	if !maps.Equal(chunks, want) {
+		t.Errorf("state.json chunks = %v, want %v", chunks, want)
+	}
+
+	bmInfoList := syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
+	if len(bmInfoList) != 1 || bmInfoList[0].GetResId() != 41 {
+		t.Fatalf("bm_info_list = %v, want one entry for clone 41", bmInfoList)
+	}
+	if got := chunkPairs(bmInfoList[0].GetChunkIdList()); !slices.Equal(got,
+		[][2]uint32{{0, 0}, {0, 1}, {2, 0}, {2, 1}}) {
+		t.Errorf("chunk_id_list = %v, want [(0,0) (0,1) (2,0) (2,1)]", got)
+	}
+	if got := bmInfoList[0].GetBmIdxList(); len(got) != 0 {
+		t.Errorf("bm_idx_list = %v, want a clone to report chunks only in "+
+			"chunk_id_list", got)
+	}
+}
+
+// TestCloneChunksSurviveRestart is §14.11 case B step 5 for clones: a killed
+// and restarted fake derives the same chunk_id_list from the recorded chunks,
+// pairs and all.
+func TestCloneChunksSurviveRestart(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	pushCloneBm(t, cnClient, 5, 41, 1, 0, 2)
+	pushCloneBm(t, cnClient, 5, 41, 0, 2, 3)
+
+	restarted, err := newFakeAgent(context.Background(), agent.dir, 4096)
+	if err != nil {
+		t.Fatalf("restarting: %v", err)
+	}
+	restarted.mu.Lock()
+	loaded := restarted.state[cntlrObjKey(cntlrPtr(1, 1))].chunkIdList(41)
+	restarted.mu.Unlock()
+	if got := chunkPairs(loaded); !slices.Equal(got,
+		[][2]uint32{{0, 2}, {1, 0}}) {
+		t.Errorf("chunk_id_list after the restart = %v, want [(0,2) (1,0)]",
+			got)
+	}
+
+	// The restarted fake reports it on the wire too: the cntlr is still
+	// known from the reloaded SyncupCn, so the worker's re-syncup gets the
+	// applied set and pushes nothing (BM2).
+	_, restartedClient := startAgent(t, restarted)
+	reply, err := restartedClient.SyncupCntlr(
+		context.Background(), cntlrFixture(true))
+	if err != nil {
+		t.Fatalf("SyncupCntlr after the restart: %v", err)
+	}
+	if code := reply.GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("SyncupCntlr after the restart code = %d (%s)",
+			code, reply.GetAgentReply().GetDetails())
+	}
+	if got := chunkPairs(
+		reply.GetBmInfoList()[0].GetChunkIdList()); !slices.Equal(got,
+		[][2]uint32{{0, 2}, {1, 0}}) {
+		t.Errorf("reported chunk_id_list after the restart = %v, "+
+			"want [(0,2) (1,0)]", got)
+	}
+}
+
+// TestAppliedSetOverrides covers the two behavior-file levers that force an
+// applied set: chunk_id_list for a clone, bm_idx_list for a migration. An
+// empty list is a forced empty set, not an absent override.
+func TestAppliedSetOverrides(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	syncupCntlrFixture(t, cnClient, true)
+	pushCloneBm(t, cnClient, 5, 41, 0, 0, 2)
+
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"chunk_id_list": ["3:1", "0:5"]}}}`)
+	bmInfoList := syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
+	if got := chunkPairs(bmInfoList[0].GetChunkIdList()); !slices.Equal(got,
+		[][2]uint32{{3, 1}, {0, 5}}) {
+		t.Errorf("forced chunk_id_list = %v, want [(3,1) (0,5)]", got)
+	}
+
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"cntlr 1:1": {"chunk_id_list": []}}}`)
+	bmInfoList = syncupCntlrFixture(t, cnClient, true).GetBmInfoList()
+	if got := bmInfoList[0].GetChunkIdList(); len(got) != 0 {
+		t.Errorf("forced empty chunk_id_list = %v, want none",
+			chunkPairs(got))
+	}
+
+	// The migration override is untouched by the clone one.
+	ptr := sidePtr(1, 3, 5)
+	syncupDn(t, dnClient, 1, ptr)
+	syncupSide(t, dnClient, ptr, 1, 30)
+	writeFile(t, agent, behaviorFileName,
+		`{"objects": {"side 1:3:5": {"bm_idx_list": [0, 2]}}}`)
+	if got := syncupSide(t, dnClient, ptr, 1, 30).GetBmInfo().
+		GetBmIdxList(); !slices.Equal(got, []uint32{0, 2}) {
+		t.Errorf("forced bm_idx_list = %v, want [0 2]", got)
 	}
 }
 

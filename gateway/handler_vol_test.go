@@ -1987,9 +1987,11 @@ func TestGetAndUpdateTransferHosts(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // volCloneSrcSliceCnt is the source geometry the clone tests are created with.
-// It is deliberately > 1 so that AppendCloneBitmap can address more than one
-// source slice and the bm_cnt high-water rule becomes observable.
-const volCloneSrcSliceCnt = uint32(4)
+// It is deliberately > 6 so that AppendCloneBitmap can address source slice 5:
+// bm_cnt is the high-water of bm_idx + 1 alone (§8.9), and only a slice index
+// well above every bm_idx the tests send can tell that rule apart from one
+// derived from src_slice_idx.
+const volCloneSrcSliceCnt = uint32(8)
 
 // volCreateClone creates one clone over dstTdName and returns the reply.
 func volCreateClone(
@@ -2089,11 +2091,19 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 }
 
 // TestAppendCloneBitmapHighWaterMark pins the two rules §8.9 gives the source
-// bitmap: a chunk is ADDRESSED by the source slice_idx and grows by appending
-// (callers page one slice's bitmap and the concatenation IS the slice's
-// bitmap), and bm_cnt is a high-water mark — max(bm_cnt, slice_idx + 1), never
-// +1 — because it is what DeleteClone deletes the chunk keys from and lowering
-// it would orphan them.
+// bitmap: a chunk is ADDRESSED by the PAIR (src_slice_idx, bm_idx) and grows
+// in place by appending (the pages of one chunk concatenate into the bytes
+// that chunk holds of the slice's bitmap), and bm_cnt is the high-water of
+// bm_idx + 1 over ALL appends across ALL slices — never +1, and never derived
+// from src_slice_idx — because it is what DeleteClone sweeps the chunk keys
+// from and lowering it would orphan them.
+//
+// The first two steps are the mutation-direction cases §9 asks for. A fresh
+// clone's (slice 5, bm 0) leaves bm_cnt at 1, which is what an implementation
+// writing max(bm_cnt, src_slice_idx + 1) would report as 6; the
+// (slice 0, bm 3) that follows raises it to 4, which a slice-derived one would
+// report as 1. Neither case can be passed by the wrong rule, and the last step
+// pins that a lower bm_idx on a third slice does not lower it again.
 //
 // The bytes are stored verbatim (GW14, [D-J]): the gateway never inspects or
 // rewrites a bit.
@@ -2102,27 +2112,30 @@ func TestAppendCloneBitmapHighWaterMark(t *testing.T) {
 	env.putTd("dst", 900, 7, 0, true)
 	created := volCreateClone(env, "clone-a", "dst")
 	for _, step := range []struct {
-		sliceIdx  uint32
-		bitmap    []byte
-		wantChunk []byte
-		wantBmCnt uint32
+		srcSliceIdx uint32
+		bmIdx       uint32
+		bitmap      []byte
+		wantChunk   []byte
+		wantBmCnt   uint32
 	}{
-		{0, []byte{0x01, 0x02}, []byte{0x01, 0x02}, 1},
-		{0, []byte{0x03}, []byte{0x01, 0x02, 0x03}, 1},
-		{2, []byte{0xff}, []byte{0xff}, 3},
-		{1, []byte{0xa0}, []byte{0xa0}, 3},
+		{5, 0, []byte{0x01, 0x02}, []byte{0x01, 0x02}, 1},
+		{5, 0, []byte{0x03}, []byte{0x01, 0x02, 0x03}, 1},
+		{0, 3, []byte{0xff}, []byte{0xff}, 4},
+		{2, 1, []byte{0xa0}, []byte{0xa0}, 4},
 	} {
+		label := fmt.Sprintf("chunk (%d, %d)", step.srcSliceIdx, step.bmIdx)
 		reply, err := env.srv.AppendCloneBitmap(
 			env.ctx, &pb.AppendCloneBitmapRequest{
 				ClusterName: env.cluster,
 				SpName:      volSpName,
 				SpRev:       env.token(),
 				CloneName:   "clone-a",
-				SliceIdx:    step.sliceIdx,
+				SrcSliceIdx: step.srcSliceIdx,
+				BmIdx:       step.bmIdx,
 				Bitmap:      step.bitmap,
 			})
 		if err != nil {
-			t.Fatalf("AppendCloneBitmap slice %d: %v", step.sliceIdx, err)
+			t.Fatalf("AppendCloneBitmap %s: %v", label, err)
 		}
 		if reply.GetCloneId() != created.GetCloneId() {
 			t.Errorf("reply clone_id: got %d, want %d",
@@ -2130,14 +2143,29 @@ func TestAppendCloneBitmapHighWaterMark(t *testing.T) {
 		}
 		chunk := &pb.CloneBitmap{}
 		env.get(model.CloneBitmapKey(
-			env.cid, volSpId, "clone-a", step.sliceIdx), chunk)
+			env.cid, volSpId, "clone-a",
+			step.srcSliceIdx, step.bmIdx), chunk)
 		if fmt.Sprint(chunk.GetBitmap()) != fmt.Sprint(step.wantChunk) {
-			t.Errorf("chunk %d: got %v, want %v",
-				step.sliceIdx, chunk.GetBitmap(), step.wantChunk)
+			t.Errorf("%s: got %v, want %v",
+				label, chunk.GetBitmap(), step.wantChunk)
 		}
 		if got := env.clone("clone-a").GetBmCnt(); got != step.wantBmCnt {
-			t.Errorf("bm_cnt after slice %d: got %d, want %d",
-				step.sliceIdx, got, step.wantBmCnt)
+			t.Errorf("bm_cnt after %s: got %d, want %d",
+				label, got, step.wantBmCnt)
+		}
+	}
+	// Chunk (5, 0) is addressed by the pair alone, so the three OTHER chunks
+	// the steps above never wrote — (5, 1) and up, (0, 0), (2, 0) — must still
+	// be absent: a self-positioned chunk is not a cell of a dense rectangle.
+	for _, absent := range []struct {
+		srcSliceIdx uint32
+		bmIdx       uint32
+	}{{5, 1}, {0, 0}, {2, 0}} {
+		key := model.CloneBitmapKey(env.cid, volSpId, "clone-a",
+			absent.srcSliceIdx, absent.bmIdx)
+		if env.exists(key, &pb.CloneBitmap{}) {
+			t.Errorf("chunk (%d, %d) must not exist",
+				absent.srcSliceIdx, absent.bmIdx)
 		}
 	}
 	if got := env.spRev(); got != 6 {
@@ -2145,26 +2173,43 @@ func TestAppendCloneBitmapHighWaterMark(t *testing.T) {
 	}
 }
 
-// TestAppendCloneBitmapRefusals pins §8.9's two bounds. Both are
-// INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of GW7's Append*Bitmap row:
-// that row is AppendMigrationBitmap's ceiling, reached by previous appends,
-// whereas these judge the slice_idx of THIS request against the geometry the
-// clone was created with.
+// TestAppendCloneBitmapRefusals pins all five bounds of §8.9, each by its GW7
+// code. The three index-and-shape rows are INVALID_ARGUMENT: they judge THIS
+// request against the geometry the clone was created with, against
+// MaxCloneBmCnt, and against one chunk's capacity — a page longer than a whole
+// chunk fits nowhere, whatever is stored. The fifth row is the
+// RESOURCE_EXHAUSTED of GW7's Append*Bitmap row, the same shape as
+// AppendMigrationBitmap's cap: a ceiling reached by PREVIOUS appends. The
+// boundary triple below is what keeps the two apart — an append that lands the
+// chunk at exactly CloneBmChunkBytes is accepted, one more byte after it is
+// RESOURCE_EXHAUSTED, and a single over-long page is INVALID_ARGUMENT against
+// an absent chunk.
 func TestAppendCloneBitmapRefusals(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		sliceIdx uint32
-		bitmap   []byte
+		name        string
+		srcSliceIdx uint32
+		bmIdx       uint32
+		bitmap      []byte
 	}{
 		{
-			name:     "slice_idx at src_slice_cnt",
-			sliceIdx: volCloneSrcSliceCnt,
-			bitmap:   []byte{0x01},
+			name:        "src_slice_idx at src_slice_cnt",
+			srcSliceIdx: volCloneSrcSliceCnt,
+			bitmap:      []byte{0x01},
 		},
 		{
-			name:     "empty bitmap",
-			sliceIdx: 0,
-			bitmap:   nil,
+			name:   "bm_idx at MaxCloneBmCnt",
+			bmIdx:  common.MaxCloneBmCnt,
+			bitmap: []byte{0x01},
+		},
+		{
+			name:   "empty bitmap",
+			bitmap: nil,
+		},
+		{
+			name: "one page over a whole chunk",
+			// Judged statelessly, so it is refused against the absent chunk
+			// this fresh clone has — no append precedes it.
+			bitmap: make([]byte, common.CloneBmChunkBytes+1),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2179,7 +2224,8 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 					SpName:      volSpName,
 					SpRev:       &pb.SpRev{Revision: beforeRev},
 					CloneName:   "clone-a",
-					SliceIdx:    tc.sliceIdx,
+					SrcSliceIdx: tc.srcSliceIdx,
+					BmIdx:       tc.bmIdx,
 					Bitmap:      tc.bitmap,
 				})
 			volWantCode(t, err, codes.InvalidArgument)
@@ -2187,16 +2233,77 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 			if got := env.clone("clone-a").GetBmCnt(); got != 0 {
 				t.Errorf("bm_cnt: got %d, want 0", got)
 			}
+			key := model.CloneBitmapKey(env.cid, volSpId, "clone-a",
+				tc.srcSliceIdx, tc.bmIdx)
+			if env.exists(key, &pb.CloneBitmap{}) {
+				t.Errorf("a refused append must write no chunk key")
+			}
 		})
 	}
+
+	// The other two thirds of the boundary triple, which need a stored chunk
+	// and therefore one env: fill (1, 2) to exactly its capacity in two
+	// appends, then prove a single further byte is RESOURCE_EXHAUSTED.
+	t.Run("a full chunk refuses one more byte", func(t *testing.T) {
+		env := newVolEnv(t)
+		env.putTd("dst", 900, 7, 0, true)
+		volCreateClone(env, "clone-a", "dst")
+		appendPage := func(bitmap []byte) error {
+			_, err := env.srv.AppendCloneBitmap(
+				env.ctx, &pb.AppendCloneBitmapRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       env.token(),
+					CloneName:   "clone-a",
+					SrcSliceIdx: 1,
+					BmIdx:       2,
+					Bitmap:      bitmap,
+				})
+			return err
+		}
+		first := make([]byte, common.CloneBmChunkBytes-1)
+		if err := appendPage(first); err != nil {
+			t.Fatalf("the first page: %v", err)
+		}
+		// Exactly at C: the capacity is the chunk's, so the byte that reaches
+		// it is still stored.
+		if err := appendPage([]byte{0xff}); err != nil {
+			t.Fatalf("the page that lands the chunk at C: %v", err)
+		}
+		chunk := &pb.CloneBitmap{}
+		env.get(model.CloneBitmapKey(
+			env.cid, volSpId, "clone-a", 1, 2), chunk)
+		if len(chunk.GetBitmap()) != common.CloneBmChunkBytes {
+			t.Fatalf("chunk (1, 2): got %d bytes, want %d",
+				len(chunk.GetBitmap()), common.CloneBmChunkBytes)
+		}
+		before := env.spConf()
+		beforeRev := env.spRev()
+		volWantCode(t, appendPage([]byte{0x01}), codes.ResourceExhausted)
+		env.wantUntouched(before, beforeRev)
+		env.get(model.CloneBitmapKey(
+			env.cid, volSpId, "clone-a", 1, 2), chunk)
+		if len(chunk.GetBitmap()) != common.CloneBmChunkBytes {
+			t.Errorf("the refused append grew the chunk to %d bytes",
+				len(chunk.GetBitmap()))
+		}
+		if got := env.clone("clone-a").GetBmCnt(); got != 3 {
+			t.Errorf("bm_cnt: got %d, want 3", got)
+		}
+	})
 }
 
 // TestDeleteCloneDropsChunksAndResumesNs pins §8.9's teardown: the Clone row,
-// EVERY chunk key from bm_idx 0 to bm_cnt-1 (an STM cannot range, so the count
-// the record carries is the only thing that can name them) and the
-// clone_name_list entry go together, and the destination's namespaces are
-// resumed in the same transaction — the clone record is the only thing that
-// remembers why they were suspended.
+// EVERY chunk key of the src_slice_cnt x bm_cnt rectangle (an STM cannot
+// range, so the geometry and the count the records carry are the only things
+// that can name them) and the clone_name_list entry go together, and the
+// destination's namespaces are resumed in the same transaction — the clone
+// record is the only thing that remembers why they were suspended.
+//
+// The chunks are written on TWO different source slices, so a sweep that still
+// walked bm_idx alone would leave one slice's chunks behind. They are also
+// sparse: bm_cnt 3 makes the sweep cover (s, 0..2) for every s below
+// src_slice_cnt, and every pair no append wrote is deleted harmlessly.
 func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -2206,18 +2313,27 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 		{NsId: 602, NsIdx: 2, TdId: 901, Suspended: true},
 	})
 	created := volCreateClone(env, "clone-a", "dst")
-	for idx := uint32(0); idx < 3; idx++ {
+	written := []struct {
+		srcSliceIdx uint32
+		bmIdx       uint32
+	}{{0, 0}, {0, 2}, {3, 1}}
+	for _, chunk := range written {
 		if _, err := env.srv.AppendCloneBitmap(
 			env.ctx, &pb.AppendCloneBitmapRequest{
 				ClusterName: env.cluster,
 				SpName:      volSpName,
 				SpRev:       env.token(),
 				CloneName:   "clone-a",
-				SliceIdx:    idx,
-				Bitmap:      []byte{byte(idx)},
+				SrcSliceIdx: chunk.srcSliceIdx,
+				BmIdx:       chunk.bmIdx,
+				Bitmap:      []byte{byte(chunk.bmIdx)},
 			}); err != nil {
-			t.Fatalf("AppendCloneBitmap %d: %v", idx, err)
+			t.Fatalf("AppendCloneBitmap (%d, %d): %v",
+				chunk.srcSliceIdx, chunk.bmIdx, err)
 		}
+	}
+	if got := env.clone("clone-a").GetBmCnt(); got != 3 {
+		t.Fatalf("bm_cnt: got %d, want 3", got)
 	}
 	reply, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
 		ClusterName: env.cluster,
@@ -2240,10 +2356,12 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 	) {
 		t.Errorf("the clone record must be gone")
 	}
-	for idx := uint32(0); idx < 3; idx++ {
-		key := model.CloneBitmapKey(env.cid, volSpId, "clone-a", idx)
+	for _, chunk := range written {
+		key := model.CloneBitmapKey(env.cid, volSpId, "clone-a",
+			chunk.srcSliceIdx, chunk.bmIdx)
 		if env.exists(key, &pb.CloneBitmap{}) {
-			t.Errorf("chunk %d must be gone", idx)
+			t.Errorf("chunk (%d, %d) must be gone",
+				chunk.srcSliceIdx, chunk.bmIdx)
 		}
 	}
 	subsystem := env.subsystem(volNqn)
@@ -3501,7 +3619,7 @@ func volTokenCases() []volTokenCase {
 					env.ctx, &pb.AppendCloneBitmapRequest{
 						ClusterName: env.cluster, SpName: volSpName,
 						SpRev: rev, CloneName: "clone-a",
-						SliceIdx: 0, Bitmap: []byte{0x01},
+						SrcSliceIdx: 0, BmIdx: 0, Bitmap: []byte{0x01},
 					})
 				return err
 			},

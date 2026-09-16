@@ -55,6 +55,13 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
+# common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4):
+# DeleteClone sweeps a clone's whole src_slice_cnt x bm_cnt chunk rectangle in
+# ONE transaction (MaxSliceCntPerSp x MaxCloneBmCnt = 256 point deletes plus a
+# handful of other ops), and etcd's default cap of 128 would refuse it. The
+# suite is shell and cannot import the constant, so the literal is repeated
+# here; it must track common/constants.go.
+ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-gateway-integtest
 
@@ -918,7 +925,8 @@ setup() {
 		"--advertise-client-urls http://127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--initial-cluster dnv-gw-it=http://127.0.0.1:$ETCD_PEER_PORT"
+		"--initial-cluster dnv-gw-it=http://127.0.0.1:$ETCD_PEER_PORT" \
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS"
 	wait_until "$WAIT_SHORT" "etcd to answer a workerctl ping" etcd_reachable
 
 	stage fakes "start four fake DNs and three fake CNs with an empty behavior"
@@ -2029,19 +2037,51 @@ EOF
 	out=$(gw get-clone --sp sp0 --name cl0)
 	assert_field "$out" '.clone.clone_id' "$cloneId" "get-clone clone_id"
 	assert_field "$out" '.clone.bm_cnt' "0" "get-clone bm_cnt"
-	# bm_idx is the SOURCE slice_idx, not an append sequence, and bm_cnt is
-	# the high-water mark DeleteClone deletes the chunk keys from.
+	# A chunk is addressed by the PAIR (src_slice_idx, bm_idx): src_slice_idx
+	# picks the source slice, bm_idx fixes the chunk's byte offset WITHIN that
+	# one slice's bitmap and says nothing about any other slice. bm_cnt is ONE
+	# uint32, the high-water of bm_idx + 1 ACROSS slices, and it is what
+	# DeleteClone sweeps the chunk keys from (§10.11 step 13, §5.8).
+	#
+	# The three appends below DISCRIMINATE that rule rather than merely
+	# exercising it: a second chunk of the SAME slice must RAISE bm_cnt (a
+	# max(bm_cnt, src_slice_idx+1) implementation would leave it at 1), and
+	# the first chunk of a SECOND slice must NOT (both a slice-derived rule
+	# and a call-counting bm_cnt += 1 would say 3).
 	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
-		--slice-idx 0 --bm-hex ff00)
+		--src-slice-idx 0 --bm-idx 0 --bm-hex ff00)
 	refresh_rev sp0
 	assert_field "$out" '.clone_id' "$cloneId" "append-clone-bm reply clone_id"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "1" \
-		"clone bm_cnt after one chunk"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" '[0]' \
-		"the clone's stored chunk indexes"
+		"clone bm_cnt after chunk (0, 0)"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
+		'["0:0"]' "the clone's stored chunk pairs after chunk (0, 0)"
 	assert_eq "$(key_count clone_bitmap)" "1" "clone_bitmap keys"
 	assert_field "$(gw get-clone --sp sp0 --name cl0)" '.clone.bm_cnt' "1" \
-		"get-clone bm_cnt after the append"
+		"get-clone bm_cnt after the first append"
+	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
+		--src-slice-idx 0 --bm-idx 1 --bm-hex 0f)
+	refresh_rev sp0
+	assert_field "$out" '.clone_id' "$cloneId" \
+		"append-clone-bm (0, 1) reply clone_id"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "2" \
+		"a second chunk of the SAME slice raises bm_cnt to 2"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
+		'["0:0","0:1"]' "the clone's stored chunk pairs after chunk (0, 1)"
+	assert_eq "$(key_count clone_bitmap)" "2" "clone_bitmap keys, both slice 0"
+	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
+		--src-slice-idx 2 --bm-idx 0 --bm-hex a5)
+	refresh_rev sp0
+	assert_field "$out" '.clone_id' "$cloneId" \
+		"append-clone-bm (2, 0) reply clone_id"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "2" \
+		"the FIRST chunk of a SECOND slice leaves bm_cnt at 2"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
+		'["0:0","0:1","2:0"]' \
+		"the clone's stored chunk pairs span two slices"
+	assert_eq "$(key_count clone_bitmap)" "3" "clone_bitmap keys, two slices"
+	assert_field "$(gw get-clone --sp sp0 --name cl0)" '.clone.bm_cnt' "2" \
+		"get-clone bm_cnt after all three appends"
 	# The transport list is a REPLACEMENT, never a merge: an address that is
 	# gone must stop being retried.
 	out=$(gw set-clone-tr --sp sp0 --rev "$SP_REV" --name cl0 \
@@ -2059,13 +2099,19 @@ EOF
 	# namespace backed by the destination td (§8.9 Action) — here the one
 	# step 12's finalize retired — so a delete can never leave a namespace
 	# ANA-inaccessible with no clone left to explain why.
+	#
+	# The chunk sweep is a NESTED loop over the src_slice_cnt x bm_cnt
+	# rectangle (§5.8), so the three keys above — two of slice 0 and one of
+	# slice 2 — must ALL be gone; a sweep that only walked bm_idx 0..bm_cnt-1
+	# of slice 0 would leave "2:0" orphaned behind.
 	out=$(gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0 --force)
 	refresh_rev sp0
 	assert_field "$out" '.clone_id' "$cloneId" "delete-clone reply clone_id"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones | keys | length')" "0" \
 		"the clone record is gone"
 	assert_eq "$(key_count clone)" "0" "clone keys after the delete"
-	assert_eq "$(key_count clone_bitmap)" "0" "clone_bitmap keys after the delete"
+	assert_eq "$(key_count clone_bitmap)" "0" \
+		"the chunk keys of BOTH slices are gone after the delete"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | length')" \
 		"0" "sp0 clone_name_list after the delete"
 	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "false" \

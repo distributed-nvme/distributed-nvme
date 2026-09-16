@@ -678,21 +678,29 @@ func (nf *NameFmt) LocalMigrBmPath(
 	)
 }
 
+// LocalCloneBmPath names one clone bitmap chunk file. A clone chunk is
+// addressed by the PAIR (src_slice_idx, bm_idx) — the source slice it
+// describes and its index within that slice's bitmap (§9.6) — so the name
+// carries two %02x segments where LocalMigrBmPath carries one. The file name
+// is only an address: the CONTENT (a stored PushCloneBitmapRequest) is what
+// the startup reconcile decodes the pair from.
 func (nf *NameFmt) LocalCloneBmPath(
 	clusterId uint64,
 	cnId uint64,
 	spId uint64,
 	cloneId uint64,
+	srcSliceIdx uint32,
 	bmIdx uint32,
 ) string {
 	return fmt.Sprintf(
-		"%s/%s-%016x-%016x-%016x-%016x-%02x",
+		"%s/%s-%016x-%016x-%016x-%016x-%02x-%02x",
 		nf.localStorPrefix,
 		localStorKindCloneBm,
 		clusterId,
 		cnId,
 		spId,
 		cloneId,
+		srcSliceIdx,
 		bmIdx,
 	)
 }

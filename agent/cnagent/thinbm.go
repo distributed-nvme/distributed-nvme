@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
 // thinbm.go is the dm-thin metadata reader behind GetThinDeviceBm / GetLegBm
@@ -341,24 +342,53 @@ func legDataBitmap(
 // The §11.4 raid0 fold (CN22 and the §11.5 recovery)
 // ---------------------------------------------------------------------------
 
-// sliceBitmap is one underlying device's bitmap in the fold. present is false
-// for a source chunk the agent has not received: an absent bit counts as
-// written, so a region overlapping it is never discarded.
+// sliceBitmap is one underlying device's bitmap in the fold, held as the
+// self-positioned chunks it arrives in: chunk b carries bytes
+// [b*C, b*C+len) of the slice's bitmap, C = common.CloneBmChunkBytes (§9.6).
+// The fold consumes them in place — nothing here reassembles a slice bitmap,
+// because chunks may be missing and a concatenation would place every later
+// chunk at the wrong offset. A nil or empty map is simply never skippable.
 type sliceBitmap struct {
-	present bool
-	bits    []byte
+	chunks map[uint32][]byte
 }
 
+// skippable is the U8 chunk math: bit idx of the slice lives in chunk
+// idx/(8*C) at bit offset idx%(8*C). It is skippable only when that chunk is
+// present, the byte is within its length, and the bit is set. An absent chunk,
+// a bit past the end of a present-but-short one ([D8]: AppendCloneBitmap may
+// still be growing that chunk), and the chunk-less zero value an out-of-range
+// or never-received slice leaves behind all resolve to written — the safe
+// direction, which can only cost an extra copy.
 func (b sliceBitmap) skippable(idx uint64) bool {
-	if !b.present {
+	const chunkBits = uint64(common.CloneBmChunkBytes) * 8
+	chunk, ok := b.chunks[uint32(idx/chunkBits)]
+	if !ok {
 		return false
 	}
-	// A bit past the end of a present-but-short chunk is unknown, and unknown
-	// resolves to written ([D8]: AppendCloneBitmap may still be growing it).
-	if idx/8 >= uint64(len(b.bits)) {
+	local := idx % chunkBits
+	if local/8 >= uint64(len(chunk)) {
 		return false
 	}
-	return b.bits[idx/8]&(1<<(idx%8)) != 0
+	return chunk[local/8]&(1<<(local%8)) != 0
+}
+
+// chunksOf cuts a whole slice bitmap into the C-sized chunks sliceBitmap
+// addresses. The §11.5 recovery builds its per-slice bitmaps locally rather
+// than receiving them as chunks, so it must split them here: handing the whole
+// bitmap over as chunk 0 would leave every bit past the first C bytes
+// unreachable, and unreachable reads as written — silently stopping the skip
+// at 1 MiB of bitmap on a large slice.
+func chunksOf(bitmap []byte) map[uint32][]byte {
+	const size = common.CloneBmChunkBytes
+	out := make(map[uint32][]byte, (len(bitmap)+size-1)/size)
+	for idx := 0; idx*size < len(bitmap); idx++ {
+		end := (idx + 1) * size
+		if end > len(bitmap) {
+			end = len(bitmap)
+		}
+		out[uint32(idx)] = bitmap[idx*size : end]
+	}
+	return out
 }
 
 // raid0Geometry is one side of the §11.4 address mapping.
@@ -387,9 +417,10 @@ func (g raid0Geometry) valid() bool {
 // instead of chunks makes the cost O(region/block_size × slice_cnt) rather
 // than O(region/stripe_size).
 //
-// The region is skippable iff every covered (slice, bit) pair is present and
-// set; anything unknown — an absent chunk, a bit past the end of a short one,
-// an unusable geometry — counts as written, which can only cost an extra copy.
+// The region is skippable iff every covered (slice, bit) pair reads as set;
+// anything unknown — the chunk holding that bit absent, the bit past the end
+// of a short chunk, an unusable geometry — counts as written, which can only
+// cost an extra copy.
 func regionSkippable(
 	r uint64,
 	regionSize uint64,
@@ -469,10 +500,17 @@ func (s *CnAgentServer) applyCloneChunks(
 		return
 	}
 	slices := make([]sliceBitmap, sliceCnt)
-	for i := uint64(0); i < sliceCnt; i++ {
-		if bits, ok := set.Get(uint32(i)); ok {
-			slices[i] = sliceBitmap{present: true, bits: bits}
+	for _, id := range set.Ids() {
+		// A chunk naming a slice the clone does not have cannot be placed;
+		// CN22 gates it away, so this is defence in depth only.
+		if uint64(id.SliceIdx) >= sliceCnt {
+			continue
 		}
+		bits, _ := set.Get(id)
+		if slices[id.SliceIdx].chunks == nil {
+			slices[id.SliceIdx].chunks = make(map[uint32][]byte)
+		}
+		slices[id.SliceIdx].chunks[id.BmIdx] = bits
 	}
 	geometry := raid0Geometry{
 		sliceCnt:   sliceCnt,
@@ -539,7 +577,7 @@ func (s *CnAgentServer) applyDstBitmaps(
 			return fmt.Errorf("slice_idx %d is outside the slice set",
 				sp.sliceIdx)
 		}
-		slices[sp.sliceIdx] = sliceBitmap{present: true, bits: mapped}
+		slices[sp.sliceIdx] = sliceBitmap{chunks: chunksOf(mapped)}
 	}
 	folded := foldRegions(cp.regionCnt, plan.blockSize, geometry, slices)
 	ranges := agent.SkipRanges(folded, 0, cp.regionCnt, plan.blockSize)

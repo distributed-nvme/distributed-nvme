@@ -226,11 +226,32 @@ watch/convergence logic (that is the worker's job).
 // with context.WithTimeout around each dial+call (AG2); chosen equal to
 // DefaultEtcdOpTimeout so a hung agent and a hung etcd bound an RPC alike.
 DefaultGatewayAgentTimeout = 10
+
+// The fixed capacity of ONE clone bitmap chunk, and the quantum that
+// positions it: chunk (s, b) holds the bytes [b*CloneBmChunkBytes, …+len)
+// of source slice s's bitmap, len <= CloneBmChunkBytes (§5.8). 1 MiB keeps
+// a grown chunk value plus the Clone and rev-bump puts of one
+// AppendCloneBitmap inside etcd's default ~1.5 MiB request cap, and every
+// PushCloneBitmap message inside gRPC's default 4 MiB. It is a clone
+// positioning quantum only — migration appends carry no byte cap.
+CloneBmChunkBytes = 1 << 20
+
+// A DEPLOYMENT REQUIREMENT, not a client setting: every etcd serving dnv
+// MUST run with --max-txn-ops=512 or higher. DeleteClone's deciding STM
+// deletes every clone bitmap chunk key in ONE transaction —
+// MaxSliceCntPerSp x MaxCloneBmCnt = 256 point deletes plus a handful of
+// other ops — and etcd's default cap is 128, which would refuse the whole
+// delete (§5.8, §10.4).
+EtcdMaxTxnOps = 512
 ```
 
 No other constant is added. `DefaultClusterName`, `ShardBucketSize`,
 `Max*CntPerCluster`, `MaxCloneBmCnt`, `MaxMigrBmCnt` and the §7 bounds all
-exist already.
+exist already. `MaxCloneBmCnt` keeps its name and its value **16**, but it
+counts the chunks ONE source slice's bitmap may be split into
+(`bm_idx < MaxCloneBmCnt`, §5.8) and is NOT a bound on the source slice
+count — that is `MaxSliceCntPerSp`, which `CreateClone`'s geometry check
+already enforces.
 
 ### 2.2 Amendments to `model` (applied at implementation time)
 
@@ -289,10 +310,17 @@ validators its read sites refuse with.
 
 ### 2.3 Schema
 
-No `pb/schema.proto` change beyond the four `Inspect*Reply` fields' later
-rename from `revision` to `applied_revision` (same field numbers — still no
-new message, RPC or key kind) and **no new etcd key kind**: the gateway writes
-only the §5.1 kinds that already exist (`cluster_conf`, the three globals,
+No `pb/schema.proto` change on the gateway's own surface beyond the four
+`Inspect*Reply` fields' later rename from `revision` to `applied_revision`
+(same field numbers) and, later still, `AppendCloneBitmapRequest`'s chunk
+address: the single `slice_idx` became the pair `src_slice_idx` (5) +
+`bm_idx` (6), pushing `bitmap` to 7 (§5.8) — deliberately wire-incompatible
+with old peers, no compatibility path anywhere. (That same change's
+`PushCloneBitmapRequest`, `BitmapInfo` and new `BmChunkId` edits are the
+worker↔agent surface, not this one.) Still no new gateway RPC and **no new
+etcd key kind** — `clone_bitmap`'s KEY gained a seventh field, but the kind
+is the one that already existed: the gateway writes only the §5.1 kinds that
+already exist (`cluster_conf`, the three globals,
 `dn_conf`/`cn_conf`, `dn_capacity`/`cn_capacity`, `dn_rev`/`cn_rev`/`sp_rev`,
 `sp_conf`, `sp_id_to_name`, `cntlr`, `slice`, `thin_device`, `subsystem`,
 `cdc`, `clone`, `clone_bitmap`, `transfer`, `migration`, `migration_bitmap`).
@@ -402,7 +430,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap (AppendCloneBitmap's index bounds are an invalid request ⇒ `INVALID_ARGUMENT`, checked in-STM per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
 
@@ -798,22 +826,58 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   token check (GW6 — any interleaved mutation bumped `SpRev`, so a token the
   request carried subsumes staleness of phase 1; a token-less request gets
   the re-resolution only, AG4/RK8); delete the Clone, its `CloneBitmap` chunks
-  (`CloneBitmapKey` for idx `0..bm_cnt-1` — point deletes, the STM has no
-  range), the list entry; set `suspended = false` on every namespace whose
-  `td_id == dst_td_id` (architecture.md §8.9 — the dst namespaces resume with
+  (`CloneBitmapKey` for every pair of the `src_slice_cnt × bm_cnt` rectangle
+  the record's own two counts describe — a nested point-delete sweep, because
+  the STM has no range; chunks are sparse, so most pairs of a real clone are
+  absent and their deletes are harmless), the list entry; set
+  `suspended = false` on every namespace whose `td_id == dst_td_id`
+  (architecture.md §8.9 — the dst namespaces resume with
   the data now local, the §5.9 DeleteTransfer twin of this write);
-  `BumpSpRev`. Reply `clone_id`.
+  `BumpSpRev`. Reply `clone_id`. The sweep's worst case is
+  `MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes plus the handful of other
+  ops in this one atomic transaction, which is why every etcd serving dnv
+  MUST run with `--max-txn-ops=common.EtcdMaxTxnOps` (§2.1): etcd's default
+  cap is 128 and would refuse the whole delete.
 * **GetClone** — one STM read. Reply the Clone.
 * **UpdateCloneTrConf** — STM: resolve; token; clone; replace
   `src_tr_conf_list`; `BumpSpRev`. Reply `clone_id`.
-* **AppendCloneBitmap** — validate `bitmap` non-empty; STM: resolve; token;
-  clone; `slice_idx < src_slice_cnt` and `< MaxCloneBmCnt` ⇒ else
-  `INVALID_ARGUMENT`; **append** the bytes to the chunk at
-  `bm_idx = slice_idx` (created if absent, the zero value of the read) —
-  §8.9's action, because the caller pages one source slice's bitmap through
-  `GetThinDeviceBitmap` and the concatenation of those pages IS that slice's
-  bitmap (§9.6), so a replace would keep only the last page and place its
-  bits at block 0; `bm_cnt = max(bm_cnt, slice_idx+1)`; `BumpSpRev`. Reply
+* **AppendCloneBitmap** — one chunk of the SOURCE bitmap, addressed by the
+  PAIR (`src_slice_idx`, `bm_idx`). Chunk `(s, b)` holds the bytes
+  `[b·C, b·C+len)` of source slice `s`'s bitmap, `len ≤ C =
+  CloneBmChunkBytes` (§2.1): `src_slice_idx` picks the source slice, `bm_idx`
+  fixes the chunk's byte offset WITHIN that one slice at the fixed quantum
+  `C` and says nothing about any other slice. No chunk's meaning depends on
+  any other chunk's existence or length, so a caller may append to any
+  `(s, b)` at any time, in any order, and may leave chunks unsent entirely;
+  an absent chunk reads as all-zero (= all-written) and a short chunk's
+  missing tail reads as written, both the safe direction
+  (architecture.md §9.6).
+  Validation: `bitmap` non-empty (`INVALID_ARGUMENT`, `validateBitmap`,
+  shared with `AppendMigrationBitmap`), then `len(bitmap) ≤ C` ⇒ else
+  `INVALID_ARGUMENT` — handler-local and NOT in `validateBitmap`, because it
+  is judged on this request alone (a page longer than a whole chunk fits
+  nowhere, whatever is already stored) and migration chunks carry no byte cap
+  of their own. STM: resolve; token; clone; `src_slice_idx < src_slice_cnt` ⇒
+  else `INVALID_ARGUMENT` (`src_slice_cnt` is the WHOLE slice bound —
+  `CreateClone` already holds it to `MaxSliceCntPerSp`, so a second constant
+  check here would judge nothing the geometry has not judged already);
+  `bm_idx < MaxCloneBmCnt` ⇒ else `INVALID_ARGUMENT`; read the chunk at
+  `CloneBitmapKey(…, src_slice_idx, bm_idx)` — an absent key decodes to an
+  empty bitmap, which is what makes "create if absent" fall out and is the
+  same read the ceiling check needs; `len(stored) + len(bitmap) ≤ C` ⇒ else
+  `RESOURCE_EXHAUSTED` (GW7's ceiling-reached row: `C` bounds the STORED
+  chunk, not one page); **append** the bytes to that chunk — §8.9's action,
+  because the caller pages one source slice's bitmap through
+  `GetThinDeviceBitmap` and the pages of ONE chunk concatenate into exactly
+  the bytes `[b·C, b·C+len)` that chunk holds (§9.6), so a replace would keep
+  only the last page and place its bits at the chunk's own offset, which
+  `PushCloneBitmap` would then hand the primary as "never written" and the
+  agent would `blkdiscard` regions the source really wrote;
+  `bm_cnt = max(bm_cnt, bm_idx+1)` — ONE `uint32`, the high-water of
+  `bm_idx + 1` over ALL appends ACROSS slices and never derived from
+  `src_slice_idx` (on a fresh clone, appending slice 5 / bm 0 leaves it at 1,
+  not 6); it is what DeleteClone sweeps the chunk keys from, so it is a max
+  and never a `+= 1`, and lowering it would orphan them; `BumpSpRev`. Reply
   `clone_id`.
 
 ### 5.9 Transfers (§8.10)
@@ -1041,7 +1105,26 @@ The other 49 RPCs never leave etcd.
    once that DN is gone and the group's own domain is all that is left; a
    release path whose `dn_conf`/`cn_conf` invariant key is missing ⇒
    `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
-   nothing torn down.
+   nothing torn down. Clone bitmaps get three of their own: `bm_cnt` as
+   §5.8's cross-slice high-water, asserted in both mutation directions —
+   `(slice 5, bm 0)` ⇒ `1` (kills a `max(bm_cnt, src_slice_idx+1)`
+   implementation, which would say 6) and `(slice 0, bm 3)` ⇒ `4` (kills any
+   other slice-derived one, which would say 1); each of
+   AppendCloneBitmap's five refusals by code, including the boundary triple
+   (an append landing exactly at `len == C` succeeds, one byte more is
+   `RESOURCE_EXHAUSTED`, a single `C+1`-byte page is `INVALID_ARGUMENT` even
+   on an empty chunk); and DeleteClone sweeping the chunks of two different
+   slices with the absent pairs harmless. The §5.8 sweep's budget is covered
+   twice: a pure-arithmetic tripwire —
+   `MaxSliceCntPerSp*MaxCloneBmCnt + 8 ≤ EtcdMaxTxnOps`, so raising either cap
+   fails here rather than on a lab VM — and, because that `+ 8` is only a
+   guess at the transaction's non-chunk overhead, a PROOF against the real
+   etcd: a clone whose whole `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle of
+   chunk keys exists is created, filled and deleted, and all 256 keys are
+   asserted gone. Only the second one can catch a deciding STM that grew a
+   write, and it discriminates: point the package's etcd at etcd's default
+   `--max-txn-ops=128` and the arithmetic tripwire still passes while the
+   ceiling test fails with etcd's own `too many operations in txn request`.
 4. **Agent-path tests**: an in-process fake implementing the generated
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`
@@ -1114,7 +1197,8 @@ pid recorded; signals only ever by recorded pid):
 $WORK/bin/etcd --name dnv-gw-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:15379 --advertise-client-urls http://127.0.0.1:15379 \
   --listen-peer-urls http://127.0.0.1:15380 --initial-advertise-peer-urls http://127.0.0.1:15380 \
-  --initial-cluster dnv-gw-it=http://127.0.0.1:15380
+  --initial-cluster dnv-gw-it=http://127.0.0.1:15380 \
+  --max-txn-ops=512                       # common.EtcdMaxTxnOps, §10.4
 $WORK/bin/fakeagent dn --grpc-address 127.0.0.1:2982<i> --dir $WORK/dn<i> --size 68719476736
 $WORK/bin/fakeagent cn --grpc-address 127.0.0.1:2983<j> --dir $WORK/cn<j> --size 0
 $WORK/bin/dnv-gateway --grpc-network tcp --grpc-address 127.0.0.1:2981<k> \
@@ -1141,6 +1225,11 @@ build` plus `go build` of `gatewayctl`, `workerctl`, `fakeagent` into
 sha256 pin (identical block to `worker_test.sh` — same cache). Server:
 passwordless ssh (`sshw "true"`); `bash nohup pkill ss tar df sed awk`
 present; ≥ 1 GiB free under `/var/tmp`; none of the §10.3 ports listening.
+That etcd MUST be started with **`--max-txn-ops=512`**
+(`common.EtcdMaxTxnOps`, §2.1 — the suite is shell and cannot import the
+constant, so the literal carries a comment naming it): step 13's
+`delete-clone` sweeps the clone's chunk keys in one transaction, and etcd's
+default cap of 128 would refuse it.
 etcd readiness is `wait_until WAIT_SHORT` on
 `workerctl --endpoints 127.0.0.1:15379 ping`; each gateway's readiness on
 `gatewayctl --gateway 127.0.0.1:2981<k> ping`.
@@ -1215,7 +1304,7 @@ token, which the B4 stage uses):
 | cntlr | `create-cntlr --sp --rev --slot` · `delete-cntlr --sp --rev --id` · `set-cntlr-enabled --sp --rev --id --enabled` · `inspect-cntlr --sp --id` · `inspect-side --sp --id` |
 | td | `create-td --sp --rev --name --size [--ori]` · `delete-td --sp --rev --name` · `list-tds --sp` |
 | ss/ns | `create-ss --sp --rev --nqn [--hosts]` · `delete-ss --sp --rev --nqn` · `list-sss --sp` · `set-ss-hosts --sp --rev --nqn --hosts` · `create-ns --sp --rev --nqn --idx --td [--uuid --nguid --suspended]` · `delete-ns --sp --rev --nqn --idx` · `set-ns-dev --sp --rev --nqn --idx --td` · `set-ns-suspended --sp --rev --nqn --idx --suspended` |
-| clone | `create-clone --sp --rev --name --dst-td --src-nqn --src-idx --src-slices --src-stripe --src-block [--src-tr…]` · `delete-clone --sp --rev --name [--force]` · `get-clone --sp --name` · `set-clone-tr --sp --rev --name --src-tr…` · `append-clone-bm --sp --rev --name --slice-idx --bm-hex` |
+| clone | `create-clone --sp --rev --name --dst-td --src-nqn --src-idx --src-slices --src-stripe --src-block [--src-tr…]` · `delete-clone --sp --rev --name [--force]` · `get-clone --sp --name` · `set-clone-tr --sp --rev --name --src-tr…` · `append-clone-bm --sp --rev --name --src-slice-idx --bm-idx --bm-hex` |
 | xfer | `create-xfer --sp --rev --name --ori-nqn --ori-idx [--hosts --auto-suspend]` · `delete-xfer --sp --rev --name [--force]` · `get-xfer --sp --name` · `set-xfer-hosts --sp --rev --name --hosts` |
 | migr | `create-migr --sp --rev --name --src-side` · `finish-migr --sp --rev --name [--force]` · `cancel-migr --sp --rev --name` · `get-migr --sp --name` · `append-migr-bm --sp --rev --name --bm-hex` |
 | spare | `create-spare --sp --rev --grp` · `delete-spare --sp --rev --grp --leg` · `switch-spare --sp --rev --grp --spare --target` |
@@ -1360,9 +1449,19 @@ path. Steps (each = one `stage`):
     `delete-xfer --force` (abort: origin ns untouched); recreate;
     `delete-xfer` (finalize: origin ns `suspended true` — asserted).
 13. `create-clone cl0` (dst t1, src bounds at their limits) → stored,
-    `bm_cnt 0`; `append-clone-bm slice 0` → chunk key, `bm_cnt 1`;
-    `get-clone`; `set-clone-tr`; `delete-clone --force` → clone + chunk keys
-    gone.
+    `bm_cnt 0`; then three `append-clone-bm` calls that DISCRIMINATE the
+    §5.8 `bm_cnt` rule rather than merely exercising it:
+    `--src-slice-idx 0 --bm-idx 0` → one chunk key, `bm_cnt 1`;
+    `--src-slice-idx 0 --bm-idx 1` (a SECOND chunk of the SAME slice) → two
+    chunk keys, `bm_cnt 2` (a `max(bm_cnt, src_slice_idx+1)` implementation
+    would still say 1 here); `--src-slice-idx 2 --bm-idx 0` (the FIRST chunk
+    of a SECOND slice) → a third chunk key and `bm_cnt` **still 2** — it is
+    the high-water of `bm_idx+1` ACROSS slices, so the slice-derived rule
+    would say 3 here and a call-counting `bm_cnt += 1` would say 3 too.
+    `get-sp`'s `clone_bm_idx.cl0` is the pair list `["0:0","0:1","2:0"]`
+    (decimal `src_slice_idx:bm_idx`, ascending);
+    `get-clone`; `set-clone-tr`; `delete-clone --force` → clone gone and the
+    chunk keys of BOTH slices gone (the nested sweep, §5.8).
 14. Migration on the first data grp: pick a side id from `get-sp`;
     `create-migr m0` → leg has 2 sides (dst `provisioned false`, distinct
     DN, slot ≠ src), dst-DN accounting + `dn_rev` bump; `append-migr-bm` ×2

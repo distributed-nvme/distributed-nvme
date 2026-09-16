@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -139,6 +140,12 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
+		// The deployment requirement of §8.9 (U10), not a tuning knob:
+		// DeleteClone sweeps up to MaxSliceCntPerSp x MaxCloneBmCnt = 256
+		// chunk keys in one transaction, and etcd's default cap of 128 ops
+		// would refuse it. A test etcd that did not carry the flag would fail
+		// a handler the deployment runs fine.
+		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",
 	)

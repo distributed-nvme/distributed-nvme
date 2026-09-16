@@ -262,6 +262,16 @@ case S:
   `dnv-0000000000000001-0000000000000012-b-00000000000003d2-000000000000000c`
   (CN2, sp2 `0x3d2`, clone `0xc`). tmpfs at `/tmp/dnv-tmpfs/{cluster}-{cn}`,
   carrying the 1 GiB sparse arena file on one loop device.
+- clone bitmap chunk files (`common.LocalCloneBmPath`), under the CN's
+  `--local-store` directory:
+  `clone-bm-{cluster:%016x}-{cn:%016x}-{sp:%016x}-{clone:%016x}-{src_slice_idx:%02x}-{bm_idx:%02x}`
+  — **two** `%02x` segments, because a clone chunk is addressed by the pair
+  (cnagent.md §2.1), where `migr-bm-*` on the dn side carries one. Case C's
+  chunk `(0, 1)` is
+  `clone-bm-0000000000000001-0000000000000012-00000000000003d2-000000000000000c-00-01`.
+  The name is only an address — the startup reconcile decodes the pair from
+  the persisted `PushCloneBitmapRequest` inside the file — so it is asserted
+  directly, since no reply assertion could ever see a misformatted one.
 - host-side device nodes: `/dev/disk/by-id/nvme-uuid.<uuid>` (the ns uuids
   above are fixed inputs, so no helper is needed).
 
@@ -368,6 +378,15 @@ under one lock: 60 s for `syncup-dn`/`syncup-side` (the dn suite's value) and
 180 s for `syncup-cn`/`syncup-cntlr`, since a CN converge can create two md
 arrays, a thin pool and a dm-clone in one call.
 
+Those replies are marshaled with `UseProtoNames` and **without**
+`EmitUnpopulated`, so field names are snake_case and any field at its zero
+value is **omitted**. That is invisible on the scalar fields the script reads
+by name, but it is not on a repeated message: a `BitmapInfo.chunk_id_list`
+entry for the pair `(0, 0)` renders as the empty object `{}`, and one for
+`(0, 1)` as `{"bm_idx": 1}`. Every jq filter over `chunk_id_list` therefore
+defaults both indexes to 0 (`.src_slice_idx // 0`) instead of reading them
+straight.
+
 Subcommands:
 
 | cmd | flags beyond globals | notes |
@@ -375,7 +394,7 @@ Subcommands:
 | `get-cn-size` | `--wait <sec>` | retry until success within wait; prints the size |
 | `syncup-cn` | `--revision`, repeated `--cntlr sp:cntlr` | full desired cntlr list every call (declarative); never sends `qos_ratio` (deferred, cnagent.md CN6) |
 | `syncup-cntlr` | `--req <file>` | reads one complete `SyncupCntlrRequest` as protojson (§ below); sanity-checks `cluster_id`/`cn_id` against the globals |
-| `push-clone-bm` | `--revision`, `--sp --cntlr`, `--clone`, `--bm-idx`, `--bitmap-hex` | revision = the cntlr's current revision (gates, never advances) |
+| `push-clone-bm` | `--revision`, `--sp --cntlr`, `--clone`, `--src-slice-idx`, `--bm-idx`, `--bitmap-hex` | revision = the cntlr's current revision (gates, never advances). The chunk is addressed by the PAIR: `--src-slice-idx` is the source slice it describes, `--bm-idx` its index **within that slice's bitmap** — not a slice number. Both default to 0; CN22 rejects `src_slice_idx >= src_slice_cnt` and `bm_idx >= MaxCloneBmCnt` independently |
 | `get-cn-info` / `get-cntlr-info` | (`--sp --cntlr`) | |
 | `check-cn` / `check-cntlr` | `--revision`, `--show-info` (+ cntlr ptr) | opens the bidi stream, one round, closes |
 | `get-td-bm` | `--sp --cntlr --td --slice-idx --start-block --block-cnt` | prints the bitmap as lowercase hex + a `bits=` count |
@@ -786,13 +805,33 @@ VM1's port with `allowed_hosts` = exactly CN2's hostnqn.
 `syncup-cntlr` CN2 (CNREV2++) adding clone 0xc (`src_nqn` = the XferNqn,
 `src_tr_conf_list = [<ip1> tcp 4200]`, `src_ns_idx 1`, `src_slice_cnt 1`,
 `src_stripe_size 65536`, `src_block_size 1048576`, `dst_td_id 0x9`,
-`dm_clone_conf {1,1}`, `auto_resume: true`, `bm_cnt 1`) **with `sp_level
+`dm_clone_conf {1,1}`, `auto_resume: true`, `bm_cnt 2` — the gateway's
+high-water of `bm_idx + 1` over the two chunks pushed below; the cn agent
+never reads the field, CN22 bounds a push by `src_slice_cnt` and
+`MaxCloneBmCnt` instead) **with `sp_level
 SP_LEVEL_NO_CLONE`** — the staged gate that makes the push race-free
 (cnagent.md CN19): assert `clone_id_to_dm_clone` reports `sp_level`, and
 no `nvme connect` to a `:4:` NQN has run on VM2. `push-clone-bm --clone
-0xc --bm-idx 0 --bitmap-hex 00000000ffffffff` (the stage 0 read-back);
-equal-revision `syncup-cntlr` re-send purely to read the reply: assert
-`bm_info_list == [{res_id: 0xc, bm_idx_list: [0]}]`.
+0xc --src-slice-idx 0 --bm-idx 0 --bitmap-hex 00000000ffffffff` (the stage 0
+read-back), then a **second** push at `--src-slice-idx 0 --bm-idx 1` carrying
+one `ff` byte. That second chunk is the suite's proof that `bm_idx` addresses
+a chunk *within* one slice's bitmap and no longer names the slice: this
+clone's `src_slice_cnt` is 1, so the single-index gate would have refused it
+as an unknown source slice (code 2, which fails the call outright). It is
+also inert on the kernel side — chunk `(0, 1)` starts at bit
+`8 × CloneBmChunkBytes`, far past this clone's 64 regions — so every stage 4
+`blkdiscard` assertion below is unchanged by it. Equal-revision
+`syncup-cntlr` re-send purely to read the reply: assert one `BitmapInfo` with
+`res_id 0xc` whose `chunk_id_list` is exactly
+`[{src_slice_idx: 0, bm_idx: 0}, {src_slice_idx: 0, bm_idx: 1}]` — ascending
+by the pair, read through the `// 0` defaults of §8 — and whose `bm_idx_list`
+is **unset**, because that field is the migration applied set and a clone
+never fills it. Then assert the store's two `clone-bm-*` files, which differ
+only in the last of the two `%02x` segments
+`{src_slice_idx}-{bm_idx}` that `LocalCloneBmPath` now ends in. That name
+check has to be made directly: the startup reconcile decodes the pair from
+the persisted `PushCloneBitmapRequest` *inside* each file, so a misformatted
+name would still reload perfectly and no reply assertion could see it.
 
 **Stage 4 — enable.** Same request at `sp_level SP_LEVEL_READWRITE`
 (CNREV2++). In this one converge the agent connects to the xfer, allocates
@@ -879,9 +918,11 @@ reconcile rebuilt everything from the store: `get-cntlr-info` all OK; the
 fresh `cn-agent.log` shows the §11.5 order — `reserve_metadata_snap` →
 `thin_dump` → `release_metadata_snap`, then the arena-unit `blkdiscard` +
 `dmsetup create` of the fresh kind-`b` wrapper, then the dst-bitmap
-`blkdiscard`s (on the `dnv-*-7-*` dm-clone) and the re-applied src chunk
+`blkdiscard`s (on the `dnv-*-7-*` dm-clone) and the re-applied src chunks
 **before** the `enable_hydration` message; equal-rev re-send still reports
-`bm_idx_list [0]` (chunk files survived). Of that order the recovery stage
+`chunk_id_list [(0, 0), (0, 1)]` and both pair-named chunk files are still in
+the store (they survived the wipe, which never touches
+`$WORK/cn-store`). Of that order the recovery stage
 re-asserts a subset — the reserve/dump/release sequence, that the *first*
 `blkdiscard` on the dm-clone precedes `enable_hydration`, and that exactly
 one kind-`b` wrapper exists for this CN — because the reconcile mints its

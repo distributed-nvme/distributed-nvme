@@ -324,17 +324,23 @@ func CloneKey(cid uint64, spId uint64, cloneName string) string {
 	)
 }
 
-// CloneBitmapKey is the key of one chunk of a clone's bitmap (MD2); bm_idx is
-// the source slice_idx.
+// CloneBitmapKey is the key of one chunk of a clone's bitmap (MD2). A chunk is
+// addressed by the PAIR (src_slice_idx, bm_idx), both rendered with
+// bmIdxField: chunk (s, b) holds the bytes [b*common.CloneBmChunkBytes, …+len)
+// of source slice s's bitmap, len <= common.CloneBmChunkBytes (§9.6). Its
+// position is fixed by b alone, so no chunk's meaning depends on any other
+// chunk's existence or length.
 func CloneBitmapKey(
 	cid uint64,
 	spId uint64,
 	cloneName string,
+	srcSliceIdx uint32,
 	bmIdx uint32,
 ) string {
 	return joinKey(
 		common.DnvPrefix, kindCloneBitmap,
-		idField(cid), idField(spId), cloneName, bmIdxField(bmIdx),
+		idField(cid), idField(spId), cloneName,
+		bmIdxField(srcSliceIdx), bmIdxField(bmIdx),
 	)
 }
 
@@ -469,8 +475,9 @@ func parseBin(s string) (uint32, bool) {
 }
 
 // parseBmIdxField parses one common.BmIdxFmt field; chunk counts are bounded
-// by common.MaxCloneBmCnt / common.MaxMigrBmCnt, so the field is always
-// exactly two hex digits.
+// by common.MaxCloneBmCnt / common.MaxMigrBmCnt and a clone key's
+// src_slice_idx by common.MaxSliceCntPerSp, so the field is always exactly two
+// hex digits.
 func parseBmIdxField(s string) (uint32, bool) {
 	if len(s) != 2 {
 		return 0, false
@@ -546,20 +553,14 @@ func ParseWorkerRegKey(key string) (string, string, bool) {
 	return role, seed, true
 }
 
-// ParseBmIdx decodes the chunk index out of a CloneBitmap or MigrBitmap key
-// (MD2). MD3 scans those two prefixes keys-only, so this is the only way the
-// loader learns which chunks exist without reading a single bitmap.
+// ParseBmIdx decodes the append sequence out of a MigrBitmap key (MD2). MD3
+// scans that prefix keys-only, so this is the only way the loader learns which
+// chunks exist without reading a single bitmap. It is the migration parser
+// alone: a clone chunk is addressed by a pair and has its own 7-field key and
+// parser (ParseCloneBmKey), which this rejects.
 func ParseBmIdx(key string) (uint32, bool) {
-	fields := strings.Split(key, keySep)
-	if len(fields) != 6 {
-		return 0, false
-	}
-	if fields[0] != common.DnvPrefix {
-		return 0, false
-	}
-	switch fields[1] {
-	case kindCloneBitmap, kindMigrBitmap:
-	default:
+	fields, ok := parseFields(key, kindMigrBitmap, 6)
+	if !ok {
 		return 0, false
 	}
 	if _, ok := parseId(fields[2]); !ok {
@@ -572,6 +573,39 @@ func ParseBmIdx(key string) (uint32, bool) {
 		return 0, false
 	}
 	return parseBmIdxField(fields[5])
+}
+
+// ParseCloneBmKey decodes the (src_slice_idx, bm_idx) pair that addresses one
+// chunk of a clone's bitmap (MD2, U1). MD3's clone scan reads the
+// CloneBitmapPrefix keys-only, so a chunk's whole address comes out of its key
+// and never out of a value. Only this 7-field shape parses: a 6-field
+// clone_bitmap key and a migration key of any width are malformed here and
+// skipped by the caller.
+func ParseCloneBmKey(
+	key string,
+) (srcSliceIdx uint32, bmIdx uint32, ok bool) {
+	fields, ok := parseFields(key, kindCloneBitmap, 7)
+	if !ok {
+		return 0, 0, false
+	}
+	if _, ok := parseId(fields[2]); !ok {
+		return 0, 0, false
+	}
+	if _, ok := parseId(fields[3]); !ok {
+		return 0, 0, false
+	}
+	if fields[4] == "" {
+		return 0, 0, false
+	}
+	srcSliceIdx, ok = parseBmIdxField(fields[5])
+	if !ok {
+		return 0, 0, false
+	}
+	bmIdx, ok = parseBmIdxField(fields[6])
+	if !ok {
+		return 0, 0, false
+	}
+	return srcSliceIdx, bmIdx, true
 }
 
 // ParseDnCapacityKey turns one scanned dn_capacity key back into the candidate

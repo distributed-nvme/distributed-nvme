@@ -241,9 +241,19 @@ message CntlrInfo {
     map<uint64, ResInfo> clone_id_to_meta = 17;
 }
 
+// One clone bitmap chunk's address: the source slice the chunk describes and
+// the chunk's index within that slice's bitmap. Migration chunks stay flat
+// uint32s — their bm_idx is an append sequence and names no slice.
+message BmChunkId {
+    uint32 src_slice_idx = 1;
+    uint32 bm_idx = 2;
+}
+
 message BitmapInfo {
     uint64 res_id = 1;
+    // bm_idx_list is migrations only; chunk_id_list is clones only.
     repeated uint32 bm_idx_list = 2;
+    repeated BmChunkId chunk_id_list = 3;
 }
 
 message DnBinConf {
@@ -432,7 +442,7 @@ message Clone {
     uint32 bm_cnt = 11;
 }
 
-// {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {bm_idx}
+// {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}
 message CloneBitmap {
     bytes bitmap = 1;
 }
@@ -993,8 +1003,9 @@ message AppendCloneBitmapRequest {
     string sp_name = 2;
     SpRev sp_rev = 3;
     string clone_name = 4;
-    uint32 slice_idx = 5;
-    bytes bitmap = 6;
+    uint32 src_slice_idx = 5;
+    uint32 bm_idx = 6;
+    bytes bitmap = 7;
 }
 
 message AppendCloneBitmapReply {
@@ -1439,8 +1450,9 @@ message PushCloneBitmapRequest {
     CntlrPointer cntlr_pointer = 3;
     uint64 revision = 4;
     uint64 clone_id = 5;
-    uint32 bm_idx = 6;
-    bytes bitmap = 7;
+    uint32 src_slice_idx = 6;
+    uint32 bm_idx = 7;
+    bytes bitmap = 8;
 }
 
 message PushCloneBitmapReply {

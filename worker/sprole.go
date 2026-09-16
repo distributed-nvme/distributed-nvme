@@ -169,7 +169,8 @@ type sidePlan struct {
 	chunks   []model.BmChunk
 }
 
-// clonePlan is one clone's bitmap source for the primary cntlr (BM1).
+// clonePlan is one clone's bitmap source for the primary cntlr (BM1): chunks
+// are the (src_slice_idx, bm_idx) pairs the snapshot found in etcd (MD3).
 type clonePlan struct {
 	name   string
 	id     uint64
@@ -1334,9 +1335,13 @@ func newSideDriver(
 			slog.Uint64("dn_id", p.dnId),
 			slog.Any("side_pointer", common.PbToLogValue(p.req.GetSidePointer())),
 		},
+		// A migration has one bitmap per leg, addressed by bm_idx alone: the
+		// pusher's shared fetch signature carries a source slice index, and
+		// it is always 0 here (§9.6).
 		fetch: func(
 			ctx context.Context,
 			name string,
+			_ uint32,
 			bmIdx uint32,
 		) ([]byte, bool, error) {
 			chunk := &pb.MigrBitmap{}
@@ -1462,10 +1467,21 @@ func (d *sideDriver) syncup(
 	return state, nil
 }
 
+// migrChunkIds is a migration agent's applied set in the pusher's shape: a
+// migration reports the flat bm_idx_list of its one bitmap, which names no
+// source slice, so every chunk of it is at slice 0 (§9.6).
+func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
+	out := make([]model.BmChunk, 0, len(bmIdxList))
+	for _, bmIdx := range bmIdxList {
+		out = append(out, model.BmChunk{Idx: bmIdx})
+	}
+	return out
+}
+
 // diffBitmap is BM2 for a migration destination side: the chunks etcd holds
-// minus the ones the agent acknowledges, pushed in ascending bm_idx (BM3).
-// Only a destination side pushes at all (BM4), and only when the reply's
-// bm_info is about this side's migration.
+// minus the ones the agent acknowledges in bm_idx_list, pushed in ascending
+// bm_idx (BM3). Only a destination side pushes at all (BM4), and only when
+// the reply's bm_info is about this side's migration.
 func (d *sideDriver) diffBitmap(
 	plan *sidePlan,
 	info *pb.BitmapInfo,
@@ -1478,7 +1494,7 @@ func (d *sideDriver) diffBitmap(
 		return
 	}
 	missing := d.pusher.missing(
-		plan.migrId, plan.chunks, info.GetBmIdxList(),
+		plan.migrId, plan.chunks, migrChunkIds(info.GetBmIdxList()),
 	)
 	if len(missing) == 0 {
 		return
@@ -1682,11 +1698,14 @@ func newCntlrDriver(
 		fetch: func(
 			ctx context.Context,
 			name string,
+			sliceIdx uint32,
 			bmIdx uint32,
 		) ([]byte, bool, error) {
 			chunk := &pb.CloneBitmap{}
 			found, err := d.deps.store.Get(
-				ctx, model.CloneBitmapKey(d.cid, d.spId, name, bmIdx), chunk,
+				ctx,
+				model.CloneBitmapKey(d.cid, d.spId, name, sliceIdx, bmIdx),
+				chunk,
 			)
 			if err != nil {
 				return nil, false, err
@@ -1705,6 +1724,7 @@ func newCntlrDriver(
 					CntlrPointer: d.ptr,
 					Revision:     part.revision,
 					CloneId:      part.resId,
+					SrcSliceIdx:  part.sliceIdx,
 					BmIdx:        part.bmIdx,
 					Bitmap:       part.bitmap,
 				})
@@ -1831,9 +1851,24 @@ func (d *cntlrDriver) syncup(
 	return state, nil
 }
 
+// cloneChunkIds is a clone agent's applied set in the pusher's shape: a clone
+// reports the (src_slice_idx, bm_idx) pairs of chunk_id_list, bm_idx_list
+// being migration-only (U7).
+func cloneChunkIds(chunkIdList []*pb.BmChunkId) []model.BmChunk {
+	out := make([]model.BmChunk, 0, len(chunkIdList))
+	for _, chunkId := range chunkIdList {
+		out = append(out, model.BmChunk{
+			SliceIdx: chunkId.GetSrcSliceIdx(),
+			Idx:      chunkId.GetBmIdx(),
+		})
+	}
+	return out
+}
+
 // diffBitmaps is BM2 for the clones of an SP, and BM4's target rule: only the
 // PRIMARY cntlr's CN runs the dm-clones, so a standby's bm_info_list is
-// ignored. A clone absent from the list has everything missing.
+// ignored. A clone absent from the list has everything missing, and so has
+// every pair its chunk_id_list omits.
 func (d *cntlrDriver) diffBitmaps(
 	plan *cntlrPlan,
 	list []*pb.BitmapInfo,
@@ -1842,9 +1877,9 @@ func (d *cntlrDriver) diffBitmaps(
 	if !plan.primary || len(plan.clones) == 0 {
 		return
 	}
-	applied := make(map[uint64][]uint32, len(list))
+	applied := make(map[uint64][]model.BmChunk, len(list))
 	for _, info := range list {
-		applied[info.GetResId()] = info.GetBmIdxList()
+		applied[info.GetResId()] = cloneChunkIds(info.GetChunkIdList())
 	}
 	for _, clone := range plan.clones {
 		if len(clone.chunks) == 0 {

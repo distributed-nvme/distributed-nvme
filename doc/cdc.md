@@ -613,7 +613,9 @@ h*:  uevents.log  stas-backup/            (captures, saved original confs)
 $WORK/bin/etcd --name dnv-cdc-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:13379 --advertise-client-urls http://127.0.0.1:13379 \
   --listen-peer-urls http://127.0.0.1:13380 --initial-advertise-peer-urls http://127.0.0.1:13380 \
-  --initial-cluster dnv-cdc-it=http://127.0.0.1:13380 >> $WORK/etcd/etcd.log 2>&1 &
+  --initial-cluster dnv-cdc-it=http://127.0.0.1:13380 \
+  --initial-cluster-token dnv-cdc-it --max-txn-ops=512 \
+  >> $WORK/etcd/etcd.log 2>&1 &
 
 $WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:13379 --range 0,1,2,3,4,5,6,7 \
   --tr-type tcp --adr-fam ipv4 --tr-addr <ip1> --tr-svc-id 18009 \
@@ -629,7 +631,12 @@ Aborts with a message on the first failure:
 
 1. `ssh -o BatchMode=yes` works to all four; `sudo -n true` works on s2, h1,
    h2 (and is **not** required on s1).
-2. s1: ports 13379/13380/18009-18012 free; `$WORK` writable.
+2. s1: ports 13379/13380/18009-18012 free; `$WORK` writable. The etcd this
+   suite starts carries `--max-txn-ops=512` (`common.EtcdMaxTxnOps`) like
+   every other etcd serving dnv: the requirement comes from the gateway's
+   `DeleteClone` chunk sweep (architecture.md §8.9), which this suite never
+   drives, but the flag is uniform across the fleet and the suite brings its
+   own etcd.
 3. s2: `modprobe nvmet nvmet-tcp` succeeds; `/sys/kernel/config/nvmet`
    present; `dmsetup targets` lists `zero`; ports 14420-14423 free.
 4. h1/h2: `modprobe nvme-tcp` succeeds; `nvme-cli` present (version logged);

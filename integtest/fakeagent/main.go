@@ -17,11 +17,15 @@
 //	               keeping the previous behaviour, so a bad file fails a test
 //	               on its assertion instead of killing the agent.
 //	state.json     the last applied request and revision per object plus the
-//	               received bitmap chunks (index + byte length). Written on
-//	               every apply (temp file + rename) and loaded at start, so a
-//	               killed and restarted fake replies like a restarted real
-//	               agent — the last revision and a bm_idx_list derived from
-//	               the recorded chunks (§14.11 case B step 5). The requests
+//	               received bitmap chunks (address + byte length; a migration
+//	               chunk is addressed by its bm_idx alone, a clone chunk by the
+//	               (src_slice_idx, bm_idx) pair it sits at, §9.6).
+//	               Written on every apply (temp file + rename) and loaded at
+//	               start, so a killed and restarted fake replies like a
+//	               restarted real agent — the last revision and the applied
+//	               set derived from the recorded chunks, a bm_idx_list for a
+//	               migration and a chunk_id_list for a clone (§14.11 case B
+//	               step 5). The requests
 //	               are protojson so the file stays human-editable: case A
 //	               step 3 sets a DN's stored revision by hand while the
 //	               process runs, and the fake picks the edit up on the next
@@ -38,6 +42,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -102,6 +107,52 @@ func rowKey(field string, id uint64) string {
 	return field + "." + strconv.FormatUint(id, 10)
 }
 
+// migrChunkKey renders the state.json chunk key of one migration chunk: the
+// bm_idx alone, in plain decimal, because a migration bitmap's chunks are
+// numbered by their append sequence (§9.6).
+func migrChunkKey(bmIdx uint32) string {
+	return strconv.FormatUint(uint64(bmIdx), 10)
+}
+
+// cloneChunkKey renders the state.json chunk key of one clone chunk: the
+// (src_slice_idx, bm_idx) pair a clone chunk is addressed by (§9.6), decimal
+// and colon-separated ("2:1"). behavior.json's chunk_id_list override spells a
+// chunk the same way.
+func cloneChunkKey(srcSliceIdx, bmIdx uint32) string {
+	return fmt.Sprintf("%d:%d", srcSliceIdx, bmIdx)
+}
+
+// parseCloneChunkKey is cloneChunkKey's inverse. A key that is not an "s:b"
+// pair — a migration chunk's plain index, or a hand edit's typo — addresses no
+// clone chunk and is skipped by its caller.
+func parseCloneChunkKey(key string) (uint32, uint32, bool) {
+	sliceField, bmField, found := strings.Cut(key, ":")
+	if !found {
+		return 0, 0, false
+	}
+	srcSliceIdx, err := strconv.ParseUint(sliceField, 10, 32)
+	if err != nil {
+		return 0, 0, false
+	}
+	bmIdx, err := strconv.ParseUint(bmField, 10, 32)
+	if err != nil {
+		return 0, 0, false
+	}
+	return uint32(srcSliceIdx), uint32(bmIdx), true
+}
+
+// sortChunkIdList orders a clone's applied set ascending by (src_slice_idx,
+// bm_idx), the order §9.6 has the worker diff and push in.
+func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
+	slices.SortFunc(chunkIdList, func(a, b *pb.BmChunkId) int {
+		if c := cmp.Compare(
+			a.GetSrcSliceIdx(), b.GetSrcSliceIdx()); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.GetBmIdx(), b.GetBmIdx())
+	})
+}
+
 // ---------------------------------------------------------------------------
 // behavior.json (§14.9)
 // ---------------------------------------------------------------------------
@@ -127,12 +178,15 @@ type objectBehavior struct {
 	ThinOk            bool                    `json:"thin_ok,omitempty"`
 	ThinMissingSlices []uint64                `json:"thin_missing_slices,omitempty"`
 	BmIdxList         *[]uint32               `json:"bm_idx_list,omitempty"`
+	ChunkIdList       *[]string               `json:"chunk_id_list,omitempty"`
 	Hang              bool                    `json:"hang,omitempty"`
 	DropStream        bool                    `json:"drop_stream,omitempty"`
 	ReplyCode         uint32                  `json:"reply_code,omitempty"`
 
-	// status is Status parsed once by validate.
-	status pb.ResStatus
+	// status is Status parsed once by validate; chunkIdList is ChunkIdList's
+	// "s:b" strings parsed by the same pass.
+	status      pb.ResStatus
+	chunkIdList []*pb.BmChunkId
 }
 
 // behaviorFile is the whole file. "size" is this fake's one addition to the
@@ -165,9 +219,10 @@ func parseResStatus(name string) (pb.ResStatus, error) {
 	return resStatus, nil
 }
 
-// validate parses every status string of one object entry. An unparseable
-// status makes the whole file malformed, which the caller logs and ignores —
-// a silently misspelled status would otherwise fail a test far from its
+// validate parses every status string of one object entry, and the "s:b"
+// chunk addresses of its chunk_id_list override. An unparseable one makes the
+// whole file malformed, which the caller logs and ignores — a silently
+// misspelled status or chunk address would otherwise fail a test far from its
 // cause.
 func (ob *objectBehavior) validate(where string) error {
 	if ob == nil {
@@ -179,6 +234,21 @@ func (ob *objectBehavior) validate(where string) error {
 			return fmt.Errorf("%s: %w", where, err)
 		}
 		ob.status = resStatus
+	}
+	if ob.ChunkIdList != nil {
+		ob.chunkIdList = make([]*pb.BmChunkId, 0, len(*ob.ChunkIdList))
+		for _, key := range *ob.ChunkIdList {
+			srcSliceIdx, bmIdx, ok := parseCloneChunkKey(key)
+			if !ok {
+				return fmt.Errorf(
+					"%s: chunk_id_list: %q is not a \"<src_slice_idx>:"+
+						"<bm_idx>\" pair", where, key)
+			}
+			ob.chunkIdList = append(ob.chunkIdList, &pb.BmChunkId{
+				SrcSliceIdx: srcSliceIdx,
+				BmIdx:       bmIdx,
+			})
+		}
 	}
 	for key, row := range ob.Rows {
 		if row == nil || row.Status == nil {
@@ -222,8 +292,8 @@ func parseBehavior(data []byte) (*behaviorFile, error) {
 // ---------------------------------------------------------------------------
 
 // objectState is one object's last applied request. Chunks maps a
-// migration/clone id to bm_idx to the chunk's byte length, which is all the
-// applied-set report of §9.6 needs.
+// migration/clone id to a chunk key (migrChunkKey resp. cloneChunkKey) to the
+// chunk's byte length, which is all the applied-set report of §9.6 needs.
 type objectState struct {
 	Revision uint64                       `json:"revision"`
 	Request  json.RawMessage              `json:"request,omitempty"`
@@ -253,9 +323,12 @@ func newRequestForKey(key string) proto.Message {
 	return nil
 }
 
-// putChunk records one received Push*Bitmap chunk (§14.9: index + byte
-// length).
-func (o *objectState) putChunk(resId uint64, bmIdx uint32, size int) {
+// putChunk records one received Push*Bitmap chunk (§14.9: address + byte
+// length). chunkKey is the caller's rendered address — migrChunkKey for a
+// migration chunk, cloneChunkKey for a clone one — so a chunk that arrives
+// again at the same address overwrites its length, which is how a grown chunk
+// ([D8], BM5) is recorded.
+func (o *objectState) putChunk(resId uint64, chunkKey string, size int) {
 	if o.Chunks == nil {
 		o.Chunks = make(map[string]map[string]uint64)
 	}
@@ -263,12 +336,13 @@ func (o *objectState) putChunk(resId uint64, bmIdx uint32, size int) {
 	if o.Chunks[key] == nil {
 		o.Chunks[key] = make(map[string]uint64)
 	}
-	o.Chunks[key][strconv.FormatUint(uint64(bmIdx), 10)] = uint64(size)
+	o.Chunks[key][chunkKey] = uint64(size)
 }
 
-// bmIdxList derives the applied index set of one migration/clone from the
-// recorded chunks (§9.6: the report is derived from the files present, so it
-// survives a restart).
+// bmIdxList derives the applied index set of one MIGRATION from the recorded
+// chunks (§9.6: the report is derived from the files present, so it survives a
+// restart). A clone's applied set is pair-addressed and derived by
+// chunkIdList.
 func (o *objectState) bmIdxList(resId uint64) []uint32 {
 	if o == nil {
 		return nil
@@ -284,6 +358,31 @@ func (o *objectState) bmIdxList(resId uint64) []uint32 {
 	}
 	slices.Sort(idxList)
 	return idxList
+}
+
+// chunkIdList is bmIdxList's clone twin: the applied set of one CLONE, derived
+// from the recorded chunks the same way and for the same reason. A clone chunk
+// is addressed by the (src_slice_idx, bm_idx) pair, so two source slices
+// sharing a bm_idx are two distinct entries; the result is ascending
+// (src_slice_idx, bm_idx) and a key that is no pair is skipped.
+func (o *objectState) chunkIdList(resId uint64) []*pb.BmChunkId {
+	if o == nil {
+		return nil
+	}
+	chunks := o.Chunks[strconv.FormatUint(resId, 10)]
+	chunkIdList := make([]*pb.BmChunkId, 0, len(chunks))
+	for key := range chunks {
+		srcSliceIdx, bmIdx, ok := parseCloneChunkKey(key)
+		if !ok {
+			continue
+		}
+		chunkIdList = append(chunkIdList, &pb.BmChunkId{
+			SrcSliceIdx: srcSliceIdx,
+			BmIdx:       bmIdx,
+		})
+	}
+	sortChunkIdList(chunkIdList)
+	return chunkIdList
 }
 
 // ---------------------------------------------------------------------------
@@ -721,13 +820,34 @@ func (a *fakeAgent) sideBmInfoLocked(key string) *pb.BitmapInfo {
 	}
 }
 
-// bmIdxListLocked derives one applied index set, honouring the behavior
-// file's bm_idx_list override.
+// bmIdxListLocked derives one migration's applied index set, honouring the
+// behavior file's bm_idx_list override.
 func (a *fakeAgent) bmIdxListLocked(key string, resId uint64) []uint32 {
 	if ob := a.objBehaviorLocked(key); ob != nil && ob.BmIdxList != nil {
 		return slices.Clone(*ob.BmIdxList)
 	}
 	return a.state[key].bmIdxList(resId)
+}
+
+// chunkIdListLocked derives one clone's applied chunk set, honouring the
+// behavior file's chunk_id_list override — the pair-addressed counterpart of
+// bm_idx_list, by which a script forces a clone's applied set (an empty list
+// forces "nothing applied"). The entries are rebuilt rather than handed out,
+// so a reply the grpc codec touches cannot reach back into the parsed file.
+func (a *fakeAgent) chunkIdListLocked(
+	key string, resId uint64,
+) []*pb.BmChunkId {
+	if ob := a.objBehaviorLocked(key); ob != nil && ob.ChunkIdList != nil {
+		forced := make([]*pb.BmChunkId, 0, len(ob.chunkIdList))
+		for _, chunkId := range ob.chunkIdList {
+			forced = append(forced, &pb.BmChunkId{
+				SrcSliceIdx: chunkId.GetSrcSliceIdx(),
+				BmIdx:       chunkId.GetBmIdx(),
+			})
+		}
+		return forced
+	}
+	return a.state[key].chunkIdList(resId)
 }
 
 // sliceIdListLocked returns the sorted slice ids of a cntlr's last request.
@@ -866,7 +986,9 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 }
 
 // cntlrBmInfoListLocked reports one BitmapInfo per clone of the last request
-// (§9.6: SyncupCntlrReply.bm_info_list, res_id = clone_id).
+// (§9.6: SyncupCntlrReply.bm_info_list, res_id = clone_id). A clone's applied
+// set rides in chunk_id_list, the pair-addressed field; bm_idx_list stays
+// unset, it carries migration chunks only.
 func (a *fakeAgent) cntlrBmInfoListLocked(key string) []*pb.BitmapInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
@@ -875,8 +997,8 @@ func (a *fakeAgent) cntlrBmInfoListLocked(key string) []*pb.BitmapInfo {
 	bmInfoList := make([]*pb.BitmapInfo, 0, len(req.GetCloneList()))
 	for _, clone := range req.GetCloneList() {
 		bmInfoList = append(bmInfoList, &pb.BitmapInfo{
-			ResId:     clone.GetCloneId(),
-			BmIdxList: a.bmIdxListLocked(key, clone.GetCloneId()),
+			ResId:       clone.GetCloneId(),
+			ChunkIdList: a.chunkIdListLocked(key, clone.GetCloneId()),
 		})
 	}
 	if len(bmInfoList) == 0 {
@@ -1226,8 +1348,8 @@ func (a *fakeAgent) PushMigrBitmap(
 	code, details := a.gatePushLocked(
 		key, req.GetRevision(), req.GetMigrId(), known)
 	if code == 0 {
-		a.state[key].putChunk(
-			req.GetMigrId(), req.GetBmIdx(), len(req.GetBitmap()))
+		a.state[key].putChunk(req.GetMigrId(),
+			migrChunkKey(req.GetBmIdx()), len(req.GetBitmap()))
 		a.saveStateLocked(ctx)
 	}
 	return &pb.PushMigrBitmapReply{
@@ -1436,8 +1558,10 @@ func (a *fakeAgent) SyncupCntlr(
 	}, nil
 }
 
-// PushCloneBitmap records one clone-bitmap chunk behind the §14.9 push gate;
-// the applied set is reported in the next SyncupCntlr reply's bm_info_list.
+// PushCloneBitmap records one clone-bitmap chunk behind the §14.9 push gate,
+// at the (src_slice_idx, bm_idx) pair the request addresses it by (§9.6); the
+// applied set is reported as the chunk_id_list of the next SyncupCntlr reply's
+// bm_info_list.
 func (a *fakeAgent) PushCloneBitmap(
 	ctx context.Context, req *pb.PushCloneBitmapRequest,
 ) (*pb.PushCloneBitmapReply, error) {
@@ -1451,8 +1575,9 @@ func (a *fakeAgent) PushCloneBitmap(
 	code, details := a.gatePushLocked(
 		key, req.GetRevision(), req.GetCloneId(), known)
 	if code == 0 {
-		a.state[key].putChunk(
-			req.GetCloneId(), req.GetBmIdx(), len(req.GetBitmap()))
+		a.state[key].putChunk(req.GetCloneId(),
+			cloneChunkKey(req.GetSrcSliceIdx(), req.GetBmIdx()),
+			len(req.GetBitmap()))
 		a.saveStateLocked(ctx)
 	}
 	return &pb.PushCloneBitmapReply{

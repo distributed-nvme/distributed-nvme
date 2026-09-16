@@ -17,12 +17,18 @@ import (
 var ErrNotFound = errors.New("model: not found")
 
 // BmChunk is one chunk of a clone's or a migration's bitmap as MD3 reports it:
-// the chunk index parsed out of the key, and the key's mod_revision, which BM5
-// memoizes to tell a changed bitmap from an unchanged one without reading a
+// the chunk's address parsed out of the key, and the key's mod_revision, which
+// BM5 memoizes to tell a changed bitmap from an unchanged one without reading a
 // single byte of it.
+//
+// For a clone the pair (SliceIdx, Idx) is the chunk's full address: Idx names
+// the chunk's fixed position inside source slice SliceIdx's bitmap (§9.6).
+// SliceIdx is ALWAYS 0 for a migration chunk, whose bm_idx is an append
+// sequence over the leg's one bitmap and names no slice.
 type BmChunk struct {
-	Idx    uint32
-	ModRev int64
+	SliceIdx uint32
+	Idx      uint32
+	ModRev   int64
 }
 
 // SpState is everything the sp role fans out or reacts on for one SP (MD3),
@@ -56,7 +62,10 @@ type SpState struct {
 	Clones map[string]*pb.Clone
 	Xfers  map[string]*pb.Transfer
 	Migrs  map[string]*pb.Migration
-	// CloneBmIdx and MigrBmIdx are keyed by clone / migration name.
+	// CloneBmIdx and MigrBmIdx are keyed by clone / migration name. A
+	// clone's entries carry the (SliceIdx, Idx) pair of every chunk key
+	// found, in ascending pair order; a migration's carry the append
+	// sequence in Idx alone, with SliceIdx 0.
 	CloneBmIdx map[string][]BmChunk
 	MigrBmIdx  map[string][]BmChunk
 	// DnByAddr holds one record per distinct Side.addr_port of the SP,
@@ -264,14 +273,28 @@ func loadSpConf(
 	return state, nil
 }
 
+// bmKeyParser decodes one scanned bitmap key into the chunk address it carries
+// (MD2): ParseCloneBmKey for a clone prefix, migrBmChunk for a migration one.
+type bmKeyParser func(key string) (sliceIdx uint32, bmIdx uint32, ok bool)
+
+// migrBmChunk adapts ParseBmIdx to the bmKeyParser shape: a migration bm_idx
+// names no slice, so the chunk's address is (0, bm_idx).
+func migrBmChunk(key string) (uint32, uint32, bool) {
+	bmIdx, ok := ParseBmIdx(key)
+	return 0, bmIdx, ok
+}
+
 // loadBmIdx scans one bitmap prefix keys-only at rev and returns the chunks it
-// found (MD3). A key that does not parse is skipped: nothing in dnv writes one
-// under this prefix, and one stray key must not fail a whole SP load.
+// found (MD3), decoding each key with the parser of that prefix's kind. A key
+// that does not parse is skipped: nothing dnv writes lands under this prefix in
+// another shape, and one stray key — a key of a superseded format, say — must
+// not fail a whole SP load.
 func loadBmIdx(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	prefix string,
 	rev int64,
+	parse bmKeyParser,
 ) ([]BmChunk, error) {
 	keyRevs, err := cli.RangeKeysAtRev(ctx, prefix, rev)
 	if err != nil {
@@ -279,13 +302,14 @@ func loadBmIdx(
 	}
 	chunks := make([]BmChunk, 0, len(keyRevs))
 	for _, keyRev := range keyRevs {
-		bmIdx, ok := ParseBmIdx(keyRev.Key)
+		sliceIdx, bmIdx, ok := parse(keyRev.Key)
 		if !ok {
 			continue
 		}
 		chunks = append(chunks, BmChunk{
-			Idx:    bmIdx,
-			ModRev: keyRev.ModRev,
+			SliceIdx: sliceIdx,
+			Idx:      bmIdx,
+			ModRev:   keyRev.ModRev,
 		})
 	}
 	return chunks, nil
@@ -330,6 +354,7 @@ func LoadSp(
 		}
 		chunks, err := loadBmIdx(
 			ctx, cli, CloneBitmapPrefix(cid, spId, cloneName), rev,
+			ParseCloneBmKey,
 		)
 		if err != nil {
 			return nil, err
@@ -342,6 +367,7 @@ func LoadSp(
 		}
 		chunks, err := loadBmIdx(
 			ctx, cli, MigrBitmapPrefix(cid, spId, migrName), rev,
+			migrBmChunk,
 		)
 		if err != nil {
 			return nil, err

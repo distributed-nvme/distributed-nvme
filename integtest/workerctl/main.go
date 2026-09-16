@@ -2902,15 +2902,26 @@ func cmdPutMigr(g *globals, args []string) {
 }
 
 // cmdPutBitmap writes one chunk of a clone's or a migration's bitmap and
-// raises bm_cnt on the parent when the chunk index is new (architecture.md
-// §8.9/§8.11, BM3), then bumps SpRev once. Rewriting an existing chunk leaves
-// bm_cnt alone but still bumps SpRev — which is exactly the "grown chunk"
-// trigger of §14.11 C5.
+// raises bm_cnt on the parent (architecture.md §8.9/§8.11, BM3), then bumps
+// SpRev once.
+//
+// A clone chunk is addressed by the PAIR --src-slice-idx / --bm-idx and holds
+// the bytes at offset bm_idx*CloneBmChunkBytes of that source slice's bitmap,
+// so the same bm_idx on two slices seeds two distinct chunks. bm_cnt is the
+// high-water of bm_idx + 1 ACROSS slices and is never derived from
+// src_slice_idx: seeding (slice 5, bm 0) into a fresh clone leaves bm_cnt 1,
+// and a chunk below the high-water raises nothing. A migration chunk keeps its
+// flat append sequence, where the new index IS the count.
+//
+// Rewriting an existing chunk leaves bm_cnt alone but still bumps SpRev —
+// which is exactly the "grown chunk" trigger of §14.11 C5.
 func cmdPutBitmap(g *globals, args []string) {
 	fs := newFlagSet("put-bitmap", g)
 	kind := fs.String("kind", "", "clone|migr (required)")
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "clone_name or migr_name (required)")
+	srcSliceIdx := fs.Uint("src-slice-idx", 0,
+		"the source slice the chunk describes (--kind clone only)")
 	bmIdx := fs.Uint("bm-idx", 0, "the chunk index")
 	hexData := fs.String("hex", "", "the chunk payload as hex (required)")
 	fs.Parse(args)
@@ -2918,12 +2929,25 @@ func cmdPutBitmap(g *globals, args []string) {
 	if *kind != "clone" && *kind != "migr" {
 		usageDie("--kind wants clone or migr, got %q", *kind)
 	}
+	if *kind == "migr" && *srcSliceIdx != 0 {
+		// A migration's chunks address no slice at all, so a non-zero
+		// --src-slice-idx is a mistake in the script rather than a chunk
+		// this command could write.
+		usageDie("--src-slice-idx %d is a clone address; --kind migr has none",
+			*srcSliceIdx)
+	}
 	if *name == "" {
 		die("--name is required")
 	}
+	// A clone chunk key carries BOTH indexes as a common.BmIdxFmt field,
+	// exactly two hex digits each (model.ParseCloneBmKey); a migration key
+	// carries the bm_idx field alone (model.ParseBmIdx). An index of 256 or
+	// more could not be parsed back out of either.
+	if *srcSliceIdx >= 1<<8 {
+		die("--src-slice-idx %d does not fit in the %q key field",
+			*srcSliceIdx, common.BmIdxFmt)
+	}
 	if *bmIdx >= 1<<8 {
-		// The key field is common.BmIdxFmt, exactly two hex digits, so an
-		// index of 256 or more could not be parsed back (model.ParseBmIdx).
 		die("--bm-idx %d does not fit in the %q key field",
 			*bmIdx, common.BmIdxFmt)
 	}
@@ -2952,12 +2976,13 @@ func cmdPutBitmap(g *globals, args []string) {
 				return fmt.Errorf("%q not found", parentKey)
 			}
 			key := model.CloneBitmapKey(
-				cid, target.spId, *name, uint32(*bmIdx),
+				cid, target.spId, *name,
+				uint32(*srcSliceIdx), uint32(*bmIdx),
 			)
 			created = !s.Get(key, &pb.CloneBitmap{})
 			s.Put(key, &pb.CloneBitmap{Bitmap: data})
-			if created {
-				parent.BmCnt++
+			if uint32(*bmIdx)+1 > parent.GetBmCnt() {
+				parent.BmCnt = uint32(*bmIdx) + 1
 				s.Put(parentKey, parent)
 			}
 			bmCnt = parent.GetBmCnt()
@@ -2988,11 +3013,14 @@ func cmdPutBitmap(g *globals, args []string) {
 		"sp_name": target.name,
 		"kind":    *kind,
 		"name":    *name,
-		"bm_idx":  uint32(*bmIdx),
-		"bytes":   len(data),
-		"created": created,
-		"bm_cnt":  bmCnt,
-		"sp_rev":  spRev,
+		// The pair a clone chunk was written at; 0 for a migration, whose
+		// chunk addresses no slice (model.BmChunk).
+		"src_slice_idx": uint32(*srcSliceIdx),
+		"bm_idx":        uint32(*bmIdx),
+		"bytes":         len(data),
+		"created":       created,
+		"bm_cnt":        bmCnt,
+		"sp_rev":        spRev,
 	})
 }
 
@@ -3528,14 +3556,27 @@ func cmdGetSp(g *globals, args []string) {
 	for migrName, migr := range state.Migrs {
 		migrs[migrName] = pbToAny(migr)
 	}
-	bmIdx := func(chunks map[string][]model.BmChunk) map[string]any {
+	// Each chunk prints as its ADDRESS, in the shape the fake agents write
+	// into state.json (§14.9) so the two sides of an assertion spell a chunk
+	// the same way: a clone chunk is the decimal "{src_slice_idx}:{bm_idx}"
+	// pair it is addressed by, a migration chunk its plain append sequence
+	// number. Both lists keep model.LoadSp's ascending order.
+	bmIdx := func(
+		chunks map[string][]model.BmChunk,
+		pair bool,
+	) map[string]any {
 		out := make(map[string]any, len(chunks))
 		for name, list := range chunks {
-			idxList := make([]uint32, 0, len(list))
+			idList := make([]any, 0, len(list))
 			for _, chunk := range list {
-				idxList = append(idxList, chunk.Idx)
+				if pair {
+					idList = append(idList, fmt.Sprintf(
+						"%d:%d", chunk.SliceIdx, chunk.Idx))
+					continue
+				}
+				idList = append(idList, chunk.Idx)
 			}
-			out[name] = idxList
+			out[name] = idList
 		}
 		return out
 	}
@@ -3550,8 +3591,8 @@ func cmdGetSp(g *globals, args []string) {
 		"clones":       clones,
 		"xfers":        xfers,
 		"migrs":        migrs,
-		"clone_bm_idx": bmIdx(state.CloneBmIdx),
-		"migr_bm_idx":  bmIdx(state.MigrBmIdx),
+		"clone_bm_idx": bmIdx(state.CloneBmIdx, true),
+		"migr_bm_idx":  bmIdx(state.MigrBmIdx, false),
 		"missing":      state.Missing,
 	})
 }

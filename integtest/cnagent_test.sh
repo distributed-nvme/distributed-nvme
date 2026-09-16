@@ -555,6 +555,11 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 		"$(d16 "$1")" "$2" "$3" "$4" "$5"
 }
 
+# req_clone's bm_cnt is the gateway's high-water of bm_idx + 1 across every
+# source slice (architecture.md §8.9), so a case pushing chunks (0, 0) and
+# (0, 1) declares 2. The cn agent never reads the field — CN22 bounds a push
+# by src_slice_cnt and MaxCloneBmCnt, never by bm_cnt — so it is carried here
+# only to keep the fixture a faithful copy of what the CP would send.
 req_clone() { # cloneid src_nqn src_vm dst_tdid bm_cnt auto_resume
 	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s, "bm_cnt": %s}' \
 		"$(d16 "$1")" "$(req_tr "${IP[$3]}")" "$2" "$STRIPE_SIZE" \
@@ -963,6 +968,27 @@ dm_kind_names() {
 # on-file allocation table, the dm tables are it). Empty output means every
 # unit of the arena is free.
 clone_meta_wrappers() { dm_kind_names b "${1:-}"; }
+
+# clone_bm_files <cluster16> <cn16> <sp16> <clone16> — the basenames of one
+# clone's bitmap chunk files in the cn store, sorted. A clone chunk is
+# addressed by the PAIR (src_slice_idx, bm_idx), so LocalCloneBmPath ends in
+# TWO %02x segments (cnagent.md §2.1) where the single-index format had one.
+# The name is only an address — the reconcile decodes the pair from the
+# persisted PushCloneBitmapRequest inside the file — which is exactly why it
+# needs asserting here: a wrong name would still reload correctly, so no reply
+# assertion can catch it. Empty output means no chunk file at all.
+clone_bm_files() {
+	local f base
+	for f in "$WORK"/cn-store/clone-bm-"$1"-"$2"-"$3"-"$4"-*; do
+		[ -e "$f" ] || continue
+		base=${f##*/}
+		# The agent writes through a "{name}.tmp-XXXX" file in the same
+		# directory and removes it on every path; skip one a crash left
+		# behind rather than reporting it as a chunk.
+		case "$base" in *.tmp-*) continue ;; esac
+		printf '%s\n' "$base"
+	done | sort
+}
 
 # resume_suspended sweeps up suspended dm devices before anything reads them.
 # It is load-bearing, not defensive: a transfer's origin ns-dev is deliberately
@@ -2162,7 +2188,7 @@ case_clone_xfer() {
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
-	local idx
+	local idx bmargs bmfiles
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -2170,6 +2196,12 @@ case_clone_xfer() {
 	clonedm=$(cn_dm_name 7 2 "$sp2" "$C_CLONE")
 	metadm=$(clone_meta_dm 2 "$sp2" "$C_CLONE")
 	nsdev1=$(cn_dm_name 6 1 "$sp1" "$S_NS")
+	# The two chunk files this case creates, as clone_bm_files sorts them:
+	# LocalCloneBmPath ends in {src_slice_idx:%02x}-{bm_idx:%02x}, so the
+	# pair (0, 0) and the pair (0, 1) differ only in the last segment.
+	bmargs="$(hex16 "$CLUSTER") $(hex16 "${CNID[2]}") $(hex16 "$sp2") $(hex16 "$C_CLONE")"
+	bmfiles=$(printf 'clone-bm-%s-00-00\nclone-bm-%s-00-01' \
+		"${bmargs// /-}" "${bmargs// /-}")
 
 	stage sp1 "stage 0: sp1 comes up on DN1/CN1 and takes the data"
 	dn_pointers 1 "$sp1:$S_MLEG:$S_MSIDE" "$sp1:$S_DLEG:$S_DSIDE"
@@ -2232,7 +2264,7 @@ case_clone_xfer() {
 
 	stage gate "stage 3: the clone is declared gated, then the chunk is pushed"
 	req_set "$req2" ".sp_level = \"SP_LEVEL_NO_CLONE\"
-		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" 1 true)]"
+		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" 2 true)]"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
@@ -2243,7 +2275,19 @@ case_clone_xfer() {
 	assert_eq "$(event_cnt "$seq" "^nvme connect .*$NQN_PREFIX:4:")" 0 \
 		"clone_xfer: the gate holds the source connection back (CN19)"
 	cnctl 2 push-clone-bm --revision "$rev2" --sp "$sp2" --cntlr "$cntlr" \
-		--clone "$C_CLONE" --bm-idx 0 --bitmap-hex 00000000ffffffff >/dev/null
+		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 0 \
+		--bitmap-hex 00000000ffffffff >/dev/null
+	# A second chunk of the SAME source slice at a non-zero bm_idx. It is the
+	# suite's proof that bm_idx addresses a chunk within one slice's bitmap
+	# and no longer names the slice itself: src_slice_cnt is 1 here, so the
+	# single-index gate would have refused this push as an unknown source
+	# slice (code 2, a hard failure of the call below). Chunk (0, 1) covers
+	# bits 8*CloneBmChunkBytes upward — far past this clone's 64 regions — so
+	# it is stored, reported and reloaded, and changes no blkdiscard anywhere
+	# in the case; the stage 4 arithmetic below stays exactly as it was.
+	cnctl 2 push-clone-bm --revision "$rev2" --sp "$sp2" --cntlr "$cntlr" \
+		--clone "$C_CLONE" --src-slice-idx 0 --bm-idx 1 \
+		--bitmap-hex ff >/dev/null
 	# An equal-revision re-send is a legal full re-apply; here it is only a
 	# way to read the applied set back out of the reply (§9).
 	out=$(cn_syncup_cntlr 2 "$req2")
@@ -2251,8 +2295,19 @@ case_clone_xfer() {
 		"clone_xfer bm_info_list length"
 	assert_eq "$(jq_of "$out" '.bm_info_list[0].res_id')" "$(d16 "$C_CLONE")" \
 		"clone_xfer bm_info_list res_id"
-	assert_eq "$(jq_of "$out" '.bm_info_list[0].bm_idx_list | @csv')" '0' \
-		"clone_xfer bm_info_list bm_idx_list"
+	# A clone reports its applied set as chunk_id_list, ascending by the pair.
+	# protojson omits a field at its zero value, so the entry for (0, 0) is
+	# the empty object {} — hence the // 0 defaults (§8).
+	assert_eq "$(jq_of "$out" \
+		'[.bm_info_list[0].chunk_id_list[]?
+		  | "\(.src_slice_idx // 0):\(.bm_idx // 0)"] | join(",")')" \
+		'0:0,0:1' "clone_xfer bm_info_list chunk_id_list"
+	# bm_idx_list is the migration applied set; a clone never fills it.
+	assert_eq "$(jq_of "$out" '.bm_info_list[0].bm_idx_list // "unset"')" \
+		unset "clone_xfer bm_info_list bm_idx_list is unset for a clone"
+	# The chunk file names carry the pair as two %02x segments (§5).
+	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
+		"clone_xfer: both chunk files are pair-named"
 
 	stage enable "stage 4: one converge builds the clone and flips the host"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
@@ -2393,8 +2448,15 @@ case_clone_xfer() {
 	assert_eq "$(helper 2 "clone_meta_wrappers $(hex16 "${CNID[2]}")")" \
 		"$metadm" "clone_xfer recovery: exactly one kind-b wrapper"
 	out=$(cn_syncup_cntlr 2 "$req2")
-	assert_eq "$(jq_of "$out" '.bm_info_list[0].bm_idx_list | @csv')" '0' \
-		"clone_xfer: the chunk files survived the wipe"
+	# The store was untouched by the wipe, so the reconcile rebuilt the
+	# applied set from the files — both pairs, decoded out of the persisted
+	# requests rather than parsed out of the names.
+	assert_eq "$(jq_of "$out" \
+		'[.bm_info_list[0].chunk_id_list[]?
+		  | "\(.src_slice_idx // 0):\(.bm_idx // 0)"] | join(",")')" \
+		'0:0,0:1' "clone_xfer: the chunk files survived the wipe"
+	assert_eq "$(helper 2 "clone_bm_files $bmargs")" "$bmfiles" \
+		"clone_xfer: both pair-named chunk files survived the wipe"
 	# The wipe killed the host's sp2 controller with DNR; it never reconnects
 	# on its own, and -n would take the live sp1 path with it (Appendix A).
 	ctrl=$(helper "$hv" "ctrl_of '$nqn' '${IP[2]}'")

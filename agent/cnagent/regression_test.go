@@ -75,7 +75,7 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 		revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
 	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
-		testCluster, testCn, testSp, testClone, 0)
+		testCluster, testCn, testSp, testClone, 0, 0)
 	if _, ok := node.protos[bmPath]; !ok {
 		t.Fatalf("the chunk was not persisted")
 	}
@@ -89,7 +89,7 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 		t.Fatalf("a standby converge deleted the clone's chunk file")
 	}
 	if len(reply.GetBmInfoList()) != 1 ||
-		len(reply.GetBmInfoList()[0].GetBmIdxList()) != 1 {
+		len(chunkIds(reply.GetBmInfoList()[0])) != 1 {
 		t.Fatalf("the applied set was dropped: %v", reply.GetBmInfoList())
 	}
 
