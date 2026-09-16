@@ -219,6 +219,9 @@ type reactionCall struct {
 	spareLegId  uint64
 	targetLegId uint64
 	now         uint64
+	// The clone drain's target, for the CLD7 derivation assertions.
+	cloneName string
+	cloneId   uint64
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -250,6 +253,12 @@ type fakeReactionOps struct {
 	drainGrpCnt   int
 	drainDone     bool
 	drainErr      error
+	// The clone drain's canned returns (clonedrain.go). cloneDrainErr is
+	// separate again, so a clone-drain test can fail its step while the sp
+	// drain and the reactions of the same pass stay healthy — CLD7 runs them
+	// in one pass, which the sp drain never does.
+	cloneChunks   [][]model.BmChunk
+	cloneDrainErr error
 }
 
 func (o *fakeReactionOps) record(call reactionCall) error {
@@ -456,6 +465,58 @@ func (o *fakeReactionOps) finishSpDelete(
 	err := o.drainErr
 	o.mu.Unlock()
 	return err
+}
+
+// The two clone-drain ops (CLD8/CLD9). drainCloneBm records the batch it was
+// handed, so a test can pin the cut and the order rather than only the count.
+
+func (o *fakeReactionOps) drainCloneBm(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	chunks []model.BmChunk,
+) (int, error) {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{
+		op: "drain_clone_bm", cloneName: cloneName, cloneId: cloneId,
+	})
+	o.cloneChunks = append(
+		o.cloneChunks, append([]model.BmChunk(nil), chunks...))
+	err := o.cloneDrainErr
+	o.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return len(chunks), nil
+}
+
+func (o *fakeReactionOps) finishCloneDelete(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+) error {
+	o.mu.Lock()
+	o.calls = append(o.calls, reactionCall{
+		op: "finish_clone", cloneName: cloneName, cloneId: cloneId,
+	})
+	err := o.cloneDrainErr
+	o.mu.Unlock()
+	return err
+}
+
+// cloneBatches is the list of batches drainCloneBm was handed, in call order.
+func (o *fakeReactionOps) cloneBatches() [][]model.BmChunk {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([][]model.BmChunk(nil), o.cloneChunks...)
 }
 
 // ---------------------------------------------------------------------------

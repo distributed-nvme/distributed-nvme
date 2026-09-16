@@ -4,134 +4,64 @@ import (
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
-	"github.com/distributed-nvme/distributed-nvme/model"
-	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// TestDeleteCloneTxnBudget is the tripwire under §8.9's chunk sweep.
-// DeleteClone deletes the whole src_slice_cnt x bm_cnt rectangle of chunk keys
-// in ONE transaction — an STM cannot range, so there is no way to split it —
-// and the worst case is MaxSliceCntPerSp x MaxCloneBmCnt deletes plus the
-// Clone key, the SpConf, the SpRev and the reads it already does. etcd caps
-// a transaction at --max-txn-ops, whose DEFAULT is 128, so every etcd serving
-// dnv is required to run with common.EtcdMaxTxnOps and every test launcher
-// passes it (gateway/etcdenv_test.go and its three siblings).
+// TestCloneDrainBatchBudget is CLD11's arithmetic tripwire, and the tripwire
+// that REPLACED TestDeleteCloneTxnBudget: the rectangle transaction that one
+// guarded — the whole src_slice_cnt x bm_cnt sweep in DeleteClone's deciding
+// STM — does not exist any more. DeleteClone latches (§5.8) and the worker
+// drains the chunk keys in batches of a constant size (dnv-worker.md §11.7).
 //
-// The assertion is arithmetic on constants and needs no etcd, which is the
-// point: raising either cap is a one-line change in common/constants.go whose
-// cost lands on a deployment flag nobody would think to re-check, and it fails
-// here at once instead of as an "etcd: too many operations in txn request" out
-// of a DeleteClone in the field. The 8 is the non-chunk ops, rounded up — it
-// is deliberately an UNDER-estimate of the real per-transaction overhead, and
-// TestDeleteCloneAtTheChunkCeiling below is what actually proves the budget,
-// against a real etcd, so this tripwire only has to fire EARLY, never exactly.
-func TestDeleteCloneTxnBudget(t *testing.T) {
-	const budget = common.MaxSliceCntPerSp*common.MaxCloneBmCnt + 8
+// The arithmetic is one line, because chunk removal is LEDGER-FREE — no DN or
+// CN accounting, pure point deletes. etcd caps a transaction at
+// max(len(Compare), len(Success), len(Failure)), and etcdutil's
+// serializable-snapshot STM compares every key it READ and every key it WROTE,
+// so the COMPARE count is the bound:
+//
+//	reads    = 3                    (SpConf, Clone, SpRev)
+//	writes   = MaxDelBmPerTxn + 1   (the dels, the SpRev put)
+//	compares = MaxDelBmPerTxn + 4   <- what etcd checks
+//
+// and it is independent of every ceiling constant. That is the property worth
+// guarding: growing MaxCloneBmCnt or MaxSliceCntPerSp now changes the batch
+// COUNT and never the transaction's legality, which is what decoupled the
+// deployment requirement from the clone shape.
+func TestCloneDrainBatchBudget(t *testing.T) {
+	const budget = common.MaxDelBmPerTxn + 4
 	if budget > common.EtcdMaxTxnOps {
 		t.Errorf(
-			"DeleteClone's worst case is %d ops (%d slices x %d chunks + 8), "+
-				"over the %d dnv requires etcd to allow: raise EtcdMaxTxnOps "+
-				"and the --max-txn-ops of every etcd that serves dnv",
-			budget, common.MaxSliceCntPerSp, common.MaxCloneBmCnt,
-			common.EtcdMaxTxnOps)
+			"one clone drain batch is %d compares (%d deletes + 4), over the %d "+
+				"dnv requires etcd to allow: lower MaxDelBmPerTxn or raise "+
+				"EtcdMaxTxnOps and the --max-txn-ops of every etcd that "+
+				"serves dnv",
+			budget, common.MaxDelBmPerTxn, common.EtcdMaxTxnOps)
 	}
-}
-
-// TestDeleteCloneAtTheChunkCeiling is the tripwire above turned into a PROOF:
-// it fills a clone's whole MaxSliceCntPerSp x MaxCloneBmCnt rectangle — every
-// chunk key DeleteClone can ever have to sweep — and deletes it, against the
-// real etcd this package runs with `--max-txn-ops=common.EtcdMaxTxnOps`.
-//
-// The arithmetic tripwire cannot do this. It counts the ops DeleteClone's
-// transaction was BELIEVED to issue; only etcd can say how many it actually
-// receives, because the deciding STM also carries resumeCloneDstNs's subsystem
-// puts, the SpConf put, the SpRev bump and one comparison per key the STM
-// read. If any of those grows — a new write in the deciding STM, a wider
-// resumeCloneDstNs, a change in how etcdutil builds the txn — this test fails
-// with etcd's own "too many operations in txn request" while the tripwire
-// stays green.
-func TestDeleteCloneAtTheChunkCeiling(t *testing.T) {
-	env := newVolEnv(t)
-	env.putTd("dst", 900, 7, 0, true)
-	if _, err := env.srv.CreateClone(env.ctx, &pb.CreateCloneRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		CloneName:   "clone-max",
-		SrcTrConf:   []*pb.NvmeTrConf{volTrConf(volCnA)},
-		SrcNqn:      volSrcNqn,
-		SrcNsIdx:    1,
-		// The ceiling itself: every source slice the geometry allows, so the
-		// sweep's rectangle is as wide as it can ever be.
-		SrcSliceCnt:   common.MaxSliceCntPerSp,
-		SrcStripeSize: 64 * 1024,
-		SrcBlockSize:  1024 * 1024,
-		DstTdName:     "dst",
-		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 2},
-		AutoResume:    true,
-	}); err != nil {
-		t.Fatalf("CreateClone: %v", err)
-	}
-	// One byte per chunk: this test is about the transaction's OP COUNT, not
-	// its byte size, and 256 one-byte chunks keep it quick.
-	for sliceIdx := uint32(0); sliceIdx < common.MaxSliceCntPerSp; sliceIdx++ {
-		for bmIdx := uint32(0); bmIdx < common.MaxCloneBmCnt; bmIdx++ {
-			_, err := env.srv.AppendCloneBitmap(
-				env.ctx, &pb.AppendCloneBitmapRequest{
-					ClusterName: env.cluster,
-					SpName:      volSpName,
-					SpRev:       env.token(),
-					CloneName:   "clone-max",
-					SrcSliceIdx: sliceIdx,
-					BmIdx:       bmIdx,
-					Bitmap:      []byte{0xff},
-				})
-			if err != nil {
-				t.Fatalf("AppendCloneBitmap (%d, %d): %v",
-					sliceIdx, bmIdx, err)
-			}
-		}
-	}
-	if got := env.clone("clone-max").GetBmCnt(); got != common.MaxCloneBmCnt {
-		t.Fatalf("bm_cnt: got %d, want %d", got, common.MaxCloneBmCnt)
-	}
-	// force: the clone has no primary cntlr to prove hydration with, and the
-	// proof is not what this test is about.
-	if _, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
-		ClusterName: env.cluster,
-		SpName:      volSpName,
-		SpRev:       env.token(),
-		CloneName:   "clone-max",
-		Force:       true,
-	}); err != nil {
-		t.Fatalf("DeleteClone over the full %dx%d rectangle: %v "+
-			"(an \"too many operations in txn request\" here means "+
-			"common.EtcdMaxTxnOps no longer covers the sweep)",
-			common.MaxSliceCntPerSp, common.MaxCloneBmCnt, err)
-	}
-	// Every one of the 256 keys is gone, not just the ones a narrower sweep
-	// would have reached.
-	for sliceIdx := uint32(0); sliceIdx < common.MaxSliceCntPerSp; sliceIdx++ {
-		for bmIdx := uint32(0); bmIdx < common.MaxCloneBmCnt; bmIdx++ {
-			key := model.CloneBitmapKey(
-				env.cid, volSpId, "clone-max", sliceIdx, bmIdx)
-			if env.exists(key, &pb.CloneBitmap{}) {
-				t.Fatalf("chunk (%d, %d) survived the delete",
-					sliceIdx, bmIdx)
-			}
-		}
+	// Prose, not a requirement (§6): 68 also fits etcd's DEFAULT cap, so no
+	// clone transaction in the system needs the raised flag any more. The
+	// deployment requirement stays EtcdMaxTxnOps for the SP drain's sake, and
+	// this assertion is what would notice if the clone half stopped being
+	// free of it.
+	const etcdDefaultMaxTxnOps = 128
+	if budget > etcdDefaultMaxTxnOps {
+		t.Errorf("one clone drain batch is %d compares, over etcd's own default "+
+			"cap of %d: the clone path is no longer free of the deployment "+
+			"flag, and gateway.md §2.1's note must change with it",
+			budget, etcdDefaultMaxTxnOps)
 	}
 }
 
 // TestSpDrainBatchBudget is SPD14's arithmetic tripwire: the worst-case D2
 // batch must fit inside the transaction size dnv requires of every etcd.
 //
-// Per §6, with D the number of distinct DNs one batch touches:
+// etcd caps a transaction at max(len(Compare), len(Success), len(Failure)),
+// and etcdutil's serializable-snapshot STM compares every key it READ and every
+// key it WROTE, so the compare count binds. Per §6, with D the number of
+// distinct DNs one batch touches:
 //
-//	compares = 3 + 2D   (SpConf, Slice, SpRev; per DN DnConf + DnRev)
-//	ops      = 3 + 4D   (Slice put/del, SpConf put, SpRev put;
+//	reads    = 3 + 2D   (SpConf, Slice, SpRev; per DN DnConf + DnRev)
+//	writes   = 3 + 4D   (Slice put/del, SpConf put, SpRev put;
 //	                     per DN DnConf put, capacity del + put, DnRev put)
-//	total    = 6 + 6D,  D <= MaxDelGrpPerTxn x (MaxAllocLegPerGrp +
+//	compares = 6 + 6D,  D <= MaxDelGrpPerTxn x (MaxAllocLegPerGrp +
 //	                                            MaxSpareLegPerGrp)
 //
 // Every constant is NAMED (SPD1): widening the allocator's group shape, the
@@ -149,8 +79,8 @@ func TestSpDrainBatchBudget(t *testing.T) {
 	const budget = 6 + 6*dns
 	if budget > common.EtcdMaxTxnOps {
 		t.Errorf(
-			"one sp drain batch is %d ops (6 + 6 x %d groups x (%d legs + %d "+
-				"spares)), over the %d dnv requires etcd to allow: lower "+
+			"one sp drain batch is %d compares (6 + 6 x %d groups x (%d legs "+
+				"+ %d spares)), over the %d dnv requires etcd to allow: lower "+
 				"MaxDelGrpPerTxn or raise EtcdMaxTxnOps and the --max-txn-ops "+
 				"of every etcd that serves dnv",
 			budget, common.MaxDelGrpPerTxn, common.MaxAllocLegPerGrp,

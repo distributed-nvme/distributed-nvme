@@ -237,13 +237,13 @@ DefaultGatewayAgentTimeout = 10
 CloneBmChunkBytes = 1 << 20
 
 // A DEPLOYMENT REQUIREMENT, not a client setting: every etcd serving dnv
-// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128.
-// Two transactions are above it: the sp drain's D2 batch, 486 ops at the
-// maximum shape (dnv-worker.md §11.6 — the larger of the two, and the one
-// this number is sized by), and DeleteClone's deciding STM, which deletes
-// every clone bitmap chunk key in ONE transaction, MaxSliceCntPerSp x
-// MaxCloneBmCnt = 256 point deletes plus a handful of other ops
-// (§5.8, §10.4).
+// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128. The
+// transaction it is SIZED by is the sp drain's D2 batch, 486 ops at the
+// maximum shape (dnv-worker.md §11.6) — the largest BOUNDED one; a large
+// enough CreateStoragePool passes the default too, but its size is the
+// request's. DeleteClone's 256-key rectangle sweep was this number's founding
+// justification and is gone: the clone drain replaced it with 68-op batches
+// that fit the default (§5.8, §10.4).
 EtcdMaxTxnOps = 512
 ```
 
@@ -332,7 +332,7 @@ already exist (`cluster_conf`, the three globals,
 
 ### 2.4 Amendment to `integtest/workerctl` (applied with §10)
 
-Three subcommands so the integration suite can play the worker (§0 #12):
+Five subcommands so the integration suite can play the worker (§0 #12):
 
 * `set-created --sp <name|id> --name <td_name>` — resolves the td, calls
   `model.FlipCreated(ctx, cli, cid, shard, spId, []TdRef{{name, tdId}})`,
@@ -342,6 +342,16 @@ Three subcommands so the integration suite can play the worker (§0 #12):
 * `set-provisioned --sp <name|id> --slice <id> --leg <id> --side <id>` — the
   same through `model.FlipProvisioned` with one `SideRef`; also bumps `SpRev`
   when it wrote.
+* `set-clone-deleting --sp <name|id> --name <clone_name>` and
+  `drain-clone --sp <name|id> --name <clone_name> [--max-steps N]` *(added
+  2026-09-16 with the clone latch, §5.8)* — the clone twins of the two below.
+  `drain-clone` is CLD7's derivation in a loop over `model.DrainCloneBm` and
+  `model.FinishCloneDelete`, and emits
+  `{"steps":…, "chunk_cnt":…, "clone_deleted":<bool>}` — `chunk_cnt` and NOT
+  `bm_cnt`, which is a different number on the same object (§5.8).
+  `set-clone-deleting` writes the flag and bumps, and deliberately does NOT
+  resume the destination namespaces the way the RPC does: that write is the
+  gateway's, and a driver that re-implemented it would drift from it.
 * `drain-sp --sp <name|id> [--max-steps N]` *(added 2026-09-15 with the
   latch, §5.4)* — runs the sp coordinator's drain to completion: SPD8's
   derivation in a loop over `model.DrainSpCntlrs` / `DrainSpSlice` /
@@ -448,7 +458,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four INVALID_ARGUMENT refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
 
@@ -849,30 +859,56 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   Reply `clone_id`. (The "destination td must be empty" precondition is
   documented-unverifiable [D3]; the per-CN clone budget is untracked, §0
   #16.)
-* **DeleteClone** — two-phase (AG4). Phase 1 STM (read-only): resolve; clone
-  (`NOT_FOUND`); when `force == false` also resolve the **primary** cntlr's
-  `addr_port` + `cn_id` — an SP with no primary cntlr ⇒
-  `FAILED_PRECONDITION`, since there is nobody to prove hydration with and a
-  promotion makes the retry succeed (`force == true` skips the lookup
-  entirely: no agent call follows, which is what lets force delete a clone
-  whose cntlr is unreachable). Between phases, `force == false` calls
-  `GetCntlrInfo`; incomplete hydration **or an unreachable agent** ⇒
-  `FAILED_PRECONDITION` (§8.9). Phase 2 STM (deciding): full re-resolution +
-  token check (GW6 — any interleaved mutation bumped `SpRev`, so a token the
-  request carried subsumes staleness of phase 1; a token-less request gets
-  the re-resolution only, AG4/RK8); delete the Clone, its `CloneBitmap` chunks
-  (`CloneBitmapKey` for every pair of the `src_slice_cnt × bm_cnt` rectangle
-  the record's own two counts describe — a nested point-delete sweep, because
-  the STM has no range; chunks are sparse, so most pairs of a real clone are
-  absent and their deletes are harmless), the list entry; set
+* **DeleteClone** — *amended 2026-09-16: it LATCHES, and the sp-worker drains
+  (dnv-worker.md §11.7).* Two-phase (AG4). Phase 1 STM (read-only): resolve;
+  clone (`NOT_FOUND`); **if `deleting` is already true, return OK here** — with
+  no writes, no bump and NO agent call — after running GW6's token check
+  explicitly, because phase 1 is the decision on that path and `openSpRead`
+  skips the check (a stale token must still ABORT ahead of the `deleting`
+  row). The short-circuit sits before the agent call and not in phase 2 for a
+  reason that is not an optimization: after the latch the CN has retired the
+  stack, so `GetCntlrInfo` no longer reports the dm-clone and a hydration check
+  would wedge every repeat delete in `FAILED_PRECONDITION` for ever. Otherwise,
+  when `force == false`, also resolve the **primary** cntlr's `addr_port` +
+  `cn_id` — an SP with no primary cntlr ⇒ `FAILED_PRECONDITION`, since there is
+  nobody to prove hydration with and a promotion makes the retry succeed
+  (`force == true` skips the lookup entirely: no agent call follows, which is
+  what lets force delete a clone whose cntlr is unreachable). Between phases,
+  `force == false` calls `GetCntlrInfo`; incomplete hydration **or an
+  unreachable agent** ⇒ `FAILED_PRECONDITION` (§8.9). Phase 2 STM (deciding):
+  full re-resolution + token check (GW6 — any interleaved mutation bumped
+  `SpRev`, so a token the request carried subsumes staleness of phase 1; a
+  token-less request gets the re-resolution only, AG4/RK8); `loadClone` again,
+  and if `deleting` became true since phase 1 return OK with no writes (the
+  same rule, raced variant); else write exactly three things —
   `suspended = false` on every namespace whose `td_id == dst_td_id`
-  (architecture.md §8.9 — the dst namespaces resume with
-  the data now local, the §5.9 DeleteTransfer twin of this write);
-  `BumpSpRev`. Reply `clone_id`. The sweep's worst case is
-  `MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes plus the handful of other
-  ops in this one atomic transaction, which is why every etcd serving dnv
-  MUST run with `--max-txn-ops=common.EtcdMaxTxnOps` (§2.1): etcd's default
-  cap is 128 and would refuse the whole delete.
+  (architecture.md §8.9 — the dst namespaces resume with the data now local,
+  the §5.9 DeleteTransfer twin of this write), the `Clone` put with
+  `deleting = true` and every other field unchanged, and `BumpSpRev`. Reply
+  `clone_id`.
+  It does NOT delete the Clone key, does not touch a chunk key and does not
+  shrink `clone_name_list`: the name must survive until the drain's last
+  transaction, because `model.LoadSp` fetches clones by iterating it. The
+  resume rides the LATCH so that it and the fan-out exclusion arrive in one
+  `SpRev` bump; deferred, the destination namespace would go dark for the whole
+  drain. Consequences for callers, all following from the Clone key and its
+  list entry surviving: `clone delete` returns while the clone still exists, so
+  an observer polls `GetClone` until `NOT_FOUND`; same-name `CreateClone` keeps
+  failing until then — `ALREADY_EXISTS`, or `RESOURCE_EXHAUSTED` on an SP whose
+  `clone_name_list` the surviving entry holds at `MaxCloneCntPerSp`, that
+  ceiling being checked ahead of the name, which also fails an UNRELATED
+  `CreateClone` for the whole drain; a `CreateClone` onto the same destination td,
+  and a `DeleteThinDevice` of that td, both keep failing
+  `FAILED_PRECONDITION` because their scans walk `clone_name_list`; and
+  `DeleteStoragePool` keeps refusing while any clone drains.
+* **loadLiveClone** — the CLD1 gate the two clone mutators that ADDRESS an
+  existing clone open with: `UpdateCloneTrConf` and `AppendCloneBitmap` answer
+  `FAILED_PRECONDITION` when `deleting` is true. (`CreateClone` addresses none
+  and needs no gate: the surviving key and list entry keep it refused.) The
+  append half is load-bearing, not cosmetic: a racing append could otherwise write a chunk key behind the
+  drain, and the drain's final emptiness guard rests on "after the latch, no
+  chunk key can ever appear again". `GetClone` and DeleteClone's own phase 1
+  keep using plain `loadClone`.
 * **GetClone** — one STM read. Reply the Clone.
 * **UpdateCloneTrConf** — STM: resolve; token; clone; replace
   `src_tr_conf_list`; `BumpSpRev`. Reply `clone_id`.
@@ -911,8 +947,11 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   `bm_cnt = max(bm_cnt, bm_idx+1)` — ONE `uint32`, the high-water of
   `bm_idx + 1` over ALL appends ACROSS slices and never derived from
   `src_slice_idx` (on a fresh clone, appending slice 5 / bm 0 leaves it at 1,
-  not 6); it is what DeleteClone sweeps the chunk keys from, so it is a max
-  and never a `+= 1`, and lowering it would orphan them; `BumpSpRev`. Reply
+  not 6); it is a max and never a `+= 1`. *Amended 2026-09-16:* it used to be
+  what DeleteClone swept the chunk keys from; the drain derives its position
+  from the surviving keys instead, so `bm_cnt` is now write-only bookkeeping
+  (risks_and_gaps.md RK10). It opens with `loadLiveClone`, so an append to a
+  latched clone is `FAILED_PRECONDITION` (CLD1); `BumpSpRev`. Reply
   `clone_id`.
 
 ### 5.9 Transfers (§8.10)
@@ -1004,7 +1043,9 @@ the retry succeed, which is what a precondition means.
 * **AG1 — placement.** Agent calls happen strictly outside STMs (§5.8):
   *before* the STM for `CreateDiskNode`/`CreateControllerNode` (`Get*Size`),
   *after* the resolving STM for `Inspect*` and `Get*Bitmap`, *between* the
-  two STMs for `DeleteClone`/`FinishMigration` with `force == false`. When a
+  two STMs for `DeleteClone`/`FinishMigration` with `force == false` — except
+  that since 2026-09-16 a `DeleteClone` whose clone is ALREADY `deleting`
+  answers in phase 1 and makes no agent call at all (§5.8, CLD3). When a
   call needs `cluster_id`, a plain pre-read of ClusterConf supplies it; the
   in-STM read stays authoritative.
 * **AG2 — connection.** Per call:
@@ -1153,21 +1194,32 @@ The other 49 RPCs never leave etcd.
    `(slice 5, bm 0)` ⇒ `1` (kills a `max(bm_cnt, src_slice_idx+1)`
    implementation, which would say 6) and `(slice 0, bm 3)` ⇒ `4` (kills any
    other slice-derived one, which would say 1); each of
-   AppendCloneBitmap's five refusals by code, including the boundary triple
+   AppendCloneBitmap's five BOUNDS by code, including the boundary triple
    (an append landing exactly at `len == C` succeeds, one byte more is
    `RESOURCE_EXHAUSTED`, a single `C+1`-byte page is `INVALID_ARGUMENT` even
-   on an empty chunk); and DeleteClone sweeping the chunks of two different
-   slices with the absent pairs harmless. The §5.8 sweep's budget is covered
-   twice: a pure-arithmetic tripwire —
-   `MaxSliceCntPerSp*MaxCloneBmCnt + 8 ≤ EtcdMaxTxnOps`, so raising either cap
-   fails here rather than on a lab VM — and, because that `+ 8` is only a
-   guess at the transaction's non-chunk overhead, a PROOF against the real
-   etcd: a clone whose whole `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle of
-   chunk keys exists is created, filled and deleted, and all 256 keys are
-   asserted gone. Only the second one can catch a deciding STM that grew a
-   write, and it discriminates: point the package's etcd at etcd's default
-   `--max-txn-ops=128` and the arithmetic tripwire still passes while the
-   ceiling test fails with etcd's own `too many operations in txn request`.
+   on an empty chunk); and the LATCH and its drain removing the chunks of two
+   different slices, with the resume asserted before a single batch has run.
+   The latch's own no-op is pinned twice, because it is decided in two places:
+   the repeat delete in phase 1 (no bump, the same `clone_id` back, and zero
+   `GetCntlrInfo` calls), and the RACED variant in phase 2 — a second
+   `DeleteClone` latching while the first is parked inside its agent call,
+   which is the only way that branch is reachable and which sends no `sp_rev`,
+   GW6 being presence-based. Its consequences are pinned together, since they
+   are one mechanism: while a clone drains, the name is `ALREADY_EXISTS`, the
+   destination thin device is `FAILED_PRECONDITION` naming that clone, and
+   `DeleteStoragePool` refuses with `still holds 1 clones` — asserted with the
+   td name lifted out of `td_name_list` for that one call, or the five-list
+   check's first row would answer instead and the assertion would prove
+   nothing. All three release at the final STM.
+   The §5.8 budget is covered twice, and both halves moved with the sweep
+   (2026-09-16): a pure-arithmetic tripwire — `MaxDelBmPerTxn + 4 ≤
+   EtcdMaxTxnOps`, and the same expression against etcd's own default 128,
+   which is the property that decoupled the deployment flag from the clone
+   shape — and a PROOF against the real etcd: a clone whose whole
+   `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle of chunk keys exists is
+   created, filled, latched and drained, and the 256 keys are asserted to
+   leave in exactly `⌈256 / MaxDelBmPerTxn⌉` batches, none of which rewrote
+   the record. Only the second one can catch a batch that grew a write.
 4. **Agent-path tests**: an in-process fake implementing the generated
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`
@@ -1270,12 +1322,12 @@ passwordless ssh (`sshw "true"`); `bash nohup pkill ss tar df sed awk`
 present; ≥ 1 GiB free under `/var/tmp`; none of the §10.3 ports listening.
 That etcd MUST be started with **`--max-txn-ops=512`**
 (`common.EtcdMaxTxnOps`, §2.1 — the suite is shell and cannot import the
-constant, so the literal carries a comment naming it): step 13's
-`delete-clone` sweeps the clone's chunk keys in one transaction, and etcd's
-default cap of 128 would refuse it. Step 17's `wctl drain-sp` commits D2
-batches of the same family, though sp0's four groups are far below the 20 a
-maximum batch pops, so no case here reaches the cap — the flag is what makes
-the suite run against an etcd configured the way production must be.
+constant, so the literal carries a comment naming it): every etcd serving dnv
+must, for the sp drain's 486-op D2 batch (dnv-worker.md §11.6). NO case here
+comes near the cap — step 13's `delete-clone` latches and its `wctl
+drain-clone` removes three chunk keys, step 17's `wctl drain-sp` pops sp0's
+four groups — so the flag is what makes the suite run against an etcd
+configured the way production must be, not something a case needs.
 etcd readiness is `wait_until WAIT_SHORT` on
 `workerctl --endpoints 127.0.0.1:15379 ping`; each gateway's readiness on
 `gatewayctl --gateway 127.0.0.1:2981<k> ping`.
@@ -1506,8 +1558,14 @@ path. Steps (each = one `stage`):
     would say 3 here and a call-counting `bm_cnt += 1` would say 3 too.
     `get-sp`'s `clone_bm_idx.cl0` is the pair list `["0:0","0:1","2:0"]`
     (decimal `src_slice_idx:bm_idx`, ascending);
-    `get-clone`; `set-clone-tr`; `delete-clone --force` → clone gone and the
-    chunk keys of BOTH slices gone (the nested sweep, §5.8).
+    `get-clone`; `set-clone-tr`; `delete-clone --force` → the LATCH: `deleting
+    true`, the dst namespace already `suspended false`, and the clone key, its
+    three chunk keys and its `clone_name_list` entry ALL still there. Then the
+    repeat delete (no second bump, forced and unforced), the CLD1 refusals
+    (`append-clone-bm`, `set-clone-tr`) and same-name `create-clone` →
+    `ALREADY_EXISTS`, each bracketed no-write. Finally `wctl drain-clone` →
+    clone gone and the chunk keys of BOTH slices gone, which a drain that
+    walked `bm_idx` alone would not manage.
 14. Migration on the first data grp: pick a side id from `get-sp`;
     `create-migr m0` → leg has 2 sides (dst `provisioned false`, distinct
     DN, slot ≠ src), dst-DN accounting + `dn_rev` bump; `append-migr-bm` ×2

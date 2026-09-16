@@ -440,6 +440,11 @@ message Clone {
     DmCloneConf dm_clone_conf = 9;
     bool auto_resume = 10;
     uint32 bm_cnt = 11;
+    // The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
+    // DeleteClone sets it and returns, and the sp coordinator drains the
+    // chunk keys. Appended, never renumbered — a renumbered field decodes
+    // silently into unknown fields rather than failing.
+    bool deleting = 12;
 }
 
 // {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}

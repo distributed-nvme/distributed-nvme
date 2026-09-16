@@ -271,9 +271,10 @@ type spWorker struct {
 	desiredCh chan desiredState
 	// reportCh carries the children's flip and leg-row reports.
 	reportCh chan spReport
-	// drainCh is the sp drain's own tick (§0 #8, drain.go): a committed drain
-	// step that left work behind posts one token here, so the next step runs at
-	// once instead of at the next cntlr_interval. Capacity one, never blocking.
+	// drainCh is the two drains' own tick (drain.go, clonedrain.go): a
+	// committed drain step that left work behind posts one token here, so the
+	// next step runs at once instead of at the next cntlr_interval. Capacity
+	// one, never blocking — a burst of steps cannot queue passes up.
 	drainCh chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -387,8 +388,9 @@ func (w *spWorker) run() {
 		case rep := <-w.reportCh:
 			w.handleReports(rep)
 		case <-w.drainCh:
-			// The sp drain's self-tick (drain.go): one more pass, which
-			// re-derives the next step from what the last one left (SPD8).
+			// The drains' self-tick (SPD6, CLD12): one more pass, which
+			// re-derives the next step from what the last one left (SPD8 for
+			// the SP, CLD7 for a clone).
 			w.reactionPass(newTraceCtx(w.ctx, w.seed))
 		case <-ticker.C:
 			w.tick()
@@ -870,6 +872,18 @@ func (w *spWorker) buildCntlrPlans(
 	for _, cloneName := range conf.GetCloneNameList() {
 		clone, ok := state.Clones[cloneName]
 		if !ok {
+			continue
+		}
+		if clone.GetDeleting() {
+			// CLD5: a LATCHED clone is fully absent from every cntlr's
+			// clone_list and from the primary's chunk-push plans, at every
+			// sp_level. Full absence is deliberately distinct from level
+			// suppression: a level-suppressed clone (SP_LEVEL_NO_CLONE) keeps
+			// its local chunk files for a later rebuild, while a deleting one
+			// must lose them — and the cn agent's removed-clone retire path
+			// drops them precisely when the clone id is absent from the plan.
+			// The bitmap pusher runs no fetches for an excluded clone, so no
+			// drain/push race exists either.
 			continue
 		}
 		clones = append(clones, clone)

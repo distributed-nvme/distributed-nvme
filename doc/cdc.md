@@ -634,9 +634,8 @@ Aborts with a message on the first failure:
 2. s1: ports 13379/13380/18009-18012 free; `$WORK` writable. The etcd this
    suite starts carries `--max-txn-ops=512` (`common.EtcdMaxTxnOps`) like
    every other etcd serving dnv: the requirement comes from the sp drain's D2
-   batch (architecture.md §8.4) and the gateway's `DeleteClone` chunk sweep
-   (§8.9), neither of which this suite ever drives, but the flag is uniform
-   across the fleet and the suite brings its own etcd.
+   batch (architecture.md §8.4), which this suite never drives, but the flag
+   is uniform across the fleet and the suite brings its own etcd.
 3. s2: `modprobe nvmet nvmet-tcp` succeeds; `/sys/kernel/config/nvmet`
    present; `dmsetup targets` lists `zero`; ports 14420-14423 free.
 4. h1/h2: `modprobe nvme-tcp` succeeds; `nvme-cli` present (version logged);

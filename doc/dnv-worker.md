@@ -493,6 +493,8 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
      | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (§7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
      | `FinishSpDelete(cid, shard, spId, spName)` | the drain checks; `cntlr_id_list` and `slice_id_list` both empty; `SpRev` and `SpGlobal` exist | delete `SpConf`, `SpName`, `SpRev`; `SpGlobal.shard_bucket[shard] -= 1`. The ONE op that does not bump `SpRev` — it deletes the key, which is the shard worker's stop signal (§8.4) |
+     | `DrainCloneBm(cid, shard, spId, spName, cloneName, cloneId, chunks []BmChunk) (batchSize int)` | the CLONE drain checks of §11.7 (CLD2: SpConf exists and is not itself deleting, `sp_id` unchanged, Clone exists, `clone_id` unchanged, `deleting == true`); `len(chunks) <= MaxDelBmPerTxn` | `Del` each named `CloneBitmap` key — nothing else, and nothing the caller did not name; the `Clone` record is NOT rewritten (`bm_cnt` untouched); bump `SpRev`. The return is the SIZE of the batch it was handed, never a count of keys that were still there — a `Del` is an idempotent pop, so the loser of an accepted two-owner overlap reports a full batch and removes nothing. An empty batch is a no-op that writes and bumps nothing |
+     | `FinishCloneDelete(cid, shard, spId, spName, cloneName, cloneId)` | the clone drain checks | delete the `Clone` key AND remove the name from `clone_name_list` in the same STM; bump `SpRev` (the SP outlives the clone, so this one bumps) |
 
 MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
      returned from inside the STM callback, it aborts without commit (EU4).
@@ -1572,8 +1574,14 @@ SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       describing key, so at every commit boundary the keys and the budgets
       agree exactly.
 
-      **Transaction budget.** Per D2 batch, with D the distinct DNs it
-      touches: compares `3 + 2D`, success ops `3 + 4D`, total `6 + 6D`, and
+      **Transaction budget.** etcd caps a transaction at
+      `max(len(Compare), len(Success), len(Failure))`, and `etcdutil`'s
+      serializable-snapshot STM compares every key it READ *and* every key it
+      WROTE, so the compare count is what binds. Per D2 batch, with D the
+      distinct DNs it touches: `3 + 2D` reads (SpConf, Slice, SpRev; per DN
+      DnConf + DnRev) and `3 + 4D` writes (Slice put/del, SpConf put, SpRev
+      put; per DN DnConf put, capacity del + put, DnRev put), hence `6 + 6D`
+      compares against `3 + 4D` success ops, and
       `D ≤ MaxDelGrpPerTxn × (MaxAllocLegPerGrp + MaxSpareLegPerGrp)` — 80
       today, so `486 ≤ EtcdMaxTxnOps = 512`. Sides contribute one DN each
       because a latched SP has no migrations and therefore no two-side legs.
@@ -1581,6 +1589,164 @@ SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       the tripwire pair that keeps it so: an arithmetic assertion over the
       NAMED constants (`gateway/txnbudget_test.go`) and a maximum-shape batch
       committed against a real etcd (`model/drain_test.go`).
+
+### 11.7 The clone drain [CLD]
+
+*Added 2026-09-16, the sp drain's sibling. Same `SPD`-style convention: the ids
+are the design's and keep their `CLD` prefix, so one id spells the rule in the
+code (`model/clonedrain.go`, `worker/clonedrain.go`) and here.*
+
+`DeleteClone` no longer sweeps a clone's bitmap chunks. It LATCHES the clone —
+`deleting = true`, the destination namespaces resumed, one `BumpSpRev`
+(architecture.md §8.9, gateway.md §5.8) — and the sp coordinator removes the
+chunk keys in batches of a constant size and then the clone itself. The sweep it
+replaced was `src_slice_cnt × bm_cnt` deletes in one transaction, 256 at today's
+16×16 and the founding justification for `EtcdMaxTxnOps = 512`; both ceilings
+are expected to grow, and a batch is `MaxDelBmPerTxn + 4 = 68` ops whatever they
+become.
+
+CLD1. **Live-clone gate.** `AppendCloneBitmap` and `UpdateCloneTrConf` refuse
+      `FAILED_PRECONDITION` when `deleting` is true. `DeleteClone` is the only
+      RPC allowed to act on a deleting clone, and it acts as a no-op (CLD3).
+      The append half is load-bearing: a racing append could otherwise write a
+      chunk key behind the drain, and CLD9's emptiness guard rests on "after
+      the latch, no chunk key can ever appear again". `CreateClone` needs no
+      check — the surviving `Clone` key keeps same-name creation at
+      `ALREADY_EXISTS` until the final STM.
+
+CLD2. **Load and refuse, never skip.** Each drain op loads the SpConf and the
+      Clone inside its OWN STM and returns an `ErrPrecondition` when the SP is
+      missing, its `sp_id` changed, the SP is itself `deleting`, the Clone is
+      missing, its `clone_id` changed, or the Clone's `deleting` is false. It
+      is SPD2's shape verbatim and inverted the same way: normal clone RPCs
+      (CLD1) require the flag CLEAR, drain ops require it SET. The SP-deleting
+      arm cannot fire — `DeleteStoragePool` needs an empty `clone_name_list`
+      and a draining clone keeps its name there — and is guarded anyway, so
+      the two drains can never run on one SP at once.
+
+CLD3. **The repeat delete is a no-op, checked in PHASE 1.** OK, no writes, no
+      bump, and no agent call, with or without `force`. The placement is the
+      rule: after the latch the CN has retired the stack, so `GetCntlrInfo`
+      reports no dm-clone and a hydration check would wedge every repeat
+      delete in `FAILED_PRECONDITION` for ever. Phase 1 therefore runs GW6's
+      token check itself, since it is the decision there and `openSpRead`
+      skips it.
+
+CLD4/CLD6. **The latch, and what it does not write.** Exactly three writes:
+      the dst-namespace resume, the `Clone` put with `deleting = true`, and
+      one `BumpSpRev`. It does not delete the Clone key, does not touch a
+      chunk key and does not shrink `clone_name_list` — `model.LoadSp` fetches
+      clones by iterating that list, so a dangling name would break every
+      later load (the sp drain's slice-final rule, applying verbatim). The
+      RESUME rides the latch so that it and CLD5's exclusion arrive in one
+      `SpRev` bump, hence one syncup: deferred to the end of the drain, CN16's
+      `auto_resume` override would vanish the moment the clone left the plan
+      while etcd still said suspended, and the destination namespace would go
+      dark for the whole teardown — a host-visible outage the one-shot never
+      had. (Force-deleting an unhydrated clone exposes unhydrated data on the
+      resumed namespace: unchanged from before, `risks_and_gaps.md` RK3.)
+
+      **The latch is one-way**, SPD5 scoped to a clone: no code path in any
+      component writes `deleting = false` on an existing `Clone`, so the flag
+      is a point of no return across restarts of every component. CLD9's
+      emptiness argument rests on it — with an un-latch, chunk keys could
+      appear again after the scan that found none — and so do CLD1 and CLD3.
+
+CLD5. **Exclusion is the teardown.** From the first post-latch fan-out the
+      deleting clone is absent from every cntlr's `clone_list` and from the
+      primary's chunk-push plans (BM4 targets), at every `sp_level`. Full
+      absence is deliberately distinct from level suppression: a
+      level-suppressed clone (`SP_LEVEL_NO_CLONE`) keeps its local chunk files
+      for a later rebuild, while a deleting one must lose them, and the cn
+      agent's removed-clone retire path (`cnagent.md` CN18) drops them
+      precisely when the clone id is absent from the plan. That path is the
+      whole physical teardown — ns-devs repointed, dm-clone and metadata
+      wrapper removed, arena units freed, source disconnected, local chunk
+      files dropped — so there are ZERO agent changes: to an agent this is
+      indistinguishable from the old post-delete syncup. The bitmap pusher
+      runs no fetches for an excluded clone, so no drain/push race exists.
+
+CLD7. **Cadence and step selection.** The drain runs ALONGSIDE the normal
+      reaction pass, not instead of it — this is the deliberate deviation from
+      SPD6, whose latched SP runs only drain steps: here the SP is healthy and
+      its other children must keep converging. Each pass runs at most one step
+      per deleting clone, bounded by `MaxCloneCntPerSp`, in
+      `clone_name_list` order; the steps run ahead of EVERY gate of the pass —
+      the cluster-conf cache lookup, `ValidateClusterConf`, the SP's own
+      `bdev_conf` gate and AR3's suppression — because none of them applies. A
+      doomed clone drains at any `sp_level`; the drain reads no geometry and no
+      cluster conf (unlike the sp drain's D2, which maintains DN capacity keys
+      and therefore stays behind the ladder's gate); and a gate that could stop
+      it would strand a latched clone permanently, the latch being one-way.
+      The derivation, from the pass's snapshot alone: surviving chunk keys in
+      `SpState.CloneBmIdx` ⇒ one batch on the LOWEST `MaxDelBmPerTxn` of them
+      in `(src_slice_idx, bm_idx)` order; none ⇒ the final STM. No other state
+      is consulted — not `bm_cnt`, not the rectangle, not a progress key — so
+      crash, restart and handoff all resume through it. Ascending order is
+      free to choose (chunk keys are independent and self-positioning, unlike
+      the sp drain's tail-pop) and is picked for determinism.
+
+CLD8. **The batch.** Deletes ONLY keys named by the caller's keys-only
+      snapshot scan, at most `MaxDelBmPerTxn` of them, each `Del` an
+      idempotent pop; refuses a larger batch, so a caller that handed over its
+      whole scan could not silently rebuild the unbounded sweep. It MUST NOT
+      rewrite the Clone record — `bm_cnt` untouched — and ends in `BumpSpRev`.
+      Physical effect: none. The CN dropped its local chunk files at retire,
+      agents never read etcd, and an excluded clone has no pusher.
+
+CLD9. **The final STM.** Del the Clone key, put the SpConf with the name
+      removed from `clone_name_list`, `BumpSpRev` — the two removals together
+      and never separately. It is invoked only when the derivation's scan found
+      zero surviving chunk keys, and that emptiness is stable even though an
+      STM cannot range: after the latch commits no chunk key can ever appear
+      again (CLD1 refuses an append inside an STM that reads the Clone, and an
+      append that read the Clone BEFORE the latch fails its compare because
+      the latch rewrote that key), and batches only delete. Unlike the sp
+      drain's D3 this BUMPS `SpRev`: the SP outlives the clone, so the bump is
+      every mutator's normal epilogue rather than a stop-signal deletion.
+
+CLD10. **Asynchrony and retry.** SPD13 verbatim: no drain STM waits on,
+      calls or verifies any agent; etcd emptiness MAY outrun physical
+      teardown, and a CN that is down keeps its stale stack until its next
+      syncup, backstopped by the existing wrapper sweeps. A failed step
+      commits nothing, bumps nothing and retries on the next RW12 tick,
+      forever; progress has exactly two user-visible states — `deleting =
+      true`, then `NOT_FOUND` — accepted deliberately, since a max-shape drain
+      is four sub-second transactions.
+
+CLD12. **Termination and the revision contract.** The latch, every batch and
+      the final STM each end in `BumpSpRev` with their own op tag; a repeat
+      delete and a failed step bump nothing. Termination is structural: no
+      committed batch can ever ADD a chunk key (CLD1 closed the only writer),
+      the set is finite, the final STM removes the clone, and a pass that
+      finds no deleting clone runs no drain step, so the drain commits and
+      bumps nothing (that pass's own reactions are unaffected, CLD7) — at
+      most six bumps per deleted clone at today's maximum shape under one
+      owner (1 latch + 4 batches + 1 final). Note the shrink is a property of
+      the SET, not of each batch: the loser of an accepted two-owner overlap
+      commits a batch of keys the winner already popped, so ITS batch shrinks
+      nothing — and still terminates, because its next pass re-scans, sees the
+      winner's deletes and moves on. That is also why the coordinator arms
+      after every committed batch rather than on progress, which is the sp
+      drain's rule (SPD6: "a step that removed nothing does not schedule
+      one") and would be
+      dead code here: a batch reports the size it was handed, never a count of
+      keys it found. A bump invalidates a client's stale GW6 token exactly as
+      `ReplaceCntlr` does today: correct, and not new.
+
+CLD11. **Transaction budget, and its tripwire pair.** Ledger-free, so one line
+      per STM. etcd caps a transaction at
+      `max(len(Compare), len(Success), len(Failure))`, and `etcdutil`'s
+      serializable-snapshot STM compares every key it READ *and* every key it
+      WROTE, so a batch is `3 + (MaxDelBmPerTxn + 1) = MaxDelBmPerTxn + 4 = 68`
+      compares against `MaxDelBmPerTxn + 1 = 65` success ops — 68 is the bound,
+      and it is independent of every ceiling constant. The final STM is 6; the
+      latch is strictly smaller than the transaction it replaced. 68 also fits
+      etcd's DEFAULT `--max-txn-ops` of 128 — prose, not a deployment change:
+      the requirement stays `EtcdMaxTxnOps` for the sp drain's 486-compare
+      batch (§11.6). `gateway/txnbudget_test.go` asserts both bounds from the
+      named constants, and `gateway/clonedrain_test.go` drains the whole 16x16
+      rectangle against a real etcd to pin the batch COUNT.
 
 ---
 
@@ -1612,6 +1778,9 @@ parses them.
 | `sp drain step` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs` or `slice`), `cntlr_cnt` for `cntlrs`; `slice_id`, `grp_cnt`, `slice_done` for `slice` | every committed D1 and D2 step (§11.6). D3 emits `sp drained` instead, so `phase=final` never appears here. Non-normative in the §12 sense — it names no decision — but the §14 drain case counts it, because it is the only record that shows a multi-batch drain advancing |
 | `sp drained` | `cluster_id`, `sp_id`, `sp_name` | D3 committed (SPD12): the SP is gone |
 | `sp drain failed` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs`/`slice`/`final`), `slice_id` for `slice`, `reason?` (an `ErrPrecondition`'s), `error` | a drain step that did not commit (SPD6). Retried on the next tick; there is no terminal-failure state |
+| `clone drain step` | `cluster_id`, `sp_id`, `clone_name`, `clone_id`, `step` (`bitmap`), `chunk_cnt` | every committed clone-drain BATCH (§11.7). `chunk_cnt` is the batch's size, deliberately NOT named `bm_cnt`: `Clone.bm_cnt` is a different number the drain neither reads nor writes (CLD8). The final STM emits `clone drained` instead, so `step=final` never appears here. Non-normative in the §12 sense; §14's case G counts it |
+| `clone drained` | `cluster_id`, `sp_id`, `clone_name`, `clone_id` | the final STM committed (CLD9): the clone is gone |
+| `clone drain failed` | `cluster_id`, `sp_id`, `sp_name`, `step` (`bitmap`/`final`), `clone_name`, `clone_id`, `reason?`, `error` | a clone-drain step that did not commit (CLD10) |
 
 Plus the `etcd *` records of `etcdutil` (§3) and the `grpc client *`
 records of the interceptors (`grpc.md`) — the latter are what an agent's
@@ -1699,6 +1868,38 @@ does).
   DESCRIBING key (refuse) and a missing RECEIVING ledger (skip); two
   concurrent drivers converging with exact ledgers; and SPD14's real-etcd
   ceiling test, one maximum-shape batch against `--max-txn-ops=512`.
+* **clonedrain.go** (§11.7) — CLD7's derivation for all three states, the
+  third being a LIVE clone, which is what stops a pass from draining one, and
+  the "none remain" state built with `bm_cnt` saying 13 — the terminal state
+  of every real drain, and the only fixture that tells a derivation reading
+  the surviving KEYS from one reading the counter; the batch cut and its
+  `(src_slice_idx, bm_idx)` order, from chunks planted DESCENDING so "the
+  lowest" cannot be satisfied by "the first the scan returned"; the drain
+  running in the same pass as a failover (CLD7's deviation from SPD6) and in
+  front of ALL FOUR gates of the pass — a cluster missing from the RW21 cache,
+  an invalid stored cluster conf, a suppressed `sp_level` and an unreadable
+  `bdev_conf`; one step per deleting clone per pass with a live sibling
+  untouched; the failed-step record for BOTH steps, the final one included — a
+  swallowed error there would log `clone drained` for a clone still in etcd,
+  which is the record §14 reads as "gone"; arming after a COMMITTED batch and
+  after nothing else — not a failed step, not the final STM (the sp drain's
+  progress guard has no clone twin, CLD12); and CLD5's exclusion at every
+  `sp_level`, from every cntlr's `clone_list` AND from the primary's chunk
+  plans, with a live sibling clone still in both. In `model`: the batch
+  deleting exactly what it was handed and refusing an oversized one; the
+  record left untouched; idempotence and the empty batch; two concurrent
+  drivers converging to NOT_FOUND with only the named benign races; the final
+  STM removing key and name together and bumping; CLD2's guards
+  mutation-tested across both ops in BOTH directions; and the ledger-free
+  property — no DN or CN key moves, no `DnRev`/`CnRev` bump. In `gateway`: the
+  latch's exact write set, the repeat delete pinned in four directions (bump,
+  no bump, the same `clone_id` in the reply, and ZERO `GetCntlrInfo` calls —
+  count calls, do not only order them) plus its RACED variant, the latch going
+  up while the loser is parked inside the agent call, which is the only way to
+  reach the phase-2 check; CLD1 in both directions; the name, the destination
+  thin device and `sp delete` all blocked until the final STM and all released
+  by it; and CLD11's real-etcd proof, the whole 16x16 rectangle drained in
+  exactly four batches.
 * **clusterconf.go** — key→id derivation, the entry handed back exactly as
   stored, an invalid conf kept in the cache rather than dropped, delete.
 
@@ -1839,13 +2040,14 @@ Preflight (fail fast, install nothing):
 The suite brings its own etcd, so it owns etcd's deployment requirements
 too: the §14.3 launch line passes `--max-txn-ops=512` because every etcd
 serving dnv must (`common.EtcdMaxTxnOps`; the sp drain's D2 batch is 486 ops
-at the maximum shape and `DeleteClone` sweeps up to `MaxSliceCntPerSp ×
-MaxCloneBmCnt` = 256 chunk keys in one transaction, while etcd's default cap
-is 128). The script carries the number as a literal with that constant named
-in a comment — a shell suite cannot import `common`. The worker's own cases
-stay far below the cap — the drain case's SP has four groups, not the 20 a
-maximum batch pops — so the flag is there to run against an etcd configured
-the way production is, not because a case needs it.
+at the maximum shape while etcd's default cap is 128 — `DeleteClone`'s
+256-key rectangle sweep was the founding justification and is gone since
+2026-09-16, §11.7's batches being 68 ops). The script carries the number as a
+literal with that constant named in a comment — a shell suite cannot import
+`common`. The worker's own cases stay far below the cap — case G's widest
+slice pops 21 groups, not the 20 x 4 DNs a maximum batch touches, and its
+clone batches are 64 deletes — so the flag is there to run against an etcd
+configured the way production is, not because a case needs it.
 
 ### 14.5 Identity plan
 
@@ -1878,7 +2080,7 @@ the way production is, not because a case needs it.
 | `low_water_mark_pct` | 50 (case D sets it per step) | |
 | `extent_size` | 64 MiB (`MinDnExtSize`) | irrelevant to fakes; keeps `GrowSlice` math small |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
-| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-op D2 batch and below `DeleteClone`'s 256-key chunk sweep |
+| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-op D2 batch. (`DeleteClone`'s 256-key sweep was the founding justification and is gone since 2026-09-16 — §11.7's batches are 68 ops.) |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which
@@ -1927,6 +2129,8 @@ on any error.
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
 | `set-free` | `dn\|cn --id --free-ext N` | rewrites `free_ext_cnt` + capacity key; no rev bump |
 | `set-deleting` | `--sp` | *added 2026-09-15:* `SpConf.deleting = true` + one `BumpSpRev` — `DeleteStoragePool`'s LATCH (architecture.md §8.4), so a case can drive the §11.6 drain without a gateway. Already latched ⇒ a no-op with no second bump (SPD3). It does NOT apply the five-empty-lists precondition: that gate is the gateway's, and re-implementing a public precondition in a driver is how the two drift apart |
+| `set-clone-deleting` | `--sp --name` | *added 2026-09-16:* `Clone.deleting = true` + one `BumpSpRev` — `DeleteClone`'s LATCH (architecture.md §8.9), so a case can drive the §11.7 drain without a gateway. Already latched ⇒ a no-op with no second bump (CLD3). It deliberately does NOT resume the destination namespaces the way the RPC does: that write is the gateway's |
+| `drain-clone` | `--sp --name [--max-steps N]` | *added 2026-09-16:* CLD7's derivation in a loop over `model.DrainCloneBm` / `FinishCloneDelete` — the GATEWAY suite's stand-in, as `drain-sp` is. This suite uses it only with `--max-steps 1`, to BUILD a partially drained clone rather than race one (case G step 6); c0's whole drain in step 5 is the real coordinator's |
 | `drain-sp` | `--sp [--max-steps N]` | *added 2026-09-15:* SPD8's derivation in a loop over `model.DrainSpCntlrs` / `DrainSpSlice` / `FinishSpDelete`, with no pass and no timer — the stand-in the GATEWAY suite uses, since it runs no worker (gateway.md §2.4). This suite uses it only with `--max-steps 1`, to BUILD a partially drained SP rather than race one; running out of steps is reported in `sp_deleted` and is never fatal |
 | `get` | `--key "<full key>"` | prints the value as protojson, choosing the message type from the key's second field |
 | `get-dn`/`get-cn`/`get-rev`/`get-sp`/`get-cntlr`/`get-slice`/`get-td` | ids | typed reads (`get-sp` = `SpConf` + every `Cntlr` + every `Slice` + every td, one snapshot) |
@@ -2322,6 +2526,27 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    steps, the first with `grp_cnt = 20` — the whole `MaxDelGrpPerTxn` budget
    spent on the DATA tail before the meta group is touched at all. Ledgers
    restored again; `SpGlobal.next_id` is 4.
+5. The CLONE drain (§11.7), in the same case because it shares the coordinator
+   and the fixture machinery: `put-sp sp3` + `put-td` + `put-clone c0` with
+   `src_slice_cnt 5`, then 65 chunk keys (5 slices x bm 0..12) — one more than
+   `MaxDelBmPerTxn`, so the drain provably needs TWO batches. Within
+   `WAIT_SYNCUP` cn0 received a `SyncupCntlr` carrying the clone; then
+   `set-clone-deleting c0`, and within `WAIT_SYNCUP` no `clone` key is left.
+   Assert: zero `clone_bitmap` keys, the name gone from `clone_name_list` (it
+   leaves with the key, in one STM), exactly two `clone drain step` records,
+   one `clone drained`, zero `clone drain failed`; cn0 then receives a
+   `SyncupCntlr` with an EMPTY `clone_list` — CLD5's exclusion observed from
+   the agent's side, which IS the teardown; and sp3 itself is untouched, its
+   slices still there and no DN budget moved, because the clone drain is
+   ledger-free and the SP outlives the clone.
+6. CLD7's resume-after-restart for a clone, built the way step 3 builds the
+   SP's: with the fleet stopped, `put-clone c1` with another 65 chunks,
+   `set-clone-deleting c1`, then `drain-clone c1 --max-steps 1` — exactly one
+   batch, which spends the whole `MaxDelBmPerTxn` budget and leaves ONE chunk
+   key and the clone key behind. Start `w1`-`w3`, wait one grace window; within
+   `WAIT_SYNCUP` c1 is gone, having taken exactly ONE more batch (for the one
+   surviving chunk) and its final STM — the position re-derived from the
+   surviving KEYS, not from `bm_cnt`, which still says 13.
 
 **E — `vote`**
 
@@ -2408,12 +2633,23 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | BM1-BM6 | C |
 | AR1-AR9 | D |
 | SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
+| CLD1-CLD12 | G steps 5-6; CLD1/CLD3's gateway halves and CLD2's guards are unit tests (§13), and the gateway suite owns the latch (gateway.md §10.11 step 13) |
 | MD2-MD6 (through the worker and `workerctl`) | every case; MD6 ops by D |
 | EU1-EU6 | every case |
 | CM1-CM6 | every launch, E (SIGTERM), fleet restarts |
 | LG | every assertion |
 
 ### 14.15 Out of scope (v1)
+
+Two things the clone drain's design asks for are out of reach of every suite in
+the tree and are recorded here rather than silently dropped (§11.7): a HOST IO
+probe against the destination namespace right after the latch — CLD4's
+resume-rides-the-latch probe, which would need a real host and a real CN, so the resume is
+asserted at the etcd level only (case G, and gateway.md §10.11 step 13) — and an
+observation that the coordinator makes NO agent call during a drain (CLD10),
+which the gateway suite's `wctl drain-clone` cannot show because it links no
+agent client, and which case G does not yet stage by stopping a CN across a
+drain.
 
 Real agents (the agent suites); more than one server; a 3-member etcd;
 etcd quorum loss, restore, or compaction races (SW4 is unit-tested only);

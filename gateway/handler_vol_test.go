@@ -2095,8 +2095,11 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 // in place by appending (the pages of one chunk concatenate into the bytes
 // that chunk holds of the slice's bitmap), and bm_cnt is the high-water of
 // bm_idx + 1 over ALL appends across ALL slices — never +1, and never derived
-// from src_slice_idx — because it is what DeleteClone sweeps the chunk keys
-// from and lowering it would orphan them.
+// from src_slice_idx. It used to be what DeleteClone swept the chunk keys
+// from, which is why lowering it would have orphaned them; since the clone
+// drain reads the surviving keys instead (dnv-worker.md §11.7) nothing
+// load-bearing reads it at all (risks_and_gaps.md RK10), and what these cases
+// pin is the RULE — kept because a future reader would inherit it.
 //
 // The first two steps are the mutation-direction cases §9 asks for. A fresh
 // clone's (slice 5, bm 0) leaves bm_cnt at 1, which is what an implementation
@@ -2293,17 +2296,23 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 	})
 }
 
-// TestDeleteCloneDropsChunksAndResumesNs pins §8.9's teardown: the Clone row,
-// EVERY chunk key of the src_slice_cnt x bm_cnt rectangle (an STM cannot
-// range, so the geometry and the count the records carry are the only things
-// that can name them) and the clone_name_list entry go together, and the
-// destination's namespaces are resumed in the same transaction — the clone
-// record is the only thing that remembers why they were suspended.
+// TestDeleteCloneDropsChunksAndResumesNs pins §8.9's teardown across the LATCH
+// and the drain that finishes it (dnv-worker.md §11.7): the Clone row, every
+// chunk key and the clone_name_list entry all go, and the destination's
+// namespaces are resumed — the clone record being the only thing that
+// remembers why they were suspended.
 //
-// The chunks are written on TWO different source slices, so a sweep that still
-// walked bm_idx alone would leave one slice's chunks behind. They are also
-// sparse: bm_cnt 3 makes the sweep cover (s, 0..2) for every s below
-// src_slice_cnt, and every pair no append wrote is deleted harmlessly.
+// One of those four moved when the sweep did, and the test is arranged around
+// it: the namespace resume rides the LATCH, in the same SpRev bump as the
+// exclusion (§0 #5), while the keys go asynchronously. If the resume were
+// deferred to the final STM instead, CN16's auto_resume override would vanish
+// when the clone left the plan while etcd still said suspended, and the
+// destination namespace would go dark for the whole drain — a host-visible
+// outage the one-shot never had.
+//
+// The chunks are written on TWO different source slices, so a drain that
+// walked bm_idx alone would leave one slice's chunks behind, and sparsely, so
+// that no scan can be satisfied by walking a rectangle.
 func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -2351,6 +2360,26 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 		t.Errorf("reply clone_id: got %d, want %d",
 			reply.GetCloneId(), created.GetCloneId())
 	}
+	// The resume is the latch's, so it holds BEFORE any drain step runs.
+	subsystem := env.subsystem(volNqn)
+	if findNs(subsystem, 1).GetSuspended() {
+		t.Errorf("the destination's namespace must be resumed by the latch")
+	}
+	if !findNs(subsystem, 2).GetSuspended() {
+		t.Errorf("a namespace on another td must be left suspended")
+	}
+	// The keys are the drain's, so they are all still there.
+	for _, chunk := range written {
+		key := model.CloneBitmapKey(env.cid, volSpId, "clone-a",
+			chunk.srcSliceIdx, chunk.bmIdx)
+		if !env.exists(key, &pb.CloneBitmap{}) {
+			t.Errorf("chunk (%d, %d) must survive the latch",
+				chunk.srcSliceIdx, chunk.bmIdx)
+		}
+	}
+
+	volDrainClone(env, "clone-a")
+
 	if env.exists(
 		model.CloneKey(env.cid, volSpId, "clone-a"), &pb.Clone{},
 	) {
@@ -2364,9 +2393,9 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 				chunk.srcSliceIdx, chunk.bmIdx)
 		}
 	}
-	subsystem := env.subsystem(volNqn)
+	subsystem = env.subsystem(volNqn)
 	if findNs(subsystem, 1).GetSuspended() {
-		t.Errorf("the destination's namespace must be resumed")
+		t.Errorf("the destination's namespace must stay resumed")
 	}
 	if !findNs(subsystem, 2).GetSuspended() {
 		t.Errorf("a namespace on another td must be left suspended")

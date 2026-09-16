@@ -139,6 +139,7 @@ ClusterConf
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
 | `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv, §8.4/§8.9) | 512 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
+| `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | | |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
 
 ---
@@ -1612,6 +1613,13 @@ resumed ⇒ reverse. Used by the transfer/clone choreography of §11.3. Reply `n
 
 ### 8.9 Clones (destination side of a copy; fig. `090Clone`)
 
+*Amended 2026-09-16: `DeleteClone` latches and the sp-worker drains
+(`dnv-worker.md` §11.7). Every clone MUTATOR but `DeleteClone` —
+`UpdateCloneTrConf` and `AppendCloneBitmap` — fails `FAILED_PRECONDITION` when
+`Clone.deleting == true`; `CreateClone` needs no check of its own, the surviving
+`Clone` key keeping same-name creation refused until the drain's last transaction
+(§8.9 has which code).*
+
 ```mermaid
 flowchart BT
     subgraph pc["Primary Cntlr — clone destination"]
@@ -1680,31 +1688,65 @@ report `RES_STATUS_ERROR` until arena units free up. Callers MUST place
 clones against the per-CN budget, not against `MaxCloneCntPerSp`; a future
 gateway MAY track the budget in etcd.
 
-**DeleteClone** —
+**DeleteClone** — *amended 2026-09-16: the one-shot chunk sweep became a latch plus an
+asynchronous drain (dnv-worker.md §11.7).*
 Errors: `FAILED_PRECONDITION` when `force = false` and hydration is not complete —
 checked outside the STM via `GetCntlrInfo` of the primary
 (`clone_id_to_dm_clone.details` carries the dm-clone status; unreachable agent also ⇒
-`FAILED_PRECONDITION`).
-Action: STM: remove from `clone_name_list`, delete `Clone` + every `CloneBitmap` chunk
-— a nested point-delete sweep over `src_slice_cnt × bm_cnt` pairs, since an STM cannot
-range and absent pairs delete harmlessly — set
-`suspended = false` on every namespace whose `td_id == dst_td_id`, bump `SpRev`. That
-sweep is one of the two reasons every etcd serving dnv must run with
-`--max-txn-ops=512` (`EtcdMaxTxnOps`): its worst case is
-`MaxSliceCntPerSp × MaxCloneBmCnt = 256` deletes plus a handful of other ops, and
-etcd's default cap is 128. The other, and the larger, is the sp drain's D2 batch
-at 486 ops (§8.4). The
-primary reloads those namespaces' `CnNsDevName`s back onto the raid0 (all data now
-local), removes the
-dm-clone first and then its metadata wrapper `CnCloneMetaDmName` (whose arena units
-become free again in the next registry enumeration, [D14]), disconnects the source, and deletes the clone's
-`LocalCloneBmPath` files (§9.6). Reply `clone_id`.
+`FAILED_PRECONDITION`). A delete of a clone whose `deleting` is ALREADY true returns OK
+with no writes, no revision bump and **no agent call** — the check comes first, in phase
+1, because after the latch the CN has retired the stack, so `GetCntlrInfo` no longer
+reports the dm-clone and a hydration check would wedge every repeat delete in
+`FAILED_PRECONDITION` for ever. A stale revision token is still `ABORTED` ahead of it.
+Action: the deciding STM writes exactly three things: `Clone.deleting = true`,
+`suspended = false` on every namespace whose `td_id == dst_td_id`, and one `SpRev` bump.
+It does NOT delete the `Clone` key, does not touch a chunk key, and does not shrink
+`clone_name_list` — the name MUST survive until the final transaction, because
+`model.LoadSp` fetches clones by iterating that list. Reply `clone_id`.
+
+The namespace resume rides the LATCH rather than the teardown, deliberately: it and the
+fan-out exclusion then arrive in the same `SpRev` bump, hence the same syncup. Deferred
+to the end of the drain, CN16's `auto_resume` override would vanish the moment the clone
+left the plan while etcd still said suspended, and the destination namespace would go
+dark for the whole teardown — a host-visible outage the one-shot never had.
+
+The teardown is the sp-worker's CLONE DRAIN (dnv-worker.md §11.7): from the first
+post-latch fan-out the clone is absent from every cntlr's `clone_list` and from the
+primary's chunk-push plans, which is what makes the primary reload those namespaces'
+`CnNsDevName`s back onto the raid0 (all data now local), remove the dm-clone first and
+then its metadata wrapper `CnCloneMetaDmName` (whose arena units become free again in
+the next registry enumeration, [D14]), disconnect the source, and delete the clone's
+`LocalCloneBmPath` files (§9.6) — the existing removed-clone retire path, unchanged.
+Meanwhile the worker deletes the chunk keys `MaxDelBmPerTxn` at a time and then the
+`Clone` key together with its `clone_name_list` entry. Consequences, all of them following from the Clone key and its `clone_name_list` entry
+surviving until the last transaction: `clone delete` returns while the clone still
+exists, so an observer polls `GetClone` until `NOT_FOUND`; same-name `CreateClone` keeps
+failing until then — `ALREADY_EXISTS`, or `RESOURCE_EXHAUSTED` on an SP the surviving
+entry holds at `MaxCloneCntPerSp`, that ceiling being `len(clone_name_list)` and checked
+ahead of the name, which is also why an UNRELATED `CreateClone` on a full SP fails for
+the whole drain; a second `CreateClone` onto the SAME destination td
+keeps failing `FAILED_PRECONDITION` ("already the destination of clone …"), because that
+scan walks `clone_name_list`; `DeleteThinDevice` of the destination td keeps failing for
+the same reason; and `DeleteStoragePool` keeps refusing (`storage pool … still holds 1
+clones`) while any clone drains. Top-down teardown therefore becomes delete-clone, poll
+until gone, then delete-td / delete-sp.
+
+Why not one transaction: the sweep it replaced was `src_slice_cnt × bm_cnt` deletes —
+256 at today's 16×16, and the founding justification for `EtcdMaxTxnOps = 512`. Both
+ceilings are expected to grow. A drain batch is `MaxDelBmPerTxn + 4 = 68` ops whatever
+they become, so growth changes the batch COUNT and never the transaction's legality; at
+today's ceilings a maximum-shape drain is four batches. Every clone transaction in the
+system now fits etcd's DEFAULT cap of 128, and the `--max-txn-ops=512` requirement is
+the sp drain's alone (§8.4).
 
 **GetClone** — STM read. **UpdateCloneTrConf** — STM replace `src_tr_conf_list`, bump
 `SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
 
 **AppendCloneBitmap** —
-Errors: `INVALID_ARGUMENT` empty bitmap; `INVALID_ARGUMENT`
+Errors: `FAILED_PRECONDITION` when the clone's `deleting` is true (*added 2026-09-16*:
+`DeleteClone` is the only RPC allowed to act on a deleting clone, and a racing append
+could otherwise write a chunk key behind the drain — which is also what makes the
+drain's final emptiness guard stable); `INVALID_ARGUMENT` empty bitmap; `INVALID_ARGUMENT`
 `len(bitmap) > CloneBmChunkBytes` (stateless, judged on this request alone);
 `INVALID_ARGUMENT` `src_slice_idx ≥ Clone.src_slice_cnt`; `INVALID_ARGUMENT`
 `bm_idx ≥ MaxCloneBmCnt`; `RESOURCE_EXHAUSTED`
@@ -1733,8 +1775,12 @@ values are size-limited. A chunk already pushed and acknowledged may keep growin
 
 `bm_cnt` is ONE `uint32`: the high-water of `bm_idx + 1` over ALL appends, across
 slices. It is NOT derived from `src_slice_idx` — on a fresh clone, appending
-`(slice 5, bm 0)` leaves `bm_cnt = 1`, not 6 — and it is what DeleteClone sweeps the
-chunk keys from, so it never lowers.
+`(slice 5, bm 0)` leaves `bm_cnt = 1`, not 6 — and it never lowers.
+*Amended 2026-09-16:* it used to be what DeleteClone swept the chunk keys from, which
+was its stated purpose. The drain derives its position from the SURVIVING KEYS instead
+(dnv-worker.md §11.7), so `bm_cnt` is now maintained by `AppendCloneBitmap` and shown by
+`GetClone` but read by nothing load-bearing — see `risks_and_gaps.md` RK10 before adding
+a reader.
 
 ### 8.10 Transfers (source side of a copy; fig. `100Transfer`)
 
@@ -2803,7 +2849,10 @@ moving ss/ns from `sp1` to `sp2`:
   sets `suspended = false` on the dst td's namespaces, §8.9, which would resume it
   `optimized` over the partial copy and hand the host a second, divergent path);
   then `DeleteClone(force=true)` on sp2 and `DeleteTransfer(force=true)` on sp1
-  (sp1 resumes serving; the sp2 td and its partial bytes remain until deleted).
+  (sp1 resumes serving; the sp2 td and its partial bytes remain until deleted —
+  and since 2026-09-16 the `DeleteClone` only LATCHES, §8.9, so deleting that td
+  means polling `GetClone` to `NOT_FOUND` first: the dst-td guard walks
+  `clone_name_list`, which the drain shrinks in its last transaction).
   **Aborting after the cutover discards every write served through sp2**: with
   `auto_resume` the sp2 namespace became the serving path at `CreateClone`, its
   writes live only on the abandoned sp2 td, and sp1 resumes from its retained
@@ -2991,13 +3040,17 @@ dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f \
 ```
 
 **etcd deployment requirement.** Every etcd node serving dnv MUST run with
-`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. Two
-transactions are above it: the sp drain's D2 batch, `6 + 6·MaxDelGrpPerTxn·
-(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 ops at the maximum shape (§8.4,
-dnv-worker.md §11.6 — the larger of the two, and the one the number is sized by),
-and DeleteClone's deciding transaction, which sweeps up to
-`MaxSliceCntPerSp × MaxCloneBmCnt` = 256 chunk deletes plus the handful of other
-ops in the same transaction (§8.9).
+`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. The
+transaction the number is SIZED by is the sp drain's D2 batch,
+`6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 ops at the
+maximum shape (§8.4, dnv-worker.md §11.6) — the largest bounded one in the system.
+It is not the only one above the default: `CreateStoragePool` writes a whole SP in
+one transaction and passes 128 well before its own maximum shape, and it has no
+constant to tripwire because `slice_cnt` and `init_ext_cnt` are the request's.
+DeleteClone's `MaxSliceCntPerSp × MaxCloneBmCnt` = 256-key rectangle sweep was the
+requirement's founding justification and is gone: since 2026-09-16 the clone drain
+removes those keys in 68-op batches, which fit the default (§8.9,
+dnv-worker.md §11.7).
 This is not something
 dnv can set from the client side — it is a server flag, so it belongs in the etcd
 deployment alongside the endpoints above.
@@ -3485,6 +3538,22 @@ own amendment sections are the surviving record.
   now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
   carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
   **[D14]**.
+* **clone incremental deletion (2026-09-16)** — `DeleteClone` became a LATCH too:
+  it commits `deleting = true`, the dst-namespace resume and one `SpRev` bump, and the
+  sp-worker removes the chunk keys `MaxDelBmPerTxn` at a time and then the clone
+  (`dnv-worker.md` §11.7, rules `CLD1`–`CLD12`). The sweep it replaced was the
+  `src_slice_cnt × bm_cnt` rectangle in one transaction — 256 deletes at today's 16×16,
+  and the founding justification for `EtcdMaxTxnOps = 512`. A batch is now 68 ops
+  whatever the ceilings become, so every clone transaction in the system fits etcd's
+  default cap and the 512 requirement is the sp drain's alone. §8.9 (its new lead-in note,
+  DeleteClone's Errors and Action, AppendCloneBitmap's Errors, and the `bm_cnt`
+  sentence), §2.1 (`MaxDelBmPerTxn`) and the `Clone.deleting` field follow; the exclusion that
+  performs the physical teardown reuses the existing removed-clone retire path, so there
+  are zero agent changes. The namespace resume stays synchronous with the RPC,
+  deliberately. New risk-register entry `RK10`. §11.3's abort walkthrough also follows:
+  the destination thin device is held for the whole drain, so deleting it now needs the
+  poll first — a consequence enumerated here, in `gateway.md` §5.8 and in `dnvctl.md`'s
+  `clone delete` row, all three of which list it beside the name and `sp delete`.
 * **sp incremental deletion (2026-09-15)** — `DeleteStoragePool` became a LATCH:
   it commits `deleting = true` plus one `SpRev` bump and returns, and the sp-worker
   drains the SP in transactions of a constant size (`dnv-worker.md` §11.6, rules
@@ -3558,9 +3627,11 @@ own amendment sections are the surviving record.
   `(src_slice_idx, bm_idx)`: §2 constants, §4.6 (`LocalCloneBmPath` gains a segment),
   §5.3 key table, §8.9 (`AppendCloneBitmap`'s five bounds incl. the new
   `RESOURCE_EXHAUSTED` chunk overflow, `bm_cnt` as a cross-slice high-water of
-  `bm_idx+1`, DeleteClone's nested sweep), §8.13 (the aligned-paging convention),
-  §9.3, §9.6 (whole section), §13 (the new `--max-txn-ops=512` etcd deployment
-  requirement DeleteClone's sweep forces) and **[D8]** now describe the pair.
+  `bm_idx+1`, and — until the 2026-09-16 clone drain replaced it — DeleteClone's
+  nested sweep), §8.13 (the aligned-paging convention),
+  §9.3, §9.6 (whole section), §13 (the `--max-txn-ops=512` etcd deployment
+  requirement DeleteClone's sweep forced, which the clone drain has since handed
+  over to the sp drain) and **[D8]** now describe the pair.
   `BitmapInfo` gains `chunk_id_list`, which clones report instead of `bm_idx_list`.
   Migration bitmaps are untouched, and the proto renumbering is deliberately
   wire-incompatible with old peers: there is no compatibility path. Old 6-field clone

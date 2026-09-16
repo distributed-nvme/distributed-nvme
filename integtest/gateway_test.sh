@@ -56,15 +56,15 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4).
-# Two transactions are above etcd's default cap of 128: the sp drain's D2
-# batch, 486 ops at the maximum shape (dnv-worker.md §11.6 — the larger, and
-# the one the number is sized by), and DeleteClone's sweep of a clone's whole
-# src_slice_cnt x bm_cnt chunk rectangle, MaxSliceCntPerSp x MaxCloneBmCnt =
-# 256 point deletes plus a handful of other ops. Step 13 reaches the second;
-# step 17's `wctl drain-sp` commits batches of the first family but nowhere
-# near its ceiling (sp0 has four groups, not twenty). The suite is shell and
-# cannot import the constant, so the literal is repeated here; it must track
-# common/constants.go.
+# ONE transaction in dnv is above etcd's default cap of 128 and bounded by a
+# constant: the sp drain's D2 batch, 486 COMPARES at the maximum shape
+# (dnv-worker.md §11.6), which is what the number is sized by. Step 17's
+# `wctl drain-sp` commits batches of that family but nowhere near its ceiling
+# (sp0 has four groups, not twenty), and step 13's `wctl drain-clone` commits
+# clone-drain batches, bounded at MaxDelBmPerTxn + 4 = 68 ops and here only
+# three deletes, which fit etcd's default and are not what this flag exists
+# for (CLD11). The suite is shell and cannot import the constant, so the
+# literal is repeated here; it must track common/constants.go.
 ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-gateway-integtest
@@ -246,9 +246,11 @@ gwx_at() { # <host:port> <UPPER_SNAKE code> <args…>
 
 # wctl is the ground-truth reader (§10.9): the raw decoded etcd state, read
 # back by a binary that is NOT the code under test. Its only writes in this
-# suite are the three worker-role stand-ins of §2.4 — set-created,
-# set-provisioned and (since 2026-09-15) drain-sp, which finishes the teardown
-# `delete-sp` now only latches.
+# suite are the worker-role stand-ins of §2.4 — set-created, set-provisioned
+# and, since the two delete RPCs became latches, drain-sp (2026-09-15) and
+# drain-clone (2026-09-16), which finish the teardowns `delete-sp` and
+# `delete-clone` now only start. Every drain step bumps SpRev, so a case that
+# holds a token must `refresh_rev` after one, exactly as after a mutator.
 wctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
@@ -2046,8 +2048,11 @@ EOF
 	# A chunk is addressed by the PAIR (src_slice_idx, bm_idx): src_slice_idx
 	# picks the source slice, bm_idx fixes the chunk's byte offset WITHIN that
 	# one slice's bitmap and says nothing about any other slice. bm_cnt is ONE
-	# uint32, the high-water of bm_idx + 1 ACROSS slices, and it is what
-	# DeleteClone sweeps the chunk keys from (§10.11 step 13, §5.8).
+	# uint32, the high-water of bm_idx + 1 ACROSS slices (§10.11 step 13,
+	# §5.8). It used to be what DeleteClone swept the chunk keys from; since
+	# 2026-09-16 the drain reads the surviving keys instead and nothing
+	# load-bearing reads bm_cnt (risks_and_gaps.md RK10), so what the appends
+	# below pin is the RULE, not a consumer of it.
 	#
 	# The three appends below DISCRIMINATE that rule rather than merely
 	# exercising it: a second chunk of the SAME slice must RAISE bm_cnt (a
@@ -2101,27 +2106,70 @@ EOF
 		'.clones.cl0.src_tr_conf_list[0].tr_addr')" "127.0.0.2" \
 		"clone src_tr_conf tr_addr after the update"
 	# --force skips the hydration proof (AG4), which is how a clone whose
-	# source never existed is abandoned. The deciding STM also RESUMES every
-	# namespace backed by the destination td (§8.9 Action) — here the one
-	# step 12's finalize retired — so a delete can never leave a namespace
-	# ANA-inaccessible with no clone left to explain why.
-	#
-	# The chunk sweep is a NESTED loop over the src_slice_cnt x bm_cnt
-	# rectangle (§5.8), so the three keys above — two of slice 0 and one of
-	# slice 2 — must ALL be gone; a sweep that only walked bm_idx 0..bm_cnt-1
-	# of slice 0 would leave "2:0" orphaned behind.
+	# source never existed is abandoned. Since 2026-09-16 the deciding STM
+	# LATCHES instead of sweeping (§5.8): it sets `deleting`, RESUMES every
+	# namespace backed by the destination td (§8.9 Action) — here the one step
+	# 12's finalize retired — and returns. The resume rides the latch and not
+	# the drain on purpose: deferred, the destination namespace would go dark
+	# for the whole teardown.
+	local latchRev
 	out=$(gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0 --force)
 	refresh_rev sp0
+	latchRev=$SP_REV
 	assert_field "$out" '.clone_id' "$cloneId" "delete-clone reply clone_id"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.deleting')" "true" \
+		"cl0 deleting after delete-clone"
+	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "false" \
+		"the destination td's namespace was resumed by the LATCH"
+	assert_eq "$(key_count clone)" "1" "the clone key survives the latch"
+	assert_eq "$(key_count clone_bitmap)" "3" \
+		"every chunk key survives the latch"
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | length')" \
+		"1" "the name survives the latch (LoadSp iterates the list)"
+	# CLD3: a repeat delete is an OK no-op — no bump AND no write at all,
+	# forced or not. The store-revision bracket is the second witness: an
+	# unchanged SpRev would also hold for a delete that rewrote the Clone key
+	# with the same flag.
+	assert_no_write "repeat delete-clone, unforced" \
+		gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0
+	assert_no_write "repeat delete-clone, forced" \
+		gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0 --force
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$latchRev" \
+		"a repeat delete-clone must not bump SpRev"
+	# CLD1: every other clone mutator refuses while it drains, and the name is
+	# not reusable until the final STM.
+	assert_no_write "append-clone-bm on a latched clone" \
+		gwx FAILED_PRECONDITION append-clone-bm --sp sp0 --rev "$SP_REV" \
+		--name cl0 --src-slice-idx 0 --bm-idx 3 --bm-hex ff
+	assert_no_write "set-clone-tr on a latched clone" \
+		gwx FAILED_PRECONDITION set-clone-tr --sp sp0 --rev "$SP_REV" \
+		--name cl0 --src-tr-addr 127.0.0.3
+	assert_no_write "create-clone of a latched name" \
+		gwx ALREADY_EXISTS create-clone --sp sp0 --rev "$SP_REV" --name cl0 \
+		--dst-td t1 --src-nqn "$srcNqn" --src-idx 1 --src-slices 16 \
+		--src-stripe 1048576 --src-block 1073741824
+	# The drain is the sp coordinator's, and this suite runs no worker: the
+	# worker-role stand-in finishes it, exactly as `wctl drain-sp` does for the
+	# sp drain. The REAL coordinator draining a real clone is dnv-worker.md
+	# §14's case G.
+	out=$(wctl drain-clone --sp sp0 --name cl0)
+	assert_eq "$(jq_of "$out" '.clone_deleted')" "true" \
+		"the drain reached its final STM"
+	assert_eq "$(jq_of "$out" '.chunk_cnt')" "3" \
+		"the drain removed all three chunk keys"
+	refresh_rev sp0
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones | keys | length')" "0" \
 		"the clone record is gone"
-	assert_eq "$(key_count clone)" "0" "clone keys after the delete"
+	assert_eq "$(key_count clone)" "0" "clone keys after the drain"
+	# The three keys — two of slice 0 and one of slice 2 — are ALL gone: a
+	# drain that walked bm_idx alone would leave "2:0" orphaned behind.
 	assert_eq "$(key_count clone_bitmap)" "0" \
-		"the chunk keys of BOTH slices are gone after the delete"
+		"the chunk keys of BOTH slices are gone after the drain"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | length')" \
-		"0" "sp0 clone_name_list after the delete"
+		"0" "sp0 clone_name_list after the drain"
 	assert_field "$(smoke_ns sp0 "$nqn" 1)" '.suspended' "false" \
-		"the destination td's namespace was resumed by the delete"
+		"the destination td's namespace stays resumed"
 
 	# -------------------------------------------------------------------
 	stage 14 "migration on the first data group: create, bitmap, cancel, finish"
@@ -4247,6 +4295,14 @@ case_faults() {
 	out=$(gw delete-clone --sp sp0 --rev "$SP_REV" --name cl0)
 	assert_field "$out" '.clone_id' "$cloneId" "delete-clone returns cl0's id"
 	refresh_rev sp0
+	# The proof let the LATCH through, which is all the RPC does now (§5.8);
+	# the drain that finishes it is the coordinator's, stood in for here.
+	assert_field "$(sp_json sp0)" '.clones.cl0.deleting' "true" \
+		"cl0: the proven delete latched it"
+	wctl drain-clone --sp sp0 --name cl0 >/dev/null
+	# Every drain step bumps SpRev (CLD12), so the cached token has to follow
+	# it exactly as it follows a mutator's.
+	refresh_rev sp0
 	out=$(sp_json sp0)
 	assert_field "$out" '.clones | length' "0" "cl0: the Clone key is gone"
 	assert_field "$out" '.sp_conf.clone_name_list | length' "0" \
@@ -4282,10 +4338,20 @@ case_faults() {
 	assert_field "$out" '.clone_id' "$forceCloneId" \
 		"delete-clone --force returns cl-force's id"
 	refresh_rev sp0
+	# Ground truth, not the reply code: the override must COMMIT its latch with
+	# the CN unreachable. The drain that follows is run by `wctl drain-clone`,
+	# which links no agent client at all — so what it shows is that the etcd
+	# side finishes with the CN down, NOT that the coordinator would make no
+	# agent call (CLD10). That property is only observable where the real
+	# coordinator runs: dnv-worker.md §14 case G.
+	# Bracketed, not dotted: jq reads `.clones.cl-force` as a subtraction.
+	assert_field "$(sp_json sp0)" '.clones["cl-force"].deleting' "true" \
+		"cl-force: --force latched it with the CN unreachable"
+	wctl drain-clone --sp sp0 --name cl-force >/dev/null
+	refresh_rev sp0
 	out=$(sp_json sp0)
-	# Ground truth, not the reply code: the override must COMMIT.
 	assert_field "$out" '.clones | length' "0" \
-		"cl-force: --force deleted the Clone key with the CN unreachable"
+		"cl-force: the drain removed the Clone key"
 	assert_field "$out" '.sp_conf.clone_name_list | length' "0" \
 		"cl-force: it left clone_name_list too"
 	start_fake cn "$cnDir" "$cnAddr" "--size 0"

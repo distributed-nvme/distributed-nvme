@@ -79,8 +79,8 @@ const (
 	MaxAllocLegPerGrp = 2
 	// MaxDelGrpPerTxn is the most groups ONE sp-drain batch removes from one
 	// slice in a single transaction (SPD10, dnv-worker.md §11.6). It bounds
-	// transaction SIZE, not
-	// rate — strictly sequential batches are the pacing — and it is a package
+	// transaction SIZE, not rate — strictly sequential batches are the
+	// pacing — and it is a package
 	// constant rather than configuration for exactly that reason. The §6
 	// arithmetic it must satisfy is
 	//
@@ -89,6 +89,24 @@ const (
 	//
 	// which gateway/txnbudget_test.go asserts from the named constants (SPD14).
 	MaxDelGrpPerTxn = 20
+	// MaxDelBmPerTxn is the most clone-bitmap chunk keys ONE clone-drain batch
+	// deletes in a single transaction (CLD8, dnv-worker.md §11.7). Like
+	// MaxDelGrpPerTxn it bounds transaction SIZE, not rate, and is a package
+	// constant rather than configuration for that reason.
+	//
+	// Chunk removal is ledger-free — no DN or CN accounting, pure point
+	// deletes — so the arithmetic is one line. etcd caps a transaction at
+	// max(len(Compare), len(Success), len(Failure)), and etcdutil's
+	// serializable-snapshot STM compares every key it READ and every key it
+	// WROTE, so the COMPARE count binds: 3 reads (SpConf, Clone, SpRev) plus
+	// MaxDelBmPerTxn + 1 writes = MaxDelBmPerTxn + 4 = 68, against 65 success
+	// ops. It is independent of every ceiling constant. Growing MaxCloneBmCnt or
+	// MaxSliceCntPerSp therefore grows the batch COUNT and never the
+	// transaction's legality; at today's 16x16 a maximum-shape drain is
+	// ceil(256 / 64) = 4 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
+	// 128 — prose, not a tripwire: the deployment requirement stays
+	// EtcdMaxTxnOps for the sp drain's sake.
+	MaxDelBmPerTxn = 64
 
 	CnCntlidSlotBase = 10000
 	CnCntlidSlotStep = 5000
@@ -285,14 +303,20 @@ const (
 	DefaultEtcdOpTimeout   = 10
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
 	// etcd serving dnv MUST run with --max-txn-ops=512 or higher; etcd's
-	// default is 128. Two transactions are above that default:
+	// default is 128.
 	//
-	//   - the sp drain's D2 batch, 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp +
-	//     MaxSpareLegPerGrp) = 486 ops at the maximum shape (SPD14 — the
-	//     larger of the two, and the one this number is sized by);
-	//   - DeleteClone's deciding transaction, which deletes every clone bitmap
-	//     chunk key at once — MaxSliceCntPerSp × MaxCloneBmCnt = 256 deletes
-	//     plus a handful of other ops (§8.9, U10).
+	// The transaction this number is SIZED by is the sp drain's D2 batch,
+	// 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) = 486
+	// COMPARES at the maximum shape (SPD14, dnv-worker.md §11.6) — etcd caps
+	// on max(len(Compare), len(Success), …), and etcdutil compares every key
+	// it read AND every key it wrote, so that sum is the bound. It is the
+	// largest bounded transaction in the system. CreateStoragePool is also above the default
+	// at a large enough shape, but its size is the REQUEST's (slice_cnt x
+	// init_ext_cnt) and there is no constant to tripwire it against.
+	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt = 256-key rectangle sweep
+	// was this number's founding justification and is gone: the clone drain
+	// replaced it with batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the
+	// default (CLD11, dnv-worker.md §11.7).
 	//
 	// The test etcd launchers and the integtest suites all pass it from here.
 	EtcdMaxTxnOps = 512

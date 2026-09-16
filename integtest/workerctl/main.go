@@ -1080,6 +1080,8 @@ var commands = []command{
 	{"set-provisioned", cmdSetProvisioned},
 	{"set-deleting", cmdSetDeleting},
 	{"drain-sp", cmdDrainSp},
+	{"set-clone-deleting", cmdSetCloneDeleting},
+	{"drain-clone", cmdDrainClone},
 	{"get", cmdGet},
 	{"get-dn", cmdGetDn},
 	{"get-cn", cmdGetCn},
@@ -3413,8 +3415,9 @@ func cmdSetDeleting(g *globals, args []string) {
 // dnv-worker inside a gateway case would make every other assertion in it
 // depend on a converging fleet.
 //
-// The worker suite drives no drain through this: there the real coordinator
-// does it, which is the point of that case.
+// The worker suite drives exactly ONE batch through this, with --max-steps 1,
+// to BUILD a partially drained SP rather than race one; the drain that
+// finishes it is the real coordinator's, which is the point of that case.
 func cmdDrainSp(g *globals, args []string) {
 	fs := newFlagSet("drain-sp", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
@@ -3498,6 +3501,196 @@ func cmdDrainSp(g *globals, args []string) {
 		"slice_cnt":  slices,
 		"sp_deleted": deleted,
 	})
+}
+
+// cmdSetCloneDeleting latches one clone the way DeleteClone does (CLD4,
+// architecture.md §8.9): `deleting = true` plus one BumpSpRev.
+//
+// It deliberately does NOT resume the destination namespaces, which the RPC
+// does in the same transaction: that write belongs to the gateway's request
+// validation and subsystem walk, the §14 suite plants whatever shape a case
+// needs, and re-implementing a public action in a test driver is how the two
+// drift apart. A case that cares about the resume drives the real RPC.
+func cmdSetCloneDeleting(g *globals, args []string) {
+	fs := newFlagSet("set-clone-deleting", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "clone_name (required)")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	spRev := uint64(0)
+	latched := false
+	cloneId := uint64(0)
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		spRev, latched, cloneId = 0, false, 0
+		conf, err := getSpConf(s, cid, target)
+		if err != nil {
+			return err
+		}
+		key := model.CloneKey(cid, target.spId, *name)
+		clone := &pb.Clone{}
+		if !s.Get(key, clone) {
+			return fmt.Errorf("clone %q not found", *name)
+		}
+		cloneId = clone.GetCloneId()
+		if clone.GetDeleting() {
+			// CLD3's no-op, so a case can re-run a stage without a second
+			// bump moving every token it holds.
+			spRev = readSpRevIn(s, cid, target)
+			return nil
+		}
+		clone.Deleting = true
+		s.Put(key, clone)
+		spRev, err = bumpSpRev(s, cid, conf)
+		latched = true
+		return err
+	})
+	if err != nil {
+		die("set-clone-deleting: %v", err)
+	}
+	emit(map[string]any{
+		"sp_name":    target.name,
+		"clone_name": *name,
+		"clone_id":   idHex(cloneId),
+		"latched":    latched,
+		"sp_rev":     spRev,
+	})
+}
+
+// cmdDrainClone runs a latched clone's drain to completion: CLD7's derivation
+// in a loop over model.DrainCloneBm and model.FinishCloneDelete, with no pass
+// and no timer.
+//
+// It is the GATEWAY suite's stand-in for the sp coordinator, which that suite
+// does not run — the clone twin of drain-sp, and there for the same reason: the
+// gateway's end state after a clone delete cannot be asserted without somebody
+// draining. The worker suite drives exactly ONE batch through it, with
+// --max-steps 1, to BUILD case G's restart fixture; the drain that finishes
+// that clone, and every step of the clone before it, is the real coordinator's.
+func cmdDrainClone(g *globals, args []string) {
+	fs := newFlagSet("drain-clone", g)
+	sp := fs.String("sp", "", "sp name or sp_id (required)")
+	name := fs.String("name", "", "clone_name (required)")
+	maxSteps := fs.Int("max-steps", 4096, "run at most this many steps")
+	fs.Parse(args)
+
+	if strings.TrimSpace(*name) == "" {
+		usageDie("--name is required")
+	}
+	ctx, done, cli := g.open()
+	defer done()
+	cid, _ := g.clusterId(ctx, cli)
+	target := resolveSp(ctx, cli, cid, *sp)
+
+	// A clone that was never there is a caller error, not a finished drain:
+	// `clone_deleted: true` must mean "this invocation, or an earlier one,
+	// removed it", so the existence check happens once, up front, and a
+	// missing clone dies rather than reporting success.
+	if !cloneExists(ctx, cli, cid, target.spId, *name) {
+		die("drain-clone: clone %q not found", *name)
+	}
+	steps, chunks := 0, 0
+	deleted := false
+	for steps < *maxSteps {
+		clone := &pb.Clone{}
+		found, err := cli.Get(
+			ctx, model.CloneKey(cid, target.spId, *name), clone)
+		if err != nil {
+			die("drain-clone: %v", err)
+		}
+		if !found {
+			deleted = true
+			break
+		}
+		if !clone.GetDeleting() {
+			die("drain-clone: clone %q is not being deleted", *name)
+		}
+		batch := cloneChunks(ctx, cli, cid, target.spId, *name)
+		if len(batch) > common.MaxDelBmPerTxn {
+			batch = batch[:common.MaxDelBmPerTxn]
+		}
+		if len(batch) == 0 {
+			err = model.FinishCloneDelete(ctx, cli, cid, target.shard,
+				target.spId, target.name, *name, clone.GetCloneId())
+			if err != nil {
+				die("drain-clone: final: %v", err)
+			}
+			deleted = true
+		} else {
+			removed, err := model.DrainCloneBm(ctx, cli, cid, target.shard,
+				target.spId, target.name, *name, clone.GetCloneId(), batch)
+			if err != nil {
+				die("drain-clone: batch: %v", err)
+			}
+			chunks += removed
+		}
+		steps++
+		if deleted {
+			break
+		}
+	}
+	emit(map[string]any{
+		"sp_name":    target.name,
+		"clone_name": *name,
+		"steps":      steps,
+		// chunk_cnt and NOT bm_cnt: `Clone.bm_cnt` is a different number with
+		// a different meaning (the cross-slice high-water of bm_idx + 1), and
+		// two fields of one name in one suite is how an assertion ends up
+		// checking the wrong thing.
+		"chunk_cnt":     chunks,
+		"clone_deleted": deleted,
+	})
+}
+
+// cloneExists reports whether one clone's key is there.
+func cloneExists(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+) bool {
+	found, err := cli.Get(ctx, model.CloneKey(cid, spId, cloneName),
+		&pb.Clone{})
+	if err != nil {
+		die("drain-clone: %v", err)
+	}
+	return found
+}
+
+// cloneChunks is MD3's keys-only scan of one clone's chunk prefix, in ascending
+// (src_slice_idx, bm_idx) order — the surviving set a drain step derives its
+// position from (CLD7).
+func cloneChunks(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	cloneName string,
+) []model.BmChunk {
+	prefix := model.CloneBitmapPrefix(cid, spId, cloneName)
+	keys, _, err := cli.RangeKeys(ctx, prefix)
+	if err != nil {
+		die("drain-clone: %v", err)
+	}
+	out := make([]model.BmChunk, 0, len(keys))
+	for _, entry := range keys {
+		sliceIdx, bmIdx, ok := model.ParseCloneBmKey(entry.Key)
+		if !ok {
+			continue
+		}
+		out = append(out, model.BmChunk{
+			SliceIdx: sliceIdx, Idx: bmIdx, ModRev: entry.ModRev,
+		})
+	}
+	return out
 }
 
 // lowestId is SPD10's target rule: the LOWEST listed id, so that two drivers

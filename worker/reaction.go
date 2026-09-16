@@ -238,6 +238,31 @@ type reactionOps interface {
 		spId uint64,
 		spName string,
 	) error
+	// drainCloneBm is one clone-drain batch (CLD8): at most
+	// MaxDelBmPerTxn chunk keys, named by the caller's snapshot scan. It
+	// returns the SIZE of that batch, not a count of keys that were still
+	// there — a Del is an idempotent pop and the op never reads them.
+	drainCloneBm(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		cloneName string,
+		cloneId uint64,
+		chunks []model.BmChunk,
+	) (int, error)
+	// finishCloneDelete is the clone drain's final STM (CLD9): the Clone key
+	// and its clone_name_list entry, together.
+	finishCloneDelete(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		cloneName string,
+		cloneId uint64,
+	) error
 }
 
 // modelReactionOps is the production reactionOps.
@@ -397,6 +422,35 @@ func (o *modelReactionOps) finishSpDelete(
 	return model.FinishSpDelete(ctx, o.cli, cid, shard, spId, spName)
 }
 
+func (o *modelReactionOps) drainCloneBm(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+	chunks []model.BmChunk,
+) (int, error) {
+	return model.DrainCloneBm(
+		ctx, o.cli, cid, shard, spId, spName, cloneName, cloneId, chunks,
+	)
+}
+
+func (o *modelReactionOps) finishCloneDelete(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	cloneName string,
+	cloneId uint64,
+) error {
+	return model.FinishCloneDelete(
+		ctx, o.cli, cid, shard, spId, spName, cloneName, cloneId,
+	)
+}
+
 // ---------------------------------------------------------------------------
 // The reactor: the little state a stateless pass still keeps
 // ---------------------------------------------------------------------------
@@ -476,6 +530,19 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		}
 		return
 	}
+	// CLD7: the clone drain runs ALONGSIDE the reactions rather than instead of
+	// them — the SP is healthy and its other children must keep converging —
+	// and ahead of EVERY gate below, because none of them applies to it. It
+	// reads no cluster conf (unlike the sp drain's D2, which maintains DN
+	// capacity keys), no SP geometry, and no sp_level. A gate that could stop
+	// it would strand a latched clone permanently, the latch being one-way.
+	//
+	// (The design words the order as "the normal fan-out first, then one batch
+	// per deleting clone". The fan-out is a different function here, driven by
+	// the watch rather than by this pass; what the wording is about is that
+	// the living children keep converging, which they do, and what matters for
+	// the drain is that nothing can skip it.)
+	w.drainClones(ctx, state)
 	cc, ok := w.deps.conf.get(w.cid)
 	if !ok {
 		// RW9: a cluster missing from the cache drives nothing. Every

@@ -140,11 +140,13 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// The deployment requirement of §8.9 (U10), not a tuning knob:
-		// DeleteClone sweeps up to MaxSliceCntPerSp x MaxCloneBmCnt = 256
-		// chunk keys in one transaction, and etcd's default cap of 128 ops
-		// would refuse it. A test etcd that did not carry the flag would fail
-		// a handler the deployment runs fine.
+		// The deployment requirement of §8.4 (U10), not a tuning knob: the sp
+		// drain's D2 batch is 486 ops at the maximum shape and etcd's default
+		// cap is 128, so a test etcd without the flag would fail a transaction
+		// the deployment runs fine. (DeleteClone's 256-key rectangle sweep was
+		// this flag's founding justification and is gone — the clone drain's
+		// batches fit the default — but the package still COMMITS a
+		// maximum-shape sp batch, in model's TestDrainSpSliceAtTheCeiling.)
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

@@ -44,6 +44,34 @@ func loadClone(
 	return clone, nil
 }
 
+// loadLiveClone is loadClone plus CLD1: a clone whose teardown has begun
+// accepts no further changes. DeleteClone is the only RPC allowed to act on
+// one, and it acts as a no-op (§5.8) — so every other clone MUTATOR opens with
+// this instead, and the two read paths (GetClone, and DeleteClone's own phase
+// 1) keep using loadClone.
+//
+// The AppendCloneBitmap half is not cosmetic: without it a racing append could
+// write a chunk key behind the drain, and the final STM's emptiness guard —
+// which rests on "after the latch, no chunk key can ever appear again" — would
+// stop being stable (CLD9).
+//
+// CreateClone needs no check of its own: the surviving Clone key keeps
+// same-name creation failing ALREADY_EXISTS until the final STM.
+func loadLiveClone(
+	stm etcdutil.STM,
+	sc *spScope,
+	cloneName string,
+) (*pb.Clone, error) {
+	clone, err := loadClone(stm, sc, cloneName)
+	if err != nil {
+		return nil, err
+	}
+	if clone.GetDeleting() {
+		return nil, errPrecondition("clone %q is being deleted", cloneName)
+	}
+	return clone, nil
+}
+
 // CreateClone is architecture.md §8.9's CreateClone: one Clone record, one
 // name in `clone_name_list`, one SpRev bump. Everything the primary needs to
 // build the dm-clone is in that record, so the RPC is pure etcd.
@@ -179,6 +207,10 @@ type clonePhase1 struct {
 	CnId      uint64
 	AddrPort  string
 	CloneId   uint64
+	// Latched is CLD3's short-circuit: the clone was ALREADY being deleted
+	// when phase 1 read it, so the RPC returns OK without the agent call and
+	// without a deciding STM.
+	Latched bool
 }
 
 // DeleteClone is architecture.md §8.9's DeleteClone, the two-phase RPC of
@@ -195,9 +227,11 @@ type clonePhase1 struct {
 //
 // The deciding STM also resumes the destination's namespaces: §11.3 has them
 // suspended (created that way, or flipped) before the clone is made, and the
-// clone record is the only thing that remembers why. Clearing the flag in the
-// same transaction that removes the clone is what stops a delete from leaving
-// a namespace ANA-inaccessible for ever.
+// clone record is the only thing that remembers why. The resume rides the
+// LATCH (CLD4), not the final STM that removes the clone: clearing `suspended`
+// in the same transaction that sets `deleting` makes it and CLD5's fan-out
+// exclusion arrive in one SpRev bump, hence one syncup. Deferred to the end of
+// the drain, the namespace would sit ANA-inaccessible for the whole teardown.
 func (s *Server) DeleteClone(
 	ctx context.Context,
 	req *pb.DeleteCloneRequest,
@@ -220,9 +254,32 @@ func (s *Server) DeleteClone(
 		if err != nil {
 			return err
 		}
+		// GW6 in PHASE 1, not only in the deciding STM: openSpRead skips the
+		// check, and §5.8's table order puts a stale token ahead of every
+		// other answer this RPC can give — including the `deleting` row, which
+		// decides here. AG4 still re-checks in phase 2; this only makes a
+		// stale client see ABORTED before the agent call rather than after it.
+		if _, err := checkSpToken(
+			stm, sc.Cid, sc.Conf, req.GetSpRev(),
+		); err != nil {
+			return err
+		}
 		clone, err := loadClone(stm, sc, req.GetCloneName())
 		if err != nil {
 			return err
+		}
+		phase1.CloneId = clone.GetCloneId()
+		if clone.GetDeleting() {
+			// CLD3: already latched ⇒ OK here, BEFORE the primary is resolved
+			// and before any agent call. Two reasons, and the first is not an
+			// optimization: after the latch the CN has retired the stack, so
+			// `GetCntlrInfo` no longer reports the dm-clone and a hydration
+			// check would wedge every repeat delete in FAILED_PRECONDITION for
+			// ever. The second is SPD3's: a second bump would only force a
+			// pointless re-resolve. The token check above has already run, so
+			// a client that lost the race sees ABORTED rather than OK.
+			phase1.Latched = true
+			return nil
 		}
 		if req.GetForce() {
 			// No agent call follows, so the primary need not even exist:
@@ -261,6 +318,10 @@ func (s *Server) DeleteClone(
 	if err != nil {
 		return nil, mapStmErr(err)
 	}
+	if phase1.Latched {
+		// CLD3: no agent call, no deciding STM, no writes.
+		return &pb.DeleteCloneReply{CloneId: phase1.CloneId}, nil
+	}
 	if !req.GetForce() {
 		if err := checkCloneHydrated(
 			ctx, phase1, req.GetCloneName(),
@@ -280,32 +341,27 @@ func (s *Server) DeleteClone(
 		if err != nil {
 			return err
 		}
+		cloneId = clone.GetCloneId()
+		if clone.GetDeleting() {
+			// CLD3, the raced variant: the flag went up between phase 1 and
+			// here. Same no-op — OK, no writes, no bump.
+			return nil
+		}
 		if err := resumeCloneDstNs(stm, sc, clone.GetDstTdId()); err != nil {
 			return err
 		}
-		stm.Del(model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName()))
-		// An STM cannot range, so the chunks are swept pair by pair over the
-		// rectangle the two records carry — src_slice_cnt from CreateClone,
-		// bm_cnt from AppendCloneBitmap's high-water, which is exactly what
-		// that RPC maintains it for. Chunks are sparse (U3), so most pairs of
-		// a real clone are absent and their deletes are harmless.
+		// CLD4: the latch, and nothing else. The Clone key stays, its chunk
+		// keys stay, and the name stays in clone_name_list — model.LoadSp
+		// fetches clones by iterating that list, so a dangling name would
+		// break every subsequent load.
 		//
-		// Worst case is MaxSliceCntPerSp x MaxCloneBmCnt = 16 x 16 = 256
-		// point deletes plus the handful of other ops in this one atomic
-		// transaction, which is why every etcd serving dnv MUST run with
-		// --max-txn-ops=common.EtcdMaxTxnOps: etcd's default cap is 128 and
-		// would refuse the whole delete (§8.9, U10).
-		sliceCnt, bmCnt := clone.GetSrcSliceCnt(), clone.GetBmCnt()
-		for sliceIdx := uint32(0); sliceIdx < sliceCnt; sliceIdx++ {
-			for bmIdx := uint32(0); bmIdx < bmCnt; bmIdx++ {
-				stm.Del(model.CloneBitmapKey(
-					sc.Cid, sc.SpId(), req.GetCloneName(), sliceIdx, bmIdx))
-			}
-		}
-		sc.Conf.CloneNameList = removeName(
-			sc.Conf.GetCloneNameList(), req.GetCloneName())
-		stm.Put(model.SpConfKey(sc.Cid, req.GetSpName()), sc.Conf)
-		cloneId = clone.GetCloneId()
+		// CLD6, SPD5's clone twin: no code path in any component writes
+		// `deleting = false` on an existing Clone, so this is one-way across
+		// restarts of every component. CLD9's emptiness argument depends on
+		// it — an un-latch would let a chunk key appear after the scan that
+		// found none — and so do CLD1's refusals.
+		clone.Deleting = true
+		stm.Put(model.CloneKey(sc.Cid, sc.SpId(), req.GetCloneName()), clone)
 		return bumpSp(stm, opDeleteClone, sc)
 	})
 	if err != nil {
@@ -462,7 +518,7 @@ func (s *Server) UpdateCloneTrConf(
 		if err != nil {
 			return err
 		}
-		clone, err := loadClone(stm, sc, req.GetCloneName())
+		clone, err := loadLiveClone(stm, sc, req.GetCloneName())
 		if err != nil {
 			return err
 		}
@@ -495,9 +551,15 @@ func (s *Server) UpdateCloneTrConf(
 //
 // `bm_cnt` is ONE uint32: the high-water of `bm_idx + 1` over ALL appends,
 // across slices, and never derived from `src_slice_idx` — on a fresh clone,
-// appending (slice 5, bm 0) leaves it at 1, not 6. It is what DeleteClone
-// sweeps the chunk keys from, so it is a max and never a +1, and lowering it
-// would orphan them.
+// appending (slice 5, bm 0) leaves it at 1, not 6. It is a max and never a +1,
+// so a chunk below the high-water raises nothing.
+//
+// It used to be what DeleteClone swept the chunk keys from, which is where the
+// max-not-+1 rule came from and why lowering it would have orphaned keys. That
+// reader is gone (§11.7's drain derives its position from the SURVIVING keys
+// and never reads this field), so `bm_cnt` is now write-only bookkeeping:
+// nothing load-bearing reads it, and the rule survives on its own terms —
+// gateway.md §5.8, risks_and_gaps.md RK10.
 //
 // The two index bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of
 // GW7's Append*Bitmap row: they judge the indexes of THIS request against a
@@ -545,7 +607,7 @@ func (s *Server) AppendCloneBitmap(
 		if err != nil {
 			return err
 		}
-		clone, err := loadClone(stm, sc, req.GetCloneName())
+		clone, err := loadLiveClone(stm, sc, req.GetCloneName())
 		if err != nil {
 			return err
 		}

@@ -48,13 +48,13 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # U10 (§14.4/§14.6): every etcd serving dnv MUST run with --max-txn-ops at
-# least this high. Two transactions are above etcd's default cap of 128: the
-# sp drain's D2 batch, 486 ops at the maximum shape (§11.6), and DeleteClone's
-# sweep of up to MaxSliceCntPerSp × MaxCloneBmCnt = 256 clone bitmap chunk
-# keys. Case G commits D2 batches, though far below their ceiling — its
-# widest slice has 21 groups' worth of sides, not the 20 x 4 DNs a maximum
-# batch touches. The literal is common.EtcdMaxTxnOps; a shell suite cannot
-# import common, so the two are kept in step by hand.
+# least this high. ONE transaction in dnv is above etcd's default cap of 128
+# and bounded by a constant: the sp drain's D2 batch, 486 COMPARES at the
+# maximum shape (§11.6). Case G commits D2 batches, far below their ceiling —
+# its widest slice has 21 groups' worth of sides, not the 20 x 4 DNs a maximum
+# batch touches — and clone-drain batches, whose 68 ops fit etcd's default
+# (CLD11). The literal is common.EtcdMaxTxnOps; a shell suite cannot import
+# common, so the two are kept in step by hand.
 ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-worker-integtest
@@ -2825,6 +2825,15 @@ drain_step_records() { # <phase>
 	wcount 'select(.msg == "sp drain step") | select(.phase == $p)' --arg p "$1"
 }
 drain_failed_records() { wcount 'select(.msg == "sp drain failed")'; }
+clone_drain_step_records() { wcount 'select(.msg == "clone drain step")'; }
+
+# clone_gone is the wait_until predicate of the clone drain, with key_cnt's
+# fail-loudly contract: a failed read leaves the poll running.
+clone_gone() {
+	local cnt
+	cnt=$(key_cnt clone) || return 1
+	[ "$cnt" = 0 ]
+}
 
 # drain_put_sp plants the case fixture: one SP with TWO slices, each a meta and
 # a data group, every leg on one of the two DNs. Two slices is the smallest
@@ -2984,6 +2993,103 @@ case_drain() {
 	assert_eq "$(drained_records)" "3" "sp2 committed its own final STM"
 	assert_eq "$(drain_failed_records)" "0" "no drain step failed"
 	drain_assert_restored 64 64 4
+
+	stage 5 "the CLONE drain: a latched clone leaves the plan and its keys go"
+	# The clone drain (§11.7) alongside the sp drain, in the same case because
+	# they share the coordinator and the fixture machinery. 65 chunks is one
+	# more than MaxDelBmPerTxn, so the drain provably needs TWO batches: the
+	# bound is what makes a batch's size independent of the clone's shape, and
+	# a single-batch fixture could not tell the two apart.
+	drain_put_sp sp3 4
+	ctl put-td --sp sp3 --name td0 --id "$TD_ID" --size 10737418240 >/dev/null
+	ctl put-clone --sp sp3 --name c0 --id "$CLONE_ID" --dst-td td0 \
+		--src-slice-cnt 5 >/dev/null
+	# One ssh for all 65 puts: 65 round trips would dominate the case.
+	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
+		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
+		"--kind clone --name c0 --src-slice-idx \$s --bm-idx \$b --hex 0102" \
+		"> /dev/null; done; done"
+	assert_eq "$(key_cnt clone_bitmap)" "65" "the clone's chunk keys"
+	wait_until "$WAIT_SYNCUP" "cn0: SyncupCntlr carrying the clone" \
+		req_ge 1 cn0 SyncupCntlr '((.clone_list // []) | length) == 1'
+	local clone_steps_before excluded_before
+	clone_steps_before=$(clone_drain_step_records)
+	# BASELINED, because every SyncupCntlr this SP sent BEFORE the clone
+	# existed also carried an empty clone_list: without a baseline the
+	# exclusion assertion below is satisfied by a request from stage 5's first
+	# line and proves nothing at all.
+	excluded_before=$(reqs cn0 SyncupCntlr '((.clone_list // []) | length) == 0')
+	ctl set-clone-deleting --sp sp3 --name c0 >/dev/null
+	wait_until "$WAIT_SYNCUP" "c0 to drain away" clone_gone
+	assert_eq "$(key_cnt clone_bitmap)" "0" "chunk keys after the clone drain"
+	assert_eq "$(key_cnt clone)" "0" "clone keys after the clone drain"
+	assert_eq "$(ctl get-sp --sp sp3 | "$JQ" -r \
+		'(.sp_conf.clone_name_list // []) | length')" "0" \
+		"the name left clone_name_list with the key, in one STM"
+	assert_eq "$((  $(clone_drain_step_records) - clone_steps_before ))" "2" \
+		"65 chunks take exactly two batches"
+	assert_eq "$(wcount 'select(.msg == "clone drained")')" "1" \
+		"exactly one \`clone drained\` record"
+	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
+		"no clone drain step failed"
+	# CLD5, observed from the agent's side: the latched clone left every
+	# cntlr's plan. That exclusion IS the teardown — the cn agent's
+	# removed-clone retire path drops the stack and the local chunk files
+	# precisely when the id stops appearing — so the SP must keep syncing
+	# while carrying no clone at all.
+	wait_until "$WAIT_SYNCUP" "cn0: a NEW SyncupCntlr with the clone excluded" \
+		reqs_gt "$excluded_before" cn0 SyncupCntlr \
+		'((.clone_list // []) | length) == 0'
+	# And the SP itself is untouched by any of it: the clone drain is
+	# ledger-free and the SP outlives the clone.
+	assert_eq "$(key_cnt slice)" "2" "sp3's slices are untouched"
+	assert_eq "$(dn_free 1)" "58" "the clone drain moved no DN budget"
+
+	stage 6 "a PARTIALLY drained clone resumes after a worker restart"
+	# CLD7's "crash, restart and ownership handoff all resume through this same
+	# derivation", built rather than raced for stage 3's reason: the window a
+	# real restart would have to hit is sub-second. With the fleet stopped, c1
+	# is latched and advanced by exactly ONE batch; what the restarted fleet
+	# finds is a clone with some chunks gone and some left, and nothing but the
+	# surviving keys tells it where it is.
+	local w
+	ctl put-clone --sp sp3 --name c1 --id "$((CLONE_ID + 1))" --dst-td td0 \
+		--src-slice-cnt 5 >/dev/null
+	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
+		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
+		"--kind clone --name c1 --src-slice-idx \$s --bm-idx \$b --hex 0102" \
+		"> /dev/null; done; done"
+	assert_eq "$(key_cnt clone_bitmap)" "65" "c1's chunk keys"
+	for w in w1 w2 w3; do stop_worker "$w"; done
+	ctl set-clone-deleting --sp sp3 --name c1 >/dev/null
+	local partial
+	partial=$(ctl drain-clone --sp sp3 --name c1 --max-steps 1)
+	assert_field "$partial" '.clone_deleted' "false" \
+		"one batch must NOT finish a 65-chunk drain"
+	assert_eq "$(jq_of "$partial" '.chunk_cnt')" "64" \
+		"the one batch spent the whole MaxDelBmPerTxn budget"
+	assert_eq "$(key_cnt clone_bitmap)" "1" "one chunk key survives the batch"
+	assert_eq "$(key_cnt clone)" "1" "the clone key survives the batch"
+	clone_steps_before=$(clone_drain_step_records)
+	for w in w1 w2 w3; do start_worker "$w"; done
+	for w in w1 w2 w3; do wait_registered "$w"; done
+	log "  waiting $((VOTE_GRACE + 2))s for the grace window (VW7)"
+	sleep $((VOTE_GRACE + 2))
+	assert_owners 50 w1 w2 w3
+	wait_until "$WAIT_SYNCUP" "c1 to finish draining after the restart" \
+		clone_gone
+	assert_eq "$(key_cnt clone_bitmap)" "0" "chunk keys after the resumed drain"
+	# The restarted fleet took exactly ONE more batch — the single surviving
+	# chunk — and then the final STM: it re-derived the position from the
+	# surviving keys, not from bm_cnt, which still says 13.
+	assert_eq "$((  $(clone_drain_step_records) - clone_steps_before ))" "1" \
+		"the resumed drain took one batch, for the one chunk that was left"
+	assert_eq "$(wcount 'select(.msg == "clone drained")')" "2" \
+		"c1 committed its own final STM"
+	assert_eq "$(wcount 'select(.msg == "clone drain failed")')" "0" \
+		"no clone drain step failed"
 }
 
 case_vote() {

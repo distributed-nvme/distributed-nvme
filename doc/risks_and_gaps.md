@@ -6,12 +6,13 @@ named here behaves as its owning spec says — nothing below is a defect
 against any of those specs; each is a boundary the design accepts,
 with the accepting decision cited. Companions: architecture.md Appendix D
 (v1 assumptions and known limits), decisions [D12]/[D15]/[D16]/[D17].
-Item ids `RK1`–`RK9`, append-only once cited — a closed item keeps its id and
+Item ids `RK1`–`RK10`, append-only once cited — a closed item keeps its id and
 is marked CLOSED in place, never deleted or renumbered. RK1–RK6 written
 2026-09-10, from the second full doc-vs-code verification and its design
 review; RK7 added 2026-09-11 with `dnvctl.md` and closed the same day by the
 presence-based GW6 change, which opened RK8 in its place; RK9 added
-2026-09-15 with the sp drain (dnv-worker.md §11.6).
+2026-09-15 with the sp drain (dnv-worker.md §11.6); RK10 added
+2026-09-16 with the clone drain (§11.7).
 
 ---
 
@@ -315,3 +316,35 @@ tripwire because there is nothing else to name. Deferred with the drain: the
 rename touches `architecture.md` §2.1's table and every doc sentence that
 cites the 8.
 Added 2026-09-15 with the sp drain.
+
+---
+
+## RK10 — `Clone.bm_cnt` is write-only bookkeeping
+
+**What.** `bm_cnt` exists for one stated purpose (architecture.md §8.9): to
+tell `DeleteClone` the rectangle of chunk keys to sweep. The clone drain
+(dnv-worker.md §11.7) retired that reader — it derives its position from the
+SURVIVING KEYS, which a keys-only scan already gives it — so the counter is
+still raised by `AppendCloneBitmap`, still shown by `clone get`, and read by
+nothing load-bearing.
+
+**Blast radius.** None today. A wrong `bm_cnt` — too low, lowered by hand,
+stale — changes no behaviour at all, where before the drain it would have
+orphaned chunk keys. The risk is the reverse of the usual one: a future reader
+added without noticing the drain would reintroduce rectangle assumptions on a
+field nothing validates, and the tests that would have caught that went away
+with the sweep. One replacement is in place, and only one: the coordinator's
+derivation is pinned with `bm_cnt` saying 13 over zero surviving chunk keys
+(`worker/clonedrain_test.go`), so a drain that consulted the counter again
+fails. Nothing guards a new reader anywhere else.
+
+**Operator guidance.** None. `clone get`'s `bm_cnt` is informational; the
+number of chunk keys a clone actually has is a `list-keys` under its
+`clone_bitmap` prefix, which is what the drain itself uses.
+
+**Direction.** Removing the field is the honest fix and is deferred as
+gratuitous schema churn: it is an appended proto3 field, so dropping it means
+a reserved number and a regeneration, for a counter that costs one `uint32`.
+Reviewers of clone-bitmap changes should know the coupling is gone before
+adding a reader.
+Added 2026-09-16 with the clone drain.

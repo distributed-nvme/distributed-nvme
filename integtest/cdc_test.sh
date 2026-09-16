@@ -66,16 +66,13 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
-# not a knob of this suite. Two transactions are above etcd's default cap of
-# 128: the sp drain's D2 batch, 486 ops at the maximum shape (dnv-worker.md
-# §11.6 — the larger, and the one the number is sized by), and the gateway's
-# DeleteClone, which sweeps a clone's whole src_slice_cnt x bm_cnt chunk
-# rectangle (MaxSliceCntPerSp x MaxCloneBmCnt = 256 point deletes plus a
-# handful of other ops) in ONE transaction. The cdc suite drives no clones,
-# so the flag changes nothing it observes; it is passed anyway so that every
-# dnv etcd launch in the tree is the same launch. The suite is shell and
-# cannot import the constant, so the literal is repeated here; it must track
-# common/constants.go.
+# not a knob of this suite. ONE transaction in dnv is above etcd's default cap
+# of 128 and bounded by a constant: the sp drain's D2 batch, 486 COMPARES at
+# the maximum shape (dnv-worker.md §11.6), which is what the number is sized
+# by. The cdc suite drains no storage pools, so the flag changes nothing it
+# observes; it is passed anyway so that every dnv etcd launch in the tree is
+# the same launch. The suite is shell and cannot import the constant, so the
+# literal is repeated here; it must track common/constants.go.
 ETCD_MAX_TXN_OPS=512
 
 WORK=/var/tmp/dnv-cdc-integtest

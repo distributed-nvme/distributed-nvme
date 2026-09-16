@@ -1010,7 +1010,12 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       `clone_list` entry with `auto_resume` targets its td, which overrides
       to not-suspended. (That override is the §11.3 flow: the destination
       namespace is *created* `suspended = true` and serves anyway while the
-      clone runs; `DeleteClone` flips the stored field to `false`.)
+      clone runs; `DeleteClone` flips the stored field to `false` — in its
+      LATCH transaction, together with the `deleting` flag, so that the
+      override and the clone's disappearance from the plan arrive in one
+      syncup (architecture.md §8.9, amended 2026-09-16). Deferred to the end
+      of the teardown it would leave this namespace effectively suspended
+      with no `clone_list` entry left to override it.)
       Suspending: ns → `AnaGrpIdInaccessible` first, then `dmsetup suspend`
       the ns-dev (its table stays the rule-1-6 backing). Resuming: resume,
       then ANA per the rule below. This is the third and last deliberate

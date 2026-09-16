@@ -3430,6 +3430,11 @@ type Clone struct {
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,9,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
 	AutoResume    bool                   `protobuf:"varint,10,opt,name=auto_resume,json=autoResume,proto3" json:"auto_resume,omitempty"`
 	BmCnt         uint32                 `protobuf:"varint,11,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"`
+	// The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
+	// DeleteClone sets it and returns, and the sp coordinator drains the
+	// chunk keys. Appended, never renumbered — a renumbered field decodes
+	// silently into unknown fields rather than failing.
+	Deleting      bool `protobuf:"varint,12,opt,name=deleting,proto3" json:"deleting,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3539,6 +3544,13 @@ func (x *Clone) GetBmCnt() uint32 {
 		return x.BmCnt
 	}
 	return 0
+}
+
+func (x *Clone) GetDeleting() bool {
+	if x != nil {
+		return x.Deleting
+	}
+	return false
 }
 
 // {dnv_prefix} clone_bitmap {cluster_id} {sp_id} {clone_name} {src_slice_idx} {bm_idx}
@@ -14365,7 +14377,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tR\x05model\x12#\n" +
 	"\ans_list\x18\x04 \x03(\v2\n" +
 	".NamespaceR\x06nsList\x12#\n" +
-	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\x87\x03\n" +
+	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\xa3\x03\n" +
 	"\x05Clone\x12\x19\n" +
 	"\bclone_id\x18\x01 \x01(\x04R\acloneId\x124\n" +
 	"\x10src_tr_conf_list\x18\x02 \x03(\v2\v.NvmeTrConfR\rsrcTrConfList\x12\x17\n" +
@@ -14380,7 +14392,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vauto_resume\x18\n" +
 	" \x01(\bR\n" +
 	"autoResume\x12\x15\n" +
-	"\x06bm_cnt\x18\v \x01(\rR\x05bmCnt\"%\n" +
+	"\x06bm_cnt\x18\v \x01(\rR\x05bmCnt\x12\x1a\n" +
+	"\bdeleting\x18\f \x01(\bR\bdeleting\"%\n" +
 	"\vCloneBitmap\x12\x16\n" +
 	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\xa2\x01\n" +
 	"\bTransfer\x12\x17\n" +
