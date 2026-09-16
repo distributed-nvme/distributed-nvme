@@ -41,7 +41,8 @@ func registerXfer(root *cobra.Command) {
 //
 // --auto-suspend asks the primary cntlr to retire the origin namespace itself
 // while it builds the transfer stack (ANA inaccessible everywhere, then the
-// origin's dm device suspended), instead of the operator sending a separate
+// origin's ns-dev parked on its td's dm-error), instead of the operator
+// sending a separate
 // `ns set-suspended`. CT8: dnvctl does not check that the pair resolves — a
 // wrong one is the gateway's NOT_FOUND.
 func xferCreateCmd() *cobra.Command {

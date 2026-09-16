@@ -17,9 +17,11 @@ import (
 // its sparse backing file and the single loop device — plus the clone-metadata
 // slot allocator that replaced the clone VG ([D14]). No LVM
 // runs anywhere in dnv any more: the bare `vgs`/`lvs` label scan touched every
-// block device on the node, including the suspended transfer-origin ns-devs
-// that wedge LVM in unkillable D state, which is the [D13](a) class the dn
-// agent evicted first.
+// block device on the node, including the transfer-origin ns-devs the CN then
+// held dm-suspended, which wedge LVM in unkillable D state — the [D13](a)
+// class the dn agent evicted first. (The CN no longer suspends those: an
+// effectively suspended namespace is parked, live, on the td's dm-error
+// (§11.6, [D12]). The scan is gone regardless.)
 //
 // The allocator's registry is the kernel's own dm tables: every kind-`b`
 // wrapper's `0 {len} linear {loopdev} {offset}` line records its own

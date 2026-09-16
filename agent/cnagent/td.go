@@ -49,7 +49,7 @@ func (s *CnAgentServer) ensureRaid0(
 		return err
 	}
 	return s.ensureDmSingle(
-		ctx, tp.raid0Name, "striped", tp.sectors, args, 0, false)
+		ctx, tp.raid0Name, "striped", tp.sectors, args, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,14 @@ func nsDevTable(np *nsPlan, devNo string) string {
 }
 
 // ensureNsDev converges one namespace's own dm-linear (§3.3 step 5) onto the
-// CN16 backing, then applies the §11.6 suspend state. Suspending is the third
-// and last deliberate suspension in dnv; the ANA move to `inaccessible` that
-// must precede it has already happened in the retire phase (CN9).
+// CN16 backing. An effectively suspended namespace needs no step of its own
+// here: it is **parked**, and rule 1 of the backing state machine has already
+// made its backing the td's dm-error, so the ordinary reload below installs
+// the park — live, never dm-suspended (§11.6, [D12]). The ANA move to
+// `inaccessible` that must precede it has already happened in the retire
+// phase (CN9) — which holds for the second caller as well: `repointTdNsDevs`
+// reaches here from the clone teardown, itself inside the retire phase and
+// after that same ANA loop.
 func (s *CnAgentServer) ensureNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -140,26 +145,31 @@ func (s *CnAgentServer) ensureNsDev(
 			return tableErr
 		}
 		if !nsDevTableMatches(targets, np, devNo) || dev.ReadOnly {
-			// Reload always resumes; the suspend state is re-applied below.
+			// Reload is suspend, load, resume: it leaves the device live, so
+			// the guard below needs no case for this branch.
 			if err := s.dm.Reload(ctx, np.devName, table); err != nil {
 				return err
 			}
 			dev = &agent.DmDevInfo{}
 		}
 	}
-	if np.suspended && !dev.Suspended {
-		return s.dm.Suspend(ctx, np.devName)
-	}
-	if !np.suspended && dev.Suspended {
+	// Nothing here ever suspends. A device found suspended while its table is
+	// already the one this pass wants is one an **older build** deliberately
+	// held suspended for §11.6, or one an interrupted reload left behind;
+	// either way it is resumed, which is the whole of the upgrade path.
+	if dev.Suspended {
 		return s.dm.Resume(ctx, np.devName)
 	}
 	return nil
 }
 
 // parkNsDev reloads one ns-dev onto its td's dm-error. It is both the §11.1
-// old_primary step 3 and the "resume before teardown" of CN21: the reload
-// resumes a deliberately suspended device, which a suspended device's own
-// removal (and the nvmet disable above it) requires.
+// old_primary step 3 and the "park before teardown" of CN21: the ns-dev must
+// stop mapping whatever is about to be removed under it, and the reload's own
+// flushing suspend is what completes the in-flight IO on the old table. The
+// reload also resumes a device an **older build** left deliberately suspended
+// (or an interrupted reload left behind), which that device's own removal and
+// the nvmet disable above it require.
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -345,15 +355,14 @@ func (s *CnAgentServer) probeNsDev(
 		return pb.ResStatus_RES_STATUS_ERROR,
 			"table is not the desired namespace backing"
 	}
-	// An effectively suspended ns-dev is *expected* suspended (CN28).
-	if np.suspended != dev.Suspended {
-		if dev.Suspended {
-			return pb.ResStatus_RES_STATUS_ERROR, "unexpectedly suspended"
-		}
-		return pb.ResStatus_RES_STATUS_ERROR, "not suspended"
-	}
+	// No ns-dev is ever expected dm-suspended, whatever the plan says: an
+	// effectively suspended one is *parked* — live, on the td's dm-error,
+	// which the table check above has already confirmed (CN28, §11.6).
 	if dev.Suspended {
-		return pb.ResStatus_RES_STATUS_OK, detailsSuspended
+		return pb.ResStatus_RES_STATUS_ERROR, "unexpectedly suspended"
+	}
+	if np.suspended {
+		return pb.ResStatus_RES_STATUS_OK, detailsParked
 	}
 	return pb.ResStatus_RES_STATUS_OK, ""
 }

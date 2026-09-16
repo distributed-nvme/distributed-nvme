@@ -158,6 +158,62 @@ die() {
 
 assert_eq() { [ "$1" = "$2" ] || die "$3: got '$1', want '$2'"; }
 
+# assert_parked pins the §11.6 park of one effectively suspended namespace:
+# the ns-dev is **live** and its table is a plain dm-linear over its td's
+# `CnErrorName`, offset 0 (CN16 rule 1). Before 2026-09-16 that namespace was
+# held `dmsetup suspend`ed on its ordinary backing instead; asserting `live`
+# alone would not catch a park onto the wrong device, and asserting the table
+# alone would not catch one left suspended, so both halves are here.
+assert_parked() { # vm nsdev tderrdev label
+	local vm=$1 nsdev=$2 errdev=$3 label=$4 errno got
+	assert_eq "$(helper "$vm" "dm_state $nsdev")" live "$label: ns-dev is live"
+	errno=$(helper "$vm" "dm_devno $errdev")
+	[ "$errno" != none ] || die "$label: the td's dm-error $errdev is gone"
+	got=$(helper "$vm" "dm_table $nsdev")
+	case "$got" in
+	"0 "*" linear $errno 0") ;;
+	*) die "$label: ns-dev table is '$got', want '0 <sectors> linear $errno 0'" ;;
+	esac
+}
+
+# assert_opens_eio is the observable the park exists for: a local block-device
+# walker that opens a parked ns-dev gets an IO error *within the timeout*
+# instead of wedging in uninterruptible D state, which is what the old held
+# suspension did to it ([D12]).
+assert_opens_eio() { # vm nsdev label
+	local rc
+	rc=$(helper "$1" "open_rc $2")
+	[ "$rc" != 124 ] || die "$3: reading the parked ns-dev blocked (timed out)"
+	[ "$rc" != 0 ] || die "$3: reading the parked ns-dev succeeded"
+}
+
+# assert_opens_ok is assert_opens_eio's positive control, and the reason the
+# suite can trust it: `open_rc` reports a raw `dd` status, so a helper broken
+# end to end — a device name that does not exist, a dd that rejects an
+# argument — returns non-zero and would make every assert_opens_eio pass
+# vacuously. One call on a device that MUST serve keeps the pair honest.
+assert_opens_ok() { # vm dev label
+	local rc
+	rc=$(helper "$1" "open_rc $2")
+	[ "$rc" = 0 ] || die "$3: a serving device did not read back (rc $rc)"
+}
+
+# assert_no_suspended_dm is §11.6's operator-visible promise: on a CN, outside
+# a DN cutover window, `dmsetup info` shows no suspended dnv device at all.
+# Before the park a transfer origin's ns-dev sat here for the whole hydration.
+assert_no_suspended_dm() { # vm label
+	local got seen
+	# An empty answer only means something once we know the listing produced
+	# rows at all: the helper swallows dmsetup's stderr, so a broken pipeline
+	# and a clean node look identical from here.
+	seen=$(helper "$1" "dnv_dm_cnt")
+	[ "${seen:-0}" -gt 0 ] ||
+		die "$2: vm$1's dm listing shows no dnv device at all — the sweep " \
+			"cannot be trusted"
+	got=$(helper "$1" "suspended_agent_dms")
+	[ -z "$got" ] || die "$2: vm$1 holds suspended dnv devices: $got"
+}
+
 jq_of() { printf '%s' "$1" | "$JQ" -r "$2"; }
 
 # assert_ok/assert_not_ok read a ResInfo.status out of a reply. An absent
@@ -815,6 +871,55 @@ dm_devno() {
 # …` both carry it in field 4.
 dm_backing() { dm_table "$1" | awk '{print $4}'; }
 
+# open_rc <name> — the exit status of a bounded 512-byte read of one dm device,
+# after a cache drop so the read has to reach the target. 0 means the device
+# served it, **124 means the read BLOCKED** — the uninterruptible D state a
+# dm-suspended device puts any opener into — and anything else is an IO error.
+# A parked ns-dev (§11.6) must give an IO error, promptly; that difference is
+# the whole reason the park replaced the suspension. No iflag=/oflag= here:
+# the VMs' uutils dd mis-handles direct IO (§4).
+#
+# `timeout 5 dd` is NOT enough and must not be "simplified" back to it
+# (measured on the lab kernel): against a dm-suspended device `timeout` fires,
+# its SIGTERM does nothing to a task in uninterruptible sleep, and `timeout`
+# then waits for that child — so the helper blocks until somebody resumes the
+# device, and a regression would HANG the suite instead of failing it. The
+# reader therefore runs detached and its status arrives through a file; after
+# the deadline this returns 124 and leaves the wedged `dd` for
+# `resume_suspended` to release at cleanup.
+open_rc() {
+	local out=/tmp/dnv-open-rc.$$ i
+	rm -f "$out"
+	# `drop_caches` alone, deliberately: it drops CLEAN pages, which is all a
+	# raw dm device this suite only ever reads can hold, and it is what makes
+	# the read below reach the target. A `sync` here would be the one call in
+	# the function that no deadline covers — `timeout` cannot end a task in
+	# uninterruptible sleep, which is the whole finding recorded above — so on
+	# the very regression this helper reports it would hang ahead of the
+	# bounded reader.
+	echo 3 >/proc/sys/vm/drop_caches 2>/dev/null
+	# The stdout/stderr redirection on the GROUP is load-bearing, not tidiness:
+	# every caller reads this function through `$(…)`, and command substitution
+	# waits for EOF on its pipe — which a background child still holding that
+	# fd never gives. Redirecting only `dd` leaves the subshell holding it, and
+	# the `$(…)` blocks exactly as long as the read does.
+	{
+		dd if="/dev/mapper/$1" of=/dev/null bs=512 count=1 status=none
+		echo $? >"$out"
+	} >/dev/null 2>&1 &
+	for ((i = 0; i < 50; i++)); do
+		[ -s "$out" ] && break
+		sleep 0.1
+	done
+	if [ -s "$out" ]; then
+		cat "$out"
+	else
+		echo 124
+	fi
+	rm -f "$out"
+	return 0
+}
+
 ss_attr() { cat "$NVMET/subsystems/$1/$2" 2>/dev/null || echo MISSING; }
 
 ns_attr() { cat "$NVMET/subsystems/$1/namespaces/$2/$3" 2>/dev/null || echo MISSING; }
@@ -954,6 +1059,36 @@ agent_dm_names() {
 		grep -E '^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-' || true
 }
 
+# suspended_agent_dms — the agent dm devices currently held suspended. The cn
+# agent leaves none across a converge pass (§11.6: an effectively suspended
+# namespace is parked, live), so on a CN VM outside a DN cutover window this
+# prints nothing; `resume_suspended` uses the same `attr` column to sweep.
+suspended_agent_dms() {
+	local row name
+	# `:..s` and NOT `:.-s`: attr is L/I/s/r-w, so pinning the second column to
+	# `-` would skip a device that also has an INACTIVE TABLE loaded — `LIsw`,
+	# exactly what an interrupted `Dm.Reload` (suspend, load, resume) leaves,
+	# which is the state this sweep exists for. agent/dm.go reads index 2 alone.
+	for row in $(dmsetup info -c --noheadings -o name,attr 2>/dev/null |
+		grep -E '^dnv[-a-z0-9]*.*:..s'); do
+		name=${row%%:*}
+		case "$name" in
+		dnv-*) printf '%s\n' "$name" ;;
+		esac
+	done
+	return 0
+}
+
+# dnv_dm_cnt — how many dnv dm devices `dmsetup info`'s name,attr listing shows
+# at all. suspended_agent_dms answers with the empty string both when nothing
+# is suspended and when its pipeline is broken (a failed dmsetup, a changed
+# separator, a wrong prefix), so the assertion built on it needs this second
+# number to tell those apart.
+dnv_dm_cnt() {
+	dmsetup info -c --noheadings -o name,attr 2>/dev/null |
+		grep -cE '^dnv[-a-z0-9]*.*:' || true
+}
+
 # dm_kind_names <kind> [node16] — the dm devices of one kind, optionally of one
 # node only. Both roles name their devices dnv-{cluster}-{node}-{kind}-…, and
 # the kind digits overlap, so every teardown pass that must not touch the other
@@ -991,8 +1126,12 @@ clone_bm_files() {
 }
 
 # resume_suspended sweeps up suspended dm devices before anything reads them.
-# It is load-bearing, not defensive: a transfer's origin ns-dev is deliberately
-# suspended (CN16) and a dn cutover may hold linears suspended. Anything that
+# A dn cutover window holds linears suspended (DN12's fence, bounded by
+# SuspendSeconds), and an interrupted reload can leave anything so. On CN VMs
+# it is debris cleanup only since 2026-09-16: the cn agent no longer suspends
+# a transfer origin — an effectively suspended namespace is *parked*, live on
+# the td's dm-error (CN16, §11.6) — so the only suspended CN device a run can
+# meet is one an older build or a killed agent left behind. Anything that
 # reads a suspended device (`dmsetup remove`, disabling the nvmet namespace
 # above it, and above all a block-device scan) blocks in uninterruptible D
 # state and wedges the node until reboot. The pattern is deliberately looser
@@ -1001,8 +1140,11 @@ clone_bm_files() {
 # which no current run can produce.
 resume_suspended() {
 	local row name
+	# `:..s`, not `:.-s` — see suspended_agent_dms: `.-` would skip `LIsw`, the
+	# device an interrupted reload leaves, which is the one this sweep most
+	# needs to release.
 	for row in $(dmsetup info -c --noheadings -o name,attr 2>/dev/null |
-		grep -E '^dnv[-a-z0-9]*.*:.-s'); do
+		grep -E '^dnv[-a-z0-9]*.*:..s'); do
 		name=${row%%:*}
 		timeout 10 dmsetup resume "$name" >/dev/null 2>&1
 	done
@@ -1831,7 +1973,7 @@ case_redund() {
 	done
 	got=$(helper 2 mdstat | grep -c '\[UU\]' || true)
 	assert_eq "$got" 0 "redund: the standby has no md arrays"
-	# CN16 rule 1: a standby's ns-dev is a linear over the td's dm-error.
+	# CN16 rule 2: a standby's ns-dev is a linear over the td's dm-error.
 	assert_eq "$(helper 2 "dm_backing $nsdev")" \
 		"$(helper 2 "dm_devno $(cn_dm_name 5 2 "$sp" "$A_TD")")" \
 		"redund: standby ns-dev is backed by the td's dm-error"
@@ -2188,7 +2330,7 @@ case_clone_xfer() {
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
-	local idx bmargs bmfiles
+	local idx bmargs bmfiles nsdev2 err1 err2
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -2196,6 +2338,11 @@ case_clone_xfer() {
 	clonedm=$(cn_dm_name 7 2 "$sp2" "$C_CLONE")
 	metadm=$(clone_meta_dm 2 "$sp2" "$C_CLONE")
 	nsdev1=$(cn_dm_name 6 1 "$sp1" "$S_NS")
+	nsdev2=$(cn_dm_name 6 2 "$sp2" "$S_NS")
+	# The two tds' permanent dm-errors (kind 5): what an effectively suspended
+	# namespace's ns-dev is parked on (CN16 rule 1, §11.6).
+	err1=$(cn_dm_name 5 1 "$sp1" "$S_TD")
+	err2=$(cn_dm_name 5 2 "$sp2" "$S_TD")
 	# The two chunk files this case creates, as clone_bm_files sorts them:
 	# LocalCloneBmPath ends in {src_slice_idx:%02x}-{bm_idx:%02x}, so the
 	# pair (0, 0) and the pair (0, 1) differ only in the last segment.
@@ -2243,6 +2390,15 @@ case_clone_xfer() {
 	assert_eq "$(host_state "$hv" "$nqn" 2)" live "clone_xfer sp2 path state"
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" inaccessible \
 		"clone_xfer sp2 path before the flip"
+	# The positive control first, on the still-serving sp1 ns-dev: without it a
+	# globally broken `open_rc` would make every assert_opens_eio below pass
+	# vacuously, since its whole test is "non-zero and not a timeout".
+	assert_opens_ok 1 "$nsdev1" "clone_xfer: the serving origin reads"
+	# `suspended = true` on sp2's namespace means **parked**, not
+	# dm-suspended: the ns-dev is live over the td's dm-error and the host
+	# queues against the ANA state above (§11.6, [D12]).
+	assert_parked 2 "$nsdev2" "$err2" "clone_xfer sp2 stored-suspended ns-dev"
+	assert_opens_eio 2 "$nsdev2" "clone_xfer sp2 stored-suspended ns-dev"
 
 	stage xfer "stage 2: the transfer retires the origin (host IO quiesced)"
 	req_set "$req1" ".xfer_list = [$(req_xfer "$C_XFER" "$nqn" 1 \
@@ -2253,8 +2409,29 @@ case_clone_xfer() {
 	assert_map_ok "$out" xfer_id_to_dm_linear "$C_XFER" clone_xfer
 	assert_map_ok "$out" xfer_id_to_subsystem "$C_XFER" clone_xfer
 	assert_map_ok "$out" xfer_id_to_namespace "$C_XFER" clone_xfer
-	assert_eq "$(helper 1 "dm_state $nsdev1")" suspended \
-		"clone_xfer: the origin ns-dev is effectively suspended (CN16)"
+	# The origin is effectively suspended (CN16), which is a **park**: the
+	# ns-dev is live on the td's dm-error, and a block-device walker that
+	# opens it gets EIO at once instead of wedging in D state ([D12]).
+	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the transfer origin"
+	assert_opens_eio 1 "$nsdev1" "clone_xfer: the transfer origin"
+	# §11.6's ordering rule, on hardware: the ANA move to `inaccessible` is
+	# written before the ns-dev is touched, which is why the park needs no
+	# grace window — nvmet refuses IO to an inaccessible namespace at the
+	# target, so nothing of the host's is in flight when the reload lands.
+	seq=$(helper 1 "cn_events $TRACE")
+	# The path is anchored on the ORIGIN's namespace: this same converge also
+	# creates the transfer's own nvmet namespace, which is born inaccessible and
+	# writes `ana_grpid 3` too, so an unanchored regex would be satisfied by the
+	# wrong write and the ordering rule would go unpinned.
+	assert_before "$seq" \
+		"^write .*/subsystems/$nqn/namespaces/1/ana_grpid 3\$" \
+		"^dmsetup reload $nsdev1 " \
+		"clone_xfer: ANA inaccessible before the origin is parked"
+	# And the whole point, node-wide: the transfer is running and NOTHING on
+	# either CN is dm-suspended. This is the state a block-device scanner used
+	# to wedge on for the length of the hydration.
+	assert_no_suspended_dm 1 "clone_xfer: mid-transfer"
+	assert_no_suspended_dm 2 "clone_xfer: mid-transfer"
 	host_wait_ana "$hv" "$nqn" 1 inaccessible 30
 	assert_eq "$(helper 1 "port_linked '$xnqn'")" linked \
 		"clone_xfer: the xfer subsystem is on the port"
@@ -2479,6 +2656,10 @@ case_clone_xfer() {
 	rev1=${CNREV[1]}
 	out=$(cn_syncup_cntlr 1 "$req1")
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer source retired"
+	# "Retired" is now a parked device, not a suspended one: the transfer is
+	# gone and the stored `suspended` flag carries the state on (§11.6).
+	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the retired source"
+	assert_opens_eio 1 "$nsdev1" "clone_xfer: the retired source"
 	req_set "$req2" ".clone_list = []
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
 	bump_cn_rev 2
@@ -2487,8 +2668,6 @@ case_clone_xfer() {
 	assert_map_ok "$out" td_id_to_raid0 "$S_TD" "clone_xfer finalized"
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer finalized"
 	seq=$(helper 2 "cn_events $TRACE")
-	local nsdev2
-	nsdev2=$(cn_dm_name 6 2 "$sp2" "$S_NS")
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
 	# CN18 teardown order: the dm-clone goes first,
@@ -2500,7 +2679,7 @@ case_clone_xfer() {
 	assert_before "$seq" "^dmsetup remove $metadm\$" \
 		"^nvme disconnect .*$NQN_PREFIX:4:" \
 		"clone_xfer: the source connection dies last"
-	# CN16 rule 5: with the clone gone the ns-dev sits on the raid0 again.
+	# CN16 rule 6: with the clone gone the ns-dev sits on the raid0 again.
 	assert_eq "$(helper 2 "dm_backing $nsdev2")" \
 		"$(helper 2 "dm_devno $(cn_dm_name 4 2 "$sp2" "$S_TD")")" \
 		"clone_xfer: the ns-dev is back on the raid0"

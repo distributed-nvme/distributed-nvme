@@ -655,8 +655,8 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    `ana_grpid` inaccessible; configfs `allowed_hosts/` of the ss contains
    exactly the host NQN on both CNs. "ns-dev table = error" is shorthand:
    the agent never gives an ns-dev an `error` target, it repoints the
-   ns-dev's own table at the td's `CnErrorName` device (CN16 rule 1) — a
-   dm-linear on this `readwrite` standby, since only rule 6's readonly level
+   ns-dev's own table at the td's `CnErrorName` device (CN16 rule 2) — a
+   dm-linear on this `readwrite` standby, since only rule 7's readonly level
    wraps the backing in dm-flakey (step 6) — so the assertion compares the
    ns-dev's backing devno with the kind-5 dm-error's, the state CN16
    actually prescribes.
@@ -790,14 +790,19 @@ agent with a provisioning-deferred leg), with ns 0xb `suspended: true` and
 no clone yet. Host
 connects the sp2 path: controller live, ana `inaccessible`, no by-id node
 appears for it (expected — the multipath device still serves via sp1).
+Assert on VM2: the stored-`suspended` ns-dev is **parked** — live, its table
+a dm-linear over the td's `CnErrorName` — and a bounded `dd` open of it
+returns an IO error within seconds rather than blocking (§11.6).
 The dst td is freshly created and never written — the [D3] precondition.
 
 **Stage 2 — transfer on sp1 (host IO quiesced from here).**
 `syncup-cntlr` CN1 (CNREV1++) adding xfer 0xc (`ori_nqn = …:c:vol1`,
 `ori_ns_idx 1`, `allowed_hosts = [CnHostNqn(0x1, 0x12)]`,
 `auto_suspend: true`). Assert: `xfer_id_to_{dm_linear,subsystem,namespace}`
-OK; on VM1 the origin ns-dev is **suspended** (`dmsetup info` — the CN16
-effective-suspend) and the sp1 path went `inaccessible`; the xfer
+OK; on VM1 the origin ns-dev is **parked**: live, its table a dm-linear over
+the td's `CnErrorName`, and a bounded `dd` open of it returns an IO error
+within seconds rather than blocking (the CN16 effective-suspend, §11.6);
+the sp1 path went `inaccessible`; the xfer
 subsystem `nqn.2024-01.io.dnv:4:…:00000000000003d1:000000000000000c` is on
 VM1's port with `allowed_hosts` = exactly CN2's hostnqn.
 
@@ -936,7 +941,9 @@ sp1 path) and reconnect; wait `optimized` again.
 
 **Stage 8 — finalize (production order).** `syncup-cntlr` CN1 (CNREV1++):
 xfer removed, ns `suspended: true` (= `DeleteTransfer(force=false)`
-semantics — the source stays retired). `syncup-cntlr` CN2 (CNREV2++):
+semantics — the source stays retired). Assert on VM1: "retired" is now a
+**parked** device, not a suspended one — the same two asserts and the same
+bounded open as stages 1 and 2. `syncup-cntlr` CN2 (CNREV2++):
 clone removed, ns `suspended: false` (= `DeleteClone`). Assert on VM2:
 ns-dev back on the raid0; the dm-clone and its kind-`b` metadata wrapper are
 both gone (`dmsetup ls | grep -- '-b-'` empty for this CN, which is also the
@@ -1030,11 +1037,13 @@ across **both** VMs (a clone on one VM holds a source on the other):
    retry loops and probers with the agents).
 2. `resume_suspended` — every suspended dm device matching `dnv*`
    (one flat prefix — [D14] removed LVM's doubled-dash
-   nodes). Load-bearing, not
-   defensive: a transfer's origin ns-dev is **deliberately suspended**
-   (CN16), and the dn cutover window may hold linears suspended; a
-   suspended device wedges `dmsetup remove`, nvmet disable above it, and
-   any block-device scan in D state.
+   nodes). The dn cutover window may hold linears suspended, and an
+   interrupted reload can leave anything so; a suspended device wedges
+   `dmsetup remove`, nvmet disable above it, and any block-device scan in D
+   state. On **CN** VMs the sweep is debris cleanup only since 2026-09-16:
+   the cn agent no longer suspends a transfer origin — an effectively
+   suspended namespace is parked, live (CN16, §11.6) — so the only suspended
+   CN device a run can meet is one an older build or a killed agent left.
 3. Host-role disconnects: every `nqn.2024-01.io.dnv-it:*` connection on
    both VMs (nvmet controllers must die before their subsystems).
 4. cn nvmet, host-facing: disable namespaces, unlink port links, rmdir the
@@ -1164,8 +1173,8 @@ another document or the harness cites can shift.
   dm-clones of pass 1 have released it, and step 9 loses `vgchange`; §17 no
   longer dumps `lvs`; Appendix A's volatile-VG bullet became the
   volatile-arena bullet. Rationale: the [D13](a) label-scan class (a bare
-  `vgs`/`lvs` scanning a CN's suspended transfer-origin ns-devs wedges LVM
-  in unkillable D state) plus deterministic naming.
+  `vgs`/`lvs` scanning a CN that at the time held its transfer-origin ns-devs
+  dm-suspended wedged LVM in unkillable D state) plus deterministic naming.
 - **U4-T6 ([D15])** — whole-side zeroing
   behind a `provisioned` gate: every DN side is fully written with
   `blkdiscard --zeroout` before its first export, tracked per extent in the
@@ -1213,6 +1222,24 @@ another document or the harness cites can shift.
   removal is asserted": its re-applies resend the *same* request, so
   `removedNamespaces(old, plan)` is empty and the new loop emits nothing at
   all. §19 records the gap, and `cnagent.md` §6 test 26 is the coverage.
+- **An effectively suspended namespace is parked, not suspended**
+  (`minor_updates_08` U1, 2026-09-16; `architecture.md` §11.6 / [D12],
+  `cnagent.md` CN16). §13 stage 2 replaces its `dm_state … suspended`
+  assertion with `assert_parked` (the ns-dev is **live** and its table is
+  `0 <sectors> linear <CnErrorName devno> 0`) plus `assert_opens_eio` — a
+  bounded `dd` of the device returns an IO error *within the timeout*
+  instead of blocking, which is the observable the whole change exists for.
+  Stages 1 and 8 gain the same pair, which they never had. Stage 2 additionally pins the ordering rule on hardware
+  (`ana_grpid 3` before the ns-dev reload, out of the converge's own event
+  stream) and asserts node-wide that **no** dnv dm device on either CN is
+  suspended while the transfer runs. New helpers: `assert_parked`,
+  `assert_opens_eio`, `assert_no_suspended_dm` on the driver, `open_rc` and
+  `suspended_agent_dms` on the VM. `resume_suspended` stays — a DN cutover
+  window still holds linears suspended and an interrupted reload can leave
+  anything so — but on a CN VM it is debris cleanup only. Cases A-B keep
+  their `CN16 rule N` prose, renumbered by the inserted parked rule (1→2,
+  5→6, 6→7). Case D is untouched and, note, carries no effectively suspended
+  namespace at all, so it is not park coverage.
 
 ## Appendix A — lab gotchas baked into this plan
 
@@ -1225,10 +1252,11 @@ another document or the harness cites can shift.
   shares one subsystem NQN across SPs, and a leg's NQN spans its sides —
   disconnect a single dead path by device (`-d`), the way case C stage 6
   and the dn suite's migration step do.
-- **A deliberately suspended dm device is part of steady state here** (a
-  transfer's origin ns-dev, CN16) — the reason `resume_suspended` runs
-  before any teardown pass and why no cleanup step may scan block devices
-  before it.
+- **A dn cutover window holds linears suspended** — the reason
+  `resume_suspended` runs before any teardown pass and why no cleanup step
+  may scan block devices before it. No **CN** device is deliberately
+  suspended any more: an effectively suspended namespace is parked, live
+  (CN16, §11.6).
 - **ANA `inaccessible` paths have no `/dev` node and queue IO** → the
   failover and transfer stages quiesce host IO across their no-serving-path
   windows.

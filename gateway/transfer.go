@@ -148,14 +148,14 @@ func (s *Server) CreateTransfer(
 // force == false FINALIZES a completed copy: it additionally sets
 // suspended = true on the origin namespace in the same STM, so the source
 // stays retired once the Transfer record — the only other thing keeping the
-// origin's dm device suspended and its ns ANA inaccessible — is gone. Doing it
+// origin's ns-dev parked and its ns ANA inaccessible — is gone. Doing it
 // in this transaction and not in a follow-up UpdateNamespaceSuspended is what
-// closes the window in which the next syncup would resume the source while the
+// closes the window in which the next syncup would unpark the source while the
 // destination is already serving the same nguid.
 //
 // force == true ABORTS: the origin is left untouched with suspended still
-// false, so the next syncup resumes its device and moves the ns back to the
-// optimized group (§11.3's abort path).
+// false, so the next syncup reloads its ns-dev onto the raid0 and moves the ns
+// back to the optimized group (§11.3's abort path).
 //
 // A missing origin subsystem or ns_idx on the finalize path is skipped, not an
 // error [D-G]: the transfer is being deleted either way, and the RPC must not

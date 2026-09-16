@@ -422,7 +422,7 @@ func (s *CnAgentServer) retireClone(
 }
 
 // repointTdNsDevs moves every ns-dev of one td onto the backing the **new**
-// plan wants — the raid0 when the cntlr still serves it (CN16 rule 5), the
+// plan wants — the raid0 when the cntlr still serves it (CN16 rule 6), the
 // dm-error otherwise. It is what lets a dm-clone be removed: a device another
 // dm table still maps cannot go.
 func (s *CnAgentServer) repointTdNsDevs(

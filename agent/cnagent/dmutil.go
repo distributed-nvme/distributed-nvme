@@ -67,10 +67,9 @@ func dmTable(targetType string, sectors uint64, args []string) string {
 		sectors, targetType, strings.Join(args, " "))
 }
 
-// ensureDmSingle converges one single-target device. keepSuspended leaves a
-// deliberately suspended device suspended (the §11.6 namespace suspend, the
-// one steady state where that is correct); everywhere else no dnv device is
-// ever left suspended ([D12]).
+// ensureDmSingle converges one single-target device. No dnv device is ever
+// left suspended ([D12]): the reload path resumes on its own, and a device
+// found suspended with the table it wants is resumed here.
 func (s *CnAgentServer) ensureDmSingle(
 	ctx context.Context,
 	name string,
@@ -78,7 +77,6 @@ func (s *CnAgentServer) ensureDmSingle(
 	sectors uint64,
 	args []string,
 	argCmp int,
-	keepSuspended bool,
 ) error {
 	if sectors == 0 {
 		return fmt.Errorf("device size is 0")
@@ -99,7 +97,7 @@ func (s *CnAgentServer) ensureDmSingle(
 		dev.ReadOnly {
 		return s.dm.Reload(ctx, name, table)
 	}
-	if dev.Suspended && !keepSuspended {
+	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}
 	return nil
@@ -110,7 +108,7 @@ func (s *CnAgentServer) ensureDmError(
 	name string,
 	sectors uint64,
 ) error {
-	return s.ensureDmSingle(ctx, name, "error", sectors, nil, 0, false)
+	return s.ensureDmSingle(ctx, name, "error", sectors, nil, 0)
 }
 
 func (s *CnAgentServer) ensureDmLinear(
@@ -125,7 +123,7 @@ func (s *CnAgentServer) ensureDmLinear(
 		return err
 	}
 	args := []string{devNo, strconv.FormatUint(offsetSectors, 10)}
-	return s.ensureDmSingle(ctx, name, "linear", sectors, args, 0, false)
+	return s.ensureDmSingle(ctx, name, "linear", sectors, args, 0)
 }
 
 // ensureDmMulti converges a multi-target concat (the pool meta/data linears of
@@ -349,8 +347,10 @@ func (s *CnAgentServer) probeDmConcat(
 
 // removeDm removes a dm device if it exists and reports whether it is gone
 // afterwards. A suspended device is resumed first: `dmsetup remove` does not
-// succeed on one, and a transfer's origin ns-dev is deliberately suspended in
-// steady state (CN16).
+// succeed on one. Nothing dnv builds is suspended in steady state any more —
+// an effectively suspended ns-dev is parked, live (CN16, §11.6) — so the
+// resume is a guard for a device an older build or an interrupted reload left
+// behind.
 func (s *CnAgentServer) removeDm(ctx context.Context, name string) bool {
 	dev, err := s.dm.Info(ctx, name)
 	if err != nil {

@@ -38,10 +38,17 @@ const (
 )
 
 // detailsSpLevel is what a resource suppressed by the sp_level reports (CN19);
-// detailsSuspended is the expected state of an effectively suspended ns-dev
-// (CN28) — both are steady states, not faults.
+// detailsParked is the expected state of an effectively suspended ns-dev
+// (CN28): **live**, its table a dm-linear over the td's dm-error (§11.6).
+// detailsSuspended is what the generic single-device probes report for a
+// device they find dm-suspended. A converge and a probe of one cntlr take the
+// same lock, so CN14's quiesce bracket is never observable from outside; what
+// makes the state reachable is an interrupted pass or an agent killed inside
+// that bracket. No ns-dev is ever expected in it. None of the three is a
+// fault.
 const (
 	detailsSpLevel   = "sp_level"
+	detailsParked    = "parked"
 	detailsSuspended = "suspended"
 	// detailsProvisioning is what a provisioning-deferred resource reports:
 	// the sides
@@ -297,8 +304,10 @@ type nsPlan struct {
 	devName string
 	sectors uint64
 
-	// suspended is the §11.6 *effective* suspend (CN16), backingName the
-	// dm device the ns-dev's table points at, flakey the [D11] read-only
+	// suspended is the §11.6 *effective* suspend (CN16) — which is a **park**,
+	// not a dm suspension: it makes backingName the td's dm-error (rule 1) and
+	// anaGrpId inaccessible, and the device stays live ([D12]). backingName is
+	// the dm device the ns-dev's table points at, flakey the [D11] read-only
 	// wrapper over it, anaGrpId the fixed [D4] group.
 	suspended   bool
 	backingName string
@@ -791,6 +800,10 @@ func (p *cntlrPlan) buildSubsystems() {
 // auto_resume clone targets its td, which overrides to not-suspended. That
 // override is the §11.3 flow: the destination namespace is *created*
 // suspended and serves anyway while the clone runs.
+//
+// The bit it returns is consumed twice, and neither consumer suspends
+// anything: nsBacking rule 1 *parks* the ns-dev on the td's dm-error, and the
+// ANA rule above keeps the namespace in the inaccessible group ([D12]).
 func (p *cntlrPlan) effectiveSuspend(ns *pb.Namespace) bool {
 	for _, clone := range p.req.GetCloneList() {
 		if clone.GetAutoResume() && clone.GetDstTdId() == ns.GetTdId() {
@@ -832,17 +845,24 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 	if np.deferred {
 		return np.td.errorName, false
 	}
-	// 1. standby or disabled cntlr; 2. no thin pools at this level.
+	// 1. *parked*: the namespace is effectively suspended (§11.6), so its
+	// ns-dev is a live dm-linear over the td's dm-error — never under
+	// dm-flakey, and never dm-suspended ([D12]). np.suspended is assigned
+	// before this runs.
+	if np.suspended {
+		return np.td.errorName, false
+	}
+	// 2. standby or disabled cntlr; 3. no thin pools at this level.
 	if !p.primary || p.level >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
 		return np.td.errorName, false
 	}
 	clone, cloned := p.cloneByTd[np.td.tdId]
-	// 3. a clone targets the td and the level suppresses clones: a raid0
+	// 4. a clone targets the td and the level suppresses clones: a raid0
 	// with holes must never serve.
 	if cloned && p.level >= pb.SpLevel_SP_LEVEL_NO_CLONE {
 		return np.td.errorName, false
 	}
-	// 4. the clone backing; 5. the plain raid0 — 6. under dm-flakey when the
+	// 5. the clone backing; 6. the plain raid0 — 7. under dm-flakey when the
 	// level is read-only.
 	if cloned {
 		return clone.finalName, p.readOnly

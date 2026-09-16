@@ -203,7 +203,10 @@ func (s *CnAgentServer) retire(
 	// the survivors the loop below selects and every removed namespace's as
 	// well (CN9).
 	// A provisioning-deferred namespace is covered by the same test, because
-	// CN16 rule 0 makes its backing the td's errorName.
+	// CN16 rule 0 makes its backing the td's errorName; so is an effectively
+	// suspended one, because rule 1 (parked) does — which is how the park
+	// lands here, after step (1)'s ANA write and before anything the build
+	// phase does (§11.6).
 	// The reload's internal suspend is what flushes the in-flight IO. A
 	// namespace whose *old* td is leaving `td_list` is parked too, even when
 	// its new backing is a live raid0: its table still maps the departing
@@ -215,10 +218,11 @@ func (s *CnAgentServer) retire(
 		}
 	}
 	// A namespace leaving `ns_list` is parked here rather than in step (3):
-	// CN9 puts the reload before the nvmet removal, and CN21's rationale —
-	// a suspended device blocks the nvmet disable above it — applies to a
-	// removed namespace exactly as it does to a surviving one (§11.6 suspend,
-	// a transfer origin). `np` is the *old* plan's, and its td's
+	// CN9 puts the reload before the nvmet removal, so the ns-dev stops
+	// mapping the stack under it first. CN21's older rationale — a suspended
+	// device blocks the nvmet disable above it — now applies only to a device
+	// an older build or an interrupted reload left suspended, which this
+	// reload resumes. `np` is the *old* plan's, and its td's
 	// `CnErrorName` still exists: td teardown is step (6) of this same phase.
 	// A namespace that never had a backing td has no dm-error to park on, and
 	// keeps `removeDm`'s own resume below as its backstop.
@@ -824,7 +828,7 @@ func (s *CnAgentServer) reportSliceDeferred(
 
 func nsDevDetails(np *nsPlan) string {
 	if np.suspended {
-		return detailsSuspended
+		return detailsParked
 	}
 	return ""
 }
@@ -867,8 +871,10 @@ func (s *CnAgentServer) reportCloneSuppressed(
 // ---------------------------------------------------------------------------
 
 // teardownCntlr is used by CN7 (pointer removed), CN2 (orphan file) and
-// CN19's SP_LEVEL_DISABLE. Strictly top-down, resuming every suspended ns-dev
-// by reloading it onto its CnErrorName **before** anything else: a suspended
+// CN19's SP_LEVEL_DISABLE. Strictly top-down, parking every ns-dev on its
+// CnErrorName **before** anything else, so nothing above or below it is
+// removed while its table still maps the stack. The same reload resumes a
+// device an older build or an interrupted reload left suspended — a suspended
 // device blocks both the nvmet disable above it and its own removal.
 //
 // Thin volumes are only **deactivated** — no `delete` messages — because the

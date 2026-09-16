@@ -164,7 +164,7 @@ func (s *CnAgentServer) ensurePool(
 	// dm-thin appends status-derived feature arguments to its table output,
 	// so only the four arguments the agent writes are compared.
 	return s.ensureDmSingle(ctx, sp.poolFinalName, "thin-pool",
-		sp.dataSectors, args, len(args), false)
+		sp.dataSectors, args, len(args))
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ func (s *CnAgentServer) ensureThin(
 	// dm-thin's table output may carry an external-origin argument the agent
 	// never writes; compare the two arguments it does write.
 	return s.ensureDmSingle(ctx, name, "thin", tp.thinSectors, args,
-		len(args), false)
+		len(args))
 }
 
 // createThinId sends one slice's `create_thin`. Its only caller is ensureThin

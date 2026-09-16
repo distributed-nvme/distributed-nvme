@@ -440,7 +440,8 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
    a dm-linear `CnNsDevName(cluster, cn, sp, ns_id)` — **the** namespace backing
    device — whose table points at its td's raid0 (normal), the dm-clone
    `CnCloneFinalName` (while a clone targets that td, fig. `090Clone` §8.9), or
-   dm-error (standby / failover / suspended transitions). Namespaces backed by the
+   dm-error (standby / failover / parked — the state of any ns-dev pointed at its td's
+   dm-error, §11.6, which includes every effectively suspended namespace). Namespaces backed by the
    same td each have their own `CnNsDevName` over the same raid0.
 6. **Host-facing nvmet**: per `Subsystem` a nvmet subsystem on the CN's port with
    `attr_cntlid_min/max` from `Cntlr.cntlid_slot`, `serial`/`model` from the etcd
@@ -448,8 +449,8 @@ Bottom-up, everything below is created/owned by the cn agent when `SyncupCntlr` 
    per `Namespace` an nvmet namespace `nsid = ns_idx`, `device_path` = the
    namespace's own `CnNsDevName`, `uuid`/`nguid` from the etcd record, membership
    of the fixed `optimized` ANA group
-   [D4] (primary) unless `suspended` (§8.8) — suspended ⇒ dm device
-   suspended + ns moved to the `inaccessible` group everywhere.
+   [D4] (primary) unless `suspended` (§8.8) — suspended ⇒ ns-dev parked on its
+   td's dm-error + ns moved to the `inaccessible` group everywhere (§11.6).
 7. **Clones / transfers / migrations** hosted by the SP, per §11.
 
 ```mermaid
@@ -1608,7 +1609,7 @@ the namespace's own `CnNsDevName` onto the new td's raid0 (a dm reload — the n
 `device_path` never changes, so the switch is invisible to the host). Reply `ns_id`.
 
 **UpdateNamespaceSuspended** — STM set `suspended`, bump `SpRev`. Suspended ⇒ every
-cntlr suspends the namespace's `CnNsDevName` and moves the ns to the `inaccessible` ANA group;
+cntlr parks the namespace's `CnNsDevName` on its td's dm-error and moves the ns to the `inaccessible` ANA group;
 resumed ⇒ reverse. Used by the transfer/clone choreography of §11.3. Reply `ns_id`.
 
 ### 8.9 Clones (destination side of a copy; fig. `090Clone`)
@@ -1792,7 +1793,7 @@ flowchart BT
         R["raid0 of the origin td<br/>CnRaid0Name"]
         LX["CnXferFinalName<br/>(dm-linear on the raid0)"]
         NX["nvmet subsystem<br/>XferNqn"]
-        LP["CnNsDevName (suspended)"]
+        LP["CnNsDevName (parked)"]
         NP["nvmet target<br/>(origin ns)"]
         SL0 --> R
         SL1 --> R
@@ -1833,15 +1834,15 @@ Action: STM: `xfer_id` from `next_id`, write `Transfer`, append `xfer_name_list`
 namespace, `allowed_hosts` from the record, `Cntlr.cntlid_slot` bounds); standbys
 export the same subsystem backed by a dm-error `CnXferFinalName` with ANA
 `inaccessible` (fig. `100Transfer` right half). Iff `auto_suspend`, the primary first
-(1) moves the origin namespace to ANA `inaccessible` on every cntlr, (2) suspends the
-origin namespace's `CnNsDevName` — the destination clone is now the only
+(1) moves the origin namespace to ANA `inaccessible` on every cntlr, (2) parks the
+origin namespace's `CnNsDevName` on its td's dm-error — the destination clone is now the only
 reader/writer of the bytes.
 
 **DeleteTransfer** —
 Semantics: `force = false` **finalizes** a completed hand-over: the STM additionally
 sets `suspended = true` on the origin namespace, so the source stays retired after the
 xfer object disappears. `force = true` **aborts**: `suspended` is left `false`, so the
-next syncup restores normal service (resume dev, ANA back).
+next syncup restores normal service (reload dev onto the raid0, ANA back).
 Action: STM: remove from `xfer_name_list`, delete `Transfer`, (maybe) flip `suspended`,
 bump `SpRev`. Agents drop the xfer subsystem + dm devices. Reply `xfer_id`.
 
@@ -2828,7 +2829,7 @@ moving ss/ns from `sp1` to `sp2`:
 * Collect the sp2 cntlrs' CN ids ⇒ `CnHostNqn` list.
 * `CreateTransfer` on sp1 (`ori_nqn`/`ori_ns_idx`, `allowed_hosts` = that list,
   `auto_suspend = true`) — the sp1 primary then: (1) origin ns → `inaccessible`,
-  (2) suspend its `CnNsDevName`, (3) create `CnXferFinalName` on the raid0, (4) export
+  (2) park its `CnNsDevName`, (3) create `CnXferFinalName` on the raid0, (4) export
   it via `XferNqn` per the Transfer.
 * `CreateClone` on sp2 (`src_tr_conf_list` = sp1 cntlr endpoints, `src_nqn` =
   the transfer's `XferNqn`, `src_ns_idx = ori_ns_idx`, the source geometry
@@ -2917,15 +2918,19 @@ is missing or unusable — CN reboot, failover to a cntlr that never ran it, tmp
 or a metadata-wrapper probe mismatch (wrong length, or a table backed by a stale loop
 path after a tmpfs remount, [D14]) — it MUST:
 
-1. Suspend the dm-linear `CnNsDevName` of every namespace backed by the td (or make
-   sure none is created / pointing anywhere live yet).
+1. Park the dm-linear `CnNsDevName` of every namespace backed by the td on the td's
+   dm-error (or make sure none is created yet).
 2. Read the **dst bitmaps**: the mapping bitmap of the dst td from every thin pool of
    the SP (per slice, *mapped = 1 = copied*).
 3. Create the dm-clone with **hydration disabled** and a freshly allocated, freshly
    hole-punched metadata wrapper ([D14]).
 4. `blkdiscard` every dm-clone region whose bits are 1 in the dst bitmaps (§11.4,
    B-side only) — marking those regions "already hydrated".
-5. Resume those `CnNsDevName`s; enable background hydration.
+5. Enable background hydration, then re-converge those `CnNsDevName`s onto whatever
+   CN16 now wants for the td (`cnagent.md` CN18 fixes that order): the dm-clone when
+   the namespace serves — an `auto_resume` clone, or one an operator has resumed —
+   and the td's dm-error while it is still effectively suspended (CN16 rule 1).
+   Nothing is resumed: step 1 parked them live (§11.6).
 
 The dst bitmaps MUST be fully applied **before** the dm-clone handles any IO —
 otherwise a read of an already-copied (and possibly since-rewritten) region would be
@@ -2937,10 +2942,21 @@ the dm-clone is rebuilt (§9.6), with no worker involvement.
 
 ### 11.6 Namespace suspend semantics
 
-`suspended = true` ⇔ every cntlr keeps the namespace's `CnNsDevName` dm-suspended and
-the ns in the `inaccessible` ANA group; `false` ⇔ normal §3.3/§3.4 behavior. Set by users
+`suspended = true` ⇒ the namespace is **effectively suspended** on every cntlr. The
+stored flag is one of two sources — the other is an `auto_suspend` transfer naming the
+namespace — and an `auto_resume` clone on its td overrides both (`cnagent.md` CN16 is
+the rule). An effectively suspended namespace's `CnNsDevName` is kept **parked** —
+live, its table a dm-linear over the td's dm-error — with the ns in the `inaccessible`
+ANA group; a namespace that is not effectively suspended gets normal §3.3/§3.4
+behavior. Set by users
 (`CreateNamespace.suspended`, `UpdateNamespaceSuspended`) and by the transfer/clone
-finalization (§8.9/§8.10).
+finalization (§8.9/§8.10). Nothing is dm-suspended: hosts queue against the ANA state,
+which nvmet enforces at the target, and a local opener of a parked ns-dev gets EIO
+rather than blocking ([D12]).
+
+*Parked*, of an ns-dev, is this device state and nothing else. It is unrelated to a
+**parked spare leg** (§10.4), which is an etcd-record state — a replaced leg retained
+in `spare_leg_list` for the operator — with no dm meaning.
 
 ### 11.7 SpLevel (see §8.4 UpdateStoragePoolLevel)
 
@@ -2956,6 +2972,9 @@ the ones backed by `CnNsDevName` — serves reads and fails writes with an IO er
 Nothing else. It is enforced **on the CN only**, by reloading each such namespace's
 `CnNsDevName` onto a dm-flakey `error_writes` table over its normal backing
 (Appendix A); never by a block-device read-only flag, and never on the DN ([D11]).
+An effectively suspended namespace is exempt at every level: it is parked on the td's
+dm-error and `inaccessible` (§11.6), so it serves no reads to keep and no writes to
+fail — the CN16 parked rule is evaluated above the dm-flakey one.
 Two measured facts rule out a bdev flag at any layer: nvmet opens a namespace's
 backing device `BLK_OPEN_READ | BLK_OPEN_WRITE`, so the top device of an export can
 never be read-only; and a read-only flag *below* the top does not stop writes that
@@ -3368,8 +3387,8 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   timeout and no error path, so (a) any block-device scanner that touches it blocks in
   uninterruptible D state — `exit_aio` then makes that task unkillable and the node
   needs a reboot — and (b) `dmsetup remove` on it does not succeed —
-  both measured on the lab kernel. The agent therefore: never suspends anywhere except
-  this one window; never lets a device outlive it, including across an agent restart
+  both measured on the lab kernel. The **dn** agent therefore: never suspends anywhere
+  except this one window; never lets a device outlive it, including across an agent restart
   (a linear found suspended with no recorded start is retired at once rather than
   starting a second window); and resumes a fenced linear before any teardown step runs
   over it. The §11.1 side failover has no window at all — it reloads onto dm-error
@@ -3378,20 +3397,27 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   reading a source's linears during those 60 s; no dnv agent scans block devices any
   more ([D13] removed the dn agent's LVM commands and [D14] the cn agent's).
 
-  One residual is recorded but not mechanised: a **transfer** origin's ns-dev
-  suspension (§8.10, §11.3) is **unbounded** — unlike this migration window it has no
-  `SuspendSeconds` floor or ceiling — so external scanners that touch it still block in
-  D state for as long as the transfer runs. The agents' own exposure to that ended with
-  [D14] (no more LVM scans on the CN either; `cnagent.md` CN16). The operational blast
-  radius deserves stating plainly: a transfer hydrating a large td
-  runs for hours, and for that whole time any block-device walk on the CN — a udev
-  worker, `blkid`, `lsblk`, a monitoring or backup agent — that opens the suspended
-  ns-dev wedges unkillably until the transfer ends. Operators SHOULD keep scanners off
-  dnv devices on CNs while transfers run (the spirit of the Appendix A udev guard). A
-  bounded alternative was considered and left undecided: after a grace window, reload
-  the origin ns-dev onto its dm-error the way this fence does — hosts already queue
-  against the `inaccessible` ANA state, and the xfer path never maps the ns-dev. Note
-  only; no mechanism change was decided.
+  The transfer origin's ns-dev (§8.10, §11.3), and every §11.6-suspended namespace,
+  used to be held dm-suspended for the life of the suspension — unbounded, with no
+  `SuspendSeconds` floor or ceiling, and the one place a block-device walker on a CN
+  could still wedge in D state. *Decided 2026-09-16 (minor_updates_08 U1):* an
+  effectively suspended namespace is **parked** instead — its ns-dev reloaded onto the
+  td's dm-error and resumed, the namespace `inaccessible` — with **no grace window**,
+  because the namespace is moved to `inaccessible` before its own ns-dev is touched
+  (the CN9 retire phase's ANA step precedes its park step) and nvmet refuses IO to an
+  inaccessible namespace at the target, so a window would absorb nothing but a local
+  scanner's bios; the reload's own flushing suspend is what keeps in-flight IO from
+  being replayed. Two bounds on that argument are stated rather than hidden: the ANA
+  write is best-effort (a failed `ana_grpid` write is logged and the pass continues),
+  so a host racing that failure takes IO errors where it used to queue in the device —
+  fail-fast rather than an unkillable wedge, and the next converge re-writes the group;
+  and the §11.5 clone rebuild parks a *serving* namespace's ns-dev from the build phase
+  with no ANA move at all, which is that recovery's own documented window and not this
+  one. With the park, the CN holds no suspension **across** a converge pass at all:
+  what is left there is CN14's snapshot quiesce, a `dmsetup suspend` bracketed around
+  one per-slice `create_snap` sequence and resumed before the pass returns
+  (`cnagent.md` CN14, CN16) — bounded by construction, unlike the §11.6 suspension it
+  replaces.
 * **[D13] The DN carries a self-describing dnv disk format; LVM is gone from the dn
   agent.** LVM left for three measured reasons. (a) Its label scan reads every block
   device on the node, so any dnv device in a bad state takes the whole node's LVM down
@@ -3420,7 +3446,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 * **[D14] LVM is gone from the CN too; the clone-metadata arena is a slot allocator.**
   The CN clone VG had reintroduced on the CN exactly the failure class [D13](a) evicted
   from the DN: a bare `vgs`/`lvs` label scan reads every block device on the node, and
-  on a CN that includes suspended transfer-origin ns-devs (lab-measured to wedge LVM in
+  on a CN that, at the time, held transfer-origin ns-devs dm-suspended (lab-measured to wedge LVM in
   unkillable D-state `exit_aio`; `ignore_suspended_devices` / `global_filter` do not
   help), error targets, md members and pathless multipath legs — and the cn agent ran
   those scans on every converge and every Check round. Replacement (§3.2 step 2, §4.5,
@@ -3644,6 +3670,19 @@ own amendment sections are the surviving record.
   nothing is discarded that was written — but it costs the bitmap optimization at that
   pair and leaks the file. Clear a CN's `--local-store` when upgrading past this
   change; see `cnagent.md` CN2.
+* **An effectively suspended namespace is parked, never suspended (2026-09-16)** —
+  §11.6 no longer means a held `dmsetup suspend` of the namespace's `CnNsDevName`. It
+  means the ns-dev's table is a dm-linear over its td's dm-error and the device is
+  **live**, with the namespace in the `inaccessible` ANA group as before; the CN holds
+  no suspension across a converge pass any more. §2 step 5/6, §8.8
+  (`UpdateNamespaceSuspended`), §8.10 and fig. `100Transfer`, §11.3, §11.5 step 1,
+  §11.6, [D12] (last paragraph) and [D14] follow, as do `cnagent.md` CN16 and its
+  probe row and `cnagent_integtest.md`. Host-visible behavior is unchanged — a host
+  sees `inaccessible` and queues, and it never saw the device's table. What changes is
+  local: a scanner that opens a parked ns-dev gets EIO at once instead of wedging in
+  uninterruptible D state, and `dmsetup remove` and the nvmet disable above it work on
+  it without a resume first. No record, request or flag changes; an upgraded agent
+  converges an ns-dev an older build left suspended on its first pass.
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 

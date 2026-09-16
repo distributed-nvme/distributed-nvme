@@ -130,9 +130,12 @@ func (d *Dm) LoadTable(
 
 // Reload swaps a live device's table: suspend, load, resume (Appendix A).
 // The device is always resumed: a reload never leaves it suspended ([D12]).
-// The one place dnv holds a suspension is the bounded §11.2 cutover window,
-// and even that ends in a reload — which is what errors the deferred IO
-// instead of replaying it.
+// No dnv suspension outlives the operation that took it: the dn's §11.2 cutover
+// window is bounded by `SuspendSeconds` and ends in a reload — which is what
+// errors the deferred IO instead of replaying it — and the cn's only remaining
+// one is CN14's snapshot quiesce, resumed inside the same converge pass. The
+// §11.6 namespace suspension that used to be unbounded is now a *park*: a
+// reload onto the td's dm-error, live (cnagent.md CN16).
 func (d *Dm) Reload(
 	ctx context.Context,
 	name string,

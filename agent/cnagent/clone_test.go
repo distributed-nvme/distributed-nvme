@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -229,14 +230,27 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, suspended: true,
 		clones: []*pb.Clone{cloneOf()}})
-	if node.dms[nsDevName(srv, testNs)].suspended {
-		t.Fatalf("auto_resume did not override the suspended flag")
+	// The override has to be pinned on the *backing*, not on the device's
+	// suspend bit: since the park (§11.6) nothing is ever dm-suspended, so a
+	// `!suspended` assert would pass whether the override worked or not.
+	cloneNo := node.devNo["/dev/mapper/"+cloneName(srv, testClone)]
+	dev := node.dms[nsDevName(srv, testNs)]
+	if want := agent.LinearTable(testTdSize/512, cloneNo, 0); dev.table !=
+		want {
+		t.Fatalf("auto_resume did not override the suspended flag: "+
+			"the ns-dev table is %q, want the dm-clone %q", dev.table, want)
+	}
+	if dev.suspended {
+		t.Fatalf("the serving ns-dev is dm-suspended")
 	}
 	if got := node.files[anaPath(testNqn, 1)]; got != "1" {
 		t.Fatalf("ana_grpid is %q, want 1 (optimized)", got)
 	}
 
-	// auto_resume = false leaves it effectively suspended.
+	// auto_resume = false leaves it effectively suspended — which since
+	// 2026-09-16 means **parked**: CN16 rule 1 wins over the clone backing of
+	// rule 5, so the ns-dev is a live dm-linear over the td's dm-error and
+	// the namespace is inaccessible. Nothing is dm-suspended ([D12]).
 	clone := cloneOf()
 	clone.AutoResume = false
 	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
@@ -244,8 +258,9 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 		clones: []*pb.Clone{clone}})); err != nil {
 		t.Fatalf("auto_resume=false: %v", err)
 	}
-	if !node.dms[nsDevName(srv, testNs)].suspended {
-		t.Fatalf("a suspended dst namespace must stay suspended")
+	assertParked(t, srv, node, testNs, testTd, "auto_resume=false")
+	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+		t.Fatalf("ana_grpid is %q, want 3 (inaccessible)", got)
 	}
 }
 

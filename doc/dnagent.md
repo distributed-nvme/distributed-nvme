@@ -1326,8 +1326,7 @@ Recorded for traceability; the edits are already applied.
   block-device scanner that touches it in unkillable D state, makes
   `dmsetup remove` fail, and defers writes that then replay at resume —
   possibly after hydration already copied that region
-  (measured on the lab kernel). `Dm.Reload` lost its `keepSuspended`
-  parameter, `sidePlan.linearSuspended` is gone, a migration source's per-CN
+  (measured on the lab kernel). `sidePlan.linearSuspended` is gone, a migration source's per-CN
   dm-linears (the primary's included) now sit on their dm-error, and the
   §11.1 failover grace sleep and its constant are deleted.
 * `architecture.md` §1/§2/§3.1/§4/§6.1/§8.11/§9.2/§9.4/§11.2/Appendix A/[D13],

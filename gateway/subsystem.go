@@ -567,9 +567,11 @@ func (s *Server) UpdateNamespaceDev(
 }
 
 // UpdateNamespaceSuspended is architecture.md §8.8's
-// UpdateNamespaceSuspended: suspended namespaces have their device suspended
-// on every cntlr and move to the inaccessible ANA group, which is what retires
-// a namespace during the transfer/clone choreography of §11.3.
+// UpdateNamespaceSuspended: a suspended namespace has its `CnNsDevName`
+// **parked** on the td's dm-error on every cntlr — live, never dm-suspended
+// (§11.6, `cnagent.md` CN16 rule 1) — and moves to the inaccessible ANA
+// group, which is what retires a namespace during the transfer/clone
+// choreography of §11.3.
 //
 // It writes and bumps even when the stored flag already equals the requested
 // one: the §0 #17 idempotent no-write applies to UpdateCntlrEnabled and the

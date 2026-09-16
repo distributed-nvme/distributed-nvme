@@ -396,7 +396,7 @@ UpdateControllerNodeDisabled (+`cn_rev`), InspectControllerNode. Same flags.
 | command | RPC | flags beyond globals | notes |
 |---|---|---|---|
 | `xfer create` | CreateTransfer | `--name`, `--ori-nqn`, `--ori-idx`, `--hosts`, `--auto-suspend` (+ `--rev`) | |
-| `xfer delete` | DeleteTransfer | `--name`, `--force` (+ `--rev`) | `--force` = abort (origin left unsuspended for syncup to resume); default finalizes, retiring the origin ns in the same STM |
+| `xfer delete` | DeleteTransfer | `--name`, `--force` (+ `--rev`) | `--force` = abort (the origin's `suspended` is left `false`, so the next syncup unparks it and restores ANA); default finalizes, retiring the origin ns in the same STM |
 | `xfer get` | GetTransfer | `--name` | |
 | `xfer set-hosts` | UpdateTransferHosts | `--name`, `--hosts` (+ `--rev`) | replaces |
 

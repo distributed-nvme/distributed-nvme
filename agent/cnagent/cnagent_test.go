@@ -480,6 +480,39 @@ func assertOk(t *testing.T, info *pb.ResInfo, label string) {
 	}
 }
 
+// assertParked pins the §11.6 park: one ns-dev's table is a plain dm-linear
+// over its td's `CnErrorName` and the device is **live**. Both halves are
+// load-bearing. An assertion on the words "dmsetup suspend"/"dmsetup resume"
+// would prove nothing either way, because `Dm.Reload` is suspend/load/resume
+// and issues both on every park; the thing [D12] forbids is the device being
+// *left* suspended, which is a final state, not a call.
+func assertParked(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+	nsId uint64,
+	tdId uint64,
+	label string,
+) {
+	t.Helper()
+	dev := node.dms[nsDevName(srv, nsId)]
+	if dev == nil {
+		t.Fatalf("%s: the ns-dev does not exist", label)
+	}
+	if dev.suspended {
+		t.Fatalf("%s: the parked ns-dev is dm-suspended ([D12])", label)
+	}
+	errNo := node.devNo["/dev/mapper/"+errorName(srv, tdId)]
+	if errNo == "" {
+		t.Fatalf("%s: the td's dm-error is gone", label)
+	}
+	want := agent.LinearTable(testTdSize/512, errNo, 0)
+	if dev.table != want {
+		t.Fatalf("%s: the ns-dev table is %q, want the park %q",
+			label, dev.table, want)
+	}
+}
+
 // assertErrorDetails is the row a failed converge leaves: RES_STATUS_ERROR
 // whose details carry the node's own output, so an operator reads what the
 // kernel said and not a paraphrase (§9.5).
@@ -1113,6 +1146,11 @@ func TestSwitchSpareLeg(t *testing.T) {
 // §6.8 — namespace states (CN16)
 // ---------------------------------------------------------------------------
 
+// TestNamespaceSuspend is §11.6 as amended 2026-09-16: an effectively
+// suspended namespace is **parked**, never dm-suspended. Both directions pin
+// the reload's own `--table` — the device the ns-dev ends up on — and the
+// order against the ANA write, which is what keeps a host from ever reaching
+// a table that has stopped serving.
 func TestNamespaceSuspend(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -1122,20 +1160,281 @@ func TestNamespaceSuspend(t *testing.T) {
 		revision: 3, primary: true, suspended: true})); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
+	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
 	assertOrder(t, node,
 		"writedirect "+anaPath(testNqn, 1)+"=3",
-		"cmd dmsetup suspend "+nsDevName(srv, testNs),
+		"cmd dmsetup reload "+nsDevName(srv, testNs)+" --table "+
+			agent.LinearTable(testTdSize/512, errNo, 0),
 	)
+	assertParked(t, srv, node, testNs, testTd, "suspend")
 
 	node.Reset()
 	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
 		revision: 4, primary: true})); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
+	raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
 	assertOrder(t, node,
-		"cmd dmsetup resume "+nsDevName(srv, testNs),
+		"cmd dmsetup reload "+nsDevName(srv, testNs)+" --table "+
+			agent.LinearTable(testTdSize/512, raid0No, 0),
 		"writedirect "+anaPath(testNqn, 1)+"=1",
 	)
+	if dev := node.dms[nsDevName(srv, testNs)]; dev.suspended {
+		t.Fatalf("the unparked ns-dev is dm-suspended")
+	}
+}
+
+// TestParkIsIdempotent is SH16 for the park. The old suspend branch was
+// trivially idempotent (`np.suspended && !dev.Suspended`); the park's
+// idempotence rests on `parkNsDev`'s own `parked` predicate, which the retire
+// phase reaches first for an effectively suspended namespace — so a drift
+// there would reload a live, correct ns-dev on every converge round the worker
+// drives. (`ensureNsDev`'s `nsDevTableMatches` is the second gate and is
+// already satisfied by the time it runs here.)
+func TestParkIsIdempotent(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
+	assertParked(t, srv, node, testNs, testTd, "fixture")
+
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, suspended: true})); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	for _, fragment := range []string{
+		"cmd dmsetup reload " + nsDevName(srv, testNs),
+		"cmd dmsetup suspend " + nsDevName(srv, testNs),
+		"cmd dmsetup resume " + nsDevName(srv, testNs),
+	} {
+		assertNoCall(t, node, fragment)
+	}
+	assertParked(t, srv, node, testNs, testTd, "re-apply")
+}
+
+// TestParkedNamespaceProbe is the CN28 row of a parked ns-dev: `OK, parked`.
+// A dm-suspended ns-dev is an ERROR whatever the plan says — nothing this
+// build produces one, so finding one is a fault to report and not a steady
+// state, which is the direction the old `!= dev.Suspended` comparison had
+// backwards for an effectively suspended namespace.
+func TestParkedNamespaceProbe(t *testing.T) {
+	nsDevRow := func(t *testing.T, srv *CnAgentServer) *pb.ResInfo {
+		t.Helper()
+		reply, err := srv.GetCntlrInfo(context.Background(),
+			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr()})
+		if err != nil {
+			t.Fatalf("GetCntlrInfo: %v", err)
+		}
+		return reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
+	}
+
+	// The other side of both carriers: a SERVING ns-dev reports OK with EMPTY
+	// details. Without it, `nsDevDetails` and `probeNsDev` could return
+	// "parked" unconditionally and every other assertion in the package would
+	// still pass — assertOk compares the status only.
+	t.Run("serving", func(t *testing.T) {
+		srv, _ := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+		row := nsDevRow(t, srv)
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+			row.GetDetails() != "" {
+			t.Fatalf("probed serving ns-dev row: %v/%q",
+				row.GetStatus(), row.GetDetails())
+		}
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true}))
+		if err != nil {
+			t.Fatalf("re-converge: %v", err)
+		}
+		row = reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+			row.GetDetails() != "" {
+			t.Fatalf("converged serving ns-dev row: %v/%q",
+				row.GetStatus(), row.GetDetails())
+		}
+	})
+
+	t.Run("parked", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{
+			revision: 2, primary: true, suspended: true})
+		assertParked(t, srv, node, testNs, testTd, "fixture")
+		row := nsDevRow(t, srv)
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+			row.GetDetails() != "parked" {
+			t.Fatalf("probed parked ns-dev row: %v/%q",
+				row.GetStatus(), row.GetDetails())
+		}
+		// The converge reply says the same thing. It is a second code path
+		// (`nsDevDetails`, not `probeNsDev`), so it needs its own pin —
+		// without one, a converge that still reported "suspended" while the
+		// probe said "parked" would go green.
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true, suspended: true}))
+		if err != nil {
+			t.Fatalf("re-converge: %v", err)
+		}
+		row = reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs]
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+			row.GetDetails() != "parked" {
+			t.Fatalf("converged parked ns-dev row: %v/%q",
+				row.GetStatus(), row.GetDetails())
+		}
+	})
+
+	// Rule 1 returns flakey = false unconditionally, and the read-only level is
+	// the only thing that could make it true. Without this sub-case that
+	// `false` is unobserved: turning it into `p.readOnly` leaves the package
+	// green, and a parked ns-dev at SP_LEVEL_READONLY would quietly become a
+	// dm-flakey table nothing in the tree describes.
+	t.Run("parked is never under dm-flakey", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{
+			revision: 2, primary: true, suspended: true,
+			level: pb.SpLevel_SP_LEVEL_READONLY})
+		assertParked(t, srv, node, testNs, testTd, "readonly + parked")
+	})
+
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+	}{
+		{"suspended, plan says parked", true},
+		{"suspended, plan says serving", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, suspended: tc.suspended})
+			node.dms[nsDevName(srv, testNs)].suspended = true
+			row := nsDevRow(t, srv)
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				row.GetDetails() != "unexpectedly suspended" {
+				t.Fatalf("row: %v/%q", row.GetStatus(), row.GetDetails())
+			}
+		})
+	}
+}
+
+// TestSuspendedNsDevFromAnOlderBuildIsResumed is the upgrade path (§1
+// Compatibility): the three shapes in which an agent that never suspends can
+// still meet a suspended ns-dev, and how each converges on the first pass.
+func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
+	// leftover re-creates what a pre-2026-09-16 agent (or an interrupted
+	// reload) left behind, and returns the count of ns-dev reloads and resumes
+	// the next converge issues.
+	leftover := func(
+		t *testing.T,
+		suspended bool,
+		table func(srv *CnAgentServer, node *fakeNode) string,
+	) (*CnAgentServer, *fakeNode, int, int) {
+		t.Helper()
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{
+			revision: 2, primary: true, suspended: suspended})
+		dev := node.dms[nsDevName(srv, testNs)]
+		dev.table = table(srv, node)
+		dev.suspended = true
+		node.Reset()
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true, suspended: suspended})); err != nil {
+			t.Fatalf("converge: %v", err)
+		}
+		nsDev := nsDevName(srv, testNs)
+		return srv, node,
+			len(node.callsMatching("cmd dmsetup reload " + nsDev)),
+			len(node.callsMatching("cmd dmsetup resume " + nsDev))
+	}
+	raid0Table := func(srv *CnAgentServer, node *fakeNode) string {
+		return agent.LinearTable(testTdSize/512,
+			node.devNo["/dev/mapper/"+raid0Name(srv, testTd)], 0)
+	}
+	errorTable := func(srv *CnAgentServer, node *fakeNode) string {
+		return agent.LinearTable(testTdSize/512,
+			node.devNo["/dev/mapper/"+errorName(srv, testTd)], 0)
+	}
+
+	// (a) Effectively suspended, still on the raid0 the older build left it
+	// holding: one reload, onto the error backing, and the device ends live.
+	t.Run("effectively suspended, raid0 table", func(t *testing.T) {
+		srv, node, reloads, _ := leftover(t, true, raid0Table)
+		if reloads != 1 {
+			t.Fatalf("want exactly one ns-dev reload, got %d", reloads)
+		}
+		assertParked(t, srv, node, testNs, testTd, "older build, raid0 table")
+	})
+
+	// (b) Effectively suspended and already on the error table, but held
+	// suspended: the park's own reload resumes it. A device left in this state
+	// is what an interrupted `Reload` produces.
+	t.Run("effectively suspended, error table", func(t *testing.T) {
+		srv, node, reloads, _ := leftover(t, true, errorTable)
+		if reloads != 1 {
+			t.Fatalf("want exactly one ns-dev reload, got %d", reloads)
+		}
+		assertParked(t, srv, node, testNs, testTd, "older build, error table")
+	})
+
+	// (c) Serving, with the table it wants, suspended: a bare `dmsetup
+	// resume`, no reload. This is the one remaining reason `ensureNsDev` looks
+	// at `dev.Suspended` at all — delete that guard and this sub-case is the
+	// only thing that notices.
+	t.Run("serving, desired table", func(t *testing.T) {
+		srv, node, reloads, resumes := leftover(t, false, raid0Table)
+		if reloads != 0 {
+			t.Fatalf("want no ns-dev reload, got %d", reloads)
+		}
+		if resumes != 1 {
+			t.Fatalf("want exactly one bare ns-dev resume, got %d", resumes)
+		}
+		dev := node.dms[nsDevName(srv, testNs)]
+		if dev.suspended || dev.table != raid0Table(srv, node) {
+			t.Fatalf("ns-dev is %q, suspended=%v", dev.table, dev.suspended)
+		}
+	})
+
+	// (d) The same guard one layer down, in `ensureDmSingle`: the td's raid0
+	// found suspended with its correct table. U1 made that resume
+	// unconditional by deleting `keepSuspended`, and nothing else in the
+	// package converges a suspended raid0, pool or thin volume — so without
+	// this sub-case the guard could be dropped as dead and the next converge
+	// after a killed agent would leave the stack wedged under a live ns-dev.
+	t.Run("a suspended raid0 is resumed", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+		raid0 := raid0Name(srv, testTd)
+		node.dms[raid0].suspended = true
+		// The asymmetry U1 introduced, pinned on the fixture that already
+		// exists: an ns-dev found suspended is an ERROR whatever the plan
+		// says, while every OTHER dm device still probes OK with
+		// `details = "suspended"`. Deliberate — only the ns-dev has a plan
+		// state that used to expect it.
+		probe, err := srv.GetCntlrInfo(context.Background(),
+			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr()})
+		if err != nil {
+			t.Fatalf("GetCntlrInfo: %v", err)
+		}
+		row := probe.GetCntlrInfo().GetTdIdToRaid0()[testTd]
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+			row.GetDetails() != "suspended" {
+			t.Fatalf("suspended raid0 row: %v/%q",
+				row.GetStatus(), row.GetDetails())
+		}
+		node.Reset()
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true})); err != nil {
+			t.Fatalf("converge: %v", err)
+		}
+		if got := len(node.callsMatching(
+			"cmd dmsetup resume " + raid0)); got != 1 {
+			t.Fatalf("want exactly one bare raid0 resume, got %d", got)
+		}
+		assertNoCall(t, node, "cmd dmsetup reload "+raid0)
+		if node.dms[raid0].suspended {
+			t.Fatalf("the raid0 is still suspended")
+		}
+	})
 }
 
 func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
@@ -1155,15 +1454,20 @@ func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transfer: %v", err)
 	}
-	// CN9 fixes the build order (transfers before ns-devs), so the xfer
-	// device is created between the origin's ANA retirement and its suspend;
-	// what §11.3 makes load-bearing — ANA inaccessible *before* the suspend,
-	// so no host IO is queued behind it — holds either way.
+	// The transfer-driven twin of TestNamespaceSuspend. Both steps are the
+	// retire phase's: CN16 rule 1 makes the origin's backing the td's
+	// dm-error, so step (2) of the retire phase parks it — ahead of the build
+	// phase, which is where the xfer device is created. What §11.3 makes
+	// load-bearing is the first edge: ANA inaccessible *before* the device is
+	// touched, so no host IO is behind the reload.
+	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
 	assertOrder(t, node,
 		"writedirect "+anaPath(testNqn, 1)+"=3",
+		"cmd dmsetup reload "+nsDevName(srv, testNs)+" --table "+
+			agent.LinearTable(testTdSize/512, errNo, 0),
 		"cmd dmsetup create "+xferName(srv, testXfer),
-		"cmd dmsetup suspend "+nsDevName(srv, testNs),
 	)
+	assertParked(t, srv, node, testNs, testTd, "auto_suspend origin")
 	info := reply.GetCntlrInfo()
 	assertOk(t, info.GetXferIdToDmLinear()[testXfer], "xfer dm")
 	assertOk(t, info.GetXferIdToSubsystem()[testXfer], "xfer subsystem")
@@ -1243,27 +1547,39 @@ func TestUpdateNamespaceDevIsOneReload(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval pins CN9's retire
-// order for a namespace that *leaves* the desired state. The fixture's
-// namespace is stored `suspended = true` (§11.6), which is the state CN21's
-// rationale is about: a suspended device blocks both the nvmet disable above
-// it and its own removal. Parking it — the reload onto the td's `CnErrorName`,
-// whose internal resume is the whole point — therefore has to precede the
-// nvmet removal, not follow it inside `removeDm`.
+// order for a namespace that *leaves* the desired state. CN21's rationale is
+// that a dm-suspended device blocks both the nvmet disable above it and its
+// own removal. Since 2026-09-16 (§11.6, [D12]) this agent never leaves one
+// suspended, so the only way a teardown still meets one is an **older build's
+// leftover** — which is exactly what the two ordering sub-cases fixture. The
+// park — the reload onto the td's `CnErrorName`, whose internal resume is the
+// whole point — therefore has to precede the nvmet removal, not follow it
+// inside `removeDm`. The third sub-case is the steady state: an already
+// parked namespace needs no reload at all.
 func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
-	// Converge A: a primary serving one deliberately suspended namespace. Its
-	// ana_grpid is already `3` (CN16), so converge B rewrites nothing there
-	// and the park is the first thing it does to the ns-dev.
+	// Converge A: a primary serving one deliberately suspended namespace. It
+	// ends *parked* — live on the td's dm-error — and its ana_grpid is already
+	// `3` (CN16), so converge B rewrites nothing there.
 	convergeA := func(t *testing.T) (*CnAgentServer, *fakeNode) {
 		t.Helper()
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, reqOpts{
 			revision: 2, primary: true, suspended: true})
-		dev := node.dms[nsDevName(srv, testNs)]
-		if dev == nil || !dev.suspended {
-			t.Fatalf("the ns-dev did not end suspended (CN16)")
-		}
+		assertParked(t, srv, node, testNs, testTd, "converge A")
 		node.Reset()
 		return srv, node
+	}
+	// olderBuildLeftover puts the ns-dev back into the state a pre-2026-09-16
+	// agent left it in: held `dmsetup suspend`ed, its table still the rule-6
+	// raid0. Nothing this build does produces it; it is the upgrade path, and
+	// the reason the park still has to come first.
+	olderBuildLeftover := func(t *testing.T, srv *CnAgentServer,
+		node *fakeNode) {
+		t.Helper()
+		raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
+		dev := node.dms[nsDevName(srv, testNs)]
+		dev.table = agent.LinearTable(testTdSize/512, raid0No, 0)
+		dev.suspended = true
 	}
 	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
 	// assertParkedOnError pins the park's *target*, which an ordering
@@ -1297,6 +1613,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 
 	t.Run("namespace leaves ns_list", func(t *testing.T) {
 		srv, node := convergeA(t)
+		olderBuildLeftover(t, srv, node)
 		subsys := defaultSubsys(false)
 		subsys[testNqn].NsList = nil
 		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
@@ -1330,6 +1647,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 
 	t.Run("subsystem leaves nqn_to_subsystem", func(t *testing.T) {
 		srv, node := convergeA(t)
+		olderBuildLeftover(t, srv, node)
 		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
 			revision: 3, primary: true,
 			subsys: map[string]*pb.Subsystem{}})); err != nil {
@@ -1346,6 +1664,32 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 			"cmd dmsetup remove "+nsDevName(srv, testNs),
 		)
 		assertParkedOnError(t, srv, node)
+	})
+
+	// The steady state after 2026-09-16: converge A already parked the ns-dev,
+	// so the retire phase finds the table it wants on a live device and
+	// `parkNsDev` returns before it issues anything. The nvmet disable and the
+	// removal then work on a device nobody ever suspended — which is the whole
+	// point of the park, and what the two sub-cases above can no longer show.
+	t.Run("an already parked namespace needs no reload", func(t *testing.T) {
+		srv, node := convergeA(t)
+		subsys := defaultSubsys(false)
+		subsys[testNqn].NsList = nil
+		if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: 3, primary: true, subsys: subsys})); err != nil {
+			t.Fatalf("remove namespace: %v", err)
+		}
+		assertNoCall(t, node, "cmd dmsetup reload "+nsDevName(srv, testNs))
+		assertNoCall(t, node, "cmd dmsetup suspend "+nsDevName(srv, testNs))
+		assertNoCall(t, node, "cmd dmsetup resume "+nsDevName(srv, testNs))
+		assertOrder(t, node,
+			"writedirect "+nsPath+"/enable=0",
+			"cmd rmdir "+nsPath,
+			"cmd dmsetup remove "+nsDevName(srv, testNs),
+		)
+		if _, ok := node.dms[nsDevName(srv, testNs)]; ok {
+			t.Fatalf("the ns-dev survived the removal")
+		}
 	})
 }
 
