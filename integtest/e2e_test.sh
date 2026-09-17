@@ -22,7 +22,11 @@
 # (E2E11): smoke, ops, copy, react. `--only` picks one. Cleanup runs
 # unconditionally at the START and, on success only, at the END (E2E6): a
 # failing run leaves every process, dm/md/nvmet object, loop device, host
-# connection and log in place and dumps diagnostics instead.
+# connection and log in place and dumps diagnostics instead. The START
+# cleanup tolerates finding nothing, but not a verb that never finished — that
+# stops the run at the end of the sweep (cleanup_start_gate, which lets the
+# other guests be swept first), instead of letting preflight misname the
+# surviving debris three steps later.
 #
 # The default shape is the widest storage pool this tree can build: 32 slices
 # (common.MaxSliceCntPerSp), md-raid1, so 2 x 32 x 2 = 128 sides on 128
@@ -60,7 +64,18 @@
 #     (E2E10): the kernel's own autoconnector matches the discovery AEN
 #     (NVME_AEN=0x70f002) and would connect behind the suite's back. Every
 #     connect here is the suite's own act.
-#  7. The `63-dnv-md.rules` mask goes on the CN VMs, which is where md runs.
+#  7. The `63-dnv-md.rules` mask goes on the CN VMs AND on the DN VMs. md runs
+#     only on a CN, but the md SUPERBLOCK that CN writes travels down the side
+#     export and lands on the DN's own storage, so a `linux_raid_member` shows
+#     up on the DN — on the side dm device and, at the same offset, on the
+#     per-CN linear that maps the side 1:1. Unmasked, the stock incremental
+#     rule (`mdadm -I`, which on that path WILL assemble a degraded array
+#     read-only) assembles it on the DN, and the array holds whichever of the
+#     two udev probed first; either way the side cannot be removed (a pinned
+#     linear holds it open too) and dn_cleanup grinds past CLEANUP_TIMEOUT.
+#     Observed 2026-09-17: 35 stray arrays on one DN VM, 28 on another —
+#     exactly the two DN VMs that carried no md udev rule at all. THIS mask
+#     was on none of the four: it went on the CN VMs only.
 #  8. NEVER run this suite while any other dnv suite runs anywhere in the lab
 #     (E2E9). It occupies all ten guests, and its CN agents mount their tmpfs
 #     at /tmp/dnv-tmpfs — the very path cnagent_test.sh owns.
@@ -519,6 +534,21 @@ QUIET=0
 # (memory note nvmet-port-teardown-ana-groups) and a WARNING in the middle of an
 # hours-long transcript is not how the operator finds that out.
 CLEANUP_DIRTY=0
+
+# The verbs of the LAST sweep that never printed their sentinel, one per line
+# as "<label> <verb> <rc>". cleanup_all clears it beside CLEANUP_DIRTY, so it
+# too describes only the sweep that just ran.
+#
+# CLEANUP_DIRTY and this are not the same question. CLEANUP_DIRTY asks "is the
+# lab dirty", which only matters at the END. This asks "did the sweep actually
+# run", which is what the START has to know: E2E6 makes the start cleanup
+# tolerant of ABSENCE — a guest with nothing on it prints its sentinel and the
+# run goes on — but a verb that timed out is not absence, it is debris that
+# survived, and continuing past it puts the run into a preflight failure about
+# whatever the debris collides with first. On 2026-09-17 that was an nvmet
+# port, and the port message blamed a refusal that had never happened.
+# cleanup_start_gate turns this list into a die.
+CLEANUP_UNFINISHED=""
 
 # --timeout on every dnvctl call. dnvctl's own default is 10 s
 # (ctl/root.go:58, a per-INVOCATION deadline), which is not enough for this
@@ -2004,6 +2034,9 @@ NQN_IT="$NQN_IT"
 # creates is dnv-<cluster16>-<node16>-<kind1>-… (common/name_fmt.go:69-86).
 DM_PREFIX="dnv"
 # The md assembly mask cnagent_test.sh:1033-1041 installs, by the same path.
+# BOTH node roles install it here (rule 7, install_udev_rule), and the verbs
+# that do live in the shared node body. This preamble is shared by all four
+# roles, so a host and a cp helper define the name and never use it.
 UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
 ETCD_NAME="$ETCD_NAME"
 CN_PORT_ID="$CN_PORT_ID"
@@ -2231,7 +2264,7 @@ HELPER_COMMON_EOF
 #
 # Everything below is copied from integtest/cnagent_test.sh's shipped helper
 # (the functions of `vm_helper_source`, :727-1388) and dnagent_test.sh's
-# cleanup (:661), with three deliberate changes:
+# cleanup (:661), with four deliberate changes:
 #
 #   a. disconnect_prefix reads /sys/class/nvme-subsystem/*/subsysnqn instead of
 #      piping `nvme list-subsys -o json` through the guest's jq
@@ -2245,6 +2278,12 @@ HELPER_COMMON_EOF
 #      what catches an instance whose ids the driver no longer knows.
 #   c. the nvmet port teardown is a guarded sweep over many ports, not
 #      `rmdir ports/1`. See ports_sweep.
+#   d. install_udev_rule / remove_udev_rule are HERE and not in the cn body.
+#      cnagent_test.sh runs both roles on one VM, so the question never arose;
+#      here the roles are on different guests and both need the mask — the CN
+#      because it assembles arrays, the DN because the CN's superblocks land on
+#      it (rule 7). It also writes only when the content differs, because dn_up
+#      calls it once per instance. See its own comment.
 helper_node_source() {
 	cat <<'HELPER_NODE_EOF'
 
@@ -2556,6 +2595,15 @@ nvmet_tree() {
 
 # md_stop_all stops every array this suite created. The agent's --homehost any
 # means the name may or may not carry a homehost prefix.
+#
+# WHAT IT MATCHES, because it runs on DN VMs too (dn_cleanup) where no dnv
+# array is ever supposed to exist: only an ARRAY line of `mdadm --detail
+# --scan` whose name is `dnv-…` or `<homehost>:dnv-…`. That is the name the cn
+# agent gives every array it creates (common.NameFmt.CnMdArrayName,
+# common/name_fmt.go:208-220, passed as `--name` at agent/cnagent/md.go:117
+# with `--homehost any` at :125), so a guest's own root or data array is never
+# touched — only an array minted by a dnv cn agent, whether it was assembled
+# here on purpose or by the stock udev rule behind our back.
 md_stop_all() {
 	local kw dev rest
 	while read -r kw dev rest; do
@@ -2571,6 +2619,93 @@ md_stop_all() {
 
 mdstat() {
 	cat /proc/mdstat 2>/dev/null || true
+	return 0
+}
+
+# --- the md assembly mask ----------------------------------------------------
+#
+# install_udev_rule masks the stock incremental md assembly for dnv arrays, so
+# the agent is the only assembler. The rule text is cnagent_test.sh:1033-1041
+# verbatim: the stock 64-md-raid-assembly.rules skips a device whose
+# SYSTEMD_READY is 0, and this file is 63-, so it runs first and sets it. It is
+# scoped by MD_NAME, so it suppresses ONLY arrays a dnv cn agent minted and
+# leaves the guest's own arrays — a root filesystem raid above all — assembling
+# normally.
+#
+# IT GOES ON BOTH NODE ROLES, which is why it lives in the shared body and not
+# in helper_cn_source (rule 7):
+#
+#   - on a CN because that is where md RUNS, and the stock rule would race the
+#     agent for an array it is in the middle of creating;
+#   - on a DN because that is where the md METADATA ends up. The cn writes each
+#     leg's superblock through the side's nvme-tcp export, so it physically
+#     lands on the DN's local storage and the DN's own udev sees a
+#     linux_raid_member. On TWO devices, and the lab evidence does not say
+#     which one it took: the nvmet namespace exports the per-CN linear
+#     (agent/dnagent/syncup_side.go:597), which ensureDmLinear builds over the
+#     side at offset 0 for its whole length (:529-566), so the superblock sits
+#     at the same offset in the kind-1 linear and in the kind-4 side and udev
+#     probes both. `mdadm -I` assembles it there — degraded, auto-read-only,
+#     over one of the DN's own dm devices — and that array holds that device
+#     open. Either way the side stays: a pinned kind-1 linear holds the kind-4
+#     side open in its turn, so dn_cleanup's dm_remove_kind runs past its bound
+#     whichever of the two it is. Measured on 2026-09-17: the two DN VMs with
+#     no rule file in /etc/udev/rules.d carried 35 and 28 such arrays and both
+#     timed out; the two that did carried none and cleaned up fine. What those
+#     two had was 58-dnv-test.rules, left behind by the dnagent lab work — a
+#     different rule, not this mask, and not in this tree; that it also kept
+#     the arrays away was incidental, and is not something to rely on.
+#
+# The DN does not get a BROADER mask, although it owns no dnv array and could
+# in principle take one: a rule that masked every linux_raid_member would also
+# mask the guest's own root array, and one that suppressed dm's udev rules
+# outright would take the /dev/disk/by-id symlinks and the blkid properties
+# with it. The narrow rule is exactly as wide as the damage.
+#
+# THE WRITE IS CONDITIONAL AND THE RELOAD IS NOT, and the asymmetry is the
+# point. dn_up calls this once per instance — 43 times on one DN VM in the
+# default shape — and systemd-udevd watches the rules directories, so an
+# unconditional `cat >` would truncate and rewrite a watched file 43 times
+# during agent startup, each truncation a window in which the mask is empty.
+# (That is the one difference from cnagent_test.sh's copy, which installs once
+# per VM and needs no such care.) But the reload is exactly what those 43 calls
+# used to retry for free: its status is discarded here, so if the write became
+# conditional AND the reload went with it, one failed reload would leave the
+# mask byte-correct on disk and stale in udevd for the rest of the run, with
+# dn_up reporting udev=present. It is cheap and idempotent, so it runs on both
+# paths and a transient failure gets 42 more chances on a DN VM.
+install_udev_rule() {
+	local want
+	want=$(
+		cat <<'RULE_EOF'
+ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
+  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
+ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
+RULE_EOF
+	)
+	if [ -s "$UDEV_RULE" ] &&
+		[ "$(cat "$UDEV_RULE" 2>/dev/null)" = "$want" ]; then
+		udevadm control --reload >/dev/null 2>&1
+		echo present
+		return 0
+	fi
+	printf '%s\n' "$want" >"$UDEV_RULE" || {
+		echo "install_udev_rule: writing $UDEV_RULE failed" >&2
+		return 1
+	}
+	[ -s "$UDEV_RULE" ] || {
+		echo "install_udev_rule: $UDEV_RULE is missing or empty" >&2
+		return 1
+	}
+	udevadm control --reload >/dev/null 2>&1
+	echo installed
+	return 0
+}
+
+remove_udev_rule() {
+	rm -f "$UDEV_RULE"
+	udevadm control --reload >/dev/null 2>&1
+	echo removed
 	return 0
 }
 
@@ -2635,16 +2770,30 @@ helper_dn_source() {
 # It prints one line of key=value pairs and returns non-zero on anything the
 # driver must die on. Never run two dn_up concurrently ON ONE GUEST:
 # `losetup --find` races with itself.
+#
+# It installs the md assembly mask first, exactly as cn_up does and for the
+# reason set out at install_udev_rule: the leg superblocks the CN writes land
+# on THIS guest's storage, and an unmasked DN assembles them behind the suite's
+# back. The mask is per GUEST, not per instance — install_udev_rule is a no-op
+# once the file is right, so every later call on this VM costs one compare.
 # <dir> <backing> <store> <log> <size> <ip> <grpc_port> <trsvcid> <port_id>
 dn_up() {
 	local dir=$1 backing=$2 store=$3 log=$4 size=$5
 	local ip=$6 gport=$7 svcid=$8 portid=$9
-	local dev wz pid pat
+	local dev wz pid pat udev
 
 	mkdir -p "$dir" "$store" || {
 		echo "dn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
+	udev=$(install_udev_rule) || {
+		echo "dn_up: installing the md assembly mask failed;" \
+			"without it this guest's own udev assembles the md legs whose" \
+			"superblocks the cn writes through the side export, and the" \
+			"arrays pin the dm devices under them against dn_cleanup" >&2
+		return 1
+	}
+
 	# truncate, NEVER fallocate -l (D15): the file must stay SPARSE, and
 	# fallocate would allocate all 2 GiB up front.
 	[ -f "$backing" ] || truncate -s "$size" "$backing" || {
@@ -2694,7 +2843,9 @@ dn_up() {
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	printf 'loop=%s wz=%s pid=%s\n' "$dev" "$wz" "$pid"
+	# start_dn_instance reads loop=, wz= and pid= and ignores any other word,
+	# so udev= is a report and nothing asserts on it.
+	printf 'loop=%s wz=%s pid=%s udev=%s\n' "$dev" "$wz" "$pid" "$udev"
 	return 0
 }
 
@@ -2709,6 +2860,32 @@ dn_up() {
 dn_cleanup() {
 	kill_agents dn >/dev/null
 	resume_suspended
+
+	# STRAY md ARRAYS FIRST, before any dm device of ours is removed. A DN
+	# never assembles an array on purpose — nothing below this line creates
+	# one — but the leg superblocks the cn writes through the side export land
+	# on this guest, and an unmasked udev assembles them here (see
+	# install_udev_rule). Such an array sits ON TOP of the DN stack, holding
+	# one of this suite's own dm devices open — the side (kind 4), or the
+	# per-CN linear (kind 1) that maps the side 1:1 and carries the same
+	# superblock at the same offset; the lab reading named a dm minor and not a
+	# kind, and a pinned kind-1 linear holds the kind-4 side open anyway. Either
+	# way `dmsetup remove` on an open device fails, and dm_force_remove's
+	# fallback — resume, then `remove --force --retry`, bounded at 10 + 10 + 15 s
+	# — only swaps in an error table and leaves the device there. So each pinned
+	# device can cost the best part of half a minute and survive anyway — twice
+	# over where the array sits on the linear, once for the linear and once for
+	# the side it goes on holding. On 2026-09-17 dn2 (35 arrays) and dn3
+	# (28) both ran past CLEANUP_TIMEOUT that way, and stopping the arrays by
+	# hand was what let the identical --cleanup-only finish on all ten
+	# guests.
+	#
+	# It is kept even though install_udev_rule now runs on DN VMs: a guest
+	# that ran an older version of this suite, or one whose rule did not take,
+	# must still be cleanable BY THE SUITE. md_stop_all matches only
+	# `name=dnv-…` (see its own comment), so it cannot touch an array of the
+	# guest's own.
+	md_stop_all
 
 	# nvmet first: a namespace must be disabled before the dm device under it
 	# can go.
@@ -2730,6 +2907,15 @@ dn_cleanup() {
 	ports_sweep
 	resume_suspended
 	loop_teardown
+	# AFTER loop_teardown, in the same position cn_cleanup_phase2 removes it:
+	# the mask may only go once no BLOCK DEVICE on this guest still exposes a
+	# dnv md superblock, because that is what a udev event is raised for. Every
+	# dm device of ours is gone above, and loop_teardown has just detached
+	# every loop device — the superblocks themselves sit at inner offsets of
+	# the backing FILES, which the `rm -rf $WORK` below takes, not at the 4 KiB
+	# header loop_teardown zeroes. These are shared lab machines and the rule
+	# does not belong to them.
+	remove_udev_rule >/dev/null
 	rm -rf "$WORK"
 	echo cleaned
 	return 0
@@ -2757,6 +2943,15 @@ diag() {
 	dmsetup status 2>/dev/null
 	echo "--- suspended dnv dm devices ---"
 	suspended_dms
+	# md on a DISK NODE is always a fault, and it is one this dump used to
+	# hide: the 2026-09-17 stray arrays had to be found by hand, with
+	# /proc/mdstat over ssh, after dn_cleanup had already timed out twice.
+	echo "--- /proc/mdstat (a DN must show none) ---"
+	mdstat
+	echo "--- mdadm --detail --scan (a DN must show none) ---"
+	mdadm --detail --scan 2>/dev/null
+	echo "--- 63-dnv-md.rules ---"
+	ls -l "$UDEV_RULE" 2>/dev/null || echo "$UDEV_RULE absent"
 	echo "--- nvme subsystems ---"
 	subsys_nqns
 	echo "--- nvmet configfs ---"
@@ -2777,33 +2972,6 @@ HELPER_DN_EOF
 # --- cn guests --------------------------------------------------------------
 helper_cn_source() {
 	cat <<'HELPER_CN_EOF'
-
-# install_udev_rule masks the stock incremental md assembly for dnv arrays, so
-# the agent is the only assembler. Copied verbatim from
-# integtest/cnagent_test.sh:1033-1041. It goes on CN guests only (rule 7):
-# that is where md runs. Removed again by cn_cleanup — these are shared lab
-# machines.
-install_udev_rule() {
-	cat >"$UDEV_RULE" <<'RULE_EOF'
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
-  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
-RULE_EOF
-	[ -s "$UDEV_RULE" ] || {
-		echo "install_udev_rule: $UDEV_RULE is missing or empty" >&2
-		return 1
-	}
-	udevadm control --reload >/dev/null 2>&1
-	echo installed
-	return 0
-}
-
-remove_udev_rule() {
-	rm -f "$UDEV_RULE"
-	udevadm control --reload >/dev/null 2>&1
-	echo removed
-	return 0
-}
 
 # tmpfs_teardown releases the cn agent's clone-metadata arena: the loop
 # devices over its tmpfs files first, then the mounts, then the directory.
@@ -2830,13 +2998,13 @@ tmpfs_teardown() {
 # (cmd/dnv-agent/main.go:88), which is the port cn_cleanup removes. Only the
 # dn agents need distinct ids, because only they share a kernel.
 cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
-	local dir=$1 store=$2 log=$3 ip=$4 gport=$5 svcid=$6 cap=$7 pid pat
+	local dir=$1 store=$2 log=$3 ip=$4 gport=$5 svcid=$6 cap=$7 pid pat udev
 
 	mkdir -p "$dir" "$store" || {
 		echo "cn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
-	install_udev_rule >/dev/null || {
+	udev=$(install_udev_rule) || {
 		echo "cn_up: installing the md assembly mask failed;" \
 			"starting the agent without it would let the stock udev rule" \
 			"assemble an array the agent is building" >&2
@@ -2862,7 +3030,10 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	printf 'pid=%s udev=installed\n' "$pid"
+	# `udev=` is install_udev_rule's own word — `installed` when this call
+	# wrote the mask, `present` when it was already exactly right — and not a
+	# constant, so the line cannot claim an install that did not happen.
+	printf 'pid=%s udev=%s\n' "$pid" "$udev"
 	return 0
 }
 
@@ -3719,6 +3890,12 @@ stop_cp_daemons() {
 # device. It is idempotent: dn_up reuses the backing file, the loop device and
 # a live process, so it is also the restart after a react case killed one.
 #
+# dn_up also installs the 63-dnv-md.rules mask, as cn_up does and before the
+# agent for the same reason — on a DN it is the CN's leg superblocks, arriving
+# through the side export, that the stock rule would assemble (rule 7). It is
+# per guest, so every later instance on a VM finds it already right and does
+# nothing.
+#
 # The write_zeroes gate is dn_up's, not this function's — it must refuse
 # BEFORE the agent is launched, since an agent that formats a disk with no
 # fast Write Zeroes would materialise the whole sparse file (43 x 2 GiB on a
@@ -3860,9 +4037,68 @@ FREE_MIN_CP=$((2 << 30))
 # Every cleanup verb is therefore invoked as `timeout N bash $HELPER <verb>`
 # and its sentinel line is checked — the helper's own internals already bound
 # each dmsetup/losetup/nvme call (`timeout 10`/`15`/`30`), and this bounds the
-# verb as a whole. 300 s is generous for the longest one, a DN VM's
-# dn_cleanup: 43 loop teardowns, each a 4 KiB dd plus wipefs plus losetup -d.
-CLEANUP_TIMEOUT=300
+# verb as a whole.
+#
+# IT IS A WEDGE DETECTOR, NOT A BUDGET, and it is sized for the debris of a
+# FAILED run at the widest shape. That is the heavy case: a successful run
+# cleans up after itself, so the START cleanup usually finds either nothing or
+# the remains of a run that stopped part way.
+#
+# TWO VERBS ARE HEAVY, and only one of them is understood.
+#   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 43 in the
+#     default shape — of nvmet ports with their ana_groups, 43 loop teardowns
+#     (a 4 KiB dd, a wipefs and a losetup -d each), the dm devices of every
+#     kind, and now md_stop_all over any stray array the mask did not catch,
+#     each a bounded `mdadm --stop`.
+#   - cn_cleanup_phase2, at least as heavy and the verb that actually blew the
+#     old bound twice. On the CN carrying the stack it is disconnect_prefix
+#     over every side connection that CN holds (up to 128 in the default shape
+#     — 64 arrays x 2 legs — each a `timeout 30 nvme disconnect`), md_stop_all
+#     over the 64 arrays at `timeout 15` each, then nine dm kinds plus
+#     dm_remove_all, where a device that will not go costs dm_force_remove's
+#     10 + 10 + 15 s.
+# On 2026-09-17 cn_cleanup_phase2 ran past the 300 s then in force on cn0 and
+# cn2 and NOTHING EXPLAINS IT: the md chain is a DN story and this verb runs
+# before any DN is touched (doc §8 item 15, §9). Which of the three CNs was
+# carrying the stack was not recorded either, so not even "the heavy one"
+# explains why two of them and not the third. The number below is chosen with
+# that question open, which is the honest reason for headroom rather than a
+# snug fit.
+#
+# THE MEASURED FIGURE, and it is the only one there is: on 2026-09-17, after
+# the stray arrays of the first run had been stopped by hand, one
+# `--cleanup-only` finished on all ten guests inside the 300 s that was in
+# force, with no warning and no timeout, leaving ports=0 dm=0 loop=0 md=0 on
+# every DN. READ IT NARROWLY: it was the SECOND sweep over that debris. The
+# first had run to the end on six of the ten guests and part way on the other
+# four (dn2, dn3, cn0, cn2), so the only guests still holding a DN's whole
+# port-and-loop debris — 43 and 43, which ports_sweep and loop_teardown sit too
+# late in dn_cleanup to have reached — were dn2 and dn3. The per-verb times
+# were not recorded either, so 300 s is an upper bound on what was seen and not
+# a reading of it.
+#
+# 600 s is that bound doubled: enough headroom for a failed run at 32 slices to
+# leave more than the successful one did, and for a CN timeout nobody has
+# explained yet.
+#
+# WHAT IT DOES NOT BOUND, and the distinction is the whole of rule 5: a task in
+# uninterruptible D state. `timeout` sends SIGTERM and then waits for the child
+# to be reaped, so an unkillable one is never reaped, there is no 124, no
+# WARNING line and no cleanup_start_gate verdict — the run simply stops here.
+# That class is reachable inside these verbs (a `dmsetup remove` or a
+# block-device scan against a suspended dm device), and resume_suspended
+# running first is the only defence there is; this bound catches the KILLABLE
+# grind, which is what dm_force_remove against a pinned device is.
+#
+# The bound is also a wait, and doubling it doubled that too. cleanup_all runs
+# its verbs strictly serially — 13 of them in the ten-guest shape (2 host, 3 cn
+# phase1, 3 cn phase2, 4 dn, 1 cp), none backgrounded — so a sweep in which
+# every one hits the bound is 130 minutes, up from 65, before
+# cleanup_start_gate says anything. That is not the operator's first news,
+# which is what makes it bearable: cleanup_report prints its WARNING for each
+# verb as that verb returns, and the gate afterwards is the summary and the
+# verdict, not the first sign.
+CLEANUP_TIMEOUT=600
 # `fstrim -a` walks every mounted filesystem. It is optional (D24, see
 # cleanup_all) so a timeout here is not an error.
 FSTRIM_TIMEOUT=120
@@ -3909,7 +4145,20 @@ NODE_TOOLS="dmsetup nvme losetup lsblk blkdiscard stat du df"
 NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # truncate: dn_up's sparse backing file (D15). wipefs and dd: loop_teardown,
 # which is the only place either is used and runs on DN VMs alone.
-DN_TOOLS="$NODE_TOOLS truncate wipefs dd"
+#
+# mdadm and udevadm are on a DN for the same two verbs they are on a CN for,
+# and they are NOT decoration. A DN with no mdadm would make dn_cleanup's
+# md_stop_all a silent no-op — the 2026-09-17 failure back again, and silently
+# this time. A DN with no udevadm is the milder of the two, and the claim is
+# kept where the evidence is: install_udev_rule and remove_udev_rule both RUN
+# it, which is all this list asks; what it buys is that the mask takes effect
+# AT ONCE. systemd-udevd notices a changed rules directory on its own — that is
+# the same property install_udev_rule's conditional write is written around —
+# so a missing reload leaves the mask stale for as long as udevd takes to see
+# it, with the agent already starting, and not unloaded for ever. (The mask's
+# own IMPORT program is mdadm as well, though by the absolute path udev rules
+# use; `command -v` is the proxy for it here, exactly as it is on a CN.)
+DN_TOOLS="$NODE_TOOLS truncate wipefs dd mdadm udevadm"
 # mdadm: the cn agent (agent/cnagent/md.go:44-168) and md_stop_all. udevadm:
 # install_udev_rule's reload. findmnt: the cn diag's tmpfs listing.
 CN_TOOLS="$NODE_TOOLS mdadm udevadm findmnt"
@@ -4020,6 +4269,94 @@ port_owner_hint() { # <trsvcid>
 	return 0
 }
 
+# port_cleanup_cause says why a port is STILL THERE after the start cleanup has
+# already swept this guest. It is written against port_drop's own branches and
+# not against an impression of them, because the second run of 2026-09-17 died
+# on exactly that difference: it told the operator the cleanup had "refused" a
+# port whose trsvcid was 4300 — inside this suite's own band, which is the one
+# case port_drop REMOVES.
+#
+# port_drop (the helper) decides on the service id alone, and has FOUR outcomes,
+# not three:
+#   empty      -> accepted, removed as debris (an agent killed between the
+#                 mkdir and the first attribute write)
+#   in band    -> accepted, removed; it is ours
+#   otherwise  -> REFUSED, and left exactly as it was found
+#   accepted, and the rmdir did not take -> `port N STUCK …`, and port_drop
+#                 still returns 0, so the verb prints its sentinel and
+#                 cleanup_start_gate does NOT die on it (cleanup_report raises
+#                 CLEANUP_DIRTY and prints a `!!!` line instead)
+# so only the third is a deliberate refusal. STUCK is the one that reaches a
+# preflight die, and naming it is the whole point of this function.
+#
+# WHY IT IS THE ONLY LIVE CAUSE at the id-collision die. port_drop is called for
+# every id a sweep of this run would visit — ports_sweep walks 1..MAX_DNS_PER_VM
+# on a DN, cn_cleanup_phase2 drops CN_PORT_ID on a CN — and cleanup_start_gate
+# has already killed the run if any verb failed to reach its sentinel. So for a
+# port whose id is inside this run's range and whose trsvcid port_drop accepts,
+# "the sweep never got there" is ruled out, and so is "no sweep visits that id":
+# what is left is a port_drop that tried and failed. The unswept-id alternative
+# is real only at the SECOND die, where the id may be outside every range this
+# suite sweeps (a CN port 7, a DN port past MAX_DNS_PER_VM) and the collision is
+# on the service id — which is why <swept> is a parameter and not a sentence.
+port_cleanup_cause() { # <trsvcid, possibly empty> <swept: yes|unknown>
+	case "$1" in
+	'')
+		printf 'The start cleanup did NOT refuse it: port_drop removes a'
+		printf ' port with an empty addr_trsvcid as debris, so this one was'
+		printf ' not left alone on purpose.'
+		;;
+	*[!0-9]*)
+		printf 'The start cleanup refused to remove it, which is deliberate:'
+		printf ' its addr_trsvcid is not a number, so it is not a port this'
+		printf ' suite can claim. Remove it by hand, or stop the suite that'
+		printf ' owns it.'
+		return 0
+		;;
+	*)
+		if [ "$1" -ge "$TRSVCID_MIN" ] && [ "$1" -le "$TRSVCID_MAX" ]; then
+			printf 'The start cleanup did NOT refuse it: %s is inside' "$1"
+			printf ' %s..%s, the band port_drop removes, so this one was' \
+				"$TRSVCID_MIN" "$TRSVCID_MAX"
+			printf ' not left alone on purpose.'
+		else
+			printf 'The start cleanup refused to remove it, which is'
+			printf ' deliberate: %s is outside %s..%s, so the port was never' \
+				"$1" "$TRSVCID_MIN" "$TRSVCID_MAX"
+			printf " this suite's to remove. Remove it by hand, or stop the"
+			printf ' suite that owns it.'
+			return 0
+		fi
+		;;
+	esac
+	# The two "port_drop would have removed this" cases share one remedy, and it
+	# names the causes in the order the evidence leaves them.
+	printf ' The likeliest cause by far is that port_drop ACCEPTED it and the'
+	printf ' rmdir did not take: search the sweep just above for a `!!!` line'
+	printf ' and a `port <id> STUCK` for THIS id — that line names the'
+	printf ' ana_groups and subsystems still in the directory, which is what'
+	printf ' would not go.'
+	if [ "${2:-unknown}" != yes ]; then
+		printf ' Failing that, the port id may be one no sweep of this suite'
+		printf ' visits (dn: 1..%s, cn: %s), in which case nothing here has' \
+			"$MAX_DNS_PER_VM" "$CN_PORT_ID"
+		printf ' ever looked at it.'
+	fi
+	# NOT "look for a WARNING line": by this point there cannot be one.
+	# cleanup_report prints WARNING exactly when a verb missed its sentinel,
+	# that is what fills CLEANUP_UNFINISHED, and cleanup_start_gate dies on it
+	# before preflight runs. Sending the operator to grep for a line the
+	# control flow excludes is the 2026-09-17 mistake in a new place.
+	printf ' A cleanup verb that stopped part way is NOT a candidate here:'
+	printf ' cleanup_start_gate would have killed the run before preflight.'
+	printf ' One thing it cannot rule out is a stranger: if another dnv suite'
+	printf ' or a human made this port AFTER the sweep, it is E2E9 that was'
+	printf ' broken, not the cleanup.'
+	printf ' Re-run with --cleanup-only; if it survives that, rmdir it by'
+	printf ' hand, ana_groups/3 and /2 first.'
+	return 0
+}
+
 # nvmet_ports_of lists one guest's nvmet ports as "<id>:<trsvcid>" lines, with
 # the service id space-stripped (nvmet reads several addr_* attributes back
 # space-padded — memory note nvmet-configfs-idempotency, and cdc_test.sh:1072
@@ -4051,8 +4388,21 @@ nvmet_ports_of() { # <ssh-wrapper> <index>
 #   2. A service id this run will bind. Two nvmet ports cannot listen on one
 #      ip:port, so the agent's own port would come up dead.
 #
-# The start cleanup has already run at this point, so anything still here is
-# either foreign (port_drop REFUSED it) or stuck (port_drop said STUCK).
+# The start cleanup has already run to the end on every guest at this point —
+# cleanup_start_gate stops the run otherwise — so a port that is still here is
+# foreign (port_drop REFUSED it), stuck (port_drop said STUCK — a `!!!` line,
+# which the start gate does not die on), outside every sweep's id range, or
+# made after the sweep by something that should not be running (E2E9). It is
+# NOT one the cleanup skipped, and port_cleanup_cause is where each message
+# gets that distinction right — getting it wrong here is what sent the
+# 2026-09-17 diagnosis after the wrong cause.
+#
+# THE TWO DIES PASS DIFFERENT <swept> ARGUMENTS, and the difference is load
+# bearing. The first fires only for 1 <= id <= idmax, and idmax is DNS_PER_VM
+# on a DN (never above MAX_DNS_PER_VM, parse_args refuses that) or CN_PORT_ID
+# on a CN — every one of which a sweep of this run walked, so `yes`. The second
+# fires on the service id whatever the port id is, so an id no sweep visits is
+# a real answer there and it gets `unknown`.
 assert_no_nvmet_conflict() { # <label> <idmax> <svclo> <svchi> <listing>
 	local label=$1 idmax=$2 lo=$3 hi=$4 listing=$5 tok id svc
 	for tok in $listing; do
@@ -4068,18 +4418,25 @@ assert_no_nvmet_conflict() { # <label> <idmax> <svclo> <svchi> <listing>
 			die "$label: $NVMET/ports/$id already exists" \
 				"(addr_trsvcid=${svc:-none}) and this run needs that id." \
 				"$(port_owner_hint "$svc")." \
-				"The start cleanup refused to remove it, which is" \
-				"deliberate — an agent given that id would rewrite its" \
-				"addr_* attributes (agent/nvmet.go:129-137). Remove it by" \
-				"hand, or stop the suite that owns it."
+				"An agent given that id would rewrite its addr_*" \
+				"attributes (agent/nvmet.go:129-137), so the run stops here." \
+				"$(port_cleanup_cause "$svc" yes)"
 		fi
 		case "$svc" in
 		'' | *[!0-9]*) continue ;;
 		esac
 		if [ "$svc" -ge "$lo" ] && [ "$svc" -le "$hi" ]; then
+			# The same cause sentence as the id collision above, from the
+			# same function: this port's id is out of the range this run
+			# uses, but its service id is one of ours, so port_drop would
+			# have removed it too and "refused" would be just as wrong here.
+			# `unknown` and not `yes`: the id that got here may be one no
+			# sweep of this suite walks, which is an answer the first die
+			# cannot have.
 			die "$label: $NVMET/ports/$id listens on $svc, which is inside" \
 				"this run's band $lo..$hi, so one of its agents could not" \
-				"bind. $(port_owner_hint "$svc")."
+				"bind. $(port_owner_hint "$svc")." \
+				"$(port_cleanup_cause "$svc" unknown)"
 		fi
 	done
 }
@@ -4134,25 +4491,29 @@ preflight_node() { # <role: dn|cn> <index>
 		die "$label: reading nvme_core.multipath failed"
 	assert_eq "$got" "Y" "$label: nvme_core.multipath"
 
-	if [ "$role" = cn ]; then
-		got=$("$sshw" "$v" "ls /proc/mdstat 2>/dev/null || echo MISSING") ||
-			die "$label: reading /proc/mdstat failed"
-		assert_eq "$got" /proc/mdstat "$label: md support"
-		# The 63-dnv-md.rules mask cn_up installs works by setting
-		# SYSTEMD_READY=0 (cnagent_test.sh:1037), which only suppresses the
-		# stock incremental assembly if the stock rule honours it. Checked on
-		# CN VMs only: rule 7 puts the mask where md runs, and a DN VM
-		# assembles no array, so the same check there would assert a
-		# precondition for something this suite does not install.
-		got=$("$sshw" "$v" \
-			"for d in /usr/lib/udev/rules.d /lib/udev/rules.d; do" \
-			"f=\$d/64-md-raid-assembly.rules;" \
-			"if [ -r \$f ] && grep -q SYSTEMD_READY \$f; then echo FOUND; break; fi;" \
-			"done; true") ||
-			die "$label: reading 64-md-raid-assembly.rules failed"
-		assert_eq "$got" FOUND \
-			"$label: the stock 64-md-raid-assembly.rules honours SYSTEMD_READY"
-	fi
+	# BOTH node roles, and the DN is not the weaker case of the two. On a CN
+	# md support is what the agent needs to build an array at all. On a DN
+	# /proc/mdstat is what proves the guest CAN assemble one — which is
+	# precisely the hazard: the leg superblocks the cn writes land on the DN
+	# through the side export, so an unmasked DN assembles them behind the
+	# suite's back (install_udev_rule, rule 7).
+	got=$("$sshw" "$v" "ls /proc/mdstat 2>/dev/null || echo MISSING") ||
+		die "$label: reading /proc/mdstat failed"
+	assert_eq "$got" /proc/mdstat "$label: md support"
+	# The 63-dnv-md.rules mask dn_up and cn_up install works by setting
+	# SYSTEMD_READY=0 (cnagent_test.sh:1037), which only suppresses the stock
+	# incremental assembly if the stock rule honours it. Both roles install
+	# the mask, so both roles need the precondition checked: on a DN a stock
+	# rule that ignored SYSTEMD_READY would leave the mask inert and the stray
+	# arrays would come straight back.
+	got=$("$sshw" "$v" \
+		"for d in /usr/lib/udev/rules.d /lib/udev/rules.d; do" \
+		"f=\$d/64-md-raid-assembly.rules;" \
+		"if [ -r \$f ] && grep -q SYSTEMD_READY \$f; then echo FOUND; break; fi;" \
+		"done; true") ||
+		die "$label: reading 64-md-raid-assembly.rules failed"
+	assert_eq "$got" FOUND \
+		"$label: the stock 64-md-raid-assembly.rules honours SYSTEMD_READY"
 
 	# The punch-hole probe. `fallocate` is the right tool here and the D15 ban
 	# does not touch it: the ban is on `fallocate -l` for a BACKING file, which
@@ -4411,15 +4772,22 @@ preflight_loop_devices() {
 # Cleanup (§7.7 at the start, §7.6 at the end — ONE function, run at both)
 # ---------------------------------------------------------------------------
 #
-# cleanup_all is called three times over a run's life: unconditionally by main
-# before anything is built (§7.7), by on_exit on SUCCESS (§7.6), and by
-# `--cleanup-only` on its own. It is therefore written to be tolerant of total
-# absence — every guest call is an _ok form — and it never dies:
+# cleanup_all is called from four sites over a run's life: unconditionally by
+# main before anything is built (§7.7), by setup_between_cases before each case
+# after the first (§7.5, E2E11 — that one is a START cleanup too, for the case
+# it precedes), by on_exit on SUCCESS (§7.6), and by `--cleanup-only` on its
+# own. So a four-case run calls it five times. It is written to be tolerant of
+# total absence — every guest call tolerates a non-zero status, either as an
+# _ok form or, for the verbs, through cleanup_verb's `|| rc=$?` — and never dies:
 #
 #   - at the START a die would be wrong (leftovers are what it is for, and
 #     preflight is the thing that judges whether the guest is now usable);
 #   - at the END a die would skip the rest of the cleanup on the other nine
 #     guests, which is the opposite of what a dirty lab needs.
+#
+# cleanup_all itself therefore still never dies — but a verb that never ran is
+# not a leftover, and the START caller (main, setup_between_cases) follows this
+# with cleanup_start_gate, which does. See CLEANUP_UNFINISHED.
 #
 # What it does instead is REPORT, loudly, through cleanup_report: a missing
 # sentinel line, and any REFUSED or STUCK nvmet port. Those two words are the
@@ -4458,15 +4826,25 @@ preflight_loop_devices() {
 
 # cleanup_report judges one guest's cleanup output. <sentinel> is the word that
 # verb echoes when it ran to the end (dn_cleanup/cn_cleanup_phase2/host_cleanup
-# /cp_cleanup say "cleaned", cn_cleanup_phase1 says "phase1").
-cleanup_report() { # <label> <sentinel> <output>
-	local label=$1 want=$2 out=$3 hits svc
+# /cp_cleanup say "cleaned", cn_cleanup_phase1 says "phase1"). <rc> is the
+# status of the whole `timeout N bash $HELPER …` — 124 is `timeout`'s own,
+# which is the one finding that names its cause exactly.
+cleanup_report() { # <label> <verb> <sentinel> <rc> <output>
+	local label=$1 verb=$2 want=$3 rc=$4 out=$5 hits svc why
 	if [ "$(printf '%s\n' "$out" | grep -cx "$want" || true)" = 0 ]; then
-		log "  WARNING: $label cleanup did not reach its '$want' line —" \
-			"it timed out (${CLEANUP_TIMEOUT}s), the guest is unreachable," \
-			"or the helper is stale. Output:"
+		# One string per branch, never a continuation: `why="a" "b"` would
+		# run `b` with why in its environment instead of assigning both.
+		case "$rc" in
+		124) why="it timed out after ${CLEANUP_TIMEOUT}s" ;;
+		255) why="rc 255: the ssh to this guest failed, or the verb exited 255" ;;
+		0) why="it exited 0 without the line, so the helper there is stale" ;;
+		*) why="it exited $rc" ;;
+		esac
+		log "  WARNING: $label cleanup verb '$verb' did not reach its" \
+			"'$want' line — $why. Output:"
 		printf '%s\n' "$out" >&2
 		CLEANUP_DIRTY=1
+		CLEANUP_UNFINISHED="$CLEANUP_UNFINISHED$label $verb $rc"$'\n'
 	fi
 	hits=$(printf '%s\n' "$out" | grep -F -e REFUSED -e STUCK || true)
 	# STUCK raises CLEANUP_DIRTY and REFUSED does not: port_drop refuses a port
@@ -4515,7 +4893,114 @@ cleanup_dirty_banner() {
 	log ""
 	log "\`$0 … --cleanup-only\` re-runs the whole §7.7 sweep and exits"
 	log "non-zero again if it still cannot finish."
+	log ""
+	log "On a DN VM the known cause of a verb that will not finish is a stray"
+	log "md array over one of this suite's dm devices — the side, or the"
+	log "per-CN linear that maps it: \`cat /proc/mdstat\` there, and"
+	log "\`sudo mdadm --stop /dev/mdN\` for each dnv-named array. dn_cleanup"
+	log "stops them itself, so an array that is still there means mdadm is"
+	log "missing on that guest, or \`mdadm --stop\` would not take, or the"
+	log "array is named something md_stop_all does not match."
 	log "##############################################################"
+}
+
+# cleanup_start_gate is the START cleanup's verdict, and the one place in this
+# file where a cleanup kills the run.
+#
+# E2E6 makes the start cleanup tolerant of ABSENCE, and it is: a guest with
+# nothing on it runs every verb to the end and prints its sentinel, and
+# CLEANUP_UNFINISHED stays empty. A verb that never printed its sentinel is the
+# opposite of absence — it means the sweep did not run to the end and the
+# debris it was supposed to remove is still there. Going on from that puts the
+# run into a preflight failure about whatever the debris collides with FIRST,
+# which is a misleading place to stop: on 2026-09-17 two DN VMs timed out in
+# dn_cleanup (35 and 28 stray md arrays, each pinning a dm device of ours), the
+# run continued, and preflight died on an nvmet port with a message that
+# blamed a refusal the cleanup had never made — three steps and one wrong
+# explanation away from the actual fault.
+#
+# THE END CLEANUP IS NOT GATED HERE AND MUST NOT BE. on_exit runs it only after
+# every assertion has passed, and there a die would skip the other nine guests;
+# it reports instead, and CLEANUP_DIRTY carries the verdict into the exit code
+# and cleanup_dirty_banner. --cleanup-only is an end cleanup by the same
+# argument and is left alone too.
+#
+# THE REMEDY IS BUILT FROM WHAT WAS RECORDED, not from the one case that has
+# been seen. This gate runs BEFORE preflight_guests, so it is now the first
+# thing an unreachable guest, or one without passwordless sudo, runs into: a
+# fixed DN-md remedy would send that operator to `cat /proc/mdstat` on a guest
+# they cannot ssh to, when what they need is preflight's own sentence about
+# ssh and sudo. Each row of CLEANUP_UNFINISHED carries a label and a status,
+# and the paragraphs below are keyed off exactly those two.
+cleanup_start_gate() { # <what this cleanup was: for the message>
+	local what=$1 label verb rc remedy=""
+	local saw_dn="" saw_cn="" saw_255="" saw_0="" saw_other_to=""
+	[ -n "$CLEANUP_UNFINISHED" ] || return 0
+	log ""
+	log "  the $what cleanup did not finish on:"
+	# A here-string and not a pipe, so these assignments are made in THIS
+	# shell and survive the loop.
+	while read -r label verb rc; do
+		[ -n "$label" ] || continue
+		if [ "$rc" = 124 ]; then
+			log "    $label: '$verb' timed out after ${CLEANUP_TIMEOUT}s"
+		else
+			log "    $label: '$verb' exited $rc without its sentinel"
+		fi
+		case "$label:$rc" in
+		dn*:124) saw_dn=1 ;;
+		cn*:124) saw_cn=1 ;;
+		*:124) saw_other_to=1 ;;
+		esac
+		case "$rc" in
+		255) saw_255=1 ;;
+		0) saw_0=1 ;;
+		esac
+	done <<<"$CLEANUP_UNFINISHED"
+	if [ -n "$saw_dn" ]; then
+		remedy="$remedy THE KNOWN CAUSE OF A DN TIMEOUT is a stray md array"
+		remedy="$remedy over one of this suite's own dm devices — the cn's leg"
+		remedy="$remedy superblocks travel down the side export and an unmasked"
+		remedy="$remedy udev assembles them on the DN, where the array pins the"
+		remedy="$remedy side (kind 4) or the per-CN linear over it (kind 1) and"
+		remedy="$remedy dm_remove_kind cannot remove either. Check with"
+		remedy="$remedy \`cat /proc/mdstat\` on that guest (a DN must show"
+		remedy="$remedy none)."
+	fi
+	if [ -n "$saw_cn" ]; then
+		remedy="$remedy A CN TIMEOUT HAS NO RECORDED CAUSE: cn_cleanup_phase2"
+		remedy="$remedy ran past the bound on two CN VMs on 2026-09-17 and"
+		remedy="$remedy nothing explains it (doc §9). On the CN carrying the"
+		remedy="$remedy stack it is as heavy as anything here — up to 128"
+		remedy="$remedy \`nvme disconnect\`s, 64 \`mdadm"
+		remedy="$remedy --stop\`s and a whole 32-slice dm stack — so start with"
+		remedy="$remedy \`dmsetup ls --tree\` and \`cat /proc/mdstat\` there,"
+		remedy="$remedy and record what you find."
+	fi
+	if [ -n "$saw_other_to" ]; then
+		remedy="$remedy A TIMEOUT ON A host OR cp VERB is unrecorded: those"
+		remedy="$remedy verbs are small — a few nvme disconnects and an unmask"
+		remedy="$remedy on a host, pids and an rm -rf on cp — so the guest is"
+		remedy="$remedy wedged rather than the sweep being long. Note that"
+		remedy="$remedy \`timeout\` cannot end a task in D state, so a verb"
+		remedy="$remedy that hit THAT would not have reported 124 at all."
+	fi
+	if [ -n "$saw_255" ]; then
+		remedy="$remedy AN rc OF 255 IS THE ssh ITSELF, not the sweep: that"
+		remedy="$remedy guest is unreachable or has no passwordless sudo."
+		remedy="$remedy Preflight's own check for that has not run yet — it is"
+		remedy="$remedy the next step — so fix the guest and re-run."
+	fi
+	if [ -n "$saw_0" ]; then
+		remedy="$remedy AN EXIT OF 0 WITHOUT THE SENTINEL means the helper on"
+		remedy="$remedy that guest is stale: ship_helpers did not land, or an"
+		remedy="$remedy older copy of $HELPER is there. It is not a wedge."
+	fi
+	die "the $what cleanup did not run to the end on the guest(s) named" \
+		"above, so their debris is still there and nothing preflight or" \
+		"any case says next would be about this run.$remedy" \
+		"Re-run \`$0 … --cleanup-only\`: it sweeps every guest again and" \
+		"exits non-zero if it still cannot finish."
 }
 
 # cleanup_verb runs one cleanup verb on one guest, bounded, and reports it. The
@@ -4527,25 +5012,37 @@ cleanup_dirty_banner() {
 # Only STDOUT is captured: the guest's stderr and the wrapper's own `[ip] …`
 # line stay live in the transcript, and every line this reads — the sentinel,
 # `port N REFUSED …`, `port N STUCK …` — is printed on stdout by the helper.
-cleanup_verb() { # <ssh-ok-wrapper> <index|""> <label> <sentinel> <verb…>
-	local sshw=$1 idx=$2 label=$3 want=$4 out
+#
+# THE WRAPPER IS THE DYING FORM (ssh_dn, not ssh_dn_ok) and the status is
+# caught here instead: `|| rc=$?` keeps cleanup_all's "never dies" promise
+# exactly as the _ok form did, and it keeps `timeout`'s 124, which is the
+# difference between "this guest was already clean" and "this guest still has
+# everything on it". The _ok forms threw that away.
+cleanup_verb() { # <ssh-wrapper> <index|""> <label> <sentinel> <verb…>
+	local sshw=$1 idx=$2 label=$3 want=$4 out rc=0
 	shift 4
+	# ${1:-} and not $1: `set -u` is on, and a caller that forgot the verb
+	# would otherwise die here instead of reporting an empty one.
+	local verb=${1:-}
 	if [ -n "$idx" ]; then
-		out=$("$sshw" "$idx" "timeout $CLEANUP_TIMEOUT bash $HELPER $*")
+		out=$("$sshw" "$idx" "timeout $CLEANUP_TIMEOUT bash $HELPER $*") ||
+			rc=$?
 	else
-		out=$("$sshw" "timeout $CLEANUP_TIMEOUT bash $HELPER $*")
+		out=$("$sshw" "timeout $CLEANUP_TIMEOUT bash $HELPER $*") || rc=$?
 	fi
-	cleanup_report "$label" "$want" "$out"
+	cleanup_report "$label" "$verb" "$want" "$rc" "$out"
 }
 
 cleanup_all() {
 	local v extra=""
 
-	# Cleared here and not at the top of the file: cleanup_all runs three or
-	# more times in a run (the start sweep, one per between-cases step, the end
-	# one), and only the LAST one says anything about the state this run leaves
-	# the lab in. See CLEANUP_DIRTY's own comment.
+	# Cleared here and not at the top of the file: cleanup_all runs five times
+	# in a full four-case run (the start sweep, one per between-cases step, the
+	# end one), and only the LAST says anything about the state this run leaves
+	# the lab in. See CLEANUP_DIRTY's own comment. CLEANUP_UNFINISHED goes with
+	# it, and for the same reason: cleanup_start_gate must judge THIS sweep.
 	CLEANUP_DIRTY=0
+	CLEANUP_UNFINISHED=""
 
 	# The two real hosts' /etc/nvme/hostnqn entries, so the nvmet hosts/ groups
 	# the agents made for them are swept too. They follow the kernel's own
@@ -4563,17 +5060,17 @@ cleanup_all() {
 
 	log "--- cleanup: hosts (they hold the controllers)"
 	for v in "${!HOST[@]}"; do
-		cleanup_verb ssh_host_ok "$v" "host$v" cleaned host_cleanup "$CP_IP"
+		cleanup_verb ssh_host "$v" "host$v" cleaned host_cleanup "$CP_IP"
 	done
 
 	log "--- cleanup: cn phase 1 (clones, before any transfer source goes)"
 	for v in "${!CN[@]}"; do
-		cleanup_verb ssh_cn_ok "$v" "cn$v" phase1 cn_cleanup_phase1
+		cleanup_verb ssh_cn "$v" "cn$v" phase1 cn_cleanup_phase1
 	done
 
 	log "--- cleanup: cn phase 2"
 	for v in "${!CN[@]}"; do
-		cleanup_verb ssh_cn_ok "$v" "cn$v" cleaned cn_cleanup_phase2 $extra
+		cleanup_verb ssh_cn "$v" "cn$v" cleaned cn_cleanup_phase2 $extra
 	done
 
 	# Only now the DN VMs. dn_cleanup kills every [d]nv-agent from the helper,
@@ -4583,12 +5080,12 @@ cleanup_all() {
 	# conv=fsync, wipefs, losetup -d, and removes $WORK.
 	log "--- cleanup: dn VMs"
 	for v in "${!DN[@]}"; do
-		cleanup_verb ssh_dn_ok "$v" "dn$v" cleaned dn_cleanup $extra
+		cleanup_verb ssh_dn "$v" "dn$v" cleaned dn_cleanup $extra
 	done
 
 	log "--- cleanup: cp"
 	stop_cp_daemons
-	cleanup_verb ssh_cp_ok "" cp cleaned cp_cleanup
+	cleanup_verb ssh_cp "" cp cleaned cp_cleanup
 
 	# D24. Without the operator's `discard='unmap'` change to each domain's
 	# vda <driver> line (plan §1.3), the guest filesystem has nothing to
@@ -6433,18 +6930,32 @@ setup() {
 # build per case. That build is the 8m45s window of the WAIT_BUILD comment, not
 # the ~5 minutes §7.4 budgets, so a four-case run is well over an hour.
 #
-# cleanup_all never dies, so a guest that could not be cleaned is a loud
-# warning here and a failure at the next assertion rather than a silent skip.
-# It also unmasks the hosts and removes $WORK everywhere, which is why
+# cleanup_all never dies, but cleanup_start_gate after it does: a verb that
+# never reached its sentinel here means the previous case's debris is still on
+# that guest, and the next case would be built on top of it. A guest that was
+# swept and is merely still dirty (a REFUSED or STUCK port) is a loud warning
+# here and a failure at the next assertion, which is the right order for a
+# finding preflight already explains better.
+# cleanup_all also unmasks the hosts and removes $WORK everywhere, which is why
 # setup_infra re-masks and re-ships.
 setup_between_cases() {
 	CASE=setup
-	log ""
-	log "=== between cases: tearing the data plane down and rebuilding it"
+	# stage() and not a bare log line, although this step issues no dnvctl call
+	# of its own. STAGE and TRACE are what die() reports, and cleanup_start_gate
+	# below is the first die site in this function — before setup_infra's
+	# `stage 01` — so without this a cleanup failure between cases would be
+	# reported at the PREVIOUS case's last stage and trace id, filed under an
+	# assertion it has nothing to do with.
+	stage 00 "between cases: tearing the data plane down and rebuilding it"
 	log "    (a fresh cluster_id makes every existing DN disk header foreign,"
 	log "     agent/dnagent/diskmeta.go:299-324 — an etcd reset alone is not"
 	log "     enough)"
 	cleanup_all
+	# The between-cases sweep is a START cleanup for the case that follows —
+	# E2E11 wants that case to begin from an EMPTY etcd and a freshly built
+	# sp, which a guest that was not swept cannot give it. Same gate, same
+	# reason as main's.
+	cleanup_start_gate "between-cases"
 	setup_infra
 	# setup_case is re-entrant by construction: its first act is to clear
 	# CLUSTER_ID, SP_ID, SP_JSON, the five CNTLR_* arrays, SS0_ID, TD0_ID,
@@ -6609,21 +7120,34 @@ cn_residue_empty() { # <v>
 }
 
 # dn_md_residue lists any md array on a DN VM whose mdadm name carries the dnv
-# prefix — the same filter cn_residue applies on a CN, run here through a
-# one-line read-only root probe because the DN helper body has no md verb of
-# its own (adding one belongs to the section that owns that heredoc).
+# prefix — the same filter cn_residue applies on a CN, run here as a one-line
+# read-only root probe rather than a helper verb: the shared node body gives
+# the DN helper `mdstat` and `md_stop_all` but no verb that LISTS the dnv
+# arrays, and adding one belongs to the section that owns that heredoc.
 #
-# WHAT IT PROVES, EXACTLY: only the CN assembles arrays (doc/cnagent.md CN12:
-# "Groups (md.go; primary only)"), so a dnv-named array on a DN VM would mean
-# something assembled one there — a stray udev rule, or an operator's own
-# experiment. It is NOT a general "no md on this guest" check, and on a guest
-# without mdadm it answers empty and proves nothing; §1.1 of the design records
-# mdadm as present on all ten lab guests, and mdadm is in CN_TOOLS but not in
-# DN_TOOLS, so this is deliberately the weaker of the two halves of §7.5's "no
-# md array on any cn/dn guest". The CN half, which is the one that can fail, is
-# cn_residue's.
+# WHAT IT PROVES, EXACTLY: only the CN assembles arrays ON PURPOSE
+# (doc/cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array
+# on a DN VM means something else assembled one — which is not hypothetical:
+# the cn writes each leg's md superblock through the side's nvme-tcp export, so
+# it lands on the DN's storage, and an unmasked DN assembles it (rule 7,
+# install_udev_rule). This is therefore the assertion that the DN's md mask
+# WORKED, not a formality. It is still not a general "no md on this guest"
+# check: it names dnv arrays only, and the guest's own arrays are none of its
+# business.
+#
+# It is no longer the weaker half of §7.5's "no md array on any cn/dn guest"
+# either, and there were TWO ways for it to be blind, not one. A guest without
+# mdadm answers empty and proves nothing, and mdadm was in CN_TOOLS alone;
+# mdadm is in DN_TOOLS now — dn_up's mask and dn_cleanup's md_stop_all both
+# need it — so preflight has already failed on any DN where the TOOL is
+# missing. That says nothing about the other way: an ssh or sudo that fails at
+# this moment also answers empty, and no tool list covers it. So the wrapper is
+# the DYING ssh_dn and not ssh_dn_ok, and the caller dies on a non-zero status
+# — the same shape dn_residue_empty and cn_residue_empty already have. The
+# `|| true` INSIDE the remote command stays: `mdadm --detail --scan` with no
+# array to report exits non-zero through the grep, and that is the pass.
 dn_md_residue() { # <v>
-	ssh_dn_ok "$1" \
+	ssh_dn "$1" \
 		"mdadm --detail --scan 2>/dev/null | grep -oE 'name=[^ ]*dnv-[0-9a-f]+' || true"
 }
 
@@ -6725,7 +7249,11 @@ case_residue() {
 		wait_until "$WAIT_DELETE" \
 			"dn$v to hold no dm device and no $NQN_PREFIX:* subsystem" \
 			dn_residue_empty "$v"
-		out=$(dn_md_residue "$v")
+		# A failure here is a failure, not an empty answer: the probe cannot
+		# pass by being unable to ask.
+		out=$(dn_md_residue "$v") ||
+			die "dn$v: listing the md arrays failed (ssh or sudo), so the" \
+				"'no dnv md array on a DN' assertion could not be taken"
 		assert_eq "${out//[[:space:]]/}" "" \
 			"dn$v holds no dnv md array (only a CN assembles one, CN12)"
 	done
@@ -11690,7 +12218,8 @@ run_case() { # <case name>
 #
 #   parse_args -> trap on_exit EXIT -> log_topology
 #     -> [--cleanup-only: ship_helpers, cleanup_all, stop]
-#     -> preflight_driver -> ship_helpers -> cleanup_all -> preflight_guests
+#     -> preflight_driver -> ship_helpers -> cleanup_all -> cleanup_start_gate
+#     -> preflight_guests
 #     -> setup -> the case loop -> run_summary
 #
 #  a. PREFLIGHT RUNS AFTER THE START CLEANUP, not before it. §7.3 says "before
@@ -11700,6 +12229,13 @@ run_case() { # <case name>
 #     cnagent_test.sh:1489-1490 and cdc_test.sh:1601-1602 put theirs in the same
 #     place for the same reason. Nothing in cleanup_all writes suite state — it
 #     only removes — so no check is reading something this run made.
+#
+#     cleanup_start_gate sits between them for that argument to hold: those
+#     checks are only about this run if the cleanup they follow actually ran.
+#     A verb that never reached its sentinel makes every one of them a question
+#     about corpses again, and the answer arrives as a preflight failure that
+#     blames whatever the corpses collide with first. §7.7's tolerance is of
+#     ABSENCE, not of a sweep that did not finish.
 #
 #  b. THE BETWEEN-CASES STEP IS setup_between_cases (cleanup_all + setup_infra
 #     + setup_case — it rebuilds the sp as well as the infrastructure, because
@@ -11830,8 +12366,11 @@ main() {
 		ship_helpers
 		cleanup_all
 		log ""
-		log "  cleanup_all never dies (§7.6): a verb that timed out, a port it" \
-			"REFUSED and a port that was STUCK are the \`!!!\` lines above."
+		log "  cleanup_all never dies (§7.6): a verb that never reached its" \
+			"sentinel is a \`WARNING:\` line above, and a port it REFUSED or" \
+			"found STUCK is a \`!!!\` line. This mode is an END cleanup, so" \
+			"it reports them all and exits non-zero rather than stopping at" \
+			"the first — cleanup_start_gate is not called here."
 		log "  Nothing was preflighted and nothing was built."
 		# Same verdict as on_exit's, for the same reason: the whole point of
 		# this mode is to leave the lab usable, so "it did not finish" has to
@@ -11854,6 +12393,10 @@ main() {
 	log ""
 	log "=== start cleanup (§7.7, unconditional, tolerant of total absence)"
 	cleanup_all
+	# Tolerant of absence, NOT of a sweep that did not run: preflight below
+	# judges the guest this run is about to use, and it can only do that if
+	# the guest was really swept. See cleanup_start_gate.
+	cleanup_start_gate start
 
 	preflight_guests
 
