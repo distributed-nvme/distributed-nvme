@@ -713,7 +713,8 @@ func TestPushMigrBitmap(t *testing.T) {
 	// A restart derives the applied set from the files on disk (SH21).
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -962,7 +963,8 @@ func TestFenceWindowDefault(t *testing.T) {
 	node := newFakeNode()
 	srv := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	if want := common.SuspendSeconds * time.Second; srv.fenceWait != want {
 		t.Errorf("fenceWait = %v, want %v", srv.fenceWait, want)
 	}
@@ -1322,7 +1324,8 @@ func TestFenceNotRestartedAcrossAnAgentRestart(t *testing.T) {
 	// The kernel state survives; the agent process does not.
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -1414,7 +1417,8 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	node.Reset()
 	restarted := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	restarted.fenceWait = time.Hour
 	if err := restarted.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)

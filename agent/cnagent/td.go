@@ -299,7 +299,7 @@ func (s *CnAgentServer) ensureSubsystem(
 			st.tracker, np.deferred,
 			nsKey, nsResName(sp.nqn, np.nsIdx), "", err)
 	}
-	err := s.nvmet.EnsurePortLink(ctx, common.NvmetPortId, sp.nqn)
+	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn)
 	info.SsIdToSubsystem[sp.ssId] = st.tracker.FromErr(ssKey, sp.nqn, "", err)
 }
 
@@ -386,7 +386,7 @@ func (s *CnAgentServer) probeExport(
 	if !ok {
 		return pb.ResStatus_RES_STATUS_ERROR, details
 	}
-	linked, err := s.nvmet.PortLinked(ctx, common.NvmetPortId, conf.Nqn)
+	linked, err := s.nvmet.PortLinked(ctx, s.port.PortId, conf.Nqn)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}

@@ -88,7 +88,10 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 `grpc.md` §3, whose byte-identity is pinned):
 
 ```go
-	// The single nvmet port every node exports (architecture.md §3.1/§3.2).
+	// The DEFAULT configfs id of the nvmet port an agent converges
+	// (architecture.md §3.1/§3.2: exactly one port per agent).
+	// `dnv-agent --nvmet-port-id` overrides it, which is what lets several
+	// agents share one node's kernel, each converging its own port.
 	NvmetPortId = 1
 
 	// The three fixed ANA groups on every node's port (architecture.md
@@ -478,12 +481,19 @@ SH18. nvmet configfs access: attribute writes go through
       used on `/sys/kernel/config` paths.
 
 SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
-      * `EnsurePort` creates `ports/{NvmetPortId}` with the node's
-        `NvmeTrConf` attributes **and** the three fixed groups: `mkdir
-        ana_groups/2`, `mkdir ana_groups/3`, then write `optimized` /
+      * `EnsurePort(portId, conf)` creates `ports/{portId}` — the calling
+        agent's `--nvmet-port-id`, `NvmetPortId` = 1 by default — with that
+        agent's `NvmeTrConf` attributes **and** the three fixed groups:
+        `mkdir ana_groups/2`, `mkdir ana_groups/3`, then write `optimized` /
         `non-optimized` / `inaccessible` into groups 1/2/3 exactly once
         (probe-first: skip when already correct). No code path ever writes an
-        `ana_state` after that.
+        `ana_state` after that. Probe-first is also what lets two agents on
+        one node co-own one port id (`architecture.md` §3.1): the second one
+        finds every attribute already as it wants it and writes nothing.
+        That holds only while their `--tr-*` values agree — two agents
+        sharing a port id with different transports would each try to
+        rewrite the other's `addr_*` every round — so agents that need
+        different transports need different `--nvmet-port-id`s.
       * every ANA transition is `SetNsAnaGrpId(nqn, nsid, grpid)` — a single
         `WriteFileDirect` of the namespace's `ana_grpid`, valid on a live
         namespace because the target group always exists.
@@ -585,11 +595,70 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
 |---|---|---|---|---|
 | `--grpc-network` | ✓ | ✓ | `tcp` | `net.Listen` network |
 | `--grpc-address` | required | required | — | gRPC endpoint; the CP stores it as `DnConf`/`CnConf` `addr_port` |
-| `--tr-type` / `--adr-fam` / `--tr-addr` / `--tr-svc-id` | required | required | — | the node's single nvmet port (`NvmeTrConf`), mirrored into `DnConf`/`CnConf` at creation |
+| `--tr-type` / `--adr-fam` / `--tr-addr` / `--tr-svc-id` | required | required | — | this agent's single nvmet port (`NvmeTrConf`), mirrored into `DnConf`/`CnConf` at creation |
+| `--nvmet-port-id` | ✓ | ✓ | `NvmetPortId` (1) | configfs id of the nvmet port this agent converges (`/sys/kernel/config/nvmet/ports/{id}`); several agents on one node's kernel take distinct ids (`architecture.md` §3.1). Env `DNV_AGENT_NVMET_PORT_ID`; a value below 1 is refused (CM3) |
 | `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` | `localStorPrefix` of `common.NewNameFmt` (`architecture.md` §4.6 state files) |
 | `--disk` | required | — | — | the raw block device that carries the dnv disk format ([D13]; §4.1 `diskmeta.go`) |
 | `--capacity` | — | ✓ | 0 | capacity budget in bytes this CN is willing to host; `GetCnSize` replies it verbatim, 0 = "use the CP default" (added by `cnagent.md` §3) |
 | `--config` | ✓ | ✓ | — | optional viper config file |
+
+     Running several agents on one node takes more than distinct port ids.
+     Each needs its own `--grpc-address`; two agents of the **same role**
+     also need their own `--local-store`, and the dn role needs its own
+     `--disk`. The `--tr-*` values follow the port id rather than the agent:
+     agents on **distinct** port ids need distinct `--tr-addr`/`--tr-svc-id`
+     pairs, because an agent's `NvmeTrConf` is what a CN dials to reach a
+     dn's sides and what a host dials to reach a cn's namespaces; agents
+     that **co-own** one port id — the dn/cn pair of `architecture.md` §13,
+     both on `4200` — must instead pass identical `--tr-*` values, since
+     they converge the same `addr_*` files (SH19).
+
+     The `--local-store` rule is the one the file names mislead about. The
+     `architecture.md` §4.6 names do carry the owning node's id — `dn-` /
+     `side-` / `migr-bm-` key on `(cluster_id, dn_id)`, the cn role's `cn-` /
+     `cntlr-` / `clone-bm-` on `(cluster_id, cn_id)` — but the store is never
+     read back by name: SH6 enumerates it with `ls -1 {prefix}` and filters
+     on the role's three **kind** prefixes alone, with no id filter. Two dn
+     agents sharing a prefix would therefore each load and converge the
+     other's DN and side records at startup (SH1, DN2): each would allocate
+     the other's side out of its **own** `--disk`, since the volume table is
+     keyed by `(sp_id, side_id)` alone (DN9), and then link the other's
+     `SideToCnNqn` subsystem into its **own** port. The prefix, not the file
+     name, is the unit of ownership. A dn and a cn agent may share one,
+     because the two roles' kind prefixes are disjoint — which is what lets
+     the `architecture.md` §13 pair both run on `/var/tmp`.
+
+     One name a dn agent builds is **not** keyed by `dn_id` and names an
+     object two agents would fight over: the side subsystem NQN.
+     `SideToCnNqn` is keyed by `leg_id` (`architecture.md` §4.4), and nvmet
+     subsystems live beside the ports rather than under them, so two dn
+     agents in one kernel must never hold the two sides of one leg. Only a
+     migration ever gives a leg two sides, so this is a placement matter
+     rather than an agent-flag one: register every DN of one kernel under the
+     same failure domain (`dnvctl dn create --location`, `architecture.md`
+     §8.2) and `architecture.md` §6.5's tier-1 anti-affinity keeps a
+     migration destination off its source's kernel. `architecture.md` §3.1
+     carries the full rule and its caveat — tier 2 relaxes that exclusion
+     rather than refusing to place. Two further dn-built names carry no
+     `dn_id` and are harmless: `CnHostNqn(cluster, cn)`, whose kernel-global
+     `hosts/{nqn}` directory both agents merely create with `mkdir -p` and no
+     code path anywhere removes, and the ns identity
+     `DnNsIdentity(cluster, sp, leg)`, which lives inside the subsystem the
+     NQN above already covers.
+
+     The cn role has the mirror-image rule, and a stricter one: run at most
+     **one** cn agent per kernel. Three cn names carry no cn id at all — the
+     host-facing subsystem NQN is the one the user passed `CreateSubsystem`,
+     so every cntlr of that SP exports the identical subsystem
+     (`architecture.md` §3.3 step 6, §3.5, §11.8);
+     `XferNqn(cluster, sp, xfer)` carries no node id
+     (`architecture.md` §4.4); and `CnMdArrayName(sp, slice, grp)`, the
+     `mdadm --name` superblock name, carries neither cluster nor cn id
+     (`architecture.md` §4.3). Nor is there a placement rule to fall back on,
+     as there is for the dn: CN scans take no `ExcludeLocs` at all
+     (`architecture.md` §6.4) and §6.5 black-lists the CNs of the SP by
+     `addr_port`, so two cn agents on one kernel are simply two CNs to the
+     allocator and both cntlrs of one SP may land there.
 
 CM3. Viper binding per subcommand: `viper.BindPFlags(cmd.Flags())`,
      `viper.SetEnvPrefix("DNV_AGENT")`,
@@ -598,8 +667,29 @@ CM3. Viper binding per subcommand: `viper.BindPFlags(cmd.Flags())`,
      `ReadInConfig`. All value reads go through viper (so file/env win per
      viper precedence).
 
-CM4. Each subcommand's `RunE`: `signal.NotifyContext(context.Background(),
-     syscall.SIGINT, syscall.SIGTERM)`; construct
+     Two checks run **after** that resolution rather than through cobra's
+     own flag machinery, so that a config file or an environment variable is
+     subject to the same rule as a flag: `requiredCommon` (the five values
+     both roles must have, plus `--disk` for dn), and the `--nvmet-port-id`
+     floor. Below 1 the subcommand's `RunE` returns
+     `--nvmet-port-id must be >= 1, got {n}`; the root command sets
+     `SilenceUsage`, so `dnv-agent` exits **1** with no usage dump, printing
+     that message **twice** — cobra's own `Error: …` line plus `main`'s
+     `fmt.Fprintln(os.Stderr, err)` — which is what anything grepping the
+     output sees. It is the same rule, not the same validation: a
+     non-numeric **flag** never reaches the floor, because pflag rejects it
+     at parse time (`invalid argument "abc" for "--nvmet-port-id" flag:
+     strconv.ParseInt: …`), while `viper.GetInt` turns any non-numeric env
+     or config value — `abc`, `2abc`, `" 3"` — into 0, which the floor then
+     reports as `got 0`. An **empty** env var is ignored by viper, so
+     `DNV_AGENT_NVMET_PORT_ID=` leaves the default standing. Every flag's
+     env spelling is the prefix plus the flag with `-` replaced by `_`:
+     `DNV_AGENT_NVMET_PORT_ID`, `DNV_AGENT_TR_SVC_ID`, and so on.
+
+CM4. Each subcommand's `RunE`: bind viper, then run CM3's two checks —
+     `requireValues`, and the `--nvmet-port-id` floor whose resolved value is
+     carried on to the constructor; `signal.NotifyContext(
+     context.Background(), syscall.SIGINT, syscall.SIGTERM)`; construct
      `common.NewNameFmt(localStore)` and the process's **single**
      `common.NewLimitedOsClient(0)`; build the role server
      (`dnagent.NewDnAgentServer(...)` / `cnagent...`); call `agent.Serve`
@@ -632,15 +722,17 @@ func newDnCmd() *cobra.Command {
 }
 
 func runDn(cmd *cobra.Command, args []string) error {
+	bindViper(cmd)                    // CM3
+	requireValues(append(requiredCommon, "disk")...) // the CM2 required rows
+	portId, _ := nvmetPortIdFromViper()              // CM3's second check
 	ctx, stop := signal.NotifyContext(
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	bindViper(cmd)                    // CM3
-	requireValues(append(requiredCommon, "disk")...) // the CM2 required rows
-	nf := common.NewNameFmt(viper.GetString("local-store"))
+	localStore := viper.GetString("local-store")
+	nf := common.NewNameFmt(localStore)
 	oc := common.NewLimitedOsClient(0)
-	srv := dnagent.NewDnAgentServer(oc, nf, viper.GetString("disk"),
-		trConfFromViper())
+	srv := dnagent.NewDnAgentServer(oc, nf, localStore,
+		viper.GetString("disk"), trConfFromViper(), portId)
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
 		srv.Reconcile,
@@ -677,7 +769,7 @@ type DnAgentServer struct {
 	host  *agent.NvmeHost
 	locks *agent.LockSet  // object key = LocalSidePath id tuple
 	disk  string          // --disk
-	port  agent.PortConf  // the four --tr-* flags as one value
+	port  agent.PortConf  // --tr-* + --nvmet-port-id as one value
 	// per-object resinfo trackers, pending-connect retry registry,
 	// per-side zeroing registry (DN9), and the SH27 background-task
 	// bookkeeping: the rootCtx captured at Reconcile plus a sync.WaitGroup
@@ -805,8 +897,8 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        (DN19) — without it, a node pointed at another node's disk would
        report `meta_info = RES_STATUS_ERROR` and then allocate extents in
        that disk's volume table anyway.
-     * `EnsurePort` (SH19: port `NvmetPortId` from the `--tr-*` flags + the
-       three fixed ANA groups).
+     * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
+       `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA groups).
      * **the Write Zeroes fail-fast**. DN9 zeroes whole
        sides with `blkdiscard --zeroout` under the ordinary SH15 timeouts,
        which only holds on hardware whose Write Zeroes is offloaded; a
@@ -1309,7 +1401,7 @@ DN18. Probe map (all via SH17 conventions; `res_name` and probe per
 |---|---|---|
 | `DnInfo.disk_info` | the `--disk` path | `lsblk --bytes --nodeps` succeeds |
 | `DnInfo.meta_info` | the `--disk` path | `ReadBlock` of the 4 KiB header: magic, version, CRC and `cluster_id`/`dn_id`/`extent_size` identity, **plus the DN5 Write-Zeroes check** (`/sys/class/block/{kname}/queue/write_zeroes_max_bytes` is absent, unreadable or ≠ 0). `details` = `"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d"` when OK — the last count is sides whose `zeroed_bits` are still incomplete (DN9); on failure the error text instead, `"disk lacks Write Zeroes"` for the WZ case |
-| `DnInfo.port_info` | `"{NvmetPortId}"` | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
+| `DnInfo.port_info` | the agent's port id as `%d` — `"1"` unless `--nvmet-port-id` says otherwise, so on a node running several agents the rows differ | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
 | `SideInfo.side_dev_info` | `DnSideName` | the volume-table record + its `zeroed_bits` + `dmsetup table`, judged by the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned = false` (the converge that allocates has not run) and `RES_STATUS_ERROR`, details `"record missing"`, at `provisioned = true`; bits incomplete ⇒ `RES_STATUS_PROVISIONING`, details `"zeroing {k}/{n}"`, at `false` and `RES_STATUS_ERROR`, details `"not zeroed"`, at `true`; an outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's output; a live table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`. The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every round |
 | `cn_id_to_dm_error[cn]` / `cn_id_to_dm_linear[cn]` | `DnErrorName` / `DnLinearName` | `dmsetup info` + `dmsetup table` (the linear's target — side device vs dm-error vs dm-clone — must match the desired role). Inside the §11.2 grace window the expected target is the **pre-fence** one and `details` is `"suspended (migration cutover grace window)"`; the probe never starts a window (DN16). While DN9's gate is closed no device is expected to exist and both report `RES_STATUS_PROVISIONING`, details `"side provisioning"` |
 | `cn_id_to_nvmeof[cn]` | the `SideToCnNqn` | configfs: subsystem present, ns enabled, `ana_grpid` as desired. `RES_STATUS_PROVISIONING`, details `"side provisioning"`, while DN9's gate is closed |
@@ -1327,7 +1419,7 @@ DN19. Error capture (§9.1): a failed command marks that resource
 
 Recorded for traceability; the edits are already applied.
 
-* `architecture.md` — [D4] replaced: three **fixed** ANA groups per node
+* `architecture.md` — [D4] replaced: three **fixed** ANA groups per nvmet
   port (ids/states written once at setup; every transition rewrites the ns
   `ana_grpid`), superseding per-namespace group allocation; call-sites in
   §3.1, §3.3, §3.4, §8.7, §8.8, §11.1, §11.6 and the Appendix A nvmet block

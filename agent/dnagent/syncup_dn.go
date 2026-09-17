@@ -6,7 +6,6 @@ import (
 	"log/slog"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -517,15 +516,16 @@ func (s *DnAgentServer) checkWriteZeroes(ctx context.Context) (string, bool) {
 	return tagNoWriteZeroes, false
 }
 
-// ensurePort converges the node's single nvmet port and its three fixed ANA
-// groups (SH19). Probing first keeps a converged port untouched: the port
-// attributes cannot be rewritten once a subsystem is linked.
+// ensurePort converges this agent's single nvmet port — s.port.PortId, the
+// --nvmet-port-id — and its three fixed ANA groups (SH19). Probing first
+// keeps a converged port untouched: the port attributes cannot be rewritten
+// once a subsystem is linked.
 func (s *DnAgentServer) ensurePort(
 	ctx context.Context,
 	t *agent.ResTracker,
 ) *pb.ResInfo {
-	resName := fmt.Sprintf("%d", common.NvmetPortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	resName := fmt.Sprintf("%d", s.port.PortId)
+	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	if err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}
@@ -533,10 +533,10 @@ func (s *DnAgentServer) ensurePort(
 		return t.Ok(resKeyPort, resName, "")
 	}
 	if err := s.nvmet.EnsurePort(
-		ctx, common.NvmetPortId, s.port); err != nil {
+		ctx, s.port.PortId, s.port); err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}
-	ok, details, err = s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	ok, details, err = s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	if err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}

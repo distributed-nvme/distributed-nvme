@@ -77,11 +77,14 @@ and diagnostics are dumped (§17).
 - **Each VM runs both agents**: `dnv-agent dn` (gRPC `<ip>:29528`) and
   `dnv-agent cn` (gRPC `<ip>:29529`, the §13 port convention). That is the
   only way two VMs yield the 2 DNs + 2 CNs that raid1 and failover need.
-- **The two agents co-own the VM's single nvmet port.** Both are launched
-  with identical `--tr-*` flags, so both converge the *same*
+- **The two agents co-own one nvmet port.** Neither is launched with
+  `--nvmet-port-id`, so both take `NvmetPortId` as their port id, and both
+  are launched with identical `--tr-*` flags, so both converge the *same*
   `ports/{NvmetPortId}` with the same attributes and the same three [D4]
   ANA groups; `EnsurePort` is probe-first (SH16/SH19), so whichever agent
-  runs first creates the port and the other issues zero writes. Their
+  runs first creates the port and the other issues zero writes. The port is
+  one per AGENT, not one per VM (`dnagent.md` CM2): agents given distinct
+  `--nvmet-port-id` values converge distinct ports and share nothing here. Their
   subsystem sets are disjoint (dn: `:2:`/`:3:` NQNs; cn: the test's
   host-facing NQNs + `:4:`), neither ever removes the port, and only
   cleanup tears it down. Production never co-locates the roles; the suite
@@ -1259,7 +1262,8 @@ another document or the harness cites can shift.
 
 ## Appendix A — lab gotchas baked into this plan
 
-- **Two agents, one port**: dn and cn co-own `ports/1` (§3). Never assert
+- **Two agents, one port**: dn and cn both keep the default
+  `--nvmet-port-id` here, so they co-own `ports/1` (§3). Never assert
   "the port's subsystem list is exactly my case's" — the other role's
   subsystems are legitimately there; assert membership, not equality.
 - **Both processes are named `dnv-agent`**: `pkill -x` kills both roles;

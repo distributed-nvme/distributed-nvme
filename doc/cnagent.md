@@ -250,12 +250,26 @@ CN-CM1. The CM2 flag table gains one cn-only row (edit applied to
 |---|---|---|---|---|
 | `--capacity` | — | ✓ | 0 | capacity budget in bytes this CN is willing to host; `GetCnSize` replies it verbatim, `0` = "use the CP default" (`DefaultCnCap`, §6.1) |
 
+     `--capacity` is the only cn-only flag, so this stays a one-row table.
+     In particular `--nvmet-port-id` (`NvmetPortId` = 1 by default, env
+     `DNV_AGENT_NVMET_PORT_ID`, refused below 1) is a **both-roles** row and
+     lives in CM2 itself, not here: the cn resolves and floor-checks it
+     exactly as the dn does (CM3), and a cn that keeps the default co-owns
+     `ports/1` with a dn agent on the same node (`architecture.md` §3.2).
+     The flag is not a licence to run two **cn** agents on one kernel: a
+     distinct port id separates their ports and nothing else, while the
+     host-facing subsystem NQN, `XferNqn` and `CnMdArrayName` carry no cn id
+     and CN placement has no location exclusion to keep two cntlrs of one SP
+     apart (CM2's cn paragraph; `architecture.md` §3.2, §6.4).
+
 CN-CM2. `runCn` mirrors `runDn` (CM4): bind viper, require the common
-     values (`--capacity` is optional), `signal.NotifyContext`, construct
+     values (`--capacity` is optional), resolve and floor-check
+     `--nvmet-port-id` (CM3), `signal.NotifyContext`, construct
      `common.NewNameFmt(localStore)` and the process's single
      `common.NewLimitedOsClient(0)`, build
-     `cnagent.NewCnAgentServer(oc, nf, localStore, capacity, trConf)`, and
-     call `agent.Serve` with the role's reconcile, a register func that
+     `cnagent.NewCnAgentServer(oc, nf, localStore, capacity, trConf,
+     portId)`, and call `agent.Serve` with the role's reconcile, a
+     register func that
      calls `pb.RegisterControllerNodeAgentServer`, and `nil` for the SH27
      background waiter — the cn owns no long-running child process, and its
      CN11 probers are cancelled at `rootCtx`, never joined (§2.2: a wedged
@@ -310,7 +324,7 @@ type CnAgentServer struct {
 	probeIO  LegProbeIO       // CN11 probe IO: direct syscalls, never oc (§2.2)
 	locks    *agent.LockSet   // object key = LocalCntlrPath id tuple
 	capacity uint64           // --capacity
-	port     agent.PortConf   // --tr-*
+	port     agent.PortConf   // --tr-* + --nvmet-port-id
 	// in-memory mirrors of the local store: cn requests, cntlr states
 	// (applied request, ResInfo tracker, a per-clone agent.CloneChunkSet
 	// keyed by (src_slice_idx, bm_idx), connect
@@ -490,8 +504,9 @@ CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
        registry. A reboot therefore leaves an empty arena and clones rebuild
        per §11.5. The orphan sweep of CN2 also runs at the end of this
        converge, under the same node write lock.
-     * `EnsurePort` (SH19: port `NvmetPortId` from the `--tr-*` flags + the
-       three fixed ANA groups). CN host-facing namespaces only ever use
+     * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
+       `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA
+       groups). CN host-facing namespaces only ever use
        groups 1 (`optimized`) and 3 (`inaccessible`) — group 2 exists on
        every port ([D4]) but no cn code path assigns it.
 
@@ -1456,7 +1471,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 
 | `ResInfo` | `res_name` | probe |
 |---|---|---|
-| `CnInfo.port_info` | `"{NvmetPortId}"` | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
+| `CnInfo.port_info` | the agent's port id as `%d` — `"1"` unless `--nvmet-port-id` says otherwise, so on a node running several agents the rows differ | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
 | `CnInfo.tmpfs_info` | the `CnTmpfsPath` | `findmnt` shows a tmpfs mounted there |
 | `CnInfo.tmp_file_info` | the `CnTmpFilePath` | `stat` size = `CnCloneMetaAreaSize` |
 | `CnInfo.loop_dev_info` | the `CnTmpFilePath` | `losetup --associated` lists exactly one loop device — this row covers the whole arena; `CnInfo.clone_vg_info` (field 5) is deleted with the clone VG (`reserved 5;`, [D14]) and per-clone metadata health lives in `clone_id_to_meta` |

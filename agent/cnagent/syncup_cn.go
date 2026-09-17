@@ -240,10 +240,16 @@ func (s *CnAgentServer) ensureLoopDev(
 		"%d loop devices back %s, want 1", len(devs), path)
 }
 
-// ensurePort converges the node's single nvmet port and its three fixed ANA
-// groups (SH19). Probing first keeps a converged port untouched — which is
-// also what lets the dn and cn roles co-own one port in the lab: whichever
-// agent runs first creates it and the other issues zero writes.
+// ensurePort converges this agent's single nvmet port — s.port.PortId, the
+// --nvmet-port-id — and its three fixed ANA groups (SH19). Probing first
+// keeps a converged port untouched — which is also what lets the dn and cn
+// roles co-own one port in the lab, as they do whenever both default to
+// common.NvmetPortId *and* their --tr-* values agree: whichever agent runs
+// first creates it and the other issues zero writes. The second conjunct is
+// not decoration — ProbePort compares the addr_* attributes against the
+// CALLER's own PortConf, so two agents on one port id with different
+// transports would each rewrite the other's every round, which is why
+// different transports need different port ids.
 //
 // CN host-facing namespaces only ever use groups 1 (optimized) and 3
 // (inaccessible); group 2 exists on every port ([D4]) but no cn code path
@@ -252,8 +258,8 @@ func (s *CnAgentServer) ensurePort(
 	ctx context.Context,
 	t *agent.ResTracker,
 ) *pb.ResInfo {
-	resName := fmt.Sprintf("%d", common.NvmetPortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	resName := fmt.Sprintf("%d", s.port.PortId)
+	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	if err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}
@@ -261,10 +267,10 @@ func (s *CnAgentServer) ensurePort(
 		return t.Ok(resKeyPort, resName, "")
 	}
 	if err := s.nvmet.EnsurePort(
-		ctx, common.NvmetPortId, s.port); err != nil {
+		ctx, s.port.PortId, s.port); err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}
-	ok, details, err = s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	ok, details, err = s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	if err != nil {
 		return t.Err(resKeyPort, resName, err.Error())
 	}
@@ -348,8 +354,8 @@ func (s *CnAgentServer) probeCn(
 		info.LoopDevInfo = t.Ok(resKeyLoopDev, filePath, devs[0])
 	}
 
-	portName := fmt.Sprintf("%d", common.NvmetPortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	portName := fmt.Sprintf("%d", s.port.PortId)
+	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	switch {
 	case err != nil:
 		info.PortInfo = t.Err(resKeyPort, portName, err.Error())

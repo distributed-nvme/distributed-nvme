@@ -47,6 +47,17 @@ func testTrConf() *pb.NvmeTrConf {
 
 func newTestServer(t *testing.T) (*DnAgentServer, *fakeNode) {
 	t.Helper()
+	return newTestServerOnPort(t, common.NvmetPortId)
+}
+
+// newTestServerOnPort is newTestServer with an explicit --nvmet-port-id.
+// Every test but TestSyncupOnNonDefaultPort takes the default, which is what
+// keeps the recorded call paths at ports/1.
+func newTestServerOnPort(
+	t *testing.T,
+	portId int,
+) (*DnAgentServer, *fakeNode) {
+	t.Helper()
 	node := newFakeNode()
 	// Must exceed DnDataOffset: at testExtentSize (1 MiB) that leaves 256
 	// data extents.
@@ -54,7 +65,7 @@ func newTestServer(t *testing.T) (*DnAgentServer, *fakeNode) {
 	node.devNo[testDisk] = "253:0"
 	node.dirs[agent.NvmetRoot] = true
 
-	srv := startTestServer(t, node)
+	srv := startTestServerOnPort(t, node, portId)
 	node.Reset()
 	return srv, node
 }
@@ -66,9 +77,18 @@ func newTestServer(t *testing.T) (*DnAgentServer, *fakeNode) {
 // cancel-then-WaitBackground shutdown.
 func startTestServer(t *testing.T, node *fakeNode) *DnAgentServer {
 	t.Helper()
+	return startTestServerOnPort(t, node, common.NvmetPortId)
+}
+
+func startTestServerOnPort(
+	t *testing.T,
+	node *fakeNode,
+	portId int,
+) *DnAgentServer {
+	t.Helper()
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewDnAgentServer(node.osClient(), nf,
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(), portId)
 	// The §11.2 cutover grace window is off unless a test asks for it: no
 	// unit test can wait common.SuspendSeconds, and with it off a migration
 	// source fences straight onto its dm-errors, which is the end state
@@ -87,6 +107,55 @@ func startTestServer(t *testing.T, node *fakeNode) *DnAgentServer {
 		t.Fatalf("reconcile: %v", err)
 	}
 	return srv
+}
+
+// portPathOf is the configfs directory of one nvmet port, formatted the way
+// agent.Nvmet.PortPath does. Expectations go through it rather than through a
+// literal "ports/1" so the default is expressed as common.NvmetPortId and a
+// non-default --nvmet-port-id can be asserted with the same strings.
+func portPathOf(portId int) string {
+	return fmt.Sprintf("%s/ports/%d", agent.NvmetRoot, portId)
+}
+
+// mentionsPort reports whether one recorded call names portPath. The path
+// has to end where the call's next separator begins, which for this fake is
+// one of: end of string, "/" (a child of the port), "=" (a write/writedirect
+// of a port attribute) or " " (the next argument). Matching on portPath+"/"
+// alone is not enough — it misses the two shapes a half-converted call site
+// produces most often, `cmd ls -1 {portPath}` (every dirExists probe, so
+// every ProbePort) and `cmd mkdir -p {portPath}` (EnsurePort's own mkdir).
+// The separator test is what keeps ports/1 from matching ports/11.
+func mentionsPort(call, portPath string) bool {
+	rest := call
+	for {
+		i := strings.Index(rest, portPath)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len(portPath):]
+		if rest == "" || strings.HasPrefix(rest, "/") ||
+			strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, " ") {
+			return true
+		}
+	}
+}
+
+// assertDefaultPortUntouched is the negative half of
+// TestSyncupOnNonDefaultPort: an agent on --nvmet-port-id 7 must neither
+// create ports/1 nor name it in any call. It reports with t.Errorf and is
+// called once per syncup round, because node.Reset() throws the previous
+// round's calls away.
+func assertDefaultPortUntouched(t *testing.T, node *fakeNode) {
+	t.Helper()
+	dflt := portPathOf(common.NvmetPortId)
+	if node.dirs[dflt] {
+		t.Errorf("%s was created by an agent on another port", dflt)
+	}
+	for _, call := range node.Calls() {
+		if mentionsPort(call, dflt) {
+			t.Errorf("a call touched the default port: %s", call)
+		}
+	}
 }
 
 func sidePtr(sideId uint64) *pb.SidePointer {
@@ -226,13 +295,17 @@ func waitZeroed(t *testing.T, srv *DnAgentServer, sideId uint64) {
 	}
 }
 
-// syncupBoth brings a DN and one side to a converged, exporting state.
+// syncupBoth brings a DN and one side to a converged, exporting state. It
+// returns the SyncupDn reply, which most callers ignore; the ones that do not
+// are asserting the dn-side ResInfo rows that only this reply carries
+// (SyncupDn's port_info comes from ensurePort, GetDnInfo's from probeDn —
+// two different sites).
 func syncupBoth(
 	t *testing.T,
 	srv *DnAgentServer,
 	revision uint64,
 	sideId uint64,
-) {
+) *pb.SyncupDnReply {
 	t.Helper()
 	dnReply, err := srv.SyncupDn(context.Background(), dnReq(revision, sideId))
 	if err != nil {
@@ -243,6 +316,7 @@ func syncupBoth(
 	}
 	syncupSideTwoPhase(t, srv, sideReq(revision, sideId, testCn0,
 		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+	return dnReply
 }
 
 // assertOrder matches wanted as a *subsequence* of the recorded calls: each
@@ -269,7 +343,7 @@ func assertOrder(t *testing.T, node *fakeNode, wanted ...string) {
 func TestFreshSyncupDn(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
-	portPath := fmt.Sprintf("%s/ports/%d", agent.NvmetRoot, common.NvmetPortId)
+	portPath := portPathOf(common.NvmetPortId)
 
 	reply, err := srv.SyncupDn(context.Background(), dnReq(1))
 	if err != nil {
@@ -330,8 +404,129 @@ func TestFreshSyncupDn(t *testing.T) {
 		got, "seq=1 sides=0") {
 		t.Errorf("meta details = %q", got)
 	}
-	if got := reply.GetDnInfo().GetPortInfo().GetResName(); got != "1" {
-		t.Errorf("port res_name = %q, want \"1\"", got)
+	// port_info names the port this agent converges, which with no
+	// --nvmet-port-id is common.NvmetPortId.
+	want := fmt.Sprintf("%d", common.NvmetPortId)
+	if got := reply.GetDnInfo().GetPortInfo().GetResName(); got != want {
+		t.Errorf("port res_name = %q, want %q", got, want)
+	}
+}
+
+// TestSyncupOnNonDefaultPort pins CM2's --nvmet-port-id (use_32_slices §5):
+// a dn server built with port id 7 creates ports/7, writes its ANA states
+// there, links the side subsystem into ports/7, reports "7" as port_info's
+// res_name on both the syncup and the probe path, and unlinks from ports/7
+// on teardown — and never touches the default ports/1. Without it many dn
+// agents could not share one node's kernel.
+//
+// The assertions are on the objects, not only on the recorded strings: the
+// port link is read back out of the fake's symlink table before and after the
+// teardown, and the side's nvmeof row is OK only because probeExport's
+// PortLinked found the link under the same port the converge made it under.
+func TestSyncupOnNonDefaultPort(t *testing.T) {
+	const portId = 7
+	if portId == common.NvmetPortId {
+		t.Fatalf("this test needs a port id other than the default %d",
+			common.NvmetPortId)
+	}
+	srv, node := newTestServerOnPort(t, portId)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	portPath := portPathOf(portId)
+
+	syncupReply := syncupBoth(t, srv, 1, testSide)
+
+	// Ahead of assertOrder, which is fatal: a regression that converges the
+	// default port also drops the ports/7 calls assertOrder asks for, so with
+	// the two the other way round this guard would never get to report.
+	assertDefaultPortUntouched(t, node)
+
+	assertOrder(t, node,
+		"cmd mkdir -p "+portPath,
+		"writedirect "+portPath+"/addr_trtype=tcp",
+		"cmd mkdir -p "+portPath+"/ana_groups/2",
+		"cmd mkdir -p "+portPath+"/ana_groups/3",
+		"writedirect "+portPath+"/ana_groups/1/ana_state=optimized",
+		"writedirect "+portPath+"/ana_groups/3/ana_state=inaccessible",
+	)
+
+	// SyncupDn's own reply names the port. This is ensurePort's res_name,
+	// which is a different site from probeDn's below.
+	syncupPort := syncupReply.GetDnInfo().GetPortInfo()
+	if got := syncupPort.GetStatus(); got != pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("SyncupDn port status = %v, details %q",
+			got, syncupPort.GetDetails())
+	}
+	if got := syncupPort.GetResName(); got != "7" {
+		t.Errorf("SyncupDn port res_name = %q, want \"7\"", got)
+	}
+
+	// The subsystem's port link is an object in the fake's symlink table,
+	// not just a recorded command.
+	nqns := make([]string, 0, 2)
+	for _, cnId := range []uint64{testCn0, testCn1} {
+		nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, cnId)
+		nqns = append(nqns, nqn)
+		link := portPath + "/subsystems/" + nqn
+		target, ok := node.links[link]
+		if !ok {
+			t.Errorf("no port link at %s; links: %v", link, node.links)
+			continue
+		}
+		if want := agent.NvmetRoot + "/subsystems/" + nqn; target != want {
+			t.Errorf("link %s -> %q, want %q", link, target, want)
+		}
+	}
+
+	// Probing reads the same port back: port_info names it, and the side's
+	// nvmeof rows are OK, which PortLinked can only report from ports/7.
+	dnReply, err := srv.GetDnInfo(context.Background(),
+		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if got := dnReply.GetDnInfo().GetPortInfo().GetStatus(); got !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("port status = %v, details %q", got,
+			dnReply.GetDnInfo().GetPortInfo().GetDetails())
+	}
+	if got := dnReply.GetDnInfo().GetPortInfo().GetResName(); got != "7" {
+		t.Errorf("port res_name = %q, want \"7\"", got)
+	}
+	sideReply, err := srv.GetSideInfo(context.Background(),
+		&pb.GetSideInfoRequest{
+			ClusterId:   testCluster,
+			DnId:        testDn,
+			SidePointer: sidePtr(testSide),
+		})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	rows := sideReply.GetSideInfo().GetCnIdToNvmeof()
+	if len(rows) != 2 {
+		t.Fatalf("%d nvmeof rows, want 2: %v", len(rows), rows)
+	}
+	for cnId, info := range rows {
+		if info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("cn %d nvmeof: %v %q",
+				cnId, info.GetStatus(), info.GetDetails())
+		}
+	}
+
+	// Teardown unlinks from the same port. RemovePortLink asks PortLinked
+	// about the id it was given and returns nil when the answer is "no", so
+	// an agent that tore down against the default would report success,
+	// delete the kernel-global subsystem and leave its ports/7 link behind.
+	// Nothing but the symlink table can tell the two apart.
+	node.Reset()
+	if _, err := srv.SyncupDn(context.Background(), dnReq(2)); err != nil {
+		t.Fatalf("SyncupDn teardown: %v", err)
+	}
+	assertDefaultPortUntouched(t, node)
+	for _, nqn := range nqns {
+		link := portPath + "/subsystems/" + nqn
+		if target, ok := node.links[link]; ok {
+			t.Errorf("the port link %s -> %q survived teardown", link, target)
+		}
 	}
 }
 
@@ -1218,7 +1413,8 @@ func TestZeroingRetryIsPaced(t *testing.T) {
 func TestZeroRetryIntervalDefault(t *testing.T) {
 	srv := NewDnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	if srv.zeroRetryInterval != common.DnZeroRetryInterval*time.Second {
 		t.Errorf("zeroRetryInterval = %v, want %v", srv.zeroRetryInterval,
 			common.DnZeroRetryInterval*time.Second)
@@ -1610,7 +1806,8 @@ func TestLocalStoreLossKeepsSideAllocation(t *testing.T) {
 	node.protos = map[string][]byte{}
 	node.mu.Unlock()
 	srv2 := NewDnAgentServer(node.osClient(), nf,
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -1702,7 +1899,8 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 	node.mu.Unlock()
 	srv2 := NewDnAgentServer(node.osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
-		common.DefaultLocalStorPrefix, testDisk, testTrConf())
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId)
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

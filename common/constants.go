@@ -219,10 +219,13 @@ const (
 	// record (see log.md R11).
 	LogStrDataLimit = 128
 
-	// The single nvmet port every node exports (architecture.md §3.1/§3.2).
+	// The DEFAULT configfs id of the nvmet port an agent converges
+	// (architecture.md §3.1/§3.2: exactly one port per agent).
+	// `dnv-agent --nvmet-port-id` overrides it, which is what lets several
+	// agents share one node's kernel, each converging its own port.
 	NvmetPortId = 1
 
-	// The three fixed ANA groups on every node's port (architecture.md
+	// The three fixed ANA groups on every nvmet port (architecture.md
 	// [D4]). Group 1 always exists in nvmet and defaults to optimized;
 	// groups 2 and 3 are created at port setup. Group states are written
 	// once and never changed; every ANA transition rewrites a namespace's

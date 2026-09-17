@@ -77,11 +77,20 @@ func (n *Nvmet) portLinkPath(portId int, nqn string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Port — the one port per node, with the three fixed ANA groups (SH19, [D4])
+// Port — the one port per agent, with the three fixed ANA groups (SH19, [D4])
 // ---------------------------------------------------------------------------
 
-// PortConf is the node's single nvmet port, built from the --tr-* flags.
+// PortConf is the agent's single nvmet port: the four --tr-* flags plus the
+// configfs id the port lives under.
 type PortConf struct {
+	// PortId is the configfs id of the port this agent converges
+	// (/sys/kernel/config/nvmet/ports/<PortId>). common.NvmetPortId is the
+	// default; `dnv-agent --nvmet-port-id` overrides it so several agents
+	// can share one node's kernel. Every Ensure/Probe/PortLink* method
+	// still takes the id as an explicit argument — this field is only where
+	// the two role servers keep the one they were built with.
+	PortId int
+
 	TrType   string
 	AdrFam   string
 	TrAddr   string

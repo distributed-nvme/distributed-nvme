@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
-	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -382,7 +381,7 @@ func (s *CnAgentServer) removeDm(ctx context.Context, name string) bool {
 
 func (s *CnAgentServer) removeExport(ctx context.Context, nqn string) {
 	if err := s.nvmet.RemoveSubsystem(
-		ctx, common.NvmetPortId, nqn); err != nil {
+		ctx, s.port.PortId, nqn); err != nil {
 		slog.ErrorContext(ctx, "removing nvmet subsystem failed",
 			slog.String("nqn", nqn),
 			slog.String("error", err.Error()))

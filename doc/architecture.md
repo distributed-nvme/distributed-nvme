@@ -239,7 +239,21 @@ Per DN, once (created by the dn agent at first `SyncupDn`):
 2. Exactly **one** nvmet port, built from `DnConf.nvme_tr_conf` (which mirrors the
    agent's `--tr-type/--adr-fam/--tr-addr/--tr-svc-id` flags). Every subsystem this DN
    ever exports — all side subsystems and all migration-source subsystems — attaches to
-   this single port.
+   this single port. The port is one per **agent**, not one per kernel: it lives at
+   configfs id `NvmetPortId` = 1 unless the agent is started with `--nvmet-port-id`
+   (`dnagent.md` CM2). Several dn agents may therefore share one kernel, each taking a
+   distinct port id and a transport address of its own (a different `--tr-addr` or
+   `--tr-svc-id`) — an agent's transport conf is copied into `Side.nvme_tr_conf` (§8.4)
+   and is what a CN dials to reach that DN's sides (§3.3 step 1), so two DNs answering
+   on one address would be indistinguishable to it. Each also needs its own `--disk`
+   and its own `--local-store` prefix: the §4.6 file names do carry `(cluster_id,
+   dn_id)`, but the store is read back by **kind** prefix alone, so two dn agents
+   sharing a prefix would adopt and converge each other's records at startup
+   (`dnagent.md` CM2/SH6). Agents that keep the default id
+   co-own `ports/1` instead, which is what lets a dn and a cn agent on one node share
+   one port: `EnsurePort` is probe-first and writes only what differs (`dnagent.md`
+   SH19). Sharing a kernel also carries one placement rule — the `SideToCnNqn` note
+   under **Per side** below.
 
 Per **side** (one per hosted leg replica):
 
@@ -274,6 +288,31 @@ Per **side** (one per hosted leg replica):
     the same namespace identity: `nsid = 1`, `device_uuid`/`device_nguid` derived
     deterministically from `(cluster_id, sp_id, leg_id)`, `attr_serial = %016x(leg_id)`,
     `attr_model = "dnv"` — and, per §11.8, cntlid slots that do **not** overlap.
+
+    That identical NQN is also what stops two dn agents sharing a kernel from holding
+    the two sides of one leg. A distinct `--nvmet-port-id` gives each agent its own
+    `ports/<id>`, but nvmet subsystems are **not** under the port — `subsystems/{nqn}`
+    is kernel-global and the port only links to it — so both agents would converge that
+    one subsystem and its one `nsid = 1`, each writing its own side device into the
+    same `device_path`, and either one's teardown would run `RemoveSubsystem` against
+    the whole of it. No other dn-side name names an object the two would fight over:
+    `DnSideName`, `DnErrorName`, `DnLinearName`,
+    `DnMigrMetaDmName`/`DnMigrSrcName`/`DnMigrFinalName`, `MigrSrcNqn`, `DnHostNqn` and
+    `LocalDnPath`/`LocalSidePath`/`LocalMigrBmPath` all carry `dn_id` (§4.2, §4.4,
+    §4.6), and the ANA groups are nested under the port. Two dn-built names do carry no
+    `dn_id` and are harmless all the same: `CnHostNqn(cluster, cn)`, whose kernel-global
+    `hosts/{nqn}` directory both agents merely create — with `mkdir -p`, and no code
+    path anywhere removes a host — and the ns identity `DnNsIdentity(cluster, sp, leg)`
+    above, which lives inside the one subsystem the NQN rule already covers.
+
+    Only a **migration** ever gives a leg two sides, so the rule is a placement one,
+    not an agent-flag one: register every DN of one kernel under the same `location`
+    and §6.5's tier 1 keeps a migration destination (and a spare leg) off the source's
+    kernel. Two things bound that. An omitted `location` defaults to the node's own
+    `addr_port` (§8.2), so agents left to the default are separate failure domains and
+    nothing keeps them apart at all; and even under a shared `location` §6.5's tier 2
+    rescans without the exclusion rather than refuse to place, so the guarantee holds
+    only while some other domain still has a free DN.
 
 ```mermaid
 flowchart BT
@@ -374,7 +413,17 @@ Per CN, once (created by the cn agent at first `SyncupCn`):
    from the **destination thin-pool bitmaps** (§11.5) — copied blocks are exactly the
    mapped blocks of the destination td, so no clone state needs to survive the CN.
 3. Exactly **one** nvmet port from `CnConf.nvme_tr_conf`; every host-facing subsystem
-   and every transfer subsystem of every cntlr on this CN attaches to it.
+   and every transfer subsystem of every cntlr on this CN attaches to it. As in §3.1
+   the port is one per **agent** at configfs id `NvmetPortId` = 1 unless
+   `--nvmet-port-id` says otherwise (`dnagent.md` CM2); a cn agent that keeps the
+   default co-owns `ports/1` with a dn agent on the same node. Unlike §3.1's dn case,
+   distinct port ids do **not** make two cn agents on one kernel safe, so run at most
+   one: the host-facing subsystem NQN is the one the user passed `CreateSubsystem` and
+   every cntlr of that SP exports it (§3.3 step 6, §3.5, §11.8), `XferNqn` carries no
+   node id (§4.4), and `CnMdArrayName` — the `mdadm --name` superblock name — carries
+   neither cluster nor cn id (§4.3). No placement rule separates them either: CN scans
+   take no `ExcludeLocs` (§6.4) and §6.5 black-lists the SP's CNs by `addr_port`, so
+   two cn agents on one kernel are simply two CNs to the allocator.
 4. **QoS** from `SyncupCnRequest.qos_ratio` (a copy of `ClusterConf.qos_ratio`,
    §10.2). Limits are size-proportional: for a device of `size` bytes,
    `iops = size / bytes_per_iops` and `bps = size / bytes_per_bps` (a zero divisor
@@ -2124,7 +2173,7 @@ concatenation (§9.6, §11.4).
 | rpc | behavior |
 |---|---|
 | `GetDnSize` | Return the byte size of the `--disk` device's **data area** — the raw size (`lsblk --bytes`) minus the fixed `DnDataOffset` prefix of the [D13] format. A device at or below `DnDataOffset` is an `Internal` error. Called by the gateway pre-registration; `dn_id` in the request is for logging only. |
-| `SyncupDn` | Carries `revision`, `side_pointer_list`, `extent_size` (the cluster's `dn_bin_conf.extent_size`, stamped into the disk header at format time and immutable thereafter, §3.1). Ensure §3.1 base state (the [D13] disk format, the single nvmet port); diff the pointer list per §9.1. Reply `agent_reply`, `revision`, `dn_info`. |
+| `SyncupDn` | Carries `revision`, `side_pointer_list`, `extent_size` (the cluster's `dn_bin_conf.extent_size`, stamped into the disk header at format time and immutable thereafter, §3.1). Ensure §3.1 base state (the [D13] disk format, this agent's own nvmet port); diff the pointer list per §9.1. Reply `agent_reply`, `revision`, `dn_info`. |
 | `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`, `provisioned`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: the side device of `ext_cnt` extents and its zeroing state (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info` (which always reports `zeroed_ext_cnt` / `total_ext_cnt`, §9.4), `bm_info` (the applied migration-bitmap indexes, §9.6). |
 | `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
 | `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything (`agent_reply`, `revision`, info). |
@@ -3200,8 +3249,11 @@ endpoints above.
 Every flag is also settable via config file and environment (viper). The worker's
 flags are specified in `dnv-worker.md` §5 (`--roles` defaults to all three; the vote
 timers default to `DefaultVoteWorkerInterval`/`DefaultVoteWorkerGraceTime`). The agent's
-`--tr-*` flags define the node's single nvmet port (`NvmeTrConf`), mirrored into
-`DnConf`/`CnConf` at creation; `--local-store` sets the `localStorPrefix` under which
+`--tr-*` flags define that agent's single nvmet port (`NvmeTrConf`), mirrored into
+`DnConf`/`CnConf` at creation, and `--nvmet-port-id` picks the configfs id that port
+lives at — default `NvmetPortId` = 1, anything below 1 refused — so several agents can
+share one node's kernel (§3.1); the two `dnv-agent` lines above name no port id, so
+both roles there take the default. `--local-store` sets the `localStorPrefix` under which
 the §4.6 state files live. `--capacity` is cn-only (a DN's size is read off its
 `--disk`): it is the byte budget `GetCnSize` replies verbatim, i.e. the per-node input
 to the §6.1 CN extent count, whose divisor `extent_size` is the cluster-wide
@@ -3319,10 +3371,14 @@ discard hydrated-marking: blkdiscard --offset {r×region} --length {region} {clo
   # metadata-only: no_discard_passdown keeps this off the destination device ([D7])
 ```
 
-**nvmet (configfs, both node kinds — one port per node):**
+**nvmet (configfs, both node kinds — one port per agent):**
 
 ```shell
-# port (once, from the --tr-* flags), with the three fixed ANA groups [D4]:
+# port (once, from the --tr-* flags), with the three fixed ANA groups [D4].
+# The 1 below is NvmetPortId, the default --nvmet-port-id; an agent on another
+# id changes only the ports/1 paths — the seven port-setup lines here and the
+# `ln -s` at the end of the block. Note that subsystems and hosts are NOT under
+# the port; every other path in this block is kernel-global.
 mkdir /sys/kernel/config/nvmet/ports/1
 echo {tr_addr}  > .../ports/1/addr_traddr ; echo {tr_svc_id} > .../ports/1/addr_trsvcid
 echo {tr_type}  > .../ports/1/addr_trtype ; echo {adr_fam}   > .../ports/1/addr_adrfam
@@ -3440,7 +3496,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   recovery (§11.5) both assume the dst td was never written before the clone; "mapped
   ⇒ copied" holds only then. The CP cannot verify it cheaply; it is a documented
   contract, satisfied trivially by creating the td right before `CreateClone`.
-* **[D4] Three fixed ANA groups per node.** Every node's single port carries exactly
+* **[D4] Three fixed ANA groups per port.** Every agent's single port carries exactly
   three ANA groups, created at port setup with fixed ids and states that are never
   rewritten afterwards: `AnaGrpIdOptimized = 1` (`optimized`; nvmet's always-present
   default group), `AnaGrpIdNonOptimized = 2` (`non-optimized`),
@@ -3449,7 +3505,10 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   namespace precisely because the target group always exists (a nonexistent grpid
   blackholes IO). The fixed set stays far from the kernel's 128-groups-per-port cap
   regardless of namespace count, and leaves nothing to allocate, persist (in etcd or
-  locally), or recover after an agent restart. Group ids have no cross-node meaning.
+  locally), or recover after an agent restart. A group is nested under its port
+  (`ports/{id}/ana_groups/{grp}`), so the ids mean nothing across ports — two agents
+  sharing a kernel under distinct `--nvmet-port-id`s get three groups each — and
+  nothing across nodes.
 * **[D5] Location copy in capacity values.** `DnConf`/`CnConf.location` is
   authoritative; the capacity key's value carries a copy so allocator scans stay
   read-only range scans. The STM that changes `location`-relevant state rewrites both.

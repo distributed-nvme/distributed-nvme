@@ -120,8 +120,80 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("local-store default = %q, want %q",
 			got, common.DefaultLocalStorPrefix)
 	}
+	if got := viper.GetInt("nvmet-port-id"); got != common.NvmetPortId {
+		t.Errorf("nvmet-port-id default = %d, want common.NvmetPortId (%d)",
+			got, common.NvmetPortId)
+	}
+	if got, err := nvmetPortIdFromViper(); err != nil ||
+		got != common.NvmetPortId {
+		t.Errorf("nvmetPortIdFromViper() = %d, %v; want %d, nil",
+			got, err, common.NvmetPortId)
+	}
 	if err := requireValues(requiredCommon...); err != nil {
 		t.Errorf("cn rejected a complete invocation: %v", err)
+	}
+}
+
+// CM2: --nvmet-port-id belongs to both roles (a dn VM runs many agents, each
+// converging its own configfs port), it defaults to common.NvmetPortId, and
+// anything below 1 is refused — configfs has no ports/0.
+func TestNvmetPortIdIsOnBothRolesAndBounded(t *testing.T) {
+	for _, use := range []string{"dn", "cn"} {
+		if subCmd(t, use).Flags().Lookup("nvmet-port-id") == nil {
+			t.Fatalf("%s has no --nvmet-port-id flag", use)
+		}
+	}
+	parse(t, "dn", append([]string{
+		"--nvmet-port-id", "7",
+	}, exampleDnArgs...))
+	if got, err := nvmetPortIdFromViper(); err != nil || got != 7 {
+		t.Errorf("nvmetPortIdFromViper() = %d, %v; want 7, nil", got, err)
+	}
+
+	for _, bad := range []string{"0", "-1"} {
+		parse(t, "cn", append([]string{
+			"--nvmet-port-id", bad,
+		}, exampleCnArgs...))
+		got, err := nvmetPortIdFromViper()
+		if err == nil {
+			t.Fatalf("--nvmet-port-id %s was accepted as %d", bad, got)
+		}
+		if !strings.Contains(err.Error(), "--nvmet-port-id") {
+			t.Errorf("error %q does not name --nvmet-port-id", err)
+		}
+		if !strings.Contains(err.Error(), bad) {
+			t.Errorf("error %q does not name the rejected value %s", err, bad)
+		}
+	}
+}
+
+// CM3: the environment reaches --nvmet-port-id like every other flag, which
+// is how the e2e suite gives each of a VM's agents its own port.
+func TestNvmetPortIdFromEnv(t *testing.T) {
+	t.Setenv("DNV_AGENT_NVMET_PORT_ID", "9")
+	parse(t, "dn", exampleDnArgs)
+	if got := viper.GetInt("nvmet-port-id"); got != 9 {
+		t.Errorf("nvmet-port-id = %d, want the environment value 9", got)
+	}
+	if got, err := nvmetPortIdFromViper(); err != nil || got != 9 {
+		t.Errorf("nvmetPortIdFromViper() = %d, %v; want 9, nil", got, err)
+	}
+
+	// An explicit flag still wins over the environment.
+	parse(t, "dn", append([]string{
+		"--nvmet-port-id", "3",
+	}, exampleDnArgs...))
+	if got, err := nvmetPortIdFromViper(); err != nil || got != 3 {
+		t.Errorf("nvmetPortIdFromViper() = %d, %v; want the flag's 3, nil",
+			got, err)
+	}
+
+	// A value the environment cannot parse as an int reads back as 0 and is
+	// refused rather than silently converging ports/0.
+	t.Setenv("DNV_AGENT_NVMET_PORT_ID", "not-a-number")
+	parse(t, "dn", exampleDnArgs)
+	if got, err := nvmetPortIdFromViper(); err == nil {
+		t.Errorf("a non-numeric env value was accepted as %d", got)
 	}
 }
 

@@ -44,8 +44,8 @@ func (s *DnAgentServer) probeDn(
 		}
 	}
 
-	portName := fmt.Sprintf("%d", common.NvmetPortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, common.NvmetPortId, s.port)
+	portName := fmt.Sprintf("%d", s.port.PortId)
+	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
 	switch {
 	case err != nil:
 		info.PortInfo = t.Err(resKeyPort, portName, err.Error())
@@ -422,7 +422,7 @@ func (s *DnAgentServer) probeExport(
 		return pb.ResStatus_RES_STATUS_ERROR, fmt.Sprintf(
 			"ana_grpid is %d, want %d", state.AnaGrpId, ns.AnaGrpId)
 	}
-	linked, err := s.nvmet.PortLinked(ctx, common.NvmetPortId, ns.Nqn)
+	linked, err := s.nvmet.PortLinked(ctx, s.port.PortId, ns.Nqn)
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}

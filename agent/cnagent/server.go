@@ -122,14 +122,16 @@ type cntlrState struct {
 
 // NewCnAgentServer builds the cn role server. oc is the process's single
 // OsClient, localStore the --local-store prefix (the same one nf was built
-// with), capacity the --capacity budget and trConf the node's single nvmet
-// port.
+// with), capacity the --capacity budget, trConf the transport of this
+// agent's nvmet port and portId the --nvmet-port-id it converges
+// (common.NvmetPortId unless the flag says otherwise).
 func NewCnAgentServer(
 	oc common.OsClient,
 	nf *common.NameFmt,
 	localStore string,
 	capacity uint64,
 	trConf *pb.NvmeTrConf,
+	portId int,
 ) *CnAgentServer {
 	return &CnAgentServer{
 		oc: oc,
@@ -148,6 +150,7 @@ func NewCnAgentServer(
 		locks:    agent.NewLockSet(),
 		capacity: capacity,
 		port: agent.PortConf{
+			PortId:  portId,
 			TrType:  trConf.GetTrType(),
 			AdrFam:  trConf.GetAdrFam(),
 			TrAddr:  trConf.GetTrAddr(),

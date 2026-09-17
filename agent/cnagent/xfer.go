@@ -122,7 +122,7 @@ func (s *CnAgentServer) ensureXfer(
 	info.XferIdToNamespace[xp.xferId] = deferredFromErr(
 		st.tracker, xp.deferred,
 		nsKey, nsResName(xp.nqn, int(xp.xfer.GetOriNsIdx())), "", nsErr)
-	linkErr := s.nvmet.EnsurePortLink(ctx, common.NvmetPortId, xp.nqn)
+	linkErr := s.nvmet.EnsurePortLink(ctx, s.port.PortId, xp.nqn)
 	info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
 		st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
 }
