@@ -879,9 +879,21 @@ case_sweep() {
 EOF
 
 	# --- cluster (§5.1) ------------------------------------------------
+	# --extent-size is the one conf flag of §5.1: it fills
+	# dn_bin_conf.extent_size and nothing else, so the recorded request must
+	# show dn_bin_conf carrying that single member and no NON-ZERO bin shift
+	# beside it. Non-zero is as far as any assertion reaches: bin0..bin3_shift
+	# are plain proto3 scalars with no presence, and §7.5 records with
+	# UseProtoNames and WITHOUT EmitUnpopulated, so a shift dnvctl sent as a
+	# literal 0 leaves no key here — and would be harmless anyway, since the
+	# gateway resolves an all-zero set to the 0/4/8/12 ladder either way
+	# (ctl/request_test.go's TestClusterCreateExtentSize says the same, and
+	# also carries the "no --extent-size sends no dn_bin_conf" half).
+	# The step keeps its number because the audit below pins 59 steps over
+	# 59 distinct RPCs.
 	sweep_step 01 CreateCluster \
-		'{"cluster_name":"c1"}' \
-		cluster create --name c1
+		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
+		cluster create --name c1 --extent-size 67108864
 	sweep_step 02 DeleteCluster \
 		'{"cluster_name":"c1"}' \
 		cluster delete --name c1

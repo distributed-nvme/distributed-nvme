@@ -307,7 +307,7 @@ surface.
 
 | command | RPC | flags beyond globals | notes |
 |---|---|---|---|
-| `cluster create` | CreateCluster | `--name` | pure gateway defaults; no conf flags in v1 |
+| `cluster create` | CreateCluster | `--name`, `--extent-size` | *2026-09-17:* the v1 rule this row used to state — that the command sends no conf message at all, so every `ClusterConf` member the request can carry is left to the gateway — is amended by exactly one flag. `--extent-size` (bytes, default `0`) sets `dn_bin_conf.extent_size`, the DN/CN allocation unit (architecture.md §6.1), which `DefaultDnExtSize` otherwise fixes at 1 GiB. A 32-slice pool takes a meta group and a data group per slice, each with one side per leg, so on lab-sized backing devices the unit has to come down to `common.MinDnExtSize` (64 MiB) — that is why the flag exists. Non-zero ⇒ `dn_bin_conf` is sent carrying `extent_size` and nothing else; `0` ⇒ no `dn_bin_conf` message at all — the same "not given" convention as `sp create`'s `--stripe-size`/`--block-size`, which build `bdev_conf.dm_raid0_conf`/`dm_pool_conf` only when non-zero (§5.4), and exactly the pure-defaults request this command shipped with. The four `bin*_shift` members have no flag and are never sent, so the gateway reads the all-zero shift set — which is *not* a ladder: it is the proto3 "unset", accepted as the one exception, while any other non-ladder set is `INVALID_ARGUMENT` — and falls back to the 0/4/8/12 defaults as a whole set, never shift by shift (architecture.md §6.2, §8.1). The `[64 MiB, 1 TiB]` bound on a non-zero value is the gateway's (architecture.md §7); dnvctl range-checks nothing (CT8), and neither end applies an alignment or power-of-two rule. The flag is env-settable like every other (CT9), which is worth knowing for this one because the value is write-once: `DNVCTL_EXTENT_SIZE=67108864` acts exactly like the flag, but text viper cannot cast to a uint64 (`-1`, `abc`, 2^64) reads back as `0` and ships no `dn_bin_conf` at all — the cluster silently keeps the 1 GiB default — where the same text as a flag argument is a pflag parse error (exit 2, no RPC). No `cluster create` flag reaches the other four conf members the request can carry: `bdev_conf`, `alloc_conf` and `health_check_conf` are stored as the gateway's resolved defaults — the cluster's `bdev_conf` is only the per-SP default set, which `sp create`'s own `bdev_conf` flags then override member by member per pool (§5.4, architecture.md §8.1/§8.4) — while `qos_ratio` is stored exactly as sent, because alone among the request's conf members it is not defaultable and its proto3 zero keeps meaning "unset" (architecture.md §7, `model.ResolveClusterConf`). `creation_epoch`, the remaining `ClusterConf` member, is no request field at all — the gateway stamps it (architecture.md §7). And because `ClusterConf` is write-once (architecture.md §8.1, no `UpdateCluster*` RPC), this flag is the only chance a given cluster's extent size ever gets to be set |
 | `cluster delete` | DeleteCluster | `--name` | |
 | `cluster get` | GetCluster | `--name` | |
 | `cluster list` | ListClusters | `--count`, `--page-token` | the one request with no `cluster_name`; the globals are ignored |
@@ -437,7 +437,15 @@ All in `ctl/` (`*_test.go`) except CT-T6.
   global `--cluster`/`--sp` fill; the `cluster` group's `--name` fallback; the
   §4 token trio (absent flag ⇒ nil message; `--rev 0` ⇒ present, revision 0;
   `--rev 0x1f` ⇒ 31); trConf/selector/dmClone nil rules; list replace-on-set;
-  `sp create`'s always-present `redund_conf` for both `--redund` values.
+  `sp create`'s always-present `redund_conf` for both `--redund` values; and
+  `cluster create`'s `--extent-size` rules (absent flag and an explicit `0` ⇒
+  no `dn_bin_conf` at all; non-zero ⇒ a `dn_bin_conf` carrying `extent_size`
+  alone, the four shifts never sent; a value outside the gateway's
+  `[64 MiB, 1 TiB]` forwarded unchecked, CT8) — the half of §7.10 step 01 the
+  59-row sweep has no room to state — together with the CT9 split on that same
+  flag: `DNVCTL_EXTENT_SIZE` supplies a value like the flag, text viper cannot
+  cast to a uint64 reads back as `0` and sends no `dn_bin_conf`, and the same
+  text as a flag argument exits 2 with no RPC issued.
 * **CT-T3 — rendering goldens.** The §3.1 pipeline: canonical key order,
   uint64-as-string, EmitUnpopulated, and the bitmap hex map for both bitmap
   reads (`{"bitmap_hex":"a5","byte_cnt":1}`).
@@ -632,7 +640,7 @@ argv after the global prefix and only the *distinctive* assertions.
 
 | # | argv | distinctive assertions |
 |---|---|---|
-| 01 | `cluster create --name c1` | `cluster_name == "c1"` (`--name` wins over global) |
+| 01 | `cluster create --name c1 --extent-size 67108864` | `cluster_name == "c1"` (`--name` wins over global); `dn_bin_conf == {"extent_size":"67108864"}` — the one `ClusterConf` member dnvctl can set (it sends other conf messages elsewhere: `sp create`'s always-present `bdev_conf` (§5.4), `migr create`/`clone create`'s `dm_clone_conf`, `dn create`/`cn create`'s `nvme_tr_conf`), as a JSON *string* because `extent_size` is a uint64, and with no `bin*_shift` keys because they are zero and §7.5 records without EmitUnpopulated. The other half — a bare `cluster create` sending no `dn_bin_conf` at all — gets no row of its own, because the sweep is one step per RPC and its length is pinned; it is CT-T2's instead, in `ctl/request_test.go` |
 | 02 | `cluster delete --name c1` | |
 | 03 | `cluster get` | `cluster_name == "itctl"` (fallback to global) |
 | 04 | `cluster list --count 2 --page-token pt0` | no `cluster_name` key at all |
@@ -815,7 +823,9 @@ which gained the `dnvctl_test.sh` and `fakegateway/` rows.
    nothing (the metadata shortcut is the drivers', not dnvctl's). Both greps
    exclude tests because CT-T5's `ctl/traceid_test.go` dials its own bufconn
    server and names the shortcut in a comment.
-5. CT-T1 pins 59 both ways; CT-T2's token trio (absent / `0` / `0x1f`) passes.
+5. CT-T1 pins 59 both ways; CT-T2's token trio (absent / `0` / `0x1f`) and its
+   `--extent-size` rules (absent and `0` ⇒ no `dn_bin_conf`; non-zero ⇒
+   `extent_size` alone) pass.
 6. `bash integtest/dnvctl_test.sh user@<lab vm>` prints `PASS`; each
    `--only` case passes in isolation; `--cleanup-only` leaves 29840/29841 free
    and `$WORK` absent.

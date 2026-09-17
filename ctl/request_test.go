@@ -71,9 +71,15 @@ type sweepRow struct {
 var sweepRows = []sweepRow{
 	// ---- §5.1 cluster ----
 	{1, "CreateCluster",
-		[]string{"cluster", "create", "--name", "c1"},
-		// --name WINS over the global --cluster.
-		&pb.CreateClusterRequest{ClusterName: "c1"}},
+		[]string{"cluster", "create", "--name", "c1",
+			"--extent-size", "67108864"},
+		// --name WINS over the global --cluster. --extent-size fills
+		// dn_bin_conf.extent_size and NOTHING else: proto.Equal compares
+		// the whole message, so the four bin shifts are asserted absent
+		// here (the gateway resolves them as the 0/4/8/12 set).
+		&pb.CreateClusterRequest{
+			ClusterName: "c1",
+			DnBinConf:   &pb.DnBinConf{ExtentSize: 67108864}}},
 	{2, "DeleteCluster",
 		[]string{"cluster", "delete", "--name", "c1"},
 		&pb.DeleteClusterRequest{ClusterName: "c1"}},
@@ -1119,6 +1125,92 @@ func TestSpLevelSpellings(t *testing.T) {
 	if req.SpLevel != pb.SpLevel_SP_LEVEL_READWRITE {
 		t.Errorf("a bare sp set-level sent %v, want READWRITE", req.SpLevel)
 	}
+}
+
+// TestClusterCreateExtentSize states what sweep step 1 cannot. That row now
+// TYPES the flag, and the table is pinned at 59 rows, one per RPC, so no
+// second `cluster create` row can exist. What the row stopped saying is
+// asserted here — a bare `cluster create` sends no dn_bin_conf — together
+// with the three things it never could: an explicit --extent-size 0 sends
+// none either, an out-of-range value still travels, and the flag's CT9
+// carriers disagree about text that is not a uint64. The row's argv is not
+// repeated here; it asserts its value against a whole CreateClusterRequest,
+// which is strictly more than this test does.
+//
+// The shifts: DnBinConf's four are proto3 scalars, so a shift dnvctl sent as
+// a literal 0 would be indistinguishable on the wire from one it did not send
+// — and harmless, since model.ResolveDnBinConf reads the all-zero set as "no
+// ladder" either way. What the whole-message comparisons below do catch is
+// the ladder dnvctl must never invent: 4, 8 or 12 travelling alongside the
+// size — the non-zero members of the default set. Nothing downstream would
+// catch it for us, because {0,4,8,12} IS a valid ladder and the gateway takes
+// it; the client would simply have decided a value the gateway resolves.
+func TestClusterCreateExtentSize(t *testing.T) {
+	bare := runArgv(t, "CreateCluster",
+		"cluster", "create", "--name", "c1").(*pb.CreateClusterRequest)
+	wantRequest(t, bare, &pb.CreateClusterRequest{ClusterName: "c1"})
+	if bare.DnBinConf != nil {
+		t.Errorf("a bare cluster create sent dn_bin_conf %v, want it absent",
+			bare.DnBinConf)
+	}
+
+	// An explicitly typed zero is the same as not typing the flag at all —
+	// §5.0's "not given" convention for an optional sub-message, the same
+	// rule as `sp create`'s --stripe-size. What CT8 forbids is the other
+	// move: translating a 0 into common.DefaultDnExtSize here rather than
+	// leaving the gateway to resolve it.
+	zero := runArgv(t, "CreateCluster", "cluster", "create",
+		"--name", "c1", "--extent-size", "0").(*pb.CreateClusterRequest)
+	if zero.DnBinConf != nil {
+		t.Errorf("--extent-size 0 sent dn_bin_conf %v, want it absent",
+			zero.DnBinConf)
+	}
+
+	// A non-zero value fills extent_size and nothing else in dn_bin_conf, and
+	// it travels unchecked: 1 is far below MinDnExtSize (67108864, which is
+	// what step 1 sends) and dnvctl forwards it anyway, because refusing it
+	// is the gateway's job (CT8).
+	tiny := runArgv(t, "CreateCluster", "cluster", "create",
+		"--name", "c1", "--extent-size", "1").(*pb.CreateClusterRequest)
+	wantRequest(t, tiny.DnBinConf, &pb.DnBinConf{ExtentSize: 1})
+
+	// CT9's three carriers do not agree about text that is not a uint64, and
+	// only the command line is loud about it: pflag parses the flag's
+	// argument and refuses what does not fit, while an environment or
+	// --config value reaches viper unparsed and u64Of is viper.GetUint64, a
+	// cast that drops its error. A ClusterConf is write-once, so for this
+	// flag the gap between the two is the gap between a usage error and a
+	// cluster whose extent size is permanently the gateway default.
+	t.Run("the environment supplies a value", func(t *testing.T) {
+		t.Setenv("DNVCTL_EXTENT_SIZE", "67108864")
+		fromEnv := runArgv(t, "CreateCluster", "cluster", "create",
+			"--name", "c1").(*pb.CreateClusterRequest)
+		wantRequest(t, fromEnv.DnBinConf, &pb.DnBinConf{ExtentSize: 67108864})
+	})
+
+	t.Run("the environment swallows a bad one", func(t *testing.T) {
+		t.Setenv("DNVCTL_EXTENT_SIZE", "-1")
+		fromEnv := runArgv(t, "CreateCluster", "cluster", "create",
+			"--name", "c1").(*pb.CreateClusterRequest)
+		if fromEnv.DnBinConf != nil {
+			t.Errorf("DNVCTL_EXTENT_SIZE=-1 sent dn_bin_conf %v, want it "+
+				"absent: viper's cast fails and reads back 0",
+				fromEnv.DnBinConf)
+		}
+	})
+
+	t.Run("the flag refuses the same text", func(t *testing.T) {
+		client := &recordingClient{want: "CreateCluster"}
+		res := runCLI(t, client, globalArgv("cluster", "create",
+			"--name", "c1", "--extent-size", "-1")...)
+		if res.code != 2 {
+			t.Errorf("--extent-size -1 exited %d, want 2 (stderr %q)",
+				res.code, res.stderr)
+		}
+		if client.calls != 0 {
+			t.Errorf("--extent-size -1 issued %d RPCs, want 0", client.calls)
+		}
+	})
 }
 
 // TestClusterNameFallback is §5.0's first field→flag exception, in all three
