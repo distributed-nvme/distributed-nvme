@@ -87,8 +87,8 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
    **relaxes** architecture.md §5.5's MUST, which is amended to match: the
    assertion is required only when the request carries the message. The cost
    of the relaxation — a token-less mutator can lose an update, and the AG4
-   two-phase safety argument no longer covers it — is recorded as RK8 in
-   risks_and_gaps.md.
+   two-phase safety argument no longer covers it — is accepted: omitting the
+   token is opting out of the gate.
 8. **Candidate retry**: `model.ErrPrecondition` with reason
    `"candidate changed"` is never surfaced; the handler re-runs the whole
    candidate unit (scan + STM) until the request context ends (GW9).
@@ -878,7 +878,7 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   unreachable agent** ⇒ `FAILED_PRECONDITION` (§8.9). Phase 2 STM (deciding):
   full re-resolution + token check (GW6 — any interleaved mutation bumped
   `SpRev`, so a token the request carried subsumes staleness of phase 1; a
-  token-less request gets the re-resolution only, AG4/RK8); `loadClone` again,
+  token-less request gets the re-resolution only, AG4); `loadClone` again,
   and if `deleting` became true since phase 1 return OK with no writes (the
   same rule, raced variant); else write exactly three things —
   `suspended = false` on every namespace whose `td_id == dst_td_id`
@@ -1066,7 +1066,7 @@ the retry succeed, which is what a precondition means.
   exactly as safe as a one-STM RPC. A **token-less** request keeps the full
   re-resolution but not that visibility — GW6 is presence-based (§0 #7), so
   an interleaved mutation it did not observe stays invisible to it. That is
-  the AG4 half of RK8.
+  the AG4 half of the token-less cost (§0 #7).
 
 The complete call matrix:
 

@@ -58,8 +58,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnagent_integtest.md           # the on-hardware dn agent suite
 │   ├── cnagent_integtest.md           # the on-hardware cn agent suite
 │   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
-│   ├── dependencies.md                # direct-dependency ledger (must match go.mod)
-│   └── risks_and_gaps.md              # ranked v1 risks / operational gaps (informational)
+│   └── dependencies.md                # direct-dependency ledger (must match go.mod)
 ├── pb/                                # protobuf: source + generated code
 │   ├── schema.proto                   # from the design inputs + go_package (§4); proto package stays unset
 │   ├── schema.pb.go                   # generated, committed
@@ -356,9 +355,7 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   2026-09-10, below). No package boundary or path changed.
 * Second doc-amendment pass (2026-09-10, after the second full doc-vs-code
   verification): an amendment record deciding five code fixes (removed
-  2026-09-10, below) and
-  `risks_and_gaps.md` (ranked v1 risks, informational) entered the §2 tree;
-  the §2 `worker/`
+  2026-09-10, below) entered the §2 tree; the §2 `worker/`
   tree gained `worker.go` and `conn.go` (matching dnv-worker.md §1's
   amended table — the file list above predates them). The pass also fixed
   stale or imprecise passages across `architecture.md`, `gateway.md`,

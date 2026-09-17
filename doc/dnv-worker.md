@@ -1439,7 +1439,7 @@ proven legal.
 
 SPD1. **The allocator's real group shape is a named constant.**
       `MaxAllocLegPerGrp = 2` is the widest group the allocator builds
-      (`MaxLegPerGrp = 8` is declared and unenforced — `RK9`). It is CITED from
+      (`MaxLegPerGrp = 8` is declared and unenforced). It is CITED from
       all three places that choose a leg count — `gateway/alloc.go` `legCntOf`,
       `model/ops.go` `legCntOf`, `worker/reaction.go` `legCnt` — and from the
       SPD14 tripwire, so widening the shape fails a test instead of a
@@ -1644,7 +1644,7 @@ CLD4/CLD6. **The latch, and what it does not write.** Exactly three writes:
       while etcd still said suspended, and the destination namespace would go
       dark for the whole teardown — a host-visible outage the one-shot never
       had. (Force-deleting an unhydrated clone exposes unhydrated data on the
-      resumed namespace: unchanged from before, `risks_and_gaps.md` RK3.)
+      resumed namespace: unchanged from before.)
 
       **The latch is one-way**, SPD5 scoped to a clone: no code path in any
       component writes `deleting = false` on an existing `Clone`, so the flag

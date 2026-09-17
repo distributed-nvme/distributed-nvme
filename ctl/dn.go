@@ -11,8 +11,8 @@
 // gateway's GW6 check keys on presence: a nil token skips the check entirely,
 // while a present token — 0 included — is compared and refused ABORTED
 // "stale revision" on mismatch (stored revisions seed at 1, so 0 is the
-// always-stale probe; risks_and_gaps.md RK8 records the trade). Either way
-// the wire content is the operator's to choose.
+// always-stale probe; a token-less mutator is simply ungated, gateway.md
+// §0 #7). Either way the wire content is the operator's to choose.
 //
 // `dn get` is the token source an operator reads before either mutator, and
 // it reads etcd. `dn inspect` is the group's only live read: the gateway

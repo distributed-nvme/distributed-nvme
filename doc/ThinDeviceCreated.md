@@ -722,7 +722,8 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    GW6 became presence-based (gateway.md §0 #7), a *token-less*
    `CreateThinDevice` does reach that race; it is then serialized by the
    serializable STM alone, which is what the structural coverage above
-   asserts, and the residual exposure is risks_and_gaps.md RK8.
+   asserts, and the residual exposure is the token-less lost update of
+   gateway.md §0 #7.
 
 ---
 

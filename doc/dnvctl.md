@@ -47,9 +47,8 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
    gateway and is now simply the gateway's behavior: GW6 became
    presence-based on 2026-09-11 (gateway.md §0 #7 / GW6, architecture.md
    §5.5; `gateway/common.go`'s three `check*Token` helpers take the token
-   *message* and compare only when it is non-nil). risks_and_gaps.md RK7
-   records that window, now CLOSED; RK8 records what the bypass costs — a
-   token-less mutator has no optimistic-concurrency gate. An explicit
+   *message* and compare only when it is non-nil). The bypass costs exactly
+   this: a token-less mutator has no optimistic-concurrency gate. An explicit
    `--rev 0` keeps its meaning: a *present* zero token, and since revisions
    seed at 1 (`gateway/storagepool.go`) and only grow (`model/ops.go`
    `BumpSpRev`), a deliberate always-stale probe.
@@ -259,9 +258,9 @@ Presence semantics — dnvctl sends exactly what was typed:
 
 **The gateway side (§0 #9):** GW6 is presence-based — token message absent ⇒
 the check is skipped; present ⇒ strict equality. So a token-less mutator
-against a real gateway now succeeds. It succeeds *ungated*, which is the point
-of risks_and_gaps.md RK8: for concurrent or scripted work the operator should
-still do `sp get` → pass `--rev`, and reserve the token-less form for
+against a real gateway now succeeds. It succeeds *ungated*, which is the
+point: for concurrent or scripted work the operator should still do
+`sp get` → pass `--rev`, and reserve the token-less form for
 interactive single-operator use. The §7 suite is immune to all of this: its
 token assertions are request-side (what dnvctl put on the wire), which is true
 under either gateway.
@@ -781,11 +780,6 @@ Recorded for traceability; the edits are applied with this document.
   to `dnvctl.md`.
 * `doc/ThinDeviceCreated.md` R13 — "`dnvctl`'s `vol` subcommands" becomes
   "`dnvctl`'s `td list` (dnvctl.md §5.6)": the group is named `td`, not `vol`.
-* `doc/risks_and_gaps.md` — **RK7** (a dnvctl mutator without `--rev` fails
-  until GW6 becomes presence-based, §0 #9) was added with this document and
-  CLOSED the same day by the gateway change; **RK8** replaces it and records
-  what the bypass costs — a token-less mutator has no optimistic-concurrency
-  gate. Id range in the preamble extended to RK8.
 
 Deliberately **not** amended when this document landed: `doc/grpc.md` — its
 §4 wiring rows for dnvctl were already correct. Its §6 acceptance inventory of

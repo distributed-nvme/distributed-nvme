@@ -838,8 +838,8 @@ creation) **plus the mutable handle the watching worker needs**: `DnRev.addr_por
   assert `stored.revision == request.revision` and fail the RPC with `ABORTED`
   ("stale revision") on mismatch. **When the message is absent**, the STM skips the
   assertion and the mutation proceeds ungated — a client omits the token precisely to opt
-  out, per request; the residual lost-update exposure is risks_and_gaps.md RK8. Presence,
-  not value, selects the two modes: a stored revision starts at 1 and only grows, so a
+  out, per request; the residual is the lost update a client accepts by omitting the
+  token. Presence, not value, selects the two modes: a stored revision starts at 1 and only grows, so a
   message present with `revision: 0` is a real token that can never match and is always
   refused. Only `revision` participates — the `addr_port`/
   `sp_name` a client echoes back from `Get*` inside that message is **ignored** on the
@@ -2557,9 +2557,9 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   CN13), so an exhausted pool behaves as dm-thin's default `queue_if_no_space`: IO
   needing a new block queues for the kernel's `no_space_timeout` (a dm-thin module
   parameter, 60 s by default) and then fails with EIO, while already-provisioned
-  blocks keep serving; operators SHOULD alert on pool usage well before 100 %
-  (`risks_and_gaps.md` RK4). `low_water_mark_pct > 100` disables this
-  automation (§7); operators then grow manually.
+  blocks keep serving; operators SHOULD alert on pool usage well before 100 %.
+  `low_water_mark_pct > 100` disables this automation (§7); operators then grow
+  manually.
 
 The worker never deletes user data on its own; every automatic action above only
 re-homes redundancy or roles.
@@ -2852,8 +2852,7 @@ moving ss/ns from `sp1` to `sp2`:
   `auto_resume` the sp2 namespace became the serving path at `CreateClone`, its
   writes live only on the abandoned sp2 td, and sp1 resumes from its retained
   copy, which stopped receiving writes at `CreateTransfer(auto_suspend)` — so an
-  abort is lossless only while nothing has written via sp2
-  (`risks_and_gaps.md` RK3).
+  abort is lossless only while nothing has written via sp2.
 
 ### 11.4 raid0 bitmap math
 
@@ -3587,7 +3586,7 @@ own amendment sections are the surviving record.
   suppressed) all follow; partial teardown is now an observable state, and what the
   single transaction really guaranteed — that DN/CN budgets never disagree with the
   keys describing them — is preserved by every batch releasing budget in the same
-  transaction that shrinks the describing key. New risk-register entry `RK9`.
+  transaction that shrinks the describing key.
 * [D15] side provisioning — the §9.4 trim protocol is replaced by whole-side zeroing behind
   the `provisioned` gate; §3.1, §8.4, §8.5, §8.11, §8.12, §9.2, §9.5, §9.7, §10.2-§10.4,
   §11.1.1, §11.2, §11.7 and Appendix A follow; new status `RES_STATUS_PROVISIONING` and
