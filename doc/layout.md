@@ -60,6 +60,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── dnvctl.md                      # dnvctl: ctl/, cmd/dnvctl + its integration suite
 │   ├── dnagent_integtest.md           # the on-hardware dn agent suite
 │   ├── cnagent_integtest.md           # the on-hardware cn agent suite
+│   ├── e2e_integtest.md               # the on-hardware end-to-end suite (all five binaries, ten guests)
 │   ├── ThinDeviceCreated.md           # the ThinDevice.created change record (normative)
 │   └── dependencies.md                # direct-dependency ledger (must match go.mod)
 ├── pb/                                # protobuf: source + generated code
@@ -158,7 +159,7 @@ distributed-nvme/                      # repo root = module root
 │   ├── root.go                        # dnvctl root: globals, dial, emit (dnvctl.md §2-§3)
 │   └── cluster.go, dn.go, cn.go, sp.go, cntlr.go, td.go, ss.go, ns.go, clone.go, xfer.go, migr.go, spare.go
 │                                      # one noun group each (dnvctl.md §5); the §11.4 copier is future work outside dnvctl
-├── integtest/                         # integration suites, driven over ssh against remote hosts (the agent suites need passwordless sudo for real dm/md/nvmet/nvme-tcp over loop devices, the cdc suite for real nvmet/nvme-tcp over dm-zero; the worker, gateway and dnvctl suites need no root): dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7
+├── integtest/                         # integration suites, driven over ssh against remote hosts (the agent suites need passwordless sudo for real dm/md/nvmet/nvme-tcp over loop devices, the cdc suite for real nvmet/nvme-tcp over dm-zero, the e2e suite for both — dm/md/nvmet/nvme-tcp over loop devices on its dn and cn guests, `nvme connect` and the autoconnector mask on its two hosts; the worker, gateway and dnvctl suites need no root, and neither does the e2e suite's control-plane guest, which is where its etcd, gateway, worker, cdc and dnvctl all run): dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7, e2e_integtest.md
 │   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
 │   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
@@ -173,6 +174,7 @@ distributed-nvme/                      # repo root = module root
 │   │                                  # cmd_vol.go (td/ss/ns/xfer), cmd_copy.go (clone/migr/spare + the bitmap reads)
 │   ├── dnvctl_test.sh                 # dnvctl suite (one VM, no sudo: the real CLI against a fake gateway)
 │   ├── fakegateway/main.go            # all 59 Gateway methods behind a behavior file (dnvctl.md §7.5)
+│   ├── e2e_test.sh                    # end-to-end suite (ten guests, no fakes: real etcd + gateway + worker + cdc, many dn agents per VM, one cn agent per VM, two kernel NVMe hosts; drives the shipped dnvctl only, and brings no driver of its own)
 │   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
 └── cmd/
     ├── dnv-gateway/main.go
@@ -301,6 +303,10 @@ Each step compiles and passes its tests before the next begins:
    four lab servers.
 8. `ctl/` + `cmd/dnvctl` (`dnvctl.md`), then the `dnvctl.md` §7 suite against
    one lab VM (the §11.4 copier is future work outside dnvctl).
+9. Nothing new to build: the `e2e_integtest.md` suite against ten lab guests,
+   last and alone, driving the five binaries of step 1-8 through the shipped
+   `dnvctl`. It occupies the whole lab, so it runs after every other suite has
+   finished, never beside one.
 
 ## 7. Acceptance checklist
 
@@ -405,3 +411,16 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   stated by the normative documents and pinned by the tests those documents
   name, and the remaining doc and code-comment citations of the records
   were retargeted to those documents. No package boundary or path changed.
+* The end-to-end suite (2026-09-17) — the §2 `doc/` tree gained
+  `e2e_integtest.md` and the §2 `integtest/` tree gained `e2e_test.sh`; the
+  `integtest/` note names the new suite's root requirement (every guest but the
+  control-plane one needs passwordless sudo) and adds the document to the
+  pointer list; §6 gained a closing step 9, which
+  builds nothing and runs that suite last and alone against ten lab guests.
+  Nothing else moved, and nothing here needed to: the suite adds no Go file and
+  no driver of its own — it drives the shipped `dnvctl` for every
+  control-plane call, and builds the existing `workerctl` and `cnagentctl` on
+  the developer machine for one read-only subcommand each (`constants`, which
+  it runs, and `host-id`, which no step of the suite calls today). So the §3
+  `integtest/*` import row, the §5 `cmd/` wiring and the
+  §7 checklist are unchanged.

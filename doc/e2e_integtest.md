@@ -1,0 +1,1074 @@
+# e2e_integtest.md — the end-to-end integration suite (`integtest/e2e_test.sh`)
+
+Status: **normative** for `integtest/e2e_test.sh`. Required background:
+`architecture.md` (§3, §6.5, §8, §9, §11), `gateway.md` (the RPCs this suite
+drives), `dnvctl.md` (the CLI it drives them with), `cnagent.md` and
+`dnagent.md` (what the agents converge and what `Inspect*` reports),
+`dnv-worker.md` §12 (the automatic reactions AR5, AR6, AR7 and AR8), `cdc.md`
+§3 (the discovery log the hosts read).
+
+Unlike `dnagent_integtest.md` and `cnagent_integtest.md`, which were written
+before their suites, **this document was written after `integtest/e2e_test.sh`
+and describes what that file actually does.** The design it came from is
+`tmp_doc/use_32_slices.md` §7; where the suite and that plan differ, the suite
+is the truth and §3 and §8 say so, item by item. Nothing here is a proposal.
+
+---
+
+## 1. Purpose — what the suite proves
+
+One storage pool at the widest shape this tree can build, on ten real machines,
+driven end to end through the shipped operator CLI, with two real kernel NVMe
+hosts reading and writing its namespaces.
+
+Concretely, a green run is the following five statements taken together.
+
+1. **The ceiling is real.** `MaxSliceCntPerSp` slices — 32 — with md-raid1, so
+   `2 × 32` groups, `2 × 32 × 2 = 128` sides on 128 *distinct* disk nodes, 64
+   md arrays and 32 dm-thin pools on one controller node. The create commits a
+   951-compare etcd transaction (967 at `MaxCntlrCntPerSp`), which is what
+   `EtcdMaxTxnOps = 1024` was raised for; an etcd below that fails the create
+   with *too many operations in txn request*. No other suite in this repo
+   builds a storage pool at that ceiling — with real agents or fake ones.
+2. **The operator surface works against a real control plane.** 53 of the 59
+   RPCs of `service Gateway` are issued by the shipped `bin/dnvctl`, over ssh,
+   against a real `dnv-gateway` on a real etcd, with real `dnv-agent dn` and
+   `dnv-agent cn` processes converging real dm, md, nvmet and nvme-tcp state.
+   Every reply the success wrapper accepts must parse as one JSON document
+   before anything reads a field out of it, and an echoed id is never the whole
+   of an assertion. Most mutators are read back from the record they changed —
+   and wherever the device is the point of the mutation, from the agent that
+   owns it as well. Four are proved somewhere else instead, because that is
+   where their effect is observable: `ns set-suspended` on host0's ANA state
+   and `ns set-dev` on the digest host0 reads through the same namespace (§4.3
+   stage 07 — `ss list`'s `suspended` and `td_id` are never re-read), and
+   `clone append-bm` and `clone set-tr` on the hydration that follows and the
+   destination digest that ends it (§4.4 stage 02), since a bitmap chunk and a
+   re-sent transport change nothing a reader could see. The teardown's three
+   deletions are a third shape again: each asserts the id its reply echoes and
+   is then proved by the whole sp's disappearance (§4.6).
+3. **Data survives every operation.** A 4 MiB `/dev/urandom` pattern is written
+   through host0 at setup and its digest (`SHA0`) is re-read after every step
+   the case marks: two slice grows, the third controller's whole life, the
+   `sp_level` ladder down to `SP_LEVEL_DISABLE` and back, a namespace park and
+   repoint, the transfer-and-clone pass, a migration commit and a migration
+   cancel, a spare-leg switch, a thin-pool auto-grow, a primary failover, a
+   controller replacement and a leg repair.
+4. **The four automatic reactions fire on real faults.** A killed cn agent
+   moves the primary role (AR5) and then loses its controller record (AR7); a
+   killed dn agent *plus* the removal of its nvmet port takes a leg out and the
+   worker spares it back in (AR8); strided host writes push one slice's thin
+   pool past its low-water mark and the worker appends a data group (AR6).
+5. **The lab is left as it was found.** After every case: every disk node's
+   `free_ext_cnt` is back to `total_ext_cnt` with an empty `side_ptr_list`, no
+   `dnv-*` dm device, no dnv md array and no tree-minted nvmet subsystem
+   survives on any of its dn or cn guests, no backing file has materialised
+   beyond 256 MiB, and the whole run's allocation on all ten guests is under
+   8 GiB.
+
+### 1.1 What it does not prove
+
+* **The six RPCs it never issues**, all of them deletions or listings of nodes
+  and clusters: `cluster delete`, `cluster list`, `dn delete`, `dn list`,
+  `cn delete`, `cn list` (`DeleteCluster`, `ListClusters`, `DeleteDiskNode`,
+  `ListDiskNodes`, `DeleteControllerNode`, `ListControllerNodes`). The node
+  deletions are covered by `gateway_test.sh`; nothing here removes a node
+  record, because the run throws the whole cluster away between cases instead —
+  and a listing proves nothing this suite does not already prove by reading
+  each node it registered.
+* **Error paths in general.** Five refusals are asserted on purpose, all in
+  `ops`: three in §4.3 stage 3 and two in stage 8. Each has its own reason —
+  the two cntlid-slot refusals *are* the point of that stage, the
+  `DeleteCntlr` one pins a documented precondition, and the two
+  `RESOURCE_EXHAUSTED`s are the only observable proof that `set-disabled` took
+  effect. `copy` additionally reads `NOT_FOUND` back after each of its three
+  object deletions. Everything else is a happy path; validation semantics stay
+  `gateway_test.sh`'s job and CLI semantics stay `dnvctl_test.sh`'s.
+* **Concurrency.** One dnvctl call at a time, one case at a time. Revision
+  tokens are never sent: `--rev` is deliberately absent from the global argv,
+  because the token is presence-based (an omitted `--rev` sends no token
+  message at all) and passing one would change what the gateway checks on
+  every mutator.
+
+---
+
+## 2. Topology and parameters
+
+### 2.1 Roles
+
+Every server comes from argv. Nothing is hardcoded, and the suite refuses to
+start when two roles name the same target.
+
+```
+bash integtest/e2e_test.sh [--only <case>] [--cleanup-only] [--slice-cnt N]
+     [--redund raid1|none] [--dns-per-vm N]
+     --cp user@ip --cn user@ip … --dn user@ip … --host user@ip …
+```
+
+| flag | count | what runs there | root |
+|---|---|---|---|
+| `--cp` | exactly 1 | etcd, `dnv-gateway`, `dnv-worker`, `dnv-cdc`, and `dnvctl` itself | no (plain login user) |
+| `--cn` | at least 3 | one `dnv-agent cn`; two carry the sp's cntlrs and the rest is the spare AR7 lands on | passwordless sudo |
+| `--dn` | at least `LEGS` (in practice 4) | `DNS_PER_VM` × `dnv-agent dn` over loop devices | passwordless sudo |
+| `--host` | exactly 2 | nothing of dnv: the kernel's nvme-tcp stack and nvme-cli | passwordless sudo |
+
+cp is the one guest driven as a plain user, so there is no sudo check for it in
+preflight; the single root thing it is ever asked for is `fstrim -a` at end
+cleanup, and that caller tolerates a refusal.
+
+The default lab shape is ten guests: 1 cp, 3 cn, 4 dn, 2 host.
+
+### 2.2 Parameters and the numbers derived from them
+
+| parameter | default | meaning |
+|---|---|---|
+| `--slice-cnt N` | 32 (`SLICE_CNT_DEFAULT`, mirroring `common.MaxSliceCntPerSp`) | slices per sp; accepted range 1..32, checked in `parse_args` rather than 200 lines into setup |
+| `--redund raid1\|none` | `raid1` | `LEGS` = 2 for raid1 (`common.MaxAllocLegPerGrp`), 1 for none |
+| `--dns-per-vm N` | the placement bound of §2.4 (43 for the default lab shape) | dn agents per DN VM; below the bound warns, never errors |
+| `--only <case>` | all four | `smoke`, `ops`, `copy`, `react` |
+| `--cleanup-only` | — | ship the helpers, run the start cleanup on every guest, stop |
+
+Derived, all in `derive_params`:
+
+```
+GRP_CNT   = 2 × SLICE_CNT                 one meta group and one data group per slice
+DNS_PER_VM_BOUND = ceil(LEGS × GRP_CNT / (DN_VM_CNT − LEGS + 1))
+DN_TOTAL  = DN_VM_CNT × DNS_PER_VM
+TD_UNIT   = SLICE_CNT × STRIPE_SIZE       every `td create --size` against sp0 is a
+                                          positive multiple of it
+```
+
+`GRP_CNT` is the plan's `GROUPS` under another name, and the rename is
+load-bearing: bash's own `GROUPS` is a special array of the user's gids and an
+assignment to it is *silently ignored*, so `GROUPS=$((2 * SLICE_CNT))` would
+leave `$GROUPS` at the primary gid and every number derived from it wrong
+without a word of complaint.
+
+Two `td create`s stand outside `TD_UNIT`, and both are deliberate. The snapshot
+of §4.3 stage 06 sends `--size 0`: a plain `td create` wants a *positive*
+multiple, and a snapshot is the one form in which 0 is legal, because it
+inherits its origin's size instead. And the fallback source pool of §4.4 is a
+second storage pool with its own geometry — one slice, the same stripe — so the
+thin device made there is checked against **that** pool's `slice_cnt ×
+stripe_size`, read back from its own `sp create` reply rather than assumed to
+match `sp0`'s.
+
+### 2.3 Fixed constants
+
+The shell cannot import `common`, so every number a Go constant owns is
+repeated with the constant it mirrors — except two, which are *read* rather
+than copied (§3, rule E2E12).
+
+| shell name | value | mirrors |
+|---|---|---|
+| `SLICE_CNT_DEFAULT` | 32 | `common.MaxSliceCntPerSp` |
+| `EXTENT_SIZE` | 67108864 | `common.MinDnExtSize`; sent once, as `cluster create --extent-size` |
+| `STRIPE_SIZE` | 1048576 | a suite choice, bounded above by `validateCloneGeometry`'s `256 × 4 KiB` ceiling on `src_stripe_size` — not by the sp's own 64 MiB limit |
+| `INIT_EXT_CNT` | 1 | extents per data group; also fixes AR6's grow size |
+| `CNTLR_CNT` | 2 | one primary and one standby, on two distinct CN VMs; the remaining `--cn` guests carry no cntlr, which is where AR7's replacement lands |
+| `SLOTS` | `0,1` | the cntlid slot list §4.3 step 3 grows to `0,1,2` |
+| `THR_PRIMARY / THR_CNTLR / THR_SIDE / THR_LEG` | 5 / 20 / 20 / 30 s | `sp create --thr-*`; the react case derives its wait bounds from the four numbers, which is why they are four variables and not one string |
+| `VOTE_INTERVAL / VOTE_GRACE` | 2 / 6 s | `dnv-worker --vote-interval/--vote-grace-time` |
+| `BACKING_SIZE` | `2G` | `truncate -s`, never `fallocate -l` |
+| `DN_CAP_BYTES / RUN_CAP_BYTES` | 256 MiB / 8 GiB | the two allocation caps of §4.6 |
+| `NQN_PREFIX` | `nqn.2024-01.io.dnv` | `common.NqnPrefix`; the suite computes tree-minted NQNs from it and sweeps them, and never mints one |
+| `NQN_IT` | `nqn.2024-01.io.dnv-it:e2e` | the prefix of the host-facing subsystems this suite creates; a suite choice, since a host-facing NQN is literally the `ss create --nqn` string |
+| `CLUSTER` / `SP` | `e2e` / `sp0` | the globals every dnvctl call carries |
+| `ETCD_MAX_TXN_OPS`, `MAX_ALLOC_LEG_PER_GRP` | *read at preflight* | `workerctl constants` |
+
+Polling budgets, every one of them bounding a `wait_until` and none of them a
+sleep: `WAIT_SHORT` 15 s, `WAIT_CP_READY` 30 s, `WAIT_AGENT` 30 s,
+`WAIT_PROVISION` 300 s, `WAIT_DELETE` 300 s, `WAIT_REACT` 120 s, `WAIT_HOST`
+60 s, and the copy case's own `WAIT_HYDRATE` 300 s, `WAIT_SRC_CONNECT` 60 s,
+`WAIT_HYDRATE_STALL` 90 s. dnvctl's own `--timeout` is 30 s by default here
+(its built-in 10 s is not enough), raised to 180 s for the `sp create` of setup
+and 120 s for the fallback pool's.
+
+### 2.4 The placement bound, and why it is 43
+
+Every side of the sp lands on a **distinct** disk node: `CreateStoragePool`
+starts its DN black list as the request's and grows it with every pick, so all
+`LEGS × GRP_CNT` sides — 128 at the default shape — need 128 disk nodes that
+have never been picked. That is why a DN VM runs dozens of agents: four guests
+cannot otherwise supply 128 nodes.
+
+Placement is per **location**, not per node. Every dn agent of VM *v*
+registers `--location dn<v>`, and a candidate scan keeps at most one candidate
+per location, so a group draws its `LEGS` sides from `LEGS` *different VMs*,
+and a pick fails `RESOURCE_EXHAUSTED` the moment fewer than `LEGS` VMs still
+hold an unpicked DN.
+
+The bound is a counting argument and nothing else:
+
+* emptying `(V − LEGS + 1)` VMs costs `(V − LEGS + 1) × N` picks, where `V` is
+  the number of DN VMs and `N` the agents on each;
+* only `LEGS × GRP_CNT − LEGS` picks happen before the **last** group's scan;
+* so if `(V − LEGS + 1) × N > LEGS × GRP_CNT − LEGS`, no scan can ever see
+  fewer than `LEGS` VMs with a DN left, and the create cannot be starved.
+
+At `V = 4`, `LEGS = 2`, `GRP_CNT = 64`: `3N > 126`, i.e. `N ≥ 43`. The suite
+computes `N = ceil(LEGS × GRP_CNT / (V − LEGS + 1)) = ceil(128/3) = 43`, which
+satisfies the inequality with at most one DN per VM to spare; the exact
+minimum, `ceil((LEGS × GRP_CNT − LEGS + 1) / (V − LEGS + 1)) = ceil(127/3)`, is
+the same 43 here. At `--redund none` on the same four VMs the bound is
+`ceil(64/4) = 16`.
+
+**Do not justify this with a "two-VM tail" argument.** When exactly two VMs
+still hold DNs, both are returned by every scan and both are picked, so they
+drain in lockstep — and lockstep *preserves* the difference between their
+counts rather than closing it. The VM that entered the tail behind stays
+behind and empties first. The counting argument above is the whole proof, and
+the suite's comment says so where the code computes it.
+
+Two consequences the suite acts on:
+
+* `--dns-per-vm` below the bound is a **warning**, not an error, and the
+  warning names what it risks: at exactly `LEGS × GRP_CNT / V` per VM (32 here)
+  the create fails about four runs in five, and a run that *does* succeed
+  leaves every VM at zero free DNs — which is where the anti-affinity relaxes
+  and two sides of one leg can land on one kernel (§8, item 5).
+* `DNS_PER_VM` above `MAX_DNS_PER_VM = 50` is a **die**, with the hint "add
+  `--dn` guests": more VMs raises the divisor and lowers the bound. The same
+  cap keeps the DN gRPC block below the CN port (`29900 + 49 = 29949 < 29950`).
+
+### 2.5 Ports, paths and processes
+
+| where | what | ports and paths |
+|---|---|---|
+| cp | etcd | client 16379, peer 16380, `--name dnv-e2e-it`, `--data-dir $WORK/etcd`, `--max-txn-ops=$ETCD_MAX_TXN_OPS` |
+| cp | `dnv-gateway` | `--grpc-address $CP_IP:29850 --etcd-endpoints 127.0.0.1:16379` |
+| cp | `dnv-worker` | `--roles dn,cn,sp --vote-interval 2 --vote-grace-time 6`; binds no port |
+| cp | `dnv-cdc` | `--tr-addr $CP_IP --tr-svc-id 18020`; `--range` left at its default, so one instance serves every shard |
+| cp | `dnvctl` | `$WORK/bin/dnvctl --gateway-address $CP_IP:29850 --cluster e2e --sp sp0 --trace-id <per stage> --timeout <secs>` |
+| dn VM *v*, instance *k* | `dnv-agent dn` | gRPC `29900+k`, trsvcid `4300+k`, `--nvmet-port-id $((k+1))`, `--disk /dev/loopN` over `$WORK/dn<k>/backing.img`, `--local-store $WORK/dn<k>/store`, log `$WORK/dn<k>/agent.log`, registered `--location dn<v>` |
+| cn VM *v* | `dnv-agent cn` | gRPC 29950, trsvcid 4300, `--capacity 0`, `$WORK/cn/store`, log `$WORK/cn/agent.log`; **no** `--nvmet-port-id`, so it converges `ports/1` |
+| host *h* | nothing of dnv | its own `/etc/nvme/hostnqn` + `hostid`; `nvmf-connect@.service` masked |
+
+`WORK=/var/tmp/dnv-e2e` on every guest. The generated guest helper lives at
+`/var/tmp/dnv-e2e-helper.sh`, a **sibling** of `$WORK` and never a child,
+because cleanup runs `rm -rf $WORK` through that very script and a script may
+not delete itself while bash is reading it. The cn agents' clone-metadata
+arena is at `/tmp/dnv-tmpfs` (`common.DefaultTmpfsPrefix`; no flag moves it),
+which is outside `$WORK` — so both the space guard and cleanup look there
+explicitly.
+
+Each dn agent needs its own `addr_trsvcid` (two nvmet ports cannot share one
+ip:port) and therefore its own configfs port, which is what
+`dnv-agent --nvmet-port-id` buys; ANA groups nest under the port, so distinct
+port ids also give each agent its own groups 1/2/3. Instance 0 keeps the
+historical port 1.
+
+**Port ownership.** Nothing above is *bound* by any other suite in this repo:
+worker 12379/12380 + 29600-29603 + 29700-29702; gateway 15379/15380 +
+29810-29812 + 29820-29823 + 29830-29832; cdc 13379/13380 + 18009-18012 +
+14420-14423; the two agent suites 29528/29529 + trsvcid 4200; dnvctl
+29840/29841. Two numbers of this suite's block do *appear* elsewhere —
+`dnvctl_test.sh` carries `127.0.0.1:29901` and `:29902` as payload for its fake
+to record — but that suite never dials them and its own port list is
+`(29840 29841)`. "No port here appears in another suite" is false as written;
+"no port here is bound by another suite" is what holds.
+
+### 2.6 Identity and the names the suite computes
+
+The suite computes NQNs the agents mint, so it can discover, connect, grep and
+sweep them; it never mints one. Each formatter mirrors `common/name_fmt.go`
+argument for argument, and the argument order is **not** uniform — `DnHostNqn`
+and `CnHostNqn` take `(cluster, node)`, `SideToCnNqn` takes
+`(cluster, sp, leg, cn)` and carries no dn id, `MigrSrcNqn` takes
+`(cluster, dn, sp, migr)` with the dn id *before* the sp id, and `XferNqn`
+takes `(cluster, sp, xfer)`.
+
+Ids are rendered with `printf '%016x'` directly from the decimal string dnvctl
+prints, never through `$(( ))`: a cluster id is a 64-bit fnv1a and has an even
+chance of landing above 2^63, where bash's signed arithmetic wraps. A
+non-decimal argument makes the helper log a bug line and return a poison string
+(`notanid-…`) rather than the plausible `0000000000000000` that would name
+cluster 0, and all three callers that build a name guard on it. Only two of
+those guards can fire, though: every formatter prints `$NQN_PREFIX` and its kind
+digit first, so the poison lands in the *third* or a later field of an otherwise
+well-formed NQN, and a guard must match it anywhere in the string. The transfer
+case's `*notanid-*)` on `XferNqn` and the migration's on `SideToCnNqn` do;
+`copy_cn_host_nqns`'s `notanid-*)` on `CnHostNqn` is anchored at the start of
+the NQN and is dead code. Nothing goes undetected today, because every id these
+three hand to a formatter — the cn id, the transfer id, the leg id, the sp id
+and the cluster id — is rejected for a non-decimal digit where it is read.
+
+Two of the five formatters, `dn_host_nqn` and `migr_src_nqn`, have no caller
+today: the suite never needs a DN's host nqn, and it observes a migration
+through the record and
+the destination side's own `InspectSide` rather than through the source
+subsystem's name.
+
+Namespaces always carry an explicit `ns create --uuid`, because an empty
+`dev_uuid` makes the gateway mint a random v4 one; the host then resolves the
+device as `/dev/disk/by-id/nvme-uuid.<uuid>`, which is the only stable name
+(the multipath head's own `/dev/nvmeXnY` number moves between reconnects). The
+three fixed uuids are `…8c01` for the sp's namespace, `…8c02` for the clone and
+AR6 targets, and `…8c03` for the fallback source pool's.
+
+Both hosts reach their namespaces as **themselves**: the nqn in
+`/etc/nvme/hostnqn`, generated if absent and never overwritten, and the id in
+`/etc/nvme/hostid`, passed explicitly on every connect. The suite asserts that
+the two hosts' nqns differ.
+
+---
+
+## 3. The rules
+
+The design (`tmp_doc/use_32_slices.md` §7.10) proposed twelve rules `E2E1` to
+`E2E12`. Each is restated below as the design worded it, then checked against
+`integtest/e2e_test.sh` and corrected where the suite does something else.
+
+Two facts about the ids themselves, both verified rather than assumed:
+
+* `ctl/doclint_test.go` used to extract a rule id as `[A-Z]{2,4}` followed by
+  digits, which `E2E1` does not match — the family name contains a digit — so
+  this family would have been **outside** the lint's namespace: no definition
+  registered, no citation checked, here or anywhere else. That is the same
+  silent gap the lint exists to close, so the family pattern was widened to
+  `[A-Z]{2,4}|[A-Z][A-Z0-9]{0,2}[A-Z]` when this suite landed. The second
+  alternative requires the family to END in a letter, which is what keeps
+  `SPD14` splitting as `SPD` + `14` rather than `SPD1` + `4`; without that
+  requirement every range in the tree parses as crossing families. `E2E` is
+  now a registered family: `TestDocRuleCitationsAreDefined` and
+  `TestDocRuleRangesResolve` both cover this file, verified by mutation —
+  citing an id past the last one defined here, and widening the range below to
+  reach it, each fail and name this file and the offending line. (Neither
+  mutation can be quoted here: the lint reads this paragraph too, which is
+  itself the demonstration.)
+* The suite cites these ids in its own comments (`E2E2` in the header,
+  `E2E11` in `main`, and so on), which is a one-way link: the shell cannot
+  check them either.
+
+* **E2E1 — servers come only from argv.** *As designed:* `--cp/--cn/--dn/--host`;
+  nothing is hardcoded. **HOLDS.** `parse_args` accepts both `--flag value` and
+  `--flag=value` for every flag and treats any positional word as a usage
+  error; the arity rules of §2.1 are enforced; a target used for two roles is a
+  die naming the duplicate. The only addresses the run ever uses are the ones
+  argv gave it, plus `127.0.0.1` for cp's own loopback to etcd; the example
+  invocation in the header comment is a comment.
+
+* **E2E2 — the control path is `bin/dnvctl` only.** *As designed:* no
+  `workerctl` or `gatewayctl` writes. **HOLDS, with one named exception that
+  writes nothing — and one tool that is built and never run.** `workerctl` is
+  built on the *driver* and run there for its `constants` subcommand alone,
+  which opens no etcd client and reads no key. `cnagentctl` is built on the
+  driver too, for `host-id --hostnqn` — a pure function of its argument — but
+  **no step of this suite calls it today**, and the file says so where the
+  wrapper is defined: every `nvme connect`/`connect-all` here presents the
+  host's own `/etc/nvme/hostnqn` and `/etc/nvme/hostid`, so a derived host id
+  is never needed. The wrapper stays because a step that connected a *host*
+  under a tree-minted nqn would need it, and the build costs a couple of
+  seconds of a package already in this repo. `etcdctl` is shipped to cp from
+  the pinned tarball for read-only diagnostics and is not invoked anywhere in
+  the file. Every control-plane read and every mutation is the shipped
+  `$WORK/bin/dnvctl`, run on cp over ssh — one ssh per invocation, and many
+  hundreds of them over a run, which is what the wall clock is mostly made of.
+  At the default shape setup registers each of the 172 disk nodes with its own
+  `dn create`, polls each one to readiness with its own `dn inspect`, and the
+  shared ending reads each one back with its own `dn get`: more than 500 round
+  trips before any case-specific invocation, and before a single poll has had
+  to repeat. dnvctl's three streams are framed apart through files on cp so
+  that "stdout is empty" and "stderr is exactly one line" can both be
+  asserted.
+
+* **E2E3 — `DNS_PER_VM` defaults to the placement bound.**
+  `ceil(legs × 2 × slice_cnt / (V − legs + 1))`; an override below it is a
+  warning, not an error. **HOLDS, and the suite adds a hard ceiling.**
+  `DNS_PER_VM > MAX_DNS_PER_VM` (50) is a die with the hint "add `--dn`
+  guests". The warning text names the failure it risks, not merely
+  "the create may starve" (§2.4).
+
+* **E2E4 — every dnagent of a VM registers `--location <vm role>`.** *As
+  designed:* every group therefore straddles VMs and no two sides of one leg
+  share a kernel. **CORRECTED — the second half is a headroom guarantee, not a
+  structural one.** The registration holds, and the suite asserts after
+  `sp create`, after each grow and after each automatic placement that the
+  `LEGS` legs of every group sit on `LEGS` different DN VMs. But a migration
+  destination and a spare leg are placed with the group's *locations* as a
+  tier-1 exclusion, and tier 2 rescans without that exclusion when tier 1
+  yields too few candidates — so with no free DN outside the group's VMs the
+  destination can legally land on the source's VM, where `SideToCnNqn`
+  (which carries no dn id) would collide between two agents of one kernel. The
+  suite therefore makes its VM-distinctness assertions for migration, spare
+  creation and AR8 **only when `DN_VM_CNT > LEGS`**, and logs a skip line
+  otherwise; the bound of §2.4 is what keeps the hazard unreachable in the lab.
+
+* **E2E5 — sparse backing files, the write-zeroes gate, and the allocation
+  caps.** **HOLDS, with three gates rather than one.** Backing files are
+  `truncate -s 2G` (never `fallocate -l`). `write_zeroes_max_bytes > 0` is
+  checked by `dn_up` *before* it launches the agent (the only place that can
+  refuse, since the agent must not exist yet), re-asserted on the driver from
+  what `dn_up` reported, and re-read once more for every recorded loop device
+  by `preflight_loop_devices` — which also asserts the record is **complete**,
+  `DN_TOTAL` devices, so a setup that silently started fewer agents than
+  `DNS_PER_VM` cannot reach `sp create` and fail there as
+  `RESOURCE_EXHAUSTED`. The triple gate exists because the dn agent only
+  *tags* a disk whose Write Zeroes is 0 and never refuses it, so side zeroing
+  would fall back to writing real zero pages and materialise every sparse
+  backing file on that guest. The per-file and whole-run caps are asserted
+  after every case (§4.6).
+
+* **E2E6 — cleanup runs unconditionally at start, and only on success at end.**
+  **HOLDS.** One function, `cleanup_all`, is called at all three sites: from
+  `main` before anything is built, from `on_exit` when the run's status is 0,
+  and alone under `--cleanup-only`. It never dies — at the start a die would be
+  wrong (leftovers are what it is for) and at the end it would turn a run whose
+  every assertion passed into a failure and skip the other nine guests. It
+  *reports* instead, and `SETUP_DONE` suppresses the end cleanup for a run that
+  died before it built anything.
+
+* **E2E7 — no `iflag=` / `oflag=`.** **HOLDS, verified by inspection of the
+  whole file including the generated helper.** Every write is buffered plus
+  `conv=fsync`; every read that must reach the media is preceded by
+  `host_drop_caches` (a `sync` first, because `drop_caches` never discards a
+  dirty page). The one read that may legitimately block —
+  `SP_LEVEL_READONLY`'s — goes through `host_sha_probe`, which runs the `dd`
+  detached on the guest with the *group's* stdout redirected and answers
+  `blocked` inside its own budget, because `timeout` cannot bound a task in D
+  state and command substitution hangs on a background child that still holds
+  the ssh pipe.
+
+* **E2E8 — pids in files, signals by pid, `pkill` only from helper files with
+  bracketed patterns.** **HOLDS.** The four cp daemons record `$!` in
+  `$WORK/<dir>/pid` and are signalled CONT → TERM → KILL by that pid; each
+  agent records its pid in its own directory and the react case stops exactly
+  one of them by that file. Every `pkill` in the file sits inside a
+  single-quoted helper heredoc, is bracketed (`[d]nv-agent`, `[d]nv-gateway`,
+  `[e]tcd --name dnv-e2e-it`), and is reached through a helper **verb**
+  (`kill_agents dn`), so the pattern never appears in an ssh command string
+  where `pkill -f` would match the wrapping `bash -lc` argv and kill its own
+  shell.
+
+* **E2E9 — never run while any other dnv suite runs anywhere in the lab.**
+  **HOLDS as an operator rule; it is not enforceable from inside.** The suite
+  states it in its header, prints it in `log_topology` before the first ssh
+  with the guest count, and names the concrete collision: its cn agents mount
+  their tmpfs at `/tmp/dnv-tmpfs`, the path `cnagent_test.sh` owns. What the
+  suite *can* check it does check — that no port of its block is already
+  listening and that no nvmet port it needs already exists (§5).
+
+* **E2E10 — hosts reach namespaces only through the cdc.** *As designed:*
+  `nvmf-connect@.service` is masked and `connect-all` is the suite's own act.
+  **CORRECTED — the mask holds; "only through the cdc" has three exceptions,
+  and each is forced.** The invariant the suite really keeps is that **every
+  path a host holds was made by this suite**: the autoconnector is masked at
+  preflight and again in `setup_infra` (because `host_cleanup` unmasks, and
+  `setup_infra` is also the rebuild half of the between-cases step), and
+  `stafd`/`stacd` must be inactive. Discovery through the cdc is used wherever
+  the subsystem is in a `CdcEntry`, and the expectation is derived from the
+  cntlrs themselves — one record per non-disabled cntlr — never from a
+  hand-written pair of addresses. The three direct `nvme connect -n <nqn>`
+  calls are:
+  1. host1 to the transfer's subsystem: a `Transfer` has no `ss_id` and is in
+     no `nqn_list`, so it is in no `CdcEntry` at all and cannot be discovered;
+  2. host1 to the fallback source pool's subsystem, where a discovery-driven
+     `connect-all` would also bring in `sp0`'s namespace — which carries the
+     same uuid as the transfer namespace host1 already holds;
+  3. host0 to the new primary after AR5, because the cdc still advertises the
+     dead CN's transport until AR7 rewrites the entries.
+
+* **E2E11 — each case starts from an empty etcd and a fresh sp.** **The intent
+  holds and the mechanism is bigger than the design's.** An etcd reset alone is
+  *not* enough and the suite argues it at length: a second `cluster create`
+  stamps a new `creation_epoch` and therefore mints a different `cluster_id`
+  and new `dn_id`s, while every DN's 4 KiB disk header still names the old
+  ones — and `EnsureFormatted` refuses such a disk as *foreign* and never
+  re-formats. Only a real `dn_cleanup` (zero the loop's first 4 KiB, `wipefs`,
+  `losetup -d`, `rm -rf $WORK`) removes that header, and only the two cn phases
+  remove a CN's store and its tmpfs arena. So the between-cases step is
+  `cleanup_all`, then a fresh `setup_infra`, then `setup_case` — the whole of
+  `setup` with a teardown in front — and the run pays for a full rebuild per
+  case. Both halves are needed and the second is the one that is easy to
+  forget: `cleanup_all` has just removed the cluster along with everything
+  else, so a between-cases step that stopped after `setup_infra` would leave
+  the next case reading `sp get` against an empty etcd. `setup_case` is
+  re-entrant by construction — its first act is to clear the ids, the cntlr
+  arrays and `SHA0`, so nothing of the previous case can be read by mistake.
+  `reset_control_plane` — stop the daemons, wipe `$WORK/etcd`, restart — stays
+  defined for a case that wants a fresh etcd *without* rebuilding the data
+  plane, and nothing calls it.
+
+* **E2E12 — the shell literals mirror named constants and say so.** *As
+  designed:* `SLICE_CNT_DEFAULT`, `ETCD_MAX_TXN_OPS`, `EXTENT_SIZE`.
+  **CORRECTED for the middle one.** `ETCD_MAX_TXN_OPS` is **not** a literal in
+  this suite: `read_constants` fills it at driver preflight from
+  `workerctl constants`, along with `MaxAllocLegPerGrp`, which it cross-checks
+  against `LEGS`. `start_etcd` dies rather than pass an empty `--max-txn-ops`.
+  That is what the other suites do since the ceiling was raised, and it is the
+  one constant this suite must not hand-copy, because this is the suite that
+  actually issues that transaction — 951 compares at its two cntlrs, against
+  the 967 the constant is sized by. The literals that do
+  exist name their constants in a comment: `SLICE_CNT_DEFAULT`,
+  `EXTENT_SIZE`, `NQN_PREFIX`, `CN_PORT_ID`, `TMPFS_DIR`, and the arithmetic
+  mirrors (`STRIPE_SIZE`, `INIT_EXT_CNT`, `CNTLR_CNT`) with the rule they
+  encode.
+
+---
+
+## 4. The cases
+
+Four cases, run in this order, each from a freshly built storage pool:
+`smoke`, `ops`, `copy`, `react`. `--only` picks one; a run that names none
+gets all four, with a full teardown and rebuild between them. Every stage sets a stage
+name and a trace id `it-<case>-<nn>`, which the gateway, the worker and every
+agent OS command carry, so one `jq 'select(.trace_id=="…")'` over any log pulls
+the whole stage.
+
+Reading the tables: the left column is the dnvctl invocation (or the act, where
+it is not one), the right column what is asserted *after* it. Every wait on a
+condition is a bounded `wait_until`, and no step waits out a fixed interval for
+something to become true. The five bare `sleep`s in the file are all in the
+process-control helpers: a 0.5 s settle before the `kill -0` liveness probe on
+a just-launched agent (`dn_up` and `cn_up` — a doomed agent needs a moment to
+exit before "still running" means anything), and three post-signal settles,
+after a `KILL` or between a TERM sweep and a KILL sweep. The react case reaches
+one of those three when it kills an agent by its pid file; the rest belong to
+setup and cleanup. Every other `sleep` in the file is the pause inside a poll
+loop — `wait_until`'s own, the host-side blocking-safe probe's, and the
+`kill -0`/`pgrep` loops those same helpers spin.
+
+### 4.1 Setup — the sp every case works on
+
+| stage | command / act | assertion |
+|---|---|---|
+| 01 | `mkwork` on all ten guests; scp the binaries; re-mask `nvmf-connect@.service` on both hosts | each of the four steps dies on failure; the `masked` answer itself was asserted in preflight, and this re-mask is here because `host_cleanup` unmasks and this function is also the rebuild half of the between-cases step |
+| 02 | start etcd, gateway, worker, cdc on cp | each listener is up before the next process needs it; then `cluster get` answers — and **`NOT_FOUND` is the healthy answer** against an empty etcd, so the readiness predicate treats it as success and anything else (`UNAVAILABLE` from a gateway that is not listening, `ABORTED` from an etcd that has not elected itself) as not-yet |
+| 03 | `dn_up` × `DNS_PER_VM` per DN VM (sequentially — `losetup --find` races with itself), `cn_up` per CN VM | each reports a loop device, a non-zero `write_zeroes_max_bytes` and a live pid; then `preflight_loop_devices` re-reads all `DN_TOTAL` devices |
+| 04 | `cluster create --name e2e --extent-size 67108864` | `cluster get`'s `cluster_id` equals the create reply's; `cluster_conf.dn_bin_conf.extent_size` is the value sent, and `bin0..bin3_shift` are 0/4/8/12 — the whole default ladder survives an extent-size-only request |
+| 05 | `dn create` per instance with `--location dn<v>`; `cn create` per CN | each retried until accepted: the gateway calls the agent's `GetDnSize`/`GetCnSize` inline and a transport failure is **`ABORTED`**, not `UNAVAILABLE`; `ALREADY_EXISTS` counts as success, since that is what a retry sees when dnvctl's own timeout fired on a call the gateway had committed |
+| 05 | `dn inspect` / `cn inspect` per node | all three `DnInfo` rows and all four `CnInfo` rows `RES_STATUS_OK`; **`dn_info.port_info.res_name` equals `k+1`** — the end-to-end proof that `--nvmet-port-id` reached the agent and that the agents of one kernel are not all converging `ports/1`; `cn_info.port_info.res_name` is `1` |
+| 06 | `sp create --cntlr-cnt 2 --slice-cnt 32 --init-ext-cnt 1 --slots 0,1 --redund raid1 --stripe-size 1048576 --thr-*` | `slice_list` is 32 slices with `slice_idx` 0..31 and no gap; every slice has exactly one meta group (1 extent) and one data group (`INIT_EXT_CNT` extents); every group has `LEGS` legs, every leg exactly one side; 128 sides on 128 **distinct** `addr_port`s; the `LEGS` legs of every group on `LEGS` different DN VMs; two cntlrs on distinct nodes, exactly one primary, none disabled; `cntlid_slot_list == [0,1]` and cntlr *i* carries `cntlid_slot_list[i]`; every **side** carries `cntlid_slot_list[0]`; the stored `stripe_size`, redundancy arm, the four thresholds, `sp_level == SP_LEVEL_READWRITE`, `deleting == false` |
+| 07 | wait | no side has `provisioned == false` (progress is logged whenever the count moves); the **primary** reports 32 `RES_STATUS_OK` pools, 64 OK groups and 128 OK legs, and `applied_revision ≥ 1`; the **standby** reports 128 OK legs and *empty* `grp_id_to_md_raid`, `slice_id_to_dm_pool`, `slice_id_to_meta`, `slice_id_to_data`, `td_id_to_raid0` and `td_id_to_thin_info` — empty maps, not `MISSING` rows, and a non-null `cntlr_info` is asserted first so that `null \| length == 0` cannot pass for "the standby builds nothing". Two of the six are **vacuous where setup makes them**: this stage runs before `td create`, so `td_id_to_raid0` and `td_id_to_thin_info` are empty on the *primary* too, and the shell says so at the function. They would start carrying weight in a step that re-checked a standby once a thin device existed, and no step does: the two later standby checks — the third cntlr of §4.3 stage 03 and the AR7 replacement of §4.5 stage 04 — assert only `grp_id_to_md_raid` and `slice_id_to_dm_pool` |
+| 08 | `td create --name t0 --size 134217728` (4 × `TD_UNIT`) | `created` flips (only the sp-worker writes it); stored size and `ori_id == 0`; then the primary carries `t0`'s raid0 — a *different* row from `created`, and the one a namespace's dm-linear points at |
+| 09 | `ss create`, `ss set-hosts`, `ns create --idx 1 --td t0 --uuid …8c01` | `ss list` shows one subsystem whose key is the `--nqn` string unmunged, `allowed_hosts` exactly the two hosts' own nqns, one namespace at nsid 1 with the chosen uuid, the right `td_id`, `suspended == false` |
+| 10 | host0 discovers through the cdc on `cp:18020`, then `connect-all` | the discovery log equals one record per non-disabled cntlr, derived from the cntlr list; **then the ANA wait, then the device** — a namespace whose only path has never been usable gets no head disk at all, so `wait_dev` before the ANA wait would burn its whole budget; host0's **ANA state** for ns 1 is `optimized` through the primary's controller and `inaccessible` through the standby's, while **both controllers' path state** is `live`. The two are different readings from different places — an ANA state is per namespace, read out of `/sys/class/nvme/<ctrl>/nvme*n*/ana_state`, and a path state is per controller, read out of `nvme list-subsys -o json` — and the suite says at that line that confusing them is how a failover test ends up asserting nothing |
+| 11 | write 4 MiB of `/dev/urandom` at offset 0, drop caches, read back | the digest equals the pattern file's; that digest is `SHA0` |
+
+### 4.2 Case `smoke`
+
+Setup is the subject; the case adds no operation of its own. It exists for the
+pair of statements the other three assume and none of them proves: that the
+widest sp this tree can build comes up whole, and that deleting it gives every
+extent back and leaves nothing behind. It runs first, so a lab that cannot
+build the shape fails after one build rather than four.
+
+| stage | act | assertion |
+|---|---|---|
+| 01 | `sp get` | still the sp setup created; 32 slices, 128 sides, `SP_LEVEL_READWRITE`; `SHA0` re-read |
+| 90-92 | the shared ending | §4.6 |
+
+### 4.3 Case `ops`
+
+Every sp-scoped mutator and reader, in nine stages. `SHA0` is re-read after
+each stage the design marks.
+
+| stage | command | assertion |
+|---|---|---|
+| 01 | `sp get`, `sp list`, `sp find-names --ids <sp_id>` | `sp list` names `sp0` exactly once; `find-names` maps the id back to the name, keyed by the **quoted decimal string** protojson renders a uint64 map key as, and answers exactly the one id asked about |
+| 02 | `sp grow-slice --slice <s0> --meta`; `sp grow-slice --slice <s1> --ext 1` | slice *s0* has two meta groups and the appended one is 1 extent (the ladder appends the slice's current meta total); slice *s1* has two data groups and the appended one carries **the slice's first data group's `ext_cnt`, not `--ext`** — `--ext` is only the exclusivity signal; every group still has `LEGS` legs on `LEGS` different VMs; the new sides provision and the primary's pools stay OK. It deliberately does **not** re-assert that every side of the sp is on a distinct DN: that is a create property, and `GrowSlice` passes a nil black list |
+| 03 | `sp set-cntlid-slots --slots 0,1,2` | `cntlid_slot_list == [0,1,2]` |
+| 03 | `sp set-cntlid-slots --slots 1,2` → `INVALID_ARGUMENT` | the message contains `cntlid_slot_list drops slot 0, which cntlr` — the handler checks every **cntlr** before it checks any side, so this is the cntlr loop's message even though it is also true that every side holds slot 0 |
+| 03 | `sp set-cntlid-slots --slots 0,2` → `INVALID_ARGUMENT` | `… drops slot 1, which cntlr`; and a refused call changed nothing |
+| 03 | `cntlr create --slot 2 --cn-white <spare cn>` | a third cntlr on that CN with `cntlid_slot 2`, **not** primary, **not** disabled; it connects every leg as a standby with no groups and no pools; the cdc advertises the third transport; host0's third path goes `live` and the namespace is `inaccessible` on it. **This half of the stage is skipped with a log line when no CN is free** — when every `--cn` guest already carries a cntlr of the sp — exactly as stage 08's CN half is; the refusals above still run and `SHA0` is re-read before the return. Neither skip can fire at an invocation the suite accepts (`--cn` is at least 3 and `CNTLR_CNT` is fixed at 2, so a spare CN always exists); both are guards against a shape a future flag could introduce, not branches the lab takes |
+| 03 | `cntlr delete --id <c3>` while enabled → `FAILED_PRECONDITION` | `is enabled; disable it first` |
+| 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs and host0 loses that path by itself (the subsystem disappears under a live controller and the reconnect is refused with DNR) |
+| 04 | `sp inspect-side --id <a side>`, `dn inspect`, `cn inspect`, `cntlr inspect` | the side's data device OK and `zeroed_ext_cnt == total_ext_cnt`, `applied_revision ≥ 1`; the DN's three rows OK with `port_info.res_name` still its own port id; the primary CN's four node rows OK; the primary cntlr's pools and groups OK |
+| 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe |
+| 05 | after the ladder | host0 lost its controller when `DISABLE` removed the subsystem under it, so it discovers and connects again; ANA first, device second; `SHA0` |
+| 06 | `td create --name s0 --ori t0 --size 0` | a snapshot is the one case in which size 0 is legal; it inherits the origin's size and its `ori_id` is `t0`'s `dev_id` |
+| 06 | `td get-bm --name t0 --slice-idx 0 --start 0 --cnt 0` | `--cnt 0` is the whole slice; the reply is the hex map, `byte_cnt` renders as a **bare number** (a Go `int`, unlike every uint64 here), `bitmap_hex` is exactly two hex digits per byte, and **bit 0 of byte 0 is clear**. Mind the polarity, because it inverts the obvious assertion: `1 = unmapped` is the wire convention of every bitmap RPC, produced by the cn agent — which starts from an all-ones map and *clears* the range of every mapped extent, inverting thin metadata's native "mapped = written" exactly once at that boundary — and passed through verbatim by the gateway. So an allocated block is a **clear** bit, and "some bit is set" would pass on a thin device nobody has ever written. What the check pins is block 0 of slice 0: dm-striped maps chunk *c* of a td to slice *c* mod `slice_cnt`, so setup's write at offset 0 is block 0 of slice 0's thin volume at every shape, and bits are LSB-first within a byte, which puts that block in the low bit of the first two hex digits |
+| 06 | `td get-leg-bm --leg <slice 0 data leg>` | the same hex map. **Skipped with a log line under `--redund none`**, where a group has one leg and no md bitmap |
+| 06 | `td create --name t1 --size <t0's size>` | three thin devices; the primary carries three raid0s |
+| 07 | `ns set-suspended --idx 1 --suspended` | the path goes `inaccessible` **and the head disk stays** — a suspend is a park (the ns-dev is pointed at the td's dm-error), not a removal, so `wait_dev_gone` would time out here. No host IO at all between the suspend and the resume: a parked ns-dev requeues, and even the cache drop issues a `sync` |
+| 07 | `ns set-suspended --suspended=false` | `optimized` again; `SHA0` |
+| 07 | `ns set-dev --idx 1 --td t1` | host0 reads the digest of 4 MiB of zeros — computed on the host from `/dev/zero`, not merely asserted to differ |
+| 07 | `ns set-dev --idx 1 --td t0` | `SHA0` |
+| 08 | `dn set-disabled --addr <a DN with no side> --disabled`, then `sp grow-slice … --dn-white <LEGS free DNs on LEGS VMs, one of them the disabled one>` → `RESOURCE_EXHAUSTED` | `disabled` is a scheduling flag and invisible to the agent, so the only proof is a refused allocation. The white list is exactly `LEGS` DNs on `LEGS` different VMs: one fewer, or two on one VM, and the step would prove nothing |
+| 08 | `cn set-disabled --addr <spare cn> --disabled`, then `cntlr create --slot 2 --cn-white <that cn>` → `RESOURCE_EXHAUSTED` | `no controller node`; **skipped with a log line when every CN already carries a cntlr** |
+| 08 | re-enable both; `sp get` | neither refusal wrote anything: both happen before the transaction |
+| 09 | `td delete s0`, `td delete t1` | only `t0` is left for the teardown; `SHA0` |
+
+### 4.4 Case `copy`
+
+The four RPC groups that move bytes: transfer, clone, migration, spare leg.
+Three deviations from the design's literal wording, each forced.
+
+**(a) All host0 IO happens after the transfer is deleted.** The design says
+"no host0 IO from here until step 4" and then asks for a host0 read while the
+origin namespace is still parked; the two cannot both be obeyed. What is
+gained is a *stronger* assertion: read while the clone still exists, the
+destination is reached through `CnCloneFinalName`, which serves an unhydrated
+region **from the source** — so a clone that copied nothing would still answer
+correctly. Read after the clone is gone, it is reached through the
+destination's own raid0, which holds only what hydration wrote.
+
+**(b) host1 connects to the transfer directly.** A `Transfer` has no `ss_id`
+and appears in no `CdcEntry`, so `nvme discover` cannot show it. It is also
+why host1 and not host0 consumes it: the transfer's namespace carries the
+**origin namespace's** uuid and nguid, so the two must never be on one kernel.
+
+**(c) `spare switch` and `spare delete` take `--grp`.** All three spare leaves
+declare it, because each request carries `grp_id` and the handler locates the
+slice from it.
+
+| stage | command | assertion |
+|---|---|---|
+| 01 | `xfer create --name x0 --ori-nqn <ss0> --ori-idx 1 --hosts <host1> --auto-suspend` | `xfer get` echoes the id, origin, `auto_suspend`, `allowed_hosts`; `xfer_name_list` names it; host0's ns 1 goes **`inaccessible` with its head disk intact** (an effective suspend is a park) |
+| 01 | host1 `nvme connect -n <XferNqn>` to the primary's transport | ANA `optimized`, then the device; the path is `live`; host1 reads `SHA0` through it — the transfer exports `t0`'s raid0 |
+| 02 | `td create --name c0` (the destination), wait for its raid0 | the dm-clone's `dest` argument needs the raid0, which `created` does not cover |
+| 02 | `xfer set-hosts --name x0 --hosts <host1>,<every CN's CnHostNqn>` | `allowed_hosts` is host1 plus all CN host nqns (the list *replaces*, so host1 is repeated or it loses its connection); **then the kernel's own answer is waited for** — the `allowed_hosts` symlink under the transfer's nvmet subsystem on the primary CN — so the clone's first connect is not refused for want of a link that is still only a record |
+| 02 | `clone create --name k0 --dst-td c0 --src-nqn <XferNqn> --src-idx 1 --src-slices … --src-stripe … --src-block … --src-tr-* … --auto-resume` | `clone get` echoes every geometry field; all four `--src-tr-*` are passed, because those flags declare **defaults** (tcp/ipv4/127.0.0.1/4420) rather than empty strings and an omitted one would silently send the loopback |
+| 02 | `clone append-bm --name k0 --src-slice-idx 0 --bm-idx 0 --bm-hex <from the source's `td get-bm`>` | the reply echoes the clone id. The bitmap is fed through **uninverted**: 1 = unwritten is the wire convention of every bitmap RPC and `GetThinDeviceBitmap` already answers in it. What the chunk *skips* is deliberately not asserted — the fold counts an absent or short chunk as written, the safe direction |
+| 02 | `clone set-tr` with the same transport | exercises the RPC without moving anything; the agent skips an entry it is already connected to |
+| 02 | wait for hydration | the primary's `clone_id_to_dm_clone` details are the raw `dmsetup status` line; field 7 is `<hydrated>/<total>`, the same field the gateway parses before it allows `clone delete`. The wait is also the fallback's trigger — see below |
+| 02 | `ns create --idx 2 --td c0 --uuid …8c02` | `optimized` and a device for host0 (both reads are sysfs and `test -e`, so they are legal while ns 1 is parked); its digest is read in stage 03 |
+| 02 | `clone delete --name k0` (no `--force`) | the gateway proves hydration from the primary's own row before it latches, so a successful call is a second, independent confirmation; `deleting == true` is read if the drain has not already finished, then `clone get` → `NOT_FOUND` and `clone_name_list` is empty |
+| 03 | host1 disconnects, then `xfer delete --name x0 --force` | `--force` is the **abort** path: without it the same STM also writes `suspended = true` on the origin, finalising the hand-over. host1 lets go first, or the subsystem would be unlinked under a live controller and the kernel would delete it with DNR |
+| 03 | — | `xfer get` → `NOT_FOUND`, `xfer_name_list` empty; host0's origin namespace is `optimized` with its device back; **the destination's digest now equals the source's**, read through `c0`'s own raid0 with no dm-clone above it; `SHA0` |
+| 03 | `ns delete --idx 2`, `td delete c0` | the head disk goes (a real removal, the one direction `wait_dev_gone` means anything) |
+| 04 | read the leg bitmap **before** `migr create` | a migration source goes ANA-inaccessible the moment the migration exists and the destination stays inaccessible until its dm-clone is built, so between the two the leg has no usable path on any CN; the read costs nothing earlier and removes the question |
+| 04 | `migr create --name m0 --src-side <side of slice 0's data group, leg 0>` | the leg has two sides; the destination is **not** on a disk node the group already occupies (the black list is unconditional) and **not on a VM it occupies** when `DN_VM_CNT > LEGS`; the two sides hold different cntlid slots |
+| 04 | `migr append-bm --name m0 --bm-hex <the reading above>` | `bm_cnt` goes 0 → 1. Skipped with a log line when the leg bitmap is empty, since an empty `--bm-hex` is refused on purpose |
+| 04 | wait, then `migr finish --name m0` | the destination side's own `migr_dst_info.dm_clone_info` is hydrated — the same measurement `FinishMigration` makes — so the RPC cannot be refused for lack of proof; afterwards the leg has one side, that side is the destination, the **leg id is unchanged** (a migration moves a side, not a leg), and `migr_name_list` is empty |
+| 04 | wait on the primary CN's own path to the surviving side | the record is gone but the DN rewrites `ana_grpid` on its *next* syncup; an inaccessible namespace requeues rather than errors, and a requeued read is exactly what `timeout` cannot bound — so this wait is what makes the next `SHA0` a read and not a gamble |
+| 04 | `migr create --name m1 --src-side <the previous destination>`, then `migr cancel --name m1` | a migrated-onto side is an ordinary side; the cancel leaves one side, the source, untouched; the same ANA wait, then `SHA0` |
+| 05 | `spare create --grp <slice 0's data group>` | one spare leg with one side, the **active** leg list unchanged (a spare is not an md member); the same DN and VM exclusions as the migration destination; its side provisions, and both cntlrs connect it — the leg-row count now includes spare legs, which is why the general `sp_totals`-driven predicate exists |
+| 05 | `spare switch --grp … --spare … --target …` | the reply's `curr_active_leg_id` / `curr_spare_leg_id`; the promoted spare is in the active list and the replaced leg is parked; the group still has `LEGS` active legs |
+| 05 | wait for md | `RES_STATUS_OK` alone proves nothing — a rebuilding array is OK with a `State:` of "clean, degraded, recovering" — so the words are read, and the wait is additionally gated on the CN having applied the `SpRev` the switch bumped to, because a switch changes *which* legs the group has and not how many, and the pre-switch array also reads "clean" |
+| 05 | `spare delete --grp … --leg <the parked one>` | no spare leg; the primary drops its row; `SHA0`. **The whole stage is skipped with a log line under `--redund none`**, where the gateway would refuse it anyway |
+
+**The clone source, and its fallback.** The source is a transfer of the *same*
+sp: the primary CN opens an nvme-tcp connection to its own nvmet port. Nothing
+in the tree refuses that, so it is legal by construction — but whether one
+kernel can be both initiator and target for the same bytes is a property of the
+lab's kernel, not of this tree, so the suite does not assume it. Two
+conditions route to the fallback, each read from the agent's own report:
+
+* the primary's `clone_id_to_target` row is still not OK `WAIT_SRC_CONNECT`
+  seconds after the clone was created — the connect never came up;
+* the dm-clone is OK but its `<hydrated>/<total>` has not moved for
+  `WAIT_HYDRATE_STALL` seconds — a same-kernel loopback that deadlocks under
+  writeback pressure *hangs* rather than failing, and without a stall detector
+  the case would burn its whole budget and never reach the fallback.
+
+The fallback abandons the clone (`--force`, since hydration is unproven by
+definition) and **rebuilds the destination thin device** rather than reusing
+it: a partially hydrated destination violates both the "never written before
+the clone" contract and the recovery rule that equates "mapped in the
+destination pool" with "already copied". It then builds a second storage pool
+`sp1` — one slice, `--redund none`, one cntlr pinned with `--cn-white` to a CN
+that is *not* `sp0`'s primary — gives it a thin device, a subsystem and a
+namespace, has host1 write a pattern into it, and clones from that over a real
+network hop. The destination is still proved byte for byte; it is simply no
+longer proved against `SHA0`. A fallback that also fails is a die naming both
+faults, never a third attempt. `sp1` is torn down before the case's shared
+ending.
+
+The design's "add +2 to `DNS_PER_VM` in that branch" is unnecessary and the
+suite does not do it: a DN that already carries one side still reports
+`free_ext_cnt > 0`, and a create's black list excludes the DNs *that create*
+picked, not the DNs another sp uses.
+
+### 4.5 Case `react`
+
+The four automatic reactions, each triggered by a real fault and each asserted
+from the record the reaction actually writes. The worker takes **at most one
+action per pass** per sp, so every wait is "threshold plus a few 5 s passes"
+and never a sleep.
+
+| stage | act | assertion |
+|---|---|---|
+| 01 | `td create --name a0 --size 2 GiB`, `ns create --idx 2 --td a0 --uuid …8c02` | `slice_list[0].slice_idx == 0` (the stripe every strided write lands in); slice 0 has exactly one data group; `stripe_size == data_block_size == 1 MiB`, so one strided 1 MiB write is exactly one new thin block; `low_water_mark_pct` in 1..100 — a 0 is refused by the pass gate and anything above 100 switches AR6 off; the device appears for host0 |
+| 02 | strided 1 MiB writes at every `SLICE_CNT × 1 MiB` of the device | **the chunk count is computed, not the design's literal 40**: `floor(lwm × total / 100) + 1 − used + 4`, from the primary's own pool `used/total` pair, because that is the pair the worker compares. Three guards: the chunks must fit in `a0`'s per-slice thin volume, must stay *inside* the pool (filling it would put dm-thin into out-of-space mode instead of tripping AR6), and must stay under a sanity cap, since every chunk is 1 MiB on **every leg** of the group |
+| 02 | wait for AR6 | slice 0 has two data groups and `data_grp_list[0]` is still the group setup created (a grow appends); the new group's `ext_cnt` is the first data group's; `LEGS` legs, one side each, on `LEGS` distinct DNs on `LEGS` different VMs. It is deliberately **not** asserted that the new group avoids the DNs the slice already occupies — the design says it does and the worker's own comment says the opposite: the grow passes a nil black list |
+| 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
+| 02 | read back | every strided chunk after a cache drop; `SHA0` for ns 1 too |
+| 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not |
+| 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 writes two `primary` flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
+| 03 | wait for the new primary | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s; and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet |
+| 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
+| 04 | leave the agent dead; wait for AR7 | the dead cntlr's id is gone from `cntlr_id_list` and the sp is back to `CNTLR_CNT` cntlrs. AR7 can only act on a cntlr AR5 has already demoted — it skips a primary while a failover candidate exists, and the model refuses it again inside its own STM — which is what makes the two reactions distinguishable at all |
+| 04 | — | the replacement is on a CN that carried **no** cntlr when the kill happened (membership, not equality: with more than one such CN the pick is random); it has a **new** cntlr id, inherits the dead one's `cntlid_slot`, is a standby (a replacement carries the old cntlr's role, and AR5 had demoted it) and is enabled |
+| 04 | — | the replacement connects every leg as a standby with no groups and no pools; the discovery log has lost the dead CN's transport and gained the replacement's — which is what makes `connect-all` safe again; host0's new path is `live` and the sp's namespace is `inaccessible` on it, and its path to the primary is still `live` |
+| 04 | restart the killed cn agent | its node rows come back; its `cntlr_ptr_list` is **empty**; and it tears down the md arrays, dm devices and nvmet exports its dead predecessor left in that kernel — which the end-of-run cleanup would also do, but only at the end of the run, and the residue check runs before that |
+| 05 | kill a dn agent **and drop its nvmet port** | killing the agent alone triggers nothing: its nvmet subsystem, port and dm-linear live in the kernel and outlive it, so the primary's probe IO still succeeds, the leg stays OK, `Leg.err_epoch` stays 0 and AR8 never fires. Both planes are needed — the gRPC rounds fail (side unhealthy) and the data path goes away (leg unhealthy). The leg is chosen so that its single side sits on a DN carrying exactly one side of the whole sp, because AR8 repairs the smallest unhealthy leg id and a DN with two sides would make two legs unhealthy |
+| 05 | wait for AR8 | first a spare leg appears (one side); then the switch: the dead leg is out of `leg_list` **and** parked in `spare_leg_list`, both halves, because either alone is also what a half-applied transaction looks like. The promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it |
+| 05 | — | the spare is not on the dead node, not on a DN the group occupies, and not on a VM it occupies when `DN_VM_CNT > LEGS`; md finishes rebuilding onto it (a fresh spare has never been an md member, so this is a full recovery), gated on the applied revision as in the copy case; `SHA0` |
+| 05 | restart the dn agent | it recreates **its own** nvmet port, not `ports/1`; the primary reports every leg again, the parked one included. It has to come back: the parked leg's side still occupies an extent, and only a live agent can retire it when the sp drains |
+| 06 | `ns delete --idx 2`, `td delete a0` | only `t0` is left for the teardown; `SHA0` |
+
+### 4.6 The ending every case shares
+
+`smoke` *is* this ending; the other three put their stages in front of it.
+
+**Stage 90 — teardown.** Before anything is deleted, the case must have cleaned
+up after itself: exactly one subsystem (`ss0`), one namespace (idx 1) and one
+thin device (`t0`) may reach the teardown, asserted first so that a case which
+forgot its own objects fails with that sentence rather than with a bare
+`FAILED_PRECONDITION` three calls later. Then, in this order and for these
+reasons:
+
+1. `ns delete --idx 1` **under the live controllers**, and `wait_dev_gone` —
+   the one direction in which that wait means anything, because a suspend is a
+   park and never removes the node;
+2. both hosts `wipe` — every `$NQN_IT` and `$NQN_PREFIX` subsystem plus the
+   discovery controller pointing at the cdc, and never `nvme disconnect-all`;
+3. `ss delete`, then `td delete` — a subsystem unlinked from its port under a
+   live controller kills that controller with DNR and the host never reconnects
+   by itself, which is why the hosts let go first;
+4. `sp delete`, which **latches and returns**: the sp still exists when the
+   reply arrives and the worker takes it apart in bounded steps, so
+   `sp get` → `NOT_FOUND` is the only completion signal there is. This one call
+   deliberately bypasses the success wrapper, so that a refusal reports *which*
+   object is still there instead of "got '1', want '0'" — the pre-checks above
+   cover subsystems and thin devices, while the precondition is five name lists
+   (clones, transfers and migrations too);
+5. `sp list` no longer names `sp0`.
+
+**Stage 91 — residue.** Every disk node's `free_ext_cnt == total_ext_cnt`
+*and* an empty `side_ptr_list` — checking both is what separates "the capacity
+came back" from "the pointer list was cleared and the number was not", two
+fields written by the same ledger flush. Then every DN guest holds no dm
+device, no `$NQN_PREFIX:*` nvmet subsystem and — through the weaker probe of §8
+item 8 — no dnv md array, and every CN guest holds none of those three either.
+Loop devices are deliberately in neither list: the
+agents keep serving on them until cleanup, so they belong to the run and not to
+the sp.
+
+**Stage 92 — the space guard.** Two caps, measuring different things:
+
+* `DN_CAP_BYTES` (256 MiB) — **allocated** bytes of one backing file, via
+  `stat -c '%b %B'`. The whole space argument of this suite is that a sparse
+  file stays sparse because side zeroing is `blkdiscard --zeroout` and the loop
+  device turns WRITE ZEROES into a hole punch; a file that has materialised has
+  exactly one cause, and this is the check that names it. A `stat` that could
+  not be read is reported as `unknown` and fails, never as a silent 0.
+* `RUN_CAP_BYTES` (8 GiB) — everything the run wrote on all ten guests,
+  `$WORK` **plus** `/tmp/dnv-tmpfs`, counted separately because the tmpfs is not
+  under `$WORK` and a guard that looked only there would miss a CN's whole
+  clone-metadata arena.
+
+Free space is re-asserted against **preflight's own floors** rather than a
+separate number, so that the statement is "the run left the guest as usable as
+preflight demanded it be". The hosts have no floor of their own (they run no
+dnv binary and hold only a pattern file), so their numbers are reported and
+counted but not asserted.
+
+A separate, read-only pass (`space_note_case`) takes the same reading again
+after each case for the run summary. It asserts nothing — a summary that could
+fail a run would be a second, quieter copy of the same rule.
+
+---
+
+## 5. Preflight
+
+Preflight runs **after** the unconditional start cleanup and **before** the
+first setup write. The design said "before any cleanup or setup writes", and
+that cannot be right for the checks that matter: a port check, a
+`ports_busy` and an nvmet-port conflict check taken before the cleanup answer
+about the *previous* run's corpses, not about whether this run can start.
+`cnagent_test.sh` and `cdc_test.sh` put theirs in the same place for the same
+reason, and nothing in the cleanup writes suite state — it only removes — so no
+check is reading something this run made.
+
+It dies on the **first** failure, naming the guest and the fix. A preflight
+that collected three problems and reported them together would still have to be
+re-run after the first was fixed.
+
+**Driver** (`preflight_driver`, before any guest is touched): `go`, `ssh`,
+`scp`, `curl`, `tar`, `sha256sum`, `awk`, `sed`, `mktemp`; a JSON parser —
+a system `jq`, else a `gojq` built into the gitignored `integtest/bin` with the
+Go toolchain the driver already needs, and every filter in the file is written
+to the intersection of the two; `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make
+build` and the five binaries; `workerctl` and `cnagentctl`; then
+`read_constants` (which must run before `start_etcd`, or `--max-txn-ops` would
+arrive empty and etcd would refuse to start) and the pinned etcd tarball, which
+is re-downloaded only when the cached one does not match the sha256 pin.
+
+**Every guest:** passwordless ssh with `BatchMode`, checked for all ten before
+any tool list is read — a guest that is simply down should say so first.
+
+**DN and CN guests:** passwordless sudo; the tool list that role actually runs
+(`dmsetup nvme losetup lsblk blkdiscard stat du df awk sed grep ss pgrep pkill
+timeout fallocate tail`, plus `truncate wipefs dd` on a DN and `mdadm udevadm
+findmnt` on a CN — deliberately *not* `cnagent_test.sh`'s list copied over: no
+guest here parses JSON, reads thin metadata or runs `cmp`); `modprobe` of
+`nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool raid1` and
+`mount -t configfs` if it is not mounted (the agents hardcode the configfs path
+and mount nothing themselves — these two writes are preconditions, not suite
+state); the nvmet configfs tree exists; `nvme_core.multipath == Y`, which is
+load-bearing on a DN too, because a migration destination is an nvme host and
+reads its source's ANA state out of the hidden per-path device that only exists
+under multipath; on a CN, `/proc/mdstat` and that the stock
+`64-md-raid-assembly.rules` honours `SYSTEMD_READY` (the mask `cn_up` installs
+works by setting it); a `fallocate -p` punch-hole probe on `/var/tmp`, which is
+what turns the agent's `blkdiscard --zeroout` into a hole punch and what the
+whole space argument rests on; `MemAvailable ≥ 2 GiB`; free space under
+`/var/tmp` ≥ 4 GiB on a CN and 4 GiB + `DNS_PER_VM × 64 MiB` on a DN; none of
+this run's ports listening; and **no conflicting nvmet port**.
+
+That last check is its own, because a configfs port is not a listening socket
+until a subsystem is linked to it, so `ports_busy` cannot see it. Two distinct
+collisions are refused: an **id** this run will use — `EnsurePort` is
+probe-first but not read-only on a port that already exists, it reuses the
+directory and rewrites the four `addr_*` attributes, so an agent would hijack a
+stranger's port rather than fail — and a **service id** this run will bind,
+since two nvmet ports cannot listen on one ip:port. The die names the suite the
+port seems to belong to, derived from the other suites' own declarations
+(4200 = the two agent suites, 14420-14423 = the cdc suite, 4420/4421 = the
+nvme-tcp default and so a hand-made target), and says that the start cleanup
+refused to remove it on purpose.
+
+**Hosts:** passwordless sudo; `nvme uuidgen systemctl udevadm dd sha256sum awk
+sed grep timeout du df tail` (`udevadm` because
+`/dev/disk/by-id/nvme-uuid.<uuid>` is a udev symlink and there is no other
+stable name; `du`/`df`/`tail` because a host runs the same space and log verbs
+the nodes do); `modprobe nvme-tcp` and a runnable nvme-cli;
+`nvme_core.multipath == Y`; the identity files, generated if absent and never
+overwritten; `stafd`/`stacd` not active — `stacd` connects on its own, `stafd`
+owns discovery controllers, and nvme-stas sends a DIM in-capsule to every
+discovery controller it learns about; and the `nvmf-connect@.service` mask.
+Finally, the two hosts' nqns must differ: two hosts that share one are one host
+to the target, `ss set-hosts` would name the same entry twice, and the copy
+case's "host1 sees the transfer, host0 does not" could not be told apart.
+
+**cp:** ssh; `ss pgrep pkill awk sed du df tail nohup grep timeout`; the four
+ports free; ≥ 2 GiB free under `/var/tmp`. No sudo check: cp is driven as a
+plain user.
+
+**Deferred:** `preflight_loop_devices` runs after the agents are started,
+because the devices do not exist before that, and before the first
+`sp create` (§3, rule E2E5).
+
+---
+
+## 6. Cleanup, and why the order is what it is
+
+One function, `cleanup_all`, run at the start of every run, at the end of a
+successful one, and alone under `--cleanup-only`. Every guest call is a
+tolerant form and none of them dies; what it does instead is **report**,
+through `cleanup_report`: a missing sentinel line (the verb timed out at 300 s,
+the guest is unreachable, or the helper is stale) and any `REFUSED` or `STUCK`
+nvmet port, with the owning-suite hint spelled out. Those two words are the
+ones that matter to the next person, because **a leftover nvmet port with live
+ana groups is what fails the next suite's setup.**
+
+The order:
+
+1. **Hosts first.** They hold the controllers over this suite's subsystems. A
+   subsystem unlinked from its port under a live controller kills that
+   controller with DNR and the host never reconnects by itself — acceptable
+   during teardown, but only after the host has stopped issuing IO. Each host
+   disconnects every `$NQN_IT` and `$NQN_PREFIX` subsystem and the discovery
+   controller pointing at the cdc (never `disconnect-all`, which would take
+   down subsystems this suite has nothing to do with), unmasks, and removes
+   `$WORK`. The identity files are **not** removed: a hostnqn is node identity
+   rather than run state, and the kernel keeps a strict 1:1 hostnqn↔hostid map
+   that a replaced file under a live association violates.
+2. **Every CN, phase 1.** Kill the agent, resume any suspended dm device, drop
+   this suite's host-facing subsystems, then the ns-devs, the transfer finals
+   and the **clone finals — while their transfer source connection is still
+   up**, because a dm-clone flushes through its source on removal and that
+   source is an nvmet export on one of these CN guests.
+3. **Every CN, phase 2.** Only now the transfers themselves; then top-down
+   through the cn stack, the md arrays, the leg and group wrappers, and last
+   the clone-metadata wrappers (which hold the arena's loop device open and
+   would wedge the tmpfs teardown with `EBUSY`); the side connections; the
+   tmpfs; the nvmet hosts entries; `ports/1` — **its ana_groups 3 and 2 first**;
+   the udev rule (these are shared lab machines); `$WORK`.
+
+   Both CN phases must finish on **every** CN before the first DN VM is
+   touched, which is why they are two loops and not one loop doing both.
+4. **The DN VMs.** Kill every `[d]nv-agent` from the helper, then drop the
+   `:2:` and `:3:` subsystems and the dm kinds in dependency order (migration
+   sources after the devices that flush through them), sweep **every** nvmet
+   port from 1 to `MAX_DNS_PER_VM` — not merely this run's `DNS_PER_VM`, since
+   an aborted earlier run or one with a larger `--dns-per-vm` may have left a
+   higher one — zero each loop device's first 4 KiB with `conv=fsync`,
+   `wipefs`, `losetup -d`, and remove `$WORK`. A CN's dm stack sits on nvme
+   connections to these sides, which is why the CNs go first: dropping the
+   sides first would leave the CN's md legs on dead paths.
+5. **cp.** The four daemons by their recorded pids (CONT → TERM → KILL), then
+   the helper's bracketed `pkill` sweep as the fallback for a pid file a crash
+   lost — the etcd pattern carries this suite's own `--name`, so a stranger's
+   etcd on that guest is never touched — and `rm -rf $WORK`.
+6. **`fstrim -a`** on every guest, best-effort and bounded.
+
+Dropping a port **refuses** to touch an nvmet port whose `addr_trsvcid` is
+outside this suite's band, printing which suite it seems to belong to. The band
+is one pair of numbers — `4300..4349`, `DN_TRSVCID_BASE` to
+`DN_TRSVCID_BASE + MAX_DNS_PER_VM − 1` — and the helper preamble ships the same
+pair to **both** roles; the check does not look at the role. What differs by
+role is only *which* ports are offered to it: a DN sweeps `ports/1` through
+`ports/50`, a CN drops `ports/1` and nothing else. So a stranger's `ports/1` on
+a CN bound to, say, 4305 would be removed rather than refused. That costs
+nothing in this lab — a CN agent binds 4300 — but the band is a shared pair of
+variables, and narrowing it for CNs means giving the drop a `<lo> <hi>` of its
+own, not rewording a comment. The one exception is a port whose `addr_trsvcid`
+is *empty*: that is debris from an agent killed between `mkdir ports/<id>` and
+its first attribute write, and it is removed rather than refused, because
+refusing would leave it forever and a leftover port is exactly what fails the
+next suite.
+
+**On failure nothing is removed.** `on_exit` runs the diagnostics instead, and
+every process, dm/md/nvmet object, loop device, host connection and log stays
+where it is.
+
+---
+
+## 7. Diagnostics on failure
+
+`on_exit` calls `diagnostics` **instead of** the cleanup, so everything the run
+built is still there while it runs and afterwards. Three properties shape it:
+
+* **Order.** cp's dump is first, because cp's `diag` prints
+  `$WORK/last.{rc,err,out}` — the failing dnvctl call's three streams — and
+  every dnvctl read below it would overwrite those three files.
+* **It must not die.** `on_exit` runs it with `|| true`, which suspends `set -e`
+  but would not survive a `die` (that calls `exit`), so every guest call is a
+  tolerant form and every dnvctl read runs in a subshell.
+* **It must be bounded.** Diagnostics runs when something is already wrong,
+  which is when a guest command hangs; each dump is `timeout 60`.
+
+What it prints, in order: the failure context (stage, trace id, case, whether
+setup finished, **the last ANA state actually observed** — which is the
+difference between "it never became optimized" and "it became inaccessible" —
+the shape, the cluster id, the cp daemons and their pids, every recorded loop
+device, and the driver's copy of the last dnvctl call's three streams, which
+survives a cp that has become unreachable); cp's own diag, 200 lines of each of
+the four daemon logs, and the `"level":"ERROR"` records of the three dnv daemons
+among them — etcd's log is tailed but not grepped, because the pattern is the
+literal token `common/log.go`'s slog handler writes for an error record, quotes
+included, and etcd is not an slog logger; the control-plane reads (`cluster get`, `sp get`, `cntlr inspect` of every cntlr —
+by the ids in `sp_conf.cntlr_id_list`, since `cntlr_list` entries carry no id
+at all — `cn inspect` of every CN and `dn inspect` of the disk nodes the case
+registered as involved), attempted only when setup built something and the
+gateway is still the process this suite started; each host's controllers, every
+namespace's uuid and `ana_state`, the mask, stas and any task in D state, which
+is what a wedged read looks like from outside; each CN's dm tree, dm status,
+suspended devices, `/proc/mdstat`, nvmet tree, loop devices, tmpfs mounts,
+space, `dmesg`, `nvme list-subsys`, 200 lines of its agent log and that log's
+`"level":"ERROR"` records; and each DN's same set plus a **selected** log dump
+— a DN VM holds up to 43 agent logs, so every
+log carrying an ERROR record is *named* with its count and only the first few,
+plus the instances the case registered, are tailed in full.
+
+Stage names and trace ids are the index into all of it: the failure line ends
+with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
+
+---
+
+## 8. Known limits
+
+1. **A multi-case run pays for a full rebuild per case.** E2E11 is satisfied
+   the expensive way: between cases the suite tears the whole data plane down
+   (`cleanup_all`) and builds it again (`setup_infra` + `setup_case`), because
+   an etcd reset alone would leave every DN disk header naming the previous
+   cluster, which `EnsureFormatted` refuses as foreign for the rest of the run
+   (§3, rule E2E11). A four-case run therefore costs four builds of a 32-slice
+   sp on top of the cases themselves, and `--only` is how a single case is
+   re-run without paying for the others.
+2. **The clone source may fall back.** The default source is a transfer of the
+   same sp, which makes one kernel both initiator and target for the same
+   bytes. That is legal by construction, and whether it *works* is a property
+   of the lab's kernel. §4.4 describes the two triggers and the second pool the
+   suite builds instead. A run that takes the fallback proves the same
+   assertions against a different digest, and says so in its transcript; the
+   branch that ran is logged.
+3. **A standby's namespaces are `inaccessible`, never `non-optimized`.** The cn
+   agent gives a host-facing namespace the optimized ANA group **iff** its
+   cntlr is primary, not disabled, not effectively suspended and not
+   provisioning-deferred; everything else goes to the **inaccessible** group.
+   The port's group 2 is not unused in the tree — the dn agent puts a side's
+   namespace there for every non-primary CN — but no namespace a *host* sees is
+   ever in it. So every host-side ANA assertion in this suite is `optimized` or
+   `inaccessible`, a host always has exactly one usable path per namespace, and
+   ANA path selection across two *usable* controllers is not exercised here and
+   cannot be while CN16 reads that way.
+4. **The closing `fstrim -a` is a no-op in this lab.** As the suite records
+   (checked 2026-09-17), none of the ten libvirt domains carries
+   `discard='unmap'` on its vda `<driver>` line, so the guest filesystem has
+   nothing to forward a discard to. The call is harmless and stays, because it
+   costs nothing and becomes
+   real the moment the operator adds that attribute. Until then the laptop's
+   free space shrinks by the run's real writes — which §4.6 caps at 8 GiB.
+5. **Anti-affinity is headroom, not structure.** See §3, rule E2E4: migration
+   destinations and spare legs relax the location exclusion when tier 1 finds
+   nobody, so the VM-distinctness assertions are made only when
+   `DN_VM_CNT > LEGS`. Running with `--dns-per-vm` well below the §2.4 bound
+   makes that relaxation reachable, and the warning says so.
+6. **Six RPCs are not exercised** (§1.1), and nothing here removes a node or a
+   cluster record.
+7. **`--redund none` runs a strictly smaller suite.** The `td get-leg-bm` read
+   of `ops` stage 06, the whole spare-leg stage of `copy` and the AR8 stage of
+   `react` are skipped with a log line, because a RedundNone group has one leg,
+   no md array and no redundancy to repair.
+8. **The md half of the residue check is asymmetric.** Only a CN assembles
+   arrays, so the DN-side "no dnv md array" probe is the weaker of the two: it
+   runs `mdadm --detail --scan` through a read-only ssh and answers empty on a
+   guest without `mdadm` — and `mdadm` is required on CN guests, not on DN
+   guests. The CN half is the one that can fail.
+9. **A blocked probe leaves an unkillable `dd` behind.** When `host_sha_probe`
+   answers `blocked` the reader is in D state, where `timeout` cannot reach it;
+   the resume that unwedges the device reaps it. That is the price of learning
+   the answer at all, and the alternative — a foreground read — hangs the run
+   for ever.
+10. **The suite occupies the whole lab.** Ten guests, and its cn agents mount
+    their tmpfs at `/tmp/dnv-tmpfs`, the path `cnagent_test.sh` owns. Rule E2E9
+    is an operator rule; nothing enforces it.
+11. **The E2E rule ids are invisible to the doc lint** (§3). `ctl/doclint_test.go`
+    cannot read a family name containing a digit, so nothing checks that a
+    citation of `E2E7` resolves — here, in another document, or in the suite's
+    own comments.
+
+---
+
+## 9. Changelog
+
+* **2026-09-17 — created.** `integtest/e2e_test.sh` and this document are
+  commit 4 of the `use_32_slices` design (`tmp_doc/use_32_slices.md`), after
+  commit 1 (`MaxSliceCntPerSp` 32, `EtcdMaxTxnOps` 1024,
+  `DefaultSliceCntPerSp`, the `CreateStoragePool` tripwire), commit 2
+  (`dnv-agent --nvmet-port-id` on both roles) and commit 3
+  (`dnvctl cluster create --extent-size`). The suite is the first in this repo
+  to build a storage pool at `MaxSliceCntPerSp`, and the only one that drives
+  the shipped `dnvctl` against a real gateway, a real worker, a real cdc, real
+  agents and real kernel NVMe hosts at the same time.
+
+  This document was written from the file rather than from the plan. The
+  places where the suite deliberately departs from `use_32_slices.md` §7 are
+  recorded in §3 (rules E2E4, E2E10, E2E11, E2E12), §4.1 (the `NOT_FOUND`
+  readiness answer, the `ABORTED` retry), §4.4 (the three deviations and the
+  unnecessary `+2` to `DNS_PER_VM`), §4.5 (AR6's computed chunk count, AR6's
+  unasserted placement claim, the host disconnect before the AR5 kill, AR8's
+  second plane), §4.6 (preflight's floors in place of a flat 10 GiB), §5
+  (preflight after the start cleanup) and §6.
+
+  Companion edits, all of them enumerations that now have one more member:
+  `doc/layout.md` §2 gained `doc/e2e_integtest.md` and `integtest/e2e_test.sh`,
+  its `integtest/` note gained this suite's root requirement and this
+  document's name, §6 gained the closing build-out step and §8 records the
+  amendment; `dnv-worker.md` §14.4, `gateway.md` §10.4 and `cdc.md` §9.4 name
+  `e2e_test.sh` beside the suites that already read `EtcdMaxTxnOps` from
+  `workerctl constants`; `dnvctl.md` §7.3 and `gateway.md` §10.3 add this
+  suite's block to the port inventories they check themselves against. No
+  package boundary, path or dependency changed: the suite adds no Go file and
+  no driver of its own — it builds `workerctl`, which it runs for `constants`,
+  and `cnagentctl`, whose `host-id` wrapper no step calls today (every connect
+  here presents the host's own `/etc/nvme/hostnqn` and `hostid`); both binaries
+  already exist.
+
+  Two sentences elsewhere were deliberately **not** touched, because they
+  record what existed when their own suite was specified rather than a live
+  count: `cdc.md` §9.2's "next to the five existing suites" and
+  `dnv-worker.md` §14.2's "next to the two agent suites". `README.md`'s
+  `integtest/` bullet still enumerates six suites and is outside this
+  document's remit.
+
+* **2026-09-17 — the case loop.** The first draft of this document recorded an
+  open defect here: `setup_between_cases` stopped after `setup_infra`, so a
+  multi-case run met the second case with an empty etcd and died in its first
+  `sp get`. The suite now calls `setup_case` there as well; §3 (E2E11) and §8
+  item 1 state the rebuild as it stands, and nothing in this document depends
+  on the old behaviour.

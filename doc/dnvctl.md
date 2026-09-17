@@ -503,8 +503,9 @@ $WORK = /var/tmp/dnv-dnvctl-integtest
 
 Ports: `ALL_PORTS=(29840 29841)` — 29840 the fake, 29841 **deliberately never
 listened on** (the transport case dials it expecting a refusal, so preflight
-must prove it free too). Both are outside every range the other five suites
-and production use (29527/2379 reserved; 295xx/296xx/297xx/298[1-3]x taken).
+must prove it free too). Both are outside every range the other six suites
+and production use (29527/2379 reserved; 295xx/296xx/297xx/298[1-3]x taken,
+and 16379/16380/18020/2985x/299xx by the `e2e_integtest.md` suite).
 
 ### 7.4 Assumptions and preflight
 

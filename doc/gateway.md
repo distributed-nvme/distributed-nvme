@@ -1395,8 +1395,8 @@ $WORK/bin/dnv-gateway --grpc-network tcp --grpc-address 127.0.0.1:2981<k> \
 ```
 
 Port block (fresh, disjoint from every other suite — worker 12379/29600s/
-29700s, cdc 13379/18009-12/14420-23, agent suites 29528/29529, production
-29527/2379):
+29700s, cdc 13379/18009-12/14420-23, agent suites 29528/29529, dnvctl
+29840/29841, e2e 16379/16380/18020/29850/299xx, production 29527/2379):
 
 | what | ports |
 |---|---|
@@ -1423,8 +1423,9 @@ it, and it does not type the number either: `preflight_driver` runs the
 `workerctl` it has just built — `constants` opens no etcd client and takes no
 `--cluster`, so it runs on the DRIVER, before setup ships anything to the
 server — and fills `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of the
-JSON it prints, well before setup starts etcd with it (§10.3). `worker_test.sh` and
-`cdc_test.sh` take the same value from the same subcommand. NO case here
+JSON it prints, well before setup starts etcd with it (§10.3). `worker_test.sh`,
+`cdc_test.sh` and `e2e_test.sh` take the same value from the same
+subcommand. NO case here
 comes near the cap — step 13's `delete-clone` latches and its `wctl
 drain-clone` removes three chunk keys, step 17's `wctl drain-sp` pops sp0's
 four groups — so the flag is what makes the suite run against an etcd

@@ -2139,8 +2139,12 @@ ops). The script does not type that number: a shell suite cannot import
 `common`, so `preflight_driver` runs `workerctl constants` on the driver — no
 etcd, no server, the binary it has just built (§14.8) — and fills
 `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of the JSON it prints, well
-before setup() launches etcd. `gateway_test.sh` and `cdc_test.sh` take the
-same value from the same subcommand. The worker's own cases stay far below the
+before setup() launches etcd. `gateway_test.sh`, `cdc_test.sh` and
+`e2e_test.sh` take the same value from the same subcommand; the last of them
+is the one that reaches the create's shape, committing `CreateStoragePool` at
+`MaxSliceCntPerSp` against a real gateway — 951 compares at its two cntlrs,
+against the 967 the constant is sized by (`e2e_integtest.md` §1). The
+worker's own cases stay far below the
 cap — case G's widest slice pops 21 groups, not the 20 x 4 DNs a maximum batch
 touches, and its clone batches are 64 deletes; the create's shape is out of
 reach here too, since `put-sp` (§14.8) commits that same STM with explicit

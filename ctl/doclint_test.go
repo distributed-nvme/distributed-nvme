@@ -161,7 +161,7 @@ var (
 	// dnvctl.md tags three of its sections this way instead of opening a
 	// paragraph with the id. The `.*` is greedy, so the id must follow the LAST
 	// dash of the heading and be the whole of its tail.
-	docHeadDefRe = regexp.MustCompile(`^#{1,6} .*[\x{2013}\x{2014}] *([A-Z]{2,4})([0-9]+) *$`)
+	docHeadDefRe = regexp.MustCompile(`^#{1,6} .*[\x{2013}\x{2014}] *([A-Z]{2,4}|[A-Z][A-Z0-9]{0,2}[A-Z])([0-9]+) *$`)
 
 	// A leading list marker, stripped before the line-start forms are tried.
 	docBulletRe = regexp.MustCompile(`^ {0,6}[-*] +`)
@@ -173,7 +173,7 @@ var (
 	// Definition forms 3 and 4, line-start: `SPD14. **Tripwires.**` and
 	// `* **GW6 — token check, presence-based.**`. What may follow the id is
 	// spelled out in docDefTerminators.
-	docPlainDefRe = regexp.MustCompile(`^([A-Z]{2,4})([0-9]+)`)
+	docPlainDefRe = regexp.MustCompile(`^([A-Z]{2,4}|[A-Z][A-Z0-9]{0,2}[A-Z])([0-9]+)`)
 
 	// A DECLARED gap: the GW14 bullet of gateway.md §4 ("The handler pattern")
 	// closes with "(There is no GW13: …)" in prose. The id is deliberately
@@ -182,7 +182,7 @@ var (
 	// that owns it rather than in an exception list here. Only the "there is no
 	// <id>" clause is read; whatever justification the document gives after the
 	// colon is the document's own, and nothing here reads or relies on it.
-	docGapRe = regexp.MustCompile(`(?i:there is no )([A-Z]{2,4})([0-9]+)`)
+	docGapRe = regexp.MustCompile(`(?i:there is no )([A-Z]{2,4}|[A-Z][A-Z0-9]{0,2}[A-Z])([0-9]+)`)
 
 	// A bracketed architecture-decision citation, `[D12]`.
 	docDCiteRe = regexp.MustCompile(`\[D([0-9]+)\]`)
@@ -194,7 +194,7 @@ var (
 	docDashRe = regexp.MustCompile(`^ *[-\x{2010}\x{2011}\x{2012}\x{2013}\x{2014}\x{2015}] *$`)
 
 	// A word run that is exactly a rule id.
-	docTokenIdRe = regexp.MustCompile(`^([A-Z]{2,4})([0-9]+)$`)
+	docTokenIdRe = regexp.MustCompile(`^([A-Z]{2,4}|[A-Z][A-Z0-9]{0,2}[A-Z])([0-9]+)$`)
 )
 
 // docDefTerminator is one thing that may follow the id on a definition line,

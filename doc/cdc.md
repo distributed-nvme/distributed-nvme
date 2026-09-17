@@ -652,8 +652,8 @@ Aborts with a message on the first failure:
    the driver preflight (§9.2) builds `workerctl` for this and reads
    `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of `workerctl constants`
    — no etcd, no server, no `--cluster` — before setup starts etcd with it.
-   `worker_test.sh` and `gateway_test.sh` take the same value from the same
-   subcommand.
+   `worker_test.sh`, `gateway_test.sh` and `e2e_test.sh` take the same value
+   from the same subcommand.
 3. s2: `modprobe nvmet nvmet-tcp` succeeds; `/sys/kernel/config/nvmet`
    present; `dmsetup targets` lists `zero`; ports 14420-14423 free.
 4. h1/h2: `modprobe nvme-tcp` succeeds; `nvme-cli` present (version logged);
