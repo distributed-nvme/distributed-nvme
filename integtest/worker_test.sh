@@ -52,14 +52,18 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # at preflight from `workerctl constants`, which prints the Go constants as
 # JSON — so the suite cannot drift from the deployment requirement it enforces.
 #
-# What sizes that requirement is the sp drain's D2 batch: the one transaction
-# in dnv above etcd's default cap of 128 whose size a constant bounds (§11.6).
-# Its compare count and the factors that multiply into it are asserted from the
-# named constants in gateway/txnbudget_test.go, not restated here. Case G
-# commits batches of that family well below the ceiling — its widest slice is
-# 21 groups over two DNs, where a maximum batch touches a DN per leg and per
-# spare of MaxDelGrpPerTxn groups — and clone-drain batches, which fit etcd's
-# default anyway (CLD11).
+# TWO transactions in dnv are above etcd's default cap of 128 with a size that
+# named constants bound. The one that SIZES the requirement is
+# CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
+# MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
+# (architecture.md §8.4) — and the sp drain's D2 batch is the second (§11.6).
+# Both compare counts, and the factors that multiply into them, are asserted
+# from the named constants in gateway/txnbudget_test.go, not restated here.
+# This suite runs no gateway — `wctl put-sp` plants its pools directly — so
+# the create never happens here, and case G commits batches of the drain
+# family well below the ceiling — its widest slice is 21 groups over two DNs,
+# where a maximum batch touches a DN per leg and per spare of MaxDelGrpPerTxn
+# groups — and clone-drain batches, which fit etcd's default anyway (CLD11).
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-worker-integtest

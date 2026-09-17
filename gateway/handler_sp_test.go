@@ -1192,9 +1192,6 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 				r.CntlidSlotList = []uint32{0}
 				r.CntlrCnt = 2
 			}},
-		{"slice_cnt zero", func(r *pb.CreateStoragePoolRequest) {
-			r.SliceCnt = 0
-		}},
 		{"slice_cnt above the maximum",
 			func(r *pb.CreateStoragePoolRequest) {
 				r.SliceCnt = common.MaxSliceCntPerSp + 1
@@ -1230,6 +1227,80 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 				t.Errorf("a §7 refusal must not create the SP")
 			}
 		})
+	}
+}
+
+// TestCreateStoragePoolDefaultsSliceCnt pins the other half of §7's
+// "substitute the default" for slice_cnt: a zero is not a refusal — it is a
+// request for common.DefaultSliceCntPerSp, the way a zero cntlr_cnt asks for
+// DefaultCntlrCntPerSp — and that substituted count is what the SP is
+// actually built with.
+//
+// The two assertions are not one written twice. The reply's slice_list WOULD
+// be: GetStoragePool builds it with loadSlices, which appends exactly one
+// entry per id of the very slice_id_list the first assertion counts (or
+// ABORTs), so the two lengths can never disagree. What the id list does not
+// determine is the SHAPE the allocator built, because CreateStoragePool reads
+// the substituted count TWICE and in two places — planSpGroups, before the
+// candidate unit, sizes the DN scan, and the STM's own `sliceIdx < sliceCnt`
+// loop mints the ids. So the second assertion walks the stored Slice records
+// and counts the disk nodes their sides sit on: a handler that substituted
+// the default for the minting loop but left planSpGroups reading the
+// request's zero passes the first assertion and fails this one.
+//
+// Both expectations are computed from the constant, never from the literal 2,
+// and so is the FIXTURE: at the file's stock sptDnCnt of 12 a
+// DefaultSliceCntPerSp of 4 would make this test die RESOURCE_EXHAUSTED in
+// the DN scan instead of reporting a moved expectation. The one spare slice's
+// worth of nodes is what makes a handler that substitutes one slice too many
+// fail on an assertion here rather than starve that same scan.
+//
+// The request is otherwise the file's default spec with slice_cnt zeroed.
+// sptSliceCnt happens to equal DefaultSliceCntPerSp today; what makes this
+// test meaningful is the zero in the REQUEST, not the shape of the SP.
+func TestCreateStoragePoolDefaultsSliceCnt(t *testing.T) {
+	// §6.5: every leg of the WHOLE SP lands on a DN of its own, and one
+	// cntlr's CN reserves the whole SP's Σ ext_cnt.
+	const envSliceCnt = common.DefaultSliceCntPerSp + 1
+	const envDnCnt = spCreateGrpsPerSlice * envSliceCnt *
+		common.MaxAllocLegPerGrp
+	const envCnFree = uint64(envSliceCnt) * (1 + sptInitExt)
+
+	env := sptNewEnv(t, envDnCnt, sptCnCnt, envCnFree)
+	spec := sptDefaultSpec(sptSpName)
+	spec.sliceCnt = 0
+	if _, err := env.srv.CreateStoragePool(
+		env.ctx, spec.req(env.name),
+	); err != nil {
+		t.Fatalf("CreateStoragePool with slice_cnt 0: %v", err)
+	}
+	reply, err := env.srv.GetStoragePool(env.ctx, &pb.GetStoragePoolRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+	})
+	if err != nil {
+		t.Fatalf("GetStoragePool: %v", err)
+	}
+	if ids := len(reply.GetSpConf().GetSliceIdList()); ids !=
+		common.DefaultSliceCntPerSp {
+		t.Errorf("sp_conf.slice_id_list: got %d ids, want "+
+			"common.DefaultSliceCntPerSp = %d",
+			ids, common.DefaultSliceCntPerSp)
+	}
+	wantSides := spCreateGrpsPerSlice * common.DefaultSliceCntPerSp *
+		common.MaxAllocLegPerGrp
+	sides := env.walkSides(reply.GetSpConf())
+	seen := make(map[string]struct{}, len(sides))
+	for _, side := range sides {
+		seen[side.AddrPort] = struct{}{}
+	}
+	if len(sides) != wantSides || len(seen) != wantSides {
+		t.Errorf("the stored slices carry %d sides on %d distinct disk "+
+			"nodes, want %d of each = spCreateGrpsPerSlice(%d) x "+
+			"common.DefaultSliceCntPerSp(%d) x common.MaxAllocLegPerGrp(%d): "+
+			"planSpGroups was not given the substituted count",
+			len(sides), len(seen), wantSides, spCreateGrpsPerSlice,
+			common.DefaultSliceCntPerSp, common.MaxAllocLegPerGrp)
 	}
 }
 

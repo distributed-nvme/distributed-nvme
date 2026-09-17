@@ -21,9 +21,10 @@ import (
 // sp coordinator would.
 
 // volDrainCloneSteps bounds volDrainClone. A max-shape drain is
-// ceil(MaxSliceCntPerSp*MaxCloneBmCnt / MaxDelBmPerTxn) + 1 = 5 steps; 64 is
-// slack by an order of magnitude and turns a stalled drain into a failure
-// rather than a hang.
+// ceil(MaxSliceCntPerSp*MaxCloneBmCnt / MaxDelBmPerTxn) + 1 = 9 steps — eight
+// full batches and the final STM — and the loop spends one more iteration
+// finding the record gone, so ten in all; 64 is more than six times that and
+// turns a stalled drain into a failure rather than a hang.
 const volDrainCloneSteps = 64
 
 // volChunks is the keys-only scan MD3 performs, in ascending
@@ -548,9 +549,10 @@ func TestCloneDrainConsequences(t *testing.T) {
 // to sweep — and drained through the real batches, against the real etcd this
 // package runs with --max-txn-ops=common.EtcdMaxTxnOps.
 //
-// What it proves is the property the arithmetic cannot: the 256 keys leave in
-// ceil(256 / MaxDelBmPerTxn) transactions of a constant size, not in one whose
-// size is the rectangle.
+// What it proves is the property the arithmetic cannot: the 512 keys leave in
+// ceil(512 / MaxDelBmPerTxn) transactions of a constant size, not in one whose
+// size is the rectangle. (512 = MaxSliceCntPerSp x MaxCloneBmCnt; the body
+// computes it, this sentence spells today's value of it out.)
 func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)

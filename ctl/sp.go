@@ -29,6 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -188,10 +189,17 @@ func spCreateCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.Uint32("cntlr-cnt", 0,
 		"cntlr_cnt — controllers to allocate (0 = the gateway default)")
+	// The default is INTERPOLATED from common.DefaultSliceCntPerSp, not typed
+	// out: `--help` is where an operator learns what a zero buys them, so the
+	// number has to be the gateway's own and has to move with it. init_ext_cnt
+	// has no default at all — CreateStoragePool refuses a zero
+	// (gateway/storagepool.go, architecture.md §8.4) — so its help says so
+	// rather than promising one.
 	flags.Uint32("slice-cnt", 0,
-		"slice_cnt — slices the SP has (0 = the gateway default)")
+		fmt.Sprintf("slice_cnt — slices the SP has (0 = the gateway "+
+			"default, %d)", common.DefaultSliceCntPerSp))
 	flags.Uint64("init-ext-cnt", 0,
-		"init_ext_cnt — DN extents per data group (0 = the default)")
+		"init_ext_cnt — DN extents per data group (required; 0 is refused)")
 	flags.String("slots", "",
 		"comma-separated cntlid_slot_list (empty = the gateway default)")
 	flags.String("redund", "raid1",

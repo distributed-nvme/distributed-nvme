@@ -641,11 +641,14 @@ Aborts with a message on the first failure:
 1. `ssh -o BatchMode=yes` works to all four; `sudo -n true` works on s2, h1,
    h2 (and is **not** required on s1).
 2. s1: ports 13379/13380/18009-18012 free; `$WORK` writable. The etcd this
-   suite starts carries `--max-txn-ops` at `common.EtcdMaxTxnOps` (512 today)
-   like every other etcd serving dnv: the requirement comes from the sp
-   drain's D2 batch (architecture.md §8.4, sized in dnv-worker.md §11.6),
-   which this suite never drives, but the flag is uniform across the fleet
-   and the suite brings its own etcd. The number is not typed in the script:
+   suite starts carries `--max-txn-ops` at `common.EtcdMaxTxnOps` (1024
+   today) like every other etcd serving dnv: the requirement is SIZED by
+   `CreateStoragePool` at its widest shape (architecture.md §8.4) and also
+   has to cover the sp drain's D2 batch (dnv-worker.md §11.6). This suite
+   creates and drains no storage pools, so it drives neither, but the flag
+   is uniform across the fleet and the suite brings its own etcd. Neither
+   compare count is restated here: `gateway/txnbudget_test.go` asserts both
+   from the named constants. The number is not typed in the script either:
    the driver preflight (§9.2) builds `workerctl` for this and reads
    `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of `workerctl constants`
    — no etcd, no server, no `--cluster` — before setup starts etcd with it.

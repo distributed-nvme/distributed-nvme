@@ -141,13 +141,16 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
 		// The deployment requirement of gateway.md §2.1, not a tuning knob:
-		// the sp drain's D2 batch is 486 ops at the maximum shape (SPD13) and
-		// etcd's default cap is 128, so a test etcd without the flag would
-		// fail a transaction the deployment runs fine. (DeleteClone's 256-key
-		// rectangle sweep was this flag's founding justification and is gone —
-		// the clone drain's batches fit the default — but the maximum-shape
-		// sp batch is still COMMITTED against a real etcd, in model's
-		// TestDrainSpSliceAtTheCeiling.)
+		// CreateStoragePool's maximum shape is 967 compares — the transaction
+		// the number is SIZED by — and the sp drain's D2 batch 486 (SPD13),
+		// while etcd's default cap is 128, so a test etcd without the flag
+		// would fail transactions the deployment runs fine. (DeleteClone's
+		// rectangle sweep — then 256 keys, at the 16-slice ceiling of the
+		// time — was this flag's founding justification and is gone; the clone
+		// drain's batches fit the default.) Both survivors are COMMITTED
+		// against a real etcd: the create in this package's
+		// TestCreateStoragePoolAtTheCeiling, the sp batch in model's
+		// TestDrainSpSliceAtTheCeiling.
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

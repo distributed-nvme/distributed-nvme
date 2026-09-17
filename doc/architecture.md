@@ -92,7 +92,7 @@ environment variables; see §13):
 | **extent** | The allocation unit for both DN space and CN budget. Size = `ClusterConf.dn_bin_conf.extent_size`, default `DefaultDnExtSize` = 1 GiB. Counts are always rounded **down** (10 GiB + 3 MiB = 10 extents). |
 | **SP, storage pool** | The unit of volume service. Owns cntlrs, slices, thin devices, subsystems, clones, transfers, migrations. Identified by `sp_name` (user visible) and `sp_id` (internal, used in device names / keys; reverse lookup via `sp_id_to_name`). |
 | **cntlr** | One SP instance on one CN. Exactly one cntlr of an SP is **primary** (runs the full device stack and serves IO); the others are **standby** (keep leg connections, export dm-error, ANA inaccessible). `1 ≤ cntlr_cnt ≤ MaxCntlrCntPerSp(4)`, default 2. Figs `020ControllerNode` (§3.2), `030PrimaryCntlr` (§3.3), `050StandbyCntlr` (§3.4). |
-| **slice** | A vertical shard of an SP. Each slice is one dm thin-pool on the primary. Thin devices are striped (raid0) across all slices. `1 ≤ slice_cnt ≤ MaxSliceCntPerSp(16)`, fixed at SP creation. Fig. `040Slice` (§3.3). |
+| **slice** | A vertical shard of an SP. Each slice is one dm thin-pool on the primary. Thin devices are striped (raid0) across all slices. `1 ≤ slice_cnt ≤ MaxSliceCntPerSp(32)`, fixed at SP creation. Fig. `040Slice` (§3.3). |
 | **group** | A contiguous chunk of pool space inside a slice. Each slice has ≥1 **meta group** (backs the thin-pool metadata device) and ≥1 **data group** (backs the thin-pool data device). `GrowSlice` appends groups. A group is either a single leg (RedundNone) or an md-raid1 over its legs (RedundMdRaid1). Every leg of a group reserves a small **meta region** at its start (md superblock + write-intent bitmap + health block, §3.6); only the remaining **data region** feeds the pool. |
 | **leg** | One replica of a group. Backed by exactly one **side** normally, two sides while that leg is being migrated. Groups may also carry **spare legs** (`MaxSpareLegPerGrp` = 2) — connected and health-checked, but not md members until a switch (§8.12). |
 | **side** | The DN-resident part of a leg: one side device `DnSideName` (a dm-linear over the side's [D13] extent runs) plus, per cntlr, a dm-error + dm-linear + nvmet subsystem exported to that cntlr's CN. Figs `000DiskNode`, `010Side` (§3.1). |
@@ -132,13 +132,13 @@ ClusterConf
 | `MaxDnCntPerCluster` | 1024 | `MaxCnCntPerCluster` | 1024 |
 | `MaxSpCntPerCluster` | 4096 | `MaxTdCntPerSp` | 1024 |
 | `MaxSsCntPerSp` | 4 | `MaxNsCntPerSs` | 4 |
-| `MaxHostCntPerSs` | 8 | `MaxSliceCntPerSp` | 16 |
+| `MaxHostCntPerSs` | 8 | `MaxSliceCntPerSp` / `DefaultSliceCntPerSp` | 32 / 2 |
 | `MinCntlrCntPerSp` / `MaxCntlrCntPerSp` / default | 1 / 4 / 2 | `MaxCntlrCntPerCn` | 256 |
 | `MaxCloneCntPerSp` | 64 | `MaxXferCntPerSp` | 4 |
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
-| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; the largest shape it must clear is `CreateStoragePool`'s 503 compares — §8.4/§13, dnv-worker.md §11.6) | 512 |
+| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; SIZED by `CreateStoragePool`'s widest shape, 967 compares — §8.4/§13, tripwired by `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget`; the sp drain's 486-compare batch is the second bounded one, dnv-worker.md §11.6) | 1024 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
 | `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | | |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
@@ -1297,14 +1297,16 @@ differences:
 Errors: `ALREADY_EXISTS` `sp_conf` key; `RESOURCE_EXHAUSTED` when
 `sum(SpGlobal.shard_bucket) ≥ MaxSpCntPerCluster`, when < `cntlr_cnt` eligible CNs, or
 when DN allocation fails (§6.5); `INVALID_ARGUMENT` when: `cntlr_cnt` outside
-`[MinCntlrCntPerSp, MaxCntlrCntPerSp]`; `slice_cnt` outside `[1, MaxSliceCntPerSp]`;
+`[MinCntlrCntPerSp, MaxCntlrCntPerSp]`; `slice_cnt` ABOVE `MaxSliceCntPerSp` (a
+`slice_cnt` of 0 is not refused — it takes the default below, as `cntlr_cnt` does);
 `init_ext_cnt == 0`; a group too small to hold its own §3.6 meta blocks
 (`model.GroupBlocks`: `total_group_blocks ≤ meta_blocks`) — the data group's
 `init_ext_cnt × extent_size`, or the fixed one-extent meta group when
 `extent_size / data_block_size` is that small — or `init_ext_cnt × extent_size`
 overflowing `uint64`; `cntlid_slot_list` has duplicates, values ≥ `CnCntlidSlotCnt`(8) or fewer
 entries than `cntlr_cnt`; any §7 violation in `bdev_conf` / `event_threshold`.
-Defaults: `cntlr_cnt = DefaultCntlrCntPerSp`(2); `cntlid_slot_list = [0..7]`;
+Defaults: `cntlr_cnt = DefaultCntlrCntPerSp`(2); `slice_cnt = DefaultSliceCntPerSp`(2);
+`cntlid_slot_list = [0..7]`;
 `bdev_conf` member-wise from `ClusterConf.bdev_conf` then constants (`redund_conf`
 unset ⇒ `redund_none`, and `dnvctl` defaults it to `redund_md_raid1` on the CLI). The
 merge itself is unchanged; what is stored is its **result**, every defaultable member
@@ -1315,7 +1317,10 @@ otherwise float with the reading binary's constants instead of fixing this SP's
 geometry for good.
 `event_threshold` is stored as sent and resolved when read (§7, §10.4).
 Action:
-1. Pre-STM: apply the request-level defaults above (`cntlr_cnt`, `cntlid_slot_list`);
+1. Pre-STM: apply the request-level defaults above (`cntlr_cnt`, `slice_cnt`,
+   `cntlid_slot_list`) — the substituted `slice_cnt` is the one everything below is
+   built from, so a defaulted SP has `DefaultSliceCntPerSp` slices in `slice_id_list`
+   and that many `Slice` keys;
    plan groups: per slice one **meta** group with `ext_cnt = 1` (the §8.5 ladder's first
    rung) then one **data** group with `ext_cnt = init_ext_cnt`, in that order — **ext
    counts only**. The groups' `meta_blocks`/`data_blocks` are not computable yet: §3.6
@@ -1349,6 +1354,26 @@ Action:
 3. Reply `sp_id`. Workers then converge: dn-workers push the new side pointers
    (`SyncupDn`), sp-workers push side + cntlr configs (`SyncupSide`/`SyncupCntlr`), and
    the primary builds §3.3.
+
+*Transaction size (amended 2026-09-17).* Step 2's STM is what `EtcdMaxTxnOps` is sized
+by (§2.1, §13). What etcd counts is the STM's reads PLUS its writes, not its distinct
+keys (gateway.md §2.1 carries that rule), so every term below is a COMPARE count and
+none of them is a key count: 7 fixed (3 reads + 4 writes over 5 keys), one `Slice` put
+per slice, 7 per distinct DN (over 4 keys) and 8 per cntlr's CN (over 5), and every
+factor of its widest shape is a ceiling constant — `MaxSliceCntPerSp` slices × 2 groups
+per slice (step 1) × `MaxAllocLegPerGrp` legs = 128 distinct DNs (§6.5's growing black
+list), and `MaxCntlrCntPerSp` cntlrs, each on a CN of its own — so
+`7 + MaxSliceCntPerSp + 7 × (2 × MaxSliceCntPerSp × MaxAllocLegPerGrp) + 8 × MaxCntlrCntPerSp`
+= 967 compares, which 1024 clears by 57. `init_ext_cnt` moves `ext_cnt` VALUES and never
+key counts, so that shape is bounded by those three ceilings alone, and it is TRIPWIRED
+rather than merely reasoned about: `gateway/txnbudget_test.go`'s
+`TestCreateStoragePoolBudget` recomputes the sum from the named constants and pins it at
+967 — so a ceiling that moves under it fails there, naming the carriers to re-pin — and
+`gateway/spceiling_test.go`'s `TestCreateStoragePoolAtTheCeiling` commits one
+maximum-shape create against a real etcd — the same pair the sp drain has in
+`TestSpDrainBatchBudget` and `model/drain_test.go`'s
+`TestDrainSpSliceAtTheCeiling`. The headroom is thin in the DN
+dimension: one more key read or written per DN inside that STM costs 128 compares.
 
 The SP does **not** serve immediately: every side it just created is
 `provisioned = false`, so the DN agents build the side devices and zero them (§9.4)
@@ -1385,7 +1410,8 @@ lists via `SyncupDn`/`SyncupCn` and tear the local stacks down; the sp-worker no
 deleted `SpRev` and stops dispatching.
 
 Why not one transaction: the old one-shot was unbounded in the DN dimension — about 532
-writes at the 16-slice maximum shape, over `EtcdMaxTxnOps` — and `GrowSlice` makes a
+writes at the THEN-maximum 16-slice shape, over the `EtcdMaxTxnOps` of the time — and
+the slice ceiling has doubled since; `GrowSlice` on top of that makes a
 slice's group count unbounded, so no single transaction could ever be proven legal. What
 that transaction actually guaranteed was not atomicity but AGREEMENT — DN and CN budgets
 never disagreeing with the keys that describe them — and the drain keeps it by
@@ -1712,7 +1738,9 @@ the source and hydrates in the background.*
 Errors: `ALREADY_EXISTS` clone key; `RESOURCE_EXHAUSTED` at `MaxCloneCntPerSp`;
 `NOT_FOUND` `dst_td_name`; `FAILED_PRECONDITION` the dst td already targeted by another
 clone; `INVALID_ARGUMENT` when `src_tr_conf` is empty, `src_nqn` invalid,
-`src_slice_cnt ∉ [1,16]`, `src_stripe_size ≠ i×4KiB (1 ≤ i ≤ 256)`,
+`src_slice_cnt ∉ [1,32]` (`MaxSliceCntPerSp`; unlike `CreateStoragePool`'s own
+`slice_cnt`, a `src_slice_cnt` of 0 is refused, not defaulted — it describes a source
+that already exists), `src_stripe_size ≠ i×4KiB (1 ≤ i ≤ 256)`,
 `src_block_size ≠ j×64KiB (1 ≤ j ≤ 16384)`, or `src_block_size` not a multiple of
 `src_stripe_size` (§11.4 constraints).
 Defaults: `dm_clone_conf` per §7; `auto_resume` as sent.
@@ -1794,13 +1822,15 @@ clones`) while any clone drains. Top-down teardown therefore becomes delete-clon
 until gone, then delete-td / delete-sp.
 
 Why not one transaction: the sweep it replaced deleted the whole rectangle of chunk
-keys — 256 at today's 16×16, and the founding justification for `EtcdMaxTxnOps = 512`. Both
-ceilings are expected to grow. A drain batch is `MaxDelBmPerTxn + 4 = 68` ops whatever
-they become, so growth changes the batch COUNT and never the transaction's legality; at
-today's ceilings a maximum-shape drain is four batches. Every clone transaction in the
-system now fits etcd's DEFAULT cap of 128, so nothing on the clone path needs the raised
-flag any more; the `--max-txn-ops=512` requirement survives for the sp drain's D2 batch
-and for `CreateStoragePool`'s own maximum shape (§8.4, §13).
+keys — 512 at today's 32×16 and, back when it was 256 at 16×16, the founding
+justification for the OLD `EtcdMaxTxnOps = 512`. Both ceilings are expected to grow and
+one of them has (`MaxSliceCntPerSp` doubled on 2026-09-17). A drain batch is
+`MaxDelBmPerTxn + 4 = 68` ops whatever they become, so growth changes the batch COUNT
+and never the transaction's legality; at today's ceilings a maximum-shape drain is
+`⌈512 / MaxDelBmPerTxn⌉` = eight batches. Every clone transaction in the system still
+fits etcd's DEFAULT cap of 128, so nothing on the clone path needs the raised flag any
+more; the `--max-txn-ops=1024` requirement is `CreateStoragePool`'s (§8.4) and the sp
+drain's D2 batch's (§13).
 
 **GetClone** — STM read. **UpdateCloneTrConf** — STM replace `src_tr_conf_list`, bump
 `SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
@@ -2254,7 +2284,7 @@ the per-RPC roles:
 
 | | `PushMigrBitmap` (`DiskNodeAgent`) | `PushCloneBitmap` (`ControllerNodeAgent`) |
 |---|---|---|
-| chunk source in etcd | `MigrBitmap` keys, `bm_idx` = append sequence `0 … bm_cnt−1` (≤ `MaxMigrBmCnt` = 4) | `CloneBitmap` keys, addressed by the pair `(src_slice_idx, bm_idx)`: `src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 16, and `bm_idx < MaxCloneBmCnt` = 16 chunks **per slice** |
+| chunk source in etcd | `MigrBitmap` keys, `bm_idx` = append sequence `0 … bm_cnt−1` (≤ `MaxMigrBmCnt` = 4) | `CloneBitmap` keys, addressed by the pair `(src_slice_idx, bm_idx)`: `src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 32, and `bm_idx < MaxCloneBmCnt` = 16 chunks **per slice** |
 | chunk meaning | chunks **concatenate in `bm_idx` order** into one bitmap over the leg's data region (§8.11); immutable once written | each chunk is a **self-positioned** slice of source slice `src_slice_idx`'s bitmap: chunk `(s, b)` holds bytes `[b·C, b·C+len)` of slice `s`'s bitmap, `len ≤ C = CloneBmChunkBytes` (§8.9); `AppendCloneBitmap` may keep growing it within `C` |
 | receiving agent | the DN hosting the migration's **destination** side | the CN hosting the **primary** cntlr (only it runs the dm-clone) |
 | request fields | `side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap` | `cntlr_pointer`, `revision`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap` |
@@ -2279,8 +2309,9 @@ direction, a region copied instead of discarded.
 
 `C = 1 MiB` keeps a grown chunk value plus the `Clone` and rev-bump puts inside etcd's
 default ~1.5 MiB request cap and every `PushCloneBitmap` message inside gRPC's default
-4 MiB; 16 chunks × 1 MiB = 16 MiB of bitmap per slice, which is an 8 TiB slice at
-64 KiB source blocks, and at most 256 MiB per clone against etcd's default 2 GiB
+4 MiB; `MaxCloneBmCnt` = 16 chunks × 1 MiB = 16 MiB of bitmap per slice, which is an
+8 TiB slice at 64 KiB source blocks, and at most `MaxSliceCntPerSp × MaxCloneBmCnt` ×
+1 MiB = 512 MiB per clone against etcd's default 2 GiB
 quota. (With the defaults the bitmaps are far smaller — a 1 TiB leg at 1 MiB
 `block_size` is 2^20 bits = 128 KiB — the chunking exists for the value-size limits
 and the paged readers, not because bitmaps are inherently huge.)
@@ -2937,11 +2968,11 @@ moving ss/ns from `sp1` to `sp2`:
 
 Definitions for one raid0 device: `slice_cnt` underlying devices, `stripe_size` chunk
 size, and per-underlying-device write bitmaps whose bit granularity is `block_size`.
-Constraints (validated in §8.9): `1 ≤ slice_cnt ≤ 16`; `stripe_size = i × 4 KiB,
-1 ≤ i ≤ 256`; `block_size = j × 64 KiB, 1 ≤ j ≤ 16384`; `block_size = k × stripe_size,
-k ≥ 1`. Address mapping for logical byte offset `off`: chunk `c = off / stripe_size`,
-slice `= c mod slice_cnt`, slice-local offset `= (c div slice_cnt) × stripe_size +
-(off mod stripe_size)`.
+Constraints (validated in §8.9): `1 ≤ slice_cnt ≤ 32` (`MaxSliceCntPerSp`);
+`stripe_size = i × 4 KiB, 1 ≤ i ≤ 256`; `block_size = j × 64 KiB, 1 ≤ j ≤ 16384`;
+`block_size = k × stripe_size, k ≥ 1`. Address mapping for logical byte offset `off`:
+chunk `c = off / stripe_size`, slice `= c mod slice_cnt`, slice-local offset
+`= (c div slice_cnt) × stripe_size + (off mod stripe_size)`.
 
 Worked example (`slice_cnt = 4`, `stripe_size = 16 KiB`, `block_size = 1 MiB`; here the
 16 KiB chunks are drawn as 4 × 4 KiB rows for compactness): writing the 1st, 3rd, 7th
@@ -3141,22 +3172,29 @@ dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f \
 ```
 
 **etcd deployment requirement.** Every etcd node serving dnv MUST run with
-`--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. The
-transaction the number is TRIPWIRED against is the sp drain's D2 batch,
-`6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 compares at
-the maximum shape (§8.4, dnv-worker.md §11.6) — the largest a tripwire BOUNDS, not
-the largest in the system. `CreateStoragePool` writes a whole SP in one transaction
-and is the larger of the two: 503 compares at its own maximum shape — 7 fixed, one
-put per slice, 7 per distinct DN and 8 per cntlr's CN, at `MaxSliceCntPerSp` slices
-× 2 groups per slice × `MaxAllocLegPerGrp` legs = 64 DNs and `MaxCntlrCntPerSp`
-cntlrs — which 512 clears by 9. `init_ext_cnt` moves `ext_cnt` VALUES, never key
-counts, so that shape is bounded by those three constants and IS tripwirable; no
-test asserts it yet, and that is a gap, not a property of the request.
-DeleteClone's `MaxSliceCntPerSp × MaxCloneBmCnt` = 256-key rectangle sweep was the
-requirement's founding justification and is gone: since 2026-09-16 the clone drain
-removes those keys in 68-op batches, which fit the default (§8.9,
-dnv-worker.md §11.7). This is not something dnv can set from the client side —
-it is a server flag, so it belongs in the etcd deployment alongside the
+`--max-txn-ops=1024` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. The
+transaction the number is SIZED by is `CreateStoragePool`, which writes a whole SP in
+one transaction: 967 compares at its maximum shape — 7 fixed, one put per slice, 7 per
+distinct DN and 8 per cntlr's CN, at `MaxSliceCntPerSp` slices × 2 groups per slice ×
+`MaxAllocLegPerGrp` legs = 128 DNs and `MaxCntlrCntPerSp` cntlrs:
+
+```
+7 + MaxSliceCntPerSp
+  + 7 × (2 × MaxSliceCntPerSp × MaxAllocLegPerGrp)
+  + 8 × MaxCntlrCntPerSp                            = 7 + 32 + 896 + 32 = 967
+```
+
+which 1024 clears by 57. `init_ext_cnt` moves `ext_cnt` VALUES, never key counts, so
+that shape is bounded by those three constants alone, and `gateway/txnbudget_test.go`'s
+`TestCreateStoragePoolBudget` is its tripwire (§8.4). The SECOND bounded transaction
+above the default, and no longer the one that sizes the number, is the sp drain's D2
+batch, `6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 compares
+at the maximum shape (§8.4, dnv-worker.md §11.6, `TestSpDrainBatchBudget`).
+DeleteClone's `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle sweep — then 256 keys, at
+the 16-slice ceiling of the time — was the requirement's founding justification and is
+gone: since 2026-09-16 the clone drain removes those keys in 68-op batches, which fit
+the default (§8.9, dnv-worker.md §11.7). This is not something dnv can set from the
+client side — it is a server flag, so it belongs in the etcd deployment alongside the
 endpoints above.
 
 Every flag is also settable via config file and environment (viper). The worker's
@@ -3663,20 +3701,64 @@ own amendment sections are the surviving record.
   now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
   carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
   **[D14]**.
+* **32 slices per SP (2026-09-17)** — `MaxSliceCntPerSp` 16 → 32, `EtcdMaxTxnOps`
+  512 → 1024, and a new `DefaultSliceCntPerSp` = 2 that `CreateStoragePool`
+  substitutes for a `slice_cnt` of 0, exactly as it already did for `cntlr_cnt`.
+  `MaxCloneBmCnt` deliberately stays 16: it counts chunks per SLICE, not slices.
+  The ceiling is still enforced in the same two places — `CreateStoragePool`, whose
+  only change is the new zero branch, and `validateCloneGeometry`, where a
+  `src_slice_cnt` of 0 is still refused because it describes a source that already
+  exists. The raised budget is SIZED by `CreateStoragePool`'s widest shape rather
+  than by the sp drain's batch — 967 compares against the drain's 486 — so the
+  create gains the tripwire-plus-real-etcd-proof pair the drain already had:
+  `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget` and
+  `gateway/spceiling_test.go`'s `TestCreateStoragePoolAtTheCeiling`. The
+  placement consequence is worth stating even though no sentence here carried a
+  number for it: §6.5's black list grows across the create's own groups, so
+  every leg the CREATE places lands on a DN of its own and an md-raid1 SP at
+  the new ceiling needs `2 × MaxSliceCntPerSp × MaxAllocLegPerGrp` = 128
+  distinct DNs — twice what 16 slices needed, and still far inside
+  `MaxDnCntPerCluster` = 1024. (`GrowSlice` keeps its own §6.5 rule — the
+  gateway never appends to its black list — so a grown group may reuse a DN
+  the create placed; that is unchanged here and is why this is a statement
+  about the create, not about the SP for the rest of its life.)
+  Carriers in this file: §2's **slice** glossary row and §2.1's
+  `MaxSliceCntPerSp`/`DefaultSliceCntPerSp` and `EtcdMaxTxnOps` rows; §8.4
+  (Errors, Defaults, Action step 1, and a new transaction-size note); §8.9
+  (`src_slice_cnt`'s range and the clone drain's "why not one transaction",
+  whose rectangle is now 512 keys drained in eight batches); §9.6 (the
+  chunk-address row and the per-clone bitmap ceiling, now 512 MiB); §11.4's raid0
+  constraint; and §13's etcd deployment requirement. Every carrier in that list
+  is RE-DERIVED at the new ceilings, numbers included. What is not re-derived is
+  HISTORY — sentences about a design that is already gone, which keep their old
+  numbers and are reworded to say *then*, with the current state named beside
+  them where a reader needs it: §8.4's ~532-write one-shot, §13's DeleteClone
+  sweep, and the three older entries below that repeat those two (clone
+  incremental deletion, sp incremental deletion, chunked per-slice clone
+  bitmaps). §8.9's "why not one transaction" carries both halves at once — its
+  rectangle re-derived to 512 keys in eight batches, the 256 at 16×16 kept
+  beside it as the founding justification it was.
+  `gateway.md`, `cnagent.md`, `dnv-worker.md`, `cdc.md` and `dnvctl.md` follow.
+  `worker_test.sh` and `cdc_test.sh` read `EtcdMaxTxnOps` from `workerctl
+  constants`, so only the rationale in their comments moved; `gateway_test.sh`
+  moves that rationale too, but also gains a hand-mirrored `MAX_SLICE_CNT`,
+  because its stage 13 creates a clone AT `MaxSliceCntPerSp` and `workerctl
+  constants` does not print that constant — so that suite is a carrier of this
+  ceiling in its own right, and the next move of it has to touch the suite.
 * **clone incremental deletion (2026-09-16)** — `DeleteClone` became a LATCH too:
   it commits `deleting = true`, the dst-namespace resume and one `SpRev` bump, and the
   sp-worker removes the chunk keys `MaxDelBmPerTxn` at a time and then the clone
   (`dnv-worker.md` §11.7, rules `CLD1`–`CLD12`). The sweep it replaced deleted the
-  whole rectangle of chunk keys in one transaction — 256 deletes at today's 16×16,
-  and the founding justification for `EtcdMaxTxnOps = 512`. A batch is now 68 ops
-  whatever the ceilings become, so every clone transaction in the system fits etcd's
-  default cap and the 512 requirement no longer rests on the clone path at all (§13).
-  §8.9 (its new lead-in note,
+  whole rectangle of chunk keys in one transaction — then 256 deletes, at the 16×16
+  ceilings of the time, and the founding justification for the then-`EtcdMaxTxnOps`
+  of 512. A batch is now 68 ops whatever the ceilings become, so every clone
+  transaction in the system fits etcd's default cap and the raised requirement no
+  longer rests on the clone path at all (§13). §8.9 (its new lead-in note,
   DeleteClone's Errors and Action, AppendCloneBitmap's Errors, and the chunk-count
-  sentence), §2.1 (`MaxDelBmPerTxn`) and the `Clone.deleting` field follow; the exclusion that
-  performs the physical teardown reuses the existing removed-clone retire path, so there
-  are zero agent changes. The namespace resume stays synchronous with the RPC,
-  deliberately. §11.3's abort walkthrough also follows:
+  sentence), §2.1 (`MaxDelBmPerTxn`) and the `Clone.deleting` field follow; the
+  exclusion that performs the physical teardown reuses the existing removed-clone
+  retire path, so there are zero agent changes. The namespace resume stays
+  synchronous with the RPC, deliberately. §11.3's abort walkthrough also follows:
   the destination thin device is held for the whole drain, so deleting it now needs the
   poll first — a consequence enumerated here, in `gateway.md` §5.8 and in `dnvctl.md`'s
   `clone delete` row, all three of which list it beside the name and `sp delete`.
@@ -3684,12 +3766,14 @@ own amendment sections are the surviving record.
   it commits `deleting = true` plus one `SpRev` bump and returns, and the sp-worker
   drains the SP in transactions of a constant size (`dnv-worker.md` §11.6, rules
   `SPD1`–`SPD14`). The one-shot teardown it replaced was unbounded in the DN
-  dimension (~532 writes at the 16-slice maximum shape, over `EtcdMaxTxnOps`) and
-  `GrowSlice` made a slice's group count unbounded, so no single transaction could
-  be proven legal. §8 preamble (the flag now has a writer), §8.4 (Errors + Action),
+  dimension (~532 writes at the then-maximum 16-slice shape, over the
+  `EtcdMaxTxnOps` of the time) and `GrowSlice` made a slice's group count
+  unbounded, so no single transaction could be proven legal. §8 preamble (the
+  flag now has a writer), §8.4 (Errors + Action),
   §2.1 (the two new constants `MaxDelGrpPerTxn` / `MaxAllocLegPerGrp`), §8.9 and
   §13 (`--max-txn-ops` was re-justified on the drain's 486-op batch, not
-  DeleteClone's 256-key sweep) and §10.4 (a `deleting` SP drains rather than being
+  DeleteClone's 256-key sweep of the time — and re-sized again on 2026-09-17, on
+  `CreateStoragePool`'s own shape) and §10.4 (a `deleting` SP drains rather than being
   suppressed) all follow; partial teardown is now an observable state, and what the
   single transaction really guaranteed — that DN/CN budgets never disagree with the
   keys describing them — is preserved by every batch releasing budget in the same
@@ -3756,9 +3840,10 @@ own amendment sections are the surviving record.
   §5.3 key table, §8.9 (`AppendCloneBitmap`'s five bounds incl. the new
   `RESOURCE_EXHAUSTED` chunk overflow, and — until the 2026-09-16 clone drain
   replaced it — DeleteClone's nested sweep), §8.13 (the aligned-paging convention),
-  §9.3, §9.6 (whole section), §13 (the `--max-txn-ops=512` etcd deployment
-  requirement DeleteClone's sweep forced, which the clone drain has since handed
-  over to the sp drain and `CreateStoragePool`) and **[D8]** now describe the pair.
+  §9.3, §9.6 (whole section), §13 (the raised `--max-txn-ops` etcd deployment
+  requirement DeleteClone's sweep forced — 512 then, 1024 since 2026-09-17 — which
+  the clone drain has since handed over to `CreateStoragePool` and the sp drain) and
+  **[D8]** now describe the pair.
   `BitmapInfo` gains `chunk_id_list`, which clones report instead of `bm_idx_list`.
   Migration bitmaps are untouched, and the proto renumbering is deliberately
   wire-incompatible with old peers: there is no compatibility path. Old 6-field clone

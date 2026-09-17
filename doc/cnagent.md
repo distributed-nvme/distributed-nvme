@@ -158,7 +158,7 @@ func (nf *NameFmt) LocalCloneBmPath(
 
 `LocalMigrBmPath` is untouched — migration chunks keep their flat `bm_idx`
 (dnagent.md SH21-SH23). Both clone fields fit two hex digits:
-`src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 16 (enforced by
+`src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 32 (enforced by
 `CreateClone`), and `bm_idx < MaxCloneBmCnt` = 16 — a constant that keeps its
 name and value but now caps the chunks of **one** source slice's bitmap, each
 of the fixed capacity `CloneBmChunkBytes` = 1 MiB (the constants themselves

@@ -175,8 +175,9 @@ authoritative for comment text (as it is for `dnagent.md` §2.2's block).
 ```go
 // dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
 // another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
-// arithmetic tripwired against it is dnv-worker.md §11.6's and §11.7's —
-// SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+// arithmetic tripwired against it is that section's for CreateStoragePool
+// and dnv-worker.md §11.6's and §11.7's for the two drains — SPD13/SPD14
+// for the sp drain, CLD11 for the clone drain.
 const (
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -192,11 +193,12 @@ const (
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 	// The --max-txn-ops requirement on every etcd serving dnv (§14.4).
-	// SPD13's 486-compare D2 batch at the maximum shape is the largest
-	// transaction the SPD14 tripwires BOUND, not the largest in the
-	// system: CreateStoragePool's 503-compare maximum shape is larger and
-	// untripwired (gateway.md §2.1, which owns this constant).
-	EtcdMaxTxnOps = 512
+	// The transaction this number is SIZED by is CreateStoragePool at its
+	// widest shape — 967 compares, every factor of it a ceiling constant,
+	// tripwired by TestCreateStoragePoolBudget (gateway.md §2.1, which owns
+	// this constant). SPD13's 486-compare D2 batch is the second bounded
+	// transaction the number has to cover, tripwired by SPD14.
+	EtcdMaxTxnOps = 1024
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
@@ -1489,9 +1491,9 @@ one, so that one id spells the rule in the code comments
 true` plus one `BumpSpRev`, five ops, nothing else (architecture.md §8.4,
 gateway.md §5.4) — and the sp coordinator takes it apart in steps whose size
 is a constant. The old one-shot was unbounded in the DN dimension (about 532
-writes at the 16-slice maximum shape, over `EtcdMaxTxnOps`) and `GrowSlice`
-makes a slice's group count unbounded, so no single transaction could ever be
-proven legal.
+writes at the then-maximum 16-slice shape, over the `EtcdMaxTxnOps` of the
+time, and the slice ceiling has doubled since) and `GrowSlice` makes a slice's
+group count unbounded, so no single transaction could ever be proven legal.
 
 SPD1. **The allocator's real group shape is a named constant.**
       `MaxAllocLegPerGrp = 2` is the widest group the allocator builds
@@ -1645,10 +1647,14 @@ SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       put; per DN DnConf put, capacity del + put, DnRev put), hence `6 + 6D`
       compares against `3 + 4D` success ops, and
       `D ≤ MaxDelGrpPerTxn × (MaxAllocLegPerGrp + MaxSpareLegPerGrp)` — 80
-      today, so `486 ≤ EtcdMaxTxnOps = 512`. Sides contribute one DN each
+      today, so `486 ≤ EtcdMaxTxnOps = 1024`. Sides contribute one DN each
       because a latched SP has no migrations and therefore no two-side legs.
       D1 (≤ ~100), D3 (≤ 8) and the latch (5) are trivially legal. SPD14 is
-      the tripwire pair that keeps it so.
+      the tripwire pair that keeps it so. This batch is the SECOND bounded
+      transaction above etcd's default cap of 128, not the one `EtcdMaxTxnOps`
+      is sized by: that is `CreateStoragePool`'s widest shape, 967 compares
+      (`gateway.md` §2.1), which was already the larger of the two at 503
+      while `MaxSliceCntPerSp` was 16.
 
 SPD14. **Tripwires.** The budget of SPD13 is kept legal by a pair of tests:
       an arithmetic assertion over the NAMED constants
@@ -1671,10 +1677,11 @@ code (`model/clonedrain.go`, `worker/clonedrain.go`) and here.*
 `deleting = true`, the destination namespaces resumed, one `BumpSpRev`
 (architecture.md §8.9, gateway.md §5.8) — and the sp coordinator removes the
 chunk keys in batches of a constant size and then the clone itself. The sweep it
-replaced was the whole rectangle of chunk keys deleted in one transaction, 256 at today's
-16×16 and the founding justification for `EtcdMaxTxnOps = 512`; both ceilings
-are expected to grow, and a batch is `MaxDelBmPerTxn + 4 = 68` ops whatever they
-become.
+replaced was the whole rectangle of chunk keys deleted in one transaction — 512
+at today's 32×16, and 256 at the then 16-slice ceiling, when it was the
+founding justification for an `EtcdMaxTxnOps` of 512; both ceilings can still
+grow, `MaxSliceCntPerSp` just did, and a batch is `MaxDelBmPerTxn + 4 = 68` ops
+whatever they become.
 
 CLD1. **Live-clone gate.** `AppendCloneBitmap` and `UpdateCloneTrConf` refuse
       `FAILED_PRECONDITION` when `deleting` is true. `DeleteClone` is the only
@@ -1787,7 +1794,7 @@ CLD10. **Asynchrony and retry.** SPD13 verbatim: no drain STM waits on,
       commits nothing, bumps nothing and retries on the next RW12 tick,
       forever; progress has exactly two user-visible states — `deleting =
       true`, then `NOT_FOUND` — accepted deliberately, since a max-shape drain
-      is five sub-second transactions after the latch: four batches and the
+      is nine sub-second transactions after the latch: eight batches and the
       final STM (CLD12).
 
 CLD12. **Termination and the revision contract.** The latch, every batch and
@@ -1797,8 +1804,8 @@ CLD12. **Termination and the revision contract.** The latch, every batch and
       the set is finite, the final STM removes the clone, and a pass that
       finds no deleting clone runs no drain step, so the drain commits and
       bumps nothing (that pass's own reactions are unaffected, CLD7) — at
-      most six bumps per deleted clone at today's maximum shape under one
-      owner (1 latch + 4 batches + 1 final). Note the shrink is a property of
+      most ten bumps per deleted clone at today's maximum shape under one
+      owner (1 latch + 8 batches + 1 final). Note the shrink is a property of
       the SET, not of each batch: the loser of an accepted two-owner overlap
       commits a batch of keys the winner already popped, so ITS batch shrinks
       nothing — and still terminates, because its next pass re-scans, sees the
@@ -1820,10 +1827,11 @@ CLD11. **Transaction budget, and its tripwire pair.** Ledger-free, so one line
       latch is strictly smaller than the transaction it replaced. 68 also fits
       etcd's DEFAULT `--max-txn-ops` of 128 — prose, not a deployment change:
       the requirement stays `EtcdMaxTxnOps` for the transactions that do NOT
-      fit 128, the sp drain's 486-compare D2 batch (§11.6) and
-      `CreateStoragePool`'s 503-compare maximum shape (`gateway.md` §2.1).
-      `gateway/txnbudget_test.go` asserts both bounds from the named
-      constants, and `gateway/clonedrain_test.go` drains the whole 16x16
+      fit 128, `CreateStoragePool`'s 967-compare maximum shape, which is what
+      that number is sized by (`gateway.md` §2.1), and the sp drain's
+      486-compare D2 batch (§11.6). `gateway/txnbudget_test.go` asserts all
+      three compare counts — this batch's 68 and those two — from the named
+      constants, and `gateway/clonedrain_test.go` drains the whole 32x16
       rectangle against a real etcd to pin the batch COUNT.
 
 ---
@@ -1945,7 +1953,7 @@ does).
   any cntlr or slice survives; the deliberate asymmetry between a missing
   DESCRIBING key (refuse) and a missing RECEIVING ledger (skip); two
   concurrent drivers converging with exact ledgers; and SPD14's real-etcd
-  ceiling test, one maximum-shape batch against `--max-txn-ops=512`.
+  ceiling test, one maximum-shape batch against `--max-txn-ops=EtcdMaxTxnOps`.
 * **clonedrain.go** (§11.7) — CLD7's derivation for all three states, the
   third being a LIVE clone, which is what stops a pass from draining one, and
   the "none remain" state built with zero surviving keys — the terminal state
@@ -1975,8 +1983,8 @@ does).
   up while the loser is parked inside the agent call, which is the only way to
   reach the phase-2 check; CLD1 in both directions; the name, the destination
   thin device and `sp delete` all blocked until the final STM and all released
-  by it; and CLD11's real-etcd proof, the whole 16x16 rectangle drained in
-  exactly four batches.
+  by it; and CLD11's real-etcd proof, the whole 32x16 rectangle drained in
+  exactly eight batches.
 * **clusterconf.go** — key→id derivation, the entry handed back exactly as
   stored, an invalid conf kept in the cache rather than dropped, delete.
 
@@ -2121,19 +2129,23 @@ Preflight (fail fast, install nothing):
   ≥ 1 GiB free.
 
 The suite brings its own etcd, so it owns etcd's deployment requirements
-too: the §14.3 launch line passes `--max-txn-ops` at 512 because every etcd
-serving dnv must (`common.EtcdMaxTxnOps`; the sp drain's D2 batch is 486
-compares at the maximum shape and `CreateStoragePool` 503, while etcd's
-default cap is 128 — `DeleteClone`'s 256-key rectangle sweep was the founding
-justification and is gone since 2026-09-16, §11.7's batches being 68 ops). The script does not type that
-number: a shell suite cannot import `common`, so `preflight_driver` runs
-`workerctl constants` on the driver — no etcd, no server, the binary it has
-just built (§14.8) — and fills `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps`
-field of the JSON it prints, well before setup() launches etcd.
-`gateway_test.sh` and `cdc_test.sh` take the same value from the same
-subcommand. The worker's own cases stay far below the cap — case G's widest
-slice pops 21 groups, not the 20 x 4 DNs a maximum batch touches, and its
-clone batches are 64 deletes — so the flag is there to run against an etcd
+too: the §14.3 launch line passes `--max-txn-ops` at 1024 because every etcd
+serving dnv must (`common.EtcdMaxTxnOps`; `CreateStoragePool` at its widest
+shape is 967 compares and is what that number is sized by, the sp drain's D2
+batch is the second at 486, while etcd's default cap is 128 — `DeleteClone`'s
+rectangle sweep, then 256 keys at the 16-slice ceiling of the time, was the
+founding justification and is gone since 2026-09-16, §11.7's batches being 68
+ops). The script does not type that number: a shell suite cannot import
+`common`, so `preflight_driver` runs `workerctl constants` on the driver — no
+etcd, no server, the binary it has just built (§14.8) — and fills
+`ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of the JSON it prints, well
+before setup() launches etcd. `gateway_test.sh` and `cdc_test.sh` take the
+same value from the same subcommand. The worker's own cases stay far below the
+cap — case G's widest slice pops 21 groups, not the 20 x 4 DNs a maximum batch
+touches, and its clone batches are 64 deletes; the create's shape is out of
+reach here too, since `put-sp` (§14.8) commits that same STM with explicit
+placement but no `put-sp` in the suite plants more than one slice, against the
+32 the 967 is counted at — so the flag is there to run against an etcd
 configured the way production is, not because a case needs it.
 
 ### 14.5 Identity plan
@@ -2173,7 +2185,7 @@ configured the way production is, not because a case needs it.
 | §3.6 group geometry (`meta_blocks`, `data_blocks`) | read at preflight from `workerctl geometry`, not written down | case D asserts a new group's geometry and feeds the matching totals back as a thin-pool status line (§14.11 D5/D6), and it is the only case that does. `read_geometry` calls the driver twice at the three values above, with one `geometry_json` helper that hard-wires `--raid1` and varies only the count — `--raid1 --ext-cnt 2` for a data group and `--raid1 --ext-cnt 1` for a meta group, both of case D's sp0 groups being `:raid1` — so the numbers come out of `model.GroupBlocks` (MD6), the same call `GrowSlice` makes. At these values that is `meta_blocks 3` for both kinds, `data_blocks` 125 and 61 |
 | `THIN_META_BLOCK_SIZE` | 4096 | dm-thin's metadata block size, fixed by the kernel: the metadata fraction of a status line counts THESE blocks, not `block_size` ones (§11.3's `× block_size / 4096`). The shell derives a meta group's contribution to that fraction as `data_blocks × block_size / 4096` = 15616; `model.GroupBlocks` knows nothing about it, which is why this one stays in the script |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
-| etcd `--max-txn-ops` | `common.EtcdMaxTxnOps` (512), read at preflight into `ETCD_MAX_TXN_OPS`, not typed in the script | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-compare D2 batch (and below `CreateStoragePool`'s 503-compare maximum shape, `gateway.md` §2.1). (`DeleteClone`'s 256-key sweep was the founding justification and is gone since 2026-09-16 — §11.7's batches are 68 ops.) The compare count itself is asserted from the named constants in `gateway/txnbudget_test.go` (SPD14, CLD11), not restated in the suite |
+| etcd `--max-txn-ops` | `common.EtcdMaxTxnOps` (1024), read at preflight into `ETCD_MAX_TXN_OPS`, not typed in the script | the deployment requirement of §14.4: etcd's default 128 is below `CreateStoragePool`'s 967-compare maximum shape, which is what sizes the requirement (`gateway.md` §2.1), and below the sp drain's 486-compare D2 batch. (`DeleteClone`'s sweep — then 256 keys, at the 16-slice ceiling of the time — was the founding justification and is gone since 2026-09-16; §11.7's batches are 68 ops.) The compare counts themselves are asserted from the named constants in `gateway/txnbudget_test.go` (SPD14, CLD11 and `TestCreateStoragePoolBudget`, the create having no rule id here), not restated in the suite |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which

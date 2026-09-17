@@ -62,11 +62,15 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # `workerctl constants`, which prints the Go constants as JSON, so this suite
 # launches etcd with whatever common/constants.go now says.
 #
-# What sizes that requirement is the sp drain's D2 batch — the one transaction
-# in dnv above etcd's default cap of 128 whose size a constant bounds
-# (dnv-worker.md §11.6); its compare count and the factors that multiply into
-# it are asserted from the named constants in gateway/txnbudget_test.go, not
-# restated here. This suite's own drains stay far under that ceiling: its
+# TWO transactions in dnv are above etcd's default cap of 128 with a size that
+# named constants bound. The one that SIZES the requirement is
+# CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
+# MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
+# (architecture.md §8.4) — and the sp drain's D2 batch is the second
+# (dnv-worker.md §11.6). Both compare counts, and the factors that multiply
+# into them, are asserted from the named constants in
+# gateway/txnbudget_test.go, not restated here. This suite's own creates and
+# drains stay far under the ceiling: it creates SP_SLICE_CNT-slice pools, and
 # `wctl drain-sp` is asserted to take 2 + SP_SLICE_CNT steps, which is one D2
 # batch per slice and therefore a whole slice's groups inside a single batch,
 # and its `wctl drain-clone` removes three chunk keys where CLD11 allows
@@ -87,6 +91,18 @@ ALL_PORTS=(15379 15380 29810 29811 29812 29820 29821 29822 29823 29830 29831 298
 
 # common.DnvPrefix — the first field of every dnv etcd key (§5.1).
 DNV_PREFIX=dnv
+
+# common.MaxSliceCntPerSp, mirrored by hand. It is CreateClone's
+# `src_slice_cnt` ceiling (§5.8, validateCloneGeometry) and stage 13 creates a
+# clone AT it, so it must track common/constants.go. `workerctl constants`
+# does not emit this one today — that is the whole reason the number is typed
+# here, and it is a gap, not a constraint: adding it to that emit and reading
+# it in read_constants(), exactly as ETCD_MAX_TXN_OPS is read, would end the
+# drift. Until then, note which way the drift is SILENT: a ceiling LOWERED
+# below this value fails stage 13 loudly with INVALID_ARGUMENT, while one
+# RAISED above it leaves stage 13 green and testing an interior geometry
+# instead of the boundary it is named for.
+MAX_SLICE_CNT=32
 
 # §10.5 identity plan.
 CLUSTER=itgw
@@ -2048,11 +2064,12 @@ EOF
 	# -------------------------------------------------------------------
 	stage 13 "create-clone cl0 at the geometry bounds, its bitmap, its delete"
 	# -------------------------------------------------------------------
-	# The three source bounds at their limits (validateCloneGeometry): 16
-	# slices, a 256 x 4 KiB stripe and a 16384 x 64 KiB block, which is also
-	# an exact multiple of the stripe.
+	# The three source bounds at their limits (validateCloneGeometry):
+	# MaxSliceCntPerSp slices, a 256 x 4 KiB stripe and a 16384 x 64 KiB
+	# block, which is also an exact multiple of the stripe. The slice bound is
+	# the source's own, independent of sp0's SP_SLICE_CNT.
 	out=$(gw create-clone --sp sp0 --rev "$SP_REV" --name cl0 --dst-td t1 \
-		--src-nqn "$srcNqn" --src-idx 1 --src-slices 16 \
+		--src-nqn "$srcNqn" --src-idx 1 --src-slices "$MAX_SLICE_CNT" \
 		--src-stripe 1048576 --src-block 1073741824)
 	refresh_rev sp0
 	local cloneId clone
@@ -2063,7 +2080,8 @@ EOF
 	assert_field "$clone" '.dst_td_id' "$t1Id" "clone dst_td_id is t1's"
 	assert_field "$clone" '.src_nqn' "$srcNqn" "clone src_nqn"
 	assert_field "$clone" '.src_ns_idx' "1" "clone src_ns_idx"
-	assert_field "$clone" '.src_slice_cnt' "16" "clone src_slice_cnt"
+	assert_field "$clone" '.src_slice_cnt' "$MAX_SLICE_CNT" \
+		"clone src_slice_cnt"
 	assert_field "$clone" '.src_stripe_size' "1048576" "clone src_stripe_size"
 	assert_field "$clone" '.src_block_size' "1073741824" "clone src_block_size"
 	assert_eq "$(smoke_jq "$clone" '.src_tr_conf_list | length')" "1" \
@@ -2165,7 +2183,8 @@ EOF
 		--name cl0 --src-tr-addr 127.0.0.3
 	assert_no_write "create-clone of a latched name" \
 		gwx ALREADY_EXISTS create-clone --sp sp0 --rev "$SP_REV" --name cl0 \
-		--dst-td t1 --src-nqn "$srcNqn" --src-idx 1 --src-slices 16 \
+		--dst-td t1 --src-nqn "$srcNqn" --src-idx 1 \
+		--src-slices "$MAX_SLICE_CNT" \
 		--src-stripe 1048576 --src-block 1073741824
 	# The drain is the sp coordinator's, and this suite runs no worker: the
 	# worker-role stand-in finishes it, exactly as `wctl drain-sp` does for the

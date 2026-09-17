@@ -309,8 +309,11 @@ func regionSkippableNaive(
 }
 
 // TestRegionSkippableMatchesTheAddressMapping sweeps the geometries §11.4
-// allows (1 <= slice_cnt <= 16, stripe_size = i x 4 KiB, block_size = k x
-// stripe_size) against pseudo-random per-slice bitmaps.
+// allows (1 <= slice_cnt <= common.MaxSliceCntPerSp, stripe_size = i x 4 KiB,
+// block_size = k x stripe_size) against pseudo-random per-slice bitmaps.
+// CreateClone is what admits them (gateway/validate.go validateCloneGeometry),
+// so the widest shape swept here is written as that constant and not as the
+// number it happens to hold.
 func TestRegionSkippableMatchesTheAddressMapping(t *testing.T) {
 	rng := uint64(0x2545f4914f6cdd1d)
 	next := func() uint64 {
@@ -319,7 +322,12 @@ func TestRegionSkippableMatchesTheAddressMapping(t *testing.T) {
 		rng ^= rng << 17
 		return rng
 	}
-	sliceCnts := []uint64{1, 2, 3, 4, 16}
+	// The ceiling is read from common, so the sweep follows it up; 16 stays
+	// as a middle value once the ceiling is past it. Every entry is a real
+	// geometry here, not a label: the naive reference below walks the whole
+	// region 4 KiB at a time, so a wider slice_cnt genuinely re-derives the
+	// chunk -> (slice, local offset) mapping for more slices.
+	sliceCnts := []uint64{1, 2, 3, 4, 16, common.MaxSliceCntPerSp}
 	stripeSizes := []uint64{4 << 10, 16 << 10, 64 << 10}
 	blockMultiples := []uint64{1, 2, 16}
 	regionMultiples := []uint64{1, 2, 4}

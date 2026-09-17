@@ -323,6 +323,26 @@ func (s *Server) CreateStoragePool(
 			cntlrCnt, len(slots))
 	}
 	sliceCnt := int(req.GetSliceCnt())
+	if sliceCnt == 0 {
+		// §7's "substitute the default", exactly as for cntlr_cnt above: a
+		// zero slice_cnt is a request for common.DefaultSliceCntPerSp, which
+		// is what both CLI drivers' --slice-cnt help promises. planSpGroups
+		// and the slice loop of the STM read this local, so the substituted
+		// count is the one the SP is built with. CreateClone's src_slice_cnt
+		// keeps refusing 0 (validateCloneGeometry): there the number
+		// describes a source that already exists, and no default can stand
+		// in for it.
+		sliceCnt = common.DefaultSliceCntPerSp
+	}
+	// The bound below judges the SUBSTITUTED count, and it keeps its lower
+	// arm for the same reason cntlr_cnt keeps its MinCntlrCntPerSp one:
+	// slice_cnt arrives as a uint32 and is converted to an int, so where int
+	// is 32 bits a value at or above 2^31 converts to a NEGATIVE that an
+	// upper bound alone waves through, and planSpGroups' make(..., 2*sliceCnt)
+	// panics on it. Where int is 64 bits the arm is unreachable once the zero
+	// has been substituted; it costs one comparison not to depend on the word
+	// size, and it keeps [1, MaxSliceCntPerSp] the exact domain this check
+	// enforces.
 	if sliceCnt < 1 || sliceCnt > common.MaxSliceCntPerSp {
 		return nil, errInvalid("slice_cnt %d is outside [1, %d]",
 			sliceCnt, common.MaxSliceCntPerSp)
@@ -609,8 +629,9 @@ func (s *Server) CreateStoragePool(
 //
 // Why a latch and not the one-shot teardown it replaces (§8.4's "Why not one
 // transaction", dnv-worker.md §11.6): that transaction was unbounded in the DN
-// dimension — already about 532 writes at the 16-slice maximum shape, over
-// common.EtcdMaxTxnOps, with no tripwire — and GrowSlice makes a slice's group
+// dimension — already about 532 writes at the then-maximum 16-slice shape,
+// over the common.EtcdMaxTxnOps of the time, with no tripwire — and the slice
+// ceiling has doubled since; GrowSlice on top of that makes a slice's group
 // count unbounded, so no single transaction can ever be proven legal. The
 // worker's drain (model/drain.go) takes it apart in steps whose size is a
 // constant (SPD10/SPD11), and SPD14 is the tripwire pair that keeps it so.

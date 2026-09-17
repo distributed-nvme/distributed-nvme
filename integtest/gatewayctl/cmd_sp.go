@@ -23,7 +23,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -51,10 +53,13 @@ func spSelectorFlags(fs *flag.FlagSet, prefix string) func() *pb.NodeSelector {
 // setupCreateSp drives CreateStoragePool (§5.4).
 //
 // --cntlr-cnt, --slice-cnt, --init-ext-cnt, --slots and --raid1 are the
-// §10.6 fixture knobs that shape the SP. Every numeric defaults to 0, which
-// is the "substitute the default" value of the §7 bound table, and an empty
-// --slots leaves cntlid_slot_list empty so the gateway defaults it to [0..7];
-// the script therefore names only what it cares about.
+// §10.6 fixture knobs that shape the SP. Every numeric defaults to 0 and an
+// empty --slots leaves cntlid_slot_list empty, so the script names only what
+// it cares about: §5.4 substitutes DefaultCntlrCntPerSp for a zero cntlr_cnt,
+// DefaultSliceCntPerSp for a zero slice_cnt and [0..7] for an empty slot list
+// (architecture.md §8.4's `Defaults:` line). A zero init_ext_cnt is the
+// exception — §5.4 answers INVALID_ARGUMENT to it — so a script that wants an
+// SP must pass that one.
 //
 // --stripe-size, --block-size and --feature-junk exist for the case C
 // validation battery (§10.14 step 1): the first two push the DmRaid0Conf and
@@ -71,9 +76,10 @@ func setupCreateSp(fs *flag.FlagSet) job {
 	cntlrCnt := fs.Uint("cntlr-cnt", 0,
 		"cntlr_cnt — how many controllers to allocate (0 = the default)")
 	sliceCnt := fs.Uint("slice-cnt", 0,
-		"slice_cnt — how many slices the SP has (0 = the default)")
+		fmt.Sprintf("slice_cnt — how many slices the SP has (0 = the "+
+			"gateway default, %d)", common.DefaultSliceCntPerSp))
 	initExtCnt := fs.Uint64("init-ext-cnt", 0,
-		"init_ext_cnt — DN extents per data group (0 = the default)")
+		"init_ext_cnt — DN extents per data group (required; 0 is refused)")
 	var slots u32List
 	fs.Var(&slots, "slots",
 		"cntlid_slot_list; empty lets the gateway default it to [0..7]")

@@ -54,10 +54,18 @@ const (
 	MaxSsCntPerSp        = 4
 	MaxNsCntPerSs        = 4
 	MaxHostCntPerSs      = 8
-	MaxSliceCntPerSp     = 16
+	MaxSliceCntPerSp     = 32
 	MaxCntlrCntPerSp     = 4
 	MinCntlrCntPerSp     = 1
 	DefaultCntlrCntPerSp = 2
+	// DefaultSliceCntPerSp is the slice count CreateStoragePool substitutes
+	// for a slice_cnt of 0, exactly as DefaultCntlrCntPerSp above is
+	// substituted for a cntlr_cnt of 0 (architecture.md §8.4's Defaults). The
+	// help of `dnvctl sp create --slice-cnt` — and of gatewayctl's own
+	// --slice-cnt — prints the number an operator gets for that zero, and
+	// both build it from this constant with a %d rather than typing a 2, so
+	// moving the default moves what the two CLIs say.
+	DefaultSliceCntPerSp = 2
 	MaxCloneCntPerSp     = 64
 	MaxXferCntPerSp      = 4
 	MaxMigrCntPerSp      = 4
@@ -101,12 +109,12 @@ const (
 	// MaxDelBmPerTxn + 1 writes = MaxDelBmPerTxn + 4 = 68, against 65 success
 	// ops. It is independent of every ceiling constant. Growing MaxCloneBmCnt or
 	// MaxSliceCntPerSp therefore grows the batch COUNT and never the
-	// transaction's legality; at today's 16x16 a maximum-shape drain is
-	// ceil(256 / 64) = 4 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
+	// transaction's legality; at today's 32x16 a maximum-shape drain is
+	// ceil(512 / 64) = 8 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
 	// 128 — prose, not a tripwire: the deployment requirement stays
-	// EtcdMaxTxnOps for the transactions that do NOT fit 128, the sp drain's
-	// 486-compare D2 batch and CreateStoragePool's 503-compare maximum shape
-	// (see EtcdMaxTxnOps below).
+	// EtcdMaxTxnOps for the transactions that do NOT fit 128,
+	// CreateStoragePool's 967-compare maximum shape and the sp drain's
+	// 486-compare D2 batch (see EtcdMaxTxnOps below).
 	MaxDelBmPerTxn = 64
 
 	CnCntlidSlotBase = 10000
@@ -307,41 +315,51 @@ const (
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
-	// etcd serving dnv MUST run with --max-txn-ops=512 or higher; etcd's
+	// etcd serving dnv MUST run with --max-txn-ops=1024 or higher; etcd's
 	// default is 128. etcd caps on max(len(Compare), len(Success), …), and
 	// etcdutil's serializable-snapshot STM compares every key it read AND
 	// every key it wrote, so that sum is what has to fit.
 	//
-	// The transaction this number is TRIPWIRED against is the sp drain's D2
-	// batch, 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) =
-	// 486 COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
+	// The transaction this number is SIZED by is CreateStoragePool at its
+	// widest shape, 967 COMPARES. Its STM costs 7 fixed (ClusterConf, SpConf
+	// and SpGlobal read; SpConf, SpName, SpRev and SpGlobal put) + one put
+	// per slice + 7 per distinct DN (DnConf, the scan's dn_capacity key and
+	// DnRev read; DnConf, the dn_capacity del and put, and DnRev written)
+	// + 8 per CN (the DN seven CN-keyed, plus that cntlr's own put), and
+	// every factor of the widest shape is a ceiling constant:
+	//
+	//	7 + MaxSliceCntPerSp
+	//	  + 7 x (2 x MaxSliceCntPerSp x MaxAllocLegPerGrp)
+	//	  + 8 x MaxCntlrCntPerSp                        <= EtcdMaxTxnOps
+	//
+	// 32 slices x 2 groups per slice (planSpGroups) x MaxAllocLegPerGrp = 2
+	// legs is 128 DNs, all distinct (§6.5's growing black list), and
+	// MaxCntlrCntPerSp = 4 cntlrs on 4 distinct CNs, so it is
+	// 7 + 32 + 7x128 + 8x4 = 967, which 1024 clears by 57. init_ext_cnt never
+	// enters that count — it moves ExtCnt VALUES, not key counts — so the
+	// shape is bounded by those three ceilings alone, and
+	// gateway/txnbudget_test.go's TestCreateStoragePoolBudget asserts the
+	// arithmetic from them. The headroom is thin in the DN dimension: one
+	// more key read or written per DN inside that STM costs 128 compares.
+	//
+	// The sp drain's D2 batch is the SECOND bounded transaction this number
+	// has to cover, and no longer the one that sizes it:
+	// 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) = 486
+	// COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
 	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
 	// committed against a real etcd by model/drain_test.go's
 	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6).
 	//
-	// That makes the D2 batch the largest transaction a tripwire BOUNDS, not
-	// the largest in the system: CreateStoragePool's own maximum shape is 503
-	// compares, and no tripwire guards it. Its STM costs 7 fixed (ClusterConf,
-	// SpConf and SpGlobal read; SpConf, SpName, SpRev and SpGlobal put) + one
-	// put per slice + 7 per distinct DN (DnConf, the scan's dn_capacity key
-	// and DnRev read; DnConf, the dn_capacity del and put, and DnRev written)
-	// + 8 per CN (the DN seven CN-keyed, plus that cntlr's own put), so at
-	// MaxSliceCntPerSp = 16 slices x 2 groups per slice (planSpGroups) x
-	// MaxAllocLegPerGrp = 2 legs = 64 DNs and MaxCntlrCntPerSp = 4 cntlrs it
-	// is 7 + 16 + 7x64 + 8x4 = 503, which 512 clears by 9. init_ext_cnt never
-	// enters that count — it moves ExtCnt VALUES, not key counts — so the
-	// shape is bounded by those three ceilings and IS tripwirable; the
-	// missing test is the gap, not the request.
-	//
-	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt = 256-key rectangle sweep
-	// was this number's founding justification and is gone: the clone drain
-	// replaced it with batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the
-	// default (CLD11, dnv-worker.md §11.7).
+	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt rectangle sweep — then
+	// 256 keys, at the 16-slice ceiling of the time — was this number's
+	// founding justification and is gone: the clone drain replaced it with
+	// batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the default (CLD11,
+	// dnv-worker.md §11.7).
 	//
 	// The Go test etcd launchers pass it from here; the three shell suites
 	// that start an etcd cannot import common, so they read it at preflight
 	// from workerctl's constants subcommand.
-	EtcdMaxTxnOps = 512
+	EtcdMaxTxnOps = 1024
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"

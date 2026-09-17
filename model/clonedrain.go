@@ -27,10 +27,11 @@ import (
 //     converging while one of its clones goes away.
 //
 // What DeleteClone replaced: a single deciding STM that swept the whole
-// rectangle of chunk keys — 256 deletes at today's
-// 16×16, the founding justification for EtcdMaxTxnOps = 512. Both ceilings are
-// expected to grow; incremental deletion makes growth change the batch COUNT
-// and never the transaction's legality.
+// rectangle of chunk keys — 512 deletes at today's 32×16 and, back when it was
+// 256 at 16×16, the founding justification for the OLD EtcdMaxTxnOps = 512.
+// Both ceilings are expected to grow and one of them has (MaxSliceCntPerSp
+// doubled on 2026-09-17); incremental deletion makes growth change the batch
+// COUNT and never the transaction's legality.
 
 // The Op names of the two clone-drain ops, the exported function names as
 // everywhere else in this package.

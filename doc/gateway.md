@@ -251,28 +251,35 @@ DefaultGatewayAgentTimeout = 10
 CloneBmChunkBytes = 1 << 20
 
 // A DEPLOYMENT REQUIREMENT, not a client setting: every etcd serving dnv
-// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128. etcd
+// MUST run with --max-txn-ops=1024 or higher; etcd's default is 128. etcd
 // caps on max(len(Compare), len(Success), …), and etcdutil's
 // serializable-snapshot STM compares every key it read AND every key it
-// wrote, so that sum is what has to fit. The transaction it is TRIPWIRED
-// against is the sp drain's D2 batch, 486 compares at the maximum shape
-// (dnv-worker.md §11.6) — the largest a tripwire BOUNDS, not the largest in
-// the system: CreateStoragePool's own maximum shape is 503 compares (7 fixed
-// + one put per slice + 7 per distinct DN + 8 per CN, at MaxSliceCntPerSp x 2
-// groups per slice x MaxAllocLegPerGrp legs = 64 DNs and MaxCntlrCntPerSp
-// cntlrs), which 512 clears by 9, and no tripwire guards it. init_ext_cnt
-// moves ExtCnt VALUES, not key counts, so that shape is bounded by those
-// three ceilings and IS tripwirable: the missing test is the gap, not the
-// request. DeleteClone's 256-key rectangle sweep was this number's founding
-// justification and is gone: the clone drain replaced it with 68-op batches
-// that fit the default (§5.8, §10.4).
-EtcdMaxTxnOps = 512
+// wrote, so that sum is what has to fit. The transaction this number is
+// SIZED by is CreateStoragePool at its widest shape, 967 compares: 7 fixed
+// + one put per slice + 7 per distinct DN + 8 per CN, at MaxSliceCntPerSp x
+// 2 groups per slice x MaxAllocLegPerGrp legs = 128 DNs and
+// MaxCntlrCntPerSp cntlrs. init_ext_cnt moves ExtCnt VALUES, not key
+// counts, so every factor of that shape is a ceiling constant and it IS
+// tripwirable: gateway/txnbudget_test.go's TestCreateStoragePoolBudget
+// asserts the arithmetic from them. The headroom is thin in the DN
+// dimension — one more key read or written per DN costs 128 compares. The
+// sp drain's D2 batch, 486 compares at the maximum shape (dnv-worker.md
+// §11.6), is the SECOND bounded transaction this number has to cover and no
+// longer the one that sizes it. DeleteClone's MaxSliceCntPerSp x
+// MaxCloneBmCnt rectangle sweep — then 256 keys, at the 16-slice ceiling of
+// the time — was this number's founding justification and is gone: the
+// clone drain replaced it with 68-op batches that fit the default (§5.8,
+// §10.4).
+EtcdMaxTxnOps = 1024
 ```
 
 No other constant is added by this document. (`MaxAllocLegPerGrp` and
 `MaxDelGrpPerTxn` were added on 2026-09-15 by the sp drain, whose owner is
 `dnv-worker.md` §11.6; they appear here only through the `EtcdMaxTxnOps`
-arithmetic above.) `DefaultClusterName`, `ShardBucketSize`,
+arithmetic above. `DefaultSliceCntPerSp`(2) was added on 2026-09-17 with
+`MaxSliceCntPerSp`'s move to 32; it is the value §5.4 substitutes for a zero
+`slice_cnt`, and its normative carrier is architecture.md §8.4's `Defaults:`
+line — §5.4 only restates it.) `DefaultClusterName`, `ShardBucketSize`,
 `Max*CntPerCluster`, `MaxCloneBmCnt`, `MaxMigrBmCnt` and the §7 bounds all
 exist already. `MaxCloneBmCnt` keeps its name and its value **16**, but it
 counts the chunks ONE source slice's bitmap may be split into
@@ -712,8 +719,16 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 ### 5.4 Storage pools (§8.4) and GrowSlice (§8.5)
 
 * **CreateStoragePool** — validate (`cntlid_slot_list`: values < 8, no dupes;
-  `cntlr_cnt ≥ 1` and ≤ len(slot list); `slice_cnt`, `init_ext_cnt` ≥ 1;
-  confs per §7). Pre-STM plan (`planSpGroups`), in D-D's order: per slice the
+  `cntlr_cnt` in `[MinCntlrCntPerSp, MaxCntlrCntPerSp]` and ≤ len(slot list);
+  `slice_cnt ≤ MaxSliceCntPerSp`(32); `init_ext_cnt ≥ 1`; confs per §7). A
+  zero `cntlr_cnt` and a zero `slice_cnt` are requests for a default, not
+  refusals: each is replaced — before the bound above it is judged — by
+  `DefaultCntlrCntPerSp`(2) and `DefaultSliceCntPerSp`(2), and it is the
+  substituted count the plan and the STM's slice loop build the SP from
+  (architecture.md §8.4's `Defaults:` line). A zero `init_ext_cnt` is still
+  `INVALID_ARGUMENT`, and so is `CreateClone`'s zero `src_slice_cnt` (§5.8):
+  that one describes a source which already exists, so no default can stand
+  in for it. Pre-STM plan (`planSpGroups`), in D-D's order: per slice the
   meta group (`ext_cnt = 1`) first, then the data group
   (`ext_cnt = init_ext_cnt`) — ext counts only;
   `model.GroupBlocks` turns each into `meta_blocks`/`data_blocks` in
@@ -906,9 +921,10 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 
 ### 5.8 Clones (§8.9)
 
-* **CreateClone** — validate §8.9 bounds (`src_slice_cnt` 1..16;
-  `src_stripe_size = i×4KiB, i ≤ 256`; `src_block_size = j×64KiB, j ≤ 16384`
-  and a multiple of the stripe); STM: resolve; token; name free ⇒ else
+* **CreateClone** — validate §8.9 bounds (`src_slice_cnt` in
+  1..`MaxSliceCntPerSp`(32); `src_stripe_size = i×4KiB, i ≤ 256`;
+  `src_block_size = j×64KiB, j ≤ 16384` and a multiple of the stripe);
+  STM: resolve; token; name free ⇒ else
   `ALREADY_EXISTS`; dst td by name (`NOT_FOUND`); mint `clone_id`; put
   `Clone{…, dst_td_id}`; append `clone_name_list`; `BumpSpRev`.
   Reply `clone_id`. (The "destination td must be empty" precondition is
@@ -1238,12 +1254,22 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    delete pinned in BOTH directions: the first must bump, the second must
    not) plus the full-teardown accounting once the drain has run, driven here
    through `model`'s three drain ops, and the sp drain's budget tripwire over
-   the named constants; §6.5's two-tier
-   placement — a spare leg and a migration destination each land on the DN
-   in the other failure domain, and still land (never `RESOURCE_EXHAUSTED`)
-   once that DN is gone and the group's own domain is all that is left; a
-   release path whose `dn_conf`/`cn_conf` invariant key is missing ⇒
-   `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
+   the named constants, and `CreateStoragePool`'s own beside it (§2.1: the
+   create is the transaction `EtcdMaxTxnOps` is SIZED by, so its arithmetic
+   is pinned twice — at the ceilings as they stand, and at the
+   then-maximum 16-slice shape whose 503 compares the factors must still
+   reproduce) plus, in a file of its own, the PROOF that tripwire can only
+   approximate: one widest-shape create — `MaxSliceCntPerSp` slices,
+   md-raid1, `MaxCntlrCntPerSp` cntlrs — committed against the real etcd this
+   package starts with `--max-txn-ops=common.EtcdMaxTxnOps`, and the same
+   test is where §6.5's distinct-NODE property — DNs and CNs alike — is
+   asserted at the ceiling instead of at the two slices of the write-set
+   case, since the two counts are what the create's compare total was computed
+   from; §6.5's two-tier placement — a spare leg and a migration destination
+   each land on the DN in the other failure domain, and still land (never
+   `RESOURCE_EXHAUSTED`) once that DN is gone and the group's own domain is all
+   that is left; a release path whose `dn_conf`/`cn_conf` invariant key is
+   missing ⇒ `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
    nothing torn down (`DeleteSpareLeg` for the DN half, `DeleteCntlr` for the
    CN half; `DeleteStoragePool` left that pair on 2026-09-15, releasing
    nothing itself any more, and the drain's deliberately OPPOSITE answer to
@@ -1281,9 +1307,11 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    which is the property that decoupled the deployment flag from the clone
    shape — and a PROOF against the real etcd: a clone whose whole
    `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle of chunk keys exists is
-   created, filled, latched and drained, and the 256 keys are asserted to
-   leave in exactly `⌈256 / MaxDelBmPerTxn⌉` batches, none of which rewrote
-   the record. Only the second one can catch a batch that grew a write.
+   created, filled, latched and drained, and the 512 keys are asserted to
+   leave in exactly `⌈512 / MaxDelBmPerTxn⌉` = 8 batches, none of which
+   rewrote the record (the test computes the rectangle from the two
+   constants; 512 and 8 are what they come to at the 2026-09-17 ceilings).
+   Only the second one can catch a batch that grew a write.
 4. **Agent-path tests**: an in-process fake implementing the generated
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`
@@ -1387,10 +1415,11 @@ sha256 pin (identical block to `worker_test.sh` — same cache). Server:
 passwordless ssh (`sshw "true"`); `bash nohup pkill ss tar df sed awk`
 present; ≥ 1 GiB free under `/var/tmp`; none of the §10.3 ports listening.
 That etcd MUST be started with **`--max-txn-ops`** at `common.EtcdMaxTxnOps`
-(§2.1, 512 today): every etcd serving dnv must, for the sp drain's 486-compare
-D2 batch (dnv-worker.md §11.6) and `CreateStoragePool`'s 503-compare maximum
-shape. The suite is shell and cannot import the constant, and it does not
-type the number either: `preflight_driver` runs the
+(§2.1, 1024 today): every etcd serving dnv must, for `CreateStoragePool`'s
+967-compare maximum shape — the transaction the number is sized by — and for
+the sp drain's 486-compare D2 batch (dnv-worker.md §11.6), the second bounded
+transaction that constant has to cover. The suite is shell and cannot import
+it, and it does not type the number either: `preflight_driver` runs the
 `workerctl` it has just built — `constants` opens no etcd client and takes no
 `--cluster`, so it runs on the DRIVER, before setup ships anything to the
 server — and fills `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of the

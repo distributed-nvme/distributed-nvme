@@ -74,14 +74,17 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # it at preflight from `workerctl constants`, which prints the Go constants as
 # JSON.
 #
-# What sizes that requirement is the sp drain's D2 batch — the one transaction
-# in dnv above etcd's default cap of 128 whose size a constant bounds
-# (dnv-worker.md §11.6); its compare count is asserted from the named constants
-# in gateway/txnbudget_test.go, not restated here. The cdc suite drains no
-# storage pools, so the flag changes nothing it observes; it is passed anyway
-# so that every etcd this tree starts — these three suites and the Go test
-# launchers in etcdutil, model, worker and gateway — gets the flag from the
-# same constant.
+# TWO transactions in dnv are above etcd's default cap of 128 with a size that
+# named constants bound. The one that SIZES the requirement is
+# CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
+# MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
+# (architecture.md §8.4) — and the sp drain's D2 batch is the second
+# (dnv-worker.md §11.6); both compare counts are asserted from the named
+# constants in gateway/txnbudget_test.go, not restated here. The cdc suite
+# creates and drains no storage pools, so the flag changes nothing it
+# observes; it is passed anyway so that every etcd this tree starts — these
+# three suites and the Go test launchers in etcdutil, model, worker and
+# gateway — gets the flag from the same constant.
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-cdc-integtest

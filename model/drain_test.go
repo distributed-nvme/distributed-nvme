@@ -651,8 +651,14 @@ func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
 // compare per key the STM read. If that grows — a new write in the batch, a
 // change in how etcdutil builds the txn — this test fails with etcd's own "too
 // many operations in txn request" while the tripwire stays green, but only
-// once the true count passes EtcdMaxTxnOps: 486 leaves 26 ops of slack, so an
-// op added PER DN (+80) is caught here and a single fixed one is not.
+// once the true count passes EtcdMaxTxnOps — and EtcdMaxTxnOps is no longer
+// sized by this batch. At 1024 the 486 leaves 538 ops of slack, so it takes
+// SEVEN ops added per DN (486 + 7×80 = 1046) before etcd refuses: one op per
+// DN is no longer caught here, and a single fixed one never was. The
+// transaction that does size the requirement is CreateStoragePool's, and its
+// own real-etcd proof — gateway/spceiling_test.go's
+// TestCreateStoragePoolAtTheCeiling, whose 967 leaves only 57 — is where a
+// change to how etcdutil builds a txn would now show up first.
 func TestDrainSpSliceAtTheCeiling(t *testing.T) {
 	const legsPerGrp = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	const dnCnt = common.MaxDelGrpPerTxn * legsPerGrp

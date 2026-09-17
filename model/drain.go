@@ -15,9 +15,10 @@ import (
 //
 // DeleteStoragePool no longer tears anything down. It commits `deleting = true`
 // plus one SpRev bump and returns (SPD3/SPD4), because the one-shot teardown it
-// replaced was unbounded in the DN dimension — already over EtcdMaxTxnOps at the
-// 16-slice maximum shape, and made unbounded for good by GrowSlice — so no
-// single transaction could ever be proven legal. What the one-shot really
+// replaced was unbounded in the DN dimension — already about 532 writes at the
+// then-maximum 16-slice shape, over the EtcdMaxTxnOps of the time, and the
+// slice ceiling has doubled since — and made unbounded for good by GrowSlice,
+// so no single transaction could ever be proven legal. What the one-shot really
 // guaranteed was not atomicity but AGREEMENT: DN and CN budgets must never
 // disagree with the keys that describe them. That is preserved here by
 // construction rather than by a single STM — every batch releases budget in the
