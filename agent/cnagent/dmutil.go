@@ -12,10 +12,11 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The device-mapper converge/probe helpers shared by leg.go, md.go, pool.go,
-// td.go, clone.go and xfer.go. Every Ensure* here is probe-first (SH16): it
-// reads the live table and mutates only a real difference, because reloading a
-// live dm table is not a no-op — it stalls host IO.
+// The device-mapper converge/probe helpers shared by the converge files
+// (leg.go, md.go, pool.go, td.go, clone.go, clonemeta.go and xfer.go), by
+// probe.go and by syncup_cntlr.go. Every Ensure* here is probe-first (SH16):
+// it reads the live table and mutates only a real difference, because
+// reloading a live dm table is not a no-op — it stalls host IO.
 
 // argCmpAny tells dmTableMatches to check only the target type and size —
 // what the leg wrapper's probe wants, where the backing device number is

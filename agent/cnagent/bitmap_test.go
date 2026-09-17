@@ -367,7 +367,7 @@ func TestRegionSkippableMatchesTheAddressMapping(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The chunk view of a source slice (U8)
+// The chunk view of a source slice (CN22)
 // ---------------------------------------------------------------------------
 
 const testChunkBits = uint64(common.CloneBmChunkBytes) * 8
@@ -419,7 +419,7 @@ func TestShortChunkTailReadsAsWritten(t *testing.T) {
 }
 
 // TestAbsentMiddleChunkKeepsLaterChunksInPlace is the case that distinguishes
-// U2's self-positioning from a concatenation model. Chunks 0 and 2 are
+// §9.6's self-positioning from a concatenation model. Chunks 0 and 2 are
 // present and chunk 1 is missing: chunk 2's bits must stay at their own
 // offset, 16C bits in. A concatenation would have slid them down behind chunk
 // 0 — reporting bit 8 as skippable and bit 16C as absent, both wrong, and the

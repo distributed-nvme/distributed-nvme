@@ -7,8 +7,10 @@ packages, §3/§4 there), and the suite conventions of `dnagent_integtest.md` /
 `cnagent_integtest.md` / `dnv-worker.md` §14.
 
 Conventions: requirement tags **DS** (discovery service model, §3), **WV**
-(etcd watcher, §4), **NP** (NVMe/TCP service, §5), **CM** (`cmd/dnv-cdc`, §6),
-**LG** (log records, §7). Decisions are cited as "§0 #n". MUST / SHOULD in the
+(etcd watcher, §4), **NP** (NVMe/TCP service, §5) and **CM** (`cmd/dnv-cdc`,
+§6); **LG** is not one of them — it is the shorthand for §7's log-record table,
+whose rows are named by their `msg` string and carry no numbered ids.
+Decisions are cited as "§0 #n". MUST / SHOULD in the
 RFC sense. "The specs" means NVMe Base 2.x + NVMe-oF + NVMe/TCP; "nvmet" means
 the Linux kernel NVMe target. Byte encodings (identify layout, log-entry
 layout, status codes) are the specs' — this document names fields and values,
@@ -159,7 +161,7 @@ Reading order for an implementer: §2 → §3 → §4 → §5 → §6 → §7 �
 | `CdcRangeAll` | `0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f` | the `--range` default (§0 #4) |
 | `CdcMaxAdminSqSize` | 32 | admin SQ entries; CAP.MQES = 31; Connect SQSIZE cap (NP4); ASQSZ in every log entry (DS3) |
 | `CdcAerl` | 3 | Identify AERL: up to 4 outstanding AERs per connection (NP11) |
-| `CdcMaxH2CData` | 8192 | ICResp MAXH2CDATA and the cap on any received PDU's data — Connect's 1024 B data blob is the only H2C data ever *read* (NP2, NP3) |
+| `CdcMaxH2CData` | 8192 | ICResp MAXH2CDATA and `readPdu`'s framing cap: a PDU whose PLEN exceeds the CapsuleCmd header plus this value is refused before its payload is read. Connect's 1024 B data blob is the only host-to-controller data dnv-cdc ever *interprets*; in-capsule data on any other command is accepted and discarded (NP2, NP3) |
 | `CdcDiscLogHeaderSize` | 1024 | discovery log: GENCTR + NUMREC + RECFMT header block (DS9) |
 | `CdcDiscLogEntrySize` | 1024 | one discovery log entry (DS9) |
 | `CdcCntlIdMax` | `0xffef` | dynamic CNTLIDs assigned round-robin in `[1, 0xffef]` (NP5) |
@@ -423,15 +425,19 @@ no served state is ever mutated concurrently.
 * **CM3 — wiring.** Build the `etcdutil` client, hand off to `cdc.Run`
   (watcher + listener + view registry). No interceptors (`grpc.md`
   unchanged). `common/log.go`'s `init` installs the JSON logger.
-* **CM4/CM5 — lifecycle logs.** `cdc starting` first, `cdc stopping` on
-  SIGTERM/SIGINT after the listener and watcher have stopped.
+* **CM4 — lifecycle logs, the start half.** `cdc starting` first.
+* **CM5 — lifecycle logs, the stop half** (CM4's other half, the same §7 pair).
+  `cdc stopping` on SIGTERM/SIGINT after the listener and watcher have stopped.
 
 Invocation reference (`architecture.md` §13, amended per §10):
 
 ```shell
 dnv-cdc --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379 \
-  --range 0,1,2,3,4,5,6,7 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.10 --tr-svc-id 8009
+  # the twin on the second CP server runs the same line with its own
+  # --tr-addr 192.168.0.11; --range is omitted because its default is all
+  # sixteen ranges (§0 #4), which is what a twin pair covering the whole
+  # cluster wants
 ```
 
 Production placement: one dnv-cdc per CP server (fig. `070Cluster`), twins of
@@ -439,7 +445,7 @@ a range on different CP servers, all endpoints listed on every host.
 
 ---
 
-## 7. Log records [LG]
+## 7. Log records
 
 JSON per `log.md`, `Info` unless the row says otherwise. The `msg` strings are
 normative — the §9 suite parses them.
@@ -535,8 +541,9 @@ between cases.
 
 ### 9.2 Deliverables and usage contract
 
-Two artifacts under `integtest/`, next to the four existing suites
-(`dnagent_test.sh`, `cnagent_test.sh`, `worker_test.sh`, `gateway_test.sh`):
+Two artifacts under `integtest/`, next to the five existing suites
+(`dnagent_test.sh`, `cnagent_test.sh`, `worker_test.sh`, `gateway_test.sh`,
+`dnvctl_test.sh`):
 
 * `integtest/cdc_test.sh` — bash, `set -euo pipefail`, the orchestrator.
 * `integtest/cdcctl/main.go` — the etcd driver that plays gateway + worker
@@ -549,8 +556,10 @@ a temporary directory and scp'd, rather than kept as files of their own, so
 that everything the suite is lives in the two artifacts above. Both need root
 and are always invoked through `sudo`.
 
-The script builds `bin/dnv-cdc` (`make build`) and `cdcctl` into
-`integtest/bin/`, reuses the worker suite's pinned etcd tarball cache
+The script builds `bin/dnv-cdc` (`make build`) and, into `integtest/bin/`,
+`cdcctl` and `workerctl` — the last for its `constants` subcommand alone
+(§9.4 item 2): it runs on the driver at preflight and is shipped to no
+server. The script reuses the worker suite's pinned etcd tarball cache
 (same version, same sha256, `integtest/bin/cache/`), and `scp`s
 `etcd etcdctl dnv-cdc cdcctl` to server 1 and the target helper (§9.7) to
 server 2.
@@ -614,7 +623,7 @@ $WORK/bin/etcd --name dnv-cdc-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:13379 --advertise-client-urls http://127.0.0.1:13379 \
   --listen-peer-urls http://127.0.0.1:13380 --initial-advertise-peer-urls http://127.0.0.1:13380 \
   --initial-cluster dnv-cdc-it=http://127.0.0.1:13380 \
-  --initial-cluster-token dnv-cdc-it --max-txn-ops=512 \
+  --initial-cluster-token dnv-cdc-it --max-txn-ops=$ETCD_MAX_TXN_OPS \
   >> $WORK/etcd/etcd.log 2>&1 &
 
 $WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:13379 --range 0,1,2,3,4,5,6,7 \
@@ -632,10 +641,16 @@ Aborts with a message on the first failure:
 1. `ssh -o BatchMode=yes` works to all four; `sudo -n true` works on s2, h1,
    h2 (and is **not** required on s1).
 2. s1: ports 13379/13380/18009-18012 free; `$WORK` writable. The etcd this
-   suite starts carries `--max-txn-ops=512` (`common.EtcdMaxTxnOps`) like
-   every other etcd serving dnv: the requirement comes from the sp drain's D2
-   batch (architecture.md §8.4), which this suite never drives, but the flag
-   is uniform across the fleet and the suite brings its own etcd.
+   suite starts carries `--max-txn-ops` at `common.EtcdMaxTxnOps` (512 today)
+   like every other etcd serving dnv: the requirement comes from the sp
+   drain's D2 batch (architecture.md §8.4, sized in dnv-worker.md §11.6),
+   which this suite never drives, but the flag is uniform across the fleet
+   and the suite brings its own etcd. The number is not typed in the script:
+   the driver preflight (§9.2) builds `workerctl` for this and reads
+   `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of `workerctl constants`
+   — no etcd, no server, no `--cluster` — before setup starts etcd with it.
+   `worker_test.sh` and `gateway_test.sh` take the same value from the same
+   subcommand.
 3. s2: `modprobe nvmet nvmet-tcp` succeeds; `/sys/kernel/config/nvmet`
    present; `dmsetup targets` lists `zero`; ports 14420-14423 free.
 4. h1/h2: `modprobe nvme-tcp` succeeds; `nvme-cli` present (version logged);

@@ -659,8 +659,9 @@ func TestParseBmIdx(t *testing.T) {
 }
 
 // TestParseCloneBmKey round-trips the clone-bitmap parser over the whole pair
-// and checks its rejections (MD2, MD3, U1). The two indexes are rendered alike
-// and adjacent, so the round trip pins their ORDER too: src_slice_idx first.
+// and checks its rejections (MD2, MD3, architecture.md §9.6). The two indexes
+// are rendered alike and adjacent, so the round trip pins their ORDER too:
+// src_slice_idx first.
 func TestParseCloneBmKey(t *testing.T) {
 	for _, srcSliceIdx := range []uint32{0, 1, 15, 255} {
 		for _, bmIdx := range []uint32{0, 1, 15, 255} {
@@ -683,7 +684,7 @@ func TestParseCloneBmKey(t *testing.T) {
 	}{
 		{"empty", ""},
 		// The old one-value-per-source-slice key, left in the store by a
-		// previous format: malformed here, skipped by loadBmIdx (U12).
+		// previous format: malformed here, skipped by loadBmIdx (MD3).
 		{"six fields", head + " 03"},
 		{"too many fields", head + " 02 03 extra"},
 		{"migration key", MigrBitmapKey(goldenCid, goldenSpId, "migr0", 3)},

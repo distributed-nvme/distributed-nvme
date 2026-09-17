@@ -5,9 +5,9 @@
 // and everything below it.
 //
 // main itself is deliberately thin (layout.md §5): it never touches etcd, it
-// logs nothing but the CM3 warning, and the "worker starting" / "worker
-// stopping" records of §12 are emitted by worker.Run, which is why the
-// endpoints travel to it in worker.Config (CM6).
+// logs nothing but the CM3 warning and the two CM5 signal records, and the
+// "worker starting" / "worker stopping" records of §12 are emitted by
+// worker.Run, which is why the endpoints travel to it in worker.Config (CM6).
 package main
 
 import (
@@ -69,8 +69,9 @@ func newRootCmd() *cobra.Command {
 }
 
 // addFlags declares the CM1 flag set. There is deliberately no
-// --etcd-op-timeout: every plain etcd operation and every STM attempt is
-// bounded by common.DefaultEtcdOpTimeout (EU5).
+// --etcd-op-timeout: every plain etcd operation, and every STM transaction as
+// a whole with its conflict retries, is bounded by
+// common.DefaultEtcdOpTimeout (EU5).
 func addFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.String("etcd-endpoints", "",

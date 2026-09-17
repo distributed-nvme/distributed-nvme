@@ -103,9 +103,10 @@ type MdCreateConf struct {
 	AssumeClean    bool
 }
 
-// Create builds a fresh array. Members shorter than RaidDevices are padded
-// with `missing`, the mdadm idiom for a degraded create — a leg whose side is
-// not exporting an optimized path yet is added later by Add.
+// Create builds a fresh array. A member list shorter than RaidDevices is
+// padded with `missing`, the mdadm idiom for a degraded create; cnagent never
+// gets there — CN12 case 1 creates only when every leg_list member of the
+// group is available, which assembleGroup enforces before it calls this.
 func (m *Md) Create(
 	ctx context.Context,
 	conf MdCreateConf,

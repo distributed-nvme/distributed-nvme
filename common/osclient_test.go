@@ -270,7 +270,7 @@ func TestProtoRoundTrip(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Logging (osclient.md §8.7, §4.5)
+// Logging (osclient.md §8.7, §4.6)
 // ---------------------------------------------------------------------------
 
 func hasAttrs(t *testing.T, rec map[string]any, keys ...string) {
@@ -475,7 +475,7 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ReadBlock / WriteBlock (osclient.md §8.9, §4.6 — architecture.md [D13])
+// ReadBlock / WriteBlock (osclient.md §8.9, §4.5 — architecture.md [D13])
 // ---------------------------------------------------------------------------
 
 func TestBlockRoundTrip(t *testing.T) {

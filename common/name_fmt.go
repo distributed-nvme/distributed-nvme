@@ -126,7 +126,7 @@ func (nf *NameFmt) DnSideName(
 
 // DnMigrMetaDmName wraps one migration's dm-clone metadata slot: the dm-clone
 // target reads its metadata device from sector 0 and takes no offset
-// argument, so the slot needs a dm-linear of its own ([P6]).
+// argument, so the slot needs a dm-linear of its own (dnagent.md DN13).
 func (nf *NameFmt) DnMigrMetaDmName(
 	clusterId uint64,
 	dnId uint64,
@@ -206,8 +206,10 @@ func (nf *NameFmt) CnMdDevName(
 }
 
 // CnMdArrayName is the array's superblock name (mdadm --name). The fixed
-// "dnv-" prefix is what the udev guard matches (ENV{MD_NAME}=="dnv-*",
-// architecture.md §4.3 / Appendix A); 26 chars, within mdadm's 32-byte limit.
+// "dnv-" prefix is what the udev guard matches
+// (ENV{MD_NAME}=="dnv-*|*:dnv-*", architecture.md §4.3 / Appendix A — the
+// second alternative covers the homehost:name form `mdadm --examine --export`
+// reports); 26 chars, within mdadm's 32-byte limit.
 func (nf *NameFmt) CnMdArrayName(
 	spId uint64,
 	sliceIdx uint32,

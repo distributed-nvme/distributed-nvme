@@ -293,9 +293,9 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	return emit(result)
 }
 
-// leaf builds one RPC command. Every one of the 59 has this shape: a Use
-// line, a one-line Short, no positional arguments, and a RunE that defers to
-// run.
+// leaf builds one RPC command. Every one of the 59 RPC leaves has this shape:
+// a Use line, a one-line Short, no positional arguments, and a RunE that
+// defers to run.
 func leaf(use, short string, build func() (job, error)) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
@@ -516,9 +516,9 @@ func hexBytesOf(name string) ([]byte, error) {
 // The two scope globals (§5.0)
 // ---------------------------------------------------------------------------
 
-// clusterOf fills `cluster_name`. It is the global for 57 of the 58 requests
-// that carry the field; only the `cluster` group's own commands override it,
-// through clusterNameOf.
+// clusterOf fills `cluster_name`. It is the global for 55 of the 58 requests
+// that carry the field; only the `cluster` group's own three commands
+// override it, through clusterNameOf.
 func clusterOf() string { return strOf("cluster") }
 
 // clusterNameOf is the `cluster` group's rule: its own --name wins, and an
@@ -658,8 +658,10 @@ func selectorOf(prefix string) *pb.NodeSelector {
 }
 
 // dmCloneConfFlags adds the two dm-clone tuning flags. Both zero yields a nil
-// conf — the GW11 "not given" convention, which lets the gateway apply its
-// own defaults.
+// conf — the GW11 "not given" convention: the handler stores the pair as it
+// arrived, the sp-worker fills a migration's zeros in (dnv-worker.md RW15),
+// and a clone's are never sent to the dm-clone target at all (CN18), leaving
+// the target's own default in place.
 func dmCloneConfFlags(flags *pflag.FlagSet) {
 	flags.Uint32("hyd-threshold", 0,
 		"DmCloneConf.hydration_threshold (0 = not given)")

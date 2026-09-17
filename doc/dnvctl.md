@@ -54,7 +54,7 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
    `BumpSpRev`), a deliberate always-stale probe.
 10. **No hidden RPCs, no client-side validation.** dnvctl never issues an RPC
     the operator did not type: no token auto-fetch, and no pre-read for the
-    "disabling the last enabled cntlr" warning that `gateway/cntlr.go:383-392`
+    "disabling the last enabled cntlr" warning that `gateway/cntlr.go:393-396`
     and architecture.md §8.6 anticipated — that warning is deferred until the
     gateway itself carries the hint in a reply. dnvctl also does not
     second-guess values; the gateway's §7 validation is the only validator
@@ -70,7 +70,7 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
     ssh, **no sudo**, house flags `[--only <case>] [--cleanup-only] user@ip`.
 13. **`integtest/fakegateway` mirrors `integtest/fakeagent`:** behavior.json
     (mtime+size reload, unknown fields rejected), state.json (atomic
-    temp+rename), the mandatory §4 server interceptors so its JSON log is the
+    temp+rename), the mandatory `grpc.md` §4 server interceptors so its JSON log is the
     assertion surface — but keyed per *method*, not per object, because the
     fake models no cluster state.
 14. **Coverage: a 59-RPC sweep** asserting every request proto on the wire,
@@ -128,7 +128,7 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
   level **live** rather than baked in — the handler `init()` builds holds
   `logLevel`, a `*slog.LevelVar`, so `SetLogLevel` still bites after the
   handler exists — and it leaves stdout reserved for the one result
-  document (§3.1). Because every §4 client-interceptor record is Info,
+  document (§3.1). Because every record of the `grpc.md` §4 client interceptors is Info (`grpc.md` §2.2 L1),
   dnvctl's own gRPC logging is silenced by design (log.md: "this is
   intended").
 
@@ -145,7 +145,7 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
   explicit dnvctl exemption); the two §3.2 error lines are the only other
   direct writes in the package, `fmt.Fprintf` to stderr from `ctl/root.go`'s
   `Execute`. `ctl/` calls slog nowhere at all: the records CT7's Warn level
-  silences are the §4 client interceptors'.
+  silences are the `grpc.md` §4 client interceptors'.
 
 ## 2. Invocation model
 
@@ -163,9 +163,10 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
 | `--trace-id` | string | `""` | override the T4 mint (§2.3) |
 | `--config` | string | `""` | optional viper config file |
 
-Env binding follows the four daemons' copy-pasted `bindViper` body verbatim
-(**CT9**): `viper.BindPFlags` on the invoked command's full flag set (persistent
-+ local) in the root's `PersistentPreRunE`, `SetEnvPrefix("DNVCTL")`,
+**CT9 — env and config binding.** Env binding follows the four daemons'
+copy-pasted `bindViper` body verbatim: `viper.BindPFlags` on the invoked
+command's full flag set (persistent + local) in the root's
+`PersistentPreRunE`, `SetEnvPrefix("DNVCTL")`,
 `SetEnvKeyReplacer("-" → "_")`, `AutomaticEnv`, optional `--config` file; every
 value is then read through viper, never off the flag. So `DNVCTL_CLUSTER`,
 `DNVCTL_SP`, `DNVCTL_GATEWAY_ADDRESS` work as ambient context; mechanically
@@ -177,8 +178,8 @@ A global left empty is sent empty; commands whose request lacks the field
 
 ### 2.2 Connection
 
-dnvctl is a real dnv component, not an integtest driver, so **CT2**: it MUST
-dial with the grpc.md §4 mandatory client block —
+**CT2 — the mandatory client block.** dnvctl is a real dnv component, not an
+integtest driver, so it MUST dial with the grpc.md §4 mandatory client block —
 
 ```go
 grpc.NewClient(gatewayAddress,
@@ -189,13 +190,13 @@ grpc.NewClient(gatewayAddress,
 
 — one connection per invocation, closed on exit. Every RPC runs under
 `context.WithTimeout(ctx, timeout seconds)`. All 59 RPCs are unary; the stream
-chain is installed anyway because §4 says both chains on every dnv connection.
+chain is installed anyway because `grpc.md` §4 says both chains on every dnv connection.
 
 ### 2.3 Trace ids
 
 **CT2 (part).** Per invocation dnvctl builds `ctx` as
 `common.WithTraceId(context.Background(), id)` where `id` is `--trace-id` when
-non-empty, else `common.NewTraceId()` (the T4 generator). The §4 client chain's
+non-empty, else `common.NewTraceId()` (the T4 generator). The `grpc.md` §4 client chain's
 `attachTraceId` moves it into the `trace_id` outgoing metadata; dnvctl never
 touches metadata directly (that shortcut is the *drivers'* carve-out, grpc.md
 §6, and does not apply here). The id appears in the failure line (§3.2) so a
@@ -385,7 +386,7 @@ UpdateControllerNodeDisabled (+`cn_rev`), InspectControllerNode. Same flags.
 | command | RPC | flags beyond globals | notes |
 |---|---|---|---|
 | `clone create` | CreateClone | `--name`, `--dst-td`, `--src-nqn`, `--src-idx`, `--src-slices`, `--src-stripe`, `--src-block`, trConfFlags("src-"), `--auto-resume`, dmCloneConfFlags (+ `--rev`) | src trConf nil ⇒ an *empty* `src_tr_conf` list is sent (the gateway's "must not be empty" refusal is reachable) |
-| `clone delete` | DeleteClone | `--name`, `--force` (+ `--rev`) | `--force` skips the CN copy-finished proof. *2026-09-16:* the RPC LATCHES and returns (architecture.md §8.9), so a successful `clone delete` means "teardown started". An operator polls `clone get` until `NOT_FOUND`; while it drains, `clone get` shows `deleting: true`, `clone append-bm` and `clone set-tr` are `FAILED_PRECONDITION`, same-name `clone create` is `ALREADY_EXISTS` (`RESOURCE_EXHAUSTED` if the surviving entry holds the SP at `MaxCloneCntPerSp`, which also blocks an unrelated `clone create`), and `sp delete` still refuses "clones exist". The destination thin device is held for the whole drain too — `td delete` of it, and a replacement `clone create` onto it, are `FAILED_PRECONDITION` until the drain's last transaction, both scans walking `clone_name_list` — so abandoning a clone is `clone delete`, poll `clone get` to `NOT_FOUND`, then `td delete`. Repeating `clone delete` is an OK no-op, forced or not. The destination namespace resumes with the LATCH, not at the end |
+| `clone delete` | DeleteClone | `--name`, `--force` (+ `--rev`) | `--force` skips the CN copy-finished proof. *2026-09-16:* the RPC LATCHES and returns (architecture.md §8.9), so a successful `clone delete` means "teardown started". An operator polls `clone get` until `NOT_FOUND`; while it drains, `clone get` shows `deleting: true`, `clone append-bm` and `clone set-tr` are `FAILED_PRECONDITION`, same-name `clone create` is `ALREADY_EXISTS` (`RESOURCE_EXHAUSTED` if the surviving entry holds the SP at `MaxCloneCntPerSp`, which also blocks an unrelated `clone create`), and `sp delete` is still refused (`FAILED_PRECONDITION`, `storage pool "<name>" still holds …` — the count it names is thin devices, which the gateway checks before clones: the destination td cannot leave `td_name_list` while the draining clone is in `clone_name_list`, which lasts until the drain's last transaction, so `sp delete` stays refused until the `td delete` below, not merely until the drain ends). The destination thin device is held for the whole drain too — `td delete` of it, and a replacement `clone create` onto it, are `FAILED_PRECONDITION` until the drain's last transaction, both scans walking `clone_name_list` — so abandoning a clone is `clone delete`, poll `clone get` to `NOT_FOUND`, `ns delete` the namespace the destination backs (the §11.3 shape always has one, and `td delete` checks that before the clone scan), then `td delete`. Repeating `clone delete` is an OK no-op, forced or not. The destination namespace resumes with the LATCH, not at the end |
 | `clone get` | GetClone | `--name` | |
 | `clone set-tr` | UpdateCloneTrConf | `--name`, trConfFlags("src-") (+ `--rev`) | |
 | `clone append-bm` | AppendCloneBitmap | `--name`, `--src-slice-idx`, `--bm-idx`, `--bm-hex` (+ `--rev`) | a chunk is addressed by the PAIR, never by either index alone: chunk (s, b) is bytes `[b*C, b*C+len)` of source slice s's bitmap, `C = common.CloneBmChunkBytes`, so chunks may be sent in any order and left unsent, while the PAGES of ONE chunk must arrive in order (the gateway appends each at that chunk's current length); empty `--bm-hex` sends an empty bitmap on purpose; a malformed non-empty value is a usage error (exit 2) |
@@ -427,9 +428,12 @@ All in `ctl/` (`*_test.go`) except CT-T6.
   `"<group> <verb>"`, cross-checked against `pb.Gateway_ServiceDesc.Methods`
   in both directions, with `len == 59` pinned (the gatewayctl test, ported).
 * **CT-T2 — argv → request.** A `recordingClient` embedding `pb.GatewayClient`
-  and overriding only the driven method (anything else panics); a
-  `runArgv(argv)` helper parses through the real cobra tree and returns the
-  captured request. Table tests per command assert every field, including:
+  and overriding every one of the 59 methods (`ctl/client_test.go`), each a
+  call into `rpcCall`, whose `want` check panics when the command drives any
+  RPC but the one the row names; a
+  `runArgv(t, rpc, argv...)` helper sets `want` to the row's RPC, parses
+  through the real cobra tree, fails the test unless exactly one RPC was
+  issued with exit 0, and returns the captured request. Table tests per command assert every field, including:
   global `--cluster`/`--sp` fill; the `cluster` group's `--name` fallback; the
   §4 token trio (absent flag ⇒ nil message; `--rev 0` ⇒ present, revision 0;
   `--rev 0x1f` ⇒ 31); trConf/selector/dmClone nil rules; list replace-on-set;
@@ -442,7 +446,7 @@ All in `ctl/` (`*_test.go`) except CT-T6.
   exact §3.2 stderr line; an unknown flag yields 2 with zero client calls;
   the `codeNames` table covers every `codes.Code`.
 * **CT-T5 — trace id.** `--trace-id x` arrives verbatim in the server's
-  incoming `trace_id` metadata (bufconn server behind the real §4 server
+  incoming `trace_id` metadata (bufconn server behind the real `grpc.md` §4 server
   chain); with the flag empty a non-empty minted id arrives; two invocations
   mint two different ids.
 * **CT-T6 — fakegateway** (`integtest/fakegateway/main_test.go`, bufconn):
@@ -510,7 +514,7 @@ scp'd to `$WORK/bin` and `chmod 0755`.
 ### 7.5 The fake: `integtest/fakegateway`
 
 `fakegateway --grpc-address <ip:port> --dir <dir>` — registers **all 59**
-`service Gateway` methods (all unary) behind the mandatory §4 server
+`service Gateway` methods (all unary) behind the mandatory `grpc.md` §4 server
 interceptors (`grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor())`
 + the stream twin, installed even though unused — same rule as fakeagent: the
 JSON log is the suite's record). The fake installs no logger of its own, so
@@ -745,11 +749,11 @@ Sweep = all 59 (§7.10 steps 01-59). Beyond it:
 
 | group | RPCs | extra coverage |
 |---|---|---|
-| cluster | 4 | S s1/s2 (ListClusters), B b6/b7, C c3, D d1/d2 (ListClusters) |
+| cluster | 4 | S s1/s2 (ListClusters), B b6/b7, C c3, D d1/d2 (ListClusters); golden 03 |
 | dn / cn | 6+6 | sweep only (token trio generalizes via b1-b3) |
-| sp | 9 | B b4, C c1/c4; goldens 19 |
+| sp | 9 | B b4, C c1/c4; golden 19 |
 | cntlr | 4 | sweep only |
-| td | 5 | B b1-b3/b5, C c2/c5; golden 33 |
+| td | 5 | B b1-b3/b5, C c2/c5; goldens 33/34 |
 | ss / ns | 4+4 | sweep only |
 | clone | 5 | C c6 |
 | xfer / migr / spare | 4+5+3 | sweep only |
@@ -805,15 +809,22 @@ which gained the `dnvctl_test.sh` and `fakegateway/` rows.
 3. `cmd/dnvctl/main.go`'s first statement is
    `common.SetLogLevel(slog.LevelWarn)`; `grep -rn "fmt.Print" ctl/` hits only
    the §3.1 emit path (CT4/CT7).
-4. `grep -rn "grpc.NewClient" ctl/` hits exactly one site carrying both §4
-   chain options (CT2); `grep -rn "AppendToOutgoingContext" ctl/` finds
-   nothing (the metadata shortcut is the drivers', not dnvctl's).
+4. `grep -rn --exclude='*_test.go' "grpc.NewClient" ctl/` hits exactly one
+   site carrying both `grpc.md` §4 chain options (CT2);
+   `grep -rn --exclude='*_test.go' "AppendToOutgoingContext" ctl/` finds
+   nothing (the metadata shortcut is the drivers', not dnvctl's). Both greps
+   exclude tests because CT-T5's `ctl/traceid_test.go` dials its own bufconn
+   server and names the shortcut in a comment.
 5. CT-T1 pins 59 both ways; CT-T2's token trio (absent / `0` / `0x1f`) passes.
 6. `bash integtest/dnvctl_test.sh user@<lab vm>` prints `PASS`; each
    `--only` case passes in isolation; `--cleanup-only` leaves 29840/29841 free
    and `$WORK` absent.
-7. The §8 amendments are present in the six companion files (spot-grep:
-   `rg -l 'dnvctl.md' README.md doc/` hits them all).
+7. The §8 amendments are present in the five companion files (spot-grep:
+   `rg -l 'dnvctl.md' README.md doc/` hits all five, plus this file and
+   four that cite it on their own account: `doc/log.md` (R2, CT7),
+   `doc/grpc.md` (§6's fakegateway bullet), `doc/dnagent.md` (CM1's
+   `ctl/` pointer) and `doc/dependencies.md` (the pflag bullet, §5.0's
+   flag helpers) — ten files).
 8. Against a *real* gateway (manual step, not in the suite): `dnvctl sp get`
    then a mutator with the returned `--rev` succeeds; the same mutator
    **without** `--rev` also succeeds, because GW6 is presence-based; and the

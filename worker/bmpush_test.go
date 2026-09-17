@@ -176,7 +176,7 @@ func bmAddrs(parts []bmPart) [][2]uint32 {
 // TestBmMissingDiff checks BM2: the chunks etcd holds minus the ones the agent
 // acknowledges, ascending (src_slice_idx, bm_idx); a clone absent from the
 // reply has everything missing. The diff is over the PAIR — one bm_idx names a
-// different chunk on every source slice (U1) — so an acknowledged (0, 1) never
+// different chunk on every source slice (MD2) — so an acknowledged (0, 1) never
 // satisfies the etcd chunk (2, 1).
 func TestBmMissingDiff(t *testing.T) {
 	captureLogs(t)
@@ -272,7 +272,7 @@ func TestBmGrownChunkMemo(t *testing.T) {
 	if got := p.missing(spCloneId, chunks, applied); len(got) != 0 {
 		t.Fatalf("missing = %v, want none", chunkAddrs(got))
 	}
-	// AppendCloneBitmap grew the chunk at (2, 1) (BM5, U3): that pair alone
+	// AppendCloneBitmap grew the chunk at (2, 1) (BM5): that pair alone
 	// is re-pushed, and (0, 1) — the same bm_idx on another slice — is not.
 	grown := []model.BmChunk{
 		{SliceIdx: 0, Idx: 1, ModRev: 10},
@@ -418,7 +418,7 @@ func TestBmRejectedPushSetsResync(t *testing.T) {
 		common.ReplyCodeStaleRevision {
 		t.Fatalf("code = %v", records[0]["code"])
 	}
-	// The §12 record addresses the chunk by the whole pair (U7).
+	// The §12 record addresses the chunk by the whole pair (BM3).
 	if idx, _ := records[0]["src_slice_idx"].(float64); uint32(idx) != 2 {
 		t.Fatalf("src_slice_idx = %v", records[0]["src_slice_idx"])
 	}

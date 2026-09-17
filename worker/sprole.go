@@ -620,7 +620,7 @@ func (w *spWorker) buildPlan(
 	// in a list that still names real CNs.
 	//
 	// Leaving the sides idle costs the drain nothing. After D1 the sides are
-	// retired through the DN pointer lists as D2 empties them (§4.4), not
+	// retired through the DN pointer lists as D2 empties them (SPD7), not
 	// through these children.
 	sideReason := ""
 	switch {
@@ -1904,7 +1904,7 @@ func (d *cntlrDriver) syncup(
 
 // cloneChunkIds is a clone agent's applied set in the pusher's shape: a clone
 // reports the (src_slice_idx, bm_idx) pairs of chunk_id_list, bm_idx_list
-// being migration-only (U7).
+// being migration-only (BM2).
 func cloneChunkIds(chunkIdList []*pb.BmChunkId) []model.BmChunk {
 	out := make([]model.BmChunk, 0, len(chunkIdList))
 	for _, chunkId := range chunkIdList {

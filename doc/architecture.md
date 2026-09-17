@@ -6,8 +6,9 @@ Conventions:
 * All numeric ids are `uint64`, rendered in keys and device names with
   `IdKeyFmt = "%016x"` (16 lower-case hex digits) unless stated otherwise
   (the shard code — §2 — and the thin-device `dev_id`/`ori_id` with their
-  `SpConf.next_dev_id` counter — §5.4, §8.7 — are `uint32`; none of those is
-  rendered into a key or device name).
+  `SpConf.next_dev_id` counter — §5.4, §8.7 — are `uint32`; the shard code is a
+  key field of `DnRev`/`CnRev`/`SpRev`/`CdcEntry`, rendered with `ShardCodeFmt`
+  (§5.1, §5.3), while `dev_id`/`ori_id` are rendered into no key or device name).
 * "STM" = software transactional memory, i.e. the Go etcd `clientv3/concurrency` STM.
 * `block_size` unqualified always means the SP's `DmPoolConf.data_block_size`.
 * Figures are Mermaid diagrams embedded in this document, named `000DiskNode` …
@@ -137,7 +138,7 @@ ClusterConf
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
-| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv, §8.4/§8.9) | 512 |
+| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; the largest shape it must clear is `CreateStoragePool`'s 503 compares — §8.4/§13, dnv-worker.md §11.6) | 512 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
 | `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | | |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
@@ -185,12 +186,53 @@ Per DN, once (created by the dn agent at first `SyncupDn`):
      `DnDiskTable`). Every mutation writes the slot that is *not* the newest valid one,
      so a torn write can only damage the older copy.
    * `DnCloneMetaOffset = 64 MiB`, `DnCloneMetaSize = 192 MiB`,
-     `DnCloneMetaUnit = 4 MiB` — 48 dm-clone metadata slots for migrations whose
-     **destination** side lives on this DN.
+     `DnCloneMetaUnit = 4 MiB` — 48 units of dm-clone metadata space for migrations
+     whose **destination** side lives on this DN. A slot is a contiguous run of whole
+     units and every migration costs at least two of them (the 4 MiB base alone fills
+     one), so at most 24 destination roles fit one DN (§8.11, `dnagent.md` DN13).
    * `DnDataOffset = 256 MiB` — the start of the extent area. Extent *i* lives at byte
      `DnDataOffset + i*extent_size`; the offset is 1 MiB-aligned rather than
      extent-aligned on purpose, so `usable = disk_size − DnDataOffset` is a pure
      constant subtraction `GetDnSize` can answer before `extent_size` is known.
+
+   The two envelopes are normative, so that a decoder written from this document
+   and `pb/schema.proto` can read a dnv disk. Every integer in them is
+   **little-endian**; both checksums are CRC-32 over the IEEE polynomial (Go's
+   `hash/crc32` default table). Offsets below are relative to the start of the
+   block, and `N` is the value of that envelope's own length field:
+
+   ```
+   header block (at DnHeaderOffset, DnHeaderSize = 4096 bytes)
+     [0:8]        magic "DNVDISK1", 8 ASCII bytes, no terminator
+     [8:12]       uint32  format version — 1, the only value accepted
+     [12:16]      uint32  N = byte length of the serialized DnDiskHeader
+     [16:16+N]    the serialized DnDiskHeader        (16 + N ≤ 4092)
+     [16+N:4092]  padding, zero-filled when dnv writes the block
+     [4092:4096]  uint32  CRC-32 over bytes [0:4092]
+
+   volume-table slot (at DnTableSlotAOffset / DnTableSlotBOffset, DnTableSlotSize each)
+     [0:8]        magic "DNVTABL1", 8 ASCII bytes, no terminator
+     [8:16]       uint64  format_uuid — a copy of the header's
+     [16:24]      uint64  seq, monotonic across the two slots
+     [24:28]      uint32  N = byte length of the serialized DnDiskTable
+     [28:32]      uint32  CRC-32 over bytes [0:28] followed by the N table bytes
+     [32:32+N]    the serialized DnDiskTable         (32 + N ≤ DnTableSlotSize)
+   ```
+
+   The header's CRC covers the whole 4 KiB block except its own four bytes — magic,
+   version, length, protobuf and the padding alike. The slot's covers the envelope
+   **and** the body: bytes `[0:28]` and then the `N` protobuf bytes, everything but
+   the CRC field itself. What is left out is the write padding — a slot is written as
+   a whole number of 4 KiB blocks, `32 + N` rounded up — which carries nothing.
+   Covering the body alone would leave `seq` unprotected, and one flipped bit there
+   could make the stale slot outrank the live one and roll the whole volume table
+   back. A slot is a candidate only when its magic matches, its `format_uuid` equals
+   the header's — which is what makes a slot left over from an earlier format of the
+   same disk lose, whatever its `seq` — `32 + N` is within `DnTableSlotSize`, its CRC
+   matches and its body parses; among the candidates the higher `seq` wins. A valid
+   header with no valid slot is a hard error, never a silently empty table, because
+   the format writes slot A before the header (`dnagent.md` DN5).
+
    The on-disk table — not the agent's local store — is authoritative for extent
    placement, so a node that loses `--local-store` but keeps its disk rebuilds exactly
    the same devices.
@@ -674,7 +716,9 @@ group is a **meta** group, else `slice_idx`:
 * `CnMdArrayName(sp,sliceIdx,grpIdx,isMeta)` =
   `dnv-{sp_id:%016x}-{sliceIdxM:%02x}-{grpIdx:%02x}` — used for `mdadm --name` (the
   array's superblock name; 26 chars, within mdadm's 32-byte name limit). The fixed
-  `dnv-` prefix is what the Appendix A udev guard matches (`ENV{MD_NAME}=="dnv-*"`).
+  `dnv-` prefix is what the Appendix A udev guard matches
+  (`ENV{MD_NAME}=="dnv-*|*:dnv-*"` — the second alternative covers the
+  `homehost:name` form `mdadm --examine --export` reports).
 
 `grpIdx` is the group's index inside its `meta_grp_list` / `data_grp_list` (stable:
 groups are only appended, never removed).
@@ -736,10 +780,10 @@ protobuf messages.
 
 `cluster_id` is derived from **two** inputs: the `cluster_name` and the cluster's
 `ClusterConf.creation_epoch` (`time.Now().UnixNano()`, stamped by the gateway inside
-`CreateCluster` and never changed afterwards).
+`CreateCluster` and never changed afterwards) — `model.ClusterId`:
 
 ```go
-func getClusterId(clusterName string, creationEpoch uint64) uint64 {
+func ClusterId(clusterName string, creationEpoch uint64) uint64 {
     h := fnv.New64a()
     h.Write([]byte(clusterName))
     var epochBytes [8]byte
@@ -886,10 +930,13 @@ exclusion).
 
 `base64.StdEncoding.EncodeToString(lastReturnedKey)`; decode with
 `base64.StdEncoding.DecodeString` and range from the **next** key. Decode failure ⇒
-`INVALID_ARGUMENT`. Empty token ⇒ start of prefix. List RPCs never use the STM — but
-every list except `ListClusters` still needs one plain read of
+`INVALID_ARGUMENT`. Empty token ⇒ start of prefix. The four paged lists —
+`ListClusters`, `ListDiskNodes`, `ListControllerNodes`, `ListStoragePools` — never use
+the STM, but every one of them except `ListClusters` still needs one plain read of
 `{p} cluster_conf {cluster_name}` first (`NOT_FOUND` if absent) to derive the
-`cluster_id` its prefix is built from (§5.2).
+`cluster_id` its prefix is built from (§5.2). `ListThinDevices` and `ListSubsystems`
+take no page arguments and are each one STM snapshot read (§8.7, §8.8; `gateway.md`
+GW5).
 
 ### 5.8 STM discipline
 
@@ -1099,7 +1146,8 @@ capacity keys maintained per §5.6; reverse on delete.
   rather than geometry — nothing is formatted or addressed with them: `EventThreshold`
   is stored exactly as sent (so an operator reads back what they asked for) and resolved
   member-wise when read (§10.4), and the `DmCloneConf` hydration pair is stored as sent
-  too — the sp-worker resolves a migration's as it builds the request (§8.11), while a
+  too — the sp-worker resolves a migration's as it builds the `SyncupSide` request
+  (`dnv-worker.md` RW15), while a
   zero in a clone's simply leaves the dm-clone target's own default in place (§8.9).
 * `CmdSoftTimeout` = 3 s / `CmdHardTimeout` = 5 s: agents SIGTERM a shell command at the
   soft timeout and SIGKILL at the hard timeout, reporting `RES_STATUS_ERROR` with the
@@ -1250,8 +1298,11 @@ Errors: `ALREADY_EXISTS` `sp_conf` key; `RESOURCE_EXHAUSTED` when
 `sum(SpGlobal.shard_bucket) ≥ MaxSpCntPerCluster`, when < `cntlr_cnt` eligible CNs, or
 when DN allocation fails (§6.5); `INVALID_ARGUMENT` when: `cntlr_cnt` outside
 `[MinCntlrCntPerSp, MaxCntlrCntPerSp]`; `slice_cnt` outside `[1, MaxSliceCntPerSp]`;
-`init_ext_cnt == 0`; `init_ext_cnt × extent_size` exceeds what one slice's data groups
-may hold; `cntlid_slot_list` has duplicates, values ≥ `CnCntlidSlotCnt`(8) or fewer
+`init_ext_cnt == 0`; a group too small to hold its own §3.6 meta blocks
+(`model.GroupBlocks`: `total_group_blocks ≤ meta_blocks`) — the data group's
+`init_ext_cnt × extent_size`, or the fixed one-extent meta group when
+`extent_size / data_block_size` is that small — or `init_ext_cnt × extent_size`
+overflowing `uint64`; `cntlid_slot_list` has duplicates, values ≥ `CnCntlidSlotCnt`(8) or fewer
 entries than `cntlr_cnt`; any §7 violation in `bdev_conf` / `event_threshold`.
 Defaults: `cntlr_cnt = DefaultCntlrCntPerSp`(2); `cntlid_slot_list = [0..7]`;
 `bdev_conf` member-wise from `ClusterConf.bdev_conf` then constants (`redund_conf`
@@ -1410,7 +1461,7 @@ extend the pool-meta/pool-data linear tables and resize the thin pool online —
 growth is **deferred on the CN** while the new group still contains a provisioning leg:
 the concat and the pool keep their old, effective size and keep reporting `OK` at that
 size, and the grow completes by itself once the leg clears (§9.4, §10.4).
-The "one grow per pool at a time" pending rule (§10.4; dnv-worker.md AR6) binds only
+The per-kind "one grow per pool at a time" pending rule (§10.4; dnv-worker.md AR6) binds only
 the sp-worker's internal auto-grow, which judges "pending" by the primary's reported
 usage; a user-driven GrowSlice is explicit operator intent, holds no such report and
 is **not** so gated (gateway.md §5.4 names the argument) — stacked grows are absorbed by the
@@ -1514,8 +1565,13 @@ snapshot's own materialization is what later makes it eligible as an origin.
 *Snapshot creation is the only gated operation.* `create_snap` is the one
 operation with a kernel-level dependency on the origin's id already being in each
 slice pool. `CreateNamespace`/`UpdateNamespaceDev` on an uncreated td are allowed
-— the ns-dev parks on the td's `CnErrorName` and the namespace stays inaccessible
-until the backing chain exists (`cnagent.md` CN16); `CreateClone` with an uncreated
+— CN16's backing rule never consults `created`: the primary builds the td's thin
+volumes, its raid0 and the ns-dev over that raid0 in one converge (over the dm-clone
+instead when a clone targets the td, CN16 rule 5; an ns-dev whose
+raid0 failed to appear reads `RES_STATUS_ERROR`, it does not park), and the ns-dev
+parks on the td's `CnErrorName` only where CN16 rules 0-4 park it anyway — a
+[D15]-deferred chain, an effectively suspended namespace, a standby or disabled
+cntlr, or a suppressing `sp_level` (`cnagent.md` CN16); `CreateClone` with an uncreated
 destination is allowed ([D3], the destination td is empty by construction);
 `GetThinDeviceBitmap` is not gated, and a slice whose pool does not hold the id yet
 fails in the agent (`thin device {dev_id} not in the metadata snapshot`, CN26),
@@ -1673,8 +1729,11 @@ and `dmsetup create` the wrapper `CnCloneMetaDmName` ([D14]), build dm-clone
 `CnCloneFinalName` (metadata = that
 wrapper, dest = the dst td's `CnRaid0Name`, source = the connected nvme ns at `src_ns_idx`,
 region size = this SP's `block_size`, `hydration_threshold`/`batch_size` from
-`dm_clone_conf`), reload the dst td's namespaces' `CnNsDevName`s onto the dm-clone, and, iff `auto_resume`,
-resume the device and move the td's namespace(s) to ANA `optimized` — i.e. steps 1-5 of
+`dm_clone_conf`), then, for each dst-td namespace that is not effectively suspended,
+reload its `CnNsDevName` onto the dm-clone and move it to ANA `optimized` —
+`auto_resume` is what overrides a stored `suspended = true` (`cnagent.md` CN16);
+otherwise the ns-dev stays parked, live, on the td's dm-error and `inaccessible`
+(nothing is dm-suspended, so there is no resume step — §11.6) — i.e. steps 1-5 of
 §11.3's destination list. After a CN reboot the primary rebuilds the clone by the
 §11.5 recovery procedure before letting any IO through.
 
@@ -1699,8 +1758,10 @@ with no writes, no revision bump and **no agent call** — the check comes first
 1, because after the latch the CN has retired the stack, so `GetCntlrInfo` no longer
 reports the dm-clone and a hydration check would wedge every repeat delete in
 `FAILED_PRECONDITION` for ever. A stale revision token is still `ABORTED` ahead of it.
-Action: the deciding STM writes exactly three things: `Clone.deleting = true`,
-`suspended = false` on every namespace whose `td_id == dst_td_id`, and one `SpRev` bump.
+Action: the deciding STM writes the latch and nothing beyond it: `Clone.deleting = true`,
+`suspended = false` on every namespace whose `td_id == dst_td_id` (one `Subsystem` put
+per subsystem that actually changes — none to `MaxSsCntPerSp` of them), and one `SpRev`
+bump.
 It does NOT delete the `Clone` key, does not touch a chunk key, and does not shrink
 `clone_name_list` — the name MUST survive until the final transaction, because
 `model.LoadSp` fetches clones by iterating that list. Reply `clone_id`.
@@ -1737,8 +1798,9 @@ keys — 256 at today's 16×16, and the founding justification for `EtcdMaxTxnOp
 ceilings are expected to grow. A drain batch is `MaxDelBmPerTxn + 4 = 68` ops whatever
 they become, so growth changes the batch COUNT and never the transaction's legality; at
 today's ceilings a maximum-shape drain is four batches. Every clone transaction in the
-system now fits etcd's DEFAULT cap of 128, and the `--max-txn-ops=512` requirement is
-the sp drain's alone (§8.4).
+system now fits etcd's DEFAULT cap of 128, so nothing on the clone path needs the raised
+flag any more; the `--max-txn-ops=512` requirement survives for the sp drain's D2 batch
+and for `CreateStoragePool`'s own maximum shape (§8.4, §13).
 
 **GetClone** — STM read. **UpdateCloneTrConf** — STM replace `src_tr_conf_list`, bump
 `SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
@@ -1864,9 +1926,9 @@ Data-plane choreography: §11.2.
 
 Admission note: the DN candidate scan covers **extents**
 only. The destination DN's [D13] clone-metadata area — `DnCloneMetaSize` = 48
-`DnCloneMetaUnit` slots per **DN**, shared by every destination role the node
-hosts across every SP — is not part of admission: each migration costs
-`ceil((4 MiB + region_cnt bytes) / DnCloneMetaUnit)` slots with `region_cnt`
+`DnCloneMetaUnit` units per **DN**, shared by every destination role the node
+hosts across every SP — is not part of admission: each migration's slot costs
+`ceil((4 MiB + region_cnt bytes) / DnCloneMetaUnit)` units with `region_cnt`
 = side bytes / `block_size` (≥ 2 — the base alone is one whole unit), so at
 most 24 concurrent destination roles fit one DN, fewer for large sides at
 small block sizes (`dnagent.md` DN13). A migration the area cannot serve is
@@ -1989,11 +2051,13 @@ concatenation (§9.6, §11.4).
   **before** the request becomes the desired state, so nothing converges, nothing is
   persisted, and the restart reconcile cannot replay it; the reply echoes the revision
   the agent still holds, so the worker sees the request was not accepted. A persisted
-  file carrying such a value never becomes live either, though the two roles get there
-  differently: the dn agent skips the file at startup exactly like an unreadable one
-  (`dnagent.md` DN2), while the cn agent loads it and refuses it inside the converge
-  instead, so that cntlr builds nothing and its last applied plan stays untouched
-  (`cnagent.md` CN8).
+  file carrying such a value never becomes live either, and both roles get there the
+  same way — the file is **loaded**, never skipped, and refused inside the converge: the
+  dn agent's `convergeDn` records the refusal on the DN's meta row and leaves the port
+  as found, and the sides of that DN are neither converged nor torn down (skipping the
+  file would make the side loop read every side as having left its parent's list and
+  tear it down — `dnagent.md` DN2); the cn agent refuses before it plans, so that cntlr
+  builds nothing and its last applied plan stays untouched (`cnagent.md` CN8).
 * **Full sync.** Every `Syncup*` request carries the complete desired state of its
   object — there is no partial mode. `SyncupDn.side_pointer_list` /
   `SyncupCn.cntlr_pointer_list` are authoritative: pointers in the request but not
@@ -2367,8 +2431,9 @@ Membership is heartbeat-based; `dnv-worker.md` §6 is the normative specificatio
 [D17] the decision record — this section is the summary. Each `dnv-worker` process
 generates one random **seed** (a v4 uuid) per incarnation and, for every role it
 carries, keeps the key `{p} worker {role} {seed}` refreshed with a `WorkerReg{epoch}`
-value every `DefaultVoteWorkerInterval` (10 s). Every worker watches the three registry
-prefixes. A registration whose put has not been observed for 2 × interval is *dead*, one
+value every `DefaultVoteWorkerInterval` (10 s). A worker scans and watches the registry
+prefix of every role it carries — all three under the default `--roles dn,cn,sp`, fewer
+for a subset (`dnv-worker.md` VW2/VW3). A registration whose put has not been observed for 2 × interval is *dead*, one
 that is being refreshed is *live* — judged by the observer's **own monotonic clock**
 since the put it last saw, never by comparing the stored epoch with local time. Every
 observed transition (appear, disappear, reappear) starts that registration's own
@@ -2422,7 +2487,10 @@ each cntlr's CN by reading `DnConf`/`CnConf` at the record's endpoint
 (`Side.addr_port` / `Cntlr.addr_port` — those keys are endpoint-addressed, §5.3):
 that yields the `dn_id`/`cn_id` the `Syncup*` requests and the
 `migr_src_conf.dst_dn_id`/`migr_dst_conf.src_dn_id` fields carry (cacheable per
-round; a moved node re-resolves on its next `DnRev`/`CnRev` event, §5.5). Bitmap chunks travel over
+round; an endpoint with no `DnConf`/`CnConf` leaves that child idle, and the sp role —
+whose revision watch is `sp_rev` alone, so no `DnRev`/`CnRev` event ever reaches it —
+re-resolves idle children on its own `cntlr_interval`
+ticker, `dnv-worker.md` RW14; no RPC moves a node's `addr_port`, §5.5). Bitmap chunks travel over
 the dedicated `PushCloneBitmap`/`PushMigrBitmap` calls instead (§9.6): the replies'
 `bm_info`/`bm_info_list` tell the worker which chunks each agent already holds —
 migration indexes in `bm_idx_list`, clone `(src_slice_idx, bm_idx)` pairs in
@@ -2503,7 +2571,12 @@ that bump `SpRev`, so the data-plane choreography is the same as for the equival
 manual RPC. The sp-worker evaluates them once per SP per health round, applies at most
 one per pass in the priority failover → auto-grow → cntlr replacement → leg repair, and
 suppresses all of them at `sp_level ≥ SP_LEVEL_NO_THINPOOL` and for
-disabled cntlrs (`dnv-worker.md` §11). A pass over a `deleting` SP runs none of them
+disabled cntlrs (`dnv-worker.md` §11). The four reactions are not the whole pass: on
+every pass over a live SP, ahead of the conf gates and of that `sp_level` suppression,
+the worker first runs one step of the CLONE DRAIN for each clone latched `deleting`
+(since 2026-09-16; §8.9, `dnv-worker.md` §11.7 CLD7/CLD12) — the drains run alongside
+the reactions, not instead of them, and are not reactions. A pass over a `deleting` SP
+runs none of the reactions
 either, but not by suppression: since 2026-09-15 it runs one step of that SP's DRAIN
 instead, at any `sp_level` (§8.4, `dnv-worker.md` §11.6) — a disabled cntlr is never a candidate, replaced
 or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6):
@@ -2512,9 +2585,12 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   `disabled` (§8.6), with no threshold wait — ⇒ pick the healthy, enabled
   cntlr with the smallest `cntlr_id`, flip the `primary` booleans. This *is* the
   failover trigger of §11.1.
-* `cntlr_unhealthy` (600 s): a (non-primary, or already-failed-over) cntlr stays
-  unhealthy ⇒ replace it: internal `DeleteCntlr` (skipping the enabled check) + internal
-  `CreateCntlr` on a fresh CN with the same `cntlid_slot`.
+* `cntlr_unhealthy` (600 s): a cntlr stays unhealthy — a non-primary one, or the
+  primary of an SP with no failover candidate (the sole-cntlr SP, or every other cntlr
+  unhealthy or disabled; otherwise AR5 moves the role away first) ⇒ replace it:
+  internal `DeleteCntlr` (skipping the enabled check) + internal
+  `CreateCntlr` on a fresh CN with the same `cntlid_slot`, primary iff the old one was
+  (`dnv-worker.md` AR7).
 * `side_unhealthy` (600 s) and `leg_unhealthy` (1200 s) — **leg repair**, one procedure
   with two triggers (`dnv-worker.md` §11.5). The sp-worker believes a leg needs replacing
   when either (1) the leg has been unhealthy from the cntlr's perspective for
@@ -2544,13 +2620,15 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   internal `GrowSlice` (`is_meta = false`, `ext_cnt` = the slice's first data group's
   `ext_cnt` — grow by the original allocation unit); when its **metadata** usage
   exceeds the same percentage, an internal `GrowSlice(is_meta = true)` (ladder-sized,
-  §8.5). One grow per pool at a time: no second grow starts while the previous one is
-  not yet visible in the reported usage. A grow whose new group still contains a
+  §8.5). One grow per pool at a time, **per kind**: no second data (resp. metadata)
+  grow starts while the previous grow of that kind is not yet visible in the reported
+  usage, and a pending data grow does not hold back a metadata grow of the same pool
+  (`dnv-worker.md` AR6). A grow whose new group still contains a
   provisioning leg is **deferred on the CN**: the concat and the pool keep their old,
   effective size and keep reporting `OK` at that size with their raw `dmsetup status`
   details, while only the deferred group's own rows report `RES_STATUS_PROVISIONING`;
-  the grow completes by itself when the leg clears, and the "one grow per pool at a
-  time" rule is unaffected because the serving pool's usage details keep flowing (§9.4,
+  the grow completes by itself when the leg clears, and the per-kind "one grow per pool
+  at a time" rule is unaffected because the serving pool's usage details keep flowing (§9.4,
   §9.5, [D15]). Auto-grow is **best-effort** — a grow can find no DN candidates, and
   nothing reserves space ahead — so a pool's data space can run out before a grow
   lands. The agent writes no feature arguments to the thin-pool table (`cnagent.md`
@@ -2831,7 +2909,8 @@ moving ss/ns from `sp1` to `sp2`:
   / pool block size, `dst_td_name`, `auto_resume = true`) — the sp2 primary then:
   (1) connect to the targets, (2) allocate arena units and create the metadata wrapper
   `CnCloneMetaDmName` ([D14]), (3) create
-  `CnCloneFinalName`, (4) reload the ns's `CnNsDevName` onto it and resume, (5) origin
+  `CnCloneFinalName`, (4) reload the ns's `CnNsDevName` onto it (the parked ns-dev is
+  live and nothing is dm-suspended, so there is no resume step — §11.6), (5) origin
   namespace → `optimized`. Hosts flip to sp2 transparently.
 * Optional bitmap fast-path: per sp1 slice `GetThinDeviceBitmap` (paged) →
   `AppendCloneBitmap(slice_idx, …)` on sp2 → worker `PushCloneBitmap` (§9.6) → sp2
@@ -2909,14 +2988,19 @@ the wrapper `CnCloneMetaDmName` (tmpfs + loop, §3.2 step 2) — is
 therefore rebuildable. Whenever the primary (re)builds a clone whose dm-clone metadata
 is missing or unusable — CN reboot, failover to a cntlr that never ran it, tmpfs loss,
 or a metadata-wrapper probe mismatch (wrong length, or a table backed by a stale loop
-path after a tmpfs remount, [D14]) — it MUST:
+path after a tmpfs remount, [D14]) — **or** whose dm-clone device is gone, whether or
+not its metadata wrapper survived (a pass that created the wrapper and then failed to
+create the dm-clone leaves a freshly hole-punched slot that dm-clone would format
+empty, with nothing hydrated, so a surviving, still-matching wrapper is no reason to
+skip the rebuild; `cnagent.md` CN18 step 4) — it MUST:
 
 1. Park the dm-linear `CnNsDevName` of every namespace backed by the td on the td's
-   dm-error (or make sure none is created yet).
-2. Read the **dst bitmaps**: the mapping bitmap of the dst td from every thin pool of
+   dm-error (or make sure none is created yet), and remove the stale dm-clone.
+2. Create the dm-clone with **hydration disabled** over a freshly allocated, freshly
+   hole-punched metadata wrapper ([D14]) — a wrapper that still matches is kept as it
+   is, because re-punching a live slot would wipe a valid dm-clone superblock.
+3. Read the **dst bitmaps**: the mapping bitmap of the dst td from every thin pool of
    the SP (per slice, *mapped = 1 = copied*).
-3. Create the dm-clone with **hydration disabled** and a freshly allocated, freshly
-   hole-punched metadata wrapper ([D14]).
 4. `blkdiscard` every dm-clone region whose bits are 1 in the dst bitmaps (§11.4,
    B-side only) — marking those regions "already hydrated".
 5. Enable background hydration, then re-converge those `CnNsDevName`s onto whatever
@@ -3021,8 +3105,12 @@ both before and after produces neither an AEN nor a generation-counter (GENCTR)
 bump for it, and that counter is per (instance, hostnqn), lasting only while the
 host holds a live connection (`cdc.md` §0 #5/#6). Hosts running `nvme-stas` then
 connect/disconnect automatically (this is what makes `DeleteSubsystem`,
-`CreateCntlr`, `UpdateCntlrEnabled` transparent to hosts). Deploy ≥ 2 instances with
-complementary ranges; hosts are configured with all cdc endpoints.
+`CreateCntlr`, `UpdateCntlrEnabled` transparent to hosts). Deploy ≥ 2 instances as
+**twins** of the same range on different CP servers, and configure hosts with all cdc
+endpoints — that is the whole redundancy mechanism: nothing fails a range over, so
+complementary ranges would leave a dead instance's shards with no discovery log and no
+AENs, and a coverage gap is an operations error no instance can detect (`cdc.md`
+§0 #3, §6).
 
 ---
 
@@ -3044,28 +3132,32 @@ dnv-agent cn --grpc-network tcp --grpc-address 192.168.0.20:29529 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
   --local-store /var/tmp --capacity 8796093022208
 
-dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7 \
+dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.10 --tr-svc-id 8009
 
-dnv-cdc --etcd-endpoints ... --range 8,9,a,b,c,d,e,f \
+dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.11 --tr-svc-id 8009
+  # twins of one range on two CP servers (§12); the full list is also --range's default
 ```
 
 **etcd deployment requirement.** Every etcd node serving dnv MUST run with
 `--max-txn-ops=512` (`EtcdMaxTxnOps`) or higher; etcd's default cap is 128. The
-transaction the number is SIZED by is the sp drain's D2 batch,
-`6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 ops at the
-maximum shape (§8.4, dnv-worker.md §11.6) — the largest bounded one in the system.
-It is not the only one above the default: `CreateStoragePool` writes a whole SP in
-one transaction and passes 128 well before its own maximum shape, and it has no
-constant to tripwire because `slice_cnt` and `init_ext_cnt` are the request's.
+transaction the number is TRIPWIRED against is the sp drain's D2 batch,
+`6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 compares at
+the maximum shape (§8.4, dnv-worker.md §11.6) — the largest a tripwire BOUNDS, not
+the largest in the system. `CreateStoragePool` writes a whole SP in one transaction
+and is the larger of the two: 503 compares at its own maximum shape — 7 fixed, one
+put per slice, 7 per distinct DN and 8 per cntlr's CN, at `MaxSliceCntPerSp` slices
+× 2 groups per slice × `MaxAllocLegPerGrp` legs = 64 DNs and `MaxCntlrCntPerSp`
+cntlrs — which 512 clears by 9. `init_ext_cnt` moves `ext_cnt` VALUES, never key
+counts, so that shape is bounded by those three constants and IS tripwirable; no
+test asserts it yet, and that is a gap, not a property of the request.
 DeleteClone's `MaxSliceCntPerSp × MaxCloneBmCnt` = 256-key rectangle sweep was the
 requirement's founding justification and is gone: since 2026-09-16 the clone drain
 removes those keys in 68-op batches, which fit the default (§8.9,
-dnv-worker.md §11.7).
-This is not something
-dnv can set from the client side — it is a server flag, so it belongs in the etcd
-deployment alongside the endpoints above.
+dnv-worker.md §11.7). This is not something dnv can set from the client side —
+it is a server flag, so it belongs in the etcd deployment alongside the
+endpoints above.
 
 Every flag is also settable via config file and environment (viper). The worker's
 flags are specified in `dnv-worker.md` §5 (`--roles` defaults to all three; the vote
@@ -3205,7 +3297,15 @@ mkdir .../subsystems/{nqn}
 echo {cntlid_min} > .../subsystems/{nqn}/attr_cntlid_min      # §11.8
 echo {cntlid_max} > .../subsystems/{nqn}/attr_cntlid_max
 echo {serial} > .../attr_serial ; echo {model} > .../attr_model    # CN host-facing + DN side
+  # allow_any_host = 0 — every dnv-internal subsystem (an xfer subsystem carries the
+  # Transfer's list verbatim, empty included) and a CN host-facing one with hosts
+  # listed: 0 goes BEFORE the links (nvmet refuses a host link while
+  # allow_any_host is 1)
 echo 0 > .../attr_allow_any_host ; ln -s .../hosts/{hostnqn} .../subsystems/{nqn}/allowed_hosts/
+  # allow_any_host = 1 — a CN host-facing subsystem with an empty allowed_hosts,
+  # nothing else (§3.3 step 6): stale links go first (nvmet refuses
+  # allow_any_host=1 while explicit hosts are linked), then 1
+rm -f .../subsystems/{nqn}/allowed_hosts/{stale_hostnqn} ; echo 1 > .../attr_allow_any_host
 mkdir .../subsystems/{nqn}/namespaces/{nsid}
 echo {device_path} > .../namespaces/{nsid}/device_path
 echo {uuid} > .../device_uuid ; echo {nguid} > .../device_nguid    # CN host-facing + DN side
@@ -3224,7 +3324,10 @@ nvme connect --transport {tr_type} --traddr {tr_addr} --trsvcid {tr_svc_id} \
   --nqn {subsys_nqn} --hostnqn {CnHostNqn|DnHostNqn} \
   --hostid {NvmeHostId(hostnqn)} \
   --fast_io_fail_tmo {DefaultNvmeFastIoFailTmo} --ctrl-loss-tmo -1
-nvme disconnect --nqn {subsys_nqn}
+nvme disconnect --nqn {subsys_nqn}      # every controller of the subsystem
+nvme disconnect --device {nvmeX}        # one controller: the cn retires a migrating
+  # leg's dead side this way — both sides share one NQN ([D1]), so --nqn would
+  # take the live path down with it (`cnagent.md` §2.3)
 ```
 
 Two spellings here are load-bearing and must not be "tidied":
@@ -3266,7 +3369,7 @@ from "not connected".
 **Id calculators (Go):**
 
 ```go
-func getClusterId(name string, creationEpoch uint64) uint64 {
+func ClusterId(name string, creationEpoch uint64) uint64 { // model.ClusterId
     h := fnv.New64a()
     h.Write([]byte(name))
     var b [8]byte
@@ -3393,7 +3496,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   The transfer origin's ns-dev (§8.10, §11.3), and every §11.6-suspended namespace,
   used to be held dm-suspended for the life of the suspension — unbounded, with no
   `SuspendSeconds` floor or ceiling, and the one place a block-device walker on a CN
-  could still wedge in D state. *Decided 2026-09-16 (minor_updates_08 U1):* an
+  could still wedge in D state. *Decided 2026-09-16 (the Appendix C park entry):* an
   effectively suspended namespace is **parked** instead — its ns-dev reloaded onto the
   td's dm-error and resumed, the namespace `inaccessible` — with **no grace window**,
   because the namespace is moved to `inaccessible` before its own ns-dev is touched
@@ -3541,7 +3644,10 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 ## Appendix C — Amendments
 
 Recorded for traceability; the edits are already applied. Companion documents record
-their own edits to this file in their §5 sections. The pre-implementation
+their own edits to this file in their amendment sections — `cnagent.md` and
+`dnagent.md` §5, `dnv-worker.md` §15, `gateway.md` §11, `dnvctl.md` §8, `cdc.md` §10,
+`ThinDeviceCreated.md` §8 (the two integration-test plans keep their suites' own
+amendment ledgers in §20). The pre-implementation
 amendment ledgers themselves have been retired from `doc/` (fully applied);
 the entries below and the companion documents'
 own amendment sections are the surviving record.
@@ -3564,7 +3670,8 @@ own amendment sections are the surviving record.
   whole rectangle of chunk keys in one transaction — 256 deletes at today's 16×16,
   and the founding justification for `EtcdMaxTxnOps = 512`. A batch is now 68 ops
   whatever the ceilings become, so every clone transaction in the system fits etcd's
-  default cap and the 512 requirement is the sp drain's alone. §8.9 (its new lead-in note,
+  default cap and the 512 requirement no longer rests on the clone path at all (§13).
+  §8.9 (its new lead-in note,
   DeleteClone's Errors and Action, AppendCloneBitmap's Errors, and the chunk-count
   sentence), §2.1 (`MaxDelBmPerTxn`) and the `Clone.deleting` field follow; the exclusion that
   performs the physical teardown reuses the existing removed-clone retire path, so there
@@ -3581,7 +3688,7 @@ own amendment sections are the surviving record.
   `GrowSlice` made a slice's group count unbounded, so no single transaction could
   be proven legal. §8 preamble (the flag now has a writer), §8.4 (Errors + Action),
   §2.1 (the two new constants `MaxDelGrpPerTxn` / `MaxAllocLegPerGrp`), §8.9 and
-  §13 (`--max-txn-ops` is now sized by the drain's 486-op batch, not by
+  §13 (`--max-txn-ops` was re-justified on the drain's 486-op batch, not
   DeleteClone's 256-key sweep) and §10.4 (a `deleting` SP drains rather than being
   suppressed) all follow; partial teardown is now an observable state, and what the
   single transaction really guaranteed — that DN/CN budgets never disagree with the
@@ -3596,7 +3703,8 @@ own amendment sections are the surviving record.
 * Consistency fixes — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
   §4.2's stale "name it like a dm kind if desired" line is corrected); §8.13 and §11.4
   pin the LSB-first wire bitmap bit order; [D12] records the unbounded transfer-origin
-  suspension residual.
+  suspension residual (superseded: the 2026-09-16 park entry below replaced that
+  paragraph, and [D12]'s last paragraph now records the park).
 * Snapshot point-in-time — §8.7 gains the rule (quiesce the
   origin td's raid0 around the per-slice `create_snap` sequence; `cnagent.md`
   CN14 is the agent-side spec).
@@ -3609,7 +3717,8 @@ own amendment sections are the surviving record.
   outside a code comment (`dnagent.md` DN13).
 * [D12] blast radius — the [D12] transfer-origin residual now carries its
   operational blast radius and the considered-but-undecided bounded
-  alternative.
+  alternative (superseded: the 2026-09-16 park entry below decided it — parked, no
+  grace window — and rewrote that paragraph).
 * Appendix D and field-name fixes — new Appendix D (v1 assumptions and known limits);
   the three `Cntlr` field references that carried a stale `cn_` prefix on
   `addr_port` now use the schema's field name (×3).
@@ -3626,8 +3735,8 @@ own amendment sections are the surviving record.
   requires `leg_unhealthy > side_unhealthy`; §8.12 attributes the spare switch to the
   sp-worker; §13 shows the worker's flags; Appendix D gains the worker's limits.
   `dnv-worker.md` is the normative spec of `worker/`, `model/`, `etcdutil/` and
-  `cmd/dnv-worker`; the `WorkerReg` schema addition is applied with `make gen` at
-  implementation time.
+  `cmd/dnv-worker`; the `WorkerReg` schema addition is applied (`message WorkerReg` in
+  `schema.proto`).
 * Defaults resolved at write time — §7's substitution rule and its resolution-order
   bullet are replaced: a create RPC bound-checks the raw request and then resolves it,
   the stored conf is concrete, and a zero read back out of etcd is invalid and refused
@@ -3649,7 +3758,7 @@ own amendment sections are the surviving record.
   replaced it — DeleteClone's nested sweep), §8.13 (the aligned-paging convention),
   §9.3, §9.6 (whole section), §13 (the `--max-txn-ops=512` etcd deployment
   requirement DeleteClone's sweep forced, which the clone drain has since handed
-  over to the sp drain) and **[D8]** now describe the pair.
+  over to the sp drain and `CreateStoragePool`) and **[D8]** now describe the pair.
   `BitmapInfo` gains `chunk_id_list`, which clones report instead of `bm_idx_list`.
   Migration bitmaps are untouched, and the proto renumbering is deliberately
   wire-incompatible with old peers: there is no compatibility path. Old 6-field clone
@@ -3673,11 +3782,12 @@ own amendment sections are the surviving record.
   Action and its chunk-count paragraph, including the "why not one transaction" note),
   `gateway.md` §5.8, `dnv-worker.md` §11.7/§12/§13/§14.8/§14.11 and the shell suites
   follow. **Compatibility: no gateway older than `a7f10aa` may run against records
-  written after this**, in two different ways. A clone CREATED after U2 carries no
-  field 11 at all, so an old gateway reads 0 and orphans every chunk key. A clone that
-  PREDATES U2 keeps whatever counter its last pre-U2 append left: protobuf-go
+  written after this**, in two different ways. A clone CREATED after the deletion
+  carries no field 11 at all, so an old gateway reads 0 and orphans every chunk key. A
+  clone that PREDATES the deletion keeps whatever counter its last append before it
+  left: protobuf-go
   preserves an unknown field across decode and re-marshal, so every later rewrite of
-  the record carries it along untouched while post-U2 appends never raise it — an old
+  the record carries it along untouched while later appends never raise it — an old
   gateway then sweeps the stale rectangle and orphans whatever was appended above it.
   Workers and agents never read the field at any version. `Migration.bm_cnt` and
   `MigrDstConf.bm_cnt` are load-bearing and untouched.
@@ -3701,13 +3811,16 @@ Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
 against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
 execution of either suite since the first amendment pass was applied. All five were
 real agent defects, not harness problems; every one is now covered by a unit
-test that fails without the fix.
+test that fails without the fix. Four of them touched this file and are listed
+below; the fifth, IR4 (DN6's dm-clone retirement order on the migration finish
+path), changed no text here and is recorded only in `dnagent.md`'s own
+"Integration-run fixes" subsection.
 
-* **IR1 — `nvme connect --fast_io_fail_tmo`** (Appendix A, §4.2 leg connect). The
+* **IR1 — `nvme connect --fast_io_fail_tmo`** (Appendix A, §3.3 step 1 leg connect). The
   option is spelled with underscores in nvme-cli; `--fast-io-fail-tmo` is rejected
   outright with `unrecognized option`, so no dnv-internal connection could ever be
   made. Appendix A now records the spelling and why it must not be "tidied".
-* **IR2 — every dnv connect passes `--hostid`** (Appendix A, §4.2). New helper
+* **IR2 — every dnv connect passes `--hostid`** (Appendix A, §3.3 step 1). New helper
   `common.NvmeHostId(hostnqn)` = 16 bytes of `sha256("dnv-hostid:{hostnqn}")`,
   RFC-4122-shaped, the `DnNsIdentity` idiom. The kernel keeps a 1:1
   hostnqn↔hostid mapping and nvme-cli fills an omitted `--hostid` from the

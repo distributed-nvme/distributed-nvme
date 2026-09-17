@@ -322,8 +322,10 @@ func loadBmIdx(
 // can never disagree. The bitmap indexes are then two keys-only scans per
 // clone / migration, run OUTSIDE that snapshot but pinned to the very
 // revision it was served at (SpState.Rev): an STM cannot range, and MD3
-// accepts the split because bitmap key sets only ever grow (§8.9/§8.11), so
-// even a slightly newer view would be harmless.
+// accepts the split because the pin is what keeps the two reads consistent —
+// neither key set is append-only: the clone drain deletes chunk keys (CLD8)
+// and FinishMigration/CancelMigration delete a migration's whole run
+// (§8.11), so a newer view could disagree with the snapshot.
 //
 // A missing SpConf returns ErrNotFound (the SP is being deleted; the delete of
 // its rev key follows). Every other listed key that is absent lands in

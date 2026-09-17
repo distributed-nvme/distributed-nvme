@@ -79,8 +79,8 @@ const (
 // spCloneChunks are the fixture clone's bitmap chunks as MD3 reports them: two
 // chunks of two DIFFERENT source slices, so every test that carries a pair
 // around fails when only the bm_idx survives. The second slice is not slice 1,
-// because the chunks are sparse (U3) and nothing derives one index from the
-// other.
+// because the chunks are gap-tolerant (architecture.md §9.6) and nothing
+// derives one index from the other.
 var spCloneChunks = []model.BmChunk{
 	{SliceIdx: 0, Idx: 0, ModRev: 11},
 	{SliceIdx: 2, Idx: 1, ModRev: 12},

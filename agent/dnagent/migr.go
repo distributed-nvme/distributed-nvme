@@ -185,7 +185,7 @@ func (s *DnAgentServer) ensureMigrDst(
 // ensureMigrMeta reserves this migration's dm-clone metadata slot and builds
 // the wrapper dm-linear over it. The wrapper exists because the dm-clone
 // target reads its metadata device from sector 0 and takes no offset
-// argument ([P6]); AllocCloneMeta zeroes a freshly chosen slot's first 8 KiB
+// argument (DN13); AllocCloneMeta zeroes a freshly chosen slot's first 8 KiB
 // before its record is persisted, so a previous tenant's bytes can never be
 // misparsed as a valid dm-clone superblock.
 func (s *DnAgentServer) ensureMigrMeta(
@@ -398,11 +398,11 @@ func (s *DnAgentServer) teardownMigrDst(
 // DnMigrConnectRetryInterval seconds under the DN1 locks, until it succeeds
 // or the side is torn down — the RPC itself never blocks on the connect.
 //
-// The loop is enrolled in the server's WaitGroup so WaitBackground means
-// "every dn background goroutine", not just zeroing (ruling R4.22). Like
-// startZeroing it therefore refuses once rootCtx is done: an armed §11.2 fence
-// timer is not enrolled and can still reach a converge after the join
-// returned, and a bg.Add after bg.Wait panics.
+// The loop is enrolled in the server's WaitGroup so WaitBackground covers the
+// connect retries too, not just zeroing (SH27). Like startZeroing it
+// therefore refuses once rootCtx is done: an armed §11.2 fence timer is not
+// enrolled and can still reach a converge after the join returned, and a
+// bg.Add after bg.Wait panics.
 func (s *DnAgentServer) startMigrRetry(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	s.mu.Lock()

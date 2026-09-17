@@ -252,10 +252,11 @@ func (c *LimitedOsClient) WriteFileDirect(
 
 // ReadBlock / WriteBlock are the raw-device metadata path of
 // architecture.md [D13]: buffered pread/pwrite plus an fsync on the write
-// side. No O_DIRECT — the regions they touch are never part of any dm table
-// and the agent is their only writer, so page-cache aliasing cannot occur —
-// and never a shell-out to dd, whose uutils build silently mishandles
-// iflag=/oflag=direct (dnagent_integtest.md §4).
+// side. No O_DIRECT — of the regions they touch only a clone-metadata slot is
+// ever part of a dm table, and there the agent only ever WRITES, before the
+// slot's wrapper dm-linear exists, so page-cache aliasing cannot occur
+// (osclient.md §4.5) — and never a shell-out to dd, whose uutils build
+// silently mishandles iflag=/oflag=direct (dnagent_integtest.md §4).
 func (c *LimitedOsClient) ReadBlock(
 	ctx context.Context,
 	path string,

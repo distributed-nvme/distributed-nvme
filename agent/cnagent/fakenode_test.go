@@ -173,9 +173,11 @@ func newFakeNode() *fakeNode {
 	return f
 }
 
-// osClient is the cn role's OsClient double. The block-IO halves are NOT wired
-// here any more: the CN11 probe does not use the OsClient (osclient.md §4.5.1), so the
-// only cn caller of WriteBlock/ReadBlockDirect is the LegProbeIO double below.
+// osClient is the cn role's OsClient double. Its block-write half is left
+// unwired: since the probe-IO carve-out the CN11 probe does not use the
+// OsClient (osclient.md §4.5.1) but the raw WriteBlockAt/ReadBlockDirectAt
+// helpers, faked through the LegProbeIO double below, and the interface has
+// no ReadBlockDirect to wire at all.
 // ReadBlockFn stays connected so that a buffered read — which the probe must
 // never issue — is still recorded rather than silently succeeding.
 func (f *fakeNode) osClient() *common.FakeOsClient {

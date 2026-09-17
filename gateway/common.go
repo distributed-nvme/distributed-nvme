@@ -198,7 +198,7 @@ func resolveCluster(
 //
 // rejectDeleting is true for every mutator except DeleteStoragePool: an SP
 // whose teardown has begun accepts no further changes (§8 preamble).
-// DeleteStoragePool is what SETS the flag (SPD3), so the branch is live from
+// DeleteStoragePool is what SETS the flag (SPD4), so the branch is live from
 // the moment it commits until the worker's drain removes the key — the whole
 // duration of a teardown, not a test-only corner.
 func resolveSp(
@@ -463,7 +463,7 @@ func mintClusterId(
 //
 // The rule itself is model.ReleaseShard, because the sp drain's FinishSpDelete
 // applies it from the worker (SPD12) and DeleteCluster's bucket-sum gate is
-// only exact while both writers agree; this stays as the name GW12's three
+// only exact while both writers agree; this stays as the name GW12's two
 // gateway call sites are read by.
 func releaseShard(bucket []uint32, shard uint32) []uint32 {
 	return model.ReleaseShard(bucket, shard)

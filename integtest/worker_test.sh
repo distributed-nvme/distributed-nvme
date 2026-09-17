@@ -47,15 +47,20 @@ ETCD_DIST="etcd-$ETCD_VERSION-linux-amd64"
 ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_DIST.tar.gz"
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
-# U10 (§14.4/§14.6): every etcd serving dnv MUST run with --max-txn-ops at
-# least this high. ONE transaction in dnv is above etcd's default cap of 128
-# and bounded by a constant: the sp drain's D2 batch, 486 COMPARES at the
-# maximum shape (§11.6). Case G commits D2 batches, far below their ceiling —
-# its widest slice has 21 groups' worth of sides, not the 20 x 4 DNs a maximum
-# batch touches — and clone-drain batches, whose 68 ops fit etcd's default
-# (CLD11). The literal is common.EtcdMaxTxnOps; a shell suite cannot import
-# common, so the two are kept in step by hand.
-ETCD_MAX_TXN_OPS=512
+# §14.4/§14.6: every etcd serving dnv MUST run with --max-txn-ops at least
+# common.EtcdMaxTxnOps. The value is NOT typed here — read_constants() fills it
+# at preflight from `workerctl constants`, which prints the Go constants as
+# JSON — so the suite cannot drift from the deployment requirement it enforces.
+#
+# What sizes that requirement is the sp drain's D2 batch: the one transaction
+# in dnv above etcd's default cap of 128 whose size a constant bounds (§11.6).
+# Its compare count and the factors that multiply into it are asserted from the
+# named constants in gateway/txnbudget_test.go, not restated here. Case G
+# commits batches of that family well below the ceiling — its widest slice is
+# 21 groups over two DNs, where a maximum batch touches a DN per leg and per
+# spare of MaxDelGrpPerTxn groups — and clone-drain batches, which fit etcd's
+# default anyway (CLD11).
+ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-worker-integtest
 
@@ -77,30 +82,44 @@ LWM=50                # low_water_mark_pct
 EXTENT_SIZE=67108864  # 64 MiB = common.MinDnExtSize
 BLOCK_SIZE=1048576    # 1 MiB, the dm-thin data block
 CHUNK_BLOCKS=128      # bitmap_chunk_block_cnt
+# dm-thin's metadata block size, fixed by the kernel at 4 KiB: the FIRST
+# fraction of a thin-pool status line (`<used_meta>/<total_meta>`, see
+# thin_pool_line) counts THESE; the SECOND fraction is in BLOCK_SIZE blocks.
+THIN_META_BLOCK_SIZE=4096
 WAIT_SHORT=5
 WAIT_MEMBERSHIP=20
 WAIT_SYNCUP=65
 
-# §3.6 geometry at (extent_size 64 MiB, block_size 1 MiB, chunk 128 blocks).
-# It is derived once here because case D's numbers hang off it:
+# §3.6 geometry, filled by read_geometry() at preflight from `workerctl
+# geometry`, which calls model.GroupBlocks — the one implementation of the
+# formula (MD6) — at this suite's EXTENT_SIZE / BLOCK_SIZE / CHUNK_BLOCKS and
+# the ext_cnt of each group kind. Case D is the only case that reads them, and
+# its sp0 is built `--group 1:1:meta:1:raid1 --group 1:2:data:2:raid1`: that is
+# where the two ext_cnts asked for, and the raid1, come from.
 #
-#   total_group_blocks = ext_cnt * 64 MiB / 1 MiB          = 64 * ext_cnt
-#   bitmap_bits        = ceil(ext_cnt * 64 MiB / 128 MiB)  = 1 for ext_cnt <= 2
-#   bitmap_bytes       = 256 + ceil(bits / 8)              = 257
-#   bitmap_blocks      = ceil(257 / 1 MiB)                 = 1
-#   meta_blocks        = 1 (md sb) + 1 (bitmap) + 1 (health) = 3   [raid1]
+# The formula, as EXPLANATION only (the shell computes none of it):
+#
+#   total_group_blocks = ext_cnt * extent_size / block_size
+#   bitmap_bits        = ceil(ext_cnt * extent_size / (chunk * block_size))
+#   bitmap_bytes       = 256 + ceil(bitmap_bits / 8)
+#   meta_blocks        = 1 (md sb) + ceil(bitmap_bytes / block_size)
+#                          + 1 (health)                            [raid1]
 #   data_blocks        = total_group_blocks - meta_blocks
 #
-# so a meta group of ext_cnt 1 has data_blocks 61 and a data group of ext_cnt
-# 2 has data_blocks 125. The pool's reported totals follow:
+# At (64 MiB, 1 MiB, 128 blocks) that is meta_blocks 3 for both kinds, with
+# data_blocks 125 for a data group (ext_cnt 2) and 61 for a meta group
+# (ext_cnt 1) — the values case D's inline comments quote when they work out
+# which used/total pair breaches a watermark, so changing any of the three
+# parameters above means re-reading those comments too.
 #
-#   total_data (1 MiB data blocks) = sum of data_blocks over the DATA groups
-#   total_meta (fixed 4 KiB blocks) = sum of data_blocks * 1 MiB / 4096
-#                                   = data_blocks * 256 over the META groups
-GRP_META_BLOCKS=3
-DATA_GRP_DATA_BLOCKS=125 # ext_cnt 2
-META_GRP_DATA_BLOCKS=61  # ext_cnt 1
-META_BLOCKS_PER_GRP=15616 # 61 * 256, one meta group in 4 KiB blocks
+# META_BLOCKS_PER_GRP is what one meta group contributes to the pool's REPORTED
+# metadata total, which dm-thin counts in its own fixed blocks; the data half
+# of that line is in BLOCK_SIZE blocks and case D sums DATA_GRP_DATA_BLOCKS for
+# it directly.
+GRP_META_BLOCKS=
+DATA_GRP_DATA_BLOCKS=  # ext_cnt 2
+META_GRP_DATA_BLOCKS=  # ext_cnt 1
+META_BLOCKS_PER_GRP=   # META_GRP_DATA_BLOCKS * BLOCK_SIZE / THIN_META_BLOCK_SIZE
 
 # Sub-object ids the script assigns (§14.5). workerctl advances SpConf.next_id
 # past all of them, so a worker reaction allocates ids ABOVE these.
@@ -920,6 +939,69 @@ fetch_etcd() {
 	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
 }
 
+# read_constants and read_geometry are how this shell reads a Go value instead
+# of copying it. Both run workerctl LOCALLY, on the binary preflight_driver has
+# just built: `constants` and `geometry` open no etcd client and read no key,
+# so neither wants a server, an etcd or a --cluster. A workerctl too old to
+# carry them exits 2 on `unknown subcommand`, which is one thing the dies
+# below report; the other is the driver itself, since the binary they run is
+# cross-built GOOS=linux GOARCH=amd64 like everything else preflight_driver
+# builds and will not exec on a driver that is not the linux/amd64 host §14.3
+# assumes.
+read_constants() {
+	local json
+	json=$("$WORKERCTL_BIN" constants) ||
+		die "\`workerctl constants\` failed: this suite reads" \
+			"common.EtcdMaxTxnOps from it and must not guess it"
+	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
+	case "$ETCD_MAX_TXN_OPS" in
+	'' | *[!0-9]*)
+		die "workerctl constants: EtcdMaxTxnOps is" \
+			"'$ETCD_MAX_TXN_OPS' in $json"
+		;;
+	esac
+	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+}
+
+# geometry_json prints `workerctl geometry`'s reply for one group of this
+# suite's shape: raid1, and the EXTENT_SIZE / BLOCK_SIZE / CHUNK_BLOCKS every
+# case's cluster is created with.
+geometry_json() { # <ext_cnt>
+	"$WORKERCTL_BIN" geometry --raid1 --ext-cnt "$1" \
+		--extent-size "$EXTENT_SIZE" --block-size "$BLOCK_SIZE" \
+		--chunk-blocks "$CHUNK_BLOCKS"
+}
+
+read_geometry() {
+	local data meta value
+	data=$(geometry_json 2) ||
+		die "\`workerctl geometry --ext-cnt 2\` failed: this suite reads the" \
+			"§3.6 geometry from it and must not re-derive it"
+	meta=$(geometry_json 1) ||
+		die "\`workerctl geometry --ext-cnt 1\` failed: this suite reads the" \
+			"§3.6 geometry from it and must not re-derive it"
+	# meta_blocks is taken from the DATA group because that is the only group
+	# case D asserts it on.
+	GRP_META_BLOCKS=$(jq_of "$data" .meta_blocks)
+	DATA_GRP_DATA_BLOCKS=$(jq_of "$data" .data_blocks)
+	META_GRP_DATA_BLOCKS=$(jq_of "$meta" .data_blocks)
+	for value in "$GRP_META_BLOCKS" "$DATA_GRP_DATA_BLOCKS" \
+		"$META_GRP_DATA_BLOCKS"; do
+		case "$value" in
+		'' | *[!0-9]*)
+			die "workerctl geometry: '$value' is not a block count" \
+				"(data $data, meta $meta)"
+			;;
+		esac
+	done
+	META_BLOCKS_PER_GRP=$((META_GRP_DATA_BLOCKS * BLOCK_SIZE /
+		THIN_META_BLOCK_SIZE))
+	log "  §3.6 geometry: meta_blocks $GRP_META_BLOCKS," \
+		"data_blocks $DATA_GRP_DATA_BLOCKS (data, ext_cnt 2) /" \
+		"$META_GRP_DATA_BLOCKS (meta, ext_cnt 1);" \
+		"meta blocks per meta group $META_BLOCKS_PER_GRP"
+}
+
 preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
@@ -938,6 +1020,8 @@ preflight_driver() {
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -o "$FAKEAGENT_BIN" ./integtest/fakeagent >&2) ||
 		die "building fakeagent failed"
+	read_constants
+	read_geometry
 	log "preflight (driver) ok"
 }
 
@@ -1051,7 +1135,7 @@ new_cluster() { # <case> [extra put-cluster flags…]
 	log "  cluster $CLUSTER, cluster_id $CID"
 }
 
-sp_rev() { # <sp name>
+sp_rev() { # <sp id>
 	ctl get-rev sp --id "$1" --shard 00 | "$JQ" -r .revision
 }
 
@@ -3339,7 +3423,7 @@ case_vote() {
 		1 --arg s "$seed4_now")
 	term_latency=$(ts_delta "$term_commit" "$term_at")
 	log "  SIGTERM -> nonmember commit: ${term_latency}s"
-	# The bounds are DERIVED, not the doc's illustrative 8/9 pair.
+	# The bounds are DERIVED here, exactly as §14.11 E step 6 states them.
 	#
 	# SIGTERM deletes the registrations at once (CM5), so a peer sees the
 	# disappear immediately and commits one grace window later:
@@ -3350,9 +3434,11 @@ case_vote() {
 	#     2*VOTE_INTERVAL + VOTE_GRACE - (time since the victim's last put)
 	# and the victim heartbeats every VOTE_INTERVAL, so the true window is
 	#     [VOTE_INTERVAL + VOTE_GRACE, 2*VOTE_INTERVAL + VOTE_GRACE]
-	# = [8, 10] s at the §14.6 timers. The doc's ">= 9 s" silently assumes the
-	# kill lands right after a heartbeat; a kill landing just BEFORE the next
-	# one is equally legal and produced 8.372 s here.
+	# = [8, 10] s at the §14.6 timers. Where inside that window a run lands
+	# depends on where the kill fell in the victim's heartbeat cycle — one
+	# landing just BEFORE the next heartbeat produced 8.372 s here — so the
+	# floor asserted below is VOTE_INTERVAL + VOTE_GRACE and the ceiling
+	# carries the same 2 s of slack as SIGTERM's.
 	#
 	# What the step actually proves is the ORDERING — a graceful stop is
 	# committed measurably sooner because it skips the dead-detection window —

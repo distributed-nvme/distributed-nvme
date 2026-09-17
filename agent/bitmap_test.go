@@ -28,7 +28,7 @@ func TestBitmapRangeHelpers(t *testing.T) {
 
 	// The first batch of a freshly allocated side starts from a nil slice and
 	// grows it to exactly the bytes the range needs (AllocSide writes no
-	// zeroed_bits at all, ruling R4.5).
+	// zeroed_bits at all, DN9).
 	bits := BitmapSetRange(nil, 0, 3)
 	if len(bits) != 1 || bits[0] != 0b0000_0111 {
 		t.Fatalf("first batch = %v, want [0b111]", bits)
@@ -72,7 +72,7 @@ func TestBitmapRangeHelpers(t *testing.T) {
 	}
 
 	// A padded byte that is physically 0xff still counts only the logical
-	// bits: this is the case BitmapBitCount would get wrong (risk R2).
+	// bits: this is the case BitmapBitCount would get wrong (DN9).
 	padded := []byte{0xff, 0xff}
 	if got := BitmapCountSet(padded, 10); got != 10 {
 		t.Errorf("padded count = %d, want 10", got)

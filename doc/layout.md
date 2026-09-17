@@ -18,12 +18,15 @@ design inputs are `architecture.md`, `schema.proto`, `constants.go` and
   `google.golang.org/protobuf`, `golang.org/x/sync`,
   `github.com/spf13/viper` (flags/config/env per `architecture.md` §13) and
   `github.com/spf13/cobra` (the `dnv-agent` and `dnvctl` subcommand trees,
-  `dnagent.md` §3) — the last two entered `go.mod` with `cmd/dnv-agent`.
+  `dnagent.md` §3) — the last two entered `go.mod` with `cmd/dnv-agent` — and
+  `github.com/spf13/pflag`, cobra's flag package, which `ctl/` imports directly
+  for the shared `*pflag.FlagSet` helpers behind its repeated flag groups.
   `go.etcd.io/etcd/client/v3` (the v3.6 line, incl. `concurrency`) entered
   `go.mod` with `etcdutil/` (§4, `dnv-worker.md` §3), and brought
   `go.etcd.io/etcd/api/v3` (`rpctypes`, for EU3's `ErrCompacted` report) and
-  `go.uber.org/zap` (only `zap.NewNop()`, EU1's silenced client logger) with
-  it as unavoidable direct imports.
+  `go.uber.org/zap` (only `zap.NewNop()`, the silenced etcd client logger
+  that `log.md` §7's acceptance grep pins) with it as unavoidable direct
+  imports.
 
 Library packages sit directly under the module root (no `pkg/` or
 `internal/` prefix), so the file paths used by the component specs —
@@ -77,9 +80,13 @@ distributed-nvme/                      # repo root = module root
 │   ├── stm.go                         # the typed SP snapshot loader
 │   ├── capacity.go                    # §5.6 capacity-key maintenance
 │   ├── alloc.go                       # §6.3/§6.4 candidate scans
-│   └── ops.go                         # the internal §8/§10.4 mutations shared by gateway and worker
+│   ├── ops.go                         # the internal §8/§10.4 mutations shared by gateway and worker
+│   ├── drain.go                       # the three sp-drain ops of dnv-worker.md §11.6 (DrainSpCntlrs, DrainSpSlice, FinishSpDelete)
+│   └── clonedrain.go                  # the two clone-drain ops of dnv-worker.md §11.7 (DrainCloneBm, FinishCloneDelete)
 ├── gateway/                           # Gateway service implementation
-│   ├── server.go                      # grpc.Server bootstrap + interceptor wiring
+│   ├── server.go                      # grpc.Server bootstrap + interceptor wiring (serverOptions)
+│   ├── traceid.go                     # the gateway.md §0 #6 trace-id mint: the ensureTraceId* server interceptors chained ahead of the grpc.md §4 pair
+│   ├── common.go                      # the handler helpers the RPC-group files share, among them: GW7 error mapping, resolve/open + token checks + rev bumps, id minting, pagination, the per-call agent dial (withAgentConn)
 │   ├── cluster.go                     # §8.1   (one file per §8 RPC group:)
 │   ├── disknode.go                    # §8.2
 │   ├── controllernode.go              # §8.3
@@ -106,7 +113,9 @@ distributed-nvme/                      # repo root = module root
 │   ├── clusterconf.go                 # §8.5 ClusterConf cache
 │   ├── health.go                      # §9 err_epoch bookkeeping (through model)
 │   ├── bmpush.go                      # §10 Push*Bitmap calls, chunk-address bookkeeping
-│   └── reaction.go                    # §11 automatic reactions
+│   ├── reaction.go                    # §11 automatic reactions
+│   ├── drain.go                       # §11.6 sp drain: the one drain step a latched SP runs per pass instead of the reactions (SPD1-SPD14)
+│   └── clonedrain.go                  # §11.7 clone drain: one step per latched clone, alongside the reactions (CLD1-CLD12)
 ├── agent/                             # shared dn/cn mechanism (dnagent.md §2)
 │   ├── agent.go                       # bootstrap: reconcile-then-serve, grpc server wiring
 │   ├── store.go                       # local store helper (Local*Path files, load-on-start)
@@ -121,8 +130,10 @@ distributed-nvme/                      # repo root = module root
 │   ├── nvmehost.go                    # nvme connect/disconnect/list-subsys wrapper
 │   ├── dnagent/                       # DiskNodeAgent policy (§9.2, dnagent.md §4): server.go,
 │   │                                  # diskmeta.go ([D13] on-disk format + allocators),
-│   │                                  # syncup_dn.go, syncup_side.go, push_migr_bm.go,
-│   │                                  # check.go (§9.7), migr.go, probe.go,
+│   │                                  # syncup_dn.go, syncup_side.go, plan.go (the per-side
+│   │                                  # plan: resource keys, dm/nvmet names, ANA groups),
+│   │                                  # fence.go (the [D12] bounded src-cutover fence of §11.2),
+│   │                                  # push_migr_bm.go, check.go (§9.7), migr.go, probe.go,
 │   │                                  # zeroing.go (§9.4 background side zeroing)
 │   └── cnagent/                       # ControllerNodeAgent policy (§9.3, cnagent.md §4): server.go,
 │                                      # plan.go, syncup_cn.go, syncup_cntlr.go, push_clone_bm.go,
@@ -147,16 +158,19 @@ distributed-nvme/                      # repo root = module root
 │   ├── root.go                        # dnvctl root: globals, dial, emit (dnvctl.md §2-§3)
 │   └── cluster.go, dn.go, cn.go, sp.go, cntlr.go, td.go, ss.go, ns.go, clone.go, xfer.go, migr.go, spare.go
 │                                      # one noun group each (dnvctl.md §5); the §11.4 copier is future work outside dnvctl
-├── integtest/                         # on-hardware suites: dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7
+├── integtest/                         # integration suites, driven over ssh against remote hosts (the agent suites need passwordless sudo for real dm/md/nvmet/nvme-tcp over loop devices, the cdc suite for real nvmet/nvme-tcp over dm-zero; the worker, gateway and dnvctl suites need no root): dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7
 │   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
 │   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
-│   ├── workerctl/main.go              # the etcd driver that plays the gateway (+ the two gateway.md §2.4 worker flips)
+│   ├── workerctl/main.go              # the etcd driver that plays the gateway (+ the six gateway.md §2.4 stand-ins: the two worker flips and the two worker drains, plus the two gateway delete latches the worker suite uses in place of DeleteStoragePool/DeleteClone)
 │   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
 │   ├── cdc_test.sh                    # cdc suite (four servers, real etcd, real nvmet, real hosts)
 │   ├── cdcctl/main.go                 # the etcd driver that plays gateway + worker for CdcEntry keys
 │   ├── gateway_test.sh                # gateway suite (one server, real etcd, 3 gateways, fake agents)
-│   ├── gatewayctl/main.go             # the gRPC driver of the gateway suite (one subcommand per RPC + `race`)
+│   ├── gatewayctl/                    # the gRPC driver of the gateway suite (one subcommand per RPC + `race`):
+│   │                                  # main.go (globals, `race`, the --expect exit contract, the subcommand registry) + the
+│   │                                  # gateway.md §10.8 subcommands' setup functions split by scope — cmd_node.go (cluster/dn/cn + ping), cmd_sp.go (sp + cntlr),
+│   │                                  # cmd_vol.go (td/ss/ns/xfer), cmd_copy.go (clone/migr/spare + the bitmap reads)
 │   ├── dnvctl_test.sh                 # dnvctl suite (one VM, no sudo: the real CLI against a fake gateway)
 │   ├── fakegateway/main.go            # all 59 Gateway methods behind a behavior file (dnvctl.md §7.5)
 │   └── bin/                           # built drivers + the etcd download cache (gitignored via bin/)
@@ -191,10 +205,10 @@ client is linked only into the binaries that use it (§3).
 | `model` | `common`, `pb`, `etcdutil` | the §5 data model as Go (`dnv-worker.md` §4): key formats, `cluster_id`, capacity keys, the §6 allocator, the internal §8/§10.4 mutations. No gRPC; never dials an agent; MUST NOT import `gateway`, `worker`, `agent`, `cdc`, `ctl`. |
 | `gateway` | `common`, `pb`, `etcdutil`, `model` | grpc server + client (dials agents) |
 | `worker` | `common`, `pb`, `etcdutil`, `model` | grpc client only (dials agents); `dnv-worker.md` |
-| `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
+| `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb` (the two role packages also `agent`, the shared mechanism they build on) | grpc server only; **no etcd** — agents never talk to etcd (`architecture.md` §1) |
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
-| `ctl` | `common`, `pb` | grpc client to the Gateway; **no etcd** |
-| `cmd/*` | the matching top-level package + `common` (`cmd/dnv-worker` also `etcdutil`: main builds the client `worker.Run` takes) | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) |
+| `ctl` | `common`, `pb` | grpc client to the Gateway; cobra + pflag + viper (the dnvctl command tree and its CT9 viper binding live here, not in `cmd/dnvctl` — `dnvctl.md` §1.2); **no etcd** |
+| `cmd/*` | the matching top-level package + `common` (`cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes; `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: main builds the two servers and their `NvmeTrConf` and registers each through `agent.Serve`; `cmd/dnvctl` imports only `common` + `ctl`) | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) — except for `dnvctl`, whose tree is `ctl`'s (row above) and whose main imports neither |
 | `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the
@@ -203,8 +217,13 @@ nothing internal.
 
 ## 4. Protobuf generation
 
-* `pb/schema.proto` is the `schema.proto` from the design inputs plus exactly
-  one added line (after `syntax`):
+* `pb/schema.proto` is the `schema.proto` from the design inputs plus one
+  added line (after `syntax`) and the schema edits the component specs have
+  recorded since — among them the `WorkerReg` message (`dnv-worker.md` §2.2),
+  the `Inspect*Reply` `revision` → `applied_revision` rename and
+  `AppendCloneBitmapRequest`'s chunk address (`gateway.md` §2.3), the [D14]
+  and [D15] field reservations, and the `Clone.bm_cnt` deletion (`reserved
+  11` / `reserved "bm_cnt"`, 2026-09-16). The added line:
 
   ```proto
   option go_package = "github.com/distributed-nvme/distributed-nvme/pb";
@@ -305,17 +324,17 @@ Recorded for traceability; the edits are already applied. Unlike the
 appended rather than inserted because §2, §3, §4 and §7 are cited by number
 from `cnagent.md`, `dnagent.md` and this file itself.
 
-* [D14] LVM removal (suite amendment U3-T4) — LVM is gone from the CN as well as the DN, so the
+* [D14] LVM removal (suite amendment U3-T5, `cnagent_integtest.md` §20) — LVM is gone from the CN as well as the DN, so the
   §2 `agent/cnagent/` list loses `lvm.go` ("the clone VG — the one LVM user
   left") and gains `clonemeta.go`: the CN base-state wrappers plus the
   clone-metadata slot allocator over the single loop device, whose kind-`b`
   wrapper dm-linears are their own allocation registry (`cnagent.md` §4.1,
   `architecture.md` [D14]).
-* [D15] side provisioning (suite amendment U4-T2) — the §2 `agent/dnagent/` list gains `zeroing.go`,
+* [D15] side provisioning (suite amendment U4-T6 of both integtest specs, §20) — the §2 `agent/dnagent/` list gains `zeroing.go`,
   the background side-provisioning goroutine of `architecture.md` §9.4
   ([D15]). No package boundary changed: it is a new file in an existing
   package.
-* The probe-IO carve-out (suite amendments U2-T2/U2-T4) — the cn probers'
+* The probe-IO carve-out (suite amendment U2-T5, `cnagent_integtest.md` §20) — the cn probers'
   block IO left the
   `OsClient`. The probe-IO dependency lives in the already-listed
   `healthcheck.go` (no new file), so the §2 note only names it; `common/`

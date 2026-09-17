@@ -25,7 +25,7 @@ import (
 // same layout.
 //
 // Every method loads lazily on first use and is safe for concurrent callers;
-// all raw-device IO goes through OsClient.ReadBlock/WriteBlock ([P7]).
+// all raw-device IO goes through OsClient.ReadBlock/WriteBlock ([D13]).
 type DiskMeta struct {
 	oc   common.OsClient
 	disk string
@@ -62,7 +62,7 @@ type DiskMeta struct {
 	diskSize uint64
 }
 
-// Envelope layout (§5.2 of the plan; all integers little-endian).
+// Envelope layout (the [D13] blocks of §3.1; all integers little-endian).
 const (
 	dnHeaderMagic   = "DNVDISK1"
 	dnTableMagic    = "DNVTABL1"
@@ -696,7 +696,7 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 //
 // The helpers are free functions on the record rather than DiskMeta methods so
 // the converge, the probe and the zeroing loop can all work off one LookupSide
-// snapshot without re-taking d.mu (rulings R4.6/R4.7).
+// snapshot without re-taking d.mu.
 // ---------------------------------------------------------------------------
 
 // sideExtCnt is the side's logical extent count — the bit count of
@@ -725,10 +725,10 @@ func sideFullyZeroed(rec *pb.DnDiskTable_SideRecord) bool {
 // fully zeroed.
 //
 // The offset comes from first-unset, never from the *count* of zeroed extents
-// (ruling R4.7): the two agree only while the set bits are a contiguous
-// prefix, which is all this protocol produces but not all the record can
-// hold, and a count-derived offset would silently zero the wrong range for
-// any other bitmap.
+// (DN9): the two agree only while the set bits are a contiguous prefix, which
+// is all this protocol produces but not all the record can hold, and a
+// count-derived offset would silently zero the wrong range for any other
+// bitmap.
 func sideNextZeroBatch(
 	rec *pb.DnDiskTable_SideRecord,
 	batch uint64,
@@ -778,7 +778,7 @@ func (d *DiskMeta) AllocSide(
 	if err != nil {
 		return nil, fmt.Errorf("allocating %d extents: %w", extCnt, err)
 	}
-	// zeroed_bits is left empty on purpose (ruling R4.5): proto3 does not
+	// zeroed_bits is left empty on purpose (DN9): proto3 does not
 	// serialize an empty bytes field, out-of-range bits read as 0, and
 	// BitmapSetRange grows the slice on the first batch — so an absent field
 	// is exactly the §9.4 protocol's "persist the record with zeroed_bits all 0",
@@ -896,7 +896,7 @@ func (d *DiskMeta) FreeSide(
 
 // AllocCloneMeta reserves a contiguous run of DnCloneMetaUnit units for one
 // migration's dm-clone metadata. The first 8 KiB of a freshly chosen slot is
-// zeroed **before** the record is persisted ([P6]): lvcreate used to zero
+// zeroed **before** the record is persisted (DN13): lvcreate used to zero
 // implicitly, and without it stale bytes from a previous tenant would be
 // misparsed as a valid dm-clone superblock. A crash after the zeroing but
 // before the record leaves the units free and re-zeroed next time; a crash

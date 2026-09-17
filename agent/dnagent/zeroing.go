@@ -29,7 +29,7 @@ import (
 // loop must NEVER block on a lock: teardownSide and the DN6 orphan sweep
 // cancel it and wait for it while holding the node WRITE lock, and cancelling
 // a ctx does not release a goroutine parked in sync.RWMutex.RLock, so a
-// blocking acquire would hang the whole agent (ruling R4.20).
+// blocking acquire would hang the whole agent (DN9).
 const zeroLockPoll = 20 * time.Millisecond
 
 // zeroJob is the geometry one zeroing loop works from. It is captured once, at
@@ -46,7 +46,7 @@ type zeroJob struct {
 // startZeroing registers the side's zeroing loop if it is not running already.
 // The caller holds the node read lock and the side's object lock.
 //
-// It refuses once rootCtx is done (ruling R4.21): an armed §11.2 fence timer
+// It refuses once rootCtx is done (SH27): an armed §11.2 fence timer
 // is not enrolled in the WaitGroup and can still reach a converge after
 // WaitBackground returned, and a bg.Add after bg.Wait panics.
 func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
@@ -196,7 +196,7 @@ func (s *DnAgentServer) zeroLoop(
 			continue
 		}
 		// A successful batch clears an outstanding failure: ERROR wins only
-		// while one is outstanding (ruling R4.14).
+		// while one is outstanding (DN9).
 		s.setZeroingErr(st, nil)
 	}
 }

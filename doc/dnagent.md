@@ -2,7 +2,8 @@
 
 Status: **normative**. Read `log.md`, `osclient.md` and `grpc.md` first — this
 document builds on their rules (one Info record per operation, `OsClient`-only
-OS access, the four interceptors, trace-id propagation) and does not restate
+OS access, trace-id propagation, and the four shared `grpc.md` §3 interceptors:
+unary client, stream client, unary server, stream server) and does not restate
 them.
 
 Required background: `schema.proto` (service `DiskNodeAgent` and its messages,
@@ -16,7 +17,8 @@ implements), §11.2 (migration), §11.7 (SpLevel), §11.8 (cntlid slots), §13
 
 Scope split: §2 and §3 are **[shared]** — they specify the mechanism package
 `agent` and the `cmd/dnv-agent` binary skeleton, which `dnv-agent cn` reuses
-unchanged; a future `cnagent.md` MUST NOT re-specify them. §4 is **[dn]** —
+unchanged; `cnagent.md` MUST NOT re-specify them, and does not — its §2/§3
+add to and amend them instead. §4 is **[dn]** —
 the `agent/dnagent` policy package. §5 records the amendments this document
 made to the companion documents.
 
@@ -28,7 +30,7 @@ made to the companion documents.
 |---|---|---|---|
 | `agent` | `agent/` | shared dn/cn **mechanism**: bootstrap, local store, revision gate, locks, `ResInfo` tracking, OS wrappers, bitmap store, check-loop rules | `common`, `pb` |
 | `dnagent` | `agent/dnagent/` | dn **policy**: the `DiskNodeAgent` service — which extent allocations, dm tables and nvmet objects to build and when | `common`, `pb`, `agent` |
-| `main` | `cmd/dnv-agent/` | cobra `dn`/`cn` dispatch, viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `common` |
+| `main` | `cmd/dnv-agent/` | cobra `dn`/`cn` dispatch, viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `common`, `pb` |
 
 Agents never talk to etcd (`layout.md` §3); acceptance re-checks it. The
 gRPC server carries the **server** interceptors of `grpc.md` §4 and no client
@@ -62,7 +64,7 @@ grep finds every refusal across the control plane and both agents.
 string-exactly, one on each side, so a change made to one copy and not the
 other goes red; §6 test 23 and `cnagent.md` §6 test 27 assert them once
 more through the two roles that reply with them. Both validators check
-**presence only** — the §7 range checks
+**presence only** — the `architecture.md` §7 range checks
 belong to the gateway, which sees the request that set the value — and
 `low_water_mark_pct` is checked for zero alone, because a value above 100
 is the legal "never grow this pool automatically" setting.
@@ -74,7 +76,16 @@ boundaries are binding, file names are not.
 ### 2.2 Additions to `common`
 
 The following enter the existing files `common/constants.go` and
-`common/name_fmt.go` (no new files — `layout.md` §7.5 still holds):
+`common/name_fmt.go` (no new files — `layout.md` §7.5 still holds). The const
+listing is a condensed, topic-grouped quote rather than a byte-for-byte one:
+its three groups live in three separate places of `common/constants.go`'s
+single `const` block, in a different order; the `SuspendSeconds` comment there
+carries a longer rationale than the one below; and the Go file's comment
+wrapping and gofmt's trailing-comment alignment differ from the listing, so the
+block cannot be pasted back into Go unchanged. The names, the values and the rules the
+comments state are the committed ones, and `common/constants.go` is
+authoritative for comment text, wrapping and order (unlike `log.md` §4 /
+`grpc.md` §3, whose byte-identity is pinned):
 
 ```go
 	// The single nvmet port every node exports (architecture.md §3.1/§3.2).
@@ -102,7 +113,8 @@ The following enter the existing files `common/constants.go` and
 	ReplyCodeInvalidConf = 3
 
 	// Seconds between background retries of a pending migration-destination
-	// nvme connect (dnagent.md DN8).
+	// nvme connect (dnagent.md DN13; the loop is SH27's "DN8 retry", so
+	// nicknamed for the DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
 
 	// Side provisioning ([D15], architecture.md §9.4, dnagent.md DN9): the
@@ -386,7 +398,10 @@ SH10. Node **write** lock: the startup reconcile and the node-level syncup
 SH11. Node **read** lock + the object's lock: every object-scoped RPC
       (`SyncupSide`/`SyncupCntlr`, `Push*Bitmap`, `GetSideInfo`/
       `GetCntlrInfo`, one `CheckSide`/`CheckCntlr` round) and every
-      background converge attempt (DN8).
+      background converge attempt (the dn's connect retry — DN13; DN1's and
+      SH27's "DN8 retry" — and DN12 fence timer, which share
+      `reconvergeSide`, and the cn's connect retry,
+      `reconvergeCntlr` — the SH27 background tasks that converge; CN1).
 
 SH12. Node **read** lock only: node-scoped reads (`GetDnInfo`/`GetCnInfo`,
       one `CheckDn`/`CheckCn` round). `GetDnSize`/`GetCnSize` take no lock.
@@ -419,7 +434,7 @@ role packages.
 
 SH15. Every wrapper call wraps its ctx with
       `context.WithTimeout(ctx, common.CmdSoftTimeout*time.Second)` before
-      calling `OsClient` (the §7 soft/hard timeout contract; `osclient.md`
+      calling `OsClient` (the `architecture.md` §7 soft/hard timeout contract; `osclient.md`
       §4.2 handles SIGTERM/SIGKILL). This covers the raw-device
       `ReadBlock`/`WriteBlock` calls of the [D13] metadata path too. A role
       package that calls the `OsClient` directly instead of through a
@@ -558,9 +573,10 @@ SH26. Info inclusion: always when `show_info = true`; when `false`, on the
 ## 3. `cmd/dnv-agent` — cobra + viper [shared]
 
 CM1. The binary is a cobra root command `dnv-agent` with exactly two
-     subcommands, `dn` and `cn`. cobra and viper live only in `cmd/`
-     (`layout.md` §3); `github.com/spf13/cobra` and `github.com/spf13/viper`
-     enter `go.mod` with this binary.
+     subcommands, `dn` and `cn`. cobra and viper live in `cmd/` and in
+     `ctl/`, dnvctl's command tree (`dnvctl.md` §1.2);
+     `github.com/spf13/cobra` and `github.com/spf13/viper` enter `go.mod`
+     with this binary.
 
 CM2. Flags (`architecture.md` §13; every flag is also settable via config
      file and environment through viper):
@@ -570,7 +586,7 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
 | `--grpc-network` | ✓ | ✓ | `tcp` | `net.Listen` network |
 | `--grpc-address` | required | required | — | gRPC endpoint; the CP stores it as `DnConf`/`CnConf` `addr_port` |
 | `--tr-type` / `--adr-fam` / `--tr-addr` / `--tr-svc-id` | required | required | — | the node's single nvmet port (`NvmeTrConf`), mirrored into `DnConf`/`CnConf` at creation |
-| `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` | `localStorPrefix` of `common.NewNameFmt` (§4.6 state files) |
+| `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` | `localStorPrefix` of `common.NewNameFmt` (`architecture.md` §4.6 state files) |
 | `--disk` | required | — | — | the raw block device that carries the dnv disk format ([D13]; §4.1 `diskmeta.go`) |
 | `--capacity` | — | ✓ | 0 | capacity budget in bytes this CN is willing to host; `GetCnSize` replies it verbatim, 0 = "use the CP default" (added by `cnagent.md` §3) |
 | `--config` | ✓ | ✓ | — | optional viper config file |
@@ -610,7 +626,8 @@ func newDnCmd() *cobra.Command {
 	addCommonFlags(cmd)               // CM2 shared rows
 	cmd.Flags().String("disk", "",
 		"raw block device that carries the dnv disk format (required)")
-	cmd.MarkFlagRequired("disk")
+	// no MarkFlagRequired: "required" is checked after the viper binding,
+	// in runDn, so a config file or env var satisfies it too (CM2/CM3)
 	return cmd
 }
 
@@ -619,6 +636,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 		context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	bindViper(cmd)                    // CM3
+	requireValues(append(requiredCommon, "disk")...) // the CM2 required rows
 	nf := common.NewNameFmt(viper.GetString("local-store"))
 	oc := common.NewLimitedOsClient(0)
 	srv := dnagent.NewDnAgentServer(oc, nf, viper.GetString("disk"),
@@ -635,7 +653,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 
 ### 4.1 Files
 
-`server.go` (the `DnAgentServer` type, lock mapping, RPC entry points),
+`server.go` (the `DnAgentServer` type, lock mapping, the RPC entry points other than the check streams of `check.go`),
 `diskmeta.go` (the [D13] on-disk format: header, A/B volume-table slots,
 extent and clone-metadata allocators), `syncup_dn.go`, `syncup_side.go`,
 `plan.go` (the per-side desired-state plan derived from the request),
@@ -678,23 +696,35 @@ DN1. Lock mapping (instantiates SH10-SH13): `SyncupDn` and the startup
 DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      converge (§4.5 steps 2-3) from the stored request — **unless** its
      `extent_size` is 0, which only a build older than DN4's conf gate can
-     have persisted. Such a file is skipped exactly like an unreadable one,
-     and for the same reason: a zero extent size is not a geometry any
-     converge may run on, and it must not reach the in-memory DN set.
-     Loading it would not corrupt the disk — DN5's `EnsureFormatted` cannot
-     confirm this disk against a zero (a formatted one answers `"foreign
-     disk: …"`, a blank one `"extent_size is 0"`), so every later mutation
-     refuses and nothing is allocated — but it would bury the conf fault
-     under an identity error on every side of that DN instead of one record
-     naming the field. The skip is not free — with no DN state in memory,
-     that node's `side-*` files take the pointer-absent branch below and are
-     torn down (DN6): their exports, dm devices and store files go, but
-     their extent **records stay**, because freeing one mutates the volume
-     table and DN5's identity check never ran here; the DN6 orphan sweep
-     stays silent for the same reason (it needs a confirmed disk). Those
-     records are reclaimed only once a DN with a concrete `extent_size` is
-     synced again. There is no compat shim: a cluster whose stored conf carries
-     zeros is refused loudly everywhere and has to be recreated. Then each
+     have persisted. Such a file is **loaded** into the in-memory DN set
+     exactly as read — not skipped like an unreadable one — and refused by
+     `convergeDn` instead, once per pass: a zero extent size is not a
+     geometry any converge may run on, so the converge stops before DN5
+     touches anything (no `lsblk`, no header read, the port left as found)
+     and reports the `architecture.md` §7 conf fault as one `Error` record (msg `"invalid
+     stored conf"`, naming the cluster and the dn). That record is the one
+     place the field is named: the `meta_info = RES_STATUS_ERROR` that
+     `convergeDn` hands back has no reply to travel in at startup, and the
+     next `GetDnInfo`/`CheckDn` round re-probes the header against the zero
+     and reports the meta row as `"foreign disk: … want …/0"` on a
+     formatted disk, `"unformatted disk"` on a blank one. Refusing
+     there rather than converging is what keeps the fault legible: DN5's
+     `EnsureFormatted` cannot confirm this disk against a zero (a formatted
+     one answers `"foreign disk: …"`, a blank one `"extent_size is 0"`), so
+     a converge would bury the conf fault under an identity error on every
+     side of that DN instead of one record naming the field. Loading rather
+     than skipping is what keeps the fault harmless: with no DN state in
+     memory, that node's `side-*` files would take the pointer-absent branch
+     below and be torn down (DN6) — a conf fault must not destroy resources.
+     So every side still in that DN's stored pointer list is left **exactly
+     as the restart found it**, neither converged nor torn down: its
+     exports, dm devices, store file and extent record stay, and its stored
+     `migr-bm-*` chunks are loaded but applied to nothing. A side whose
+     pointer already left the list is torn down as usual (DN6) — the pointer
+     check runs before the conf check. The DN6 orphan sweep stays silent (it
+     needs a confirmed disk, and DN5's identity check never ran here). There
+     is no compat shim: a cluster whose stored conf carries zeros is refused
+     loudly everywhere and has to be recreated. Then each
      `side-*` file: if its pointer is absent from the stored
      `SyncupDnRequest.side_pointer_list`, tear the side down (DN6) — it was
      removed mid-teardown; otherwise re-run the SyncupSide converge (§4.6)
@@ -724,7 +754,7 @@ DN3. `lsblk --bytes --nodeps --noheadings --output SIZE {--disk}`; reply the
 ### 4.5 `SyncupDn`
 
 DN4. Gate the revision (SH8) against the stored `SyncupDnRequest`. Then,
-     still with **zero** side effects, the §7 **conf gate**:
+     still with **zero** side effects, the `architecture.md` §7 **conf gate**:
      `agent.ValidateExtentSize(req.extent_size)` (§2.1) refuses a 0 with
      `ReplyCodeInvalidConf` and the message
      `"invalid stored conf: dn_bin_conf.extent_size is zero"`, echoing the
@@ -790,7 +820,10 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        `details = "disk lacks Write Zeroes"`, which flows into the worker's
        `err_epoch` → capacity-key removal (§9.5, §10.2) and takes the
        unsuitable DN out of allocation. An absent or unreadable attribute is
-       **not** a verdict — it is logged and the converge continues, because
+       **not** a verdict — the attribute read reports both as *not present*,
+       silently, and the converge continues (only a failed `lsblk`, an empty
+       `KNAME` or an unparsable value is logged, as a warning, and the
+       converge continues just the same), because
        failing every kernel that simply does not publish the attribute would
        remove healthy DNs for a reason nothing measured. Unlike the identity
        check this is a **health** signal, never a write gate (DN19): a DN
@@ -856,7 +889,7 @@ DN6. Diff `side_pointer_list` against the local `side-*` files (§9.1 full
      disk (§11.2). The dm-clone goes **before** the disconnect
      that removes its source device: pulling the source out from under a
      live dm-clone leaves in-flight hydration IO with nowhere to go, and the
-     `dmsetup remove` that follows then blocks until the §7 hard timeout.
+     `dmsetup remove` that follows then blocks until the `architecture.md` §7 hard timeout.
      (The `sp_level`/end-of-migration teardown of a destination role follows
      the same order — DN11, DN13.) Ids are never reused, so a deleted side
      never comes back.
@@ -1559,7 +1592,8 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
 14. **`GetDnSize`**: the reply is `disk size − DnDataOffset`; a device at or
     below `DnDataOffset`, and a failing `lsblk`, both report through the gRPC
     status (DN3).
-15. **cmd**: the §13 example `dnv-agent dn …` invocation parses; `--disk` is
+15. **cmd**: the `architecture.md` §13 example `dnv-agent dn …` invocation
+    parses; `--disk` is
     required for `dn` and absent from `cn`; env `DNV_AGENT_GRPC_ADDRESS`
     overrides the flag default (CM3).
 16. **Converge matrix** (DN9): one `SyncupSide` per row of the DN9 table
@@ -1573,7 +1607,11 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
 17. **Resume at k**: after a simulated restart (fresh server, same fake store
     and disk-segment table) with `k` of `n` bits set, the first `--zeroout`
     covers `[k, k+DnZeroBatchExtCnt)` — the zeroed prefix is never rewritten —
-    and the reply reports `zeroed_ext_cnt = k`, `total_ext_cnt = n`.
+    and the remaining batches follow in order; the restart test asserts the
+    batch order and reads no reply. The `zeroed_ext_cnt = k`,
+    `total_ext_cnt = n` reply is asserted by test 16's converge matrix, on
+    its `provisioned = false`, partial-bits row (`unprovisioned/partial`),
+    without a restart.
 18. **Paced retry**: a scripted `blkdiscard` failure leaves that batch's bits
     unset, puts the command output into `side_dev_info`
     (`RES_STATUS_ERROR`, outranking `PROVISIONING`), and the next attempt
@@ -1585,14 +1623,23 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     is that the `dmsetup remove` of `DnSideName` is recorded strictly after
     the in-flight `blkdiscard` returned, and the teardown's node **write** lock
     never deadlocks against the goroutine's table update (DN9's try-acquire
-    rule). Same for a migration cancelled during destination zeroing, and for
-    SH27: after `Serve` returns, no zeroing goroutine and no child command is
-    still running.
+    rule). The same path reached on a migration destination still zeroing
+    (DN13) has no test of its own. SH27's join is asserted at the mechanism
+    level only: `agent`'s `TestServeJoinsBackgroundOnEveryReturnPath` drives
+    `Serve` with a hand-rolled goroutine rooted at the reconcile ctx and
+    asserts that a listener failure and a reconcile failure each cancel and
+    then join it before `Serve` returns. No Go test drives a dn server, a
+    zeroing goroutine or a `blkdiscard` child through `Serve`; in
+    `agent/dnagent` the cancel-then-`WaitBackground` pair is test
+    scaffolding (`startTestServer`'s cleanup and `stopTestServer` run it),
+    not an assertion.
 20. **Write Zeroes fail-fast** (DN5): a scripted
     `/sys/class/block/{kname}/queue/write_zeroes_max_bytes` of `0` makes
     `SyncupDn` report `meta_info = RES_STATUS_ERROR` with `"disk lacks Write
     Zeroes"` while the rest of the converge still runs (DN19); a non-zero
-    value, an absent attribute and an unreadable one all converge normally.
+    value and an absent attribute both converge normally (the test scripts
+    absent, `0` and `2097152`; an unreadable attribute has no case of its
+    own, because the attribute read reports it as absent — DN5).
 21. **Export gate and level independence**: at `provisioned = false` with all
     bits set, `side_dev_info` is `RES_STATUS_OK`, every per-CN row is
     `RES_STATUS_PROVISIONING`/`"side provisioning"`, and no nvmet object
@@ -1614,8 +1661,9 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     **no** `writeblock`, no `dmsetup` or configfs call and no `WriteProto`
     to `LocalDnPath` — the disk is never read for identity against a
     guessed extent size, and the zero never becomes desired state. A
-    `Reconcile` over a `dn-*` file carrying that zero skips it exactly like
-    an unreadable one (DN2). The string is asserted verbatim here and, for
+    `Reconcile` over a `dn-*` file carrying that zero loads it, records the
+    refusal once, mutates nothing and leaves that DN's side in place, state
+    file included (DN2). The string is asserted verbatim here and, for
     `model.ValidateClusterConf`, in `model/capacity_test.go`; the two
     assertions together are what keep the two copies of the rule in step
     (§2.1).
@@ -1636,7 +1684,8 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
    `grep -F "per exported namespace" doc/architecture.md` finds nothing
    (the [D4] amendment is applied).
 6. `grep -rnE "pvcreate|vgcreate|lvcreate|lvchange|lvremove|\\blvs\\b|\\bvgs\\b|\\bpvs\\b" agent/ cmd/ common/` finds nothing outside comments and test-guard string literals — **repo-wide**: no dnv agent runs any LVM command ([D13], [D14]).
-7. A manual run of the §13 example starts `dnv-agent dn`, serves
+7. A manual run of the `architecture.md` §13 example starts `dnv-agent dn`,
+   serves
    `GetDnSize`, and a `SyncupDn`/`SyncupSide`/`CheckSide` round-trip shows
    one trace id across `grpc server request`, `os command` and
    `os write file direct` records.
@@ -1652,8 +1701,11 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     `2 no_hydration no_discard_passdown`.
 11. `agent.Serve` takes a `waitBackground func()` and calls it after
     `GracefulStop` (SH27); the dn passes `srv.WaitBackground` and the cn
-    `nil`; a shutdown test shows no zeroing goroutine and no `blkdiscard`
-    child surviving `Serve`'s return.
+    `nil`; `agent`'s `TestServeJoinsBackgroundOnEveryReturnPath` shows
+    `Serve` cancelling and then joining a hand-rolled background goroutine
+    on its listener-failure and reconcile-failure return paths — no Go test
+    drives a zeroing goroutine or a `blkdiscard` child through `Serve`
+    (§6 test 19).
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

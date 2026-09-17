@@ -46,8 +46,10 @@ func registerMigr(root *cobra.Command) {
 // allocated by the gateway, so the only placement input is the optional
 // --dn-black / --dn-white selector (nil when both are empty). The hydration
 // knobs are the same pair CreateClone takes, because the destination side is
-// driven by a dm-clone as well, and both zero means "not given" so the gateway
-// applies its own defaults (§5.0, GW11).
+// driven by a dm-clone as well, and both zero means "not given": the gateway
+// stores the message as it arrived, and the sp-worker fills a migration's
+// zeros in with the architecture.md §7 constants as it builds the side
+// request (§5.0, GW11, dnv-worker.md RW15).
 func migrCreateCmd() *cobra.Command {
 	cmd := leaf(
 		"create",

@@ -33,8 +33,9 @@ func (s *CnAgentServer) pushCloneBitmap(
 				cntlrPointerText(req.GetCntlrPointer())),
 		}
 	}
-	// The two indexes bound independently (U4): the slice against the clone's
-	// own source geometry, the chunk index against the per-slice chunk cap.
+	// The two indexes bound independently (CN22): the slice against the
+	// clone's own source geometry, the chunk index against the per-slice
+	// chunk cap.
 	if req.GetSrcSliceIdx() >= clone.GetSrcSliceCnt() ||
 		req.GetBmIdx() >= common.MaxCloneBmCnt {
 		return &pb.PushCloneBitmapReply{

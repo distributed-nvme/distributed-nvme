@@ -888,7 +888,7 @@ EOF
 	sweep_step 03 GetCluster \
 		"{\"cluster_name\":\"$CLUSTER\"}" \
 		cluster get
-	# Golden 1 of 3: the canned empty reply, rendered. It pins
+	# Golden 1 of 4: the canned empty reply, rendered. It pins
 	# EmitUnpopulated (every field visible), the uint64-as-string of
 	# cluster_id, null for an absent sub-message, and the sorted key order
 	# json.Marshal gives the re-parsed document (§3.1).
@@ -966,7 +966,7 @@ EOF
 	sweep_step 19 GetStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		sp get
-	# Golden 2 of 3: the injected reply carries a revision above 2^53, so
+	# Golden 2 of 4: the injected reply carries a revision above 2^53, so
 	# this is the assertion that would fail the day §3.1's re-parse started
 	# decoding uint64 into a JSON number.
 	assert_eq "$CTL_OUT" "$GOLD_SP_GET" "golden: sp get (uint64 as string)"
@@ -1029,8 +1029,9 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"td_name\":\"t0\",\"block_cnt\":\"64\"}" \
 		td get-bm --name t0 --slice-idx 0 --start 0 --cnt 64
-	# Golden 3 of 3: §3.1's one deviation. The fake was told to answer with
-	# the single byte 0xa5 and dnvctl must print it as hex, not base64.
+	# Goldens 3 and 4 of 4: §3.1's one deviation. The fake was told to answer
+	# with the single byte 0xa5 here and 0xa5a5 for the leg below, and dnvctl
+	# must print both as hex, not base64.
 	assert_eq "$CTL_OUT" "$GOLD_TD_BM" "golden: td get-bm hex map"
 	sweep_step 34 GetLegBitmap \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",

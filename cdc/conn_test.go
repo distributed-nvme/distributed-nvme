@@ -263,8 +263,9 @@ func TestHandshakeRejects(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestFirstCapsuleMustBeConnect proves NP4: the admin queue does not exist
-// until Fabrics Connect has made it, so any other capsule first — and any
-// in-capsule data on a command that is not Connect — is a protocol error.
+// until Fabrics Connect has made it, so any other capsule first is a protocol
+// error — and in-capsule data does not change that answer, since NP2 has a
+// non-Connect command's data accepted and discarded.
 func TestFirstCapsuleMustBeConnect(t *testing.T) {
 	t.Run("identify before connect", func(t *testing.T) {
 		ts := startServer(t)
@@ -1414,7 +1415,7 @@ func TestHostTerminateRequestEndsTheConnection(t *testing.T) {
 // TestInCapsuleDataOnANonConnectCommand proves what handleCapsule documents:
 // a command that carries in-capsule data and is not Connect — nvme-stas sends
 // the TP-8010 Discovery Information Management command (opcode 21h) with a
-// 1024 byte payload to every discovery controller — has its data read and
+// 1024 byte payload to every discovery controller — has its data accepted and
 // discarded and the COMMAND refused (NP12, §0 #2), rather than the connection
 // terminated. A C2HTermReq here would put the production host stack in a
 // permanent connect/reset loop.

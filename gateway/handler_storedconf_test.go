@@ -177,7 +177,7 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     ledger and has no conf gate of its own, and all three are driven here
 //     rather than one standing for the rest, so moving any of them off the
 //     shared constructor is caught. DeleteStoragePool used to be the fourth;
-//     it releases nothing since it became a latch (§3), and the gate its
+//     it releases nothing since it became a latch (§8.4), and the gate its
 //     release moved to — model.DrainSpSlice's, which needs the same ladder for
 //     the same MaintainDnCapacity reason — is pinned by
 //     TestDrainSliceRefusesAnInvalidStoredConf in model/drain_test.go. The

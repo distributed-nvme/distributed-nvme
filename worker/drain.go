@@ -12,16 +12,17 @@
 //     SpConf and takes the first matching phase; crash, restart and shard
 //     handoff all resume through the same derivation, and a progress key would
 //     only be a second copy of the truth that can disagree with the first.
-//   - Every committed step ends in `BumpSpRev`, so the drain is its own tick:
-//     the step arms the next pass directly (§0 #8), and the bump also re-fires
-//     the coordinator's fan-out, which is what stops the children of the objects
-//     the step removed.
+//   - A committed step that popped something ends in `BumpSpRev` — every step
+//     but the last — so the drain is its own tick: the step arms the next pass
+//     directly (SPD6), and the bump also re-fires the coordinator's fan-out,
+//     which is what stops the children of the objects the step removed. A step
+//     that popped nothing bumps nothing and is left to the RW12 tick.
 //   - The last step, D3, DELETES the SpRev key, which is already the shard
-//     worker's stop signal (§10.3) — so the drain terminates itself in the same
+//     worker's stop signal (SW3) — so the drain terminates itself in the same
 //     transaction that finishes the job.
 //
 // A failed step commits nothing, bumps nothing and is retried on the next RW12
-// tick, forever (§0 #9). There is no terminal-failure state: a delete that gave
+// tick, forever (SPD6). There is no terminal-failure state: a delete that gave
 // up would just strand garbage, and progress is already user-visible through
 // `sp get` (a shrinking inventory), so no error field is added.
 package worker
@@ -109,7 +110,7 @@ func (w *spWorker) drainStep(ctx context.Context, p *spPass) {
 			return
 		}
 		// D3 deletes the SpRev key rather than bumping it, so nothing is armed:
-		// the shard worker stops this coordinator on that delete (§10.3).
+		// the shard worker stops this coordinator on that delete (SW3).
 		slog.InfoContext(ctx, msgSpDrainDone,
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
@@ -147,7 +148,7 @@ func (w *spWorker) drainStepped(
 	}
 }
 
-// drainFailed turns one failed step into the §7 record (§0 #9). A
+// drainFailed turns one failed step into the §12 record (SPD6). A
 // model.ErrPrecondition contributes the precondition that did not hold — SPD2's
 // three refusals land here — and every failure, precondition or not, carries the
 // error text: unlike a reaction, a drain step that does not run leaves an object
@@ -176,14 +177,14 @@ func (w *spWorker) drainFailed(
 }
 
 // armDrain schedules the next drain pass at once rather than at the next
-// cntlr_interval tick (§0 #8: "the drain is its own tick").
+// cntlr_interval tick (SPD6: "the drain is its own tick").
 //
-// The design states that as "each committed batch's own SpRev bump re-fires the
-// coordinator's watch". In this implementation that watch event reaches the
-// coordinator as a DESIRED CHANGE, which drives the fan-out and not the reaction
-// pass (run()), so the self-perpetuation is expressed directly: a committed step
-// posts here and run() turns that into the next pass. The channel holds one
-// token and the send never blocks, so a burst of steps cannot queue passes up.
+// SPD6 puts it as a committed step scheduling the next pass "from its own
+// commit". The step's SpRev bump reaches the coordinator as a DESIRED CHANGE,
+// which drives the fan-out and not the reaction pass (run()), so the
+// self-perpetuation is expressed directly: a committed step posts here and
+// run() turns that into the next pass. The channel holds one token and the
+// send never blocks, so a burst of steps cannot queue passes up.
 //
 // A coordinator assembled by hand — the plan-only and reaction test fixtures —
 // has no loop to wake and no channel; its passes are driven directly.

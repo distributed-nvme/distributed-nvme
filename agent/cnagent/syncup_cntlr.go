@@ -931,7 +931,7 @@ func (s *CnAgentServer) teardownCntlrResources(
 	s.stopConnectRetry(st)
 	for _, cp := range plan.clones {
 		s.removeDm(ctx, cp.finalName)
-		// Under cloneMetaMu like every other registry mutation (R3.6): this
+		// Under cloneMetaMu like every other registry mutation (CN18): this
 		// teardown runs on one cntlr while another cntlr of the same CN may be
 		// enumerating and allocating.
 		s.removeCloneMetaDm(ctx, cp.metaDmName)

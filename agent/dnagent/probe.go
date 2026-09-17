@@ -72,7 +72,7 @@ func (s *DnAgentServer) probeSide(
 	if !plan.wantDm {
 		return info
 	}
-	// The same gate the converge uses (ruling R4.3), so a probe can never
+	// The same gate the converge uses (DN9), so a probe can never
 	// claim a stack the converge deliberately did not build.
 	if state != sideDevReady {
 		s.reportAboveSideDeferred(st, plan, info)
@@ -91,7 +91,7 @@ func (s *DnAgentServer) probeSide(
 // zeroing goroutine (DN16, SH25). That is why "record absent at
 // provisioned = false" reports MISSING with empty details rather than the
 // matrix's "zeroing 0/n": with no record the only available extent count is
-// the request's, and the etcd flag is a gate, never evidence (ruling R4.15).
+// the request's, and the etcd flag is a gate, never evidence (DN9).
 func (s *DnAgentServer) probeSideDev(
 	ctx context.Context,
 	st *sideState,

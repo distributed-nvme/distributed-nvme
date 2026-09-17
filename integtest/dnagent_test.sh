@@ -128,7 +128,7 @@ assert_not_ok() {
 	[ "$got" != "RES_STATUS_OK" ] || die "$3: status is OK, want not OK"
 }
 
-# assert_gated is assert_not_ok's strict twin (ruling R4.35).
+# assert_gated is assert_not_ok's strict twin (§9's exact-status rule).
 # RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok: every "this must not be built" check would
 # silently start accepting a side that never provisioned. Where the expectation
@@ -303,8 +303,9 @@ dn_clone_name() { # cluster dn sp migr
 ns_by_id() { "$CTL" ns-id --cluster "$CLUSTER" --sp "$1" --leg "$2" | "$JQ" -r .by_id; }
 
 # ---------------------------------------------------------------------------
-# CN emulation (§3): the cn role is unimplemented, so CN identities are plain
-# `nvme connect --hostnqn <CnHostNqn>` from the VMs, cross-connected.
+# CN emulation (§3): this suite exercises the DN contract without a CN, so CN
+# identities are plain `nvme connect --hostnqn <CnHostNqn>` from the VMs,
+# cross-connected.
 # ---------------------------------------------------------------------------
 
 # host_id mirrors common.NvmeHostId. Every emulated connect must pass it: the
@@ -707,8 +708,8 @@ cleanup() {
 
 	# Unformat each loop device: zeroing the 4 KiB header is enough, because
 	# the volume-table slots are inert without it — a slot only counts when
-	# its format_uuid matches the header's ([D13] §5.2). No oflag=, per the
-	# §4 dd rule.
+	# its format_uuid matches the header's ([D13], dnagent.md DN5: magic
+	# absent ⇒ the disk is blank). No oflag=, per the §4 dd rule.
 	local dev
 	for dev in $(loop_devs); do
 		dd if=/dev/zero of="$dev" bs=4096 count=1 conv=fsync >/dev/null 2>&1
@@ -1367,9 +1368,10 @@ migr_declare_dst() { # m revision sp_level
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m dst"
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m dst"
 	if [ "$level" = no_migration ]; then
-		# CN19-style suppression: wantMigr is false below SP_LEVEL_NO_MIGRATION,
-		# so migr_dst_info is not emitted at all. assert_gated, not
-		# assert_not_ok, so a PROVISIONING dst cannot satisfy it (ruling R4.35).
+		# DN11 suppression: wantMigr needs `level < SP_LEVEL_NO_MIGRATION`, so
+		# at this level migr_dst_info is not emitted at all. assert_gated, not
+		# assert_not_ok, so a PROVISIONING dst cannot satisfy it (§9's
+		# exact-status rule).
 		assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 			"migr $m gated clone"
 		# §12 step 6c's other half: "no `nvme connect` issued yet". The clone
@@ -1585,7 +1587,7 @@ migr_finish_dst() { # m revision
 		--ext-cnt 2 --cntlid-slot 1 --primary-cn "${MCN[$m]}" \
 		--sp-level readwrite --provisioned=true)
 	# The request drops --migr-dst, so the whole migr_dst_info block goes away
-	# with the clone (ruling R4.35: gated, never merely "not OK").
+	# with the clone (§9's exact-status rule: gated, never merely "not OK").
 	assert_gated "$out" ".side_info.migr_dst_info.dm_clone_info.status" \
 		"migr $m clone after finish"
 	assert_cn_ok "$out" cn_id_to_dm_linear "${MCN[$m]}" "migr $m finished dst"
@@ -2094,7 +2096,9 @@ case_restart() {
 	assert_eq "$(jq_of "$out" '.bm_info.bm_idx_list | @csv')" '0' \
 		"restart post-restart bm_idx_list"
 
-	stage idempotent "same-revision re-applies must mutate nothing"
+	stage idempotent "unchanged re-applies must mutate nothing"
+	# §15 step 5: the syncup-side re-sends are equal-revision, the syncup-dn
+	# ones higher-revision — the counter is two past what the setup stored.
 	DNREV[1]=${REV[1]}
 	out=$(ctl 1 syncup-dn --revision "${REV[1]}" --extent-size "$EXTENT_SIZE" \
 		--side "$sp:$leg:$srcside")

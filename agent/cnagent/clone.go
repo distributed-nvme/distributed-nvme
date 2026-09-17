@@ -13,6 +13,13 @@ import (
 // CN18 — clones (fig. `090Clone`), primary only and only below
 // SP_LEVEL_NO_CLONE.
 
+// detailsCloneMetaMissing is what `clone_id_to_dm_clone` reports when CN18 step
+// 2 could not supply the metadata slot (CN28): with no slot this pass can map,
+// the dm-clone is not merely absent, it cannot be built at all — which is why
+// the row says it even where a dm-clone from an earlier pass happens to still
+// be up. Both channels say it — ensureClone below and probeCntlr's clone loop.
+const detailsCloneMetaMissing = "metadata wrapper missing"
+
 // ensureClone runs the CN18 sequence for one clone and reports whether the
 // source connection still needs the background retry. Every step captures its
 // own failure into the clone's ResInfos and lets the pass continue (CN29).
@@ -78,7 +85,7 @@ func (s *CnAgentServer) ensureClone(
 		info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
 			metaKey, metaName, err.Error())
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
-			dmKey, cp.finalName, "metadata wrapper missing")
+			dmKey, cp.finalName, detailsCloneMetaMissing)
 		return false
 	}
 	metaOk := s.cloneMetaConverged(ctx, arena, cp)
@@ -108,7 +115,7 @@ func (s *CnAgentServer) ensureClone(
 				info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
 					metaKey, metaName, err.Error())
 				info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
-					dmKey, cp.finalName, "metadata wrapper missing")
+					dmKey, cp.finalName, detailsCloneMetaMissing)
 				return false
 			}
 		}
@@ -224,8 +231,11 @@ func pathStates(view *subsysView) string {
 	return "paths: " + strings.Join(states, ",")
 }
 
-// cloneMetaInfo is the CN28 clone_id_to_meta row: the wrapper's own dm table
-// read back out of the arena registry ([D14]).
+// cloneMetaInfo is the ordinary CN28 clone_id_to_meta row: the wrapper's own dm
+// table read back out of the arena registry ([D14]). probeCntlr skips it for a
+// clone that is past CN18 step 1 and whose slot the arena cannot supply — that
+// row is probeCloneArenaCannotSupply's, so both channels report the same
+// refusal pair. ensureClone's step 1 failure branch above still reports it.
 func (s *CnAgentServer) cloneMetaInfo(
 	ctx context.Context,
 	st *cntlrState,
@@ -402,7 +412,7 @@ func (s *CnAgentServer) retireClone(
 	}
 	s.removeDm(ctx, cp.finalName)
 	// The wrapper's removal is what frees its units, so it is a registry
-	// mutation and runs under cloneMetaMu (R3.6) — the dm-clone above it is
+	// mutation and runs under cloneMetaMu (CN18) — the dm-clone above it is
 	// already gone, so nothing maps it and the removal cannot fail EBUSY.
 	s.removeCloneMetaDm(ctx, cp.metaDmName)
 	// `--nqn` is safe here: every path of the source subsystem is being

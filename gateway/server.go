@@ -9,9 +9,9 @@
 // etcdutil.RunSTM's serializable-snapshot isolation plus the §5.5 revision
 // tokens. A gateway writes nothing to etcd that describes itself.
 //
-// It imports only common, pb, etcdutil, model and the grpc runtime
-// (layout.md §3): it is a gRPC server AND a client, and cobra/viper live in
-// cmd/ only.
+// It imports only common, pb, etcdutil, model and the grpc/protobuf runtimes
+// (layout.md §3): it is a gRPC server AND a client, and the cobra/viper flag
+// parsing lives in cmd/dnv-gateway.
 package gateway
 
 import (

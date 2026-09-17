@@ -52,9 +52,9 @@ decision, not an assumption.
 | R4 | Flip predicate: `agent_reply.code == 0`, and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
 | R6 | One STM and one bump **per reply**, covering every td that reply completes (batching allowed). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
-| R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; ns-devs park on `CnErrorName` and clone destinations are empty tds ([D3]). |
+| R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; an ns-dev needs no gate — CN16's backing rules never read `created`, so an uncreated td's ns-dev takes whatever backing CN16 picks: its raid0 in the converge that builds it, unless a clone targets the td or the namespace is parked (U2-S4) — and clone destinations are empty tds ([D3]). |
 | R8 | `DeleteThinDevice` of an origin is refused while any snapshot of it has `created == false`, found by reading the SP's tds inside the STM (no reverse index). | Retire runs before build (CN9): an origin leaving `td_list` in the converge that first materializes its snapshot sends `delete {ori dev_id}` before `create_snap` and loses the snapshot for good. `ListThinDevices` already reads the same set in one STM. |
-| R9 | The cn agent **uses** the flag: `created == true` means "never send a `create_thin`/`create_snap` for this td again" (the `delete {dev_id}` a td leaving `td_list` triggers stays ungated — R2/N4). | A failover sends zero device-set-mutating pool messages instead of one failing `create_thin`/`create_snap` per td × slice (the rebuild's only `dmsetup message` traffic is the CN14 sweep's reserve/release pair — R14), and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what today's unconditional `create_thin` would do. |
+| R9 | The cn agent **uses** the flag: `created == true` means "never send a `create_thin`/`create_snap` for this td again" (the `delete {dev_id}` a td leaving `td_list` triggers stays ungated — R2/N4). | A failover sends zero device-set-mutating pool messages instead of one failing `create_thin`/`create_snap` per td × slice (the rebuild's only `dmsetup message` traffic is the CN14 sweep's reserve/release pair — R14), and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what the unconditional `create_thin` before this change did. |
 | R10 | The snapshot pre-pass owns every message of an uncreated snapshot; the lazy `createSnapId` fallback and the `snapDone` handoff are removed; `td_list` order carries no meaning. | With the origin guaranteed materialized (R7/R8), same-pass origin-then-snapshot ordering can no longer occur, which was the only reason for both. |
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
@@ -66,28 +66,37 @@ decision, not an assumption.
 ## 1. Problem
 
 Snapshot creation (`create_snap {dev_id} {ori_id}`) needs the origin's id
-in each slice pool's metadata. Today nothing in the control plane knows
-whether that is so: `CreateThinDevice` with `ori_name` succeeds the moment
-the origin *record* exists, and the cn agent copes by ordering — the
-CN14 snapshot pre-pass declines any slice whose origin thin device is
-absent on this CN and hands it to the lazy per-td path, which relies on the
-origin preceding the snapshot in `td_list` (cnagent.md CN14, §6 test 19).
-Three consequences:
+in each slice pool's metadata. Before this change nothing in the control
+plane knew whether that was so: `CreateThinDevice` with `ori_name` succeeded
+the moment the origin *record* existed, and the cn agent coped by ordering —
+the CN14 snapshot pre-pass of that time declined any slice whose origin thin
+device was absent on this CN and handed it to the lazy per-td path, which
+relied on the origin preceding the snapshot in `td_list` (the pre-change
+cnagent.md CN14 and §6 test 19; U4 rewrote both, and CN14 now states the
+opposite — no origin-device filter, order independence). Three
+consequences:
 
 * Ordering logic on the agent (`snapshotPrePass`'s origin-device filter, the
   `snapDone` handoff between the pre-pass and `ensureThin`, the snapshot
-  branch of `createThinId`) exists only to survive a control-plane state
-  that a materialization flag would make impossible.
-* `DeleteThinDevice` of an origin is unconditional. If the primary is down
-  when a snapshot is created and the origin is deleted before it comes
-  back, the next converge sends `delete {ori dev_id}` (retire phase) before
-  `create_snap` (build phase) and the snapshot is permanently empty.
-* Every converge on a CN whose devices are absent — a failover, a restart
-  reconcile — sends one `create_thin`/`create_snap` per td × slice that the
-  pool already holds, tolerating `EEXIST` (cnagent.md CN14: "a message for
-  an id the pool already holds fails harmlessly"). That tolerance is also a
-  hazard: a pool that somehow *lost* an id is silently given a fresh, empty
-  volume under the same `dev_id`.
+  branch of `createThinId`) existed only to survive a control-plane state
+  that a materialization flag makes impossible.
+* `DeleteThinDevice` of an origin was unconditional. If the primary was down
+  when a snapshot was created and the origin was deleted before it came
+  back, the next converge sent `delete {ori dev_id}` (retire phase) before
+  `create_snap` (build phase) and the snapshot was permanently empty.
+* Every converge on a CN whose devices were absent — a failover, a restart
+  reconcile — sent one `create_thin`/`create_snap` per td × slice that the
+  pool already held, tolerating `EEXIST` (the pre-change `ensureThin`
+  comment in `agent/cnagent/pool.go`: "a message for an id the pool already
+  holds fails harmlessly" — a rule that now stands only for an *uncreated*
+  td: `ensureThin`'s `create_thin` for a plain one (cnagent.md CN14 case 2)
+  and the pre-pass's `create_snap` for a snapshot (case 3: `snapshotPrePass`
+  logs a failed message and lets the thin loop's `dmsetup create` decide) —
+  and never for a created td, which is never sent a create message at all —
+  its only pool message is the ungated `delete` of R9 when it leaves
+  `td_list`). That
+  tolerance was also a hazard: a pool that somehow *lost* an id was silently
+  given a fresh, empty volume under the same `dev_id`.
 
 `ThinDevice.created` fixes all three: it is set exactly once, when the
 primary has reported the td's thin volume `RES_STATUS_OK` in every slice.
@@ -197,9 +206,20 @@ in the common case, so the flip lands in that same round (U3); worst case is
 one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7).
 
 **U2-S4 Not gated (R7).** `CreateNamespace`/`UpdateNamespaceDev` on an
-uncreated td: allowed; the ns-dev parks on the td's `CnErrorName` and the
-namespace stays `inaccessible` until the backing chain exists (cnagent.md
-CN16). `CreateClone` with an uncreated `dst_td_name`: allowed ([D3], the
+uncreated td: allowed, and the agent needs no gate either — the cn agent's
+CN16 backing rules never consult `created`, so on a primary at a
+pool-carrying `sp_level` the converge that sends the td's
+`create_thin`/`create_snap` messages builds its raid0 and, unless a clone
+targets the td or the namespace is effectively suspended, the ns-dev over
+that raid0 in the same pass. A provisioning-deferred backing chain ([D15])
+does leave the ns-dev on the td's `CnErrorName` with the namespace
+`inaccessible` until the slice provisions, and a pool-suppressing `sp_level`
+below `SP_LEVEL_DISABLE` puts it on `CnErrorName` too (CN16 rule 3),
+exported and erroring rather than `inaccessible` (U2-S5, cnagent.md
+CN16/CN19), while at `SP_LEVEL_DISABLE` neither the ns-dev nor the
+subsystem exists at all (cnagent.md CN19's `SP_LEVEL_DISABLE` row, CN21) —
+none of this is a function of `created`. `CreateClone` with an uncreated
+`dst_td_name`: allowed ([D3], the
 destination td is empty by construction). `GetThinDeviceBitmap` on an
 uncreated td: not gated at the gateway; when the slice's pool does not hold
 the id yet, `GetThinDeviceBm` fails with the existing gRPC error (`thin
@@ -324,7 +344,8 @@ create failed (`ERROR`). `RES_STATUS_PROVISIONING` keeps its [D15] meaning:
 healthy, not ready, no `err_epoch`, and — here — not created.
 
 **Tests (worker; landed in `worker/sprole_test.go` (`TestSpCompletedTds`,
-`TestSpFlipBatchesOneStm`, …) and `model/ops_test.go` — dnv-worker.md §13
+`TestSpCreatedFlipOnlyForUncreatedTds`, `TestSpFlipRecordsOnlyAppliedRefs`,
+…) and `model/ops_test.go` (`TestFlipCreated`) — dnv-worker.md §13
 is the inventory of record and re-scoped this list, §9 item 5. The Check
 stream is consumed in `worker/revision.go`; no `worker/check.go` exists.)**
 
@@ -365,7 +386,7 @@ retire phase, CN15-CN21 and the standby shape are untouched.
 | `td.created` | `td.ori_id` | who messages | what |
 |---|---|---|---|
 | `true` | any | nobody | `dmsetup create` of the `thin` table when the device is absent; the id is known to exist in every slice pool (U3). |
-| `false` | `0` | `ensureThin` | `create_thin {dev_id}` when the device is absent, then `dmsetup create` — as today (`EEXIST` tolerated: a crash between the message and the create, or a message a previous primary already sent). |
+| `false` | `0` | `ensureThin` | `create_thin {dev_id}` when the device is absent, then `dmsetup create` — unchanged from before this change (`EEXIST` tolerated: a crash between the message and the create, or a message a previous primary already sent). |
 | `false` | `≠ 0` | the pre-pass, only | `create_snap {dev_id} {ori_id}` per pool-ready slice whose snapshot device is absent, inside the CN14 quiesce when the origin's raid0 is live; then the thin loop's `dmsetup create`. |
 
 `ensureThin` therefore never messages a td with `ori_id != 0`, whatever the
@@ -419,8 +440,8 @@ one caller, the pre-pass.
 **U4-S4 Order independence.** Neither the thin loop nor the pre-pass depends
 on the relative position of an origin and its snapshot in `td_list`, and
 `buildTds` keeps request order with no sort. Same-pass creation of an origin
-and its snapshot — the case cnagent.md CN14 currently orders around — is
-not a state the gateway can produce.
+and its snapshot — the case the pre-change cnagent.md CN14 ordered around —
+is not a state the gateway can produce.
 
 **U4-S5 Violated precondition (R11).** A `create_snap` whose `ori_id` the
 pool does not hold fails at the message; the `dmsetup create` fails; the
@@ -563,7 +584,7 @@ below is what shows the bare creates attached the existing ids).
 * **Pool-metadata loss is an intervention event, not a self-healing one.**
   A created td whose id a pool no longer holds reads `RES_STATUS_ERROR` on
   every converge and is never re-created by message (U4-S2). This
-  supersedes today's behaviour, which would silently hand the `dev_id` a
+  supersedes the pre-change behaviour, which silently handed the `dev_id` a
   fresh empty volume; it belongs next to the "no thin-metadata repair path"
   limit of Appendix D.
 * **One more fan-out per td creation.** Every flip bumps `SpRev` (R5), so
@@ -681,7 +702,10 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
 * §20 — new bullet: "**U5 (`ThinDeviceCreated.md`)** — `req_td` gained the
   optional `created` argument, `assert_absent` was added, case B models the
   gateway's `created` on the origin at the snapshot step and gained the
-  rebuild step 9."
+  rebuild step 9." (Landed not in §20 but as the "**U5 (consistency
+  fixes)**" bullet of a `### ThinDeviceCreated.md` subsection after
+  Appendix A, which also records `mutations()`'s optional leading
+  `trace_id` filter and case B's drop/rebuild stages at §12 step 9.)
 
 ### `layout.md`, `dnagent.md`, `log.md`, `osclient.md`, `grpc.md`
 

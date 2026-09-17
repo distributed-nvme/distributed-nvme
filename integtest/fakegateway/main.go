@@ -1106,11 +1106,13 @@ func main() {
 	if err != nil {
 		die("listening on %s failed: %v", *addr, err)
 	}
-	// The server interceptors are not optional: fakegateway.log is the
-	// suite's only record of what dnvctl sent and under which trace id
-	// (doc/grpc.md §4, dnvctl.md §7.5/§7.7). The stream twin is installed
-	// even though every Gateway RPC is unary — the §4 chain is one rule, and
-	// a fake that half-applies it is a fake that stops being evidence.
+	// The server interceptors are not optional: fakegateway.log carries the
+	// method, the caller's trace id and the interceptor's rendering of every
+	// request and reply (doc/grpc.md §4, dnvctl.md §7.5/§7.7). The suite reads
+	// its trace-id evidence there; request EQUALITY it asserts against
+	// state.json's last_request. The stream twin is installed even though
+	// every Gateway RPC is unary — the §4 chain is one rule, and a fake that
+	// half-applies it is a fake that stops being evidence.
 	server := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
 		grpc.ChainStreamInterceptor(common.GrpcStreamServerInterceptor()),

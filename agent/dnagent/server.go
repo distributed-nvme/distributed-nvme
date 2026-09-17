@@ -61,9 +61,11 @@ type DnAgentServer struct {
 	rootCtx context.Context
 }
 
-// WaitBackground joins every dn background goroutine. cmd/dnv-agent passes it
-// to agent.Serve, which cancels rootCtx and calls it after GracefulStop has
-// drained the last RPC (SH27).
+// WaitBackground joins the dn background goroutines enrolled in bg — the §9.4
+// zeroing loops and the DN8 connect retries. The §11.2 fence timer is the
+// deliberate carve-out (SH27); rootCtx cancellation is what stops that one.
+// cmd/dnv-agent passes it to agent.Serve, which cancels rootCtx and calls it
+// after GracefulStop has drained the last RPC (SH27).
 func (s *DnAgentServer) WaitBackground() {
 	s.bg.Wait()
 }
@@ -110,7 +112,7 @@ type sideState struct {
 	zeroDone   chan struct{}
 	// zeroErr is the last failed batch's error, published for side_dev_info
 	// exactly the way a cn legProber publishes its outcome (CN11). It is
-	// cleared by the next successful batch (ruling R4.14).
+	// cleared by the next successful batch (DN9).
 	zeroErr error
 
 	// fenceAt is when this side's per-CN dm-linears were suspended for the

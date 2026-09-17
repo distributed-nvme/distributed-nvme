@@ -315,7 +315,8 @@ RedundMdRaid1 (bitmap_bits = 1 → bitmap_bytes = 257 → bitmap_blocks = 1)
 
 Thin pools: case S/B/C pools get a 63 MiB metadata dev and 127 MiB data dev
 (RedundNone), case A/D 61/125 (raid1); `low_water_mark` in the pool table =
-`data_blocks × 50 / 100` (63 for 127). Every td is 64 MiB = 67108864 (a
+`data_blocks × (100 − low_water_mark_pct) / 100`, the agent's own arithmetic
+(63 for 127 at the default pct 50). Every td is 64 MiB = 67108864 (a
 multiple of `slice_cnt × stripe_size`), 64 thin blocks — thin overcommit
 against the 127-block pool is fine at these write volumes.
 
@@ -443,7 +444,8 @@ baseline `syncup-cn` used 1, case S's pointer-introducing `syncup-cn` used
         "leg_list": [{"leg_id": "4", "leg_idx": 0, "side_list": [{
           "side_id": "5", "addr_port": "<ip1>:29528", "cntlid_slot": 0,
           "nvme_tr_conf": {"tr_type": "tcp", "adr_fam": "ipv4",
-                           "tr_addr": "<ip1>", "tr_svc_id": "4200"}}]}]
+                           "tr_addr": "<ip1>", "tr_svc_id": "4200"},
+          "provisioned": true}]}]
       }],
       "data_grp_list": [{
         "grp_id": "6", "ext_cnt": "2",
@@ -451,7 +453,8 @@ baseline `syncup-cn` used 1, case S's pointer-introducing `syncup-cn` used
         "leg_list": [{"leg_id": "7", "leg_idx": 0, "side_list": [{
           "side_id": "8", "addr_port": "<ip1>:29528", "cntlid_slot": 0,
           "nvme_tr_conf": {"tr_type": "tcp", "adr_fam": "ipv4",
-                           "tr_addr": "<ip1>", "tr_svc_id": "4200"}}]}]
+                           "tr_addr": "<ip1>", "tr_svc_id": "4200"},
+          "provisioned": true}]}]
       }]
     }
   },
@@ -469,8 +472,16 @@ baseline `syncup-cn` used 1, case S's pointer-introducing `syncup-cn` used
 ```
 
 (`serial`/`model` are what the gateway would stamp per [D2]; the agent
-consumes them verbatim. The `id_to_slice` key is `sprintf("%016x",
-slice_id)` per §9.3.)
+consumes them verbatim. `provisioned: true` on every side is what `req_side`
+always renders — §9's two-phase DN setup has flipped each side before its
+cntlr converges — and it is load-bearing: a leg whose sides all lack the
+flag is provisioning-deferred ([D15], the deferral §19 leaves to the unit
+tests; an empty `side_list` is a malformed request, not a deferral), so a
+request transcribed without it builds no leg wrapper, group device (the
+`CnGrpName` linear here; an md array under raid1), pool or raid0 — those
+rows read `RES_STATUS_PROVISIONING` and the
+namespace sits `inaccessible` on the td's dm-error. The `id_to_slice` key
+is `sprintf("%016x", slice_id)` per §9.3.)
 
 ## 9. Conventions
 
@@ -918,10 +929,11 @@ reconcile returns, and here that reconcile is the whole §11.5 recovery
 (reconnect, re-read the destination bitmaps, re-apply the chunk), so the
 wait-up budget is the recovery's, not a process start's. Assert the
 reconcile rebuilt everything from the store: `get-cntlr-info` all OK; the
-fresh `cn-agent.log` shows the §11.5 order — `reserve_metadata_snap` →
-`thin_dump` → `release_metadata_snap`, then the arena-unit `blkdiscard` +
-`dmsetup create` of the fresh kind-`b` wrapper, then the dst-bitmap
-`blkdiscard`s (on the `dnv-*-7-*` dm-clone) and the re-applied src chunks
+fresh `cn-agent.log` shows the §11.5 order — the arena-unit `blkdiscard` +
+`dmsetup create` of the fresh kind-`b` wrapper, then the `dmsetup create`
+of the `dnv-*-7-*` dm-clone (hydration disabled), then
+`reserve_metadata_snap` → `thin_dump` → `release_metadata_snap`, then the
+dst-bitmap `blkdiscard`s (on that dm-clone) and the re-applied src chunks
 **before** the `enable_hydration` message; equal-rev re-send still reports
 `chunk_id_list [(0, 0), (0, 1)]` and both pair-named chunk files are still in
 the store (they survived the wipe, which never touches
@@ -980,8 +992,9 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
 
 1. Snapshot: `get-cn-info` + `get-cntlr-info` on both CNs (jq-normalized;
    excluded from later comparison: every `ResInfo.epoch`, and
-   `leg_id_to_leg[].details` — the CN11 prober restarts and re-stamps its
-   timestamps).
+   `leg_id_to_leg[].details` — it carries no timestamp, but the CN11
+   probers restart with the agent and a just-restarted primary reports
+   `health probe pending` until its first probe completes).
 2. Restart both cn agents: `pkill -f 'dnv-agent cn'`; wait for exit; `mv
    cn-agent.log cn-agent.pre-restart.log`; relaunch; `get-cn-size --wait 60`
    — the listener opens only after the startup reconcile returns, so the
@@ -1221,8 +1234,8 @@ another document or the harness cites can shift.
   `removedNamespaces(old, plan)` is empty and the new loop emits nothing at
   all. §19 records the gap, and `cnagent.md` §6 test 26 is the coverage.
 - **An effectively suspended namespace is parked, not suspended**
-  (`minor_updates_08` U1, 2026-09-16; `architecture.md` §11.6 / [D12],
-  `cnagent.md` CN16). §13 stage 2 replaces its `dm_state … suspended`
+  (2026-09-16; `architecture.md` §11.6 / [D12], `cnagent.md` CN16). §13
+  stage 2 replaces its `dm_state … suspended`
   assertion with `assert_parked` (the ns-dev is **live** and its table is
   `0 <sectors> linear <CnErrorName devno> 0`) plus `assert_opens_eio` — a
   bounded `dd` of the device returns an IO error *within the timeout*
@@ -1231,12 +1244,17 @@ another document or the harness cites can shift.
   (`ana_grpid 3` before the ns-dev reload, out of the converge's own event
   stream) and asserts node-wide that **no** dnv dm device on either CN is
   suspended while the transfer runs. New helpers: `assert_parked`,
-  `assert_opens_eio`, `assert_no_suspended_dm` on the driver, `open_rc` and
-  `suspended_agent_dms` on the VM. `resume_suspended` stays — a DN cutover
+  `assert_opens_eio`, its positive control `assert_opens_ok` (one call on a
+  device that must serve, so a broken `open_rc` cannot pass every EIO check
+  vacuously) and `assert_no_suspended_dm` on the driver; `open_rc`,
+  `suspended_agent_dms` and `dnv_dm_cnt` (the dnv-device count that tells
+  the sweep's empty answer from a broken pipeline) on the VM.
+  `resume_suspended` stays — a DN cutover
   window still holds linears suspended and an interrupted reload can leave
-  anything so — but on a CN VM it is debris cleanup only. Cases A-B keep
-  their `CN16 rule N` prose, renumbered by the inserted parked rule (1→2,
-  5→6, 6→7). Case D is untouched and, note, carries no effectively suspended
+  anything so — but on a CN VM it is debris cleanup only. Cases A and C keep
+  their `CN16 rule N` prose, renumbered by the inserted parked rule (A's
+  standby rule 1→2, C's clone-gone rule 5→6); case B cites none. Case D is
+  untouched and, note, carries no effectively suspended
   namespace at all, so it is not park coverage.
 
 ## Appendix A — lab gotchas baked into this plan

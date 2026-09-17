@@ -76,7 +76,7 @@ func TestMigrationDestinationSequence(t *testing.T) {
 	srcNqn := nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
 
 	// Bottom-up: the clone-metadata slot (zeroed *before* its record is
-	// persisted, [P6]) and its wrapper, connect, dm-clone, the per-CN stack
+	// persisted, DN13) and its wrapper, connect, dm-clone, the per-CN stack
 	// on top of it, then the exports with the primary's namespace optimized.
 	assertOrder(t, node,
 		fmt.Sprintf("writeblock %s off=%d len=8192",
@@ -277,8 +277,8 @@ func TestMigrationDestinationProvisionsFirst(t *testing.T) {
 	}
 }
 
-// [P1]: hydration is infrastructure IO, not user IO, so SP_LEVEL_READONLY
-// never pauses it. A destination converged straight at READONLY still ends up
+// [D11]: SP_LEVEL_READONLY never pauses hydration — it is infrastructure IO,
+// not user IO. A destination converged straight at READONLY still ends up
 // hydrating.
 func TestMigrationDestinationHydrationEnabledAtReadOnly(t *testing.T) {
 	srv, node := newTestServer(t)

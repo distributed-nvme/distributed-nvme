@@ -352,7 +352,7 @@ type sliceBitmap struct {
 	chunks map[uint32][]byte
 }
 
-// skippable is the U8 chunk math: bit idx of the slice lives in chunk
+// skippable is the CN22 chunk math: bit idx of the slice lives in chunk
 // idx/(8*C) at bit offset idx%(8*C). It is skippable only when that chunk is
 // present, the byte is within its length, and the bit is set. An absent chunk,
 // a bit past the end of a present-but-short one ([D8]: AppendCloneBitmap may

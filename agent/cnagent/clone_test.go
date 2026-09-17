@@ -508,6 +508,318 @@ func TestCloneMetaArenaExhaustion(t *testing.T) {
 	// The source connection is fine, so its row is not dragged down with it.
 	assertOk(t, reply.GetCntlrInfo().GetCloneIdToTarget()[testClone],
 		"clone target")
+
+	// The CN24 check round must report the *same* pair. ResTracker.Set
+	// overwrites, so a probe that answered the plain "no wrapper, no dm-clone"
+	// MISSING here would replace the converge's verdict, and the two channels
+	// would trade these two rows — and the `epoch` on them — on every round.
+	node.Reset()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 3,
+		}, nil)
+	probedMeta := probed.GetCloneIdToMeta()[testClone]
+	if probedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		probedMeta.GetDetails() != meta.GetDetails() {
+		t.Fatalf("the check round flipped clone_id_to_meta to %v/%q, want the "+
+			"converge's ERROR/%q",
+			probedMeta.GetStatus(), probedMeta.GetDetails(), meta.GetDetails())
+	}
+	probedDm := probed.GetCloneIdToDmClone()[testClone]
+	if probedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		probedDm.GetDetails() != "metadata wrapper missing" {
+		t.Fatalf("the check round flipped clone_id_to_dm_clone to %v/%q, want "+
+			"the converge's ERROR/%q", probedDm.GetStatus(),
+			probedDm.GetDetails(), "metadata wrapper missing")
+	}
+	// The source is still connected on this round, which is what lets the probe
+	// answer for CN18 step 2 at all: a clone whose step 1 has not succeeded is
+	// one the converge never carried that far.
+	assertOk(t, probed.GetCloneIdToTarget()[testClone], "probed clone target")
+	// Preserving that verdict must not cost the probe its read-only contract
+	// (CN23): the arena question is answered from this pass's enumeration, with
+	// no allocation, no hole punch and no `dmsetup create`.
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+}
+
+// TestCloneMetaAbsentWrapperWithRoomProbesMissing is the other side of the
+// exhaustion pair, and the bound on it: a wrapper that is merely not built yet
+// — here the §11.5 case, the volatile wrapper and the dm-clone that mapped it
+// both lost — is a truthful RES_STATUS_MISSING while the arena still has room,
+// not the CN18 step 2 refusal. The converge agrees: its next pass allocates the
+// slot and rebuilds (TestCloneRecovery), which is the opposite of reporting
+// that the arena could not supply it.
+func TestCloneMetaAbsentWrapperWithRoomProbesMissing(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+
+	// The wrapper and the dm-clone that mapped it go behind the agent's back,
+	// exactly as a CN reboot loses them. No other wrapper claims a unit, so the
+	// whole 256-unit arena is free.
+	metaDm := cloneMetaName(srv, testClone)
+	removeCloneDevice(node, srv)
+	delete(node.dms, metaDm)
+	delete(node.devNo, "/dev/mapper/"+metaDm)
+	delete(node.devSize, "/dev/mapper/"+metaDm)
+
+	node.Reset()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+	meta := probed.GetCloneIdToMeta()[testClone]
+	if meta.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		meta.GetDetails() != "" {
+		t.Fatalf("clone_id_to_meta is %v/%q, want MISSING/\"\"",
+			meta.GetStatus(), meta.GetDetails())
+	}
+	dm := probed.GetCloneIdToDmClone()[testClone]
+	if dm.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		dm.GetDetails() != "" {
+		t.Fatalf("clone_id_to_dm_clone is %v/%q, want MISSING/\"\"",
+			dm.GetStatus(), dm.GetDetails())
+	}
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+}
+
+// TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing pins the step
+// 1 gate in front of the refusal pair, in the direction the two tests above
+// cannot reach. A converge whose source connection fails stops at CN18 step 1
+// and reports `clone_id_to_dm_clone` MISSING "source not connected" with the
+// meta row left to cloneMetaInfo, which reads the enumeration for the wrapper's
+// own row but never asks whether the arena could supply a slot — however full
+// the arena happens to be. A probe that asked anyway would invent an
+// ERROR/ERROR pair against that, and this one flips *both* rows, the meta row
+// MISSING→ERROR, which is what the worker's health pass keys on.
+func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
+	t *testing.T,
+) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	loop := loopDev(t, srv, node)
+
+	// The same filler as TestCloneMetaArenaExhaustion: one kind-`b` wrapper
+	// claiming every unit, so the arena genuinely has no run left.
+	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
+	node.dms[filler] = &fakeDm{
+		table: fmt.Sprintf("0 %d linear %s 0",
+			cnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
+		thinIds: map[uint32]bool{},
+	}
+	node.devNo["/dev/mapper/"+filler] = "253:200"
+	// ...and the source refuses the connect, so step 1 never completes.
+	node.failCmdAlways["nvme connect"] = "nvme connect: Connection refused"
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("disconnected source: %v", err)
+	}
+	dm := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
+	if dm.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		dm.GetDetails() != "source not connected" {
+		t.Fatalf("converged clone_id_to_dm_clone is %v/%q, want "+
+			"MISSING/\"source not connected\"",
+			dm.GetStatus(), dm.GetDetails())
+	}
+	meta := reply.GetCntlrInfo().GetCloneIdToMeta()[testClone]
+	if meta.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		meta.GetDetails() != "" {
+		t.Fatalf("converged clone_id_to_meta is %v/%q, want MISSING/\"\"",
+			meta.GetStatus(), meta.GetDetails())
+	}
+
+	node.Reset()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 3,
+		}, nil)
+	probedMeta := probed.GetCloneIdToMeta()[testClone]
+	if probedMeta.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+		probedMeta.GetDetails() != "" {
+		t.Fatalf("the check round flipped clone_id_to_meta to %v/%q, want "+
+			"MISSING/\"\"", probedMeta.GetStatus(), probedMeta.GetDetails())
+	}
+	probedDm := probed.GetCloneIdToDmClone()[testClone]
+	if probedDm.GetStatus() != pb.ResStatus_RES_STATUS_MISSING {
+		t.Fatalf("the check round flipped clone_id_to_dm_clone to %v/%q, want "+
+			"MISSING", probedDm.GetStatus(), probedDm.GetDetails())
+	}
+	// The source really is the thing that is down on this round — otherwise
+	// the two assertions above could be passing for an unrelated reason.
+	if tgt := probed.GetCloneIdToTarget()[testClone]; tgt.GetStatus() ==
+		pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("clone_id_to_target is OK, so the source connected after all")
+	}
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+}
+
+// TestCloneMetaUnprobeableArenaProbesTheConvergePair is the other half of CN18
+// step 2's refusal that a read-only pass can establish: an arena that does not
+// answer at all. The converge treats that as step 2 failing — `clone_id_to_meta`
+// ERROR with planArena's message and `clone_id_to_dm_clone` ERROR "metadata
+// wrapper missing" (clone.go's planArena branch) — so the check round must say
+// the same, even though the dm-clone below is still up and would otherwise
+// probe OK. That last part is what makes this case distinct from exhaustion:
+// there the dm row flipped ERROR→MISSING, here it would flip ERROR→OK.
+func TestCloneMetaUnprobeableArenaProbesTheConvergePair(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	filePath := srv.nf.CnTmpFilePath(testCluster, testCn)
+
+	// A second loop device attached to the arena file behind the agent's back
+	// — CN5 wants exactly one, and nothing ever detaches the extra, which is
+	// why LoopDevices documents this state as sticky.
+	node.loops[filePath] = append(node.loops[filePath], "/dev/loop99")
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("unprobeable arena: %v", err)
+	}
+	meta := reply.GetCntlrInfo().GetCloneIdToMeta()[testClone]
+	if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(meta.GetDetails(), "clone-metadata arena "+
+			"unavailable: 2 loop devices back "+filePath+", want 1") {
+		t.Fatalf("converged clone_id_to_meta is %v/%q, want the arena error",
+			meta.GetStatus(), meta.GetDetails())
+	}
+	dm := reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone]
+	if dm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		dm.GetDetails() != "metadata wrapper missing" {
+		t.Fatalf("converged clone_id_to_dm_clone is %v/%q, want "+
+			"ERROR/\"metadata wrapper missing\"",
+			dm.GetStatus(), dm.GetDetails())
+	}
+
+	node.Reset()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 3,
+		}, nil)
+	probedMeta := probed.GetCloneIdToMeta()[testClone]
+	if probedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		probedMeta.GetDetails() != meta.GetDetails() {
+		t.Fatalf("the check round flipped clone_id_to_meta to %v/%q, want the "+
+			"converge's ERROR/%q",
+			probedMeta.GetStatus(), probedMeta.GetDetails(), meta.GetDetails())
+	}
+	probedDm := probed.GetCloneIdToDmClone()[testClone]
+	if probedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		probedDm.GetDetails() != "metadata wrapper missing" {
+		t.Fatalf("the check round flipped clone_id_to_dm_clone to %v/%q, want "+
+			"the converge's ERROR/%q", probedDm.GetStatus(),
+			probedDm.GetDetails(), "metadata wrapper missing")
+	}
+	// The dm-clone is still there: the ERROR above is the arena's, not a
+	// device that happens to be gone.
+	if _, ok := node.dms[cloneName(srv, testClone)]; !ok {
+		t.Fatalf("the dm-clone is gone, so the dm row could be ERROR for an " +
+			"unrelated reason")
+	}
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+}
+
+// TestCloneMetaPresentWrapperInFullArenaProbesOk pins the absence check the
+// refusal branch opens with. cloneMetaCanSupply asks the allocator's own
+// question — is there a free run for this clone's wrapper? — and a wrapper that
+// already exists holds its own units in the taken set, so for a converged clone
+// in an arena with nothing free beside it the answer is "no contiguous run
+// left", which is no verdict on that clone at all. probeCloneArenaCannotSupply
+// therefore refuses nothing for a wrapper the enumeration found, and the check
+// round reports the OK pair the converge reported. Without that short-circuit
+// this fixture — a clone the converge is perfectly happy with — would probe
+// ERROR/ERROR and feed err_epoch every round, which is the very flip the branch
+// exists to prevent.
+func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	loop := loopDev(t, srv, node)
+
+	// The clone's own wrapper holds units [0,2)...
+	metaDm := cloneMetaName(srv, testClone)
+	if got, want := node.dms[metaDm].table,
+		wrapperTable(node, loop, 0); got != want {
+		t.Fatalf("the clone's wrapper table is %q, want %q", got, want)
+	}
+	// ...and a kind-`b` stranger claims every unit after it, so the arena has
+	// no free run left at all.
+	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
+	node.dms[filler] = &fakeDm{
+		table: fmt.Sprintf("0 %d linear %s %d",
+			(cnCloneMetaUnitCnt-2)*cnCloneMetaUnitSectors, node.devNo[loop],
+			2*cnCloneMetaUnitSectors),
+		thinIds: map[uint32]bool{},
+	}
+	node.devNo["/dev/mapper/"+filler] = "253:200"
+
+	node.Reset()
+	_, probed := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+	assertOk(t, probed.GetCloneIdToMeta()[testClone], "clone_id_to_meta")
+	assertOk(t, probed.GetCloneIdToDmClone()[testClone], "clone_id_to_dm_clone")
+	for _, call := range node.Mutations() {
+		t.Fatalf("the check round mutated: %q", call)
+	}
+
+	// The control, without which the pair above could be passing for a probe
+	// that never reached the branch: hand the wrapper's own run to a second
+	// stranger and lose the wrapper (and the dm-clone that mapped it) the way a
+	// CN reboot does. The arena's footprint is unchanged — every unit claimed —
+	// and now the refusal really is this clone's verdict.
+	removeCloneDevice(node, srv)
+	delete(node.dms, metaDm)
+	delete(node.devNo, "/dev/mapper/"+metaDm)
+	delete(node.devSize, "/dev/mapper/"+metaDm)
+	squatter := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x998)
+	node.dms[squatter] = &fakeDm{
+		table:   wrapperTable(node, loop, 0),
+		thinIds: map[uint32]bool{},
+	}
+	node.devNo["/dev/mapper/"+squatter] = "253:201"
+
+	node.Reset()
+	_, refused := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+	refusedMeta := refused.GetCloneIdToMeta()[testClone]
+	if refusedMeta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(refusedMeta.GetDetails(),
+			"no contiguous run of 2 clone-metadata units") {
+		t.Fatalf("with the wrapper gone clone_id_to_meta is %v/%q, want the "+
+			"allocator's refusal — the arena was not full, so the OK pair "+
+			"above proves nothing", refusedMeta.GetStatus(),
+			refusedMeta.GetDetails())
+	}
+	refusedDm := refused.GetCloneIdToDmClone()[testClone]
+	if refusedDm.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		refusedDm.GetDetails() != "metadata wrapper missing" {
+		t.Fatalf("with the wrapper gone clone_id_to_dm_clone is %v/%q, want "+
+			"ERROR/\"metadata wrapper missing\"",
+			refusedDm.GetStatus(), refusedDm.GetDetails())
+	}
 }
 
 // TestCloneMetaOrphanWrapperSwept is the CN2 reconcile bullet: a kind-`b`
@@ -643,7 +955,7 @@ func TestPushCloneBitmapGates(t *testing.T) {
 		Revision: 2, CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0,
 		Bitmap: []byte{0xff},
 	}, "unknown clone")
-	// The two indexes bound independently (U4). A valid slice with an
+	// The two indexes bound independently (CN22). A valid slice with an
 	// out-of-range bm_idx is rejected on the chunk cap alone...
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
@@ -840,7 +1152,7 @@ func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 // TestCloneWrapperRemovalTakesTheArenaLock: removing a kind-`b` wrapper is a
 // mutation of the allocator's registry — the dm table set itself — so it
 // belongs inside cloneMetaMu with the enumerate → discard → create section it
-// races (ruling R3.6). Without it a retire on one cntlr can delete a wrapper
+// races (CN18). Without it a retire on one cntlr can delete a wrapper
 // in the middle of another cntlr's allocation.
 func TestCloneWrapperRemovalTakesTheArenaLock(t *testing.T) {
 	srv, node := newTestServer(t)

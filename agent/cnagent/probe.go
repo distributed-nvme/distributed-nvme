@@ -11,8 +11,9 @@ import (
 
 // The probe map of CN28. Every function here is read-only: Get*Info and the
 // Check* streams must never mutate (CN23, SH25). In particular
-// `reserve_metadata_snap` runs only inside the CN25 bitmap reads, never from
-// here (CN29).
+// `reserve_metadata_snap` runs only inside `dumpThinMetadata` — the CN25
+// bitmap reads, the CN14 activation sweep and the §11.5 dst-bitmap read —
+// never from here (CN29).
 
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
@@ -231,12 +232,33 @@ func (s *CnAgentServer) probeCntlr(
 			info.CloneIdToTarget[cp.cloneId] = t.Ok(
 				tgtKey, cp.clone.GetSrcNqn(), pathStates(view))
 		}
+		dmKey := resKeyOf(resKeyCloneDmFmt, cp.cloneId)
+		metaKey := resKeyOf(resKeyCloneMetaFmt, cp.cloneId)
+		// CN18 step 2's refusal pair, for the same reason the dstTd == nil
+		// branch above answers with the converge's error: an arena that cannot
+		// supply this clone's slot leaves the wrapper and the dm-clone over it
+		// not two independently absent devices — they are one refusal, which
+		// the converge reports as ERROR on both rows (ensureClone). The step 1
+		// gate is what makes that comparison honest: a converge whose source
+		// connection fails never reaches step 2 — it reports
+		// `clone_id_to_dm_clone` MISSING "source not connected" and leaves the
+		// meta row to cloneMetaInfo, the very helper this loop falls through
+		// to below, so that row already agrees without this branch.
+		if cloneSourceConnected(view, cp) {
+			if details, refused := s.probeCloneArenaCannotSupply(
+				ctx, plan, cp); refused {
+				info.CloneIdToMeta[cp.cloneId] = t.Err(
+					metaKey, cp.metaDmName, details)
+				info.CloneIdToDmClone[cp.cloneId] = t.Err(
+					dmKey, cp.finalName, detailsCloneMetaMissing)
+				continue
+			}
+		}
 		status, details := s.probeCloneDm(ctx, cp)
 		info.CloneIdToDmClone[cp.cloneId] = t.Set(
-			resKeyOf(resKeyCloneDmFmt, cp.cloneId), cp.finalName,
-			status, details)
+			dmKey, cp.finalName, status, details)
 		info.CloneIdToMeta[cp.cloneId] = s.cloneMetaInfo(
-			ctx, st, plan, cp, resKeyOf(resKeyCloneMetaFmt, cp.cloneId))
+			ctx, st, plan, cp, metaKey)
 	}
 
 	if !plan.wantAny {
@@ -306,6 +328,29 @@ func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 	for _, tr := range cp.clone.GetSrcTrConfList() {
 		ctrl := view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId())
 		if ctrl == nil || ctrl.state != "live" {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneSourceConnected reports whether ensureCloneSource would get past CN18
+// step 1 on this view **without connecting anything**: every configured
+// endpoint already has a controller — whatever its state, since the converge
+// only connects the ones that are missing — and the source namespace device is
+// there. It is deliberately not cloneSourceLive: that one answers the
+// clone_id_to_target row, this one answers "did the converge reach step 2",
+// which is what makes a step 2 verdict comparable between the two channels at
+// all. A view that still needs a connect is not connected here, because whether
+// that connect would succeed is exactly what a read-only probe may not find out
+// (CN23) — and a converge whose connect fails stops at step 1 and reports that
+// on these rows instead.
+func cloneSourceConnected(view *subsysView, cp *clonePlan) bool {
+	if view == nil || !view.found || view.nsDev == "" {
+		return false
+	}
+	for _, tr := range cp.clone.GetSrcTrConfList() {
+		if view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) == nil {
 			return false
 		}
 	}

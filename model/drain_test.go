@@ -559,7 +559,7 @@ func TestDrainSpSliceReleasesSpareLegs(t *testing.T) {
 // of the transaction: a caller that derived D2 from a stale snapshot must not
 // start popping groups while cntlrs are still stacking the whole SP.
 //
-// Cntlrs-first is not cosmetic (§0 #4). Every cntlr stacks the WHOLE SP on its
+// Cntlrs-first is not cosmetic (SPD9). Every cntlr stacks the WHOLE SP on its
 // CN and the coordinator keeps syncing during the drain, so a slices-first
 // drain would make every CN reload its pool concats and disband md arrays on
 // every batch, racing the DN export teardown each time, for stacks nothing will
@@ -648,9 +648,11 @@ func TestDrainSliceRefusesAnInvalidStoredConf(t *testing.T) {
 //
 // The tripwire counts the ops the transaction is BELIEVED to issue; only etcd
 // can say how many it actually receives, because the commit also carries one
-// compare per key the STM read. If any of that grows — a new write in the
-// batch, a change in how etcdutil builds the txn — this test fails with etcd's
-// own "too many operations in txn request" while the tripwire stays green.
+// compare per key the STM read. If that grows — a new write in the batch, a
+// change in how etcdutil builds the txn — this test fails with etcd's own "too
+// many operations in txn request" while the tripwire stays green, but only
+// once the true count passes EtcdMaxTxnOps: 486 leaves 26 ops of slack, so an
+// op added PER DN (+80) is caught here and a single fixed one is not.
 func TestDrainSpSliceAtTheCeiling(t *testing.T) {
 	const legsPerGrp = common.MaxAllocLegPerGrp + common.MaxSpareLegPerGrp
 	const dnCnt = common.MaxDelGrpPerTxn * legsPerGrp
@@ -671,7 +673,7 @@ func TestDrainSpSliceAtTheCeiling(t *testing.T) {
 			addrPort := fmt.Sprintf("drain-dn-%03d:9000", idx)
 			addrs = append(addrs, addrPort)
 			// One DN per side and one side pointer per DN: the widest D2 batch
-			// there is, which is what the §6 budget is computed for.
+			// there is, which is what SPD13's budget is computed for.
 			env.putDn(addrPort, uint64(900+idx), uint32(idx%256), opsDnFree)
 			sideId := drainDataSideBase + uint64(idx)
 			env.chargeDn(addrPort, []*pb.SidePointer{{
@@ -922,7 +924,7 @@ func TestDrainOpsRefuseAnUnlatchedSp(t *testing.T) {
 // Idempotence, concurrency and lost keys
 // ---------------------------------------------------------------------------
 
-// TestDrainStepsAreIdempotent is §4.2's "a step is an idempotent pop what is
+// TestDrainStepsAreIdempotent is SPD8's "a step is an idempotent pop what is
 // still there": the accepted transient two-owner overlap means both owners run
 // the same step, and the loser must find nothing to do rather than an error to
 // amplify.
@@ -971,16 +973,20 @@ func TestDrainStepsAreIdempotent(t *testing.T) {
 	}
 }
 
-// TestDrainConcurrentDriversConverge is §8's "two concurrent drivers converge
-// without error amplification", run for real: two goroutines drive the same
-// drain to the end at the same time, and the SP must end up gone with neither
-// driver reporting a failure that is not one of the two benign races.
+// TestDrainConcurrentDriversConverge is dnv-worker.md §13's "two concurrent
+// drivers converging with exact ledgers", run for real: two goroutines drive
+// the same drain to the end at the same time, and the SP must end up gone with
+// neither driver reporting a failure outside the three tolerated reasons.
 //
-// The benign races are named rather than blanket-tolerated: the loser of a
-// step whose object is already gone is a no-op (above), and a D3 that runs
-// while the other driver has not committed its last batch yet is "slices
-// remain" — a real refusal that the next pass re-derives past. Anything else
-// is a bug this test must fail on.
+// They are named rather than blanket-tolerated: the loser of a step whose
+// object is already gone is a no-op, not a failure at all (above). A D3 that
+// runs while the other driver has not committed its last batch yet is "slices
+// remain", and a driver whose SP the other's D3 deleted between its read and
+// its call is "sp not found" — real refusals the next pass re-derives past.
+// "cntlrs not drained" is the third reason tolerated and the defensive one:
+// the drain only ever empties the cntlr list, so a driver that dispatched on
+// an empty one cannot find it refilled. Anything else is a bug this test must
+// fail on.
 func TestDrainConcurrentDriversConverge(t *testing.T) {
 	env := newOpsEnv(t)
 	env.chargeFixture()
@@ -1021,8 +1027,8 @@ func TestDrainConcurrentDriversConverge(t *testing.T) {
 					(pre.Reason == "slices remain" ||
 						pre.Reason == "cntlrs not drained" ||
 						pre.Reason == "sp not found") {
-					// The two benign races, plus the one a driver sees when
-					// the other's D3 committed between its read and its call.
+					// The two real refusals the next pass re-derives
+					// past, and the defensive one (see the header).
 					continue
 				}
 				errs[idx] = err

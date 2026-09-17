@@ -653,10 +653,10 @@ func TestSideProvisioningMatrix(t *testing.T) {
 		// Let exactly the first batch land and park the second one *inside*
 		// its child. A failing batch would freeze the record too, but it would
 		// also publish a zeroErr — ERROR wins over the progress string while
-		// one is outstanding (ruling R4.14) — and a batch merely paced by
+		// one is outstanding (DN9) — and a batch merely paced by
 		// zeroRetryInterval keeps moving, so k would be racy and only its
-		// prefix assertable. Blocking is what makes the whole formatted string
-		// exact.
+		// prefix assertable. Blocking is what makes the whole formatted
+		// string exact.
 		batch1 := "cmd blkdiscard --zeroout --offset " + strconv.FormatUint(
 			common.DnZeroBatchExtCnt*testExtentSize, 10)
 		node.blockCmd(batch1)
@@ -831,7 +831,7 @@ func TestSideProvisioningMatrix(t *testing.T) {
 			t.Error("row 6 built the side device")
 		}
 		// total_ext_cnt is never omitted: with no record it comes from the
-		// request (ruling R4.16).
+		// request (DN9).
 		if reply.GetSideInfo().GetTotalExtCnt() != testExtCnt {
 			t.Errorf("total_ext_cnt = %d, want %d",
 				reply.GetSideInfo().GetTotalExtCnt(), testExtCnt)
@@ -840,7 +840,7 @@ func TestSideProvisioningMatrix(t *testing.T) {
 
 	// A read-only probe never allocates, so "record absent at
 	// provisioned = false" is MISSING with empty details, not the matrix's
-	// "zeroing 0/n" (ruling R4.15).
+	// "zeroing 0/n" (DN9).
 	t.Run("probe/unprovisioned/absent", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
@@ -1043,7 +1043,7 @@ func TestZeroingCancelledBeforeDeviceRemoval(t *testing.T) {
 // Every reply's counters come from the RECORD whenever one exists — including
 // the paths that then fail (the DN9 ext-count mismatch, a disk the agent may
 // not mutate). side_conf.ext_cnt is a gate, never evidence: the disk is
-// authoritative ([D13], ruling R4.16). Only row 6 — no record at all — falls
+// authoritative ([D13], DN9). Only row 6 — no record at all — falls
 // back to the request's number, which the matrix pins separately.
 func TestAllocFailureReportsTheRecordsCounters(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1183,7 +1183,7 @@ func TestZeroingRetryIsPaced(t *testing.T) {
 			"loop", got)
 	}
 
-	// The outstanding failure is what side_dev_info reports (ruling R4.14).
+	// The outstanding failure is what side_dev_info reports (DN9).
 	reply, err := srv.SyncupSide(ctx, unprovisionedSideReq(
 		2, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
 	if err != nil {
@@ -1528,7 +1528,7 @@ func TestDisableLevelKeepsZeroing(t *testing.T) {
 	}
 }
 
-// TestReadOnlyLevelIsNoOpOnDn pins [P1]/[D11]: SP_LEVEL_READONLY — and every
+// TestReadOnlyLevelIsNoOpOnDn pins DN11/[D11]: SP_LEVEL_READONLY — and every
 // CN-only level below SP_LEVEL_NO_MIGRATION — has no DN-side behavior at all.
 // Read-only is enforced on the CN's user-facing namespaces; the DN cannot
 // enforce it (nvmet needs a writeable backing bdev, dm remaps bypass mid-stack
@@ -1584,12 +1584,12 @@ func TestReadOnlyLevelIsNoOpOnDn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 12. The orphan sweep is pointer-list driven ([D13], [P4])
+// 12. The orphan sweep is pointer-list driven ([D13], DN6)
 // ---------------------------------------------------------------------------
 
-// [P4]: the on-disk volume table, not --local-store, is authoritative for
-// extent placement — "a node that loses --local-store but keeps the disk
-// recovers exactly as it did with LVM". The sweep must therefore never treat
+// [D13]: the on-disk volume table, not --local-store, is authoritative for
+// extent placement — a node that loses --local-store but keeps its disk
+// recovers exactly the layout it had. The sweep must therefore never treat
 // "no local state for this side" as proof that the side is gone: doing so
 // frees its extents, and the next SyncupSide re-runs the §9.4 provisioning
 // protocol and zeroes live data.
@@ -2101,7 +2101,7 @@ func TestProbeReportsABrokenDeviceWhileZeroing(t *testing.T) {
 // a gRPC handler, and nothing in this repo installs a recovery interceptor, so
 // it takes the whole dn agent down with every side it hosts. `go test -race`
 // cannot see it: both reads are correctly mutex-guarded, only the timing is
-// wrong (ruling R4.14).
+// wrong (DN9).
 func TestProbeSideDevBindsTheZeroingErrorOnce(t *testing.T) {
 	srv, node := newTestServer(t)
 	ctx := context.Background()

@@ -266,7 +266,9 @@ CN-CM2. `runCn` mirrors `runDn` (CM4): bind viper, require the common
 
 ### 4.1 Files
 
-`server.go` (the `CnAgentServer` type, lock mapping, RPC entry points),
+`server.go` (the `CnAgentServer` type, lock mapping, and the RPC entry
+points other than the check streams of `check.go` and the bitmap reads of
+`bitmapread.go`),
 `plan.go` (per-cntlr derived names/sizes, the ns-dev backing and ANA state
 machines of CN16), `syncup_cn.go`, `syncup_cntlr.go`, `leg.go` (CN10 side
 connections + wrappers), `healthcheck.go` (the CN11 [D6] probers and their
@@ -278,9 +280,16 @@ unit accounting over the single loop device, the `blkdiscard` recycle guard,
 the kind-`b` wrapper linears and the `dmsetup ls`/`dmsetup table` enumeration
 that **is** the allocation registry), `pool.go` (concats, thin pools, thin volumes), `td.go` (raid0,
 dm-error, ns-dev, flakey), `clone.go` (CN18 + §11.5 recovery), `xfer.go`,
-`push_clone_bm.go`, `thinbm.go` (CN25-CN27: the thin-metadata snapshot
+`push_clone_bm.go`, `dmutil.go` (the dm ensure/probe helpers —
+`ensureDmSingle`/`ensureDmError`/`ensureDmLinear`/`ensureDmMulti`,
+`probeDmTarget`/`probeDmArgs`/`probeDmConcat`, `removeDm`/`removeExport` —
+shared by the converge files, `probe.go` and `syncup_cntlr.go` (its retire
+phase, the per-td dm-error of its build phase and the CN21 teardown);
+`ensureDmClone` stays in `clone.go`),
+`thinbm.go` (CN25-CN27: the thin-metadata snapshot
 reader behind `GetThinDeviceBm`/`GetLegBm` and the §11.4 clone-geometry
-fold), `check.go`, `probe.go`. Colocated `_test.go` files. This is the
+fold), `bitmapread.go` (the `GetThinDeviceBm`/`GetLegBm` RPC entry points),
+`check.go`, `probe.go`. Colocated `_test.go` files. This is the
 `layout.md` §2 recommended split (updated by §5); package boundaries are
 binding, file names are not.
 
@@ -384,11 +393,18 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      each `cntlr-*` request: if its pointer is absent from the stored
      `SyncupCnRequest.cntlr_pointer_list`, tear the cntlr down (CN21) —
      it was removed mid-teardown; otherwise re-run the SyncupCntlr
-     converge (§4.6) from the stored request — which, per CN18, runs the
-     §11.5 recovery for any clone whose **dm-clone or metadata wrapper** is
-     gone or mismatched — recovery keys off missing dm-clone *metadata*, not
-     off the wrapper alone (`TestCloneRecoveryWhenOnlyTheDmCloneVanished`) —
-     (a reboot
+     converge (§4.6) from the stored request — which, per CN18 step 4, runs
+     the §11.5 recovery for a clone whose **dm-clone metadata** is missing
+     or unusable, or whose **dm-clone device** itself vanished while a
+     healthy wrapper stayed behind
+     (`TestCloneRecoveryWhenOnlyTheDmCloneVanished`); a dm-clone that is
+     present over a wrapper that still matches, but whose table has drifted
+     — a changed length, devno or region size — is reloaded by step 3's
+     probe-first converge (SH16) with step 4's locally held source chunks
+     re-applied, and is not a §11.5 recovery; the same drifted table over a
+     missing or mismatched wrapper is instead removed and rebuilt by the
+     recovery, which never sees the drift.
+     (A reboot
      clears the tmpfs, the loop device and every kind-`b` wrapper together —
      the arena is volatile *with* the kernel's dm state — so the reconcile
      starts from an empty arena; a plain agent restart preserves both and the
@@ -505,13 +521,13 @@ CN8. **Gating.** The pointer MUST be present in the stored
      `SyncupCnRequest.cntlr_pointer_list` — else `ReplyCodeUnknownObject`
      (`SyncupCn` introduces pointers first, §9.1). Then the SH8 revision
      gate against the stored `SyncupCntlrRequest`. Then, last and still
-     with **zero** side effects, the §7 **conf gate**:
+     with **zero** side effects, the `architecture.md` §7 **conf gate**:
      `agent.ValidateBdevConf(req.bdev_conf)` (`dnagent.md` §2.1) refuses a
      request whose `dm_pool_conf.data_block_size`,
      `dm_pool_conf.low_water_mark_pct` or `dm_raid0_conf.stripe_size` is 0,
      or whose `redund_conf` selected md-raid1 with a 0
      `bitmap_chunk_block_cnt`. The control plane resolves all four when it
-     *writes* the conf (§7), so a zero here is a geometry no agent may
+     *writes* the conf (`architecture.md` §7), so a zero here is a geometry no agent may
      invent a replacement for — those values become the thin-pool's, the
      raid0's and the md bitmap's own arguments (CN12, CN13, CN15), and a
      geometry this node guessed is one the rest of the cluster does not
@@ -595,9 +611,9 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
        over a non-existent device is the very hazard CN16's ANA conjunct
        prevents.
      * an unprovisioned **spare** leg defers only itself — spares never
-       assemble (§8.12) — and is explicitly marked unavailable, so CN12's
-       case-1 guard refuses `--create --assume-clean` by rule rather than by
-       zero value.
+       assemble (§8.12), so the group's own assembly is unaffected (CN12) —
+       and `leg_id_to_leg` reports it `RES_STATUS_PROVISIONING` like any
+       other provisioning leg (CN10).
      * bitmap reads follow the effective state as well: CN27's data-group
        span walks the **effective** `data_grp_list` (leaving a deferred group
        in the walk would silently shift every later group's offset), and
@@ -781,7 +797,7 @@ CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       `dm_pool_conf.low_water_mark_pct`) / 100. `pct = 0` is **invalid**
       and never reaches that arithmetic: the control plane resolved an
       omitted percentage to `DefaultPoolLowWatermarkPct` when it *wrote*
-      the conf (§7), so a zero arriving here is a value no agent may
+      the conf (`architecture.md` §7), so a zero arriving here is a value no agent may
       replace, and CN8's conf gate refuses the request before any planning
       runs. `pct > 100` still means auto-grow off and still passes `0` — no
       dm events at all (§3.3). Nothing is clamped in either direction: the
@@ -879,9 +895,10 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       *devices* are created after the resume, since the content is fixed at
       message time. The window is bounded by `slice_cnt` messages under the
       SH15 timeouts. The trigger is liveness and nothing else: when the
-      origin td's raid0 is not live — never built on this cntlr, already
-      removed, or `sp_level` suppressing pools — there is no dnv IO path to
-      quiesce and the messages go unquiesced. A *deferred* origin is not a
+      origin td's raid0 is not live — never built on this cntlr, or already
+      removed — there is no dnv IO path to quiesce and the messages go
+      unquiesced (at a pool-suppressing `sp_level` the pre-pass does not run
+      at all, so no `create_snap` is sent, CN19). A *deferred* origin is not a
       case of that: `deferred` suppresses the raid0's converge, not the
       device, so a raid0 an earlier revision built stays live and is
       quiesced like any other (`ThinDeviceCreated.md` U4-S3 removed the
@@ -1034,7 +1051,7 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       resumes it: `ensureNsDev` and `removeDm` bare-resume a device whose
       table already matches, while `parkNsDev` (and CN21 through it) reloads
       it, which resumes it as a side effect.
-      *Decided 2026-09-16 (minor_updates_08 U1): parked, see [D12].*
+      *Decided 2026-09-16: parked, see [D12] and `architecture.md` §11.6.*
       `UpdateNamespaceDev` arrives as a changed `ns.td_id` and is exactly
       one ns-dev reload — the nvmet `device_path` never changes.
 
@@ -1167,7 +1184,12 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          **currently probed** loop path — a tmpfs remounted under a live
          agent) is removed and reallocated by the converge, after the
          dm-clone above it is already gone so the removal cannot EBUSY; that
-         *is* the §11.5 rebuild path.
+         *is* the §11.5 rebuild path. On a recovery build (metadata missing
+         or unusable, or the dm-clone device gone) this step first parks the
+         dst td's ns-devs on `CnErrorName` (`parkTdNsDevs`, no ANA move),
+         removes the old dm-clone if one is still present, and only then
+         allocates a missing wrapper or replaces a mismatched one — a
+         matching wrapper is left alone.
       3. dm-clone `CnCloneFinalName`: metadata = the step-2 wrapper, dest = the dst
          td's `CnRaid0Name`, source = the connected device, region size =
          `block_size / 512` sectors, created
@@ -1178,7 +1200,9 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          destination, unmapping the very blocks step 4 says are already
          there;
          then `hydration_threshold`/`hydration_batch_size` messages from
-         `dm_clone_conf`.
+         `dm_clone_conf`, one per non-zero member the probed status does
+         not already show (probe-first, SH16; a zero leaves the target's
+         own default in place, `architecture.md` §7).
       4. Apply every locally present bitmap chunk — the CN22 fold over the
          `(src_slice_idx, bm_idx)`-addressed chunks this node holds, read in
          place — and, when
@@ -1191,7 +1215,8 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          bitmaps: with every affected ns-dev parked
          on `CnErrorName` (by the retire phase when the namespace is
          effectively suspended or the cntlr is standby, and otherwise by
-         this step itself — `parkTdNsDevs` takes a *serving* namespace off
+         step 2 of a recovery build, before the old dm-clone is removed —
+         `parkTdNsDevs` takes a *serving* namespace off
          the td with no ANA move, and that IO-error window is this
          recovery's own), read the td's mapping bitmap from every slice pool
          (the CN25 machinery, B-side of §11.4) and `blkdiscard` every
@@ -1372,7 +1397,7 @@ CN25. Both serve the §8.13 gateway reads from a **dm-thin metadata
       `release_metadata_snap` — on the success path and on every error
       path, because a leaked reservation blocks the next reserve; a
       reserve that fails "already reserved" is released and retried once.
-      The §7 command timeouts bound the dump; a pool whose metadata
+      The `architecture.md` §7 command timeouts bound the dump; a pool whose metadata
       outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails the
       RPC, and the caller falls back to a full copy — bitmaps are an
       optimization, never a correctness input (§8.9). The activation sweep
@@ -1453,7 +1478,9 @@ CN29. Error capture (§9.1): a failed command marks that resource
       `RES_STATUS_ERROR` with the command output in `details` and the
       converge pass **continues** with the remaining resources; protocol
       failures are the only things reported through `agent_reply`. Probes
-      never mutate — `reserve_metadata_snap` runs only inside CN25, never
+      never mutate — `reserve_metadata_snap` runs only inside
+      `dumpThinMetadata` (the CN25 bitmap reads, the CN14 activation sweep
+      and the §11.5 dst-bitmap read of CN18 step 4), never
       from `probe.go`. `RES_STATUS_PROVISIONING` is never produced by this
       path: it is assigned by the CN9 gate, not by a failed command.
 
@@ -1608,25 +1635,31 @@ contradicts them.
   either way — only its backing flips to `CnErrorName`); and the [D12]
   residual (an unbounded transfer-origin suspension blocks external scanners
   in D state, while the agent's own exposure ended with [D14]) is recorded —
-  note only, no mechanism change.
+  note only, no mechanism change. (That residual note is superseded by the
+  2026-09-16 park bullet below, which resolved it.)
 * `cnagent.md` CN14 + CN16 (second-pass U1/U5) — CN14 gains the
   cross-slice point-in-time rule for `create_snap`: quiesce the origin td's
   raid0 around the whole per-slice message sequence (implemented; §6 test
   item 19 carries the assertions);
   CN16's [D12] residual paragraph now states the transfer-origin
   suspension's operational blast radius and the considered-but-undecided
-  bounded alternative (reload onto `CnErrorName` after a grace window).
+  bounded alternative (reload onto `CnErrorName` after a grace window). (The
+  CN16 half is superseded by the 2026-09-16 park bullet below: that
+  paragraph is gone from CN16, the reload onto `CnErrorName` became the rule
+  and no grace window exists.)
 * `architecture.md` §2 / §3.3 / §8.7 / §9.5 / §10.3 / Appendix C / Appendix D
   (`ThinDeviceCreated.md` U1-U4) — the `created` flag and its gateway and
   worker rules: `CreateThinDevice` refuses a snapshot of an uncreated origin,
   `DeleteThinDevice` refuses an origin with an uncreated snapshot,
   `ListThinDevices` is the client's wait primitive, and the sp-worker flips
   the flag from the thin rows of any cntlr reply. This document's CN14 is the
-  agent-side spec; §8.7/§10.3 are the gateway/worker spec until `gateway/`
-  and `worker/` land.
+  agent-side spec; §8.7/§10.3 are the gateway/worker spec, implemented in
+  `gateway/` (`gateway/thindevice.go`) and `worker/` (`worker/sprole.go`'s
+  created flip, `dnv-worker.md` RW19).
 * `architecture.md` §2 / §8.8 / §8.10 / §11.3 / §11.5 / §11.6 / [D12] / [D14]
   + this document's CN16, CN21, the `ns_id_to_dm_linear` probe row and §6
-  items 8 / 26 / 28 / 29 (`minor_updates_08` U1, 2026-09-16) — an effectively
+  items 8 / 26 / 28 / 29 (decided 2026-09-16; recorded in [D12] and
+  `architecture.md` §11.6) — an effectively
   suspended namespace is **parked**, not dm-suspended: its ns-dev is a live
   dm-linear over the td's `CnErrorName` (the new CN16 rule 1, which renumbers
   the rest of the backing state machine) and the namespace is `inaccessible`
@@ -1657,8 +1690,8 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
 1. **Fresh SyncupCn**: scripted empty probes; assert the CN5 sequence
    (`findmnt`/`mkdir`/`mount`, `truncate --size {CnCloneMetaAreaSize}`,
    `losetup --associated` then `losetup --find --show`, then the port attrs,
-   `mkdir ana_groups/2`+`3`, the three
-   one-time `ana_state` writes) and the `WriteProto` to `LocalCnPath`
+   `mkdir ana_groups/2`+`3`, the one-time `ana_state` writes — the test pins
+   groups 1 and 3 of the three) and the `WriteProto` to `LocalCnPath`
    afterwards (SH5). No `io.max` write and no cgroup path appears anywhere
    in the recorded calls (CN6), and **no LVM command appears at all** — the
    arena needs none (CN18).
@@ -1671,7 +1704,9 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    no dm/md/nvme/configfs mutation, no `ana_grpid` write.
 4. **Standby converge**: legs connected + wrappers built + per-td errors +
    ns-devs on error + subsystems with every ns `ana_grpid = 3`; **no**
-   mdadm, pool, thin, raid0 or clone command appears.
+   mdadm, pool, thin, raid0 or clone command appears (RedundNone fixture —
+   a raid1 standby's retire step probes each group with `mdadm --detail`,
+   §7 item 8).
 5. **Primary converge order**: one fresh primary pass (a RedundNone
    fixture) asserts the CN9 build order — connects → wrapper creates →
    RedundNone group linears (`CnGrpName`) → stdin multi-target concat
@@ -1772,7 +1807,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     connections; `DISABLE` leaves only base state and keeps the store
     files; lowering rebuilds.
 12. **Check streams** (CN24): first reply full info; unchanged
-    `show_info = false` round omits it; a flipped probe re-includes it;
+    `show_info = false` round omits it; `show_info = true` re-includes it;
     unknown object ⇒ code 2 with the stream kept open; a round never
     mutates.
 13. **Lock smoke** (CN1): a `SyncupCntlr` blocked in a slow scripted
@@ -1782,7 +1817,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     → dump → release ordering, release also on a scripted dump failure and
     after an "already reserved" retry; the wire inversion (mapped ⇒ 0);
     paging windows; the meta-group all-zero rule; the data-group span
-    arithmetic against a two-data-group slice.
+    arithmetic on the fixture's single data group (`TestLegBitmap`).
 15. **Leg prober** (CN11): registry logic under a fake clock with a **fake
     `LegProbeIO`** (§2.2 — the prober never touches the server's `oc`: a
     round records no `writeblock`/`readblockdirect` `OsClient` call at all),
@@ -1805,7 +1840,7 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     round can only delay the next one. The teardown ordering assertion is
     explicit: the leg's `nvme disconnect` is recorded **before** the
     `dmsetup remove` of its wrapper (CN21).
-16. **cmd**: the §13 example `dnv-agent cn …` invocation parses; `--disk`
+16. **cmd**: the `architecture.md` §13 example `dnv-agent cn …` invocation parses; `--disk`
     is rejected for `cn`; `--capacity` reaches `GetCnSize` verbatim; env
     `DNV_AGENT_CAPACITY` overrides the flag default (CM3).
 17. **Provisioning deferral** (CN9/CN10/CN12/CN13/CN16): a group with one
@@ -2003,31 +2038,38 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    `/sys/kernel/config` (SH18), no `ana_state` write outside `EnsurePort`,
    and no `io.max`/cgroup write anywhere (CN6).
 5. `grep -rn "zero-superblock" agent/cnagent/` finds nothing outside
-   comments (CN12); `grep -rn "s.oc" agent/cnagent/healthcheck.go` finds
+   comments and test-guard string literals (CN12);
+   `grep -rn "s.oc" agent/cnagent/healthcheck.go` finds
    nothing, and `grep -rn "common.WriteBlockAt\|common.ReadBlockDirectAt"
    agent/cnagent/` hits only the `LegProbeIO` implementation — the CN11 probe
    IO never passes through the `OsClient` (§2.2).
 6. `grep -rnE "pvcreate|vgcreate|lvcreate|lvchange|lvremove|\blvs\b|\bvgs\b|\bpvs\b" agent/ cmd/ common/`
-   finds nothing outside comments — **repo-wide**: LVM is gone from dnv
-   entirely ([D13]/[D14]), superseding the old cn-only exemption and
-   dnagent.md acceptance 6. And `grep -rn "zeroout" agent/cnagent/` finds
+   finds nothing outside comments and test-guard string literals —
+   **repo-wide**: LVM is gone from dnv entirely ([D13]/[D14]), superseding
+   the old cn-only exemption (`dnagent.md` acceptance 6 is the same
+   repo-wide grep). And `grep -rn "zeroout" agent/cnagent/` finds
    nothing: the clone-metadata arena uses a plain `blkdiscard` hole punch,
    while `--zeroout` belongs only to the dn side-provisioning path (CN18/§9.4).
-7. A manual run of the §13 example starts `dnv-agent cn`, serves
+7. A manual run of the `architecture.md` §13 example starts `dnv-agent cn`, serves
    `GetCnSize`, and a `SyncupCn`/`SyncupCntlr`/`CheckCntlr` round-trip
    shows one trace id across its `grpc server request`, `os command` and
    `os write file direct` records; the `probe write block` / `probe read
    block direct` records of the CN11 leg probers appear on their own
    per-attempt trace ids (CN2), never on an RPC's — and they carry no
    `os command` framing, because the prober issues its IO directly (§2.2).
-8. A `SyncupCntlr` whose legs are all `provisioned = false` issues zero
-   `nvme connect`, `mdadm` and `dmsetup create` calls, and every affected
-   `ResInfo` is `RES_STATUS_PROVISIONING` — never `RES_STATUS_ERROR`.
+8. A **primary**'s `SyncupCntlr` whose legs are all `provisioned = false`
+   issues zero `nvme connect` and `mdadm` calls (a standby's retire step
+   still probes each raid1 group with `mdadm --detail`, since `retiredGrps`
+   returns every group when `wantGrp` is false) — the dm devices it does create are the
+   error-backed shape: each td's `CnErrorName`, the ns-devs on it (CN16
+   rule 0, [D15]) and any transfer's `CnXferFinalName` as an error table
+   (CN17) — and every affected `ResInfo` is `RES_STATUS_PROVISIONING` —
+   never `RES_STATUS_ERROR`.
 9. §5 records every change the design-review pass made.
 10. Both greps of this item carry `--exclude=*_test.go`, because both are
     claims about what the shipped agent code contains and the tests of §6
-    test 23 / test 27 and `agent/conf_test.go` deliberately quote the same
-    strings back:
+    test 27, `dnagent.md`'s §6 test 23 (`agent/dnagent/conf_test.go`) and
+    `agent/conf_test.go` deliberately quote the same strings back:
     `grep -rn --exclude=*_test.go "invalid stored conf" agent/` finds only
     `agent/conf.go`'s error builder (plus the doc comment above it) and the
     `msgInvalidStoredConf` constant in each role package — one string
@@ -2053,7 +2095,9 @@ Found by running `integtest/dnagent_test.sh` and `integtest/cnagent_test.sh`
 against two real VMs (kernel 7.0, nvme-cli 2.16, mdadm 4.5) — the first
 execution of either suite since the design-review pass was applied. All five were
 real agent defects, not harness problems; every one is now covered by a unit
-test that fails without the fix.
+test that fails without the fix. The four that touch this role are listed
+below; IR4 (DN6, the dm-clone retire order) is dn-only and is recorded in
+`dnagent.md`'s Integration-run fixes.
 
 * **IR5 (CN28)** — `ns_id_to_namespace`'s `uuid`/`nguid` probe compares through
   the shared `agent.SameNsId` rather than case-folding alone: nvmet reads both

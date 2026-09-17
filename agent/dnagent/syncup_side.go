@@ -97,7 +97,7 @@ func (s *DnAgentServer) convergeSide(
 		return info
 	}
 	if state != sideDevReady {
-		// The whole per-CN stack is gated together (ruling R4.3): dm-error,
+		// The whole per-CN stack is gated together (DN9 step 4): dm-error,
 		// dm-linear, nvmet, migr-src and migr-dst. A side that is still
 		// provisioning has nothing above it by design, and a side whose bits
 		// are incomplete must not export a zeroed impostor of the data.
@@ -197,7 +197,7 @@ func (s *DnAgentServer) ensureSideDev(
 ) sideDevState {
 	t := st.tracker
 	name := plan.sideDevName
-	// total_ext_cnt is never omitted (ruling R4.16). Until a record exists the
+	// total_ext_cnt is never omitted (DN9). Until a record exists the
 	// only number available is the request's, which is why it is seeded here
 	// and overwritten from the record below — the record always wins.
 	info.TotalExtCnt = plan.conf.GetExtCnt()
@@ -219,9 +219,8 @@ func (s *DnAgentServer) ensureSideDev(
 		// report from here on, including on the failure paths below: AllocSide
 		// can still refuse (a DN9 ext-count mismatch, or a disk this agent may
 		// not mutate) and those replies must carry the disk's numbers, not a
-		// request value the agent can prove wrong (ruling R4.16). They are
-		// overwritten with the identical values once AllocSide hands the
-		// record back.
+		// request value the agent can prove wrong (DN9). They are overwritten
+		// with the identical values once AllocSide hands the record back.
 		info.ZeroedExtCnt, info.TotalExtCnt = sideZeroedCnt(rec), sideExtCnt(rec)
 	}
 	// Rows 1-5 all go through AllocSide: it returns the existing record —
@@ -229,7 +228,7 @@ func (s *DnAgentServer) ensureSideDev(
 	// and allocates only when there is none, a case row 6 has already taken
 	// off the table. Its error is reported rather than discarded, because the
 	// matrix needs "could not allocate" to be distinguishable from "allocated"
-	// and from "must not allocate" (ruling R4.2).
+	// and from "must not allocate" (DN9).
 	rec, err = s.meta.AllocSide(
 		ctx, plan.spId, plan.sideId, plan.conf.GetExtCnt())
 	if err != nil {
@@ -255,7 +254,7 @@ func (s *DnAgentServer) ensureSideDev(
 		if zeroErr := s.zeroingErr(st); zeroErr != nil {
 			// A batch that failed or was killed reports its output, and ERROR
 			// wins while that failure is outstanding; the next successful
-			// batch puts the row back to PROVISIONING (ruling R4.14).
+			// batch puts the row back to PROVISIONING (DN9).
 			info.SideDevInfo = t.Err(resKeySideDev, name, zeroErr.Error())
 			return sideDevProvisioning
 		}
@@ -655,7 +654,7 @@ func (s *DnAgentServer) moveCnAnaGroups(
 //
 // PROVISIONING never feeds err_epoch (§9.5), which is the point: one cause is
 // reported once — on side_dev_info, as ERROR when it really is one — instead
-// of multiplying a single fault across every per-CN stack (ruling R4.4).
+// of multiplying a single fault across every per-CN stack (DN10).
 //
 // It fills exactly the keys probeAboveSideDev fills, so a side that becomes
 // exportable later replaces them one for one.
@@ -904,7 +903,7 @@ func (s *DnAgentServer) teardownSide(
 	// `dmsetup remove` on a device with an open fd fails EBUSY. The wait is
 	// bounded — the child is SIGTERMed at CmdSoftTimeout and SIGKILLed at
 	// CmdHardTimeout — and the loop never blocks on a lock, so waiting for it
-	// here, under the node write lock, cannot deadlock (ruling R4.20).
+	// here, under the node write lock, cannot deadlock (DN9).
 	s.stopZeroing(st)
 	// Strictly top-down. The per-CN dm-linears go first because everything
 	// below is one of their table targets — `dmsetup remove` on a device

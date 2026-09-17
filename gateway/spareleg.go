@@ -28,7 +28,7 @@ import (
 // Two of the three are model ops the sp-worker's §10.4 leg repair already
 // drives (§0 #4: reused, never duplicated); DeleteSpareLeg is the gateway's
 // own STM, because no worker reaction ever removes a spare — a parked leg
-// stays parked until an operator frees the slot (§0 item 17).
+// stays parked until an operator frees the slot (dnv-worker.md §0 #17, AR8).
 
 // The op names the model helpers put into their error messages and the bump
 // helpers cite; they are the RPC names so a log line names something

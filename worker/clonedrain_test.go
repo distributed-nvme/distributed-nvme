@@ -104,14 +104,14 @@ func TestCloneDrainDerivation(t *testing.T) {
 	})
 }
 
-// TestCloneDrainBatchIsCutAndOrdered is CLD8's two rules where they are
-// applied: the batch handed to the op is at most MaxDelBmPerTxn chunks, and it
-// is the LOWEST of them in (src_slice_idx, bm_idx) order.
+// TestCloneDrainBatchIsCutAndOrdered is CLD7's derivation where it is applied:
+// the batch handed to the op is at most MaxDelBmPerTxn chunks (CLD8's ceiling)
+// and it is the LOWEST of them in (src_slice_idx, bm_idx) order.
 //
 // The fixture's chunks are planted out of order, so "the lowest" cannot be
 // satisfied by "the first the scan happened to return" — the pair order is the
-// rule, and it is the pair and not the bm_idx, because one bm_idx acknowledged
-// on one source slice says nothing about the same bm_idx on another (U1).
+// rule, and it is the pair and not the bm_idx, because a chunk's address IS
+// the pair (MD2); ascending is free to choose and is picked for determinism.
 func TestCloneDrainBatchIsCutAndOrdered(t *testing.T) {
 	h := newReactHarness(t, reactFixture(t))
 	pairs := make([][2]uint32, 0, common.MaxDelBmPerTxn+3)

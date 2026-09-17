@@ -160,7 +160,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 // ran would otherwise leak its extents forever.
 //
 // The rule is deliberately narrow, because the volume table — not the local
-// store — is authoritative for extent placement ([D13], [P4]): a record is
+// store — is authoritative for extent placement ([D13], DN6): a record is
 // swept only when the DN's **authoritative side_pointer_list** proves its
 // owner is gone. "No local state for this side" is NOT such a proof. A node
 // that lost --local-store but kept its disk still has every side in its DN's
@@ -498,9 +498,9 @@ func (s *DnAgentServer) ensureDiskMeta(
 // (tagNoWriteZeroes, false) **only** when the sysfs attribute is present and
 // reads 0. An absent or unreadable attribute is not a verdict — an older
 // kernel simply may not publish it, and failing a healthy DN for that would
-// take it out of allocation for a reason the spec never states (ruling R4.11).
+// take it out of allocation for a reason the spec never states (DN5).
 //
-// A failure reports meta_info but never gates converging (ruling R4.12): an
+// A failure reports meta_info but never gates converging (DN5): an
 // already-populated DN keeps serving the sides it hosts, and DN5's identity
 // check stays the only write gate.
 func (s *DnAgentServer) checkWriteZeroes(ctx context.Context) (string, bool) {

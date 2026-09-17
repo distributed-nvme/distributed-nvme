@@ -494,10 +494,12 @@ func MaintainDnCapacity(
 	// ladder names a key nothing ever wrote and leaves the live one behind.
 	// The gates that do that are, in the gateway, CreateDiskNode,
 	// DeleteDiskNode, UpdateDiskNodeDisabled and newDnLedger (the constructor
-	// the six handlers that keep their own DN bookkeeping share); in model,
-	// GrowSlice's own gate and, for CreateSpareLeg, its two callers'; in the
-	// worker, newDnMonitor's per-write re-validation. The one caller with no
-	// gate is integtest/workerctl, which plants records on purpose.
+	// the five handlers that keep their own DN bookkeeping share); in model,
+	// GrowSlice's and DrainSpSlice's own gates and, for CreateSpareLeg, its
+	// two callers'; in the worker, newDnMonitor's per-write re-validation. The
+	// callers with no gate are integtest/workerctl's put-dn, move-dn,
+	// put-migr and set-free, which plant records on purpose; its put-sp
+	// validates the stored conf like the gateway does.
 	conf := cc.GetDnBinConf()
 	oldKey := dnCapacityKeyOf(cid, addrPort, conf, oldDn)
 	newKey := dnCapacityKeyOf(cid, addrPort, conf, newDn)

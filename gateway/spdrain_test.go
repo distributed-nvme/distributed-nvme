@@ -36,7 +36,7 @@ const sptDrainSteps = 64
 // asserts about the END state is what the worker produces.
 //
 // A step that fails is fatal rather than retried: in a unit test there is no
-// "the world heals later" (§0 #9), and a drain that cannot make progress is
+// "the world heals later" (SPD6), and a drain that cannot make progress is
 // exactly the bug these tests exist to catch.
 func sptDrain(env *sptEnv, spName string) {
 	env.t.Helper()
@@ -120,7 +120,7 @@ func sptChangedKeys(before map[string][]byte, after map[string][]byte) []string 
 	return changed
 }
 
-// TestDeleteStoragePoolLatchesOnly is §3's whole write set: SpConf with
+// TestDeleteStoragePoolLatchesOnly is §8.4's whole write set: SpConf with
 // `deleting = true` and one SpRev bump, and NOTHING else.
 //
 // It is asserted as a key-set difference rather than as a list of things that
@@ -210,9 +210,9 @@ func TestDeleteStoragePoolRepeatIsANoOp(t *testing.T) {
 	if got := env.spRev(shard, spId); got != 2 {
 		t.Errorf("a token-less repeat bumped sp_rev to %d, want 2", got)
 	}
-	// A STALE token still ABORTs on a deleting SP: the table order of §3 puts
-	// GW6 ahead of the `deleting` short-circuit, so a client that lost the race
-	// is told so rather than being answered OK.
+	// A STALE token still ABORTs on a deleting SP: SPD3 puts GW6 ahead of the
+	// `deleting` short-circuit, so a client that lost the race is told so
+	// rather than being answered OK.
 	_, err := env.srv.DeleteStoragePool(
 		env.ctx, &pb.DeleteStoragePoolRequest{
 			ClusterName: env.name,
@@ -223,10 +223,10 @@ func TestDeleteStoragePoolRepeatIsANoOp(t *testing.T) {
 	sptWantStale(t, err)
 }
 
-// TestDeleteStoragePoolDuringDrain pins the two consequences §3 states for the
-// record: the name is NOT reusable until D3 commits, and every other mutator
-// keeps refusing while the drain runs — at every stage of it, not only right
-// after the latch.
+// TestDeleteStoragePoolDuringDrain pins the two consequences SPD12 and SPD4
+// state for the record: the name is NOT reusable until D3 commits, and every
+// other mutator keeps refusing while the drain runs — at every stage of it,
+// not only right after the latch.
 func TestDeleteStoragePoolDuringDrain(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))

@@ -241,8 +241,9 @@ func (s *CnAgentServer) ensureLegs(
 			// [D15]: every side is still zeroing, so the DN exports nothing —
 			// there is no subsystem to connect to, no multipath namespace to
 			// wrap and no device to probe. Deliberate, healthy, no action.
-			// available is set explicitly rather than left at its zero value,
-			// so the §11.1.1 case-1 guard refuses `--assume-clean` by rule.
+			// available is set explicitly, but the map's zero value reads the
+			// same: nothing consults this entry — a group with a provisioning
+			// leg_list leg is deferred, and a spare's flag is never read.
 			info.LegIdToLeg[lp.legId] = st.tracker.Provisioning(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, detailsProvisioning)
 			available[lp.legId] = false

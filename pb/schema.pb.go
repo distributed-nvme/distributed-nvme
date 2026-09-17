@@ -452,7 +452,11 @@ type DmPoolConf struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DataBlockSize uint64                 `protobuf:"varint,1,opt,name=data_block_size,json=dataBlockSize,proto3" json:"data_block_size,omitempty"`
 	// Thin pool low water mark.
-	// 0 means using DefaultPoolLowWatermarkPct
+	// 0 means "unset" and is resolved once, on the
+	// create request (architecture.md §7): to the
+	// cluster's stored value for a storage pool,
+	// else to DefaultPoolLowWatermarkPct. A 0 read
+	// back out of etcd is refused as an invalid conf.
 	// 1 - 100 means percentage
 	// >100 means won't grow a slice automatically.
 	LowWaterMarkPct uint32 `protobuf:"varint,2,opt,name=low_water_mark_pct,json=lowWaterMarkPct,proto3" json:"low_water_mark_pct,omitempty"`
@@ -892,11 +896,13 @@ type EventThreshold struct {
 	// How many seconds to wait before allocating a
 	// new cntlr and delete the old one.
 	CntlrUnhealthy uint32 `protobuf:"varint,2,opt,name=cntlr_unhealthy,json=cntlrUnhealthy,proto3" json:"cntlr_unhealthy,omitempty"`
-	// How long time to wait before allocating a
-	// new side when the side is unhealthy.
+	// How long the SIDE must have been unhealthy
+	// before its leg is repaired; the leg only has
+	// to be unhealthy, for any duration
+	// (dnv-worker.md AR8 case 2).
 	SideUnhealthy uint32 `protobuf:"varint,3,opt,name=side_unhealthy,json=sideUnhealthy,proto3" json:"side_unhealthy,omitempty"`
-	// How long time to wait before allocating a
-	// new side when the leg is unhealthy.
+	// How long the LEG must have been unhealthy
+	// before it is repaired (AR8 case 1).
 	LegUnhealthy  uint32 `protobuf:"varint,4,opt,name=leg_unhealthy,json=legUnhealthy,proto3" json:"leg_unhealthy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3429,8 +3435,8 @@ type Clone struct {
 	DstTdId       uint64                 `protobuf:"varint,8,opt,name=dst_td_id,json=dstTdId,proto3" json:"dst_td_id,omitempty"`
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,9,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
 	AutoResume    bool                   `protobuf:"varint,10,opt,name=auto_resume,json=autoResume,proto3" json:"auto_resume,omitempty"`
-	// minor_updates_08 U2). Reserving the NUMBER is what
-	// keeps a future varint field from decoding an old
+	// architecture.md Appendix C). Reserving the NUMBER is
+	// what keeps a future varint field from decoding an old
 	// record's counter as itself; the name goes with it.
 	// The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
 	// DeleteClone sets it and returns, and the sp coordinator drains the

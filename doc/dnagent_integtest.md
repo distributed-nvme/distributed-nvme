@@ -71,7 +71,9 @@ bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
 - One IP per VM — the one in the ssh arg — is used for everything: ssh, the
   gRPC target, and nvmet `--tr-addr`. gRPC listens on `<ip>:29528`
   (`architecture.md` §13 convention); nvmet `--tr-svc-id 4200`.
-- The `cn` role is not implemented, so **CN identities are emulated** with
+- This suite exercises the DN contract without a CN — the `cn` role has its
+  own plan and suite (`cnagent_integtest.md`, `integtest/cnagent_test.sh`) —
+  so **CN identities are emulated** with
   plain `nvme connect --hostnqn <CnHostNqn> --hostid <NvmeHostId>` from the
   VMs themselves,
   cross-connected: CN identities hosted on VM2 connect to DN1's exports and
@@ -359,8 +361,9 @@ Subcommands:
 - **Revisions**: the script keeps one monotonic counter per DN (`REV1`,
   `REV2`), incremented before every state-changing `syncup-*`. Equal-revision
   re-sends are legal full re-applies and are used deliberately (fetching
-  `bm_info`, case D idempotency). Never send a lower value except the case D
-  stale probe.
+  `bm_info`, case D's `syncup-side` idempotency re-sends; its `syncup-dn`
+  re-sends are higher-revision re-applies, §15 step 5). Never send a lower
+  value except the case D stale probe.
 - **Ordering**: a side pointer must appear in `SyncupDn.side_pointer_list`
   before its first `SyncupSide` (else `code 2`).
 - **Two-phase side setup (the worker's `provisioned` flip, played by the
@@ -652,10 +655,11 @@ in parallel)**
 
 **Stage 4 — finish (production order: dst first, then src)**
 15. `syncup-side` DNdst S2 (REVdst++): side_conf only (still slot 1),
-    **no `migr_dst_conf`** → clone flushed and removed, agent-side
-    `nvme disconnect` from src, the metadata wrapper removed and its slot
-    freed, primary linear back onto the plain side device, ns stays
-    `optimized`. Assert `migr_dst_info` no longer OK
+    **no `migr_dst_conf`** → in this order: the primary linear is reloaded
+    back onto the plain side device **first** (IR4: nothing may still map the
+    clone), then the clone is removed (`dmsetup remove`), then the agent-side
+    `nvme disconnect` from src, then the metadata wrapper is removed and its
+    slot freed; the ns stays `optimized`. Assert `migr_dst_info` no longer OK
     (missing/empty) and per-CN infos OK. The request still carries
     `--provisioned=true`: dropping it here would read as "retire this side's
     exports", not as "finish the migration" (§9).
@@ -797,8 +801,13 @@ by `sp_level no_migration`.
      restart — the cheapest proof that `zeroed_bits` survived in the on-disk
      volume table.
    - `bm_info` re-fetch still `[0]` — chunk files survived.
-5. **Idempotency (mutation-free re-apply)**: re-send the *same-revision*
-   `syncup-dn` and `syncup-side` to both DNs; assert code 0. Then assert the
+5. **Idempotency (mutation-free re-apply)**: re-send the `syncup-dn` and
+   `syncup-side` requests to both DNs unchanged, at `REV<dn>`; assert code 0.
+   For `syncup-side` that is an *equal-revision* re-apply; for `syncup-dn` it
+   is a *higher-revision* one — the per-DN counter (§9) is two past the
+   revision the setup's `syncup-dn` stored, the two-phase side setup having
+   bumped it twice — which also advances the stored DN revision to `REV<dn>`,
+   and step 6's `REV1-1` probe is stale only against that. Then assert the
    post-restart log (`agent.log`, which covers reconcile + these re-applies)
    contains **no mutating operations**: the `mutations()` helper lists
    `dmsetup create|reload|remove|suspend|resume|message`,
@@ -915,8 +924,9 @@ JSON logs on either VM.
 ## 19. Out of scope (v1)
 
 Negative/error-path testing (bad configs, unknown objects, `code 2` paths)
-beyond the case D stale probe; CN-role integration (`dnv-agent cn` is
-unimplemented); fault injection (dm-flakey/dm-delay, target crashes mid
+beyond the case D stale probe; CN-role integration (`dnv-agent cn` has its
+own plan and suite, `cnagent_integtest.md` / `integtest/cnagent_test.sh`);
+fault injection (dm-flakey/dm-delay, target crashes mid
 hydration); performance/soak; TLS/auth (none exists in the agent);
 `SP_LEVEL` values other than `READWRITE`/`NO_MIGRATION` (still true — and
 since [D11] the levels between them have no DN-side behavior at all, so there
@@ -1041,7 +1051,10 @@ another document or the harness cites can shift.
   hostnqn per hostid, so leaving the node-wide `/etc/nvme/hostid` implicit made
   the second identity's connect fail `EINVAL`.
 - No other change was needed here: the four remaining findings of this run
-  (`dnagent.md` IR1-IR5) were agent defects that this suite detected exactly as
-  designed — the stage-3 target assertion caught the connect flag and the sysfs
-  gap, the case-B teardown residue check caught the dm-clone ordering leak, and
-  the case-D `mutations` assertion caught the namespace-identity rewrite.
+  (`dnagent.md` IR1, IR3, IR4 and IR5 — its IR2, the agent's own explicit
+  `--hostid`, is the agent-side half of the hostid finding IR-T1 fixed above,
+  which is why `dnagent.md` counts five agent defects) were agent defects that
+  this suite detected exactly as designed — the stage-3 target assertion
+  caught the connect flag and the sysfs gap, the case-B teardown residue check
+  caught the dm-clone ordering leak, and the case-D `mutations` assertion
+  caught the namespace-identity rewrite.

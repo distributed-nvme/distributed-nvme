@@ -11,8 +11,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The [D13] on-disk format, exercised against the fakeNode segment store.
-// Every rule of the plan's §5.4 gets a test here.
+// The [D13] on-disk format, exercised against the fakeNode segment store —
+// dnagent.md §6 test 13.
 
 const (
 	metaDisk       = "/dev/meta-disk"
@@ -43,7 +43,7 @@ func formatted(t *testing.T) (*DiskMeta, *fakeNode) {
 }
 
 // reopen builds a second DiskMeta over the same fake disk — the "agent
-// restarted, --local-store is gone, the disk is authoritative" case ([P4]).
+// restarted, --local-store is gone, the disk is authoritative" case ([D13]).
 func reopen(node *fakeNode) *DiskMeta {
 	meta := NewDiskMeta(node.osClient(), metaDisk)
 	meta.SetDiskSize(metaDiskSize)
@@ -338,8 +338,8 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 			t.Fatalf("AllocSide: %v", err)
 		}
 	}
-	// Re-format: cleanup zeroes only the header block (§7.4), so both slots
-	// survive with their old uuid and their high seqs.
+	// Re-format: cleanup zeroes only the header block (dnagent_integtest.md
+	// §16), so both slots survive with their old uuid and their high seqs.
 	node.corruptBlock(metaDisk, common.DnHeaderOffset,
 		make([]byte, common.DnHeaderSize))
 
@@ -625,7 +625,7 @@ func TestDiskMetaExhaustion(t *testing.T) {
 	}
 }
 
-// [P6]: the chosen slot's first 8 KiB is zeroed *before* the record is
+// DN13: the chosen slot's first 8 KiB is zeroed *before* the record is
 // persisted, so a crash can never leave a stale dm-clone superblock behind a
 // live record.
 func TestDiskMetaCloneMetaZeroedBeforeRecord(t *testing.T) {
@@ -930,7 +930,7 @@ func TestDiskMetaNextZeroBatchSteps(t *testing.T) {
 	}
 
 	// A hole left behind by a failed batch is picked up again from
-	// first-unset, not from a count-derived offset (ruling R4.7).
+	// first-unset, not from a count-derived offset (DN9).
 	if err := meta.FreeSide(ctx, testSp, testSide); err != nil {
 		t.Fatalf("FreeSide: %v", err)
 	}
@@ -988,8 +988,9 @@ func TestDiskMetaRecordSnapshots(t *testing.T) {
 	_ = snapshot
 }
 
-// The envelope is exactly what §5.2 of the plan specifies — a decoder written
-// against the document must be able to read it.
+// The envelope: the magics, the version, the seq and the format_uuid that
+// architecture.md §3.1 names, at the byte offsets diskmeta.go's "Envelope
+// layout" block fixes (dnagent.md §6 test 13).
 func TestDiskMetaEnvelopeLayout(t *testing.T) {
 	_, node := formatted(t)
 	ctx := context.Background()

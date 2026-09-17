@@ -455,9 +455,8 @@ func agentpathBucketSum(bucket []uint32) uint32 {
 // consumed by the STM that follows the call, and total_ext_cnt rounds DOWN
 // to whole extents of the cluster's extent_size.
 //
-// The size-below-one-extent row also pins house rule 8 for this path: the
-// refusal happens inside the STM, so it must leave no DnConf and no minted
-// id behind.
+// The size-below-one-extent row also pins EU4 for this path: the refusal
+// happens inside the STM, so it must leave no DnConf and no minted id behind.
 func TestAgentPathCreateDiskNodeConsumesAgentSize(t *testing.T) {
 	extSize := uint64(common.DefaultDnExtSize)
 	tests := []struct {
@@ -1091,7 +1090,8 @@ func TestAgentPathHangingAgentAbortsWithinBudget(t *testing.T) {
 	if elapsed > budget+5*time.Second {
 		t.Errorf("returned after %v, past the %v budget", elapsed, budget)
 	}
-	// House rule 8: a probe that never answered leaves no node registered.
+	// AG1's pre-STM placement: a probe that never answered leaves no node
+	// registered — the handler returns before the STM that writes one.
 	if agentpathGet(
 		t, cli, model.DnConfKey(cid, fake.addrPort), &pb.DnConf{}) {
 		t.Errorf("dn_conf was written although the size probe timed out")
@@ -1111,7 +1111,7 @@ func TestAgentPathHangingAgentAbortsWithinBudget(t *testing.T) {
 // creating handlers: the subject is the between-the-phases call and the code
 // it maps to, and a hand-written phase-1 read set is the smallest state that
 // reaches it. Each also asserts the deciding STM never ran — the record is
-// still there and SpRev never bumped (house rule 8).
+// still there and SpRev never bumped (AG1's placement).
 func TestAgentPathForceFalseRefusesUnreachableAgent(t *testing.T) {
 	const spRev = uint64(5)
 

@@ -4,11 +4,13 @@
 # One server, a real single-node etcd, THREE real dnv-gateway instances and the
 # fake dn/cn agents of dnv-worker.md §14.9, driven from this machine over ssh
 # by integtest/gatewayctl (the gRPC driver) with etcd ground truth read back
-# through integtest/workerctl (read-only, plus the two §2.4 worker flips).
+# through integtest/workerctl (read-only, plus the four §2.4 worker-role
+# writes: the flips set-created/set-provisioned and the drains drain-sp/
+# drain-clone).
 #
 #   bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
 #
-# Cases (§10.13-§10.15), in order, each against a WIPED store: smoke, parallel,
+# Cases (§10.11-§10.15), in order, each against a WIPED store: smoke, parallel,
 # contention, faults, restart. Cleanup runs unconditionally at the start and,
 # on success only, at the end: a failing run leaves etcd's data, every log and
 # every behavior file in place and dumps the §10.17 diagnostics.
@@ -56,16 +58,20 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement, not a tuning knob (§10.4).
-# ONE transaction in dnv is above etcd's default cap of 128 and bounded by a
-# constant: the sp drain's D2 batch, 486 COMPARES at the maximum shape
-# (dnv-worker.md §11.6), which is what the number is sized by. Step 17's
-# `wctl drain-sp` commits batches of that family but nowhere near its ceiling
-# (sp0 has four groups, not twenty), and step 13's `wctl drain-clone` commits
-# clone-drain batches, bounded at MaxDelBmPerTxn + 4 = 68 ops and here only
-# three deletes, which fit etcd's default and are not what this flag exists
-# for (CLD11). The suite is shell and cannot import the constant, so the
-# literal is repeated here; it must track common/constants.go.
-ETCD_MAX_TXN_OPS=512
+# The value is NOT typed here: read_constants() fills it at preflight from
+# `workerctl constants`, which prints the Go constants as JSON, so this suite
+# launches etcd with whatever common/constants.go now says.
+#
+# What sizes that requirement is the sp drain's D2 batch — the one transaction
+# in dnv above etcd's default cap of 128 whose size a constant bounds
+# (dnv-worker.md §11.6); its compare count and the factors that multiply into
+# it are asserted from the named constants in gateway/txnbudget_test.go, not
+# restated here. This suite's own drains stay far under that ceiling: its
+# `wctl drain-sp` is asserted to take 2 + SP_SLICE_CNT steps, which is one D2
+# batch per slice and therefore a whole slice's groups inside a single batch,
+# and its `wctl drain-clone` removes three chunk keys where CLD11 allows
+# MaxDelBmPerTxn and fits etcd's default anyway.
+ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-gateway-integtest
 
@@ -849,6 +855,29 @@ fetch_etcd() {
 	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
 }
 
+# read_constants is how this shell reads a Go value instead of copying it. It
+# runs workerctl LOCALLY, on the binary preflight_driver has just built:
+# `constants` opens no etcd client and reads no key, so it wants no server, no
+# etcd and no --cluster. A workerctl too old to carry it exits 2 on `unknown
+# subcommand`, which is one thing the die below reports; the other is the
+# driver itself, since the binary it runs is cross-built GOOS=linux
+# GOARCH=amd64 like everything else preflight_driver builds and will not exec
+# on a driver that is not a linux/amd64 host.
+read_constants() {
+	local json
+	json=$("$WORKERCTL_BIN" constants) ||
+		die "\`workerctl constants\` failed: this suite reads" \
+			"common.EtcdMaxTxnOps from it and must not guess it"
+	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
+	case "$ETCD_MAX_TXN_OPS" in
+	'' | *[!0-9]*)
+		die "workerctl constants: EtcdMaxTxnOps is" \
+			"'$ETCD_MAX_TXN_OPS' in $json"
+		;;
+	esac
+	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+}
+
 preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
@@ -867,6 +896,7 @@ preflight_driver() {
 			go build -o "$BIN_DIR/$drv" "./integtest/$drv" >&2) ||
 			die "building $drv failed"
 	done
+	read_constants
 	log "preflight (driver) ok"
 }
 
@@ -1508,7 +1538,8 @@ EOF
 		"$addr dn_capacity free after re-enabling"
 	assert_eq "$(key_count dn_capacity)" "4" "dn_capacity keys after re-enabling"
 	assert_eq "$(dn_rev_of "$addr")" "1" "$addr dn_rev after the whole flip"
-	# The CN mirror, once, on the node no cntlr will land on later.
+	# The CN mirror, once, on cn2 — reverted in full below, so which node
+	# carries it constrains nothing later (stage 10 derives the cntlr-free CN).
 	addr=$(cn_addr 2)
 	out=$(gw set-cn-disabled --addr "$addr" --rev 1 --disabled)
 	assert_field "$out" '.cn_id' "3" "set-cn-disabled reply cn_id"
@@ -2487,9 +2518,9 @@ EOF
 	sliceId=$(sp_first_slice sp0)
 	out=$(gw delete-sp --sp sp0 --rev "$SP_REV")
 	assert_field "$out" '.sp_id' "$spId" "delete-sp reply sp_id"
-	# sp_incremental_deleting.md §3: delete-sp LATCHES and returns. The SP is
-	# still there, flagged, with every key it implies intact — that inventory
-	# shrinking is what an operator watches as progress.
+	# §5.4 (SPD4): delete-sp LATCHES and returns. The SP is still there,
+	# flagged, with every key it implies intact — that inventory shrinking
+	# is what an operator watches as progress.
 	refresh_rev sp0
 	latchRev=$SP_REV
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.deleting')" "true" \
@@ -3100,7 +3131,7 @@ case_parallel() {
 		"delete-sp wave: OK jobs (codes $(parallel_race_codes "$out"))"
 	assert_eq "$(jq_of "$out" '[.[] | .reply.sp_id | tonumber] | sort | @json')" \
 		"$sp_ids" "delete-sp wave: the sp_id set matches step 3's"
-	# Every job LATCHED its SP (§3); the teardown is the sp coordinator's, and
+	# Every job LATCHED its SP (§5.4); the teardown is the sp coordinator's, and
 	# this suite runs none, so the worker-role stand-in finishes each one. The
 	# ten drains are sequential on purpose: what the wave was racing is the
 	# gateway's ten concurrent latches, and the drains would only add a race
@@ -3836,8 +3867,9 @@ faults_validation_battery() {
 		--slots 0,0,1
 	gwx INVALID_ARGUMENT set-cntlid-slots --sp sp0 --rev "$SP_REV" --slots 8
 
-	# GW10 pagination: count is clamped at MaxListCnt (1024) and a page token
-	# that is not base64 is malformed input, not an empty page.
+	# GW10 pagination: a count above MaxListCnt (1024) is REFUSED, never
+	# silently capped, and a page token that is not base64 is malformed
+	# input, not an empty page.
 	gwx INVALID_ARGUMENT list-clusters --count 2000
 	gwx INVALID_ARGUMENT list-clusters --page-token '!!'
 
@@ -3849,7 +3881,7 @@ faults_validation_battery() {
 		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" \
 		--feature-junk
 
-	# The other half of the clamp: 0 is proto3's "unset" and selects
+	# The other half of the bound: 0 is proto3's "unset" and selects
 	# DefaultListCnt (64), so it is ACCEPTED. With itgw the only cluster of
 	# this case the page cannot be full, which is why the token comes back
 	# empty (§5.7: a non-full page ends the listing).
@@ -4197,12 +4229,12 @@ case_faults() {
 		gwx FAILED_PRECONDITION switch-spare --sp sp0 --rev "$SP_REV" \
 		--grp "$dataGrp" --spare "$spare" --target "$dataLeg"
 
-	# The twelfth guard of §10.14 step 3 — an SP-level mutator refused because
-	# the SP is `deleting` — has no probe HERE on purpose, but not for the old
-	# reason: since 2026-09-15 `delete-sp` sets the flag (§5.4), and step 17 of
-	# case S drives the gate for real. It cannot be driven here, because this
-	# stage's sp0 must stay live for the rest of the battery and the latch is
-	# one-way.
+	# The thirteenth guard of §10.14 step 3 — an SP-level mutator refused
+	# because the SP is `deleting` — has no probe HERE on purpose, but not for
+	# the old reason: since 2026-09-15 `delete-sp` sets the flag (§5.4), and
+	# step 17 of case S drives the gate for real. It cannot be driven here,
+	# because this stage's sp0 must stay live for the rest of the battery and
+	# the latch is one-way.
 
 	after=$(faults_sp_snapshot sp0)
 	assert_eq "$after" "$before" "step 3: sp0's content must not change"

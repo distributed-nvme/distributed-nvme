@@ -464,8 +464,9 @@ func cmdPing(g *globals, args []string) {
 // ---------------------------------------------------------------------------
 
 // cmdPut writes one CdcEntry at model.CdcEntryKey (§9.6) — what the gateway
-// does at CreateSubsystem / UpdateSubsystemHosts and the worker at
-// CreateCntlr / ReplaceCntlr (§1), reduced to the one key dnv-cdc reads.
+// does at CreateSubsystem / UpdateSubsystemHosts / CreateCntlr / DeleteCntlr /
+// UpdateCntlrEnabled and the worker at ReplaceCntlr (§1), reduced to the one
+// key dnv-cdc reads.
 //
 // It is ONE plain Put, not a read-modify-write: the stored value is the whole
 // message, and the rewrites of §9.12 steps 4-5 and §9.13 step 4 ("ssE now

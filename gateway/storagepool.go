@@ -478,10 +478,10 @@ func (s *Server) CreateStoragePool(
 					metaBlocks, dataBlocks, err := model.GroupBlocks(
 						plan.ExtCnt, extentSize, bdev)
 					if err != nil {
-						// §8.4's "init_ext_cnt × extent_size exceeds what one
-						// slice's data groups may hold": the requested group
-						// is too small to carry its own §3.6 metadata, or the
-						// product overflows.
+						// §8.4's INVALID_ARGUMENT for the geometry: the
+						// requested group is too small to carry its own §3.6
+						// metadata, or init_ext_cnt × extent_size overflows
+						// uint64.
 						return errInvalid("%v", err)
 					}
 					grp := &pb.Group{
@@ -607,12 +607,13 @@ func (s *Server) CreateStoragePool(
 // cascades: by that precondition a deletable SP has no children a user owns, so
 // the "other resources" the drain removes are only the SP's own bookkeeping.
 //
-// Why a latch and not the one-shot teardown it replaces (§0 #1): that
-// transaction was unbounded in the DN dimension — already about 532 writes at
-// the 16-slice maximum shape, over common.EtcdMaxTxnOps, with no tripwire — and
-// GrowSlice makes a slice's group count unbounded, so no single transaction can
-// ever be proven legal. The worker's drain (model/drain.go) takes it apart in
-// steps whose size is a constant.
+// Why a latch and not the one-shot teardown it replaces (§8.4's "Why not one
+// transaction", dnv-worker.md §11.6): that transaction was unbounded in the DN
+// dimension — already about 532 writes at the 16-slice maximum shape, over
+// common.EtcdMaxTxnOps, with no tripwire — and GrowSlice makes a slice's group
+// count unbounded, so no single transaction can ever be proven legal. The
+// worker's drain (model/drain.go) takes it apart in steps whose size is a
+// constant (SPD10/SPD11), and SPD14 is the tripwire pair that keeps it so.
 //
 // SPD4 — the emptiness check and the latch share this STM with the reads, so
 // they are atomic, and once latched resolveSp's existing rejectDeleting gate

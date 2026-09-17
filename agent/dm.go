@@ -271,7 +271,7 @@ const sysfsBlockDir = "/sys/class/block"
 //
 // dev's kernel name is resolved with `lsblk --nodeps --noheadings --output
 // KNAME` first: the agent's --disk is documented as a /dev/disk/by-uuid
-// symlink, whose basename is not a sysfs node (ruling R4.10).
+// symlink, whose basename is not a sysfs node (DN5).
 //
 // ok is false when the attribute does not exist — that is NOT a verdict (an
 // older kernel simply may not publish it); only a present 0 is.

@@ -33,7 +33,11 @@ message DmCloneConf {
 message DmPoolConf {
     uint64 data_block_size = 1;
     // Thin pool low water mark.
-    // 0 means using DefaultPoolLowWatermarkPct
+    // 0 means "unset" and is resolved once, on the
+    // create request (architecture.md §7): to the
+    // cluster's stored value for a storage pool,
+    // else to DefaultPoolLowWatermarkPct. A 0 read
+    // back out of etcd is refused as an invalid conf.
     // 1 - 100 means percentage
     // >100 means won't grow a slice automatically.
     uint32 low_water_mark_pct = 2;
@@ -82,11 +86,13 @@ message EventThreshold {
     // How many seconds to wait before allocating a
     // new cntlr and delete the old one.
     uint32 cntlr_unhealthy = 2;
-    // How long time to wait before allocating a
-    // new side when the side is unhealthy.
+    // How long the SIDE must have been unhealthy
+    // before its leg is repaired; the leg only has
+    // to be unhealthy, for any duration
+    // (dnv-worker.md AR8 case 2).
     uint32 side_unhealthy = 3;
-    // How long time to wait before allocating a
-    // new side when the leg is unhealthy.
+    // How long the LEG must have been unhealthy
+    // before it is repaired (AR8 case 1).
     uint32 leg_unhealthy = 4;
 }
 
@@ -441,8 +447,8 @@ message Clone {
     bool auto_resume = 10;
     reserved 11;
     reserved "bm_cnt";  // was: uint32 bm_cnt (deleted 2026-09-16,
-                        // minor_updates_08 U2). Reserving the NUMBER is what
-                        // keeps a future varint field from decoding an old
+                        // architecture.md Appendix C). Reserving the NUMBER is
+                        // what keeps a future varint field from decoding an old
                         // record's counter as itself; the name goes with it.
     // The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
     // DeleteClone sets it and returns, and the sp coordinator drains the

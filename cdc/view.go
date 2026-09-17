@@ -15,12 +15,15 @@ import (
 // decides which hosts a change is worth an AEN to.
 //
 // One mutex serializes every read and every mutation of served state, which is
-// the §4 rule that "every mutation of served state happens on one goroutine"
-// expressed the way Go expresses it: the watcher mutates, the connections
-// read, and neither ever observes a half-applied change. Delivery is
-// deliberately NOT done under the lock — impact returns the list of
-// connections to poke and the caller writes to their sockets afterwards, so a
-// host that has stopped reading can never stall the watcher.
+// the §4 serialization invariant — no served state is ever mutated
+// concurrently — expressed the way Go expresses it: the watcher goroutine
+// mutates the entries and runs the impact pass, the connection goroutines
+// attach and detach their host state under the same lock, and no reader ever
+// observes a half-applied change. Delivery is deliberately NOT done under the
+// lock — impact returns the list of connections to poke, deliver only sets
+// each connection's pending bit and wakes its AEN goroutine, and that
+// goroutine does the socket write, so a host that has stopped reading can
+// never stall the watcher.
 
 // ---------------------------------------------------------------------------
 // Entries (DS1)

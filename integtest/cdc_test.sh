@@ -56,6 +56,10 @@ BIN_DIR="$REPO_ROOT/integtest/bin"
 CACHE_DIR="$BIN_DIR/cache"
 CDC_BIN="$REPO_ROOT/bin/dnv-cdc"
 CDCCTL_BIN="$BIN_DIR/cdcctl"
+# workerctl is the worker suite's etcd driver and is never shipped anywhere by
+# THIS suite. It is built here for one subcommand, `constants`, which prints
+# the common package's constants as JSON on the driver (see read_constants).
+WORKERCTL_BIN="$BIN_DIR/workerctl"
 
 # The pinned etcd release, shared with the worker suite: same version, same
 # digest, same integtest/bin/cache. A tarball already verified there is never
@@ -66,14 +70,19 @@ ETCD_URL="https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/$ETCD_
 ETCD_SHA256=ffe840ff9295808e88cce2794a18a5ac87f12a5203c8314d0bf6aa119b41bac5
 ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # common.EtcdMaxTxnOps — a DEPLOYMENT requirement of every etcd serving dnv,
-# not a knob of this suite. ONE transaction in dnv is above etcd's default cap
-# of 128 and bounded by a constant: the sp drain's D2 batch, 486 COMPARES at
-# the maximum shape (dnv-worker.md §11.6), which is what the number is sized
-# by. The cdc suite drains no storage pools, so the flag changes nothing it
-# observes; it is passed anyway so that every dnv etcd launch in the tree is
-# the same launch. The suite is shell and cannot import the constant, so the
-# literal is repeated here; it must track common/constants.go.
-ETCD_MAX_TXN_OPS=512
+# not a knob of this suite. The value is NOT typed here: read_constants() fills
+# it at preflight from `workerctl constants`, which prints the Go constants as
+# JSON.
+#
+# What sizes that requirement is the sp drain's D2 batch — the one transaction
+# in dnv above etcd's default cap of 128 whose size a constant bounds
+# (dnv-worker.md §11.6); its compare count is asserted from the named constants
+# in gateway/txnbudget_test.go, not restated here. The cdc suite drains no
+# storage pools, so the flag changes nothing it observes; it is passed anyway
+# so that every etcd this tree starts — these three suites and the Go test
+# launchers in etcdutil, model, worker and gateway — gets the flag from the
+# same constant.
+ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-cdc-integtest
 
@@ -1113,6 +1122,8 @@ write_host_helper() { # <path>
 #
 #   wipe <cdc-ip>          disconnect every dnv-it subsystem and every
 #                          discovery controller pointing at the cdc fleet
+#   wipe_data              disconnect every dnv-it subsystem only, leaving
+#                          the discovery controllers to stafd
 #   mask / unmask          neutralise the kernel's own nvmf autoconnect
 #   stas_start <ip> <work> <p0> <p1> <p2> <p3>
 #   stas_stop <work>
@@ -1311,8 +1322,9 @@ stas_start)
 	;;
 stas_stop) stas_stop "${2-}" ;;
 *)
-	echo "usage: cdc_host.sh wipe <ip> | mask | unmask | uev_start <work> |" \
-		"uev_stop | stas_start <ip> <work> <p…> | stas_stop <work>" >&2
+	echo "usage: cdc_host.sh wipe <ip> | wipe_data | mask | unmask |" \
+		"uev_start <work> | uev_stop | stas_start <ip> <work> <p…> |" \
+		"stas_stop <work>" >&2
 	exit 2
 	;;
 esac
@@ -1519,6 +1531,30 @@ fetch_etcd() {
 	[ -x "$CACHE_DIR/$ETCD_DIST/etcdctl" ] || die "no etcdctl after extraction"
 }
 
+# read_constants is how this shell reads a Go value instead of copying it. It
+# runs workerctl LOCALLY, on the binary preflight_driver has just built:
+# `constants` opens no etcd client and reads no key, so it wants no server, no
+# etcd and no --cluster, and nothing of workerctl but this one subcommand is
+# used by the cdc suite. A workerctl too old to carry it exits 2 on `unknown
+# subcommand`, which is one thing the die below reports; the other is the
+# driver itself, since the binary it runs is cross-built GOOS=linux
+# GOARCH=amd64 (see preflight_driver) and will not exec on a driver that is not
+# a linux/amd64 host.
+read_constants() {
+	local json
+	json=$("$WORKERCTL_BIN" constants) ||
+		die "\`workerctl constants\` failed: this suite reads" \
+			"common.EtcdMaxTxnOps from it and must not guess it"
+	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
+	case "$ETCD_MAX_TXN_OPS" in
+	'' | *[!0-9]*)
+		die "workerctl constants: EtcdMaxTxnOps is" \
+			"'$ETCD_MAX_TXN_OPS' in $json"
+		;;
+	esac
+	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+}
+
 preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
@@ -1530,10 +1566,18 @@ preflight_driver() {
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build >&2) ||
 		die "make build failed"
 	[ -x "$CDC_BIN" ] || die "missing: $CDC_BIN after make build"
-	log "  building integtest/bin/cdcctl"
+	log "  building integtest/bin/{cdcctl,workerctl}"
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -o "$CDCCTL_BIN" ./integtest/cdcctl >&2) ||
 		die "building cdcctl failed"
+	# workerctl is built for `constants` alone and is NOT shipped by this
+	# suite. It is built with the same CGO/GOOS/GOARCH as everything else so
+	# that the binary left in the shared integtest/bin is the one the worker
+	# and gateway suites would have put there and do ship.
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -o "$WORKERCTL_BIN" ./integtest/workerctl >&2) ||
+		die "building workerctl failed"
+	read_constants
 	log "preflight (driver) ok"
 }
 
@@ -2208,8 +2252,8 @@ case_ha() {
 		wait_until "$WAIT_SHORT" "$dir to exit" cdc_gone "$dir"
 	done
 	# The data connections are to s2's nvmet, not to the cdc fleet, so they
-	# must be untouched by the fleet dying (DS11: nothing about a discovery
-	# outage disturbs an established I/O path).
+	# must be untouched by the fleet dying (§9.14 step 4: data connections
+	# are undisturbed throughout the full-fleet restart).
 	assert_dev h1 "h1 kept its data connections across the fleet outage" ssa ssb
 	assert_dev h2 "h2 kept its data connections across the fleet outage" ssa ssc
 	for i in 0 1 2 3; do start_cdc "$i"; done

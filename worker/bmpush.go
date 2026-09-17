@@ -78,7 +78,7 @@ type bmPlan struct {
 }
 
 // bmMemoKey is the BM5 memo's key: one chunk of one clone / migration, at the
-// (src_slice_idx, bm_idx) pair that addresses it (U7).
+// (src_slice_idx, bm_idx) pair that addresses it (BM1).
 type bmMemoKey struct {
 	resId    uint64
 	sliceIdx uint32
@@ -206,11 +206,13 @@ func newBmPusher(p bmPusherParams) *bmPusher {
 // etcd mod_revision has advanced since — AppendCloneBitmap may grow a chunk
 // that keeps its pair (BM5).
 //
-// architecture.md [D8] describes the same memo by the byte length last
-// pushed; dnv-worker.md BM5 is the normative rule for this implementation and
-// uses the mod_revision, which needs no chunk value to decide.
+// architecture.md [D8] keeps that memo per (clone_id, src_slice_idx, bm_idx)
+// and is clone-only; dnv-worker.md BM5 generalizes the key to (res_id,
+// src_slice_idx, bm_idx) so one implementation serves migrations too, and BM5
+// is the normative rule here. Either way the mod_revision needs no chunk value
+// to decide.
 //
-// The result is ascending (src_slice_idx, bm_idx) lexicographic (BM3, U7):
+// The result is ascending (src_slice_idx, bm_idx) lexicographic (BM3):
 // load-bearing for a migration, whose chunks concatenate, and deterministic
 // only for a clone, whose chunks are self-positioned.
 func (p *bmPusher) missing(
@@ -458,7 +460,7 @@ func (p *bmPusher) connect() (*grpc.ClientConn, error) {
 }
 
 // attrs are the §12 "bitmap pushed" attributes of one chunk: kind, the
-// object's ids, the resource id and the chunk's address (U7). src_slice_idx
+// object's ids, the resource id and the chunk's address (BM1). src_slice_idx
 // is the clone chunk's source slice and always 0 for kind=migr.
 func (p *bmPusher) attrs(resId uint64, sliceIdx uint32, bmIdx uint32) []any {
 	attrs := make([]any, 0, len(p.ids)+5)

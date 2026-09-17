@@ -15,8 +15,8 @@ import (
 // helper, so a test that called drainStep directly would keep passing if the
 // pass stopped routing to it.
 
-// latch is what DeleteStoragePool's STM leaves behind (§3): the flag set and
-// nothing else. Everything below starts from it.
+// latch is what DeleteStoragePool's STM leaves behind (SPD4): the deleting
+// flag set and no other conf change. Everything below starts from it.
 func (h *reactHarness) latch() {
 	h.t.Helper()
 	h.state.Conf.Deleting = true
@@ -119,10 +119,11 @@ func TestDrainRunsAtEverySpLevel(t *testing.T) {
 	}
 }
 
-// TestDrainFailedStepIsLogged is §0 #9 and §7: a failed step commits nothing,
-// logs `sp drain failed` with the phase and the cause, and is simply retried on
-// the next tick. There is no terminal-failure state and no error field — a
-// delete that gave up would just strand garbage.
+// TestDrainFailedStepIsLogged is SPD6 and its §12 record: a failed step commits
+// nothing, logs `sp drain failed` with the phase and the cause, and is simply
+// retried on the next tick. There is no terminal-failure state and no status
+// field on the SpConf (SPD6) — a delete that gave up would just strand
+// garbage. The RECORD does carry `error`, asserted below.
 //
 // The `reason` attribute is asserted separately from `error`, because an
 // SPD2 refusal is a model.ErrPrecondition whose Reason is the whole diagnosis
@@ -186,7 +187,7 @@ func TestDrainStepRecordsProgress(t *testing.T) {
 	}
 }
 
-// TestDrainArmsItsOwnTick is §0 #8's mechanism: a committed step that moved the
+// TestDrainArmsItsOwnTick is SPD6's self-tick: a committed step that moved the
 // SP schedules the next pass AT ONCE, instead of waiting for the
 // cntlr_interval ticker.
 //
@@ -290,7 +291,7 @@ func TestDrainStepArmsOnlyOnProgress(t *testing.T) {
 	}
 }
 
-// TestDrainSelfTickIsWired is §0 #8's other half: run() must actually TURN an
+// TestDrainSelfTickIsWired is SPD6's other half: run() must actually TURN an
 // armed token into a pass, and startSpWorker must give the coordinator a
 // channel to arm in the first place.
 //

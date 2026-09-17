@@ -18,9 +18,9 @@ RPCs, and the agent services); `doc/grpc.md`; `doc/log.md`.
 Conventions: `{p}` is the etcd key prefix (`"dnv "`). Ids in keys are `%016x`
 (`common.IdKeyFmt`). MUST/SHOULD/MAY are RFC 2119. Rule ids are append-only
 once cited from code: `GW` (serving + handler pattern, §3–§4), `AG` (agent
-calls, §6), `CM` (cmd, §7), `LG` (log records, §8), `IT` (integration test,
-§10). "cid" abbreviates `cluster_id`; "token" always means the request-side
-`DnRev`/`CnRev`/`SpRev` optimistic-concurrency value (§5.5).
+calls, §6), `CM` (cmd, §7) and `LG` (log records, §8). §10's integration test
+plan defines no rule ids of its own. "cid" abbreviates `cluster_id`; "token" always means the request-side
+`DnRev`/`CnRev`/`SpRev` optimistic-concurrency value (`architecture.md` §5.5).
 
 Terminology:
 
@@ -31,7 +31,7 @@ Terminology:
 | token check | asserting `stored.revision == request token revision`, when the request carries the token message at all (GW6) |
 | deciding STM | the STM that commits a mutation; for two-phase RPCs (AG4) it is the second one |
 | candidate unit | one "scan outside + STM commit" round of an allocating RPC (GW9) |
-| plays the worker | the integration suite writing a worker-owned flip (`created`/`provisioned`) through `workerctl` so a gateway precondition can be exercised without running dnv-worker |
+| plays the worker | the integration suite writing a worker-owned flip (`created`/`provisioned`) or running a worker-owned drain (sp, clone) through `workerctl`, so a gateway precondition can be exercised — or a latch finished — without running dnv-worker (§2.4) |
 
 ---
 
@@ -50,8 +50,9 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
 3. **Statelessness**: dnv-gateway is stateless and active-active. There is no
    leader election, no registration key, no shard split and no instance-count
    limit. Any instance serves any request; multi-instance correctness rests
-   entirely on `etcdutil.RunSTM` serializable-snapshot isolation plus the §5.5
-   rev tokens. A gateway writes nothing to etcd that describes itself.
+   entirely on `etcdutil.RunSTM` serializable-snapshot isolation plus the
+   `architecture.md` §5.5 rev tokens. A gateway writes nothing to etcd that
+   describes itself.
 4. **Code placement**: new STM bodies live in `gateway/` per-resource files
    (layout.md's recommended split). `model` changes are limited to the exports
    and amendments of §2.2; the three mutations `model` already exports
@@ -107,14 +108,16 @@ Decisions fixed before writing this spec; the body cites them as "§0 #n".
     3 cn. `integtest/gatewayctl` is a pure gRPC driver (dnagentctl style) plus
     a barrier-based `race` subcommand; etcd ground truth is verified with the
     existing `workerctl` read-only subcommands. No dnv-worker runs; the suite
-    plays the worker with two new `workerctl` flip subcommands (§2.2, §10.9).
+    plays the worker with the `workerctl` worker-role subcommands of §2.4 —
+    the `set-created`/`set-provisioned` flips and the `drain-sp`/`drain-clone`
+    stand-ins (§10.9).
 13. **Cases and coverage**: five cases S/A/B/C/D; all 59 RPCs appear in at
     least one case; §10.18 is the coverage matrix. The suite asserts
     correctness only — never latency or throughput.
 14. **Unit tests**: the repo's real-etcd `TestMain` fixture pattern
     (`ETCD_BIN` env, else PATH, else skip — deliberately duplicated per
     package, model MD9 / etcdutil EU7), plus `bufconn` for gRPC-level tests.
-15. **Pagination** (§5.7) is implemented in `gateway/` — no model helper
+15. **Pagination** (`architecture.md` §5.7) is implemented in `gateway/` — no model helper
     exists or is added beyond the three `*ConfPrefix` key builders of §2.2.
 16. **Clone budget**: the per-CN clone budget stays untracked
     (architecture.md §8.9 "a future gateway MAY track the budget in etcd" —
@@ -184,6 +187,7 @@ MUST keep the package boundaries and the dependency rule):
 ```
 gateway/
   server.go           Server type, Run(), grpc.Server bootstrap + interceptors (§3)
+  traceid.go          the §0 #6 trace-id mint: ensureTraceId* interceptors chained ahead of the grpc.md §4 pair (§3)
   common.go           resolution, token check, error mapping helpers (§4)
   cluster.go          §8.1 handlers
   disknode.go         §8.2 handlers
@@ -200,14 +204,15 @@ gateway/
   alloc.go            the §6.5 per-operation candidate compositions
   validate.go         the §7 request validation
 cmd/dnv-gateway/main.go
-integtest/gatewayctl/main.go     (§10.8)
+integtest/gatewayctl/            (§10.8: main.go + cmd_node.go, cmd_sp.go, cmd_vol.go, cmd_copy.go)
 integtest/gateway_test.sh        (§10)
 ```
 
 Dependency rule (layout.md, normative): `gateway` imports only `common`,
 `pb`, `etcdutil`, `model` plus the grpc runtime — it is a gRPC server *and*
-client (it dials agents). `cmd/dnv-gateway` imports `gateway` + `common`;
-cobra/viper live in `cmd/` only. `make build` picks the new binary up from
+client (it dials agents). `cmd/dnv-gateway` imports `gateway`, `common` and
+`etcdutil` (it builds the client GW2 takes — CM3); cobra/viper live in
+`cmd/` and `ctl/`, never in `gateway/`. `make build` picks the new binary up from
 `cmd/dnv-gateway/main.go` with no Makefile edit.
 
 Out of scope for v1: dnvctl, TLS/auth (the whole of dnv is plaintext gRPC),
@@ -220,9 +225,18 @@ watch/convergence logic (that is the worker's job).
 
 ### 2.1 Additions to `common/constants.go`
 
+The listing is a condensed quote, not a byte-for-byte one: the three constants
+sit in three different places of `common/constants.go`'s single `const` block,
+in another order (only `DefaultGatewayAgentTimeout` is left under a
+"dnv-gateway" heading there), and their comments there carry longer rationale
+and a different wrapping. The names, the values and the rules the comments
+state are the committed ones, and `common/constants.go` is authoritative for
+comment text — as it is for `dnagent.md` §2.2's block.
+
 ```go
 // Per-call budget for the gateway's agent RPCs (GetDnSize/GetCnSize, the
-// Get*Info behind Inspect*, the Get*Bm bitmap reads), in seconds. Applied
+// Get*Info behind Inspect* and behind the force = false checks of
+// DeleteClone/FinishMigration, the Get*Bm bitmap reads), in seconds. Applied
 // with context.WithTimeout around each dial+call (AG2); chosen equal to
 // DefaultEtcdOpTimeout so a hung agent and a hung etcd bound an RPC alike.
 DefaultGatewayAgentTimeout = 10
@@ -237,11 +251,19 @@ DefaultGatewayAgentTimeout = 10
 CloneBmChunkBytes = 1 << 20
 
 // A DEPLOYMENT REQUIREMENT, not a client setting: every etcd serving dnv
-// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128. The
-// transaction it is SIZED by is the sp drain's D2 batch, 486 ops at the
-// maximum shape (dnv-worker.md §11.6) — the largest BOUNDED one; a large
-// enough CreateStoragePool passes the default too, but its size is the
-// request's. DeleteClone's 256-key rectangle sweep was this number's founding
+// MUST run with --max-txn-ops=512 or higher; etcd's default cap is 128. etcd
+// caps on max(len(Compare), len(Success), …), and etcdutil's
+// serializable-snapshot STM compares every key it read AND every key it
+// wrote, so that sum is what has to fit. The transaction it is TRIPWIRED
+// against is the sp drain's D2 batch, 486 compares at the maximum shape
+// (dnv-worker.md §11.6) — the largest a tripwire BOUNDS, not the largest in
+// the system: CreateStoragePool's own maximum shape is 503 compares (7 fixed
+// + one put per slice + 7 per distinct DN + 8 per CN, at MaxSliceCntPerSp x 2
+// groups per slice x MaxAllocLegPerGrp legs = 64 DNs and MaxCntlrCntPerSp
+// cntlrs), which 512 clears by 9, and no tripwire guards it. init_ext_cnt
+// moves ExtCnt VALUES, not key counts, so that shape is bounded by those
+// three ceilings and IS tripwirable: the missing test is the gap, not the
+// request. DeleteClone's 256-key rectangle sweep was this number's founding
 // justification and is gone: the clone drain replaced it with 68-op batches
 // that fit the default (§5.8, §10.4).
 EtcdMaxTxnOps = 512
@@ -275,8 +297,8 @@ validators its read sites refuse with.
    `BumpDnRev(s etcdutil.STM, op string, cid uint64, dn *pb.DnConf)` /
    `BumpCnRev(…, cn *pb.CnConf)` — same behavior, taking the conf message the
    caller already holds: read the rev key — missing ⇒ error — `revision += 1`,
-   put back **preserving** `addr_port`/`sp_name` (§5.5: rewrite, never
-   delete+recreate).
+   put back **preserving** `addr_port`/`sp_name` (`architecture.md` §5.5:
+   rewrite, never delete+recreate).
 3. `GrowSlice`, `CreateSpareLeg` and `SwitchSpareLeg` gain one parameter
    `expectRev uint64` checked first inside their STM against the stored
    `SpRev.revision`: `0` skips the check (the worker's internal calls pass 0),
@@ -324,19 +346,22 @@ with old peers, no compatibility path anywhere. (That same change's
 `PushCloneBitmapRequest`, `BitmapInfo` and new `BmChunkId` edits are the
 worker↔agent surface, not this one.) Still no new gateway RPC and **no new
 etcd key kind** — `clone_bitmap`'s KEY gained a seventh field, but the kind
-is the one that already existed: the gateway writes only the §5.1 kinds that
-already exist (`cluster_conf`, the three globals,
+is the one that already existed: the gateway writes only the
+`architecture.md` §5.3 kinds that already exist (`cluster_conf`, the three globals,
 `dn_conf`/`cn_conf`, `dn_capacity`/`cn_capacity`, `dn_rev`/`cn_rev`/`sp_rev`,
 `sp_conf`, `sp_id_to_name`, `cntlr`, `slice`, `thin_device`, `subsystem`,
 `cdc`, `clone`, `clone_bitmap`, `transfer`, `migration`, `migration_bitmap`).
 
 ### 2.4 Amendment to `integtest/workerctl` (applied with §10)
 
-Five subcommands so the integration suite can play the worker (§0 #12):
+Six subcommands so the integration suites can play the worker (§0 #12). This
+suite runs four of them — the two flips and the two drains; `set-deleting` and
+`set-clone-deleting`, the worker suite's stand-ins for the two gateway latches,
+are listed with them because the six are one family:
 
 * `set-created --sp <name|id> --name <td_name>` — resolves the td, calls
   `model.FlipCreated(ctx, cli, cid, shard, spId, []TdRef{{name, tdId}})`,
-  emits `{"td_name":…, "flipped":<bool>, "sp_rev":…}`. Note the flip bumps
+  emits `{"td_name":…, "td_id":…, "flipped":<bool>, "sp_rev":…}`. Note the flip bumps
   `SpRev` exactly once when it wrote (the suite's rev bookkeeping must count
   it).
 * `set-provisioned --sp <name|id> --slice <id> --leg <id> --side <id>` — the
@@ -344,14 +369,25 @@ Five subcommands so the integration suite can play the worker (§0 #12):
   when it wrote.
 * `set-clone-deleting --sp <name|id> --name <clone_name>` and
   `drain-clone --sp <name|id> --name <clone_name> [--max-steps N]` *(added
-  2026-09-16 with the clone latch, §5.8)* — the clone twins of the two below.
+  2026-09-16 with the clone latch, §5.8)* — the clone twins of `set-deleting`
+  and `drain-sp` below; this suite runs only `drain-clone` (§10.11 step 13,
+  §10.14 step 5), the latch being the RPC's.
   `drain-clone` is CLD7's derivation in a loop over `model.DrainCloneBm` and
   `model.FinishCloneDelete`, and emits
-  `{"steps":…, "chunk_cnt":…, "clone_deleted":<bool>}` — `chunk_cnt`, the
-  batch size.
+  `{"sp_name":…, "clone_name":…, "steps":…, "chunk_cnt":…,
+  "clone_deleted":<bool>}` — `chunk_cnt` counting the chunk KEYS the whole
+  drain removed, summed over every batch (§10.11 step 13 asserts 3), not one
+  batch's size.
   `set-clone-deleting` writes the flag and bumps, and deliberately does NOT
   resume the destination namespaces the way the RPC does: that write is the
   gateway's, and a driver that re-implemented it would drift from it.
+* `set-deleting --sp <name|id>` *(added 2026-09-15 with the latch, §5.4)* —
+  `SpConf.deleting = true` plus one `BumpSpRev`, `DeleteStoragePool`'s latch
+  without its five-empty-lists precondition (that gate is the gateway's), and
+  a no-op with no second bump when already latched (SPD3); emits
+  `{"sp_name":…, "sp_id":…, "latched":<bool>, "sp_rev":…}`. The worker
+  suite's, not this one's: it is how dnv-worker.md §14's case G puts an SP in
+  front of the real coordinator without a gateway.
 * `drain-sp --sp <name|id> [--max-steps N]` *(added 2026-09-15 with the
   latch, §5.4)* — runs the sp coordinator's drain to completion: SPD8's
   derivation in a loop over `model.DrainSpCntlrs` / `DrainSpSlice` /
@@ -411,9 +447,12 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   that ends up in a stored conf substituting that default is GW11's job on
   the write path, never this one's — and `bdev_feature_list` empty. The list
   `count` is the one bounded numeric GW11 does not cover, because it reaches
-  no stored message at all: `pageLimit` caps it at 1024 and turns a zero
-  into `DefaultListCnt` 64 per request, and `validatePageArgs` runs it —
-  with the token decode — before a List handler's first etcd read (GW10).
+  no stored message at all: `pageLimit` refuses a value above `MaxListCnt`
+  1024 (`INVALID_ARGUMENT`, never a silent cap) and turns a zero into
+  `DefaultListCnt` 64 per request, and `validatePageArgs` runs it —
+  with the token decode — before the three cluster-scoped List handlers'
+  ClusterConf read; `ListClusters` reaches the same two checks through
+  `pageNames` before its range (GW10).
   Violations ⇒ `INVALID_ARGUMENT` before any etcd read.
   State-dependent validation (slot in use, `ns_idx` taken, …) happens
   inside the STM.
@@ -427,8 +466,10 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   `DeleteStoragePool` is what SETS that flag (§5.4), so the gate is live from
   the moment it commits until the drain removes the key.
   The **paged** `List*` RPCs (clusters, disk nodes, controller nodes,
-  storage pools) use plain reads, not an STM (§5.7): one `Get` of ClusterConf
-  for the cid, then `Range`. `ListThinDevices`, `ListSubsystems` and the
+  storage pools) use plain reads, not an STM (`architecture.md` §5.7): the
+  three cluster-scoped ones do one `Get` of ClusterConf for the cid and then
+  `Range`; `ListClusters` ranges the `cluster_conf` prefix directly, there
+  being no cid to derive. `ListThinDevices`, `ListSubsystems` and the
   single-object `Get*` RPCs are one-STM consistency reads (§5.6–§5.8).
 * **GW6 — token check, presence-based.** Immediately after resolution and
   before any other state check, a mutator reads its rev key
@@ -436,8 +477,9 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   `stored.revision == req.Get<X>Rev().GetRevision()` **only when
   `req.Get<X>Rev() != nil`**; a mismatch ⇒ `ABORTED` with message
   `stale revision` (§0 #7). A request that carries no token message skips the
-  comparison and proceeds. The rev key is read either way — it is a §5.1
-  invariant key whose absence is §5.9's `ABORTED`, the bump helpers rely on
+  comparison and proceeds. The rev key is read either way — it is an
+  `architecture.md` §5.3 invariant key whose absence is `architecture.md`
+  §5.9's `ABORTED`, the bump helpers rely on
   it having been read, and keeping it in the read set leaves a skipped check
   no weaker than a checked one against a concurrent delete. A present message
   carrying `revision: 0` is a real token, not an omission, and is always
@@ -445,10 +487,10 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   always sees `ABORTED`, never a misleading precondition error computed
   against state it has not read; a client that sent none has waived that
   ordering and meets its other preconditions directly. The echoed `addr_port`/`sp_name` inside the token message is
-  ignored (§5.5). Every mutation that changes agent-visible desired state
+  ignored (`architecture.md` §5.5). Every mutation that changes agent-visible desired state
   bumps the matching revision exactly once in the same STM
   (`model.BumpSpRev`/`BumpDnRev`/`BumpCnRev`); `Update*Disabled` and
-  capacity/err-epoch maintenance never bump (§5.5).
+  capacity/err-epoch maintenance never bump (`architecture.md` §5.5).
 * **GW7 — error mapping** (the only table; handlers return
   `status.Error(code, msg)` from inside the STM closure):
 
@@ -458,9 +500,9 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
   | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
-  | `sum(shard_bucket) ≥ Max*CntPerCluster`; too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four INVALID_ARGUMENT refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check) | `RESOURCE_EXHAUSTED` |
+  | `sum(shard_bucket) ≥ Max*CntPerCluster`; the per-SP and per-group count ceilings — `len(cntlr_id_list) ≥ MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at `MaxSsCntPerSp`, a subsystem's `ns_list` at `MaxNsCntPerSs`, `clone_name_list` at `MaxCloneCntPerSp`, `xfer_name_list` at `MaxXferCntPerSp`, `migr_name_list` at `MaxMigrCntPerSp`, a group's `spare_leg_list` at `MaxSpareLegPerGrp` (architecture.md §8.6–§8.12); too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four INVALID_ARGUMENT refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check); the ledgers' own `charge` shortfall (`dnLedger.charge`/`cnLedger.charge`, `gateway/alloc.go`) — defensive, since `verifyPick` answers the same shortfall as candidate-changed first | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
-  | everything §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
+  | everything `architecture.md` §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
 
   `model.ErrNotFound` (from `LoadSp`) maps to `NOT_FOUND`;
   `ErrPrecondition{Reason: "candidate changed"}` maps to nothing — see GW9.
@@ -483,7 +525,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   (`"dn not found"` / `"dn not allocatable"`) rather than a GW9 re-scan;
   only the gateway-ledger paths treat every vanished pick as
   candidate-changed and re-scan.
-* **GW8 — one STM per RPC** (§5.8). Everything computable beforehand (name
+* **GW8 — one STM per RPC** (`architecture.md` §5.8). Everything computable beforehand (name
   formatting, group plans, candidate lists, the stamped `creation_epoch`) is
   prepared outside; all reads and writes commit in one `RunSTM`. The closure
   MUST be a pure function of what it reads through the STM (it is re-run on
@@ -496,7 +538,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
   `ErrPrecondition{"candidate changed"}` when one is gone; on that error —
   and only that error — re-scan and retry until `ctx` ends (then `ABORTED`).
-* **GW10 — pagination** (§5.7). `page_token` =
+* **GW10 — pagination** (`architecture.md` §5.7). `page_token` =
   `base64.StdEncoding.EncodeToString(lastReturnedKey)`; decode failure ⇒
   `INVALID_ARGUMENT`; empty ⇒ start of prefix; range starts at the key
   **after** the decoded one; a reply whose page is not full returns an empty
@@ -518,14 +560,19 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   (§5.4). A handler that then COMPUTES with a stored member validates it
   first and REFUSES rather than guessing around a zero:
   `model.ValidateClusterConf` in `CreateDiskNode` and `CreateControllerNode`
-  (before dividing a reported size by `extent_size`), in
+  (before dividing a reported size by `extent_size`), in `DeleteDiskNode` and
+  `UpdateDiskNodeDisabled` (the last check before their first write, because
+  the one capacity key each moves is named by shifting the STORED ladder), in
   `CreateStoragePool` and the `GrowSlice` handler (before any group
-  geometry), and in the §6.5 scans `pickDns`/`pickCn` (where a zero batch
+  geometry), in `newDnLedger` — the DN ledger `CreateStoragePool`,
+  `DeleteSpareLeg`, `CreateMigration`, `FinishMigration` and
+  `CancelMigration` build before staging their first write, for the same
+  capacity-key reason — and in the §6.5 scans `pickDns`/`pickCn` (where a zero batch
   size would silently make the scan width zero and turn every allocation
   into `RESOURCE_EXHAUSTED`); `model.ValidateBdevConf` in `GrowSlice` and in
   `CreateThinDevice` (before sizing against the stripe). Such a zero is a
   lost invariant, not a bad request, so every one of those gates is GW7's
-  §5.9 `ABORTED` and never `INVALID_ARGUMENT`. `model.GrowSlice` re-runs
+  `architecture.md` §5.9 `ABORTED` and never `INVALID_ARGUMENT`. `model.GrowSlice` re-runs
   both validators inside its own STM and can report that refusal only as an
   `ErrPrecondition`, which `mapModelErr` renders `FAILED_PRECONDITION`; the
   handler's pre-check above is what makes that a race rather than the
@@ -551,18 +598,21 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   other: `CreateClone` and `CreateMigration` store the request's message as
   it arrived (§8.9, §8.11), the sp-worker fills a migration's zeros in with
   their §7 constants as it builds the side request (`dnv-worker.md` RW15),
-  and a zero in a clone's is simply omitted from the dm-clone table the cn
-  agent writes, leaving the target's own default in place (`cnagent.md`
-  CN18).
-* **GW12 — id minting.** Cluster-scoped ids per §5.4 inside the STM: read the
+  and a zero in a clone's is simply never messaged to the dm-clone target by
+  the cn agent (`ensureHydrationKnobs`, which sends CN18 step 3's
+  `hydration_threshold`/`hydration_batch_size` messages, sends each only for
+  a non-zero member), leaving the target's own default in place
+  (`architecture.md` §7).
+* **GW12 — id minting.** Cluster-scoped ids per `architecture.md` §5.4 inside the STM: read the
   global, `id = next_id; next_id += 1`; `shard_code` = index of the smallest
   `shard_bucket` (first on ties), `bucket[shard_code] += 1`; the
   `Max*CntPerCluster` gate is `sum(bucket)` before increment. Deletion
   decrements the bucket, never reuses ids. Per-SP ids via `model.SpNextId`;
   thin-device `dev_id` from `SpConf.next_dev_id++` (`ori_id = 0` = none).
 * **GW14 — bitmaps are opaque.** Bitmap bytes cross the gateway VERBATIM in
-  both directions: `AppendCloneBitmap` stores what the request carries
-  (§5.8), `PushMigrationBitmap` forwards the stored bytes (§5.10), and the
+  both directions: `AppendCloneBitmap` and `AppendMigrationBitmap` store what
+  the request carries (§5.8, §5.10 — the push of those stored chunks to the
+  agents is the worker's, dnv-worker.md §10, not a gateway RPC), and the
   §5.12 reads reply the agent's bytes. The wire convention — 1 =
   unmapped/never-written, LSB-first — is produced and consumed by the
   agents (architecture.md §11.4's single inversion at the agent boundary);
@@ -603,8 +653,8 @@ stay in the cited architecture.md section; nothing below overrides them.
   ClusterConf and the three globals (`next_id: 1`, `shard_bucket`:
   `ShardBucketSize` zeros). Reply `cluster_id`.
 * **DeleteCluster** — STM: resolve; emptiness check is
-  `sum(shard_bucket) == 0` on **all three** globals (§5.4 makes the sum the
-  live object count, so no range read is needed) ⇒ else
+  `sum(shard_bucket) == 0` on **all three** globals (`architecture.md` §5.4
+  makes the sum the live object count, so no range read is needed) ⇒ else
   `FAILED_PRECONDITION`; delete ClusterConf + the three globals. Reply the
   cid.
 * **GetCluster** — one STM: ClusterConf → cid → the three globals (a missing
@@ -627,7 +677,10 @@ stay in the cited architecture.md section; nothing below overrides them.
   `DnRev{addr_port, revision: 1}` at `DnRevKey(shard, cid, dn_id)`; put the
   global. Reply `dn_id`.
 * **DeleteDiskNode** — STM: resolve; `DnConf` by addr (`NOT_FOUND`); token vs
-  `DnRev` (GW6); `side_ptr_list` non-empty ⇒ `FAILED_PRECONDITION`; delete
+  `DnRev` (GW6); `side_ptr_list` non-empty ⇒ `FAILED_PRECONDITION`;
+  `model.ValidateClusterConf` on the resolved ClusterConf (a zero ⇒ `ABORTED`,
+  GW11 — the last check before the first write, since the capacity key to
+  delete is named by the stored ladder); delete
   DnRev, DnConf, capacity key (`MaintainDnCapacity(…, old, nil)`);
   `DnGlobal.shard_bucket[shard] -= 1`. Reply `dn_id`.
 * **GetDiskNode** — one STM: DnConf, then DnRev by the read id+shard
@@ -635,7 +688,9 @@ stay in the cited architecture.md section; nothing below overrides them.
 * **ListDiskNodes** — paged plain range over `DnConfPrefix(cid)` (GW10).
 * **UpdateDiskNodeDisabled** — STM: resolve; DnConf; token; if
   `disabled` already equals the request: OK, nothing written (§0 #17); else
-  set it and `MaintainDnCapacity(old, new)`. **No revision bump, no agent
+  `model.ValidateClusterConf` (a zero ⇒ `ABORTED`, GW11 — below the no-op,
+  above the put, because the flip moves a capacity key the stored ladder
+  names), set it and `MaintainDnCapacity(old, new)`. **No revision bump, no agent
   call** (§8.2). Reply `dn_id`.
 * **InspectDiskNode** — STM: read DnConf (the ids that address the agent
   request and the log line; the resolving Snapshot supplies the cid, so no
@@ -880,9 +935,11 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   `SpRev`, so a token the request carried subsumes staleness of phase 1; a
   token-less request gets the re-resolution only, AG4); `loadClone` again,
   and if `deleting` became true since phase 1 return OK with no writes (the
-  same rule, raced variant); else write exactly three things —
-  `suspended = false` on every namespace whose `td_id == dst_td_id`
-  (architecture.md §8.9 — the dst namespaces resume with the data now local,
+  same rule, raced variant); else write nothing but the resume, the latch
+  and the bump — `suspended = false` on every namespace whose
+  `td_id == dst_td_id`, as one `Subsystem` put per subsystem that actually
+  changed and none for the rest (`resumeCloneDstNs`; architecture.md §8.9 —
+  the dst namespaces resume with the data now local,
   the §5.9 DeleteTransfer twin of this write), the `Clone` put with
   `deleting = true` and every other field unchanged, and `BumpSpRev`. Reply
   `clone_id`.
@@ -1036,7 +1093,7 @@ the retry succeed, which is what a precondition means.
 
 ## 6. Agent calls
 
-* **AG1 — placement.** Agent calls happen strictly outside STMs (§5.8):
+* **AG1 — placement.** Agent calls happen strictly outside STMs (`architecture.md` §5.8):
   *before* the STM for `CreateDiskNode`/`CreateControllerNode` (`Get*Size`),
   *after* the resolving STM for `Inspect*` and `Get*Bitmap`, *between* the
   two STMs for `DeleteClone`/`FinishMigration` with `force == false` — except
@@ -1083,7 +1140,7 @@ The complete call matrix:
 | GetThinDeviceBitmap | `GetThinDeviceBm` | post-STM |
 | GetLegBitmap | `GetLegBm` | post-STM |
 
-The other 49 RPCs never leave etcd.
+No other `service Gateway` RPC leaves etcd — the matrix above is complete.
 
 ---
 
@@ -1146,7 +1203,8 @@ The other 49 RPCs never leave etcd.
    skip; one server for the whole package on an ephemeral port.
 2. **validate.go**: table-driven, no I/O — every §7 row (sizes, patterns,
    NQN incl. the discovery-NQN impossibility, numeric bounds (a zero passes,
-   asking for the default), count clamp, `bdev_feature_list`, level enum),
+   asking for the default), the list `count` bound — zero accepted as the
+   default, above `MaxListCnt` refused — `bdev_feature_list`, level enum),
    plus both arms of the `dn_bin_conf` shift rule: all four zero accepted (it
    asks for 0/4/8/12), any other non-ladder set `INVALID_ARGUMENT` (§5.1).
 3. **Handler tests** against the real etcd through a `Server` constructed
@@ -1168,8 +1226,13 @@ The other 49 RPCs never leave etcd.
    `bdev_conf.dm_raid0_conf.stripe_size` zeroed — every RPC that computes
    from one then refusing `ABORTED` with `model`'s message verbatim
    (`invalid stored conf: ` + the field) and nothing written:
-   `CreateDiskNode`, `CreateControllerNode` on the cluster's, every GW9
-   allocating RPC through the §6.5 scans on it, and `GrowSlice` and
+   `CreateDiskNode`, `CreateControllerNode`, `DeleteDiskNode` and
+   `UpdateDiskNodeDisabled` on the cluster's, every GW9
+   allocating RPC through the §6.5 scans on it, `DeleteSpareLeg`,
+   `FinishMigration` and `CancelMigration` through `newDnLedger`'s gate on it
+   — twelve cases for the cluster's conf, `GrowSlice` reaching it through a
+   gate of its own (both confs, after its snapshot and before the meta
+   ladder) as well as through the scan — and `GrowSlice` and
    `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
    `DeleteStoragePool`'s latch (SpConf + SpRev and nothing else, and a repeat
    delete pinned in BOTH directions: the first must bump, the second must
@@ -1253,8 +1316,9 @@ asserts nothing about latency or throughput (§0 #13). Out of scope: §10.19.
 
 ### 10.2 Deliverables and usage contract
 
-`integtest/gateway_test.sh` (bash) + `integtest/gatewayctl/` (Go) + the two
-`workerctl` flip subcommands of §2.4.
+`integtest/gateway_test.sh` (bash) + `integtest/gatewayctl/` (Go) + the four
+`workerctl` worker-role subcommands of §2.4 this suite runs (`set-created`,
+`set-provisioned`, `drain-sp`, `drain-clone`).
 
 ```
 bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
@@ -1265,8 +1329,9 @@ sudo anywhere**. `--only` takes one of `smoke parallel contention faults
 restart` (validated against the case list); `--cleanup-only` runs cleanup and
 exits. Fail-fast: first failed assertion prints
 `FAILED at stage '<case>: <desc>' (trace_id …)`, runs diagnostics (§10.17)
-and leaves debris in place; success prints `PASS`. Cleanup always runs first
-(a crashed previous run must not fail preflight). The flag parser, `stage`,
+and leaves debris in place; success prints `PASS`. Cleanup runs ahead of the
+server preflight (a crashed previous run must not fail it); only the driver's
+own preflight — tools and builds — precedes it (§10.7). The flag parser, `stage`,
 `die`, `assert_*`, `wait_until`, `sshw`, `remote_start`/pid files and
 `SSH_OPTS` follow `worker_test.sh` verbatim.
 
@@ -1294,7 +1359,7 @@ $WORK/bin/etcd --name dnv-gw-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:15379 --advertise-client-urls http://127.0.0.1:15379 \
   --listen-peer-urls http://127.0.0.1:15380 --initial-advertise-peer-urls http://127.0.0.1:15380 \
   --initial-cluster dnv-gw-it=http://127.0.0.1:15380 \
-  --max-txn-ops=512                       # common.EtcdMaxTxnOps, §10.4
+  --max-txn-ops=$ETCD_MAX_TXN_OPS         # common.EtcdMaxTxnOps, read at preflight (§10.4)
 $WORK/bin/fakeagent dn --grpc-address 127.0.0.1:2982<i> --dir $WORK/dn<i> --size 68719476736
 $WORK/bin/fakeagent cn --grpc-address 127.0.0.1:2983<j> --dir $WORK/cn<j> --size 0
 $WORK/bin/dnv-gateway --grpc-network tcp --grpc-address 127.0.0.1:2981<k> \
@@ -1321,10 +1386,16 @@ build` plus `go build` of `gatewayctl`, `workerctl`, `fakeagent` into
 sha256 pin (identical block to `worker_test.sh` — same cache). Server:
 passwordless ssh (`sshw "true"`); `bash nohup pkill ss tar df sed awk`
 present; ≥ 1 GiB free under `/var/tmp`; none of the §10.3 ports listening.
-That etcd MUST be started with **`--max-txn-ops=512`**
-(`common.EtcdMaxTxnOps`, §2.1 — the suite is shell and cannot import the
-constant, so the literal carries a comment naming it): every etcd serving dnv
-must, for the sp drain's 486-op D2 batch (dnv-worker.md §11.6). NO case here
+That etcd MUST be started with **`--max-txn-ops`** at `common.EtcdMaxTxnOps`
+(§2.1, 512 today): every etcd serving dnv must, for the sp drain's 486-compare
+D2 batch (dnv-worker.md §11.6) and `CreateStoragePool`'s 503-compare maximum
+shape. The suite is shell and cannot import the constant, and it does not
+type the number either: `preflight_driver` runs the
+`workerctl` it has just built — `constants` opens no etcd client and takes no
+`--cluster`, so it runs on the DRIVER, before setup ships anything to the
+server — and fills `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of the
+JSON it prints, well before setup starts etcd with it (§10.3). `worker_test.sh` and
+`cdc_test.sh` take the same value from the same subcommand. NO case here
 comes near the cap — step 13's `delete-clone` latches and its `wctl
 drain-clone` removes three chunk keys, step 17's `wctl drain-sp` pops sp0's
 four groups — so the flag is what makes the suite run against an etcd
@@ -1339,7 +1410,7 @@ Cluster name `itgw` (every case starts from a wiped store and creates it
 through the gateway — never `workerctl put-cluster`). DNs are
 `127.0.0.1:29820..23`, locations `rack0..rack3`; CNs `127.0.0.1:29830..32`,
 locations `rack0..rack2` (distinct — the CN scan location-dedupes too). Fake
-tr confs: `tcp/ipv4/127.0.0.1/44<port suffix>`. SPs: `sp0` (S, B, C, D
+tr confs: `tcp/ipv4/127.0.0.1/44<port suffix>`. SPs: `sp0` (S, B, C
 baseline), `spA0..spA9` (A), `spD0..spD9` (D). tds `t0 t1 …`, subsystems
 `nqn.2025-01.io.dnv:itgw:<sp>:ss<i>`, namespaces by `ns_idx` 1.., clones
 `cl0..`, transfers `x0..`, migrations `m0..`. Trace ids `it-<case>-<stage>`
@@ -1364,12 +1435,15 @@ fake → truncate logs → start gw0..2 → ping all three.
 
 ### 10.7 Setup phase (after start-cleanup)
 
-1. `cleanup` (unconditional), 2. preflight local (tools, builds, fetch_etcd),
-3. preflight server (§10.4), 4. `mkdir -p` the `$WORK` tree, 5. one
+1. preflight driver (tools, `resolve_jq`, `fetch_etcd`, `make build`, the
+three `go build`s and `read_constants` — §10.4's driver-side
+`workerctl constants`, last because it runs the binary just built),
+2. `cleanup` (unconditional), 3. preflight server (§10.4 —
+after the cleanup, so a crashed previous run's ports cannot fail it),
+4. `mkdir -p` the `$WORK` tree and `SETUP_DONE=1`, 5. one
 `scp -q` of `etcd etcdctl dnv-gateway gatewayctl workerctl fakeagent` to
 `$WORK/bin` + `chmod 0755`, 6. start etcd, `wait_until` workerctl ping,
-7. start the 7 fakeagents, 8. start gw0..gw2, ping each via gatewayctl,
-9. `SETUP_DONE=1`.
+7. start the 7 fakeagents, 8. start gw0..gw2, ping each via gatewayctl.
 
 ### 10.8 The driver: gatewayctl
 
@@ -1399,7 +1473,7 @@ token, which the B4 stage uses):
 | cluster | `create-cluster` `delete-cluster` `get-cluster` `list-clusters [--count --page-token]` |
 | dn | `create-dn --addr --location [--tr-*] [--disabled]` · `delete-dn --addr --rev` · `get-dn --addr` · `list-dns` · `set-dn-disabled --addr --rev --disabled` · `inspect-dn --addr` |
 | cn | the six mirrors (`create-cn` …) |
-| sp | `create-sp --sp [--cntlr-cnt --slice-cnt --init-ext-cnt --slots --raid1]` · `delete-sp --sp --rev` · `get-sp --sp` · `list-sps` · `set-cntlid-slots --sp --rev --slots` · `set-sp-level --sp --rev --level` · `find-sp-names --ids` · `grow-slice --sp --rev --slice [--ext \| --meta] [--selector-*]` |
+| sp | `create-sp --sp [--cntlr-cnt --slice-cnt --init-ext-cnt --slots --raid1]` · `delete-sp --sp --rev` · `get-sp --sp` · `list-sps` · `set-cntlid-slots --sp --rev --slots` · `set-sp-level --sp --rev --level` · `find-sp-names --ids` · `grow-slice --sp --rev --slice [--ext \| --meta] [--dn-black --dn-white]` |
 | cntlr | `create-cntlr --sp --rev --slot` · `delete-cntlr --sp --rev --id` · `set-cntlr-enabled --sp --rev --id --enabled` · `inspect-cntlr --sp --id` · `inspect-side --sp --id` |
 | td | `create-td --sp --rev --name --size [--ori]` · `delete-td --sp --rev --name` · `list-tds --sp` |
 | ss/ns | `create-ss --sp --rev --nqn [--hosts]` · `delete-ss --sp --rev --nqn` · `list-sss --sp` · `set-ss-hosts --sp --rev --nqn --hosts` · `create-ns --sp --rev --nqn --idx --td [--uuid --nguid --suspended]` · `delete-ns --sp --rev --nqn --idx` · `set-ns-dev --sp --rev --nqn --idx --td` · `set-ns-suspended --sp --rev --nqn --idx --suspended` |
@@ -1433,22 +1507,32 @@ when every job executed (whatever its code); non-zero only on harness
 failure. The script counts codes with jq and asserts the etcd outcome
 separately.
 
-### 10.9 Etcd verification: workerctl, read-only plus two flips
+### 10.9 Etcd verification: workerctl, read-only plus the worker-role writes
 
 Ground truth never goes through the code under test: after every mutation
 stage the script asserts raw decoded etcd state via the existing `workerctl`
-subcommands `ping · get --key · get-dn · get-cn · get-rev · get-sp ·
-get-cntlr · get-slice · get-td · list-keys` (`wctl()` wrapper,
-`--endpoints 127.0.0.1:15379 --cluster itgw --trace-id $TRACE`), and the
+subcommands `get --key · get-dn · get-cn · get-rev · get-sp ·
+list-keys` (`wctl()` wrapper,
+`--endpoints 127.0.0.1:15379 --cluster itgw --trace-id $TRACE`) — plus two
+invocations that bypass that wrapper: `ping`, the §10.7 readiness probe, run
+on the server with no `--cluster`, and `constants`, run on the driver's own
+copy before the server has one (§10.4) — and the
 gateway's own read RPCs are asserted as a **secondary** check wherever one
 exists (get/list/inspect read-back must agree with ground truth). The only
-`workerctl` writes this suite may perform are `set-created` and
-`set-provisioned` (§2.4) — playing the worker at exactly the steps a
-precondition demands it — plus `etcdctl del --prefix "dnv "` in the per-case
-wipe. Anything else writing through `workerctl` would test workerctl, not
+`workerctl` writes this suite may perform are the four §2.4 worker-role
+subcommands: the flips `set-created` and `set-provisioned` — playing the
+worker at exactly the steps a precondition demands it (§10.11 steps 9 and
+15, and the live `sp0` §10.14 stands up) — and the drains `drain-sp` and
+`drain-clone` — standing in for the sp coordinator after a latch the gateway
+committed (§10.11 steps 13 and 17, §10.12 step 6, §10.14 step 5, §10.15
+step 6) — plus `etcdctl`, for `del --prefix "dnv "` in the per-case wipe and
+for the `endpoint status` store-revision probe of the §10.10 refusal
+brackets. Anything else writing through `workerctl` (`put-*`, `set-cntlr`,
+`set-deleting`, `set-clone-deleting`, …) would test workerctl, not
 the gateway, and is forbidden. Rev bookkeeping: `sp_rev`-consuming stages
 run in the parent shell, never in subshells (the dnagent suite's documented
-counter hazard), and both flips bump `SpRev` (§2.4).
+counter hazard), and both flips bump `SpRev`, as does every drain step — the
+sp drain's last one deletes the key instead (§2.4).
 
 ### 10.10 Conventions
 
@@ -1457,10 +1541,15 @@ counter hazard), and both flips bump `SpRev` (§2.4).
 * Every mutating stage: ① gatewayctl call (expected code), ② `wctl`
   ground-truth asserts (exact fields through jq; protojson renders uint64 as
   strings — compare via `tostring`), ③ gateway read-back where a read RPC
-  covers it. Every **refusal** stage brackets the call with
-  `wctl get-sp --sp <x>` (or `list-keys` counts for non-SP scopes) and
-  asserts the before/after `store_rev` (and content) are identical — refusals
-  write nothing, provably.
+  covers it. Every **refusal** stage brackets the call with the etcd store
+  revision — `store_rev`, read through `etcdctl endpoint status`, which etcd
+  advances only for a transaction that wrote — and asserts it did not move
+  (`assert_no_write`); where a readable statement of the same fact exists
+  (`next_dev_id`, a `wctl` field, a rev read back through the gateway) it is
+  asserted too, and
+  case C additionally compares a whole `wctl get-sp` snapshot before and
+  after each of its steps 1-4 (step 5 mutates) — refusals write nothing,
+  provably.
 * `assert_field <json> <jq> <want> <label>`; `assert_eq/ne/ge`; `wait_until`
   only for process readiness — the gateway itself is synchronous, so **no
   stage ever sleeps** waiting for etcd content.
@@ -1471,8 +1560,9 @@ counter hazard), and both flips bump `SpRev` (§2.4).
 
 ### 10.11 Case S — `smoke` (sequential, gw0 only)
 
-The full-lifecycle sweep; with §10.13/§10.14 it gives every RPC its happy
-path. Steps (each = one `stage`):
+The full-lifecycle sweep; it gives every RPC but `ListStoragePools` its
+happy path (that one runs in §10.12 steps 3 and 6 and §10.15 steps 3, 4 and
+6), and §10.13/§10.14 add the refusal paths. Steps (each = one `stage`):
 
 1. `create-cluster itgw` → reply cid; `wctl get --key "dnv cluster_conf
    itgw"`: `creation_epoch != 0` and, although the request named none of
@@ -1509,7 +1599,7 @@ path. Steps (each = one `stage`):
    `DnConf.disabled true`; repeat (idempotent, still rev 1); re-enable →
    capacity key back. Same once for a CN.
 6. `create-sp sp0` (§10.6 shape) → sp_id 1; assert the whole §5.4 write set:
-   `SpConf` (id lists, `next_id` = 1 + minted count, `next_dev_id 1`, and a
+   `SpConf` (id lists, `next_dev_id 1`, and a
    `bdev_conf` concrete in every defaultable member: the three inherited
    from the cluster through D-C's merge (`data_block_size 1048576`,
    `low_water_mark_pct 50`, `stripe_size 65536`), plus
@@ -1537,7 +1627,9 @@ path. Steps (each = one `stage`):
    OK, `ori_id == t0.dev_id`, `dev_id 2`; `list-tds` map agrees.
 10. `create-ss ss0` → `serial == %016x(ss_id)`, `model dnv`, `CdcEntry`
     holds **both enabled** cntlrs' tr confs + hosts; `set-ss-hosts` →
-    Subsystem **and** CdcEntry; `create-cntlr` (slot 2, cn2) → CdcEntry
+    Subsystem **and** CdcEntry; `create-cntlr` (slot 2, on whichever CN the
+    random §6.5 pick left without a cntlr of sp0 — computed from the stored
+    cntlrs, never hardcoded) → CdcEntry
     gains its tr conf; `set-cntlr-enabled false` → tr conf removed (and
     `true` back on); `delete-cntlr` of that disabled non-primary → clean
     reversal; `list-sss` agrees.
@@ -1556,7 +1648,9 @@ path. Steps (each = one `stage`):
     `--src-slice-idx 2 --bm-idx 0` (the FIRST chunk of a SECOND slice) → a
     third key, so a key formed from `bm_idx` alone is dead too. Three calls,
     three keys, none overwritten.
-    `get-sp`'s `clone_bm_idx.cl0` is the pair list `["0:0","0:1","2:0"]`
+    `wctl get-sp`'s `clone_bm_idx.cl0` (workerctl's index of the chunk keys —
+    the gateway's `GetStoragePoolReply` has no such field) is the pair list
+    `["0:0","0:1","2:0"]`
     (decimal `src_slice_idx:bm_idx`, ascending);
     `get-clone`; `set-clone-tr`; `delete-clone --force` → the LATCH: `deleting
     true`, the dst namespace already `suspended false`, and the clone key, its
@@ -1632,7 +1726,7 @@ exact global invariants — the settled definition of parallel correctness
    `DnGlobal.next_id 2`, `Σbucket 1` — losers burned no id.
 3. `create-sp sp0`; `race`: 8 × `create-td` distinct names, **same token**
    → exactly 1 OK, 7 `ABORTED`; exactly 1 td exists; `SpConf.next_id`
-   advanced by 1; `sp_rev` +1. (The §5.5 token is the serializer.)
+   advanced by 1; `sp_rev` +1. (The `architecture.md` §5.5 token is the serializer.)
 4. Stale probes (sequential): `set-sp-level` with the pre-step-3 token →
    `ABORTED`, bracketed no-write; with the fresh token → OK. `create-td`
    duplicate name, fresh token → `ALREADY_EXISTS`, no-write
@@ -1653,11 +1747,18 @@ definition of (b).
 
 ### 10.14 Case C — `faults` (gw0; refusals and agent failures)
 
+A fixture stage (the shell's stage 0, not one of the five batteries) first
+creates the cluster, the nodes and a live `sp0` with four tds (one flipped
+`created` by `wctl set-created`), a subsystem with a namespace, a clone, a
+migration and a spare leg; the numbered steps are the batteries run against
+it. The fixture's own RPCs are not counted in §10.18's matrix.
+
 1. Validation battery (each → `INVALID_ARGUMENT`, one shared bracketed
-   no-write around the whole batch): bad name pattern (`sp/../x`), 65-byte
+   no-write around the whole batch): bad name pattern (`sp!0` — `/` and `.`
+   are legal name characters, so `sp/../x` would prove nothing), 65-byte
    name, bad NQN (and the discovery NQN), td size not a multiple, grow-slice
-   `--meta --ext 2`, slots with dupes / value 8, `count` out of clamp
-   handled (0→64 accepted, 2000 → `INVALID_ARGUMENT`), bad page token,
+   `--meta --ext 2`, slots with dupes / value 8, `count` at both ends of
+   its bound (0→64 accepted, 2000 → `INVALID_ARGUMENT`, never capped), bad page token,
    nonempty `bdev_feature_list`.
 2. `NOT_FOUND` battery: every group probed once against a missing cluster /
    sp / dn / td / nqn / ns_idx / clone / xfer / migr / side / spare ids.
@@ -1700,7 +1801,7 @@ brackets), codes match GW7, agent-call budget is bounded — the settled (c).
 4. Re-drive every failed job against gw0 → OK; now 10 complete SPs.
 5. Restart gw1 with the identical command line → `ping` OK; one
    create/delete round-trip through gw1; assert `list-keys` full dump
-   contains **only** §5.1 kinds owned by the data — no gateway
+   contains **only** `architecture.md` §5.3 kinds owned by the data — no gateway
    registration/lease/residue of any kind existed or exists.
 6. `delete-sp` ×10 via round-robin, each latch immediately followed by its
    `wctl drain-sp`; accounting restored.
@@ -1728,25 +1829,26 @@ logs to follow the request.
 
 ### 10.18 Coverage matrix
 
-Every RPC appears in ≥ 1 case; S alone covers all 59 happy paths.
+Every RPC appears in ≥ 1 case; S covers every happy path but
+`ListStoragePools`, which runs only in A (steps 3, 6) and D (steps 3, 4, 6).
 
 | RPCs | S | A | B | C | D |
 |---|---|---|---|---|---|
-| CreateCluster / DeleteCluster / GetCluster / ListClusters | 1,2,17 | 1 | 1 | 1,2,3 | 1 |
-| CreateDiskNode / Delete / Get / List / UpdateDisabled / Inspect | 3,4,5,17 | 2,6 | 2 | 2,3,4 | 1 |
-| the six ControllerNode mirrors | 3,4,5,17 | 2,6 | — | 2,4 | 1 |
-| CreateStoragePool / Delete / Get / List / UpdateCntlidSlotList / UpdateLevel / FindNames | 6,8,17 | 3,6 | 3 | 1,2,3 | 2–6 |
-| GrowSlice | 7 | — | — | 1 (validation) | — |
+| CreateCluster / DeleteCluster / GetCluster / ListClusters | 1,2,17 | 1 | 1,2 | 1,3 | 1 |
+| CreateDiskNode / Delete / Get / List / UpdateDisabled / Inspect | 3,4,5,17 | 2,6 | 2,3 | 2,3,4 | 1 |
+| the six ControllerNode mirrors | 3,4,5,17 | 2,6 | 3 | 2,4 | 1 |
+| CreateStoragePool / Delete / Get / List / UpdateCntlidSlotList / UpdateLevel / FindNames | 6,8,17 (List: A, D only) | 3,6 | 3,4 | 1,2,3,5 | 2,3,4,6 |
+| GrowSlice | 7,17 | — | — | 1 (validation) | — |
 | CreateCntlr / DeleteCntlr / UpdateCntlrEnabled | 10 | — | — | 3 | — |
-| InspectCntlr / InspectSide | 16 | — | — | 4 | — |
-| CreateThinDevice / DeleteThinDevice / ListThinDevices | 9,17 | 4,6 | 3,4,6 | 1,2,3 | — |
-| CreateSubsystem / Delete / List / UpdateHosts | 10,17 | 5,6 | 5 | 2,3 | — |
-| CreateNamespace / Delete / UpdateDev / UpdateSuspended | 11,17 | 5,6 | 5 | 1,2 | — |
-| CreateClone / Delete / Get / UpdateTrConf / AppendBitmap | 13 | — | — | 5 | — |
+| InspectCntlr / InspectSide | 16 | — | — | 2 | — |
+| CreateThinDevice / DeleteThinDevice / ListThinDevices | 9,17 | 4,6 | 3,4,6 | 1,2,3 | 5 |
+| CreateSubsystem / Delete / List / UpdateHosts | 10,11,17 | 5,6 | 5 | 1,2,3 | — |
+| CreateNamespace / Delete / UpdateDev / UpdateSuspended | 11,12,17 | 5,6 | 5 | 2 | — |
+| CreateClone / Delete / Get / UpdateTrConf / AppendBitmap | 13 | — | — | 2,5 | — |
 | CreateTransfer / Delete / Get / UpdateHosts | 12 | — | — | 2 | — |
-| CreateMigration / Finish / Cancel / Get / AppendBitmap | 14 | — | — | 3,5 | — |
-| CreateSpareLeg / Delete / Switch | 15 | — | — | 3 | — |
-| GetThinDeviceBitmap / GetLegBitmap | 16 | — | — | 4 | — |
+| CreateMigration / Finish / Cancel / Get / AppendBitmap | 14 | — | — | 2,3,5 | — |
+| CreateSpareLeg / Delete / Switch | 15 | — | — | 2,3 | — |
+| GetThinDeviceBitmap / GetLegBitmap | 16 | — | — | — | — |
 
 Rule coverage: GW6 → B3-6; GW7 → C throughout; GW9 → A3 (implicit) ;
 GW12 → A2/B2; AG2/AG3 → C4-5; AG4 → C5; GW1/§0 #3 → D. Unit-only (§9):
@@ -1759,14 +1861,16 @@ GracefulStop. (The `SpConf.deleting` gate left this list on 2026-09-15:
 Performance/latency/soak; real agents, dnv-worker, dnv-cdc, dnvctl; multi-
 node etcd; etcd outage behavior (unit-level only); TLS/auth (none exists in
 dnv); clone-budget enforcement (§0 #16). The `deleting`-mediated async
-teardown left this list on 2026-09-15 in HALF: `delete-sp` sets the flag and
-case S asserts the latch, but the drain that consumes it belongs to the
-sp-worker, which this suite does not run — `wctl drain-sp` stands in for it
-(§2.4), and dnv-worker.md §14's drain case owns the real coordinator.
+teardowns left this list in HALF — `delete-sp` on 2026-09-15 and
+`delete-clone` on 2026-09-16: each sets its flag and case S asserts the latch
+(§10.11 steps 17 and 13), but the drains that consume them belong to the
+sp-worker, which this suite does not run — `wctl drain-sp` and `wctl
+drain-clone` stand in for them (§2.4), and dnv-worker.md §14's case G owns
+the real coordinator for both.
 
 ---
 
-## 11. Amendments to companion documents (to apply with the implementation)
+## 11. Amendments to companion documents (applied with the implementation)
 
 * `common/constants.go`: add `DefaultGatewayAgentTimeout` (§2.1).
 * `model`: the five §2.2 items (exports; `expectRev` on the three shared
@@ -1775,7 +1879,9 @@ sp-worker, which this suite does not run — `wctl drain-sp` stands in for it
   three ops pass `expectRev = 0`.
 * `integtest/workerctl`: `set-created`, `set-provisioned`, and — with the
   2026-09-15 latch — `drain-sp`, the worker-role stand-in that finishes a
-  teardown this suite's gateway only starts (§2.4, §5.4).
+  teardown this suite's gateway only starts, plus `set-deleting`, the worker
+  suite's own latch (§2.4, §5.4); with the 2026-09-16 clone latch, their
+  clone twins `set-clone-deleting` and `drain-clone` (§2.4, §5.8).
 * `doc/cdc.md` §"CdcEntry ownership": rename the RPC it calls
   `UpdateSubsystemAllowedHosts` to the real name **`UpdateSubsystemHosts`**
   (proto and architecture.md §8.8 agree; cdc.md is the outlier).

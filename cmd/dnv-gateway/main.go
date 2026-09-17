@@ -50,7 +50,8 @@ func newRootCmd() *cobra.Command {
 		Long: "dnv-gateway serves the Gateway gRPC service to users and " +
 			"CLIs. It reads and writes etcd, and calls agents only for " +
 			"GetDnSize/GetCnSize, the Get*Info behind its Inspect* RPCs " +
-			"and the Get*Bm bitmap reads (gateway.md).",
+			"and behind the force=false checks of DeleteClone and " +
+			"FinishMigration, and the Get*Bm bitmap reads (gateway.md).",
 		SilenceUsage: true,
 		// main reports the error on stderr and exits 1; without this cobra
 		// would print the very same line a second time.
@@ -67,10 +68,11 @@ func newRootCmd() *cobra.Command {
 // addFlags declares the CM2 flag set: the two gRPC-server flags of
 // cmd/dnv-agent and the two etcd flags of cmd/dnv-worker.
 //
-// There is deliberately no --etcd-op-timeout — every plain etcd operation and
-// every STM attempt is bounded by common.DefaultEtcdOpTimeout (EU5) — and no
-// default gRPC port: --grpc-address is required exactly as the agent's is, and
-// 29527 stays a documented example rather than a constant (§0 #10).
+// There is deliberately no --etcd-op-timeout — every plain etcd operation, and
+// every STM transaction as a whole with its conflict retries, is bounded by
+// common.DefaultEtcdOpTimeout (EU5) — and no default gRPC port:
+// --grpc-address is required exactly as the agent's is, and 29527 stays a
+// documented example rather than a constant (§0 #10).
 func addFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.String("grpc-network", "tcp", "net.Listen network")

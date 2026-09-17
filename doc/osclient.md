@@ -19,7 +19,8 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
 * Package: `common`, alongside `constants.go`/`name_fmt.go`.
 * Consumers: primarily `dnv-agent` (dn/cn) for `dmsetup`/`mdadm`/`nvme`/
   nvmet-configfs work and for persisting the `Local*Path` protobuf state files;
-  `dnvctl`'s copier may use it too. **All** OS command execution and disk file
+  the `architecture.md` §11.4 userspace copier (future work outside `dnvctl`)
+  may use it too. **All** OS command execution and disk file
   I/O in production code goes through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile` directly outside this file. This is what makes
   the logging rules of `log.md` R8.1/R8.2 enforceable and makes every consumer
@@ -29,12 +30,12 @@ store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
   `common.ReadBlockDirectAt` directly — outside the semaphore, never under a
   lock — and log their own records. Test fixtures that
   spawn a helper process for their own package are outside the rule, not
-  exceptions to it; §8 lists the four that exist.
+  exceptions to it; §8 lists the five that exist.
 * Dependencies: `golang.org/x/sync/semaphore`, `google.golang.org/protobuf`.
   Go ≥ 1.20 for `exec.Cmd.Cancel`/`WaitDelay`; the module itself pins
   `go 1.26.5` in `go.mod`.
 
-## 2. Interface (normative, verbatim)
+## 2. Interface (normative; signatures verbatim)
 
 ```go
 package common
@@ -928,7 +929,7 @@ available):
    `path`/`offset`/`length` and **no** `data` attribute. The fake dispatches
    both methods and returns zero values when the fn fields are unset.
 10. **Direct read helper** (`common.ReadBlockDirectAt` — no `OsClient`
-    involved): against a pre-sized backing file, `WriteBlock` then
+    involved): against a pre-sized backing file, `WriteBlockAt` then
     `ReadBlockDirectAt` at an aligned offset returns the same bytes (tmpfs
     rejects O_DIRECT — run against a file on a real filesystem, and skip
     with a diagnostic if the open fails with `EINVAL`); a misaligned
@@ -971,7 +972,7 @@ Recorded for traceability; the edits are already applied. Unlike the
 "amendments applied to companion documents" sections of `dnagent.md` §5 and
 `cnagent.md` §5, this one records edits made **to this document**.
 
-* The probe-IO carve-out (suite amendment U2-T4) — **`ReadBlockDirect` removed** from the `OsClient`
+* The probe-IO carve-out (suite amendment U2-T5, `cnagent_integtest.md` §20) — **`ReadBlockDirect` removed** from the `OsClient`
   interface (§2), from `LimitedOsClient` (§5) and from `FakeOsClient` (§6). Its
   two raw bodies are exported instead as the package-level helpers
   `common.WriteBlockAt` / `common.ReadBlockDirectAt`, which take no `ctx`, no

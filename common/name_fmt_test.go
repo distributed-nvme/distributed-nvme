@@ -244,7 +244,7 @@ func TestLocalStorePaths(t *testing.T) {
 		nf.LocalMigrBmPath(testCluster, testDn, testSp, testMigr, 3),
 		"/var/tmp/migr-bm-"+c+"-0000000000000003-0000000000000011-000000000000001e-03")
 	// A clone chunk is addressed by the PAIR (src_slice_idx, bm_idx), so the
-	// name ends in two %02x segments and never one (U9, §9.6).
+	// name ends in two %02x segments and never one (§9.6).
 	checkName(t, "LocalCloneBmPath",
 		nf.LocalCloneBmPath(testCluster, testCn, testSp, testClone, 0x07, 0x0a),
 		"/var/tmp/clone-bm-"+c+"-0000000000000005-0000000000000011-0000000000000041-07-0a")

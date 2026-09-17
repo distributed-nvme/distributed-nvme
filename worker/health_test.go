@@ -490,10 +490,11 @@ func TestHealthDnWriteNeedsClusterConf(t *testing.T) {
 // from a cluster that is not even deleted — so the write fails instead.
 //
 // This is not the only worker STM write that takes a ClusterConf — the sp
-// role's model.GrowSlice and model.CreateSpareLeg take one too (reaction.go)
-// — but each of those is handed the p.cc the reaction pass validated before
-// it built the pass, and GrowSlice re-checks both confs at the top of its own
-// STM besides. The monitor's write re-reads the conf from the RW21 cache per
+// role's model.GrowSlice, model.CreateSpareLeg and model.DrainSpSlice take one
+// too (reaction.go, drain.go) — but each of those is handed the p.cc the
+// reaction pass validated before it built the pass, and GrowSlice (both confs)
+// and DrainSpSlice (the cluster one) re-check at the top of their own STMs
+// besides. The monitor's write re-reads the conf from the RW21 cache per
 // write instead of using the snapshot the revision loop validated, so the
 // loop's gate does not cover the value this write uses; that, not uniqueness,
 // is why it validates again (health.go).

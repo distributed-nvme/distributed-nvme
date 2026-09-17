@@ -1,8 +1,8 @@
 // Package model is the architecture.md §5 etcd data model expressed as Go
 // (dnv-worker.md §4): key formats and their parsers, the §5.2 cluster_id, the
 // §5.6 capacity keys, the §6 allocator and the internal §8/§10 mutations. It
-// is shared by the worker now and the gateway later, so that both build the
-// same keys and enforce the same invariants.
+// is shared by the worker, the gateway and dnv-cdc, so that one set of key
+// formats and invariants serves every consumer.
 //
 // model imports common, pb and etcdutil only (layout.md §3). It never dials an
 // agent, never sleeps, and logs nothing of its own beyond the etcdutil records
@@ -576,7 +576,7 @@ func ParseBmIdx(key string) (uint32, bool) {
 }
 
 // ParseCloneBmKey decodes the (src_slice_idx, bm_idx) pair that addresses one
-// chunk of a clone's bitmap (MD2, U1). MD3's clone scan reads the
+// chunk of a clone's bitmap (MD2, §9.6). MD3's clone scan reads the
 // CloneBitmapPrefix keys-only, so a chunk's whole address comes out of its key
 // and never out of a value. Only this 7-field shape parses: a 6-field
 // clone_bitmap key and a migration key of any width are malformed here and

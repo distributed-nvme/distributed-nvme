@@ -107,7 +107,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	})
 	// Two chunks of source slice 0 and one of source slice 1: the fixture's
 	// (1, 0) and (0, 0) share a bm_idx and are still two chunks, because a
-	// clone chunk is addressed by the pair (U1).
+	// clone chunk is addressed by the pair (architecture.md §9.6).
 	for _, pair := range [][2]uint32{{0, 0}, {0, 1}, {1, 0}} {
 		mustPut(
 			t, cli,
@@ -151,7 +151,7 @@ func bmIndexes(chunks []BmChunk) []uint32 {
 }
 
 // bmPairs renders a clone chunk list as the (src_slice_idx, bm_idx) addresses
-// it carries (U1).
+// it carries (architecture.md §9.6).
 func bmPairs(chunks []BmChunk) [][2]uint32 {
 	out := make([][2]uint32, 0, len(chunks))
 	for _, chunk := range chunks {
@@ -390,7 +390,7 @@ func TestLoadSpEmptyBitmapIndex(t *testing.T) {
 	}
 }
 
-// TestLoadSpSkipsOldFormatCloneBmKeys is U12's whole compatibility story under
+// TestLoadSpSkipsOldFormatCloneBmKeys is MD3's whole compatibility story under
 // test: a key of the superseded one-value-per-source-slice format sits under
 // the very prefix MD3 scans, and the load drops it rather than failing or
 // inventing an address for it. Nothing tolerates it, nothing deletes it.

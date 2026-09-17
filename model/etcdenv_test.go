@@ -101,12 +101,13 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-advertise-peer-urls", peerUrl,
 		"--initial-cluster", name+"="+peerUrl,
 		"--initial-cluster-token", name,
-		// U10: dnv requires --max-txn-ops=common.EtcdMaxTxnOps of every etcd
-		// it runs against; the server's own default is 128, below the 486
-		// compares one maximum-shape sp-drain batch reaches — and THIS package
-		// commits that batch, in TestDrainSpSliceAtTheCeiling. (DeleteClone's
-		// 256-key rectangle sweep was this flag's founding justification and
-		// is gone; the clone drain's batches fit the default, CLD11.)
+		// architecture.md §13: dnv requires --max-txn-ops=common.EtcdMaxTxnOps
+		// of every etcd it runs against; the server's own default is 128,
+		// below the 486 compares one maximum-shape sp-drain batch reaches
+		// (SPD13) — and THIS package commits that batch, in
+		// TestDrainSpSliceAtTheCeiling (SPD14). (DeleteClone's 256-key
+		// rectangle sweep was this flag's founding justification and is gone;
+		// the clone drain's batches fit the default, CLD11.)
 		"--max-txn-ops", strconv.Itoa(common.EtcdMaxTxnOps),
 		"--log-level", "error",
 		"--log-outputs", "stderr",

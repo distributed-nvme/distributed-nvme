@@ -406,17 +406,19 @@ func (c *conn) dispatch(p *pdu) error {
 
 // handleCapsule executes one admin command.
 //
-// In-capsule data on a command other than Connect is READ AND DISCARDED, not
-// treated as a protocol error. NP2 lists it among the terminal PDU errors, but
-// that rule cannot survive contact with the production host stack: nvme-stas
-// sends the TP-8010 Discovery Information Management command (opcode 21h)
-// with its 1024 byte payload in the capsule to every discovery controller it
-// connects to. Answering C2HTermReq puts the host in a permanent
-// connect/reset loop, whereas refusing the COMMAND — invalid opcode, DNR, per
-// NP12 and §0 #2's "nothing registers into it" — is what the specs prescribe
-// and what stas is written to handle. The framing itself is already bounded:
-// readPdu refuses any PDU past common.CdcMaxH2CData before a byte of it is
-// buffered, which is the rule NP2 exists to enforce.
+// In-capsule data on a command other than Connect is ACCEPTED AND DISCARDED,
+// not treated as a protocol error (NP2). NP2's earlier reading — that such
+// data is a terminal PDU error — was corrected against the production host
+// stack: nvme-stas sends the TP-8010 Discovery Information Management command
+// (opcode 21h) with its 1024 byte payload in the capsule to every discovery
+// controller it connects to. Answering C2HTermReq puts the host in a
+// permanent connect/reset loop, whereas refusing the COMMAND — invalid
+// opcode, DNR, per NP12 and §0 #2's "nothing registers into it" — is what the
+// specs prescribe and what stas is written to handle. The framing itself is
+// already bounded: readPdu refuses any PDU whose data would exceed
+// common.CdcMaxH2CData — a plen past maxPduLen, the header plus that cap —
+// before a byte of it is buffered, which is the framing cap NP2 exists to
+// enforce.
 func (c *conn) handleCapsule(p *pdu) error {
 	s := sqe(p.hdr[pduCommonHdrLen : pduCommonHdrLen+sqeLen])
 	isConnect := s.opc() == opcFabrics && s.fctype() == fctypeConnect

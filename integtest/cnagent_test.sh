@@ -250,7 +250,7 @@ assert_provisioning_or_ok() { # json path label
 # PROVISIONING with no race: the resources a deferred side or leg deliberately
 # does not create. RES_STATUS_PROVISIONING is a *healthy* status, so it
 # satisfies a bare assert_not_ok and trips every assert_all_ok — naming it
-# explicitly is what keeps both honest (ruling R4.35).
+# explicitly is what keeps both honest (§9's exact-status rule).
 assert_provisioning() { # json path label
 	local got
 	got=$(jq_of "$1" "$2 // \"ABSENT\"")
@@ -261,7 +261,7 @@ assert_provisioning() { # json path label
 # assert_suppressed reads a resource CN19 gated off: not OK, with "sp_level" as
 # the reason. The details check is what keeps it exact now that
 # RES_STATUS_PROVISIONING also satisfies "not OK" — a deferred resource reports
-# "provisioning", never "sp_level" (ruling R4.35, R4.28).
+# "provisioning", never "sp_level" (CN19; §9's exact-status rule).
 assert_suppressed() { # json path label
 	assert_not_ok "$1" "$2.status" "$3"
 	assert_eq "$(jq_of "$1" "$2.details // \"ABSENT\"")" sp_level "$3 details"
@@ -560,8 +560,10 @@ req_cntlr() { # cnidx cntlid_slot primary
 # req_side renders one Side. provisioned is always true here: dn_side has
 # already run the two-phase §9.4 provisioning before any CN sees the side, so
 # the desired state the sp-worker would publish at this point already carries
-# its flip. Without the flag every leg would be provisioning-deferred and no
-# case would build anything at all.
+# its flip. Without the flag every leg would be provisioning-deferred and the
+# cases would build the error-backed shape of cnagent.md §7 item 8 — each td's
+# dm-error, the ns-devs on it and any transfer's `CnXferFinalName` as an error
+# table — instead of their real stacks.
 req_side() { # sideid dnidx
 	printf '{"side_id": "%s", "addr_port": "%s:%s", "cntlid_slot": 0, "nvme_tr_conf": %s, "provisioned": true}' \
 		"$(d16 "$1")" "${IP[$2]}" "$DN_GRPC_PORT" "$(req_tr "${IP[$2]}")"
@@ -611,7 +613,7 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 		"$(d16 "$1")" "$2" "$3" "$4" "$5"
 }
 
-# The Clone record carries no chunk count (minor_updates_08 U2): how many
+# The Clone record carries no chunk count (architecture.md §8.9): how many
 # chunks a clone holds is how many CloneBitmap keys it has. cnagentctl parses
 # this request with strict protojson, so a leftover "bm_cnt" key would fail
 # the call outright rather than being ignored.
@@ -1339,8 +1341,9 @@ cleanup_phase2() { # <cn16> <dn16>
 	resume_suspended
 
 	# Unformat each dn loop device: zeroing the 4 KiB header is enough,
-	# because the volume-table slots are inert without it ([D13] §5.2). No
-	# oflag=, per the §4 dd rule.
+	# because the volume-table slots are inert without it ([D13],
+	# dnagent.md DN5: magic absent ⇒ the disk is blank). No oflag=, per
+	# the §4 dd rule.
 	local dev
 	for dev in $(loop_devs); do
 		dd if=/dev/zero of="$dev" bs=4096 count=1 conv=fsync >/dev/null 2>&1
@@ -2821,8 +2824,10 @@ case_restart() {
 
 	stage reconcile "the reloaded state deep-equals the pre-restart snapshot"
 	# ResInfo.epoch is the time of the last observed status change and the
-	# trackers are in-memory; leg_id_to_leg[].details carries the CN11 prober's
-	# own timestamps, and the probers restart with the agent.
+	# trackers are in-memory; leg_id_to_leg[].details is the CN11 leg verdict
+	# — the block prober's on a primary, the sysfs transport report on a
+	# standby — and a restarted primary reports "health probe pending" there
+	# until its first post-restart probe completes.
 	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)
 		| if .cntlr_info.leg_id_to_leg then
 		    .cntlr_info.leg_id_to_leg |= with_entries(.value |= del(.details))

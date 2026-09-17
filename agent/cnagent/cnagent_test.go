@@ -705,8 +705,8 @@ func TestFreshSyncupCn(t *testing.T) {
 // a single timed-out probe attach a *second* loop to the arena file, and from
 // then on every pass reports "2 loop devices …, want 1": no clone metadata
 // can be allocated or probed on the CN until an operator runs `losetup -d`
-// (CN18: a **single** loop device, re-learned every
-// converge; §8 rejects loop sprawl outright).
+// (CN5: a **single** loop device, re-learned every converge; [D14] rejects
+// loop sprawl outright).
 func TestFailedLosetupNeverAttachesASecondLoop(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -1394,19 +1394,20 @@ func TestSuspendedNsDevFromAnOlderBuildIsResumed(t *testing.T) {
 	})
 
 	// (d) The same guard one layer down, in `ensureDmSingle`: the td's raid0
-	// found suspended with its correct table. U1 made that resume
-	// unconditional by deleting `keepSuspended`, and nothing else in the
-	// package converges a suspended raid0, pool or thin volume — so without
-	// this sub-case the guard could be dropped as dead and the next converge
-	// after a killed agent would leave the stack wedged under a live ns-dev.
+	// found suspended with its correct table. The park ([D12]) made that
+	// resume unconditional by deleting `keepSuspended`, and nothing else in
+	// the package converges a suspended raid0, pool or thin volume — so
+	// without this sub-case the guard could be dropped as dead and the next
+	// converge after a killed agent would leave the stack wedged under a
+	// live ns-dev.
 	t.Run("a suspended raid0 is resumed", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 		raid0 := raid0Name(srv, testTd)
 		node.dms[raid0].suspended = true
-		// The asymmetry U1 introduced, pinned on the fixture that already
-		// exists: an ns-dev found suspended is an ERROR whatever the plan
-		// says, while every OTHER dm device still probes OK with
+		// The asymmetry the park introduced, pinned on the fixture that
+		// already exists: an ns-dev found suspended is an ERROR whatever
+		// the plan says, while every OTHER dm device still probes OK with
 		// `details = "suspended"`. Deliberate — only the ns-dev has a plan
 		// state that used to expect it.
 		probe, err := srv.GetCntlrInfo(context.Background(),
@@ -2445,7 +2446,7 @@ func TestProvisioningCheckRoundIsStable(t *testing.T) {
 // TestSpLevelBeatsProvisioning is §6 test 18's precedence clause: a resource
 // that is both level-suppressed and provisioning-deferred reports MISSING /
 // "sp_level" and not PROVISIONING — the operator said it must not exist, which
-// outranks "it is coming" (CN19, ruling R4.28). Both channels say so.
+// outranks "it is coming" (CN19). Both channels say so.
 func TestSpLevelBeatsProvisioning(t *testing.T) {
 	srv, _ := newTestServer(t)
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,

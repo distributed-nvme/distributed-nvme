@@ -49,10 +49,18 @@ T3. Propagation is transitive end to end by construction: dnvctl mints an id →
     interceptor with that ctx → agent server interceptor restores it → the
     agent's `OsClient`/state-file logs carry the same `trace_id`.
 
-T4. Minting trace ids is the entry points' job, not the interceptors'
+T4. Minting trace ids is the entry points' job, not the §3 interceptors'
     (non-normative recommendation): `dnvctl` creates one per CLI invocation,
-    `dnv-worker` one per sync/health round, `dnv-gateway` handlers MAY create
-    one when a request arrived without one. A sufficient generator:
+    `dnv-worker` one per RW10 unit of work — each Check round (an in-round
+    syncup shares the round's id), each out-of-round syncup, sp fan-out,
+    reaction pass, report/flip STM and bitmap chunk push — and `dnv-gateway` mints one for a
+    request that arrived without one — not in its handlers but in its own
+    `ensureTraceIdUnary`/`ensureTraceIdStream` interceptors
+    (`gateway/traceid.go`), which `serverOptions` (`gateway/server.go`) chains
+    AHEAD of the §4 pair, so the id is already in the incoming metadata when
+    the shared chain logs the request (`gateway.md` §0 #6, §3). The §3
+    interceptors themselves never mint. The generator, `common.NewTraceId` in
+    `common/log.go`, in outline:
 
     ```go
     func NewTraceId() string {
@@ -62,8 +70,6 @@ T4. Minting trace ids is the entry points' job, not the interceptors'
     }
     // ctx := common.WithTraceId(context.Background(), common.NewTraceId())
     ```
-
-    (Put `NewTraceId` in `common/log.go` if implemented.)
 
 ### 2.2 Message logging
 
@@ -407,7 +413,7 @@ grpcServer := grpc.NewServer(
 
 | binary | server interceptors on | client interceptors on |
 |---|---|---|
-| dnv-gateway | its `Gateway` gRPC server | its connections to dn/cn agents (`GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, the `Get*Bm` bitmap reads) |
+| dnv-gateway | its `Gateway` gRPC server | its connections to dn/cn agents (`GetDnSize`/`GetCnSize`, the `Get*Info` behind its `Inspect*`, the `GetCntlrInfo`/`GetSideInfo` force=false checks of `DeleteClone`/`FinishMigration`, the `Get*Bm` bitmap reads) |
 | dnv-worker | — | its connections to dn/cn agents (`Syncup*`, `Push*Bitmap`, the `Check*` streams — the worker never calls `Get*Info`) |
 | dnv-agent dn / cn | its `DiskNodeAgent` / `ControllerNodeAgent` server | — |
 | dnvctl | — | its connection to the gateway (mints a trace id per invocation, T4) |
@@ -498,7 +504,13 @@ instead is recorded here, so that the one carve-out left does not live only in
   §4: it stands in for an agent, and its `agent.log` is the record the suites
   read for what the worker sent — `worker_test.sh` matches `grpc server *`
   records only, never the worker's own client-side ones, which carry the same
-  payloads (§5 prints one such pair).
+  payloads (§5 prints one such pair). `integtest/fakegateway` does the same
+  for the dnvctl suite: it serves all 59 `Gateway` methods behind both server
+  interceptors, and its `fakegateway.log` is the record `dnvctl_test.sh`
+  reads for which RPC dnvctl put on the wire and under which trace id — it
+  selects `grpc server request` records by `trace_id` and `method`; the
+  request payloads it asserts come from the fake's `state.json` (`dnvctl.md`
+  §7.5, §7.7).
 * None of the five drivers installs a logger of its own: each inherits
   `common`'s `init()` chain, which already puts the JSON records on **stderr**
   (`log.md` R2, R3). That inheritance is what keeps a driver's **stdout** the
@@ -524,7 +536,9 @@ instead is recorded here, so that the one carve-out left does not live only in
   interceptor record per gRPC message, logs far more than a one-shot driver;
   its records still reach `agent.log` because the launcher merges both streams
   (`>> …/agent.log 2>&1`), so the file the suite reads holds what it held
-  before.
+  before. `integtest/fakegateway` is launched the same way by
+  `dnvctl_test.sh` (`>> …/fakegateway.log 2>&1`), so the interceptor records
+  that suite reads land in `fakegateway.log` from stderr.
 
 ## 7. Amendments applied to this document
 

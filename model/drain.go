@@ -22,7 +22,7 @@ import (
 // disagree with the keys that describe them. That is preserved here by
 // construction rather than by a single STM — every batch releases budget in the
 // same transaction that shrinks the describing key, so at every commit boundary
-// the keys and the budgets agree exactly (§0 #10).
+// the keys and the budgets agree exactly (SPD13).
 //
 // The three phases, in the order SPD8 derives them from the SpConf alone:
 //
@@ -30,7 +30,7 @@ import (
 //	D2  DrainSpSlice    one batch of up to MaxDelGrpPerTxn groups of one slice
 //	D3  FinishSpDelete  sp_conf, sp_id_to_name, sp_rev and the shard bucket
 //
-// Cntlrs go first deliberately, inverting the naive slices-first order (§0 #4):
+// Cntlrs go first deliberately, inverting the naive slices-first order (SPD9):
 // every cntlr stacks the WHOLE SP on its CN and the coordinator keeps syncing
 // during the drain, so slices-first would make every CN reload pool concats and
 // disband md arrays on every batch — racing the DN export teardown each time —
@@ -131,7 +131,7 @@ func DrainSpCntlrs(
 		}
 		cntlrIds := conf.GetCntlrIdList()
 		if len(cntlrIds) == 0 {
-			// Another owner's D1 got there first (§4.2). A drain step is an
+			// Another owner's D1 got there first (SPD8). A drain step is an
 			// idempotent "pop what is still there", so an empty list is nothing
 			// to do rather than a refusal — SPD2's three conditions above are
 			// the only refusals, and a second `sp drain failed` record per pass
@@ -141,7 +141,7 @@ func DrainSpCntlrs(
 		// Every cntlr reserved the SP's WHOLE footprint, so every one of them
 		// returns it (§6.5). It is computed from the slices as they are NOW,
 		// which is what makes a grown SP release exactly what it charged — and
-		// is the second reason D1 runs before any group is popped (§0 #4).
+		// is the second reason D1 runs before any group is popped (SPD9).
 		footprint, err := spFootprint(s, opDrainSpCntlrs, cid, conf)
 		if err != nil {
 			return err
@@ -243,9 +243,9 @@ func releaseSpCns(
 // means the lists never reindex under a concurrent reader.
 //
 // A batch MUST NOT touch a second slice, even when the first has fewer remaining
-// groups than the budget: the transaction budget of §6 is derived per slice, and
-// the slice-final STM below is what keeps the SpConf's id list and the keys it
-// points at in step.
+// groups than the budget: SPD13's transaction budget is derived for one slice,
+// and the slice-final STM below is what keeps the SpConf's id list and the keys
+// it points at in step.
 //
 // For every removed group, each leg's and each spare leg's sides are released
 // through the DN ledger — per distinct DN once per STM: DnConf put with the
@@ -255,10 +255,10 @@ func releaseSpCns(
 // `slice` key and removes the id from slice_id_list; otherwise it puts the
 // shrunken Slice. There is no "empty slice" intermediate state, and no dangling
 // id: model.LoadSp fetches children by iterating the id lists, so a slice id
-// pointing at nothing would break every subsequent load (§0 #7).
+// pointing at nothing would break every subsequent load (SPD10, SPD11).
 //
 // Every commit therefore leaves a LOADABLE SP whose id lists exactly match its
-// keys and whose DN budgets exactly match its sides (§0 #10).
+// keys and whose DN budgets exactly match its sides (SPD13).
 func DrainSpSlice(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -485,8 +485,9 @@ func removeSidePtr(
 //
 // It is the one drain STM that does NOT bump SpRev — it DELETES the key, and
 // that delete is already the shard worker's stop signal for the sp coordinator
-// (§10.3). The drain therefore terminates itself in the same transaction that
-// finishes the job. After the commit the name is reusable.
+// (dnv-worker.md SW3; the prose carrier is architecture.md §8.4). The drain
+// therefore terminates itself in the same transaction that finishes the job.
+// After the commit the name is reusable.
 func FinishSpDelete(
 	ctx context.Context,
 	cli *etcdutil.Client,

@@ -611,7 +611,8 @@ func (w *spWorker) refuseReactionConf(ctx context.Context, err error) {
 	)
 }
 
-// newPass indexes one snapshot into everything the four reactions read (AR1).
+// newPass indexes one snapshot into everything the reactions read (AR1):
+// failover, thin-pool auto-grow, cntlr replacement, leg repair (AR5-AR8).
 func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 	p := &spPass{
 		state: state,
@@ -664,8 +665,8 @@ func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
 }
 
 // reactionSuppressed is AR3's surviving half: no reaction runs at
-// sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge (§11.7).
-// The record is emitted on the transition only.
+// sp_level >= SP_LEVEL_NO_THINPOOL, where an operator is in charge
+// (architecture.md §11.7). The record is emitted on the transition only.
 //
 // The `deleting` half of AR3 has moved (SPD6): a latched SP no longer merely
 // suppresses its reactions, it runs the drain of drain.go instead, and

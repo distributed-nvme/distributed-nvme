@@ -63,8 +63,9 @@ func ensureTraceIdUnary() grpc.UnaryServerInterceptor {
 // server stream wrapper uses (`loggingServerStream.Context` in
 // common/interceptor.go).
 //
-// `service Gateway` has no streaming RPC today (gateway.md §3 is 59 unary
-// calls), so this half never runs; it is wired for symmetry with the shared
+// `service Gateway` has no streaming RPC today — schema.proto declares 59
+// unary calls and not one `stream`, as dnvctl.md §2.2 states from the client
+// side — so this half never runs; it is wired for symmetry with the shared
 // chain, which installs both halves, so that the first streaming RPC added
 // here inherits the mint instead of quietly losing it.
 func ensureTraceIdStream() grpc.StreamServerInterceptor {

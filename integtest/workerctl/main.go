@@ -3,13 +3,23 @@
 // the architecture.md §5.3 keys through model, marshals the pb messages, bumps
 // the revision keys and reads keys back as protojson.
 //
-// It runs ON THE TEST SERVER, where etcd listens on localhost, and is invoked
-// over ssh by integtest/worker_test.sh (§14.3, §14.10). It never dials an
-// agent and never sleeps: it is the gateway's write path with explicit
-// placement (§14.8, architecture.md §0 item 19). Every mutation is one
+// Every subcommand that reaches etcd runs ON THE TEST SERVER, where etcd
+// listens on localhost, and is invoked over ssh by two suites:
+// integtest/worker_test.sh, whose fake gateway it is (§14.3, §14.10), and
+// integtest/gateway_test.sh, which reads etcd back through it as ground
+// truth and writes through exactly the four worker-role stand-ins of
+// gateway.md §2.4 — set-created, set-provisioned, drain-sp and drain-clone.
+// It never dials an agent and never sleeps: it is the gateway's write path
+// with explicit placement (§14.8, §0 item 19). Every mutation is one
 // etcdutil.RunSTM, so the state it leaves behind is exactly the state a real
 // gateway STM would have produced — capacity keys per §5.6, revision keys
-// bumped in place per §5.5, SpConf.next_id past every id the script assigned.
+// bumped in place per §5.5, SpConf.next_id past every id the script
+// assigned.
+//
+// `constants` and `geometry` are the exceptions: they open no client and read
+// no key, so a suite runs them on the DRIVER, on the binary it has just built
+// and before it ships anything. They are how a shell suite reads a Go constant
+// and the §3.6 geometry formula instead of hand-copying either.
 //
 // Conventions the script relies on:
 //
@@ -63,11 +73,14 @@ const (
 	// writes: the probe succeeds on not-found (§14.7 step 3), so what it
 	// proves is that etcd answers, not that anything is stored.
 	pingKey = common.DnvPrefix + " ping"
-	// The nvme_tr_conf fields every DnConf/CnConf this driver writes carries
-	// (§14.8: "so the SyncupSide nvme_tr_conf fields are non-empty"). The
-	// fake agents never open an NVMe-oF port, so the service id only has to be
-	// deterministic and plausible: 4420 is the IANA nvme-tcp port and the one
-	// the real agents use.
+	// nvmeTrType / nvmeAdrFam are the nvme_tr_conf fields every DnConf/CnConf
+	// this driver writes carries; the fake agents never open an NVMe-oF port,
+	// so they only have to be deterministic and plausible. nvmeTrSvcId is only
+	// the FALLBACK tr_svc_id of an --addr with no port — nvmeTrConfOf stores
+	// the node's own port instead — and 4420 is the IANA nvme-tcp port, which
+	// is all that makes it the plausible fallback: a real agent has no default
+	// here at all, since dnv-agent's --tr-svc-id is required (architecture.md
+	// §13 launches both agents with 4200).
 	nvmeTrType  = "tcp"
 	nvmeAdrFam  = "ipv4"
 	nvmeTrSvcId = "4420"
@@ -749,9 +762,10 @@ func messageForKey(key string) (proto.Message, error) {
 }
 
 // nvmeTrConfOf builds the transport record of a node from its gRPC endpoint.
-// The fakes never open an NVMe-oF port, so only the shape matters: the worker
-// copies these fields into every SyncupSide/SyncupCntlr, and §14.8 asks for
-// them to be non-empty.
+// The fakes never open an NVMe-oF port, so only the shape matters: these
+// fields are copied into the Sides put-sp and put-migr write, the Cntlrs
+// put-sp writes and the CdcEntry put-ss builds; the worker sends a migration
+// source side's as src_nvme_tr_conf.
 func nvmeTrConfOf(addrPort string) *pb.NvmeTrConf {
 	host, port := addrPort, nvmeTrSvcId
 	if idx := strings.LastIndex(addrPort, ":"); idx >= 0 {
@@ -850,8 +864,15 @@ func (g *globals) open() (context.Context, func(), *etcdutil.Client) {
 
 // clusterId reads ClusterConf and derives the cluster_id from it, exactly as
 // the gateway must (architecture.md §5.2, §14.8): cluster_id is not computable
-// from a name alone, so every subcommand but put-cluster / ping / list-* goes
-// through here first.
+// from a name alone, so a subcommand that BUILDS a cluster-scoped key comes
+// through here first. Six subcommands never do: put-cluster (it writes the
+// very ClusterConf this reads), get (it is handed a whole key and needs no
+// id), list-workers (the worker registry is keyed by role and seed, not by
+// cluster), ping, and the two etcd-free ones, constants and geometry.
+// list-keys is the single CONDITIONAL caller: it reads the ClusterConf when it
+// was given a cluster-scoped kind name and a --cluster, and not when it was
+// given a raw `dnv `-prefixed prefix. Every other subcommand reads it
+// unconditionally.
 func (g *globals) clusterId(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1059,6 +1080,8 @@ type command struct {
 
 var commands = []command{
 	{"ping", cmdPing},
+	{"constants", cmdConstants},
+	{"geometry", cmdGeometry},
 	{"put-cluster", cmdPutCluster},
 	{"put-dn", cmdPutDn},
 	{"put-cn", cmdPutCn},
@@ -1183,6 +1206,102 @@ func cmdPing(g *globals, args []string) {
 		"endpoints": g.endpoints,
 		"key":       pingKey,
 		"found":     found,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// constants, geometry — the two subcommands that touch no etcd
+// ---------------------------------------------------------------------------
+
+// cmdConstants prints the common package's transaction-budget constants as one
+// JSON object. It exists because a shell suite cannot import common: worker,
+// gateway and cdc each have to launch etcd with
+// --max-txn-ops=common.EtcdMaxTxnOps (§14.4), and before this subcommand all
+// three carried the number as a hand-copied literal.
+//
+// The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
+// one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
+// that reads it. The other four are the factors of the SPD13/CLD11 budgets a
+// suite may want to size a case against.
+//
+// It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
+// against the binary it has just built, before any host is contacted.
+func cmdConstants(g *globals, args []string) {
+	fs := newFlagSet("constants", g)
+	fs.Parse(args)
+
+	emit(map[string]any{
+		"EtcdMaxTxnOps":     common.EtcdMaxTxnOps,
+		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
+		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
+		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
+		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
+	})
+}
+
+// cmdGeometry prints the §3.6 block geometry of ONE group — the meta_blocks
+// and data_blocks a group of --ext-cnt extents gets — by calling
+// model.GroupBlocks, the one implementation of that formula (MD6). The
+// arithmetic is deliberately NOT repeated here: put-sp computes a group's
+// geometry with the same call on a BdevConf assembled the same way, so the two
+// cannot disagree.
+//
+// The flag defaults are put-cluster's, because the conf this builds is the one
+// put-cluster would store and put-sp would inherit: --block-size and
+// --chunk-blocks are the cluster's bdev_conf, --extent-size its
+// dn_bin_conf.extent_size, and --raid1 chooses the redund kind that put-sp's
+// `--group …:raid1` would have chosen. low_water_mark_pct and stripe_size are
+// not flags: ValidateBdevConf refuses them at zero, ResolveBdevConf fills both
+// with their defaults, and neither enters the geometry.
+//
+// Like constants, it touches no etcd and runs on the driver.
+func cmdGeometry(g *globals, args []string) {
+	fs := newFlagSet("geometry", g)
+	extentSize := fs.Uint64("extent-size", common.MinDnExtSize,
+		"dn_bin_conf.extent_size in bytes")
+	blockSize := fs.Uint64("block-size", common.DefaultDmPoolDataBlockSize,
+		"bdev_conf.dm_pool_conf.data_block_size, the §3.6 block_size")
+	chunkBlocks := fs.Uint64("chunk-blocks", common.DefaultChunkBlockCnt,
+		"redund_md_raid1.bitmap_chunk_block_cnt, the §3.6 bitmap chunk; "+
+			"ignored without --raid1")
+	extCnt := fs.Uint64("ext-cnt", 0, "the group's ext_cnt (required)")
+	raid1 := fs.Bool("raid1", false,
+		"the group is md-raid1 (md superblock + bitmap + health block); "+
+			"without it the group is redund_none and meta is the health "+
+			"block alone")
+	fs.Parse(args)
+
+	if *extCnt == 0 {
+		die("--ext-cnt is required and must not be 0")
+	}
+	bdev := &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{DataBlockSize: *blockSize},
+	}
+	if *raid1 {
+		bdev.RedundConf = &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{
+					BitmapChunkBlockCnt: *chunkBlocks,
+				},
+			},
+		}
+	} else {
+		bdev.RedundConf = &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundNone{
+				RedundNone: &pb.RedundNone{},
+			},
+		}
+	}
+	bdev = model.ResolveBdevConf(bdev)
+	metaBlocks, dataBlocks, err := model.GroupBlocks(*extCnt, *extentSize, bdev)
+	if err != nil {
+		die("geometry: %v", err)
+	}
+	emit(map[string]any{
+		"ext_cnt":     *extCnt,
+		"raid1":       *raid1,
+		"meta_blocks": metaBlocks,
+		"data_blocks": dataBlocks,
 	})
 }
 
@@ -2964,7 +3083,7 @@ func cmdPutBitmap(g *globals, args []string) {
 	target := resolveSp(ctx, cli, cid, *sp)
 
 	// bmCnt is Migration's only: a Clone record carries no chunk count
-	// (minor_updates_08 U2), so the output key is emitted for --kind migr.
+	// (§14.8), so the output key is emitted for --kind migr.
 	var bmCnt uint32
 	var migr bool
 	var spRev uint64

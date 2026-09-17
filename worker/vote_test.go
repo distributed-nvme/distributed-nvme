@@ -953,7 +953,9 @@ func TestVoteFenceWatchStalled(t *testing.T) {
 
 // TestVoteFenceKeyDeleted is VW8 (c): a peer committed this worker dead and
 // deleted its key. The worker's own shutdown and fence deletes must NOT
-// trigger it, which is why self-issued deletes are tracked.
+// trigger it, and cannot: both discard the incarnation before the watch loop
+// can select again, so no bookkeeping of self-issued deletes is kept
+// (vote.go).
 func TestVoteFenceKeyDeleted(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()

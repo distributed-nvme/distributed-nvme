@@ -18,7 +18,9 @@ Conventions:
 * Rule ids are append-only once cited from code: `VW` vote worker (§6), `SW`
   shard worker (§7), `RW` revision worker (§8), `HL` health (§9), `BM` bitmap
   pushes (§10), `AR` automatic reactions (§11), `EU` etcdutil (§3), `MD`
-  model (§4), `CM` cmd (§5), `LG` log records (§12).
+  model (§4), `CM` cmd (§5). `LG` is not one of them: it is the shorthand for
+  §12's log-record table, whose rows are named by their `msg` string and carry
+  no numbered ids.
 * MUST / SHOULD in the RFC sense. Seconds unless stated.
 
 Terminology used throughout:
@@ -78,8 +80,8 @@ Appendix B carries the cross-component one as **[D17]**.
    `extent_size` and `qos_ratio` are read from it every round.
 10. **A new shared package `model`** (§4) holds the §5 etcd data model as
     Go: key formats, `cluster_id`, capacity keys, the §6 allocator and the
-    internal §8/§10.4 mutations, so the gateway later builds on the same
-    code. `layout.md` §3 is amended accordingly.
+    internal §8/§10.4 mutations, which `gateway/` builds on too.
+    `layout.md` §3 is amended accordingly.
 11. **`etcdutil` is specified here** (§3) — the worker is its first consumer.
 12. **Four automatic reactions**: failover, thin-pool auto-grow, cntlr
     replacement, leg repair (§11). The §10.4 `side_unhealthy` *migration* is
@@ -98,7 +100,7 @@ Appendix B carries the cross-component one as **[D17]**.
     replaced — but a disabled *primary* is itself the AR5 failover trigger
     (§8.6). Reactions are suppressed at `sp_level ≥ SP_LEVEL_NO_THINPOOL`.
     *Amended 2026-09-15:* a `deleting` SP is no longer suppressed — it runs
-    one DRAIN step per pass instead, at any level (§11.6).
+    at most one DRAIN step per pass instead, at any level (§11.6).
 16. **Sole-cntlr SPs are repaired** (AR7): a primary with no failover
     candidate is replaced by a new primary on a fresh CN with the same
     `cntlid_slot`.
@@ -144,14 +146,14 @@ Packages and files (`layout.md` §2/§3 as amended by §15):
 | package | files | may import (internal) |
 |---|---|---|
 | `etcdutil` | `etcdutil.go` | `common` — takes `proto.Message`, never imports `pb` |
-| `model` | `keys.go`, `stm.go`, `capacity.go`, `alloc.go`, `ops.go` | `common`, `pb`, `etcdutil` |
-| `worker` | `worker.go` (`Run`/`Config` and the worker-lifecycle §12 msg constants; the flip/bitmap/reaction msgs live beside their emitters in `sprole.go`/`bmpush.go`/`reaction.go`), `vote.go`, `shard.go`, `revision.go`, `conn.go` (the RW7 connection cache), `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go` | `common`, `pb`, `etcdutil`, `model` |
+| `model` | `keys.go`, `stm.go`, `capacity.go`, `alloc.go`, `ops.go`, `drain.go` (the §11.6 sp-drain ops of MD6), `clonedrain.go` (the §11.7 clone-drain ops) | `common`, `pb`, `etcdutil` |
+| `worker` | `worker.go` (`Run`/`Config` and the worker-lifecycle §12 msg constants; the flip/bitmap/reaction msgs live beside their emitters in `sprole.go`/`bmpush.go`/`reaction.go`), `vote.go`, `shard.go`, `revision.go`, `conn.go` (the RW7 connection cache), `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go`, `drain.go` (the §11.6 sp drain's worker half), `clonedrain.go` (the §11.7 clone drain's) | `common`, `pb`, `etcdutil`, `model` |
 | `cmd/dnv-worker` | `main.go` | `worker`, `common`, `etcdutil` (CM4: main builds the client `worker.Run` takes) (+ cobra, viper) |
 
 Out of scope here: the gateway (request validation, the public RPCs, the
 `Inspect*`/`Get*Size`/`Get*Bm` agent calls), `dnv-cdc`, `dnvctl`. Where the
 worker performs an "internal" variant of a gateway mutation (§11), the STM
-body lives in `model` so the gateway later adds only validation and reply
+body lives in `model` and the gateway adds only validation and reply
 mapping on top (MD8).
 
 Reading order for an implementer: §2 (constants) → §3/§4 (the two
@@ -163,8 +165,18 @@ libraries) → §6 → §7 → §8 → §9-§11 → §5 → §12 → §13/§14.
 
 ### 2.1 Additions to `common/constants.go`
 
+The listing is a condensed quote, not a byte-for-byte one: `common/constants.go`
+carries longer comments than the ones below, and the `const ( … )` wrapper is
+this listing's — there these names are one region of the single block that holds
+every `common` constant. The names, the values, the order and the rules the
+comments state are the committed ones, and `common/constants.go` is
+authoritative for comment text (as it is for `dnagent.md` §2.2's block).
+
 ```go
-// dnv-worker (dnv-worker.md §2.1).
+// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
+// another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
+// arithmetic tripwired against it is dnv-worker.md §11.6's and §11.7's —
+// SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 const (
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -179,6 +191,12 @@ const (
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
+	// The --max-txn-ops requirement on every etcd serving dnv (§14.4).
+	// SPD13's 486-compare D2 batch at the maximum shape is the largest
+	// transaction the SPD14 tripwires BOUND, not the largest in the
+	// system: CreateStoragePool's 503-compare maximum shape is larger and
+	// untripwired (gateway.md §2.1, which owns this constant).
+	EtcdMaxTxnOps = 512
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
@@ -198,7 +216,7 @@ substituted value. The four `Default*Unhealthy` thresholds are resolved
 from `SpConf.event_threshold` when a pass reads them (AR4).
 `DefaultDnExtSize` and `DefaultPoolLowWatermarkPct` are read on no worker
 code path at all (only as fixture values in the §13 tests): the gateway
-resolves those two at write time (§7), and the worker uses what is stored
+resolves those two at write time (`architecture.md` §7), and the worker uses what is stored
 or refuses it (RW9, RW14, AR1).
 
 ### 2.2 `pb/schema.proto` — one added message (applied at implementation time)
@@ -213,22 +231,22 @@ message WorkerReg {
 }
 ```
 
-Placed after `SpName`, the last stored message. The edit is deliberately
-**not** applied together with this document: a proto change without `make
-gen` would leave the committed generated code out of sync, and the pinned
-toolchain (README: protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2) is
-what regenerates `schema.pb.go`/`schema_grpc.pb.go` in the same change.
-Nothing else in the schema changes; in particular `Migration` gains no
-field, because the §10.4 migration reaction is withdrawn (§0 item 12).
+Placed after `SpName`, the last stored message (`pb/schema.proto`), and
+regenerated with `make gen` under the pinned toolchain (README:
+protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2), the generated
+`schema.pb.go`/`schema_grpc.pb.go` being committed with it (§16 item 3).
+Nothing else in the schema changed for this document; in particular
+`Migration` gained no field, because the §10.4 migration reaction is
+withdrawn (§0 item 12).
 
 ---
 
 ## 3. Package `etcdutil` [EU]
 
 `log.md` §5.3 fixes the logging obligations and forbids direct `clientv3`
-calls elsewhere; `layout.md` §2 places the package. The worker is its first
-consumer; the gateway and `dnv-cdc` extend it later without changing what is
-specified here.
+calls elsewhere; `layout.md` §2 places the package. The worker was its first
+consumer; the gateway (`gateway.md` GW2) and `dnv-cdc` (`cdc.md`) use it
+too, within what is specified here.
 
 EU1. **Client.** `New(ctx, endpoints []string, dialTimeout time.Duration)
      (*Client, error)` wraps one `clientv3.Client` (`go.etcd.io/etcd/client/v3`,
@@ -339,28 +357,35 @@ EU7. **Tests.** `etcdutil_test.go` runs against a real `etcd` binary found on
 
 ## 4. Package `model` [MD]
 
-The `architecture.md` §5 etcd data model as Go, shared by the worker now and
-the gateway later. `model` imports `common`, `pb`, `etcdutil`; it never dials
+The `architecture.md` §5 etcd data model as Go, shared by the worker, the
+gateway and `dnv-cdc`. `model` imports `common`, `pb`, `etcdutil`; it never dials
 an agent, never sleeps, and logs nothing of its own beyond the `etcdutil`
 records its reads and writes produce.
 
 MD1. **Files.** `keys.go` (key formats, parsers, `ClusterId`), `stm.go` (the
-     SP snapshot loader), `capacity.go` (§5.6), `alloc.go` (§6.3/§6.4),
-     `ops.go` (the internal mutations of MD6). Unit tests colocated.
+     SP snapshot loader), `capacity.go` (§5.6), `alloc.go` (`architecture.md`
+     §6.3/§6.4), `ops.go` (the internal mutations of MD6), `drain.go` (MD6's
+     sp-drain ops, §11.6), `clonedrain.go` (MD6's clone-drain ops, §11.7).
+     Unit tests colocated.
 
 MD2. **Keys.** One function per §5.3 key, one per prefix a component scans or
-     watches, and a parser for every key a worker decodes from a watch:
+     watches, and a parser for every key whose fields a component reads back
+     out of it (the rev, registry, capacity, bitmap-chunk and cdc keys); the
+     list-range and `ClusterConf` keys carry one name after their prefix and
+     are decoded by a prefix trim at the caller (`gateway/common.go`
+     `pageNames`, `worker/clusterconf.go` `clusterConfName`), not by a
+     `model` parser:
 
      | message / purpose | function → key |
      |---|---|
      | `ClusterConf` | `ClusterConfKey(name)` → `{p} cluster_conf {name}`; `ClusterConfPrefix()` → `{p} cluster_conf ` |
      | `DnGlobal`/`CnGlobal`/`SpGlobal` | `DnGlobalKey(cid)` … → `{p} dn_global {cid}` … |
      | `DnRev`/`CnRev`/`SpRev` | `DnRevKey(shard, cid, dnId)` → `{p} dn_rev {shard} {cid} {dnId}`; `DnRevPrefix(shard)` → `{p} dn_rev {shard} `; `ParseDnRevKey(key) (shard uint32, cid, dnId uint64, ok bool)` — likewise `Cn*`, `Sp*` |
-     | `DnConf`/`CnConf` | `DnConfKey(cid, addrPort)`, `CnConfKey(cid, addrPort)` |
-     | `DnCapacity` | `DnCapacityKey(cid, binIdx, freeExt, addrPort)` → `{p} dn_capacity {cid} {bin:%01x} {free:%016x} {addr_port}`; `DnCapacityPrefix(cid, binIdx)` |
-     | `CnCapacity` | `CnCapacityKey(cid, freeExt, addrPort)`; `CnCapacityPrefix(cid)` |
-     | `CdcEntry` | `CdcEntryKey(cid, shard, spId, ssId)`; `CdcEntryPrefix()`; `ParseCdcEntryKey(key) (cid uint64, shard uint32, spId uint64, ssId uint64, ok bool)` — the one prefix and parser pair a worker never uses: dnv-cdc scans and watches the prefix and decodes the keys off it (`cdc.md` §2.2, §4) |
-     | `SpConf`, `SpName` | `SpConfKey(cid, spName)`, `SpNameKey(cid, spId)` |
+     | `DnConf`/`CnConf` | `DnConfKey(cid, addrPort)`, `CnConfKey(cid, addrPort)`; `DnConfPrefix(cid)` → `{p} dn_conf {cid} `, `CnConfPrefix(cid)` → `{p} cn_conf {cid} ` — the gateway's `ListDiskNodes`/`ListControllerNodes` page ranges (`gateway.md` GW10), scanned by no worker |
+     | `DnCapacity` | `DnCapacityKey(cid, binIdx, freeExt, addrPort)` → `{p} dn_capacity {cid} {bin:%01x} {free:%016x} {addr_port}`; `DnCapacityPrefix(cid, binIdx)`; `ParseDnCapacityKey(key) (binIdx uint32, freeExt uint64, addrPort string, ok bool)` — MD5's scan reads the candidate out of the key itself |
+     | `CnCapacity` | `CnCapacityKey(cid, freeExt, addrPort)`; `CnCapacityPrefix(cid)`; `ParseCnCapacityKey(key) (freeExt uint64, addrPort string, ok bool)` |
+     | `CdcEntry` | `CdcEntryKey(cid, shard, spId, ssId)`; `CdcEntryPrefix()`; `ParseCdcEntryKey(key) (cid uint64, shard uint32, spId uint64, ssId uint64, ok bool)` — a prefix and parser pair no worker uses (like the three list-range prefixes above and below): dnv-cdc scans and watches the prefix and decodes the keys off it (`cdc.md` §2.2, §4) |
+     | `SpConf`, `SpName` | `SpConfKey(cid, spName)`, `SpNameKey(cid, spId)`; `SpConfPrefix(cid)` → `{p} sp_conf {cid} ` — the `ListStoragePools` page range (`gateway.md` GW10), scanned by no worker |
      | `Cntlr`, `Slice` | `CntlrKey(cid, spId, cntlrId)`, `SliceKey(cid, spId, sliceId)` |
      | `ThinDevice`, `Subsystem` | `ThinDeviceKey(cid, spId, tdName)`, `SubsystemKey(cid, spId, nqn)` |
      | `Clone`, `CloneBitmap` | `CloneKey(cid, spId, name)`, `CloneBitmapKey(cid, spId, name, srcSliceIdx, bmIdx)` — the 7-field key, BOTH indexes `BmIdxFmt` —, `CloneBitmapPrefix(cid, spId, name)`, `ParseCloneBmKey(key) (srcSliceIdx, bmIdx uint32, ok bool)` |
@@ -422,8 +447,10 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      at a time (BM3). Bitmap indexes come from a keys-only scan
      (`RangeKeysAtRev`, EU2) performed **outside** the STM at the same store
      revision (`clientv3.WithRev(state.Rev)`): the STM cannot range, and the
-     set of indexes only ever grows (§8.9/§8.11), so a slightly newer view is
-     harmless. One loader serves both prefixes and forks on the key parser
+     pin is what keeps the two reads consistent — the set of indexes is not
+     append-only, since the §11.7 clone drain deletes chunk keys, so the scan
+     is served at the snapshot's own revision and never at a newer one
+     (`RangeKeysAtRev`, EU2). One loader serves both prefixes and forks on the key parser
      (MD2): `ParseCloneBmKey` under a `CloneBitmapPrefix`, `ParseBmIdx` —
      reported at `SliceIdx = 0` — under a `MigrBitmapPrefix`. A key the
      prefix's own parser rejects is skipped silently, so one stray key of a
@@ -444,12 +471,12 @@ MD4. **Capacity keys** (`architecture.md` §5.6, §6.2). `DnBinIdx(freeExt
      rule, inside that op's STM. `old` is the record as read in the same STM,
      which is what makes the delete target exact.
 
-MD5. **Allocator** (§6.3/§6.4 verbatim). `FindDnCandidates(ctx, cli, cid,
+MD5. **Allocator** (`architecture.md` §6.3/§6.4 verbatim). `FindDnCandidates(ctx, cli, cid,
      cc, candExt uint64, candCnt int, black, white, excludeLocs []string)
      ([]Cand, error)` — `excludeLocs` seeds the `LocList`, so the caller's
      own failure domains are excluded before the walk starts —
      `FindDnCandidatesAntiAffine(…, candCnt, requiredCnt int, black, white,
-     excludeLocs []string) ([]Cand, bool, error)`, the §6.5 two-tier rule
+     excludeLocs []string) ([]Cand, bool, error)`, the `architecture.md` §6.5 two-tier rule
      (tier 1 with the exclusion; tier 2 rescans without it when tier 1 yields
      fewer than `requiredCnt` — the DNs the caller must actually place, never
      the oversampled `candCnt` — and its candidates are merged **behind**
@@ -468,7 +495,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      precondition it lists (MD7), and bumps exactly the revisions
      `architecture.md` §8/§10 assign to the equivalent RPC. `now` is the
      caller's unix seconds; thresholds are resolved inside from
-     `SpConf.event_threshold` with the §7 defaults. `shard`/`spId` address
+     `SpConf.event_threshold` with the `architecture.md` §7 defaults. `shard`/`spId` address
      the `SpRev` key; `spName` the `SpConf`. Three ops — `GrowSlice`,
      `CreateSpareLeg`, `SwitchSpareLeg` — also take `expectRev` (added by
      gateway.md §2.2 #3): when non-zero the STM re-checks `SpRev.revision ==
@@ -486,12 +513,12 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
-     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (§7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (§8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
+     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
-     | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (§7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
+     | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (`architecture.md` §7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
      | `FinishSpDelete(cid, shard, spId, spName)` | the drain checks; `cntlr_id_list` and `slice_id_list` both empty; `SpRev` and `SpGlobal` exist | delete `SpConf`, `SpName`, `SpRev`; `SpGlobal.shard_bucket[shard] -= 1`. The ONE op that does not bump `SpRev` — it deletes the key, which is the shard worker's stop signal (§8.4) |
      | `DrainCloneBm(cid, shard, spId, spName, cloneName, cloneId, chunks []BmChunk) (batchSize int)` | the CLONE drain checks of §11.7 (CLD2: SpConf exists and is not itself deleting, `sp_id` unchanged, Clone exists, `clone_id` unchanged, `deleting == true`); `len(chunks) <= MaxDelBmPerTxn` | `Del` each named `CloneBitmap` key — nothing else, and nothing the caller did not name; the `Clone` record is NOT rewritten; bump `SpRev`. The return is the SIZE of the batch it was handed, never a count of keys that were still there — a `Del` is an idempotent pop, so the loser of an accepted two-owner overlap reports a full batch and removes nothing. An empty batch is a no-op that writes and bumps nothing |
      | `FinishCloneDelete(cid, shard, spId, spName, cloneName, cloneId)` | the clone drain checks | delete the `Clone` key AND remove the name from `clone_name_list` in the same STM; bump `SpRev` (the SP outlives the clone, so this one bumps) |
@@ -503,7 +530,7 @@ MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
      re-evaluates on its next pass.
 
 MD8. **Gateway reuse (non-normative).** The public RPCs of `architecture.md`
-     §8 are the same STM bodies plus request validation (§7), the public
+     §8 are the same STM bodies plus request validation (`architecture.md` §7), the public
      preconditions (`DeleteCntlr`'s `disabled == true`, `primary == false`)
      and reply mapping; the gateway adds those on top of `model` rather than
      duplicating the bodies.
@@ -512,7 +539,7 @@ MD9. **Tests.** Key golden strings (the §5.1 example, every prefix ending in
      a space, round-trip of every parser); `ClusterId` against a fixed
      vector; `DnBinIdx`/allocatable tables; and, against the EU7 etcd binary
      (skipped without one): the allocator's bin walk, location dedupe,
-     black/white lists, the `excludeLocs` seeding of §6.5 tier 1 and the
+     black/white lists, the `excludeLocs` seeding of `architecture.md` §6.5 tier 1 and the
      two-tier helper (tier 1 alone; the tier-2 rescan merged **behind** it;
      and the trigger itself — a tier 1 short of `candCnt` but not of
      `requiredCnt` must NOT fall through); each MD6 op's happy path, every
@@ -586,8 +613,8 @@ CM7. **Wiring check.** `go list -deps ./cmd/dnv-worker | grep etcd` finds the
 
 ## 6. The vote worker — `worker/vote.go` [VW]
 
-One vote worker per process. It owns the seed, the heartbeat loop, the three
-registry watches, the per-registration state machines, the effective
+One vote worker per process. It owns the seed, the heartbeat loop, one
+registry watch per configured role (VW3, VW10), the per-registration state machines, the effective
 membership of every role, the ownership computation, and the lifecycle of the
 shard workers.
 
@@ -842,7 +869,7 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      (`ReplyCodeStaleRevision`) means the agent holds a revision newer than
      etcd's, which only an etcd restore can cause and is logged at `Error`.
      Invalid conf (`ReplyCodeInvalidConf`) means the agent found a proto3
-     zero where §7 requires a concrete value and converged nothing
+     zero where `architecture.md` §7 requires a concrete value and converged nothing
      (`dnagent.md` §2.2). Only `SyncupDn` and `SyncupCntlr` can return it,
      and the same members are checked on this side first — `extent_size` by
      RW9's gate, the SP's `bdev_conf` by RW14's — so a request this worker
@@ -885,7 +912,7 @@ RW8. **Round timeout** = the object kind's interval: a reply arriving later
 RW9. **Inputs from the cache** (§8.5), every one used **as stored**:
      `dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval`
      (already inside `[MinHealthCheckInterval, MaxHealthCheckInterval]` —
-     `CreateCluster` resolved and clamped them at write time, §7),
+     `CreateCluster` resolved and clamped them at write time, `architecture.md` §7),
      `extent_size`, `qos_ratio`, `dn_bin_conf`. A cluster absent from the
      cache ⇒ the loop **idles**: no stream, no syncup, one `cluster conf
      missing` record, a retry every `DefaultHealthCheckInterval` seconds.
@@ -904,7 +931,7 @@ RW9. **Inputs from the cache** (§8.5), every one used **as stored**:
      the error string, so a steady bad conf costs one record and a conf
      that changes from one invalid value to another still reports.
 
-RW10. **Trace ids.** Every round, syncup, push, flip and reaction runs under
+RW10. **Trace ids.** Every round, syncup, fan-out, push, flip and reaction runs under
       `common.WithTraceId(ctx, seed[:8] + "-" + common.NewTraceId())`. The
       interceptors carry it to the agent (`grpc.md` T1), whose log then names
       the worker that sent each request — the §14 suite's
@@ -975,7 +1002,7 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       (HL2).
 
       Between the load and the plan the fan-out validates the SP's stored
-      `bdev_conf` with `model.ValidateBdevConf` (§7). That geometry is what
+      `bdev_conf` with `model.ValidateBdevConf` (`architecture.md` §7). That geometry is what
       RW16's request carries verbatim and what RW15's migration destination
       takes its `block_size` from — a plain side request carries none of
       it. `dm_raid0_conf.stripe_size` is read on no worker path at all, and
@@ -997,8 +1024,10 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
 RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       side_pointer{sp_id, leg_id, side_id}, revision = SpRev.revision,
       side_conf{ext_cnt = group.ext_cnt, cntlid_slot = side.cntlid_slot,
-      primary_cn_id = the cn_id of the cntlr with primary == true (0 if
-      none), standby_id_list = the cn_ids of every other cntlr — disabled
+      primary_cn_id = the cn_id of the cntlr with primary == true (0 when
+      cntlrs exist but none is primary; an SP with NO cntlr gets no side
+      request at all, its side children staying idle — SPD7),
+      standby_id_list = the cn_ids of every other cntlr — disabled
       ones included, a disabled cntlr keeps its standby shape
       (`cnagent.md` §4) —, sp_level = SpConf.sp_level, provisioned =
       side.provisioned}}`. If the side's leg has two sides and a `Migration`
@@ -1010,7 +1039,7 @@ RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       group.meta_blocks, dm_clone_conf = the migration's, bm_cnt =
       Migration.bm_cnt}`. The migration's `dm_clone_conf` is the one conf
       still filled in here (`hydration_threshold` / `hydration_batch_size`
-      0 ⇒ their §7 defaults, on a copy — the loaded state is shared with
+      0 ⇒ their `architecture.md` §7 defaults, on a copy — the loaded state is shared with
       every child). `block_size` and everything else is sent as stored; a
       zero in the SP's geometry was refused by RW14's gate instead.
 
@@ -1020,7 +1049,8 @@ RW16. **Cntlr request.** `SyncupCntlrRequest{cluster_id, cn_id,
       fmt.Sprintf(IdKeyFmt, slice_id) — the key the cn agent reads —,
       td_list in td_name_list order, nqn_to_subsystem, clone_list,
       xfer_list, migr_list}`. Every cntlr of the SP receives the full state
-      (§10.3).
+      (§10.3) — less any clone whose `deleting` is set, which is absent from
+      every cntlr's `clone_list` (CLD5).
 
 RW17. **Rounds** send `CheckSideRequest{cluster_id, dn_id, side_pointer,
       revision, show_info}` / `CheckCntlrRequest{cluster_id, cn_id,
@@ -1100,8 +1130,9 @@ HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
      health monitor's, issued against a conf re-read from the cache after
      the gate ran — one the watch goroutine may have replaced in between. It is not the only
      worker STM write that takes a `ClusterConf` — the sp role's
-     `GrowSlice` and `CreateSpareLeg` take one too (MD6, HL6) — but those
-     two sit behind AR1's gate, and `GrowSlice` re-checks both confs at the
+     `GrowSlice`, `CreateSpareLeg` and `DrainSpSlice` take one too (MD6,
+     HL6) — but those three sit behind AR1's cluster-conf gate, and
+     `GrowSlice` re-checks both confs, `DrainSpSlice` the cluster's, at the
      top of its own STM besides. Guessing a ladder here would leave the
      real capacity key undeleted, and `architecture.md` §6.3's bin scan
      would go on offering it as an allocation candidate for a DN HL1 has
@@ -1140,7 +1171,9 @@ HL6. **No cross-role health writes.** The sp role's health bookkeeping — this
      `Cntlr`/`Leg`/`Side` only), and the dn/cn roles never touch SP records.
      (The sp role's §11 *reactions* do rewrite `DnConf`/`CnConf` through the
      model ops — GrowSlice charges DNs and every cntlr CN, CreateSpareLeg
-     charges its one DN, ReplaceCntlr rewrites two `CnConf`s — but that is
+     charges its one DN, ReplaceCntlr rewrites two `CnConf`s — and so does
+     the §11.6 sp drain, whose D1 credits every cntlr CN and whose D2
+     batches credit every DN they touch (`model/drain.go`) — but that is
      allocation bookkeeping, not health.) An unreachable DN is therefore
      marked on `DnConf` by its dn-role owner and on the `Side` records of its
      sides by each sp-role owner, independently.
@@ -1230,26 +1263,34 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      the **primary** cntlr (pool usage, spare readiness) and `now` (unix
      seconds).
 
-     **Both** stored confs are validated before the pass is built — the
-     cluster's with `model.ValidateClusterConf`, the SP's `bdev_conf` with
-     `model.ValidateBdevConf` (§7). Both, because this pass takes its own
+     **Both** stored confs are validated before the reactions are evaluated
+     — the cluster's with `model.ValidateClusterConf`, the SP's `bdev_conf`
+     with `model.ValidateBdevConf` (`architecture.md` §7). Both, because this pass takes its own
      fresh snapshot of the SP rather than reusing the fan-out's: AR6 reads
      `low_water_mark_pct` and `data_block_size` straight off it and sizes a
      meta grow with the cluster's `extent_size`, while the DN scans of AR6
      and AR8 walk the bin ladder and every allocating reaction takes its
      oversampling batch from `alloc_conf`. A
      failure refuses the pass with one `invalid stored conf` record (§12,
-     once per distinct error) and nothing else happens: no candidate scan,
-     no `model` op, no `reaction applied` and no `reaction skipped`. The
+     once per distinct error) and no reaction runs: no candidate scan,
+     no reaction `model` op, no `reaction applied` and no `reaction skipped`.
+     Neither drain sits behind both gates (`worker/reaction.go`): the
+     clone drain's steps (CLD7) run first of all, ahead of the cluster-conf
+     lookup and of both validations, and a latched SP's drain step (SPD6)
+     runs behind the cluster-conf gate — its D2 batch maintains DN capacity
+     keys off the ladder — but ahead of the `bdev_conf` one, so a refusal
+     of the SP's own geometry still lets that SP drain. The
      ticker keeps running — the pass cadence falls back to
      `DefaultHealthCheckInterval` on an unusable conf and logs nothing of
      its own, because a coordinator that stopped ticking would stop
      retrying the fan-out and the pass forever, and those two are where the
      refusal is already recorded. A cluster missing from the cache stops
-     the pass the same way, silently: its children log `cluster conf
-     missing` for the idle period (RW9).
+     the pass the same way, silently — after the clone drain's steps, which
+     read no cluster conf, and before an sp drain step, which does: its
+     children log `cluster conf missing` for the idle period (RW9).
 
-AR2. **One action per SP per pass**, evaluated in this priority; the first
+AR2. **One action per SP per pass** — "action" meaning a *reaction*
+     throughout this rule — evaluated in this priority; the first
      applicable one runs and the pass ends:
      1. primary failover (AR5)
      2. thin-pool auto-grow (AR6)
@@ -1259,13 +1300,16 @@ AR2. **One action per SP per pass**, evaluated in this priority; the first
      Every action is a `model` op that re-validates its preconditions inside
      its STM (MD6/MD7); success logs `reaction applied` and the resulting
      `SpRev` bump re-fans the SP (RW14), so the next pass sees the new state.
-     The invariant is **at most one applied action per SP per pass**; a
+     The invariant is **at most one applied action per SP per pass**; the
+     clone drain's steps are not actions in this sense and commit alongside
+     one — a pass over a live SP can bump `SpRev` once per deleting clone
+     (CLD7, CLD12) and once more for its reaction. A
      `reaction skipped` that means "not applicable here, keep looking" does
      not end the pass. The pass continues past: AR5's no-failover-candidate
      (AR7's sole-primary variant, §0 item 16, is defined as "AR5 found
      none" and would otherwise be unreachable); AR6's `grow_pending`,
      `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
-     grow deferred on the CN, the §8.5 ceiling — and must not disable
+     grow deferred on the CN, the `architecture.md` §8.5 ceiling — and must not disable
      AR7/AR8 for the duration); and AR8's `leg_has_two_sides` and
      `spare_list_full`, which move the scan to the next candidate leg.
      Everything else ends the pass as before: every `ErrPrecondition`, every
@@ -1276,11 +1320,14 @@ AR2. **One action per SP per pass**, evaluated in this priority; the first
 
 AR3. **Suppression.** No reaction runs for an SP with
      `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
-     §11.7, where an operator is in charge). *Amended 2026-09-15:* an SP with
-     `deleting == true` used to be suppressed here too; it now runs exactly
+     `architecture.md` §11.7, where an operator is in charge). *Amended 2026-09-15:* an SP with
+     `deleting == true` used to be suppressed here too; it now runs at most
      one DRAIN step per pass and no reaction at all, at ANY `sp_level`,
-     because a doomed SP must drain whatever level an operator left it at
-     (§11.6, SPD6). A **disabled** cntlr is never a
+     because a doomed SP must drain whatever level an operator left it at —
+     "at most", because the AR1 gates that sit ahead of the branch still
+     apply: a pass whose `LoadSp` failed, or whose cluster conf is missing or
+     unusable, runs no step at all (the SP's own `bdev_conf` gate sits
+     *behind* it, deliberately — §11.6, SPD6). A **disabled** cntlr is never a
      candidate, replaced or repaired — but a disabled *primary* is itself the
      AR5 failover trigger (§8.6). Disabling is the operator's hands-off
      signal, and §10.4's "skipping the enabled check" is read as skipping the
@@ -1288,10 +1335,10 @@ AR3. **Suppression.** No reaction runs for an SP with
      disabled cntlrs.
 
 AR4. **Thresholds.** `now − err_epoch ≥ T` with `T` the SP's
-     `event_threshold` field, `0` ⇒ the §7 default (`DefaultPrimaryUnhealthy`
+     `event_threshold` field, `0` ⇒ the `architecture.md` §7 default (`DefaultPrimaryUnhealthy`
      5, `DefaultCntlrUnhealthy` 600, `DefaultSideUnhealthy` 600,
      `DefaultLegUnhealthy` 1200). `leg_unhealthy > side_unhealthy` is a
-     gateway validation rule (§7, amended by §15); the worker is correct
+     gateway validation rule (`architecture.md` §7, amended by §15); the worker is correct
      either way.
 
 ### 11.2 Failover
@@ -1301,7 +1348,7 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      `cntlr_id` among those with `primary == false`, `disabled == false`,
      `err_epoch == 0`; none ⇒ `reaction skipped` (`no candidate`) and the pass
      continues (AR2); else
-     `model.Failover(old, candidate)`. This is the §11.1 failover trigger;
+     `model.Failover(old, candidate)`. This is the `architecture.md` §11.1 failover trigger;
      the data-plane choreography is the agents'. The `disabled` trigger waits
      out no threshold: disabling is explicit operator intent and the disabled
      primary has already stopped serving (§8.6). The candidate-skip
@@ -1323,13 +1370,13 @@ AR6. Per slice, from the primary's `slice_id_to_dm_pool[slice_id]` row,
      change. With `lwm = dm_pool_conf.low_water_mark_pct` **as stored**
      (`> 100` ⇒ auto-grow off, the one value that is a meaning rather than
      a default; a `0` never reaches here — `CreateStoragePool` resolved it
-     at write time and AR1's gate refuses one that did, §7):
+     at write time and AR1's gate refuses one that did, `architecture.md` §7):
 
      * **data grow** when `used_data × 100 > lwm × total_data`: internal
        `GrowSlice(is_meta = false)` with `ext_cnt` = the slice's first data
        group's `ext_cnt` (grow by the original allocation unit);
      * **meta grow** when `used_meta × 100 > lwm × total_meta`: internal
-       `GrowSlice(is_meta = true)`, ladder-sized (§8.5); data is checked
+       `GrowSlice(is_meta = true)`, ladder-sized (`architecture.md` §8.5); data is checked
        first when both breach.
 
      **Pending rule (stateless).** A grow of a kind is *pending* while the
@@ -1343,7 +1390,7 @@ AR6. Per slice, from the primary's `slice_id_to_dm_pool[slice_id]` row,
      issue a second grow; a grow deferred on the CN ([D15]) stays pending the
      same way, because its totals have not moved. Candidates:
      `FindDnCandidatesAntiAffine(candExt = ext_cnt, candCnt = legs ×
-     dn_batch_size, requiredCnt = legs, black = ∅, excludeLocs = ∅ — §6.5
+     dn_batch_size, requiredCnt = legs, black = ∅, excludeLocs = ∅ — `architecture.md` §6.5
      leaves the grow on the plain scan, so tier 2 never runs)` where
      `legs` = 1 (`RedundNone`) or 2 (`RedundMdRaid1`),
      picked randomly with the growing black list so the legs land on
@@ -1412,21 +1459,30 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         group the list holds two parked legs, and only `DeleteSpareLeg` by an
         operator frees a slot (Appendix B).
 
-AR9. **The worker never**: deletes a td, subsystem, clone, transfer,
-     migration or spare; touches a `RedundNone` leg; acts on a suppressed SP;
-     starts a migration; or runs two reactions in one pass. Every automatic
-     action re-homes redundancy or roles (§10.4). *Amended 2026-09-15:* it
-     does delete the implicit children — cntlrs, slices, groups, legs, sides —
-     of an SP a `DeleteStoragePool` has LATCHED, which is §11.6's drain and
-     not a reaction; the list above is about objects a USER made, and the
-     drain touches none of them (a latched SP has none, by the same
-     five-empty-lists precondition that let it be latched).
+AR9. **The worker never**: deletes a td, subsystem, transfer, migration or
+     spare, or a clone that is not `deleting`; touches a `RedundNone` leg;
+     acts on a suppressed SP; starts a migration; or runs two reactions in
+     one pass. Every automatic action re-homes redundancy or roles (§10.4).
+     *Amended 2026-09-15:* it does delete the implicit children — cntlrs,
+     slices, groups, legs, sides — of an SP a `DeleteStoragePool` has
+     LATCHED, which is §11.6's drain and not a reaction (the five-empty-lists
+     precondition that let it be latched means it holds no td, subsystem,
+     clone, transfer or migration; a spare leg it may still hold is a leg
+     and goes with its group — `TestDrainSpSliceReleasesSpareLegs`).
+     *Amended 2026-09-16:* and it does delete a `Clone` a
+     `DeleteClone` has LATCHED — its chunk keys in batches, then the record
+     together with its `clone_name_list` entry — which is §11.7's drain and
+     not a reaction (CLD8, CLD9). Both drains finish a deletion a user began
+     with the latch and neither ever starts one; the list above is what no
+     reaction touches.
 
 ### 11.6 The sp drain [SPD]
 
-*Added 2026-09-15. The rule ids are
-that document's and keep its `SPD` prefix rather than taking a new two-letter
-one, so that one id spells the rule in the design, in the code comments
+*Added 2026-09-15 from the sp incremental-delete design
+(`sp_incremental_deleting.md`, a working document that was retired without
+ever being committed; this section is the surviving definition). The rule ids
+are that design's and keep its `SPD` prefix rather than taking a new two-letter
+one, so that one id spells the rule in the code comments
 (`model/drain.go`, `worker/drain.go`) and here.*
 
 `DeleteStoragePool` no longer tears an SP down. It LATCHES it — `deleting =
@@ -1526,14 +1582,17 @@ SPD9. **D1 — cntlrs first.** Every cntlr in one transaction, BEFORE any slice
       host IO and discovery: a latched SP has an empty `nqn_list`, hence no
       subsystems, no `CdcEntry` keys and no host paths.
 
-SPD10/SPD11. **D2 — one slice batch.** Up to `MaxDelGrpPerTxn` groups of ONE
+SPD10. **D2 — one slice batch.** Up to `MaxDelGrpPerTxn` groups of ONE
       slice, popped from the TAIL of `data_grp_list` first and then, if budget
       remains, from the tail of `meta_grp_list`. A batch MUST NOT touch a
       second slice even when the first has fewer groups left than the budget.
       Tail-popping is not a detail: a group's position in its list and a leg's
       `leg_idx` inside it are the md member order, so no surviving group or
-      leg is ever renumbered. The batch that empties a slice deletes the
-      `Slice` key AND its `slice_id_list` entry in the same transaction —
+      leg is ever renumbered.
+
+SPD11. **D2's slice-final half**, the same batch as SPD10's and never a step
+      of its own. The batch that empties a slice deletes
+      the `Slice` key AND its `slice_id_list` entry in the same transaction —
       there is no "empty slice" intermediate state, and `model.LoadSp`
       iterates the id lists, so a dangling id would break every later load.
 
@@ -1556,8 +1615,11 @@ SPD12. **D3 — the final keys.** `SpConf`, `SpName`, `SpRev` and GW12's
       latched — the latch is one-way (SPD5) and nothing else removes the keys —
       so the drain names the repair on every tick in `sp drain failed`
       (`reason=cntlr not found` / `slice not found`), and an operator restores
-      the missing key (the §14.8 driver's `put-sp` rewrites the whole SP) to
-      let it finish. That is a louder and more recoverable state than a silent
+      the missing key by hand — a raw etcd put (`etcdctl`) of the `Cntlr` or
+      `Slice` record: the §14.8 driver has no subcommand that CREATES a
+      `cntlr`/`slice` key (`set-cntlr` rewrites only a cntlr that still
+      exists), and its `put-sp` refuses an SP whose `sp_conf`
+      exists — to let it finish. That is a louder and more recoverable state than a silent
       ledger drift, which is why it is the direction chosen.
 
 SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
@@ -1586,14 +1648,23 @@ SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       today, so `486 ≤ EtcdMaxTxnOps = 512`. Sides contribute one DN each
       because a latched SP has no migrations and therefore no two-side legs.
       D1 (≤ ~100), D3 (≤ 8) and the latch (5) are trivially legal. SPD14 is
-      the tripwire pair that keeps it so: an arithmetic assertion over the
-      NAMED constants (`gateway/txnbudget_test.go`) and a maximum-shape batch
-      committed against a real etcd (`model/drain_test.go`).
+      the tripwire pair that keeps it so.
+
+SPD14. **Tripwires.** The budget of SPD13 is kept legal by a pair of tests:
+      an arithmetic assertion over the NAMED constants
+      (`gateway/txnbudget_test.go`, `TestSpDrainBatchBudget`) and a
+      maximum-shape D2 batch committed against a real etcd started with
+      `--max-txn-ops=EtcdMaxTxnOps` (`model/drain_test.go`,
+      `TestDrainSpSliceAtTheCeiling`), so a widening of `MaxDelGrpPerTxn`,
+      `MaxAllocLegPerGrp` or `MaxSpareLegPerGrp` that would overrun the
+      budget fails a test instead of a deployment (SPD1).
 
 ### 11.7 The clone drain [CLD]
 
-*Added 2026-09-16, the sp drain's sibling. Same `SPD`-style convention: the ids
-are the design's and keep their `CLD` prefix, so one id spells the rule in the
+*Added 2026-09-16, the sp drain's sibling, from the clone incremental-delete
+design — a working document retired the same way, never committed; this
+section is the surviving definition. Same `SPD`-style convention: the ids
+are that design's and keep their `CLD` prefix, so one id spells the rule in the
 code (`model/clonedrain.go`, `worker/clonedrain.go`) and here.*
 
 `DeleteClone` no longer sweeps a clone's bitmap chunks. It LATCHES the clone —
@@ -1632,13 +1703,16 @@ CLD3. **The repeat delete is a no-op, checked in PHASE 1.** OK, no writes, no
       token check itself, since it is the decision there and `openSpRead`
       skips it.
 
-CLD4/CLD6. **The latch, and what it does not write.** Exactly three writes:
-      the dst-namespace resume, the `Clone` put with `deleting = true`, and
+CLD4. **The latch, and what it does not write.** The write set is the
+      dst-namespace resume — one `Subsystem` put per subsystem of the SP that
+      held a suspended namespace of the destination td, `0..MaxSsCntPerSp` of
+      them (`gateway/clone.go` `resumeCloneDstNs`) — plus exactly two more:
+      the `Clone` put with `deleting = true` and
       one `BumpSpRev`. It does not delete the Clone key, does not touch a
       chunk key and does not shrink `clone_name_list` — `model.LoadSp` fetches
       clones by iterating that list, so a dangling name would break every
-      later load (the sp drain's slice-final rule, applying verbatim). The
-      RESUME rides the latch so that it and CLD5's exclusion arrive in one
+      later load (SPD11, the sp drain's slice-final rule, applying verbatim).
+      The RESUME rides the latch so that it and CLD5's exclusion arrive in one
       `SpRev` bump, hence one syncup: deferred to the end of the drain, CN16's
       `auto_resume` override would vanish the moment the clone left the plan
       while etcd still said suspended, and the destination namespace would go
@@ -1646,11 +1720,12 @@ CLD4/CLD6. **The latch, and what it does not write.** Exactly three writes:
       had. (Force-deleting an unhydrated clone exposes unhydrated data on the
       resumed namespace: unchanged from before.)
 
-      **The latch is one-way**, SPD5 scoped to a clone: no code path in any
-      component writes `deleting = false` on an existing `Clone`, so the flag
-      is a point of no return across restarts of every component. CLD9's
-      emptiness argument rests on it — with an un-latch, chunk keys could
-      appear again after the scan that found none — and so do CLD1 and CLD3.
+CLD6. **The latch is one-way** — CLD4's latch, and SPD5 scoped to a clone: no
+      code path in any component writes `deleting = false` on an existing
+      `Clone`, so the flag is a point of no return across restarts of every
+      component. CLD9's emptiness argument rests on it — with an un-latch,
+      chunk keys could appear again after the scan that found none — and so do
+      CLD1 and CLD3.
 
 CLD5. **Exclusion is the teardown.** From the first post-latch fan-out the
       deleting clone is absent from every cntlr's `clone_list` and from the
@@ -1712,7 +1787,8 @@ CLD10. **Asynchrony and retry.** SPD13 verbatim: no drain STM waits on,
       commits nothing, bumps nothing and retries on the next RW12 tick,
       forever; progress has exactly two user-visible states — `deleting =
       true`, then `NOT_FOUND` — accepted deliberately, since a max-shape drain
-      is four sub-second transactions.
+      is five sub-second transactions after the latch: four batches and the
+      final STM (CLD12).
 
 CLD12. **Termination and the revision contract.** The latch, every batch and
       the final STM each end in `BumpSpRev` with their own op tag; a repeat
@@ -1743,14 +1819,16 @@ CLD11. **Transaction budget, and its tripwire pair.** Ledger-free, so one line
       and it is independent of every ceiling constant. The final STM is 6; the
       latch is strictly smaller than the transaction it replaced. 68 also fits
       etcd's DEFAULT `--max-txn-ops` of 128 — prose, not a deployment change:
-      the requirement stays `EtcdMaxTxnOps` for the sp drain's 486-compare
-      batch (§11.6). `gateway/txnbudget_test.go` asserts both bounds from the
-      named constants, and `gateway/clonedrain_test.go` drains the whole 16x16
+      the requirement stays `EtcdMaxTxnOps` for the transactions that do NOT
+      fit 128, the sp drain's 486-compare D2 batch (§11.6) and
+      `CreateStoragePool`'s 503-compare maximum shape (`gateway.md` §2.1).
+      `gateway/txnbudget_test.go` asserts both bounds from the named
+      constants, and `gateway/clonedrain_test.go` drains the whole 16x16
       rectangle against a real etcd to pin the batch COUNT.
 
 ---
 
-## 12. Log records [LG]
+## 12. Log records
 
 JSON records per `log.md`, all at `Info` unless stated, all with the trace
 id of RW10 where one exists. The `msg` strings are normative — the §14 suite
@@ -1925,6 +2003,7 @@ failure the worker is specified to handle; error paths of etcd itself
 | B | `health` | `err_epoch` set/cleared with the capacity keys; hang, kill, `PROVISIONING`, the sp-object table |
 | C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, push failure ⇒ resync, primary change |
 | D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression |
+| G | `drain` | the §11.6 sp drain by the real coordinator: D1 once, one D2 batch per slice, D3, every ledger restored; resume after a fleet restart from `SpConf` alone; the `MaxDelGrpPerTxn` batch bound (the data-before-meta pop order itself is a §13 unit test, `TestDrainSpSliceBatchSizeAndOrder`); the §11.7 clone drain in two batches, CLD5's exclusion seen from the CN, resume from the surviving chunk keys |
 | E | `vote` | exact single ownership, join (~¼ moves, the rest stable), `SIGKILL`, `SIGTERM`, `SIGSTOP`/`SIGCONT` with the self-fence, attribution by trace id |
 | F | `handoff` | a killed owner's shards are re-driven at the same revision; a flip mid-handoff happens once |
 
@@ -1940,7 +2019,10 @@ Three artifacts under `integtest/`, next to the two agent suites:
 * `integtest/workerctl/main.go` — the **etcd driver that plays the gateway**
   (§14.8): formats §5.3 keys through `model`, marshals protos, bumps
   revisions, reads keys back as protojson. Imports `pb`, `common`, `model`,
-  `etcdutil`. Runs **on the server** (etcd listens on localhost) via ssh.
+  `etcdutil`. Every subcommand that reaches etcd runs **on the server** (etcd
+  listens on localhost) via ssh; the two that reach none — `constants` and
+  `geometry` (§14.8) — run **on the driver**, on the binary preflight has just
+  built and before anything is shipped.
 * `integtest/fakeagent/main.go` — the fake agents (§14.9): one binary,
   `dn`/`cn` subcommands, the generated `DiskNodeAgent` /
   `ControllerNodeAgent` servers with the real server interceptors, driven
@@ -1958,7 +2040,7 @@ bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@192.168.10.2
 
 * One positional arg: the ssh target. Passwordless ssh is assumed (checked
   in preflight); **no sudo** — nothing in this suite needs root.
-* `--only <case>`: `smoke|revision|health|bitmap|reaction|vote|handoff`;
+* `--only <case>`: `smoke|revision|health|bitmap|reaction|drain|vote|handoff`;
   setup and start-cleanup still run.
 * `--cleanup-only`: scrub the server and exit.
 * No prompts; exit 0 on success, non-zero on the first failure. Cleanup at
@@ -1976,7 +2058,7 @@ bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@192.168.10.2
    etcd          --listen-client-urls http://127.0.0.1:12379  --listen-peer-urls http://127.0.0.1:12380
    dnv-worker ×3 w1 w2 w3, --roles dn,cn,sp  (+ w4 started/stopped by case E)
    fakeagent dn ×4  <ip>:29600 … <ip>:29603      fakeagent cn ×3  <ip>:29700 … <ip>:29702
-   workerctl        invoked over ssh against 127.0.0.1:12379
+   workerctl        invoked over ssh against 127.0.0.1:12379   # except constants/geometry: driver-side, §14.8
 ```
 
 * The fake agents bind the server's own `<ip>` so the `addr_port` values in
@@ -2004,7 +2086,7 @@ from):
 $WORK/bin/etcd --name dnv-it --data-dir $WORK/etcd \
   --listen-client-urls http://127.0.0.1:12379 --advertise-client-urls http://127.0.0.1:12379 \
   --listen-peer-urls http://127.0.0.1:12380 --initial-advertise-peer-urls http://127.0.0.1:12380 \
-  --initial-cluster dnv-it=http://127.0.0.1:12380 --max-txn-ops=512 \
+  --initial-cluster dnv-it=http://127.0.0.1:12380 --max-txn-ops=$ETCD_MAX_TXN_OPS \
   >> $WORK/etcd/etcd.log 2>&1 &
 
 $WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:12379 --roles dn,cn,sp \
@@ -2030,20 +2112,26 @@ Preflight (fail fast, install nothing):
 * driver: `go`, `ssh`, `scp`, `curl`, `tar`, `sha256sum`, and a `jq` (system
   `jq`, else the `gojq` drop-in built into `integtest/bin/` exactly as the
   dn suite does); `make build` succeeds; the etcd tarball's sha256 matches
-  the pin after download.
+  the pin after download; the `workerctl` just built answers `constants` and
+  `geometry` with numbers (`read_constants` / `read_geometry`, §14.8), so a
+  driver binary that cannot supply them fails here rather than mid-case.
 * server, via `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new`:
   `bash`, `nohup`, `pkill`, `ss`, `tar`, `df`; the nine ports of §14.3 not
   listening (`ss -ltn`, checked after the start-cleanup); `/var/tmp` with
   ≥ 1 GiB free.
 
 The suite brings its own etcd, so it owns etcd's deployment requirements
-too: the §14.3 launch line passes `--max-txn-ops=512` because every etcd
-serving dnv must (`common.EtcdMaxTxnOps`; the sp drain's D2 batch is 486 ops
-at the maximum shape while etcd's default cap is 128 — `DeleteClone`'s
-256-key rectangle sweep was the founding justification and is gone since
-2026-09-16, §11.7's batches being 68 ops). The script carries the number as a
-literal with that constant named in a comment — a shell suite cannot import
-`common`. The worker's own cases stay far below the cap — case G's widest
+too: the §14.3 launch line passes `--max-txn-ops` at 512 because every etcd
+serving dnv must (`common.EtcdMaxTxnOps`; the sp drain's D2 batch is 486
+compares at the maximum shape and `CreateStoragePool` 503, while etcd's
+default cap is 128 — `DeleteClone`'s 256-key rectangle sweep was the founding
+justification and is gone since 2026-09-16, §11.7's batches being 68 ops). The script does not type that
+number: a shell suite cannot import `common`, so `preflight_driver` runs
+`workerctl constants` on the driver — no etcd, no server, the binary it has
+just built (§14.8) — and fills `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps`
+field of the JSON it prints, well before setup() launches etcd.
+`gateway_test.sh` and `cdc_test.sh` take the same value from the same
+subcommand. The worker's own cases stay far below the cap — case G's widest
 slice pops 21 groups, not the 20 x 4 DNs a maximum batch touches, and its
 clone batches are 64 deletes — so the flag is there to run against an etcd
 configured the way production is, not because a case needs it.
@@ -2059,7 +2147,8 @@ configured the way production is, not because a case needs it.
   loc-cn{0..2}`.
 * Shard codes are chosen by the script (`--shard`), not by a bucket walk:
   `00` by default; case E spreads DNs over `00`, `55`, `aa`, `ff`.
-* SPs: `sp_name sp0`/`sp1`, `sp_id 1`/`2`, shard `00`; sub-object ids are
+* SPs: `sp_name sp0`…`sp3`, `sp_id 1`…`4` (case G uses all four, the
+  others `sp0`/`sp1`), shard `00`; sub-object ids are
   assigned explicitly by the script and echoed by `workerctl` (it also
   advances `SpConf.next_id` past them, so a worker reaction allocates fresh
   ids above them).
@@ -2067,7 +2156,9 @@ configured the way production is, not because a case needs it.
   `c0…`, migrations `m0…`.
 * Free extents are the script's lever for deterministic allocation: a
   reaction that must pick a node is always given **exactly** the eligible
-  candidates it needs (`put-dn`/`put-cn --free-ext` before the trigger).
+  candidates it needs (`put-dn`/`put-cn --free-ext` seed a node's budget;
+  `set-free dn|cn --free-ext` rewrites it — with the capacity key, no rev
+  bump — before each trigger).
 
 ### 14.6 Test-time constants
 
@@ -2075,11 +2166,14 @@ configured the way production is, not because a case needs it.
 |---|---|---|
 | `--vote-interval` / `--vote-grace-time` | 2 / 6 | dead detection after 4 s, commit 6 s later; a fresh worker drives after 6 s |
 | `health_check_conf.*_interval` | 1 | one round per second on every stream (`MinHealthCheckInterval`) |
-| `event_threshold` (`primary`, `cntlr`, `side`, `leg`) | 2, 4, 3, 6 | `leg > side` as §7 requires; every reaction fires within seconds |
+| `event_threshold` (`primary`, `cntlr`, `side`, `leg`) | 2, 4, 3, 6 | `leg > side` as `architecture.md` §7 requires; every reaction fires within seconds. Case B step 8 alone overrides them with `3600,3600,3600,3600`, so the ERROR rows it injects — D's reaction triggers — fire nothing |
 | `low_water_mark_pct` | 50 (case D sets it per step) | |
 | `extent_size` | 64 MiB (`MinDnExtSize`) | irrelevant to fakes; keeps `GrowSlice` math small |
+| `block_size` / `bitmap_chunk_block_cnt` | 1 MiB (`DefaultDmPoolDataBlockSize`) / 128 blocks (`DefaultChunkBlockCnt`) | the `--block-size` / `--chunk-blocks` every case's cluster is created with (all eight go through `new_cluster`, and none overrides them); with `extent_size` they are the cluster half of the §3.6 geometry below, the group half being its own `ext_cnt` and redundancy kind |
+| §3.6 group geometry (`meta_blocks`, `data_blocks`) | read at preflight from `workerctl geometry`, not written down | case D asserts a new group's geometry and feeds the matching totals back as a thin-pool status line (§14.11 D5/D6), and it is the only case that does. `read_geometry` calls the driver twice at the three values above, with one `geometry_json` helper that hard-wires `--raid1` and varies only the count — `--raid1 --ext-cnt 2` for a data group and `--raid1 --ext-cnt 1` for a meta group, both of case D's sp0 groups being `:raid1` — so the numbers come out of `model.GroupBlocks` (MD6), the same call `GrowSlice` makes. At these values that is `meta_blocks 3` for both kinds, `data_blocks` 125 and 61 |
+| `THIN_META_BLOCK_SIZE` | 4096 | dm-thin's metadata block size, fixed by the kernel: the metadata fraction of a status line counts THESE blocks, not `block_size` ones (§11.3's `× block_size / 4096`). The shell derives a meta group's contribution to that fraction as `data_blocks × block_size / 4096` = 15616; `model.GroupBlocks` knows nothing about it, which is why this one stays in the script |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
-| etcd `--max-txn-ops` | 512 = `common.EtcdMaxTxnOps` | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-op D2 batch. (`DeleteClone`'s 256-key sweep was the founding justification and is gone since 2026-09-16 — §11.7's batches are 68 ops.) |
+| etcd `--max-txn-ops` | `common.EtcdMaxTxnOps` (512), read at preflight into `ETCD_MAX_TXN_OPS`, not typed in the script | the deployment requirement of §14.4: etcd's default 128 is below the sp drain's 486-compare D2 batch (and below `CreateStoragePool`'s 503-compare maximum shape, `gateway.md` §2.1). (`DeleteClone`'s 256-key sweep was the founding justification and is gone since 2026-09-16 — §11.7's batches are 68 ops.) The compare count itself is asserted from the named constants in `gateway/txnbudget_test.go` (SPD14, CLD11), not restated in the suite |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which
@@ -2104,17 +2198,23 @@ sleep N then assert.
 ### 14.8 The driver: `workerctl`
 
 Global flags: `--endpoints 127.0.0.1:12379`, `--cluster <name>` (every
-subcommand except `put-cluster`/`ping`/`list-*` reads `ClusterConf` first to
-derive `cluster_id`, exactly as the gateway must, §5.2), `--trace-id`
+subcommand except `put-cluster`, `ping`, `constants`, `geometry`, `get` and
+`list-workers` reads `ClusterConf` first to derive `cluster_id`, exactly as
+the gateway must, `architecture.md` §5.2 — `list-keys` does so only for a
+cluster-scoped kind, while `constants` and `geometry` dial no etcd at all, so
+every global flag parses and is then unused for them), `--trace-id`
 (`it-<case>-<step>`, so the driver's `etcd put` records correlate with the
-stage), `--timeout` (default 10 s). Ids accept `0x` hex. Every read prints
-protojson on stdout; every mutation prints the ids it assigned. Exit non-zero
-on any error.
+stage), `--timeout` (default 10 s). Ids accept `0x` hex. A read prints
+protojson on stdout (`list-keys` one key per line, `list-workers` one object
+per line); a mutation prints the ids it assigned; `constants` and `geometry`
+print a plain JSON object of their own. Exit non-zero on any error.
 
 | cmd | flags | writes |
 |---|---|---|
 | `ping` | | one `Get` of `dnv ping` |
-| `put-cluster` | `--name`, `--dn-interval --cn-interval --side-interval --cntlr-interval`, `--extent-size`, `--lwm`, `--dn-batch --cn-batch` | `ClusterConf` (+ zeroed `DnGlobal`/`CnGlobal`/`SpGlobal`); prints `cluster_id` |
+| `constants` | | *added 2026-09-17:* opens no etcd client and needs no `--cluster`, so a suite runs it on the DRIVER against the binary it has just built. Prints the five `common` constants of the SPD13/CLD11 transaction budgets as one JSON object keyed by the **Go identifiers**: `EtcdMaxTxnOps`, which is what the suites pass to etcd, plus the four factors `MaxDelGrpPerTxn`, `MaxAllocLegPerGrp`, `MaxSpareLegPerGrp` and `MaxDelBmPerTxn`, which a case can size itself against. This is how a shell suite reads a Go constant instead of copying it (§14.4). Writes nothing |
+| `geometry` | `--ext-cnt` (required, non-zero), `--raid1`, `--extent-size --block-size --chunk-blocks` (`put-cluster`'s spellings and defaults) | *added 2026-09-17:* no etcd and no `--cluster` either. Builds the `BdevConf` those flags describe (`--raid1` ⇒ a `RedundMdRaid1` carrying `--chunk-blocks`, otherwise `RedundNone`, which ignores it), passes it through `model.ResolveBdevConf` and prints `ext_cnt`, `raid1`, `meta_blocks`, `data_blocks` from `model.GroupBlocks` — the call `put-sp` and `GrowSlice` both make (MD6), so a suite's §3.6 expectations cannot drift from the geometry the worker computes (§14.6). Writes nothing |
+| `put-cluster` | `--name`, `--dn-interval --cn-interval --side-interval --cntlr-interval`, `--extent-size`, `--lwm`, `--block-size --chunk-blocks` (`architecture.md` §3.6's `data_block_size` / `bitmap_chunk_block_cnt`), `--dn-batch --cn-batch` | `ClusterConf` (+ zeroed `DnGlobal`/`CnGlobal`/`SpGlobal`); prints `cluster_id` |
 | `put-dn` | `--id --shard --addr --location --total-ext --free-ext [--disabled] [--side sp:leg:side]…` | `DnConf`, `DnRev` (`revision` = current + 1, or 1), `DnCapacity` per §5.6 through `model.MaintainDnCapacity` — one STM |
 | `put-cn` | `--id --shard --addr --location --total-ext --free-ext [--disabled] [--cntlr sp:cntlr]…` | `CnConf`, `CnRev`, `CnCapacity` |
 | `bump-rev` | `dn\|cn\|sp --id --shard` | `revision += 1` in place (never delete + put), prints the new value |
@@ -2127,6 +2227,8 @@ on any error.
 | `set-level` | `--sp --level N` | `SpConf.sp_level`; bump `SpRev` |
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
 | `set-free` | `dn\|cn --id --free-ext N` | rewrites `free_ext_cnt` + capacity key; no rev bump |
+| `set-created` | `--sp --name` | *added with gateway.md §2.4:* `ThinDevice.created = true` through `model.FlipCreated` (RW19's op, keyed by name AND the stored `td_id`); bumps `SpRev` iff it wrote; prints `td_name`, `td_id`, `flipped`, `sp_rev`. The gateway suite's stand-in for the worker's flip — this suite never calls it |
+| `set-provisioned` | `--sp --slice --leg --side` | *added with gateway.md §2.4:* `Side.provisioned = true` through `model.FlipProvisioned` (RW18's op) with one `SideRef`; bumps `SpRev` iff it wrote; prints the three ids, `flipped`, `sp_rev`. Likewise the gateway suite's, unused here |
 | `set-deleting` | `--sp` | *added 2026-09-15:* `SpConf.deleting = true` + one `BumpSpRev` — `DeleteStoragePool`'s LATCH (architecture.md §8.4), so a case can drive the §11.6 drain without a gateway. Already latched ⇒ a no-op with no second bump (SPD3). It does NOT apply the five-empty-lists precondition: that gate is the gateway's, and re-implementing a public precondition in a driver is how the two drift apart |
 | `set-clone-deleting` | `--sp --name` | *added 2026-09-16:* `Clone.deleting = true` + one `BumpSpRev` — `DeleteClone`'s LATCH (architecture.md §8.9), so a case can drive the §11.7 drain without a gateway. Already latched ⇒ a no-op with no second bump (CLD3). It deliberately does NOT resume the destination namespaces the way the RPC does: that write is the gateway's |
 | `drain-clone` | `--sp --name [--max-steps N]` | *added 2026-09-16:* CLD7's derivation in a loop over `model.DrainCloneBm` / `FinishCloneDelete` — the GATEWAY suite's stand-in, as `drain-sp` is. This suite uses it only with `--max-steps 1`, to BUILD a partially drained clone rather than race one (case G step 6); c0's whole drain in step 5 is the real coordinator's |
@@ -2137,7 +2239,7 @@ on any error.
 | `list-workers` | `--role` | seed + epoch per registration |
 
 `workerctl` never dials an agent and never sleeps; it is the gateway's write
-path with explicit placement (§0 item 19) — its **resolve-at-write** (§7)
+path with explicit placement (§0 item 19) — its **resolve-at-write** (`architecture.md` §7)
 included, because the worker refuses a conf nobody made concrete (RW9,
 RW14, AR1) and the suite's fixture writer therefore has to be a resolver
 too. `put-cluster` stores `model.ResolveClusterConf(...)`, so the four
@@ -2149,7 +2251,7 @@ the `ClusterConf` before computing any group geometry; `set-lwm` turns
 `--pct 0` into `DefaultPoolLowWatermarkPct` while storing a value above 100
 exactly as given, that being a meaning and not a default. Storing the raw
 literal instead would leave the bin shifts all zero — no flag sets them —
-which is not a ladder (§7), and every case would refuse at its first round.
+which is not a ladder (`architecture.md` §7), and every case would refuse at its first round.
 
 `put-bitmap` addresses a **clone** chunk by the PAIR `--src-slice-idx` /
 `--bm-idx` (MD2) and a **migration** chunk by `--bm-idx` alone: a non-zero
@@ -2251,12 +2353,16 @@ sent it (RW10). Rules:
 
 * **Remote execution**: `sshw <cmd>` echoes `[server] <cmd>` and runs it as
   the plain user; `ctl <args>` = `sshw $WORK/bin/workerctl --endpoints
-  127.0.0.1:12379 --cluster $CLUSTER --trace-id $TRACE <args>`.
+  127.0.0.1:12379 --cluster $CLUSTER --trace-id $TRACE <args>`. The two
+  etcd-free subcommands do not go through `ctl`: `read_constants` and
+  `read_geometry` run the driver-side `workerctl` directly, at preflight,
+  before there is a server copy to call (§14.4, §14.8).
 * **Log reading on the driver**: `rlog <path>` = `ssh … cat <path>`; every
   assertion is `rlog … | jq …` on the driver — the server needs no `jq`.
 * **`wait_until <secs> <label> <cmd…>`** polls twice a second until the
-  command exits 0, else `die`. `assert_none_for <secs> <cmd…>` sleeps then
-  asserts the command exits non-zero (the negative form).
+  command exits 0, else `die`. `assert_none_for <secs> <label> <cmd…>` sleeps then
+  asserts the command exits non-zero (the negative form; the label names
+  the failure).
 * **Ownership table** (`owners <role>`): from every worker log, the shards
   with more `shard owned` than `shard released` records for that role; the
   union over workers must cover 256 shards exactly once.
@@ -2266,8 +2372,9 @@ sent it (RW10). Rules:
 * **Request counters**: `reqs <agent> <method> [<jq filter>]` counts `grpc
   server request` records (unary) or `grpc server recv` (streams) for a
   method; `last_req` prints the newest one's `data`.
-* **Revisions**: the script trusts `workerctl` (it prints every new
-  revision) and keeps `DNREV[i]`, `CNREV[i]`, `SPREV[name]`.
+* **Revisions**: the script caches none; a step that needs one re-reads it
+  through the `get-rev` helpers `sp_rev`/`dn_rev`/`cn_rev` (`ctl get-rev …
+  --id`; `workerctl` prints every new revision too, but nothing is kept).
 * **Stages** mint `it-<case>-<step>` trace ids for `workerctl`; the worker
   mints its own (RW10), so worker-side correlation is by key and time.
 * **Fleet restart before every case**: `SIGTERM` the workers, wait for
@@ -2331,7 +2438,9 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    owner's log, `stream close` in dn1's; `assert_none_for 3` any new
    `CheckDn` `recv` at dn1.
 6. `put-sp sp0` (one cntlr on cn 1, one slice, one `RedundNone` data group
-   with `S1` on dn… — dn 1's rev was deleted, so `put-dn 2 dn2` first);
+   with `S1` on dn 3 — dn 1's rev was deleted and its `DnConf`, moved onto
+   fake dn1's endpoint in step 2, still owns that endpoint, so `put-dn 3 dn2`
+   first, keeping the §14.5 `dn_id` ↔ fake mapping);
    `bump-rev sp 1` ⇒ `SyncupSide` and `SyncupCntlr` with the new revision at
    every target within `WAIT_SHORT`, and the sp child's `CheckSide` request
    revision follows.
@@ -2353,10 +2462,13 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
 6. `dn {rows: {meta_info: {status: PROVISIONING}}}` ⇒ `assert_none_for 3`
    `err_epoch` stays 0 and the capacity key stays.
 7. `meta_info ERROR "disk lacks Write Zeroes"` ⇒ set (a plain `ERROR`).
-8. `put-cn 2 cn1`; `put-sp sp0`: `C1` cn 1 primary, `C2` cn 2; one slice,
+8. `put-cn 2 cn1`; `put-sp sp0` with `--thresholds 3600,3600,3600,3600`
+   (not §14.6's 2/4/3/6: the rows below are D's reaction triggers, and an
+   AR5 failover or an AR8 spare would bump `SpRev`, which the last bullet
+   asserts never happens): `C1` cn 1 primary, `C2` cn 2; one slice,
    raid1 data group `G1` legs `L1`(`S1` dn 1) `L2`(`S2` dn 2 — `put-dn 2
    dn1` first). Wait for provisioning and a clean state (`get-slice`
-   `err_epoch` 0 everywhere; `SPREV` noted).
+   `err_epoch` 0 everywhere; the `SpRev` noted via `sp_rev`).
    * cn0 (primary) `rows leg_id_to_leg.<L1> ERROR` ⇒ `Leg.err_epoch` set on
      `L1` within `WAIT_SHORT`; clear ⇒ 0.
    * cn1 (standby) the same row ⇒ `assert_none_for 3` no `Leg.err_epoch`.
@@ -2387,8 +2499,11 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
 2. Within `WAIT_SHORT`: dn1 received `PushMigrBitmap bm_idx 0` then `1`,
    the second's `grpc server request` timestamp after the first's `grpc
    server reply` (one in flight, ascending), `revision` = the current
-   `SpRev`; the next `SyncupSide` reply carries `bm_info.bm_idx_list [0,1]`
-   and `assert_none_for 3` no further pushes. dn0 (the src) received none.
+   `SpRev`; after a forced re-fan (`bump-rev sp` — nothing else issues a
+   `SyncupSide` after a clean push sequence, BM6 re-syncing only on a
+   failure, and `bm_info` rides only on a `SyncupSide` reply) the reply
+   carries `bm_info.bm_idx_list [0,1]` and the push count has not moved;
+   `assert_none_for 3` no further pushes. dn0 (the src) received none.
 3. Clearing cn0's behavior and bumping `SpRev` makes the whole clone missing
    at once: cn0 receives one `PushCloneBitmap` per PAIR, and the three
    `grpc server request` timestamps are ordered `(0,0) ≤ (0,1) ≤ (1,0)` —
@@ -2416,19 +2531,29 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    dn0..dn3 with `--free-ext 8`, CNs 1..3 on cn0..cn2 with `--free-ext 64`.
    `put-sp sp0`: `C1` cn 1 slot 0 primary, `C2` cn 2 slot 1; slice `1`;
    meta `G1` ext 1 raid1 `L1`(`S1` dn 1) `L2`(`S2` dn 2); data `G2` ext 2
-   raid1 `L3`(`S3` dn 1) `L4`(`S4` dn 2); td `td0`. Wait provisioned,
-   created; note `SPREV`.
-2. **Failover.** cn0 `cntlr 1:1 rows ss_id_to_subsystem.<ss> ERROR` ⇒
+   raid1 `L3`(`S3` dn 1) `L4`(`S4` dn 2); td `td0`; subsystem `ss0` with
+   one namespace on it. Wait provisioned, created; note the `SpRev`
+   (`sp_rev`).
+2. **Failover.** First `set-free cn 1 64` and sample every baseline step 3
+   compares against (`SpConf.next_id`, the reaction counts, cn 1's and
+   cn 3's budgets, cn 3's rev): the
+   replacement lands ~2 s after the failover, while this step still polls,
+   so cn 1 must be healthy and allocatable BEFORE it runs — otherwise an
+   empty budget, not AR7's black list, is what excludes it. Then cn0
+   `cntlr 1:1 rows ss_id_to_subsystem.<ss> ERROR` ⇒
    `Cntlr.err_epoch` on `C1`; within `2 + WAIT_SHORT` s: `get-cntlr` `C2
    primary true`, `C1 primary false`; `reaction applied kind=failover`;
    `SyncupSide primary_cn_id 2` at both DNs; `SyncupCntlr cntlr.primary`
    true at cn1. Before the threshold (`assert_none_for 1`) nothing flips.
-3. **Replacement.** Keep `C1` unhealthy; `set-free cn 1 64` (the CN node is
-   healthy and allocatable — the black list is what must exclude it);
+3. **Replacement.** Keep `C1` unhealthy (cn 1 itself is healthy and
+   allocatable since step 2 — the black list is what must exclude it);
    within `4 + WAIT_SHORT` s: `C1` gone from `cntlr_id_list`; a new cntlr
-   `C5`(the next id) on **cn 3** (the only other eligible: not hosting sp0)
+   whose id is the `next_id` sampled in step 2 (34 = `0x22` here:
+   `put-td`/`put-ss` advanced it past `TD_ID`/`SS_ID`/`NS_ID` =
+   0x10/0x20/0x21) on **cn 3** (the only other eligible: not hosting sp0)
    with `cntlid_slot 0`, `primary false`; `get-cn 1` `cntlr_ptr_list` empty
-   and `free_ext_cnt` restored, `get-cn 3` pointer present and budget
+   and `free_ext_cnt` credited by the SP's 3-extent footprint (step 2's
+   64 → 67), `get-cn 3` pointer present and budget
    debited; `CdcEntry` of `ss0` lists cn 2 and cn 3, not cn 1; `SyncupCn`
    at cn0 (empty list) and cn2 (one pointer); `SyncupCntlr` at cn2;
    `reaction applied kind=replace_cntlr`.
@@ -2441,7 +2566,9 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
 5. **Data grow.** `set-lwm sp0 50`; `set-free dn 3 8`, `set-free dn 4 8`,
    `set-free dn 1 0`, `set-free dn 2 0` (exactly two candidates for a 2-leg
    group). cn (sp0's current primary) `rows slice_id_to_dm_pool.1 OK
-   details "0 16384 thin-pool 1 10/1024 600/1024 - rw …"` ⇒ within
+   details "0 16384 thin-pool 1 100/15616 80/125 - rw …"` (the totals are
+   the §3.6 geometry below: one data group of 125 blocks, one meta group of
+   61 × 256 = 15616 4 KiB blocks; 80/125 = 64 % breaches lwm 50) ⇒ within
    `WAIT_SHORT`: `get-slice 1` `data_grp_list` length 2, the new group
    `ext_cnt 2`, `meta_blocks`/`data_blocks` per §3.6 (64 MiB extents, 1 MiB
    blocks, 128-block chunks ⇒ `meta_blocks 3`, `data_blocks 125`), two
@@ -2449,13 +2576,18 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    `free_ext_cnt 6` each; `CnRev` of every cntlr CN bumped and budgets
    debited; `reaction applied kind=grow_data`. **Pending**: keep the same
    details for 5 s ⇒ `assert_none_for 5` a second grow (`reaction skipped
-   reason=grow_pending` present). Report `600/2048` ⇒ still no grow (29 %).
-   `set-free dn 1 8`, `dn 2 8`; report `1100/2048` ⇒ a third data group.
-6. **Meta grow.** Report `900/1024` metadata (data below lwm) ⇒ one meta
-   group with `ext_cnt 1` (the ladder: current meta total 1 ⇒ +1);
-   `kind=grow_meta`; report metadata `900/2048` ⇒ pending until totals
-   reflect the second group, then a group of `ext_cnt 2`. `set-lwm 101` ⇒
-   `assert_none_for 3` no grow at any usage.
+   reason=grow_pending` present: the reported total 125 is still no larger
+   than the 125 the groups before the newest imply). Report `80/250` ⇒ the
+   totals reflect the second group, nothing is pending, and still no grow
+   (32 %). `set-free dn 1 8`, `dn 2 8`, `dn 3 0`, `dn 4 0`; report
+   `140/250` (56 %) ⇒ a third data group, on dn 1 and dn 2.
+6. **Meta grow.** Report `9000/15616` metadata (data `10/375`, below lwm)
+   ⇒ one meta group with `ext_cnt 1` (the ladder: current meta total 1 ⇒
+   +1) and `data_blocks 61`; `kind=grow_meta`; the same line again ⇒
+   `grow_pending`, no second grow; `9000/31232` ⇒ the totals reflect the
+   second group, nothing is pending, and 29 % is below lwm, so still none;
+   `20000/31232` (64 %) ⇒ a third meta group of `ext_cnt 2`. `set-lwm 101`
+   ⇒ `assert_none_for 3` no grow at any usage (`30000/31232`, `300/375`).
 7. **Leg repair, case 1.** Reset free extents so exactly one DN not in `G2`
    is eligible. The primary reports `leg_id_to_leg.<L3> ERROR` (side rows
    stay OK) ⇒ `Leg.err_epoch` on `L3`; `assert_none_for 4` no spare (below
@@ -2495,16 +2627,16 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
 **G — `drain`** (§11.6; the gateway suite owns the LATCH and stands the drain
 in with `wctl drain-sp`, this case owns the real coordinator)
 
-1. `put-cluster it-drain`; `put-dn 1/2` (free 8), `put-cn 1/2` (free 64);
+1. `put-cluster it-drain`; `put-dn 1/2` (free 64, see step 4), `put-cn 1/2` (free 64);
    `put-sp sp0` with TWO slices, each a meta group (ext 1) and a data group
    (ext 2), every leg on one of the two DNs — the smallest shape that proves
    a batch never spans slices. Each DN is charged 6 extents and each CN the
-   SP's whole 6-extent footprint (§6.5). Within `WAIT_SYNCUP`: `dn0` received
+   SP's whole 6-extent footprint (`architecture.md` §6.5). Within `WAIT_SYNCUP`: `dn0` received
    `SyncupSide` for `S1` and `cn0` `SyncupCntlr` for `C1`.
 2. `set-deleting sp0` (the workerctl stand-in for `DeleteStoragePool`'s
    latch, §14.8). Within `WAIT_SYNCUP`: no `sp_conf` key is left. Then
    `sp_rev`, `sp_id_to_name`, `cntlr` and `slice` are all at 0; every DN is
-   back to free 8 with an empty `side_ptr_list` and every CN to free 64 with
+   back to free 64 with an empty `side_ptr_list` and every CN to free 64 with
    an empty `cntlr_ptr_list`; one capacity key per node; `SpGlobal`'s
    Σ `shard_bucket` is 0 while `next_id` is still 2. The records: exactly one
    `sp drain step phase=cntlrs`, exactly TWO `phase=slice` (one batch per
@@ -2559,10 +2691,13 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    `w4` owns 40..90 shards per role; every shard **not** owned by `w4` has
    the same owner as before (stability); each moved shard shows `shard
    released` in exactly one old owner's log.
-4. **Attribution**: for a DN whose shard moved, its fake log shows
-   `SyncupDn` with the same revision from the old owner's `seed8` and then
-   the new owner's; after settling, every `CheckDn recv` in the last 3 s
-   carries the new owner's `seed8` only.
+4. **Attribution**: for a DN whose shard moved, its fake log shows a
+   `SyncupDn` from the old owner's `seed8` and then `CheckDn` rounds from
+   the new owner's, and every `SyncupDn` it ever received carried revision
+   1 — none came from the new owner, because the agent is already at the
+   desired revision, so RW4 step 5 issues none and `synced` advances from
+   the clean Check reply (RW2); after settling, every `CheckDn recv` in the
+   last 3 s carries the new owner's `seed8` only.
 5. **`SIGKILL w2`** (no key delete): within 4 + `WAIT_SHORT` s `membership
    observed state=dead` for `w2`'s seed in the others; within
    `WAIT_MEMBERSHIP` `membership committed state=nonmember`; `list-workers`
@@ -2571,11 +2706,12 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    drops it at once; the others commit `nonmember` within `VOTE_GRACE + 2`
    s — measurably sooner than step 5 (the script compares the two commit
    latencies against DERIVED bounds: `SIGTERM` < `VOTE_GRACE + 2` = 8 s;
-   `SIGKILL`, measured from the signal, falls in `[VOTE_INTERVAL +
-   VOTE_GRACE, 2·VOTE_INTERVAL + VOTE_GRACE]` = [8, 10] s, because the
-   dead-detection window depends on where the kill lands in the victim's
-   heartbeat cycle; and the ordering `SIGTERM < SIGKILL`, which is what the
-   step actually proves); `owners` exact over
+   `SIGKILL`, measured from the signal, ≥ `VOTE_INTERVAL + VOTE_GRACE` =
+   8 s and < `2·VOTE_INTERVAL + VOTE_GRACE + 2` = 12 s — the true window is
+   [8, 10] s, because the dead-detection window depends on where the kill
+   lands in the victim's heartbeat cycle, and the upper bound carries the
+   same 2 s of slack as `SIGTERM`'s; and the ordering `SIGTERM < SIGKILL`,
+   which is what the step actually proves); `owners` exact over
    `w1 w3`.
 7. **`SIGSTOP w3`**: within 4 + `WAIT_SHORT` s `w1` observes it dead, within
    `WAIT_MEMBERSHIP` commits it and owns all 256 shards per role. **`SIGCONT
@@ -2584,25 +2720,43 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    over `w1 w3`, each ≥ 50; the old seed's key is absent from
    `list-workers`; `w3` logged `shard released` for every shard it held
    before driving anything under the new seed.
-8. Start `w2` and `w4` again only through the §14.10 fleet restart of the
-   next case.
+8. `w2` and `w4` stay stopped. The §14.10 fleet restart of the next case
+   starts `w1`..`w3`, so `w2` comes back there and `w4` — case E's own
+   extra worker — never does; every later case asserts its ownership
+   tables over the three-worker fleet.
 
 **F — `handoff`**
 
 1. `put-cluster it-handoff`; `put-dn 1 dn0`; find the owner of `(dn, 00)`
    from `owners`; `SIGKILL` it. Within `WAIT_MEMBERSHIP`: another worker
-   owns `00`; dn0's log shows a `SyncupDn` with the **same** revision from
-   the new `seed8`, then `CheckDn` rounds from it; `get-dn 1` `err_epoch 0`
-   throughout.
+   owns `00`; dn0's log shows `CheckDn` rounds from the new `seed8` (which
+   is why no `SyncupDn` from it appears: the agent is already at the desired
+   revision, so RW4 step 5 issues none) while every `SyncupDn` dn0 ever received
+   carried revision 1 (the **same** revision, re-driven); `get-dn 1`
+   `err_epoch 0` throughout.
 2. `put-cn 1 cn0`, `put-sp sp0` (one cntlr on cn 1; one slice; raid1 group
    with sides on dn 1 and dn 2 — `put-dn 2 dn1`) with dn0/dn1 behavior
    `zeroed_ext_cnt 0` (sides never finish provisioning). Find the owner of
-   `(sp, 00)`, `SIGKILL` it; wait for the new owner's `SyncupSide`
-   (`provisioned false`) — the same revision again. Set `zeroed = total` on
-   both fakes ⇒ within `WAIT_SHORT` `flip applied kind=provisioned`
-   **exactly once** across all worker logs and `SpRev` advanced by exactly
-   one (the flip is observation-driven and needs no recovery).
-3. `owners` exact over the surviving workers.
+   `(sp, 00)`, `SIGKILL` it; wait for the new owner's `CheckSide` rounds at
+   dn0 (which is why no `SyncupSide` from it appears — RW4 step 5 again); `SpRev` is unchanged
+   across the handoff and the last `SyncupSide` dn0 received carried that
+   revision with `provisioned false`. Then release the sides ONE AT A TIME
+   — `zeroed = total` on dn0, then on dn1 — so that RW18's "several sides
+   MAY share one STM" cannot blur the count: after each, within
+   `WAIT_SHORT`, exactly one more `flip applied kind=provisioned` across
+   all worker logs and `SpRev` advanced by exactly one (the flip is
+   observation-driven and needs no recovery); then `assert_none_for 5` no
+   repeated flip.
+3. **Both sides released together**, on a second SP because a provisioned
+   side never goes back: `put-sp sp1` (id 2; one cntlr on cn 1; one raid1
+   group with sides on dn 1 and dn 2, both held at `zeroed_ext_cnt 0`);
+   wait for both `SyncupSide`s with `provisioned false`; clear both
+   behaviors back to back ⇒ within `WAIT_SHORT` both sides `provisioned
+   true`, exactly one flip record per side and neither twice, the records
+   carrying one or two distinct revisions (one shared STM or two — RW18's
+   MAY) and `SpRev` advanced by exactly that number; `assert_none_for 5` no
+   further flip.
+4. `owners` exact over the surviving workers.
 
 ### 14.12 Teardown and cleanup (`cleanup()`, also `--cleanup-only`)
 
@@ -2645,7 +2799,9 @@ Two things the clone drain's design asks for are out of reach of every suite in
 the tree and are recorded here rather than silently dropped (§11.7): a HOST IO
 probe against the destination namespace right after the latch — CLD4's
 resume-rides-the-latch probe, which would need a real host and a real CN, so the resume is
-asserted at the etcd level only (case G, and gateway.md §10.11 step 13) — and an
+asserted at the etcd level only, and only by the gateway suite (gateway.md
+§10.11 step 13): case G's `set-clone-deleting` deliberately writes no resume
+(§14.8) and its `sp3` has no namespace at all — and an
 observation that the coordinator makes NO agent call during a drain (CLD10),
 which the gateway suite's `wctl drain-clone` cannot show because it links no
 agent client, and which case G does not yet stage by stopping a CN across a
@@ -2654,7 +2810,7 @@ drain.
 Real agents (the agent suites); more than one server; a 3-member etcd;
 etcd quorum loss, restore, or compaction races (SW4 is unit-tested only);
 clock-skew injection (the design does not depend on clocks, VW4); TLS/auth
-(Appendix D "the fabric is trusted"); a worker whose watch breaks while
+(`architecture.md` Appendix D "the fabric is trusted"); a worker whose watch breaks while
 its puts succeed (VW8 (b), unit-tested); `RedundNone` leg failures (nothing
 automatic is specified); CN-side `PushCloneBitmap` for a clone whose
 primary is `PROVISIONING`-deferred.
@@ -2701,10 +2857,11 @@ file, in the style of `ThinDeviceCreated.md` §8 and the agents' §5 sections.
 * §1 — the etcd client dependency names this document and the v3.6 line.
 * §2 — `doc/dnv-worker.md` in the tree; `etcdutil.go`'s comment names the
   §3 surface; the `worker/` file list is the §1 table of this document
-  (`vote.go`, `shard.go`, `revision.go`, `dnrole.go`, `cnrole.go`,
-  `sprole.go`, `clusterconf.go`, `health.go`, `bmpush.go`, `reaction.go`);
+  (`worker.go`, `vote.go`, `shard.go`, `revision.go`, `conn.go`,
+  `dnrole.go`, `cnrole.go`, `sprole.go`, `clusterconf.go`, `health.go`,
+  `bmpush.go`, `reaction.go`, `drain.go`, `clonedrain.go`);
   new `model/` package (`keys.go`, `stm.go`, `capacity.go`, `alloc.go`,
-  `ops.go`); the `integtest/` tree (both agent suites, `worker_test.sh`,
+  `ops.go`, `drain.go`, `clonedrain.go`); the `integtest/` tree (both agent suites, `worker_test.sh`,
   `workerctl/`, `fakeagent/`, `bin/` with its `cache/`).
 * §3 — new row `model` (may import `common`, `pb`, `etcdutil`); `gateway`,
   `worker` and `cdc` may import `model`; a row for the `integtest/*`
@@ -2717,20 +2874,24 @@ file, in the style of `ThinDeviceCreated.md` §8 and the agents' §5 sections.
 
 ### `dependencies.md`
 
-* The planned etcd client entry names this document and pins the v3.6 line.
+* The etcd client entry (`go.etcd.io/etcd/client/v3`, under "Current")
+  names this document and pins the v3.6 line.
 
 ### `README.md`
 
-* The documents sentence and the "not yet implemented" paragraph point at
+* The documents sentence and the "Implemented so far" bullets point at
   this document for `etcdutil/`, `model/`, `worker/` and `cmd/dnv-worker`.
 
 ### Deferred to implementation time
 
+All three landed with the implementation:
+
 * `pb/schema.proto`: the `WorkerReg` message of §2.2, regenerated with
-  `make gen` (README toolchain) in the same change that adds `etcdutil/`.
-* `common/constants.go`: the §2.1 block.
-* `go.mod`: `go.etcd.io/etcd/client/v3` (and its transitive requirements)
-  when `etcdutil/` lands; `dependencies.md` then moves it to "Current".
+  `make gen` (README toolchain) in the change that added `etcdutil/`.
+* `common/constants.go`: the §2.1 block, except `EtcdMaxTxnOps` — that one
+  is `gateway.md` §2.1's and was added into the same block later.
+* `go.mod`: `go.etcd.io/etcd/client/v3` v3.6.14 (and its transitive
+  requirements); `dependencies.md` lists it under "Current".
 
 ---
 
@@ -2753,10 +2914,14 @@ file, in the style of `ThinDeviceCreated.md` §8 and the agents' §5 sections.
    (VW6).
 6. Every `msg` string of §12 appears with the listed attributes in a run of
    the §14 suite; the suite passes end to end on the lab server
-   (`bash integtest/worker_test.sh user@192.168.10.20`). The one exception
-   is `invalid stored conf`: `workerctl` resolves every conf it writes
+   (`bash integtest/worker_test.sh user@192.168.10.20`). The exceptions are
+   `invalid stored conf` — `workerctl` resolves every conf it writes
    (§14.8), so the suite never produces one, and the three gates are
-   covered by the §13 unit tests instead.
+   covered by the §13 unit tests instead — and three records no case
+   stages: `sp drain failed` and `clone drain failed`, which case G asserts
+   at zero after every drain, and `cluster conf missing`, RW9's idle state,
+   which every case avoids by writing its `ClusterConf` before any rev key
+   and no case asserts either way (§13's revision tests cover it).
 7. Every `grpc.NewClient` in `worker/` uses the `grpc.md` §4 chain options;
    every trace id in an agent log produced by the suite has the
    `{seed8}-{16 hex}` shape (RW10).
@@ -2777,10 +2942,10 @@ owned by `B`.
 |---|---|---|
 | 0 | `D` starts, puts its three keys | `A`, `B`, `C` observe an appear for `D` (VW3) and start `D`'s 60 s timers (VW5). `D` scans, observes `A`, `B`, `C` and itself, starts four timers; its effective set is empty (VW7): it drives nothing |
 | 0–60 | `D` heartbeats every 10 s | puts refresh `lastSeen`; no transition, timers keep running |
-| ≈60 | timers fire | `A`, `B`, `C` commit `D` as member (VW6) and recompute (VW9): the shards whose largest ticket is now `D`'s (~¼) move — `B` stops `s`'s shard worker if `D` outranks it, logging `shard released`; `D` commits all four and starts shard workers for the same shards, logging `shard owned`. The switch is simultaneous to within watch latency; agents see an equal-revision re-sync from `D` |
+| ≈60 | timers fire | `A`, `B`, `C` commit `D` as member (VW6) and recompute (VW9): the shards whose largest ticket is now `D`'s (~¼) move — `B` stops `s`'s shard worker if `D` outranks it, logging `shard released`; `D` commits all four and starts shard workers for the same shards, logging `shard owned`. The switch is simultaneous to within watch latency; agents see `D`'s first `Check*` round, which finds them at the desired revision and issues no `Syncup*` (RW4 step 5) |
 | 300 | `B` is `SIGKILL`ed | nothing yet: `B`'s keys stay, its last put was at ≈300 |
 | ≈320 | `B`'s deadline (`lastSeen + 20`) fires everywhere | `A`, `C`, `D` observe `B` dead (disappear), start `B`'s 60 s timers |
-| ≈380 | timers fire | each commits `B` as nonmember, issues `Delete` of `B`'s keys (VW6; the first wins, the rest are no-ops), recomputes: `B`'s shards go to whoever holds the next-largest ticket; `B`'s revision keys were never touched, so the new owners' first rounds re-sync at the current revisions (RW4 step 5) |
+| ≈380 | timers fire | each commits `B` as nonmember, issues `Delete` of `B`'s keys (VW6; the first wins, the rest are no-ops), recomputes: `B`'s shards go to whoever holds the next-largest ticket; `B`'s revision keys were never touched, so the new owners' first rounds find the agents at the current revisions and issue no `Syncup*` (RW4 step 5) |
 | 500 | `C` is `SIGTERM`ed | `C` deletes its keys at once (CM5) and drains; `A`, `D` observe a disappear immediately (a delete event) and start 60 s timers — no 20 s wait |
 | ≈560 | timers fire | `A`, `D` commit, recompute; `C`'s in-flight syncups finished long before (≤ 60 s deadline) |
 | 700 | `A` is `SIGSTOP`ped | its puts stop; at ≈720 `D` observes it dead and starts a timer; at ≈780 commits it nonmember, deletes its keys, owns everything |
@@ -2789,7 +2954,7 @@ owned by `B`.
 The dead worker's shards were undriven from 300 to ≈380 (80 s); the
 gracefully stopped worker's from 500 to ≈560 (60 s). Revision keys are
 durable, so nothing is lost — convergence is delayed, not skipped
-(Appendix D).
+(`architecture.md` Appendix D).
 
 ---
 
@@ -2821,5 +2986,7 @@ durable, so nothing is lost — convergence is delayed, not skipped
 * **Log volume**: every round logs a `grpc client send`/`recv` pair per
   object (`grpc.md` L6) and every heartbeat an `etcd put`; with 5 s rounds
   and thousands of objects this is the dominant log stream of the control
-  plane, as it is for the agents. `RES_STATUS_UNKNOWN` and health
-  transitions are the only records the worker adds per object.
+  plane, as it is for the agents. Health transitions (`health changed`,
+  the `unreachable` reason included — the `RES_STATUS_UNKNOWN` marking
+  itself is in-memory and logs nothing, HL1) are the only records the
+  worker adds per object.

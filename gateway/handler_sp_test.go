@@ -1245,9 +1245,9 @@ func TestCreateStoragePoolValidation(t *testing.T) {
 // next_id never rewinds (GW12: a deleted sp_id must never come back), and each
 // node the two RPCs touched has been bumped exactly twice (§5.5).
 //
-// The delete now only LATCHES (§3), so sptDrain stands in for the sp
+// The delete now only LATCHES (§8.4), so sptDrain stands in for the sp
 // coordinator. The property under test is unchanged by that split, and
-// deliberately so: §0 #10 keeps the one-shot's real guarantee — DN and CN
+// deliberately so: SPD13 keeps the one-shot's real guarantee — DN and CN
 // budgets never disagree with the keys that describe them — by having every
 // batch release budget in the same transaction that shrinks the describing
 // key, so the END state must still be exactly this.
@@ -1683,11 +1683,11 @@ func TestDeleteStoragePoolRefusals(t *testing.T) {
 // reach the fixture the other one reads.
 //
 // The sp_rev key is still READ on the way through — it is a §5.1 invariant key
-// whose absence is ABORTED either way — and since the RPC became a latch (§3)
-// a token-less delete bumps it exactly like a token-carrying one; the drain
-// then deletes it at D3. What the second subtest therefore pins is the whole
-// effect of the bypass: the latch commits, and the teardown it starts returns
-// every extent. TestGrowSliceWithoutAToken pins the bump on its own.
+// whose absence is ABORTED either way — and since the RPC became a latch
+// (§8.4) a token-less delete bumps it exactly like a token-carrying one; the
+// drain then deletes it at D3. What the second subtest therefore pins is the
+// whole effect of the bypass: the latch commits, and the teardown it starts
+// returns every extent. TestGrowSliceWithoutAToken pins the bump on its own.
 func TestDeleteStoragePoolWithoutAToken(t *testing.T) {
 	t.Run("the name lists still refuse it", func(t *testing.T) {
 		env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
@@ -1807,7 +1807,7 @@ func TestDeleteStoragePoolUnknown(t *testing.T) {
 //
 // The two rows used to be DeleteStoragePool's, the widest release path there
 // was. It is no longer a release path at all — the sp drain took its ledgers
-// with it (§3) — so each row now drives the widest SURVIVING user of the
+// with it (§8.4) — so each row now drives the widest SURVIVING user of the
 // ledger it is about: DeleteSpareLeg for the DN half, DeleteCntlr for the CN
 // half. The drain's own answer to the same lost key is deliberately the
 // opposite one, and TestDrainToleratesALostNodeRecord in model/drain_test.go

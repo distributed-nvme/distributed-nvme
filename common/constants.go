@@ -80,9 +80,8 @@ const (
 	// MaxDelGrpPerTxn is the most groups ONE sp-drain batch removes from one
 	// slice in a single transaction (SPD10, dnv-worker.md §11.6). It bounds
 	// transaction SIZE, not rate — strictly sequential batches are the
-	// pacing — and it is a package
-	// constant rather than configuration for exactly that reason. The §6
-	// arithmetic it must satisfy is
+	// pacing — and it is a package constant rather than configuration for
+	// exactly that reason. The SPD13 arithmetic it must satisfy is
 	//
 	//	6 + 6 x MaxDelGrpPerTxn x (MaxAllocLegPerGrp + MaxSpareLegPerGrp)
 	//	    <= EtcdMaxTxnOps
@@ -105,7 +104,9 @@ const (
 	// transaction's legality; at today's 16x16 a maximum-shape drain is
 	// ceil(256 / 64) = 4 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
 	// 128 — prose, not a tripwire: the deployment requirement stays
-	// EtcdMaxTxnOps for the sp drain's sake.
+	// EtcdMaxTxnOps for the transactions that do NOT fit 128, the sp drain's
+	// 486-compare D2 batch and CreateStoragePool's 503-compare maximum shape
+	// (see EtcdMaxTxnOps below).
 	MaxDelBmPerTxn = 64
 
 	CnCntlidSlotBase = 10000
@@ -235,7 +236,8 @@ const (
 	ReplyCodeInvalidConf = 3
 
 	// Seconds between background retries of a pending migration-destination
-	// nvme connect (dnagent.md DN8).
+	// nvme connect (dnagent.md DN13; the loop is SH27's "DN8 retry", so
+	// nicknamed for the DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
 
 	// Side provisioning ([D15], architecture.md §9.4,
@@ -286,7 +288,10 @@ const (
 	// reload happens on the first converge at or after it.
 	SuspendSeconds = 60
 
-	// dnv-worker (dnv-worker.md §2.1).
+	// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
+	// another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
+	// arithmetic tripwired against it is dnv-worker.md §11.6's and §11.7's —
+	// SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -303,36 +308,56 @@ const (
 	DefaultEtcdOpTimeout   = 10
 	// EtcdMaxTxnOps is a DEPLOYMENT REQUIREMENT, not a client setting: every
 	// etcd serving dnv MUST run with --max-txn-ops=512 or higher; etcd's
-	// default is 128.
+	// default is 128. etcd caps on max(len(Compare), len(Success), …), and
+	// etcdutil's serializable-snapshot STM compares every key it read AND
+	// every key it wrote, so that sum is what has to fit.
 	//
-	// The transaction this number is SIZED by is the sp drain's D2 batch,
-	// 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) = 486
-	// COMPARES at the maximum shape (SPD14, dnv-worker.md §11.6) — etcd caps
-	// on max(len(Compare), len(Success), …), and etcdutil compares every key
-	// it read AND every key it wrote, so that sum is the bound. It is the
-	// largest bounded transaction in the system. CreateStoragePool is also above the default
-	// at a large enough shape, but its size is the REQUEST's (slice_cnt x
-	// init_ext_cnt) and there is no constant to tripwire it against.
+	// The transaction this number is TRIPWIRED against is the sp drain's D2
+	// batch, 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) =
+	// 486 COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
+	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
+	// committed against a real etcd by model/drain_test.go's
+	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6).
+	//
+	// That makes the D2 batch the largest transaction a tripwire BOUNDS, not
+	// the largest in the system: CreateStoragePool's own maximum shape is 503
+	// compares, and no tripwire guards it. Its STM costs 7 fixed (ClusterConf,
+	// SpConf and SpGlobal read; SpConf, SpName, SpRev and SpGlobal put) + one
+	// put per slice + 7 per distinct DN (DnConf, the scan's dn_capacity key
+	// and DnRev read; DnConf, the dn_capacity del and put, and DnRev written)
+	// + 8 per CN (the DN seven CN-keyed, plus that cntlr's own put), so at
+	// MaxSliceCntPerSp = 16 slices x 2 groups per slice (planSpGroups) x
+	// MaxAllocLegPerGrp = 2 legs = 64 DNs and MaxCntlrCntPerSp = 4 cntlrs it
+	// is 7 + 16 + 7x64 + 8x4 = 503, which 512 clears by 9. init_ext_cnt never
+	// enters that count — it moves ExtCnt VALUES, not key counts — so the
+	// shape is bounded by those three ceilings and IS tripwirable; the
+	// missing test is the gap, not the request.
+	//
 	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt = 256-key rectangle sweep
 	// was this number's founding justification and is gone: the clone drain
 	// replaced it with batches of MaxDelBmPerTxn + 4 = 68 ops, which fit the
 	// default (CLD11, dnv-worker.md §11.7).
 	//
-	// The test etcd launchers and the integtest suites all pass it from here.
+	// The Go test etcd launchers pass it from here; the three shell suites
+	// that start an etcd cannot import common, so they read it at preflight
+	// from workerctl's constants subcommand.
 	EtcdMaxTxnOps = 512
-
-	// dnv-gateway (gateway.md §2.1).
-	//
-	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
-	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect*, the
-	// Get*Bm bitmap reads), in seconds. Applied with context.WithTimeout
-	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
-	// hung agent and a hung etcd bound an RPC alike.
-	DefaultGatewayAgentTimeout = 10
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
 	WorkerRoleSp = "sp"
+
+	// dnv-gateway (gateway.md §2.1). That section adds three constants and
+	// only this one lands here: CloneBmChunkBytes sits beside MaxCloneBmCnt
+	// above, and EtcdMaxTxnOps in the dnv-worker block, whose header says so.
+	//
+	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
+	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect* and
+	// behind the force = false checks of DeleteClone/FinishMigration, the
+	// Get*Bm bitmap reads), in seconds. Applied with context.WithTimeout
+	// around each dial+call (AG2); chosen equal to DefaultEtcdOpTimeout so a
+	// hung agent and a hung etcd bound an RPC alike.
+	DefaultGatewayAgentTimeout = 10
 
 	// dnv-cdc (cdc.md §2.1).
 	//
@@ -359,10 +384,12 @@ const (
 	// CdcAerl is Identify's AERL: up to CdcAerl + 1 outstanding AERs per
 	// connection (NP11).
 	CdcAerl = 3
-	// CdcMaxH2CData is ICResp's MAXH2CDATA and the in-capsule data cap: the
-	// 1024 B Connect data blob is the only host-to-controller data dnv-cdc
-	// ever accepts (NP3). 8192 is NVME_TCP_ADMIN_CCSZ, the host's own admin
-	// capsule budget.
+	// CdcMaxH2CData is ICResp's MAXH2CDATA and the framing cap: readPdu
+	// refuses any PDU whose PLEN exceeds the CapsuleCmd header plus this
+	// value, before reading its payload. The 1024 B Connect data blob is the
+	// only host-to-controller data dnv-cdc ever interprets — in-capsule data
+	// on any other command is accepted and discarded (NP2, NP3). 8192 is
+	// NVME_TCP_ADMIN_CCSZ, the host's own admin capsule budget.
 	CdcMaxH2CData = 8192
 	// The discovery log page geometry (DS9): a header block followed by
 	// fixed-size entries, both as the specs lay them out.

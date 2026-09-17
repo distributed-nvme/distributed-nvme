@@ -204,7 +204,7 @@ func (p *sidePlan) migrFinalName() string {
 }
 
 // migrMetaDmName / migrMetaDmPath name the wrapper dm-linear over this
-// migration's dm-clone metadata slot ([P6]).
+// migration's dm-clone metadata slot (DN13).
 func (p *sidePlan) migrMetaDmName() string {
 	return p.nf.DnMigrMetaDmName(
 		p.clusterId, p.dnId, p.spId, p.migrDst.GetMigrId())

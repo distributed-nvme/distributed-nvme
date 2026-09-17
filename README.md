@@ -16,8 +16,10 @@ Module: `github.com/distributed-nvme/distributed-nvme`.
 | `pb/` | `schema.proto` plus the committed generated code |
 | `common/` | leaf package: constants, name formats, logging, `OsClient`, gRPC interceptors |
 | `etcdutil/` | central etcd helpers (proto (un)marshal + logging) |
+| `model/` | the architecture §5 etcd data model as Go: keys, capacity, candidate scans, the mutations gateway and worker share |
 | `gateway/`, `worker/`, `agent/`, `cdc/`, `ctl/` | the service implementations |
 | `cmd/` | one directory per binary: `dnv-gateway`, `dnv-worker`, `dnv-agent`, `dnv-cdc`, `dnvctl` |
+| `integtest/` | the integration suites (driven over ssh against remote hosts) and their drivers (never linked into a `cmd/` binary) |
 
 Import rules are in `doc/layout.md` §3. In short: `common` and `pb` import
 nothing internal, agents and `dnvctl` never link the etcd client.
@@ -46,12 +48,15 @@ files are committed, so an ordinary build or test never requires protoc.
   name formats, `DnNsIdentity`, `NvmeHostId`), `log.go` (`log/slog` JSON
   logging on stderr, trace ids on the context, `PbToLogValue`,
   `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
-  commands and file/proto/block I/O plus the §4.5.1 raw probe helpers), and
-  `interceptor.go` (the four gRPC interceptors).
+  commands and file/proto/block I/O plus the `osclient.md` §4.5.1 raw probe
+  helpers), and
+  `interceptor.go` (the shared gRPC interceptors every dnv connection chains:
+  unary client, stream client, unary server, stream server — `dnv-gateway`
+  chains its own trace-id mint ahead of them, `grpc.md` T4).
 * `etcdutil/` — the one and only door to etcd (`dnv-worker.md` §3, `log.md`
   §5.3): typed `Get`/`Put`/`Delete`/`Range`/`RangeKeys`/`WatchTyped` and the
-  two STM runners, with the protobuf (un)marshaling and the `log.md` records
-  inside.
+  three STM runners (`RunSTM`, `Snapshot`, `SnapshotRev`), with the protobuf
+  (un)marshaling and the `log.md` records inside.
 * `model/` — the architecture §5 etcd data model as Go (`dnv-worker.md` §4):
   key formats and parsers, `cluster_id`, the §5.6 capacity keys, the §6
   candidate scans, the §7 conf resolvers and stored-conf validators, and the
@@ -61,8 +66,10 @@ files are committed, so an ordinary build or test never requires protoc.
 * `worker/` — `dnv-worker.md` §6-§11: the heartbeat/grace/ticket vote layer and
   its shard ownership, the per-shard revision watchers, the per-object
   `Check*` loops with their `Syncup*` and `Push*Bitmap` calls, the `err_epoch`
-  health bookkeeping, the `provisioned`/`created` flips and the four automatic
-  reactions.
+  health bookkeeping, the `provisioned`/`created` flips, the §11 automatic
+  reactions (failover, thin-pool auto-grow, cntlr replacement, leg repair —
+  at most one applied per SP per pass), and the §11.6 sp drain and §11.7
+  clone drain that tear down what `DeleteStoragePool`/`DeleteClone` latch.
 * `agent/` — the shared dn/cn agent mechanism of `dnagent.md` §2:
   reconcile-then-serve bootstrap, local store, revision gate, lock
   hierarchy, `ResInfo` tracking, dm/nvmet/nvme-host wrappers, bitmap-chunk
@@ -85,14 +92,18 @@ files are committed, so an ordinary build or test never requires protoc.
   discovery-log server that answers hosts and fans out AENs.
 * `gateway/` and `cmd/dnv-gateway` — the control-plane API server of
   `doc/gateway.md`: all 59 RPCs of `service Gateway` over `etcdutil`'s STM
-  machinery, the §6.5 allocation, the §5.5 revision tokens and the ten agent
-  calls behind `Get*Size` / `Inspect*` / `Get*Bitmap`. Stateless and
-  active-active: any instance serves any request.
+  machinery, the architecture §6.5 allocation, the architecture §5.5 revision
+  tokens and the ten agent calls (`gateway.md` §6): the eight behind
+  `Get*Size` / `Inspect*` / `Get*Bitmap` plus the `GetCntlrInfo`/`GetSideInfo`
+  hydration checks of `DeleteClone`/`FinishMigration` with `force=false`.
+  `DeleteStoragePool` and `DeleteClone` latch (`deleting = true`) rather than
+  tear down; the worker's drains do the teardown. Stateless and active-active:
+  any instance serves any request.
 * `ctl/` and `cmd/dnvctl` — the operator CLI of `doc/dnvctl.md`: one noun
   group per §5 table with every one of the 59 RPCs as a leaf command,
   presence-based `--rev` tokens, protojson results on stdout and logs on
   stderr at Warn.
-* `integtest/` — the on-hardware suites of `dnagent_integtest.md`,
+* `integtest/` — the integration suites of `dnagent_integtest.md`,
   `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9, `gateway.md`
   §10 and `dnvctl.md` §7 (`dnagent_test.sh`, `cnagent_test.sh`,
   `worker_test.sh`, `cdc_test.sh`, `gateway_test.sh`, `dnvctl_test.sh` and

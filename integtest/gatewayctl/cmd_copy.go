@@ -30,16 +30,21 @@ import (
 // CreateClone and CreateMigration and returns their accessor.
 //
 // Both knobs are proto3 "unset means default at use time" values (§7, GW11):
-// the gateway's validateBound lets a zero through and resolves it later. An
-// untouched pair therefore sends NO DmCloneConf at all rather than an empty
-// one, the same "not given" convention trConfFlags uses, so the record the
-// script then reads back through get-clone / get-migr holds exactly what the
-// caller asked for and nothing the driver invented.
+// validateBound lets a zero through and the handler stores the pair as it
+// arrived — the sp-worker fills a migration's zeros in as it builds the side
+// request (worker/sprole.go's migrCloneConf), while a clone's pair reaches the
+// cn agent untouched, where a zero leaves the dm-clone target's own default in
+// place (CN18). An untouched pair therefore sends NO DmCloneConf at all rather
+// than an empty one, the same "not given" convention trConfFlags uses, so the
+// record the script then reads back through get-clone / get-migr holds
+// exactly what the caller asked for and nothing the driver invented.
 func dmCloneConfFlags(fs *flag.FlagSet) func() *pb.DmCloneConf {
 	threshold := fs.Uint("hyd-threshold", 0,
-		"dm_clone_conf.hydration_threshold (0 = let the CP default it)")
+		"dm_clone_conf.hydration_threshold (0 = not given; the "+
+			"sp-worker defaults a migration's, dm-clone a clone's)")
 	batch := fs.Uint("hyd-batch", 0,
-		"dm_clone_conf.hydration_batch_size (0 = let the CP default it)")
+		"dm_clone_conf.hydration_batch_size (0 = not given; the "+
+			"sp-worker defaults a migration's, dm-clone a clone's)")
 	return func() *pb.DmCloneConf {
 		if *threshold == 0 && *batch == 0 {
 			return nil

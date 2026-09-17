@@ -2111,9 +2111,9 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 // page and place its bits at the chunk's own offset, which PushCloneBitmap
 // would hand the primary as "never written".
 //
-// Nothing here reads the Clone record: it carries no chunk count (U2), and an
-// append does not rewrite it. The bytes are stored verbatim (GW14, [D-J]): the
-// gateway never inspects or rewrites a bit.
+// Nothing here reads the Clone record: it carries no chunk count (§8.9), and
+// an append does not rewrite it. The bytes are stored verbatim (GW14, [D-J]):
+// the gateway never inspects or rewrites a bit.
 func TestAppendCloneBitmapPairAddressing(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -2314,7 +2314,7 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 //
 // One of those four moved when the sweep did, and the test is arranged around
 // it: the namespace resume rides the LATCH, in the same SpRev bump as the
-// exclusion (§0 #5), while the keys go asynchronously. If the resume were
+// exclusion (CLD4), while the keys go asynchronously. If the resume were
 // deferred to the final STM instead, CN16's auto_resume override would vanish
 // when the clone left the plan while etcd still said suspended, and the
 // destination namespace would go dark for the whole drain — a host-visible

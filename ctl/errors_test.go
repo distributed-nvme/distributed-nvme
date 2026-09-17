@@ -162,7 +162,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		{"unknown flag",
 			[]string{"td", "create", "--no-such-flag"}},
 		// An unknown VERB under a known group has its own test below: it is
-		// the one row of §3.2 the implementation does not satisfy.
+		// the same §3.2 row, held by the RunE root.go's group() installs.
 		{"unknown group",
 			[]string{"nosuchgroup", "list"}},
 		{"positional argument",
@@ -233,29 +233,34 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 // TestUnknownVerbIsAUsageError pins §3.2's "unknown command" row on the shape
 // an operator actually types it in: a typo'd verb under a real group.
 //
-// FAILING, and deliberately not weakened — this exposes a defect in
-// ctl/root.go's group() helper. A group command has no Run/RunE, and cobra's
-// (*Command).execute returns flag.ErrHelp for any command that is not
-// Runnable BEFORE it ever calls ValidateArgs (cobra@v1.10.2 command.go:955,
-// above the ValidateArgs call at :968). ExecuteC treats flag.ErrHelp as
-// success — "always show help if requested, even if SilenceErrors is in
-// effect", command.go:1152 — printing the group's help and returning nil,
-// which Execute then maps to exit 0. So `dnvctl td lst`
-// exits 0 with a page of help text on STDOUT — which breaks two promises at
-// once, §3.2's "unknown command ⇒ exit 2, stdout empty, no RPC issued" and
-// §3.1's "nothing else is ever printed to stdout". A script that mistypes a
-// verb is told it succeeded, and `dnvctl td lst | jq .` fails on the help
-// text rather than on the exit code.
+// What the row rests on is the RunE ctl/root.go's group() gives every group.
+// A group issues no RPC of its own, so the obvious shape is a parent with no
+// Run/RunE — and cobra's (*Command).execute returns flag.ErrHelp for any
+// command that is not Runnable BEFORE it ever calls ValidateArgs
+// (cobra@v1.10.2 command.go:955, above the ValidateArgs call at :968), while
+// ExecuteC treats flag.ErrHelp as success — "always show help if requested,
+// even if SilenceErrors is in effect", command.go:1152. That shape would
+// answer `dnvctl td lst` with a page of help text on STDOUT and exit 0,
+// breaking §3.2's "unknown command ⇒ exit 2, stdout empty, no RPC issued"
+// (§3.1's stdout promise is scoped to an RPC path, and this argv issues no
+// RPC): a script that mistypes a verb would be told it succeeded. Being
+// Runnable puts ValidateArgs back in the path, where `Args: cobra.NoArgs`
+// produces the `unknown command` error this test pins.
 //
-// The group's `Args: cobra.NoArgs` does not save it: cobra reaches the
-// not-Runnable branch first, and Find's legacyArgs check only fires for the
-// ROOT command (args.go:35, `!cmd.HasParent()`), which is why the sibling
-// case `dnvctl nosuchgroup list` DOES exit 2.
+// The group's `Args` alone would not have saved it: cobra reaches the
+// not-Runnable branch first. Nor would Find's legacyArgs fallback, which
+// names an unknown command for the ROOT only (args.go:35, `!cmd.HasParent()`)
+// and is consulted only when `Args == nil` (command.go:775) — this root
+// declares `Args: cobra.NoArgs`, so the sibling case `dnvctl nosuchgroup
+// list` exits 2 by the same mechanism one level up: the root's RunE makes it
+// Runnable, and ValidateArgs' cobra.NoArgs — not needsSubcommand — returns
+// the `unknown command` error.
 //
-// The same path makes a bare `dnvctl td` print help on stdout and exit 0.
-// That one is arguably cobra's stock help behaviour (§0 #3 permits `help`),
-// so it is described here rather than asserted; the typo'd verb is not
-// arguable.
+// The same RunE makes a bare `dnvctl td` a usage error too, needsSubcommand's
+// other message rather than a help screen. That one no spec row demands, so
+// it is described here rather than asserted; the typo'd verb is not arguable.
+// `--help` is unaffected either way: cobra handles the help flag first, so
+// the stock help of §0 #3 still prints to stdout and exits 0.
 func TestUnknownVerbIsAUsageError(t *testing.T) {
 	for _, argv := range [][]string{
 		{"td", "no-such-verb"},

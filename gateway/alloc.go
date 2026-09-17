@@ -155,10 +155,10 @@ func candAddrs(cands []model.Cand) []string {
 // The DN ledger
 // ---------------------------------------------------------------------------
 
-// dnLedger accumulates one STM's DN bookkeeping so that a DN touched by
-// several sides — two legs of the same SP, or every side of an SP being torn
-// down — is read once, written once, has its capacity key maintained once and
-// its revision bumped exactly once (§5.5, §5.6).
+// dnLedger accumulates one STM's DN bookkeeping so that a DN this transaction
+// touches more than once — a pick verified and then charged, or a side list
+// that names it twice — is read once, written once, has its capacity key
+// maintained once and its revision bumped exactly once (§5.5, §5.6).
 //
 // Every record it hands out is the one THIS transaction read, which is what
 // makes model.MaintainDnCapacity's delete target exact: a capacity key embeds
@@ -187,13 +187,14 @@ type dnLedger struct {
 // one is the resolve-at-read this rule removed (§7), so the ledger refuses
 // with the same errAborted the allocating paths already give (§5.9).
 //
-// Six handlers build a ledger — CreateStoragePool and DeleteStoragePool,
-// DeleteSpareLeg, and CreateMigration, FinishMigration and CancelMigration —
-// and each builds it before staging its first write, so a refusal here returns
-// having written nothing rather than relying on the transaction being
-// abandoned (EU4). Two of the six reach a conf gate before this one anyway
-// (CreateStoragePool's own, CreateMigration's through pickDns); the other four
-// have none, which is what this covers.
+// Five handlers build a ledger — CreateStoragePool, DeleteSpareLeg, and
+// CreateMigration, FinishMigration and CancelMigration — and each builds it
+// before staging its first write, so a refusal here returns having written
+// nothing rather than relying on the transaction being abandoned (EU4).
+// DeleteStoragePool builds none since it became a latch: the worker's drain
+// returns its extents (dnv-worker.md §11.6). Two of the five reach a conf gate
+// before this one anyway (CreateStoragePool's own, CreateMigration's through
+// pickDns); the other three have none, which is what this covers.
 func newDnLedger(
 	s etcdutil.STM,
 	cid uint64,
