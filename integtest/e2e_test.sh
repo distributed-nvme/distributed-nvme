@@ -256,17 +256,90 @@ CNTLR_CNT=2
 SLOTS=0,1
 
 # event_threshold, in seconds (ctl/sp.go:213-219 declares the four flags;
-# worker/reaction.go consumes them). Short values are what make the react case
-# finish: the worker declares a primary unhealthy after THR_PRIMARY seconds
-# (AR5), a cntlr after THR_CNTLR (AR7), a side after THR_SIDE, a leg after
-# THR_LEG (AR8). The react case derives its own wait bounds from these
-# numbers, so they exist as four variables and not as one opaque string.
-THR_PRIMARY=5
-THR_CNTLR=20
-THR_SIDE=20
-THR_LEG=30
-THR="--thr-primary $THR_PRIMARY --thr-cntlr $THR_CNTLR"
-THR="$THR --thr-side $THR_SIDE --thr-leg $THR_LEG"
+# worker/reaction.go consumes them). TWO SETS, ONE PER KIND OF CASE, and
+# sp_thresholds picks between them before each sp is built.
+#
+# WHY THE CHOICE IS MADE AT CREATE TIME AND NOWHERE ELSE. There is no RPC that
+# changes a threshold after CreateStoragePool: the four flags exist only on
+# `sp create`, the handler stores the message verbatim
+# (gateway/storagepool.go:457, and model.ResolveEventThreshold is deliberately
+# exempt from resolve-at-write, model/ops.go:148-192), and the sp's whole life
+# runs on whatever that one call wrote. Every other sp-scoped mutator leaves
+# event_threshold alone. So the set a case needs has to be chosen before its sp
+# exists, which is why this is a parameter of setup_create_sp and not of a case.
+#
+# WHAT THE FIRST REAL RUN MEASURED (2026-09-17, commit deca203, all ten lab
+# guests). Building the default shape — 32 slices, raid1, 64 md arrays over 128
+# legs, 32 thin pools — kept the primary CN spawning 126,657 processes over
+# 8m45s: 82,099 dmsetup, 20,127 mdadm, 16,795 lsblk, about 240 a second
+# sustained on a 2-vCPU guest. (That is the whole window, restarts included —
+# see WAIT_BUILD.) Under that load the primary cannot answer a health check inside
+# five seconds, the worker sets its err_epoch, and AR5 moves the role. The new
+# primary then starts the SAME build from scratch, goes unresponsive
+# in its turn and hands the role back: the first run recorded
+# failover 1->2, a spare_create, and failover 2->1, all inside setup.
+#
+# NOTE CAREFULLY, because it is what decides the shape of the fix:
+# common.DefaultPrimaryUnhealthy is ALSO 5 (common/constants.go:206), and
+# ResolveEventThreshold turns an absent flag into it (model/ops.go:179-181). So
+# the failover loop is NOT caused by an aggressive suite value — omitting
+# --thr-primary would produce exactly the same five seconds. The only way out is
+# a LONG value, passed explicitly, at create.
+#
+# THE QUIET SET — smoke, ops and copy. These three cases test operations, not
+# reactions: a failover or a spare in the middle of one is noise that
+# invalidates its assertions (an absolute side count, a "no spare leg yet", a
+# digest read through a controller that is no longer the primary). So every
+# threshold here is longer than any build can run. 1800 s is 3.4 x the 525 s
+# window the first run measured (see WAIT_BUILD for what that number is and is
+# not), on a shape that is already the widest this tree can build; leg is
+# doubled because gateway/validate.go:297-305 refuses leg_unhealthy <=
+# side_unhealthy after the defaults are resolved. Nothing caps them from above:
+# ResolveEventThreshold's own comment says "No upper bound applies: §7 only
+# requires each value to be >= 1" (model/ops.go:155-156).
+THR_QUIET_PRIMARY=1800
+THR_QUIET_CNTLR=1800
+THR_QUIET_SIDE=1800
+THR_QUIET_LEG=3600
+
+# THE REACTING SET — react alone. AR7 waits cntlr_unhealthy and AR8 waits
+# side_unhealthy/leg_unhealthy, and at the gateway defaults (600, 600, 1200 —
+# common/constants.go:207-209) neither is observable inside any bound this
+# suite could sanely wait out. react therefore keeps D17's short values and
+# pays for them: its OWN build can produce a failover and a spare before the
+# case starts, which is why every react assertion is written against a shape
+# snapshot rather than against a count (see the react section's header).
+THR_REACT_PRIMARY=5
+THR_REACT_CNTLR=20
+THR_REACT_SIDE=20
+THR_REACT_LEG=30
+
+# The two argv strings, composed once so log_topology can print both and
+# sp_thresholds only has to choose. Each splits into eight words at the call
+# site (see setup_create_sp).
+THR_QUIET="--thr-primary $THR_QUIET_PRIMARY --thr-cntlr $THR_QUIET_CNTLR"
+THR_QUIET="$THR_QUIET --thr-side $THR_QUIET_SIDE --thr-leg $THR_QUIET_LEG"
+THR_REACT="--thr-primary $THR_REACT_PRIMARY --thr-cntlr $THR_REACT_CNTLR"
+THR_REACT="$THR_REACT --thr-side $THR_REACT_SIDE --thr-leg $THR_REACT_LEG"
+
+# The ACTIVE set: the four numbers the sp now being built will carry, and the
+# argv that carries them. They exist as four variables and not as one opaque
+# string for two reasons, neither of which is arithmetic: setup_create_sp
+# asserts them back one FIELD at a time out of `sp get`, which is also the proof
+# that $THR split into eight words instead of arriving as one; and react's
+# progress messages name the individual threshold the operator is waiting on
+# (primary_unhealthy in step 3, cntlr_unhealthy in step 4, side/leg_unhealthy in
+# step 5). No wait bound in this file is computed from any of them — WAIT_REACT
+# is a flat number sized by hand against react's own short set.
+# sp_thresholds is the only writer; the initial value is the quiet set so that
+# nothing is ever unset under `set -u`, and main overwrites it before the first
+# sp is created.
+THR_SET=quiet
+THR_PRIMARY=$THR_QUIET_PRIMARY
+THR_CNTLR=$THR_QUIET_CNTLR
+THR_SIDE=$THR_QUIET_SIDE
+THR_LEG=$THR_QUIET_LEG
+THR=$THR_QUIET
 
 # dnv-worker's vote loop (D9). The worker's reactions cannot fire faster than
 # its vote interval, which is why every react bound is threshold + intervals.
@@ -314,15 +387,81 @@ UUID2=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c02
 
 # Polling budgets, in seconds. Every one of them bounds a wait_until; none of
 # them is a sleep.
+#
+# THE BIG ONES ARE SIZED AGAINST A MEASURED WINDOW, NOT AN ESTIMATE. The plan's
+# "expect ~5 min per build" is optimistic for this shape and the first real run
+# proved it: the primary CN's agent log spans 8m45s (525 s) of build work and
+# records 126,657 process spawns in it — 82,099 dmsetup, 20,127 mdadm, 16,795
+# lsblk, about 240 a second sustained on a 2-vCPU guest.
+#
+# READ 525 s FOR WHAT IT IS. It is the longest build WINDOW the lab has
+# produced, and not the cost of one uninterrupted build. Two failovers fired
+# inside it (§7.1), and each one starts the build again from nothing on the
+# other CN, so the 126,657 spawns are the sum over everything that agent did in
+# those 8m45s — its own attempts, its demotion teardown, its legs. Nor is it a
+# completion time: the suite had already died at its 300 s bound with the
+# primary still climbing, at 21 of 32 pools and 49 of 64 groups. No
+# uninterrupted 32-slice build has been timed yet, so every margin below is a
+# ratio against that window, which is the only number there is to size from.
+#
+# The constraint is the process-spawn rate of a 2-vCPU guest; it is NOT memory
+# (all three CN guests held ~2.8 GiB of 3.4 GiB free throughout, with load
+# averages under 1), so the plan's §9 first fallback of raising the CN guests
+# to 8 GiB addresses the wrong resource.
+#
+# THE LINE BETWEEN THE TWO BIG BUDGETS IS "FROM NOTHING" vs "AN INCREMENT", not
+# "a cntlr stack" vs "everything else". WAIT_BUILD is a WHOLE cntlr stack built
+# from nothing — and setup's sides wait, which is the other from-nothing
+# convergence in the file: all 128 sides, each zeroed whole before it can be
+# exported, all at once. How long that one takes has not been measured on its
+# own (the first run passed it, then died in the stack wait), so it carries the
+# same generous budget rather than a number nobody has. WAIT_PROVISION is an
+# INCREMENTAL convergence on something that already exists, the sides a grow
+# adds among them. They are separate so that a stuck td-create does not cost
+# twenty minutes.
 WAIT_SHORT=15          # a process to answer at all
 WAIT_CP_READY=30       # the four cp daemons to serve (§7.4 step 2)
 WAIT_AGENT=30          # `dn create`/`cn create` to stop returning UNAVAILABLE
-WAIT_PROVISION=300     # 128 sides zeroed, 64 md arrays, 32 pools (§7.4 step 7)
-WAIT_DELETE=300        # `sp delete` to drain to NOT_FOUND
-WAIT_REACT=120         # an automatic reaction to land after its threshold
+WAIT_BUILD=1200        # 32 pools + 64 md arrays + 128 legs on ONE CN, from
+                       # nothing — and setup's own first wait, all 128 sides
+                       # blkdiscard-zeroed from nothing across the DN agents,
+                       # the other from-nothing convergence in the file. 2.3x
+                       # the 8m45s / 126,657-spawn window above, which leaves
+                       # margin for a lab under more load and for the react
+                       # case, whose build may lose a failover's worth of work
+                       # and start again (§7.1's reacting set)
+WAIT_PROVISION=600     # an incremental convergence on something that already
+                       # exists: the handful of sides a grow adds, one grown
+                       # group's md + pool reload, a td's thin volumes and
+                       # raid0, one leg reconnecting. 2x the old 300 s, which
+                       # was sized against the same optimistic estimate
+WAIT_DELETE=900        # `sp delete` to drain to NOT_FOUND. The drain is the
+                       # build run backwards on the same 2-vCPU CN — 32 pools,
+                       # 64 arrays and 128 legs torn down and every side
+                       # retired on its DN — so it is sized against the 525 s
+                       # window, not against the old 300 s
+WAIT_REACT=120         # an automatic reaction to land after its threshold.
+                       # Unchanged: it is threshold + a few 5s worker passes
+                       # (D9's vote loop), and every threshold it bounds is
+                       # react's own short set
 WAIT_HOST=60           # a host device/ANA state to appear
 
+# How many times setup's stage 07 will wait out a whole stack before it calls
+# the sp non-convergent. It is a COUNT and not a budget: each round is two
+# WAIT_BUILDs that SUCCEEDED and were then invalidated by the role moving again
+# (a timeout inside either one dies on the spot, so this never multiplies the
+# wall clock by three). Under react's set one move during setup is ordinary —
+# the first run had two — and a lab that cannot get past three is one where the
+# build loses the race against primary_unhealthy every time, which is a finding
+# and not a wait to sit through.
+SETUP_STACK_ROUNDS=3
+
 CASES=(smoke ops copy react)
+
+# The cases this run will actually execute, in CASES order with --only applied.
+# main fills it BEFORE setup, because setup builds the FIRST case's sp and
+# sp_thresholds has to know whose sp that is.
+RUN_CASES=()
 
 # ---------------------------------------------------------------------------
 # Mutable state
@@ -377,8 +516,8 @@ QUIET=0
 # whose trsvcid is outside this suite's band, i.e. one that was never ours to
 # remove. on_exit and --cleanup-only turn it into a non-zero exit, because a
 # leftover port with live ana_groups is what fails the NEXT suite's setup
-# (memory note nvmet-port-teardown-ana-groups) and a WARNING in the middle of a
-# forty-minute transcript is not how the operator finds that out.
+# (memory note nvmet-port-teardown-ana-groups) and a WARNING in the middle of an
+# hours-long transcript is not how the operator finds that out.
 CLEANUP_DIRTY=0
 
 # --timeout on every dnvctl call. dnvctl's own default is 10 s
@@ -551,7 +690,7 @@ on_exit() {
 # ---------------------------------------------------------------------------
 
 # ssh_to runs one command on one target. QUIET is raised while wait_until
-# polls, so a five minute poll does not bury the transcript.
+# polls, so a poll that may run for WAIT_BUILD does not bury the transcript.
 ssh_to() { # <target> <cmd…>
 	local target=$1
 	shift
@@ -4225,7 +4364,7 @@ preflight_guests() {
 # `t.Err(resKeyMeta, s.disk, details)` for a tagged disk
 # (agent/dnagent/syncup_dn.go:490-491), so dn_node_ready's meta_info row would
 # never reach RES_STATUS_OK and setup WOULD fail at its own wait — after
-# WAIT_PROVISION (300 s) per disk, with a message about a header rather than
+# WAIT_PROVISION per disk, with a message about a header rather than
 # about a kernel attribute, and with the agent free to have been writing real
 # zero pages the whole time (checkWriteZeroes "never gates converging", its own
 # comment at :502-505). This check turns that into one named line.
@@ -4939,8 +5078,8 @@ BASELINE_MIB=4
 PATTERN0=""
 SHA0=""
 
-# Scratch used by the progress-reporting predicates below, so a five minute
-# wait says what it is waiting for instead of going silent.
+# Scratch used by the progress-reporting predicates below, so a wait that may
+# run for WAIT_BUILD says what it is waiting for instead of going silent.
 SIDES_LEFT=-1
 STACK_LAST=""
 DISC_WANT=""
@@ -5258,8 +5397,8 @@ sp_sides_provisioned() {
 		# from GRP_CNT x LEGS: three of the four callers run after the sp has
 		# grown (ops step 2 adds two groups, copy's spare adds a leg, react's
 		# AR6 adds a group), and a total smaller than the count is exactly the
-		# number an operator reads while deciding whether a five-minute wait
-		# is stuck. SP_ANY_SIDE_PATH is the same set SP_UNPROV_CNT filters, so
+		# number an operator reads while deciding whether a long wait is
+		# stuck. SP_ANY_SIDE_PATH is the same set SP_UNPROV_CNT filters, so
 		# the two numbers are always commensurable.
 		total=$(jq_of "$CTL_OUT" "[$SP_ANY_SIDE_PATH] | length")
 		log "  sides still provisioning: $left of $total"
@@ -5267,59 +5406,31 @@ sp_sides_provisioned() {
 	[ "$left" = 0 ]
 }
 
-# cntlr_stack_ready is §7.4 step 7's second wait: the PRIMARY's whole stack.
-# The three counts are what doc/cnagent.md CN10/CN12/CN13 say a primary holds
-# at READWRITE with no td yet — one leg row per leg of every group (both
-# roles), one md/linear row per group and one thin-pool row per slice.
+# THE TWO FRESH-SP PREDICATES THAT USED TO LIVE HERE ARE GONE, and this note is
+# their headstone rather than a style change. cntlr_stack_ready and
+# cntlr_legs_ready took their expected leg count from the constant
+# GRP_CNT x LEGS — the shape a FRESH sp has — and their own comment already
+# warned that CN10 walks spare_leg_list too, so a `spare create`, a
+# `sp grow-slice` or an automatic reaction makes the real count higher and the
+# predicate waits for ever. The first real run walked into exactly that: AR8
+# created one spare during setup step 7 and the wait sat at `legs 129/128` until
+# its budget ran out. A warning in a comment is not a guard, so setup now uses
+# the same live-shape predicates every case uses — cntlr_full_ready and
+# cntlr_legs_full_ready, which re-read [$SP_LEG_PATH] plus [$SP_SPARE_LEG_PATH]
+# on every poll. The two facts the old comments carried are kept where they are
+# still true:
 #
-# grp_id_to_md_raid is asserted for `none` as well as raid1: the probe's switch
-# is on plan.wantGrp, not on the redundancy arm, and probeGroup answers for a
-# RedundNone dm-linear exactly as it does for an array
-# (agent/cnagent/probe.go:62-77, agent/cnagent/md.go:371-394).
-#
-# CAVEAT for a later case: the expected leg count is hard-coded as
-# GRP_CNT x LEGS, the shape a FRESH sp has. CN10 walks spare_leg_list too, so
-# after a `spare create` or a `sp grow-slice` the real count is higher and
-# this predicate (and cntlr_legs_ready) would wait for ever. Compute the
-# expected number from `sp get` — [$SP_LEG_PATH] plus [$SP_SPARE_LEG_PATH] —
-# instead of reusing these two unchanged.
-cntlr_stack_ready() { # <cntlr id>
-	local pools grps legs sig
-	if ! ctl_try cntlr inspect --id "$1"; then
-		return 1
-	fi
-	pools=$(jq_of "$CTL_OUT" "$CNTLR_OK_POOLS")
-	grps=$(jq_of "$CTL_OUT" "$CNTLR_OK_GRPS")
-	legs=$(jq_of "$CTL_OUT" "$CNTLR_OK_LEGS")
-	sig="pools $pools/$SLICE_CNT, groups $grps/$GRP_CNT,"
-	sig="$sig legs $legs/$((GRP_CNT * LEGS))"
-	if [ "$sig" != "$STACK_LAST" ]; then
-		STACK_LAST=$sig
-		log "  cntlr $1: $sig"
-	fi
-	[ "$pools" = "$SLICE_CNT" ] && [ "$grps" = "$GRP_CNT" ] &&
-		[ "$legs" = "$((GRP_CNT * LEGS))" ]
-}
-
-# cntlr_legs_ready is the STANDBY's wait. A standby has no groups and no pools
-# at all (see setup_assert_standby), so legs are the only rows to wait on —
-# and they do reach RES_STATUS_OK on a standby: CN11 gives a standby the
-# transport probe (a live controller per desired side, plus an ana_state of
-# optimized or non-optimized on a single-sided leg) in place of the primary's
-# block probe.
-cntlr_legs_ready() { # <cntlr id>
-	local legs sig
-	if ! ctl_try cntlr inspect --id "$1"; then
-		return 1
-	fi
-	legs=$(jq_of "$CTL_OUT" "$CNTLR_OK_LEGS")
-	sig="legs $legs/$((GRP_CNT * LEGS))"
-	if [ "$sig" != "$STACK_LAST" ]; then
-		STACK_LAST=$sig
-		log "  cntlr $1: $sig"
-	fi
-	[ "$legs" = "$((GRP_CNT * LEGS))" ]
-}
+#   * the three counts are what doc/cnagent.md CN10/CN12/CN13 say a primary
+#     holds at READWRITE — one leg row per leg of every group (both roles), one
+#     md/linear row per group, one thin-pool row per slice;
+#   * grp_id_to_md_raid is expected for `none` as well as raid1, because the
+#     probe's switch is on plan.wantGrp and not on the redundancy arm, and
+#     probeGroup answers for a RedundNone dm-linear exactly as it does for an
+#     array (agent/cnagent/probe.go:62-77, agent/cnagent/md.go:371-394);
+#   * a standby's legs DO reach RES_STATUS_OK: CN11 gives it the transport probe
+#     (a live controller per desired side, plus an ana_state of optimized or
+#     non-optimized on a single-sided leg) in place of the primary's block
+#     probe.
 
 # cntlr_raid0_ready waits for the primary to hold <cnt> td raid0 devices — the
 # row `td list`'s `created` does NOT cover. `created` flips when a cntlr has
@@ -5607,6 +5718,43 @@ setup_register_nodes() {
 # §7.4 step 6 — the storage pool, and every assertion on its shape
 # ---------------------------------------------------------------------------
 
+# sp_thresholds selects the event_threshold set the NEXT `sp create` will carry
+# (§7.1's two sets and the measurements behind them). main calls it once before
+# setup and once before each setup_between_cases, so the sp a case works in is
+# always built with that case's set — the only moment the choice can be made,
+# because no RPC changes a threshold afterwards.
+#
+# An unknown name DIES rather than defaulting: a fifth case added to $CASES is a
+# decision about whether it may tolerate a reaction mid-run, and silently giving
+# it the quiet set would make that decision invisibly.
+sp_thresholds() { # <case name>
+	case "$1" in
+	react)
+		THR_SET=reacting
+		THR_PRIMARY=$THR_REACT_PRIMARY
+		THR_CNTLR=$THR_REACT_CNTLR
+		THR_SIDE=$THR_REACT_SIDE
+		THR_LEG=$THR_REACT_LEG
+		THR=$THR_REACT
+		;;
+	smoke | ops | copy)
+		THR_SET=quiet
+		THR_PRIMARY=$THR_QUIET_PRIMARY
+		THR_CNTLR=$THR_QUIET_CNTLR
+		THR_SIDE=$THR_QUIET_SIDE
+		THR_LEG=$THR_QUIET_LEG
+		THR=$THR_QUIET
+		;;
+	*)
+		die "sp_thresholds has no event_threshold set for case '$1'." \
+			"Every case must choose one AT CREATE TIME — no RPC changes a" \
+			"threshold afterwards — so a new case has to be named here"
+		;;
+	esac
+	log ""
+	log "=== thresholds for the $1 case's sp: the $THR_SET set, $THR"
+}
+
 setup_create_sp() {
 	stage 06 "sp create — $SLICE_CNT slices, $REDUND, $GRP_CNT groups, $((GRP_CNT * LEGS)) sides"
 	local slot0=${SLOTS%%,*}
@@ -5622,7 +5770,15 @@ setup_create_sp() {
 	#
 	# $THR is UNQUOTED so it splits into its eight words. That is deliberate,
 	# and it is why the four thresholds also exist as separate variables: the
-	# react case derives its bounds from the numbers, not from this string.
+	# read-backs below assert them one field at a time, and react's messages
+	# name the one threshold each of its waits is watching. Nothing computes a
+	# wait bound from them.
+	#
+	# WHICH eight words is sp_thresholds' answer, and main has already given it
+	# — the $THR_SET set (§7.1). This is the ONLY place the choice can take
+	# effect: no RPC changes an event_threshold after CreateStoragePool, so the
+	# set this call carries is the set the case lives with. The four read-backs
+	# below are against the ACTIVE variables, so they follow the choice.
 	# shellcheck disable=SC2086
 	ctl_timeout 180 ctl_ok sp create \
 		--cntlr-cnt "$CNTLR_CNT" --slice-cnt "$SLICE_CNT" \
@@ -5821,8 +5977,14 @@ setup_assert_standby() { # <the standby's cntlr inspect reply>
 		"CN15: a standby builds no td raid0"
 	assert_field "$doc" '.cntlr_info.td_id_to_thin_info | length' 0 \
 		"CN14: a standby builds no thin volumes"
+	# The LIVE leg total, not GRP_CNT x LEGS. A build under the reacting
+	# threshold set can leave a spare leg behind (react's, §7.1), CN10 walks
+	# spare_leg_list as well as leg_list, and the fresh-sp constant would then be
+	# one short of what the agent correctly reports. The winning poll's own
+	# sp_totals_poll ran in this same shell (wait_until does not fork), so these
+	# are the numbers the reply in $doc was judged against.
 	assert_field "$doc" '.cntlr_info.leg_id_to_leg | length' \
-		"$((GRP_CNT * LEGS))" \
+		"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
 		"CN10: a standby connects every leg, so leg_id_to_leg is full"
 }
 
@@ -5834,7 +5996,7 @@ setup_wait_stack() {
 	# Side.provisioned. Until then the CN skips the side entirely (CN10), so
 	# nothing above it can build.
 	SIDES_LEFT=-1
-	wait_until "$WAIT_PROVISION" \
+	wait_until "$WAIT_BUILD" \
 		"every one of the $((GRP_CNT * LEGS)) sides of $SP to be provisioned" \
 		sp_sides_provisioned
 	# The predicate ran in this shell, so its last (successful) `sp get` is
@@ -5842,36 +6004,155 @@ setup_wait_stack() {
 	SP_JSON=$CTL_OUT
 	assert_field "$SP_JSON" "$SP_UNPROV_CNT" 0 "unprovisioned sides"
 	sp_read_roles
+	# THE TARGET OF THE TWO WAITS BELOW IS THE LIVE SHAPE, and this is where the
+	# first real run died. Setup used to wait against the fresh-sp constant
+	# GRP_CNT x LEGS; a spare leg created by AR8 while the wait ran made the
+	# agent report 129 leg rows against a target of 128, and the poll could never
+	# pass however long it was given (the transcript's last line was
+	# `legs 129/128`). primary_stack_ready and standby_shape_ready both go
+	# through sp_totals_poll, which re-reads the totals on every poll and shouts
+	# when the shape moves — the only form that can both finish and say what
+	# happened.
+	#
+	# Under the quiet threshold set — smoke, ops and copy — nothing may move at
+	# all, so the shout is the signal that a reaction fired when none should
+	# have. Under react's reacting set it is expected and the waits survive it.
+	#
+	# This reading buys nothing the predicates do not refresh; it is here so the
+	# SP_*_TOTAL globals are this sp's, and not the previous case's, before the
+	# first poll runs. Every value they hold after a wait is the WINNING poll's.
+	sp_totals
 
-	STACK_LAST=""
-	wait_until "$WAIT_PROVISION" \
-		"primary cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN to build its pools, groups and legs" \
-		cntlr_stack_ready "$PRIMARY_CNTLR_ID"
-	assert_field "$CTL_OUT" '.cntlr_info.slice_id_to_dm_pool | length' \
-		"$SLICE_CNT" "the primary reports one thin-pool row per slice"
-	assert_field "$CTL_OUT" '.cntlr_info.grp_id_to_md_raid | length' \
-		"$GRP_CNT" "the primary reports one group row per group"
-	assert_field "$CTL_OUT" "$CNTLR_OK_GRPS" "$GRP_CNT" \
-		"every group of the primary is RES_STATUS_OK"
-	assert_field "$CTL_OUT" "$CNTLR_OK_POOLS" "$SLICE_CNT" \
-		"every thin pool of the primary is RES_STATUS_OK"
-	assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" "$((GRP_CNT * LEGS))" \
-		"every leg of the primary is RES_STATUS_OK"
-	# applied_revision is the agent's own view of how far it has converged
-	# (InspectCntlrReply.applied_revision comes from the agent, not from the
-	# rev key), so a zero here would mean the CN has never accepted a
-	# revision-gated SyncupCntlr and every row above was read off a node that
-	# is converging blind.
-	assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
-		"the primary has applied at least one SyncupCntlr revision"
+	# standby_shape_ready resolves "the cntlr that is not the primary" out of its
+	# own poll, which names one controller only at §7.1's cntlr_cnt 2. Asserted
+	# here, the way react step 3 asserts the same assumption, so that a changed
+	# §7.1 fails with this sentence instead of timing out later.
+	assert_eq "$CNTLR_CNT" 2 \
+		"setup's standby wait is written for §7.1's cntlr_cnt 2"
 
-	STACK_LAST=""
-	wait_until "$WAIT_PROVISION" \
-		"the standby cntlr $STANDBY_CNTLR_ID on cn$STANDBY_CN to connect its $((GRP_CNT * LEGS)) legs" \
-		cntlr_legs_ready "$STANDBY_CNTLR_ID"
-	setup_assert_standby "$CTL_OUT"
-	assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" "$((GRP_CNT * LEGS))" \
-		"every leg of the standby is RES_STATUS_OK (CN11's transport probe)"
+	# NEITHER WAIT BELOW IS PINNED TO A CNTLR ID, and the stage exits only when
+	# the two agree. primary_stack_ready and standby_shape_ready each resolve
+	# their role from the `sp get` of their own poll, because under react's
+	# threshold set a failover during this build is expected — the first real run
+	# had two — and either wait pinned to an id would end up watching the node in
+	# the OTHER role, whose target it can then never reach: the stack target
+	# against a standby that by CN12/CN13 builds nothing, or the emptiness target
+	# against a primary that is building everything.
+	#
+	# Following the role inside a wait is not enough by itself, because the two
+	# waits are consecutive and the role can move in the SECOND one, after the
+	# first has already asserted a complete stack. The standby wait is exactly
+	# where that is most likely: a demoted old primary tears down 32 pools and 64
+	# md arrays before it looks like a standby, and the instant that teardown ends
+	# its err_epoch clears and it is a failover candidate again
+	# (worker/reaction.go:645-649, failoverEligible). What every step after this
+	# one needs — setup_create_td's raid0 wait, step 09's namespace, step 10's
+	# host connect, all of which read PRIMARY_* — is a primary that holds a
+	# complete stack NOW. So the pair runs in a loop whose exit condition is that
+	# statement and not an id comparison — see the check at the bottom of it —
+	# bounded by SETUP_STACK_ROUNDS so that a lab which ping-pongs for ever fails
+	# loudly instead of spinning.
+	local round=0 built=""
+	while :; do
+		round=$((round + 1))
+		if [ "$round" -gt "$SETUP_STACK_ROUNDS" ]; then
+			die "the primary role of $SP moved after every one of" \
+				"$SETUP_STACK_ROUNDS complete builds. Each move starts the" \
+				"whole build again on the other CN (see WAIT_BUILD), so this" \
+				"sp is not converging: the build is losing the race against" \
+				"the $THR_SET threshold set ($THR) every time."
+		fi
+		stack_wait_reset
+		wait_until "$WAIT_BUILD" \
+			"the primary of $SP (cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN as this wait begins) to build its pools, groups and legs" \
+			primary_stack_ready
+		# The cntlr the winning poll inspected, i.e. the one the assertions
+		# below are about. stack_wait_reset clears PRIMARY_WAIT_ID before the
+		# next wait, so it is saved here rather than read again later.
+		built=$PRIMARY_WAIT_ID
+		assert_field "$CTL_OUT" '.cntlr_info.slice_id_to_dm_pool | length' \
+			"$SLICE_CNT" "the primary reports one thin-pool row per slice"
+		assert_field "$CTL_OUT" '.cntlr_info.grp_id_to_md_raid | length' \
+			"$SP_GRP_TOTAL" "the primary reports one group row per group"
+		assert_field "$CTL_OUT" "$CNTLR_OK_GRPS" "$SP_GRP_TOTAL" \
+			"every group of the primary is RES_STATUS_OK"
+		assert_field "$CTL_OUT" "$CNTLR_OK_POOLS" "$SLICE_CNT" \
+			"every thin pool of the primary is RES_STATUS_OK"
+		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
+			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
+			"every leg of the primary is RES_STATUS_OK"
+		# applied_revision is the agent's own view of how far it has converged
+		# (InspectCntlrReply.applied_revision comes from the agent, not from the
+		# rev key), so a zero here would mean the CN has never accepted a
+		# revision-gated SyncupCntlr and every row above was read off a node that
+		# is converging blind.
+		assert_ge "$(jq_of "$CTL_OUT" '.applied_revision')" 1 \
+			"the primary has applied at least one SyncupCntlr revision"
+
+		# THE ROLES ARE RE-READ HERE, because the wait above may have followed a
+		# failover: PRIMARY_*/STANDBY_* still name the controllers the sides-
+		# provisioned reply described.
+		sp_refresh
+		sp_read_roles
+		sp_totals
+		if [ "$PRIMARY_CNTLR_ID" != "$built" ]; then
+			log "!!! the primary moved again the moment its stack was" \
+				"complete: cntlr $built built it, cntlr $PRIMARY_CNTLR_ID" \
+				"holds the role now and has the same build ahead of it." \
+				"Waiting for THAT one; that was round $round of" \
+				"$SETUP_STACK_ROUNDS."
+			continue
+		fi
+
+		stack_wait_reset
+		wait_until "$WAIT_BUILD" \
+			"the standby of $SP (cntlr $STANDBY_CNTLR_ID on cn$STANDBY_CN as this wait begins) to connect its $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs and hold no group or pool" \
+			standby_shape_ready
+		setup_assert_standby "$CTL_OUT"
+		assert_field "$CTL_OUT" "$CNTLR_OK_LEGS" \
+			"$((SP_LEG_TOTAL + SP_SPARE_TOTAL))" \
+			"every leg of the standby is RES_STATUS_OK (CN11's transport probe)"
+
+		# THE EXIT CONDITION, and it is not "the same cntlr is still primary".
+		# It is "the primary HOLDS a complete stack now", which is what every
+		# step below assumes. The id can be unchanged and the statement false: a
+		# demotion inside the standby wait is a teardown (CN12/CN13), so a cntlr
+		# that was demoted and promoted again inside that window is primary under
+		# its old id with its pools and groups gone. One extra `cntlr inspect`
+		# settles it, and in the ordinary case it passes on the first try.
+		sp_refresh
+		sp_read_roles
+		sp_totals
+		if [ "$PRIMARY_CNTLR_ID" != "$built" ]; then
+			log "!!! the primary moved while the standby's shape was being" \
+				"waited on: cntlr $built built the stack, cntlr" \
+				"$PRIMARY_CNTLR_ID holds the role now. The steps below read" \
+				"PRIMARY_*, so the stack is waited out again; that was" \
+				"round $round of $SETUP_STACK_ROUNDS."
+			continue
+		fi
+		STACK_LAST=""
+		if ! cntlr_stack_matches "$PRIMARY_CNTLR_ID"; then
+			log "!!! cntlr $PRIMARY_CNTLR_ID is primary again but no longer" \
+				"holds the stack it built: it was demoted and re-promoted" \
+				"while the standby wait ran, and a demotion tears the pools" \
+				"and groups down (CN12/CN13). Waiting for the rebuild; that" \
+				"was round $round of $SETUP_STACK_ROUNDS."
+			continue
+		fi
+		break
+	done
+	# The shape this build actually produced, said out loud. Under the quiet set
+	# it must be the fresh-sp shape; under react's set it may already carry a
+	# spare, and every later assertion of that case is written against THIS
+	# number rather than against GRP_CNT x LEGS.
+	if [ "$SP_SPARE_TOTAL" != 0 ] ||
+		[ "$SP_LEG_TOTAL" != "$((GRP_CNT * LEGS))" ]; then
+		log "!!! this build did not produce the fresh-sp shape:" \
+			"$SP_LEG_TOTAL legs and $SP_SPARE_TOTAL spare leg(s) against" \
+			"$((GRP_CNT * LEGS)) legs and 0 spares. A reaction fired during" \
+			"setup; the sp carries the $THR_SET threshold set ($THR)."
+	fi
 }
 
 # ---------------------------------------------------------------------------
@@ -6149,7 +6430,8 @@ setup() {
 # --local-store with it — and only the two cn phases remove the CN's store and
 # its tmpfs arena. So the between-cases step is cleanup_all followed by a
 # fresh setup_infra and a fresh setup_case, and the run pays for a second full
-# build (the ~5 minutes §7.4 budgets) per case.
+# build per case. That build is the 8m45s window of the WAIT_BUILD comment, not
+# the ~5 minutes §7.4 budgets, so a four-case run is well over an hour.
 #
 # cleanup_all never dies, so a guest that could not be cleaned is a loud
 # warning here and a failure at the next assertion rather than a silent skip.
@@ -6596,8 +6878,16 @@ case_smoke() {
 	assert_field "$SP_JSON" '.sp_conf.sp_id' "$SP_ID" \
 		"\`sp get\` still answers for the sp setup created"
 	assert_field "$SP_JSON" '.slice_list | length' "$SLICE_CNT" "slices"
+	# THESE TWO ABSOLUTES ARE DELIBERATE, and after §7.1's per-case thresholds
+	# they carry a second statement as well as the first. smoke's sp is built
+	# with the QUIET set, so no reaction can fire during or after its build: a
+	# side count that is not GRP_CNT x LEGS, or a spare leg at all, means one
+	# did — which is a finding about the lab, not a shape to accommodate. This
+	# is the opposite choice from the react case's, for the opposite reason.
 	assert_field "$SP_JSON" "[$SP_SIDE_PATH] | length" "$((GRP_CNT * LEGS))" \
-		"sides (nothing has grown the sp in this case)"
+		"sides (nothing has grown the sp, and the quiet thresholds let nothing react)"
+	assert_field "$SP_JSON" "[$SP_SPARE_LEG_PATH] | length" 0 \
+		"spare legs (the quiet thresholds mean AR8 cannot have created one)"
 	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE "sp_level"
 	check_sha0 "before the teardown"
 	case_finish
@@ -6617,37 +6907,111 @@ case_smoke() {
 SNAP0=s0
 TD1=t1
 
-# The current shape of the sp, recomputed from the last `sp get` rather than
-# from GRP_CNT. Step 2 grows two slices, so from that point on the constants
-# setup asserted against are stale — and the predicates setup left behind
-# (cntlr_stack_ready, cntlr_legs_ready) hard-code GRP_CNT x LEGS and would wait
-# for ever. Their own comments say so; these are the general forms.
+# The current shape of the sp, recomputed from a `sp get` rather than from
+# GRP_CNT. Step 2 grows two slices, so from that point on the constants setup
+# asserted against are stale; a spare leg or an automatic reaction moves them
+# too. Setup uses these same general forms — the fresh-sp predicates that once
+# sat beside cntlr_raid0_ready were deleted for the reason their headstone
+# there gives.
 SP_GRP_TOTAL=0
 SP_LEG_TOTAL=0
 SP_SPARE_TOTAL=0
 SP_SIDE_TOTAL=0
 
 sp_totals() {
-	SP_GRP_TOTAL=$(sp_field "[$SP_GRP_PATH] | length")
-	SP_LEG_TOTAL=$(sp_field "[$SP_LEG_PATH] | length")
-	SP_SPARE_TOTAL=$(sp_field "[$SP_SPARE_LEG_PATH] | length")
-	SP_SIDE_TOTAL=$(sp_field "[$SP_SIDE_PATH] | length")
+	sp_totals_of "$SP_JSON" "SP_JSON"
+}
+
+# sp_totals_of is the one parser both forms share. <what> names the document for
+# the failure message, because the two callers hold different ones: sp_totals
+# parses the last `sp get` sp_refresh stored, and sp_totals_poll parses a reply
+# it fetched itself, one poll ago.
+sp_totals_of() { # <sp get reply> <what>
+	SP_GRP_TOTAL=$(jq_of "$1" "[$SP_GRP_PATH] | length")
+	SP_LEG_TOTAL=$(jq_of "$1" "[$SP_LEG_PATH] | length")
+	SP_SPARE_TOTAL=$(jq_of "$1" "[$SP_SPARE_LEG_PATH] | length")
+	SP_SIDE_TOTAL=$(jq_of "$1" "[$SP_SIDE_PATH] | length")
 	local n
 	for n in "$SP_GRP_TOTAL" "$SP_LEG_TOTAL" "$SP_SPARE_TOTAL" "$SP_SIDE_TOTAL"; do
 		case "$n" in
 		'' | *[!0-9]*)
-			die "sp_totals read '$n' out of \`sp get\`; SP_JSON is not an sp"
+			die "sp_totals read '$n' out of \`sp get\`; $2 is not an sp"
 			;;
 		esac
 	done
 }
 
-# cntlr_full_ready is cntlr_stack_ready against the CURRENT shape: one thin-pool
-# row per slice, one group row per group, one leg row per leg. The leg count
-# includes the SPARE legs because CN10 walks spare_leg_list too — ops creates
-# none, but writing the number any other way would leave a trap for the copy
-# case, which does.
-cntlr_full_ready() { # <cntlr id>
+# ---------------------------------------------------------------------------
+# The shape target, re-read on every poll
+# ---------------------------------------------------------------------------
+#
+# WHY IT CANNOT BE READ ONCE, from the first real run (2026-09-17, deca203).
+# Two predicates had the same defect in two shapes: setup's cntlr_stack_ready
+# took its leg target from the CONSTANT GRP_CNT x LEGS, and cntlr_full_ready
+# took its from a `sp_totals` reading made once, before the wait began. Setup
+# step 7 hit the first of them. While it waited, AR8 created a spare leg — the
+# reacting thresholds were still in force for every case then — and the agent
+# correctly reported 129 leg rows, because CN10 walks spare_leg_list as well as
+# leg_list. The target stayed 128. The transcript's last line is
+#
+#     cntlr 1: pools 21/32, groups 49/64, legs 129/128
+#
+# and no amount of time could have made that poll pass: the sp really did hold
+# 128 legs and exactly one spare, and the agent's leg_id_to_leg held exactly
+# those 129 ids. A wait whose target cannot be reached is not a slow wait, it is
+# a hang with a stopwatch on it.
+#
+# So the two predicates below re-read the totals on EVERY poll, with one extra
+# `sp get` per poll as the price, and they SHOUT when the shape moves under
+# them. The shout is not decoration: while one of these waits is running the
+# suite itself is blocked, so nothing it did can have changed the shape — and
+# after §7.1's per-case thresholds a smoke, ops or copy build can no longer
+# produce one either. A moved total in those three cases means a reaction fired
+# when none should have, and that is a finding about the run, not a hiccup to
+# absorb.
+
+# The "<legs>+<spares>" of the last live reading, per wait. stack_wait_reset
+# clears it at the start of every such wait, so the baseline is that wait's own
+# first poll and never a number a previous step left behind.
+SP_SHAPE_LAST=""
+
+stack_wait_reset() {
+	STACK_LAST=""
+	SP_SHAPE_LAST=""
+	PRIMARY_WAIT_ID=""
+	STANDBY_WAIT_ID=""
+	STANDBY_SHAPE_LAST=""
+}
+
+# sp_totals_poll refreshes the four totals from a fresh `sp get` and answers
+# false when the gateway could not be reached — a poll that cannot read the sp
+# must go round again, never compare against a half-filled target. It does NOT
+# touch SP_JSON: its callers are predicates whose successful poll must leave
+# $CTL_OUT holding the `cntlr inspect` reply the assertions after the wait read,
+# which is also why they call this FIRST and inspect second.
+sp_totals_poll() {
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	sp_totals_of "$CTL_OUT" "the \`sp get\` of a shape poll"
+	local sig="$SP_LEG_TOTAL legs + $SP_SPARE_TOTAL spare leg(s)"
+	if [ -n "$SP_SHAPE_LAST" ] && [ "$sig" != "$SP_SHAPE_LAST" ]; then
+		log "!!! $SP's shape MOVED while a wait was running:" \
+			"$SP_SHAPE_LAST -> $sig."
+		log "!!! The suite is blocked in that wait, so it did not do this: an" \
+			"automatic reaction did. In the $CASE case the sp carries the" \
+			"$THR_SET threshold set ($THR)."
+	fi
+	SP_SHAPE_LAST=$sig
+	return 0
+}
+
+# cntlr_stack_matches is the comparison itself: one thin-pool row per slice, one
+# group row per group, one leg row per leg, all RES_STATUS_OK. The leg count
+# includes the SPARE legs because CN10 walks spare_leg_list too. It ASSUMES the
+# SP_*_TOTAL globals were refreshed by the caller's own sp_totals_poll in this
+# same poll, which is why it is not called from anywhere else.
+cntlr_stack_matches() { # <cntlr id>
 	local pools grps legs want sig
 	if ! ctl_try cntlr inspect --id "$1"; then
 		return 1
@@ -6665,9 +7029,106 @@ cntlr_full_ready() { # <cntlr id>
 		[ "$legs" = "$want" ]
 }
 
-# cntlr_legs_full_ready is the standby form: a standby builds no groups and no
-# pools at all (CN12, CN13), so its legs are the only rows to wait on.
-cntlr_legs_full_ready() { # <cntlr id>
+# cntlr_full_ready is that comparison against a NAMED cntlr, for every step that
+# knows which controller it means and would want a failover to fail the wait.
+cntlr_full_ready() { # <cntlr id>
+	if ! sp_totals_poll; then
+		return 1
+	fi
+	cntlr_stack_matches "$1"
+}
+
+# ---------------------------------------------------------------------------
+# primary_stack_ready — the same comparison against WHICHEVER cntlr is primary
+# ---------------------------------------------------------------------------
+#
+# Every wait that watches a WHOLE STACK BEING BUILT needs this rather than
+# cntlr_full_ready, and the reason is the react case. Its sp carries the reacting
+# threshold set, primary_unhealthy 5, and the first real run's build moved the
+# role TWICE while setup's own build wait was running (failover 1->2, then 2->1,
+# both inside setup). A wait pinned to the cntlr that was primary when the wait
+# started would then be watching a node that is now a standby: a standby builds
+# no pools and no groups at all (CN12, CN13), so the poll could never pass and
+# the wait would burn its whole WAIT_BUILD before dying with a message about a
+# controller that is doing exactly what a standby should.
+#
+# TWO WAITS USE IT, and they want different things from a move. Setup's
+# (setup_wait_stack) absorbs it: any of the sp's cntlrs may build the stack, so
+# the wait follows the role and the caller re-reads the roles afterwards.
+# react's stage 03 (react_new_primary_ready) cannot absorb it: its step 04 is
+# written about the cntlr AR5 elected, so it wraps this and stops the run the
+# moment the role leaves that cntlr. The pinned form, cntlr_full_ready, is for
+# the steps that watch an INCREMENTAL convergence on a named controller under
+# the quiet set, where nothing may move the role at all.
+#
+# So this follows the role and SAYS SO when it moves. It does not make a
+# failover invisible — a move is logged with both ids and the progress line
+# restarts under the new one — it only stops a legitimate failover from turning
+# into a twenty-minute timeout. The cntlr the winning poll inspected is left in
+# PRIMARY_WAIT_ID, and $CTL_OUT is its reply, so the assertions after the wait
+# read the node that actually finished the build.
+#
+# THE THREE SHAPE GUARDS BELOW ARE INSURANCE, NOT A TRANSIENT. A reply with no
+# primary, with two, or whose two parallel lists disagree sends the poll round
+# again rather than failing — but none of those states is reachable through
+# `sp get` today, and the comment must not claim the election passes through
+# them. GetStoragePool answers out of one `Snapshot`, so the whole reply is a
+# single store revision (gateway/storagepool.go:714-759); every writer of the
+# `primary` flag leaves exactly one primary in that revision (`idx == 0` at
+# create, gateway/storagepool.go:574; false at CreateCntlr, gateway/cntlr.go:271;
+# the old cntlr's own flag at ReplaceCntlr, which deletes the old key in the same
+# STM, model/ops.go:1516; and model.Failover flips both booleans in one STM,
+# model/ops.go:1062-1066); and loadCntlrs walks cntlr_id_list and returns ABORTED
+# on a missing key (gateway/alloc.go:496-511), so the two lists cannot come back
+# different lengths. The guards are cheap, and they are what keeps a future
+# non-atomic writer — or a reply this code could not otherwise tell from a valid
+# one — from being read as a stack that is simply not finished yet.
+PRIMARY_WAIT_ID=""
+
+primary_stack_ready() {
+	local n ids prim
+	if ! sp_totals_poll; then
+		return 1
+	fi
+	# $CTL_OUT is still the `sp get` sp_totals_poll just read.
+	n=$(jq_of "$CTL_OUT" '.cntlr_list | length')
+	ids=$(jq_of "$CTL_OUT" '.sp_conf.cntlr_id_list | length')
+	case "$n$ids" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	# The same pairing sp_read_roles rests on: loadCntlrs reads the cntlrs in
+	# sp_conf.cntlr_id_list order (gateway/alloc.go:496-511), so position i of
+	# cntlr_list is the cntlr whose id is cntlr_id_list[i]. transpose would pad
+	# the shorter list with nulls, so the lengths are checked first.
+	[ "$n" = "$ids" ] || return 1
+	prim=$(jq_of "$CTL_OUT" \
+		'[.sp_conf.cntlr_id_list, [.cntlr_list[].primary]]
+		 | transpose | map(select(.[1] == true) | .[0]) | join(",")')
+	# One id and nothing else: "" is no primary and "3,7" is two, and both are
+	# states to poll through rather than to judge.
+	case "$prim" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if [ "$prim" != "$PRIMARY_WAIT_ID" ]; then
+		if [ -n "$PRIMARY_WAIT_ID" ]; then
+			log "!!! the primary role MOVED while this wait was running:" \
+				"cntlr $PRIMARY_WAIT_ID -> cntlr $prim."
+			log "!!! AR5 fired. The new primary builds the whole stack from" \
+				"nothing (CN12/CN13: a standby had neither groups nor pools)," \
+				"so the progress below starts again. In the $CASE case the sp" \
+				"carries the $THR_SET threshold set ($THR)."
+		fi
+		PRIMARY_WAIT_ID=$prim
+		STACK_LAST=""
+	fi
+	cntlr_stack_matches "$prim"
+}
+
+# cntlr_legs_match is the leg comparison itself, with no `sp get` of its own. It
+# ASSUMES the SP_*_TOTAL globals were refreshed by the caller's own
+# sp_totals_poll in this same poll, exactly as cntlr_stack_matches does, and it
+# leaves that cntlr's inspect reply in $CTL_OUT.
+cntlr_legs_match() { # <cntlr id>
 	local legs want sig
 	if ! ctl_try cntlr inspect --id "$1"; then
 		return 1
@@ -6680,6 +7141,123 @@ cntlr_legs_full_ready() { # <cntlr id>
 		log "  cntlr $1: $sig"
 	fi
 	[ "$legs" = "$want" ]
+}
+
+# cntlr_legs_full_ready is that comparison against a NAMED cntlr: a standby
+# builds no groups and no pools at all (CN12, CN13), so its legs are the only
+# rows to wait on. Unlike a stack target, a leg target does NOT become
+# unreachable when the role moves — a promoted controller has every leg too — so
+# a failover under one of these waits does not hang it; it only stops the wait
+# from meaning what its caller meant, which is why react's step 04 tests the
+# role itself before it asserts the emptiness rules.
+cntlr_legs_full_ready() { # <cntlr id>
+	if ! sp_totals_poll; then
+		return 1
+	fi
+	cntlr_legs_match "$1"
+}
+
+# standby_shape_ready is the leg comparison against WHICHEVER cntlr is not the
+# primary, plus the two EMPTINESS rules setup_assert_standby then asserts: CN12
+# gives a standby no group devices and CN13 no pool, so grp_id_to_md_raid and
+# slice_id_to_dm_pool are empty maps rather than maps of MISSING rows
+# (setup_assert_standby's header has the four code shapes).
+#
+# THE EMPTINESS IS WHY IT WAITS AT ALL. A standby is not always a controller
+# that was BORN one. If AR5 fired during this build — react's threshold set
+# makes that likely — the standby is the DEMOTED old primary, and it tears its
+# groups and pools down on its next syncup rather than at the instant of the
+# demotion. Waiting on the leg count alone would reach setup_assert_standby
+# while those rows were still there and fail a node that was doing the right
+# thing a second too slowly.
+#
+# AND THE EMPTINESS IS ALSO WHY IT FOLLOWS THE ROLE, as primary_stack_ready
+# does. Pinned to the id that was the standby when the wait began, a failover
+# mid-wait would leave it insisting that the new PRIMARY hold no groups and no
+# pools — a target that node spends the next 8m45s making less reachable, so the
+# wait would spend its whole WAIT_BUILD and die about a controller doing exactly
+# what a primary should. That is the same unsatisfiable-target shape the pinned
+# stack wait had, one role over.
+#
+# It is setup's wait alone, and setup runs at CNTLR_CNT 2 — its caller asserts
+# that before the wait — so "the cntlr that is not the primary" names exactly
+# one controller. A reply that does not show exactly one primary AND exactly one
+# non-primary is polled through, for the reason primary_stack_ready's header
+# gives. The winning poll's id is left in STANDBY_WAIT_ID and $CTL_OUT is that
+# cntlr's inspect reply, so the assertions after the wait read the node the
+# predicate actually judged.
+#
+# STANDBY_SHAPE_LAST is its own scratch and NOT STACK_LAST, because this
+# predicate also writes STACK_LAST through cntlr_legs_match: sharing one
+# variable would make each of them see the other's signature as a change and log
+# a line per poll, twice a second, for as long as the teardown took.
+STANDBY_SHAPE_LAST=""
+STANDBY_WAIT_ID=""
+
+standby_shape_ready() {
+	local roles prim stby grps pools sig
+	if ! sp_totals_poll; then
+		return 1
+	fi
+	# $CTL_OUT is still the `sp get` sp_totals_poll just read. The same pairing
+	# sp_read_roles rests on: position i of cntlr_list is the cntlr whose id is
+	# cntlr_id_list[i] (gateway/alloc.go:496-511). transpose would pad the
+	# shorter list with nulls, so unequal lengths answer " " and both ids come
+	# out empty.
+	roles=$(jq_of "$CTL_OUT" \
+		'if (.cntlr_list | length) != (.sp_conf.cntlr_id_list | length)
+		 then " "
+		 else [.sp_conf.cntlr_id_list, [.cntlr_list[].primary]] | transpose
+		      | [(map(select(.[1] == true) | .[0]) | join(",")),
+		         (map(select(.[1] != true) | .[0]) | join(","))]
+		      | join(" ")
+		 end')
+	prim=${roles% *}
+	stby=${roles#* }
+	# One id each and nothing else: "" is none and "3,7" is two, and both are
+	# states to poll through rather than to judge.
+	case "$prim" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	case "$stby" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if [ "$stby" != "$STANDBY_WAIT_ID" ]; then
+		if [ -n "$STANDBY_WAIT_ID" ]; then
+			log "!!! the standby role MOVED while this wait was running:" \
+				"cntlr $STANDBY_WAIT_ID -> cntlr $stby (the primary is now" \
+				"cntlr $prim)."
+			log "!!! AR5 fired. The new standby is the DEMOTED old primary," \
+				"so it has a whole stack to tear down before it can look" \
+				"like one (CN12/CN13), and the progress below starts again." \
+				"In the $CASE case the sp carries the $THR_SET threshold" \
+				"set ($THR)."
+		fi
+		STANDBY_WAIT_ID=$stby
+		STACK_LAST=""
+		STANDBY_SHAPE_LAST=""
+	fi
+	if ! cntlr_legs_match "$stby"; then
+		return 1
+	fi
+	# $CTL_OUT is that cntlr's inspect reply; `// {}` because InspectCntlr
+	# answers a NULL cntlr_info for a controller the agent does not know yet.
+	grps=$(jq_of "$CTL_OUT" '(.cntlr_info.grp_id_to_md_raid // {}) | length')
+	pools=$(jq_of "$CTL_OUT" '(.cntlr_info.slice_id_to_dm_pool // {}) | length')
+	case "$grps$pools" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	if [ "$grps" != 0 ] || [ "$pools" != 0 ]; then
+		sig="$grps group(s) and $pools pool(s)"
+		if [ "$sig" != "$STANDBY_SHAPE_LAST" ]; then
+			STANDBY_SHAPE_LAST=$sig
+			log "  cntlr $stby: legs ok, but still holding $sig — a demoted" \
+				"primary tearing down what CN12/CN13 say a standby has" \
+				"none of"
+		fi
+		return 1
+	fi
+	return 0
 }
 
 # cntlr_pos_of_addr finds a cntlr's position in the parallel CNTLR_* arrays by
@@ -6831,7 +7409,7 @@ ops_grow() {
 		sp_sides_provisioned
 	SP_JSON=$CTL_OUT
 	sp_totals
-	STACK_LAST=""
+	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
 		"the primary cntlr $PRIMARY_CNTLR_ID to carry $SP_GRP_TOTAL groups and $SLICE_CNT pools" \
 		cntlr_full_ready "$PRIMARY_CNTLR_ID"
@@ -6916,8 +7494,11 @@ ops_slots() {
 	traddr3=${CNTLR_TRADDRS[$pos]}
 
 	sp_totals
-	STACK_LAST=""
-	wait_until "$WAIT_PROVISION" \
+	stack_wait_reset
+	# WAIT_BUILD: a cntlr created now has nothing, so this is $SP_LEG_TOTAL
+	# fresh nvme-tcp connections on a CN that held none — the standby half of
+	# the measured build, not an incremental convergence.
+	wait_until "$WAIT_BUILD" \
 		"the third cntlr $c3 on cn$spare to connect every leg as a standby" \
 		cntlr_legs_full_ready "$c3"
 	assert_field "$CTL_OUT" '.cntlr_info | type' object \
@@ -7191,7 +7772,14 @@ ops_set_level() { # <level, without the SP_LEVEL_ prefix>
 		"the stored sp_level after \`sp set-level --level $lvl\`"
 	ops_level_want "$lvl"
 	LEVEL_LAST=""
-	wait_until "$WAIT_PROVISION" \
+	# WAIT_BUILD, not WAIT_PROVISION: this ladder walks all the way down to
+	# DISABLE and back, and the rungs around it are not incremental at all.
+	# DISABLE suppresses every resource CN19 names, so the CN tears the whole
+	# stack down; the step back up rebuilds all $SLICE_CNT pools and every md
+	# array from nothing, which is the same piece of work setup pays for, at the
+	# 8m45s / 126,657-spawn scale of the WAIT_BUILD comment. One budget for every rung,
+	# because the cheap rungs return on their first poll and cost nothing.
+	wait_until "$WAIT_BUILD" \
 		"the primary cntlr $PRIMARY_CNTLR_ID to reach CN19's shape for SP_LEVEL_$lvl" \
 		cntlr_level_ready "$PRIMARY_CNTLR_ID"
 	# The predicate ran in this shell, so its last reply is still in $CTL_OUT.
@@ -7763,7 +8351,13 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 #
 # WAIT_HYDRATE — the whole copy of a $TD0_SIZE destination. At the default
 #   shape that is 128 MiB pulled over one nvme-tcp connection into 32 thin
-#   pools; 300 s is the same order as WAIT_PROVISION, which zeroes far more.
+#   pools. It is set to WAIT_PROVISION's number and not to its NAME, so that
+#   the two can be argued about separately: a hydration is bounded by the
+#   nvme-tcp path and by dm-clone's own copy threads, not by the dmsetup/mdadm
+#   spawn rate that decides a build. The 300 s it carried before was sized
+#   against the old 300 s WAIT_PROVISION; that budget doubled on the 8m45s
+#   window the first run measured, and this one follows because the copy runs on the SAME 2-vCPU
+#   CN and competes with the same work.
 # WAIT_SRC_CONNECT — how long the CN may take to bring the source connection
 #   up before "it never will" is the honest reading. The CN retries a failed
 #   source connect from its own registry (agent/cnagent/clone.go:66
@@ -7772,7 +8366,7 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 #   before the copy is called frozen. It is deliberately smaller than
 #   WAIT_HYDRATE: the stall is what routes to the fallback, and a stall
 #   detector that fires only at the budget would never route anywhere.
-WAIT_HYDRATE=300
+WAIT_HYDRATE=600
 WAIT_SRC_CONNECT=60
 WAIT_HYDRATE_STALL=90
 
@@ -8116,6 +8710,23 @@ src_td_created() { # <sp name> <td name>
 # src_cntlr_ready is cntlr_full_ready for a pool whose shape is known from its
 # arguments rather than from the SP_* globals (which describe sp0 and must not
 # be clobbered while this case is mid-flight).
+#
+# IT IS THE ONE SHAPE TARGET IN THIS FILE THAT IS STILL A CONSTANT, and that is
+# safe here rather than an oversight. $SP_SRC is built once by
+# copy_src_sp_build, with one slice, --redund none and ONE cntlr, and nothing in
+# this file grows it, spares it or fails it over:
+#
+#   * a spare needs raid1 — CreateSpareLeg and AR8 both refuse a RedundNone
+#     group ("there is no redundancy to repair", gateway/spareleg.go:194-198;
+#     reason=redund_none, worker/reaction.go:1174-1183), so no spare_leg_list
+#     entry can appear and the leg count cannot move;
+#   * AR5 needs a failover candidate and this pool has exactly one cntlr;
+#   * AR6 would need its pool over the low water mark, and this pool holds one
+#     copy of $TD0_SIZE with nothing else written into it;
+#   * and it carries the QUIET threshold set anyway, because the copy case does.
+#
+# A shape that cannot move may be compared against a constant. sp0's can move,
+# which is why it is not.
 src_cntlr_ready() { # <sp name> <cntlr id> <pools> <grps> <legs>
 	local pools grps legs sig
 	if ! ctl_try --sp "$1" cntlr inspect --id "$2"; then
@@ -8350,7 +8961,11 @@ copy_src_sp_build() {
 	# --slots 0: cntlr_cnt must not exceed len(cntlid_slot_list)
 	# (gateway/storagepool.go:319-324), and one cntlr needs one slot.
 	# $THR is UNQUOTED so its eight words split, exactly as setup_create_sp
-	# passes it.
+	# passes it — and it is the same set, because sp_thresholds chose it for the
+	# copy case and this pool lives inside that case. That is the QUIET set, and
+	# it is the right one here for the same reason: nothing about this pool is a
+	# reaction test, and a failover in the middle of a hydration would invalidate
+	# the digest comparison the whole fallback exists to make.
 	# shellcheck disable=SC2086
 	ctl_timeout 120 ctl_ok --sp "$SP_SRC" sp create \
 		--cntlr-cnt 1 --slice-cnt 1 --init-ext-cnt "$INIT_EXT_CNT" \
@@ -8845,10 +9460,14 @@ copy_xfer_delete() {
 # CN's own view of its path (cn_wait_ana), not from the gateway's record — the
 # record going away is what the DN acts on, one syncup later.
 #
-# The worker will not interfere: AR8 skips a leg with two sides outright
-# ("two sides means a user migration is in flight on this leg",
-# worker/reaction.go:1185), so the whole window is invisible to leg repair
-# even though it is far longer than --thr-leg $THR_LEG seconds.
+# The worker will not interfere, and that holds for a reason that does not
+# depend on a number: AR8 skips a leg with two sides outright ("two sides means
+# a user migration is in flight on this leg", worker/reaction.go:1185), so the
+# whole window is invisible to leg repair however long it lasts. The copy case's
+# sp also carries the QUIET threshold set (§7.1: leg_unhealthy $THR_LEG s), so
+# nothing here is even close to a threshold — but the migration would be safe at
+# the reacting set too, which is why the two-sides rule is the argument and the
+# threshold is only the belt.
 #
 # PLACEMENT, and the one assertion that needs a guard: the destination's DN is
 # excluded by the BLACK LIST, always — grpDnAddrs names every DN the group
@@ -9086,9 +9705,10 @@ copy_migration() {
 #
 # THE LEG-ROW ARITHMETIC IS WHY cntlr_full_ready EXISTS. CN10 walks
 # spare_leg_list as well as leg_list, so a spare adds a leg_id_to_leg row on
-# every cntlr; setup's cntlr_stack_ready hard-codes GRP_CNT x LEGS and would
-# wait for ever from here on. sp_totals + cntlr_full_ready compute the number
-# from the CURRENT `sp get`, which is what this step uses.
+# every cntlr, and a target taken from the fresh-sp constant GRP_CNT x LEGS
+# would be one short for ever. cntlr_full_ready computes the number from the
+# CURRENT `sp get` on every poll, which is what this step — and setup itself —
+# uses.
 #
 # THE SWITCH IS A FULL REBUILD, not a bitmap-scoped repair: a fresh spare has
 # never been an md member, so md recovers the whole group onto it
@@ -9174,11 +9794,11 @@ copy_spare() {
 	SP_JSON=$CTL_OUT
 	sp_totals
 	assert_eq "$SP_SPARE_TOTAL" 1 "the sp holds exactly one spare leg"
-	STACK_LAST=""
+	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
 		"the primary cntlr $PRIMARY_CNTLR_ID to connect the spare leg too" \
 		cntlr_full_ready "$PRIMARY_CNTLR_ID"
-	STACK_LAST=""
+	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
 		"the standby cntlr $STANDBY_CNTLR_ID to connect the spare leg too" \
 		cntlr_legs_full_ready "$STANDBY_CNTLR_ID"
@@ -9228,7 +9848,7 @@ copy_spare() {
 		"the group holds no spare leg again"
 	sp_totals
 	assert_eq "$SP_SPARE_TOTAL" 0 "the sp holds no spare leg"
-	STACK_LAST=""
+	stack_wait_reset
 	wait_until "$WAIT_PROVISION" \
 		"the primary cntlr $PRIMARY_CNTLR_ID to drop the released leg's row" \
 		cntlr_full_ready "$PRIMARY_CNTLR_ID"
@@ -9349,6 +9969,49 @@ case_copy() {
 #    list spare legs among its five blockers, and the drain releases them
 #    explicitly (model/drain.go:369-375 legsOf, "active legs first, spares
 #    after … both are released"), so case_residue's capacity check covers it.
+#
+# ===========================================================================
+# THIS CASE'S OWN BUILD MAY HAVE REACTED BEFORE THE CASE STARTS
+# ===========================================================================
+# react is the one case whose sp carries the REACTING threshold set (§7.1):
+# primary_unhealthy 5, cntlr_unhealthy 20, side_unhealthy 20, leg_unhealthy 30.
+# It has to — AR7 and AR8 are unobservable at the gateway defaults of 600 and
+# 1200 inside any bound this suite could wait out, and no RPC changes a
+# threshold after CreateStoragePool, so the values the case needs are the values
+# its build runs under.
+#
+# The consequence is measured, not hypothetical. Building this shape kept the
+# primary CN spawning 126,657 processes over 8m45s (82,099 dmsetup, 20,127
+# mdadm, 16,795 lsblk) on a 2-vCPU guest — the whole window, restarts included,
+# see WAIT_BUILD — and under that load it cannot answer a health check inside
+# five seconds. The first real run recorded, all inside setup:
+#
+#     "kind":"failover","old_cntlr_id":1,"new_cntlr_id":2
+#     "kind":"spare_create","slice_id":47,"grp_id":53,"leg_id":56,"spare_leg_id":355
+#     "kind":"failover","old_cntlr_id":2,"new_cntlr_id":1
+#
+# So when this case starts, the sp MAY already hold a spare leg it did not ask
+# for, and the primary MAY be a different controller than the one the create
+# elected. That is expected and it is not a bug. Every assertion below is
+# therefore written against a SNAPSHOT of the shape the case actually starts
+# from (react_snapshot, and the per-step `before` readings each step takes for
+# itself), never against a count that assumes a pristine build:
+#
+#   * the primary is read through PRIMARY_CNTLR_ID after a fresh sp_read_roles,
+#     so which controller it is has never mattered here;
+#   * AR6's proof is "slice 0 gained one data group", not "slice 0 has two";
+#   * AR8's proof is "the group gained one spare and then parked the dead leg
+#     in it", not "the group holds exactly one spare".
+#
+# The one thing a snapshot cannot rescue is a build that never converges: if the
+# failover loop keeps handing the role back and forth, each new primary starts
+# the whole build again. That is a real risk of running this case at 32 slices
+# and it is bounded, not hidden — setup_wait_stack follows the role through both
+# of its waits and re-runs the pair when the role moves under them, up to
+# SETUP_STACK_ROUNDS times, and then dies saying the sp is not converging rather
+# than timing out on a target that has moved. It shouts when a build did not
+# produce the fresh-sp shape, and the shape-poll shouts when the shape moves
+# under a wait.
 # ---------------------------------------------------------------------------
 
 # --- the objects this case creates ------------------------------------------
@@ -9415,6 +10078,13 @@ REACT_OLD_STANDBY_ID=""
 REACT_SPARE_CN=-1
 REACT_SPARE_ADDRS=""
 
+# The cntlr AR5 elected in step 3. Steps 3 and 4 are both written about it —
+# step 3 waits for ITS rebuild and connects host0 to ITS transport, step 4
+# asserts that the replacement is the OTHER cntlr and is a standby — so a second
+# AR5 during either one takes the case's subject away. Recorded so that both
+# steps can say so and stop, rather than wait out a target that has moved.
+REACT_NEW_PRIMARY_ID=""
+
 # AR7: the cntlr that replaced the dead one.
 REACT_REPL_POS=-1
 REACT_REPL_ID=""
@@ -9440,11 +10110,48 @@ REACT_POOL_LAST=""
 REACT_ROLE_LAST=""
 REACT_SPARE_LAST=""
 
-# Slice 0's SECOND data group — the one AR6 appends. The first is $COPY_GRP0,
-# which the copy section already defines as '.slice_list[0].data_grp_list[0]'
-# and whose contract says to reuse it rather than spell the walk again. A grow
-# APPENDS (model.GrowSlice), so index 0 stays the group setup created.
-REACT_GRP1='.slice_list[0].data_grp_list[1]'
+# --- the shape this case starts from (see the header) -----------------------
+#
+# react_snapshot fills these from one `sp get` at the top of the case: the
+# answer to "what did this case's own build leave behind", which under the
+# reacting threshold set is not necessarily the fresh-sp shape.
+#
+# WHAT READS THEM, exactly — because "every later assertion is written against
+# the snapshot" would be the wrong sentence. ONE of the five is read by a later
+# assertion: REACT_BASE_SLICE0_DATA, by step 01. The other four are recorded for
+# the log line and for react_snapshot's own `!!!` fresh-shape shout, and nothing
+# else touches them. Every step that is judged on a DELTA takes its own `before`
+# reading immediately before the act it judges — react_grow's before_grps and
+# before_data, react_leg_repair's before_spares/before_spare_cnt/before_sp_spares
+# — because the shape can move between stage 00 and that act under this case's
+# thresholds, and a delta measured from stage 00 would then be a delta against
+# the wrong baseline.
+#
+# REACT_BASE_SPARE_TOTAL   spare legs in the WHOLE sp (log and shout only)
+# REACT_BASE_GRP_TOTAL     groups in the whole sp (log and shout only)
+# REACT_BASE_LEG_TOTAL     active legs in the whole sp (log and shout only)
+# REACT_BASE_PRIMARY_ID    the cntlr that is primary when the case starts. It is
+#                          recorded for the log and for the one sentence a
+#                          reader needs — which controller built the stack every
+#                          early step reads — and NOT compared against anything:
+#                          every step re-reads the roles for itself, because AR5
+#                          is the thing under test.
+# REACT_BASE_SLICE0_DATA   slice 0's data-group count, i.e. the index the group
+#                          AR6 appends will occupy (GrowSlice appends). The one
+#                          value a later step asserts against (step 01).
+REACT_BASE_SPARE_TOTAL=0
+REACT_BASE_GRP_TOTAL=0
+REACT_BASE_LEG_TOTAL=0
+REACT_BASE_PRIMARY_ID=""
+REACT_BASE_SLICE0_DATA=0
+
+# Slice 0's data group AR6 appends. The one setup created is $COPY_GRP0, which
+# the copy section defines as '.slice_list[0].data_grp_list[0]' and whose
+# contract says to reuse it rather than spell the walk again. A grow APPENDS
+# (model.GrowSlice), so the new group's index is the count BEFORE the grow —
+# 1 on a pristine build, and react_grow computes it rather than assuming it,
+# because a build that grew slice 0 by itself would make the literal wrong.
+REACT_GRP1=""
 
 # A sanity cap on the AR6 write. The number of chunks is computed from the
 # pool, so this only catches a shape whose pool is so large that filling it to
@@ -9714,6 +10421,47 @@ react_primary_moved() { # <old cntlr id>
 	return 1
 }
 
+# react_new_primary_ready is step 3's rebuild wait: primary_stack_ready, which
+# follows the role, plus the one thing this case cannot do with a move.
+#
+# WHY IT IS NOT cntlr_full_ready. The rebuild is a whole stack on a node that had
+# only legs — the WAIT_BUILD comment's piece of work — and this sp's
+# primary_unhealthy is $THR_REACT_PRIMARY
+# seconds: the first run proved a CN doing that work misses health rounds and
+# gets its err_epoch stamped. Meanwhile AR7 has minted the replacement on an idle
+# CN with err_epoch 0, which is all failoverEligible asks for
+# (worker/reaction.go:645-649), so AR5 has a candidate again and can move the
+# role off the cntlr it just elected. Pinned to that cntlr, the wait would then
+# be comparing a STANDBY against $SLICE_CNT pools and $SP_GRP_TOTAL groups —
+# rows CN12 and CN13 say a standby never has — and would spend its whole
+# WAIT_BUILD before dying about a node doing exactly what a standby should.
+#
+# WHY IT DIES INSTEAD OF FOLLOWING THE MOVE, which is where it parts company
+# with setup. Setup does not care which cntlr builds the stack, so it waits for
+# the new one. Step 4 does care: it is written about the cntlr AR5 elected here
+# — it resolves the replacement as "the cntlr that is neither this one nor the
+# dead one" and asserts the replacement is a standby — and after a second AR5
+# neither sentence is true of the tree's correct behaviour. So the run stops
+# here, in seconds, naming what happened, instead of timing out in twenty minutes
+# and then failing step 4 on an assertion that has become a false statement.
+react_new_primary_ready() { # <the cntlr AR5 elected>
+	local rc=0
+	primary_stack_ready || rc=1
+	# PRIMARY_WAIT_ID is empty until a poll has read a judgeable reply, and
+	# primary_stack_ready has already logged the move itself.
+	if [ -n "$PRIMARY_WAIT_ID" ] && [ "$PRIMARY_WAIT_ID" != "$1" ]; then
+		die "AR5 fired a SECOND time while cntlr $1 was rebuilding the stack:" \
+			"the primary is cntlr $PRIMARY_WAIT_ID now. That is legal —" \
+			"AR7's replacement is healthy, so it is a failover candidate" \
+			"(failoverEligible), and the rebuild makes cntlr $1 miss the" \
+			"${THR_PRIMARY}s primary_unhealthy of the $THR_SET set ($THR)." \
+			"But step 4 is written about cntlr $1, so this case cannot" \
+			"judge AR7 after it. Re-run react; if it repeats, the 2-vCPU CN" \
+			"cannot build this shape inside primary_unhealthy at all."
+	fi
+	return $rc
+}
+
 # react_cntlr_replaced is AR7's: the dead cntlr's id is gone from
 # cntlr_id_list (ReplaceCntlr deletes the old key and appends a NEW id,
 # model/ops.go:1502-1532) and the SP is back to its full cntlr count.
@@ -9783,6 +10531,45 @@ react_spare_switched() { # <dead leg id>
 	[ "$act" = 0 ] && [ "$park" = 1 ]
 }
 
+# --- step 0: the shape this case starts from --------------------------------
+#
+# One `sp get`, recorded before anything is done to the sp, and said out loud.
+# Everything below compares against these numbers rather than against the
+# fresh-sp constants, for the reason the section header gives: this case's own
+# build runs under the reacting threshold set and may have produced a failover
+# or a spare before the case begins.
+react_snapshot() {
+	stage 00 "the shape this case starts from (its build ran under the ${THR_SET} thresholds)"
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	REACT_BASE_SPARE_TOTAL=$SP_SPARE_TOTAL
+	REACT_BASE_GRP_TOTAL=$SP_GRP_TOTAL
+	REACT_BASE_LEG_TOTAL=$SP_LEG_TOTAL
+	REACT_BASE_PRIMARY_ID=$PRIMARY_CNTLR_ID
+	REACT_BASE_SLICE0_DATA=$(sp_field '.slice_list[0].data_grp_list | length')
+	case "$REACT_BASE_SLICE0_DATA" in
+	'' | *[!0-9]* | 0)
+		die "slice 0 reports '$REACT_BASE_SLICE0_DATA' data groups;" \
+			"every slice is created with exactly one (planSpGroups," \
+			"gateway/storagepool.go:254-263)"
+		;;
+	esac
+	log "  $SP starts this case with $REACT_BASE_GRP_TOTAL groups," \
+		"$REACT_BASE_LEG_TOTAL active legs and" \
+		"$REACT_BASE_SPARE_TOTAL spare leg(s); slice 0 has" \
+		"$REACT_BASE_SLICE0_DATA data group(s); the primary is cntlr" \
+		"$REACT_BASE_PRIMARY_ID on cn$PRIMARY_CN"
+	if [ "$REACT_BASE_SPARE_TOTAL" != 0 ] ||
+		[ "$REACT_BASE_LEG_TOTAL" != "$((GRP_CNT * LEGS))" ] ||
+		[ "$REACT_BASE_SLICE0_DATA" != 1 ]; then
+		log "!!! that is NOT the fresh-sp shape ($((GRP_CNT * LEGS)) legs," \
+			"0 spares, 1 data group in slice 0): a reaction fired during this" \
+			"case's own build, which the reacting threshold set allows." \
+			"Every assertion below is written against the numbers above."
+	fi
+}
+
 # --- step 1 -----------------------------------------------------------------
 #
 # §7.5's "setup, plus `td create --name a0 --size $((64*TD_UNIT))` (2 GiB) and
@@ -9816,8 +10603,14 @@ react_target() {
 		die "sp_conf.slice_id_list[0] is '$REACT_SLICE0_ID', not a decimal id"
 		;;
 	esac
-	assert_field "$SP_JSON" '.slice_list[0].data_grp_list | length' 1 \
-		"slice 0 has exactly one data group before AR6 appends the second"
+	# Slice 0's data-group count is the SNAPSHOT's, not the literal 1: step 02
+	# asserts that AR6 appended ONE group to whatever was there, which is the
+	# statement about AR6, and a build that had already grown slice 0 by itself
+	# must not fail the case here. react_snapshot has already shouted if the
+	# count is not 1.
+	assert_field "$SP_JSON" '.slice_list[0].data_grp_list | length' \
+		"$REACT_BASE_SLICE0_DATA" \
+		"slice 0's data-group count is still the one react_snapshot recorded"
 	REACT_GRP_ID=$(sp_field "$COPY_GRP0.grp_id")
 	case "$REACT_GRP_ID" in
 	'' | *[!0-9]* | 0)
@@ -9913,10 +10706,34 @@ react_target() {
 
 react_grow() {
 	stage 02 "AR6: fill slice 0's thin pool past low_water_mark_pct = $REACT_LWM"
-	local dev need total0 ext0 slicemib msg
+	local dev need total0 ext0 slicemib msg before_grps before_data
 
 	dev=$(host_dev "$UUID2")
 	slicemib=$((REACT_TD_SIZE / SLICE_CNT / 1048576))
+
+	# THE TWO `BEFORE` READINGS THIS STEP ASSERTS AGAINST, taken here rather
+	# than inherited from step 01: everything AR6 is judged on is a DELTA of
+	# one, and a delta needs a reading from just before the act that causes it.
+	# before_data is also the INDEX the appended group will occupy, because
+	# GrowSlice appends — which is what $REACT_GRP1 becomes, instead of the
+	# literal `[1]` it used to be.
+	#
+	# sp_read_roles comes with them: every read below goes to $PRIMARY_CNTLR_ID
+	# — the pool status AR6 itself compares, and the row react_pool_grew waits
+	# on — and this case's sp carries the reacting thresholds, so the role may
+	# have moved since step 01 read it. Inspecting a cntlr that is now a standby
+	# would find no pool row at all and die on a missing used/total ratio.
+	sp_refresh
+	sp_read_roles
+	sp_totals
+	before_grps=$SP_GRP_TOTAL
+	before_data=$(sp_field '.slice_list[0].data_grp_list | length')
+	case "$before_data" in
+	'' | *[!0-9]* | 0)
+		die "slice 0 reports '$before_data' data groups before the AR6 write"
+		;;
+	esac
+	REACT_GRP1=".slice_list[0].data_grp_list[$before_data]"
 
 	react_pool_read "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID"
 	msg="slice 0's thin pool on the primary: AR6 never grows an ERROR,"
@@ -9953,13 +10770,15 @@ react_grow() {
 		"$REACT_STRIDE_MIB" 0
 
 	REACT_POOL_LAST=""
-	msg="AR6 to append a second data group to slice 0 (the worker reads the"
+	msg="AR6 to append one more data group to slice 0 (the worker reads the"
 	msg="$msg primary's pool status once per 5s pass)"
 	wait_until "$WAIT_REACT" "$msg" \
-		react_grow_progress "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID" 2
+		react_grow_progress "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID" \
+		"$((before_data + 1))"
 	sp_refresh
-	assert_field "$SP_JSON" '.slice_list[0].data_grp_list | length' 2 \
-		"slice 0 now has two data groups"
+	assert_field "$SP_JSON" '.slice_list[0].data_grp_list | length' \
+		"$((before_data + 1))" \
+		"slice 0 gained exactly one data group"
 	assert_field "$SP_JSON" "$COPY_GRP0.grp_id" "$REACT_GRP_ID" \
 		"the grow APPENDED: data_grp_list[0] is still the group setup created"
 	ext0=$(sp_field "$COPY_GRP0.ext_cnt")
@@ -9997,8 +10816,11 @@ react_grow() {
 		sp_sides_provisioned
 	SP_JSON=$CTL_OUT
 	sp_totals
-	assert_eq "$SP_GRP_TOTAL" "$((GRP_CNT + 1))" \
-		"the sp holds one group more than setup built"
+	# A DELTA against this step's own `before` reading, not against GRP_CNT: the
+	# statement AR6 earns is "one group more than there was", and the constant
+	# would be wrong for any build that had already grown a slice by itself.
+	assert_eq "$SP_GRP_TOTAL" "$((before_grps + 1))" \
+		"AR6 added exactly one group to the sp"
 
 	# THE GROW REACHED THE DEVICE, not merely etcd: dm-thin reports the pool's
 	# own data total, so a bigger total is the CN having reloaded the pool over
@@ -10125,6 +10947,11 @@ react_failover() {
 	assert_eq "$PRIMARY_CNTLR_ID" "$REACT_OLD_STANDBY_ID" "$msg"
 	assert_ne "$PRIMARY_ADDR" "$REACT_OLD_PRIMARY_ADDR" \
 		"and it is not on the CN whose agent was killed"
+	# The subject of the rest of this step AND of step 4. Both check it against
+	# the live primary, because AR5 can fire again while the rebuild below runs
+	# (react_new_primary_ready's header says why, and why this case stops rather
+	# than follows).
+	REACT_NEW_PRIMARY_ID=$PRIMARY_CNTLR_ID
 
 	# WHAT AR5 IS, EXACTLY: the two `primary` fields plus the SpRev bump
 	# (model/ops.go:1062-1066). The dead cntlr's RECORD survives — its
@@ -10174,11 +11001,28 @@ react_failover() {
 	# md arrays and $SLICE_CNT thin pools, on a node that already had every leg
 	# connected.
 	sp_totals
-	STACK_LAST=""
+	stack_wait_reset
 	msg="the new primary cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN to build"
 	msg="$msg $SLICE_CNT pools, $SP_GRP_TOTAL groups and"
 	msg="$msg $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
-	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
+	# WAIT_BUILD: this is a WHOLE stack, built from nothing on a node that had
+	# only legs — the same piece of work setup pays for, at the 8m45s /
+	# 126,657-spawn scale of the WAIT_BUILD comment, and the reason the failover
+	# loop is self-defeating in the first place.
+	#
+	# react_new_primary_ready, NOT cntlr_full_ready: for the whole of that build
+	# AR5 can fire again, and a wait pinned to cntlr $REACT_NEW_PRIMARY_ID would
+	# then be watching a standby for pools it will never hold — twenty minutes of
+	# WAIT_BUILD and a misleading message at the end of them. The predicate
+	# follows the role for its progress line and stops the run the moment the
+	# role leaves this cntlr; its header has the reasoning, including why this
+	# case stops where setup follows.
+	wait_until "$WAIT_BUILD" "$msg" \
+		react_new_primary_ready "$REACT_NEW_PRIMARY_ID"
+	# The two waits below stay pinned to the same cntlr, and deliberately: they
+	# run AFTER the stack is complete, when the spawn storm that trips
+	# primary_unhealthy is over, and a leg/raid0/level target on a node that got
+	# demoted anyway fails in WAIT_PROVISION rather than in WAIT_BUILD.
 	wait_until "$WAIT_PROVISION" \
 		"the new primary to build the raid0 of $TD0 and $TD_REACT" \
 		cntlr_raid0_ready "$PRIMARY_CNTLR_ID" 2
@@ -10255,6 +11099,27 @@ react_replace() {
 	SP_JSON=$CTL_OUT
 	sp_read_roles
 
+	# EVERY ASSERTION BELOW IS ABOUT THE CNTLR AR5 ELECTED IN STEP 3, so it is
+	# checked before any of them is made. The replacement is resolved as "the
+	# cntlr that is neither the primary's nor the dead one's", and it is asserted
+	# to be a standby with no groups and no pools; a second AR5 — legal, and
+	# possible for as long as the replacement is healthy and this build keeps
+	# missing primary_unhealthy — makes the first sentence resolve to the WRONG
+	# cntlr and the second one false of a tree that did the right thing. Step 3's
+	# rebuild wait catches that during the build; this catches it in the window
+	# between the two steps.
+	if [ "$PRIMARY_CNTLR_ID" != "$REACT_NEW_PRIMARY_ID" ]; then
+		die "AR5 fired again between step 3 and step 4: cntlr" \
+			"$REACT_NEW_PRIMARY_ID was the primary this case elected and" \
+			"rebuilt, cntlr $PRIMARY_CNTLR_ID holds the role now. AR7's" \
+			"replacement is healthy, so it is a failover candidate" \
+			"(failoverEligible, worker/reaction.go:645-649), and the" \
+			"$THR_SET set's ${THR_PRIMARY}s primary_unhealthy ($THR) is" \
+			"short enough for a busy CN to trip. This step cannot judge AR7" \
+			"after that: it resolves the replacement by elimination from the" \
+			"primary, and asserts the replacement is a STANDBY."
+	fi
+
 	for i in "${!CNTLR_ADDRS[@]}"; do
 		if [ "${CNTLR_ADDRS[$i]}" = "$PRIMARY_ADDR" ]; then
 			continue
@@ -10299,10 +11164,12 @@ react_replace() {
 		"($REACT_REPL_ADDR)"
 
 	sp_totals
-	STACK_LAST=""
+	stack_wait_reset
 	msg="the replacement cntlr $REACT_REPL_ID to connect all"
 	msg="$msg $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs as a standby"
-	wait_until "$WAIT_PROVISION" "$msg" cntlr_legs_full_ready "$REACT_REPL_ID"
+	# WAIT_BUILD, for the same reason ops step 3's third cntlr gets it: a cntlr
+	# born now holds nothing, so this is every leg connected from scratch.
+	wait_until "$WAIT_BUILD" "$msg" cntlr_legs_full_ready "$REACT_REPL_ID"
 	assert_field "$CTL_OUT" '.cntlr_info | type' object \
 		"the replacement's InspectCntlr reply carries a CntlrInfo"
 	assert_field "$CTL_OUT" '.cntlr_info.grp_id_to_md_raid | length' 0 \
@@ -10385,6 +11252,7 @@ react_leg_repair() {
 	stage 05 "AR8: a disk node dies and the worker spares its leg out"
 	local n i sideid saddr hits out rev grpid msg
 	local before_addrs before_vms spareaddr sparevm
+	local before_spares before_spare_cnt before_sp_spares fresh
 
 	sp_refresh
 	sp_read_roles
@@ -10392,8 +11260,36 @@ react_leg_repair() {
 	grpid=$(sp_field "$COPY_GRP0.grp_id")
 	assert_eq "$grpid" "$REACT_GRP_ID" \
 		"slice 0's first data group is still the one step 01 recorded"
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list | length" 0 \
-		"the group holds no spare leg before AR8"
+
+	# THE SPARE READING THIS WHOLE STEP IS JUDGED AGAINST. It is a snapshot and
+	# not the literal 0 it used to be: this case's build runs under the reacting
+	# threshold set and the first real run produced a spare_create during setup
+	# (see the section header). Asserting "the group holds no spare leg" would
+	# fail a run that behaved exactly as designed — and, worse, the wait below
+	# used to be `react_spare_cnt_is 1`, which on a group that ALREADY held one
+	# would have returned true on its first poll and passed this step without
+	# AR8 having done anything at all.
+	#
+	# before_spares is a jq array literal of the group's spare leg ids, sorted,
+	# so the assertions after the switch can be set comparisons. `tojson` on an
+	# empty list gives `[]`, which is a valid filter fragment too.
+	before_spares=$(sp_field \
+		"$COPY_GRP0 | [.spare_leg_list[].leg_id] | sort | tojson")
+	before_spare_cnt=$(sp_field "$COPY_GRP0.spare_leg_list | length")
+	before_sp_spares=$SP_SPARE_TOTAL
+	case "$before_spare_cnt$before_sp_spares" in
+	'' | *[!0-9]*)
+		die "the spare counts read '$before_spare_cnt' (group) and" \
+			"'$before_sp_spares' (sp), which are not numbers"
+		;;
+	esac
+	if [ "$before_spare_cnt" != 0 ] || [ "$before_sp_spares" != 0 ]; then
+		log "!!! AR8 starts with spare legs already present:" \
+			"$before_spare_cnt in group $REACT_GRP_ID (ids $before_spares)," \
+			"$before_sp_spares in the sp. This case's build may create one" \
+			"(the $THR_SET threshold set); every assertion below is a delta" \
+			"on these numbers."
+	fi
 
 	# THE LEG TO KILL: one whose single side sits on a disk node that carries
 	# exactly ONE side of this whole sp. AR8 repairs the unhealthy leg with the
@@ -10441,10 +11337,19 @@ react_leg_repair() {
 	assert_ne "$REACT_DN_INST" none \
 		"side $REACT_SIDE_ID's addr_port $REACT_SIDE_ADDR names a dn instance"
 	diag_note_dn "$REACT_DN_VM" "$REACT_DN_INST"
+	# The group's occupied DNs and VMs, SPARE LEGS INCLUDED. That is not caution,
+	# it is what the code black-lists: grpAddrs walks GetLegList() and
+	# GetSpareLegList() (worker/reaction.go:1418-1432) and grpLocations resolves
+	# a location for every address grpAddrs names (:1398-1416). A `before` set
+	# taken over the active legs alone would be a weaker statement than the one
+	# AR8 actually makes, and on a group that already carries a spare it would
+	# be the wrong set.
 	before_addrs=$(sp_field \
-		"$COPY_GRP0 | [.leg_list[] | .side_list[] | .addr_port] | unique | join(\",\")")
+		"$COPY_GRP0 | [(.leg_list[], .spare_leg_list[]) | .side_list[] | .addr_port]
+		 | unique | join(\",\")")
 	before_vms=$(sp_field \
-		"$COPY_GRP0 | [.leg_list[] | .side_list[] | $SP_SIDE_VM] | unique | join(\",\")")
+		"$COPY_GRP0 | [(.leg_list[], .spare_leg_list[]) | .side_list[] | $SP_SIDE_VM]
+		 | unique | join(\",\")")
 	log "  killing dn$REACT_DN_VM instance $REACT_DN_INST" \
 		"($REACT_SIDE_ADDR), which carries side $REACT_SIDE_ID of leg" \
 		"$REACT_LEG_ID (position $REACT_LEG_POS of group $REACT_GRP_ID);" \
@@ -10483,13 +11388,39 @@ react_leg_repair() {
 	msg="AR8 to create a spare leg for group $REACT_GRP_ID (side_unhealthy"
 	msg="$msg ${THR_SIDE}s or leg_unhealthy ${THR_LEG}s, and the leg's err_epoch"
 	msg="$msg only starts when the primary's probe fails)"
-	wait_until "$WAIT_REACT" "$msg" react_spare_cnt_is 1
+	# ONE MORE than the group had, so a group that already carried a spare
+	# cannot satisfy this on the first poll.
+	wait_until "$WAIT_REACT" "$msg" \
+		react_spare_cnt_is "$((before_spare_cnt + 1))"
 	SP_JSON=$CTL_OUT
-	assert_field "$SP_JSON" "$COPY_GRP0.spare_leg_list[0].side_list | length" 1 \
-		"the spare leg has exactly one side"
-	log "  group $REACT_GRP_ID now holds a spare leg" \
-		"$(sp_field "$COPY_GRP0.spare_leg_list[0].leg_id") on" \
-		"$(sp_field "$COPY_GRP0.spare_leg_list[0].side_list[0].addr_port")"
+	# `fresh` is the spare AR8 just minted: the entries whose leg_id was not in
+	# the before set. Naming it that way rather than by index is what makes the
+	# two assertions below about AR8's spare and not about whichever entry
+	# happens to sit at position 0.
+	#
+	# ONE HONEST LIMIT, and it is the same one the previous form had: AR8 takes
+	# at most one action per pass, so the create and the switch are different
+	# passes — but if the poll that wins happens to land after BOTH, the entry
+	# that is "new since AR8 started" is the DEAD leg the switch parked, not the
+	# spare it promoted. The two assertions below hold either way (exactly one
+	# new entry, with exactly one side); only the log line would name the dead
+	# leg. The promotion itself is proved after the switch, from the POSITION in
+	# leg_list, which is where REACT_SPARE_LEG is read.
+	#
+	# The test is jq's ARRAY DIFFERENCE and not `index`: in `A | index(.leg_id)`
+	# the argument is evaluated against A, so `.leg_id` would be read off the
+	# array rather than off the leg. `[.leg_id] - <before>` is empty exactly
+	# when the id was already there, and it needs no jq variable — which also
+	# keeps a `$` out of a double-quoted shell string.
+	fresh="[$COPY_GRP0.spare_leg_list[]
+	        | select((([.leg_id] - $before_spares) | length) == 1)]"
+	assert_jq "$SP_JSON" "($fresh | length) == 1" \
+		"exactly one spare leg of group $REACT_GRP_ID is new since AR8 started"
+	assert_field "$SP_JSON" "$fresh[0].side_list | length" 1 \
+		"the new spare leg has exactly one side"
+	log "  group $REACT_GRP_ID now holds a new spare leg" \
+		"$(sp_field "$fresh[0].leg_id") on" \
+		"$(sp_field "$fresh[0].side_list[0].addr_port")"
 
 	msg="AR8 to switch that spare in for the dead leg $REACT_LEG_ID (its side"
 	msg="$msg must zero and the primary must report the leg OK first)"
@@ -10497,11 +11428,18 @@ react_leg_repair() {
 	sp_refresh
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
 		"the group still has $LEGS active leg(s)"
+	# THE SET AFTER THE SWITCH, derived rather than assumed: SwitchSpareLeg
+	# takes the new spare OUT of spare_leg_list and puts the dead leg IN
+	# (model/ops.go:1824-1830), so the group's spare set is exactly what it was
+	# before AR8 plus the dead leg — and its size is unchanged by the switch,
+	# which is why the sp-wide count below is before + 1 and not before + 2.
 	assert_jq "$SP_JSON" \
-		"($COPY_GRP0 | [.spare_leg_list[] | .leg_id]) == [\"$REACT_LEG_ID\"]" \
-		"the dead leg is parked in spare_leg_list, and it is the only parked leg"
+		"($COPY_GRP0 | [.spare_leg_list[].leg_id] | sort)
+		 == (($before_spares + [\"$REACT_LEG_ID\"]) | sort)" \
+		"group $REACT_GRP_ID's parked legs are the ones it started with plus the dead leg $REACT_LEG_ID"
 	sp_totals
-	assert_eq "$SP_SPARE_TOTAL" 1 "the sp holds exactly one parked leg"
+	assert_eq "$SP_SPARE_TOTAL" "$((before_sp_spares + 1))" \
+		"the sp holds one more parked leg than when AR8 started"
 
 	# THE PROMOTED LEG IS READ OUT OF leg_list AFTER THE SWITCH, not out of
 	# spare_leg_list before it: SwitchSpareLeg puts the spare in the target's
@@ -10585,7 +11523,7 @@ react_leg_repair() {
 		"the restarted agent recreated its OWN nvmet port, not ports/1"
 	sp_refresh
 	sp_totals
-	STACK_LAST=""
+	stack_wait_reset
 	msg="the primary to report all $((SP_LEG_TOTAL + SP_SPARE_TOTAL)) legs"
 	msg="$msg again, the parked one included"
 	wait_until "$WAIT_PROVISION" "$msg" cntlr_full_ready "$PRIMARY_CNTLR_ID"
@@ -10616,6 +11554,7 @@ react_drop_target() {
 
 case_react() {
 	CASE=react
+	react_snapshot
 	react_target
 	react_grow
 	react_failover
@@ -10784,8 +11723,9 @@ run_case() { # <case name>
 #     wipefs, losetup -d) plus its `rm -rf $WORK` removes that header, and only
 #     the two cn phases remove a CN's store and its tmpfs arena — which is
 #     exactly cleanup_all, in exactly the order it already gets right. The price
-#     is a second full build per case (§7.4 budgets ~5 min); the alternative is
-#     a suite that cannot run its second case.
+#     is a second full build per case — the 8m45s window of the WAIT_BUILD
+#     comment, not §7.4's optimistic ~5 min; the alternative is a suite that
+#     cannot run its second case.
 #
 #     §7.6 offers gateway_test.sh as the precedent for the narrow reset. It is
 #     not one, in either direction. That suite's per-case reset is `wipe_etcd`
@@ -10805,7 +11745,7 @@ run_case() { # <case name>
 # log_topology prints, once and before the first ssh, exactly what this run will
 # do to which machines. An operator who mistyped a --dn or pointed --cp at a
 # guest another suite is using sees it in the first twenty lines rather than
-# after a five minute build.
+# after a nine minute build.
 log_topology() {
 	local v last
 	log ""
@@ -10813,7 +11753,15 @@ log_topology() {
 	log "  shape:     slice_cnt $SLICE_CNT, redund $REDUND," \
 		"legs/group $LEGS, groups $GRP_CNT (meta + data per slice),"
 	log "             sides $((GRP_CNT * LEGS)), cntlrs $CNTLR_CNT," \
-		"cntlid slots $SLOTS, thresholds $THR"
+		"cntlid slots $SLOTS"
+	# Both threshold sets, because the choice is per case and is made at the one
+	# moment it can be made — `sp create` (§7.1, sp_thresholds).
+	log "  thresholds: smoke/ops/copy  $THR_QUIET"
+	log "              (quiet: no reaction may fire during a build, and the" \
+		"measured build window is 8m45s)"
+	log "              react           $THR_REACT"
+	log "              (reacting: AR5/AR7/AR8 must fire inside a bound, so" \
+		"react's own build may react too)"
 	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (F4 bound" \
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
 	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
@@ -10909,8 +11857,27 @@ main() {
 
 	preflight_guests
 
-	# §7.4 steps 1-11. setup_infra raises SETUP_DONE the moment it writes
-	# anything, which is what switches on_exit from "clean up" to "dump".
+	# THE RUN LIST IS COMPUTED BEFORE ANYTHING IS BUILT, because `setup` builds
+	# the FIRST case's sp and sp_thresholds has to know whose sp that is: the
+	# event_threshold set is chosen at `sp create` and no RPC changes it
+	# afterwards (§7.1). parse_args has already refused an --only that names no
+	# case, so this list cannot come out empty; it is checked anyway, because an
+	# empty list would otherwise index an empty array under `set -u`.
+	local name i ran=""
+	RUN_CASES=()
+	for name in "${CASES[@]}"; do
+		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
+			continue
+		fi
+		RUN_CASES+=("$name")
+	done
+	[ "${#RUN_CASES[@]}" -ge 1 ] ||
+		die "no case to run: --only '$ONLY' matched none of ${CASES[*]}"
+
+	# §7.4 steps 1-11, built for the FIRST case that will run. setup_infra raises
+	# SETUP_DONE the moment it writes anything, which is what switches on_exit
+	# from "clean up" to "dump".
+	sp_thresholds "${RUN_CASES[0]}"
 	setup
 
 	# §7.5 / D14 / E2E11. Every case starts from an EMPTY etcd and a freshly
@@ -10919,15 +11886,15 @@ main() {
 	# it — see (b) in this section's header for why an etcd reset alone is not
 	# that, and why the sp has to be rebuilt and not merely re-read.
 	# setup_between_cases never runs after the LAST case; on_exit owns the end.
-	local name first=1 ran=""
-	for name in "${CASES[@]}"; do
-		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
-			continue
-		fi
-		if [ "$first" -eq 0 ]; then
+	#
+	# sp_thresholds comes BEFORE setup_between_cases for the same reason it
+	# comes before setup: the rebuild inside it is what runs `sp create`.
+	for i in "${!RUN_CASES[@]}"; do
+		name=${RUN_CASES[$i]}
+		if [ "$i" -gt 0 ]; then
+			sp_thresholds "$name"
 			setup_between_cases
 		fi
-		first=0
 		# run_case, never `case_$name` directly: it is the case plus its §7.8
 		# reading, so a case can never be run without being measured.
 		run_case "$name"
