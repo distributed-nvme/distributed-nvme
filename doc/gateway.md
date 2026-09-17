@@ -347,8 +347,8 @@ Five subcommands so the integration suite can play the worker (§0 #12):
   2026-09-16 with the clone latch, §5.8)* — the clone twins of the two below.
   `drain-clone` is CLD7's derivation in a loop over `model.DrainCloneBm` and
   `model.FinishCloneDelete`, and emits
-  `{"steps":…, "chunk_cnt":…, "clone_deleted":<bool>}` — `chunk_cnt` and NOT
-  `bm_cnt`, which is a different number on the same object (§5.8).
+  `{"steps":…, "chunk_cnt":…, "clone_deleted":<bool>}` — `chunk_cnt`, the
+  batch size.
   `set-clone-deleting` writes the flag and bumps, and deliberately does NOT
   resume the destination namespaces the way the RPC does: that write is the
   gateway's, and a driver that re-implemented it would drift from it.
@@ -855,7 +855,7 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   `src_stripe_size = i×4KiB, i ≤ 256`; `src_block_size = j×64KiB, j ≤ 16384`
   and a multiple of the stripe); STM: resolve; token; name free ⇒ else
   `ALREADY_EXISTS`; dst td by name (`NOT_FOUND`); mint `clone_id`; put
-  `Clone{…, dst_td_id, bm_cnt: 0}`; append `clone_name_list`; `BumpSpRev`.
+  `Clone{…, dst_td_id}`; append `clone_name_list`; `BumpSpRev`.
   Reply `clone_id`. (The "destination td must be empty" precondition is
   documented-unverifiable [D3]; the per-CN clone budget is untracked, §0
   #16.)
@@ -943,16 +943,12 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   the bytes `[b·C, b·C+len)` that chunk holds (§9.6), so a replace would keep
   only the last page and place its bits at the chunk's own offset, which
   `PushCloneBitmap` would then hand the primary as "never written" and the
-  agent would `blkdiscard` regions the source really wrote;
-  `bm_cnt = max(bm_cnt, bm_idx+1)` — ONE `uint32`, the high-water of
-  `bm_idx + 1` over ALL appends ACROSS slices and never derived from
-  `src_slice_idx` (on a fresh clone, appending slice 5 / bm 0 leaves it at 1,
-  not 6); it is a max and never a `+= 1`. *Amended 2026-09-16:* it used to be
-  what DeleteClone swept the chunk keys from; the drain derives its position
-  from the surviving keys instead, so `bm_cnt` is now write-only bookkeeping
-  (risks_and_gaps.md RK10). It opens with `loadLiveClone`, so an append to a
-  latched clone is `FAILED_PRECONDITION` (CLD1); `BumpSpRev`. Reply
-  `clone_id`.
+  agent would `blkdiscard` regions the source really wrote. The `Clone`
+  record is **not rewritten**: it carries no chunk count, and how many chunks
+  a clone holds is how many `CloneBitmap` keys it has — which is what the
+  drain and `PushCloneBitmap` read. It opens with `loadLiveClone`, so an
+  append to a latched clone is `FAILED_PRECONDITION` (CLD1) and the clone key
+  is in the STM's read set either way; `BumpSpRev`. Reply `clone_id`.
 
 ### 5.9 Transfers (§8.10)
 
@@ -1189,11 +1185,16 @@ The other 49 RPCs never leave etcd.
    CN half; `DeleteStoragePool` left that pair on 2026-09-15, releasing
    nothing itself any more, and the drain's deliberately OPPOSITE answer to
    the same lost key — skip, because a latched SP must still be deletable —
-   is pinned in `model`). Clone bitmaps get three of their own: `bm_cnt` as
-   §5.8's cross-slice high-water, asserted in both mutation directions —
-   `(slice 5, bm 0)` ⇒ `1` (kills a `max(bm_cnt, src_slice_idx+1)`
-   implementation, which would say 6) and `(slice 0, bm 3)` ⇒ `4` (kills any
-   other slice-derived one, which would say 1); each of
+   is pinned in `model`). Clone bitmaps get three of their own, all on the
+   PAIR addressing of §5.8: the appends `(slice 5, bm 0)`, `(slice 0, bm 3)`
+   and `(slice 2, bm 1)` land in three chunk keys holding exactly the bytes
+   each sent, **and the three pairs no append wrote — `(5, 1)`, `(0, 0)`,
+   `(2, 0)` — are asserted ABSENT**, which is what kills a key formed from
+   `bm_idx` alone (it makes `(0, 0)` the same key as `(5, 0)`) and one formed
+   from `src_slice_idx` alone (it makes `(5, 1)` the same as `(5, 0)`). A byte
+   compare discriminates neither, because the test reads back through the same
+   key builder that wrote. A second append to `(slice 5, bm 0)` GROWS that
+   chunk in place rather than replacing it; each of
    AppendCloneBitmap's five BOUNDS by code, including the boundary triple
    (an append landing exactly at `len == C` succeeds, one byte more is
    `RESOURCE_EXHAUSTED`, a single `C+1`-byte page is `INVALID_ARGUMENT` even
@@ -1546,16 +1547,15 @@ path. Steps (each = one `stage`):
 12. `create-xfer x0` (origin ss0/1) → Transfer stored; `set-xfer-hosts`;
     `delete-xfer --force` (abort: origin ns untouched); recreate;
     `delete-xfer` (finalize: origin ns `suspended true` — asserted).
-13. `create-clone cl0` (dst t1, src bounds at their limits) → stored,
-    `bm_cnt 0`; then three `append-clone-bm` calls that DISCRIMINATE the
-    §5.8 `bm_cnt` rule rather than merely exercising it:
-    `--src-slice-idx 0 --bm-idx 0` → one chunk key, `bm_cnt 1`;
+13. `create-clone cl0` (dst t1, src bounds at their limits) → stored; then
+    three `append-clone-bm` calls that DISCRIMINATE the §5.8 PAIR addressing
+    rather than merely exercising it:
+    `--src-slice-idx 0 --bm-idx 0` → one chunk key;
     `--src-slice-idx 0 --bm-idx 1` (a SECOND chunk of the SAME slice) → two
-    chunk keys, `bm_cnt 2` (a `max(bm_cnt, src_slice_idx+1)` implementation
-    would still say 1 here); `--src-slice-idx 2 --bm-idx 0` (the FIRST chunk
-    of a SECOND slice) → a third chunk key and `bm_cnt` **still 2** — it is
-    the high-water of `bm_idx+1` ACROSS slices, so the slice-derived rule
-    would say 3 here and a call-counting `bm_cnt += 1` would say 3 too.
+    chunk keys, so a key formed from `src_slice_idx` alone is dead;
+    `--src-slice-idx 2 --bm-idx 0` (the FIRST chunk of a SECOND slice) → a
+    third key, so a key formed from `bm_idx` alone is dead too. Three calls,
+    three keys, none overwritten.
     `get-sp`'s `clone_bm_idx.cl0` is the pair list `["0:0","0:1","2:0"]`
     (decimal `src_slice_idx:bm_idx`, ascending);
     `get-clone`; `set-clone-tr`; `delete-clone --force` → the LATCH: `deleting

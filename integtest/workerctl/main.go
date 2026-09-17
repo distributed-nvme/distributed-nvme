@@ -2667,7 +2667,6 @@ func cmdPutClone(g *globals, args []string) {
 			SrcStripeSize: *srcStripe,
 			SrcBlockSize:  *srcBlock,
 			DstTdId:       dstTdId,
-			BmCnt:         0,
 		})
 		conf.CloneNameList = append(conf.CloneNameList, *name)
 		advanceNextId(conf, uint64(id))
@@ -2905,20 +2904,19 @@ func cmdPutMigr(g *globals, args []string) {
 	})
 }
 
-// cmdPutBitmap writes one chunk of a clone's or a migration's bitmap and
-// raises bm_cnt on the parent (architecture.md §8.9/§8.11, BM3), then bumps
-// SpRev once.
+// cmdPutBitmap writes one chunk of a clone's or a migration's bitmap
+// (architecture.md §8.9/§8.11, BM3), raises `bm_cnt` on a MIGRATION's parent,
+// and bumps SpRev once.
 //
 // A clone chunk is addressed by the PAIR --src-slice-idx / --bm-idx and holds
 // the bytes at offset bm_idx*CloneBmChunkBytes of that source slice's bitmap,
-// so the same bm_idx on two slices seeds two distinct chunks. bm_cnt is the
-// high-water of bm_idx + 1 ACROSS slices and is never derived from
-// src_slice_idx: seeding (slice 5, bm 0) into a fresh clone leaves bm_cnt 1,
-// and a chunk below the high-water raises nothing. A migration chunk keeps its
-// flat append sequence, where the new index IS the count.
+// so the same bm_idx on two slices seeds two distinct chunks. The Clone record
+// carries no chunk count, so a clone put writes the chunk key and nothing
+// else. A migration chunk keeps its flat append sequence, where the new index
+// IS the count.
 //
-// Rewriting an existing chunk leaves bm_cnt alone but still bumps SpRev —
-// which is exactly the "grown chunk" trigger of §14.11 C5.
+// Rewriting an existing chunk raises no count but still bumps SpRev — which is
+// exactly the "grown chunk" trigger of §14.11 C5.
 func cmdPutBitmap(g *globals, args []string) {
 	fs := newFlagSet("put-bitmap", g)
 	kind := fs.String("kind", "", "clone|migr (required)")
@@ -2965,7 +2963,10 @@ func cmdPutBitmap(g *globals, args []string) {
 	cid, _ := g.clusterId(ctx, cli)
 	target := resolveSp(ctx, cli, cid, *sp)
 
+	// bmCnt is Migration's only: a Clone record carries no chunk count
+	// (minor_updates_08 U2), so the output key is emitted for --kind migr.
 	var bmCnt uint32
+	var migr bool
 	var spRev uint64
 	created := false
 	err = cli.RunSTM(ctx, func(s etcdutil.STM) error {
@@ -2974,6 +2975,10 @@ func cmdPutBitmap(g *globals, args []string) {
 			return err
 		}
 		if *kind == "clone" {
+			// The clone record is still LOADED — the existence guard is what
+			// keeps `put-bitmap --name <unknown>` from planting an orphan
+			// chunk key under a clone nothing else knows about — but it is
+			// never rewritten: an append changes nothing in it.
 			parentKey := model.CloneKey(cid, target.spId, *name)
 			parent := &pb.Clone{}
 			if !s.Get(parentKey, parent) {
@@ -2985,12 +2990,8 @@ func cmdPutBitmap(g *globals, args []string) {
 			)
 			created = !s.Get(key, &pb.CloneBitmap{})
 			s.Put(key, &pb.CloneBitmap{Bitmap: data})
-			if uint32(*bmIdx)+1 > parent.GetBmCnt() {
-				parent.BmCnt = uint32(*bmIdx) + 1
-				s.Put(parentKey, parent)
-			}
-			bmCnt = parent.GetBmCnt()
 		} else {
+			migr = true
 			parentKey := model.MigrationKey(cid, target.spId, *name)
 			parent := &pb.Migration{}
 			if !s.Get(parentKey, parent) {
@@ -3013,7 +3014,7 @@ func cmdPutBitmap(g *globals, args []string) {
 	if err != nil {
 		die("put-bitmap: %v", err)
 	}
-	emit(map[string]any{
+	out := map[string]any{
 		"sp_name": target.name,
 		"kind":    *kind,
 		"name":    *name,
@@ -3023,9 +3024,12 @@ func cmdPutBitmap(g *globals, args []string) {
 		"bm_idx":        uint32(*bmIdx),
 		"bytes":         len(data),
 		"created":       created,
-		"bm_cnt":        bmCnt,
 		"sp_rev":        spRev,
-	})
+	}
+	if migr {
+		out["bm_cnt"] = bmCnt
+	}
+	emit(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -3640,10 +3644,8 @@ func cmdDrainClone(g *globals, args []string) {
 		"sp_name":    target.name,
 		"clone_name": *name,
 		"steps":      steps,
-		// chunk_cnt and NOT bm_cnt: `Clone.bm_cnt` is a different number with
-		// a different meaning (the cross-slice high-water of bm_idx + 1), and
-		// two fields of one name in one suite is how an assertion ends up
-		// checking the wrong thing.
+		// chunk_cnt is the number of chunk KEYS this drain removed. The Clone
+		// record carries no count of its own to confuse it with.
 		"chunk_cnt":     chunks,
 		"clone_deleted": deleted,
 	})

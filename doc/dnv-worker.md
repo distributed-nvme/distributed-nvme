@@ -493,7 +493,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
      | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (§7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
      | `FinishSpDelete(cid, shard, spId, spName)` | the drain checks; `cntlr_id_list` and `slice_id_list` both empty; `SpRev` and `SpGlobal` exist | delete `SpConf`, `SpName`, `SpRev`; `SpGlobal.shard_bucket[shard] -= 1`. The ONE op that does not bump `SpRev` — it deletes the key, which is the shard worker's stop signal (§8.4) |
-     | `DrainCloneBm(cid, shard, spId, spName, cloneName, cloneId, chunks []BmChunk) (batchSize int)` | the CLONE drain checks of §11.7 (CLD2: SpConf exists and is not itself deleting, `sp_id` unchanged, Clone exists, `clone_id` unchanged, `deleting == true`); `len(chunks) <= MaxDelBmPerTxn` | `Del` each named `CloneBitmap` key — nothing else, and nothing the caller did not name; the `Clone` record is NOT rewritten (`bm_cnt` untouched); bump `SpRev`. The return is the SIZE of the batch it was handed, never a count of keys that were still there — a `Del` is an idempotent pop, so the loser of an accepted two-owner overlap reports a full batch and removes nothing. An empty batch is a no-op that writes and bumps nothing |
+     | `DrainCloneBm(cid, shard, spId, spName, cloneName, cloneId, chunks []BmChunk) (batchSize int)` | the CLONE drain checks of §11.7 (CLD2: SpConf exists and is not itself deleting, `sp_id` unchanged, Clone exists, `clone_id` unchanged, `deleting == true`); `len(chunks) <= MaxDelBmPerTxn` | `Del` each named `CloneBitmap` key — nothing else, and nothing the caller did not name; the `Clone` record is NOT rewritten; bump `SpRev`. The return is the SIZE of the batch it was handed, never a count of keys that were still there — a `Del` is an idempotent pop, so the loser of an accepted two-owner overlap reports a full batch and removes nothing. An empty batch is a no-op that writes and bumps nothing |
      | `FinishCloneDelete(cid, shard, spId, spName, cloneName, cloneId)` | the clone drain checks | delete the `Clone` key AND remove the name from `clone_name_list` in the same STM; bump `SpRev` (the SP outlives the clone, so this one bumps) |
 
 MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
@@ -1600,7 +1600,7 @@ code (`model/clonedrain.go`, `worker/clonedrain.go`) and here.*
 `deleting = true`, the destination namespaces resumed, one `BumpSpRev`
 (architecture.md §8.9, gateway.md §5.8) — and the sp coordinator removes the
 chunk keys in batches of a constant size and then the clone itself. The sweep it
-replaced was `src_slice_cnt × bm_cnt` deletes in one transaction, 256 at today's
+replaced was the whole rectangle of chunk keys deleted in one transaction, 256 at today's
 16×16 and the founding justification for `EtcdMaxTxnOps = 512`; both ceilings
 are expected to grow, and a batch is `MaxDelBmPerTxn + 4 = 68` ops whatever they
 become.
@@ -1681,7 +1681,7 @@ CLD7. **Cadence and step selection.** The drain runs ALONGSIDE the normal
       The derivation, from the pass's snapshot alone: surviving chunk keys in
       `SpState.CloneBmIdx` ⇒ one batch on the LOWEST `MaxDelBmPerTxn` of them
       in `(src_slice_idx, bm_idx)` order; none ⇒ the final STM. No other state
-      is consulted — not `bm_cnt`, not the rectangle, not a progress key — so
+      is consulted — not the Clone record, not the rectangle, not a progress key — so
       crash, restart and handoff all resume through it. Ascending order is
       free to choose (chunk keys are independent and self-positioning, unlike
       the sp drain's tail-pop) and is picked for determinism.
@@ -1690,7 +1690,7 @@ CLD8. **The batch.** Deletes ONLY keys named by the caller's keys-only
       snapshot scan, at most `MaxDelBmPerTxn` of them, each `Del` an
       idempotent pop; refuses a larger batch, so a caller that handed over its
       whole scan could not silently rebuild the unbounded sweep. It MUST NOT
-      rewrite the Clone record — `bm_cnt` untouched — and ends in `BumpSpRev`.
+      rewrite the Clone record and ends in `BumpSpRev`.
       Physical effect: none. The CN dropped its local chunk files at retire,
       agents never read etcd, and an excluded clone has no pusher.
 
@@ -1778,7 +1778,7 @@ parses them.
 | `sp drain step` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs` or `slice`), `cntlr_cnt` for `cntlrs`; `slice_id`, `grp_cnt`, `slice_done` for `slice` | every committed D1 and D2 step (§11.6). D3 emits `sp drained` instead, so `phase=final` never appears here. Non-normative in the §12 sense — it names no decision — but the §14 drain case counts it, because it is the only record that shows a multi-batch drain advancing |
 | `sp drained` | `cluster_id`, `sp_id`, `sp_name` | D3 committed (SPD12): the SP is gone |
 | `sp drain failed` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs`/`slice`/`final`), `slice_id` for `slice`, `reason?` (an `ErrPrecondition`'s), `error` | a drain step that did not commit (SPD6). Retried on the next tick; there is no terminal-failure state |
-| `clone drain step` | `cluster_id`, `sp_id`, `clone_name`, `clone_id`, `step` (`bitmap`), `chunk_cnt` | every committed clone-drain BATCH (§11.7). `chunk_cnt` is the batch's size, deliberately NOT named `bm_cnt`: `Clone.bm_cnt` is a different number the drain neither reads nor writes (CLD8). The final STM emits `clone drained` instead, so `step=final` never appears here. Non-normative in the §12 sense; §14's case G counts it |
+| `clone drain step` | `cluster_id`, `sp_id`, `clone_name`, `clone_id`, `step` (`bitmap`), `chunk_cnt` | every committed clone-drain BATCH (§11.7). `chunk_cnt` is the batch's size (CLD8; the `Clone` record carries no chunk count). The final STM emits `clone drained` instead, so `step=final` never appears here. Non-normative in the §12 sense; §14's case G counts it |
 | `clone drained` | `cluster_id`, `sp_id`, `clone_name`, `clone_id` | the final STM committed (CLD9): the clone is gone |
 | `clone drain failed` | `cluster_id`, `sp_id`, `sp_name`, `step` (`bitmap`/`final`), `clone_name`, `clone_id`, `reason?`, `error` | a clone-drain step that did not commit (CLD10) |
 
@@ -1870,9 +1870,8 @@ does).
   ceiling test, one maximum-shape batch against `--max-txn-ops=512`.
 * **clonedrain.go** (§11.7) — CLD7's derivation for all three states, the
   third being a LIVE clone, which is what stops a pass from draining one, and
-  the "none remain" state built with `bm_cnt` saying 13 — the terminal state
-  of every real drain, and the only fixture that tells a derivation reading
-  the surviving KEYS from one reading the counter; the batch cut and its
+  the "none remain" state built with zero surviving keys — the terminal state
+  of every real drain; the batch cut and its
   `(src_slice_idx, bm_idx)` order, from chunks planted DESCENDING so "the
   lowest" cannot be satisfied by "the first the scan returned"; the drain
   running in the same pass as a failover (CLD7's deviation from SPD6) and in
@@ -2123,7 +2122,7 @@ on any error.
 | `del-rev` | `dn\|cn\|sp --id --shard` | deletes the rev key only |
 | `put-sp` | `--name --id --shard --slots 0,1,2 --level N --thresholds p,c,s,l --lwm N --cntlr id:cn_id:slot:primary…  --slice id:idx…  --group slice:grp:meta\|data:ext_cnt:none\|raid1…  --leg grp:leg:idx…  --side leg:side:dn_id:slot…` | `SpConf` (+ `next_id` past every id), `SpName`, every `Cntlr`, every `Slice` (sides `provisioned = false`), `SpRev{revision = 1, sp_name}`; the DN/CN pointer lists, budgets, capacity keys and `DnRev`/`CnRev` bumps — the `CreateStoragePool` STM with explicit placement |
 | `put-td`, `put-ss`, `put-clone`, `put-xfer`, `put-migr` | the message's fields (`--migr name:id:src_side:dst_side` also appends the dst `Side` to the leg) | the record + the `SpConf` list entry; bump `SpRev` |
-| `put-bitmap` | `--kind clone\|migr --sp --name [--src-slice-idx] --bm-idx --hex` | the chunk (+ `bm_cnt` on the parent); bump `SpRev` |
+| `put-bitmap` | `--kind clone\|migr --sp --name [--src-slice-idx] --bm-idx --hex` | the chunk (+ `bm_cnt` on a migration's parent); bump `SpRev` |
 | `set-cntlr` | `--sp --id --primary=… --disabled=…` | rewrites the `Cntlr`; bump `SpRev` |
 | `set-level` | `--sp --level N` | `SpConf.sp_level`; bump `SpRev` |
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
@@ -2157,15 +2156,16 @@ which is not a ladder (§7), and every case would refuse at its first round.
 `--src-slice-idx` together with `--kind migr` is a usage error, while `0`
 passes, 0 being the migration convention for a chunk that names no slice.
 Either index of 256 or more is refused, since neither would parse back out
-of its `common.BmIdxFmt` key field. On a clone it raises `bm_cnt` to the
-high-water of `bm_idx + 1` **across** slices and never derives it from
-`src_slice_idx` — seeding `(slice 5, bm 0)` into a fresh clone leaves
-`bm_cnt` 1, not 6, and a chunk below the high-water raises nothing — while a
-migration's `bm_cnt` is still incremented once per newly created chunk,
-where the new index *is* the count. Rewriting an existing chunk raises no
-count but still bumps `SpRev`, which is the [D8]/BM5 driver that §14.11 C's
-grown-chunk step relies on. Its emitted JSON carries `src_slice_idx` next to
-`bm_idx` (`0` for `migr`), plus `bytes`, `created`, `bm_cnt` and `sp_rev`.
+of its `common.BmIdxFmt` key field. On a clone it writes the chunk key and
+touches **no other record**: the `Clone` carries no chunk count, though it is
+still loaded, because that existence check is what stops a `--name` nobody
+knows from planting an orphan chunk. Both kinds bump `SpRev`. A migration's
+`bm_cnt` is still incremented once per newly created chunk, where the new
+index *is* the count.
+Rewriting an existing chunk raises no count but still bumps `SpRev`, which is
+the [D8]/BM5 driver that §14.11 C's grown-chunk step relies on. Its emitted
+JSON carries `src_slice_idx` next to `bm_idx` (`0` for `migr`), plus `bytes`,
+`created` and `sp_rev` — and `bm_cnt` for `--kind migr` only.
 
 `get-sp` prints the chunk addresses `LoadSp` found in the two shapes the
 fakes spell them in (§14.9), so that both sides of an assertion spell a
@@ -2378,7 +2378,7 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    (§14.8). `put-clone c0 dst td0 src_slice_cnt 2`, then THREE clone
    chunks at three pairs — `(0,0)`, `(0,1)`, `(1,0)` — so that two of them
    share a `bm_idx` on different source slices while one source slice holds
-   two chunks; `bm_cnt` ends at 2, the U5 high-water of `bm_idx + 1`, not 3.
+   two chunks; three distinct chunk keys (`key_cnt clone_bitmap` = 3).
    cn0's `chunk_id_list` lever (§14.9) is set to exactly those three pairs
    BEFORE they are seeded, so the clone pushes are held back until step 3
    releases them: seeded one at a time each chunk would be pushed as it
@@ -2546,7 +2546,7 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    key and the clone key behind. Start `w1`-`w3`, wait one grace window; within
    `WAIT_SYNCUP` c1 is gone, having taken exactly ONE more batch (for the one
    surviving chunk) and its final STM — the position re-derived from the
-   surviving KEYS, not from `bm_cnt`, which still says 13.
+   surviving KEYS.
 
 **E — `vote`**
 

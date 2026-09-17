@@ -3429,7 +3429,9 @@ type Clone struct {
 	DstTdId       uint64                 `protobuf:"varint,8,opt,name=dst_td_id,json=dstTdId,proto3" json:"dst_td_id,omitempty"`
 	DmCloneConf   *DmCloneConf           `protobuf:"bytes,9,opt,name=dm_clone_conf,json=dmCloneConf,proto3" json:"dm_clone_conf,omitempty"`
 	AutoResume    bool                   `protobuf:"varint,10,opt,name=auto_resume,json=autoResume,proto3" json:"auto_resume,omitempty"`
-	BmCnt         uint32                 `protobuf:"varint,11,opt,name=bm_cnt,json=bmCnt,proto3" json:"bm_cnt,omitempty"`
+	// minor_updates_08 U2). Reserving the NUMBER is what
+	// keeps a future varint field from decoding an old
+	// record's counter as itself; the name goes with it.
 	// The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
 	// DeleteClone sets it and returns, and the sp coordinator drains the
 	// chunk keys. Appended, never renumbered — a renumbered field decodes
@@ -3537,13 +3539,6 @@ func (x *Clone) GetAutoResume() bool {
 		return x.AutoResume
 	}
 	return false
-}
-
-func (x *Clone) GetBmCnt() uint32 {
-	if x != nil {
-		return x.BmCnt
-	}
-	return 0
 }
 
 func (x *Clone) GetDeleting() bool {
@@ -14377,7 +14372,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tR\x05model\x12#\n" +
 	"\ans_list\x18\x04 \x03(\v2\n" +
 	".NamespaceR\x06nsList\x12#\n" +
-	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\xa3\x03\n" +
+	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"\x9a\x03\n" +
 	"\x05Clone\x12\x19\n" +
 	"\bclone_id\x18\x01 \x01(\x04R\acloneId\x124\n" +
 	"\x10src_tr_conf_list\x18\x02 \x03(\v2\v.NvmeTrConfR\rsrcTrConfList\x12\x17\n" +
@@ -14391,9 +14386,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rdm_clone_conf\x18\t \x01(\v2\f.DmCloneConfR\vdmCloneConf\x12\x1f\n" +
 	"\vauto_resume\x18\n" +
 	" \x01(\bR\n" +
-	"autoResume\x12\x15\n" +
-	"\x06bm_cnt\x18\v \x01(\rR\x05bmCnt\x12\x1a\n" +
-	"\bdeleting\x18\f \x01(\bR\bdeleting\"%\n" +
+	"autoResume\x12\x1a\n" +
+	"\bdeleting\x18\f \x01(\bR\bdeletingJ\x04\b\v\x10\fR\x06bm_cnt\"%\n" +
 	"\vCloneBitmap\x12\x16\n" +
 	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\xa2\x01\n" +
 	"\bTransfer\x12\x17\n" +

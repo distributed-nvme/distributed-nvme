@@ -1802,15 +1802,20 @@ case_bitmap() {
 EOF
 	# Three chunks at three PAIRS: (0,0) and (0,1) are two chunks of source
 	# slice 0's bitmap, and (1,0) shares bm_idx 0 with (0,0) on another
-	# source slice. bm_cnt ends at 2 — the U5 high-water of bm_idx + 1 across
-	# slices — and is never derived from src_slice_idx.
+	# source slice. Three pairs, three keys — a key built from either index
+	# alone would merge two of them.
 	ctl put-bitmap --sp sp0 --kind clone --name c0 --src-slice-idx 0 --bm-idx 0 --hex 0102
 	ctl put-bitmap --sp sp0 --kind clone --name c0 --src-slice-idx 0 --bm-idx 1 --hex 0304
-	local clone_bm_cnt
-	clone_bm_cnt=$(ctl put-bitmap --sp sp0 --kind clone --name c0 \
-		--src-slice-idx 1 --bm-idx 0 --hex 0506 | "$JQ" -r .bm_cnt)
-	assert_eq "$clone_bm_cnt" 2 \
-		"c0 bm_cnt after (0,0), (0,1), (1,0): the bm_idx+1 high-water"
+	local clone_put
+	clone_put=$(ctl put-bitmap --sp sp0 --kind clone --name c0 \
+		--src-slice-idx 1 --bm-idx 0 --hex 0506)
+	assert_eq "$(key_cnt clone_bitmap)" 3 \
+		"c0 chunk keys after (0,0), (0,1), (1,0)"
+	# The output key follows the record: a Clone carries no chunk count, so a
+	# clone put emits no bm_cnt at all (§14.8). The migration half is asserted
+	# below, so the two directions of the same branch are both pinned.
+	assert_eq "$("$JQ" -r 'has("bm_cnt")' <<<"$clone_put")" false \
+		"a clone put-bitmap must emit no bm_cnt"
 	# The migration chunks go in LAST, and only once the fixture has gone
 	# quiet: step 2 asserts that the chunk-1 push carries EXACTLY the SpRev of
 	# the put that introduced it (BM3's `revision = synced`), which holds only
@@ -1826,7 +1831,12 @@ EOF
 	quiet_rev=$(sp_rev 1)
 	assert_none_for 2 "an SpRev bump before the migration chunks are written" \
 		sp_rev_changed 1 "$quiet_rev"
-	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 0 --hex aa00ff
+	local migr0_out
+	migr0_out=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 0 --hex aa00ff)
+	# A MIGRATION's parent does carry the counter, and put-bitmap raises it
+	# (§14.8) — the other direction of the clone assert above.
+	assert_eq "$("$JQ" -r '.bm_cnt' <<<"$migr0_out")" 1 \
+		"a migr put-bitmap emits the parent's raised bm_cnt"
 	local migr1_rev
 	migr1_rev=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee |
 		"$JQ" -r .sp_rev)
@@ -3083,7 +3093,7 @@ case_drain() {
 	assert_eq "$(key_cnt clone_bitmap)" "0" "chunk keys after the resumed drain"
 	# The restarted fleet took exactly ONE more batch — the single surviving
 	# chunk — and then the final STM: it re-derived the position from the
-	# surviving keys, not from bm_cnt, which still says 13.
+	# surviving keys.
 	assert_eq "$((  $(clone_drain_step_records) - clone_steps_before ))" "1" \
 		"the resumed drain took one batch, for the one chunk that was left"
 	assert_eq "$(wcount 'select(.msg == "clone drained")')" "2" \

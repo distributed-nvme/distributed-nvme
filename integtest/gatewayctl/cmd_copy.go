@@ -245,9 +245,10 @@ func setupSetCloneTr(fs *flag.FlagSet) job {
 // A chunk is addressed by the PAIR --src-slice-idx / --bm-idx: chunk (s, b)
 // holds the bytes at offset b*CloneBmChunkBytes of source slice s's bitmap, so
 // --bm-idx is the chunk's fixed position WITHIN that one slice and says nothing
-// about any other slice. The record's bm_cnt counts no calls either: it is the
-// high-water of bm_idx + 1 over every slice, which is why §10.11 step 13 asserts
-// it from the indexes it sent rather than from the number of appends.
+// about any other slice. The Clone record carries no chunk count at all — how
+// many chunks a clone holds is how many chunk keys it has — which is why
+// §10.11 step 13 asserts the three PAIRS it sent rather than any number on the
+// record.
 func setupAppendCloneBm(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint

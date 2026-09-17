@@ -1988,9 +1988,9 @@ func TestGetAndUpdateTransferHosts(t *testing.T) {
 
 // volCloneSrcSliceCnt is the source geometry the clone tests are created with.
 // It is deliberately > 6 so that AppendCloneBitmap can address source slice 5:
-// bm_cnt is the high-water of bm_idx + 1 alone (§8.9), and only a slice index
-// well above every bm_idx the tests send can tell that rule apart from one
-// derived from src_slice_idx.
+// a chunk is addressed by the PAIR (src_slice_idx, bm_idx) (§8.9), and only a
+// slice index well above every bm_idx the tests send can tell a key built from
+// the pair apart from one built from either index alone.
 const volCloneSrcSliceCnt = uint32(8)
 
 // volCreateClone creates one clone over dstTdName and returns the reply.
@@ -2022,9 +2022,10 @@ func volCreateClone(
 }
 
 // TestCreateCloneWritesRecord pins §8.9's write set: the destination td is
-// resolved to its td_id (an id is never reused, so a renamed or recreated
-// device can never silently become the destination) and the record starts with
-// bm_cnt 0 — the source bitmap is a pure optimization that may arrive later.
+// resolved to its td_id, so a renamed or recreated device can never silently
+// become the destination (an id is never reused). The record carries no chunk
+// count — the source bitmap is a pure optimization that may arrive later, and
+// what a clone holds is the set of its chunk keys.
 func TestCreateCloneWritesRecord(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -2044,7 +2045,6 @@ func TestCreateCloneWritesRecord(t *testing.T) {
 		DstTdId:       900,
 		DmCloneConf:   &pb.DmCloneConf{HydrationThreshold: 2},
 		AutoResume:    true,
-		BmCnt:         0,
 	}
 	if got := env.clone("clone-a"); !proto.Equal(got, want) {
 		t.Errorf("clone: got %v, want %v", got, want)
@@ -2090,41 +2090,45 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 	env.wantUntouched(before, beforeRev)
 }
 
-// TestAppendCloneBitmapHighWaterMark pins the two rules §8.9 gives the source
-// bitmap: a chunk is ADDRESSED by the PAIR (src_slice_idx, bm_idx) and grows
-// in place by appending (the pages of one chunk concatenate into the bytes
-// that chunk holds of the slice's bitmap), and bm_cnt is the high-water of
-// bm_idx + 1 over ALL appends across ALL slices — never +1, and never derived
-// from src_slice_idx. It used to be what DeleteClone swept the chunk keys
-// from, which is why lowering it would have orphaned them; since the clone
-// drain reads the surviving keys instead (dnv-worker.md §11.7) nothing
-// load-bearing reads it at all (risks_and_gaps.md RK10), and what these cases
-// pin is the RULE — kept because a future reader would inherit it.
+// TestAppendCloneBitmapPairAddressing pins the two rules §8.9 gives the source
+// bitmap: a chunk is ADDRESSED by the PAIR (src_slice_idx, bm_idx), and it
+// grows in place by appending (the pages of one chunk concatenate into the
+// bytes that chunk holds of the slice's bitmap).
 //
-// The first two steps are the mutation-direction cases §9 asks for. A fresh
-// clone's (slice 5, bm 0) leaves bm_cnt at 1, which is what an implementation
-// writing max(bm_cnt, src_slice_idx + 1) would report as 6; the
-// (slice 0, bm 3) that follows raises it to 4, which a slice-derived one would
-// report as 1. Neither case can be passed by the wrong rule, and the last step
-// pins that a lower bm_idx on a third slice does not lower it again.
+// No per-step byte compare can tell a wrong key builder apart, and it is worth
+// being explicit about why: the four appends collide under NEITHER wrong key
+// (bm_idx alone gives 0, 0, 3, 1; src_slice_idx alone gives 5, 5, 0, 2), and
+// every read-back goes through the same builder that wrote, so each step reads
+// its own bytes whatever the key is.
 //
-// The bytes are stored verbatim (GW14, [D-J]): the gateway never inspects or
-// rewrites a bit.
-func TestAppendCloneBitmapHighWaterMark(t *testing.T) {
+// The absence loop below is therefore the entire discrimination. A bm_idx-only
+// key makes (0, 0) the same key as (5, 0); a src_slice_idx-only key makes
+// (5, 1) the same as (5, 0) and (2, 0) the same as (2, 1). All three are
+// asserted absent, so either wrong builder leaves one of them present.
+//
+// Step 2 is the in-place growth pin: a second page at the SAME pair must
+// extend the chunk, never replace it — a replacement would keep only the last
+// page and place its bits at the chunk's own offset, which PushCloneBitmap
+// would hand the primary as "never written".
+//
+// Nothing here reads the Clone record: it carries no chunk count (U2), and an
+// append does not rewrite it. The bytes are stored verbatim (GW14, [D-J]): the
+// gateway never inspects or rewrites a bit.
+func TestAppendCloneBitmapPairAddressing(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
 	created := volCreateClone(env, "clone-a", "dst")
+	createdRecord := env.clone("clone-a")
 	for _, step := range []struct {
 		srcSliceIdx uint32
 		bmIdx       uint32
 		bitmap      []byte
 		wantChunk   []byte
-		wantBmCnt   uint32
 	}{
-		{5, 0, []byte{0x01, 0x02}, []byte{0x01, 0x02}, 1},
-		{5, 0, []byte{0x03}, []byte{0x01, 0x02, 0x03}, 1},
-		{0, 3, []byte{0xff}, []byte{0xff}, 4},
-		{2, 1, []byte{0xa0}, []byte{0xa0}, 4},
+		{5, 0, []byte{0x01, 0x02}, []byte{0x01, 0x02}},
+		{5, 0, []byte{0x03}, []byte{0x01, 0x02, 0x03}},
+		{0, 3, []byte{0xff}, []byte{0xff}},
+		{2, 1, []byte{0xa0}, []byte{0xa0}},
 	} {
 		label := fmt.Sprintf("chunk (%d, %d)", step.srcSliceIdx, step.bmIdx)
 		reply, err := env.srv.AppendCloneBitmap(
@@ -2152,14 +2156,20 @@ func TestAppendCloneBitmapHighWaterMark(t *testing.T) {
 			t.Errorf("%s: got %v, want %v",
 				label, chunk.GetBitmap(), step.wantChunk)
 		}
-		if got := env.clone("clone-a").GetBmCnt(); got != step.wantBmCnt {
-			t.Errorf("bm_cnt after %s: got %d, want %d",
-				label, got, step.wantBmCnt)
+		// An append rewrites nothing in the Clone record. proto.Equal against
+		// the record CreateClone wrote is stronger than any field compare:
+		// it fails on a field the append had no business touching too.
+		if got := env.clone("clone-a"); !proto.Equal(got, createdRecord) {
+			t.Errorf("the Clone record changed on %s: got %v, want %v",
+				label, got, createdRecord)
 		}
 	}
-	// Chunk (5, 0) is addressed by the pair alone, so the three OTHER chunks
-	// the steps above never wrote — (5, 1) and up, (0, 0), (2, 0) — must still
-	// be absent: a self-positioned chunk is not a cell of a dense rectangle.
+	// The three chunks the steps above never wrote — (5, 1), (0, 0), (2, 0) —
+	// must still be absent: a self-positioned chunk is not a cell of a dense
+	// rectangle. This loop is what kills each wrong key. A key built from
+	// bm_idx alone makes (0, 0) the same key as (5, 0), so (0, 0) would be
+	// present; a key built from src_slice_idx alone makes (5, 1) the same key
+	// as (5, 0) and (2, 0) the same as (2, 1), so both would be present.
 	for _, absent := range []struct {
 		srcSliceIdx uint32
 		bmIdx       uint32
@@ -2233,8 +2243,8 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 				})
 			volWantCode(t, err, codes.InvalidArgument)
 			env.wantUntouched(before, beforeRev)
-			if got := env.clone("clone-a").GetBmCnt(); got != 0 {
-				t.Errorf("bm_cnt: got %d, want 0", got)
+			if n := volCloneKeyCnt(env, "clone-a"); n != 0 {
+				t.Errorf("a refused append created %d chunk keys", n)
 			}
 			key := model.CloneBitmapKey(env.cid, volSpId, "clone-a",
 				tc.srcSliceIdx, tc.bmIdx)
@@ -2290,8 +2300,8 @@ func TestAppendCloneBitmapRefusals(t *testing.T) {
 			t.Errorf("the refused append grew the chunk to %d bytes",
 				len(chunk.GetBitmap()))
 		}
-		if got := env.clone("clone-a").GetBmCnt(); got != 3 {
-			t.Errorf("bm_cnt: got %d, want 3", got)
+		if n := volCloneKeyCnt(env, "clone-a"); n != 1 {
+			t.Errorf("%d chunk keys after the refusal, want 1", n)
 		}
 	})
 }
@@ -2341,8 +2351,8 @@ func TestDeleteCloneDropsChunksAndResumesNs(t *testing.T) {
 				chunk.srcSliceIdx, chunk.bmIdx, err)
 		}
 	}
-	if got := env.clone("clone-a").GetBmCnt(); got != 3 {
-		t.Fatalf("bm_cnt: got %d, want 3", got)
+	if n := volCloneKeyCnt(env, "clone-a"); n != len(written) {
+		t.Fatalf("%d chunk keys before the delete, want %d", n, len(written))
 	}
 	reply, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
 		ClusterName: env.cluster,

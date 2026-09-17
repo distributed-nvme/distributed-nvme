@@ -83,8 +83,8 @@ func (w *spWorker) drainClones(ctx context.Context, state *model.SpState) {
 // surviving chunk keys ⇒ one batch on the lowest MaxDelBmPerTxn of them;
 // none ⇒ the final STM.
 //
-// No other state is consulted — not `bm_cnt`, not the rectangle, not a progress
-// key — so crash, restart and ownership handoff all resume through this same
+// No other state is consulted — not the Clone record, not the rectangle, not a
+// progress key — so crash, restart and ownership handoff all resume through this same
 // derivation. Ascending order is free to choose, chunk keys being independent
 // and self-positioning, and is picked for determinism.
 func (w *spWorker) drainCloneStep(
@@ -141,10 +141,9 @@ func (w *spWorker) drainCloneStep(
 		slog.String("clone_name", name),
 		slog.Uint64("clone_id", clone.GetCloneId()),
 		slog.String("step", cloneDrainStepBm),
-		// chunk_cnt and NOT bm_cnt: `Clone.bm_cnt` is a different number —
-		// AppendCloneBitmap's `bm_idx + 1` high-water, which this drain never
-		// reads and never writes (§11.7 CLD8) — and one operator-facing name
-		// must not carry two meanings.
+		// chunk_cnt is the batch's size — how many chunk keys THIS step
+		// removed — and not any count carried by the Clone record, which
+		// carries none (§11.7 CLD8).
 		slog.Int("chunk_cnt", removed),
 	}
 	slog.InfoContext(ctx, msgCloneDrainStep, attrs...)

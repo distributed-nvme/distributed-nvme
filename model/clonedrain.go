@@ -27,7 +27,7 @@ import (
 //     converging while one of its clones goes away.
 //
 // What DeleteClone replaced: a single deciding STM that swept the whole
-// `src_slice_cnt × bm_cnt` rectangle of chunk keys — 256 deletes at today's
+// rectangle of chunk keys — 256 deletes at today's
 // 16×16, the founding justification for EtcdMaxTxnOps = 512. Both ceilings are
 // expected to grow; incremental deletion makes growth change the batch COUNT
 // and never the transaction's legality.
@@ -98,9 +98,9 @@ func loadCloneForOp(
 // exactly is what keeps a batch from removing a chunk an append wrote after the
 // scan.
 //
-// It MUST NOT rewrite the Clone record. `bm_cnt` stays exactly as
-// AppendCloneBitmap left it (CLD7): the drain derives its position from the
-// surviving keys, so the counter is not load-bearing here, and rewriting it
+// It MUST NOT rewrite the Clone record (CLD7). The record carries no chunk
+// count to maintain — the set of a clone's chunks IS the set of its chunk keys,
+// which is what this drain derives its position from — and rewriting the record
 // would both cost an op and invent a second copy of the truth.
 //
 // Physical effect: none. The CN dropped its local chunk files at retire — the

@@ -2038,61 +2038,48 @@ EOF
 	assert_eq "$(smoke_jq "$clone" '.src_tr_conf_list | length')" "1" \
 		"clone src_tr_conf_list"
 	# §8.9: a clone starts with no source bitmap at all; the chunks are a pure
-	# optimization that may arrive at any time.
-	assert_field "$clone" '.bm_cnt' "0" "clone bm_cnt at creation"
+	# optimization that may arrive at any time, and the record carries no
+	# count of them.
+	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
+		'[]' "the clone holds no chunk at creation"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.clone_name_list | @json')" \
 		'["cl0"]' "sp0 clone_name_list"
 	out=$(gw get-clone --sp sp0 --name cl0)
 	assert_field "$out" '.clone.clone_id' "$cloneId" "get-clone clone_id"
-	assert_field "$out" '.clone.bm_cnt' "0" "get-clone bm_cnt"
 	# A chunk is addressed by the PAIR (src_slice_idx, bm_idx): src_slice_idx
 	# picks the source slice, bm_idx fixes the chunk's byte offset WITHIN that
-	# one slice's bitmap and says nothing about any other slice. bm_cnt is ONE
-	# uint32, the high-water of bm_idx + 1 ACROSS slices (§10.11 step 13,
-	# §5.8). It used to be what DeleteClone swept the chunk keys from; since
-	# 2026-09-16 the drain reads the surviving keys instead and nothing
-	# load-bearing reads bm_cnt (risks_and_gaps.md RK10), so what the appends
-	# below pin is the RULE, not a consumer of it.
+	# one slice's bitmap and says nothing about any other slice (§10.11 step
+	# 13, §5.8).
 	#
-	# The three appends below DISCRIMINATE that rule rather than merely
-	# exercising it: a second chunk of the SAME slice must RAISE bm_cnt (a
-	# max(bm_cnt, src_slice_idx+1) implementation would leave it at 1), and
-	# the first chunk of a SECOND slice must NOT (both a slice-derived rule
-	# and a call-counting bm_cnt += 1 would say 3).
+	# The three appends below DISCRIMINATE that addressing rather than merely
+	# exercising it. A second chunk of the SAME slice must make a SECOND key
+	# — a key built from src_slice_idx alone would overwrite the first — and
+	# the first chunk of a SECOND slice must make a THIRD, which a key built
+	# from bm_idx alone would not. Three calls, three keys, none overwritten.
 	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
 		--src-slice-idx 0 --bm-idx 0 --bm-hex ff00)
 	refresh_rev sp0
 	assert_field "$out" '.clone_id' "$cloneId" "append-clone-bm reply clone_id"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "1" \
-		"clone bm_cnt after chunk (0, 0)"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
 		'["0:0"]' "the clone's stored chunk pairs after chunk (0, 0)"
 	assert_eq "$(key_count clone_bitmap)" "1" "clone_bitmap keys"
-	assert_field "$(gw get-clone --sp sp0 --name cl0)" '.clone.bm_cnt' "1" \
-		"get-clone bm_cnt after the first append"
 	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
 		--src-slice-idx 0 --bm-idx 1 --bm-hex 0f)
 	refresh_rev sp0
 	assert_field "$out" '.clone_id' "$cloneId" \
 		"append-clone-bm (0, 1) reply clone_id"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "2" \
-		"a second chunk of the SAME slice raises bm_cnt to 2"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
-		'["0:0","0:1"]' "the clone's stored chunk pairs after chunk (0, 1)"
+		'["0:0","0:1"]' "a second chunk of the SAME slice is a second key"
 	assert_eq "$(key_count clone_bitmap)" "2" "clone_bitmap keys, both slice 0"
 	out=$(gw append-clone-bm --sp sp0 --rev "$SP_REV" --name cl0 \
 		--src-slice-idx 2 --bm-idx 0 --bm-hex a5)
 	refresh_rev sp0
 	assert_field "$out" '.clone_id' "$cloneId" \
 		"append-clone-bm (2, 0) reply clone_id"
-	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clones.cl0.bm_cnt')" "2" \
-		"the FIRST chunk of a SECOND slice leaves bm_cnt at 2"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.clone_bm_idx.cl0 | @json')" \
 		'["0:0","0:1","2:0"]' \
-		"the clone's stored chunk pairs span two slices"
+		"the FIRST chunk of a SECOND slice is a third key"
 	assert_eq "$(key_count clone_bitmap)" "3" "clone_bitmap keys, two slices"
-	assert_field "$(gw get-clone --sp sp0 --name cl0)" '.clone.bm_cnt' "2" \
-		"get-clone bm_cnt after all three appends"
 	# The transport list is a REPLACEMENT, never a merge: an address that is
 	# gone must stop being retried.
 	out=$(gw set-clone-tr --sp sp0 --rev "$SP_REV" --name cl0 \
@@ -4061,7 +4048,7 @@ case_faults() {
 	out=$(sp_json sp0)
 	assert_field "$out" '.clones.cl0.dst_td_id == .tds.t1.td_id' "true" \
 		"cl0: destination is t1"
-	assert_field "$out" '.clones.cl0.bm_cnt' "0" \
+	assert_eq "$(smoke_jq "$out" '.clone_bm_idx.cl0 | @json')" '[]' \
 		"cl0: no source bitmap chunks yet"
 
 	# One migration on the META group's first leg. Meta is deliberate: it

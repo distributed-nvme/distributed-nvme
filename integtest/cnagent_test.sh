@@ -611,15 +611,14 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 		"$(d16 "$1")" "$2" "$3" "$4" "$5"
 }
 
-# req_clone's bm_cnt is the gateway's high-water of bm_idx + 1 across every
-# source slice (architecture.md §8.9), so a case pushing chunks (0, 0) and
-# (0, 1) declares 2. The cn agent never reads the field — CN22 bounds a push
-# by src_slice_cnt and MaxCloneBmCnt, never by bm_cnt — so it is carried here
-# only to keep the fixture a faithful copy of what the CP would send.
-req_clone() { # cloneid src_nqn src_vm dst_tdid bm_cnt auto_resume
-	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s, "bm_cnt": %s}' \
+# The Clone record carries no chunk count (minor_updates_08 U2): how many
+# chunks a clone holds is how many CloneBitmap keys it has. cnagentctl parses
+# this request with strict protojson, so a leftover "bm_cnt" key would fail
+# the call outright rather than being ignored.
+req_clone() { # cloneid src_nqn src_vm dst_tdid auto_resume
+	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s}' \
 		"$(d16 "$1")" "$(req_tr "${IP[$3]}")" "$2" "$STRIPE_SIZE" \
-		"$BLOCK_SIZE" "$(d16 "$4")" "$6" "$5"
+		"$BLOCK_SIZE" "$(d16 "$4")" "$5"
 }
 
 join_json() {
@@ -2441,7 +2440,7 @@ case_clone_xfer() {
 
 	stage gate "stage 3: the clone is declared gated, then the chunk is pushed"
 	req_set "$req2" ".sp_level = \"SP_LEVEL_NO_CLONE\"
-		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" 2 true)]"
+		| .clone_list = [$(req_clone "$C_CLONE" "$xnqn" 1 "$S_TD" true)]"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")

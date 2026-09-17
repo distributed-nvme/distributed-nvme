@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -38,10 +40,7 @@ func (e *opsEnv) putDrainClone(
 		SrcNqn:      "nqn.2024-01.io.dnv:src",
 		SrcSliceCnt: common.MaxSliceCntPerSp,
 		DstTdId:     601,
-		// bm_cnt as AppendCloneBitmap's high-water would have left it: the
-		// drain must not read it, and must not rewrite it either.
-		BmCnt:    uint32(len(pairs)),
-		Deleting: deleting,
+		Deleting:    deleting,
 	})
 	chunks := make([]BmChunk, 0, len(pairs))
 	for _, pair := range pairs {
@@ -87,9 +86,9 @@ func (e *opsEnv) drainCloneChunkCnt() int {
 //
 // "Exactly the chunks it was handed" is the load-bearing half. An STM cannot
 // range, so the set a batch may touch has to come in from the caller's snapshot
-// scan; a batch that derived the set itself — from the record's
-// src_slice_cnt x bm_cnt rectangle, as the sweep this replaced did — would be
-// back to a transaction whose size is the clone's shape.
+// scan; a batch that derived the set itself — from the rectangle the record's
+// geometry implies, as the sweep this replaced did — would be back to a
+// transaction whose size is the clone's shape.
 func TestDrainCloneBm(t *testing.T) {
 	env := newOpsEnv(t)
 	chunks := env.putDrainClone(true, [][2]uint32{
@@ -120,10 +119,10 @@ func TestDrainCloneBm(t *testing.T) {
 				"survive it", chunk.SliceIdx, chunk.Idx)
 		}
 	}
-	// CLD8: the record is untouched — bm_cnt above all, which the drain does
-	// not read and must not maintain (CLD7).
-	if got := env.clone(drainCloneName); got.GetBmCnt() != before.GetBmCnt() ||
-		got.GetDeleting() != true {
+	// CLD8: the record is untouched. proto.Equal against the pre-batch record
+	// is the whole statement — the drain reads nothing out of the record and
+	// must write nothing into it (CLD7), including a field added later.
+	if got := env.clone(drainCloneName); !proto.Equal(got, before) {
 		t.Errorf("the batch rewrote the Clone: got %v, want %v", got, before)
 	}
 	if got := env.spRev(); got != revBefore+1 {

@@ -109,6 +109,7 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 	for _, pair := range [][2]uint32{{0, 0}, {0, 2}, {3, 1}} {
 		volAppendBm(env, "clone-a", pair[0], pair[1])
 	}
+	before := env.clone("clone-a")
 	beforeRev := env.spRev()
 
 	got, err := env.srv.DeleteClone(env.ctx, &pb.DeleteCloneRequest{
@@ -130,13 +131,14 @@ func TestDeleteCloneLatchesOnly(t *testing.T) {
 		t.Errorf("deleting must be true after the latch")
 	}
 	// Every other field is untouched — the latch is a flag, not a rewrite.
-	if clone.GetBmCnt() != 3 {
-		t.Errorf("bm_cnt: got %d, want 3 (the latch must not rewrite it)",
-			clone.GetBmCnt())
-	}
-	if clone.GetDstTdId() != 900 || clone.GetSrcSliceCnt() !=
-		volCloneSrcSliceCnt {
-		t.Errorf("the latch rewrote the clone: %v", clone)
+	// proto.Equal against the pre-latch record with `deleting` set is a
+	// stronger statement than any field-by-field compare: it fails on a field
+	// the latch had no business touching, including one added later.
+	wantAfter := proto.Clone(before).(*pb.Clone)
+	wantAfter.Deleting = true
+	if !proto.Equal(clone, wantAfter) {
+		t.Errorf("the latch rewrote the clone: got %v, want %v",
+			clone, wantAfter)
 	}
 	if n := volCloneKeyCnt(env, "clone-a"); n != 3 {
 		t.Errorf("%d chunk keys survive the latch, want 3", n)
@@ -615,9 +617,9 @@ func TestCloneDrainAtTheChunkCeiling(t *testing.T) {
 		t.Errorf("%d batches, want %d (%d chunks / %d per batch)",
 			batches, wantBatches, total, common.MaxDelBmPerTxn)
 	}
-	// The record itself is untouched by every batch (CLD8): bm_cnt is not
-	// load-bearing for the drain, and rewriting it would be a second copy of
-	// a truth the surviving keys already carry.
+	// The record itself is untouched by every batch (CLD8): the drain derives
+	// its position from the surviving keys, and writing anything into the
+	// record would be a second copy of a truth those keys already carry.
 	if got := env.clone("clone-max"); !proto.Equal(got, clone) {
 		t.Errorf("a batch rewrote the Clone: got %v, want %v", got, clone)
 	}

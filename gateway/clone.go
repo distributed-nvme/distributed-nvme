@@ -177,10 +177,6 @@ func (s *Server) CreateClone(
 			DstTdId:       td.GetTdId(),
 			DmCloneConf:   req.GetDmCloneConf(),
 			AutoResume:    req.GetAutoResume(),
-			// The clone starts with no source bitmap; AppendCloneBitmap
-			// grows the count, and the chunks are a pure optimization that
-			// may arrive at any time (§8.9).
-			BmCnt: 0,
 		})
 		sc.Conf.CloneNameList = append(
 			sc.Conf.CloneNameList, req.GetCloneName())
@@ -549,24 +545,19 @@ func (s *Server) UpdateCloneTrConf(
 // paging would keep only the last one (the STM below) — which is why the pages
 // of ONE chunk must arrive in slice-bitmap order.
 //
-// `bm_cnt` is ONE uint32: the high-water of `bm_idx + 1` over ALL appends,
-// across slices, and never derived from `src_slice_idx` — on a fresh clone,
-// appending (slice 5, bm 0) leaves it at 1, not 6. It is a max and never a +1,
-// so a chunk below the high-water raises nothing.
-//
-// It used to be what DeleteClone swept the chunk keys from, which is where the
-// max-not-+1 rule came from and why lowering it would have orphaned keys. That
-// reader is gone (§11.7's drain derives its position from the SURVIVING keys
-// and never reads this field), so `bm_cnt` is now write-only bookkeeping:
-// nothing load-bearing reads it, and the rule survives on its own terms —
-// gateway.md §5.8, risks_and_gaps.md RK10.
+// The Clone record carries no chunk count, and an append does not rewrite it:
+// the set of a clone's chunks IS the set of its `CloneBitmap` keys, which is
+// what §11.7's drain and `PushCloneBitmap` read (gateway.md §5.8). The clone
+// key still enters this transaction's read set through `loadLiveClone` below,
+// so the optimistic-concurrency guard is unchanged.
 //
 // The two index bounds are INVALID_ARGUMENT and not the RESOURCE_EXHAUSTED of
 // GW7's Append*Bitmap row: they judge the indexes of THIS request against a
 // geometry the clone was created with and against a compile-time constant. The
 // chunk-overflow check in the STM IS that row's shape — a ceiling reached by
-// previous appends, exactly like AppendMigrationBitmap's `bm_cnt ≥
-// MaxMigrBmCnt` — and is the one refusal here that is RESOURCE_EXHAUSTED. The
+// previous appends, exactly like AppendMigrationBitmap's
+// `bm_cnt ≥ MaxMigrBmCnt` — and is the one refusal here that is
+// RESOURCE_EXHAUSTED. The
 // stateless page cap is INVALID_ARGUMENT again, because a page longer than a
 // whole chunk fits nowhere, whatever is already stored (§8.9 Errors).
 //
@@ -656,11 +647,9 @@ func (s *Server) AppendCloneBitmap(
 		}
 		chunk.Bitmap = append(chunk.GetBitmap(), req.GetBitmap()...)
 		stm.Put(bmKey, chunk)
-		if bmIdx+1 > clone.GetBmCnt() {
-			clone.BmCnt = bmIdx + 1
-		}
-		stm.Put(model.CloneKey(
-			sc.Cid, sc.SpId(), req.GetCloneName()), clone)
+		// The Clone record itself is NOT rewritten: an append changes nothing
+		// in it. `loadLiveClone` above already read the clone key, so it is in
+		// this STM's read set and the conflict guard is the same as before.
 		cloneId = clone.GetCloneId()
 		return bumpSp(stm, opAppendCloneBitmap, sc)
 	})

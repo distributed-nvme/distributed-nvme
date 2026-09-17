@@ -38,7 +38,7 @@ func (h *reactHarness) withClone(name string, id uint64, pairs [][2]uint32) {
 		h.state.CloneBmIdx = make(map[string][]model.BmChunk)
 	}
 	h.state.Conf.CloneNameList = append(h.state.Conf.GetCloneNameList(), name)
-	h.state.Clones[name] = &pb.Clone{CloneId: id, BmCnt: uint32(len(pairs))}
+	h.state.Clones[name] = &pb.Clone{CloneId: id}
 	chunks := make([]model.BmChunk, 0, len(pairs))
 	for _, pair := range pairs {
 		chunks = append(chunks, model.BmChunk{
@@ -61,11 +61,9 @@ func TestCloneDrainDerivation(t *testing.T) {
 			t.Errorf("batch targeted %q/%d, want c0/700",
 				calls[0].cloneName, calls[0].cloneId)
 		}
-		// The §12 record, whose attribute name is the operator's. chunk_cnt
-		// and NOT bm_cnt: nothing else in the tree pins the worker's own
-		// record — the shell suites read `wctl drain-clone`'s JSON, a
-		// different producer — so without this the rename could go back, or a
-		// second `bm_cnt` could appear beside it, with the whole suite green.
+		// The §12 record, whose attribute name is the operator's: nothing else
+		// in the tree pins the worker's own record — the shell suites read
+		// `wctl drain-clone`'s JSON, a different producer.
 		recs := h.logs.withMsg(msgCloneDrainStep)
 		if len(recs) != 1 {
 			t.Fatalf("%q records = %d, want 1", msgCloneDrainStep, len(recs))
@@ -73,24 +71,20 @@ func TestCloneDrainDerivation(t *testing.T) {
 		if recs[0]["chunk_cnt"] != float64(2) {
 			t.Errorf("chunk_cnt = %v, want 2", recs[0]["chunk_cnt"])
 		}
-		if recs[0]["bm_cnt"] != nil {
-			t.Errorf("bm_cnt = %v, want no such attribute (it is the Clone's "+
-				"high-water, a different number)", recs[0]["bm_cnt"])
+		// An slog attribute name is a string literal, so the compiler guards
+		// nothing here: deleting `Clone.bm_cnt` does not stop anyone adding
+		// `slog.Int("bm_cnt", …)` beside chunk_cnt. §12's row lists chunk_cnt
+		// only, and the one `bm_cnt` left in dnv is Migration's.
+		if _, ok := recs[0]["bm_cnt"]; ok {
+			t.Errorf("the clone drain record must carry no bm_cnt attribute")
 		}
 	})
 
 	t.Run("none remain", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
+		// Zero surviving keys under a latched clone: the TERMINAL state of
+		// every real drain, and the one the final STM has to recognise.
 		h.withClone("c0", 700, nil)
-		// bm_cnt says 13 while the scan says zero, which is the TERMINAL state
-		// of every real drain: AppendCloneBitmap only ever raised the
-		// high-water and CLD8 forbids the batches from lowering it. Without
-		// this line the fixture's counter and its keys agree in every case,
-		// and a derivation that read `bm_cnt == 0` instead of the surviving
-		// keys would pass the whole file while never finishing a real drain —
-		// it would hand an empty batch to an op that commits nothing, and
-		// CLD12's unconditional arm would spin on it for ever.
-		h.state.Clones["c0"].BmCnt = 13
 		h.latchClone("c0")
 		h.pass()
 		h.wantOps("finish_clone")

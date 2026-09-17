@@ -97,7 +97,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 		SsId: 81, Serial: "s0", Model: "m0",
 	})
 	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
-		CloneId: 91, BmCnt: 2,
+		CloneId: 91,
 	})
 	mustPut(t, cli, TransferKey(cid, fixtureSpId, "xfer0"), &pb.Transfer{
 		XferId: 92,
@@ -107,8 +107,7 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	})
 	// Two chunks of source slice 0 and one of source slice 1: the fixture's
 	// (1, 0) and (0, 0) share a bm_idx and are still two chunks, because a
-	// clone chunk is addressed by the pair (U1). bm_cnt is the high-water of
-	// bm_idx + 1 over all three, hence 2.
+	// clone chunk is addressed by the pair (U1).
 	for _, pair := range [][2]uint32{{0, 0}, {0, 1}, {1, 0}} {
 		mustPut(
 			t, cli,
@@ -404,7 +403,7 @@ func TestLoadSpSkipsOldFormatCloneBmKeys(t *testing.T) {
 		CloneNameList: []string{"clone0"},
 	})
 	mustPut(t, cli, CloneKey(cid, fixtureSpId, "clone0"), &pb.Clone{
-		CloneId: 1, BmCnt: 1,
+		CloneId: 1,
 	})
 	mustPut(
 		t, cli,

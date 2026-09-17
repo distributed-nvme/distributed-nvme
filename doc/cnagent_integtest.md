@@ -232,7 +232,7 @@ one `next_id` counter (distinct within their SP); every case has distinct
 | S | 0x3a1 | 0x1 (CN1, 0, primary) | slice 0x2; meta 0x3 (none, 1, leg 0x4→side 0x5@DN1); data 0x6 (none, 2, leg 0x7→side 0x8@DN1) | td 0x9 (dev_id 1, 64 MiB); ss 0xa `nqn.2024-01.io.dnv-it:s:vol1` (allow-any); ns 0xb idx 1, uuid `11111111-1111-4111-8111-111111111111` |
 | A | 0x3b1 | 0x1 (CN1, 0, primary), 0x2 (CN2, 1, standby) | slice 0x3; meta 0x4 (raid1, 1, legs 0x5→0x6@DN1, 0x7→0x8@DN2); data 0x9 (raid1, 2, legs 0xa→0xb@DN1, 0xc→0xd@DN2) | td 0xe (64 MiB); ss 0xf `…:a:vol1` (allowed_hosts = [host NQN]); ns 0x10 idx 1, uuid `22222222-…` |
 | B | 0x3c1 | 0x1 (CN1, 0, primary) | as S (slice 0x2, meta 0x3/leg 0x4/side 0x5, data 0x6/leg 0x7/side 0x8, all @DN1) | td1 0x9 (dev_id 1); snapshot td2 0xc (dev_id 2, ori_id 1); ss1 0xa `…:b:vol1` / ns1 0xb; ss2 0xd `…:b:snap1` / ns2 0xe |
-| C | sp1 0x3d1, sp2 0x3d2 | sp1: 0x1 (CN1, slot 0); sp2: 0x1 (CN2, slot 2) — §11.3 disjoint slots | each sp: as S, sp1 sides @DN1, sp2 sides @DN2 | each: td 0x9 (64 MiB); **shared** ss NQN `…:c:vol1` (ss_id 0xa each) and ns 0xb idx 1 with **identical** uuid `33333333-…`/nguid; sp1 xfer 0xc (auto_suspend, allowed_hosts = [`CnHostNqn(0x1, 0x12)`]); sp2 clone 0xc (auto_resume, bm_cnt 1, src = sp1's `XferNqn`) |
+| C | sp1 0x3d1, sp2 0x3d2 | sp1: 0x1 (CN1, slot 0); sp2: 0x1 (CN2, slot 2) — §11.3 disjoint slots | each sp: as S, sp1 sides @DN1, sp2 sides @DN2 | each: td 0x9 (64 MiB); **shared** ss NQN `…:c:vol1` (ss_id 0xa each) and ns 0xb idx 1 with **identical** uuid `33333333-…`/nguid; sp1 xfer 0xc (auto_suspend, allowed_hosts = [`CnHostNqn(0x1, 0x12)`]); sp2 clone 0xc (auto_resume, src = sp1's `XferNqn`) |
 | D | 0x3e1 | 0x1 (CN1, 0, primary), 0x2 (CN2, 1, standby) | as A (slice 0x3, meta 0x4, data 0x9, raid1 across DN1/DN2) | td 0xe; ss 0xf `…:d:vol1`; ns 0x10 idx 1 |
 
 `nguid` is always the uuid with the dashes removed. All sides use
@@ -810,10 +810,8 @@ VM1's port with `allowed_hosts` = exactly CN2's hostnqn.
 `syncup-cntlr` CN2 (CNREV2++) adding clone 0xc (`src_nqn` = the XferNqn,
 `src_tr_conf_list = [<ip1> tcp 4200]`, `src_ns_idx 1`, `src_slice_cnt 1`,
 `src_stripe_size 65536`, `src_block_size 1048576`, `dst_td_id 0x9`,
-`dm_clone_conf {1,1}`, `auto_resume: true`, `bm_cnt 2` — the gateway's
-high-water of `bm_idx + 1` over the two chunks pushed below; the cn agent
-never reads the field, CN22 bounds a push by `src_slice_cnt` and
-`MaxCloneBmCnt` instead) **with `sp_level
+`dm_clone_conf {1,1}`, `auto_resume: true` — the record carries no chunk
+count; CN22 bounds a push by `src_slice_cnt` and `MaxCloneBmCnt` instead) **with `sp_level
 SP_LEVEL_NO_CLONE`** — the staged gate that makes the push race-free
 (cnagent.md CN19): assert `clone_id_to_dm_clone` reports `sp_level`, and
 no `nvme connect` to a `:4:` NQN has run on VM2. `push-clone-bm --clone

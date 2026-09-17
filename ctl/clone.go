@@ -199,8 +199,8 @@ func cloneSetTrCmd() *cobra.Command {
 // C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
 // send them in any order and leave whole chunks unsent; only the PAGES of ONE
 // chunk must arrive in slice-bitmap order, because the gateway appends each
-// page at that chunk's current length. The record's bm_cnt numbers nothing —
-// it is the high-water of bm_idx+1 over every slice.
+// page at that chunk's current length. The Clone record carries no chunk count:
+// how many chunks a clone holds is how many chunk keys it has.
 //
 // --bm-hex splits the two failure kinds §5.9 insists on: an EMPTY value sends
 // an empty bitmap on purpose, so the gateway's "bitmap must not be empty"

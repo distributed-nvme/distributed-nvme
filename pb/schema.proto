@@ -439,7 +439,11 @@ message Clone {
     uint64 dst_td_id = 8;
     DmCloneConf dm_clone_conf = 9;
     bool auto_resume = 10;
-    uint32 bm_cnt = 11;
+    reserved 11;
+    reserved "bm_cnt";  // was: uint32 bm_cnt (deleted 2026-09-16,
+                        // minor_updates_08 U2). Reserving the NUMBER is what
+                        // keeps a future varint field from decoding an old
+                        // record's counter as itself; the name goes with it.
     // The clone-delete latch (architecture.md §8.9, dnv-worker.md §11.7):
     // DeleteClone sets it and returns, and the sp coordinator drains the
     // chunk keys. Appended, never renumbered — a renumbered field decodes

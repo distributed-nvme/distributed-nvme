@@ -39,7 +39,6 @@ func cloneOf() *pb.Clone {
 		DmCloneConf: &pb.DmCloneConf{
 			HydrationThreshold: 1, HydrationBatchSize: 1},
 		AutoResume: true,
-		BmCnt:      1,
 	}
 }
 

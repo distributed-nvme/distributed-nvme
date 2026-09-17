@@ -220,7 +220,7 @@ func spFixture() *model.SpState {
 			"nqn.2024-01.io.dnv:sp0": {SsId: 600, Serial: "dnv0"},
 		},
 		Clones: map[string]*pb.Clone{
-			spCloneNm: {CloneId: spCloneId, BmCnt: 2},
+			spCloneNm: {CloneId: spCloneId},
 		},
 		Xfers: map[string]*pb.Transfer{
 			spXferName: {XferId: 700},

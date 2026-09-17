@@ -8,7 +8,7 @@ import (
 
 // TestCloneDrainBatchBudget is CLD11's arithmetic tripwire, and the tripwire
 // that REPLACED TestDeleteCloneTxnBudget: the rectangle transaction that one
-// guarded — the whole src_slice_cnt x bm_cnt sweep in DeleteClone's deciding
+// guarded — the whole rectangle of chunk keys swept in DeleteClone's deciding
 // STM — does not exist any more. DeleteClone latches (§5.8) and the worker
 // drains the chunk keys in batches of a constant size (dnv-worker.md §11.7).
 //
