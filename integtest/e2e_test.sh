@@ -371,8 +371,18 @@ BACKING_SIZE=2G
 
 # Space guard (D16, E2E5), asserted after every case: allocated bytes of one
 # backing file, and allocated bytes of everything this run wrote on all guests.
+#
+# RUN_CAP_BYTES is DERIVED in derive_params, not set here, because D16's flat
+# 8 GiB is below the floor of the very shape this suite exists to test. §7.8
+# built that figure out of the INCREMENTAL writes — clone hydration, migration,
+# the spare switch, AR6, host patterns, thin metadata — and never counted the
+# storage pool's own data. The sp's sides are
+# LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE, which at the default shape is
+# 2 x 64 x 1 x 64 MiB = 8 GiB EXACTLY, so the cap equalled the floor and the
+# guard could not pass: run 5 measured 9204092928 bytes against 8589934592 and
+# failed with every per-file allocation well inside its own cap.
 DN_CAP_BYTES=$((256 << 20))
-RUN_CAP_BYTES=$((8 << 30))
+RUN_CAP_BYTES=0
 
 # The cluster and sp every case works in, and the dnvctl globals that carry
 # them (ctl/root.go:187-197: --gateway-address, --cluster, --sp, --trace-id).
@@ -512,6 +522,8 @@ DN_TOTAL=0
 TD_UNIT=0
 CN_CNT=0
 DN_VM_CNT=0
+SP_DATA_BYTES=0
+RUN_SLACK_BYTES=0
 
 JQ=jq
 ONLY=""
@@ -1262,6 +1274,26 @@ derive_params() {
 	# Two groups per slice — one meta, one data — for every slice, from
 	# planSpGroups (gateway/storagepool.go:254-263), and LEGS sides per group.
 	GRP_CNT=$((2 * SLICE_CNT))
+
+	# The space guard's run cap, derived from the shape rather than D16's flat
+	# 8 GiB (see RUN_CAP_BYTES's comment for why that could never pass).
+	#
+	# SP_DATA_BYTES is the floor: every one of the LEGS*GRP_CNT sides is
+	# INIT_EXT_CNT extents of EXTENT_SIZE, and a raid1 leg's initial resync
+	# writes its whole data area, so those extents MATERIALISE in the backing
+	# file however sparse it started. That is not waste and not a leak — it is
+	# the storage pool.
+	#
+	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
+	# four daemon logs, 175 agent logs, the CN thin metadata and md bitmaps,
+	# the host pattern files, and each case's own writes, which §7.8 bounds at
+	# under 1 GiB. Run 5 measured 586 MiB of it after the smoke case, the
+	# heaviest contributors being the cp at 296 MiB and cn0 at 79 MiB; 4 GiB
+	# leaves room for the copy and react cases, which write more, while still
+	# being a number a real leak would cross.
+	SP_DATA_BYTES=$((LEGS * GRP_CNT * INIT_EXT_CNT * EXTENT_SIZE))
+	RUN_SLACK_BYTES=$((4 << 30))
+	RUN_CAP_BYTES=$((SP_DATA_BYTES + RUN_SLACK_BYTES))
 
 	# Every one of the LEGS*GRP_CNT sides lands on a DISTINCT disk node: the
 	# create's black list starts as the request's and grows with every pick

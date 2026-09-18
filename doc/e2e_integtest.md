@@ -64,7 +64,7 @@ Concretely, a green run is the following five statements taken together.
    `dnv-*` dm device, no dnv md array and no tree-minted nvmet subsystem
    survives on any of its dn or cn guests, no backing file has materialised
    beyond 256 MiB, and the whole run's allocation on all ten guests is under
-   8 GiB.
+   the §4.6 run cap derived from its shape (12 GiB at the default one).
 
 ### 1.1 What it does not prove
 
@@ -172,7 +172,7 @@ than copied (§3, rule E2E12).
 | `THR_PRIMARY / THR_CNTLR / THR_SIDE / THR_LEG`, `THR`, `THR_SET` | whichever set the sp being built carries | the *active* set, copied from one of the two by `sp_thresholds`. They are four variables and not one string because `setup_create_sp` asserts them back a **field at a time** out of `sp get` — which is also the proof that the argv string split into eight words — and because `react`'s messages name the individual threshold each of its waits is watching. **No wait bound is computed from any of them**: `WAIT_REACT` is a flat number, sized by hand |
 | `VOTE_INTERVAL / VOTE_GRACE` | 2 / 6 s | `dnv-worker --vote-interval/--vote-grace-time` |
 | `BACKING_SIZE` | `2G` | `truncate -s`, never `fallocate -l` |
-| `DN_CAP_BYTES / RUN_CAP_BYTES` | 256 MiB / 8 GiB | the two allocation caps of §4.6 |
+| `DN_CAP_BYTES / RUN_CAP_BYTES` | 256 MiB / derived (12 GiB at the default shape) | the two allocation caps of §4.6; the run cap is `LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE + 4 GiB` |
 | `NQN_PREFIX` | `nqn.2024-01.io.dnv` | `common.NqnPrefix`; the suite computes tree-minted NQNs from it and sweeps them, and never mints one |
 | `NQN_IT` | `nqn.2024-01.io.dnv-it:e2e` | the prefix of the host-facing subsystems this suite creates; a suite choice, since a host-facing NQN is literally the `ss create --nqn` string |
 | `CLUSTER` / `SP` | `e2e` / `sp0` | the globals every dnvctl call carries |
@@ -1144,10 +1144,30 @@ the sp.
   device turns WRITE ZEROES into a hole punch; a file that has materialised has
   exactly one cause, and this is the check that names it. A `stat` that could
   not be read is reported as `unknown` and fails, never as a silent 0.
-* `RUN_CAP_BYTES` (8 GiB) — everything the run wrote on all ten guests,
-  `$WORK` **plus** `/tmp/dnv-tmpfs`, counted separately because the tmpfs is not
-  under `$WORK` and a guard that looked only there would miss a CN's whole
-  clone-metadata arena.
+* `RUN_CAP_BYTES` — everything the run wrote on all ten guests, `$WORK`
+  **plus** `/tmp/dnv-tmpfs`, counted separately because the tmpfs is not under
+  `$WORK` and a guard that looked only there would miss a CN's whole
+  clone-metadata arena. It is **derived from the shape**, not the flat 8 GiB
+  D16 asked for:
+
+  ```
+  SP_DATA_BYTES  = LEGS x GRP_CNT x INIT_EXT_CNT x EXTENT_SIZE   # 8 GiB at the default shape
+  RUN_CAP_BYTES  = SP_DATA_BYTES + 4 GiB
+  ```
+
+  D16's flat figure was below the FLOOR of the shape this suite exists to test.
+  §7.8 of the design built it out of the incremental writes — clone hydration,
+  migration, the spare switch, AR6, host patterns, thin metadata — and never
+  counted the storage pool's own data. Every one of the `LEGS x GRP_CNT` sides
+  is `INIT_EXT_CNT` extents of `EXTENT_SIZE`, and a raid1 leg's initial resync
+  writes its whole data area, so those extents materialise however sparse the
+  backing file started. At the default shape that is 2 x 64 x 1 x 64 MiB =
+  8 GiB exactly — the cap equalled the floor, and run 5 failed the guard at
+  9204092928 bytes against 8589934592 with every per-file allocation well
+  inside its own cap. The 4 GiB of slack covers what run 5 measured above the
+  sides (586 MiB after the smoke case: 296 MiB of etcd and daemon logs on cp,
+  79 MiB on cn0, the rest agent logs and host patterns) with room for the copy
+  and react cases, which write more.
 
 Free space is re-asserted against **preflight's own floors** rather than a
 separate number, so that the statement is "the run left the guest as usable as
@@ -1702,7 +1722,9 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
    nothing to forward a discard to. The call is harmless and stays, because it
    costs nothing and becomes
    real the moment the operator adds that attribute. Until then the laptop's
-   free space shrinks by the run's real writes — which §4.6 caps at 8 GiB.
+   free space shrinks by the run's real writes — which §4.6 caps, at the
+   default shape, at 12 GiB. That accretes across runs: four runs and their
+   cleanups cost about 7 GiB of host free space on 2026-09-17.
 5. **Anti-affinity is headroom, not structure.** See §3, rule E2E4: migration
    destinations and spare legs relax the location exclusion when tier 1 finds
    nobody, so the VM-distinctness assertions are made only when
