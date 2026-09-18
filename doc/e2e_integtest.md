@@ -891,10 +891,10 @@ change the sp's shape is the case.
 | 03 | `sp set-cntlid-slots --slots 0,2` → `INVALID_ARGUMENT` | `… drops slot 1, which cntlr`; and a refused call changed nothing |
 | 03 | `cntlr create --slot 2 --cn-white <spare cn>` | a third cntlr on that CN with `cntlid_slot 2`, **not** primary, **not** disabled; it connects every leg as a standby with no groups and no pools — on `WAIT_BUILD`, because a controller born now holds nothing and every leg is a fresh nvme-tcp connection, which is the standby half of a build rather than an incremental convergence; the cdc advertises the third transport — and being in the log is not the same as listening, so the export gate of §4.1 stage 10 runs over all three cntlrs before host0 reconnects, the two older ones answering on the first poll; host0's third path goes `live` and the namespace is `inaccessible` on it. **This half of the stage is skipped with a log line when no CN is free** — when every `--cn` guest already carries a cntlr of the sp — exactly as stage 08's CN half is; the refusals above still run and `SHA0` is re-read before the return. Neither skip can fire at an invocation the suite accepts (`--cn` is at least 3 and `CNTLR_CNT` is fixed at 2, so a spare CN always exists); both are guards against a shape a future flag could introduce, not branches the lab takes |
 | 03 | `cntlr delete --id <c3>` while enabled → `FAILED_PRECONDITION` | `is enabled; disable it first` |
-| 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs and host0 loses that path by itself (the subsystem disappears under a live controller and the reconnect is refused with DNR) |
+| 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs, and **host0's third path stops being usable for IO** — its state becomes anything but `live`. It is **not** asserted that the controller goes away, which is what this row used to claim and what cost the first `--slice-cnt 1` run a 60 s timeout (§8 item 18): the agent on that CN retires the host-facing subsystem, and when that leaves the port with none — as it did in that run, where both configfs directories were measured empty while host0 sat in `connecting` — the port stops listening, so the reconnect gets ECONNREFUSED, which *retries*. The controller then sits in `connecting` until `ctrl_loss_tmo`, a retry budget rather than a deadline, which no connect in this suite overrides and so is the kernel's 600 s default. The wait accepts `none` too, because a CN whose port still carried another subsystem would answer the reconnect with DNR and the kernel would delete the controller; which of the two happens is a property of that CN, and neither is this row's subject. The wait is given `WAIT_PROVISION`: what has to happen first is one incremental convergence by that agent, and `WAIT_HOST` is sized for the kernel-side transition that follows it. Every state but `live` ends it and a path that was never there reads `none`, so it could pass having measured nothing in three ways, and **two of them are closed by the witness**: a typo'd traddr and a misspelled NQN cannot produce the `nvme<X>` that the same host/NQN/traddr triple resolved to while the path was `live` a few lines above, and an empty or absent witness dies instead of passing — as does an empty *capture*, which is checked for both `''` and `none` where it is taken, since an empty reading means the driver-side jq did not run rather than that the path is absent. The **third is not** closed by it: the witness is a string captured before the disable and never re-read, so a host0 that had lost *every* controller for `ss0` in between would still hold a valid one and still read `none` on the first poll. That one is closed by a reading taken **after** the wait — the path to the primary is re-asserted `live`, the same assertion the step already makes before the delete, and nothing between them touches the primary |
 | 04 | `sp inspect-side --id <a side>`, `dn inspect`, `cn inspect`, `cntlr inspect` | the side's data device OK and `zeroed_ext_cnt == total_ext_cnt`, `applied_revision ≥ 1`; the DN's three rows OK with `port_info.res_name` still its own port id; the primary CN's four node rows OK; the primary cntlr's pools and groups OK |
 | 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe. Every rung is bounded by `WAIT_BUILD` and not `WAIT_PROVISION`: `DISABLE` suppresses everything CN19 names, so the CN tears the whole stack down and the climb back builds all 32 pools and all 64 arrays again — the same work setup pays for. One budget for all of them, because the cheap rungs return on their first poll and cost nothing |
-| 05 | after the ladder | host0 lost its controller when `DISABLE` removed the subsystem under it, so it discovers and connects again — behind the export gate over **every** cntlr, because the ladder is sp-scoped and the standby tore its own export down and rebuilt it too while `ops_set_level`'s wait watched only the primary. That gate is the **only** wait covering the standby here, and what it is waiting for there is a from-nothing rebuild, so it is given `WAIT_BUILD` rather than the default `WAIT_PROVISION`: `build()` is sequential with legs first and the subsystem among the last rows, so the standby's `ss_id_to_subsystem` cannot go `RES_STATUS_OK` until every leg has been reconnected — the same piece of work the rung above spends a `WAIT_BUILD` on for the primary. The primary returns on the first poll, so the wider budget costs nothing when nothing is wrong. Then the verdict, ANA first, device second; `SHA0` |
+| 05 | after the ladder | host0 discovers and connects again — but **not** because `DISABLE` took its controllers away, which is what this row used to say. `DISABLE` removes the host-facing subsystem on *both* cntlrs, and `ss0` is the only subsystem either CN's port carries — the case issues no second `ss create`, no `xfer create` and no `clone create` at any step — so each port loses its **last** subsystem and stops listening; by §8 item 18 the reconnect is then ECONNREFUSED rather than refused with DNR, and host0's controllers sit in `connecting` on `ctrl_loss_tmo`'s 600 s retry budget. Whether the climb back lands inside that budget — in which case the kernel re-attaches them itself — or outside it decides what the connect-all finds to do, and neither ending is this row's subject. What **is**: the connect-all cannot prove the outcome, because `connect_verdict` fires only on a zero controller count and a controller that has been `connecting` since `DISABLE` still counts (so would `connect_added_ctrl`, which asks about the controller object — the very thing that survives). The step therefore waits for **`live` on both transports** afterwards, which is false of a controller still retrying. All of it behind the export gate over **every** cntlr, because the ladder is sp-scoped and the standby tore its own export down and rebuilt it too while `ops_set_level`'s wait watched only the primary. That gate is the **only** wait covering the standby here, and what it is waiting for there is a from-nothing rebuild, so it is given `WAIT_BUILD` rather than the default `WAIT_PROVISION`: `build()` is sequential with legs first and the subsystem among the last rows, so the standby's `ss_id_to_subsystem` cannot go `RES_STATUS_OK` until every leg has been reconnected — the same piece of work the rung above spends a `WAIT_BUILD` on for the primary. The primary returns on the first poll, so the wider budget costs nothing when nothing is wrong. Then the verdict, the two `live` waits, and ANA first, device second; `SHA0` |
 | 06 | `td create --name s0 --ori t0 --size 0` | a snapshot is the one case in which size 0 is legal; it inherits the origin's size and its `ori_id` is `t0`'s `dev_id` |
 | 06 | `td get-bm --name t0 --slice-idx 0 --start 0 --cnt 0` | `--cnt 0` is the whole slice; the reply is the hex map, `byte_cnt` renders as a **bare number** (a Go `int`, unlike every uint64 here), `bitmap_hex` is exactly two hex digits per byte, and **bit 0 of byte 0 is clear**. Mind the polarity, because it inverts the obvious assertion: `1 = unmapped` is the wire convention of every bitmap RPC, produced by the cn agent — which starts from an all-ones map and *clears* the range of every mapped extent, inverting thin metadata's native "mapped = written" exactly once at that boundary — and passed through verbatim by the gateway. So an allocated block is a **clear** bit, and "some bit is set" would pass on a thin device nobody has ever written. What the check pins is block 0 of slice 0: dm-striped maps chunk *c* of a td to slice *c* mod `slice_cnt`, so setup's write at offset 0 is block 0 of slice 0's thin volume at every shape, and bits are LSB-first within a byte, which puts that block in the low bit of the first two hex digits |
 | 06 | `td get-leg-bm --leg <slice 0 data leg>` | the same hex map. **Skipped with a log line under `--redund none`**, where a group has one leg and no md bitmap |
@@ -948,7 +948,7 @@ slice from it.
 | 02 | wait for hydration | the primary's `clone_id_to_dm_clone` details are the raw `dmsetup status` line; field 7 is `<hydrated>/<total>`, the same field the gateway parses before it allows `clone delete`. The wait is also the fallback's trigger — see below |
 | 02 | `ns create --idx 2 --td c0 --uuid …8c02` | first **the export gate** on the primary's `ns_id_to_namespace` row for ns 2, although nothing connects here — host0 has held the controller to `ss0` since setup and the kernel picks the namespace up on the AEN, but `ns create` returning is still only the gateway's answer, and this namespace is backed by the **live dm-clone** (CN16 rule 5), so the CN has strictly more to build than §4.5 stage 01's has; without the gate a slow converge spends the whole `WAIT_HOST` of the ANA wait and then blames ANA. Then `optimized` and a device for host0 (both reads are sysfs and `test -e`, so they are legal while ns 1 is parked); its digest is read in stage 03 |
 | 02 | `clone delete --name k0` (no `--force`) | the gateway proves hydration from the primary's own row before it latches, so a successful call is a second, independent confirmation; `deleting == true` is read if the drain has not already finished, then `clone get` → `NOT_FOUND` and `clone_name_list` is empty |
-| 03 | host1 disconnects, then `xfer delete --name x0 --force` | `--force` is the **abort** path: without it the same STM also writes `suspended = true` on the origin, finalising the hand-over. host1 lets go first, or the subsystem would be unlinked under a live controller and the kernel would delete it with DNR |
+| 03 | host1 disconnects, then `xfer delete --name x0 --force` | `--force` is the **abort** path: without it the same STM also writes `suspended = true` on the origin, finalising the hand-over. host1 lets go first, or the subsystem would be unlinked under a live controller and the kernel would delete it with DNR — and **that sentence needs the port to go on listening**, which here it does, by accident of what else is on it: the port is the primary CN's and `ss0`'s own subsystem stays linked to it throughout the case (§8 item 18). Where a port loses its *last* subsystem the reconnect is refused by nothing at all and the controller survives, which is the ops stage 03 ending. The disconnect verb discards every `nvme disconnect`'s status, so what proves host1 let go is the wait after it, and there the demand really is that the path be **gone** — a disconnect deletes the controller object — rather than merely not `live` |
 | 03 | — | `xfer get` → `NOT_FOUND`, `xfer_name_list` empty; host0's origin namespace is `optimized` with its device back; **the destination's digest now equals the source's**, read through `c0`'s own raid0 with no dm-clone above it; `SHA0` |
 | 03 | `ns delete --idx 2`, `td delete c0` | the head disk goes (a real removal, the one direction `wait_dev_gone` means anything) |
 | 04 | read the leg bitmap **before** `migr create` | a migration source goes ANA-inaccessible the moment the migration exists and the destination stays inaccessible until its dm-clone is built, so between the two the leg has no usable path on any CN; the read costs nothing earlier and removes the question |
@@ -988,7 +988,12 @@ thin device, a subsystem and a namespace, has host1 write a pattern into it,
 and clones from that over a real network hop. The destination is still proved
 byte for byte; it is simply no longer proved against `SHA0`. A fallback that
 also fails is a die naming both faults, never a third attempt. `sp1` is torn
-down before the case's shared ending.
+down before the case's shared ending, in `case_teardown`'s order and for its
+reasons: the namespace under the live controller, then **host1 disconnects and
+the suite waits for that path to be gone** — `gone` and not merely "not `live`",
+because a disconnect deletes the controller object outright (§8 item 18), and
+the disconnect verb discards each `nvme disconnect`'s status so the wait is the
+only check there is — then the subsystem, the thin device and the pool.
 
 `sp1`'s readiness predicate is **the one wait target left in the suite that is
 computed from constants instead of re-read**, and the file argues for it rather
@@ -1078,7 +1083,7 @@ assertion.
 | 02 | wait for AR6 | slice 0 gained **exactly one** data group and the sp gained exactly one group, both against readings this step takes for itself just before the write — with `sp_read_roles` among them, because the role may have moved since stage 01 and inspecting a controller that is now a standby would find no pool row to read a `used/total` ratio out of. `data_grp_list[0]` is still the group setup created (a grow appends), so the appended group's index is the count *before* the grow rather than the literal `[1]`; the new group's `ext_cnt` is the first data group's; `LEGS` legs, one side each, on `LEGS` distinct DNs on `LEGS` different VMs. It is deliberately **not** asserted that the new group avoids the DNs the slice already occupies — the design says it does and the worker's own comment says the opposite: the grow passes a nil black list |
 | 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
 | 02 | read back | every strided chunk after a cache drop; `SHA0` for ns 1 too |
-| 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not |
+| 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not. **Both waits are on the disconnect and both run before the kill**, which is what makes `gone` the right demand at each: what they observe is host0's own `nvme disconnect -n <ss0>`, and that deletes the controller objects, so the two paths leave `nvme list-subsys` outright. The disconnect verb discards every status, so these two waits are the only thing carrying the invariant. Nothing weaker would do, and nothing like ops stage 03's "not `live`" belongs here: after the kill the dead agent removes **nothing**, its CN's port keeps every subsystem it had, and a controller host0 had not disconnected would stay `live` — so asserting that a path went away *because of the kill* would be asserting the opposite of what happens (§8 item 18) |
 | 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 writes two `primary` flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
 | 03 | wait for the new primary (`WAIT_BUILD`, `react_new_primary_ready`) | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s; and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet. A second AR5 during that rebuild **stops the run there**, naming both controllers, for the reason above the table; the two smaller waits after it stay pinned to the same controller, since by then the spawn storm is over and a wrong target costs `WAIT_PROVISION` rather than `WAIT_BUILD` |
 | 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; the export gate is the `cntlr_level_ready` wait in the row above, which asks the same question over every row of the cntlr rather than two of them, so no second poll was added — the connect is still followed by its verdict; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
@@ -1639,7 +1644,22 @@ took", and the stage on the failure line above says which. The third run had
 only the state to print: it printed `none`, which was the first of those two,
 while the failure line above it described the second. §4.1 stage 10 is the wait
 that now
-separates them before the timeout —
+separates them before the timeout. Since the first
+`--slice-cnt 1` run a **third** line sits beside that pair, `last path:`, and it
+is a different kind of reading: a per-controller **path** state out of `nvme
+list-subsys` (`live` / `connecting` / `resetting` / `deleting` / `none`) rather
+than a per-namespace ANA state out of sysfs — the distinction §4.1 stage 10
+makes at length. What it is for is §8 item 18: after a `cntlr delete` the three
+answers `live`, `connecting` and `none` are three different faults, and the
+wait's own message cannot name which one it saw. Only `host_path_not_live`
+writes it, and `host_wait_path_not_live` clears it at **both** ends of its wait
+rather than only at the head as `ANA_LAST`'s rule has it — there is exactly one
+such wait in the suite, so a value cleared only on the way in would stand for
+the rest of the run and be reprinted beside failures that took no path reading
+at all. A separate flag, and not the value, is what says whether a reading was
+taken, because an empty reading is a fault of its own and is the same string as
+a cleared one; `(none read)` therefore means no such wait took a reading, and a
+reading is printed quoted. Then
 the shape, the cluster id, the cp daemons and their pids, every recorded loop
 device, and the driver's copy of the last dnvctl call's three streams, which
 survives a cp that has become unreachable); cp's own diag, 200 lines of each of
@@ -2151,6 +2171,125 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     and `dn_md_residue` here, `residue` in `cnagent_test.sh` — which grep the
     same absent `name=` field and therefore assert nothing (item 8).
 
+18. **A host controller does not go away when the target stops listening, and
+    the DNR rule that says otherwise needs a port that is still up.** Read out
+    of the first `--slice-cnt 1 --redund raid1` run (2026-09-17, at `c8162b9`),
+    which reached `ops` stage 03 and died there after 60 s waiting for host0 to
+    lose its path to a deleted cntlr.
+
+    The control plane had done its part. `cntlr delete --id <c3>` returned OK,
+    `sp get` showed the sp back to its two cntlrs, and on that CN **both**
+    `/sys/kernel/config/nvmet/subsystems/` and
+    `/sys/kernel/config/nvmet/ports/1/subsystems/` were empty — the agent had
+    retired the host-facing subsystem exactly as it should. host0 nevertheless
+    still held the controller, in state `connecting`, beside its two `live`
+    ones.
+
+    The two endings, and what separates them:
+
+    * **The port keeps listening.** One subsystem leaves a port that still
+      carries others, so the reconnect reaches a target that answers, and it
+      answers with the DNR bit set — the kernel gives up and deletes the
+      controller. This is memory note
+      `nvmet-port-unlink-dnr-kills-host-ctrl`. The one place in this suite
+      where that precondition is demonstrably met is `copy` stage 03: the port
+      is the primary CN's and `ss0`'s subsystem stays linked to it while the
+      transfer's leaves. Where `case_teardown` and `cleanup_all` cite the same
+      sentence they are citing it as a **reason to make the host let go
+      first**, and that ordering does not depend on which ending follows — for
+      a host still issuing IO, a controller left retrying into `ctrl_loss_tmo`
+      is no better than one deleted outright. Those two are not re-derived
+      here; what is claimed about them is only that the ordering rule stands
+      under either ending.
+    * **The port loses its LAST subsystem.** It then does not listen at all —
+      the same fact the export gate depends on in the build direction (§4.1
+      stage 10: an nvmet port with no subsystem linked to it is not a listening
+      socket). The reconnect gets **ECONNREFUSED**, which is a *retry* and not
+      a refusal, so the controller object survives in `connecting` until
+      `ctrl_loss_tmo`. That is a retry budget rather than a deadline (memory
+      note `nvme-io-error-timing-matrix`), no connect in this suite overrides
+      it, and the kernel's default is 600 s — ten times `WAIT_HOST` and equal
+      to `WAIT_PROVISION`, so "wait for the controller to disappear" is a race
+      against the budget wherever it is asked rather than an assertion.
+
+    Which of the two a site gets is a property of that CN's port, not of the
+    RPC, and a site cannot assert it about a lab it shares. So the predicate
+    after a `cntlr delete` is now the property that actually matters and is
+    observable at once — **the host will not use this path for IO** — which is
+    "the state is anything but `live`", true of `connecting`, `resetting`,
+    `deleting` and of the absent path alike. `host_path_gone` survives, for the
+    four sites that follow an explicit `nvme disconnect`: that verb deletes the
+    controller object, so `none` is the right demand there and nothing weaker
+    would prove the disconnect landed.
+
+    **The vacuity this opens, and how much of it is closed.** "Not `live`" is
+    also true of a path that never existed — `path_field` answers `none` for a
+    typo'd traddr, a misspelled NQN or a host holding nothing — so the wait
+    could pass on its first poll having measured nothing, in three ways.
+    `host_wait_path_not_live` takes a **witness** against the first two: the
+    `nvme<X>` that `host_ctrl` answered for the *same* host/NQN/traddr triple
+    while the path was still `live`, captured at the call site a few lines
+    earlier. It is a reading and not a promise — `host_ctrl` answers `none` for
+    a wrong traddr or a wrong NQN, so a witness cannot be produced for
+    arguments that name nothing — and an empty or `none` witness **dies**
+    rather than passing, as does an empty *capture* at the call site, which is
+    checked for `''` as well as `none` because an empty reading means the
+    driver-side jq did not run rather than that the path is gone.
+
+    The **third is not closed by the witness**, and saying it was would be the
+    weaker claim of the two this item exists to correct. The witness is a
+    string captured before the act and is never compared with anything read at
+    wait time, so a host that lost *every* controller for that NQN in between
+    still carries a valid one and still reads `none` on the first poll — which
+    is exactly the shape of a `cntlr delete` regression that tore down more
+    than the one cntlr's export. Only a reading taken **after** the wait closes
+    that, so the call site re-asserts its surviving path to the primary `live`
+    once the wait returns.
+
+    **What a timeout here now prints.** The wait names the witness controller
+    and the state as the wait began; the predicate logs every state it has not
+    already logged — including the first reading of each wait, whatever it is,
+    so that the empty reading the `-n` guard exists for cannot be mistaken for
+    a cleared value and printed as nothing at all; and the `diagnostics`
+    context block prints `last path:` beside `last ANA:` and `last ctrl:`.
+    Whether the controller was `live`, `connecting` or absent is three
+    different faults and the next reader needs to be told which. `last path:`
+    is cleared at **both** ends of the wait, not only at its head as `ANA_LAST`
+    is: this is the suite's one wait of the kind, so a value left standing
+    after a *successful* one would be reprinted beside every later failure in
+    the run, and the flag that says whether a reading was taken at all is kept
+    separately from the reading, because an empty reading and a cleared one are
+    the same string.
+
+    **Implicated and corrected: `ops` stage 05**, the `sp set-level` ladder,
+    one step after the site above and in the same case. Its note claimed the
+    same DNR ending for the `DISABLE` rung — "host0 must connect again on the
+    way back up, it is not a reconnect the kernel can make by itself" — and
+    every clause of this item applies to it: `retire` takes the `!plan.wantAny`
+    branch and `teardownCntlrResources` removes the host-facing subsystem on
+    **both** cntlrs, `ss0` is the only subsystem either CN's port carries in
+    that case at all — it issues no second `ss create`, no `xfer` and no
+    `clone` — so both ports lose their last subsystem and the reconnect is
+    ECONNREFUSED. The controllers therefore survive in `connecting` for as
+    long as `ctrl_loss_tmo` lasts, and whenever they do the `host_connect_all`
+    after the ladder cannot fail: `connect_verdict` fires only on a zero count
+    and `ctrls_of` counts a controller in any state. (It could not *prove* the
+    recovery either way — a count of one is satisfied by one transport of the
+    two.) That site now waits for `live` on **both**
+    transports instead; `connect_added_ctrl` would have been vacuous there for
+    the same reason, since the controller object is what survives.
+
+    **Not implicated:** the four `host_path_gone` sites. Each is preceded by
+    `disconnect_prefix`, and each of those verbs discards every disconnect's
+    status, which is exactly why a `none` demand belongs there. Their remaining
+    weakness is different and is **not** closed: a `none` reading is what a
+    path at the *wrong* address reads too, so a stale traddr variable at one of
+    those sites would pass while the real path stood. The invariant they carry
+    is "the host holds no path", which an absent path does satisfy, so a wrong
+    address there costs a check rather than a false statement — but the
+    strictly stronger form, "host <h> holds no controller for this NQN at all",
+    is not what those sites ask today.
+
 ---
 
 ## 9. Changelog
@@ -2623,3 +2762,65 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   * the residue oracle and the diagnostics dump are described as reading an
     "`mdadm --detail --scan` name". Those two match the probes left blind on
     purpose above, and are stale in the same way §8 item 8 is.
+
+* **2026-09-17 — the first `--slice-cnt 1` run, and the predicate it broke.**
+  The suite was run at the smallest shape (`--slice-cnt 1 --redund raid1`) at
+  `c8162b9`. `smoke` passed **in full** — setup's eleven steps, the teardown,
+  the drain to `NOT_FOUND`, the residue check and the space guard — and `ops`
+  stages 01 and 02 passed. It failed in `ops` stage 03, 60 s into a wait for
+  host0 to lose its path to a cntlr that had just been deleted.
+
+  The control plane was right and the assertion was wrong. §8 item 18 has the
+  evidence and the mechanism; the changes are:
+
+  1. **`host_path_gone` is no longer the predicate after a `cntlr delete`.**
+     Its replacement at that one site is `host_wait_path_not_live`, which waits
+     for a state that is anything but `live` — the property a `cntlr delete`
+     owes the host, and one that `connecting` and `none` both satisfy, because
+     whether that CN's port stops listening (ECONNREFUSED, a retry) or stays up
+     to refuse the reconnect (DNR, a delete) depends on what else is linked to
+     it. The wait is given `WAIT_PROVISION` rather than `WAIT_HOST`: an agent
+     has to converge before the kernel has anything to react to, which is
+     `wait_ns_exported`'s split made in the teardown direction.
+  2. **`host_path_gone` stays at its other four sites, and its header now says
+     what they have in common:** every one of them follows an explicit
+     `nvme disconnect`, which deletes the controller object. The header used to
+     open "the negation host0 needs after a `cntlr delete`", which described
+     none of the four and mis-described the fifth.
+  3. **Two of the three ways the new predicate could pass vacuously are
+     closed, and the third is closed elsewhere.** Every state but `live` ends
+     it and an absent path reads `none`, so it takes a **witness** — the
+     `nvme<X>` that `host_ctrl` answered for the same triple while the path was
+     `live` — and dies on an empty one instead of passing; the `ops` stage 03
+     call site captures it immediately after the `host_path_live` wait, and
+     that capture now rejects `''` as well as `none`, since an empty reading is
+     a jq that did not run rather than a path that is gone. What the witness
+     cannot catch is host0 losing *every* controller in between — it is not
+     re-read at wait time — so the call site re-asserts its path to the primary
+     `live` after the wait returns.
+  4. **A timeout says what it saw.** The wait names the witness controller and
+     the entry state, the predicate logs every state transition **including its
+     first reading**, and `diagnostics` prints `last path:` beside `last ANA:`
+     and `last ctrl:` (§7). `live`, `connecting` and absent are three different
+     faults — and so is the empty reading, which before the first-reading log
+     and the separate "was anything read" flag printed as nothing at all and
+     then as `(none read)`. `last path:` is cleared on the way out of the wait
+     as well as on the way in, because the suite has exactly one such wait and
+     a value cleared only at the head would stand for the rest of the run.
+
+  Three neighbouring comments were corrected rather than left to be read as
+  general rules. `copy` stage 03's DNR sentence now names the condition that
+  makes it true there (the primary CN's port keeps `ss0`'s subsystem);
+  `react` stage 03 now records that **both** of its `host_path_gone` waits run
+  *before* the kill and observe host0's own disconnect — the kill removes no
+  nvmet object at all, so a path that survived it would stay `live`, and
+  asserting it had gone would assert the opposite of what happens; and `ops`
+  stage 05, the rung after the one that failed, claimed the DNR ending for
+  `DISABLE`, where the ports lose their **last** subsystem and so it is the
+  ECONNREFUSED ending instead. That one was not only a wrong comment: whenever
+  host0's controllers outlive `DISABLE` in `connecting` — which is the whole
+  `ctrl_loss_tmo` budget — the `host_connect_all` after the ladder cannot fail,
+  because `connect_verdict` fires on a zero count and a `connecting` controller
+  counts. So that site now waits for `live` on both transports, which is the
+  property the connect was there to produce and is false of a controller still
+  retrying (§8 item 18, §4.3 stage 05).

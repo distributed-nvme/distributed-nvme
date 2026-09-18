@@ -5735,6 +5735,21 @@ diagnostics() {
 	# line above says which wait it came from.
 	log "  last ANA:   ${ANA_LAST:-(none read)}"
 	log "  last ctrl:  ${ANA_CTRL:-(none read)}"
+	# HOST_PATH_LAST is the same idea one layer out, and it is a PATH state
+	# (live / connecting / resetting / deleting / none) rather than an ANA
+	# state — the two are read from different places and mean different things,
+	# which the §4.1 stage 10 note in the doc says at length. It is written
+	# only by host_path_not_live and cleared by host_wait_path_not_live at BOTH
+	# ends of its wait, so a reading stands here only while the wait that took
+	# it is the wait that died. HOST_PATH_SEEN and not the value is what says
+	# whether one was taken, because the empty reading the `-n` guard exists
+	# for is indistinguishable from a cleared value; it is printed quoted for
+	# the same reason.
+	if [ "${HOST_PATH_SEEN:-0}" = 1 ]; then
+		log "  last path:  '${HOST_PATH_LAST-}'"
+	else
+		log "  last path:  (none read)"
+	fi
 	log "  shape:      slice_cnt=$SLICE_CNT redund=$REDUND legs=$LEGS" \
 		"groups=$GRP_CNT dns_per_vm=$DNS_PER_VM dn_total=$DN_TOTAL"
 	log "  cluster_id: ${CLUSTER_ID:-(not read yet)}"
@@ -8695,18 +8710,159 @@ cntlr_pos_of_addr() { # <addr_port> → index | -1
 	printf -- '-1'
 }
 
-# host_path_gone is the negation host0 needs after a `cntlr delete`: the CN's
-# agent removes the host-facing subsystem with the controller, and a subsystem
-# that disappears under a live controller refuses the reconnect with DNR, so
-# the kernel deletes the controller instead of retrying (memory note
-# nvmet-port-unlink-dnr-kills-host-ctrl). path_field answers the word "none"
+# host_path_gone is the negation a site needs after host <h> has been told to
+# `nvme disconnect` from <nqn>: that verb deletes the controller OBJECT, so the
+# path leaves `nvme list-subsys` altogether. path_field answers the word "none"
 # when there is no such path, never "", which is why this compares text.
+#
+# ALL FOUR OF ITS CALL SITES ARE EXACTLY THAT, and none of them is anything
+# else: copy's fallback-source teardown and its `xfer delete` stage each run
+# `helper_host 1 disconnect_prefix …` first, and react step 3 runs
+# `helper_host 0 disconnect_prefix "$SS0"` before the kill — one call covering
+# both of its waits, since that verb is by NQN and takes down every controller
+# of the subsystem. Each of those three calls discards every `nvme disconnect`'s
+# status, so the wait after it is what proves the disconnect landed — which is
+# the whole reason a `none` reading is the right thing to demand there.
+#
+# IT IS NOT THE PREDICATE FOR A `cntlr delete`, and one site used it that way
+# until the 2026-09-17 `--slice-cnt 1` run died on it: 60 s in ops step 3 after
+# a delete the control plane had carried out correctly (the record was gone,
+# the sp was back to two cntlrs, and on the CN both
+# /sys/kernel/config/nvmet/subsystems/ and .../ports/1/subsystems/ were empty),
+# while host0 sat on the path in state `connecting`. The comment this one
+# replaces cited memory note nvmet-port-unlink-dnr-kills-host-ctrl for "a
+# subsystem that disappears under a live controller refuses the reconnect with
+# DNR, so the kernel deletes the controller". That note is about a PORT UNLINK
+# on a port that goes on carrying OTHER subsystems and therefore goes on
+# LISTENING: the reconnect reaches a target that answers, and a DNR answer is
+# what deletes the controller. Take a port's LAST subsystem away and it does
+# not listen at all — the fact wait_ns_exported's own label states in the build
+# direction, "the port link that makes the port listen" — the reconnect gets
+# ECONNREFUSED, and ECONNREFUSED is a
+# retry and not a refusal. The controller then stays put until ctrl_loss_tmo,
+# which is a retry budget rather than a deadline (memory note
+# nvme-io-error-timing-matrix) and which no connect in this suite overrides, so
+# it is the kernel's 600 s default: ten times WAIT_HOST and equal to
+# WAIT_PROVISION, which makes "wait for the controller to disappear" a race
+# against the budget wherever it is used rather than an assertion.
+# host_path_not_live below is what a site asserts when what it means is "the
+# host will not use this path".
 host_path_gone() { # <h> <nqn> <traddr>
 	[ "$(host_path_state "$1" "$2" "$3")" = none ]
 }
 
 host_path_live() { # <h> <nqn> <traddr>
 	[ "$(host_path_state "$1" "$2" "$3")" = live ]
+}
+
+# HOST_PATH_LAST is the state the last host_path_not_live reading saw, and it
+# is here for ANA_LAST's reason (section 2): wait_until's timeout message names
+# the wait and not the observation, while the next reader of a timeout here
+# needs to know which of live / connecting / none was actually there — those
+# are three different faults. The diagnostics dump prints it.
+#
+# HOST_PATH_SEEN separates "no poll has read this path" from "a poll read it
+# and got the EMPTY string", which is a reading and a fault of its own (the
+# `-n` guard below). They are the same value, so without the flag neither the
+# transition log nor the dump can tell them apart — and the empty reading is
+# precisely the one both of them are wanted for.
+#
+# ANA_LAST's clear-in-the-predicate rule does NOT carry over unchanged, because
+# what makes it safe there is missing here. ANA_LAST is cleared at the head of
+# every host_wait_ana and those run in nearly every stage, so a standing value
+# is nearly always the current one; host_wait_path_not_live has exactly ONE
+# call site in the whole suite (ops step 3), so a value cleared only at its
+# entry would stand for the rest of the run and every later dump would print a
+# reading taken in a different stage, about a controller that no longer exists.
+# So the clear happens at BOTH ends of that wait — before it, and again when it
+# SUCCEEDS — and a value can then only be standing while the wait that took it
+# is the wait that died.
+HOST_PATH_LAST=""
+HOST_PATH_SEEN=0
+
+# host_path_not_live is "host <h> will not send IO down this path", which is
+# what a `cntlr delete` actually produces. Only `live` carries IO; `connecting`
+# (the ECONNREFUSED retry above), `resetting`, `deleting` and the absent path
+# (`none`) all fail it, and the predicate accepts every one of them on purpose,
+# because which ending a given site gets depends on whether that CN's nvmet
+# port still carries another subsystem — and no site here can assert that about
+# a lab it shares.
+#
+# It logs every state it has not already logged, so the transcript above a
+# timeout carries the transition as well as the last reading. The FIRST poll
+# after a clear logs whatever it read: it is HOST_PATH_SEEN and not the value
+# that says whether anything has been read, so an empty reading cannot match a
+# cleared HOST_PATH_LAST and pass in silence.
+host_path_not_live() { # <h> <nqn> <traddr>
+	local s
+	s=$(host_path_state "$1" "$2" "$3")
+	if [ "$HOST_PATH_SEEN" = 0 ] || [ "$s" != "$HOST_PATH_LAST" ]; then
+		HOST_PATH_LAST=$s
+		HOST_PATH_SEEN=1
+		log "  host$1's path to $3 for $2: state '$s'"
+	fi
+	# The `-n` is not decoration. path_field cannot answer "" — it ends
+	# `first // "none"` and subsys_json_of turns a node holding nothing, or an
+	# ssh that came back empty, into `[]` — so an empty reading means the jq
+	# itself did not run, and "not live" is exactly the wrong way for that to
+	# resolve. It keeps waiting instead, and the log line above says `state ''`
+	# (which is what HOST_PATH_SEEN is for: an empty reading and a cleared
+	# HOST_PATH_LAST are the same string, and before the flag this one line
+	# never printed).
+	[ -n "$s" ] && [ "$s" != live ]
+}
+
+# host_wait_path_not_live bounds that wait and closes TWO OF THE THREE ways it
+# could pass without measuring anything. EVERY reading but `live` satisfies the
+# predicate, and a path that was never there reads `none` — so a typo'd traddr,
+# a misspelled NQN or a host that holds nothing at all would each pass on the
+# first poll having asserted precisely nothing.
+#
+# <witness> CLOSES THE FIRST TWO OF THOSE THREE, and it closes them at the CALL
+# SITE rather than in here: the caller passes the nvme<X> that
+# `host_ctrl <h> <nqn> <traddr>` answered for the SAME three arguments while
+# the path was live, and host_ctrl answers `none` for a wrong traddr and for a
+# wrong NQN alike — so arguments that name nothing cannot produce a witness,
+# and an empty or `none` one dies below instead of passing.
+#
+# IT DOES NOT CLOSE THE THIRD. The witness is a string captured before the act
+# and is never compared with anything read at wait time — this function tests
+# it for empty/`none` and otherwise only prints it — so a host that has lost
+# EVERY controller for <nqn> since the capture still carries a valid witness
+# and still reads `none` on the first poll. Nothing but a reading taken AFTER
+# the wait can close that one, which is why the ops step 3 call site re-asserts
+# its surviving path to the primary one line later.
+#
+# [secs] defaults to WAIT_HOST, which is sized for a kernel-side transition.
+# A site whose path only stops being live once an AGENT has converged — retired
+# the subsystem that was carrying it — passes WAIT_PROVISION, for the reason
+# wait_ns_exported's header gives for the same choice.
+host_wait_path_not_live() { # <h> <nqn> <traddr> <witness ctrl> <what> [secs]
+	local entry
+	HOST_PATH_LAST=""
+	HOST_PATH_SEEN=0
+	if [ -z "$4" ] || [ "$4" = none ]; then
+		die "host$1: host_wait_path_not_live was given no witness controller" \
+			"for $2 on $3. Any state but 'live' ends this wait and a path that" \
+			"was never there reads 'none', so without a controller that this" \
+			"same triple resolved to while it WAS live the wait would pass" \
+			"having measured nothing. The call site must capture" \
+			"\`host_ctrl $1 $2 $3\` while the path is live and pass it here." \
+			"An EMPTY witness is the other reading of this: the capture ran" \
+			"and the driver-side jq did not, which is not a statement about" \
+			"the host — ops step 3 separates the two where it captures."
+	fi
+	entry=$(host_path_state "$1" "$2" "$3")
+	wait_until "${6:-$WAIT_HOST}" \
+		"host$1 to stop using its path to $3 for IO — $5. It was controller $4 while that path was live, its state as this wait begins is '$entry', and ANY state but 'live' ends the wait: a target that stopped listening makes the reconnect ECONNREFUSED, which retries into ctrl_loss_tmo, so 'connecting' is one legal ending and 'none' — the controller deleted outright — is the other" \
+		host_path_not_live "$1" "$2" "$3"
+	# wait_until dies on a timeout, so this runs only when the wait SUCCEEDED —
+	# and that is the case the clear is for. This is the suite's only wait of
+	# the kind, so a reading left standing after a successful one would be
+	# reprinted by every diagnostics dump for the rest of the run, beside
+	# failures whose waits took no path reading at all.
+	HOST_PATH_LAST=""
+	HOST_PATH_SEEN=0
 }
 
 # --- step 1 -----------------------------------------------------------------
@@ -8857,7 +9013,7 @@ ops_grow() {
 # ctl_fail_msg cannot express it.
 ops_slots() {
 	stage 03 "sp set-cntlid-slots, then a third cntlr in the new slot"
-	local spare spareaddr c3 pos traddr3
+	local spare spareaddr c3 pos traddr3 ctrl3
 
 	# Everything below is written for §7.1's fixed two-slot list. Deriving the
 	# three literals from $SLOTS would hide, not remove, that dependency.
@@ -8953,6 +9109,29 @@ ops_slots() {
 	connect_added_ctrl 0 "$SS0" "$traddr3"
 	wait_until "$WAIT_HOST" "host0's third path, to cn$spare ($traddr3), to go live" \
 		host_path_live 0 "$SS0" "$traddr3"
+	# The WITNESS for the wait at the end of this step, taken here because here
+	# is where the path is live. host_wait_path_not_live's header says why it
+	# cannot be skipped: every state but `live` ends that wait, so without a
+	# controller THIS triple resolved to it could not tell "host0 let go" from
+	# "these arguments never named a path".
+	ctrl3=$(host_ctrl 0 "$SS0" "$traddr3")
+	# BOTH halves, the way connect_added_ctrl and host_wait_path_not_live's own
+	# entry check test the same reading: `assert_ne "$ctrl3" none` alone PASSES
+	# on the empty string, which is the degraded reading — a truncated ssh
+	# reply, a jq that did not run — that the `-n` guard in host_path_not_live
+	# exists for. An empty capture would otherwise sail through here and die 60
+	# lines below, after the disable and the delete, with a message blaming the
+	# call site for not having captured a witness when in fact it did.
+	case "$ctrl3" in
+	'' | none)
+		die "host0's third path to $traddr3 for $SS0 resolved to no nvme" \
+			"controller ('$ctrl3') while the wait above had just seen it" \
+			"live. 'none' means the path is not in \`nvme list-subsys\`;" \
+			"an EMPTY reading means the driver-side jq did not run at all," \
+			"which is a truncated or unparseable list-subsys reply and not" \
+			"a statement about the host."
+		;;
+	esac
 	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
 		"host0's path to the primary is still live"
 	# A standby's namespaces are ANA-inaccessible: CN16 as amended by [D15]
@@ -8988,9 +9167,51 @@ ops_slots() {
 	sp_read_roles
 	assert_field "$SP_JSON" '.cntlr_list | length' "$CNTLR_CNT" \
 		"the sp is back to its $CNTLR_CNT cntlrs"
-	wait_until "$WAIT_HOST" \
-		"host0 to lose its path to the deleted cntlr on cn$spare ($traddr3)" \
-		host_path_gone 0 "$SS0" "$traddr3"
+	# WHAT THE HOST OWES AFTER A `cntlr delete`, and it is NOT that the
+	# controller object disappears — that is what the 2026-09-17 `--slice-cnt 1`
+	# run spent 60 s waiting for. What was on the guests when that wait expired:
+	# the record gone, the sp back to two cntlrs, cn$spare's
+	# /sys/kernel/config/nvmet/subsystems/ AND .../ports/1/subsystems/ both
+	# EMPTY — the agent had retired the host-facing subsystem exactly as it
+	# should — and host0 still holding the controller in state `connecting`.
+	# That is the ECONNREFUSED ending: the port had lost its last subsystem, an
+	# nvmet port with none does not listen, and a refused connect is a RETRY.
+	# The controller then sits in `connecting` until ctrl_loss_tmo, which is a
+	# budget and not a deadline and which no connect here overrides, so it is
+	# the kernel's 600 s default — ten times WAIT_HOST, and exactly the
+	# WAIT_PROVISION this wait is given below, so even at the wider budget
+	# "wait for the controller to disappear" would be a race against the clock
+	# rather than an assertion.
+	#
+	# So what the delete owes host0 is that this path stops carrying IO, and a
+	# controller that is not `live` carries none. host_wait_path_not_live
+	# accepts `none` as well, deliberately: a CN whose port still held another
+	# subsystem — which is not what cn$spare holds in this case, but is not
+	# something this step can assert about a lab it shares — would answer the
+	# reconnect with DNR and the kernel would delete the controller. Both
+	# endings satisfy what this step is actually about.
+	#
+	# WAIT_PROVISION, not WAIT_HOST: what has to happen first is one
+	# INCREMENTAL convergence by that agent (the retire of one subsystem on a
+	# cntlr with nothing else left to do), and WAIT_HOST's 60 s is sized for the
+	# kernel-side transition that follows it — wait_ns_exported's header makes
+	# the same split for the same reason, in the build direction.
+	host_wait_path_not_live 0 "$SS0" "$traddr3" "$ctrl3" \
+		"cntlr $c3 is gone from the sp and its agent on cn$spare has to retire the host-facing subsystem that was carrying this path" \
+		"$WAIT_PROVISION"
+	# THE READING THE WITNESS CANNOT TAKE. The witness was captured before the
+	# disable, so it rules out arguments that name nothing — but not host0
+	# losing every controller for $SS0 in between, which reads `none` on this
+	# wait's first poll and passes it. That is exactly the shape of a delete
+	# regression that tore down more than the spare's export, so the surviving
+	# path is re-read here, after the wait, and it is the same assertion this
+	# step already makes before the delete. $PRIMARY_TRADDR was re-read from
+	# `sp get` above, so it names whichever cntlr is primary NOW — a
+	# re-election during the disable would not change the answer, because host0
+	# has held a live path to BOTH surviving cntlrs since setup_export_ns
+	# asserted them, and neither of them is what was deleted.
+	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
+		"host0 still holds its path to the primary after the delete"
 	check_sha0 "after a third cntlr was created, disabled and deleted"
 }
 
@@ -9105,10 +9326,27 @@ ops_inspect() {
 # rung asserts.
 #
 # Two consequences of the DISABLE rung that the steps below depend on:
-#  - the host-facing subsystem goes with everything else, and a subsystem that
-#    disappears under a live controller kills that controller with DNR, so
-#    host0 must CONNECT AGAIN on the way back up. It is not a reconnect the
-#    kernel can make by itself.
+#  - the host-facing subsystem goes with everything else, on BOTH cntlrs:
+#    retire takes the !plan.wantAny branch and teardownCntlrResources calls
+#    removeExport for every subsystem of the plan
+#    (agent/cnagent/syncup_cntlr.go:168-179 and :919-921), which unlinks it
+#    from the port and removes it. And $SS0 is the only subsystem either CN's
+#    port carries — the whole ops case issues no second `ss create`, no `xfer
+#    create` and no `clone create` at any step, and one cn agent has one nvmet
+#    port shared by everything it exports (agent/nvmet.go:80) — so each port
+#    loses its LAST subsystem and stops listening.
+#
+#    THAT IS NOT THE DNR ENDING this comment used to claim. A port that does
+#    not listen refuses nothing: the reconnect gets ECONNREFUSED, which is a
+#    retry (§8 item 18, and host_path_gone's header for the measurement it came
+#    from). So host0's controllers go to `connecting` rather than away, on
+#    ctrl_loss_tmo's 600 s retry budget, and which side of that budget the
+#    climb back to READWRITE lands on is what decides whether the kernel
+#    re-attaches them by itself or the connect-all after the ladder has to make
+#    new ones. Either way the connect-all's own verdict cannot prove the path
+#    came back — a controller that has been `connecting` since the DISABLE rung
+#    is still a controller for ctrls_of to count — which is why that step waits
+#    for `live` on both transports afterwards instead.
 #  - none of this is a health event: worker/health.go's cntlrObservation
 #    (:463-501) reacts to RES_STATUS_ERROR rows only, so a ladder full of
 #    MISSING rows never makes the primary look unhealthy and no re-election
@@ -9227,7 +9465,7 @@ ops_set_level() { # <level, without the SP_LEVEL_ prefix>
 
 ops_levels() {
 	stage 05 "sp set-level: the whole §11.7 ladder down to DISABLE and back"
-	local dev got out lvl
+	local dev got out lvl a
 	dev=$(host_dev "$UUID1")
 	sp_refresh
 	sp_read_roles
@@ -9306,8 +9544,11 @@ ops_levels() {
 
 	# Back at READWRITE the whole stack is OK again (the last ops_set_level
 	# waited for exactly that, and cntlr_level_ready's LEVEL_WANT includes
-	# ss_id_to_subsystem and ns_id_to_namespace). What is left is the host,
-	# which lost its controller when DISABLE removed the subsystem under it.
+	# ss_id_to_subsystem and ns_id_to_namespace). What is left is the host —
+	# which did NOT necessarily lose its controllers when DISABLE removed the
+	# subsystems under them: both CN ports lost their last subsystem there, so
+	# the reconnect had nothing to refuse it. The note above ops_level_want has
+	# the mechanism and what it costs the checks below.
 	sp_refresh
 	sp_read_roles
 	disc_want_of_sp "$SS0"
@@ -9334,6 +9575,26 @@ ops_levels() {
 	# so the wider budget costs nothing when nothing is wrong.
 	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID" "$WAIT_BUILD"
 	host_connect_all 0 "$SS0"
+	# AND THE CHECK THAT CAN STILL FAIL HERE, because the connect-all's own
+	# verdict cannot. connect_verdict fires only on a zero controller count and
+	# ctrls_of counts a controller in ANY state, so controllers that survived
+	# the DISABLE rung in `connecting` — the note above ops_level_want says why
+	# they may — make the count >= 1 before this connect even runs.
+	# connect_added_ctrl would be vacuous here for the same reason and is not
+	# used: it asks whether a controller OBJECT exists for the address, and the
+	# object is exactly what survives. What the ladder owes host0 is that its
+	# paths CARRY IO again, which is `live` and is false of a controller still
+	# retrying.
+	#
+	# A wait rather than an assert, and the budget is the kernel-side one: a
+	# surviving controller re-attaches on its own reconnect timer once the port
+	# listens again, which is after the export gate above has already returned,
+	# while a controller this connect-all made is live when it returns.
+	for a in "$PRIMARY_TRADDR" "$STANDBY_TRADDR"; do
+		wait_until "$WAIT_HOST" \
+			"host0's path to $a for $SS0 to be live again after the ladder" \
+			host_path_live 0 "$SS0" "$a"
+	done
 	# ANA first, device second: a namespace whose only path has never been
 	# usable gets no head disk at all (section 2's rule, measured in this lab).
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
@@ -10562,7 +10823,10 @@ copy_src_sp_teardown() {
 	# The `||` can only catch ssh or the dispatch: disconnect_prefix throws
 	# every `nvme disconnect`'s stdout, stderr and status away and ends
 	# `return 0`, so the verb cannot report a disconnect that did not land.
-	# The wait below is the check that actually holds.
+	# The wait below is the check that actually holds — and `gone` is the right
+	# demand here, unlike ops step 3's: the host was told to disconnect, which
+	# deletes the controller object, rather than having a subsystem taken out
+	# from under it (host_path_gone's header separates the two).
 	helper_host 1 disconnect_prefix "$SS_SRC" >/dev/null ||
 		die "host1: the disconnect_prefix verb could not be run for $SS_SRC"
 	wait_until "$WAIT_HOST" "host1 to drop its path to $SS_SRC" \
@@ -10865,9 +11129,14 @@ copy_clone() {
 # host1 lets go BEFORE the subsystem is unlinked, which is case_teardown's
 # rule (a) applied here: a subsystem unlinked from its port under a live
 # controller refuses the reconnect with DNR and the kernel deletes the
-# controller (memory note nvmet-port-unlink-dnr-kills-host-ctrl). Doing it in
-# this order means host1 ends the stage with no path at all rather than with
-# one the kernel tore down behind us.
+# controller (memory note nvmet-port-unlink-dnr-kills-host-ctrl). And the
+# note's precondition HOLDS at this site, which is why the sentence may be
+# written flat here and may not be written at all in ops step 3: the port being
+# unlinked from is the PRIMARY CN's, and $SS0's own subsystem stays linked to
+# it throughout this case, so the port goes on listening and the reconnect
+# reaches a target that can answer DNR. Doing it in this order means host1 ends
+# the stage with no path at all rather than with one the kernel tore down
+# behind us.
 copy_xfer_delete() {
 	stage 03 "xfer delete --force, then host0 reads both namespaces back"
 	local dev
@@ -12409,6 +12678,18 @@ react_failover() {
 	# The `||` catches ssh or the dispatch and nothing more — disconnect_prefix
 	# discards every disconnect's status and ends `return 0` — so the invariant
 	# above is carried by the two host_path_gone waits below, not by this line.
+	#
+	# AND `gone` IS THE RIGHT DEMAND AT BOTH, for a reason that has nothing to
+	# do with the kill: BOTH WAITS RUN BEFORE IT. What they observe is host0's
+	# own `nvme disconnect -n $SS0`, which deletes the controller objects, so
+	# the paths leave `nvme list-subsys` outright — the ops step 3 ending, where
+	# a subsystem is taken out from under a controller nobody disconnected and
+	# the controller survives in `connecting`, cannot arise here. The kill below
+	# would not produce it either: the dead agent removes NOTHING, the CN's port
+	# keeps every subsystem it had, and host0's controller would stay `live` on
+	# a target with nothing left to rewrite ana_grpid — which is exactly the
+	# hazard the paragraph above disconnects to avoid, and asserting "the path
+	# went away" after the kill would be asserting the opposite of what happens.
 	helper_host 0 disconnect_prefix "$SS0" >/dev/null ||
 		die "host0: the disconnect_prefix verb could not be run for $SS0," \
 			"so host0 has not even been asked to let go before the kill"
