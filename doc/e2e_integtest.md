@@ -1200,12 +1200,17 @@ any tool list is read — a guest that is simply down should say so first.
 (`dmsetup nvme losetup lsblk blkdiscard stat du df awk sed grep ss pgrep pkill
 timeout fallocate tail`, plus `truncate wipefs dd` on a DN, `findmnt` on a CN,
 and `mdadm` and `udevadm` on **both** — the md mask and the md stop run on both
-node roles, so a DN without `mdadm` would make `dn_cleanup`'s `md_stop_all` a
-silent no-op (and the mask's own `IMPORT{program}` names `/sbin/mdadm`) — which
-is the second run's failure again and quieter (§8 item 15) — while a DN without
-`udevadm` could not reload the rules `dn_up` has just written, so the mask may
-still be inert as the agent starts, for as long as `systemd-udevd` takes to
-notice the changed rules directory by itself; the list is
+node roles, and `udevadm` is **no longer the milder of the two** since
+`md_stop_all` took its name filter to `MD_NAME` (§8 item 17). `mdadm` is doubly
+load-bearing there: it is the fallback name source *and* the thing that stops
+the array, so a node without it makes that verb the second run's silent no-op
+outright (§8 item 15); a node without `udevadm` keeps the stop and loses the
+one name source that answers for an array whose members `mdadm` can no longer
+read. The mask's own `IMPORT{program}` names `/sbin/mdadm` too.
+`udevadm` has its second job besides — a node without it could not reload the
+rules `dn_up` has just written, so the mask may still be inert as the agent
+starts, for as long as `systemd-udevd` takes to notice the changed rules
+directory by itself; the list is
 deliberately *not* `cnagent_test.sh`'s copied over: no guest here parses JSON,
 reads thin metadata or runs `cmp`); `modprobe` of
 `nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool raid1` and
@@ -1339,7 +1344,7 @@ measurement is of a sweep over what a previous sweep had already taken. The
 per-verb times were not recorded either, so 300 s is an upper
 bound on what was seen and not a reading of it, and 600 s is that bound
 doubled: room for a *failed* run at 32 slices to leave more debris than a
-successful one, and for the CN timeouts nobody has explained (§9). What the
+successful one, and for the CN timeouts nobody has yet explained (§9). What the
 start cleanup meets is usually either nothing or the remains of a run that
 stopped part way — a successful run cleans up after itself, and tolerance of
 absence is the whole of E2E6 at the start.
@@ -1347,14 +1352,31 @@ absence is the whole of E2E6 at the start.
 The bound sizes **two** heavy verbs, and the suite comment now says so rather
 than only naming the DN. `dn_cleanup` on one DN VM is up to `DNS_PER_VM`
 instances' worth — 43 nvmet ports with their ana_groups, 43 loop teardowns, the
-dm devices of every kind and `md_stop_all`. `cn_cleanup_phase2` is at least as
+dm devices of every kind and `md_stop_all`, which is a bounded `udevadm info`
+read per array in `/proc/mdstat`, a bounded `mdadm --detail` read for each
+array udev could not name, and a bounded `mdadm --stop` for each `dnv-` one. `cn_cleanup_phase2` is at least as
 heavy, and it is the verb that actually blew the old bound twice: on the CN
 carrying the stack it is `disconnect_prefix` over up to 128 side connections at
 `timeout 30` each, 64 `mdadm --stop`s at `timeout 15`, then nine dm kinds plus
-`dm_remove_all`, where a device that will not go costs 10 + 10 + 15 s. Which CN
-was carrying the stack in the run that timed out was not recorded, so not even
-"it was the heavy one" is available as an explanation for `cn0` and `cn2` and
-not `cn1` (§9).
+`dm_remove_all`, where a device that will not go costs 10 + 10 + 15 s.
+
+**The CN timeouts now have a candidate and still have no confirmed cause.**
+`md_stop_all` is one function in the shared node body, so the no-op of §8 item
+17 was on the CN too, and `cn_cleanup_phase2` places its `md_stop_all` between
+the top-of-stack dm kinds and the kind `a`/`9`/`b` wrappers precisely to unpin
+the leg wrappers: with the stop doing nothing, every kind-`9` leg wrapper under
+a live array — up to 128 at this shape — went the long way round through
+`dm_force_remove`. That is a mechanism, and it is more than "nothing explains
+it" ever was. It is not a finding, and what it leaves open is narrower than
+"two CNs and not one": `CNTLR_CNT` is 2 and `--cn` is at least 3 (three in the
+lab, §2), so at least one CN carries no cntlr of this sp and its
+`cn_cleanup_phase2` walks empty `dmsetup ls` output — the spare CN finishing
+fast is the shape, not a clue. Of the two
+that are heavy (128 kind-`9` leg wrappers and 128 `:2:` connections each), only
+the **primary** has arrays, because CN12 gives a standby no groups. So the md
+no-op is a mechanism for whichever CN was primary and **not** for the standby,
+whose overrun is the part still unexplained. The next run is what settles it,
+and 600 s stays until then (§9).
 
 **What the bound does not bound** is a task in uninterruptible D state. GNU
 `timeout` signals and then waits for the child to be reaped, so an unkillable
@@ -1391,7 +1413,8 @@ exit of 124 is reported as the timeout it is, everything else as the status it
 was), then dies with `--cleanup-only` as the retry and a remedy **built from
 the rows it just listed**, not from the one case that has been seen: the stray
 md array and `cat /proc/mdstat` for a `dn*` timeout; for a `cn*` one, that
-`cn_cleanup_phase2` has no recorded cause and is as heavy as anything here; for
+`cn_cleanup_phase2` has no confirmed cause — the `md_stop_all` no-op is the
+candidate and does not explain two CNs — and is as heavy as anything here; for
 `rc 255`, that the ssh or the passwordless sudo is what failed, since this gate
 now runs *before* preflight's own check for exactly that; and for an exit of 0
 without the sentinel, a stale helper. Handing an operator `cat /proc/mdstat` on
@@ -1399,10 +1422,16 @@ a guest they cannot reach is the shape of mistake this whole change exists to
 remove. Nothing gates the **end** cleanup or `--cleanup-only` themselves: a die
 there would skip the other nine guests, and `CLEANUP_DIRTY` already carries
 that verdict into the exit code and into `cleanup_dirty_banner` — which now
-ends with the same DN hint, plus the three readings of seeing a stray array
-*there*, where `dn_cleanup` has already tried to stop one: `mdadm` is missing
-on that guest, `mdadm --stop` would not take, or the array's name is not one
-`md_stop_all` matches.
+ends with the same DN hint, plus the readings of seeing a stray array *there*,
+where `dn_cleanup` has already tried to stop one: `mdadm` or `udevadm` is
+missing on that guest, neither of the two name reads could name the array, or
+`mdadm --stop` would not take. The hint also hands the operator the `udevadm
+info --query=property --name=/dev/mdN | grep MD_NAME` line, because neither
+`/proc/mdstat` nor `mdadm --detail --scan` prints the name on these guests and
+"stop each `dnv-` array" is not an instruction anyone can follow without it —
+plus `mdadm --detail --no-devices --export` for an `inactive` array, which udev
+has no `MD_NAME` for at all, and the members-in-`/proc/mdstat` reading for the
+array neither command names.
 
 The order:
 
@@ -1440,6 +1469,17 @@ The order:
    tmpfs; the nvmet hosts entries; `ports/1` — **its ana_groups 3 and 2 first**;
    the udev rule (these are shared lab machines); `$WORK`.
 
+   The md stop in the middle of that list is **load-bearing and not
+   bookkeeping**: a live raid1 array holds its members open, and its members
+   are the kind-`9` leg wrappers (`CnLegName`, "what md/groups consume as the
+   member device"), so the `a`/`9` pass after it cannot do its work until it
+   has done its own. Kind `a` is not pinned by an array at all — `CnGrpName` is
+   the **RedundNone** group device, and a RedundMdRaid1 group has the md device
+   in its place and no kind-`a` name — so at this suite's default `--redund
+   raid1` it is the 128 leg wrappers that are at stake. It is the same
+   `md_stop_all` the DN runs, from the same shared helper body, and it was the
+   same no-op until 2026-09-17 (§8 item 17).
+
    Both CN phases must finish on **every** CN before the first DN VM is
    touched, which is why they are two loops and not one loop doing both.
 4. **The DN VMs.** Kill every `[d]nv-agent` from the helper, resume anything
@@ -1474,9 +1514,39 @@ The order:
    identical invocation finish. The stop stays in the order even now that
    `dn_up` installs the mask, because a guest that ran an older copy of this
    suite, or whose rule did not take, has to be cleanable **by the suite**; and
-   `md_stop_all` matches only an `mdadm --detail --scan` name of `dnv-…` or
+   `md_stop_all` matches only an **`MD_NAME`** of `dnv-…` or
    `<homehost>:dnv-…` — the cn agent's own `--name` under `--homehost any` — so
    a lab guest's own array is never a candidate.
+
+   **The stop only started working on 2026-09-17** (§8 item 17). Until then
+   `md_stop_all` filtered on a `name=` field of `mdadm --detail --scan`, and
+   that command prints no name on these guests — only `ARRAY /dev/md/<hex
+   MD_DEVNAME> metadata=1.2` — so every line was skipped and the verb stopped
+   nothing, on either node role. It now walks `/proc/mdstat` and reads
+   `MD_NAME` out of `udevadm info --query=property --name=/dev/mdN`, falling
+   back to `mdadm --detail --no-devices --export /dev/mdN` when udev has no
+   such property — which is the same property the mask rule already matched on,
+   and, since udev imports it from that very mdadm command
+   (`63-md-raid-arrays.rules`), the same answer cached and live. Both reads are
+   there because each is blind to arrays the other names: udev has no `MD_`
+   property at all while an array is `clear` or `inactive`, because the
+   `array_state` line above that import jumps past it, and mdadm has no
+   `MD_NAME` when it cannot read a member's superblock. So the cost accounting
+   above is the accounting of the **no-op**: the arrays were still standing when
+   the dm passes ran, which is why every one of those removals took the
+   fallback. `mdadm` and `udevadm` are therefore both preflight requirements on
+   **both** node roles (§5) — an unreadable name matches neither pattern and
+   the array is left alone, which is the safe direction and also exactly the
+   silent no-op this fix removes. Preflight only covers the sweeps that follow
+   it, though: it runs **after** the start cleanup (§5) and `--cleanup-only`
+   skips it altogether, so a guest missing either tool gets one unguarded
+   sweep — and the start sweep is precisely where a silent no-op cost the run
+   on 2026-09-17, so it is the one call the check cannot protect.
+   And one array is named by neither source: an `inactive` array
+   standing over members that are already error targets, which is what a
+   cleanup that fell through to `dmsetup remove --force` leaves behind. That
+   one is skipped, keeps pinning its members, and needs an operator and
+   `/proc/mdstat` to find.
 
    The mask comes off at the *end*, in the same position `cn_cleanup_phase2`
    removes it: a udev event is raised by a block device, so the rule may only
@@ -1644,22 +1714,32 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
    of `ops` stage 06, the whole spare-leg stage of `copy` and the AR8 stage of
    `react` are skipped with a log line, because a RedundNone group has one leg,
    no md array and no redundancy to repair.
-8. **The two md halves of the residue check ask different questions, and the
-   DN half is no longer the weaker one.** Both grep `mdadm --detail --scan` for
-   a `dnv-` array name — `cn_residue` inside the helper, `dn_md_residue`
-   through a one-line read-only ssh. On a CN the question is whether the
-   agent's own arrays went with the sp, which is teardown. On a DN the question
-   is whether an array exists that *nothing in this suite assembles on purpose*
-   — the stray assembly of item 15 — which makes it the assertion that the DN's
-   md mask worked, and not a formality. It had two ways to be blind and both
-   are now closed: `mdadm` is a required DN tool (§5), so preflight has already
-   failed on a DN where the tool is missing, and the probe goes through the
-   *dying* `ssh_dn` with the caller dying on a non-zero status, so an ssh or
-   sudo that fails at that moment is a failure rather than an empty pass.
-   It is still not a general "no md on this guest" check: a lab guest's own
-   arrays are outside the name filter on both roles, deliberately. Neither half
-   ran in either of the two lab runs so far, because both died before a case
-   reached stage 91 — the first run's stray arrays were found by hand.
+8. **The two md halves of the residue check ask different questions, and BOTH
+   ARE STILL BLIND — this is open, not closed.** Both grep `mdadm --detail
+   --scan` for a `dnv-` array name — `cn_residue` inside the helper,
+   `dn_md_residue` through a one-line read-only ssh. On a CN the question is
+   whether the agent's own arrays went with the sp, which is teardown. On a DN
+   the question is whether an array exists that *nothing in this suite
+   assembles on purpose* — the stray assembly of item 15 — which makes it the
+   assertion that the DN's md mask worked, and not a formality.
+   This paragraph used to say it "had two ways to be blind and both are now
+   closed": `mdadm` is a required DN tool (§5), so preflight has already failed
+   on a DN where the tool is missing, and the probe goes through the *dying*
+   `ssh_dn` with the caller dying on a non-zero status, so an ssh or sudo that
+   fails at that moment is a failure rather than an empty pass. Both of those
+   remain true, and **there was a third, which neither closed and which is the
+   one that matters**: `mdadm --detail --scan` does not print a name at all on
+   these guests (item 17), so the `name=…dnv-…` grep on both halves matches
+   nothing, always, and each half passes on every guest whatever it holds.
+   `md_stop_all` had exactly the same defect and is fixed; these two probes are
+   **not** fixed, and the same third blindness sits on `cnagent_test.sh`'s
+   `residue`, whose md line is the same grep. Until they are moved to `MD_NAME`
+   the way `md_stop_all` was, read a green stage-91 md assertion as "not
+   asked". The other qualification stands: it is not a general "no md on this
+   guest" check either, since a lab guest's own arrays are outside the name
+   filter on both roles, deliberately. Neither half ran in either of the two
+   lab runs so far, because both died before a case reached stage 91 — the
+   first run's stray arrays were found by hand.
 9. **A blocked probe leaves an unkillable `dd` behind.** When `host_sha_probe`
    answers `blocked` the reader is in D state, where `timeout` cannot reach it;
    the resume that unwedges the device reaps it. That is the price of learning
@@ -1929,6 +2009,125 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     many words that a connect issued on the strength of the raid0 alone can be
     refused by a target that has not created the subsystem yet (§4.5). Setup,
     which connects first and which every case runs, did not.
+17. **`md_stop_all` had never stopped an array, on either node role, because
+    `mdadm --detail --scan` prints no name on these guests.** Measured on the
+    lab guest carrying the stack (`cn2`, `192.168.122.77`, kernel `7.0.0-31`,
+    `mdadm` from Ubuntu 26.04) on 2026-09-17, at `3734d3c`.
+
+    The verb filtered each `ARRAY` line of `mdadm --detail --scan` for
+    `*name=dnv-*` or `*name=*:dnv-*`. What that command prints there is:
+
+    ```
+    ARRAY /dev/md/6030def500000000000000010800 metadata=1.2
+    ARRAY /dev/md/6030def500000000000000010500 metadata=1.2
+    ARRAY /dev/md/6030def500000000000000010600 metadata=1.2
+    ```
+
+    — a path built from `MD_DEVNAME`, which is hex, and no `name=` field at
+    all. A `bash -x` trace of the real verb on that guest: **59 `ARRAY` lines,
+    59 `case`s, 59 `continue`s, zero `mdadm --stop`.** The name really is
+    `any:dnv-0000000000000001-88-00` (the agent creates with `--homehost any`);
+    it is simply not in that output. udev has it:
+    `udevadm info --query=property --name=/dev/mdX` prints both `MD_DEVNAME`
+    and `MD_NAME`.
+
+    On **those 59 arrays** the neighbouring mdadm commands did not give it up
+    either — `mdadm --detail /dev/mdX` printed no `Name :` line,
+    `mdadm --detail --export` printed `MD_UUID` and `MD_DEVNAME` but no
+    `MD_NAME`, and `mdadm --examine --export` on a member answered "No md
+    superblock detected on /dev/dm-12". **That is a property of those arrays,
+    not of mdadm from the assembled side**, and the first draft of this item
+    stated it as the latter. It cannot be: udev's `MD_NAME` is *itself* an
+    mdadm answer — `63-md-raid-arrays.rules` imports it from `mdadm --detail
+    --no-devices --export $devnode` on the array device — so the two sources
+    are the same command, cached and live. What was measured about those 59 is
+    that mdadm could not read a member superblock while udev still held the
+    value it had imported earlier; the explanation to hand is that the same
+    failed sweep had just run ~128 `dm_force_remove` fallbacks, and `--force`
+    swaps an error target in under exactly those legs — that step is inference,
+    the unreadable member is not.
+    Measured on the same guest with the same mdadm, `--detail --no-devices
+    --export` prints `MD_NAME` for a healthy array, live **or** `inactive`.
+
+    **The replacement is verified, not designed.** Walking `/proc/mdstat` and
+    reading `MD_NAME` with `udevadm` matched **59 of 59** arrays on that guest
+    and stopped all 59 in **1.9 s**. That is what `md_stop_all` now does, on
+    both node roles, with the same `dnv-*` / `*:dnv-*` pair the mask rule uses
+    — the two now read the same property rather than two different renderings
+    of "the name" — with the mdadm command above as a **fallback** when udev
+    has no such property, because the two go blind on different arrays:
+
+    * udev has no `MD_` property at all while an array is `clear` or
+      `inactive`, since the line above that import
+      (`ATTR{md/array_state}=="clear*|inactive", ENV{SYSTEMD_READY}="0",
+      GOTO="md_end"`) jumps past it. That state is the one the stray DN
+      assembly of item 15 passes through: `mdadm -I` on the single member a DN
+      can see leaves `inactive`, and it stays there until
+      `mdadm-last-resort` promotes it — for good if nothing does.
+    * mdadm has no `MD_NAME` when it cannot read a member superblock, which is
+      the wedged case above.
+
+    An array that is **both** — `inactive` over members that are already error
+    targets, which is what a cleanup that reached `--force` leaves behind — is
+    named by neither and is still skipped — permanently, since `mdadm --run`
+    on such an array was measured failing with EIO out of `array_state`, so it
+    never leaves `inactive`. That one needs an operator, and
+    `/proc/mdstat` (an `inactive` array over this suite's dm names) is what
+    identifies it. `mdadm` and `udevadm` are both required tools for both roles
+    (§5), because an unreadable name matches neither pattern and the array is
+    left alone, which is the safe direction and is also precisely this no-op —
+    but preflight runs **after** the start cleanup and not at all under
+    `--cleanup-only`, so it does not cover the sweep this failure happened in.
+
+    **What it cost.** With the arrays left standing, every `dm_force_remove`
+    call on a device under one found it `BUSY` — confirmed by hand, `dmsetup
+    remove … failed: Device or resource busy` — and ran the full fallback
+    (`remove`, `resume`, `remove --force --retry`, bounded at 10 + 10 + 15 s).
+    At the e2e shape that is ~128 devices taking the long way round, which is
+    the `CLEANUP_TIMEOUT` overrun that has stopped runs in the **start** sweep,
+    before any case began. (Which numbered runs those were is not re-derived
+    here; the reading that matters is the mechanism, and the mechanism is
+    measured.)
+    Once the arrays were stopped the same operations are trivial: 5 `nvme
+    disconnect`s in 0.36 s, 5 `mdadm --stop`s in 0.15 s, 5 `dmsetup remove`s in
+    0.03 s.
+
+    **Two things this does NOT implicate.** The udev mask is correct and
+    unchanged, and the `--examine --export` failure above is not an objection
+    to it, because the mask asks that question of a **member** and on the
+    member's own `add`/`change` event, where the superblock is readable and the
+    array does not exist yet. The rule file is two rules, though, and only the
+    first is scoped: `ACTION=="add|change", SUBSYSTEM=="block",
+    ENV{ID_FS_TYPE}=="linux_raid_member"` carries the `IMPORT`, while
+    `ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"` has no subsystem
+    and no fs-type match at all. What keeps the second off an **array** device
+    is the file name: `63-dnv-md.rules` sorts ahead of
+    `63-md-raid-arrays.rules`, which is what sets `MD_NAME` there, so on the
+    array's own event the property is not there yet to match — measured with
+    the rule installed: the array's db held `MD_NAME` and no `SYSTEMD_READY`,
+    the member held `ID_FS_TYPE=linux_raid_member`, `MD_NAME` and
+    `SYSTEMD_READY=0`. Even if a later event carried the property in from the
+    db and the second rule did fire on an array, it would only hide that array
+    from systemd: `mdadm --stop` and the agent's own `--create`/`--assemble` do
+    not go through udev, and `64-md-raid-assembly.rules` reads `SYSTEMD_READY`
+    to skip *incremental* assembly, which is something done to members.
+    And `dm_force_remove` was re-examined and left
+    as it is: on a device that is **already gone** its three calls are three
+    immediate ioctl failures rather than three timeouts, and that case is
+    close to unreachable anyway because `dm_remove_kind`/`dm_remove_all`
+    enumerate live names out of `dmsetup ls`; on a device that is **genuinely
+    busy** each of the three earns its place — `remove` is the fast path,
+    `resume` is rule 5's D-state guard, and `--force --retry` is the only one
+    that does anything at all to a device that will not go: `--retry` retries
+    the removal, which wins against a transient holder, and `--force` swaps in
+    an error target when it still cannot go, so the device stops backing our
+    storage even though, as the order above says, it stays where it is until
+    its holder lets go. With the stop working the busy case should not arise
+    from md at all.
+
+    **The same defect is still live in three residue probes** — `cn_residue`
+    and `dn_md_residue` here, `residue` in `cnagent_test.sh` — which grep the
+    same absent `name=` field and therefore assert nothing (item 8).
 
 ---
 
@@ -2130,9 +2329,15 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   says what each half asks.
 
   **What the run did not establish.** `cn_cleanup_phase2` also ran past the
-  bound on cn0 and cn2 in that same sweep, and nothing above explains it: the
-  md chain is a DN story, and no mechanism was found by which a stray array on
-  a DN could wedge a CN verb that runs before the DNs are touched. The repeat
+  bound on cn0 and cn2 in that same sweep, and nothing *in this entry* explains
+  it: the md chain is read here as a DN story, and no mechanism was found by
+  which a stray array on a DN could wedge a CN verb that runs before the DNs
+  are touched. (That narrow sentence still holds — but the premise that the md
+  chain is a DN story does not. The 2026-09-17 `md_stop_all` entry below, item
+  4, supplies a candidate for the CN carrying the stack: arrays on the **CN**,
+  left standing by the same no-op, pinning that verb's own kind-`9` leg
+  wrappers. See §6. It covers a primary and not a standby, so the CN question
+  is narrower than it is here, not closed.) The repeat
   invocation finished on all ten guests, CNs included, but it does not settle
   the CN question either, because the first sweep had already done part of that
   work. For the DN guests the repeat *does* mean something — the intervention
@@ -2268,3 +2473,131 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   run turned into the first thing an operator reads when a connecting stage
   fails, since nvme-cli's silence leaves the kernel's line as the only record;
   §8 item 16 holds the observation and its evidence.
+
+* **2026-09-17 — `md_stop_all` had never stopped an array.** Measured on the
+  lab guest carrying the stack at `3734d3c`, and the evidence is in §8 item 17.
+  The verb filtered the `name=` field of `mdadm --detail --scan`, which that
+  command does not print on these guests: a `bash -x` trace of the real verb
+  saw 59 `ARRAY` lines, 59 `continue`s and zero `mdadm --stop`. The function was
+  **byte-identical in `integtest/cnagent_test.sh`**, so it was the same no-op
+  there.
+
+  1. **The fix, in both suites.** `md_stop_all` now walks `/proc/mdstat` and
+     reads each array's `MD_NAME` from
+     `udevadm info --query=property --name=/dev/mdN`, falling back to
+     `mdadm --detail --no-devices --export /dev/mdN` when udev holds no such
+     property, and stopping only an array whose
+     name matches `dnv-*` or `*:dnv-*` — the **same two patterns** the
+     `63-dnv-md.rules` mask matches, against the **same property**, which is
+     why the mask worked all along while this verb did not. The two reads are
+     one command twice over — udev imports that property from that mdadm
+     invocation — and they are both here because each misses arrays the other
+     names: udev has nothing for a `clear`/`inactive` array, mdadm has nothing
+     when a member superblock is unreadable, and an array that is both is named
+     by neither and still skipped (§8 item 17). The `mdadm --stop`
+     stays bounded at `timeout 15` and both name reads are bounded too. The
+     safety property is unchanged and is now load-bearing in a second way: an
+     unreadable name matches neither pattern and the array is left alone, so
+     a lost name source costs a skip and never a wrong stop — and a guest
+     without `mdadm` is the old silent no-op back outright, since `mdadm` is
+     also what does the stopping. That is why `mdadm` **and**
+     `udevadm` are
+     required tools for **both node roles** — both were already in `DN_TOOLS`
+     and `CN_TOOLS` here, and the note calling `udevadm` "the milder of the
+     two" next to `mdadm` is gone; `cnagent_test.sh`'s preflight list did not
+     have `udevadm` at all and does now. What preflight does **not** cover is
+     the start sweep and `--cleanup-only`, which both run before it or without
+     it (§5) — the 2026-09-17 failure was in a start sweep. The
+     `/proc/mdstat` walk also matches on `^md[^ :]+` rather than `^md[0-9]*`,
+     whose zero-or-more digits reduce a `CREATE names=yes` line
+     (`md_<name> : active`) to the bare token `md`, i.e. the by-name
+     *directory*; the lab guests use the default `names=no`, so that is a trap
+     rather than a live failure. The verified form matched 59 of 59 arrays and
+     stopped all 59 in 1.9 s (§6, §8 item 17).
+  2. **Why `cnagent_test.sh` passes with the same no-op in it, and the fix went
+     in anyway.** Three reasons, all read out of that suite. Only two of its
+     five cases build arrays (`redund` and `restart`, through `req_raid1`), and
+     each builds exactly two — one meta group, one data group — against this
+     suite's 64. Both end in `cn_drop` for each CN, the declarative cntlr
+     teardown, and the **agent** stops the arrays on that path — in the agent's
+     code, not in an assertion: `syncup_cntlr.go`'s retire walks the plan's
+     groups into `removeGroup`, which is `mdadm --stop` for a raid1 group
+     (`agent/cnagent/md.go`). The suite asserts nothing about it. After
+     `cn_drop 1; cn_drop 2` each case runs only `assert_no_residue`, whose md
+     line is the same blind `mdadm --detail --scan` grep, so the probe that
+     would have covered the drop is the vacuous one. (`redund`'s demote stage
+     *does* assert `mdadm --stop` twice, and that is evidence the agent's stop
+     works — but demote is a `SyncupCntlr` with `primary = false`, a different
+     path from the `syncup-cn` with an empty cntlr list that `cn_drop` sends.)
+     And the one
+     verb that would have exposed the no-op, `wipe_cn`, runs only in
+     `clone_xfer`, which is built with `req_none` and has no array at all. So
+     nothing is left for `md_stop_all` to stop by the time cleanup runs, its
+     `residue` assertion passes on the dm half, and the busy-device fallback
+     never arises. None of that makes the verb correct — what needs it is the
+     unconditional **start-of-run sweep**, which is what recovers a crashed
+     run, and `--cleanup-only`. The crash path itself calls no cleanup at all
+     in that suite: `on_exit` runs `cleanup_all` only on a zero exit status and
+     otherwise dumps diagnostics and leaves the debris in place, deliberately.
+     So the same fix went in.
+  3. **`dm_force_remove` was reconsidered and deliberately left alone.** The
+     reasoning is now in the comment above this suite's copy (the identical
+     copies in `cnagent_test.sh` and `dnagent_test.sh` were not touched):
+     on an already-gone device the three calls are three immediate ioctl
+     failures and not three timeouts, and `dm_remove_kind`/`dm_remove_all`
+     enumerate live names out of `dmsetup ls` so that case is a race rather
+     than a shape; on a genuinely busy device each of the three is doing
+     distinct work, and the one that made them expensive in the lab was
+     `md_stop_all`, not this.
+  4. **The CN timeouts have a candidate now and still no confirmed cause.**
+     `md_stop_all` is one function in the shared node body, so
+     `cn_cleanup_phase2`'s own call — which sits between the top-of-stack dm
+     kinds and the `a`/`9`/`b` pass exactly to unpin the kind-`9` leg wrappers
+     — stopped nothing either, and up to 128 leg wrappers per CN would then
+     have taken the fallback. It is a mechanism and not a finding, and what it
+     leaves open is the **standby**, not "two CNs and not one": `CNTLR_CNT` is
+     2 and `--cn` is at least 3 (§2), so a spare CN holds no cntlr of the
+     sp and nothing for `cn_cleanup_phase2` to remove — two heavy CNs and a
+     spare one is the shape, not an anomaly. Of the two heavy ones only the
+     primary has arrays (CN12: a standby has no groups), so the md no-op
+     explains the primary's overrun and not the standby's.
+     `CLEANUP_TIMEOUT` stays at 600 s until a run measures it, and the gate's
+     `cn*` remedy says "no confirmed cause" rather than "no recorded cause"
+     (§6).
+  5. **The operator hints now name the command that can answer the question.**
+     `cleanup_dirty_banner` used to say "`sudo mdadm --stop /dev/mdN` for each
+     dnv-named array" over a `cat /proc/mdstat` that does not print names, and
+     the `dn*` branch of `cleanup_start_gate` sent the operator to the same
+     nameless listing. Both now hand over the `udevadm info --query=property
+     --name=/dev/mdN | grep MD_NAME` line and say why, and both add
+     `mdadm --detail --no-devices --export /dev/mdN` for an `inactive` array,
+     which udev holds no `MD_NAME` for. The banner's readings of a surviving
+     array gained the ones this fix added: a missing `mdadm` or `udevadm`, an
+     array neither read could name, and — for that last case — how to identify
+     it from its members in `/proc/mdstat` instead.
+
+  **Left open, and named rather than fixed:** the three residue probes that
+  carry the identical defect — `cn_residue` and `dn_md_residue` in this suite,
+  `residue` in `cnagent_test.sh` — still grep `mdadm --detail --scan` for a
+  `name=` that is not there, so the md half of the stage-91 teardown assertion
+  matches nothing on every guest and passes whatever is held. §8 item 8 no
+  longer claims that probe's blindness is closed, and stage 91's own banner,
+  its `dn_md_residue` assertion text and its closing log line now say the md
+  third is **not asked**, so a green stage does not read as a check that was
+  taken.
+
+  Three sentences in `doc/cnagent_integtest.md` are stale and that document is
+  outside this one's remit, so they are named here for the next sweep — but
+  they are **not** all the same kind of stale:
+
+  * §16 step 7 specifies that suite's cleanup order as "`mdadm --stop` every
+    array whose `mdadm --detail --scan` name starts `dnv-`". That is
+    `md_stop_all`, the function this change rewrote, so it is a live doc/code
+    contradiction and not a recorded open item: the filter is now
+    `/proc/mdstat` plus `MD_NAME`.
+  * §5's binary list still omits `udevadm`, which `cnagent_test.sh`'s preflight
+    now requires (for `udevadm control --reload` and for the `MD_NAME` read).
+    That divergence is **new, created by this change**.
+  * the residue oracle and the diagnostics dump are described as reading an
+    "`mdadm --detail --scan` name". Those two match the probes left blind on
+    purpose above, and are stale in the same way §8 item 8 is.

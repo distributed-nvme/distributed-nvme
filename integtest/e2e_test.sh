@@ -2468,6 +2468,33 @@ suspended_dms() {
 
 # dm_force_remove removes one device, falling back to --force (which swaps in
 # an error table when the device is still open) rather than blocking.
+#
+# THE THREE CALLS WERE RE-EXAMINED ON 2026-09-17 AND LEFT ALONE, because the
+# case that made them expensive was never this function's. What made the
+# 2026-09-17 cleanup grind was md_stop_all stopping nothing, so ~128 devices
+# were still pinned under live arrays — the kind-9 leg wrappers on a CN, a
+# side or the per-CN linear over it on a DN — and every one of them took all
+# three calls; with md_stop_all fixed the busy case should not arise from md.
+# The two shapes, read separately:
+#   - A DEVICE THAT IS ALREADY GONE costs three immediate failures and not
+#     three timeouts: each call is one device-mapper ioctl the kernel answers
+#     with "Device does not exist", so nothing waits and no bound is reached.
+#     It is also close to unreachable — dm_remove_kind and dm_remove_all both
+#     enumerate live names out of `dmsetup ls` (dm_names, dm_kind_names), so a
+#     gone device here means something removed it between the listing and the
+#     call.
+#   - A DEVICE THAT IS GENUINELY BUSY needs all three, and each earns its
+#     place: `remove` is the fast path and the only one that does not touch
+#     the table first, `resume` is rule 5's guard (a device left suspended
+#     must be resumed before anything else touches it, or it goes to D
+#     state where `timeout` cannot reach it), and `--force --retry` is the only
+#     one that does anything at all to a device that will not go — `--retry`
+#     retries the removal, which wins against a TRANSIENT holder such as a udev
+#     worker still probing, and `--force` swaps in an error target when it
+#     still cannot go, so the device stops backing our storage even though (doc
+#     §6) the device itself stays until its holder lets go. Dropping any of
+#     them trades a bounded grind for a wedge or for debris, and
+#     CLEANUP_TIMEOUT is the wedge detector that already bounds the grind.
 dm_force_remove() { # <name>
 	timeout 10 dmsetup remove "$1" >/dev/null 2>&1 && return 0
 	timeout 10 dmsetup resume "$1" >/dev/null 2>&1
@@ -2665,27 +2692,163 @@ nvmet_tree() {
 
 # --- md ----------------------------------------------------------------------
 
-# md_stop_all stops every array this suite created. The agent's --homehost any
-# means the name may or may not carry a homehost prefix.
+# md_stop_all stops every array this suite created. It enumerates the arrays
+# from /proc/mdstat and reads each one's NAME — from udev, and from mdadm when
+# udev has none — because the agent's `--homehost any` means the name may or
+# may not carry a homehost prefix, and because the name is the only thing that
+# separates one of our arrays from a lab guest's own.
+#
+# IT USED TO READ `mdadm --detail --scan` AND THAT COMMAND HAS NO NAME IN IT.
+# Measured on cn2 (192.168.122.77, kernel 7.0.0-31, Ubuntu 26.04 mdadm) on
+# 2026-09-17: the scan prints
+#
+#   ARRAY /dev/md/6030def500000000000000010800 metadata=1.2
+#
+# and nothing else — the path carries MD_DEVNAME, which is hex, not the name —
+# so the old `*name=dnv-*` case could never fire. A `bash -x` trace of the real
+# verb: 59 ARRAY lines, 59 `case`s, 59 `continue`s, zero `mdadm --stop`. The
+# function had never stopped anything on this lab. udev has the name on the
+# assembled device:
+#
+#   $ udevadm info --query=property --name=/dev/md88
+#   MD_DEVNAME=6030def500000000000000018800
+#   MD_NAME=any:dnv-0000000000000001-88-00
+#
+# Walking /proc/mdstat and reading MD_NAME that way matched 59 of 59 arrays on
+# that guest and stopped all 59 in 1.9 s.
+#
+# TWO SOURCES FOR ONE NAME, BECAUSE THEY GO BLIND ON DIFFERENT ARRAYS. udev's
+# MD_NAME is not udev's own answer: the stock
+# /usr/lib/udev/rules.d/63-md-raid-arrays.rules IMPORTs it from
+# `mdadm --detail --no-devices --export $devnode` on the ARRAY device, so the
+# udev read is that mdadm answer cached at the last event that reached the
+# import, and the fallback is the same answer live. Each misses a case the
+# other has:
+#
+#   - udev has nothing while the array is `clear` or `inactive`. The line
+#     above that import in the same file —
+#     ATTR{md/array_state}=="clear*|inactive", ENV{SYSTEMD_READY}="0",
+#     GOTO="md_end" — jumps past it, so such an array has no MD_ property in
+#     the db at all and the udev read comes back empty. That state is not
+#     hypothetical here: `mdadm -I` on ONE member of a two-member raid1 lands
+#     exactly there, which is the stray DN assembly of §8 item 15 before
+#     mdadm-last-resort promotes it — and for good, if nothing does.
+#   - mdadm has nothing when it cannot read a member's superblock. That is
+#     what the 59 wedged arrays of 2026-09-17 looked like: `mdadm --detail
+#     --export` printed MD_UUID and MD_DEVNAME but no MD_NAME and
+#     `mdadm --examine --export` answered "No md superblock detected on
+#     /dev/dm-12" — an unreadable member, and the explanation to hand is that
+#     the same failed sweep had just run ~128 dm_force_remove fallbacks, whose
+#     `--force` swaps an error target in under exactly those legs (that last
+#     step is inference; the unreadable member is what was measured). That is
+#     a property of those particular arrays and not of
+#     mdadm from the assembled side: measured on the same guest with the same
+#     mdadm, `--detail --no-devices --export` prints MD_NAME for a live dnv
+#     array AND for an inactive one whose one member is readable.
+#
+# NEITHER SOURCE REACHES AN ARRAY THAT IS BOTH inactive and standing over
+# members mdadm cannot read — which is precisely what a cleanup that fell
+# through to `dmsetup remove --force` leaves behind, and it is permanent:
+# `mdadm --run` on an array over an error target was measured failing with EIO
+# out of `array_state`, so it never leaves `inactive`. That array is
+# skipped, it still pins its members, and stopping it needs an operator. The
+# udevadm line the banner and the start gate hand over does not name this one
+# either, by construction; what identifies it is /proc/mdstat — an `inactive`
+# array whose member devices are this suite's dm names. The STOP is not the
+# part that fails: `mdadm --stop` was measured working on an inactive array on
+# that guest. It is the name read that does.
+#
+# THE MASK WAS NEVER IMPLICATED and needs no change, but it is TWO rules and
+# only the first is scoped. The first — ACTION=="add|change",
+# SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member" — IMPORTs MD_NAME
+# from `mdadm --examine --export` on the MEMBER's devnode, the event whose
+# assembly it then suppresses. The second, ENV{MD_NAME}=="dnv-*|*:dnv-*",
+# ENV{SYSTEMD_READY}="0", carries no subsystem and no fs-type match at all;
+# what keeps it off an ARRAY device is the file name. 63-dnv-md.rules sorts
+# ahead of 63-md-raid-arrays.rules, which is what sets MD_NAME on an array, so
+# on the array's own event the property is not there yet to match — measured
+# with the rule installed on cn2: the array's db held MD_NAME and no
+# SYSTEMD_READY, the member held ID_FS_TYPE=linux_raid_member, MD_NAME and
+# SYSTEMD_READY=0. Should a later event ever carry MD_NAME in from the db and
+# make it match there, it is still not this function's problem: SYSTEMD_READY
+# is a systemd readiness flag and 64-md-raid-assembly.rules reads it to skip
+# INCREMENTAL assembly, which is done to members; `mdadm --stop` and the
+# agent's own `--create`/`--assemble` do not go through udev at all.
 #
 # WHAT IT MATCHES, because it runs on DN VMs too (dn_cleanup) where no dnv
-# array is ever supposed to exist: only an ARRAY line of `mdadm --detail
-# --scan` whose name is `dnv-…` or `<homehost>:dnv-…`. That is the name the cn
-# agent gives every array it creates (common.NameFmt.CnMdArrayName,
-# common/name_fmt.go:208-220, passed as `--name` at agent/cnagent/md.go:117
-# with `--homehost any` at :125), so a guest's own root or data array is never
-# touched — only an array minted by a dnv cn agent, whether it was assembled
-# here on purpose or by the stock udev rule behind our back.
+# array is ever supposed to exist: an MD_NAME of `dnv-…` or `<homehost>:dnv-…`,
+# and nothing else. That is now the SAME pair of patterns install_udev_rule
+# writes into the mask (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
+# property — the two are no longer two different readings of "the name". It is
+# the name the cn agent gives every array it creates
+# (common.NameFmt.CnMdArrayName, common/name_fmt.go:208-229, passed as `--name`
+# at agent/cnagent/md.go:117 with `--homehost any` at :125), so a guest's own
+# root or data array is never touched — only an array minted by a dnv cn agent,
+# whether it was assembled here on purpose or by the stock udev rule behind our
+# back.
+#
+# AN UNREADABLE NAME LEAVES THE ARRAY ALONE. An answer empty from BOTH reads —
+# no udevadm or no mdadm, no udev db entry for that array, an array state that
+# kept MD_NAME out of the db over members mdadm cannot read, either command
+# hitting its bound — matches neither pattern, so the loop skips it. That is
+# the safe direction of the two and the one this function may not lose; it is
+# also the direction that makes the verb silently do nothing, which is exactly
+# the failure above, so mdadm and udevadm are both required tools for BOTH
+# node roles (DN_TOOLS, CN_TOOLS) and preflight fails on a guest without
+# either.
+#
+# PREFLIGHT DOES NOT COVER EVERY CALL, and the gap is where the 2026-09-17
+# failure sat: preflight_guests runs AFTER the unconditional start cleanup
+# (main, and §5), and `--cleanup-only` does not preflight at all. So on a guest
+# missing one of the two tools, the start sweep — the one that recovers a
+# crashed run — and `--cleanup-only` each get one silent no-op pass, and only
+# the sweeps after preflight are covered.
+#
+# THE /proc/mdstat PATTERN IS `^md[^ :]+` and not `^md[0-9]*`, which would
+# match the bare `md` of a line like `md_dnv-… : active` — mdadm names the
+# device that way when mdadm.conf carries `CREATE names=yes`, since the agent
+# creates through /dev/md/<name> (NameFmt.MdPath). `/dev/md` is the by-name
+# DIRECTORY, so that token would read nothing and skip an array we own. The
+# lab guests run the default `names=no` and show md88/md127, so this is a trap
+# and not a live failure.
 md_stop_all() {
-	local kw dev rest
-	while read -r kw dev rest; do
-		[ "$kw" = ARRAY ] || continue
-		case "$rest" in
-		*name=dnv-* | *name=*:dnv-*) ;;
+	local d name
+	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
+		name=$(timeout 10 udevadm info --query=property \
+			--name="/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		[ -n "$name" ] || name=$(timeout 10 mdadm --detail \
+			--no-devices --export "/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		case "$name" in
+		dnv-* | *:dnv-*) ;;
 		*) continue ;;
 		esac
-		timeout 15 mdadm --stop "$dev" >/dev/null 2>&1
-	done < <(mdadm --detail --scan 2>/dev/null)
+		timeout 15 mdadm --stop "/dev/$d" >/dev/null 2>&1
+	done
+	return 0
+}
+
+# md_names prints the MD_NAME of every assembled dnv array, one per line, by
+# md_stop_all's route and for md_stop_all's reason: `mdadm --detail --scan`
+# prints no `name=` field on these guests, so the `grep -oE 'name=…dnv-…'` this
+# replaces matched NOTHING and every residue assertion built on it passed
+# vacuously — a teardown check that could not fail. Empty output is the pass,
+# as it was before; the difference is that it is now empty because there is no
+# array, not because the field was never there.
+md_names() {
+	local d name
+	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
+		name=$(timeout 10 udevadm info --query=property \
+			--name="/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		[ -n "$name" ] || name=$(timeout 10 mdadm --detail \
+			--no-devices --export "/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		case "$name" in
+		dnv-* | *:dnv-*) printf '%s\n' "$name" ;;
+		esac
+	done
 	return 0
 }
 
@@ -2954,9 +3117,16 @@ dn_cleanup() {
 	#
 	# It is kept even though install_udev_rule now runs on DN VMs: a guest
 	# that ran an older version of this suite, or one whose rule did not take,
-	# must still be cleanable BY THE SUITE. md_stop_all matches only
-	# `name=dnv-…` (see its own comment), so it cannot touch an array of the
-	# guest's own.
+	# must still be cleanable BY THE SUITE. md_stop_all matches only an
+	# MD_NAME of `dnv-…` or `<homehost>:dnv-…` (see its own comment), so it
+	# cannot touch an array of the guest's own.
+	#
+	# IT ONLY STARTED WORKING ON 2026-09-17. Until then it filtered on a
+	# `name=` field `mdadm --detail --scan` does not print on these guests, so
+	# it stopped nothing, and the arrays described above were still standing
+	# when the dm removals below ran — which is what made every one of them
+	# take dm_force_remove's fallback. The cost figure above is that no-op's,
+	# not this verb's.
 	md_stop_all
 
 	# nvmet first: a namespace must be disabled before the dm device under it
@@ -3165,11 +3335,18 @@ cn_cleanup_phase2() { # [extra host nqn…]
 
 # cn_residue is the CN half of smoke's teardown assertion: no dm device, no
 # md array, no nvmet subsystem of this suite may survive the sp.
+#
+# ITS md LINE IS BLIND AND IS NOT FIXED HERE. `mdadm --detail --scan` prints no
+# `name=` field on these guests (md_stop_all's comment has the measurement), so
+# the grep below matches nothing whatever this guest holds, and the md third of
+# this assertion passes for free. The dm and nvmet lines are unaffected. The
+# fix is the one md_stop_all took — /proc/mdstat plus MD_NAME out of `udevadm
+# info` — and it belongs with dn_md_residue, which carries the identical grep;
+# doc §8 items 8 and 17 record it as open.
 cn_residue() {
 	dm_names
 	subsys_names | grep -F -e "$NQN_PREFIX:" -e "$NQN_IT" || true
-	mdadm --detail --scan 2>/dev/null |
-		grep -oE 'name=[^ ]*dnv-[0-9a-f]+' || true
+	md_names
 	return 0
 }
 
@@ -4231,8 +4408,10 @@ FREE_MIN_CP=$((2 << 30))
 #   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 43 in the
 #     default shape — of nvmet ports with their ana_groups, 43 loop teardowns
 #     (a 4 KiB dd, a wipefs and a losetup -d each), the dm devices of every
-#     kind, and now md_stop_all over any stray array the mask did not catch,
-#     each a bounded `mdadm --stop`.
+#     kind, and now md_stop_all over any stray array the mask did not catch —
+#     a bounded `udevadm info` read per array in /proc/mdstat, a bounded
+#     `mdadm --detail` read for each array udev could not name, and a bounded
+#     `mdadm --stop` for each dnv one.
 #   - cn_cleanup_phase2, at least as heavy and the verb that actually blew the
 #     old bound twice. On the CN carrying the stack it is disconnect_prefix
 #     over every side connection that CN holds (up to 128 in the default shape
@@ -4241,12 +4420,29 @@ FREE_MIN_CP=$((2 << 30))
 #     dm_remove_all, where a device that will not go costs dm_force_remove's
 #     10 + 10 + 15 s.
 # On 2026-09-17 cn_cleanup_phase2 ran past the 300 s then in force on cn0 and
-# cn2 and NOTHING EXPLAINS IT: the md chain is a DN story and this verb runs
-# before any DN is touched (doc §8 item 15, §9). Which of the three CNs was
-# carrying the stack was not recorded either, so not even "the heavy one"
-# explains why two of them and not the third. The number below is chosen with
-# that question open, which is the honest reason for headroom rather than a
-# snug fit.
+# cn2. That was written down here as having NO explanation, on the ground that
+# the md chain is a DN story and this verb runs before any DN is touched (doc
+# §8 item 15, §9). Half of that ground is gone: md_stop_all is ONE function in
+# the shared node body and it was a no-op on BOTH roles, so this verb's own
+# `md_stop_all` — which sits between the top-of-stack dm kinds and the kind
+# a/9/b wrappers precisely to unpin the LEG wrappers — stopped nothing either,
+# and every kind-9 leg wrapper under a live array (up to 128 in the default
+# shape) would then have gone the long way round through dm_force_remove. Kind
+# 9 and not kind a: an md member is a CnLegName device, and CnGrpName is the
+# RedundNone group device, which a raid1 group does not have at all
+# (common/name_fmt.go:352-391). That is a mechanism, not a finding: what it
+# still does not explain is the STANDBY. "Two CNs and not the third" needs no
+# explaining: CNTLR_CNT is 2 and --cn is at least 3 (three in the lab), so at
+# least one CN carries no cntlr of this sp at all (SPARE_CN_LIST, logged on
+# every run) and its
+# cn_cleanup_phase2 is a walk over empty `dmsetup ls` output. The other two are
+# both heavy — 128 kind-9 leg wrappers and 128 `:2:` connections each — but
+# only the PRIMARY has arrays (CN12: "Groups (md.go; primary only — a standby
+# has none)"), and the mask is what keeps a stray one off the standby's leg
+# wrappers, which carry md superblocks of their own. So the md no-op is a
+# mechanism for the CN that was primary and not for the other one. The number
+# below was chosen with the standby's overrun unexplained and stays where it is
+# until a run measures it.
 #
 # THE MEASURED FIGURE, and it is the only one there is: on 2026-09-17, after
 # the stray arrays of the first run had been stopped by hand, one
@@ -4329,21 +4525,34 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # truncate: dn_up's sparse backing file (D15). wipefs and dd: loop_teardown,
 # which is the only place either is used and runs on DN VMs alone.
 #
-# mdadm and udevadm are on a DN for the same two verbs they are on a CN for,
-# and they are NOT decoration. A DN with no mdadm would make dn_cleanup's
-# md_stop_all a silent no-op — the 2026-09-17 failure back again, and silently
-# this time. A DN with no udevadm is the milder of the two, and the claim is
-# kept where the evidence is: install_udev_rule and remove_udev_rule both RUN
-# it, which is all this list asks; what it buys is that the mask takes effect
-# AT ONCE. systemd-udevd notices a changed rules directory on its own — that is
-# the same property install_udev_rule's conditional write is written around —
-# so a missing reload leaves the mask stale for as long as udevd takes to see
-# it, with the agent already starting, and not unloaded for ever. (The mask's
-# own IMPORT program is mdadm as well, though by the absolute path udev rules
-# use; `command -v` is the proxy for it here, exactly as it is on a CN.)
+# mdadm and udevadm are on a DN for the same verbs they are on a CN for, and
+# they are NOT decoration, and udevadm is no longer the milder of the two,
+# which is the one thing this note used to get wrong. md_stop_all takes the
+# array's name from `udevadm info` and falls back to `mdadm --detail
+# --no-devices --export` (its own comment says which array each read misses).
+# So mdadm is doubly load-bearing — it is the fallback name source AND the
+# thing that does the stopping, and a node without it makes the verb the silent
+# no-op of 2026-09-17 outright — while a node without udevadm keeps the stop
+# and loses the one name source that survives members mdadm cannot read.
+# Preflight is what makes either loud, FOR THE SWEEPS THAT COME AFTER IT:
+# cleanup_all runs before preflight_guests (main, §5) and `--cleanup-only`
+# never preflights at all, so on a guest missing a tool the start sweep — which
+# is where the 2026-09-17 failure happened, and which is also what recovers a
+# crashed run — gets one unguarded pass, and so does every `--cleanup-only`
+# invocation. From the first between-cases sweep on, the guest has been
+# checked. udevadm has two more callers besides:
+# install_udev_rule and remove_udev_rule both run `udevadm control --reload`,
+# and what that buys is that the mask takes effect AT ONCE. systemd-udevd
+# notices a changed rules directory on its own — that is the same property
+# install_udev_rule's conditional write is written around — so a missing reload
+# leaves the mask stale for as long as udevd takes to see it, with the agent
+# already starting, and not unloaded for ever. (The mask's own IMPORT program
+# is mdadm as well, though by the absolute path udev rules use; `command -v` is
+# the proxy for it here, exactly as it is on a CN.)
 DN_TOOLS="$NODE_TOOLS truncate wipefs dd mdadm udevadm"
 # mdadm: the cn agent (agent/cnagent/md.go:44-168) and md_stop_all. udevadm:
-# install_udev_rule's reload. findmnt: the cn diag's tmpfs listing.
+# md_stop_all's name read and install_udev_rule's reload. findmnt: the cn
+# diag's tmpfs listing.
 CN_TOOLS="$NODE_TOOLS mdadm udevadm findmnt"
 # The hosts run no dnv binary at all (D13). nvme: every connect and disconnect.
 # uuidgen: /etc/nvme/hostid when it is absent. systemctl: the nvmf-connect mask
@@ -5084,11 +5293,23 @@ cleanup_dirty_banner() {
 	log ""
 	log "On a DN VM the known cause of a verb that will not finish is a stray"
 	log "md array over one of this suite's dm devices — the side, or the"
-	log "per-CN linear that maps it: \`cat /proc/mdstat\` there, and"
-	log "\`sudo mdadm --stop /dev/mdN\` for each dnv-named array. dn_cleanup"
-	log "stops them itself, so an array that is still there means mdadm is"
-	log "missing on that guest, or \`mdadm --stop\` would not take, or the"
-	log "array is named something md_stop_all does not match."
+	log "per-CN linear that maps it: \`cat /proc/mdstat\` there, then, for"
+	log "each mdN it lists,"
+	log "  udevadm info --query=property --name=/dev/mdN | grep MD_NAME"
+	log "and \`sudo mdadm --stop /dev/mdN\` for every one whose MD_NAME is"
+	log "\`dnv-…\` or \`<homehost>:dnv-…\`. Neither /proc/mdstat nor"
+	log "\`mdadm --detail --scan\` prints the name on these guests, which is"
+	log "why the udev property is the one to read. udev has no MD_NAME for an"
+	log "array whose state is \`inactive\` — which is what a one-member"
+	log "assembly is — so for those ask mdadm instead:"
+	log "  mdadm --detail --no-devices --export /dev/mdN | grep MD_NAME"
+	log "and if THAT is empty too, mdadm cannot read the member superblock"
+	log "(an error target under it, after a \`dmsetup remove --force\`): the"
+	log "array is ours if its members in /proc/mdstat are this suite's dm"
+	log "devices, and \`mdadm --stop\` is still the way out. dn_cleanup stops"
+	log "them itself, so an array that is still there means mdadm or udevadm"
+	log "is missing on that guest, or neither read named it, or"
+	log "\`mdadm --stop\` would not take."
 	log "##############################################################"
 }
 
@@ -5153,13 +5374,28 @@ cleanup_start_gate() { # <what this cleanup was: for the message>
 		remedy="$remedy side (kind 4) or the per-CN linear over it (kind 1) and"
 		remedy="$remedy dm_remove_kind cannot remove either. Check with"
 		remedy="$remedy \`cat /proc/mdstat\` on that guest (a DN must show"
-		remedy="$remedy none)."
+		remedy="$remedy no dnv array), and read each one's name with"
+		remedy="$remedy \`udevadm info --query=property --name=/dev/mdN |"
+		remedy="$remedy grep MD_NAME\` — neither /proc/mdstat nor"
+		remedy="$remedy \`mdadm --detail --scan\` prints it on these guests."
+		remedy="$remedy An \`inactive\` array (a one-member assembly) has no"
+		remedy="$remedy MD_NAME in udev at all: for those, \`mdadm --detail"
+		remedy="$remedy --no-devices --export /dev/mdN\`."
 	fi
 	if [ -n "$saw_cn" ]; then
-		remedy="$remedy A CN TIMEOUT HAS NO RECORDED CAUSE: cn_cleanup_phase2"
-		remedy="$remedy ran past the bound on two CN VMs on 2026-09-17 and"
-		remedy="$remedy nothing explains it (doc §9). On the CN carrying the"
-		remedy="$remedy stack it is as heavy as anything here — up to 128"
+		remedy="$remedy A CN TIMEOUT HAS NO CONFIRMED CAUSE: cn_cleanup_phase2"
+		remedy="$remedy ran past the bound on two CN VMs on 2026-09-17 (doc"
+		remedy="$remedy §9). The candidate is the same md no-op the DNs had —"
+		remedy="$remedy md_stop_all is one function on both roles and stopped"
+		remedy="$remedy nothing until 2026-09-17, so this verb's kind-9 leg"
+		remedy="$remedy wrappers stayed pinned under live arrays —"
+		remedy="$remedy but it covers the PRIMARY only, since only a primary"
+		remedy="$remedy assembles arrays (CN12); the standby holds as many leg"
+		remedy="$remedy wrappers and no array, and a spare CN holds no cntlr"
+		remedy="$remedy at all (CNTLR_CNT=2), so it is the standby's overrun"
+		remedy="$remedy that is"
+		remedy="$remedy open. On the CN carrying the stack"
+		remedy="$remedy the verb is as heavy as anything here — up to 128"
 		remedy="$remedy \`nvme disconnect\`s, 64 \`mdadm"
 		remedy="$remedy --stop\`s and a whole 32-slice dm stack — so start with"
 		remedy="$remedy \`dmsetup ls --tree\` and \`cat /proc/mdstat\` there,"
@@ -7688,13 +7924,12 @@ cn_residue_empty() { # <v>
 	[ -z "${out//[[:space:]]/}" ]
 }
 
-# dn_md_residue lists any md array on a DN VM whose mdadm name carries the dnv
-# prefix — the same filter cn_residue applies on a CN, run here as a one-line
-# read-only root probe rather than a helper verb: the shared node body gives
-# the DN helper `mdstat` and `md_stop_all` but no verb that LISTS the dnv
-# arrays, and adding one belongs to the section that owns that heredoc.
+# dn_md_residue lists any md array on a DN VM whose name carries the dnv
+# prefix. It is the same filter cn_residue applies on a CN, and it is now the
+# same CODE: both call the shared node body's `md_names`, which reads MD_NAME
+# per array the way md_stop_all does.
 #
-# WHAT IT PROVES, EXACTLY: only the CN assembles arrays ON PURPOSE
+# WHAT IT IS MEANT TO PROVE, EXACTLY: only the CN assembles arrays ON PURPOSE
 # (doc/cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array
 # on a DN VM means something else assembled one — which is not hypothetical:
 # the cn writes each leg's md superblock through the side's nvme-tcp export, so
@@ -7704,20 +7939,25 @@ cn_residue_empty() { # <v>
 # check: it names dnv arrays only, and the guest's own arrays are none of its
 # business.
 #
-# It is no longer the weaker half of §7.5's "no md array on any cn/dn guest"
-# either, and there were TWO ways for it to be blind, not one. A guest without
-# mdadm answers empty and proves nothing, and mdadm was in CN_TOOLS alone;
-# mdadm is in DN_TOOLS now — dn_up's mask and dn_cleanup's md_stop_all both
-# need it — so preflight has already failed on any DN where the TOOL is
-# missing. That says nothing about the other way: an ssh or sudo that fails at
-# this moment also answers empty, and no tool list covers it. So the wrapper is
-# the DYING ssh_dn and not ssh_dn_ok, and the caller dies on a non-zero status
-# — the same shape dn_residue_empty and cn_residue_empty already have. The
-# `|| true` INSIDE the remote command stays: `mdadm --detail --scan` with no
-# array to report exits non-zero through the grep, and that is the pass.
+# THREE WAYS IT COULD ANSWER EMPTY WITHOUT PROVING ANYTHING. Two are closed by
+# preflight and by the wrapper: a guest without mdadm or udevadm answers empty,
+# and both are in DN_TOOLS now — dn_up's mask, dn_cleanup's md_stop_all and
+# md_names all need them — so preflight fails first on a DN that lacks either;
+# and an ssh or sudo that fails at this moment also answers empty, which no
+# tool list covers, so the wrapper is the DYING helper_dn (over ssh_dn, not
+# ssh_dn_ok) and the caller dies on a non-zero status, the shape
+# dn_residue_empty and cn_residue_empty already have.
+#
+# The third was the one that mattered, and it is now CLOSED. This probe used to
+# run `mdadm --detail --scan | grep -oE 'name=…dnv-…'`, and on these guests that
+# scan prints no `name=` field at all (md_stop_all's comment carries the
+# measurement and the bash -x trace), so the grep matched nothing on every DN,
+# always, and the assertion passed whatever the guest held — while the DN md
+# mask it exists to verify was exactly the thing that had been wrong. It reads
+# MD_NAME per array now, the way md_stop_all does. cn_residue's md line had the
+# identical hole and takes the identical fix, through the same `md_names`.
 dn_md_residue() { # <v>
-	ssh_dn "$1" \
-		"mdadm --detail --scan 2>/dev/null | grep -oE 'name=[^ ]*dnv-[0-9a-f]+' || true"
+	helper_dn "$1" md_names
 }
 
 case_teardown() {
@@ -7831,6 +8071,15 @@ case_teardown() {
 }
 
 case_residue() {
+	# READ THE md THIRD OF THIS STAGE AS "NOT ASKED" (doc §8 items 8 and 17):
+	# both probes below still grep `mdadm --detail --scan` for a name that
+	# command does not print on these guests, so their md half matches nothing
+	# on every guest and passes whatever is held. The dm and nvmet thirds are
+	# real. The stage banner below still names md because that is what the
+	# stage is meant to assert; every line that reports a RESULT and names md
+	# — the DN assertion text, the CN wait label and the closing log — says
+	# the md third was not asked, and they go back to plain claims when the
+	# probes move to MD_NAME the way md_stop_all did.
 	stage 91 "residue: no DN capacity held, no dm/md/nvmet object of $SP left"
 	local v k out
 
@@ -7848,7 +8097,8 @@ case_residue() {
 	done
 
 	# Then the guests themselves. dn_residue is dm devices plus tree-minted
-	# nvmet subsystems; cn_residue adds the dnv md arrays. Loop devices are
+	# nvmet subsystems; cn_residue adds the dnv md arrays — blindly, see the
+	# note on the stage line and on dn_md_residue. Loop devices are
 	# deliberately in neither: the agents keep serving on them until cleanup, so
 	# they belong to the run and not to the sp.
 	RESIDUE_LAST=""
@@ -7861,15 +8111,18 @@ case_residue() {
 		out=$(dn_md_residue "$v") ||
 			die "dn$v: listing the md arrays failed (ssh or sudo), so the" \
 				"'no dnv md array on a DN' assertion could not be taken"
+		# Only a CN assembles one (CN12) — but this probe is the blind
+		# one, so a pass here is "not asked" (doc §8 items 8 and 17).
 		assert_eq "${out//[[:space:]]/}" "" \
-			"dn$v holds no dnv md array (only a CN assembles one, CN12)"
+			"dn$v holds no dnv md array (NOT ASKED, §8 item 17)"
 	done
 	for v in "${!CN[@]}"; do
 		wait_until "$WAIT_DELETE" \
-			"cn$v to hold no dm device, md array or subsystem of this suite" \
+			"cn$v to hold no dm device or subsystem of this suite (its md list is the blind probe)" \
 			cn_residue_empty "$v"
 	done
-	log "  every dn and cn guest is free of this sp's dm, md and nvmet objects"
+	log "  every dn and cn guest is free of this sp's dm and nvmet objects" \
+		"(the md third was NOT ASKED — doc §8 item 17)"
 }
 
 # read_space fills the three globals from one guest's `space` verb. It exists

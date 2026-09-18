@@ -1013,7 +1013,7 @@ residue() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-$1-" || true
 	ls "$NVMET/subsystems" 2>/dev/null | grep -E ":$1:" || true
-	mdadm --detail --scan 2>/dev/null | grep -oE "name=[^ ]*dnv-$1-[0-9a-f]+-[0-9a-f]+" || true
+	md_names | grep -E "dnv-$1-[0-9a-f]+-[0-9a-f]+" || true
 }
 
 # cn_residue <cn16> — every dm device of one CN plus the test's host-facing
@@ -1204,19 +1204,81 @@ drop_subsys_glob() {
 	return 0
 }
 
-# md_stop_all stops every array this suite created: mdadm --detail --scan
-# names them, and the agent's --homehost any means the name may or may not
-# carry a homehost prefix.
+# md_stop_all stops every array this suite created: /proc/mdstat enumerates
+# them and udev holds each one's name, with mdadm asked directly when udev does
+# not. The agent's --homehost any means the name may or may not carry a
+# homehost prefix, so both forms are matched — the same `dnv-*|*:dnv-*` pair
+# install_udev_rule writes into the mask, against the same MD_NAME property.
+#
+# IT USED TO FILTER ON `mdadm --detail --scan`, WHICH PRINTS NO NAME on these
+# guests (measured on the lab, kernel 7.0.0-31 / Ubuntu 26.04 mdadm,
+# 2026-09-17):
+# the scan line is `ARRAY /dev/md/<hex MD_DEVNAME> metadata=1.2` and nothing
+# more, so every line hit `continue` and the function stopped nothing, ever.
+# `udevadm info --query=property` has it.
+#
+# THE TWO READS GO BLIND ON DIFFERENT ARRAYS, which is why both are here.
+# udev's MD_NAME is imported from `mdadm --detail --no-devices --export` on the
+# array (/usr/lib/udev/rules.d/63-md-raid-arrays.rules), so the udev read is
+# that answer cached and the fallback is it live. udev has nothing for an array
+# in state `clear` or `inactive`, because the line before that import in the
+# same file jumps past it on exactly those states; mdadm has nothing when it
+# cannot read a member's superblock, which is what the 59 wedged arrays of
+# 2026-09-17 were: `--detail --export` had lost MD_NAME there and `--examine`
+# failed on the member, and the explanation to hand is that dm_force_remove's
+# `--force` had just put error targets under their legs. An array that is both
+# — inactive over unreadable members — is named by neither and is still
+# skipped.
+#
+# An unreadable name matches neither pattern, so the array is left alone: this
+# verb never stops an array that is not a dnv one, and a guest without udevadm
+# or without mdadm gets the old no-op back rather than a wrong stop — which is
+# why both are in the preflight tool list. Note where that list is NOT reached:
+# preflight_vms runs after the unconditional start cleanup, and --cleanup-only
+# skips it entirely, so those two sweeps each get one unguarded pass.
+#
+# The /proc/mdstat pattern is `^md[^ :]+`: `^md[0-9]*` also matches the bare
+# `md` of a `md_<name> : active` line (mdadm.conf `CREATE names=yes`), and
+# /dev/md is the by-name directory, so that token reads nothing and skips an
+# array we own. These VMs run the default names=no; this is a trap, not a live
+# failure.
 md_stop_all() {
-	local kw dev rest
-	while read -r kw dev rest; do
-		[ "$kw" = ARRAY ] || continue
-		case "$rest" in
-		*name=dnv-* | *name=*:dnv-*) ;;
+	local d name
+	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
+		name=$(timeout 10 udevadm info --query=property \
+			--name="/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		[ -n "$name" ] || name=$(timeout 10 mdadm --detail \
+			--no-devices --export "/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		case "$name" in
+		dnv-* | *:dnv-*) ;;
 		*) continue ;;
 		esac
-		timeout 15 mdadm --stop "$dev" >/dev/null 2>&1
-	done < <(mdadm --detail --scan 2>/dev/null)
+		timeout 15 mdadm --stop "/dev/$d" >/dev/null 2>&1
+	done
+	return 0
+}
+
+# md_names prints the MD_NAME of every assembled dnv array, one per line, by
+# md_stop_all's route and for md_stop_all's reason: `mdadm --detail --scan`
+# prints no `name=` field on these guests, so the `grep -oE "name=…dnv-…"` that
+# `residue` used matched NOTHING and the teardown's md assertion passed
+# vacuously. Empty output is still the pass; the difference is that it is now
+# empty because there is no array, not because the field was never there.
+md_names() {
+	local d name
+	for d in $(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null); do
+		name=$(timeout 10 udevadm info --query=property \
+			--name="/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		[ -n "$name" ] || name=$(timeout 10 mdadm --detail \
+			--no-devices --export "/dev/$d" 2>/dev/null |
+			sed -n 's/^MD_NAME=//p')
+		case "$name" in
+		dnv-* | *:dnv-*) printf '%s\n' "$name" ;;
+		esac
+	done
 	return 0
 }
 
@@ -1498,7 +1560,15 @@ preflight_vms() {
 		local missing
 		# No LVM binaries: [D14] removed LVM from the CN entirely. thin_dump stays
 		# — it is the §12 thin-metadata oracle, not an LVM command.
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm truncate stat findmnt thin_dump; do command -v \$b >/dev/null || echo \$b; done")
+		# udevadm: install_udev_rule's and cleanup_phase2's `udevadm control
+		# --reload`, and md_stop_all's MD_NAME read — the first of its two
+		# name sources, and the only one that answers for an array whose
+		# members mdadm can no longer read. mdadm is the other source and is
+		# also what does the stopping, so a VM without it makes that verb the
+		# silent no-op it was until 2026-09-17. Note this list is reached
+		# AFTER the start-of-run cleanup_all and not at all under
+		# --cleanup-only, so those sweeps run unchecked.
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm truncate stat findmnt thin_dump; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agents hardcode the configfs path and neither mount nor
 		# modprobe; the harness does both here and nothing else.
