@@ -252,7 +252,9 @@ provisioning, for the drain and for a hydration) is now three different ones:
   again.
 * `WAIT_PROVISION` bounds an **incremental** convergence on something that
   already exists: the handful of sides a grow adds, one grown group's md array
-  and pool reload, a thin device's volumes and raid0, one leg reconnecting.
+  and pool reload, a thin device's volumes and raid0, one leg reconnecting, and
+  — since the third run — a cntlr's host-facing export, its nvmet subsystem,
+  the link that makes its port listen and its namespace (§4.1 stage 10).
   Twice the old 300 s. Separating the two is what keeps a stuck `td create` from
   costing twenty minutes.
 * `WAIT_DELETE` bounds the drain, which is the build run backwards on the same
@@ -332,7 +334,7 @@ Two consequences the suite acts on:
 | cp | `dnvctl` | `$WORK/bin/dnvctl --gateway-address $CP_IP:29850 --cluster e2e --sp sp0 --trace-id <per stage> --timeout <secs>` |
 | dn VM *v*, instance *k* | `dnv-agent dn` | gRPC `29900+k`, trsvcid `4300+k`, `--nvmet-port-id $((k+1))`, `--disk /dev/loopN` over `$WORK/dn<k>/backing.img`, `--local-store $WORK/dn<k>/store`, log `$WORK/dn<k>/agent.log`, registered `--location dn<v>` |
 | cn VM *v* | `dnv-agent cn` | gRPC 29950, trsvcid 4300, `--capacity 0`, `$WORK/cn/store`, log `$WORK/cn/agent.log`; **no** `--nvmet-port-id`, so it converges `ports/1` |
-| host *h* | nothing of dnv | its own `/etc/nvme/hostnqn` + `hostid`; `nvmf-connect@.service` masked |
+| host *h* | nothing of dnv | its own `/etc/nvme/hostnqn` + `hostid`; `nvmf-connect@.service` and `nvmf-connect.target` masked, and the mask read back rather than announced |
 
 `WORK=/var/tmp/dnv-e2e` on every guest. The generated guest helper lives at
 `/var/tmp/dnv-e2e-helper.sh`, a **sibling** of `$WORK` and never a child,
@@ -574,8 +576,11 @@ Two facts about the ids themselves, both verified rather than assumed:
   and each is forced.** The invariant the suite really keeps is that **every
   path a host holds was made by this suite**: the autoconnector is masked at
   preflight and again in `setup_infra` (because `host_cleanup` unmasks, and
-  `setup_infra` is also the rebuild half of the between-cases step), and
-  `stafd`/`stacd` must be inactive. Discovery through the cdc is used wherever
+  `setup_infra` is also the rebuild half of the between-cases step) — and since
+  the third run the helper *reads both units back* with `systemctl is-enabled`
+  instead of printing `masked` whatever happened, so the two `assert_eq`s that
+  carry this rule are evidence rather than an echo — and `stafd`/`stacd` must
+  be inactive. Discovery through the cdc is used wherever
   the subsystem is in a `CdcEntry`, and the expectation is derived from the
   cntlrs themselves — one record per non-disabled cntlr — never from a
   hand-written pair of addresses. The three direct `nvme connect -n <nqn>`
@@ -659,7 +664,7 @@ loop — `wait_until`'s own, the host-side blocking-safe probe's, and the
 
 | stage | command / act | assertion |
 |---|---|---|
-| 01 | `mkwork` on all ten guests; scp the binaries; re-mask `nvmf-connect@.service` on both hosts | each of the four steps dies on failure; the `masked` answer itself was asserted in preflight, and this re-mask is here because `host_cleanup` unmasks and this function is also the rebuild half of the between-cases step |
+| 01 | `mkwork` on all ten guests; scp the binaries; re-mask `nvmf-connect@.service` and `nvmf-connect.target` on both hosts | each of the four steps dies on failure, and the mask is **asserted** here as it is in preflight: the helper's two `systemctl mask` calls carry `|| true`, so since the third run the verb re-reads both units with `systemctl is-enabled` and prints the word `masked` only when both say it — anything else comes back as `service=… target=…` and fails the `assert_eq` with the states it actually found. An unconditional `echo masked` made that assertion prove nothing, and rule E2E10 rests on it. This re-mask is here because `host_cleanup` unmasks and this function is also the rebuild half of the between-cases step |
 | 02 | start etcd, gateway, worker, cdc on cp | each listener is up before the next process needs it; then `cluster get` answers — and **`NOT_FOUND` is the healthy answer** against an empty etcd, so the readiness predicate treats it as success and anything else (`UNAVAILABLE` from a gateway that is not listening, `ABORTED` from an etcd that has not elected itself) as not-yet |
 | 03 | `dn_up` × `DNS_PER_VM` per DN VM (sequentially — `losetup --find` races with itself), `cn_up` per CN VM | each reports a loop device, a non-zero `write_zeroes_max_bytes` and a live pid; then `preflight_loop_devices` re-reads all `DN_TOTAL` devices |
 | 04 | `cluster create --name e2e --extent-size 67108864` | `cluster get`'s `cluster_id` equals the create reply's; `cluster_conf.dn_bin_conf.extent_size` is the value sent, and `bin0..bin3_shift` are 0/4/8/12 — the whole default ladder survives an extent-size-only request |
@@ -669,7 +674,7 @@ loop — `wait_until`'s own, the host-side blocking-safe probe's, and the
 | 07 | wait (three waits, all `WAIT_BUILD`; the last two repeat together if the role moves under them) | no side has `provisioned == false` (progress is logged whenever the count moves, with a denominator read out of the same reply); then the **primary** reports one `RES_STATUS_OK` pool per slice, one OK group per group and one OK leg per leg **of the shape the poll just read**, and `applied_revision ≥ 1`; the **standby** reports the same leg total and *empty* `grp_id_to_md_raid`, `slice_id_to_dm_pool`, `slice_id_to_meta`, `slice_id_to_data`, `td_id_to_raid0` and `td_id_to_thin_info` — empty maps, not `MISSING` rows, and a non-null `cntlr_info` is asserted first so that `null \| length == 0` cannot pass for "the standby builds nothing". Two of the six are **vacuous where setup makes them**: this stage runs before `td create`, so `td_id_to_raid0` and `td_id_to_thin_info` are empty on the *primary* too, and the shell says so at the function. They would start carrying weight in a step that re-checked a standby once a thin device existed, and no step does: the two later standby checks — the third cntlr of §4.3 stage 03 and the AR7 replacement of §4.5 stage 04 — assert only `grp_id_to_md_raid` and `slice_id_to_dm_pool`. This stage is where the first run died, and three things about it are new (see below the table) |
 | 08 | `td create --name t0 --size 134217728` (4 × `TD_UNIT`) | `created` flips (only the sp-worker writes it); stored size and `ori_id == 0`; then the primary carries `t0`'s raid0 — a *different* row from `created`, and the one a namespace's dm-linear points at |
 | 09 | `ss create`, `ss set-hosts`, `ns create --idx 1 --td t0 --uuid …8c01` | `ss list` shows one subsystem whose key is the `--nqn` string unmunged, `allowed_hosts` exactly the two hosts' own nqns, one namespace at nsid 1 with the chosen uuid, the right `td_id`, `suspended == false` |
-| 10 | host0 discovers through the cdc on `cp:18020`, then `connect-all` | the discovery log equals one record per non-disabled cntlr, derived from the cntlr list; **then the ANA wait, then the device** — a namespace whose only path has never been usable gets no head disk at all, so `wait_dev` before the ANA wait would burn its whole budget; host0's **ANA state** for ns 1 is `optimized` through the primary's controller and `inaccessible` through the standby's, while **both controllers' path state** is `live`. The two are different readings from different places — an ANA state is per namespace, read out of `/sys/class/nvme/<ctrl>/nvme*n*/ana_state`, and a path state is per controller, read out of `nvme list-subsys -o json` — and the suite says at that line that confusing them is how a failover test ends up asserting nothing |
+| 10 | host0 discovers through the cdc on `cp:18020`; **the export gate**; `connect-all`; **the verdict** | the discovery log equals one record per non-disabled cntlr, derived from the cntlr list — a statement about what the *gateway wrote*, which is why it is not enough on its own (below the table). Then `wait_ns_exported_all` holds out, for **every non-disabled cntlr** and not only the primary, until that cntlr's own agent reports `ss_id_to_subsystem[<ss0's id>]` and `ns_id_to_namespace[<ns 1's id>]` `RES_STATUS_OK`, on `WAIT_PROVISION`. Then the connect, and then `connect_verdict`, which **dies when host0 holds no controller for `ss0`** — nvme-cli's exit status is reported and never believed. **Then the ANA wait, then the device** — a namespace whose only path has never been usable gets no head disk at all, so `wait_dev` before the ANA wait would burn its whole budget; host0's **ANA state** for ns 1 is `optimized` through the primary's controller and `inaccessible` through the standby's, while **both controllers' path state** is `live`. The two are different readings from different places — an ANA state is per namespace, read out of `/sys/class/nvme/<ctrl>/nvme*n*/ana_state`, and a path state is per controller, read out of `nvme list-subsys -o json` — and the suite says at that line that confusing them is how a failover test ends up asserting nothing |
 | 11 | write 4 MiB of `/dev/urandom` at offset 0, drop caches, read back | the digest equals the pattern file's; that digest is `SHA0` |
 
 **Stage 07 is where the first run died, and it is three different things now.**
@@ -746,6 +751,110 @@ the threshold set the sp carries. Under the quiet set that cannot happen
 without a finding behind it; under `react`'s it is the case's own starting
 point (§4.5).
 
+**Stage 10 is where the third run died, and it is three things now.** The run
+before it reached this stage with a clean build and then connected host0 to
+nothing: `connect-all` exited 0 having made no controller at all, and the
+stage spent its budget waiting for an ANA state on a path that did not exist.
+§8 item 16 is the evidence; what the stage does about it is here.
+
+1. **The export gate, ahead of the connect.** A discovery log proves that the
+   *gateway* wrote a `CdcEntry` — it is built from the cntlr records and
+   served out of etcd, so it advertises a subsystem and every transport of it
+   before any agent has built anything. `wait_ns_exported_all` therefore waits
+   for the other half, out of `cntlr inspect`: for **every non-disabled cntlr**
+   — `connect-all` connects every record the log offers, and the third run lost
+   both of them — the agent's own `ss_id_to_subsystem[<ss0's id>]` and
+   `ns_id_to_namespace[<ns 1's id>]` rows must read `RES_STATUS_OK`, on
+   `WAIT_PROVISION`. The subsystem row is the one that matters most, because
+   `RES_STATUS_OK` on it includes the **link into the nvmet port**, and that
+   link is what makes the port listen at all; the namespace row is the
+   freshness proof, since its key did not exist before `ns create` and a row
+   under it cannot have come from an older syncup. `= RES_STATUS_OK` and never
+   "not `MISSING`": a provisioning-deferred chain reports
+   `RES_STATUS_PROVISIONING`, which is not ready. One predicate serves both
+   roles because a standby exports the subsystem too, its namespace sitting in
+   the inaccessible ANA group (§8 item 3) — the third run's own dump has
+   `ss_id_to_subsystem` `RES_STATUS_OK` on both cntlrs, with `epoch`s three
+   seconds apart — the two moments this gate is waiting for, and both of them
+   after the connect that run made.
+2. **The verdict, after it.** The helper's `connect_all` now prints every
+   controller the host holds for that subsystem and a machine-readable
+   `ctrl_cnt=`, and `connect_verdict` dies on zero, naming what it means: that
+   there is no ANA state without a controller, that the transports used were
+   the ones the gateway stored, and that the place to look is the CN agent's
+   log for when it created the nvmet subsystem and linked it to its port. The
+   sentence about the exit status is branched on the status itself — over an
+   `rc` of 0 it says that a zero is not evidence, and over a non-zero one it
+   points at nvme-cli's own output instead, because there the tool did say so.
+   It is branched on **which verb ran**, too: the silent zero was measured for
+   `connect-all` and never for the plain `nvme connect` behind `host_connect`,
+   so only the `connect-all` branch cites it as a measurement, and the sentence
+   about what the failure looked like on the wire differs with it — an nvmet
+   port with no subsystem linked to it does not listen at all, which is
+   `ECONNREFUSED`, but an agent has **one** nvmet port shared by every
+   subsystem *it* exports, and a CN guest runs exactly one cn agent ([D12]), so
+   at a `host_connect` site the port can already be listening for a different
+   subsystem and the reader must not be sent looking for `-111`. An unreadable `ctrl_cnt` is its own death, naming the
+   causes that are reachable: a truncated ssh reply, or a helper that died
+   before its verification tail. It does **not** name a stale helper —
+   `ship_helpers` regenerates and re-ships all four helpers to every guest on
+   every run, dying on a failed `scp`, before anything is built or connected,
+   so re-shipping is a last resort there rather than the first move.
+   **The count is per subsystem, which is not the question at two of the
+   sites.** §4.3 stage 03 and §4.5 stage 04 connect-all to pick up one *new*
+   transport while host0 still holds a live path to the primary, so `ctrl_cnt`
+   is ≥ 1 there whatever the new transport did and the verdict cannot fire.
+   Those two sites follow it with `connect_added_ctrl`, the per-address half:
+   an instantaneous read of the controller for **that** traddr, so a
+   connect-all that silently added nothing dies at the connect instead of
+   `WAIT_HOST` later in the `host_path_live` wait. The check is
+   deliberately **instantaneous** rather than a poll: the file's reason is that
+   both nvme verbs are synchronous and nvme-cli does not retry a connect it
+   failed, so a poll here would paper over exactly the race the gate in front
+   of it removes — and the third run is the evidence, since both CNs were
+   listening within nine seconds of its connect and host0 still held nothing
+   when the stage gave up a minute later.
+3. **The ANA wait is two waits on one budget.** `ana_of` answers `none` both
+   for "this host holds no controller on that transport" and for "the
+   controller is there but carries no namespace with that uuid", and the third
+   run died of the first while the message described the second.
+   `host_wait_ana` now waits first for *any* controller for that subsystem on
+   that transport, then for the state, and the second wait gets the remainder
+   of the caller's budget rather than a second copy of it — floored at 1 s,
+   since `wait_until` tests its predicate before it tests the clock, so a
+   1-second budget is still one honest attempt. The controller it resolved is
+   kept in `ANA_CTRL` beside `ANA_LAST`: the ANA wait's message names it, and
+   the failure context prints the pair as `last ANA:` and `last ctrl:`, which
+   is what tells "no path" from "the path is up and the namespace is not on it"
+   (§7). `cn_wait_ana` carries the same split one hop down, for the same
+   reason.
+
+The gate and the verdict are not local to this stage. `host_connect_all` and
+`host_connect` are now the only two places the driver reaches nvme-cli's
+connect verbs at all, and every one of the suite's seven connect sites has an
+export gate in front of it: setup's here, the third cntlr of §4.3 stage 03 and
+the post-ladder reconnect of §4.3 stage 05 (`wait_ns_exported_all`, because
+those are `connect-all`s), the transfer of §4.4 stage 01
+(`wait_xfer_exported` — a transfer's rows are keyed by its xfer id) and the
+fallback source pool of §4.4 (`wait_ns_exported` through `--sp`), host0's
+return to the new primary in §4.5 stage 03 (where the `cntlr_level_ready` wait
+already in front of it asks the same question over every row, so no second poll
+was added) and the AR7 replacement of §4.5 stage 04.
+
+**And the gate is not only for connects.** Every `ns create` whose namespace a
+host then reads gets one, whether or not anything connects. There are four of
+them: setup's ns 1 and §4.4's fallback source pool, both listed above because a
+connect follows them, plus §4.4 stage 02's second namespace and §4.5 stage
+01's, where nothing connects at all — host0 has held the controller since setup
+and the kernel picks the new namespace up on the AEN. `ns create` returning is
+still only a control-plane fact, and the gate is what makes a slow converge
+fail naming the missing row instead of spending `WAIT_HOST` on the ANA state of
+a namespace that does not exist yet. §4.4 stage 02's is the one with the most
+behind it — CN16 rule 5 backs that namespace with the **live dm-clone**, so the
+CN has strictly more to build there than at §4.5 stage 01 — and it was the site
+the first sweep missed, because the sweep was made by grepping `connect`, and a
+site that connects nothing cannot be found that way.
+
 ### 4.2 Case `smoke`
 
 Setup is the subject; the case adds no operation of its own. It exists for the
@@ -780,12 +889,12 @@ change the sp's shape is the case.
 | 03 | `sp set-cntlid-slots --slots 0,1,2` | `cntlid_slot_list == [0,1,2]` |
 | 03 | `sp set-cntlid-slots --slots 1,2` → `INVALID_ARGUMENT` | the message contains `cntlid_slot_list drops slot 0, which cntlr` — the handler checks every **cntlr** before it checks any side, so this is the cntlr loop's message even though it is also true that every side holds slot 0 |
 | 03 | `sp set-cntlid-slots --slots 0,2` → `INVALID_ARGUMENT` | `… drops slot 1, which cntlr`; and a refused call changed nothing |
-| 03 | `cntlr create --slot 2 --cn-white <spare cn>` | a third cntlr on that CN with `cntlid_slot 2`, **not** primary, **not** disabled; it connects every leg as a standby with no groups and no pools — on `WAIT_BUILD`, because a controller born now holds nothing and every leg is a fresh nvme-tcp connection, which is the standby half of a build rather than an incremental convergence; the cdc advertises the third transport; host0's third path goes `live` and the namespace is `inaccessible` on it. **This half of the stage is skipped with a log line when no CN is free** — when every `--cn` guest already carries a cntlr of the sp — exactly as stage 08's CN half is; the refusals above still run and `SHA0` is re-read before the return. Neither skip can fire at an invocation the suite accepts (`--cn` is at least 3 and `CNTLR_CNT` is fixed at 2, so a spare CN always exists); both are guards against a shape a future flag could introduce, not branches the lab takes |
+| 03 | `cntlr create --slot 2 --cn-white <spare cn>` | a third cntlr on that CN with `cntlid_slot 2`, **not** primary, **not** disabled; it connects every leg as a standby with no groups and no pools — on `WAIT_BUILD`, because a controller born now holds nothing and every leg is a fresh nvme-tcp connection, which is the standby half of a build rather than an incremental convergence; the cdc advertises the third transport — and being in the log is not the same as listening, so the export gate of §4.1 stage 10 runs over all three cntlrs before host0 reconnects, the two older ones answering on the first poll; host0's third path goes `live` and the namespace is `inaccessible` on it. **This half of the stage is skipped with a log line when no CN is free** — when every `--cn` guest already carries a cntlr of the sp — exactly as stage 08's CN half is; the refusals above still run and `SHA0` is re-read before the return. Neither skip can fire at an invocation the suite accepts (`--cn` is at least 3 and `CNTLR_CNT` is fixed at 2, so a spare CN always exists); both are guards against a shape a future flag could introduce, not branches the lab takes |
 | 03 | `cntlr delete --id <c3>` while enabled → `FAILED_PRECONDITION` | `is enabled; disable it first` |
 | 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs and host0 loses that path by itself (the subsystem disappears under a live controller and the reconnect is refused with DNR) |
 | 04 | `sp inspect-side --id <a side>`, `dn inspect`, `cn inspect`, `cntlr inspect` | the side's data device OK and `zeroed_ext_cnt == total_ext_cnt`, `applied_revision ≥ 1`; the DN's three rows OK with `port_info.res_name` still its own port id; the primary CN's four node rows OK; the primary cntlr's pools and groups OK |
 | 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe. Every rung is bounded by `WAIT_BUILD` and not `WAIT_PROVISION`: `DISABLE` suppresses everything CN19 names, so the CN tears the whole stack down and the climb back builds all 32 pools and all 64 arrays again — the same work setup pays for. One budget for all of them, because the cheap rungs return on their first poll and cost nothing |
-| 05 | after the ladder | host0 lost its controller when `DISABLE` removed the subsystem under it, so it discovers and connects again; ANA first, device second; `SHA0` |
+| 05 | after the ladder | host0 lost its controller when `DISABLE` removed the subsystem under it, so it discovers and connects again — behind the export gate over **every** cntlr, because the ladder is sp-scoped and the standby tore its own export down and rebuilt it too while `ops_set_level`'s wait watched only the primary. That gate is the **only** wait covering the standby here, and what it is waiting for there is a from-nothing rebuild, so it is given `WAIT_BUILD` rather than the default `WAIT_PROVISION`: `build()` is sequential with legs first and the subsystem among the last rows, so the standby's `ss_id_to_subsystem` cannot go `RES_STATUS_OK` until every leg has been reconnected — the same piece of work the rung above spends a `WAIT_BUILD` on for the primary. The primary returns on the first poll, so the wider budget costs nothing when nothing is wrong. Then the verdict, ANA first, device second; `SHA0` |
 | 06 | `td create --name s0 --ori t0 --size 0` | a snapshot is the one case in which size 0 is legal; it inherits the origin's size and its `ori_id` is `t0`'s `dev_id` |
 | 06 | `td get-bm --name t0 --slice-idx 0 --start 0 --cnt 0` | `--cnt 0` is the whole slice; the reply is the hex map, `byte_cnt` renders as a **bare number** (a Go `int`, unlike every uint64 here), `bitmap_hex` is exactly two hex digits per byte, and **bit 0 of byte 0 is clear**. Mind the polarity, because it inverts the obvious assertion: `1 = unmapped` is the wire convention of every bitmap RPC, produced by the cn agent — which starts from an all-ones map and *clears* the range of every mapped extent, inverting thin metadata's native "mapped = written" exactly once at that boundary — and passed through verbatim by the gateway. So an allocated block is a **clear** bit, and "some bit is set" would pass on a thin device nobody has ever written. What the check pins is block 0 of slice 0: dm-striped maps chunk *c* of a td to slice *c* mod `slice_cnt`, so setup's write at offset 0 is block 0 of slice 0's thin volume at every shape, and bits are LSB-first within a byte, which puts that block in the low bit of the first two hex digits |
 | 06 | `td get-leg-bm --leg <slice 0 data leg>` | the same hex map. **Skipped with a log line under `--redund none`**, where a group has one leg and no md bitmap |
@@ -830,14 +939,14 @@ slice from it.
 | stage | command | assertion |
 |---|---|---|
 | 01 | `xfer create --name x0 --ori-nqn <ss0> --ori-idx 1 --hosts <host1> --auto-suspend` | `xfer get` echoes the id, origin, `auto_suspend`, `allowed_hosts`; `xfer_name_list` names it; host0's ns 1 goes **`inaccessible` with its head disk intact** (an effective suspend is a park) |
-| 01 | host1 `nvme connect -n <XferNqn>` to the primary's transport | ANA `optimized`, then the device; the path is `live`; host1 reads `SHA0` through it — the transfer exports `t0`'s raid0 |
+| 01 | host1 `nvme connect -n <XferNqn>` to the primary's transport | first the export gate, `wait_xfer_exported` on the primary's `xfer_id_to_subsystem` and `xfer_id_to_namespace` rows — **and the park that precedes it is not that gate**: a cntlr converges in one retire phase top-down and then one build phase bottom-up, and the origin namespace's park belongs to the retire half while the transfer's subsystem belongs to the build half, so host0's ns 1 can already read `inaccessible` while `XferNqn` does not exist on that CN yet. Then the connect and its verdict; ANA `optimized`, then the device; the path is `live`; host1 reads `SHA0` through it — the transfer exports `t0`'s raid0 |
 | 02 | `td create --name c0` (the destination), wait for its raid0 | the dm-clone's `dest` argument needs the raid0, which `created` does not cover |
 | 02 | `xfer set-hosts --name x0 --hosts <host1>,<every CN's CnHostNqn>` | `allowed_hosts` is host1 plus all CN host nqns (the list *replaces*, so host1 is repeated or it loses its connection); **then the kernel's own answer is waited for** — the `allowed_hosts` symlink under the transfer's nvmet subsystem on the primary CN — so the clone's first connect is not refused for want of a link that is still only a record |
 | 02 | `clone create --name k0 --dst-td c0 --src-nqn <XferNqn> --src-idx 1 --src-slices … --src-stripe … --src-block … --src-tr-* … --auto-resume` | `clone get` echoes every geometry field; all four `--src-tr-*` are passed, because those flags declare **defaults** (tcp/ipv4/127.0.0.1/4420) rather than empty strings and an omitted one would silently send the loopback |
 | 02 | `clone append-bm --name k0 --src-slice-idx 0 --bm-idx 0 --bm-hex <from the source's `td get-bm`>` | the reply echoes the clone id. The bitmap is fed through **uninverted**: 1 = unwritten is the wire convention of every bitmap RPC and `GetThinDeviceBitmap` already answers in it. What the chunk *skips* is deliberately not asserted — the fold counts an absent or short chunk as written, the safe direction |
 | 02 | `clone set-tr` with the same transport | exercises the RPC without moving anything; the agent skips an entry it is already connected to |
 | 02 | wait for hydration | the primary's `clone_id_to_dm_clone` details are the raw `dmsetup status` line; field 7 is `<hydrated>/<total>`, the same field the gateway parses before it allows `clone delete`. The wait is also the fallback's trigger — see below |
-| 02 | `ns create --idx 2 --td c0 --uuid …8c02` | `optimized` and a device for host0 (both reads are sysfs and `test -e`, so they are legal while ns 1 is parked); its digest is read in stage 03 |
+| 02 | `ns create --idx 2 --td c0 --uuid …8c02` | first **the export gate** on the primary's `ns_id_to_namespace` row for ns 2, although nothing connects here — host0 has held the controller to `ss0` since setup and the kernel picks the namespace up on the AEN, but `ns create` returning is still only the gateway's answer, and this namespace is backed by the **live dm-clone** (CN16 rule 5), so the CN has strictly more to build than §4.5 stage 01's has; without the gate a slow converge spends the whole `WAIT_HOST` of the ANA wait and then blames ANA. Then `optimized` and a device for host0 (both reads are sysfs and `test -e`, so they are legal while ns 1 is parked); its digest is read in stage 03 |
 | 02 | `clone delete --name k0` (no `--force`) | the gateway proves hydration from the primary's own row before it latches, so a successful call is a second, independent confirmation; `deleting == true` is read if the drain has not already finished, then `clone get` → `NOT_FOUND` and `clone_name_list` is empty |
 | 03 | host1 disconnects, then `xfer delete --name x0 --force` | `--force` is the **abort** path: without it the same STM also writes `suspended = true` on the origin, finalising the hand-over. host1 lets go first, or the subsystem would be unlinked under a live controller and the kernel would delete it with DNR |
 | 03 | — | `xfer get` → `NOT_FOUND`, `xfer_name_list` empty; host0's origin namespace is `optimized` with its device back; **the destination's digest now equals the source's**, read through `c0`'s own raid0 with no dm-clone above it; `SHA0` |
@@ -891,6 +1000,12 @@ exactly one controller, AR6 would need the pool over its low-water mark and it
 holds one copy of `t0` with nothing else written into it, and it carries the
 quiet set besides. A shape that cannot move may be compared against a constant;
 `sp0`'s can, which is why it is not.
+
+`sp1`'s subsystem and namespace get the same export gate as every other connect
+in the suite (§4.1 stage 10): `ss create` and `ns create` returning are
+control-plane facts, and this pool's own single cntlr still has to build the
+nvmet objects behind them. The two ids the gate needs are read out of those two
+replies and refused if they are empty, non-decimal or 0.
 
 The design's "add +2 to `DNS_PER_VM` in that branch" is unnecessary and the
 suite does not do it: a DN that already carries one side still reports
@@ -958,7 +1073,7 @@ assertion.
 | stage | act | assertion |
 |---|---|---|
 | 00 | `sp get` | the snapshot above: the numbers are recorded, logged, and shouted about when they are not the fresh-sp shape. The one thing it asserts is that slice 0 reports at least one data group, which no `sp create` can violate — every slice is created with exactly one |
-| 01 | `td create --name a0 --size 2 GiB`, `ns create --idx 2 --td a0 --uuid …8c02` | `slice_list[0].slice_idx == 0` (the stripe every strided write lands in); slice 0's data-group count is **still the one stage 00 recorded** — not the literal 1, so a build that grew slice 0 by itself does not fail the case here, and stage 00 has already shouted if it did; `stripe_size == data_block_size == 1 MiB`, so one strided 1 MiB write is exactly one new thin block; `low_water_mark_pct` in 1..100 — a 0 is refused by the pass gate and anything above 100 switches AR6 off; the device appears for host0 |
+| 01 | `td create --name a0 --size 2 GiB`, `ns create --idx 2 --td a0 --uuid …8c02` | `slice_list[0].slice_idx == 0` (the stripe every strided write lands in); slice 0's data-group count is **still the one stage 00 recorded** — not the literal 1, so a build that grew slice 0 by itself does not fail the case here, and stage 00 has already shouted if it did; `stripe_size == data_block_size == 1 MiB`, so one strided 1 MiB write is exactly one new thin block; `low_water_mark_pct` in 1..100 — a 0 is refused by the pass gate and anything above 100 switches AR6 off; then the export gate on the primary's `ns_id_to_namespace` row for ns 2, although nothing connects here — host0 already holds the controller and the kernel picks the namespace up on the AEN, but `ns create` returning is still only the gateway's answer, and without the gate a slow converge would spend `WAIT_HOST` reporting an ANA state for a namespace the CN has not made; the device appears for host0 |
 | 02 | strided 1 MiB writes at every `SLICE_CNT × 1 MiB` of the device | **the chunk count is computed, not the design's literal 40**: `floor(lwm × total / 100) + 1 − used + 4`, from the primary's own pool `used/total` pair, because that is the pair the worker compares. Three guards: the chunks must fit in `a0`'s per-slice thin volume, must stay *inside* the pool (filling it would put dm-thin into out-of-space mode instead of tripping AR6), and must stay under a sanity cap, since every chunk is 1 MiB on **every leg** of the group |
 | 02 | wait for AR6 | slice 0 gained **exactly one** data group and the sp gained exactly one group, both against readings this step takes for itself just before the write — with `sp_read_roles` among them, because the role may have moved since stage 01 and inspecting a controller that is now a standby would find no pool row to read a `used/total` ratio out of. `data_grp_list[0]` is still the group setup created (a grow appends), so the appended group's index is the count *before* the grow rather than the literal `[1]`; the new group's `ext_cnt` is the first data group's; `LEGS` legs, one side each, on `LEGS` distinct DNs on `LEGS` different VMs. It is deliberately **not** asserted that the new group avoids the DNs the slice already occupies — the design says it does and the worker's own comment says the opposite: the grow passes a nil black list |
 | 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
@@ -966,10 +1081,10 @@ assertion.
 | 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not |
 | 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 writes two `primary` flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
 | 03 | wait for the new primary (`WAIT_BUILD`, `react_new_primary_ready`) | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s; and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet. A second AR5 during that rebuild **stops the run there**, naming both controllers, for the reason above the table; the two smaller waits after it stay pinned to the same controller, since by then the spawn storm is over and a wrong target costs `WAIT_PROVISION` rather than `WAIT_BUILD` |
-| 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
+| 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; the export gate is the `cntlr_level_ready` wait in the row above, which asks the same question over every row of the cntlr rather than two of them, so no second poll was added — the connect is still followed by its verdict; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
 | 04 | leave the agent dead; wait for AR7 | the dead cntlr's id is gone from `cntlr_id_list` and the sp is back to `CNTLR_CNT` cntlrs. AR7 can only act on a cntlr AR5 has already demoted — it skips a primary while a failover candidate exists, and the model refuses it again inside its own STM — which is what makes the two reactions distinguishable at all. Then, before any assertion below: the primary is still the controller AR5 elected in stage 03, or the run stops. Every row below resolves the replacement by elimination from the primary, so a second AR5 in the window between the two steps would point them at the wrong controller |
 | 04 | — | the replacement is on a CN that carried **no** cntlr when the kill happened (membership, not equality: with more than one such CN the pick is random); it has a **new** cntlr id, inherits the dead one's `cntlid_slot`, is a standby (a replacement carries the old cntlr's role, and AR5 had demoted it) and is enabled |
-| 04 | — | the replacement connects every leg as a standby with no groups and no pools, on `WAIT_BUILD` for the same reason the third cntlr of §4.3 gets it; the discovery log has lost the dead CN's transport and gained the replacement's — which is what makes `connect-all` safe again; host0's new path is `live` and the sp's namespace is `inaccessible` on it, and its path to the primary is still `live` |
+| 04 | — | the replacement connects every leg as a standby with no groups and no pools, on `WAIT_BUILD` for the same reason the third cntlr of §4.3 gets it; the discovery log has lost the dead CN's transport and gained the replacement's — which is what makes `connect-all` safe again, though being in the log is not being ready, so the export gate runs over both cntlrs first and the new primary answers on its first poll; host0's new path is `live` and the sp's namespace is `inaccessible` on it, and its path to the primary is still `live` |
 | 04 | restart the killed cn agent | its node rows come back; its `cntlr_ptr_list` is **empty**; and it tears down the md arrays, dm devices and nvmet exports its dead predecessor left in that kernel — which the end-of-run cleanup would also do, but only at the end of the run, and the residue check runs before that |
 | 05 | kill a dn agent **and drop its nvmet port** | killing the agent alone triggers nothing: its nvmet subsystem, port and dm-linear live in the kernel and outlive it, so the primary's probe IO still succeeds, the leg stays OK, `Leg.err_epoch` stays 0 and AR8 never fires. Both planes are needed — the gRPC rounds fail (side unhealthy) and the data path goes away (leg unhealthy). The leg is chosen so that its single side sits on a DN carrying exactly one side of the whole sp, because AR8 repairs the smallest unhealthy leg id and a DN with two sides would make two legs unhealthy |
 | 05 | wait for AR8 | **one more spare than the group had**, read before the kill together with the ids themselves, so a group that already carried one cannot satisfy the wait on its first poll — which is what the old `== 1` form would have done, passing the step without AR8 having acted. Exactly one entry of `spare_leg_list` is new against that id set, and it has one side. Then the switch: the dead leg is out of `leg_list` **and** the group's parked set is exactly what it started with plus the dead leg, and the sp holds one more parked leg than when AR8 started — one more and not two, because `SwitchSpareLeg` takes the promoted spare out as it puts the dead leg in. Both halves are asserted, because either alone is also what a half-applied transaction looks like, and the promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it. One honest limit, unchanged in kind from the old form: AR8 acts once per pass, so the create and the switch are different passes, but a poll that lands after both would find the *dead* leg as the new entry — the two assertions hold either way and only the log line would name the wrong leg |
@@ -992,7 +1107,12 @@ reasons:
    the one direction in which that wait means anything, because a suspend is a
    park and never removes the node;
 2. both hosts `wipe` — every `$NQN_IT` and `$NQN_PREFIX` subsystem plus the
-   discovery controller pointing at the cdc, and never `nvme disconnect-all`;
+   discovery controller pointing at the cdc, and never `nvme disconnect-all`.
+   Since the third run the verb **re-reads sysfs** and prints
+   `wipe_left=<nqns>` when any of those connections survived, and this caller
+   dies on that line: every `nvme disconnect` inside `wipe` is `|| true` with
+   its output discarded, so the verb's own exit status says nothing, and step 3
+   below is exactly where that matters;
 3. `ss delete`, then `td delete` — a subsystem unlinked from its port under a
    live controller kills that controller with DNR and the host never reconnects
    by itself, which is why the hosts let go first;
@@ -1168,7 +1288,10 @@ the nodes do); `modprobe nvme-tcp` and a runnable nvme-cli;
 `nvme_core.multipath == Y`; the identity files, generated if absent and never
 overwritten; `stafd`/`stacd` not active — `stacd` connects on its own, `stafd`
 owns discovery controllers, and nvme-stas sends a DIM in-capsule to every
-discovery controller it learns about; and the `nvmf-connect@.service` mask.
+discovery controller it learns about; and the mask of `nvmf-connect@.service`
+**and** `nvmf-connect.target`, asserted from the helper's own
+`systemctl is-enabled` reading of both units rather than from the fact that it
+ran two `systemctl mask` calls.
 Finally, the two hosts' nqns must differ: two hosts that share one are one host
 to the target, `ss set-hosts` would name the same entry twice, and the copy
 case's "host1 sees the transfer, host0 does not" could not be told apart.
@@ -1289,10 +1412,22 @@ The order:
    during teardown, but only after the host has stopped issuing IO. Each host
    disconnects every `$NQN_IT` and `$NQN_PREFIX` subsystem and the discovery
    controller pointing at the cdc (never `disconnect-all`, which would take
-   down subsystems this suite has nothing to do with), unmasks, and removes
+   down subsystems no dnv suite has anything to do with), unmasks, and removes
    `$WORK`. The identity files are **not** removed: a hostnqn is node identity
    rather than run state, and the kernel keeps a strict 1:1 hostnqn↔hostid map
    that a replaced file under a live association violates.
+   Two corrections the third run made here. The sweep is **not** "every
+   connection this suite could have made and nothing else": `$NQN_PREFIX` is
+   `nqn.2024-01.io.dnv` with no terminator, so the prefix test also matches
+   `nqn.2024-01.io.dnv-it:cdc:*`, `cdc_test.sh`'s own host-facing subsystems on
+   the two host guests the two suites share — at the start of a run that is
+   debris worth sweeping, and at any other time it is one more reason for rule
+   E2E9. (The discovery half is unaffected, being keyed by traddr.) And the
+   disconnects are `|| true` with their output discarded, so the verb now
+   re-reads sysfs and reports what survived as `wipe_left=`. That line is read
+   by the teardown of §4.6, which dies on it; here in the cleanup `host_cleanup`
+   sends `wipe`'s output to `/dev/null` and only its own `cleaned` sentinel
+   reaches the driver, which is what the cleanup gate checks for.
 2. **Every CN, phase 1.** Kill the agent, resume any suspended dm device, drop
    this suite's host-facing subsystems, then the ns-devs, the transfer finals
    and the **clone finals — while their transfer source connection is still
@@ -1393,8 +1528,28 @@ built is still there while it runs and afterwards. Three properties shape it:
   which is when a guest command hangs; each dump is `timeout 60`.
 
 What it prints, in order: the failure context (stage, trace id, case, whether
-setup finished, **the last ANA state actually observed** — which is the
-difference between "it never became optimized" and "it became inaccessible" —
+setup finished, **the last ANA state observed and the controller the last probe
+resolved** — the state alone is the difference between "it never became
+optimized" and "it became inaccessible", and since the third run the pair
+carries a third answer the state could not: `none` is what the probe returns
+both for a controller that is not there and for one whose namespaces do not
+include that uuid. **Read the pair controller first.** `last ctrl: none` is the
+no-path answer whatever the line above it says — that is the
+`*_ctrl_is_present` half of the split wait, which takes no ANA reading at all
+and therefore *clears* `ANA_LAST`, so what prints beside it is `(none read)`.
+Leaving the previous reading standing was the first attempt at this and it was
+backwards: the two globals are written in exactly two places and reset nowhere,
+so a no-controller timeout at any stage after a successful ANA read would have
+printed a fresh `last ctrl: none` beside a stale `last ANA: optimized` — the
+dump claiming a reading that wait never took, which is the fault the split
+exists to remove. `last ANA: none` beside a **controller name** is the other
+answer: the path is up and the namespace is not on it. Both globals are shared
+by the host and CN probes, so the pair is "the last reading either of them
+took", and the stage on the failure line above says which. The third run had
+only the state to print: it printed `none`, which was the first of those two,
+while the failure line above it described the second. §4.1 stage 10 is the wait
+that now
+separates them before the timeout —
 the shape, the cluster id, the cp daemons and their pids, every recorded loop
 device, and the driver's copy of the last dnvctl call's three streams, which
 survives a cp that has become unreachable); cp's own diag, 200 lines of each of
@@ -1406,8 +1561,9 @@ by the ids in `sp_conf.cntlr_id_list`, since `cntlr_list` entries carry no id
 at all — `cn inspect` of every CN and `dn inspect` of the disk nodes the case
 registered as involved), attempted only when setup built something and the
 gateway is still the process this suite started; each host's controllers, every
-namespace's uuid and `ana_state`, the mask, stas and any task in D state, which
-is what a wedged read looks like from outside; each CN's dm tree, dm status,
+namespace's uuid and `ana_state`, the mask, stas, any task in D state — which
+is what a wedged read looks like from outside — and 100 lines of its `dmesg`;
+each CN's dm tree, dm status,
 suspended devices, `/proc/mdstat`, `mdadm --detail --scan`, nvmet tree, loop
 devices, tmpfs mounts, space, `dmesg`, `nvme list-subsys`, 200 lines of its
 agent log and that log's `"level":"ERROR"` records; and each DN's same set —
@@ -1418,6 +1574,19 @@ the dump had already said nothing about them — plus a **selected** log dump
 — a DN VM holds up to 43 agent logs, so every
 log carrying an ERROR record is *named* with its count and only the first few,
 plus the instances the case registered, are tailed in full.
+
+**When the failing stage is one that connected, read the host's `dmesg`
+first.** The dump has always carried it; what the third run changed is how much
+weight it has to bear. nvme-cli prints nothing and exits 0 whether it connected
+every path or none (§8 item 16), so the kernel's lines are the only record that
+a connect was attempted at all and the only place its fault is named: a
+`new ctrl: NQN "<the subsystem>"` line for each path that came up, and for one
+that did not, `failed to connect socket: -111` — `ECONNREFUSED`, one per
+discovery record, which says the advertised address was not listening.
+Neither appears anywhere else in the transcript. Since the third run the suite
+gets there first: `connect_verdict` dies at the connect, naming the CN agent
+log to read and the nvmet objects to look for, so the `dmesg` is the
+confirmation rather than the discovery.
 
 Stage names and trace ids are the index into all of it: the failure line ends
 with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
@@ -1659,6 +1828,107 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     thing that can suppress the assembly — the two clean guests were carrying a
     different rule file, whose text nobody read — nor what a guest whose udev
     does not probe dm devices at all would have done.
+16. **`nvme connect-all` exited 0 having connected nothing, and the cdc
+    advertises a subsystem before any CN has built it — the third run's setup
+    failure, observed once.** Two facts, both established on the guests at
+    commit `7721516`. The second is why the first was reached at all, and
+    neither is a slow step that a larger budget would have absorbed.
+
+    **(a) An exit status is not evidence of a path.** Stage 10's helper printed
+    `rc=0` and nothing else — `connect_all` folds nvme-cli's stderr into its
+    stdout, so "nothing else" covers both streams — while host0 ended the stage
+    holding no controller at all: the diagnostics' `nvme list-subsys`,
+    "controllers" and "ana states" sections are empty, and its dmesg carries no
+    `new ctrl: NQN "nqn.2024-01.io.dnv-it:e2e:ss0"` line anywhere. What that
+    dmesg does carry, between the `new ctrl` and `Removing ctrl` pair of
+    connect-all's own discovery connection, is
+    `nvme nvme1: failed to connect socket: -111` **twice** — `ECONNREFUSED`,
+    one per discovery record. So both connects were attempted, both failed in
+    the kernel's TCP connect, and nvme-cli reported neither and returned 0.
+    A second shape of the same zero was reproduced by hand against this same
+    cluster: `connect-all` presenting a hostnqn that is not in the subsystem's
+    `allowed_hosts` also exits 0 with nothing connected, and the cdc's own log
+    says why — `nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-0000deadbeef`
+    connected at 20:11:37.554 and disconnected 8 ms later — which is DS4 doing
+    its job: a non-empty `allowed_hosts` hides the entry from every other host,
+    the log page comes back empty, and there is nothing to connect. It is not a
+    privilege story either: run as a non-root user the same command fails
+    loudly with `Failed to open /dev/nvme-fabrics: Permission denied` and rc 1,
+    and `ssh_host` prepends sudo. Read this as two observations rather than a
+    law about nvme-cli: what is established is that on this lab's nvme-cli an
+    empty discovery log and a socket that refuses both leave rc 0 — not that
+    every failure does. The suite's older rule — report the status, never
+    assert it — is unchanged, and the helper still only reports it. What the
+    observation added is the other half of the verb: the helper now prints
+    every controller the host holds for that subsystem and a machine-readable
+    `ctrl_cnt=`, and `connect_verdict` dies on zero, so what a connect is
+    judged by is the host's own state (§4.1 stage 10).
+
+    **(b) The discovery log is a control-plane reading, so it runs ahead of the
+    data plane.** `CreateSubsystem` writes the `CdcEntry` in the same STM as
+    the Subsystem and the SpConf (`gateway/subsystem.go:189-195`), and the
+    transports it advertises are `enabledCntlrTrConfs(cntlrs)` — every
+    non-disabled cntlr's own `nvme_tr_conf`, taken from the cntlr **records**
+    (`gateway/common.go:784-793`). Not one field of it is a report from an
+    agent. dnv-cdc serves its log from an etcd watch (`cdc.md` §3), so the
+    advertisement is live within milliseconds of the commit, while the CN
+    learns of the subsystem on its next syncup and builds it bottom-up. The
+    third run's own timestamps, from the cp daemons' logs and the primary CN's
+    agent log:
+
+    | when (UTC) | what |
+    |---|---|
+    | 20:09:11.3204 / .3259 | the gateway's `CreateSubsystem` request and reply |
+    | 20:09:11.3265 / .3267 | the cdc's watch event for the new entry — both CN transports, no `allowed_hosts` yet — and the entry applied |
+    | 20:09:11.3643 | the `SyncupCntlr` carrying that subsystem reaches the primary CN; its reply comes at 20:09:18.1439, 6.8 s later |
+    | 20:09:11.6357 | `UpdateSubsystemHosts`'s rewrite of the entry reaches the cdc |
+    | 20:09:12.0205 | `CreateNamespace` |
+    | 20:09:13.5614 | host0's `nvme discover`, the suite's own, logged by the cdc as a host connect |
+    | 20:09:13.9418 | `connect-all`'s own discovery connection — and 5 ms and 10 ms after it in host0's dmesg, the two `-111`s |
+    | 20:09:15.6892 / .6977 | the **standby** cn0 creates the nvmet subsystem and links it into `ports/1/subsystems` |
+    | 20:09:17.6375 | cn0 writes its namespace's `ana_grpid` 3 and enables it — the standby's inaccessible copy |
+    | 20:09:18.1247 / .1313 | the **primary** cn2 creates the subsystem and links it |
+    | 20:09:23.2982 / .3069 | cn2 links both hosts into the subsystem's `allowed_hosts` |
+    | 20:09:23.3219 / .3223 | cn2 creates namespace 1 and writes its `enable` |
+
+    The last five rows are the two agents' own `mkdir`, `ln` and configfs-write
+    lines, read out of their logs. So the connects went out **1.75 s before
+    either CN had a
+    listener at all**, 4.2 s before the primary had one, and 9.4 s before the
+    primary held the namespace whose ANA state stage 10 waits on. An nvmet port
+    is not a listening socket until a subsystem is linked to it — the same fact
+    preflight's nvmet-port check is built on (§5) — which is exactly what
+    `-111` says. It was **not** a permissions race: in that first pass the
+    desired host set was still empty, so the agent read `attr_allow_any_host`
+    as `0` and wrote `1` (20:09:18.1265), and a subsystem that admits everybody
+    would have admitted host0 too. Everything had caught up long before the
+    stage's 60 s ANA wait expired: cn2's diagnostics dump shows `ss0` under
+    `subsystems` **and** under `ports/1/subsystems`, both hosts' nqns in its
+    `allowed_hosts` and namespace 1 present, and the guest still answers
+    `LISTEN … 192.168.122.77:4300`. Nothing was wrong with the transports, the
+    NQNs, the hostid or the cdc, and the end state is what says so: the address
+    the log advertised is the one cn2 listens on, the NQN in the log is the one
+    it created in configfs, and host0's own nqn is one of the two under that
+    subsystem's `allowed_hosts`.
+
+    **Connecting immediately after a control-plane write is a race the suite
+    must wait out, and calling it a timing fluke would be wrong twice over.**
+    It is not rare: there is no ordering in the tree that makes the etcd commit
+    and the CN's convergence simultaneous, the gateway returns as soon as the
+    STM commits, and a cntlr builds bottom-up with the subsystem, the
+    namespaces and their ns-devs as the last rows to appear (§4.5) — so the
+    window is about a whole syncup pass wide, 6.8 s here, on this sp's widest
+    shape, on a 2-vCPU guest. And it is not a wait that was
+    too short: the connect does not retry, so the step that timed out was not
+    the connect but the ANA read behind it, watching for a path that had
+    already been refused and would never be made again. Only a wait on the
+    CN's own answer closes it, which is what §4.1 stage 10 now does. The
+    pattern was already in this file at the other end of the run: `react`'s
+    stage 03 waits for CN19's whole `READWRITE` shape — subsystem and namespace
+    rows included — before host0 connects to the new primary, and says in so
+    many words that a connect issued on the strength of the raid0 alone can be
+    refused by a target that has not created the subsystem yet (§4.5). Setup,
+    which connects first and which every case runs, did not.
 
 ---
 
@@ -1873,3 +2143,128 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   rather than a theory: 600 s is wide enough for a CN tearing down a whole
   32-slice stack, and any verb that still exceeds it now stops the run where it
   happened instead of surfacing later as something else (§6).
+
+* **2026-09-17 — the third lab run: the build came up clean, and the host
+  connected to nothing.** At commit `7721516` the two earlier rounds of fixes
+  did what they were for. The md mask held on all four DN guests, preflight
+  passed everywhere, and the build was clean in the strong sense — no failover,
+  no spare leg:
+
+  ```
+  primary cntlr 1 on cn2 (192.168.122.77:29950), standby 2 on cn0 (192.168.122.125:29950)
+  cntlr 1: pools 32/32, groups 64/64, legs 128/128
+  cntlr 2: legs 128/128
+  ```
+
+  Setup steps 01 to 09 all passed: 172 dn agents, the cluster, 175 node
+  records, the 32-slice raid1 sp, all 128 sides provisioned, the primary's
+  whole stack, `t0`, `ss0`, `set-hosts` and ns 1. It then failed in setup
+  step 10, 60 s after a `connect-all` that had reported `rc=0`:
+
+  ```
+  FAILED … timed out after 60s waiting for:
+    host0 ANA 'optimized' for ns 2b6f0cc9-… via 192.168.122.77
+  ```
+
+  **The message pointed at the wrong part of the tree.** host0 held no
+  controller at all — no ANA state was ever read, and the failure context's
+  `last ANA` line said `none` — so the fault was not in ANA, and not in the
+  cdc either: the discovery log printed just above the failure was correct and
+  had been served correctly. §8 item 16 is the evidence and the timeline;
+  in one sentence each, the two facts behind it are that **`nvme connect-all`
+  exits 0 having connected nothing** — in this run both of its connects took
+  `ECONNREFUSED` and it said nothing about either — and that **the cdc's
+  discovery log is a control-plane reading**, written by the gateway from the
+  cntlr records and served out of etcd, so it advertises a subsystem and both
+  its transports before any CN agent has created the nvmet subsystem, linked it
+  to its port or made the namespace. Step 10 discovered and connected 2.6 s
+  after `ss create` committed, which was 1.75 s before the first of the two CNs
+  had a listener at all. **That is a race to be waited out, not a timing
+  fluke:** nothing in the tree makes the etcd commit and the CN's convergence
+  simultaneous, and a longer wait would not have helped — both CNs were
+  listening within nine seconds of that connect, and host0 still held nothing
+  when the stage gave up a minute later, because nothing retried it.
+
+  **What changed, in the suite:** every connect now has a gate in front of it
+  and a verdict behind it, and the ANA wait no longer speaks for both.
+
+  1. **The export gate.** `wait_ns_exported` / `wait_ns_exported_all` /
+     `wait_xfer_exported` hold out for the *agent's* rows out of
+     `cntlr inspect` — `ss_id_to_subsystem` plus `ns_id_to_namespace`, or a
+     transfer's two rows keyed by its xfer id — `RES_STATUS_OK`, for every
+     non-disabled cntlr where the connect is a `connect-all`. The budget is
+     `WAIT_PROVISION` where the convergence really is incremental, which is
+     everywhere a from-nothing wait has already run against the same cntlr or
+     nothing was torn down; `ops` stage 05 passes `WAIT_BUILD` instead, because
+     there the gate is the only wait covering the **standby** and the standby
+     is rebuilding from nothing after `DISABLE`. `RES_STATUS_OK` on the
+     subsystem row is what covers the link into the nvmet port, and that link
+     is what makes the port listen (§4.1 stage 10). All seven connect sites
+     have a gate in front of them — six through these helpers, and `react`
+     stage 03 through the `cntlr_level_ready` wait that already asked the same
+     question over every row of the cntlr — and so do the two namespaces that
+     connect nothing but are read by a host: `react` stage 01's second
+     namespace, and `copy` stage 02's, which is backed by the live dm-clone.
+     That second one was missed by the first sweep, which was made by grepping
+     `connect` — a method that structurally cannot find a site where nothing
+     connects. The four `ns create` calls in the suite are the whole class and
+     all four are now gated.
+  2. **The verdict.** `connect_all` and `connect` now print the controllers the
+     host holds for the subsystem and a `ctrl_cnt=`, and `connect_verdict` —
+     reached through the driver's two new wrappers, `host_connect_all` and
+     `host_connect`, the only places the driver touches nvme-cli's connect
+     verbs — dies on zero with a message that says an exit status of 0 proves
+     nothing, that this is neither an ANA nor a cdc fault, and where to look.
+     The message is branched on **which verb ran**, because the silent zero was
+     measured for `connect-all` and not for the plain `nvme connect`, and
+     because the `ECONNREFUSED` shape belongs to a port with no subsystem
+     linked to it — an agent has one nvmet port shared by every subsystem it
+     exports, and a CN runs one cn agent, so at a `host_connect` site it may
+     already be listening.
+     Where the count cannot answer the question — the two sites that
+     connect-all onto a subsystem the host already holds a path to —
+     `connect_added_ctrl` reads the controller for the **new traddr**
+     immediately afterwards. It does not poll: both verbs are synchronous, so a
+     poll would hide the race the gate removes.
+  3. **The ANA wait is two waits.** `ana_of`'s `none` means both "no
+     controller" and "no such namespace on it", and the run died of the first
+     while the message described the second. `host_wait_ana` and `cn_wait_ana`
+     now wait for a controller first and the state second, sharing the caller's
+     one budget, and keep the controller they resolved in `ANA_CTRL`, which the
+     failure context prints as `last ctrl:` beside `last ANA:` (§4.1 stage 10,
+     §7). The no-controller half **clears** `ANA_LAST` rather than leaving it:
+     the two globals are reset nowhere else, so leaving the previous stage's
+     reading standing would have made the dump print a fresh `last ctrl: none`
+     beside a stale `last ANA: optimized` — a reading that wait never took,
+     which is the exact fault the split was added to remove.
+  4. **The mask is read back.** Unrelated to the failure, found beside it: the
+     host helper's `mask` verb printed `masked` unconditionally while its two
+     `systemctl mask` calls carried `|| true`, so preflight's `assert_eq`
+     proved nothing about the state rule E2E10 rests on. It now re-reads both
+     units with `systemctl is-enabled` and prints what it found, and the host
+     `diag` dump prints both units too rather than only the service (§2.5, §3
+     rule E2E10, §4.1 stage 01, §5, §7).
+  5. **So is the host wipe.** The same shape once more: every `nvme disconnect`
+     inside `wipe` is `|| true` with its output discarded, so the verb exited 0
+     whether the host let go or not — and the teardown unlinks the subsystem
+     immediately afterwards, which kills a surviving controller with DNR. The
+     verb now re-reads sysfs and prints `wipe_left=`, and the teardown dies on
+     it, **naming the NQNs that survived** rather than asserting they are
+     `ss0`: for the reason in the same breath below, a `wipe_left=` line can
+     carry a `cdc` NQN, and the DNR sentence about `ss delete` is said only
+     when `ss0` is among the survivors (§4.6). Its header lost a false sentence
+     at the same time: the sweep is not "every connection this suite could have
+     made and nothing else", because the `$NQN_PREFIX` test has no terminator
+     and reaches `cdc_test.sh`'s subsystems on the shared host guests (§6).
+  6. **The three `disconnect_prefix` sites say what they can detect.** The same
+     shape as the `wipe` one and left over from it: the verb discards every
+     `nvme disconnect`'s status and ends `return 0`, so `|| die "disconnecting
+     X failed"` could only ever fire on ssh or the dispatch. The messages now
+     say that, and each site's real check remains the `host_path_gone` poll
+     that already followed it (§4.4 stages 02-03, §4.5 stage 03).
+
+  In this document, §4.1 stage 10 and the four case tables state the gate and
+  the verdict where they run; §7 keeps the host `dmesg` dump, which the third
+  run turned into the first thing an operator reads when a connecting stage
+  fails, since nvme-cli's silence leaves the kernel's line as the only record;
+  §8 item 16 holds the observation and its evidence.
