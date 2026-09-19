@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"time"
 
@@ -29,6 +31,25 @@ func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return cmdCtx(ctx)
 }
 
+// Reported says whether the tool ran to completion and gave an answer.
+// common.OsClient.RunCommand returns exitCode -1 together with a non-nil
+// error when the process never reported — killed at the soft timeout, killed
+// at the hard timeout, failed to start, ctx cancelled, semaphore refused —
+// and exitCode > 0 when the tool ran and answered "no". Conflating the two is
+// what let a killed probe read as "the object does not exist": the removal
+// was skipped, the object was forgotten, and nothing enumerated it again.
+//
+// A killed command may still have completed in the kernel (the ioctl finishes
+// regardless of the signal), so a caller that learns "did not answer" must
+// re-probe rather than conclude anything.
+func Reported(exitCode int, err error) bool {
+	return err == nil || exitCode > 0
+}
+
+func reported(exitCode int, err error) bool {
+	return Reported(exitCode, err)
+}
+
 // run executes one command under the soft timeout. It returns the raw
 // results; callers decide whether a non-zero exit means "absent" or "failed".
 func (b *osBase) run(
@@ -39,6 +60,26 @@ func (b *osBase) run(
 	cctx, cancel := cmdCtx(ctx)
 	defer cancel()
 	return b.oc.RunCommand(cctx, name, args, "")
+}
+
+// runProbe executes one command whose non-zero exit means "the object is not
+// there". It splits the three outcomes the sweep depends on: (stdout, true,
+// nil) the tool answered yes, ("", false, nil) the tool ran and answered no,
+// and ("", false, err) the tool did not answer at all and the caller learned
+// nothing.
+func (b *osBase) runProbe(
+	ctx context.Context,
+	name string,
+	args ...string,
+) (string, bool, error) {
+	stdout, stderr, exitCode, err := b.run(ctx, name, args...)
+	if err != nil {
+		if !reported(exitCode, err) {
+			return "", false, cmdError(name, args, stdout, stderr, err)
+		}
+		return "", false, nil
+	}
+	return stdout, true, nil
 }
 
 // runStdin executes one command with a stdin payload. dmsetup's --table is
@@ -110,6 +151,34 @@ func (c *Cmd) Run(
 	return c.run(ctx, name, args...)
 }
 
+// RunProbe is runProbe for role packages: a command whose non-zero exit means
+// "absent", with "did not answer" kept apart from it.
+func (c *Cmd) RunProbe(
+	ctx context.Context,
+	name string,
+	args ...string,
+) (string, bool, error) {
+	return c.runProbe(ctx, name, args...)
+}
+
+// ListDir lists a directory for a role package; ok is false when it does not
+// exist, and an error means the listing did not answer.
+func (c *Cmd) ListDir(
+	ctx context.Context,
+	path string,
+) ([]string, bool, error) {
+	return c.listDir(ctx, path)
+}
+
+// ReadAttr reads a virtual-filesystem attribute for a role package under the
+// "did not answer" rule: ok is false only for a genuine ENOENT.
+func (c *Cmd) ReadAttr(
+	ctx context.Context,
+	path string,
+) (string, bool, error) {
+	return c.readAttrStrict(ctx, path)
+}
+
 // RunOk folds a non-zero exit into an error carrying the command output.
 func (c *Cmd) RunOk(ctx context.Context, name string, args ...string) error {
 	return c.runOk(ctx, name, args...)
@@ -158,6 +227,28 @@ func (b *osBase) readAttr(
 	return strings.TrimSpace(data), true, nil
 }
 
+// readAttrStrict is readAttr under the "did not answer" rule: only a genuine
+// ENOENT is "absent", every other failure is an error. The enumerators of the
+// sweep read through this one, because their caller's next move on an
+// "absent" is a removal — an unreadable device_path must never make a
+// subsystem look unowned. The probe-first writes keep readAttr, where a
+// failed read just means "write the value".
+func (b *osBase) readAttrStrict(
+	ctx context.Context,
+	path string,
+) (string, bool, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	data, err := b.oc.ReadFile(cctx, path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read %s: %w", path, err)
+	}
+	return strings.TrimSpace(data), true, nil
+}
+
 // writeAttr writes a virtual-filesystem attribute in place (SH18: WriteFile's
 // atomic replace cannot work on configfs).
 func (b *osBase) writeAttr(
@@ -194,14 +285,16 @@ func (b *osBase) ensureAttr(
 }
 
 // listDir returns the entries of a directory; ok is false when the directory
-// does not exist.
+// does not exist. An `ls` that did NOT answer is an error, never "absent":
+// RemoveSubsystem and RemovePortLink walk their children through this, and a
+// killed listing used to make them skip every object silently.
 func (b *osBase) listDir(
 	ctx context.Context,
 	path string,
 ) ([]string, bool, error) {
-	stdout, _, _, err := b.run(ctx, "ls", "-1", path)
-	if err != nil {
-		return nil, false, nil
+	stdout, ok, err := b.runProbe(ctx, "ls", "-1", path)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	var out []string
 	for _, line := range strings.Split(stdout, "\n") {

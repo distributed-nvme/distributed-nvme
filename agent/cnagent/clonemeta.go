@@ -715,13 +715,13 @@ func (s *CnAgentServer) probeCloneArenaCannotSupply(
 	return "", false
 }
 
-// reconcileCloneMeta removes the kind-`b` wrappers of one CN whose clone is in
+// reconcileCloneMeta removes the kind-`cb` wrappers of one CN whose clone is in
 // no locally stored cntlr's desired state — their units are free again in the
 // next enumeration. It runs only from the two passes that see *every* stored
 // cntlr (Reconcile and syncupCn), both under the node write lock; a
 // SyncupCntlr sees one cntlr and could never tell an orphan from a stranger's
 // wrapper. Wanted names are compared as a set, so no reverse parser for the
-// kind-`b` name format is needed.
+// kind-`cb` name format is needed.
 func (s *CnAgentServer) reconcileCloneMeta(
 	ctx context.Context,
 	clusterId uint64,

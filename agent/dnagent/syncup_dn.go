@@ -117,20 +117,40 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		st := s.getDn(key)
 		s.convergeDn(ctx, st)
 	}
+	// A side whose pointer has left its parent's list is FORGOTTEN here —
+	// file, chunks, memory entry, object lock and goroutines — without any
+	// attempt to remove its resources. The node-level sweep below finds them
+	// by name, which the teardown this replaced could not: it deleted the
+	// same state after a best-effort removal pass whose every step only
+	// logged its failure.
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
 		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
 		if dn == nil || !pointerKnown(dn.req, st.req.GetSidePointer()) {
-			// Removed from its parent's list mid-teardown.
-			s.teardownSide(ctx, key, st)
+			s.dropSideState(ctx, key, st)
+		}
+	}
+	for _, key := range s.dnKeys() {
+		st := s.getDn(key)
+		if agent.ValidateExtentSize(st.req.GetExtentSize()) != nil {
+			// §7: a dn whose stored conf is unusable converges nothing and
+			// sweeps nothing. A conf fault must not destroy resources.
+			continue
+		}
+		s.sweepDn(ctx, st, true)
+	}
+	for _, key := range s.allSideKeys() {
+		st := s.getSide(key)
+		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+		if dn == nil {
 			continue
 		}
 		if agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
 			// §7: the parent's conf is unusable, which is NOT the same thing
 			// as this side having left its parent's list. Every run of this
 			// side is carved out of that extent size, so nothing here may be
-			// converged — and nothing may be torn down either. convergeDn
-			// above already recorded the refusal for this DN.
+			// converged — and nothing may be swept either. convergeDn above
+			// already recorded the refusal for this DN.
 			continue
 		}
 		s.convergeSide(ctx, st, dn.req.GetExtentSize())
@@ -150,13 +170,17 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 		s.applyMigrBitmaps(ctx, st, dn.req.GetExtentSize())
 	}
-	s.sweepOrphanRecords(ctx)
 	return nil
 }
 
-// sweepOrphanRecords closes the crash window between a teardown's resource
-// removal and its table update: a side torn down by DN6 whose FreeSide never
-// ran would otherwise leak its extents forever.
+// sweepOrphanRecords is the record half of the node-level pass: it releases
+// the allocation records whose owners the authoritative pointer lists prove
+// gone. It closes the crash window between a removal and its table update —
+// a side whose device went but whose FreeSide never ran would otherwise leak
+// its extents for ever.
+//
+// It removes NO device. The layers do that, in the order the kernel needs;
+// this step only acts on a device it has verified is already gone.
 //
 // The rule is deliberately narrow, because the volume table — not the local
 // store — is authoritative for extent placement ([D13], DN6): a record is
@@ -169,7 +193,11 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 //
 // The caller holds the node write lock, so neither the DN set nor the side
 // set can move under it.
-func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
+func (s *DnAgentServer) sweepOrphanRecords(
+	ctx context.Context,
+	res *agent.SweepResult,
+	remove bool,
+) {
 	clusterId, dnId, ok := s.meta.Identity()
 	if !ok {
 		// Unformatted, unreadable, or a disk this node has not confirmed as
@@ -187,6 +215,7 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 	if err != nil {
 		slog.ErrorContext(ctx, "reading the volume table failed",
 			slog.String("error", err.Error()))
+		res.Fail("side records", err)
 		return
 	}
 	for _, rec := range sideRecs {
@@ -194,22 +223,28 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 		if _, live := known[key]; live {
 			continue
 		}
-		// A record is provably orphaned only when no local state claims it, so
-		// there is normally no goroutine to stop here — but the join must
-		// happen before the removal all the same: a `blkdiscard --zeroout`
-		// child holds the side device open and `dmsetup remove` would fail
-		// EBUSY (§9.4).
-		s.stopZeroingOf(clusterId, dnId, rec.GetSpId(), rec.GetSideId())
-		if !s.removeDm(ctx, s.nf.DnSideName(
-			clusterId, dnId, rec.GetSpId(), rec.GetSideId())) {
-			// The extents stay allocated while a device still maps them;
-			// the next node-level pass retries.
+		name := s.nf.DnSideName(
+			clusterId, dnId, rec.GetSpId(), rec.GetSideId())
+		// The DEVICE is the layers' business, not this step's: they remove it
+		// in the order the kernel needs and stop the descent when something
+		// above it will not go. Removing it from here would jump that order.
+		// What is left for this step is the record, and the one thing it may
+		// act on is a device this pass has VERIFIED gone — freeing extents a
+		// live device still maps hands them to the next side.
+		dev, err := s.dm.Info(ctx, name)
+		if err != nil || dev != nil {
+			res.Add(agent.LeftoverKindDm, name)
+			continue
+		}
+		if !remove {
+			res.Add(agent.LeftoverKindRecord, name)
 			continue
 		}
 		if err := s.meta.FreeSide(
 			ctx, rec.GetSpId(), rec.GetSideId()); err != nil {
 			slog.ErrorContext(ctx, "freeing an orphan side record failed",
 				slog.String("error", err.Error()))
+			res.Fail("free side record "+name, err)
 		}
 	}
 
@@ -217,6 +252,7 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 	if err != nil {
 		slog.ErrorContext(ctx, "reading the volume table failed",
 			slog.String("error", err.Error()))
+		res.Fail("clone metadata records", err)
 		return
 	}
 	claimed := s.claimedMigrs()
@@ -233,8 +269,15 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 		if !s.spFullyKnown(rec.GetSpId(), known, haveState) {
 			continue
 		}
-		if !s.removeDm(ctx, s.nf.DnMigrMetaDmName(
-			clusterId, dnId, rec.GetSpId(), rec.GetMigrId())) {
+		name := s.nf.DnMigrMetaDmName(
+			clusterId, dnId, rec.GetSpId(), rec.GetMigrId())
+		dev, err := s.dm.Info(ctx, name)
+		if err != nil || dev != nil {
+			res.Add(agent.LeftoverKindDm, name)
+			continue
+		}
+		if !remove {
+			res.Add(agent.LeftoverKindRecord, name)
 			continue
 		}
 		if err := s.meta.FreeCloneMeta(
@@ -242,14 +285,18 @@ func (s *DnAgentServer) sweepOrphanRecords(ctx context.Context) {
 			slog.ErrorContext(ctx,
 				"freeing an orphan clone-metadata record failed",
 				slog.String("error", err.Error()))
+			res.Fail("free clone metadata record "+name, err)
 		}
 	}
 }
 
 // stopZeroingOf cancels and joins the §9.4 zeroing goroutine of a side named
-// only by its allocation record — the shape the DN6 orphan sweep works in. It
-// is a no-op when no local state for that side exists, which is the sweep's
-// normal case.
+// only by its ids — the shape the node-level sweep works in, where a side's
+// state has already been dropped. The join must precede the side device's
+// removal: the goroutine's `blkdiscard --zeroout` child holds that device
+// open, and `dmsetup remove` on a device with an open fd fails EBUSY. It is a
+// no-op when no local state for that side exists, which is the sweep's normal
+// case.
 func (s *DnAgentServer) stopZeroingOf(
 	clusterId uint64,
 	dnId uint64,
@@ -290,20 +337,18 @@ func (s *DnAgentServer) knownSides() (
 }
 
 // claimedMigrs lists the (sp_id, migr_id) pairs a live destination role owns.
-// Both the currently requested and the last applied conf count, so a converge
-// that has not run yet never loses its metadata slot.
+// The REQUEST alone decides: it is stored (putSide) before any converge
+// builds a thing, so a metadata slot cannot be in use by a role whose claim
+// is not visible here. The "last applied conf" this used to also consult was
+// memory of a past converge — the very thing that let a role whose teardown
+// failed keep its slot claimed for ever.
 func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make(map[[2]uint64]struct{})
 	for _, st := range s.sides {
 		spId := st.req.GetSidePointer().GetSpId()
-		for _, dst := range []*pb.SyncupSideRequest_MigrDstConf{
-			st.req.GetMigrDstConf(), st.appliedMigrDst,
-		} {
-			if dst == nil {
-				continue
-			}
+		if dst := st.req.GetMigrDstConf(); dst != nil {
 			out[[2]uint64{spId, dst.GetMigrId()}] = struct{}{}
 		}
 	}
@@ -350,13 +395,9 @@ func (s *DnAgentServer) allSideKeys() []string {
 
 func newSideState(req *pb.SyncupSideRequest) *sideState {
 	return &sideState{
-		req:               req,
-		tracker:           agent.NewResTracker(),
-		chunks:            agent.NewChunkSet(),
-		appliedCnIds:      cnIdsOf(req.GetSideConf()),
-		appliedMigrSrc:    req.GetMigrSrcConf(),
-		appliedMigrSrcRaw: req.GetMigrSrcConf(),
-		appliedMigrDst:    req.GetMigrDstConf(),
+		req:     req,
+		tracker: agent.NewResTracker(),
+		chunks:  agent.NewChunkSet(),
 	}
 }
 
@@ -416,18 +457,25 @@ func (s *DnAgentServer) syncupDn(
 	st.req = req
 	s.putDn(key, st)
 
-	info := s.convergeDn(ctx, st)
-	s.teardownRemovedSides(ctx, req)
-	s.sweepOrphanRecords(ctx)
-
+	// The dn file is persisted BEFORE the sweep, not after it. The
+	// sweep is what removes the resources of a side whose pointer has just
+	// left the list, and it can block for the whole failfast window on a dead
+	// remote; a request cancelled in that window used to skip the save
+	// entirely, and the next Reconcile then rebuilt the side from the OLD
+	// list. With the new list on disk first, a crash mid-sweep is nothing but
+	// a startup sweep.
 	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting dn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
 	}
+	info := s.convergeDn(ctx, st)
+	s.dropRemovedSides(ctx, req)
+	sweep := s.sweepDn(ctx, st, true)
+
 	return &pb.SyncupDnReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),
 		DnInfo:     info,
 	}
@@ -546,10 +594,13 @@ func (s *DnAgentServer) ensurePort(
 	return t.Ok(resKeyPort, resName, "")
 }
 
-// teardownRemovedSides implements the DN6 pointer diff: a local side whose
-// pointer left the authoritative list is torn down top-down. Ids are never
-// reused, so a deleted side never comes back.
-func (s *DnAgentServer) teardownRemovedSides(
+// dropRemovedSides implements the DN6 pointer diff: a local side whose
+// pointer left the authoritative list is FORGOTTEN — its goroutines are
+// stopped, its state file and bitmap chunks deleted, its memory entry and
+// object lock dropped. Nothing is removed from the node here; the node-level
+// sweep that runs next finds every one of its resources by name. Ids are
+// never reused, so a dropped side never comes back.
+func (s *DnAgentServer) dropRemovedSides(
 	ctx context.Context,
 	req *pb.SyncupDnRequest,
 ) {
@@ -558,6 +609,35 @@ func (s *DnAgentServer) teardownRemovedSides(
 		if st == nil || pointerKnown(req, st.req.GetSidePointer()) {
 			continue
 		}
-		s.teardownSide(ctx, key, st)
+		s.dropSideState(ctx, key, st)
 	}
+}
+
+// dropSideState is the bookkeeping half of the old teardown. The zeroing
+// goroutine is cancelled AND JOINED: its `blkdiscard --zeroout` child holds
+// /dev/mapper/{DnSideName} open, and `dmsetup remove` on a device with an
+// open fd fails EBUSY, so the sweep that follows would find the side device
+// pinned by this very process. The wait is bounded — the child is SIGTERMed
+// at CmdSoftTimeout and SIGKILLed at CmdHardTimeout — and the loop never
+// blocks on a lock, so waiting here under the node write lock cannot deadlock
+// (DN9).
+func (s *DnAgentServer) dropSideState(
+	ctx context.Context,
+	key string,
+	st *sideState,
+) {
+	s.stopMigrRetry(st)
+	s.stopZeroing(st)
+	s.clearFence(st)
+	ptr := st.req.GetSidePointer()
+	paths := []string{s.nf.LocalSidePath(
+		st.req.GetClusterId(), st.req.GetDnId(),
+		ptr.GetSpId(), ptr.GetSideId())}
+	paths = append(paths, s.chunkPaths(st)...)
+	if err := s.store.Remove(ctx, paths...); err != nil {
+		slog.ErrorContext(ctx, "removing side state files failed",
+			slog.String("error", err.Error()))
+	}
+	s.dropSide(key)
+	s.locks.DropObj(key)
 }

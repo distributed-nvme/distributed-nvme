@@ -71,6 +71,9 @@ func (h *NvmeHost) DisconnectDevice(ctx context.Context, dev string) error {
 
 // SubsysState is what sysfs says about one subsystem the host holds.
 type SubsysState struct {
+	// Nqn is the subsystem's own NQN. ListSubsys already knows it (it is
+	// what the caller asked for); ListAllSubsys is why it is carried.
+	Nqn        string
 	Found      bool
 	Live       bool
 	States     []string
@@ -132,36 +135,31 @@ var (
 	nvmePathEntryPattern = regexp.MustCompile(`^nvme\d+c\d+n\d+$`)
 )
 
-// listDir lists a directory. A failure means "absent", never an error: the
-// whole /sys/class/nvme-subsystem tree is missing until the host holds its
-// first fabrics controller.
-func (h *NvmeHost) listDir(ctx context.Context, path string) []string {
-	stdout, _, _, err := h.run(ctx, "ls", "-1", path)
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, line := range strings.Split(stdout, "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			out = append(out, name)
-		}
-	}
-	return out
+// listSysfs lists a directory of the nvme sysfs tree. An absent directory is
+// "no entries" — the whole /sys/class/nvme-subsystem tree is missing until
+// the host holds its first fabrics controller — but a listing that did not
+// answer is an error, so a caller enumerating connections cannot read a
+// killed `ls` as "this host holds nothing".
+func (h *NvmeHost) listSysfs(
+	ctx context.Context,
+	path string,
+) ([]string, error) {
+	entries, _, err := h.listDir(ctx, path)
+	return entries, err
 }
 
 // readTrimmed reads one sysfs attribute under the §7 soft timeout (SH15).
 // Unlike most of sysfs, the /sys/class/nvme* tree can stall while a controller
 // is mid-reset or being torn down, which is exactly when this walk runs
-// (SH15 applies to every read of it). A timeout reads as "absent", like any
-// other failure.
-func (h *NvmeHost) readTrimmed(ctx context.Context, path string) (string, bool) {
-	cctx, cancel := cmdCtx(ctx)
-	defer cancel()
-	data, err := h.oc.ReadFile(cctx, path)
-	if err != nil {
-		return "", false
-	}
-	return strings.TrimSpace(data), true
+// (SH15 applies to every read of it). Only a genuine ENOENT is "absent": a
+// stalled read is an error, because ListSubsys reading it as absence would
+// report a live subsystem as not connected — and the caller of that answer
+// disconnects nothing and forgets it.
+func (h *NvmeHost) readTrimmed(
+	ctx context.Context,
+	path string,
+) (string, bool, error) {
+	return h.readAttrStrict(ctx, path)
 }
 
 // ListSubsys probes one subsystem NQN: whether the host holds a controller
@@ -171,57 +169,200 @@ func (h *NvmeHost) ListSubsys(
 	ctx context.Context,
 	nqn string,
 ) (*SubsysState, error) {
-	for _, entry := range h.listDir(ctx, sysfsNvmeSubsysDir) {
+	entries, err := h.listSysfs(ctx, sysfsNvmeSubsysDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
 		dir := sysfsNvmeSubsysDir + "/" + entry
-		if got, ok := h.readTrimmed(ctx, dir+"/subsysnqn"); !ok || got != nqn {
+		got, ok, err := h.readTrimmed(ctx, dir+"/subsysnqn")
+		if err != nil {
+			return nil, err
+		}
+		if !ok || got != nqn {
 			continue
 		}
-		state := &SubsysState{Found: true}
-		for _, name := range h.listDir(ctx, dir) {
-			switch {
-			case nvmeNsEntryPattern.MatchString(name):
-				if state.DevicePath == "" {
-					state.DevicePath = "/dev/" + name
-				}
-			case nvmeCtrlEntryPattern.MatchString(name):
-				path := h.readCtrl(ctx, name)
-				state.Paths = append(state.Paths, path)
-				state.States = append(state.States, path.State)
-				if path.State == "live" {
-					state.Live = true
-				}
-			}
+		state, err := h.readSubsysDir(ctx, dir, nqn)
+		if err != nil {
+			return nil, err
 		}
 		return state, nil
 	}
 	return &SubsysState{}, nil
 }
 
+// SubsysBrief is the cheap view of one subsystem this host holds: which
+// subsystem it is, and where to look if more is wanted.
+//
+// It deliberately carries no per-controller detail. Reading a controller's
+// transport, state and ANA costs four file reads EACH, and a node carrying a
+// storage pool's worth of legs holds hundreds of them — while a sweep needs
+// none of it: the question a sweep asks is "which subsystems are here", and
+// for a handful of them "what is the namespace node called".
+type SubsysBrief struct {
+	Nqn string
+	// Dir is the subsystem's sysfs directory, so a caller that needs the
+	// namespace node can ask for it with SubsysDevicePath instead of paying
+	// for a directory listing on every subsystem. On a node carrying a
+	// storage pool's worth of legs that is one forked `ls` per leg per pass,
+	// and a sweep wants the node for a handful of them at most.
+	Dir string
+}
+
+// HeldWithHostNqn reports whether any controller of one enumerated subsystem
+// was opened with the given host NQN.
+//
+// It is what tells a sweep its own connection from a sibling agent's on a
+// node that runs several: the nvme HOST namespace is per kernel, not per
+// agent, and a MigrSrcNqn carries the SOURCE dn's id, not the connecting
+// one's. The host NQN is the only field that names who opened the
+// connection.
+func (h *NvmeHost) HeldWithHostNqn(
+	ctx context.Context,
+	brief SubsysBrief,
+	hostNqn string,
+) (bool, error) {
+	names, err := h.listSysfs(ctx, brief.Dir)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		if !nvmeCtrlEntryPattern.MatchString(name) {
+			continue
+		}
+		got, ok, err := h.readTrimmed(
+			ctx, sysfsNvmeCtrlDir+"/"+name+"/hostnqn")
+		if err != nil {
+			return false, err
+		}
+		if ok && got == hostNqn {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// SubsysDevicePath is the multipath namespace node of one enumerated
+// subsystem, or "" when it has none.
+func (h *NvmeHost) SubsysDevicePath(
+	ctx context.Context,
+	brief SubsysBrief,
+) (string, error) {
+	names, err := h.listSysfs(ctx, brief.Dir)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range names {
+		if nvmeNsEntryPattern.MatchString(name) {
+			return "/dev/" + name, nil
+		}
+	}
+	return "", nil
+}
+
+// ListAllSubsys enumerates every subsystem this host holds a controller for.
+// It is what lets a sweep find connections no desired state names — a clone
+// source whose cntlr is gone, a leg of an sp that left the pointer list —
+// which a per-NQN lookup by definition cannot.
+func (h *NvmeHost) ListAllSubsys(ctx context.Context) ([]SubsysBrief, error) {
+	entries, err := h.listSysfs(ctx, sysfsNvmeSubsysDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []SubsysBrief
+	for _, entry := range entries {
+		dir := sysfsNvmeSubsysDir + "/" + entry
+		nqn, ok, err := h.readTrimmed(ctx, dir+"/subsysnqn")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// The subsystem went away between the listing and the read.
+			continue
+		}
+		out = append(out, SubsysBrief{Nqn: nqn, Dir: dir})
+	}
+	return out, nil
+}
+
+func (h *NvmeHost) readSubsysDir(
+	ctx context.Context,
+	dir string,
+	nqn string,
+) (*SubsysState, error) {
+	state := &SubsysState{Found: true, Nqn: nqn}
+	names, err := h.listSysfs(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		switch {
+		case nvmeNsEntryPattern.MatchString(name):
+			if state.DevicePath == "" {
+				state.DevicePath = "/dev/" + name
+			}
+		case nvmeCtrlEntryPattern.MatchString(name):
+			path, err := h.readCtrl(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			state.Paths = append(state.Paths, path)
+			state.States = append(state.States, path.State)
+			if path.State == "live" {
+				state.Live = true
+			}
+		}
+	}
+	return state, nil
+}
+
 // readCtrl reads one controller's transport, liveness and — from its own
 // hidden path device, the only place it exists — the ANA state.
-func (h *NvmeHost) readCtrl(ctx context.Context, name string) PathState {
+func (h *NvmeHost) readCtrl(
+	ctx context.Context,
+	name string,
+) (PathState, error) {
 	ctrlDir := sysfsNvmeCtrlDir + "/" + name
 	path := PathState{Name: name}
-	if address, ok := h.readTrimmed(ctx, ctrlDir+"/address"); ok {
+	address, ok, err := h.readTrimmed(ctx, ctrlDir+"/address")
+	if err != nil {
+		return path, err
+	}
+	if ok {
 		path.TrAddr, path.TrSvcId = ParseNvmeAddress(address)
 	}
-	if transport, ok := h.readTrimmed(ctx, ctrlDir+"/transport"); ok {
+	transport, ok, err := h.readTrimmed(ctx, ctrlDir+"/transport")
+	if err != nil {
+		return path, err
+	}
+	if ok {
 		path.Transport = transport
 	}
-	if ctrlState, ok := h.readTrimmed(ctx, ctrlDir+"/state"); ok {
+	ctrlState, ok, err := h.readTrimmed(ctx, ctrlDir+"/state")
+	if err != nil {
+		return path, err
+	}
+	if ok {
 		path.State = ctrlState
 	}
-	for _, entry := range h.listDir(ctx, ctrlDir) {
+	entries, err := h.listSysfs(ctx, ctrlDir)
+	if err != nil {
+		return path, err
+	}
+	for _, entry := range entries {
 		if !nvmePathEntryPattern.MatchString(entry) {
 			continue
 		}
-		if ana, ok := h.readTrimmed(
-			ctx, ctrlDir+"/"+entry+"/ana_state"); ok {
+		ana, ok, err := h.readTrimmed(ctx, ctrlDir+"/"+entry+"/ana_state")
+		if err != nil {
+			return path, err
+		}
+		if ok {
 			path.AnaState = ana
 			break
 		}
 	}
-	return path
+	return path, nil
 }
 
 // ParseNvmeAddress splits the "traddr=1.2.3.4,trsvcid=4420,src_addr=…" bag

@@ -26,7 +26,7 @@ import (
 // cap (the fast-Write-Zeroes hardware assumption of §9.4).
 
 // zeroLockPoll is how often the loop retries a lock it could not take. The
-// loop must NEVER block on a lock: teardownSide and the DN6 orphan sweep
+// loop must NEVER block on a lock: dropSideState and the DN6 record sweep
 // cancel it and wait for it while holding the node WRITE lock, and cancelling
 // a ctx does not release a goroutine parked in sync.RWMutex.RLock, so a
 // blocking acquire would hang the whole agent (DN9).
@@ -35,7 +35,8 @@ const zeroLockPoll = 20 * time.Millisecond
 // zeroJob is the geometry one zeroing loop works from. It is captured once, at
 // registration, rather than read from a *sidePlan on every batch: the loop
 // outlives the converge pass that started it, and a plan is a per-pass value
-// (teardownSide even builds one with extentSize 0).
+// (collectClaims even builds one with extentSize 0, to read names and gates
+// out of a request without an extent size to hand).
 type zeroJob struct {
 	spId       uint64
 	sideId     uint64

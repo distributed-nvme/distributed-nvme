@@ -54,11 +54,12 @@ func cloneOfTd(cloneId uint64, srcNqn string, dstTdId uint64) *pb.Clone {
 }
 
 // pushChunk pushes one chunk of the pair (srcSliceIdx, bmIdx); pushBitmap is
-// the one-slice fixture's chunk (0, 0).
+// the one-slice fixture's chunk (0, 0). A push carries no revision ([D13]):
+// it is position-addressed data keyed by an id that is never reused, so there
+// is nothing for the cntlr's stored revision to be compared with.
 func pushChunk(
 	t *testing.T,
 	srv *CnAgentServer,
-	revision uint64,
 	srcSliceIdx uint32,
 	bmIdx uint32,
 	bitmap []byte,
@@ -69,7 +70,6 @@ func pushChunk(
 			ClusterId:    testCluster,
 			CnId:         testCn,
 			CntlrPointer: cntlrPtr(),
-			Revision:     revision,
 			CloneId:      testClone,
 			SrcSliceIdx:  srcSliceIdx,
 			BmIdx:        bmIdx,
@@ -86,11 +86,10 @@ func pushChunk(
 func pushBitmap(
 	t *testing.T,
 	srv *CnAgentServer,
-	revision uint64,
 	bitmap []byte,
 ) {
 	t.Helper()
-	pushChunk(t, srv, revision, 0, 0, bitmap)
+	pushChunk(t, srv, 0, 0, bitmap)
 }
 
 // chunkIds flattens a clone's reported applied set into comparable pairs.
@@ -134,7 +133,7 @@ func TestCloneBuild(t *testing.T) {
 
 	// Stage 2: the chunk lands while nothing serves it.
 	node.Reset()
-	pushBitmap(t, srv, 3, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	assertNoCall(t, node, "cmd blkdiscard")
 	bmPath := srv.nf.LocalCloneBmPath(
 		testCluster, testCn, testSp, testClone, 0, 0)
@@ -353,7 +352,7 @@ func TestCloneTeardownOrder(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 
 	node.Reset()
 	// DeleteClone: the clone leaves clone_list and the namespace's stored
@@ -474,9 +473,13 @@ func TestCloneMetaArenaExhaustion(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	loop := loopDev(t, srv, node)
 
-	// A kind-`b` wrapper claiming every unit of the arena, planted behind the
-	// agent's back (a SyncupCn would sweep it as an orphan).
-	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
+	// A kind-`cb` wrapper claiming every unit of the arena, planted behind
+	// the agent's back. The arena is per CN, so a wrapper of ANOTHER sp
+	// exhausts it just as well — and it has to be another sp's, because this
+	// cntlr's own sweep would remove a wrapper of testSp that no clone of
+	// testSp's request names.
+	const fillerSp = testSp + 1
+	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, fillerSp, 0x999)
 	node.dms[filler] = &fakeDm{
 		table: fmt.Sprintf("0 %d linear %s 0",
 			cnCloneMetaUnitCnt*cnCloneMetaUnitSectors, node.devNo[loop]),
@@ -952,14 +955,14 @@ func TestPushCloneBitmapGates(t *testing.T) {
 	}
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0,
+		CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0,
 		Bitmap: []byte{0xff},
 	}, "unknown clone")
 	// The two indexes bound independently (CN22). A valid slice with an
 	// out-of-range bm_idx is rejected on the chunk cap alone...
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: testClone, SrcSliceIdx: 0,
+		CloneId: testClone, SrcSliceIdx: 0,
 		BmIdx: common.MaxCloneBmCnt, Bitmap: []byte{0xff},
 	}, "bm_idx >= MaxCloneBmCnt")
 	// ...and an out-of-range slice is rejected with the chunk index at 0, so
@@ -967,23 +970,84 @@ func TestPushCloneBitmapGates(t *testing.T) {
 	// is 1, and bm_idx 0 is always legal.
 	unknown(&pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 2, CloneId: testClone, SrcSliceIdx: 1, BmIdx: 0,
+		CloneId: testClone, SrcSliceIdx: 1, BmIdx: 0,
 		Bitmap: []byte{0xff},
 	}, "src_slice_idx >= src_slice_cnt")
 	// A pair that is in range on both axes is accepted, which is what makes
 	// the two rejections above bounds and not blanket refusals.
-	pushChunk(t, srv, 2, 0, common.MaxCloneBmCnt-1, []byte{0xff})
+	pushChunk(t, srv, 0, common.MaxCloneBmCnt-1, []byte{0xff})
+}
 
-	stale, err := srv.PushCloneBitmap(ctx, &pb.PushCloneBitmapRequest{
+// TestPushHasNoRevisionGate pins [D13] on the cn side: PushCloneBitmap carries
+// no revision and the handler compares none, so a chunk the worker planned
+// against a report the cntlr's stored revision has since superseded is applied
+// rather than discarded. The old gate refused exactly this, and refusing it
+// only ever threw away work that was about to be redone — a chunk is
+// position-addressed data at a (clone_id, src_slice_idx, bm_idx) whose ids are
+// never reused, and a push never advances the stored revision.
+//
+// The one refusal that survives is the object one: a clone the stored request
+// does not name is ReplyCodeUnknownObject with a message the worker logs.
+func TestPushHasNoRevisionGate(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	// Revision 2 is the report the push below is planned from.
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	// ...and the cntlr moves on to 3 before the push arrives, which is the
+	// superseded-report case.
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+		revision: 3, primary: true,
+		clones: []*pb.Clone{cloneOf()}})); err != nil {
+		t.Fatalf("advancing the stored revision: %v", err)
+	}
+
+	// Nothing on the wire can carry a revision any more, so no later edit can
+	// reintroduce the gate without changing the proto.
+	if (&pb.PushCloneBitmapRequest{}).ProtoReflect().Descriptor().
+		Fields().ByName("revision") != nil {
+		t.Fatal("PushCloneBitmapRequest still carries a revision field")
+	}
+
+	node.Reset()
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
+	// Persisted AND applied: the chunk reached the file and the dm-clone.
+	bmPath := srv.nf.LocalCloneBmPath(
+		testCluster, testCn, testSp, testClone, 0, 0)
+	assertOrder(t, node,
+		"writeproto "+bmPath,
+		"cmd blkdiscard --offset 33554432 --length 33554432",
+	)
+	// And it is in the applied set the next reply reports, which is the only
+	// thing that stops the worker re-pushing it.
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+		revision: 4, primary: true, clones: []*pb.Clone{cloneOf()}}))
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if len(reply.GetBmInfoList()) != 1 {
+		t.Fatalf("bm_info_list = %v", reply.GetBmInfoList())
+	}
+	if got := chunkIds(reply.GetBmInfoList()[0]); len(got) != 1 ||
+		got[0] != [2]uint32{0, 0} {
+		t.Fatalf("applied set = %v, want the pushed pair (0, 0)", got)
+	}
+
+	// The object refusal is untouched, message and all.
+	unknownReply, err := srv.PushCloneBitmap(ctx, &pb.PushCloneBitmapRequest{
 		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
-		Revision: 1, CloneId: testClone, SrcSliceIdx: 0, BmIdx: 0,
-		Bitmap: []byte{0xff},
+		CloneId: 0x999, SrcSliceIdx: 0, BmIdx: 0, Bitmap: []byte{0xff},
 	})
 	if err != nil {
-		t.Fatalf("stale push: %v", err)
+		t.Fatalf("unknown clone: %v", err)
 	}
-	if stale.GetAgentReply().GetCode() != common.ReplyCodeStaleRevision {
-		t.Fatalf("stale push: code %d", stale.GetAgentReply().GetCode())
+	if got := unknownReply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeUnknownObject {
+		t.Fatalf("unknown clone: code %d, want %d",
+			got, common.ReplyCodeUnknownObject)
+	}
+	if unknownReply.GetAgentReply().GetDetails() == "" {
+		t.Fatal("the refusal carried no message for the worker to log")
 	}
 }
 
@@ -993,7 +1057,7 @@ func TestPushCloneBitmapPersistBeforeApply(t *testing.T) {
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
 
 	node.Reset()
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
 		testCluster, testCn, testSp, testClone, 0, 0)
 	assertOrder(t, node,
@@ -1004,12 +1068,12 @@ func TestPushCloneBitmapPersistBeforeApply(t *testing.T) {
 	// A grown chunk overwrites the file and re-applies ([D8]).
 	node.Reset()
 	grown := append(hexBytes(t, testSkipHex), 0xff)
-	pushBitmap(t, srv, 2, grown)
+	pushBitmap(t, srv, grown)
 	assertOrder(t, node, "writeproto "+bmPath, "cmd blkdiscard --offset")
 
 	// An identical re-push is neither rewritten nor re-applied.
 	node.Reset()
-	pushBitmap(t, srv, 2, grown)
+	pushBitmap(t, srv, grown)
 	assertNoCall(t, node, "writeproto "+bmPath)
 	assertNoCall(t, node, "cmd blkdiscard")
 }
@@ -1024,9 +1088,9 @@ func TestPushCloneBitmapSurvivesRestart(t *testing.T) {
 	clone.SrcSliceCnt = 2
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{clone}})
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	// A second slice's chunk 1: a pair neither index alone can name.
-	pushChunk(t, srv, 2, 1, 1, []byte{0xff})
+	pushChunk(t, srv, 1, 1, []byte{0xff})
 	for _, id := range [][2]uint32{{0, 0}, {1, 1}} {
 		path := srv.nf.LocalCloneBmPath(
 			testCluster, testCn, testSp, testClone, id[0], id[1])
@@ -1061,7 +1125,7 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 		level: pb.SpLevel_SP_LEVEL_NO_CLONE})
 
 	node.Reset()
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	assertNoCall(t, node, "cmd blkdiscard")
 
 	node.Reset()

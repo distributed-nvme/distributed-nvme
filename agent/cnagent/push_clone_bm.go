@@ -46,12 +46,6 @@ func (s *CnAgentServer) pushCloneBitmap(
 				clone.GetSrcSliceCnt(), common.MaxCloneBmCnt),
 		}
 	}
-	// A push never advances the stored revision; it only may not be older.
-	if reject := agent.GateRevision(
-		st.req.GetRevision(), req.GetRevision()); reject != nil {
-		return &pb.PushCloneBitmapReply{AgentReply: reject}
-	}
-
 	set := st.chunkSet(req.GetCloneId())
 	chunkKey := agent.CloneChunkKey{
 		SliceIdx: req.GetSrcSliceIdx(),
@@ -130,10 +124,15 @@ func (s *CnAgentServer) bitmapInfoList(st *cntlrState) []*pb.BitmapInfo {
 	return out
 }
 
-// cloneChunkPaths lists the local files of the chunks one clone holds.
-func (s *CnAgentServer) cloneChunkPaths(
+// cloneChunkPathsOf lists the local files of the chunks one clone holds. It
+// is addressed by ids rather than by a plan because the sweep names a clone
+// from its dm device's OWN NAME, and there is no plan for a clone the request
+// no longer carries.
+func (s *CnAgentServer) cloneChunkPathsOf(
 	st *cntlrState,
-	plan *cntlrPlan,
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
 	cloneId uint64,
 ) []string {
 	set := st.chunks[cloneId]
@@ -143,39 +142,25 @@ func (s *CnAgentServer) cloneChunkPaths(
 	paths := make([]string, 0, set.Len())
 	for _, id := range set.Ids() {
 		paths = append(paths, s.nf.LocalCloneBmPath(
-			plan.clusterId, plan.cnId, plan.spId, cloneId,
-			id.SliceIdx, id.BmIdx))
+			clusterId, cnId, spId, cloneId, id.SliceIdx, id.BmIdx))
 	}
 	return paths
 }
 
-// dropCloneChunks deletes one clone's chunk files with the rest of its state
-// (SH7, CN18 teardown).
-func (s *CnAgentServer) dropCloneChunks(
-	ctx context.Context,
+// allChunkPathsOf lists every chunk file of a cntlr — what dropping a cntlr
+// removes (CN7). It takes ids rather than a plan: the drop happens before any
+// plan is built, and a cntlr whose pointer has left the list has no desired
+// state left to build one from.
+func (s *CnAgentServer) allChunkPathsOf(
 	st *cntlrState,
-	plan *cntlrPlan,
-	cloneId uint64,
-) {
-	paths := s.cloneChunkPaths(st, plan, cloneId)
-	if len(paths) > 0 {
-		if err := s.store.Remove(ctx, paths...); err != nil {
-			slog.ErrorContext(ctx, "removing clone bitmap chunks failed",
-				slog.String("error", err.Error()))
-		}
-	}
-	delete(st.chunks, cloneId)
-}
-
-// allChunkPaths lists every chunk file of a cntlr — what a full teardown
-// removes (CN7, CN21).
-func (s *CnAgentServer) allChunkPaths(
-	st *cntlrState,
-	plan *cntlrPlan,
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
 ) []string {
 	var paths []string
 	for cloneId := range st.chunks {
-		paths = append(paths, s.cloneChunkPaths(st, plan, cloneId)...)
+		paths = append(paths, s.cloneChunkPathsOf(
+			st, clusterId, cnId, spId, cloneId)...)
 	}
 	return paths
 }

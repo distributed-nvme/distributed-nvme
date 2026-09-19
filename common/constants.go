@@ -245,6 +245,18 @@ const (
 	// is the conf that is unusable, which is why it is neither of the two
 	// above.
 	ReplyCodeInvalidConf = 3
+	// ReplyCodeLeftover reports an ACCEPTED request with residue: the
+	// desired state is stored and every wanted object was converged, but the
+	// node still holds objects the desired state does not want, or an
+	// enumeration of what exists did not answer. It is the one thing that
+	// travels in agent_reply rather than in the *Info rows, because a
+	// leftover by definition has no row — nothing wanted names it.
+	//
+	// It is not a rejection: the worker evaluates the reply's rows exactly as
+	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)
+	// until the code changes. "Pending" is never stored anywhere; the code is
+	// recomputed by enumerating the node on every Syncup* and every Check*.
+	ReplyCodeLeftover = 4
 
 	// Seconds between background retries of a pending migration-destination
 	// nvme connect (dnagent.md DN13; the loop is SH27's "DN8 retry", so

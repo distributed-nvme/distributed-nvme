@@ -59,22 +59,25 @@ type bmPart struct {
 	// bmIdx is the chunk index: the append sequence for a migration, the
 	// chunk's fixed position WITHIN source slice sliceIdx's bitmap for a
 	// clone (§9.6).
-	bmIdx uint32
-	// revision is the object's SYNCED revision (BM3).
-	revision uint64
-	bitmap   []byte
+	bmIdx  uint32
+	bitmap []byte
 }
 
 // bmPlan is the work one Syncup* reply's diff produced for ONE migration or
-// clone (BM2): the chunks the agent does not hold — ascending by
+// clone (BM2): the chunks the agent does not hold, ascending by
 // (src_slice_idx, bm_idx), which is what makes a migration's chunk
-// concatenation interpretable (§9.6) — plus the revision every push of the
-// batch carries.
+// concatenation interpretable (§9.6).
+//
+// A plan carries no revision. A push is position-addressed data keyed by an
+// id that is never reused, it never advances the agent's stored revision, and
+// an agent that does not know the object refuses it by name — so a push
+// planned against a report the desired state has since superseded is either
+// still correct or refused, and gating it on a revision only ever discarded
+// work that was about to be redone.
 type bmPlan struct {
-	resId    uint64
-	name     string
-	revision uint64
-	parts    []model.BmChunk
+	resId uint64
+	name  string
+	parts []model.BmChunk
 }
 
 // bmMemoKey is the BM5 memo's key: one chunk of one clone / migration, at the
@@ -131,9 +134,10 @@ type bmPusherParams struct {
 }
 
 // bmPusher is the push engine of one sp child (§10). Its public surface is
-// three calls from the child's loop goroutine — missing (BM2/BM5), submit
-// (BM3) and takeFailed (BM6) — plus stop, which the coordinator makes after
-// joining the child's loop.
+// two calls from the child's loop goroutine — missing (BM2/BM5) and submit
+// (BM3) — plus stop, which the coordinator makes after joining the child's
+// loop. A failure raises no flag and re-arms nothing: it is logged, and the
+// next Syncup* reply re-plans the diff from the agent's acknowledged set.
 type bmPusher struct {
 	deps     *deps
 	seed     string
@@ -171,7 +175,6 @@ type bmPusher struct {
 	conn     *grpc.ClientConn
 	connHeld bool
 	stopped  bool
-	failed   bool
 }
 
 // newBmPusher builds one child's push engine (§10).
@@ -270,17 +273,6 @@ func (p *bmPusher) submit(plan *bmPlan) {
 	go p.run(plan)
 }
 
-// takeFailed reports and clears the BM6 flag: a push that failed or was
-// rejected asks the child's loop for an equal-revision re-apply, whose reply
-// restarts the diff. There is no push-specific timer.
-func (p *bmPusher) takeFailed() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	failed := p.failed
-	p.failed = false
-	return failed
-}
-
 // stop ends the engine and joins its runners. An in-flight push is allowed to
 // finish — its own DefaultWorkerPushTimeout deadline bounds the wait, exactly
 // as RW11 bounds an in-flight Syncup* — and the connection reference is given
@@ -327,10 +319,10 @@ func (p *bmPusher) run(plan *bmPlan) {
 }
 
 // pushPlan delivers one plan's chunks in ascending (src_slice_idx, bm_idx),
-// one at a time (BM3). Every failure aborts the rest of the plan and raises
-// the BM6 flag: the next round's equal-revision Syncup* reply produces a fresh
-// diff, so nothing is lost by giving up here — and nothing would be retried
-// without it, because a diff only ever comes from a Syncup* reply.
+// one at a time (BM3). Every failure ends the rest of the plan and is logged;
+// nothing is re-armed. The next Syncup* reply carries the agent's acknowledged
+// set and re-plans whatever is still missing, which is the only place a diff
+// has ever come from.
 func (p *bmPusher) pushPlan(plan *bmPlan) {
 	conn, err := p.connect()
 	if err != nil {
@@ -338,7 +330,6 @@ func (p *bmPusher) pushPlan(plan *bmPlan) {
 			// RW10: a push that never got as far as a chunk is still a push,
 			// so its record carries a trace id of this worker's incarnation
 			// like every other one.
-			p.setFailed()
 			slog.InfoContext(
 				newTraceCtx(p.ctx, p.seed), msgBitmapPushFailed, append(
 					p.attrs(plan.resId, 0, 0),
@@ -370,9 +361,8 @@ func (p *bmPusher) pushOne(
 	if err != nil || !found {
 		// The chunk's address came from the coordinator's snapshot, so a
 		// value that cannot be read now is either an etcd failure or a chunk
-		// deleted with its object. Both raise the BM6 flag: without it this
-		// child would never diff again until the next revision bump.
-		p.setFailed()
+		// deleted with its object. Both end this plan; the next Syncup*
+		// reply re-plans from a fresh snapshot.
 		attrs := p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx)
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))
@@ -392,11 +382,9 @@ func (p *bmPusher) pushOne(
 		name:     plan.name,
 		sliceIdx: chunk.SliceIdx,
 		bmIdx:    chunk.Idx,
-		revision: plan.revision,
 		bitmap:   bitmap,
 	})
 	if err != nil {
-		p.setFailed()
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
 			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.String("error", err.Error()),
@@ -408,15 +396,14 @@ func (p *bmPusher) pushOne(
 	)
 	slog.InfoContext(ctx, msgBitmapPushed, attrs...)
 	if code != 0 {
-		// A stale revision, or an introducing Syncup* the agent has not
-		// applied yet (BM6). The §12 record above carries only the code, so
-		// the agent's own explanation is logged next to it.
+		// The agent does not know the object, or the chunk's address is out
+		// of range for it. The §12 record above carries only the code, so the
+		// agent's own explanation is logged next to it and the plan ends.
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
 			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.Uint64("code", uint64(code)),
 			slog.String("details", details),
 		)...)
-		p.setFailed()
 		return false
 	}
 	p.memoize(plan.resId, chunk)
@@ -428,13 +415,6 @@ func (p *bmPusher) memoize(resId uint64, chunk model.BmChunk) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.memo[memoKeyOf(resId, chunk)] = chunk.ModRev
-}
-
-// setFailed raises the BM6 flag.
-func (p *bmPusher) setFailed() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.failed = true
 }
 
 // connect takes this pusher's own reference to the child's agent connection

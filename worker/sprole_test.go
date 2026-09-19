@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1062,6 +1063,9 @@ type stubCntlrAgent struct {
 
 	syncupReply func(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrReply
 	checkReply  func(req *pb.CheckCntlrRequest) *pb.CheckCntlrReply
+	// pushCode is the AgentReply code every PushCloneBitmap answers with, the
+	// cn twin of stubSideAgent.pushCode.
+	pushCode uint32
 }
 
 func (s *stubCntlrAgent) SyncupCntlr(
@@ -1110,8 +1114,11 @@ func (s *stubCntlrAgent) PushCloneBitmap(
 ) (*pb.PushCloneBitmapReply, error) {
 	s.mu.Lock()
 	s.pushReqs = append(s.pushReqs, req)
+	code := s.pushCode
 	s.mu.Unlock()
-	return &pb.PushCloneBitmapReply{}, nil
+	return &pb.PushCloneBitmapReply{
+		AgentReply: &pb.AgentReply{Code: code, Details: "no such clone"},
+	}, nil
 }
 
 func (s *stubCntlrAgent) syncups() []*pb.SyncupCntlrRequest {
@@ -1889,7 +1896,7 @@ func TestSpCloneBitmapWiringCarriesThePair(t *testing.T) {
 		t.Fatalf("push carried %v, want the (2, 1) chunk's value",
 			push.GetBitmap())
 	}
-	if push.GetCloneId() != spCloneId || push.GetRevision() != testSpRev {
+	if push.GetCloneId() != spCloneId {
 		t.Fatalf("push = %v", push)
 	}
 	for _, sent := range h.cntlrs[spCnA].pushes() {
@@ -1912,5 +1919,195 @@ func TestSpLoadFailureRetriesOnTick(t *testing.T) {
 	h.ops.setErr(nil)
 	h.advanceUntil("fan-out after the retry", roundInterval, func() bool {
 		return len(h.cntlrs[spCnA].syncups()) > 0
+	})
+}
+
+// ---------------------------------------------------------------------------
+// [D12] — common.ReplyCodeLeftover is an ACCEPTED reply
+// ---------------------------------------------------------------------------
+
+// TestLeftoverCodeIsAccepted pins [D12]: a reply carrying
+// common.ReplyCodeLeftover is an accepted request — the desired state is
+// stored and every WANTED object converged; what is left over is something the
+// desired state does not want, or an enumeration that did not answer, and the
+// agent goes on sweeping either way. Its *Info rows are therefore a full probe
+// of the wanted objects and are read exactly as code 0's, while the code alone
+// re-drives the sweep by forcing a Syncup* every round (RW4 step 5).
+//
+// Every site that reads a reply's rows returned "no verdict" on ANY non-zero
+// code before [D12]. Left that way, one leftover would have frozen health,
+// bitmap pushes, RW19 td completion and the HL2 leg rows for as long as it
+// survived — which is exactly as long as a dead remote's failfast window, i.e.
+// exactly when they matter.
+func TestLeftoverCodeIsAccepted(t *testing.T) {
+	// (a) The five observation functions of HL1/HL2 read a leftover reply's
+	// rows exactly as a code 0 reply's — and still return no verdict for the
+	// three REJECTION codes, which is what keeps this from being the vacuous
+	// "every code is accepted".
+	t.Run("rows are evaluated as for code 0", func(t *testing.T) {
+		legs := func(res *pb.ResInfo) *pb.CntlrInfo {
+			return &pb.CntlrInfo{
+				LegIdToLeg: map[uint64]*pb.ResInfo{spLegMeta: res},
+			}
+		}
+		cases := []struct {
+			name string
+			run  func(code uint32) (healthObs, string)
+		}{
+			{"dn clean", func(code uint32) (healthObs, string) {
+				return dnObservation(code, &pb.DnInfo{DiskInfo: resOk("disk")})
+			}},
+			{"dn error row", func(code uint32) (healthObs, string) {
+				return dnObservation(code, &pb.DnInfo{
+					DiskInfo: resErr("disk", "io error"),
+				})
+			}},
+			{"cn error row", func(code uint32) (healthObs, string) {
+				return cnObservation(code, &pb.CnInfo{
+					PortInfo: resErr("port", "nvmet"),
+				})
+			}},
+			{"cntlr clean", func(code uint32) (healthObs, string) {
+				return cntlrObservation(code, &pb.CntlrInfo{
+					GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
+				})
+			}},
+			{"cntlr error row", func(code uint32) (healthObs, string) {
+				return cntlrObservation(code, &pb.CntlrInfo{
+					GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+						1: resErr("md", "degraded"),
+					},
+				})
+			}},
+			{"side error row", func(code uint32) (healthObs, string) {
+				return sideObservation(code, &pb.SideInfo{
+					SideDevInfo: resErr("side-dev", "gone"),
+				})
+			}},
+			{"leg ok row", func(code uint32) (healthObs, string) {
+				return legObservation(code, legs(resOk("leg")), spLegMeta)
+			}},
+			{"leg error row", func(code uint32) (healthObs, string) {
+				return legObservation(
+					code, legs(resErr("leg", "probe io error")), spLegMeta)
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				wantObs, wantRes := tc.run(0)
+				obs, res := tc.run(common.ReplyCodeLeftover)
+				if obs != wantObs || res != wantRes {
+					t.Fatalf("leftover gave (%v, %q), code 0 gave (%v, %q)",
+						obs, res, wantObs, wantRes)
+				}
+				for _, code := range []uint32{
+					common.ReplyCodeStaleRevision,
+					common.ReplyCodeUnknownObject,
+					common.ReplyCodeInvalidConf,
+				} {
+					if obs, _ := tc.run(code); obs != healthNone {
+						t.Fatalf("code %d gave %v, want no verdict", code, obs)
+					}
+				}
+			})
+		}
+	})
+
+	// (b), (c) and (d) end to end through a real cntlr child: the reply's
+	// revision MATCHES, so the code alone is what re-syncs, and nothing here
+	// depends on a revision mismatch.
+	t.Run("pushes, td completion, leg rows and the re-sync", func(t *testing.T) {
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		for _, chunk := range spCloneChunks {
+			h.store.seed(t,
+				model.CloneBitmapKey(
+					testCid, testSpId, spCloneNm, chunk.SliceIdx, chunk.Idx,
+				),
+				&pb.CloneBitmap{Bitmap: []byte{
+					byte(chunk.SliceIdx), byte(chunk.Idx),
+				}},
+			)
+		}
+		const details = "leftover(1): c9:dnv-...-c9-..."
+		var rounds atomic.Int64
+		h.cntlrs[spCnA].checkReply = func(
+			req *pb.CheckCntlrRequest,
+		) *pb.CheckCntlrReply {
+			rounds.Add(1)
+			return &pb.CheckCntlrReply{
+				Revision: req.GetRevision(),
+				AgentReply: &pb.AgentReply{
+					Code:    common.ReplyCodeLeftover,
+					Details: details,
+				},
+				CntlrInfo: &pb.CntlrInfo{
+					// Every slice of the uncreated td is complete (RW19).
+					TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+						spTdOpen: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+							spSliceA: resOk("thin-a"),
+							spSliceB: resOk("thin-b"),
+						}},
+					},
+					// ...and one leg is bad (HL2).
+					LegIdToLeg: map[uint64]*pb.ResInfo{
+						spLegMeta: resErr("leg-meta", "probe io error"),
+					},
+				},
+			}
+		}
+		// The sweep's reply, with no bm_info_list: every chunk of the fixture
+		// clone is missing, so a push is planned off a leftover reply (BM2).
+		h.cntlrs[spCnA].syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			return &pb.SyncupCntlrReply{
+				Revision: req.GetRevision(),
+				AgentReply: &pb.AgentReply{
+					Code:    common.ReplyCodeLeftover,
+					Details: details,
+				},
+			}
+		}
+		h.start()
+
+		// (b) pushes are still planned.
+		waitFor(t, "a bitmap push off a leftover reply", func() bool {
+			return len(h.cntlrs[spCnA].pushes()) > 0
+		})
+		// (c) RW19 td completion and the HL2 leg rows are still reported.
+		waitFor(t, "the RW19 created flip", func() bool {
+			return len(h.ops.createdCalls()) > 0
+		})
+		if calls := h.ops.createdCalls(); len(calls[0]) != 1 ||
+			calls[0][0].TdId != spTdOpen {
+			t.Fatalf("flip batch = %v, want the uncreated td",
+				h.ops.createdCalls()[0])
+		}
+		waitFor(t, "the HL2 leg row", func() bool {
+			for _, write := range h.hw.all() {
+				if write.record == healthRecordLeg &&
+					write.objId == spLegMeta && write.epoch != 0 {
+					return true
+				}
+			}
+			return false
+		})
+		// (d) and the code re-syncs every round although the revision matches.
+		h.advanceUntil("three more check rounds", roundInterval, func() bool {
+			return rounds.Load() >= 4
+		})
+		if got := len(h.cntlrs[spCnA].syncups()); got < 3 {
+			t.Fatalf("%d SyncupCntlr calls over %d rounds, want one per "+
+				"round while the leftover lasts",
+				got, rounds.Load())
+		}
+		// It is an accepted reply, so it is never logged as a rejection.
+		if got := len(h.logs.withMsg(msgSyncupRejected)); got != 0 {
+			t.Fatalf("%d 'syncup rejected' records for a leftover reply", got)
+		}
+		waitFor(t, "the leftover record", func() bool {
+			return len(h.logs.withMsg(msgSyncupLeftover)) > 0
+		})
 	})
 }

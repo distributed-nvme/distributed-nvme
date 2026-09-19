@@ -3,7 +3,7 @@ package cnagent
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -39,10 +39,23 @@ type MdDetail struct {
 }
 
 // Detail probes one array. A non-zero exit means the array is not running —
-// which is "absent", not a failure: assembly is exactly what fixes it.
+// which is "absent", not a failure: assembly is exactly what fixes it. A run
+// that did NOT answer is an error and must never read as absent: `mdadm
+// --detail` opens the array's members and loads a superblock from one of
+// them, so on a leg whose DN side is gone it blocks in the multipath head's
+// requeue list until fast_io_fail_tmo expires — past the soft timeout — and
+// gets killed. Reading that kill as "the array is not there" is exactly what
+// let a teardown skip `mdadm --stop`, leave the array pinning its two leg
+// wrappers, and leak them for ever.
+//
+// Which is also why no sweep calls this: a probe that reads member devices
+// can never run in a teardown. ListArrays and Gone answer from sysfs instead.
 func (m *Md) Detail(ctx context.Context, dev string) (*MdDetail, error) {
-	stdout, _, _, err := m.cmd.Run(ctx, "mdadm", "--detail", dev)
+	stdout, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--detail", dev)
 	if err != nil {
+		return nil, err
+	}
+	if !ok {
 		return &MdDetail{}, nil
 	}
 	detail := &MdDetail{Exists: true, Raw: strings.TrimSpace(stdout)}
@@ -56,11 +69,134 @@ func (m *Md) Detail(ctx context.Context, dev string) (*MdDetail, error) {
 			break
 		}
 	}
-	export, _, _, err := m.cmd.Run(ctx, "mdadm", "--detail", "--export", dev)
-	if err == nil {
+	export, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--detail", "--export", dev)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		detail.Devices = parseMdExportDevices(export)
 	}
 	return detail, nil
+}
+
+// ---------------------------------------------------------------------------
+// The sysfs view of the node's arrays
+//
+// Everything the sweep needs about an array it reads from sysfs, which never
+// touches a member device and therefore never blocks on a dead leg:
+//
+//   - `ls /sys/block` names every array node, so a sweep finds arrays it has
+//     no plan for — the whole point of deriving removal from the live system;
+//   - `/sys/block/mdN/md/array_state` says whether it still holds its
+//     members. Only "clear" is gone; "inactive" is an assembled but not
+//     running array, which pins them just as hard;
+//   - `/sys/block/mdN/md/dev-*/block/dm/name` names each member's dm device,
+//     which is what attributes the array to an sp. A member with no such
+//     attribute is not a dm device at all, and an array with one is not ours.
+//
+// `mdadm --detail --scan` would be the obvious enumerator and is deliberately
+// not used: it loads superblocks.
+// ---------------------------------------------------------------------------
+
+const sysfsBlockDir = "/sys/block"
+
+// mdBlockEntryPattern matches an array's node name under /sys/block. The
+// named nodes (/dev/md/<name>) are symlinks and never appear here.
+var mdBlockEntryPattern = regexp.MustCompile(`^md[0-9]+$`)
+
+// MdArray is one array as sysfs sees it.
+type MdArray struct {
+	// Dev is the node the sweep stops: /dev/mdN, the number sysfs gave.
+	// Never /dev/md/<name>, which depends on udev having run.
+	Dev  string
+	Name string
+	// State is array_state verbatim.
+	State string
+	// Members are the dm names of the array's dm members.
+	Members []string
+	// Foreign is set when a member is not a dm device of ours to name — a
+	// bare disk, a partition, or a member whose directory vanished mid-walk.
+	// An array with one is never attributed and never stopped.
+	Foreign bool
+}
+
+// ListArrays enumerates every md array on the node from sysfs alone. An array
+// that vanished between the listing and its reads is dropped rather than
+// reported; a listing or read that did not answer is an error, because the
+// caller would otherwise read it as "no arrays" and sweep on.
+func (m *Md) ListArrays(ctx context.Context) ([]MdArray, error) {
+	entries, ok, err := m.cmd.ListDir(ctx, sysfsBlockDir)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	var out []MdArray
+	for _, entry := range entries {
+		if !mdBlockEntryPattern.MatchString(entry) {
+			continue
+		}
+		mdDir := sysfsBlockDir + "/" + entry + "/md"
+		state, ok, err := m.cmd.ReadAttr(ctx, mdDir+"/array_state")
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		members, ok, err := m.cmd.ListDir(ctx, mdDir)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		array := MdArray{
+			Dev:   "/dev/" + entry,
+			Name:  entry,
+			State: state,
+		}
+		for _, member := range members {
+			if !strings.HasPrefix(member, "dev-") {
+				continue
+			}
+			dmName, ok, err := m.cmd.ReadAttr(
+				ctx, mdDir+"/"+member+"/block/dm/name")
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				array.Foreign = true
+				continue
+			}
+			array.Members = append(array.Members, dmName)
+		}
+		out = append(out, array)
+	}
+	return out, nil
+}
+
+// Gone verifies a stop. Only an absent sysfs directory or array_state
+// "clear" counts; "inactive" is an array that still holds its members and
+// would still pin them against a dmsetup remove.
+func (m *Md) Gone(ctx context.Context, dev string) (bool, error) {
+	name := dev
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	if name == "" {
+		return false, fmt.Errorf("md device %q has no node name", dev)
+	}
+	state, ok, err := m.cmd.ReadAttr(
+		ctx, sysfsBlockDir+"/"+name+"/md/array_state")
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return true, nil
+	}
+	return state == "clear", nil
 }
 
 // parseMdExportDevices pulls the member paths out of `mdadm --detail --export`:
@@ -86,9 +222,19 @@ func parseMdExportDevices(export string) []string {
 // HasSuperblock reports whether a member device carries an md superblock.
 // `mdadm --examine` exits non-zero on a device without one, which is the
 // §11.1.1 "no superblock" case rather than an error.
-func (m *Md) HasSuperblock(ctx context.Context, dev string) bool {
-	_, _, _, err := m.cmd.Run(ctx, "mdadm", "--examine", "--export", dev)
-	return err == nil
+//
+// A run that did not answer is an error and must never read as "no
+// superblock": `--examine` opens the member device exactly as `--detail`
+// does, so on a leg whose DN side has gone it blocks until failfast and gets
+// killed — and if that happened to every member of an available group,
+// assembleGroup would take the answer as case 1 and `mdadm --create
+// --assume-clean` over live data.
+func (m *Md) HasSuperblock(ctx context.Context, dev string) (bool, error) {
+	_, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--examine", "--export", dev)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
 }
 
 // MdCreateConf carries the §3.3 step 2 options every dnv array is created
@@ -228,7 +374,14 @@ func (s *CnAgentServer) assembleGroup(
 			continue
 		}
 		members = append(members, lp.path)
-		if s.md.HasSuperblock(ctx, lp.path) {
+		// A probe that did not answer aborts the whole assembly: with no
+		// answer this pass cannot tell case 1 from case 2, and guessing case 1
+		// creates over live data.
+		has, err := s.md.HasSuperblock(ctx, lp.path)
+		if err != nil {
+			return err
+		}
+		if has {
 			withSuperblock = append(withSuperblock, lp.path)
 		}
 	}
@@ -341,24 +494,6 @@ func (s *CnAgentServer) devNoSet(
 		out[devNo] = path
 	}
 	return out, nil
-}
-
-// removeGroup tears one group device down: `mdadm --stop` for an array,
-// `dmsetup remove` for a RedundNone linear.
-func (s *CnAgentServer) removeGroup(ctx context.Context, gp *grpPlan) {
-	if !gp.raid1 {
-		s.removeDm(ctx, gp.dmName)
-		return
-	}
-	detail, err := s.md.Detail(ctx, gp.devPath)
-	if err != nil || !detail.Exists {
-		return
-	}
-	if err := s.md.Stop(ctx, gp.devPath); err != nil {
-		slog.ErrorContext(ctx, "stopping md array failed",
-			slog.String("array", gp.devPath),
-			slog.String("error", err.Error()))
-	}
 }
 
 // probeGroup is the read-only CN28 view of a group: for RedundMdRaid1 an

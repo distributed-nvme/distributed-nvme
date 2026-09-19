@@ -368,8 +368,7 @@ func cmdPushCloneBm(args []string) {
 	var g globals
 	fs := newFlagSet("push-clone-bm", &g)
 	sp, cntlr := cntlrPointerFlags(fs)
-	var revision, clone hexUint
-	fs.Var(&revision, "revision", "the cntlr's current revision (gates only)")
+	var clone hexUint
 	fs.Var(&clone, "clone", "clone id")
 	srcSliceIdx := fs.Uint("src-slice-idx", 0,
 		"src_slice_idx the chunk describes")
@@ -395,7 +394,6 @@ func cmdPushCloneBm(args []string) {
 		ClusterId:    uint64(g.cluster),
 		CnId:         uint64(g.cn),
 		CntlrPointer: cntlrPointerOf(sp, cntlr),
-		Revision:     uint64(revision),
 		CloneId:      uint64(clone),
 		SrcSliceIdx:  uint32(*srcSliceIdx),
 		BmIdx:        uint32(*bmIdx),

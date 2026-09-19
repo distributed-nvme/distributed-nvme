@@ -7,33 +7,91 @@ import (
 	"hash/fnv"
 )
 
+// DmKind is the kind field of a dnv dm device name: a role letter followed
+// by one hex digit. The letter is what makes the name attributable
+// on a node that runs both agents: cn ids and dn ids come from separate
+// counters (CnGlobal.next_id, DnGlobal.next_id) and can collide numerically,
+// so a bare digit left `dnv-<cluster>-<node>-9-...` ambiguous between a cn
+// leg wrapper and a dn kind 9 that does not exist yet.
+type DmKind string
+
 const (
-	dmKindDnError     = 0x0
-	dmKindDnLinear    = 0x1
-	dmKindDnMigrSrc   = 0x2
-	dmKindDnMigrFinal = 0x3
-	dmKindDnSide      = 0x4
-	dmKindDnMigrMeta  = 0x5
+	DmKindDnError     DmKind = "d0"
+	DmKindDnLinear    DmKind = "d1"
+	DmKindDnMigrSrc   DmKind = "d2"
+	DmKindDnMigrFinal DmKind = "d3"
+	DmKindDnSide      DmKind = "d4"
+	DmKindDnMigrMeta  DmKind = "d5"
 
-	dmKindCnPoolMeta   = 0x0
-	dmKindCnPoolData   = 0x1
-	dmKindCnPoolFinal  = 0x2
-	dmKindCnThinDev    = 0x3
-	dmKindCnRaid0      = 0x4
-	dmKindCnError      = 0x5
-	dmKindCnNsDev      = 0x6
-	dmKindCnCloneFinal = 0x7
-	dmKindCnXferFinal  = 0x8
-	dmKindCnLeg        = 0x9
-	dmKindCnGrp        = 0xa
-	dmKindCnCloneMeta  = 0xb
+	DmKindCnPoolMeta   DmKind = "c0"
+	DmKindCnPoolData   DmKind = "c1"
+	DmKindCnPoolFinal  DmKind = "c2"
+	DmKindCnThinDev    DmKind = "c3"
+	DmKindCnRaid0      DmKind = "c4"
+	DmKindCnError      DmKind = "c5"
+	DmKindCnNsDev      DmKind = "c6"
+	DmKindCnCloneFinal DmKind = "c7"
+	DmKindCnXferFinal  DmKind = "c8"
+	DmKindCnLeg        DmKind = "c9"
+	DmKindCnGrp        DmKind = "ca"
+	DmKindCnCloneMeta  DmKind = "cb"
+)
 
-	nqnKindDnHost   = 0x0
-	nqnKindCnHost   = 0x1
-	nqnKindSideToCn = 0x2
-	nqnKindMigrSrc  = 0x3
-	nqnKindXfer     = 0x4
+// DmRoleCn and DmRoleDn are the role letters of DmKind.
+const (
+	DmRoleCn = 'c'
+	DmRoleDn = 'd'
+)
 
+// dmKindIdCnt is how many 16-hex-digit id fields a name of each kind carries
+// (Appendix B). ParseDmName enforces it, so a name whose shape does not match
+// its kind is "not a dnv dm name" rather than a half-decoded one.
+var dmKindIdCnt = map[DmKind]int{
+	DmKindDnError:     3,
+	DmKindDnLinear:    3,
+	DmKindDnMigrSrc:   2,
+	DmKindDnMigrFinal: 2,
+	DmKindDnSide:      2,
+	DmKindDnMigrMeta:  2,
+
+	DmKindCnPoolMeta:   2,
+	DmKindCnPoolData:   2,
+	DmKindCnPoolFinal:  2,
+	DmKindCnThinDev:    3,
+	DmKindCnRaid0:      2,
+	DmKindCnError:      2,
+	DmKindCnNsDev:      2,
+	DmKindCnCloneFinal: 2,
+	DmKindCnXferFinal:  2,
+	DmKindCnLeg:        2,
+	DmKindCnGrp:        2,
+	DmKindCnCloneMeta:  2,
+}
+
+// NqnKind is the kind field of a dnv NVMe qualified name. Unlike DmKind it
+// keeps its bare hex digit: an NQN already carries the dnv prefix, and the
+// two roles never enumerate each other's NQN kinds.
+type NqnKind int
+
+const (
+	NqnKindDnHost   NqnKind = 0x0
+	NqnKindCnHost   NqnKind = 0x1
+	NqnKindSideToCn NqnKind = 0x2
+	NqnKindMigrSrc  NqnKind = 0x3
+	NqnKindXfer     NqnKind = 0x4
+)
+
+// nqnKindIdCnt is how many 16-hex-digit id fields an NQN of each kind
+// carries; ParseNqn enforces it exactly as ParseDmName enforces dmKindIdCnt.
+var nqnKindIdCnt = map[NqnKind]int{
+	NqnKindDnHost:   2, // cluster, dn
+	NqnKindCnHost:   2, // cluster, cn
+	NqnKindSideToCn: 4, // cluster, sp, leg, cn
+	NqnKindMigrSrc:  4, // cluster, dn, sp, migr
+	NqnKindXfer:     3, // cluster, sp, xfer
+}
+
+const (
 	localStorKindDn      = "dn"
 	localStorKindCn      = "cn"
 	localStorKindSide    = "side"
@@ -74,11 +132,11 @@ func (nf *NameFmt) DnErrorName(
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnError,
+		DmKindDnError,
 		spId,
 		sideId,
 		cnId,
@@ -93,11 +151,11 @@ func (nf *NameFmt) DnLinearName(
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnLinear,
+		DmKindDnLinear,
 		spId,
 		sideId,
 		cnId,
@@ -114,11 +172,11 @@ func (nf *NameFmt) DnSideName(
 	sideId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnSide,
+		DmKindDnSide,
 		spId,
 		sideId,
 	)
@@ -134,11 +192,11 @@ func (nf *NameFmt) DnMigrMetaDmName(
 	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnMigrMeta,
+		DmKindDnMigrMeta,
 		spId,
 		migrId,
 	)
@@ -151,11 +209,11 @@ func (nf *NameFmt) DnMigrSrcName(
 	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnMigrSrc,
+		DmKindDnMigrSrc,
 		spId,
 		migrId,
 	)
@@ -168,11 +226,11 @@ func (nf *NameFmt) DnMigrFinalName(
 	migrId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		dnId,
-		dmKindDnMigrFinal,
+		DmKindDnMigrFinal,
 		spId,
 		migrId,
 	)
@@ -235,11 +293,11 @@ func (nf *NameFmt) CnPoolMetaName(
 	sliceId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnPoolMeta,
+		DmKindCnPoolMeta,
 		spId,
 		sliceId,
 	)
@@ -252,11 +310,11 @@ func (nf *NameFmt) CnPoolDataName(
 	sliceId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnPoolData,
+		DmKindCnPoolData,
 		spId,
 		sliceId,
 	)
@@ -269,11 +327,11 @@ func (nf *NameFmt) CnPoolFinalName(
 	sliceId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnPoolFinal,
+		DmKindCnPoolFinal,
 		spId,
 		sliceId,
 	)
@@ -287,11 +345,11 @@ func (nf *NameFmt) CnThinDevName(
 	sliceId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnThinDev,
+		DmKindCnThinDev,
 		spId,
 		tdId,
 		sliceId,
@@ -305,11 +363,11 @@ func (nf *NameFmt) CnRaid0Name(
 	tdId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnRaid0,
+		DmKindCnRaid0,
 		spId,
 		tdId,
 	)
@@ -322,11 +380,11 @@ func (nf *NameFmt) CnErrorName(
 	tdId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnError,
+		DmKindCnError,
 		spId,
 		tdId,
 	)
@@ -339,11 +397,11 @@ func (nf *NameFmt) CnNsDevName(
 	nsId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnNsDev,
+		DmKindCnNsDev,
 		spId,
 		nsId,
 	)
@@ -360,11 +418,11 @@ func (nf *NameFmt) CnLegName(
 	legId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnLeg,
+		DmKindCnLeg,
 		spId,
 		legId,
 	)
@@ -380,11 +438,11 @@ func (nf *NameFmt) CnGrpName(
 	grpId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnGrp,
+		DmKindCnGrp,
 		spId,
 		grpId,
 	)
@@ -431,11 +489,11 @@ func (nf *NameFmt) CnCloneMetaDmName(
 	cloneId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnCloneMeta,
+		DmKindCnCloneMeta,
 		spId,
 		cloneId,
 	)
@@ -452,11 +510,11 @@ func (nf *NameFmt) CnCloneMetaDmPrefix(
 	cnId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-",
+		"%s-%016x-%016x-%s-",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnCloneMeta,
+		DmKindCnCloneMeta,
 	)
 }
 
@@ -467,11 +525,11 @@ func (nf *NameFmt) CnCloneFinalName(
 	cloneId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnCloneFinal,
+		DmKindCnCloneFinal,
 		spId,
 		cloneId,
 	)
@@ -484,11 +542,11 @@ func (nf *NameFmt) CnXferFinalName(
 	xferId uint64,
 ) string {
 	return fmt.Sprintf(
-		"%s-%016x-%016x-%01x-%016x-%016x",
+		"%s-%016x-%016x-%s-%016x-%016x",
 		nf.dmPrefix,
 		clusterId,
 		cnId,
-		dmKindCnXferFinal,
+		DmKindCnXferFinal,
 		spId,
 		xferId,
 	)
@@ -515,7 +573,7 @@ func (nf *NameFmt) DnHostNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindDnHost,
+		NqnKindDnHost,
 		clusterId,
 		dnId,
 	)
@@ -528,7 +586,7 @@ func (nf *NameFmt) CnHostNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindCnHost,
+		NqnKindCnHost,
 		clusterId,
 		cnId,
 	)
@@ -547,7 +605,7 @@ func (nf *NameFmt) SideToCnNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindSideToCn,
+		NqnKindSideToCn,
 		clusterId,
 		spId,
 		legId,
@@ -564,7 +622,7 @@ func (nf *NameFmt) MigrSrcNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindMigrSrc,
+		NqnKindMigrSrc,
 		clusterId,
 		dnId,
 		spId,
@@ -580,7 +638,7 @@ func (nf *NameFmt) XferNqn(
 	return fmt.Sprintf(
 		"%s:%01x:%016x:%016x:%016x",
 		nf.nqnPrefix,
-		nqnKindXfer,
+		NqnKindXfer,
 		clusterId,
 		spId,
 		xferId,

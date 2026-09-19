@@ -94,22 +94,28 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	for _, key := range s.cnKeys() {
 		s.convergeCn(ctx, s.getCn(key))
 	}
+	// A cntlr whose pointer has left its parent's list is FORGOTTEN here —
+	// file, chunks, memory entry and object lock — without any attempt to
+	// remove its resources. That is safe because the node-level sweep below
+	// finds those resources by name, and it is better than the teardown this
+	// replaced: a teardown that failed still deleted the file, and nothing
+	// ever looked again.
 	for _, key := range s.allCntlrKeys() {
 		st := s.getCntlr(key)
 		cn := s.getCn(cnKey(st.req.GetClusterId(), st.req.GetCnId()))
 		if cn == nil || !pointerKnown(cn.req, st.req.GetCntlrPointer()) {
-			// Removed from its parent's list mid-teardown.
-			s.teardownCntlr(ctx, key, st)
-			continue
+			s.dropCntlrState(ctx, key, st)
 		}
-		s.convergeCntlr(ctx, st)
 	}
-	// After the converges, so a clone that was just (re)built already holds
-	// its wrapper and is never mistaken for an orphan.
+	// The node-level sweep, which also owns the kind-cb wrapper sweep. It can
+	// run before the cntlr converges because its wanted set comes from the
+	// stored REQUESTS, not from what happens to exist: a clone this pass is
+	// about to (re)build is named by its cntlr's clone_list already.
 	for _, key := range s.cnKeys() {
-		st := s.getCn(key)
-		s.reconcileCloneMeta(
-			ctx, st.req.GetClusterId(), st.req.GetCnId())
+		s.sweepCn(ctx, s.getCn(key), true)
+	}
+	for _, key := range s.allCntlrKeys() {
+		s.convergeCntlr(ctx, s.getCntlr(key))
 	}
 	return nil
 }
@@ -134,20 +140,25 @@ func (s *CnAgentServer) syncupCn(
 	st.req = req
 	s.putCn(key, st)
 
-	info := s.convergeCn(ctx, st)
-	s.teardownRemovedCntlrs(ctx, req)
-	// The node write lock is held, so the stored cntlr set is stable and the
-	// orphan sweep can trust it ([D14]).
-	s.reconcileCloneMeta(ctx, req.GetClusterId(), req.GetCnId())
-
+	// The cn file is persisted BEFORE the sweep, not after it. The
+	// sweep is what removes the resources of a cntlr whose pointer has just
+	// left the list, and it can block for the whole failfast window on a dead
+	// leg; a request cancelled in that window used to skip the save entirely,
+	// and the next Reconcile then rebuilt the cntlr from the OLD list against
+	// sides that no longer exist. With the new list on disk first, a crash
+	// mid-sweep is nothing but a startup sweep.
 	path := s.nf.LocalCnPath(req.GetClusterId(), req.GetCnId())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting cn state failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
 	}
+	info := s.convergeCn(ctx, st)
+	s.dropRemovedCntlrs(ctx, req)
+	sweep := s.sweepCn(ctx, st, true)
+
 	return &pb.SyncupCnReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),
 		CnInfo:     info,
 	}
@@ -280,12 +291,21 @@ func (s *CnAgentServer) ensurePort(
 	return t.Ok(resKeyPort, resName, "")
 }
 
-// teardownRemovedCntlrs implements the CN7 pointer diff: a local cntlr whose
-// pointer left the authoritative list is torn down per CN21. Ids are never
-// reused, so a deleted cntlr never comes back. The base state itself is never
-// torn down — like the DN port it outlives every cntlr, and only lab cleanup
-// removes it.
-func (s *CnAgentServer) teardownRemovedCntlrs(
+// dropRemovedCntlrs implements the CN7 pointer diff: a local cntlr whose
+// pointer left the authoritative list is FORGOTTEN — its state file, its
+// bitmap chunks, its memory entry and its object lock go, and its goroutines
+// are cancelled. Nothing is removed from the node here; the node-level sweep
+// that runs next finds every one of its resources by name.
+//
+// That separation is the whole point of the design. The teardown this
+// replaced deleted the same state AFTER a best-effort removal pass whose
+// every step only logged its failure, so a cntlr whose array would not stop
+// was forgotten with its devices still live and nothing ever enumerated them
+// again. Ids are never reused, so a dropped cntlr never comes back.
+//
+// The base state itself is never torn down — like the DN port it outlives
+// every cntlr, and only lab cleanup removes it.
+func (s *CnAgentServer) dropRemovedCntlrs(
 	ctx context.Context,
 	req *pb.SyncupCnRequest,
 ) {
@@ -294,8 +314,31 @@ func (s *CnAgentServer) teardownRemovedCntlrs(
 		if st == nil || pointerKnown(req, st.req.GetCntlrPointer()) {
 			continue
 		}
-		s.teardownCntlr(ctx, key, st)
+		s.dropCntlrState(ctx, key, st)
 	}
+}
+
+// dropCntlrState is the bookkeeping half of the old teardown: stop what this
+// cntlr is running, delete what it persisted, and forget it.
+func (s *CnAgentServer) dropCntlrState(
+	ctx context.Context,
+	key string,
+	st *cntlrState,
+) {
+	s.stopConnectRetry(st)
+	s.stopLegProbers(st, nil)
+	ptr := st.req.GetCntlrPointer()
+	paths := []string{s.nf.LocalCntlrPath(
+		st.req.GetClusterId(), st.req.GetCnId(),
+		ptr.GetSpId(), ptr.GetCntlrId())}
+	paths = append(paths, s.allChunkPathsOf(st,
+		st.req.GetClusterId(), st.req.GetCnId(), ptr.GetSpId())...)
+	if err := s.store.Remove(ctx, paths...); err != nil {
+		slog.ErrorContext(ctx, "removing cntlr state files failed",
+			slog.String("error", err.Error()))
+	}
+	s.dropCntlr(key)
+	s.locks.DropObj(key)
 }
 
 // ---------------------------------------------------------------------------

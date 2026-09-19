@@ -11304,10 +11304,9 @@ type PushMigrBitmapRequest struct {
 	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
 	DnId          uint64                 `protobuf:"varint,2,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
 	SidePointer   *SidePointer           `protobuf:"bytes,3,opt,name=side_pointer,json=sidePointer,proto3" json:"side_pointer,omitempty"`
-	Revision      uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
-	MigrId        uint64                 `protobuf:"varint,5,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
-	BmIdx         uint32                 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
-	Bitmap        []byte                 `protobuf:"bytes,7,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	MigrId        uint64                 `protobuf:"varint,4,opt,name=migr_id,json=migrId,proto3" json:"migr_id,omitempty"`
+	BmIdx         uint32                 `protobuf:"varint,5,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
+	Bitmap        []byte                 `protobuf:"bytes,6,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11361,13 +11360,6 @@ func (x *PushMigrBitmapRequest) GetSidePointer() *SidePointer {
 		return x.SidePointer
 	}
 	return nil
-}
-
-func (x *PushMigrBitmapRequest) GetRevision() uint64 {
-	if x != nil {
-		return x.Revision
-	}
-	return 0
 }
 
 func (x *PushMigrBitmapRequest) GetMigrId() uint64 {
@@ -12376,11 +12368,10 @@ type PushCloneBitmapRequest struct {
 	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
 	CnId          uint64                 `protobuf:"varint,2,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
 	CntlrPointer  *CntlrPointer          `protobuf:"bytes,3,opt,name=cntlr_pointer,json=cntlrPointer,proto3" json:"cntlr_pointer,omitempty"`
-	Revision      uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
-	CloneId       uint64                 `protobuf:"varint,5,opt,name=clone_id,json=cloneId,proto3" json:"clone_id,omitempty"`
-	SrcSliceIdx   uint32                 `protobuf:"varint,6,opt,name=src_slice_idx,json=srcSliceIdx,proto3" json:"src_slice_idx,omitempty"`
-	BmIdx         uint32                 `protobuf:"varint,7,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
-	Bitmap        []byte                 `protobuf:"bytes,8,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	CloneId       uint64                 `protobuf:"varint,4,opt,name=clone_id,json=cloneId,proto3" json:"clone_id,omitempty"`
+	SrcSliceIdx   uint32                 `protobuf:"varint,5,opt,name=src_slice_idx,json=srcSliceIdx,proto3" json:"src_slice_idx,omitempty"`
+	BmIdx         uint32                 `protobuf:"varint,6,opt,name=bm_idx,json=bmIdx,proto3" json:"bm_idx,omitempty"`
+	Bitmap        []byte                 `protobuf:"bytes,7,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12434,13 +12425,6 @@ func (x *PushCloneBitmapRequest) GetCntlrPointer() *CntlrPointer {
 		return x.CntlrPointer
 	}
 	return nil
-}
-
-func (x *PushCloneBitmapRequest) GetRevision() uint64 {
-	if x != nil {
-		return x.Revision
-	}
-	return 0
 }
 
 func (x *PushCloneBitmapRequest) GetCloneId() uint64 {
@@ -14992,16 +14976,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12&\n" +
 	"\tside_info\x18\x03 \x01(\v2\t.SideInfoR\bsideInfo\x12$\n" +
-	"\abm_info\x18\x04 \x01(\v2\v.BitmapInfoR\x06bmInfo\"\xe0\x01\n" +
+	"\abm_info\x18\x04 \x01(\v2\v.BitmapInfoR\x06bmInfo\"\xc4\x01\n" +
 	"\x15PushMigrBitmapRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05dn_id\x18\x02 \x01(\x04R\x04dnId\x12/\n" +
-	"\fside_pointer\x18\x03 \x01(\v2\f.SidePointerR\vsidePointer\x12\x1a\n" +
-	"\brevision\x18\x04 \x01(\x04R\brevision\x12\x17\n" +
-	"\amigr_id\x18\x05 \x01(\x04R\x06migrId\x12\x15\n" +
-	"\x06bm_idx\x18\x06 \x01(\rR\x05bmIdx\x12\x16\n" +
-	"\x06bitmap\x18\a \x01(\fR\x06bitmap\"C\n" +
+	"\fside_pointer\x18\x03 \x01(\v2\f.SidePointerR\vsidePointer\x12\x17\n" +
+	"\amigr_id\x18\x04 \x01(\x04R\x06migrId\x12\x15\n" +
+	"\x06bm_idx\x18\x05 \x01(\rR\x05bmIdx\x12\x16\n" +
+	"\x06bitmap\x18\x06 \x01(\fR\x06bitmap\"C\n" +
 	"\x13PushMigrBitmapReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\"F\n" +
@@ -15098,17 +15081,16 @@ const file_pb_schema_proto_rawDesc = "" +
 	"cntlr_info\x18\x03 \x01(\v2\n" +
 	".CntlrInfoR\tcntlrInfo\x12-\n" +
 	"\fbm_info_list\x18\x04 \x03(\v2\v.BitmapInfoR\n" +
-	"bmInfoList\"\x8a\x02\n" +
+	"bmInfoList\"\xee\x01\n" +
 	"\x16PushCloneBitmapRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\x122\n" +
-	"\rcntlr_pointer\x18\x03 \x01(\v2\r.CntlrPointerR\fcntlrPointer\x12\x1a\n" +
-	"\brevision\x18\x04 \x01(\x04R\brevision\x12\x19\n" +
-	"\bclone_id\x18\x05 \x01(\x04R\acloneId\x12\"\n" +
-	"\rsrc_slice_idx\x18\x06 \x01(\rR\vsrcSliceIdx\x12\x15\n" +
-	"\x06bm_idx\x18\a \x01(\rR\x05bmIdx\x12\x16\n" +
-	"\x06bitmap\x18\b \x01(\fR\x06bitmap\"D\n" +
+	"\rcntlr_pointer\x18\x03 \x01(\v2\r.CntlrPointerR\fcntlrPointer\x12\x19\n" +
+	"\bclone_id\x18\x04 \x01(\x04R\acloneId\x12\"\n" +
+	"\rsrc_slice_idx\x18\x05 \x01(\rR\vsrcSliceIdx\x12\x15\n" +
+	"\x06bm_idx\x18\x06 \x01(\rR\x05bmIdx\x12\x16\n" +
+	"\x06bitmap\x18\a \x01(\fR\x06bitmap\"D\n" +
 	"\x14PushCloneBitmapReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\"F\n" +

@@ -155,13 +155,11 @@ type revWorker struct {
 	done      chan struct{}
 
 	// State owned by the loop goroutine (RW2).
-	desired      desiredState
-	synced       uint64
-	resyncWanted bool
-	stream       *streamState
-	conn         *grpc.ClientConn
-	connAddr     string
-	idleLogged   bool
+	desired    desiredState
+	stream     *streamState
+	conn       *grpc.ClientConn
+	connAddr   string
+	idleLogged bool
 	// confRefused memoizes the stored-conf error last logged, so a steady
 	// invalid conf costs one Error record rather than one per round, and a
 	// conf that changes from one invalid value to another still reports.
@@ -184,8 +182,7 @@ type recvResult struct {
 }
 
 // startRevWorker builds a revision worker, hands it to newDriver so the
-// kind-specific half can call back into it (BM6's wantResync,
-// syncedRevision), and starts its goroutine.
+// kind-specific half can call back into it, and starts its goroutine.
 func startRevWorker(
 	p revWorkerParams,
 	newDriver func(w *revWorker) objDriver,
@@ -229,18 +226,6 @@ func (w *revWorker) update(d desiredState) {
 func (w *revWorker) stop() {
 	w.cancel()
 	<-w.done
-}
-
-// wantResync marks the object for an equal-revision re-apply on the next
-// round (BM6, RW4 step 6). A driver calls it when a Push*Bitmap failed.
-func (w *revWorker) wantResync() {
-	w.resyncWanted = true
-}
-
-// syncedRevision is the last revision the agent acknowledged (RW2); the
-// bitmap pushes of §10 carry it.
-func (w *revWorker) syncedRevision() uint64 {
-	return w.synced
 }
 
 // desiredRevision is the revision the object is being driven to (RW2).
@@ -351,25 +336,19 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 		w.fail(ctx)
 		return
 	}
-	// RW2: `synced` is the last revision the agent ACKNOWLEDGED — "the
-	// revision of a code == 0 Syncup* reply OR of a Check* reply". A clean
-	// round after a shard handoff, a worker restart or an agent restart is
-	// such an acknowledgement even though it needs no Syncup*, and it is this
-	// revision the §10 bitmap pushes carry (BM3).
-	if reply.code == 0 {
-		w.synced = reply.revision
-	}
 	// Step 5: process the reply's *Info if present (HL4/HL5), then re-sync
-	// when the agent rejected the request or holds another revision — which
-	// is also how the first sync after a shard handoff, a worker restart or
-	// an agent restart happens, with no recovery step of its own.
+	// when the agent rejected the request, reported leftovers, or holds
+	// another revision — which is also how the first sync after a shard
+	// handoff, a worker restart or an agent restart happens, with no recovery
+	// step of its own.
+	//
+	// The leftover case is what re-drives a sweep: the agent recomputes the
+	// verdict on every Check*, so as long as the node still holds something
+	// the desired state does not want, every round issues a Syncup* that
+	// sweeps again. No backoff (RW12), and no flag anywhere — the code itself
+	// is the state.
 	w.driver.observe(ctx, reply)
 	needSyncup := reply.code != 0 || reply.revision != w.desired.revision
-	// Step 6: an equal-revision re-apply after a failed push (BM6). Folded
-	// into the same call so one round never issues two Syncup*.
-	if w.resyncWanted {
-		needSyncup = true
-	}
 	if needSyncup {
 		w.syncup(ctx, cc)
 	}
@@ -465,15 +444,21 @@ func (w *revWorker) syncup(ctx context.Context, cc *pb.ClusterConf) {
 		return
 	}
 	w.logSyncupResult(ctx, revision, reply.code, nil)
-	if reply.code != 0 {
+	if !accepted(reply.code) {
 		w.logSyncupRejected(ctx, revision, reply)
-		// HL1/HL2: code != 0 neither sets nor clears health; observe is still
-		// called so the driver can record what it learned.
+		// HL1/HL2: a rejection neither sets nor clears health; observe is
+		// still called so the driver can record what it learned.
 		w.driver.observe(ctx, reply)
 		return
 	}
-	w.synced = reply.revision
-	w.resyncWanted = false
+	if reply.code == common.ReplyCodeLeftover {
+		// An accepted request with residue: the desired state is stored and
+		// the wanted objects converged, but the node still holds objects it
+		// does not want, or an enumeration did not answer. RW4 step 5 re-
+		// issues the Syncup* every round while the code persists, so the
+		// record is what makes a lingering leftover visible in the worker log.
+		w.logSyncupLeftover(ctx, revision, reply)
+	}
 	w.driver.observe(ctx, reply)
 }
 
@@ -722,4 +707,20 @@ func (w *revWorker) logSyncupRejected(
 		return
 	}
 	slog.InfoContext(ctx, msgSyncupRejected, attrs...)
+}
+
+// logSyncupLeftover emits the §12 "syncup leftover" record: the request was
+// accepted and stored, and the agent's details name what the node still holds
+// that the desired state does not want. It is Info, not Error — the agent
+// re-sweeps every round on its own, and a leftover is normal for as long as a
+// dead remote's failfast window lasts.
+func (w *revWorker) logSyncupLeftover(
+	ctx context.Context,
+	revision uint64,
+	reply *replyState,
+) {
+	slog.InfoContext(ctx, msgSyncupLeftover, append(w.idAttrs(),
+		slog.Uint64("revision", revision),
+		slog.String("details", reply.details),
+	)...)
 }

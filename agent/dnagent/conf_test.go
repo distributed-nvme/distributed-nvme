@@ -221,7 +221,7 @@ func TestSyncupDnRefusesAZeroExtentSize(t *testing.T) {
 //
 // The obvious implementation — skip the file, like an unreadable one — is
 // DESTRUCTIVE: Reconcile's side loop reads a missing DN record as "this side
-// left its parent's list" and calls teardownSide on every side of that DN,
+// left its parent's list" and drops the state of every side of that DN,
 // removing its nvmet exports, its dm devices and its local state file. A conf
 // fault must not delete resources. So the record is LOADED, convergeDn refuses
 // it once, and every side of that DN is left exactly as the restart found it.
@@ -280,7 +280,8 @@ func TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown(
 		t.Errorf("the disk was written:\n%s", image)
 	}
 	// The side survives, state file and all. This is the regression guard:
-	// with the refusal written as a skip, teardownSide removed this file.
+	// with the refusal written as a skip, the side's state was dropped and
+	// this file removed.
 	if _, ok := node.protos[sidePath]; !ok {
 		t.Errorf("the side state file was torn down by a conf refusal")
 	}

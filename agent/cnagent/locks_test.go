@@ -257,7 +257,7 @@ func TestReconcileDropsOrphanChunks(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
 		testCluster, testCn, testSp, testClone, 0, 0)
 

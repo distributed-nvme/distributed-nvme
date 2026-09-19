@@ -102,10 +102,8 @@ func nsDevTable(np *nsPlan, devNo string) string {
 // here: it is **parked**, and rule 1 of the backing state machine has already
 // made its backing the td's dm-error, so the ordinary reload below installs
 // the park — live, never dm-suspended (§11.6, [D12]). The ANA move to
-// `inaccessible` that must precede it has already happened in the retire
-// phase (CN9) — which holds for the second caller as well: `repointTdNsDevs`
-// reaches here from the clone teardown, itself inside the retire phase and
-// after that same ANA loop.
+// `inaccessible` that must precede it has already happened in the sweep's P1
+// pre-step (CN9), which runs before anything else in the pass.
 func (s *CnAgentServer) ensureNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -117,8 +115,8 @@ func (s *CnAgentServer) ensureNsDev(
 		return fmt.Errorf("namespace size is 0")
 	}
 	// The td's dm-error is the one backing that may not exist yet when a
-	// namespace is pointed at it — the retire phase reaches here before the
-	// build phase creates it.
+	// namespace is pointed at it — the sweep's park pre-step reaches here
+	// before the build phase creates it.
 	if np.td != nil && np.backingName == np.td.errorName {
 		if err := s.ensureDmError(
 			ctx, np.td.errorName, np.td.sectors); err != nil {

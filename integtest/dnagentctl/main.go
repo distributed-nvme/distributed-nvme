@@ -474,8 +474,7 @@ func cmdPushMigrBm(args []string) {
 	var g globals
 	fs := newFlagSet("push-migr-bm", &g)
 	sp, leg, side := sidePointerFlags(fs)
-	var revision, migr hexUint
-	fs.Var(&revision, "revision", "the side's current revision (gates only)")
+	var migr hexUint
 	fs.Var(&migr, "migr", "migration id")
 	bmIdx := fs.Uint("bm-idx", 0, "chunk index")
 	bitmapHex := fs.String("bitmap-hex", "", "chunk bytes as hex")
@@ -498,7 +497,6 @@ func cmdPushMigrBm(args []string) {
 		ClusterId:   uint64(g.cluster),
 		DnId:        uint64(g.dn),
 		SidePointer: sidePointerOf(sp, leg, side),
-		Revision:    uint64(revision),
 		MigrId:      uint64(migr),
 		BmIdx:       uint32(*bmIdx),
 		Bitmap:      bitmap,

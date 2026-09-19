@@ -1705,6 +1705,20 @@ host_ctrl() { # <h> <nqn> <traddr>   → nvme<X>, or "none"
 	host_path_field "$1" "$2" "$3" Name
 }
 
+# host_path_is_none is the strict end of host_path_not_live: the path is GONE,
+# not merely idle. Only a controller that is gone releases the hidden path
+# device that keeps a namespace head alive, so this — and not `not live` — is
+# what a later `wait_dev_gone` needs to have happened first.
+#
+# It asks for the literal "none" rather than testing for emptiness, because
+# path_field ends `first // "none"` and answers "" only when the jq did not
+# run at all (host_path_not_live's `-n` guard carries the reasoning). An empty
+# reading here means the measurement failed, and "the path is gone" is the
+# wrong way for a failed measurement to resolve.
+host_path_is_none() { # <h> <nqn> <traddr>
+	[ "$(host_path_state "$1" "$2" "$3")" = none ]
+}
+
 cn_path_field() { # <v> <nqn> <traddr> <trsvcid> <field>
 	path_field "$(cn_subsys_json "$1")" "$2" "$3" "$4" "$5"
 }
@@ -2135,7 +2149,8 @@ TMPFS_DIR="$TMPFS_DIR"
 NQN_PREFIX="$NQN_PREFIX"
 NQN_IT="$NQN_IT"
 # common.DmPrefix (common/constants.go:136): every dm device either agent
-# creates is dnv-<cluster16>-<node16>-<kind1>-… (common/name_fmt.go:69-86).
+# creates is dnv-<cluster16>-<node16>-<kind2>-… (common/name_fmt.go:69-86),
+# where kind2 is the role letter 'c' or 'd' followed by one hex digit.
 DM_PREFIX="dnv"
 # The md assembly mask cnagent_test.sh:1033-1041 installs, by the same path.
 # BOTH node roles install it here (rule 7, install_udev_rule), and the verbs
@@ -2376,10 +2391,12 @@ HELPER_COMMON_EOF
 #      resolve_jq builds one for the DRIVER — and cdc_test.sh:1142-1153
 #      already does it from sysfs.
 #   b. dm_kind_names takes no node id. cnagent_test.sh passes one because both
-#      roles share a VM there and the kind digits overlap between roles
-#      (common/name_fmt.go:11-29). Here a DN VM runs only dn agents and a CN VM
-#      only the cn agent, so filtering by kind alone is both sufficient and
-#      what catches an instance whose ids the driver no longer knows.
+#      roles share a VM there; the kind now carries the role letter (c0…cb,
+#      d0…d5) so the roles no longer overlap, but the node id still scopes a
+#      pass to one of the two agents there. Here a DN VM runs only dn agents
+#      and a CN VM only the cn agent, so filtering by kind alone is both
+#      sufficient and what catches an instance whose ids the driver no longer
+#      knows.
 #   c. the nvmet port teardown is a guarded sweep over many ports, not
 #      `rmdir ports/1`. See ports_sweep.
 #   d. install_udev_rule / remove_udev_rule are HERE and not in the cn body.
@@ -2446,13 +2463,14 @@ agent_pids() { # <dn|cn>
 
 dm_names() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E "^$DM_PREFIX-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-" || true
+		grep -E "^$DM_PREFIX-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-" || true
 	return 0
 }
 
-# dm_kind_names <kind>: the dm devices of one kind digit. A name is
-# dnv-<cluster>-<node>-<kind>-…, so the kind is field 4 under -F-.
-dm_kind_names() { # <kind hex digit>
+# dm_kind_names <kind>: the dm devices of one kind. A name is
+# dnv-<cluster>-<node>-<kind>-…, so the kind is field 4 under -F-; a kind is a
+# role letter plus a hex digit (c0…cb on a CN, d0…d5 on a DN).
+dm_kind_names() { # <kind, e.g. c9 or d4>
 	dm_names | awk -F- -v k="$1" '$4 == k'
 	return 0
 }
@@ -2504,7 +2522,7 @@ suspended_dms() {
 # THE THREE CALLS WERE RE-EXAMINED ON 2026-09-17 AND LEFT ALONE, because the
 # case that made them expensive was never this function's. What made the
 # 2026-09-17 cleanup grind was md_stop_all stopping nothing, so ~128 devices
-# were still pinned under live arrays — the kind-9 leg wrappers on a CN, a
+# were still pinned under live arrays — the kind-c9 leg wrappers on a CN, a
 # side or the per-CN linear over it on a DN — and every one of them took all
 # three calls; with md_stop_all fixed the busy case should not arise from md.
 # The two shapes, read separately:
@@ -2534,7 +2552,7 @@ dm_force_remove() { # <name>
 	return 0
 }
 
-dm_remove_kind() { # <kind hex digit>
+dm_remove_kind() { # <kind, e.g. c9 or d4>
 	local name
 	for name in $(dm_kind_names "$1"); do
 		dm_force_remove "$name"
@@ -2911,10 +2929,10 @@ mdstat() {
 #     which one it took: the nvmet namespace exports the per-CN linear
 #     (agent/dnagent/syncup_side.go:597), which ensureDmLinear builds over the
 #     side at offset 0 for its whole length (:529-566), so the superblock sits
-#     at the same offset in the kind-1 linear and in the kind-4 side and udev
+#     at the same offset in the kind-d1 linear and in the kind-d4 side and udev
 #     probes both. `mdadm -I` assembles it there — degraded, auto-read-only,
 #     over one of the DN's own dm devices — and that array holds that device
-#     open. Either way the side stays: a pinned kind-1 linear holds the kind-4
+#     open. Either way the side stays: a pinned kind-d1 linear holds the kind-d4
 #     side open in its turn, so dn_cleanup's dm_remove_kind runs past its bound
 #     whichever of the two it is. Measured on 2026-09-17: the two DN VMs with
 #     no rule file in /etc/udev/rules.d carried 35 and 28 such arrays and both
@@ -3133,10 +3151,10 @@ dn_cleanup() {
 	# one — but the leg superblocks the cn writes through the side export land
 	# on this guest, and an unmasked udev assembles them here (see
 	# install_udev_rule). Such an array sits ON TOP of the DN stack, holding
-	# one of this suite's own dm devices open — the side (kind 4), or the
-	# per-CN linear (kind 1) that maps the side 1:1 and carries the same
+	# one of this suite's own dm devices open — the side (kind d4), or the
+	# per-CN linear (kind d1) that maps the side 1:1 and carries the same
 	# superblock at the same offset; the lab reading named a dm minor and not a
-	# kind, and a pinned kind-1 linear holds the kind-4 side open anyway. Either
+	# kind, and a pinned kind-d1 linear holds the kind-d4 side open anyway. Either
 	# way `dmsetup remove` on an open device fails, and dm_force_remove's
 	# fallback — resume, then `remove --force --retry`, bounded at 10 + 10 + 15 s
 	# — only swaps in an error table and leaves the device there. So each pinned
@@ -3164,17 +3182,17 @@ dn_cleanup() {
 	# nvmet first: a namespace must be disabled before the dm device under it
 	# can go.
 	drop_subsys_glob "$NQN_PREFIX:2:*"
-	dm_remove_kind 1 # per-CN linears
-	dm_remove_kind 3 # migration final
+	dm_remove_kind d1 # per-CN linears
+	dm_remove_kind d3 # migration final
 
 	# The migration sources are retired after the devices above, because a
 	# migration target flushes through its source.
 	disconnect_prefix "$NQN_PREFIX:3:"
 	drop_subsys_glob "$NQN_PREFIX:3:*"
-	dm_remove_kind 5 # migration metadata
-	dm_remove_kind 2 # migration source linear
-	dm_remove_kind 0 # dn error
-	dm_remove_kind 4 # side
+	dm_remove_kind d5 # migration metadata
+	dm_remove_kind d2 # migration source linear
+	dm_remove_kind d0 # dn error
+	dm_remove_kind d4 # side
 	dm_remove_all
 
 	hosts_drop "$@"
@@ -3327,9 +3345,9 @@ cn_cleanup_phase1() {
 	disconnect_prefix "$NQN_IT"
 	drop_subsys_glob "$NQN_IT:*"
 
-	dm_remove_kind 6 # ns-dev
-	dm_remove_kind 8 # transfer final
-	dm_remove_kind 7 # clone final, while its :4: source connection is up
+	dm_remove_kind c6 # ns-dev
+	dm_remove_kind c8 # transfer final
+	dm_remove_kind c7 # clone final, while its :4: source connection is up
 	echo phase1
 	return 0
 }
@@ -3342,15 +3360,15 @@ cn_cleanup_phase2() { # [extra host nqn…]
 	drop_subsys_glob "$NQN_PREFIX:4:*"
 
 	# Top-down through the cn stack, then the arrays, then the leg and group
-	# wrappers, then the clone-metadata wrappers (kind b holds the arena's
+	# wrappers, then the clone-metadata wrappers (kind cb holds the arena's
 	# loop device open and would wedge tmpfs_teardown's losetup -d with EBUSY).
-	for kind in 5 4 3 2 1 0; do
+	for kind in c5 c4 c3 c2 c1 c0; do
 		dm_remove_kind "$kind"
 	done
 	md_stop_all
-	dm_remove_kind a
-	dm_remove_kind 9
-	dm_remove_kind b
+	dm_remove_kind ca
+	dm_remove_kind c9
+	dm_remove_kind cb
 	disconnect_prefix "$NQN_PREFIX:2:"
 	dm_remove_all
 
@@ -4457,18 +4475,19 @@ FREE_MIN_CP=$((2 << 30))
 # §8 item 15, §9). Half of that ground is gone: md_stop_all is ONE function in
 # the shared node body and it was a no-op on BOTH roles, so this verb's own
 # `md_stop_all` — which sits between the top-of-stack dm kinds and the kind
-# a/9/b wrappers precisely to unpin the LEG wrappers — stopped nothing either,
-# and every kind-9 leg wrapper under a live array (up to 128 in the default
-# shape) would then have gone the long way round through dm_force_remove. Kind
-# 9 and not kind a: an md member is a CnLegName device, and CnGrpName is the
-# RedundNone group device, which a raid1 group does not have at all
+# ca/c9/cb wrappers precisely to unpin the LEG wrappers — stopped nothing
+# either, and every kind-c9 leg wrapper under a live array (up to 128 in the
+# default shape) would then have gone the long way round through
+# dm_force_remove. Kind c9 and not kind ca: an md member is a CnLegName
+# device, and CnGrpName is the RedundNone group device, which a raid1 group
+# does not have at all
 # (common/name_fmt.go:352-391). That is a mechanism, not a finding: what it
 # still does not explain is the STANDBY. "Two CNs and not the third" needs no
 # explaining: CNTLR_CNT is 2 and --cn is at least 3 (three in the lab), so at
 # least one CN carries no cntlr of this sp at all (SPARE_CN_LIST, logged on
 # every run) and its
 # cn_cleanup_phase2 is a walk over empty `dmsetup ls` output. The other two are
-# both heavy — 128 kind-9 leg wrappers and 128 `:2:` connections each — but
+# both heavy — 128 kind-c9 leg wrappers and 128 `:2:` connections each — but
 # only the PRIMARY has arrays (CN12: "Groups (md.go; primary only — a standby
 # has none)"), and the mask is what keeps a stray one off the standby's leg
 # wrappers, which carry md superblocks of their own. So the md no-op is a
@@ -5403,7 +5422,7 @@ cleanup_start_gate() { # <what this cleanup was: for the message>
 		remedy="$remedy over one of this suite's own dm devices — the cn's leg"
 		remedy="$remedy superblocks travel down the side export and an unmasked"
 		remedy="$remedy udev assembles them on the DN, where the array pins the"
-		remedy="$remedy side (kind 4) or the per-CN linear over it (kind 1) and"
+		remedy="$remedy side (kind d4) or the per-CN linear over it (kind d1) and"
 		remedy="$remedy dm_remove_kind cannot remove either. Check with"
 		remedy="$remedy \`cat /proc/mdstat\` on that guest (a DN must show"
 		remedy="$remedy no dnv array), and read each one's name with"
@@ -5419,7 +5438,7 @@ cleanup_start_gate() { # <what this cleanup was: for the message>
 		remedy="$remedy ran past the bound on two CN VMs on 2026-09-17 (doc"
 		remedy="$remedy §9). The candidate is the same md no-op the DNs had —"
 		remedy="$remedy md_stop_all is one function on both roles and stopped"
-		remedy="$remedy nothing until 2026-09-17, so this verb's kind-9 leg"
+		remedy="$remedy nothing until 2026-09-17, so this verb's kind-c9 leg"
 		remedy="$remedy wrappers stayed pinned under live arrays —"
 		remedy="$remedy but it covers the PRIMARY only, since only a primary"
 		remedy="$remedy assembles arrays (CN12); the standby holds as many leg"
@@ -9213,6 +9232,40 @@ ops_slots() {
 	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
 		"host0 still holds its path to the primary after the delete"
 	check_sha0 "after a third cntlr was created, disabled and deleted"
+
+	# AND THEN DROP THE DEAD PATH, which is cleanup this step owes the REST OF
+	# THE RUN rather than an assertion about the delete.
+	#
+	# What is left above is a controller that can never connect again — the
+	# ECONNREFUSED retry this step's header describes — and the kernel holds it
+	# in `connecting` for the whole ctrl_loss_tmo budget: 600 s, ten times
+	# WAIT_HOST, which no connect in this suite overrides.
+	#
+	# That zombie is not inert, because it keeps the hidden per-controller path
+	# device (`nvme1c3n1`) it created while it was live, and an nvme
+	# subsystem's namespace HEAD lives as long as any path device still
+	# references it. So while it sits there host0 cannot lose
+	# /dev/disk/by-id/nvme-uuid.$UUID1 no matter how correctly both surviving
+	# CNs remove the namespace — which is what made case_teardown's
+	# `wait_dev_gone` unsatisfiable. That was not a regression in anything the
+	# agents do: a 2026-09-18 run of this case at 02b303c and one of the same
+	# case with teardown-by-sweep applied both died at it-ops-90 on the same
+	# 60 s wait, with host0 holding exactly this shape (nvme1 live, nvme2 live,
+	# nvme3 connecting, one by-id link, `hidden=1` path device present). The
+	# two steps were simply written against each other.
+	#
+	# Disconnecting the controller BY DEVICE is what closes it, and it costs
+	# the later assertion nothing: --device takes this one controller and
+	# leaves the two live paths that `ns delete` is actually proved over
+	# (cnagent_test.sh's SH20 rule, the same reason a migrating leg's dead side
+	# is retired by device and not by nqn). It is `|| true` because a
+	# controller the kernel happened to delete on its own — the DNR ending
+	# host_wait_path_not_live also accepts — makes `nvme disconnect` exit
+	# non-zero, and both endings are the one this wants.
+	ssh_host_ok 0 "timeout 30 nvme disconnect -d $ctrl3 >/dev/null 2>&1 || true"
+	wait_until "$WAIT_HOST" \
+		"host0 to stop holding a path for the deleted cntlr $c3" \
+		host_path_is_none 0 "$SS0" "$traddr3"
 }
 
 # --- step 4 -----------------------------------------------------------------

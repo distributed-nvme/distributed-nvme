@@ -728,6 +728,11 @@ func TestFreshSyncupCn(t *testing.T) {
 	file := srv.nf.CnTmpFilePath(testCluster, testCn)
 
 	assertOrder(t, node,
+		// The cn file carries the pointer list the node-level sweep
+		// removes against, so it is persisted BEFORE anything is converged or
+		// swept — a crash in the middle is then a startup sweep rather than a
+		// rebuild against the old list.
+		"writeproto "+srv.nf.LocalCnPath(testCluster, testCn),
 		"cmd findmnt", "cmd mkdir -p "+tmpfs, "cmd mount -t tmpfs",
 		"cmd stat --format %s "+file,
 		"cmd truncate --size 1073741824 "+file,
@@ -740,7 +745,6 @@ func TestFreshSyncupCn(t *testing.T) {
 			"/ana_groups/1/ana_state",
 		"writedirect "+portPathOf(common.NvmetPortId)+
 			"/ana_groups/3/ana_state",
-		"writeproto "+srv.nf.LocalCnPath(testCluster, testCn),
 	)
 	// [D14]: LVM is gone from the CN too — CN5 stops at the loop device and
 	// the arena is carved by the slot allocator. This is the unit-test form
@@ -1140,6 +1144,13 @@ func TestStandbyConverge(t *testing.T) {
 func TestFailoverRetireOrder(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true})
+	// Read before the flip: the sweep is about to stop this array, and a
+	// stopped array has no sysfs node left to name.
+	mdNode := node.mdNode(srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false)))
+	if mdNode == "" {
+		t.Fatalf("the fixture array has no sysfs node")
+	}
 
 	node.Reset()
 	reply, err := srv.SyncupCntlr(context.Background(),
@@ -1150,16 +1161,19 @@ func TestFailoverRetireOrder(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	mdDev := srv.nf.MdPath(
-		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	// The sweep stops the node SYSFS named — /dev/mdN — never the
+	// /dev/md/<name> symlink udev may not have made, and never after an
+	// `mdadm --detail`, whose member reads block until failfast on a leg
+	// whose DN side has gone.
 	assertOrder(t, node,
 		"writedirect "+anaPath(testNqn, 1)+"=3",
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
 		"cmd dmsetup remove "+raid0Name(srv, testTd),
 		"cmd dmsetup remove "+thinName(srv, testTd),
 		"cmd dmsetup remove "+poolName(srv),
-		"cmd mdadm --stop "+mdDev,
+		"cmd mdadm --stop "+mdNode,
 	)
+	assertNoCall(t, node, "cmd mdadm --detail")
 	// Standbys keep their legs: no leg NQN is disconnected.
 	assertNoCall(t, node, "cmd nvme disconnect")
 }
@@ -2007,6 +2021,13 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	// they cannot pin the per-leg order — the CN21 flip is asserted on the
 	// meta leg's own two calls below.
 	assertOrder(t, node,
+		// The cntlr is FORGOTTEN first — file, chunks, memory entry —
+		// and its resources are then found by name by the node-level sweep.
+		// The old teardown removed the resources first and deleted the file
+		// whether or not that worked, which is how a cntlr whose array would
+		// not stop was forgotten with its devices still live.
+		"cmd rm -f "+srv.nf.LocalCntlrPath(
+			testCluster, testCn, testSp, testCntlr),
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
 		"cmd rmdir "+agent.NvmetRoot+"/subsystems/"+testNqn,
 		"cmd dmsetup remove "+nsDevName(srv, testNs),
@@ -2014,8 +2035,6 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 		"cmd dmsetup remove "+thinName(srv, testTd),
 		"cmd dmsetup remove "+poolName(srv),
 		"cmd dmsetup remove "+legName(srv, testMetaLeg),
-		"cmd rm -f "+srv.nf.LocalCntlrPath(
-			testCluster, testCn, testSp, testCntlr),
 	)
 	// CN21: one leg disconnects *before* its wrapper
 	// is removed — a probe wedged on a pathless leg holds an open fd on the

@@ -41,7 +41,7 @@ func (s *DnAgentServer) syncupSide(
 	st.req = req
 	s.putSide(key, st)
 
-	info := s.convergeSide(ctx, st, dn.req.GetExtentSize())
+	info, sweep := s.convergeSide(ctx, st, dn.req.GetExtentSize())
 
 	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
@@ -51,50 +51,42 @@ func (s *DnAgentServer) syncupSide(
 			slog.String("error", err.Error()))
 	}
 	return &pb.SyncupSideReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),
 		SideInfo:   info,
 		BmInfo:     s.bitmapInfo(st),
 	}
 }
 
-// convergeSide brings one side to its desired state: tear the layers the
-// sp_level (or a finished migration) forbids down top-down, then build what
-// is wanted bottom-up — side device, dm, nvmet — probing first at every step
-// (SH16).
+// convergeSide brings one side to its desired state: sweep away everything
+// the desired state does not want, top-down, then build what it does want
+// bottom-up — side device, dm, nvmet — probing first at every step (SH16).
+// It returns the SideInfo and the sweep's verdict, which is what the reply's
+// agent_reply carries.
 func (s *DnAgentServer) convergeSide(
 	ctx context.Context,
 	st *sideState,
 	extentSize uint64,
-) *pb.SideInfo {
+) (*pb.SideInfo, *agent.SweepResult) {
 	plan := newSidePlan(s.nf, st.req, extentSize)
 	info := &pb.SideInfo{}
 
-	s.teardownForbidden(ctx, st, plan)
-	st.appliedCnIds = plan.cnIds
-	st.appliedMigrSrc = plan.migrSrc
-	// The raw conf is tracked alongside the effective one: it is what says a
-	// source role exists at all, and so what teardownForbidden keys its
-	// tracker cleanup on (§11.2).
-	st.appliedMigrSrcRaw = plan.migrSrcRaw
-	// A destination role the request still wants is simply re-applied; one it
-	// has dropped is retired by retireMigrDst, which owns st.appliedMigrDst
-	// until the dm-clone is actually gone.
-	retiredDst := st.appliedMigrDst
-	if plan.wantMigr {
-		st.appliedMigrDst = plan.migrDst
-		retiredDst = nil
-	}
+	// The sweep replaced teardownForbidden and retireMigrDst, and with them
+	// the applied* fields they diffed against. Those fields were memory of a
+	// past converge that the converge itself then overwrote, so a removal
+	// that failed was forgotten; what to remove is now derived by subtracting
+	// this plan from what the node actually holds.
+	sweep := s.sweepSide(ctx, st, plan, true)
 
 	state := s.ensureSideDev(ctx, st, plan, info)
 	if !plan.wantDm {
 		// SP_LEVEL_DISABLE: only the side device, its allocation record and —
 		// because zeroing is bottom-layer provisioning, like the trim it
-		// replaced — its zeroing goroutine remain (DN11, §9.4).
-		// teardownForbidden has just removed the per-CN linears, so nothing
-		// holds the dm-clone open any more.
-		s.retireMigrDst(ctx, st, plan, retiredDst)
-		return info
+		// replaced — its zeroing goroutine remain (DN11, §9.4). The sweep
+		// above has already removed everything else, dm-clone included: at
+		// this level nothing is wanted but the side device, so the per-CN
+		// linears went first and stopped holding the clone open.
+		return info, sweep
 	}
 	if state != sideDevReady {
 		// The whole per-CN stack is gated together (DN9 step 4): dm-error,
@@ -108,7 +100,7 @@ func (s *DnAgentServer) convergeSide(
 		// device is doing.
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info)
-		return info
+		return info, sweep
 	}
 
 	// §11.2 src step 1: hand IO over before the dm-linears are reloaded onto
@@ -122,9 +114,6 @@ func (s *DnAgentServer) convergeSide(
 		cloneLive = s.ensureMigrDst(ctx, st, plan, info)
 	}
 	s.ensureCnDm(ctx, st, plan, info, cloneLive)
-	// Only now do the per-CN linears point at the plain side device again,
-	// which is what lets the finished migration's dm-clone be removed.
-	s.retireMigrDst(ctx, st, plan, retiredDst)
 	switch {
 	case plan.migrSrc != nil:
 		s.ensureMigrSrc(ctx, st, plan, info)
@@ -135,7 +124,7 @@ func (s *DnAgentServer) convergeSide(
 	if plan.wantExport {
 		s.ensureCnExports(ctx, st, plan, info, cloneLive)
 	}
-	return info
+	return info, sweep
 }
 
 // ---------------------------------------------------------------------------
@@ -422,13 +411,20 @@ func (s *DnAgentServer) ensureCnDm(
 // The queued IO drains against whatever table is live — for a fenced linear
 // its pre-fence one — which is the same thing the end of the window would
 // have done, only without the dm-error swap the side no longer needs.
+//
+// The set of devices comes from the ENUMERATION, not from a remembered cn
+// list: a linear built for a CN that has since left standby_id_list is
+// exactly the one a remembered list would miss, and leaving it suspended
+// would queue bios with no timeout ([D12]).
 func (s *DnAgentServer) unfenceLinears(
 	ctx context.Context,
-	st *sideState,
 	plan *sidePlan,
+	actual *dnActual,
 ) {
-	for _, cnId := range unionIds(st.appliedCnIds, plan.cnIds) {
-		name := plan.linearName(cnId)
+	ofSide := func(dn common.DmName) bool {
+		return dn.Ids[0] == plan.spId && dn.Ids[1] == plan.sideId
+	}
+	for _, name := range actual.dmsOfKind(common.DmKindDnLinear, ofSide) {
 		dev, err := s.dm.Info(ctx, name)
 		if err != nil || dev == nil || !dev.Suspended {
 			continue
@@ -735,243 +731,6 @@ func (s *DnAgentServer) reportMigrSrcDeferred(
 // Teardown
 // ---------------------------------------------------------------------------
 
-// teardownForbidden removes, top-down, everything the current desired state
-// no longer wants: layers the sp_level forbids, the endpoints of a finished
-// migration, and the stacks of CNs that left the list.
-func (s *DnAgentServer) teardownForbidden(
-	ctx context.Context,
-	st *sideState,
-	plan *sidePlan,
-) {
-	for _, cnId := range removedIds(st.appliedCnIds, plan.cnIds) {
-		s.removeExport(ctx, plan.sideNqn(cnId))
-		s.removeDm(ctx, plan.linearName(cnId))
-		s.removeDm(ctx, plan.errName(cnId))
-		st.tracker.Drop(resKeyOf(resKeyNvmeofFmt, cnId))
-		st.tracker.Drop(resKeyOf(resKeyDmLinearFmt, cnId))
-		st.tracker.Drop(resKeyOf(resKeyDmErrorFmt, cnId))
-	}
-	if !plan.wantExport {
-		for _, cnId := range plan.cnIds {
-			s.removeExport(ctx, plan.sideNqn(cnId))
-			st.tracker.Drop(resKeyOf(resKeyNvmeofFmt, cnId))
-		}
-	}
-	// A migration role that ended is named by the *previously* applied conf:
-	// the incoming request no longer carries it. The RAW conf is what the
-	// block keys on, because a source role exists — and reports rows — from
-	// the moment migr_src_conf appears, whether or not the destination has
-	// provisioned (§11.2). Only the resource work is guarded by the
-	// *effective* conf: a role that never left the deferred state built
-	// nothing to remove.
-	if raw := st.appliedMigrSrcRaw; raw != nil {
-		srcPlan := plan.withMigrSrc(raw)
-		built := st.appliedMigrSrc != nil
-		if built && plan.migrSrc == nil {
-			// The cutover was cancelled or finished: the window is over and
-			// the linears go back to their normal targets, resumed. They are
-			// resumed here rather than left to ensureCnDm, which a pass that
-			// takes the [D15] gate never reaches — and nothing else would ever
-			// resume them ([D12]).
-			s.clearFence(st)
-			s.unfenceLinears(ctx, st, plan)
-		}
-		if built && (plan.migrSrc == nil || !plan.wantExport) {
-			s.removeExport(ctx, srcPlan.migrSrcNqn())
-		}
-		if built && (plan.migrSrc == nil || !plan.wantDm) {
-			s.removeDm(ctx, srcPlan.migrSrcName())
-		}
-		// The tracker keys go the moment the role does, deferred or not: an
-		// entry that outlives its resource makes the *next* migration on this
-		// side report the dead one's epoch, because epoch is only refreshed on
-		// a status change (SH14) and both report PROVISIONING.
-		if plan.migrSrcRaw == nil || !plan.wantExport {
-			st.tracker.Drop(resKeyMigrSrcNvmeof)
-		}
-		if plan.migrSrcRaw == nil || !plan.wantDm {
-			st.tracker.Drop(resKeyMigrSrcDm)
-		}
-	}
-	if !plan.wantDm {
-		for _, cnId := range plan.cnIds {
-			s.removeDm(ctx, plan.linearName(cnId))
-			s.removeDm(ctx, plan.errName(cnId))
-			st.tracker.Drop(resKeyOf(resKeyDmLinearFmt, cnId))
-			st.tracker.Drop(resKeyOf(resKeyDmErrorFmt, cnId))
-		}
-	}
-}
-
-// retireMigrDst tears down a destination role the request has dropped — the
-// §11.2 finish step, and any level that forbids the migration layer.
-//
-// It is deliberately *not* part of teardownForbidden, which runs before the
-// per-CN layer is converged. The dm-clone sits **under** the per-CN
-// dm-linears: while one still points at it, `dmsetup remove` on the clone
-// fails EBUSY, and so then does every device beneath it — the metadata
-// wrapper and the side device itself, which a later empty side list can then
-// never remove either. So this runs only where the linears have already left
-// the clone: repointed onto the plain side device by ensureCnDm, or removed
-// outright by teardownForbidden at SP_LEVEL_DISABLE.
-//
-// st.appliedMigrDst is cleared only on success. A pass that could not finish
-// (a gated side still exporting through the clone, a transient EBUSY) leaves
-// the role named, and the next converge retries it.
-func (s *DnAgentServer) retireMigrDst(
-	ctx context.Context,
-	st *sideState,
-	plan *sidePlan,
-	dst *pb.SyncupSideRequest_MigrDstConf,
-) {
-	if dst == nil {
-		return
-	}
-	if s.teardownMigrDst(ctx, st, plan.withMigrDst(dst)) {
-		st.appliedMigrDst = nil
-	}
-}
-
-// withMigrSrc / withMigrDst give a plan whose migration name helpers resolve,
-// so a role that is being torn down can still be named.
-func (p *sidePlan) withMigrSrc(
-	conf *pb.SyncupSideRequest_MigrSrcConf,
-) *sidePlan {
-	clone := *p
-	clone.migrSrc = conf
-	return &clone
-}
-
-func (p *sidePlan) withMigrDst(
-	conf *pb.SyncupSideRequest_MigrDstConf,
-) *sidePlan {
-	clone := *p
-	clone.migrDst = conf
-	return &clone
-}
-
-func removedIds(applied, want []uint64) []uint64 {
-	keep := make(map[uint64]struct{}, len(want))
-	for _, id := range want {
-		keep[id] = struct{}{}
-	}
-	var out []uint64
-	for _, id := range applied {
-		if _, ok := keep[id]; !ok {
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
-// teardownSide removes a side completely, top-down (DN6): nvmet exports, the
-// dm-clone, the migration-destination connection and its retry loop, the
-// remaining dm devices, the dm-clone metadata wrapper and its slot, the side
-// device and its allocation record — then the local files and the object lock
-// (SH7).
-func (s *DnAgentServer) teardownSide(
-	ctx context.Context,
-	key string,
-	st *sideState,
-) {
-	plan := newSidePlan(s.nf, st.req, 0)
-	if plan.migrSrc == nil && st.appliedMigrSrc != nil {
-		plan = plan.withMigrSrc(st.appliedMigrSrc)
-	}
-	if plan.migrDst == nil && st.appliedMigrDst != nil {
-		plan = plan.withMigrDst(st.appliedMigrDst)
-	}
-
-	// Unfence before anything else. A side torn down inside the §11.2 grace
-	// window still has its per-CN dm-linears suspended, and the whole
-	// teardown runs over them: disabling an nvmet namespace closes its
-	// backing device, and `dmsetup remove` does not succeed on a suspended
-	// one. Resuming first means every step below operates on live devices.
-	s.clearFence(st)
-	s.unfenceLinears(ctx, st, plan)
-
-	for _, cnId := range unionIds(st.appliedCnIds, plan.cnIds) {
-		s.removeExport(ctx, plan.sideNqn(cnId))
-	}
-	if plan.migrSrc != nil {
-		s.removeExport(ctx, plan.migrSrcNqn())
-	}
-
-	s.stopMigrRetry(st)
-	// Cancel the §9.4 zeroing goroutine **and wait for it**: its
-	// `blkdiscard --zeroout` child holds /dev/mapper/{DnSideName} open, and
-	// `dmsetup remove` on a device with an open fd fails EBUSY. The wait is
-	// bounded — the child is SIGTERMed at CmdSoftTimeout and SIGKILLed at
-	// CmdHardTimeout — and the loop never blocks on a lock, so waiting for it
-	// here, under the node write lock, cannot deadlock (DN9).
-	s.stopZeroing(st)
-	// Strictly top-down. The per-CN dm-linears go first because everything
-	// below is one of their table targets — `dmsetup remove` on a device
-	// another dm device still maps fails with EBUSY. The dm-clone then goes
-	// before the disconnect that removes its source device: pulling the
-	// source out from under a live dm-clone leaves in-flight hydration IO
-	// with nowhere to go, and the remove blocks until the §7 hard timeout
-	// (DN6).
-	for _, cnId := range unionIds(st.appliedCnIds, plan.cnIds) {
-		s.removeDm(ctx, plan.linearName(cnId))
-	}
-	if plan.migrDst != nil {
-		s.removeDm(ctx, plan.migrFinalName())
-		s.disconnect(ctx, plan.srcNqnOfDst())
-	}
-	if plan.migrSrc != nil {
-		s.removeDm(ctx, plan.migrSrcName())
-	}
-	for _, cnId := range unionIds(st.appliedCnIds, plan.cnIds) {
-		s.removeDm(ctx, plan.errName(cnId))
-	}
-	// A record is released only once its device is really gone: freeing it
-	// while the device still maps those bytes would let the next allocation
-	// hand them to another side. A record left behind is not a leak — the
-	// DN6 orphan sweep retries it on the next node-level pass.
-	if plan.migrDst != nil {
-		if s.removeDm(ctx, plan.migrMetaDmName()) {
-			if err := s.meta.FreeCloneMeta(ctx, plan.spId,
-				plan.migrDst.GetMigrId()); err != nil {
-				slog.ErrorContext(ctx,
-					"freeing the clone-metadata slot failed",
-					slog.String("error", err.Error()))
-			}
-		}
-	}
-	if s.removeDm(ctx, plan.sideDevName) {
-		if err := s.meta.FreeSide(ctx, plan.spId, plan.sideId); err != nil {
-			slog.ErrorContext(ctx, "freeing the side allocation failed",
-				slog.String("error", err.Error()))
-		}
-	}
-
-	paths := []string{s.nf.LocalSidePath(
-		plan.clusterId, plan.dnId, plan.spId, plan.sideId)}
-	paths = append(paths, s.chunkPaths(st)...)
-	if err := s.store.Remove(ctx, paths...); err != nil {
-		slog.ErrorContext(ctx, "removing side state files failed",
-			slog.String("error", err.Error()))
-	}
-	s.dropSide(key)
-	s.locks.DropObj(key)
-}
-
-func unionIds(a, b []uint64) []uint64 {
-	seen := make(map[uint64]struct{}, len(a)+len(b))
-	var out []uint64
-	for _, list := range [][]uint64{a, b} {
-		for _, id := range list {
-			if _, ok := seen[id]; ok {
-				continue
-			}
-			seen[id] = struct{}{}
-			out = append(out, id)
-		}
-	}
-	return out
-}
-
 func (s *DnAgentServer) removeExport(ctx context.Context, nqn string) {
 	if err := s.nvmet.RemoveSubsystem(
 		ctx, s.port.PortId, nqn); err != nil {
@@ -991,7 +750,9 @@ func (s *DnAgentServer) disconnect(ctx context.Context, nqn string) {
 			slog.String("error", err.Error()))
 		return
 	}
-	if !state.Found {
+	// A subsystem the kernel has kept after its last controller went holds
+	// nothing open; disconnecting it again would be a command per round.
+	if !state.Found || len(state.Paths) == 0 {
 		return
 	}
 	if err := s.host.Disconnect(ctx, nqn); err != nil {

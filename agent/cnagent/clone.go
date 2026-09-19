@@ -391,67 +391,6 @@ func (s *CnAgentServer) parkTdNsDevs(
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Teardown (CN18, strictly ordered)
-// ---------------------------------------------------------------------------
-
-// retireClone removes one clone stack. The order is load-bearing: the ns-devs
-// come off the dm-clone first, the dm-clone goes **before** its source
-// connection dies (dm-clone flushes through the source on removal and blocks
-// without it), and only then the metadata wrapper and the connection. Removing
-// the wrapper is what frees its units: they reappear as free in the next
-// registry enumeration ([D14]).
-func (s *CnAgentServer) retireClone(
-	ctx context.Context,
-	st *cntlrState,
-	plan *cntlrPlan,
-	cp *clonePlan,
-) {
-	if cp.dstTd != nil {
-		s.repointTdNsDevs(ctx, plan, cp.dstTd.tdId)
-	}
-	s.removeDm(ctx, cp.finalName)
-	// The wrapper's removal is what frees its units, so it is a registry
-	// mutation and runs under cloneMetaMu (CN18) — the dm-clone above it is
-	// already gone, so nothing maps it and the removal cannot fail EBUSY.
-	s.removeCloneMetaDm(ctx, cp.metaDmName)
-	// `--nqn` is safe here: every path of the source subsystem is being
-	// retired with the clone.
-	s.disconnect(ctx, cp.clone.GetSrcNqn())
-	// Only a clone that actually left `clone_list` loses its chunks (SH7). A
-	// clone the role or the sp_level merely suppresses keeps them
-	// applied-by-file (CN19, CN22) — deleting them on every standby converge
-	// would make the worker re-push them forever, and would leave a promoted
-	// standby's §11.5 rebuild nothing to skip with.
-	if plan.cloneById[cp.cloneId] == nil {
-		s.dropCloneChunks(ctx, st, plan, cp.cloneId)
-	}
-	st.tracker.Drop(resKeyOf(resKeyCloneTgtFmt, cp.cloneId))
-	st.tracker.Drop(resKeyOf(resKeyCloneDmFmt, cp.cloneId))
-	st.tracker.Drop(resKeyOf(resKeyCloneMetaFmt, cp.cloneId))
-}
-
-// repointTdNsDevs moves every ns-dev of one td onto the backing the **new**
-// plan wants — the raid0 when the cntlr still serves it (CN16 rule 6), the
-// dm-error otherwise. It is what lets a dm-clone be removed: a device another
-// dm table still maps cannot go.
-func (s *CnAgentServer) repointTdNsDevs(
-	ctx context.Context,
-	plan *cntlrPlan,
-	tdId uint64,
-) {
-	for _, np := range plan.namespaces {
-		if np.td == nil || np.td.tdId != tdId {
-			continue
-		}
-		if err := s.ensureNsDev(ctx, np); err != nil {
-			slog.ErrorContext(ctx, "repointing a namespace device failed",
-				slog.String("dm", np.devName),
-				slog.String("error", err.Error()))
-		}
-	}
-}
-
 // probeCloneDm is the read-only view of a dm-clone: the raw status line rides
 // into details (§9.5).
 func (s *CnAgentServer) probeCloneDm(

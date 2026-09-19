@@ -296,9 +296,10 @@ const (
 // leaves no other writer, so a pool id absent from it can only belong to a td
 // deleted at or before that revision.
 //
-// deleteThinId is deliberately not reused: it swallows the message error by
-// design (CN14's fire-and-forget retire), while the sweep must see a failure
-// to keep the flag alive for the retry.
+// The sweep's own per-td deletion (deleteThinIdByName, sweep.go L7) is
+// deliberately not reused here: it swallows the message error by design, a
+// fire-and-forget removal whose retry is the next pass's enumeration, while
+// this activation sweep must SEE a failure to keep its arming alive.
 func (s *CnAgentServer) sweepThinIds(
 	ctx context.Context,
 	st *cntlrState,
@@ -336,26 +337,6 @@ func (s *CnAgentServer) sweepThinIds(
 	slog.InfoContext(ctx, msgThinSweep,
 		slog.String("pool", sp.poolFinalName),
 		slog.Any("deleted", strays))
-}
-
-// deleteThinId is the CN14 **deletion** path — a td that left td_list. A
-// cntlr teardown (CN21) never sends it: the pool metadata lives on the DN
-// legs, and the next hosting CN must find the thin volumes intact.
-func (s *CnAgentServer) deleteThinId(
-	ctx context.Context,
-	sp *slicePlan,
-	devId uint32,
-) {
-	pool, err := s.dm.Info(ctx, sp.poolFinalName)
-	if err != nil || pool == nil {
-		return
-	}
-	if err := s.dm.Message(ctx, sp.poolFinalName, 0,
-		fmt.Sprintf("delete %d", devId)); err != nil {
-		slog.ErrorContext(ctx, "thin-pool delete message failed",
-			slog.String("pool", sp.poolFinalName),
-			slog.String("error", err.Error()))
-	}
 }
 
 // ---------------------------------------------------------------------------

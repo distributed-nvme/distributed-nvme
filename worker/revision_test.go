@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -466,8 +465,8 @@ func TestRevisionRejectedSyncupIsLogged(t *testing.T) {
 		common.ReplyCodeStaleRevision {
 		t.Fatalf("code = %v", rec["code"])
 	}
-	// A rejected syncup never advances synced, so health is untouched by the
-	// code != 0 rows (HL1).
+	// A rejection carries no verdict, so health is untouched by the code != 0
+	// rows (HL1).
 	if got := len(h.hw.all()); got != 0 {
 		t.Fatalf("code != 0 wrote health: %v", h.hw.all())
 	}
@@ -517,71 +516,6 @@ func TestRevisionDesiredChangeSyncsAtOnce(t *testing.T) {
 			t.Fatalf("revision 3 was sent; RW3 must coalesce to the latest")
 		}
 	}
-}
-
-// resyncDriver wraps a real driver and marks the object for an
-// equal-revision re-apply from inside observe — which is exactly where BM6
-// does it, on the revision worker's own goroutine.
-type resyncDriver struct {
-	objDriver
-	host *revWorker
-	fire *atomic.Bool
-}
-
-func (d *resyncDriver) observe(ctx context.Context, r *replyState) {
-	d.objDriver.observe(ctx, r)
-	if d.fire.CompareAndSwap(true, false) {
-		d.host.wantResync()
-	}
-}
-
-// TestRevisionResyncWantedResends checks RW4 step 6 / BM6: a failed push sets
-// resyncWanted and the next round issues an equal-revision re-apply even
-// though the agent is at the right revision and reported code 0.
-func TestRevisionResyncWantedResends(t *testing.T) {
-	h := newRevHarness(t)
-	stub := &stubDnAgent{
-		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
-			return &pb.CheckDnReply{Revision: req.GetRevision()}
-		},
-	}
-	h.fleet.addDn(t, testAddr, stub)
-	h.defaultConf()
-	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
-	var fire atomic.Bool
-	params := revWorkerParams{
-		deps:    h.deps,
-		role:    common.WorkerRoleDn,
-		shard:   testShard,
-		cid:     testCid,
-		id:      testDnId,
-		seed:    seedOf(1),
-		desired: desiredState{revision: 6, handle: testAddr},
-	}
-	w := startRevWorker(params, func(host *revWorker) objDriver {
-		return &resyncDriver{
-			objDriver: newDnDriver(params, host),
-			host:      host,
-			fire:      &fire,
-		}
-	})
-	t.Cleanup(w.stop)
-
-	waitFor(t, "steady state", func() bool { return stub.checkCount() >= 1 })
-	if got := len(stub.syncups()); got != 0 {
-		t.Fatalf("%d syncups in the steady state, want none", got)
-	}
-	// resyncWanted is owned by the loop goroutine, and BM6 sets it from
-	// inside the driver — which is where the wrapper above sets it too.
-	fire.Store(true)
-	h.advanceUntil("equal-revision re-apply", roundInterval, func() bool {
-		for _, req := range stub.syncups() {
-			if req.GetRevision() == 6 {
-				return true
-			}
-		}
-		return false
-	})
 }
 
 // TestRevisionStopLetsInFlightUnaryFinish checks RW11: a graceful stop lets an
@@ -993,61 +927,55 @@ func TestRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	}
 }
 
-// syncedProbeDriver reports the host's synced revision (RW2) from inside
-// observe, which runs on the revision worker's own goroutine — the only place
-// the field may be read without racing the loop.
-type syncedProbeDriver struct {
-	objDriver
-	host *revWorker
-	seen *atomic.Uint64
-}
-
-func (d *syncedProbeDriver) observe(ctx context.Context, r *replyState) {
-	d.objDriver.observe(ctx, r)
-	d.seen.Store(d.host.syncedRevision())
-}
-
-// TestRevisionCleanRoundAdvancesSynced checks RW2's definition of `synced`:
-// "the last revision the agent acknowledged — the revision of a code == 0
-// Syncup* reply OR OF A Check* reply". After a shard handoff or a worker
-// restart the agent is often already at the desired revision, so no Syncup*
-// is issued at all (RW4 step 5) and the Check reply is the only
-// acknowledgement there is. Getting this wrong leaves synced at 0, and the BM3
-// pushes that carry the object's synced revision are then rejected as stale.
-func TestRevisionCleanRoundAdvancesSynced(t *testing.T) {
+// TestSyncupLeftoverLogged pins the §12 "syncup leftover" record: a Syncup*
+// reply carrying common.ReplyCodeLeftover was ACCEPTED — the desired state is
+// stored and every wanted object converged — so it is not a rejection and must
+// never be logged as one. What it adds is the agent's own account of what the
+// node still holds that the desired state does not want (or of an enumeration
+// that did not answer), which is the only place a lingering leftover becomes
+// visible in the worker log.
+func TestSyncupLeftoverLogged(t *testing.T) {
 	h := newRevHarness(t)
+	const details = "leftover(2): d4:dnv-...-d4-..., d0:dnv-...-d0-..."
 	stub := &stubDnAgent{
-		// The agent is already where the worker wants it: nothing to sync.
 		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
-			return &pb.CheckDnReply{Revision: req.GetRevision()}
+			// A revision behind, so every round issues the Syncup* below.
+			return &pb.CheckDnReply{Revision: req.GetRevision() - 1}
+		},
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			return &pb.SyncupDnReply{
+				Revision: req.GetRevision(),
+				AgentReply: &pb.AgentReply{
+					Code:    common.ReplyCodeLeftover,
+					Details: details,
+				},
+			}, nil
 		},
 	}
 	h.fleet.addDn(t, testAddr, stub)
 	h.defaultConf()
 	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
-	var seen atomic.Uint64
-	params := revWorkerParams{
-		deps:    h.deps,
-		role:    common.WorkerRoleDn,
-		shard:   testShard,
-		cid:     testCid,
-		id:      testDnId,
-		seed:    seedOf(1),
-		desired: desiredState{revision: 7, handle: testAddr},
-	}
-	w := startRevWorker(params, func(host *revWorker) objDriver {
-		return &syncedProbeDriver{
-			objDriver: newDnDriver(params, host),
-			host:      host,
-			seen:      &seen,
-		}
-	})
-	t.Cleanup(w.stop)
+	h.startDn(testAddr, 4)
 
-	waitFor(t, "synced from the Check reply", func() bool {
-		return seen.Load() == 7
+	waitFor(t, "the leftover record", func() bool {
+		return len(h.logs.withMsg(msgSyncupLeftover)) >= 1
 	})
-	if got := len(stub.syncups()); got != 0 {
-		t.Fatalf("%d syncups, want the round alone to advance synced", got)
+	rec := h.logs.withMsg(msgSyncupLeftover)[0]
+	if rec["level"] != "INFO" {
+		t.Fatalf("leftover logged at %v, want INFO", rec["level"])
+	}
+	if rec["details"] != details {
+		t.Fatalf("details = %v, want the agent's leftover names", rec["details"])
+	}
+	if revision, _ := rec["revision"].(float64); uint64(revision) != 4 {
+		t.Fatalf("revision = %v, want the synced 4", rec["revision"])
+	}
+	if got := rec["dn_id"]; got == nil {
+		t.Fatalf("the record carries no ids: %v", rec)
+	}
+	// RW5's three rejection codes mean the request was NOT applied; a
+	// leftover reply was, so "syncup rejected" would be wrong about it.
+	if got := len(h.logs.withMsg(msgSyncupRejected)); got != 0 {
+		t.Fatalf("%d 'syncup rejected' records for an accepted reply", got)
 	}
 }

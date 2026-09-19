@@ -357,6 +357,11 @@ func TestFreshSyncupDn(t *testing.T) {
 	}
 
 	assertOrder(t, node,
+		// The dn file carries the side pointer list the node-level
+		// sweep removes against, so it is persisted BEFORE anything is
+		// converged or swept — a crash in the middle is then a startup sweep
+		// rather than a rebuild against the old list.
+		"writeproto "+nf.LocalDnPath(testCluster, testDn),
 		fmt.Sprintf("readblock %s off=%d len=%d",
 			testDisk, common.DnHeaderOffset, common.DnHeaderSize),
 		fmt.Sprintf("writeblock %s off=%d",
@@ -370,7 +375,6 @@ func TestFreshSyncupDn(t *testing.T) {
 		"writedirect "+portPath+"/ana_groups/1/ana_state=optimized",
 		"writedirect "+portPath+"/ana_groups/2/ana_state=non-optimized",
 		"writedirect "+portPath+"/ana_groups/3/ana_state=inaccessible",
-		"writeproto "+nf.LocalDnPath(testCluster, testDn),
 	)
 	// LVM is gone from the dn agent entirely ([D13]).
 	for _, call := range node.Calls() {
@@ -652,9 +656,14 @@ func TestSyncupDnTearsDownRemovedSide(t *testing.T) {
 	if _, err := srv.SyncupDn(context.Background(), dnReq(2)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
-	// Top-down: nvmet exports, then the per-CN dm devices, then the side
-	// device, then its allocation record, then the files.
+	// The side is FORGOTTEN first — its file and chunks go at pointer
+	// removal — and the sweep then finds its resources by name, top-down:
+	// nvmet exports, the per-CN dm devices, the side device, its allocation
+	// record. The teardown this replaced ran in the opposite order and
+	// deleted the file whether or not the removals worked.
 	assertOrder(t, node,
+		"cmd rm -f "+
+			nf.LocalSidePath(testCluster, testDn, testSp, testSide),
 		"cmd rmdir "+agent.NvmetRoot+"/subsystems/"+
 			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
 		"cmd dmsetup remove "+
@@ -664,8 +673,6 @@ func TestSyncupDnTearsDownRemovedSide(t *testing.T) {
 		"cmd dmsetup remove "+
 			nf.DnSideName(testCluster, testDn, testSp, testSide),
 		fmt.Sprintf("writeblock %s off=", testDisk),
-		"cmd rm -f "+
-			nf.LocalSidePath(testCluster, testDn, testSp, testSide),
 	)
 	if _, ok, _ := srv.meta.LookupSide(
 		context.Background(), testSp, testSide); ok {

@@ -1042,18 +1042,14 @@ func (a *fakeAgent) gateSyncupLocked(
 	return 0, ""
 }
 
-// gatePushLocked is the §14.9 gate of the Push* RPCs: a lower revision is
-// ReplyCodeStaleRevision, and a migr_id/clone_id absent from the object's
-// last applied request is ReplyCodeUnknownObject.
+// gatePushLocked is the §14.9 gate of the Push* RPCs. A push carries no
+// revision any more: the only rejections left are behavior.json's forced code
+// and an id the object's last request does not name.
 func (a *fakeAgent) gatePushLocked(
-	key string, revision uint64, resId uint64, known bool,
+	key string, resId uint64, known bool,
 ) (uint32, string) {
 	if code := a.forcedCodeLocked(key); code != 0 {
 		return code, "behavior.json reply_code"
-	}
-	if obj := a.state[key]; obj != nil && revision < obj.Revision {
-		return common.ReplyCodeStaleRevision, fmt.Sprintf(
-			"stale revision %d < stored %d", revision, obj.Revision)
 	}
 	if !known {
 		return common.ReplyCodeUnknownObject, fmt.Sprintf(
@@ -1345,8 +1341,7 @@ func (a *fakeAgent) PushMigrBitmap(
 	key := sideObjKey(req.GetSidePointer())
 	known := a.sideKnownLocked(req.GetSidePointer()) &&
 		a.migrKnownLocked(key, req.GetMigrId())
-	code, details := a.gatePushLocked(
-		key, req.GetRevision(), req.GetMigrId(), known)
+	code, details := a.gatePushLocked(key, req.GetMigrId(), known)
 	if code == 0 {
 		a.state[key].putChunk(req.GetMigrId(),
 			migrChunkKey(req.GetBmIdx()), len(req.GetBitmap()))
@@ -1572,8 +1567,7 @@ func (a *fakeAgent) PushCloneBitmap(
 	key := cntlrObjKey(req.GetCntlrPointer())
 	known := a.cntlrKnownLocked(req.GetCntlrPointer()) &&
 		a.cloneKnownLocked(key, req.GetCloneId())
-	code, details := a.gatePushLocked(
-		key, req.GetRevision(), req.GetCloneId(), known)
+	code, details := a.gatePushLocked(key, req.GetCloneId(), known)
 	if code == 0 {
 		a.state[key].putChunk(req.GetCloneId(),
 			cloneChunkKey(req.GetSrcSliceIdx(), req.GetBmIdx()),

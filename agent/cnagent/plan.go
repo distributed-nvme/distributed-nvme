@@ -133,9 +133,9 @@ type cntlrPlan struct {
 	xfers     []*xferPlan
 	xferById  map[uint64]*xferPlan
 
-	// sp_level gates (CN19). Levels are desired state: raising one tears
-	// layers down in the retire phase, lowering it rebuilds them in the
-	// build phase.
+	// sp_level gates (CN19). Levels are desired state: raising one shrinks
+	// the sweep's wanted set, so the layers it forbids are swept away;
+	// lowering it rebuilds them in the build phase.
 	wantAny   bool // level < SP_LEVEL_DISABLE
 	wantLeg   bool // + level < SP_LEVEL_NO_SIDE
 	wantGrp   bool // + primary, level < SP_LEVEL_NO_REDUND
@@ -932,8 +932,8 @@ func (p *cntlrPlan) hostNqn() string {
 // sit behind an agent.ValidateBdevConf gate. poolArgs is this method's only
 // caller, and poolArgs runs only from ensurePool (the converge, gated in
 // syncupCntlr and convergeCntlr) and from probePool (the probe, gated in
-// probeCntlr). The other plan builders — teardownCntlr, PushCloneBitmap and
-// the CN25 bitmap reads — compute no mark at all. This agent has no default of
+// probeCntlr). The other plan builders — PushCloneBitmap and the CN25 bitmap
+// reads — compute no mark at all. This agent has no default of
 // its own to apply, which is the point: a mark it invented would be one the
 // pool was not sized for.
 func (p *cntlrPlan) lowWaterMark(dataBlocks uint64) uint64 {

@@ -15,7 +15,9 @@ Prove that a real `dnv-agent dn` — real device-mapper, the [D13] on-disk
 metadata, nvmet configfs, nvme-tcp — behaves per `dnagent.md` on two machines, driven over gRPC from the developer
 machine. All 8 `DiskNodeAgent` RPCs are exercised (§18). Happy-path
 correctness only; error-path testing is out of scope (§19) except one
-stale-revision probe that is structurally required by case D.
+stale-revision probe that is structurally required by case D. Case E's
+`ReplyCodeLeftover` is not a second exception: code 4 reports an accepted
+request with residue, not a rejection.
 
 Test cases:
 
@@ -25,10 +27,21 @@ Test cases:
 | A | `sides` | multiple sides exported to multiple CNs; ANA + allowed-hosts |
 | B | `migr_full` | 2 concurrent opposite-direction migrations, full copy |
 | C | `migr_bitmap` | same, with `PushMigrBitmap`; bitmap + meta_blocks honored |
+| E | `teardown` | removal derived by sweep: the leftover is reported, then a later pass of the same revision finishes it |
 | D | `restart` | state persistence, reconcile, idempotent re-apply |
 
-Cases are independent: each creates its own objects (own `sp_id`) and tears
-them down. They run in the order above, fail-fast.
+Cases are independent: each creates its own objects (own `sp_id`; `teardown`
+gives each of its two stages one, 0xf1 and 0xf2) and tears them down. They
+run in the order above, fail-fast.
+
+`teardown` is the only case with no section of its own; `architecture.md`
+§9.8 (removal is what the node holds minus what the desired state wants) is
+its specification. `dead_source` (sp 0xf1) tears a migration destination
+down over a source export yanked behind its back, and re-drives the same
+revision until the reply is 0; `pinned_side` (sp 0xf2) holds a side device
+open from outside the agent and asserts `ReplyCodeLeftover` on `SyncupDn`
+**and** on the read-only `GetDnInfo`, with the reply naming the device, then
+completion once the fd goes.
 
 ## 2. Deliverables and usage contract
 
@@ -43,14 +56,21 @@ Usage:
 
 ```
 bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
-    user1@192.168.10.12 user2@192.168.10.13
+    [--wipe] user1@192.168.10.12 user2@192.168.10.13
 ```
 
 - Two positional args: ssh targets for VM1 and VM2. Passwordless ssh and
   passwordless sudo are assumed (checked in preflight, §4).
-- `--only <case>`: run a single case (`smoke|sides|migr_full|migr_bitmap|restart`).
-  Setup and start-cleanup still run.
+- `--only <case>`: run a single case
+  (`smoke|sides|migr_full|migr_bitmap|teardown|restart`). Setup and
+  start-cleanup still run.
 - `--cleanup-only`: scrub both VMs and exit.
+- `--wipe`: the one-time lab wipe described at the end of §16. It runs no
+  case, takes every dnv dm device, nvmet subsystem and md array on both VMs —
+  including residue whose dm names carry the pre-role-letter kind spelling,
+  which no cleanup verb here can see — and then runs the ordinary
+  start-of-run cleanup. It is destructive to anything else using those VMs,
+  which is why it is a flag and not a step.
 - Fully automated: no prompts, exit 0 on success, non-zero on first failure.
 - Cleanup policy: best-effort cleanup at **start, always** (a crashed prior
   run must not break this one); cleanup at **end only on success** — on
@@ -220,15 +240,17 @@ VM2 = `0x2`. All ids below are chosen so every case has a distinct `sp_id`
 | A | 0xb1 | legs 0x1,0x2: sides 0x11,0x12 on DN1; legs 0x3,0x4: sides 0x13,0x14 on DN2 | — | 0x21 (VM2), 0x22 (VM1) |
 | B | 0xc1 | leg 0x1: 0x11@DN1 → 0x12@DN2; leg 0x2: 0x21@DN2 → 0x22@DN1 | 0x31, 0x32 | 0x23 (VM2), 0x24 (VM1) |
 | C | 0xd1 | leg 0x1: 0x11@DN1 → 0x12@DN2; leg 0x2: 0x21@DN2 → 0x22@DN1 | 0x41, 0x42 | 0x23 (VM2), 0x24 (VM1) |
+| E1 | 0xf1 | leg 0x1: 0x11@DN1 → 0x12@DN2 (`dead_source`) | 0x61 | 0x23 (VM2) |
+| E2 | 0xf2 | leg 0x1: side 0x11 on DN2, exported, never connected (`pinned_side`) | — | primary 0x21, no CN attaches |
 | D | 0xe1 | leg 0x1: side 0x11 on DN1; gated dst side 0x12 on DN2 | 0x51 | 0x21 (VM2) |
 
 Derived names the script greps for (all ids rendered `%016x`), e.g. for
 cluster 0x1 / DN1 / case B leg 0x1 / CN 0x23:
 
-- side device: `dnv-0000000000000001-0000000000000001-4-00000000000000c1-0000000000000011`
-  (dm kind `4`: a dm-linear concatenating the side's extent runs, [D13])
+- side device: `dnv-0000000000000001-0000000000000001-d4-00000000000000c1-0000000000000011`
+  (dm kind `d4`: a dm-linear concatenating the side's extent runs, [D13])
 - clone-metadata wrapper (dst DN 0x2, migr 0x31):
-  `dnv-0000000000000001-0000000000000002-5-00000000000000c1-0000000000000031`
+  `dnv-0000000000000001-0000000000000002-d5-00000000000000c1-0000000000000031`
 - side→CN subsystem NQN:
   `nqn.2024-01.io.dnv:2:0000000000000001:00000000000000c1:0000000000000001:0000000000000023`
 - CN hostnqn: `nqn.2024-01.io.dnv:1:0000000000000001:0000000000000023`
@@ -236,10 +258,19 @@ cluster 0x1 / DN1 / case B leg 0x1 / CN 0x23:
   `nqn.2024-01.io.dnv:3:0000000000000001:0000000000000001:00000000000000c1:0000000000000031`
 - dst DN hostnqn (used by the agent itself for the migration connect):
   `nqn.2024-01.io.dnv:0:0000000000000001:0000000000000002`
-- dm devices: `dnv-{cluster}-{dn}-0-{sp}-{side}-{cn}` (error),
-  `...-1-...` (linear, the exported dev), `...-2-{sp}-{migr}` (migr src),
-  `...-3-{sp}-{migr}` (dm-clone), `...-4-{sp}-{side}` (side device),
-  `...-5-{sp}-{migr}` (clone-metadata wrapper).
+- dm devices: `dnv-{cluster}-{dn}-d0-{sp}-{side}-{cn}` (error),
+  `...-d1-...` (linear, the exported dev), `...-d2-{sp}-{migr}` (migr src),
+  `...-d3-{sp}-{migr}` (dm-clone), `...-d4-{sp}-{side}` (side device),
+  `...-d5-{sp}-{migr}` (clone-metadata wrapper).
+  The kind field is **two characters**, a role letter in front of the digit
+  the kind used to be: `d0`…`d5` on a DN, `c0`…`cb` on a CN. The letter is
+  what makes a dm name attributable on a node that runs both agents — `dn_id`
+  and `cn_id` come from separate counters (`DnGlobal.next_id`,
+  `CnGlobal.next_id`) and can be numerically equal, and the bare digit
+  overlapped between the roles: `…-4-{sp}-{x}` was the dn side device *and*
+  the cn raid0, same shape, same field count. NQN kinds keep their bare digit
+  (`:0:`, `:1:`, `:2:`, `:3:`): an NQN carries the `dnv` prefix and neither
+  role ever enumerates the other's NQN kinds.
 - namespace identity per leg: uuid/nguid = `common.DnNsIdentity(cluster, sp, leg)`,
   serial = `%016x` of leg_id, model `dnv`. The CN-side device node is found
   via `/dev/disk/by-id/nvme-uuid.<uuid>` (uuid printed by `dnagentctl ns-id`).
@@ -348,7 +379,7 @@ Subcommands:
 | `get-dn-size` | `--wait <sec>` | retry until success within wait |
 | `syncup-dn` | `--revision`, `--extent-size`, repeated `--side sp:leg:side` | full desired side list every call (declarative) |
 | `syncup-side` | `--revision`, `--sp --leg --side`, `--ext-cnt`, `--cntlid-slot`, `--primary-cn`, repeated `--standby-cn`, `--sp-level readwrite\|no_migration` (the parser takes all eight `SpLevel` names, so the flag stays usable if a later case needs another level; this suite sends only these two, §19), `--provisioned` (bool, **default false** — the proto zero value and the gateway's default for a new `Side`; every steady-state call must pass it, §9), optional `--migr-src migr:dstSide:dstDn` (+ `--dst-provisioned`, bool, default false), optional `--migr-dst migr:srcSide:srcDn --src-traddr <ip> --src-trsvcid 4200 --block-size --meta-blocks --hydr-threshold --hydr-batch --bm-cnt` | src_nvme_tr_conf is always `tcp/ipv4`; `side_conf.provisioned` and, with `--migr-src`, `migr_src_conf.dst_provisioned` are sent verbatim — the script plays the worker's flip (§9). Both bools MUST be written `--flag=true` / `--flag=false`: Go's `flag` package never consumes the next token for a bool, so `--provisioned true` parses as `--provisioned=true` plus a positional and silently drops every later flag |
-| `push-migr-bm` | `--revision`, `--sp --leg --side`, `--migr`, `--bm-idx`, `--bitmap-hex` | revision = side's current revision (gates, never advances) |
+| `push-migr-bm` | `--sp --leg --side`, `--migr`, `--bm-idx`, `--bitmap-hex` | a push carries no revision and is never gated on one (DN15): the agent takes it whenever it knows the migration. A chunk is addressed by `bm_idx` alone and never advances the stored revision, so one that crosses a converge is applied rather than discarded |
 | `get-dn-info` / `get-side-info` | (`--sp --leg --side`) | `get-side-info` prints the reply as protojson on **stdout** (unchanged — case D deep-equals it) plus a `dnagentctl: zeroed <k>/<n>` progress line on **stderr**, from `side_info.{zeroed_ext_cnt,total_ext_cnt}` |
 | `check-dn` / `check-side` | `--revision`, `--show-info` (+ side ptr) | opens the bidi stream, one request/reply round, closes |
 | `wait-hydrated` | side ptr, `--interval 0.5`, `--timeout 120`, `--min-first <n>` | polls `GetSideInfo`, parses `migr_dst_info.dm_clone_info.details` with `agent.ParseCloneStatus`; `--min-first` asserts the first sample's hydrated ≥ n; logs each sample to stderr and exits when hydrated == total, printing `{"first_hydrated":k,"first_total":n,"hydrated":n,"samples":s,"total":n}` on stdout — the `first_*` pair is the §14 layer-3 skip jump, kept in the exit line so a run log carries it even when nobody watched stderr |
@@ -371,8 +402,9 @@ Subcommands:
   request carries `provisioned = true` **and** every extent's `zeroed_bits`
   bit is set. There is no worker in this suite, so every `syncup-side` that
   *creates* a side is issued twice: through the `sync_side_2phase()` helper,
-  or — for §12's two migration destinations — through the equivalent pair
-  `migr_provision_dst()` (phases a and b) and `migr_declare_dst()` (c):
+  or — for a migration destination, §12's two and case E's one — through the
+  equivalent pair `migr_provision_dst()` (phases a and b) and
+  `migr_declare_dst()` (c):
   (a) `--provisioned=false` — the agent allocates the extent runs, builds
       `DnSideName` and starts the background zeroing goroutine. Assert
       `side_dev_info.status` is `RES_STATUS_PROVISIONING` **or already
@@ -382,11 +414,12 @@ Subcommands:
       blesses; the `zeroing k/n` details string is not asserted); every
       `cn_id_to_dm_error/linear/nvmeof[<cn>]` entry
       present and `RES_STATUS_PROVISIONING`; **no** `:2:` subsystem in
-      configfs yet; and, kernel-side, **no dm device of kind 0 or 1 for that
-      side** (helper `export_dms`, the per-CN dm-error/dm-linear pair) — the
-      reply's statuses say the agent believes it exported nothing, this says
-      the node agrees. Kind 4, the side device, is deliberately not matched:
-      building it is exactly what phase (a) does. The pattern is scoped to
+      configfs yet; and, kernel-side, **no dm device of kind `d0` or `d1` for
+      that side** (helper `export_dms`, the per-CN dm-error/dm-linear pair) —
+      the reply's statuses say the agent believes it exported nothing, this
+      says the node agrees. Kind `d4`, the side device, is deliberately not
+      matched: building it is exactly what phase (a) does. The pattern is
+      scoped to
       the one side rather than the whole `sp`, because cases A and B/C
       provision the sides of a pool one after another and a pool-wide
       pattern would match a sibling side's already-live export and fail a
@@ -420,8 +453,10 @@ Subcommands:
   and the genuinely two-valued phase-(a) checks use
   `assert_provisioning_or_ok` — never `assert_not_ok`.
 - **Converge check**: after a case reaches steady state — cases S and A run
-  both rounds, the B/C teardown runs `check-dn` only, and case D proves its
-  steady state by the §15 snapshot diff instead of check rounds (§18) — one
+  both rounds, the B/C teardown runs `check-dn` only, case D proves its
+  steady state by the §15 snapshot diff instead of check rounds (§18), and
+  case E runs no round at all (its steady state is the empty one, proved by
+  `get-dn-info` and the residue checks) — one
   `check-dn` and/or one `check-side` round with `--show-info` asserts reply
   code 0, matching revision, and all expected `ResInfo.status ==
   RES_STATUS_OK`.
@@ -439,7 +474,7 @@ Subcommands:
    primary CN 0x21, no standbys, `sp_level readwrite`,
    `--provisioned=false` — assert code 0, `side_dev_info` PROVISIONING-or-OK
    (§9(a)), `cn_id_to_dm_error/linear/nvmeof[0x21]` all PROVISIONING, and no `:2:`
-   subsystem and no kind-0/1 dm device for the side yet (the §9 phase-(a)
+   subsystem and no kind-`d0`/`d1` dm device for the side yet (the §9 phase-(a)
    gate proof); (b) `wait-zeroed` ⇒ 1/1; (c) REV1++ and re-send with
    `--provisioned=true` — assert code 0, `side_dev_info` OK,
    `cn_id_to_dm_error/linear/nvmeof[0x21]` all OK.
@@ -455,7 +490,7 @@ Subcommands:
 6. Teardown: VM2 `nvme disconnect -n <nqn>`; `syncup-dn` DN1 (REV1++) with
    an **empty side list** → side torn down declaratively. Assert via
    `get-dn-info` (all base infos still OK) and on VM1: no `dnv-*-0xa1-*` dm
-   devices at all (the side device is dm kind 4, so the one pattern covers
+   devices at all (the side device is dm kind `d4`, so the one pattern covers
    it) and no `:2:` subsystem in configfs.
 
 Success: all assertions pass; proves build/ship/launch, gRPC, dm/nvmet
@@ -535,7 +570,7 @@ the clone or connecting, so chunks can be pushed first)*
      `side_dev_info` PROVISIONING-or-OK (§9(a)), the §9 phase-(a) gate proof for the one
      CN this request names (`cn_id_to_dm_error`, `cn_id_to_dm_linear` and
      `cn_id_to_nvmeof` all PROVISIONING, no `:2:` subsystem in configfs on
-     DNdst, and no kind-0/1 dm device for S2),
+     DNdst, and no kind-`d0`/`d1` dm device for S2),
      `migr_dst_info.dm_clone_info` **absent** — `assert_gated`, i.e. the
      field is omitted or `MISSING`, never `PROVISIONING` and never `OK`.
      Two gates coincide on this request and the **level wins**:
@@ -573,7 +608,7 @@ the clone or connecting, so chunks can be pushed first)*
    src is untouched:
    - `migr_src_info.{dm_linear_info,nvmeof_info}` report
      `RES_STATUS_PROVISIONING` — the only observable difference;
-   - `fenced_linears` finds **no** suspended `dnv-*-1-{sp}-*` (no grace
+   - `fenced_linears` finds **no** suspended `dnv-*-d1-{sp}-*` (no grace
      window opened);
    - no `nqn...:3:{cluster}:{DNsrc}:{sp}:{M}` subsystem exists in configfs
      (no migr-src export);
@@ -599,7 +634,7 @@ also has no /dev node)*
    60 s, then reloaded onto their dm-errors ([D12]) — and the RPC returns
    without waiting for it. The script **observes** the window
    (`fenced_linears`, which greps `dmsetup info -o name,attr` for a
-   suspended `dnv-*-1-{sp}-*`) and logs `grace window HIT` or a
+   suspended `dnv-*-d1-{sp}-*`) and logs `grace window HIT` or a
    `window missed` warning, in the same tolerant style as the step 13
    read-through probe: a slow preceding step could push the sample past the
    window, and the end state is what the step 19 residue checks prove. Note
@@ -614,13 +649,13 @@ in parallel)**
 11. `syncup-side` DNdst S2 (REVdst++): identical to step 6c but
     `sp_level readwrite`. In this one converge the agent: allocates the
     clone-metadata slot (first 8 KiB zeroed before the record is persisted)
-    and builds its wrapper device `dnv-*-5-*`, `nvme connect`s to
+    and builds its wrapper device `dnv-*-d5-*`, `nvme connect`s to
     `nqn...:3:{cluster}:{DNsrc}:{sp}:{M}` as
     `DnHostNqn(cluster, DNdst)`, creates the dm-clone with hydration off,
     (C:) applies persisted chunks via `blkdiscard`, enables hydration,
     reloads the primary linear onto the clone, moves the ns to `optimized`.
     Assert `migr_dst_info.{target_info,dm_clone_info}` both OK, **and** the
-    dm-clone's live table: one `ssh … dmsetup table dnv-*-3-{sp}-{M}` on
+    dm-clone's live table: one `ssh … dmsetup table dnv-*-d3-{sp}-{M}` on
     DNdst (helper `clone_table`) matching
     `' 2 no_hydration no_discard_passdown( |$)'`. That check is
     **mandatory**, not optional hardening, and the regex is exact on both
@@ -690,10 +725,10 @@ in parallel)**
   sha256(`pattern-M.bin`) — full copy, including the regions case C will
   skip, including the first 3 MiB meta region.
 - Log check on DNdst: **zero** `blkdiscard` records mentioning the dm-clone
-  device `dnv-*-3-*` (discard-based skipping must not happen without
+  device `dnv-*-d3-*` (discard-based skipping must not happen without
   bitmaps). The device scoping is load-bearing, and doubly so with
   side provisioning: it issues `blkdiscard --zeroout` against
-  the **side** device (`dnv-*-4-*`), one record per `DnZeroBatchExtCnt`
+  the **side** device (`dnv-*-d4-*`), one record per `DnZeroBatchExtCnt`
   batch at phase (a) of the §9 two-phase setup, and those are expected.
 
 ## 14. Case C — `migr_bitmap` specifics (worked example)
@@ -752,14 +787,14 @@ The four assertion layers:
    the hard floor is what matters.
 4. **Log arithmetic (meta_blocks proof)**: on DNdst,
    `grep '"blkdiscard"' agent.log` must contain exactly one record for the
-   dm-clone device `dnv-*-3-{sp}-{migr}` with `--offset 67108864
+   dm-clone device `dnv-*-d3-{sp}-{migr}` with `--offset 67108864
    --length 67108864`: first skip bit 61 → region 3+61 = 64 → offset
    64 × 1 MiB; run of 64 bits → length 64 MiB. Wrong meta_blocks handling
    shifts the offset by ±N MiB and this assertion catches it exactly. (This
    is a log-format-coupled check by design; if the JSON layout drifts,
    adjust the grep, not the assertion.) Scope the grep by device: the
    same log also holds side-provisioning
-   `blkdiscard --zeroout` records against `dnv-*-4-{sp}-{side}`; and
+   `blkdiscard --zeroout` records against `dnv-*-d4-{sp}-{side}`; and
    the dm-clone's table reads `2 no_hydration no_discard_passdown`, so
    these skip discards are metadata-only by construction and never reach the
    destination disk.
@@ -865,16 +900,16 @@ load-bearing:
    loops above, so a foreign host directory is left alone),
    `rmdir ports/1/ana_groups/{2,3}` and `rmdir ports/1` run at the end of
    step 4.
-4. dm removal, top-down with a retry sweep: pass 1 removes `dnv-*-1-*`
-   (per-CN linears) then `dnv-*-3-*` (clones — **while the migration nvme
+4. dm removal, top-down with a retry sweep: pass 1 removes `dnv-*-d1-*`
+   (per-CN linears) then `dnv-*-d3-*` (clones — **while the migration nvme
    connection is still up**: a clone flushes to its source on remove and
    blocks otherwise); then `nvme disconnect` every `nqn...:3:*` this node is
    a *host* of (its controllers to the peer's migration sources) and drop
    this node's *own* `nqn...:3:*` subsystems the same inside-out way as
    step 3 — two disjoint sets on any one VM, since the NQN carries the dn id
-   of the node exporting it; pass 2 removes `dnv-*-5-*` (the clone-metadata
-   wrappers the clones sat on), `dnv-*-2-*`, `dnv-*-0-*` and finally
-   `dnv-*-4-*` (the side devices everything above was stacked on), then
+   of the node exporting it; pass 2 removes `dnv-*-d5-*` (the clone-metadata
+   wrappers the clones sat on), `dnv-*-d2-*`, `dnv-*-d0-*` and finally
+   `dnv-*-d4-*` (the side devices everything above was stacked on), then
    retries anything still busy.
 5. Unformat each loop device: `dd if=/dev/zero of=<loop> bs=4096 count=1
    conv=fsync` (no `oflag=`, per the §4 dd rule) plus `wipefs -a <loop>`.
@@ -898,6 +933,89 @@ uninterruptible D state.
 End-of-run cleanup (success only) is the same function; start-of-run cleanup
 runs it unconditionally before setup.
 
+**The one-time lab wipe (`--wipe`, `lab_wipe`).** Step 4 above removes dm
+devices **by kind**, with the role-lettered literals of §5 (`d0`…`d5`), and
+the retry sweep that closes it enumerates `agent_dm_names`, which matches the
+same two-character field for either role. Residue an older binary left on a
+lab VM carries the old single-digit spelling, so neither can see it: it stays
+there for ever, holding the loop
+device under it open against step 6's `losetup -d`, and `residue` never
+reports it either. (An NQN's kind kept its bare digit and an md array name
+carries no kind field at all, so neither spelling changed and neither can
+leave residue the verbs above cannot see, which is why the blind spot is
+dm-only.) `lab_wipe` reads no kind at all.
+`--wipe` runs it on both VMs concurrently (for `cleanup_all`'s reason: a `:3:`
+export on one VM backs the other's migration connection), then runs the
+ordinary cleanup above, and runs no case. Its order is this section's,
+generalized away from the kind list:
+
+1. `pkill -x dnv-agent`, wait up to 5 s for it to go, then `pkill -9 -x` —
+   step 1 above; then `resume_suspended`, for the reason this section gives
+   below: a suspended device wedges `dmsetup remove`, the nvmet namespace
+   disable above it and any block-device scan, in uninterruptible D state,
+   which no `timeout` bounds.
+2. `mdadm --stop` every md array on the node that is ours. Nothing in this
+   suite assembles one, but a CN's leg superblocks travel down the side
+   export and an unmasked udev assembles them **here**
+   (`e2e_integtest.md` §6, §8 item 15); such an array sits on top of this
+   node's stack holding a side or a per-CN linear open, and a held dm device
+   cannot be removed. Ours is decided by two independent reads, because each
+   is blind to a case the other sees: the **member route** takes a member's
+   dm name out of `/sys/block/mdN/md/dev-*/block/dm/name` — no superblock
+   read, and the only route that names the `inactive` one-member assembly
+   udev leaves here, which udev holds no `MD_NAME` for — and the **name
+   route** reads `MD_NAME` from udev, falling back to `mdadm --detail
+   --no-devices --export`, which is the only one left once the members
+   themselves are gone. Neither can name an array that is not a dnv one, so
+   a guest's own array is never stopped.
+3. `nvme disconnect-all`: a live controller keeps its subsystem alive and
+   that subsystem's namespace keeps its backing dm device open.
+4. Every `nqn.2024-01.io.dnv*` nvmet subsystem, port links first, namespaces
+   disabled before their `rmdir`. This one is written out rather than reusing
+   the step 3 verb, which takes a single NQN kind digit: the wipe wants the
+   whole prefix, residue of a kind this build no longer mints included.
+5. The dm devices, bottom-up by attrition instead of by a kind order: up to
+   12 rounds of `dmsetup ls | awk '$1 ~ /^dnv/'` + `dmsetup remove`, each
+   round taking what the previous one unpinned. "Reverse dependency order" is
+   exactly "whatever is still there after the round that freed it". A round
+   that frees nothing means a holder outside the set, and that round falls
+   back to `dm_force_remove`; the cap is what keeps a wedge from spinning
+   here for ever.
+6. `resume_suspended` again, closing the pass.
+
+**Three passes, because one is provably not enough.** Stopping an array frees
+its member wrappers, but the members still carry md superblocks, so a dm
+device that reappears — or that udev re-examines while the wipe is running —
+is assembled into a fresh array that pins the wrapper again, which is exactly
+the auto-assembly this suite masks *during* a run and nothing masks before
+one. Measured on a lab guest 2026-09-18: one pass reported an empty dm residue
+and still left eight leg wrappers held open by four re-assembled arrays, and a
+second, identical pass took all of them. A pass that opens with no `dnv*` dm
+device left breaks out, so a clean node still costs one pass and not three.
+
+**The residue is the exit status, not just the report.** After the last pass
+`lab_wipe` prints what is left — dm names, nvmet subsystems, and every md
+array on the node whether ours or not — and **fails** if any dm device or
+nvmet subsystem survived; `--wipe` then dies naming the VM. It printed the
+report alone once, and since the driver runs both VMs concurrently and
+discarded their status, a wipe that left one VM full of debris showed the
+other VM's clean report and the run said PASS — against the same rule the
+sweep this suite tests lives by: what is left is reported, and reporting it is
+not success. The md line is reported and never counted, since a guest's own
+array is not ours to fail on.
+
+It deliberately does not touch `$WORK`, the loop devices, the port-level
+nvmet objects (`hosts/*`, `ana_groups/{2,3}`, `ports/1`) or the disk-format
+header: those belong to the run, and the ordinary cleanup that `--wipe` runs
+afterwards — the tail of step 4, then steps 5 and 6 — is what takes them.
+
+Two warnings, and together they are why it is a flag and not a step. On a
+shared VM it destroys a **concurrent** run's objects — every `dnv*` dm device
+and every `nqn.2024-01.io.dnv*` subsystem on the node, whoever created them.
+And `nvme disconnect-all` takes every fabrics controller on the node, dnv's or
+not, including connections no dnv suite made. Run it once, alone, before the
+first run of the role-lettered binaries on a VM.
+
 ## 17. Failure diagnostics
 
 On any assertion/command failure, before exiting: dump to the driver console
@@ -913,10 +1031,10 @@ JSON logs on either VM.
 | RPC | exercised by | asserted |
 |---|---|---|
 | `GetDnSize` | setup wait-up | exact data-area size 1879048192; liveness |
-| `SyncupDn` | every case + setup | reply code, dn_info statuses, declarative side add/remove, stale probe (D) |
-| `SyncupSide` | S, A, B, C, D | side_info statuses, per-CN maps, migr confs, gated→enabled transition, equal-rev idempotency; the two-phase `provisioned` gate (§9) and the `dst_provisioned = false` equivalence probe (§12 step 8b) |
+| `SyncupDn` | every case + setup | reply code, dn_info statuses, declarative side add/remove, stale probe (D), `ReplyCodeLeftover` naming the pinned device and the same revision re-sent to completion (E) |
+| `SyncupSide` | S, A, B, C, E, D | side_info statuses, per-CN maps, migr confs, gated→enabled transition, equal-rev idempotency; the two-phase `provisioned` gate (§9) and the `dst_provisioned = false` equivalence probe (§12 step 8b) |
 | `PushMigrBitmap` | C, D | reply code 0; effects via §14 layers |
-| `GetDnInfo` | teardown checks, D | statuses, snapshot equality |
+| `GetDnInfo` | S teardown, E, D | statuses, snapshot equality; the leftover verdict recomputed on a read-only path (E) |
 | `GetSideInfo` | every case (the §9 two-phase helper samples it and `wait-zeroed` polls it on each first side converge), B/C hydration polling, D | dm_clone status parsing, snapshot equality; `zeroed_ext_cnt`/`total_ext_cnt` (polled by `wait-zeroed`) |
 | `CheckDn` | S, A, B/C teardown | stream round: code 0, revision echo, show_info statuses |
 | `CheckSide` | S, A | same (case D proves steady state by the §15 snapshot diff instead of check rounds) |
@@ -926,12 +1044,23 @@ JSON logs on either VM.
 Negative/error-path testing (bad configs, unknown objects, `code 2` paths)
 beyond the case D stale probe; CN-role integration (`dnv-agent cn` has its
 own plan and suite, `cnagent_integtest.md` / `integtest/cnagent_test.sh`);
-fault injection (dm-flakey/dm-delay, target crashes mid
-hydration); performance/soak; TLS/auth (none exists in the agent);
+fault injection with dm-flakey/dm-delay, and any IO error, delay or
+corruption injected under a live stack — the `teardown` case does yank a
+migration source's nvmet export out from under a destination whose clone may
+still be hydrating, but that removes a real remote rather than doctoring a
+device; performance/soak; TLS/auth (none exists in the agent);
 `SP_LEVEL` values other than `READWRITE`/`NO_MIGRATION` (still true — and
 since [D11] the levels between them have no DN-side behavior at all, so there
 would be nothing to observe);
-`CancelMigration`-style flows (dropping a migration before completion). The
+the **source** half of a `CancelMigration` rollback — a source side that has
+already fenced its per-CN linears and exported its migr-src subsystem
+returning to normal service on a `SyncupSide` whose `migr_src_conf` is gone
+(ANA back, export dropped); no case sends that request, and §12 step 16
+deletes the source side outright instead. The **destination** half is no
+longer out of scope: the `teardown` case abandons a migration before the §12
+step 15 finish converge and takes the destination side out of the pointer
+list over a source export removed behind its back; whether its dm-clone is
+still hydrating at that moment is observed and logged, never asserted. The
 §11.2 grace window is observed but not asserted (§12 step 9): pinning it would
 make the suite timing-dependent, and its end state is already proved by the
 step 19 residue checks. Also out of scope: the §9.4
@@ -939,8 +1068,9 @@ side-provisioning error rows (`provisioned = true` with incomplete bits ⇒
 `ERROR` and no export; a missing allocation record at `provisioned = true` ⇒
 `ERROR` and **no** allocation write) and the DN5 Write-Zeroes fail-fast
 (sysfs `write_zeroes_max_bytes == 0`) — all negative paths, unit-tested per
-`dnagent.md` §6; likewise cancel-and-wait of a zeroing goroutine mid-batch,
-which needs the `CancelMigration`-style flows this suite does not run.
+`dnagent.md` §6; likewise cancel-and-wait of a zeroing goroutine mid-batch:
+every side here is zeroed to completion (`wait-zeroed`) before anything drops
+it, so no drop ever arrives with a batch still in flight.
 Listed here so their later addition extends this file rather than reshaping
 it.
 
@@ -957,7 +1087,7 @@ another document or the harness cites can shift.
   metadata-only and can never destroy an acknowledged post-cutover write on
   the destination device. This suite had no dm-clone **table** assertion at
   all, so §12 step 11 gained a **mandatory** one — helper `clone_table`
-  (`dmsetup table` of `dnv-*-3-{sp}-{M}` on DNdst) matched against
+  (`dmsetup table` of `dnv-*-d3-{sp}-{M}` on DNdst) matched against
   `' 2 no_hydration no_discard_passdown( |$)'`, the exact pair, not a
   substring. The pinned form is safe because `dmsetup table`
   (`STATUSTYPE_TABLE`) reprints dm-clone's saved constructor args:
@@ -995,7 +1125,7 @@ another document or the harness cites can shift.
   to levels *below* `SP_LEVEL_NO_MIGRATION` with `provisioned = false`,
   which this suite never sends; §13's case-B `blkdiscard` check and §14's
   layer-1 and layer-4 notes are re-scoped by device because provisioning now
-  emits its own `blkdiscard` records against `dnv-*-4-*`; §15's mutation-free re-apply
+  emits its own `blkdiscard` records against `dnv-*-d4-*`; §15's mutation-free re-apply
   gains its precondition (all sides zeroed before the restart, so the
   zeroing registry starts nothing) and its snapshot now includes
   `zeroed_ext_cnt`/`total_ext_cnt`; §16 step 1 notes the goroutine's

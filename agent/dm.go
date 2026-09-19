@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -44,12 +45,17 @@ type DmTarget struct {
 	Args   []string
 }
 
-// Info returns the live state of a dm device, or nil when it does not exist.
+// Info returns the live state of a dm device, nil when it does not exist, and
+// an error when `dmsetup info` did not answer. The third case used to be
+// folded into the second, which made every removal's verification a lie: a
+// killed probe reported the device gone, the caller freed the extent record
+// that still backed it, and the next allocation handed those extents out
+// twice.
 func (d *Dm) Info(ctx context.Context, name string) (*DmDevInfo, error) {
-	stdout, _, _, err := d.run(ctx, "dmsetup", "info",
+	stdout, ok, err := d.runProbe(ctx, "dmsetup", "info",
 		"--columns", "--noheadings", "-o", "attr", name)
-	if err != nil {
-		return nil, nil
+	if err != nil || !ok {
+		return nil, err
 	}
 	attr := strings.TrimSpace(stdout)
 	info := &DmDevInfo{}
@@ -60,6 +66,54 @@ func (d *Dm) Info(ctx context.Context, name string) (*DmDevInfo, error) {
 		info.ReadOnly = true
 	}
 	return info, nil
+}
+
+// dmLsEmptyLine is what `dmsetup ls` prints, with exit status 0, on a node
+// that holds no dm device at all.
+const dmLsEmptyLine = "No devices found"
+
+// dmLsDevNoPattern is the normalized "major:minor" a `dmsetup ls` line ends
+// with. Both spellings the tool has used are normalized into it before the
+// match: "(253:4)" and the older "(253, 4)".
+var dmLsDevNoPattern = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
+
+// List enumerates every dm device on the node, name to "major:minor". It is
+// the root of every sweep: what to remove is derived by subtracting the
+// desired state from what actually exists, and nothing else on the node can
+// name a device the agent has no plan for.
+//
+// `dmsetup ls` prints the literal "No devices found" and still exits 0 on an
+// empty node; that one line is dropped by name. A non-zero exit, or a run
+// that did not answer, is an error — a caller must never read either as "the
+// node holds no dm devices".
+//
+// The device number can be absent or unparsable for an entry the listing
+// named and the kernel has already dropped. Such an entry is KEPT, with an
+// empty devno: a name is all a sweep needs to attribute and remove, and
+// dropping it would hide from the sweep exactly the objects a concurrent
+// teardown is in the middle of.
+func (d *Dm) List(ctx context.Context) (map[string]string, error) {
+	stdout, stderr, _, err := d.run(ctx, "dmsetup", "ls")
+	if err != nil {
+		return nil, cmdError("dmsetup", []string{"ls"}, stdout, stderr, err)
+	}
+	out := make(map[string]string)
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.TrimSpace(line) == dmLsEmptyLine {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		devNo := strings.Trim(strings.Join(fields[1:], ""), "()")
+		devNo = strings.ReplaceAll(devNo, ",", ":")
+		if !dmLsDevNoPattern.MatchString(devNo) {
+			devNo = ""
+		}
+		out[fields[0]] = devNo
+	}
+	return out, nil
 }
 
 // Table returns the parsed live table of a dm device.

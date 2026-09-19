@@ -73,7 +73,7 @@ func TestSuppressedCloneKeepsItsChunks(t *testing.T) {
 	// A standby that nonetheless carries the clone in its desired state.
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
-	pushBitmap(t, srv, 2, hexBytes(t, testSkipHex))
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
 	bmPath := srv.nf.LocalCloneBmPath(
 		testCluster, testCn, testSp, testClone, 0, 0)
 	if _, ok := node.protos[bmPath]; !ok {

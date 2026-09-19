@@ -63,8 +63,13 @@ func (s *CnAgentServer) checkCnRound(
 		}, nil
 	}
 	info := s.probeCn(ctx, st)
+	// The verdict: the same enumeration and the same comparison the sweep
+	// makes, with nothing touched (CN23). It is recomputed every round and
+	// stored nowhere, so a leftover that has since gone stops being reported
+	// on its own, and one that is still there keeps driving the worker's
+	// re-sync until the next SyncupCn sweeps it away.
 	reply := &pb.CheckCnReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.sweepCn(ctx, st, false).Reply(),
 		Revision:   st.req.GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
@@ -125,7 +130,9 @@ func (s *CnAgentServer) checkCntlrRound(
 	}
 	info := s.probeCntlr(ctx, st)
 	reply := &pb.CheckCntlrReply{
-		AgentReply: agent.OkReply(),
+		// The cntlr-level verdict. A cn's own Check reports node-level
+		// leftovers only; each object drives its own Syncup*.
+		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {

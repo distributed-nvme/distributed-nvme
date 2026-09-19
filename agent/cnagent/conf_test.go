@@ -117,10 +117,10 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 				reqOpts{revision: 2, primary: true, raid1: tc.raid1})
 			key := cntlrKey(testCluster, testCn, testSp, testCntlr)
 			st := srv.getCntlr(key)
-			if st == nil || st.applied == nil {
-				t.Fatalf("the fixture converge left no applied plan")
+			if st == nil {
+				t.Fatalf("the fixture converge left no cntlr state")
 			}
-			appliedBefore, reqBefore := st.applied, st.req
+			reqBefore := st.req
 			path := srv.nf.LocalCntlrPath(testCluster, testCn, testSp,
 				testCntlr)
 			storedBefore := node.protos[path]
@@ -191,9 +191,6 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 			}
 			if st.req != reqBefore || st.req.GetRevision() != 2 {
 				t.Errorf("the refused request became desired state")
-			}
-			if st.applied != appliedBefore {
-				t.Errorf("the refusal replaced the applied plan")
 			}
 			assertRefusalRecord(t, capture, tc.want)
 		})
@@ -273,15 +270,24 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 
 		// The CN base state (§3.2) still converges — the mount, the arena
 		// file, the loop device and the port. The refusal is scoped to the
-		// cntlr, and every object a cntlr converge would build or retire is
+		// cntlr, and every object a cntlr converge would build or sweep is
 		// named by one of these: its dm devices, its md arrays, its leg
 		// connections and everything under the nvmet subsystems tree, whose
-		// `ana_grpid` writes are the retire phase's first step.
+		// `ana_grpid` writes are the sweep's first pre-step.
+		//
+		// The node-level sweep does ENUMERATE the nvmet tree — it must, to
+		// find what an sp whose pointer left the list has behind it — so the
+		// claim is about writes, not reads: nothing under subsystems/ is
+		// created, removed, linked or written.
 		for _, fragment := range []string{
 			"cmd dmsetup create", "cmd dmsetup reload", "cmd dmsetup remove",
 			"cmd dmsetup suspend", "cmd dmsetup message", "cmd mdadm",
 			"cmd nvme connect", "cmd nvme disconnect",
-			agent.NvmetRoot + "/subsystems",
+			"cmd mkdir -p " + agent.NvmetRoot + "/subsystems",
+			"cmd rmdir " + agent.NvmetRoot + "/subsystems",
+			"cmd ln -s " + agent.NvmetRoot + "/subsystems",
+			"cmd rm -f " + agent.NvmetRoot,
+			"writedirect " + agent.NvmetRoot + "/subsystems",
 		} {
 			if node.hasCall(fragment) {
 				t.Errorf("a refused Reconcile ran %q: %v", fragment,
@@ -292,9 +298,6 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 		if st == nil {
 			t.Fatalf("the persisted cntlr was not loaded at all")
 		}
-		if st.applied != nil {
-			t.Errorf("a refused Reconcile left an applied plan")
-		}
 		if len(st.probers) != 0 {
 			t.Errorf("a refused Reconcile started %d probers",
 				len(st.probers))
@@ -303,19 +306,19 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 	})
 
 	// The CN10/CN18 connect-retry loop re-enters with the request it already
-	// holds. Here the cntlr HAS an applied plan, so "left alone" is a real
-	// claim: the gate returns before newCntlrPlan, and a later teardown still
-	// plans from the shape this agent built.
+	// holds. Here the cntlr has already been converged once, so "left alone"
+	// is a real claim: the gate returns before newCntlrPlan, and the sweep
+	// that would otherwise run never enumerates anything.
 	t.Run("connect retry", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		capture := captureLogs(t)
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 		key := cntlrKey(testCluster, testCn, testSp, testCntlr)
 		st := srv.getCntlr(key)
-		if st == nil || st.applied == nil {
-			t.Fatalf("the fixture converge left no applied plan")
+		if st == nil {
+			t.Fatalf("the fixture converge left no cntlr state")
 		}
-		appliedBefore := st.applied
+		reqBefore := st.req
 		// What a Reconcile-loaded zero, or a request the agent kept across a
 		// downgrade, leaves in the state the retry loop re-enters with.
 		st.req = zeroConfReq(reqOpts{revision: 2, primary: true},
@@ -328,8 +331,8 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 			t.Fatalf("a refused reconverge mutated:\n%s",
 				strings.Join(mutations, "\n"))
 		}
-		if st.applied != appliedBefore {
-			t.Errorf("the refusal replaced the applied plan")
+		if st.req == reqBefore {
+			t.Fatalf("the fixture did not install the zeroed request")
 		}
 		assertRefusalRecord(t, capture, msgNoWaterMark)
 	})

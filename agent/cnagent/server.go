@@ -90,12 +90,6 @@ type cntlrState struct {
 	// source of truth for the applied set (SH21).
 	chunks map[uint64]*agent.CloneChunkSet
 
-	// applied is the shape of the last converge, so a resource that leaves
-	// the desired state — a td dropped from td_list, a clone deleted, a
-	// layer suppressed by a rising sp_level — can still be named while it is
-	// torn down.
-	applied *cntlrPlan
-
 	// pendingSweep marks slices whose pool device THIS incarnation created
 	// but has not yet successfully swept for orphan thin ids (CN14's
 	// activation sweep). Keyed by slice_id; in-memory only —
@@ -351,7 +345,7 @@ func (s *CnAgentServer) GetCnInfo(
 		}, nil
 	}
 	return &pb.GetCnInfoReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.sweepCn(ctx, st, false).Reply(),
 		Revision:   st.req.GetRevision(),
 		CnInfo:     s.probeCn(ctx, st),
 	}, nil
@@ -382,7 +376,7 @@ func (s *CnAgentServer) GetCntlrInfo(
 		return unknown, nil
 	}
 	return &pb.GetCntlrInfoReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 		CntlrInfo:  s.probeCntlr(ctx, st),
 	}, nil

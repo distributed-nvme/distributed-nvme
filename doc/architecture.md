@@ -257,7 +257,7 @@ Per DN, once (created by the dn agent at first `SyncupDn`):
 
 Per **side** (one per hosted leg replica):
 
-* A **side device** `DnSideName` (dm kind `4`): one dm-linear whose targets concatenate
+* A **side device** `DnSideName` (dm kind `d4`): one dm-linear whose targets concatenate
   the extent runs the volume table allocated to `(sp_id, side_id)`, `Group.ext_cnt`
   extents in total. Provisioning MUST follow the §9.4 protocol: the record is created
   with `zeroed_bits` all 0, the assembled device is zeroed batch by batch with
@@ -352,7 +352,7 @@ the **destination** side (`migr_dst_conf`): an nvme host connection to
 dm-clone metadata **slot** in the [D13] clone-metadata area — whole `DnCloneMetaUnit`
 units, with its first 8 KiB zeroed before its record is persisted so a previous
 tenant's bytes can never be misparsed as a dm-clone superblock — fronted by a wrapper
-dm-linear `DnMigrMetaDmName` (dm kind `5`), because the dm-clone target reads its
+dm-linear `DnMigrMetaDmName` (dm kind `d5`), because the dm-clone target reads its
 metadata device from sector 0 and takes no offset argument; and a
 dm-clone device `DnMigrFinalName` (dest = the local side device, source = the connected
 nvme device, region size = `migr_dst_conf.block_size`). The per-cntlr dm-linears of the
@@ -395,11 +395,11 @@ Per CN, once (created by the cn agent at first `SyncupCn`):
    `CnCloneMetaAreaSize / CnCloneMetaUnit` = 256 **units** of `CnCloneMetaUnit` = 4 MiB
    — "unit", never "extent": an extent is the 1 GiB allocation unit of §2. A clone's
    dm-clone metadata device is a **wrapper dm-linear** `CnCloneMetaDmName` (CN dm kind
-   `b`, `cnagent.md` §2.1) over `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)`
+   `cb`, `cnagent.md` §2.1) over `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)`
    **contiguous** units, first-fit, with `region_cnt = td.size / block_size`; the
    wrapper exists for the same reason `DnMigrMetaDmName` does — dm-clone reads its
    superblock from sector 0 and takes no offset argument. **The kernel's dm tables are
-   the allocation registry**: enumerating this CN's kind-`b` wrappers and reading their
+   the allocation registry**: enumerating this CN's kind-`cb` wrappers and reading their
    `0 {len} linear {loopdev_majmin} {offset_sectors}` tables reconstructs the used map, so
    there is no on-file allocation table and none of the [D13] header/CRC/A-B machinery
    is needed — the arena is volatile *together with* the kernel's dm state (a reboot
@@ -697,9 +697,10 @@ gets `bitmap_bits = 8192`, `bitmap_bytes = 1280`, `bitmap_blocks = 1`, so
 All formats below are normative. `NameFmt` is constructed from the prefixes in
 `constants.go`: `dmPrefix = DmPrefix = "dnv"`, `nqnPrefix = NqnPrefix =
 "nqn.2024-01.io.dnv"`, `tmpfsPrefix = DefaultTmpfsPrefix`, `localStorPrefix =
-DefaultLocalStorPrefix = "/var/tmp"`. Unless noted, every id field is `%016x` and every
-kind field is `%01x`, joined by `-`. The signatures and formats in this section are
-normative and match `name_fmt.go`. Two of them deserve their rationale up front: a
+DefaultLocalStorPrefix = "/var/tmp"`. Unless noted, every id field is `%016x`, joined
+by `-`; a dm name's kind field is the two-character string of §4.1, an NQN's is a bare
+`%01x` digit (§4.4). The signatures and formats in this section are normative and match
+`name_fmt.go`. Two of them deserve their rationale up front: a
 side subsystem is keyed by `leg_id` and carries **no** `dn_id`, so the two sides of a
 leg export one and the same NQN from their two DNs (§4.4, §11.2); a transfer NQN
 carries no node id either — every enabled cntlr of the SP exports the same transfer
@@ -719,12 +720,22 @@ its superblock name alone.
 
 ### 4.1 dm-device kinds
 
-DN-side (`dmKindDn*`): `0` error, `1` linear, `2` migr-src, `3` migr-final(dm-clone),
-`4` side (the [D13] extent-run concat), `5` migr-meta (the dm-clone metadata wrapper).
-CN-side (`dmKindCn*`): `0` pool-meta, `1` pool-data, `2` pool-final(thin-pool),
-`3` thin-dev, `4` raid0, `5` error, `6` ns-dev, `7` clone-final(dm-clone),
-`8` xfer-final. CN kinds `9` (leg wrapper `CnLegName`), `a` (RedundNone group device
-`CnGrpName`) and `b` (clone-metadata wrapper `CnCloneMetaDmName`, [D14]) are
+The kind is a **role letter plus a hex digit** (teardown by sweep, §9.8): `d…` for a
+dn-agent device, `c…` for a cn-agent one. The letter is not decoration. One kernel can
+host both agents, and `dn_id` and `cn_id` come from two separate counters
+(`DnGlobal.next_id`, `CnGlobal.next_id`, §5.4) that hand out the same numbers, so a
+bare digit left `dnv-{cluster}-{node}-4-{sp}-{id}` ambiguous between the dn side device
+and the cn raid0 — same digit, same field count, and nothing left for a parse to
+separate them by (bare `2` and `5` collide the same way). An agent decides what to
+remove by reading back the names the kernel holds (§9.8), so a name it cannot attribute
+is a device it cannot sweep.
+
+DN-side (`DmKindDn*`): `d0` error, `d1` linear, `d2` migr-src, `d3` migr-final(dm-clone),
+`d4` side (the [D13] extent-run concat), `d5` migr-meta (the dm-clone metadata wrapper).
+CN-side (`DmKindCn*`): `c0` pool-meta, `c1` pool-data, `c2` pool-final(thin-pool),
+`c3` thin-dev, `c4` raid0, `c5` error, `c6` ns-dev, `c7` clone-final(dm-clone),
+`c8` xfer-final. CN kinds `c9` (leg wrapper `CnLegName`), `ca` (RedundNone group device
+`CnGrpName`) and `cb` (clone-metadata wrapper `CnCloneMetaDmName`, [D14]) are
 cn-agent-internal and are **defined in `cnagent.md` §2.1**; they follow the same
 `dnv-{cluster}-{cn}-{kind}-…` format as §4.2's rows.
 
@@ -732,25 +743,33 @@ cn-agent-internal and are **defined in `cnagent.md` §2.1**; they follow the sam
 
 | function | format |
 |---|---|
-| `DnErrorName(cluster,dn,sp,side,cn)`  | `dnv-{cluster}-{dn}-0-{sp}-{side}-{cn}` |
-| `DnLinearName(cluster,dn,sp,side,cn)` | `dnv-{cluster}-{dn}-1-{sp}-{side}-{cn}` |
-| `DnMigrSrcName(cluster,dn,sp,migr)`   | `dnv-{cluster}-{dn}-2-{sp}-{migr}` |
-| `DnMigrFinalName(cluster,dn,sp,migr)` | `dnv-{cluster}-{dn}-3-{sp}-{migr}` |
-| `DnSideName(cluster,dn,sp,side)`      | `dnv-{cluster}-{dn}-4-{sp}-{side}` — the side's data device ([D13]) |
-| `DnMigrMetaDmName(cluster,dn,sp,migr)`| `dnv-{cluster}-{dn}-5-{sp}-{migr}` — wrapper over the dm-clone metadata slot |
-| `CnPoolMetaName(cluster,cn,sp,slice)` | `dnv-{cluster}-{cn}-0-{sp}-{slice}` |
-| `CnPoolDataName(cluster,cn,sp,slice)` | `dnv-{cluster}-{cn}-1-{sp}-{slice}` |
-| `CnPoolFinalName(cluster,cn,sp,slice)`| `dnv-{cluster}-{cn}-2-{sp}-{slice}` |
-| `CnThinDevName(cluster,cn,sp,td,slice)`| `dnv-{cluster}-{cn}-3-{sp}-{td}-{slice}` |
-| `CnRaid0Name(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-4-{sp}-{td}` |
-| `CnErrorName(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-5-{sp}-{td}` |
-| `CnNsDevName(cluster,cn,sp,ns)`       | `dnv-{cluster}-{cn}-6-{sp}-{ns}` — one per **namespace**, not per td (§3.3 step 5, §8.8) |
-| `CnCloneFinalName(cluster,cn,sp,clone)`| `dnv-{cluster}-{cn}-7-{sp}-{clone}` |
-| `CnXferFinalName(cluster,cn,sp,xfer)` | `dnv-{cluster}-{cn}-8-{sp}-{xfer}` |
+| `DnErrorName(cluster,dn,sp,side,cn)`  | `dnv-{cluster}-{dn}-d0-{sp}-{side}-{cn}` |
+| `DnLinearName(cluster,dn,sp,side,cn)` | `dnv-{cluster}-{dn}-d1-{sp}-{side}-{cn}` |
+| `DnMigrSrcName(cluster,dn,sp,migr)`   | `dnv-{cluster}-{dn}-d2-{sp}-{migr}` |
+| `DnMigrFinalName(cluster,dn,sp,migr)` | `dnv-{cluster}-{dn}-d3-{sp}-{migr}` |
+| `DnSideName(cluster,dn,sp,side)`      | `dnv-{cluster}-{dn}-d4-{sp}-{side}` — the side's data device ([D13]) |
+| `DnMigrMetaDmName(cluster,dn,sp,migr)`| `dnv-{cluster}-{dn}-d5-{sp}-{migr}` — wrapper over the dm-clone metadata slot |
+| `CnPoolMetaName(cluster,cn,sp,slice)` | `dnv-{cluster}-{cn}-c0-{sp}-{slice}` |
+| `CnPoolDataName(cluster,cn,sp,slice)` | `dnv-{cluster}-{cn}-c1-{sp}-{slice}` |
+| `CnPoolFinalName(cluster,cn,sp,slice)`| `dnv-{cluster}-{cn}-c2-{sp}-{slice}` |
+| `CnThinDevName(cluster,cn,sp,td,slice)`| `dnv-{cluster}-{cn}-c3-{sp}-{td}-{slice}` |
+| `CnRaid0Name(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-c4-{sp}-{td}` |
+| `CnErrorName(cluster,cn,sp,td)`       | `dnv-{cluster}-{cn}-c5-{sp}-{td}` |
+| `CnNsDevName(cluster,cn,sp,ns)`       | `dnv-{cluster}-{cn}-c6-{sp}-{ns}` — one per **namespace**, not per td (§3.3 step 5, §8.8) |
+| `CnCloneFinalName(cluster,cn,sp,clone)`| `dnv-{cluster}-{cn}-c7-{sp}-{clone}` |
+| `CnXferFinalName(cluster,cn,sp,xfer)` | `dnv-{cluster}-{cn}-c8-{sp}-{xfer}` |
 
-The leg wrapper of §3.3 step 1 is agent-internal — it is CN dm kind `9`, `CnLegName`
-in `cnagent.md` §2.1 — and, like kinds `a` and `b`, is not part of the cross-component
+The leg wrapper of §3.3 step 1 is agent-internal — it is CN dm kind `c9`, `CnLegName`
+in `cnagent.md` §2.1 — and, like kinds `ca` and `cb`, is not part of the cross-component
 contract [D1].
+
+`common.ParseDmName` is the reverse of this table, and how a sweep decides whether a
+name the kernel handed back is its own. It is strict on purpose: the `dnv` prefix, a
+kind this build knows, and exactly the id count that kind carries, each a full 16 hex
+digits. A name that does not decode exactly is "not a dnv name" rather than a
+partly-read one, because the caller's next move is a removal. Every kind of both roles
+carries the **sp id first**, which is what lets a sweep group a node's devices by
+storage pool without consulting any stored plan (§9.8).
 
 ### 4.3 md names (node path = `MdPath` = `/dev/md/{name}`)
 
@@ -788,7 +807,7 @@ nqnKinds: `0` DnHost, `1` CnHost, `2` SideToCn, `3` MigrSrc, `4` Xfer. `:` joine
 
 **LVM survives nowhere in dnv** — [D13] removed it from the DN, [D14] from the CN. A DN
 carries the [D13] disk format, a CN carries the loop-backed clone-metadata arena of §3.2
-step 2, and every dnv device name is a dm name from §4.2 (kinds `9`/`a`/`b` per §4.1).
+step 2, and every dnv device name is a dm name from §4.2 (kinds `c9`/`ca`/`cb` per §4.1).
 
 | function | value |
 |---|---|
@@ -1674,10 +1693,10 @@ by `MaxSsCntPerSp × MaxNsCntPerSs`, cheap) or by any `Clone.dst_td_id`;
 `FAILED_PRECONDITION` if any td of the SP has `ori_id ==` this td's `dev_id` and
 `created == false` (read `td_name_list` + every `ThinDevice` in the same STM — the
 `ListThinDevices` read set, bounded by `MaxTdCntPerSp`), with details naming the
-blocking snapshot(s). Retire runs before build (`cnagent.md` CN9), so an origin
-leaving `td_list` in the converge that would first materialize its snapshot sends
-`delete {ori dev_id}` before `create_snap` and loses the snapshot for good; the guard
-is what makes that unreachable. Details name the blocking snapshot(s):
+blocking snapshot(s). A converge's sweep phase runs before its build phase
+(`cnagent.md` CN9/CN21), so an origin leaving `td_list` in the converge that would
+first materialize its snapshot sends `delete {ori dev_id}` before `create_snap` and
+loses the snapshot for good; the guard is what makes that unreachable. Details name the blocking snapshot(s):
 `snapshot {td_name} of {target} is not created yet`. A snapshot with
 `created == true` does **not** block, and because the match is on `dev_id`,
 which is never reused, no stale snapshot can block a same-name recreate. The td
@@ -1855,7 +1874,10 @@ primary's chunk-push plans, which is what makes the primary reload those namespa
 `CnNsDevName`s back onto the raid0 (all data now local), remove the dm-clone first and
 then its metadata wrapper `CnCloneMetaDmName` (whose arena units become free again in
 the next registry enumeration, [D14]), disconnect the source, and delete the clone's
-`LocalCloneBmPath` files (§9.6) — the existing removed-clone retire path, unchanged.
+`LocalCloneBmPath` files (§9.6). None of that is a path of its own: the clone is simply
+no longer in the wanted set, so the §9.8 sweep removes its devices in that order, and
+the chunk files are swept against `clone_list` rather than off the wrapper's removal —
+a standby holds chunks and builds no wrapper at all.
 Meanwhile the worker deletes the chunk keys `MaxDelBmPerTxn` at a time and then the
 `Clone` key together with its `clone_name_list` entry. Consequences, all of them following from the Clone key and its `clone_name_list` entry
 surviving until the last transaction: `clone delete` returns while the clone still
@@ -2115,11 +2137,20 @@ concatenation (§9.6, §11.4).
   the same dir, fsync, rename. The stored request contains the revision, so no separate
   revision record exists. On start the agent loads every file under its prefix,
   reconciles the system to it (full idempotent re-apply, §11.5 for clones), then
-  serves. When an object disappears from its parent's pointer list, the agent tears its
-  resources down and deletes the file(s).
-* **Revision gate.** A `Syncup*`/`Push*` request with a revision **lower** than the
-  stored one is rejected (`AgentReply.code != 0`, `details` explains). Equal revision:
-  re-apply idempotently (workers retry). Higher: apply, then persist.
+  serves. When an object disappears from its parent's pointer list, the agent drops its
+  file(s), its chunk files, its in-memory entry and its object lock in that same pass,
+  **before** anything of it is removed. It keeps no record of the object afterwards
+  because it needs none: the §9.8 sweep finds the object's resources by their names, and
+  a record kept until they were gone would be a record of work owed — the very thing
+  that let a failed teardown be forgotten.
+* **Revision gate.** A `Syncup*` request with a revision **lower** than the stored one
+  is rejected (`AgentReply.code != 0`, `details` explains). Equal revision: re-apply
+  idempotently (workers retry). Higher: apply, then persist. `Push*Bitmap` carries no
+  revision and passes no such gate (§9.6): a chunk is position-addressed data under an
+  id that is never reused, it never advances the stored revision, and the agent refuses
+  one for an object it does not know by name — so a push planned against a report the
+  desired state has since superseded is either still correct or refused, and gating it
+  on a revision only ever discarded work that was about to be redone.
 * **Conf gate.** Agents resolve no conf defaults of their own (§7): a geometry an agent
   invented is one the rest of the cluster does not share, and dm, md and the on-disk
   headers would be built against it. A request carrying a value the control plane
@@ -2133,16 +2164,23 @@ concatenation (§9.6, §11.4).
   file carrying such a value never becomes live either, and both roles get there the
   same way — the file is **loaded**, never skipped, and refused inside the converge: the
   dn agent's `convergeDn` records the refusal on the DN's meta row and leaves the port
-  as found, and the sides of that DN are neither converged nor torn down (skipping the
-  file would make the side loop read every side as having left its parent's list and
-  tear it down — `dnagent.md` DN2); the cn agent refuses before it plans, so that cntlr
-  builds nothing and its last applied plan stays untouched (`cnagent.md` CN8).
+  as found, and the sides of that DN are neither converged nor swept — a conf fault must
+  not destroy resources (skipping the file instead would make the side loop read every
+  side as having left its parent's list and drop its state, leaving the side's devices
+  on the node with nothing left that names them — `dnagent.md` DN2); the cn agent
+  refuses before it plans, and since the sweep needs a plan to know what is wanted, that
+  cntlr builds nothing, sweeps nothing and leaves the node exactly as it found it
+  (`cnagent.md` CN8).
 * **Full sync.** Every `Syncup*` request carries the complete desired state of its
   object — there is no partial mode. `SyncupDn.side_pointer_list` /
   `SyncupCn.cntlr_pointer_list` are authoritative: pointers in the request but not
-  local ⇒ add; local but not in the request ⇒ move to a to-be-deleted list and tear
-  their resources down (ids are never reused, so a deleted side/cntlr never comes
-  back). The embedded object lists inside `SyncupSide`/`SyncupCntlr` diff the same way.
+  local ⇒ add; local but not in the request ⇒ drop the object's state and let the §9.8
+  sweep remove its resources by name (ids are never reused, so a deleted side/cntlr
+  never comes back). There is no to-be-deleted list: a list of removals still owed is
+  memory of a failure, and the agent keeps none — what has to go is recomputed from the
+  live node on every pass. The embedded object lists inside `SyncupSide`/`SyncupCntlr`
+  are authoritative the same way, and what they no longer name is swept, never diffed
+  against the request applied before it.
   Bitmap chunks are the one thing that never rides in a `Syncup*` request; they travel
   only over the dedicated `Push*Bitmap` RPCs (§9.6).
 * **RPC shapes.** `Syncup*`, `Push*Bitmap`, `Get*Info`, `GetDnSize`/`GetCnSize` and
@@ -2175,7 +2213,7 @@ concatenation (§9.6, §11.4).
 | `GetDnSize` | Return the byte size of the `--disk` device's **data area** — the raw size (`lsblk --bytes`) minus the fixed `DnDataOffset` prefix of the [D13] format. A device at or below `DnDataOffset` is an `Internal` error. Called by the gateway pre-registration; `dn_id` in the request is for logging only. |
 | `SyncupDn` | Carries `revision`, `side_pointer_list`, `extent_size` (the cluster's `dn_bin_conf.extent_size`, stamped into the disk header at format time and immutable thereafter, §3.1). Ensure §3.1 base state (the [D13] disk format, this agent's own nvmet port); diff the pointer list per §9.1. Reply `agent_reply`, `revision`, `dn_info`. |
 | `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`, `provisioned`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: the side device of `ext_cnt` extents and its zeroing state (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info` (which always reports `zeroed_ext_cnt` / `total_ext_cnt`, §9.4), `bm_info` (the applied migration-bitmap indexes, §9.6). |
-| `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
+| `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
 | `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything (`agent_reply`, `revision`, info). |
 | `CheckDn` / `CheckSide` (stream) | Health streams, one per DN resp. per side, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `dn_info` / `side_info`. |
 
@@ -2186,7 +2224,7 @@ concatenation (§9.6, §11.4).
 | `GetCnSize` | Return the capacity budget in bytes this CN is willing to host (0 = "use the default"); typically from local config. |
 | `SyncupCn` | `revision`, `qos_ratio`, `cntlr_pointer_list`. Ensure §3.2 base state (tmpfs, the 1 GiB sparse backing file, the single loop device — re-learned via `losetup --associated`, never persisted — and the single nvmet port; there is no VG, [D14]); accept and persist `qos_ratio` (enforcement is deferred until the §3.2 step 4 open issue is decided — the agent programs no limit, `cnagent.md` CN6); diff pointers. Reply `agent_reply`, `revision`, `cn_info`. |
 | `SyncupCntlr` | One `cntlr_pointer`, `revision`, `bdev_conf` (incl. `dm_pool_conf.low_water_mark_pct`, §3.3), `sp_level`, `cntlr`, `id_to_slice` (key = `sprintf(IdKeyFmt, slice_id)`), `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`, `migr_list`. Converge §3.3 (primary) or §3.4 (standby); a primary→standby or standby→primary flip follows §11.1 exactly; clone rebuild follows §11.5. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list` (the applied clone-bitmap chunks, one `BitmapInfo` per clone, its applied set carried as `chunk_id_list` — `(src_slice_idx, bm_idx)` pairs, §9.6; `bm_idx_list` is migrations only). |
-| `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `revision`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath(…, src_slice_idx, bm_idx)`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
+| `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath(…, src_slice_idx, bm_idx)`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
 | `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
 | `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
 | `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
@@ -2336,7 +2374,7 @@ the per-RPC roles:
 | chunk source in etcd | `MigrBitmap` keys, `bm_idx` = append sequence `0 … bm_cnt−1` (≤ `MaxMigrBmCnt` = 4) | `CloneBitmap` keys, addressed by the pair `(src_slice_idx, bm_idx)`: `src_slice_idx < src_slice_cnt ≤ MaxSliceCntPerSp` = 32, and `bm_idx < MaxCloneBmCnt` = 16 chunks **per slice** |
 | chunk meaning | chunks **concatenate in `bm_idx` order** into one bitmap over the leg's data region (§8.11); immutable once written | each chunk is a **self-positioned** slice of source slice `src_slice_idx`'s bitmap: chunk `(s, b)` holds bytes `[b·C, b·C+len)` of slice `s`'s bitmap, `len ≤ C = CloneBmChunkBytes` (§8.9); `AppendCloneBitmap` may keep growing it within `C` |
 | receiving agent | the DN hosting the migration's **destination** side | the CN hosting the **primary** cntlr (only it runs the dm-clone) |
-| request fields | `side_pointer`, `revision`, `migr_id`, `bm_idx`, `bitmap` | `cntlr_pointer`, `revision`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap` |
+| request fields | `side_pointer`, `migr_id`, `bm_idx`, `bitmap` (no `revision`: see the worker's step 2) | `cntlr_pointer`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap` (likewise) |
 | local chunk file | `LocalMigrBmPath(cluster, dn, sp, migr, bm_idx)` | `LocalCloneBmPath(cluster, cn, sp, clone, src_slice_idx, bm_idx)` |
 | applied-set report | `SyncupSideReply.bm_info` (`BitmapInfo.res_id = migr_id`, applied set in `bm_idx_list`) | `SyncupCntlrReply.bm_info_list` (one `BitmapInfo` per clone, `res_id = clone_id`, applied set in `chunk_id_list` as `(src_slice_idx, bm_idx)` pairs) |
 | apply action | shift by the leg's `meta_blocks` (§8.11), then §11.4 → `blkdiscard` on `DnMigrFinalName` | §11.4 → `blkdiscard` on `CnCloneFinalName` |
@@ -2375,11 +2413,16 @@ and the paged readers, not because bitmaps are inherently huge.)
    but not in the reported set are exactly the missed parts still to deliver. For a
    clone the diff is over PAIRS — the same `bm_idx` on two different source slices are
    two distinct chunks.
-2. **Push one part per request.** Each missed part is written as one
+2. **Push one part per request, with no revision.** Each missed part is written as one
    `PushMigrBitmapRequest` / `PushCloneBitmapRequest` carrying the addressing ids
-   (`side_pointer` + `migr_id`, resp. `cntlr_pointer` + `clone_id`), the `revision`,
-   the chunk address (`bm_idx`, resp. `src_slice_idx` + `bm_idx`) and the raw chunk
-   bytes.
+   (`side_pointer` + `migr_id`, resp. `cntlr_pointer` + `clone_id`), the chunk address
+   (`bm_idx`, resp. `src_slice_idx` + `bm_idx`) and the raw chunk bytes — and nothing
+   else. A push carries **no revision and is gated on none** (§9.1): the chunk is
+   position-addressed data under an id that is never reused, applying it never advances
+   the agent's stored revision, and an agent that does not know the object refuses the
+   push by name. A part planned against a report the desired state has since superseded
+   is therefore either still correct or refused, and the revision gate this protocol
+   used to carry only ever discarded work the next round was about to redo.
 3. **One in flight per migration/clone.** The worker issues the next `Push*Bitmap`
    call for a migration/clone **only after the reply to the previous one has
    arrived**, and pushes its missed parts in ascending `bm_idx` for a migration,
@@ -2396,14 +2439,24 @@ and the paged readers, not because bitmaps are inherently huge.)
    destination change the new node's syncup reply simply reports an empty/partial
    applied set (`bm_idx_list`, resp. `chunk_id_list`) and the worker pushes the
    missing parts there.
-6. A reply with `AgentReply.code != 0` (stale revision; unknown `migr_id`/`clone_id`
-   because the introducing `SyncupSide`/`SyncupCntlr` has not been applied yet) is not
-   fatal: the worker re-pushes the part on its next sync round.
+6. **A failure ends this object's plan and is remembered nowhere.** A transport error,
+   a chunk whose value can no longer be read from etcd, or a reply with
+   `AgentReply.code != 0` (an unknown `migr_id`/`clone_id`, because the introducing
+   `SyncupSide`/`SyncupCntlr` has not been applied yet; or an address outside the
+   object's geometry) is logged — with the agent's `details` when the agent answered at
+   all — and stops the remaining parts of that migration/clone, since step 3 sends the
+   next part only after an OK. Nothing is re-armed and no retry is scheduled: the
+   object's next `Syncup*` reply reports its applied set again, and whatever is still
+   missing is planned again from that. The plans of other migrations/clones are
+   unaffected (step 4).
 
 **dnv-agent side:**
 
-1. **Gate** the request per §9.1: reject (`code != 0`) a stale revision or a
-   `migr_id`/`clone_id` it does not know yet.
+1. **Gate by name.** Reject (`code != 0`) a `migr_id`/`clone_id` the agent does not
+   know yet, and — on the CN, whose chunks are addressed by a pair — an address outside
+   the clone's own geometry (`src_slice_idx ≥ src_slice_cnt`, `bm_idx ≥
+   MaxCloneBmCnt`). There is no revision gate: the request carries no revision (§9.1),
+   and the ids it names are the whole of its addressing.
 2. **Persist, then apply.** Write the chunk to its `LocalMigrBmPath` /
    `LocalCloneBmPath` file first (temp file + fsync + rename, §9.1); then recompute
    the fully-skippable dm-clone regions from **all** locally present chunks of that
@@ -2423,11 +2476,12 @@ and the paged readers, not because bitmaps are inherently huge.)
    stays out of the applied set — that set is derived from the files present (§9.1) — so
    the object's next `Syncup*` reply reports the chunk as missing and the worker
    re-pushes it. Nothing else schedules that re-push, and the failed persist does not
-   schedule the `Syncup*` either: unlike the `code != 0` case of the worker side's
-   step 6 above, a `code = 0` ack raises no re-sync request, and the object's periodic
-   rounds are `Check*` rounds (§9.7), whose replies carry no applied set. So the chunk
-   waits for whatever re-issues the object's `Syncup*` anyway — a revision bump, or a
-   `Check*` round the agent rejects or answers with another revision — with no timer
+   schedule the `Syncup*` either: **no push outcome does**, the failures of the worker's
+   step 6 included — the push path raises no re-sync request of any kind — and the
+   object's periodic rounds are `Check*` rounds (§9.7), whose replies carry no applied
+   set. So the chunk waits for whatever re-issues the object's `Syncup*` anyway — a
+   revision bump, or a `Check*` round the agent answers with another revision or with a
+   non-zero code (a rejection, or the `ReplyCodeLeftover` of §9.8) — with no timer
    and no push-side retry of its own; until then its regions are copied instead of
    skipped, which costs only the optional bitmap fast path of §8.9/§8.11. The one case
    that does not heal even that way, once the `Syncup*` comes, is a failed persist of
@@ -2441,9 +2495,15 @@ and the paged readers, not because bitmaps are inherently huge.)
    restart, §11.5 clone rebuild, `sp_level` lowering) — re-application is idempotent.
    Because the applied sets in `bm_info`/`bm_info_list` are derived from the files on
    disk, they survive restarts and the worker never re-pushes what the node already
-   holds. The files are deleted together with their object: when the migration/clone
-   disappears from the synced desired state (or via §8.9/§8.11 teardown), the agent
-   removes them with the rest of the local state.
+   holds. The files are deleted together with their object, by the same §9.8 sweep that
+   removes its devices: the local store is swept against the STORED REQUEST, so a clone
+   that has left `clone_list` (§8.9) and a side that is no longer the destination of the
+   migration whose chunks it holds (§8.11) lose them in that pass, and a side whose
+   pointer leaves the DN's list loses them with the rest of its local state. What a
+   standby role or an `sp_level` merely SUPPRESSES keeps its chunks applied-by-file — a
+   clone on a standby cntlr, a destination role the level has switched off — because
+   sweeping those would make the worker re-push every one of them the moment the
+   suppression lifted.
 
 **Grown clone chunks [D8].** `AppendCloneBitmap` may append more bytes to a chunk
 `(src_slice_idx, bm_idx)` that was already pushed and acknowledged — up to the
@@ -2492,14 +2552,168 @@ object's live state cheaply instead of polling `Get*Info`:
     (§9.4: the sp-worker's flip rule of §10.3 reads those counters, so their progress
     **is** a change and needs no blanket carve-out) — and is left unset otherwise. The
     first reply on a fresh stream always carries the full `*Info`.
-* **Revision check.** A reply whose `revision` differs from the request's means the
-  agent has not applied the revision the worker believes current (or does not know the
-  object at all: `agent_reply.code != 0`); the worker re-issues the object's `Syncup*`.
+* **Revision check, and the re-sync it drives.** The worker re-issues the object's
+  `Syncup*` when the reply's `revision` differs from the **desired** one — the agent
+  has not applied what the worker believes current — **or** when `agent_reply.code` is
+  non-zero at all. A rejection (stale revision, unknown object, invalid conf) says the
+  request was never applied; `ReplyCodeLeftover` (§9.8) says it WAS applied and the node
+  still holds something unwanted, and re-syncing on it is the whole of the sweep's retry
+  machinery — the agent recomputes the verdict on every round, so an unclean node is
+  swept again every round, with no timer and nothing remembered anywhere.
 * **Health.** The worker turns a broken stream, a missing reply within the round
   timeout, or `RES_STATUS_ERROR` entries in the `*Info` into the `err_epoch` updates of
   §10.2/§10.3 (`RES_STATUS_UNKNOWN` is what the worker records itself while the stream
   is dead, §9.5). The `Check*` replies are the primary health signal; the `Syncup*`
   replies are the secondary one.
+
+### 9.8 Teardown by sweep (removal is actual minus desired)
+
+Creation is driven by the desired state alone; **removal is driven by the difference
+between the desired state and the live node**. An agent never derives what to remove
+from what it remembers — not from the plan it applied last time, not from a list of
+removals it owes, not from a flag saying that one failed. It enumerates what the node
+actually holds, subtracts what the desired state wants, and removes the rest. This
+section is the contract both roles share; `cnagent.md` (CN21) and `dnagent.md` (DN6)
+are the per-role specifications.
+
+The reason is that a removal derived from `applied plan minus new plan` is forgotten
+the instant the new plan is stored, so a removal that failed is never attempted again
+— the object stays on the node with nothing left anywhere that names it. The node
+cannot forget in that way: while the device is there, the next enumeration finds it.
+
+* **Actual minus desired, at two scopes.** *Node-level*, in `SyncupDn`/`SyncupCn` and
+  at startup under the node write lock: everything belonging to a side/sp whose pointer
+  has left the parent's list, plus the objects no side/sp can be read off at all.
+  *Object-level*, inside one side's/cntlr's own converge under the node read lock plus
+  that object's own lock — so the objects of one node converge concurrently — in place
+  of a retire phase: that object's resources minus its **wanted set**, which is what
+  the build phase would ensure for the stored request with every [D15] deferral that
+  merely POSTPONES an object left in the set — a provisioning leg's wrapper and a
+  deferred group's array are wanted although the build skips them, or the pass that is
+  about to build them would sweep them away first. The one deferral that shrinks the
+  set instead is §11.2's source role: `dst_provisioned = false` is *defined* to be
+  equivalent to no `migr_src_conf` at all, so a deferred source is neither built nor
+  wanted (`dnagent.md` DN6). The node-level pass never touches a side/sp that *is* in
+  the pointer list, even when its own file is missing: the pointer arrives before the
+  object's `Syncup*` (§9.1), and after a lost `--local-store` the resources must be
+  re-adopted probe-first by that `Syncup*`.
+* **Attribution is by name, and by what a nameless object is built out of.** §4.1's
+  role letter and §4.2's ids say which agent, which cluster, which node and which sp a
+  dm device belongs to, and §4.4 does the same for a dnv-format NQN. The objects whose
+  names carry no owner are attributed by their contents instead: an md array by the leg
+  wrappers among its members, and only when **every** member is one of ours and they
+  all name one sp (an array with any other member is not attributable and is never
+  stopped, which is what leaves a co-hosted dn agent's udev-assembled array alone); a
+  host-facing subsystem, whose NQN is the user's own string, by the sp of any stored
+  cntlr that still names it in `nqn_to_subsystem` and only then by the ns-dev its
+  namespaces point at — the request has to be asked first, because a subsystem whose
+  last namespace was just deleted has nothing left to read an owner off; a side's `:2:`
+  export, whose NQN names a leg and not a side ([D1]), by the per-cn dm-linear its
+  namespace backs; a clone-source connection by the cntlr that names it as `src_nqn` or
+  by the live dm-clone that maps it. What cannot be attributed to any of the node's own
+  objects is *unowned*. The one unowned kind only the node-level pass removes is a
+  host-facing subsystem no request claims and no namespace attributes, because only its
+  write lock makes "nobody here wants it" stable. Two are removed by BOTH scopes,
+  because for them that question is settled from state already stable under the node
+  READ lock: a clone-source connection, tested against every stored cntlr's request —
+  persisted before that converge issues any `nvme connect` — and against the live
+  dm-clone tables; and a `:2:` export holding no namespace and linked to no port but
+  ours, tested the same way against every stored side's request, and harmless to remove
+  in any case because it exports nothing and holds nothing open. A `cb` clone-metadata
+  wrapper no stored cntlr's `clone_list` names is swept by the node-level pass too,
+  across every sp at once — but it is not unowned: a `cb` name carries its sp, so a
+  cntlr's own pass already removes the ones of its sp that its `clone_list` no longer
+  names.
+* **Several agents share one kernel, so "not mine" and "nobody's" are different
+  answers.** A lab node runs a dn agent per disk and often a cn beside them, and dm,
+  nvmet and the nvme host namespace are all per KERNEL. Where a name identifies its
+  owner (§4.1's role letter and node id; a `:3:` export's dn id; a `:2:` *connection*'s
+  cn id) that is the whole test. Where it does not, the sweep must be able to say
+  **foreign** and stop, because "I cannot attribute it" followed by a removal takes a
+  healthy sibling's object:
+  * a `:2:` export whose namespace backs ANOTHER dn's per-cn dm-linear is that agent's
+    and is never touched; one with no namespace at all is judged by the nvmet **port**
+    it is linked to, since each agent converges exactly one port id; and one linked to
+    no port while holding no namespace exports nothing and holds nothing open, so
+    removing it is harmless whoever built it;
+  * a `:3:` host connection is judged by the controller's `hostnqn`, because the dn id
+    inside a `MigrSrcNqn` is the SOURCE dn's and the connection could have been opened
+    by any agent on the node;
+  * a host-facing subsystem whose namespaces back another cn's ns-dev is foreign, not
+    unowned — the unowned arm removes.
+  The reads this costs are per object, so each is reached only after a cheap filter has
+  failed to settle it (an sp this node holds a device for, a stored request that still
+  names the object): a node running dozens of agents must not walk the whole configfs
+  tree once per agent per round.
+* **State is dropped at pointer removal; the parent's list is persisted first.** An
+  object whose pointer has left the list loses its file, its chunk files, its memory
+  entry and its object lock in the same pass, before anything of it is removed (§9.1).
+  The parent's own request is persisted **before** the sweep, not after it: a sweep can
+  block for a whole `fast_io_fail_tmo` window on a dead remote — §3.3 step 1 connects
+  every leg with `fast_io_fail_tmo = 5` and `ctrl-loss-tmo = -1`, which is also the
+  bound that makes a pass safe to run at all, since from five seconds after a path loss
+  every IO queued at that multipath head fails immediately — and a request cancelled in
+  that window used to skip the save, leaving the next startup to rebuild the object from
+  the old list against sides that no longer exist. With the new list on disk first, a
+  crash mid-sweep is nothing worse than a startup sweep.
+* **An enumeration that did not answer licenses no removal.** The rule above is
+  about one object; this one is about the listing the whole pass is derived from.
+  "Actual minus desired" with an unanswered `dmsetup ls` subtracts to *remove
+  nothing*, which looks like the safe direction and is not: an empty `actual` is
+  also the shape of "there is nothing left", so every removal gated on ABSENCE
+  rather than on presence fires. The layer stop rule never triggers, so lower
+  layers run as though the ones above them had succeeded; the live-device half of
+  the evidence that protects a shared object (a dm-clone still mapping its source)
+  vanishes node-wide; and objects attributed WITHOUT the dm listing — a host-facing
+  subsystem, read from configfs — are removed on a snapshot that proves nothing.
+  So the pass reports and touches nothing, and the recorded failure makes the
+  verdict non-OK, which is what re-drives it. The same applies per object: a live
+  dm-clone that will not say what it maps makes EVERY clone-source connection
+  in-use for that pass, because recording a failure is not the same as acting on
+  one — nothing downstream reads the failure list before removing.
+* **"Gone" is probe-verified, never inferred from an exit status.** dm through
+  `dmsetup info`, nvme host connections through sysfs, md arrays through sysfs
+  `array_state`, nvmet through configfs — and `mdadm --detail` never runs in a sweep,
+  because it loads a superblock from the member devices and that read blocks until
+  failfast on a leg whose DN side has gone. A command that **did not answer** — killed
+  at the §7 soft or hard timeout, never started, ctx cancelled — has told the caller
+  nothing at all, and in particular has not said the object is absent: the kernel
+  operation may well have completed, an ioctl finishing regardless of the signal that
+  killed its process. So the exit status never decides. A fresh probe does, and a probe
+  that did not answer either reads as *unknown*, which counts as still present. For an
+  nvme connection that probe asks for a CONTROLLER, not for the subsystem directory: the
+  kernel keeps `/sys/class/nvme-subsystem/nvme-subsysN` after its last controller is
+  deleted, and that directory — no path, no block device, nothing held open — would
+  otherwise be reported as a leftover for ever. On the
+  DN the consequence is sharper than a leak: a side's or a migration's allocation record
+  is released only once its device is **verified** gone, because freeing extents a live
+  device still maps hands the same blocks to the next side.
+* **Top-down, and the descent stops at the first layer that left something behind.**
+  The layers are the §3.1/§3.3 stack read downwards. Every unwanted object of a layer
+  is attempted, but the layer below is skipped when this one left anything: a leg
+  pulled out from under a live md array, or a migration source pulled out from under a
+  live dm-clone, is destructive, while a pass that simply runs again next round costs
+  nothing — by then the failfast window has passed and the same order succeeds. The
+  skipped layers' objects are reported as leftovers without being touched.
+* **The verdict is recomputed every time and stored nowhere.** "Something is left" is
+  the result of one comparison, never a flag. The read-only paths run the same
+  enumeration and the same comparison with nothing touched, so every `Check*` round and
+  every `Get*Info` answers a verdict as current as the sweep's own while still removing
+  nothing. A leftover that has since gone therefore stops being reported by itself, and
+  one that is still there keeps being reported without anything having remembered it.
+* **A leftover travels as `ReplyCodeLeftover` (= 4).** It is the one per-resource
+  outcome that cannot ride in the `*Info` rows of §9.5: those rows are keyed by the ids
+  of *wanted* objects, and a leftover is by definition something nothing wants. The
+  code means **accepted with residue** — the desired state is stored and every wanted
+  object converged — and is not a rejection: the worker reads the reply's rows exactly
+  as for code 0 and re-issues the object's `Syncup*` every round (`dnv-worker.md` RW12,
+  no backoff) until the code changes. That is the whole of the retry machinery — no
+  agent-side retry loop re-drives a sweep, and the startup case needs no recovery step
+  because the first `Check*` after a restart reports whatever the node still holds.
+  `details` names the leftovers, at most eight of them, and reports an enumeration that
+  did not answer the same way — an answer the agent cannot trust cannot prove the node
+  clean. The agent log carries the full list once per pass, so a lingering leftover is
+  visible every round rather than once.
 
 ---
 
@@ -2600,8 +2814,9 @@ every `SyncupCntlrReply` and every `CheckCntlrReply` for `err_epoch` maintenance
 timer, and `GetCntlrInfo` replies are not a source. A reply `R` from **any** cntlr of
 SP `S` (thin rows are only ever filled by a cntlr acting as primary, and the ids live
 in the shared pool metadata on the DN legs) **completes** a td `X` of `S` when all four
-hold: (1) `R.agent_reply.code == 0`; (2)
-`R.cntlr_info.td_id_to_thin_info[X.td_id]` exists; (3) the key set of its
+hold: (1) `R.agent_reply` was **accepted** — `code == 0`, or the `ReplyCodeLeftover`
+of §9.8, whose rows are a full probe of the wanted objects and are read exactly as
+code 0's; (2) `R.cntlr_info.td_id_to_thin_info[X.td_id]` exists; (3) the key set of its
 `slice_id_to_dm_thin` equals the SP's slice ids exactly — every slice, no extra, no
 missing; (4) every row's `status == RES_STATUS_OK`. Anything else — no entry (a
 standby, `cnagent.md` CN14 "primary only"), a partial map, any
@@ -3302,7 +3517,7 @@ dmsetup create {CnCloneMetaDmName} --table \
 # {loopdev} is the path losetup reports (/dev/loopN); {loopdev_majmin} is its major:minor,
 # which is what a dm table names and what `dmsetup table` reads back.
 # registry read-back (the dm tables ARE the allocation table):
-dmsetup ls | grep '^dnv-{cluster}-{cn}-b-' ; dmsetup table {CnCloneMetaDmName}
+dmsetup ls | grep '^dnv-{cluster}-{cn}-cb-' ; dmsetup table {CnCloneMetaDmName}
 ```
 
 **md-raid1** (`{data_offset_k} = meta_blocks × block_size / 1024`, §3.6; every member
@@ -3597,7 +3812,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   effectively suspended namespace is **parked** instead — its ns-dev reloaded onto the
   td's dm-error and resumed, the namespace `inaccessible` — with **no grace window**,
   because the namespace is moved to `inaccessible` before its own ns-dev is touched
-  (the CN9 retire phase's ANA step precedes its park step) and nvmet refuses IO to an
+  (CN9's pre-steps do the ANA move first and the park second) and nvmet refuses IO to an
   inaccessible namespace at the target, so a window would absorb nothing but a local
   scanner's bios; the reload's own flushing suspend is what keeps in-flight IO from
   being replayed. Two bounds on that argument are stated rather than hidden: the ANA
@@ -3648,7 +3863,7 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   `losetup --associated`, never persisted, because loop names are unpredictable and a
   per-clone loop sprawl is unwanted — carved into 256 `CnCloneMetaUnit` = 4 MiB units
   and handed out first-fit in **contiguous** runs to wrapper dm-linears
-  `CnCloneMetaDmName` (CN dm kind `b`, `cnagent.md` §2.1; the wrapper exists because
+  `CnCloneMetaDmName` (CN dm kind `cb`, `cnagent.md` §2.1; the wrapper exists because
   dm-clone reads its superblock from sector 0 and takes no offset, the same reason
   `DnMigrMetaDmName` does). **The kernel's dm tables are the allocation registry** —
   each wrapper's `0 {len} linear {loopdev_majmin} {offset_sectors}` records its own allocation,
@@ -3662,8 +3877,8 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   [D13](a) label-scan class eliminated rather than mitigated, one less dependency
   (lvm2), and CN naming as deterministic as everything else. Arena exhaustion is the old
   `lvcreate`-ENOSPC equivalent (`RES_STATUS_ERROR` on the clone's resources); orphaned
-  kind-`b` wrappers are removed by reconcile, which frees their units; a wrapper whose
-  length or backing loop path no longer matches the currently probed loop device is
+  kind-`cb` wrappers are removed by the §9.8 sweep, which frees their units; a wrapper
+  whose length or backing loop path no longer matches the currently probed loop device is
   `RES_STATUS_ERROR` and is repaired by the §11.5 clone rebuild.
 * **[D15] Whole-side zeroing behind a `provisioned` gate; `RES_STATUS_PROVISIONING`.**
   dnv is multi-tenant, so a new side must never expose a previous tenant's bytes. The
@@ -3757,7 +3972,7 @@ own amendment sections are the surviving record.
 * [D14] LVM removal — LVM leaves the CN. §1, §2, §3 preamble, §3.1, §3.2 step 2, §3.6,
   §4 preamble, §4.1, §4.2, §4.5 (retitled; `CnCloneVgName`/`CnCloneMetaName`/
   `CnCloneMetaPath` deleted), §5.2, §8.9, §9.3, §11.3, §11.5, Appendix A and [D9]/[D12]
-  now describe the loop-backed clone-metadata arena with kind-`b` wrapper linears and
+  now describe the loop-backed clone-metadata arena with kind-`cb` wrapper linears and
   carry no LVM reference outside the historical rationale of [D13]/[D14]; new decision
   **[D14]**.
 * **32 slices per SP (2026-09-17)** — `MaxSliceCntPerSp` 16 → 32, `EtcdMaxTxnOps`
@@ -3815,9 +4030,11 @@ own amendment sections are the surviving record.
   longer rests on the clone path at all (§13). §8.9 (its new lead-in note,
   DeleteClone's Errors and Action, AppendCloneBitmap's Errors, and the chunk-count
   sentence), §2.1 (`MaxDelBmPerTxn`) and the `Clone.deleting` field follow; the
-  exclusion that performs the physical teardown reuses the existing removed-clone
-  retire path, so there are zero agent changes. The namespace resume stays
-  synchronous with the RPC, deliberately. §11.3's abort walkthrough also follows:
+  exclusion that performs the physical teardown needed no agent change at the time,
+  because it reused the then-existing removed-clone retire path; teardown by sweep has
+  since deleted that path, and the same exclusion is now carried by the §9.8 sweep's
+  wanted set. The namespace resume stays synchronous with the RPC, deliberately.
+  §11.3's abort walkthrough also follows:
   the destination thin device is held for the whole drain, so deleting it now needs the
   poll first — a consequence enumerated here, in `gateway.md` §5.8 and in `dnvctl.md`'s
   `clone delete` row, all three of which list it beside the name and `sp delete`.
@@ -3843,7 +4060,7 @@ own amendment sections are the surviving record.
   new decision **[D15]**. The §8/§10 worker and gateway items are implemented: the
   provisioned flip in `worker/sprole.go`, every new Side written unprovisioned,
   `SwitchSpareLeg`'s not-provisioned refusal, and `agent/dnagent/zeroing.go`.
-* Consistency fixes — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `9`/`a`/`b` (and
+* Consistency fixes — §4.1 points at `cnagent.md` §2.1 for CN dm kinds `c9`/`ca`/`cb` (and
   §4.2's stale "name it like a dm kind if desired" line is corrected); §8.13 and §11.4
   pin the LSB-first wire bitmap bit order; [D12] records the unbounded transfer-origin
   suspension residual (superseded: the 2026-09-16 park entry below replaced that
@@ -3907,14 +4124,21 @@ own amendment sections are the surviving record.
   Migration bitmaps are untouched, and the proto renumbering is deliberately
   wire-incompatible with old peers: there is no compatibility path. Old 6-field clone
   keys in etcd are silently skipped by the existing skip-unparseable path
-  (`ParseCloneBmKey` rejects them on the field count). Old agent chunk files are NOT —
-  the renumbering collides `bitmap` (old field 7, wire type 2) with `bm_idx` (new
-  field 7, wire type 0), and protobuf-go moves a wire-type mismatch to unknown fields
-  instead of erroring, so such a file decodes cleanly as an EMPTY chunk at the pair
-  `(old_bm_idx, 0)`. That is bounded and safe — an empty chunk is never skippable, so
-  nothing is discarded that was written — but it costs the bitmap optimization at that
-  pair and leaks the file. Clear a CN's `--local-store` when upgrading past this
-  change; see `cnagent.md` CN2.
+  (`ParseCloneBmKey` rejects them on the field count). Old agent chunk files are NOT, and what
+  becomes of them is not what the wire-type collision suggests. Deleting `revision`
+  (field 4) shifted every later tag down one, so each tag in an old file is read as
+  the field that used to sit one tag higher. A **pre-pair** file (`revision` 4,
+  `clone_id` 5, `bm_idx` 6, `bitmap` 7) has every wire type still matching, so it
+  decodes with no error and **no unknown fields at all**, into `{clone_id: <the old
+  revision>, src_slice_idx: <the old clone_id>, bm_idx: <the old bm_idx>, bitmap:
+  <intact>}` — measured, not inferred. A **post-pair, pre-deletion** file is displaced
+  the same way and additionally loses its bitmap, because new field 7 is `bytes`
+  against the file's varint and old field 8 no longer exists. In both cases `clone_id`
+  reads back as a revision number, so `findClone` almost never matches and the file is
+  **deleted as an orphan** rather than loaded — no wrong chunk is ever installed, and
+  the residual risk is the freak case where an old revision equals a live `clone_id`.
+  Clear a CN's `--local-store` when upgrading past this change; see `cnagent.md` CN2,
+  which carries the full derivation.
 * **`Clone.bm_cnt` is deleted (2026-09-16)** — the field was the high-water of
   `bm_idx + 1` over a clone's appends, and existed so that `DeleteClone` could sweep
   the `src_slice_cnt × bm_cnt` rectangle of chunk keys. The clone drain retired that

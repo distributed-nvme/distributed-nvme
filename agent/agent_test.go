@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	// Aliased: the fakeSysfs methods below bind `fs` to their receiver.
+	iofs "io/fs"
 	"strings"
 	"sync"
 	"testing"
@@ -586,6 +588,16 @@ func TestAnaStateOf(t *testing.T) {
 type fakeSysfs struct {
 	dirs  map[string][]string
 	files map[string]string
+	// killLs makes `ls -1 <dir>` answer the way a child killed at the SH15
+	// soft timeout does — exit -1 with a non-nil error — instead of the exit
+	// status a tool that ran and looked gives. No arrangement of the tree's
+	// contents can express that outcome, and telling it apart from an exit
+	// status is exactly what the enumerators of a sweep turn on.
+	killLs map[string]bool
+	// readErr answers one path with an error that is NOT fs.ErrNotExist: an
+	// attribute that could not be read at all, as opposed to one that is not
+	// there. It must never reach a caller as an absence.
+	readErr map[string]error
 	// read is every path ReadFile served, and noDeadline the subset that
 	// arrived on a ctx carrying no deadline.
 	read       []string
@@ -600,7 +612,11 @@ func (fs *fakeSysfs) osClient() *common.FakeOsClient {
 			if cmd != "ls" {
 				return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
 			}
-			entries, ok := fs.dirs[args[len(args)-1]]
+			path := args[len(args)-1]
+			if fs.killLs[path] {
+				return "", "signal: killed", -1, errors.New("signal: killed")
+			}
+			entries, ok := fs.dirs[path]
 			if !ok {
 				return "", "", 2, fmt.Errorf("no such directory")
 			}
@@ -611,9 +627,20 @@ func (fs *fakeSysfs) osClient() *common.FakeOsClient {
 			if _, ok := ctx.Deadline(); !ok {
 				fs.noDeadline = append(fs.noDeadline, path)
 			}
+			if err, ok := fs.readErr[path]; ok {
+				return "", err
+			}
 			data, ok := fs.files[path]
 			if !ok {
-				return "", fmt.Errorf("no such file: %s", path)
+				// An absent file must wrap fs.ErrNotExist, because that is
+				// the one thing agent.readAttrStrict tests: the production
+				// LimitedOsClient hands back os.ReadFile's *fs.PathError, and
+				// "absent" is distinguished from "the read did not answer"
+				// by errors.Is(err, fs.ErrNotExist) alone. A bare
+				// fmt.Errorf here would make every absent attribute look
+				// like a stalled sysfs read.
+				return "", fmt.Errorf("no such file: %s: %w", path,
+					iofs.ErrNotExist)
 			}
 			return data, nil
 		},

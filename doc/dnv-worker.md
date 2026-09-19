@@ -829,10 +829,24 @@ RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
      coordinator can snapshot it (AR1).
 
 RW2. **State**: `desired` (the revision to reach plus the inputs the request
-     is built from), `synced` (the last revision the agent acknowledged —
-     the `revision` of a `code == 0` `Syncup*` reply or of a `Check*` reply),
-     `stream`, `lastInfo` (the last `*Info` received), the health state of
-     §9, `resyncWanted` (BM6), and the round timer.
+     is built from), `stream`, `lastInfo` (the last `*Info` received), the
+     health state of §9, and the round timer. No round's outcome is kept as
+     WORK STILL OWED: there is no last-acknowledged revision and no
+     "re-sync wanted" flag anywhere in the loop. RW4 step 5 recomputes the
+     whole re-sync condition from the reply in hand — its own `revision`
+     against `desired.revision`, its own `agent_reply.code` — so a worker
+     just handed the shard decides exactly as one that has driven the
+     object for an hour, and no failure can be forgotten by a flag
+     something cleared. Two things a round produces do outlive it, and
+     neither is such a record: `lastInfo`, because a `show_info = false`
+     reply omits an unchanged `*Info` and health is evaluated on the latest
+     known one (HL5); and the §9 health state, as the last verdict WRITTEN
+     — which is exactly what HL3's transitions-only rule has to compare the
+     next observation against. (BM5's `mod_revision` memo survives rounds
+     too, but it belongs to the §10 pusher; and the memos of what was
+     LOGGED — RW9's two, plus, on a cntlr child, the last standby leg row
+     logged per leg, so HL2's standing row does not repeat every round —
+     never record what is owed.)
 
 RW3. **Coalescing.** Desired changes arrive from the parent (shard worker or
      SP coordinator) over a channel of capacity one that is overwritten, so
@@ -855,15 +869,22 @@ RW4. **Round**, every `interval` seconds (RW9):
         `agent_reply.code != 0` **or** `reply.revision != desired.revision`
         ⇒ issue `Syncup*` (RW5) — this is also how the first sync after a
         shard handoff, a worker restart or an agent restart happens, with no
-        recovery step of its own;
-     6. `resyncWanted` ⇒ issue `Syncup*` (an equal-revision re-apply, §9.1);
-     7. re-arm the timer.
+        recovery step of its own, and how a leftover is re-driven: the agent
+        recomputes `ReplyCodeLeftover` (RW5) from a fresh enumeration of its
+        node on every `Check*`, so for as long as it still holds something
+        the desired state does not want, every round issues the `Syncup*`
+        that sweeps again, and the round it comes clean is the round the
+        re-sync stops — no backoff (RW12), no flag, the code is the state;
+     6. re-arm the timer.
 
 RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
-     under `DefaultWorkerSyncupTimeout` with a trace id (RW10). `code == 0`
-     ⇒ `synced = reply.revision`, process the `*Info` (§9), `bm_info` /
-     `bm_info_list` (§10), and the sp flips (RW18/RW19). `code != 0` ⇒ log
-     `syncup rejected` (`code`, `details`) and leave it to the next round:
+     under `DefaultWorkerSyncupTimeout` with a trace id (RW10). An ACCEPTED
+     reply — `code == 0`, or `ReplyCodeLeftover` below — has its `*Info`
+     processed (§9), its `bm_info` / `bm_info_list` diffed (§10) and its sp
+     flips run (RW18/RW19). A REJECTED one (`ReplyCodeStaleRevision`,
+     `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`, and any other
+     non-zero code — below) ⇒ log `syncup rejected` (`code`, `details`) and
+     leave it to the next round:
      unknown object (`ReplyCodeUnknownObject`) means the parent syncup has
      not landed yet — e.g. an sp-worker's `SyncupSide` reaching the DN before
      the dn-worker's `SyncupDn` listed the side, which is normal since the
@@ -879,13 +900,30 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      agent's copy of those rules and `model`'s have drifted apart
      (`dnagent.md` §2.1).
 
-     The handling is uniform in the code and does not enumerate the codes:
-     only `ReplyCodeStaleRevision` raises the record to `Error`, every
-     other value — including one this worker does not know — is `Info`, and
-     in all cases `synced` is left where it was, so RW4 step 5 issues the
-     same `Syncup*` again next round until the reply changes. A gRPC error
-     is logged and left to the next round. A desired change that arrives
-     while a syncup is in flight is applied when it returns.
+     `ReplyCodeLeftover` is the one non-zero code that is **not** a
+     rejection: the request was applied — the desired state is stored and
+     every wanted object converged — and the node still holds objects the
+     desired state does not want, or an enumeration of what it holds did
+     not answer, which proves nothing either way (`architecture.md` §9.8).
+     It is logged as `syncup leftover` (`revision`, the agent's `details`)
+     at `Info`, beside the ordinary `syncup result`: nothing agent-side
+     re-drives the sweep, it runs again on the re-sync RW4 step 5 issues, so
+     a leftover is a normal state for as long as a dead remote's failfast
+     window lasts, and the record is what makes one that does NOT go away
+     visible in the log.
+
+     The rejection handling does not enumerate the codes: only
+     `ReplyCodeStaleRevision` raises the record to `Error`, every other
+     value — including one this worker does not know — is `Info`, and an
+     unknown code counts as a rejection, because a reply this worker cannot
+     interpret carries no verdict it may act on. Nothing is remembered
+     either way (RW2): the re-send is not armed here, it comes from the
+     NEXT round's own reply, which repeats the same code or the same
+     revision mismatch until the agent's answer changes. An agent that
+     stores a non-zero outcome must therefore report it on `Check*` too, or
+     the `Syncup*` that would clear it is never issued. A gRPC error is
+     logged and left to the next round. A desired change that arrives while
+     a syncup is in flight is applied when it returns.
 
 RW6. **Immediate syncup.** A desired change from the parent triggers a
      `Syncup*` at once, without waiting for the round. A change that arrives
@@ -945,9 +983,13 @@ RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
       connection and logs `revision worker stopped`. Parents join their
       children with a `sync.WaitGroup`.
 
-RW12. **No backoff anywhere.** The round is the retry cadence for an
-      unreachable agent, a rejected syncup, a failed push and a missing
-      cluster conf alike.
+RW12. **No backoff anywhere.** The round is the retry cadence for everything
+      the loop could not finish — an unreachable agent, a rejected syncup, a
+      leftover reply, a health write that did not commit, a missing cluster
+      conf. A failed PUSH is the one thing NOT on that list, and not because
+      it waits longer: it arms nothing at all (BM6), so no round retries it.
+      It is re-planned only when the object's next `Syncup*` is issued for
+      some other reason, from the agent's own acknowledged set (BM2).
 
 ### 8.2 dn role — `worker/dnrole.go`
 
@@ -1058,12 +1100,13 @@ RW17. **Rounds** send `CheckSideRequest{cluster_id, dn_id, side_pointer,
       revision, show_info}` / `CheckCntlrRequest{cluster_id, cn_id,
       cntlr_pointer, revision, show_info}`.
 
-RW18. **Provisioned flip** (§10.3). On a `code == 0` `SyncupSide`/`CheckSide`
-      reply (the same gate RW19 spells out) for a side whose driven request
-      (`plan.req` — `provisioned` moves only false→true, so the request being
-      driven and the one last synced cannot disagree here) carried
-      `provisioned = false` and
-      whose `side_info.zeroed_ext_cnt == total_ext_cnt > 0`, the child
+RW18. **Provisioned flip** (§10.3). On an ACCEPTED `SyncupSide`/`CheckSide`
+      reply (`code == 0` or `ReplyCodeLeftover` — the gate RW19 defers to,
+      HL1 the reason) for a side whose driven request (`plan.req` —
+      `provisioned` moves only false→true, so the request being driven and
+      the last one the agent acknowledged cannot disagree here) carried
+      `provisioned = false` and whose
+      `side_info.zeroed_ext_cnt == total_ext_cnt > 0`, the child
       reports the side to the coordinator, which runs `model.FlipProvisioned`
       (several sides reported within one round MAY share one STM). The bump
       re-fans the SP (RW14) and the re-synced sides carry `provisioned =
@@ -1071,7 +1114,8 @@ RW18. **Provisioned flip** (§10.3). On a `code == 0` `SyncupSide`/`CheckSide`
       round carries the full `*Info` and flips whatever is still `false`.
 
 RW19. **Created flip** (§10.3, `ThinDeviceCreated.md` U3, verbatim). Every
-      `SyncupCntlrReply` and `CheckCntlrReply` with `code == 0` is scanned:
+      `SyncupCntlrReply` and `CheckCntlrReply` with an accepted code (RW18)
+      is scanned:
       a td `X` of the loaded state with `created == false` is a candidate
       when `cntlr_info.td_id_to_thin_info[X.td_id]` exists, its
       `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
@@ -1118,9 +1162,10 @@ HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
      |---|---|
      | stream cannot be opened, breaks, or no reply within the round timeout | set to `now` if 0; the in-memory info is marked `RES_STATUS_UNKNOWN` (what the worker records itself while the stream is dead, §9.5 — never written to etcd) |
      | any `RES_STATUS_ERROR` row in `DnInfo` (`disk_info`, `meta_info`, `port_info`) or `CnInfo` (`port_info`, `tmpfs_info`, `tmp_file_info`, `loop_dev_info`) | set to `now` if 0 — including `meta_info` `"disk lacks Write Zeroes"` (§9.4), which is a plain `ERROR` |
-     | a clean round: reply in time, `code == 0`, no `ERROR` row in the latest known info | cleared to 0 |
+     | a clean round: reply in time, an accepted `code` (0 or `ReplyCodeLeftover`), no `ERROR` row in the latest known info | cleared to 0 |
      | `RES_STATUS_PROVISIONING`, `MISSING` | neither set nor clear ([D15]) |
-     | `agent_reply.code != 0` | neither set nor clear; triggers a re-sync (RW4) |
+     | a rejection code (stale revision, unknown object, invalid conf, or one this worker does not know) | neither set nor clear; triggers a re-sync (RW4 step 5) |
+     | `agent_reply.code == ReplyCodeLeftover` | evaluated exactly as `code == 0` — the rows above set it, clear it or do neither — and the re-sync of RW4 step 5 still runs. The request WAS applied, so the `*Info` is a full probe of every WANTED object; a leftover is by definition an object nothing wants, so it has no row of its own to be judged by. Reading the code as a rejection would freeze health — and the pushes of §10, and the RW18/RW19 flips — for as long as one leftover survived |
 
      The **DN** write needs a usable `ClusterConf` and re-reads it from the
      cache per write rather than capturing it: MD4 derives the capacity
@@ -1152,7 +1197,10 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      | `Leg.err_epoch` | the **primary** cntlr's `leg_id_to_leg[leg] == RES_STATUS_ERROR` (the §3.6 probe; spares included). A standby's leg row is logged, never recorded | the primary reports the row `RES_STATUS_OK` |
      | `Side.err_epoch` | its `CheckSide` stream cannot be opened / breaks / misses a round, or `side_dev_info` or any `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` row is `RES_STATUS_ERROR`, or a `migr_src_info` / `migr_dst_info` row is `ERROR` | its next round is clean |
 
-     `PROVISIONING`, `MISSING` and `code != 0` never set any of the three.
+     `PROVISIONING`, `MISSING` and a rejection code never set any of the
+     three. `ReplyCodeLeftover` is not a rejection: its rows are evaluated
+     exactly as a `code == 0` reply's — here, and in the RW18/RW19 reports
+     the same replies carry — for HL1's reason.
 
 HL3. **Transitions only.** A record is written when the observed health
      changes (healthy → unhealthy sets the epoch once — the threshold clock
@@ -1208,11 +1256,11 @@ BM2. **Diff.** After every `SyncupSide` reply: `missing = MigrBmIdx[migr] −
      everything missing.
 
 BM3. **One in flight per migration/clone, ascending address,** each
-     `PushMigrBitmapRequest{cluster_id, dn_id, side_pointer, revision =
-     synced, migr_id, bm_idx, bitmap}` / `PushCloneBitmapRequest{…,
-     cntlr_pointer, clone_id, src_slice_idx, bm_idx, bitmap}` under
-     `DefaultWorkerPushTimeout`; the next part is sent only after a `code ==
-     0` reply. The order is ascending `bm_idx` for a migration and ascending
+     `PushMigrBitmapRequest{cluster_id, dn_id, side_pointer, migr_id,
+     bm_idx, bitmap}` / `PushCloneBitmapRequest{…, cntlr_pointer, clone_id,
+     src_slice_idx, bm_idx, bitmap}` under `DefaultWorkerPushTimeout`; the
+     next part is sent only after a `code == 0` reply. The order is
+     ascending `bm_idx` for a migration and ascending
      `(src_slice_idx, bm_idx)` **lexicographic** for a clone, so that two
      source slices sharing a `bm_idx` are two ordered chunks and not one. The
      ordering is LOAD-BEARING FOR MIGRATIONS ONLY, whose chunks concatenate
@@ -1220,6 +1268,16 @@ BM3. **One in flight per migration/clone, ascending address,** each
      the order is deterministic and nothing more. Different migrations/clones
      push independently and MAY run concurrently toward one agent (§9.6
      step 4); within one object the child sequences them.
+
+     **Neither request carries a revision**, and no agent gates one on a
+     revision. A chunk is position-addressed data keyed by a `migr_id` /
+     `clone_id` that is never reused (`architecture.md` §5.4), applying it
+     advances no stored revision, and an agent that does not hold the object
+     refuses the push BY NAME (`ReplyCodeUnknownObject`, BM6) rather than by
+     comparing revisions. A push planned from a report the desired state has
+     since superseded is therefore either still correct or refused by name;
+     gating it on a revision only ever discarded work that was about to be
+     redone anyway.
 
 BM4. **Targets.** Migration chunks go only to the destination side's DN;
      clone chunks only to the CN hosting the **primary** cntlr. A standby's
@@ -1242,11 +1300,30 @@ BM5. **Grown clone chunks ([D8]).** The child memoizes, per `(res_id,
      memoizes migration chunks too, where the `mod_revision` comparison is
      inert.
 
-BM6. **Failure.** A push that fails (gRPC error, timeout) or is rejected
-     (`code != 0`: stale revision, or the introducing syncup not applied yet)
-     sets the object's `resyncWanted`; the next round issues an
-     equal-revision `Syncup*` (RW4 step 6) whose reply restarts the diff.
-     There is no push-specific timer.
+BM6. **Failure.** A push that fails — a gRPC error or timeout, a chunk whose
+     value can no longer be read from etcd, or an `agent_reply.code != 0`
+     (`ReplyCodeUnknownObject`: the introducing `Syncup*` has not been
+     applied yet, or the address is out of range for the object) — is logged
+     as `bitmap push failed` (§12) and **ends that plan**. The remaining
+     parts are not sent, nothing is re-armed and no flag is raised anywhere.
+     The next `Syncup*` reply for the object re-plans the diff (BM2) from
+     the agent's OWN acknowledged set, which is the only place a diff has
+     ever come from; a plan rebuilt from a remembered failure would be a
+     plan built from the worker's memory instead of from the agent's state.
+     The rest of the plan goes with the failed part because the parts are
+     ordered (BM3) and a migration's chunks are interpretable only in
+     sequence.
+
+     There is no push-specific timer and no push-driven re-sync. When the
+     refusal was the agent's own, its `Check*` reply says so too — the same
+     rejection code, or a stored revision behind the desired one — and RW4
+     step 5 issues the `Syncup*` that re-plans within the round. When the
+     push failed on the wire while the agent is healthy and at the desired
+     revision, no re-sync is due and the chunk waits for the next `Syncup*`
+     from any cause (a revision bump, a leftover, a handoff). That wait is
+     accepted because the skip bitmap is an optimization: a chunk that has
+     not arrived leaves its regions hydrated instead of `blkdiscard`ed
+     (`architecture.md` §9.6), which costs copying, never correctness.
 
 ---
 
@@ -1558,8 +1635,8 @@ SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
       real CN id and build a dm-error, a dm-linear, a subsystem and a
       namespace for the CN numbered 0. (An SP that merely has no PRIMARY among
       cntlrs that do exist keeps RW15's documented behaviour.) The sides are
-      retired through the DN pointer lists as the batches empty them, not
-      through these children.
+      removed by each DN agent's own sweep as the batches empty the DN
+      pointer lists, not through these children.
 
 SPD8. **Step selection.** From the freshly loaded `SpConf` ALONE, first match
       wins: `cntlr_id_list` non-empty ⇒ **D1** `DrainSpCntlrs`; else
@@ -1626,9 +1703,16 @@ SPD12. **D3 — the final keys.** `SpConf`, `SpName`, `SpRev` and GW12's
 
 SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       Etcd emptiness MAY outrun physical teardown — an agent that is down
-      keeps its stale stacks until its next syncup, with the DN orphan sweep
-      and the CN wrapper sweep as the crash-window backstops. This is the
-      system's existing convergence contract, not new risk.
+      keeps its stale stacks until its next syncup. What makes that safe is
+      that each agent derives what to REMOVE by enumerating what its node
+      actually holds and subtracting what the desired state wants
+      (`architecture.md` §9.8): an SP whose keys this drain deleted leaves
+      the pointer lists, and the next `SyncupCn`/`SyncupDn` sweeps its
+      devices away by name, with no plan, no list and no memory of the drain
+      needed at either end — a removal that does not succeed is reported as
+      `ReplyCodeLeftover` and retried on every round (RW4 step 5) instead of
+      being forgotten. This is the system's existing convergence contract,
+      not new risk.
 
       **Budget consistency (what the one-shot really guaranteed).** Partial
       teardown is now a real, observable state, and what the single
@@ -1704,11 +1788,12 @@ CLD2. **Load and refuse, never skip.** Each drain op loads the SpConf and the
 
 CLD3. **The repeat delete is a no-op, checked in PHASE 1.** OK, no writes, no
       bump, and no agent call, with or without `force`. The placement is the
-      rule: after the latch the CN has retired the stack, so `GetCntlrInfo`
-      reports no dm-clone and a hydration check would wedge every repeat
-      delete in `FAILED_PRECONDITION` for ever. Phase 1 therefore runs GW6's
-      token check itself, since it is the decision there and `openSpRead`
-      skips it.
+      rule: after the latch the clone has left every cntlr's `clone_list`
+      and the CN's next sweep has taken the stack with it (CLD5), so
+      `GetCntlrInfo` reports no dm-clone and a hydration check would wedge
+      every repeat delete in `FAILED_PRECONDITION` for ever. Phase 1
+      therefore runs GW6's token check itself, since it is the decision
+      there and `openSpRead` skips it.
 
 CLD4. **The latch, and what it does not write.** The write set is the
       dst-namespace resume — one `Subsystem` put per subsystem of the SP that
@@ -1740,9 +1825,12 @@ CLD5. **Exclusion is the teardown.** From the first post-latch fan-out the
       absence is deliberately distinct from level suppression: a
       level-suppressed clone (`SP_LEVEL_NO_CLONE`) keeps its local chunk files
       for a later rebuild, while a deleting one must lose them, and the cn
-      agent's removed-clone retire path (`cnagent.md` CN18) drops them
-      precisely when the clone id is absent from the plan. That path is the
-      whole physical teardown — ns-devs repointed, dm-clone and metadata
+      agent's cntlr-level sweep (`cnagent.md` CN21) drops them precisely when
+      the clone id is absent from the request — the test is membership of
+      `clone_list`, not the presence of a wrapper, since a standby builds no
+      wrapper to key it off. That sweep, and the build phase that follows it
+      in the same converge, are the whole physical teardown — the ns-dev
+      parked and then put back on its ordinary backing, dm-clone and metadata
       wrapper removed, arena units freed, source disconnected, local chunk
       files dropped — so there are ZERO agent changes: to an agent this is
       indistinguishable from the old post-delete syncup. The bitmap pusher
@@ -1773,8 +1861,9 @@ CLD8. **The batch.** Deletes ONLY keys named by the caller's keys-only
       idempotent pop; refuses a larger batch, so a caller that handed over its
       whole scan could not silently rebuild the unbounded sweep. It MUST NOT
       rewrite the Clone record and ends in `BumpSpRev`.
-      Physical effect: none. The CN dropped its local chunk files at retire,
-      agents never read etcd, and an excluded clone has no pusher.
+      Physical effect: none. The CN dropped its local chunk files in the
+      sweep that followed the exclusion (CLD5), agents never read etcd, and
+      an excluded clone has no pusher.
 
 CLD9. **The final STM.** Del the Clone key, put the SpConf with the name
       removed from `clone_name_list`, `BumpSpRev` — the two removals together
@@ -1790,7 +1879,8 @@ CLD9. **The final STM.** Del the Clone key, put the SpConf with the name
 CLD10. **Asynchrony and retry.** SPD13 verbatim: no drain STM waits on,
       calls or verifies any agent; etcd emptiness MAY outrun physical
       teardown, and a CN that is down keeps its stale stack until its next
-      syncup, backstopped by the existing wrapper sweeps. A failed step
+      syncup, which removes it because the clone is no longer in the request
+      and not because anything recorded that it should be. A failed step
       commits nothing, bumps nothing and retries on the next RW12 tick,
       forever; progress has exactly two user-visible states — `deleting =
       true`, then `NOT_FOUND` — accepted deliberately, since a max-shape drain
@@ -1856,9 +1946,11 @@ parses them.
 | `invalid stored conf` | `Error`. From a revision worker: `role`, `shard`, `cluster_id`, `id` (+ `side_pointer`/`cntlr_pointer` for sp children), `error`. From the sp coordinator (both its gates): `cluster_id`, `sp_id`, `sp_name`, `error` | RW9 (the loop's conf gate), RW14 (the fan-out's `bdev_conf` gate), AR1 (the pass gate) — once per distinct error, never once per round |
 | `syncup result` | ids, `revision`, `code`, `error?` | every `Syncup*` reply or failure (RW5) |
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
+| `syncup leftover` | ids, `revision`, `details` (the agent's leftover names, `leftover(n): kind:name, … [+k more]` and/or `enumeration failed: …`) | RW5, on an accepted reply carrying `ReplyCodeLeftover` — one record per `Syncup*`, so a leftover that does not go away is in the log every round |
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
 | `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
+| `bitmap push failed` | the `bitmap pushed` attributes up to `bm_idx` (`src_slice_idx` and `bm_idx` 0 for a push that never reached a chunk), then either `error` (transport, fetch, `chunk not found`) **or** `code` + `details` — the agent's own explanation, which the `bitmap pushed` record beside it cannot carry because it holds the code alone | BM6. Non-normative in the §12 sense: it names no decision, it exists because a push that produced no `AgentReply` has no code to report and must not be logged as a `bitmap pushed` with an invented 0 |
 | `reaction applied` | `cluster_id`, `sp_id`, `kind` (`failover`/`grow_data`/`grow_meta`/`replace_cntlr`/`spare_create`/`spare_switch`), ids, `revision` | AR2 |
 | `reaction skipped` | `cluster_id`, `sp_id`, `kind`, `reason` | AR2 |
 | `sp drain step` | `cluster_id`, `sp_id`, `sp_name`, `phase` (`cntlrs` or `slice`), `cntlr_cnt` for `cntlrs`; `slice_id`, `grp_cnt`, `slice_done` for `slice` | every committed D1 and D2 step (§11.6). D3 emits `sp drained` instead, so `phase=final` never appears here. Non-normative in the §12 sense — it names no decision — but the §14 drain case counts it, because it is the only record that shows a multi-batch drain advancing |
@@ -1894,7 +1986,9 @@ does).
   rescan diff, parse rejects malformed keys.
 * **revision.go** — round timeout ⇒ unreachable; revision mismatch and
   `code != 0` ⇒ syncup; desired change ⇒ immediate syncup and coalescing
-  under an in-flight call; `resyncWanted` ⇒ equal-revision re-send; stop
+  under an in-flight call; `TestSyncupLeftoverLogged` — a `ReplyCodeLeftover`
+  reply is logged as `syncup leftover` at `Info`, with the agent's `details`
+  and the object's ids, and never as `syncup rejected` (RW5); stop
   lets an in-flight unary finish before closing the stream; connection
   reference counting; idle without cluster conf, and the same quiesced
   refusal on an invalid one.
@@ -1906,6 +2000,12 @@ does).
   fan-out after a repair starting the children it owed;
   RW18/RW19 candidate selection (all four `created`
   conditions, the partial-map and `PROVISIONING` negatives);
+  `TestLeftoverCodeIsAccepted` — the five observation functions give a
+  `ReplyCodeLeftover` reply the same verdict as a `code == 0` one and still
+  none for the three rejection codes, and end to end through a cntlr child
+  at a MATCHING revision a leftover reply plans its pushes, completes its
+  td, records its leg row, logs no `syncup rejected`, and re-syncs every
+  round (HL1, HL2, RW19, RW4 step 5);
   `TestSpCloneBitmapWiringCarriesThePair` — the clone `fetch` reads the key
   of the whole pair and `deliver` sets `src_slice_idx` as well as `bm_idx`,
   the applied set is read from `chunk_id_list`, and a `bm_idx_list` set on a
@@ -1922,9 +2022,10 @@ does).
   and a growth at `(0, 1)` to a revision still below `(2, 1)`'s is still
   re-pushed — the mutation direction a `bm_idx`-only memo fails),
   `TestBmObjectsPushIndependently`, `TestBmMigrTargetIsDestinationDn` /
-  `TestBmCloneTargetIsPrimaryCn` (BM4), `TestBmRejectedPushSetsResync` /
-  `TestBmFailedPushSetsResync` / `TestBmMissingChunkSetsResync` (BM6), and
-  `TestBmPushRecordsCarryATraceId`.
+  `TestBmCloneTargetIsPrimaryCn` (BM4), `TestPushFailureIsLoggedOnly` (BM6:
+  each of the three failure paths logs, ends the plan and arms nothing, and
+  a refused push drives no `Syncup*` of its own over three further rounds),
+  and `TestBmPushRecordsCarryATraceId`.
 * **reaction.go** — priority and one-per-pass; every suppression; AR5's two
   triggers (an unhealthy primary past `primary_unhealthy`, and a `disabled`
   primary with no threshold wait — `TestReactionDisabledPrimaryFailsOver`);
@@ -2009,7 +2110,7 @@ failure the worker is specified to handle; error paths of etcd itself
 | S | `smoke` | one worker: full-state fan-out, Check rounds, the provisioned flip → bump → re-fan, the created flip, clean health |
 | A | `revision` | bumps, a moved endpoint without a delete, stale/unknown replies, a deleted rev key |
 | B | `health` | `err_epoch` set/cleared with the capacity keys; hang, kill, `PROVISIONING`, the sp-object table |
-| C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, push failure ⇒ resync, primary change |
+| C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, a rejected syncup that blocks the diff, arms nothing, and is re-driven only by the `Check*` reply's own code, primary change |
 | D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression |
 | G | `drain` | the §11.6 sp drain by the real coordinator: D1 once, one D2 batch per slice, D3, every ledger restored; resume after a fleet restart from `SpConf` alone; the `MaxDelGrpPerTxn` batch bound (the data-before-meta pop order itself is a §13 unit test, `TestDrainSpSliceBatchSizeAndOrder`); the §11.7 clone drain in two batches, CLD5's exclusion seen from the CN, resume from the surviving chunk keys |
 | E | `vote` | exact single ownership, join (~¼ moves, the rest stable), `SIGKILL`, `SIGTERM`, `SIGSTOP`/`SIGCONT` with the self-fence, attribution by trace id |
@@ -2303,9 +2404,10 @@ sent it (RW10). Rules:
 * **Revision gate**, per object (`dn`, `cn`, `side sp:leg:side`, `cntlr
   sp:cntlr`): a `Syncup*` with `revision <` the stored one ⇒ `code =
   ReplyCodeStaleRevision`; `≥` ⇒ apply (store the request and revision).
-  `Push*` with a lower revision ⇒ code 1; a `migr_id`/`clone_id` not in the
-  object's last request ⇒ `ReplyCodeUnknownObject`. `SyncupSide`/`CheckSide`
-  for a side pointer absent from the DN's last `SyncupDn` ⇒ code 2, and
+  A `Push*` carries no revision and is gated on none (BM3); a
+  `migr_id`/`clone_id` not in the object's last request ⇒
+  `ReplyCodeUnknownObject`. `SyncupSide`/`CheckSide` for a side pointer
+  absent from the DN's last `SyncupDn` ⇒ code 2, and
   likewise a cntlr absent from the CN's last `SyncupCn` — the real agents'
   ordering rule, which the worker's independent roles must survive (RW5).
 * **`state.json`** in `--dir`: the last applied request and revision per
@@ -2514,11 +2616,12 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    BM3's.
 2. Within `WAIT_SHORT`: dn1 received `PushMigrBitmap bm_idx 0` then `1`,
    the second's `grpc server request` timestamp after the first's `grpc
-   server reply` (one in flight, ascending), `revision` = the current
-   `SpRev`; after a forced re-fan (`bump-rev sp` — nothing else issues a
-   `SyncupSide` after a clean push sequence, BM6 re-syncing only on a
-   failure, and `bm_info` rides only on a `SyncupSide` reply) the reply
-   carries `bm_info.bm_idx_list [0,1]` and the push count has not moved;
+   server reply` (one in flight, ascending), and neither request carries a
+   `revision` field at all (BM3); after a forced re-fan (`bump-rev sp` —
+   nothing else issues a `SyncupSide` after a clean push sequence, a push
+   arms no re-sync of its own (BM6), and `bm_info` rides only on a
+   `SyncupSide` reply) the reply carries `bm_info.bm_idx_list [0,1]` and
+   the push count has not moved;
    `assert_none_for 3` no further pushes. dn0 (the src) received none.
 3. Clearing cn0's behavior and bumping `SpRev` makes the whole clone missing
    at once: cn0 receives one `PushCloneBitmap` per PAIR, and the three
@@ -2534,9 +2637,11 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    second `PushCloneBitmap` at the SAME pair `(0,0)` at cn0 carrying the new
    length (the `mod_revision` memo, BM5), and no push of `(0,1)` or `(1,0)`.
 6. dn1 behavior `side … {reply_code: 1}` and `put-bitmap migr m0 3` ⇒ the
-   push is rejected; within 3 rounds an equal-revision `SyncupSide` is
-   re-issued (`syncup result` with the same revision twice); clear ⇒ the
-   push succeeds.
+   forced code rejects the `SyncupSide` itself, so the BM2 diff never runs
+   and no push is attempted at all; what re-issues the equal-revision
+   `SyncupSide` within 3 rounds (`syncup result` with the same revision
+   twice) is the `CheckSide` reply carrying the same forced code, RW4
+   step 5. Clear ⇒ the next reply is accepted and the push succeeds.
 7. `set-cntlr --sp 1 --id 1 --primary=false`, `--id 2 --primary=true` ⇒
    within `WAIT_SHORT` cn1 receives all three pairs; cn0 none after the
    change.
@@ -2711,9 +2816,10 @@ in with `wctl drain-sp`, this case owns the real coordinator)
    `SyncupDn` from the old owner's `seed8` and then `CheckDn` rounds from
    the new owner's, and every `SyncupDn` it ever received carried revision
    1 — none came from the new owner, because the agent is already at the
-   desired revision, so RW4 step 5 issues none and `synced` advances from
-   the clean Check reply (RW2); after settling, every `CheckDn recv` in the
-   last 3 s carries the new owner's `seed8` only.
+   desired revision, so RW4 step 5's condition is false on the very first
+   round and the new owner needs no handover state to know it (RW2); after
+   settling, every `CheckDn recv` in the last 3 s carries the new owner's
+   `seed8` only.
 5. **`SIGKILL w2`** (no key delete): within 4 + `WAIT_SHORT` s `membership
    observed state=dead` for `w2`'s seed in the others; within
    `WAIT_MEMBERSHIP` `membership committed state=nonmember`; `list-workers`
@@ -2933,11 +3039,19 @@ All three landed with the implementation:
    (`bash integtest/worker_test.sh user@192.168.10.20`). The exceptions are
    `invalid stored conf` — `workerctl` resolves every conf it writes
    (§14.8), so the suite never produces one, and the three gates are
-   covered by the §13 unit tests instead — and three records no case
+   covered by the §13 unit tests instead — and five records no case
    stages: `sp drain failed` and `clone drain failed`, which case G asserts
-   at zero after every drain, and `cluster conf missing`, RW9's idle state,
+   at zero after every drain; `cluster conf missing`, RW9's idle state,
    which every case avoids by writing its `ClusterConf` before any rev key
-   and no case asserts either way (§13's revision tests cover it).
+   and no case asserts either way (§13's revision tests cover it);
+   `syncup leftover`, which no fake produces on its own — the fake agents
+   compute no sweep verdict, and the one lever the suite has over a reply
+   code is `behavior.json`'s `reply_code`, which no case ever sets to
+   `ReplyCodeLeftover` (§13's `TestSyncupLeftoverLogged` covers it); and
+   `bitmap push failed`, which that same lever cannot stage either — a
+   forced code rejects the object's `Syncup*` before the BM2 diff runs, so
+   no push is sent while it is set (§13's `TestPushFailureIsLoggedOnly`
+   covers it).
 7. Every `grpc.NewClient` in `worker/` uses the `grpc.md` §4 chain options;
    every trace id in an agent log produced by the suite has the
    `{seed8}-{16 hex}` shape (RW10).

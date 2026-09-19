@@ -5,9 +5,10 @@
 # over gRPC from this machine by integtest/dnagentctl.
 #
 #   bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
-#       user1@ip1 user2@ip2
+#       [--wipe] user1@ip1 user2@ip2
 #
-# Cases: smoke, sides, migr_full, migr_bitmap, restart (§10-§15). Cleanup runs
+# Cases: smoke, sides, migr_full, migr_bitmap, teardown, restart (§10-§15,
+# and architecture.md §9.8 for `teardown`). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
 # leaves every dm/nvmet object and both agent logs in place and dumps
 # diagnostics (§17).
@@ -79,12 +80,13 @@ MCNVM=("" 2 1)
 JQ=jq
 ONLY=""
 CLEANUP_ONLY=0
+WIPE=0
 CASE="setup"
 TRACE="it-setup"
 STAGE="(startup)"
 SETUP_DONE=0
 
-CASES=(smoke sides migr_full migr_bitmap restart)
+CASES=(smoke sides migr_full migr_bitmap teardown restart)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -293,7 +295,15 @@ migr_src_nqn() { # cluster dn sp migr
 cn_host_nqn() { printf '%s:1:%s:%s' "$NQN_PREFIX" "$(hex16 "$1")" "$(hex16 "$2")"; }
 
 dn_clone_name() { # cluster dn sp migr
-	printf 'dnv-%s-%s-3-%s-%s' \
+	printf 'dnv-%s-%s-d3-%s-%s' \
+		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")"
+}
+
+# dn_side_name is the [D13] side data device (dm kind d4): the one device
+# the `teardown` case pins, and the one whose verified removal is what lets
+# the side's allocation record be freed (DN6).
+dn_side_name() { # cluster dn sp side
+	printf 'dnv-%s-%s-d4-%s-%s' \
 		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")"
 }
 
@@ -377,6 +387,9 @@ vm_helper_source() {
 WORK=/var/tmp/dnv-integtest
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
+# PIN_PREFIX is where pin_dev records its holders' pids: outside $WORK,
+# which cleanup removes wholesale, so a pin always outlives what it pins.
+PIN_PREFIX=/var/tmp/dnv-it-pin
 
 subsys_json() {
 	local json
@@ -485,21 +498,22 @@ host_subsys_present() {
 
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
-# The dm-name pattern covers the side device too, now that it is dm kind 4.
+# The dm-name pattern covers the side device too, now that it is dm kind d4.
 residue() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-$1-" || true
+		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-$1-" || true
 	ls "$NVMET/subsystems" 2>/dev/null | grep -E ":$1:" || true
 }
 
 # export_dms <sp16> <side16> — the per-CN *export stack* one side currently
-# has on this node: the dm-error (kind 0, DnErrorName) and the dm-linear
-# (kind 1, DnLinearName), which are the only two dm kinds that exist per CN.
+# has on this node: the dm-error (kind d0, DnErrorName) and the dm-linear
+# (kind d1, DnLinearName), which are the only two dm kinds that exist per CN.
 # It is the kernel-side half of the §9.4 provisioning gate — nothing is exported
-# before the side is fully zeroed — so it deliberately does NOT match kind 4
+# before the side is fully zeroed — so it deliberately does NOT match kind d4
 # (DnSideName): the side device is exactly what phase (a) is supposed to
-# build, and `residue` would report it. See common/name_fmt.go:11-15 for the
-# kind digits and DnErrorName/DnLinearName for the field order,
+# build, and `residue` would report it. See common/name_fmt.go for the kind
+# constants (every dn kind is the role letter `d` in front of the old digit)
+# and DnErrorName/DnLinearName for the field order,
 # dnv-<cluster16>-<dn16>-<kind>-<sp16>-<side16>-<cn16>.
 #
 # The scope is the side, not the storage pool: cases A and B/C provision the
@@ -508,7 +522,7 @@ residue() {
 export_dms() { # sp16 side16
 	agent_dm_names |
 		awk -F- -v sp="$1" -v side="$2" \
-			'($4 == "0" || $4 == "1") && $5 == sp && $6 == side'
+			'($4 == "d0" || $4 == "d1") && $5 == sp && $6 == side'
 }
 
 # fenced_linears <sp16> — the per-CN dm-linears of one storage pool that are
@@ -517,7 +531,7 @@ export_dms() { # sp16 side16
 # device matches ':.-s' — name, then '.', '-', 's'.
 fenced_linears() {
 	dmsetup info -c --noheadings -o name,attr 2>/dev/null |
-		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-1-$1-.*:.-s" || true
+		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-d1-$1-.*:.-s" || true
 }
 
 # clone_table <clone dm name> — the live dm-clone table, so the mandatory feature pair
@@ -537,7 +551,7 @@ clone_discards() {
 any_clone_discards() {
 	jq -r 'select(.msg == "os command" and .cmd == "blkdiscard")
 	       | (.args | join(" "))' "$WORK/agent.log" 2>/dev/null |
-		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-3-' || true
+		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-d3-' || true
 }
 
 # mutations [logfile] — every mutating operation in an agent log (§15 step 5).
@@ -569,11 +583,120 @@ mutations() {
 # source path can be disconnected by device instead of by NQN (§12 step 17).
 ctrl_of() { path_field "$1" "$2" Name; }
 
+# --- device pins (architecture.md §9.8) -------------------------------------
+#
+# A pin is an open file descriptor on a dm device, held by a process OUTSIDE
+# the agent. It is the one way this suite can make a `dmsetup remove` fail for
+# a reason the agent cannot argue with — dm refuses to remove a device whose
+# open count is non-zero — so it is how the `teardown` case proves that a
+# removal the sweep could not finish is REPORTED (the leftover reply code,
+# naming the device) instead of being forgotten, and that re-sending the same
+# request finishes the job once the holder is gone.
+
+# dm_open_cnt <dm name> — the device's open count, or -1 when `dmsetup info`
+# did not answer at all, which for this helper's purposes means the device is
+# gone. Both answers are needed: "pinned" is open > 0, while "released" is
+# satisfied just as well by a device that has since been removed.
+dm_open_cnt() {
+	local out
+	out=$(dmsetup info -c --noheadings -o open "$1" 2>/dev/null) || {
+		printf '%s\n' -1
+		return 0
+	}
+	out=${out//[[:space:]]/}
+	[ -n "$out" ] || out=-1
+	printf '%s\n' "$out"
+}
+
+# pin_dev <dm name> — hold one device open until unpin_dev or cleanup kills
+# the holder. `setsid nohup` detaches it from the ssh session that started it,
+# and the opener execs `sleep`, so what holds the device is a bare fd on a
+# process with no other business — nothing the agent can ask to let go.
+#
+# BOTH stdout and stderr are redirected, and that is not tidiness: the driver
+# reads a helper's output through a `$( )`, which waits until the last writer
+# of the inherited descriptor closes it, so a background child that kept
+# either one would hang the caller for the sleep's whole hour.
+#
+# The holder records its OWN pid rather than the `$!` of the pipeline that
+# started it: `setsid` forks only when its caller is already a process group
+# leader, so `$!` is the holder in a non-interactive shell and the wrapper
+# that has already exited in an interactive one — and an unpin that killed
+# whatever pid had been recycled into that number would be far worse than no
+# pin at all.
+#
+# Both the pidfile and the open count are polled before returning, so a caller
+# that gets a 0 back has a device that is provably held by a process this
+# helper can provably find again. A stage that asserted a leftover against a
+# device nothing actually held would fail with a message pointing at the
+# agent.
+pin_dev() {
+	local name=$1 file pid i
+	file=$PIN_PREFIX.$name.pid
+	rm -f "$file"
+	setsid nohup bash -c \
+		"exec 3</dev/mapper/$name; echo \$\$ >$file; exec sleep 3600" \
+		</dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < 40; i++)); do
+		pid=$(cat "$file" 2>/dev/null)
+		if [ -n "$pid" ] && [ "$(dm_open_cnt "$name")" -gt 0 ]; then
+			echo "pinned $name (pid $pid)"
+			return 0
+		fi
+		sleep 0.25
+	done
+	echo "pin of $name never took effect" >&2
+	return 1
+}
+
+# unpin_dev <dm name> — kill the holder and wait for the fd to be closed. The
+# close happens when the kernel reaps the process, so returning any earlier
+# would hand the caller a device that is still busy for a moment.
+unpin_dev() {
+	local name=$1 pid i
+	pid=$(cat "$PIN_PREFIX.$name.pid" 2>/dev/null)
+	rm -f "$PIN_PREFIX.$name.pid"
+	[ -n "$pid" ] && kill "$pid" >/dev/null 2>&1
+	for ((i = 0; i < 40; i++)); do
+		if [ "$(dm_open_cnt "$name")" -le 0 ]; then
+			echo "unpinned $name"
+			return 0
+		fi
+		sleep 0.25
+	done
+	echo "$name is still open after its pin was killed" >&2
+	return 1
+}
+
+# kill_pins drops every pin on this node, whoever left it and whatever it
+# names. cleanup runs it unconditionally, because a stage that failed between
+# pin_dev and unpin_dev would otherwise leave an fd on a dm device that the
+# next run cannot remove at all: `dmsetup remove --force` only swaps in an
+# error table, the device itself stays until the last close.
+kill_pins() {
+	local file pid i
+	for file in "$PIN_PREFIX".*.pid; do
+		[ -e "$file" ] || continue
+		pid=$(cat "$file" 2>/dev/null)
+		rm -f "$file"
+		[ -n "$pid" ] || continue
+		kill -9 "$pid" >/dev/null 2>&1
+		# The fd closes as the process dies, not as the signal is sent, and
+		# everything after this in cleanup removes dm devices: a holder that
+		# has not gone yet still holds its device open.
+		for ((i = 0; i < 20; i++)); do
+			kill -0 "$pid" >/dev/null 2>&1 || break
+			sleep 0.25
+		done
+	done
+	return 0
+}
+
 # --- teardown ---------------------------------------------------------------
 
 agent_dm_names() {
 	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E '^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]-' || true
+		grep -E '^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-' || true
 }
 
 dm_kind_names() { agent_dm_names | awk -F- -v k="$1" '$4 == k'; }
@@ -667,6 +790,12 @@ cleanup() {
 	done
 	pkill -9 -x dnv-agent >/dev/null 2>&1
 
+	# Every device pin, whoever left it (see kill_pins). It comes before
+	# everything below because an fd on a dm device outlives the agent that
+	# was just killed, and nothing here can remove a device while it is
+	# open — not even `dmsetup remove --force`.
+	kill_pins
+
 	# Nothing may stay suspended from here on (see resume_suspended).
 	resume_suspended
 
@@ -679,14 +808,14 @@ cleanup() {
 	# the clones sat on, then the migr-src linears and dm-errors, and only
 	# then the side devices everything above was stacked on. A final sweep
 	# retries anything that was busy.
-	dm_remove_kind 1
-	dm_remove_kind 3
+	dm_remove_kind d1
+	dm_remove_kind d3
 	disconnect_kind 3
 	drop_subsystems 3
-	dm_remove_kind 5
-	dm_remove_kind 2
-	dm_remove_kind 0
-	dm_remove_kind 4
+	dm_remove_kind d5
+	dm_remove_kind d2
+	dm_remove_kind d0
+	dm_remove_kind d4
 	for name in $(agent_dm_names); do
 		dm_force_remove "$name"
 	done
@@ -721,6 +850,163 @@ cleanup() {
 	return 0
 }
 
+# lab_wipe — the ONE-TIME lab wipe of the teardown-by-sweep plan §3.2. It is
+# NOT part of a run: only the driver's --wipe reaches it.
+#
+# Why it exists at all: every teardown verb above removes dm devices BY KIND,
+# and the kind literals they pass are the new, role-lettered ones (c0…cb,
+# d0…d5). Residue an older binary left on a shared lab VM carries the old
+# single-digit spelling (0…b), so those verbs walk straight past it and it
+# stays there forever, pinning loop devices and nvmet objects the next run
+# needs. This one reads no kind at all — everything named `dnv*` goes, both
+# spellings and the pre-arena `dnv--clone--vg-*` LVM debris with it.
+#
+# That is also why it is not wired into cleanup: on a shared VM it would
+# destroy a CONCURRENT run's objects, and `nvme disconnect-all` takes every
+# fabrics controller on the node, dnv's or not. Run it once, alone.
+#
+# The order is §16's, generalized away from the kind list: arrays first (an
+# array holds its member wrappers open and is the one holder `dmsetup remove
+# --force` cannot argue with), then the controllers, then the nvmet objects
+# that pin dm devices from above, then the dm devices themselves — enumerated
+# out of `dmsetup ls` once per round instead of from a kind order, because
+# "reverse dependency order" is exactly "whatever is still there after the
+# round that freed it".
+lab_wipe() {
+	local d dev nm mdname hit i cnt prev names name
+
+	pkill -x dnv-agent >/dev/null 2>&1
+	for ((i = 0; i < 20; i++)); do
+		pgrep -x dnv-agent >/dev/null 2>&1 || break
+		sleep 0.25
+	done
+	pkill -9 -x dnv-agent >/dev/null 2>&1
+
+	# Nothing may stay suspended from here on (see resume_suspended): reading
+	# a suspended device goes to D state, where `timeout` cannot reach it.
+	resume_suspended
+
+	# THREE PASSES, because one is provably not enough. Stopping the arrays
+	# frees their member wrappers, but the members still carry md
+	# superblocks, and a dm device that reappears — or that udev re-examines
+	# while this is running — is re-assembled into a fresh array that pins
+	# the wrapper again (the auto-assembly this suite masks during a run is
+	# not masked before one). Measured on a cn guest 2026-09-18: one pass
+	# reported `dm left:` EMPTY and left 8 kind-9 wrappers held open by 4
+	# re-assembled arrays; a second, identical invocation removed all of
+	# them. So the sequence runs until the node is clean, not once.
+	local pass
+	for pass in 1 2 3; do
+		if [ "$pass" -gt 1 ] && [ -z "$(dmsetup ls 2>/dev/null |
+			awk '$1 ~ /^dnv/ {print $1}')" ]; then
+			break
+		fi
+
+		# Every md array on this node that is ours, by two independent routes
+		# because each is blind to a case the other sees. THE MEMBER ROUTE reads
+		# the member's dm name straight out of sysfs (plan Appendix C), needs no
+		# superblock read, and is the only one that works for the `inactive`
+		# one-member assemblies udev leaves on a DN — udev has no MD_NAME for
+		# those. THE NAME ROUTE is the only one left once the members themselves
+		# are already gone. Neither can name an array that is not a dnv one, so
+		# this never stops the guest's own.
+		for d in /sys/block/md*; do
+			[ -d "$d/md" ] || continue
+			hit=0
+			for dev in "$d"/md/dev-*; do
+				[ -e "$dev/block/dm/name" ] || continue
+				nm=$(cat "$dev/block/dm/name" 2>/dev/null)
+				case "$nm" in dnv*) hit=1 ;; esac
+			done
+			if [ "$hit" -eq 0 ]; then
+				mdname=$(timeout 10 udevadm info --query=property \
+					--name="/dev/${d##*/}" 2>/dev/null |
+					sed -n 's/^MD_NAME=//p')
+				[ -n "$mdname" ] || mdname=$(timeout 10 mdadm --detail \
+					--no-devices --export "/dev/${d##*/}" 2>/dev/null |
+					sed -n 's/^MD_NAME=//p')
+				case "$mdname" in dnv-* | *:dnv-*) hit=1 ;; esac
+			fi
+			if [ "$hit" -eq 1 ]; then
+				timeout 15 mdadm --stop "/dev/${d##*/}" >/dev/null 2>&1
+			fi
+		done
+
+		# Every fabrics controller this node holds, whoever opened it: a live
+		# controller keeps the subsystem below it alive, and that subsystem's
+		# namespace keeps its backing dm device open.
+		timeout 60 nvme disconnect-all >/dev/null 2>&1
+
+		# nvmet, port links first — a subsystem still linked to a port cannot be
+		# removed, and a namespace must be disabled before its backing dm device
+		# can go. drop_subsystems takes ONE nqn kind digit; the wipe wants the
+		# plan's whole `nqn.2024-01.io.dnv*` glob, residue of a kind this build
+		# no longer mints included, so the sweep is written out here.
+		if [ -d "$NVMET" ]; then
+			local subsys ns host link
+			for link in "$NVMET"/ports/*/subsystems/"$NQN_PREFIX"*; do
+				[ -e "$link" ] && rm -f "$link"
+			done
+			for subsys in "$NVMET"/subsystems/"$NQN_PREFIX"*; do
+				[ -d "$subsys" ] || continue
+				for ns in "$subsys"/namespaces/*; do
+					[ -d "$ns" ] || continue
+					echo 0 >"$ns/enable" 2>/dev/null
+					rmdir "$ns" 2>/dev/null
+				done
+				for host in "$subsys"/allowed_hosts/*; do
+					[ -e "$host" ] && rm -f "$host"
+				done
+				rmdir "$subsys" 2>/dev/null
+			done
+		fi
+
+		# The dm devices, bottom-up by attrition rather than by a kind order: a
+		# device that is still open fails and is listed again next round, by
+		# which time whatever held it has gone. A round that frees nothing means
+		# a holder outside this set, and --force (an error table swapped in) is
+		# the only answer to that; the round cap keeps a wedge from spinning here
+		# forever.
+		prev=-1
+		for ((i = 0; i < 12; i++)); do
+			names=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}')
+			[ -n "$names" ] || break
+			cnt=$(printf '%s\n' "$names" | wc -l)
+			if [ "$cnt" -eq "$prev" ]; then
+				for name in $names; do dm_force_remove "$name"; done
+			else
+				for name in $names; do
+					timeout 10 dmsetup remove "$name" >/dev/null 2>&1
+				done
+			fi
+			prev=$cnt
+		done
+
+		resume_suspended
+	done
+
+	# The residue is the report AND the exit status. It used to be the report
+	# alone, on the reasoning that this verb is best-effort like every other
+	# one here — but the driver runs both VMs concurrently and discards their
+	# status, so a wipe that left one VM full of debris printed the other
+	# VM's clean report and the run said PASS. A cleanup that cannot fail is
+	# a cleanup nobody can trust, which is the same rule the sweep this suite
+	# tests lives by: what is left is reported, and reporting it is not
+	# success. Everything this deliberately does not touch — $WORK, the loop
+	# devices, the udev rule, the nvmet port — belongs to the ordinary
+	# cleanup that runs after it and is not counted here.
+	local dm_left nvmet_left md_left
+	dm_left=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
+	nvmet_left=$(ls "$NVMET/subsystems" 2>/dev/null | grep -F dnv | tr '\n' ' ')
+	md_left=$(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null | tr '\n' ' ')
+	echo wiped
+	printf 'dm left: %s\n' "$dm_left"
+	printf 'nvmet left: %s\n' "$nvmet_left"
+	printf 'md on this node (ours or not): %s\n' "$md_left"
+	[ -z "$dm_left$nvmet_left" ] || return 1
+	return 0
+}
+
 diag() {
 	echo "--- agent.log (last 120 lines) ---"
 	tail -n 120 "$WORK/agent.log" 2>/dev/null
@@ -749,6 +1035,38 @@ ship_helper() {
 		scp -q "${SSH_OPTS[@]}" "$tmp" "${VM[$idx]}:$HELPER"
 	done
 	rm -f "$tmp"
+}
+
+# wipe_all runs the one-time lab wipe (plan §3.2) on both VMs, concurrently
+# for cleanup_all's reason: a subsystem on one VM backs a connection on the
+# other, so the shorter the window the better. `--wipe` is its only caller and
+# it always runs the ordinary start-of-run cleanup afterwards, which takes
+# what the wipe deliberately leaves — $WORK, the loop devices and the nvmet
+# port.
+#
+# EACH VM'S STATUS IS READ, and that is the whole point of the rewrite. This
+# used to be `helper_ok … &` with `wait "$pid" || true`, which discards both:
+# on 2026-09-18 a wipe left one guest holding 8 kind-9 wrappers and 4 md
+# arrays, printed only the other VM's clean residue report — the two VMs'
+# output interleaves, so a missing report does not stand out — and exited
+# PASS. The next run then died in a residue stage on debris the wipe had
+# claimed to remove. A verb whose failure cannot be seen is worse than no
+# verb, which is the same rule the sweep this suite tests is built on.
+wipe_all() {
+	local idx rc pids=() bad=()
+	for idx in 1 2; do
+		helper "$idx" lab_wipe &
+		pids+=($!)
+	done
+	for idx in 1 2; do
+		rc=0
+		wait "${pids[$((idx - 1))]}" || rc=$?
+		[ "$rc" -eq 0 ] || bad+=("vm$idx (${IP[$idx]}) rc=$rc")
+	done
+	[ ${#bad[@]} -eq 0 ] ||
+		die "the lab wipe left objects behind on ${bad[*]} — the residue is" \
+			"printed above; re-run --wipe, and if the same names survive that" \
+			"something outside dnv is holding them"
 }
 
 # cleanup_all runs the two VMs concurrently: dismantling one node's nvmet
@@ -843,7 +1161,7 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agent hardcodes the configfs path and neither mounts nor
 		# modprobes; the harness does both here and nothing else.
@@ -943,6 +1261,60 @@ assert_no_residue() { # sp
 	for idx in 1 2; do
 		got=$(helper "$idx" "residue $(hex16 "$1")")
 		[ -z "$got" ] || die "vm$idx still holds objects of sp $1: $got"
+	done
+}
+
+# dn_drop_until_clean re-issues one DN's drop — the syncup-dn whose side list
+# is empty, at the revision the caller has already minted — every 2 s until
+# the agent replies 0, and gives up after <secs>.
+#
+# It exists because a teardown that has to remove resources hanging off a dead
+# remote is legitimately not finished in one pass (architecture.md §9.8, DN6).
+# The sweep removes what the desired state no longer wants, verifies every
+# removal with a probe that cannot block, and replies with the leftover code
+# while anything is still there. The first `dmsetup remove` of a dm-clone
+# whose source has just died is killed at the 3 s soft timeout; its kernel
+# operation completes when the queued hydration IO fails at fast_io_fail_tmo
+# (5 s), and the pass after that finds the device gone.
+#
+# Re-driving is the worker's own rule, and the loop is the suite playing that
+# part: in production the retry comes from the CHECK round — the agent
+# recomputes the verdict on every CheckDn, and a round whose code is non-zero
+# issues another SyncupDn (RW4 step 5) — never from the Syncup reply itself.
+# No such round is running behind this suite, so it re-sends the request
+# itself.
+#
+# Only code 4 is tolerated in between. Every other non-zero code is a refusal
+# (stale revision, invalid conf, unknown object) that repeating cannot fix, so
+# it dies immediately rather than after the whole budget. The first reply is
+# logged with its details: whether the very first pass was already clean or
+# reported the leftover the design predicts is the one thing about this loop
+# worth reading afterwards, and neither outcome is a failure.
+dn_drop_until_clean() { # dnidx secs
+	local idx=$1 secs=$2 out code details deadline first=1
+	deadline=$((SECONDS + secs))
+	while :; do
+		# No --expect-code: 4 is expected here for a while, so the reply is
+		# read rather than asserted. `|| true` keeps ctl's own exit status —
+		# which enforces --expect-code 0 by default — from ending the run.
+		out=$(ctl "$idx" syncup-dn --revision "${REV[$idx]}" \
+			--extent-size "$EXTENT_SIZE" || true)
+		[ -n "$out" ] || die "dn$idx drop: the RPC produced no reply"
+		code=$(jq_of "$out" '.agent_reply.code // 0')
+		details=$(jq_of "$out" '.agent_reply.details // ""')
+		if [ "$first" -eq 1 ]; then
+			log "dn$idx drop: first reply code $code, details: ${details:-(none)}"
+			first=0
+		fi
+		if [ "$code" = 0 ]; then
+			assert_dn_info_ok "$out" "dn$idx drop"
+			return 0
+		fi
+		[ "$code" = 4 ] ||
+			die "dn$idx drop: agent_reply.code $code ($details)"
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "dn$idx drop: still not clean after ${secs}s: $details"
+		sleep 2
 	done
 }
 
@@ -1881,8 +2253,8 @@ case_migr_full() {
 		assert_eq "$got" "${PAT_SHA[$m]}" "migr $m full-copy sha256"
 		# Discard-based skipping must not happen without bitmaps. The §9.4
 		# provisioning `blkdiscard --zeroout` that replaced the old side-create
-		# trim targets the side device (dnv-*-4-*), never a dm-clone
-		# (dnv-*-3-*), so it does not match this filter either.
+		# trim targets the side device (dnv-*-d4-*), never a dm-clone
+		# (dnv-*-d3-*), so it does not match this filter either.
 		local discards
 		discards=$(helper "${MDSTDN[$m]}" any_clone_discards)
 		[ -z "$discards" ] ||
@@ -1916,11 +2288,12 @@ case_migr_bitmap() {
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		local revs=("" "$1" "$2") m out
 		for m in 1 2; do
-			# A push gates on the side's revision and never advances it.
-			ctl "${MDSTDN[$m]}" push-migr-bm --revision "${revs[$m]}" \
+			# A push carries no revision: it is position-addressed data the
+			# agent takes whenever it knows the migration ([D13]).
+			ctl "${MDSTDN[$m]}" push-migr-bm \
 				--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 				--migr "${MID[$m]}" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
-			ctl "${MDSTDN[$m]}" push-migr-bm --revision "${revs[$m]}" \
+			ctl "${MDSTDN[$m]}" push-migr-bm \
 				--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}" \
 				--migr "${MID[$m]}" --bm-idx 1 --bitmap-hex "$C_BM1" >/dev/null
 			# Re-send the gated request verbatim (equal revision, idempotent)
@@ -1963,6 +2336,267 @@ case_migr_bitmap() {
 	}
 
 	run_migration_cases
+}
+
+# ---------------------------------------------------------------------------
+# Case E — teardown (architecture.md §9.8, DN6)
+# ---------------------------------------------------------------------------
+#
+# Both stages pin the same claim: removal is derived from what the node
+# ACTUALLY holds minus what the desired state wants, so a teardown that cannot
+# finish REPORTS what is left — an accepted reply carrying the leftover code 4
+# and naming the objects — and the next pass of the same revision finishes it.
+# The defect this replaced forgot the object together with the plan that named
+# it, and nothing ever looked again.
+#
+# `dead_source` is the DN's own version of that defect. A migration
+# destination hydrates through an nvme connection to its source; the source
+# export is then yanked with the destination never told, and the destination
+# is torn down immediately. The order the sweep has to keep is the whole
+# point: the dm-clone comes off BEFORE the connection it hydrates through
+# (DN6) — pulling the source out from under a live clone strands its IO — and
+# it comes off over a source that is already dead, so its removal blocks on
+# the queued hydration IO until fast_io_fail_tmo fails it, which is longer
+# than the soft timeout that kills the command. That is why the drop is a
+# loop and not a single call. What may not happen in that window is any
+# forgetting: the side's allocation record and the migration's clone-metadata
+# record are freed only after their devices have been PROBED gone, so the sp's
+# extents cannot be handed to the next side while a device still maps them.
+#
+# `pinned_side` pins the device-level half of the same rule with no remote
+# involved at all: an fd held outside the agent makes exactly one removal fail
+# for a reason the agent cannot argue with, and the stage reads the reply. The
+# record-level half — a record is never freed while its device still exists —
+# is pinned by the unit test TestSideRecordFreedOnlyAfterDeviceGone, which can
+# script a killed `dmsetup remove`; this stage cannot and does not try.
+#
+# pinned_side runs second for one reason: it is the only stage here that can
+# leave a device pinned when it fails, so nothing after it in this case has to
+# work around one. A pin a failed run leaves behind is killed unconditionally
+# by the next run's start-of-run cleanup, which is why cleanup kills pins at
+# all.
+
+case_teardown() {
+	CASE=teardown
+	# A migration case's globals: the shared migr_* helpers read $SP, $MID and
+	# $BM_CNT, and migr_declare_dst files its reply under $REPLY_DIR. The ids
+	# are this case's own, so a failure never leaves debris another case's
+	# residue assertions would report.
+	SP=0xf1
+	MID=("" 0x61 0x62)
+	BM_CNT=0
+	REPLY_DIR=$(mktemp -d)
+	DIAG_SIDES=()
+
+	teardown_dead_source
+	teardown_pinned_side
+
+	rm -rf "$REPLY_DIR"
+}
+
+# teardown_dead_source builds one migration exactly as case B does, kills the
+# source export behind the destination's back, and tears the destination down
+# inside the window where its clone's hydration IO is still queued at a
+# controller that will never answer.
+teardown_dead_source() {
+	local m=1
+	local src=${MSRCDN[$m]} dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
+	local out provrev rev srcnqn got raw pair hydrated total idx
+
+	stage dsptr "the two DNs learn this migration's side pointers"
+	# One migration, not case B/C's opposite-direction pair: this case is
+	# about what one destination's teardown does, and a second migration
+	# converging on the same nodes would only make the failure harder to read.
+	bump_dn_rev "$src"
+	out=$(ctl "$src" syncup-dn --revision "${REV[$src]}" \
+		--extent-size "$EXTENT_SIZE" \
+		--side "$SP:${MLEG[$m]}:${MSRCSIDE[$m]}")
+	assert_dn_info_ok "$out" "teardown dn$src pointers"
+	bump_dn_rev "$dst"
+	out=$(ctl "$dst" syncup-dn --revision "${REV[$dst]}" \
+		--extent-size "$EXTENT_SIZE" \
+		--side "$SP:${MLEG[$m]}:${MDSTSIDE[$m]}")
+	assert_dn_info_ok "$out" "teardown dn$dst pointers"
+
+	stage dssrc "the source side provisions two-phase and exports"
+	diag_add_side "$src" "$SP" "${MLEG[$m]}" "${MSRCSIDE[$m]}"
+	bump_rev "$src"
+	provrev=${REV[$src]}
+	bump_rev "$src"
+	rev=${REV[$src]}
+	migr_src_side "$m" "$provrev" "$rev"
+
+	stage dsdata "128 MiB written through the CN device, as case B does"
+	migr_prep_data "$m"
+
+	stage dsprov "the destination provisions first (§9.4)"
+	diag_add_side "$dst" "$SP" "${MLEG[$m]}" "${MDSTSIDE[$m]}"
+	bump_rev "$dst"
+	migr_provision_dst "$m" "${REV[$dst]}"
+
+	stage dsgate "the destination is declared, gated at sp_level no_migration"
+	bump_rev "$dst"
+	migr_declare_dst "$m" "${REV[$dst]}" no_migration
+
+	stage dsconn "the CN adds the destination path (still inaccessible)"
+	migr_connect_dst "$m"
+
+	stage dscut "source cutover: the source hands the leg over"
+	# §12's dst_provisioned=false gate is case B's proof, not this one's: the
+	# only thing needed here is the state the cutover leaves behind.
+	bump_rev "$src"
+	migr_cutover_src "$m" "${REV[$src]}"
+
+	stage dshydr "the destination is enabled and hydrates from the source"
+	bump_rev "$dst"
+	migr_declare_dst "$m" "${REV[$dst]}" readwrite
+	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" optimized 30
+	# Observed, never asserted, exactly like §12's read-through window: 128
+	# regions of 1 MiB over a local TCP link can be through before this
+	# samples. Hydration still in flight is what makes the clone's removal
+	# below block on the dead source; hydration already finished still
+	# exercises the removal order and both record releases. Both are a pass,
+	# and the log says which of the two this run got.
+	out=$(ctl "$dst" get-side-info \
+		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
+	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
+	pair=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { split($(i + 4), a, "/"); print a[1], a[2]; exit }}')
+	hydrated=${pair%% *}
+	total=${pair##* }
+	if [ -n "$hydrated" ] && [ -n "$total" ] && [ "$hydrated" -lt "$total" ]; then
+		log "teardown: hydration window HIT ($hydrated/$total hydrated)"
+	else
+		log "teardown: WARNING hydration window missed ($raw)"
+	fi
+
+	stage dskill "the source export is yanked; the destination is never told"
+	# drop_subsystems, not a syncup-side with migr_src_conf dropped: that
+	# would be an ORDERLY retirement — the source would take its own migr-src
+	# linear with it and report its own leftovers, and a code 4 on that reply
+	# would fail this stage for something that is not the destination's
+	# business. What the destination has to survive is an export that is
+	# simply gone, which is what this verb leaves behind, and it is
+	# best-effort, so nothing here can fail for the wrong reason.
+	helper "$src" "drop_subsystems 3"
+	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
+	assert_eq "$(helper "$src" "subsys_present '$srcnqn'")" no \
+		"teardown: the source export survived drop_subsystems"
+
+	stage dsdrop "and IMMEDIATELY the destination side leaves the pointer list"
+	# Nothing sleeps between the yank and this drop: the dm-clone has to be
+	# removed inside the window where its hydration IO to the dead source is
+	# still queued, which is the window the sweep is written for (§9.8's
+	# failfast bound). The loop is what lets the pass that is killed at the
+	# soft timeout be followed by one that finds the device gone.
+	bump_dn_rev "$dst"
+	dn_drop_until_clean "$dst" 60
+
+	stage dsgone "nothing of the migration is left on the destination"
+	for idx in 1 2; do
+		got=$(helper "$idx" "dm_kind_names d3")
+		[ -z "$got" ] || die "vm$idx still holds a dm-clone: $got"
+		got=$(helper "$idx" "dm_kind_names d5")
+		[ -z "$got" ] ||
+			die "vm$idx still holds a clone-metadata wrapper: $got"
+		assert_eq "$(helper "$idx" "subsys_present '$srcnqn'")" no \
+			"vm$idx still exports the migration source"
+		# The connection the clone hydrated through. "Gone" is the absence of
+		# a CONTROLLER, which is what the agent's own probe asks: the kernel
+		# can keep a subsystem directory after its last controller has died,
+		# and an empty subsystem holds nothing open.
+		assert_eq "$(helper "$idx" "ctrl_of '$srcnqn' '${IP[$src]}'")" none \
+			"vm$idx still holds a controller to the dead source"
+	done
+	got=$(helper "$dst" "residue $(hex16 "$SP")")
+	[ -z "$got" ] || die "dn$dst still holds objects of sp $SP: $got"
+	# Both records are gone, and this is the proof: an allocation or
+	# clone-metadata record whose owner left the authoritative lists is a
+	# leftover in its own right, so the read-only verdict a Get*Info takes
+	# would answer 4 while either one survived. ctl enforces the 0 itself.
+	ctl "$dst" get-dn-info >/dev/null
+
+	stage dssrcdrop "the source side goes too, taking the orphaned d2 with it"
+	# The source was never told its migration ended, so its migr-src linear is
+	# still wanted by its own desired state and could not have been in the
+	# sweep above. It goes when the side does — the same sweep, on the other
+	# node — which is why the d2 assertion lives here and not in dsgone.
+	cn_disconnect "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}"
+	bump_dn_rev "$src"
+	dn_drop_until_clean "$src" 60
+	for idx in 1 2; do
+		got=$(helper "$idx" "dm_kind_names d2")
+		[ -z "$got" ] || die "vm$idx still holds a migr-src linear: $got"
+	done
+	assert_no_residue "$SP"
+	ctl "$src" get-dn-info >/dev/null
+	sshv_ok "$vm" "rm -f $WORK/pattern-$m.bin"
+	# Both sides are gone, so the §17 dump must not ask for them again.
+	DIAG_SIDES=()
+}
+
+# teardown_pinned_side holds one side device open from outside the agent and
+# drops the side. The removal cannot succeed while the fd is there, and the
+# stage asserts what the agent does about that: it reports the device, it
+# keeps reporting it on the read-only path, and it finishes the job on the
+# next pass of the same revision once the fd is gone.
+teardown_pinned_side() {
+	local dn=2 sp=0xf2 leg=0x1 side=0x11 cn=0x21
+	local out provrev siderev name details
+
+	stage pinptr "dn$dn learns one plain side pointer"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
+	assert_dn_info_ok "$out" "teardown pinned pointers"
+
+	stage pinside "the side provisions two-phase and exports"
+	diag_add_side "$dn" "$sp" "$leg" "$side"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	siderev=${REV[$dn]}
+	sync_side_2phase "$dn" "$provrev" "$siderev" "$sp" "$leg" "$side" \
+		--ext-cnt 1 --cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	out=$SYNC_SIDE_REPLY
+	assert_ok "$out" ".side_info.side_dev_info.status" "teardown pinned side_dev"
+	# No CN connects: a removal that fails on a held fd needs no remote at
+	# all, and leaving the export unconnected keeps the only thing in this
+	# stage that can block the sweep the pin itself.
+
+	stage pinhold "an fd outside the agent holds the side device open"
+	name=$(dn_side_name "$CLUSTER" "${DNID[$dn]}" "$sp" "$side")
+	helper "$dn" "pin_dev '$name'"
+
+	stage pindrop "the drop cannot remove it: code 4, and the reply names it"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --expect-code 4)
+	# A leftover is an ACCEPTED request: the desired state was stored and the
+	# DN's own base state converged, so the node rows are OK all the same.
+	assert_dn_info_ok "$out" "teardown pinned drop"
+	details=$(jq_of "$out" '.agent_reply.details // ""')
+	case "$details" in
+	*"$name"*) ;;
+	*) die "the leftover details do not name $name: '$details'" ;;
+	esac
+	# Everything above the side device came off in the same pass — the export,
+	# the per-CN dm-linear and the per-CN dm-error — so what is left is
+	# EXACTLY the pinned device. A sweep that stopped at its first failure, or
+	# one that never reached the layers above, would leave more than this.
+	assert_eq "$(helper "$dn" "residue $(hex16 "$sp")")" "$name" \
+		"the residue while the side device is pinned"
+	# The verdict is recomputed, never stored: the read-only path enumerates
+	# the node again and has to reach the same answer.
+	ctl "$dn" get-dn-info --expect-code 4 >/dev/null
+
+	stage pinfree "the fd goes; the same revision, re-sent, finishes the job"
+	helper "$dn" "unpin_dev '$name'"
+	dn_drop_until_clean "$dn" 30
+	assert_no_residue "$sp"
+	# And the record went with the device: an orphan side record would make
+	# this verdict 4 exactly as the pinned device did.
+	ctl "$dn" get-dn-info >/dev/null
+	DIAG_SIDES=()
 }
 
 # ---------------------------------------------------------------------------
@@ -2021,7 +2655,7 @@ case_restart() {
 	write_range "$cnvm" "$WORK/pattern-restart.bin" "$dev" 4
 
 	stage bitmap "one chunk pushed to the gated destination"
-	ctl 2 push-migr-bm --revision "${REV[2]}" \
+	ctl 2 push-migr-bm \
 		--sp "$sp" --leg "$leg" --side "$dstside" \
 		--migr "$migr" --bm-idx 0 --bitmap-hex "$C_BM0" >/dev/null
 
@@ -2158,9 +2792,14 @@ case_restart() {
 usage() {
 	cat >&2 <<EOF
 usage: bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \\
-           <user@vm1> <user@vm2>
+           [--wipe] <user@vm1> <user@vm2>
 
 cases: ${CASES[*]}
+
+--wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
+including residue an older binary left under the pre-role-letter dm kind
+spelling, then runs the ordinary cleanup. It runs no case. Never run it
+while another suite is using these VMs.
 EOF
 	exit 2
 }
@@ -2179,6 +2818,10 @@ parse_args() {
 			;;
 		--cleanup-only)
 			CLEANUP_ONLY=1
+			shift
+			;;
+		--wipe)
+			WIPE=1
 			shift
 			;;
 		-h | --help) usage ;;
@@ -2207,6 +2850,18 @@ main() {
 	parse_args "$@"
 	trap on_exit EXIT
 	log "driver: $(hostname), vm1=${VM[1]} (${IP[1]}), vm2=${VM[2]} (${IP[2]})"
+
+	if [ "$WIPE" -eq 1 ]; then
+		ship_helper
+		STAGE="lab wipe"
+		log ""
+		log "=== one-time lab wipe: EVERY dnv object on both VMs"
+		wipe_all
+		log ""
+		log "=== post-wipe cleanup"
+		cleanup_all
+		return 0
+	fi
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then
 		ship_helper

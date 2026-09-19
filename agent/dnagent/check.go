@@ -63,8 +63,13 @@ func (s *DnAgentServer) checkDnRound(
 		}, nil
 	}
 	info := s.probeDn(ctx, st)
+	// The verdict: the same enumeration and the same comparison the sweep
+	// makes, with nothing touched. It is recomputed every round and stored
+	// nowhere, so a leftover that has since gone stops being reported on its
+	// own, and one that is still there keeps driving the worker's re-sync
+	// until the next SyncupDn sweeps it away.
 	reply := &pb.CheckDnReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.dnVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
@@ -125,7 +130,9 @@ func (s *DnAgentServer) checkSideRound(
 	}
 	info := s.probeSide(ctx, st)
 	reply := &pb.CheckSideReply{
-		AgentReply: agent.OkReply(),
+		// The side-level verdict. A dn's own Check reports node-level
+		// leftovers only; each object drives its own Syncup*.
+		AgentReply: s.sideVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {

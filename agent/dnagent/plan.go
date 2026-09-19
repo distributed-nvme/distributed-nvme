@@ -129,9 +129,9 @@ func newSidePlan(
 	if p.migrSrcRaw != nil && !p.migrSrcRaw.GetDstProvisioned() {
 		// Nil-ing the field is the whole implementation of the equivalence:
 		// linearBacking, preFenceBacking, anaGrpId, ensureCnDm's fence,
-		// convergeSide's ANA handover and teardownForbidden's applied-role diff
-		// all key off migrSrc, so the side keeps serving exactly as it did
-		// before the migration was created.
+		// convergeSide's ANA handover and the sweep's wanted set all key off
+		// migrSrc, so the side keeps serving exactly as it did before the
+		// migration was created.
 		p.migrSrcDeferred = true
 		p.migrSrc = nil
 	}
@@ -280,6 +280,17 @@ func (p *sidePlan) anaGrpId(cnId uint64, cloneLive bool) int {
 		return common.AnaGrpIdOptimized
 	}
 	return common.AnaGrpIdNonOptimized
+}
+
+// withMigrSrc gives a plan whose migration-source name helpers resolve, so a
+// role that is deferred — migrSrc nil, migrSrcRaw set — can still be named in
+// the rows it publishes.
+func (p *sidePlan) withMigrSrc(
+	conf *pb.SyncupSideRequest_MigrSrcConf,
+) *sidePlan {
+	clone := *p
+	clone.migrSrc = conf
+	return &clone
 }
 
 func resKeyOf(format string, cnId uint64) string {

@@ -3,7 +3,9 @@ package cnagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,9 +54,19 @@ type fakeNode struct {
 	// name — and this is how the suite reproduces that window deterministically
 	// ([D14]).
 	lsGhosts []string
+	// dmLsLegacyDevNo switches `dmsetup ls` to the older "(253, 4)" device
+	// number spelling. Dm.List normalizes both into "253:4"; nothing on the
+	// lab kernels prints the comma form any more, so this is the only way
+	// the second branch of that normalization is ever exercised.
+	dmLsLegacyDevNo bool
 
 	// md arrays, keyed by the /dev/md/{name} path
 	arrays map[string]*fakeArray
+	// nextMdMinor names the kernel node an array is published under. An
+	// array has two spellings: the /dev/md/{name} symlink mdadm created it
+	// with, and the /dev/mdN the kernel owns — and a sweep only ever has the
+	// second one, because it enumerates /sys/block (md.go ListArrays).
+	nextMdMinor int
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
 	// assembleDrop models mdadm leaving a member out of an assembly for
@@ -99,8 +111,40 @@ type fakeNode struct {
 	dispatchStderr string
 
 	// failCmd fails the first matching command; failCmdAlways every one.
+	// Both model "the tool ran and answered no": exit code 1, a non-nil
+	// error, and no dispatch, so the fake's state is left exactly as the
+	// real kernel would leave it after a refused ioctl.
 	failCmd       map[string]string
 	failCmdAlways map[string]string
+	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
+	// command that never answered — exit code -1 with a non-nil error, what
+	// common.OsClient.RunCommand returns when the SH15 soft timeout killed
+	// the child. These two DISPATCH first: the signal reaches the tool, but
+	// the ioctl it had already issued completes in the kernel regardless, so
+	// the node changed and the agent was told nothing.
+	killCmd       map[string]bool
+	killCmdAlways map[string]bool
+	// killCmdNoEffect / killCmdNoEffectAlways are the same answer with the
+	// opposite truth underneath: killed before the tool touched anything.
+	//
+	// Both halves exist because a sweep must be INDIFFERENT to which one
+	// happened. It cannot tell them apart — that is the whole content of
+	// "did not answer" — so the only correct behaviour is to re-enumerate
+	// and act on what it then finds. A test that only ever kills one half
+	// would pass against an agent that quietly assumed the other.
+	killCmdNoEffect       map[string]bool
+	killCmdNoEffectAlways map[string]bool
+	// failRead / killRead are the ReadFile counterparts, matched on a
+	// substring of the path. failRead* returns an error that is NOT
+	// fs.ErrNotExist (an unreadable attribute), killRead* returns
+	// context.DeadlineExceeded (a sysfs read the soft timeout cut off).
+	// Neither may ever read as "absent": agent.readAttrStrict, which the
+	// nvme host walk and the md sysfs walk both read through, tests for
+	// fs.ErrNotExist and nothing else.
+	failRead       map[string]bool
+	failReadAlways map[string]bool
+	killRead       map[string]bool
+	killReadAlways map[string]bool
 	// gate blocks a command until the channel is closed (lock tests).
 	gate map[string]chan struct{}
 }
@@ -125,7 +169,16 @@ type fakeDm struct {
 type fakeArray struct {
 	name    string // the mdadm --name value
 	members []string
-	state   string
+	// state is the `mdadm --detail` State line ("clean", "clean, degraded").
+	state string
+	// node is the kernel's own name for the array, "mdN": what /sys/block
+	// publishes it under and the only spelling a sweep ever sees.
+	node string
+	// arrayState is /sys/block/{node}/md/array_state, a different vocabulary
+	// from state: "clean"/"active" for a running array, "inactive" for one
+	// that is assembled but not running — which still pins its members —
+	// and "clear" for one that is gone.
+	arrayState string
 }
 
 type fakeSubsys struct {
@@ -166,10 +219,24 @@ func newFakeNode() *fakeNode {
 		thinDumps:     make(map[string]string),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
-		gate:          make(map[string]chan struct{}),
+
+		killCmd:               make(map[string]bool),
+		killCmdAlways:         make(map[string]bool),
+		killCmdNoEffect:       make(map[string]bool),
+		killCmdNoEffectAlways: make(map[string]bool),
+		failRead:              make(map[string]bool),
+		failReadAlways:        make(map[string]bool),
+		killRead:              make(map[string]bool),
+		killReadAlways:        make(map[string]bool),
+
+		gate: make(map[string]chan struct{}),
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
+	// /sys/block exists on every node, empty or not: an `ls` of it that does
+	// not answer is an error to Md.ListArrays, never "this node runs no
+	// arrays", so the fake must not model a missing directory by default.
+	f.dirs[sysfsBlockDir] = true
 	return f
 }
 
@@ -319,6 +386,9 @@ func (f *fakeNode) indexOfCallFrom(substr string, from int) int {
 // ---------------------------------------------------------------------------
 
 func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("read %s", path)
@@ -327,11 +397,55 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		// plain-file path and is deliberately not covered by the prefix.
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
 	}
+	if err := f.readHookErr(path); err != nil {
+		return "", err
+	}
 	data, ok := f.files[path]
 	if !ok {
-		return "", fmt.Errorf("no such file: %s", path)
+		// The absent-file error MUST wrap fs.ErrNotExist. The production
+		// LimitedOsClient returns os.ReadFile's *fs.PathError, and
+		// agent.readAttrStrict — which the nvme host walk and the md sysfs
+		// walk read through — tells "absent" from "did not answer" by
+		// errors.Is(err, fs.ErrNotExist) and by nothing else. A bare
+		// fmt.Errorf here would turn every missing attribute into a stalled
+		// read and every enumerator into an error.
+		return "", fmt.Errorf("no such file: %s: %w", path, fs.ErrNotExist)
 	}
 	return data, nil
+}
+
+// readHookErr applies the failRead/killRead hooks: the ReadFile half of the
+// same "answered no" / "did not answer" split the command hooks model. Both
+// errors are deliberately NOT fs.ErrNotExist — an unreadable attribute and a
+// timed-out one are the two ways a read can fail without the file being
+// absent, and neither may make a sweep believe an object is gone.
+//
+// Deleting the matched key inside the range is the one-shot form (deleting
+// the current key during a range is defined behaviour in Go).
+func (f *fakeNode) readHookErr(path string) error {
+	for key := range f.failRead {
+		if strings.Contains(path, key) {
+			delete(f.failRead, key)
+			return errors.New("input/output error")
+		}
+	}
+	for key := range f.failReadAlways {
+		if strings.Contains(path, key) {
+			return errors.New("input/output error")
+		}
+	}
+	for key := range f.killRead {
+		if strings.Contains(path, key) {
+			delete(f.killRead, key)
+			return context.DeadlineExceeded
+		}
+	}
+	for key := range f.killReadAlways {
+		if strings.Contains(path, key) {
+			return context.DeadlineExceeded
+		}
+	}
+	return nil
 }
 
 func (f *fakeNode) writeFile(
@@ -450,12 +564,29 @@ func parentDir(path string) string {
 // Command dispatch
 // ---------------------------------------------------------------------------
 
+// A CANCELLED CONTEXT FAILS, the way the production client does, and the dn
+// twin of this fake carries the reasoning: common/osclient.go runs commands
+// through exec.CommandContext and tests ctx.Err() per file operation, so a
+// converge whose context dies part-way stops there. A fake that ignores the
+// context runs such a pass to completion and is blind by construction to a
+// retry loop that cancels its own attempt — which is exactly the bug the dn
+// agent had.
+func (f *fakeNode) ctxErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
 func (f *fakeNode) runCommand(
 	ctx context.Context,
 	name string,
 	args []string,
 	stdin string,
 ) (string, string, int, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err.Error(), -1, err
+	}
 	line := "cmd " + name + " " + strings.Join(args, " ")
 	if stdin != "" {
 		line += " stdin=" + strings.Join(dmTargets(stdin), " | ")
@@ -483,7 +614,19 @@ func (f *fakeNode) runCommand(
 			return "", stderr, 1, fmt.Errorf("exit status 1")
 		}
 	}
+	// The kill hooks are checked here, in the same place as the fail hooks,
+	// and after them: a key registered in both fails rather than being
+	// killed. "No effect" returns before the dispatch; "killed" runs the
+	// dispatch and throws the answer away.
+	killedNoEffect := takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line)
+	var killed bool
+	if !killedNoEffect {
+		killed = takeKill(f.killCmd, f.killCmdAlways, line)
+	}
 	f.mu.Unlock()
+	if killedNoEffect {
+		return killedCmdResult()
+	}
 
 	if gate != nil {
 		select {
@@ -497,6 +640,12 @@ func (f *fakeNode) runCommand(
 	defer f.mu.Unlock()
 	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
+	if killed {
+		// The tool was killed, but the ioctl it had already issued ran to
+		// completion in the kernel: the node changed and the agent was told
+		// nothing. Whatever the dispatch returned is discarded.
+		return killedCmdResult()
+	}
 	if code != 0 {
 		stderr := f.dispatchStderr
 		if stderr == "" {
@@ -505,6 +654,32 @@ func (f *fakeNode) runCommand(
 		return stdout, stderr, code, fmt.Errorf("exit status %d", code)
 	}
 	return stdout, "", 0, nil
+}
+
+// takeKill reports whether line matches a one-shot or an always kill hook,
+// consuming the one-shot key so it fires exactly once.
+func takeKill(oneShot, always map[string]bool, line string) bool {
+	for key := range oneShot {
+		if strings.Contains(line, key) {
+			delete(oneShot, key)
+			return true
+		}
+	}
+	for key := range always {
+		if strings.Contains(line, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// killedCmdResult is what common.OsClient.RunCommand returns for a child the
+// SH15 soft timeout killed: no output, exit code -1 and a non-nil error —
+// exactly the (exitCode, err) pair agent.Reported calls "did not answer",
+// and the one thing a `dmsetup info` or an `mdadm --stop` must never be
+// allowed to read as "the object is not there".
+func killedCmdResult() (string, string, int, error) {
+	return "", "signal: killed", -1, errors.New("signal: killed")
 }
 
 func (f *fakeNode) dispatch(
@@ -756,6 +931,22 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 // device-mapper
 // ---------------------------------------------------------------------------
 
+// lsDevNo renders one `dmsetup ls` device number in the spelling this node's
+// dmsetup uses: "253:4" by default, "253, 4" with dmLsLegacyDevNo set. A
+// name the listing carries but the kernel has already dropped has no device
+// number at all and prints as the empty "()" — which Dm.List keeps, by name.
+func (f *fakeNode) lsDevNo(name string) string {
+	devNo := f.devNo["/dev/mapper/"+name]
+	if !f.dmLsLegacyDevNo {
+		return devNo
+	}
+	major, minor, ok := strings.Cut(devNo, ":")
+	if !ok {
+		return devNo
+	}
+	return major + ", " + minor
+}
+
 func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 	if len(args) == 0 {
 		return "", 3
@@ -777,8 +968,7 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		sort.Strings(names)
 		var sb strings.Builder
 		for _, name := range names {
-			fmt.Fprintf(&sb, "%s\t(%s)\n",
-				name, f.devNo["/dev/mapper/"+name])
+			fmt.Fprintf(&sb, "%s\t(%s)\n", name, f.lsDevNo(name))
 		}
 		return sb.String(), 0
 	case "info":
@@ -1220,18 +1410,27 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 	case contains(args, "--detail"):
 		return f.mdDetail(args)
 	case contains(args, "--stop"):
+		// Both spellings are accepted: the named /dev/md/{name} symlink the
+		// build path uses, and the /dev/mdN a sweep stops — a sweep gets its
+		// arrays from /sys/block and never learns the name.
 		dev := args[len(args)-1]
-		if _, ok := f.arrays[dev]; !ok {
+		key, array := f.arrayByDev(dev)
+		if array == nil {
 			return "", 1
 		}
-		if holder := f.heldBy(dev); holder != "" {
+		if holder := f.heldBy(key); holder != "" {
 			f.dispatchStderr = "mdadm: Cannot get exclusive access to " +
 				dev + ": held by " + holder
 			return "", 1
 		}
-		delete(f.arrays, dev)
-		delete(f.devNo, dev)
-		delete(f.devSize, dev)
+		// A successful stop is published in sysfs, not just in the fake's
+		// own map: that is what lets a test kill `mdadm --stop` and still
+		// see Md.Gone report true, which is the whole "killed but the kernel
+		// completed it" case.
+		f.unpublishArray(array)
+		delete(f.arrays, key)
+		delete(f.devNo, key)
+		delete(f.devSize, key)
 		return "", 0
 	case contains(args, "--add"):
 		return f.mdAdd(args)
@@ -1275,10 +1474,11 @@ func (f *fakeNode) mdCreate(args []string) (string, int) {
 		members = append(members, member)
 		f.superblocks[member] = true
 	}
-	f.arrays[dev] = &fakeArray{name: name, members: members,
-		state: "clean"}
+	f.installArray(dev, &fakeArray{name: name, members: members,
+		state: "clean", arrayState: "clean"})
 	f.devNo[dev] = f.newDevNo()
 	f.devSize[dev] = f.arraySize(members)
+	f.publishArray(f.arrays[dev])
 	return "", 0
 }
 
@@ -1298,13 +1498,15 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if len(members) == 0 {
 		return "", 1
 	}
-	f.arrays[dev] = &fakeArray{name: name, members: members,
-		state: "clean, degraded"}
+	array := &fakeArray{name: name, members: members,
+		state: "clean, degraded", arrayState: "clean"}
 	if len(members) > 1 {
-		f.arrays[dev].state = "clean"
+		array.state = "clean"
 	}
+	f.installArray(dev, array)
 	f.devNo[dev] = f.newDevNo()
 	f.devSize[dev] = f.arraySize(members)
+	f.publishArray(array)
 	return "", 0
 }
 
@@ -1321,8 +1523,8 @@ func (f *fakeNode) arraySize(members []string) uint64 {
 
 func (f *fakeNode) mdDetail(args []string) (string, int) {
 	dev := args[len(args)-1]
-	array, ok := f.arrays[dev]
-	if !ok {
+	_, array := f.arrayByDev(dev)
+	if array == nil {
 		return "", 1
 	}
 	if contains(args, "--export") {
@@ -1348,21 +1550,22 @@ func (f *fakeNode) mdDetail(args []string) (string, int) {
 
 func (f *fakeNode) mdAdd(args []string) (string, int) {
 	dev := args[0]
-	array, ok := f.arrays[dev]
-	if !ok {
+	_, array := f.arrayByDev(dev)
+	if array == nil {
 		return "", 1
 	}
 	member := args[len(args)-1]
 	array.members = append(array.members, member)
 	f.superblocks[member] = true
 	array.state = "clean"
+	f.publishArray(array)
 	return "", 0
 }
 
 func (f *fakeNode) mdRemove(args []string) (string, int) {
 	dev := args[0]
-	array, ok := f.arrays[dev]
-	if !ok {
+	_, array := f.arrayByDev(dev)
+	if array == nil {
 		return "", 1
 	}
 	member := args[len(args)-1]
@@ -1373,7 +1576,169 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 		}
 	}
 	array.members = kept
+	f.publishArray(array)
 	return "", 0
+}
+
+// ---------------------------------------------------------------------------
+// The /sys/block view of md
+//
+// Md.ListArrays and Md.Gone read arrays out of sysfs alone, because every
+// mdadm probe opens a member device and a leg whose DN side is gone blocks
+// until failfast — past the soft timeout. So the fake has to publish what the
+// kernel publishes:
+//
+//	/sys/block/{node}                             the array node, mdN
+//	/sys/block/{node}/md/array_state              clean / inactive / clear
+//	/sys/block/{node}/md/dev-{kname}              one per member
+//	/sys/block/{node}/md/dev-{kname}/block/dm/name  the member's DM NAME
+//
+// The last one is absent for a member that is not a dm device, which is how
+// an array of ours is told from a foreign one (MdArray.Foreign).
+//
+// It all lives in the ordinary dirs/files maps, exactly like the configfs and
+// nvme-subsystem trees, so `ls -1 /sys/block` picks the arrays up through
+// children() and anything else a test puts under /sys/block keeps listing.
+// ---------------------------------------------------------------------------
+
+// arrayByDev resolves either spelling of an array node: the /dev/md/{name}
+// symlink the fake keys arrays by, and the /dev/mdN sysfs publishes.
+func (f *fakeNode) arrayByDev(dev string) (string, *fakeArray) {
+	if array, ok := f.arrays[dev]; ok {
+		return dev, array
+	}
+	for key, array := range f.arrays {
+		if array.node != "" && dev == "/dev/"+array.node {
+			return key, array
+		}
+	}
+	return "", nil
+}
+
+// installArray puts an array at dev, giving it a kernel node name. An array
+// replacing one at the same path inherits its node, so a re-create does not
+// leak a /sys/block entry; the sysfs subtree of the old one is dropped.
+func (f *fakeNode) installArray(dev string, array *fakeArray) {
+	if old, ok := f.arrays[dev]; ok {
+		f.unpublishArray(old)
+		array.node = old.node
+	}
+	if array.node == "" {
+		array.node = fmt.Sprintf("md%d", f.nextMdMinor)
+		f.nextMdMinor++
+	}
+	if array.arrayState == "" {
+		array.arrayState = "clean"
+	}
+	f.arrays[dev] = array
+}
+
+// publishArray rewrites an array's whole /sys/block subtree from its current
+// members, so a member add or remove shows up in the sysfs view too.
+func (f *fakeNode) publishArray(array *fakeArray) {
+	f.unpublishArray(array)
+	mdDir := sysfsBlockDir + "/" + array.node + "/md"
+	f.dirs[sysfsBlockDir] = true
+	f.dirs[sysfsBlockDir+"/"+array.node] = true
+	f.dirs[mdDir] = true
+	f.files[mdDir+"/array_state"] = array.arrayState + "\n"
+	for _, member := range array.members {
+		devDir := mdDir + "/dev-" + f.kernelName(member)
+		f.dirs[devDir] = true
+		f.dirs[devDir+"/block"] = true
+		dmName, ok := strings.CutPrefix(member, "/dev/mapper/")
+		if !ok {
+			// Not a dm device: the whole dm/ directory is absent, which is
+			// the ENOENT that makes the array foreign.
+			continue
+		}
+		f.dirs[devDir+"/block/dm"] = true
+		f.files[devDir+"/block/dm/name"] = dmName + "\n"
+	}
+}
+
+func (f *fakeNode) unpublishArray(array *fakeArray) {
+	if array.node == "" {
+		return
+	}
+	root := sysfsBlockDir + "/" + array.node
+	for entry := range f.dirs {
+		if entry == root || strings.HasPrefix(entry, root+"/") {
+			delete(f.dirs, entry)
+		}
+	}
+	for entry := range f.files {
+		if strings.HasPrefix(entry, root+"/") {
+			delete(f.files, entry)
+		}
+	}
+}
+
+// kernelName is the /sys/class/block name of a member device: dm-N for a
+// /dev/mapper path — the minor of its device number, exactly as the kernel
+// numbers them — and the bare basename for anything else.
+func (f *fakeNode) kernelName(path string) string {
+	if strings.HasPrefix(path, "/dev/mapper/") {
+		if _, minor, ok := strings.Cut(f.devNo[path], ":"); ok {
+			return "dm-" + minor
+		}
+	}
+	return path[strings.LastIndexByte(path, '/')+1:]
+}
+
+// mdNode is the /dev/mdN a sweep sees for the array created at dev, or "".
+func (f *fakeNode) mdNode(dev string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return ""
+	}
+	return "/dev/" + array.node
+}
+
+// setArrayState scripts /sys/block/{node}/md/array_state — "inactive" for an
+// assembled-but-not-running array, which Md.Gone must NOT accept as gone.
+func (f *fakeNode) setArrayState(dev, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	array.arrayState = state
+	f.files[sysfsBlockDir+"/"+array.node+"/md/array_state"] = state + "\n"
+}
+
+// arrayGone is the assertion side of a stop: neither mdadm nor sysfs still
+// knows the array. An array whose /sys/block entry survived is NOT gone —
+// it still pins its members against a `dmsetup remove`.
+func (f *fakeNode) arrayGone(dev string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return true
+	}
+	return !f.dirs[sysfsBlockDir+"/"+array.node]
+}
+
+// seedArray installs an array no mdadm run of this test created — an array
+// left behind by a previous incarnation, or a foreign one whose members are
+// not dm devices at all (`seedArray("/dev/md/other", "other", "/dev/sdb")`).
+// Unlike mdCreate it stamps no superblocks: a foreign array's members are not
+// ours to claim.
+func (f *fakeNode) seedArray(dev, name string, members ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	array := &fakeArray{name: name, members: members,
+		state: "clean", arrayState: "clean"}
+	f.installArray(dev, array)
+	if _, ok := f.devNo[dev]; !ok {
+		f.devNo[dev] = f.newDevNo()
+	}
+	f.devSize[dev] = f.arraySize(members)
+	f.publishArray(array)
 }
 
 // ---------------------------------------------------------------------------

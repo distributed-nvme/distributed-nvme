@@ -47,6 +47,7 @@ const (
 
 	msgSyncupResult   = "syncup result"
 	msgSyncupRejected = "syncup rejected"
+	msgSyncupLeftover = "syncup leftover"
 
 	msgHealthChanged = "health changed"
 )

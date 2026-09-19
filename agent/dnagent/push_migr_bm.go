@@ -32,12 +32,6 @@ func (s *DnAgentServer) pushMigrBitmap(
 				sidePointerText(req.GetSidePointer())),
 		}
 	}
-	// A push never advances the stored revision; it only may not be older.
-	if reject := agent.GateRevision(
-		st.req.GetRevision(), req.GetRevision()); reject != nil {
-		return &pb.PushMigrBitmapReply{AgentReply: reject}
-	}
-
 	path := s.nf.LocalMigrBmPath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetMigrId(), req.GetBmIdx())
 	if err := s.store.Save(ctx, path, req); err != nil {

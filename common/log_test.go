@@ -248,10 +248,9 @@ func TestPbToLogValueBytesAndNesting(t *testing.T) {
 			LegId:  21,
 			SideId: 22,
 		},
-		Revision: 9,
-		MigrId:   30,
-		BmIdx:    0,
-		Bitmap:   []byte{0x01, 0x02, 0x03, 0x04},
+		MigrId: 30,
+		BmIdx:  0,
+		Bitmap: []byte{0x01, 0x02, 0x03, 0x04},
 	}
 
 	value, ok := PbToLogValue(req).(map[string]any)

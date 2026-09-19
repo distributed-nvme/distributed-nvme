@@ -1414,7 +1414,6 @@ func newSideDriver(
 					ClusterId:   d.cid,
 					DnId:        d.dnId,
 					SidePointer: d.ptr,
-					Revision:    part.revision,
 					MigrId:      part.resId,
 					BmIdx:       part.bmIdx,
 					Bitmap:      part.bitmap,
@@ -1512,8 +1511,8 @@ func (d *sideDriver) syncup(
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetSideInfo(),
 	)
-	if state.code == 0 {
-		d.diffBitmap(plan, reply.GetBmInfo(), reply.GetRevision())
+	if accepted(state.code) {
+		d.diffBitmap(plan, reply.GetBmInfo())
 	}
 	return state, nil
 }
@@ -1536,7 +1535,6 @@ func migrChunkIds(bmIdxList []uint32) []model.BmChunk {
 func (d *sideDriver) diffBitmap(
 	plan *sidePlan,
 	info *pb.BitmapInfo,
-	revision uint64,
 ) {
 	if plan.migrName == "" || len(plan.chunks) == 0 {
 		return
@@ -1551,23 +1549,19 @@ func (d *sideDriver) diffBitmap(
 		return
 	}
 	d.pusher.submit(&bmPlan{
-		resId:    plan.migrId,
-		name:     plan.migrName,
-		revision: revision,
-		parts:    missing,
+		resId: plan.migrId,
+		name:  plan.migrName,
+		parts: missing,
 	})
 }
 
 // observe folds one CheckSide/SyncupSide reply into the side's health (HL2,
-// HL4), the BM6 resync flag and the RW18 flip report.
+// HL4) and the RW18 flip report. A failed push is not re-armed here: it is
+// logged and left to the next Syncup* reply, which re-plans the diff from the
+// agent's own acknowledged set.
 func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	obs, res := sideObservation(r.code, d.info())
 	d.health.observe(ctx, obs, res)
-	if d.pusher.takeFailed() {
-		// BM6: the next round issues an equal-revision Syncup* whose reply
-		// restarts the diff.
-		d.host.wantResync()
-	}
 	d.reportProvisioned(ctx, r, d.current())
 }
 
@@ -1586,7 +1580,7 @@ func (d *sideDriver) reportProvisioned(
 	r *replyState,
 	plan *sidePlan,
 ) {
-	if r.code != 0 || plan.req.GetSideConf().GetProvisioned() {
+	if !accepted(r.code) || plan.req.GetSideConf().GetProvisioned() {
 		return
 	}
 	info := d.info()
@@ -1773,7 +1767,6 @@ func newCntlrDriver(
 					ClusterId:    d.cid,
 					CnId:         d.cnId,
 					CntlrPointer: d.ptr,
-					Revision:     part.revision,
 					CloneId:      part.resId,
 					SrcSliceIdx:  part.sliceIdx,
 					BmIdx:        part.bmIdx,
@@ -1896,8 +1889,8 @@ func (d *cntlrDriver) syncup(
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),
 	)
-	if state.code == 0 {
-		d.diffBitmaps(plan, reply.GetBmInfoList(), reply.GetRevision())
+	if accepted(state.code) {
+		d.diffBitmaps(plan, reply.GetBmInfoList())
 	}
 	return state, nil
 }
@@ -1923,7 +1916,6 @@ func cloneChunkIds(chunkIdList []*pb.BmChunkId) []model.BmChunk {
 func (d *cntlrDriver) diffBitmaps(
 	plan *cntlrPlan,
 	list []*pb.BitmapInfo,
-	revision uint64,
 ) {
 	if !plan.primary || len(plan.clones) == 0 {
 		return
@@ -1943,27 +1935,24 @@ func (d *cntlrDriver) diffBitmaps(
 			continue
 		}
 		d.pusher.submit(&bmPlan{
-			resId:    clone.id,
-			name:     clone.name,
-			revision: revision,
-			parts:    missing,
+			resId: clone.id,
+			name:  clone.name,
+			parts: missing,
 		})
 	}
 }
 
 // observe folds one CheckCntlr/SyncupCntlr reply into the cntlr's health
-// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg), the BM6
-// resync flag, the RW19 created candidates and the leg rows the coordinator
-// records.
+// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg), the RW19
+// created candidates and the leg rows the coordinator records. A failed push
+// is not re-armed here: it is logged and left to the next Syncup* reply.
 func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	info := d.info()
 	obs, res := cntlrObservation(r.code, info)
 	d.health.observe(ctx, obs, res)
-	if d.pusher.takeFailed() {
-		d.host.wantResync()
-	}
-	if r.code != 0 {
-		// HL2/RW19: code != 0 neither sets health nor completes a td.
+	if !accepted(r.code) {
+		// HL2/RW19: a rejected request neither sets health nor completes a
+		// td. A leftover reply is accepted and evaluated like code 0.
 		return
 	}
 	plan := d.current()
@@ -1985,7 +1974,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 func (d *cntlrDriver) legRows(info *pb.CntlrInfo) []legRow {
 	rows := make([]legRow, 0, len(info.GetLegIdToLeg()))
 	for _, legId := range sortedKeys(info.GetLegIdToLeg()) {
-		// The caller has already established code == 0 (HL2).
+		// The caller has already established an accepted code (HL2).
 		obs, res := legObservation(0, info, legId)
 		if obs == healthNone {
 			continue

@@ -102,3 +102,18 @@ func (t *ResTracker) Drop(key string) {
 	defer t.mu.Unlock()
 	delete(t.state, key)
 }
+
+// Keep forgets every history whose key the desired state no longer names. It
+// is Drop derived the same way a sweep derives a removal — from the wanted
+// set, not from a diff against a remembered plan — so an object that left the
+// desired state cannot leave its epoch behind to be read as a new object's on
+// a later rebuild (SH14).
+func (t *ResTracker) Keep(wanted map[string]struct{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.state {
+		if _, ok := wanted[key]; !ok {
+			delete(t.state, key)
+		}
+	}
+}

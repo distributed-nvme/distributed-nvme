@@ -2,7 +2,9 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,6 +37,11 @@ type fakeNode struct {
 
 	// device-mapper
 	dms map[string]*fakeDm
+	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
+	// listing is an inherently stale snapshot — a converge can remove a
+	// wrapper between the `ls` and the probe of that one name — and this is
+	// how the suite reproduces that window deterministically.
+	lsGhosts []string
 
 	// configfs / directories
 	dirs  map[string]bool
@@ -46,17 +53,61 @@ type fakeNode struct {
 
 	// nvme host connections, keyed by subsystem nqn
 	conns map[string]*fakeConn
+	// nextSubsys and nextCtrl are monotonic and never reused. Sizing the
+	// index off len(conns) let a disconnect hand the next connect an index a
+	// live subsystem was still using, so two subsystems collided on one
+	// /sys/class/nvme-subsystem path and the sysfs walk saw one of them
+	// twice.
+	nextSubsys int
+	nextCtrl   int
 
 	// failBlockWrite fails every WriteBlock at this offset (0 disables it),
 	// so a test can build the crash windows of the [D13] save protocol.
 	failBlockWrite uint64
 	failBlockSet   bool
 
+	// dispatchStderr lets one command answer with the stderr the kernel
+	// really prints — the EBUSY of a `dmsetup remove` on a device something
+	// above it still maps.
+	dispatchStderr string
+
 	// failCmd fails the first matching command with the given stderr;
 	// failCmdAlways fails every matching command, for the persistent
-	// failures a single converge pass is supposed to survive.
+	// failures a single converge pass is supposed to survive. Both model
+	// "the tool ran and answered no": exit code 1, a non-nil error, and no
+	// dispatch, so the fake's state is left exactly as a refused ioctl
+	// leaves the node.
 	failCmd       map[string]string
 	failCmdAlways map[string]string
+	// killCmd / killCmdAlways model the OTHER half of agent.Reported: a
+	// command that never answered — exit code -1 with a non-nil error, what
+	// common.OsClient.RunCommand returns when the SH15 soft timeout killed
+	// the child. These two DISPATCH first: the signal reaches the tool, but
+	// the ioctl it had already issued completes in the kernel regardless, so
+	// the node changed and the agent was told nothing.
+	killCmd       map[string]bool
+	killCmdAlways map[string]bool
+	// killCmdNoEffect / killCmdNoEffectAlways are the same answer with the
+	// opposite truth underneath: killed before the tool touched anything.
+	//
+	// Both halves exist because a sweep must be INDIFFERENT to which one
+	// happened. It cannot tell them apart — that is the whole content of
+	// "did not answer" — so the only correct behaviour is to re-enumerate
+	// and act on what it then finds. A test that only ever kills one half
+	// would pass against an agent that quietly assumed the other.
+	killCmdNoEffect       map[string]bool
+	killCmdNoEffectAlways map[string]bool
+	// failRead / killRead are the ReadFile counterparts, matched on a
+	// substring of the path. failRead* returns an error that is NOT
+	// fs.ErrNotExist (an unreadable attribute), killRead* returns
+	// context.DeadlineExceeded (a sysfs read the soft timeout cut off).
+	// Neither may ever read as "absent": agent.readAttrStrict, which the
+	// nvme host walk reads through, tests for fs.ErrNotExist and nothing
+	// else.
+	failRead       map[string]bool
+	failReadAlways map[string]bool
+	killRead       map[string]bool
+	killReadAlways map[string]bool
 	// gate blocks a command until the channel is closed (lock tests).
 	gate map[string]chan struct{}
 	// hardGate blocks a command until the channel is closed and — unlike gate
@@ -99,9 +150,34 @@ type fakeConn struct {
 	// ctrl and subsys are the sysfs names the connection materialises.
 	// NvmeHost.ListSubsys reads /sys, not `nvme list-subsys -o json` (which
 	// on real nvme-cli lists no namespaces at all), so the fake has to build
-	// the same tree a real connect does.
+	// the same tree a real connect does. ctrl names the FIRST controller
+	// still attached to the subsystem.
 	ctrl   string
 	subsys string
+	// nqn keys this connection in f.conns; idx is the monotonic subsystem
+	// index its sysfs names are built from.
+	nqn string
+	idx int
+	// ctrls is every controller attached to this subsystem. A subsystem can
+	// hold more than one — the two sides of a migrating leg share one NQN
+	// ([D1]) — which is exactly why `nvme disconnect --device` exists and
+	// why it has to be modelled separately from `--nqn`.
+	ctrls []*fakeCtrl
+}
+
+// fakeCtrl is one controller (one path) of a subsystem.
+type fakeCtrl struct {
+	name    string // "nvme3"
+	trAddr  string
+	trSvcId string
+	trType  string
+	state   string
+	pathDev string // "nvme0c3n1", the hidden path device carrying ana_state
+	// hostNqn is the --hostnqn the connect was made with. The kernel
+	// publishes it per controller, and it is the only field that says WHICH
+	// agent on a shared kernel opened the connection — a MigrSrcNqn names
+	// the source dn, not the connecting one.
+	hostNqn string
 }
 
 func newFakeNode() *fakeNode {
@@ -118,8 +194,18 @@ func newFakeNode() *fakeNode {
 		conns:         make(map[string]*fakeConn),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
-		gate:          make(map[string]chan struct{}),
-		hardGate:      make(map[string]chan struct{}),
+
+		killCmd:               make(map[string]bool),
+		killCmdAlways:         make(map[string]bool),
+		killCmdNoEffect:       make(map[string]bool),
+		killCmdNoEffectAlways: make(map[string]bool),
+		failRead:              make(map[string]bool),
+		failReadAlways:        make(map[string]bool),
+		killRead:              make(map[string]bool),
+		killReadAlways:        make(map[string]bool),
+
+		gate:     make(map[string]chan struct{}),
+		hardGate: make(map[string]chan struct{}),
 	}
 }
 
@@ -185,6 +271,10 @@ func (f *fakeNode) Reset() {
 var readOnlyPrefixes = []string{
 	"cmd ls ", "cmd lsblk ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
+	// `dmsetup ls` is the root of the sweep's enumeration and changes
+	// nothing; without it here every SH16 no-mutation assertion would fail
+	// the moment a converge started sweeping.
+	"cmd dmsetup ls",
 	"cmd nvme list-subsys", "read ", "readproto ", "readblock ",
 }
 
@@ -243,14 +333,61 @@ func (f *fakeNode) indexOfCallFrom(substr string, from int) int {
 // ---------------------------------------------------------------------------
 
 func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("read %s", path)
+	if err := f.readHookErr(path); err != nil {
+		return "", err
+	}
 	data, ok := f.files[path]
 	if !ok {
-		return "", fmt.Errorf("no such file: %s", path)
+		// The absent-file error MUST wrap fs.ErrNotExist. The production
+		// LimitedOsClient returns os.ReadFile's *fs.PathError, and
+		// agent.readAttrStrict — which the nvme host walk reads through —
+		// tells "absent" from "did not answer" by
+		// errors.Is(err, fs.ErrNotExist) and by nothing else. A bare
+		// fmt.Errorf here would turn every missing attribute into a stalled
+		// read and every enumerator into an error.
+		return "", fmt.Errorf("no such file: %s: %w", path, fs.ErrNotExist)
 	}
 	return data, nil
+}
+
+// readHookErr applies the failRead/killRead hooks: the ReadFile half of the
+// same "answered no" / "did not answer" split the command hooks model. Both
+// errors are deliberately NOT fs.ErrNotExist — an unreadable attribute and a
+// timed-out one are the two ways a read can fail without the file being
+// absent, and neither may make a sweep believe an object is gone.
+//
+// Deleting the matched key inside the range is the one-shot form (deleting
+// the current key during a range is defined behaviour in Go).
+func (f *fakeNode) readHookErr(path string) error {
+	for key := range f.failRead {
+		if strings.Contains(path, key) {
+			delete(f.failRead, key)
+			return errors.New("input/output error")
+		}
+	}
+	for key := range f.failReadAlways {
+		if strings.Contains(path, key) {
+			return errors.New("input/output error")
+		}
+	}
+	for key := range f.killRead {
+		if strings.Contains(path, key) {
+			delete(f.killRead, key)
+			return context.DeadlineExceeded
+		}
+	}
+	for key := range f.killReadAlways {
+		if strings.Contains(path, key) {
+			return context.DeadlineExceeded
+		}
+	}
+	return nil
 }
 
 func (f *fakeNode) writeFile(
@@ -409,12 +546,30 @@ func parentDir(path string) string {
 // Command dispatch
 // ---------------------------------------------------------------------------
 
+// A CANCELLED CONTEXT FAILS, the way the production client does.
+// common/osclient.go runs every command through exec.CommandContext and tests
+// ctx.Err() at the head of each file operation, so a converge whose context
+// dies part-way stops doing work at that point. The fake ignored the context
+// entirely, which made it blind to a whole class of bug by construction: a
+// DN8 retry converge that cancelled its OWN context in stopMigrRetry ran to
+// completion here and stalled for ever on the lab, and the unit test written
+// for it passed against the broken code until this check existed.
+func (f *fakeNode) ctxErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
 func (f *fakeNode) runCommand(
 	ctx context.Context,
 	name string,
 	args []string,
 	stdin string,
 ) (string, string, int, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err.Error(), -1, err
+	}
 	line := "cmd " + name + " " + strings.Join(args, " ")
 	if stdin != "" {
 		// A multi-line table travels through stdin (dmsetup's --table is
@@ -452,7 +607,19 @@ func (f *fakeNode) runCommand(
 			return "", stderr, 1, fmt.Errorf("exit status 1")
 		}
 	}
+	// The kill hooks are checked here, in the same place as the fail hooks,
+	// and after them: a key registered in both fails rather than being
+	// killed. "No effect" returns before the dispatch; "killed" runs the
+	// dispatch and throws the answer away.
+	killedNoEffect := takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line)
+	var killed bool
+	if !killedNoEffect {
+		killed = takeKill(f.killCmd, f.killCmdAlways, line)
+	}
 	f.mu.Unlock()
+	if killedNoEffect {
+		return killedCmdResult()
+	}
 
 	if gate != nil {
 		select {
@@ -468,12 +635,48 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
+	if killed {
+		// The tool was killed, but the ioctl it had already issued ran to
+		// completion in the kernel: the node changed and the agent was told
+		// nothing. Whatever the dispatch returned is discarded.
+		return killedCmdResult()
+	}
 	if code != 0 {
-		return stdout, "fake: " + name + " failed", code,
-			fmt.Errorf("exit status %d", code)
+		stderr := f.dispatchStderr
+		if stderr == "" {
+			stderr = "fake: " + name + " failed"
+		}
+		return stdout, stderr, code, fmt.Errorf("exit status %d", code)
 	}
 	return stdout, "", 0, nil
+}
+
+// takeKill reports whether line matches a one-shot or an always kill hook,
+// consuming the one-shot key so it fires exactly once.
+func takeKill(oneShot, always map[string]bool, line string) bool {
+	for key := range oneShot {
+		if strings.Contains(line, key) {
+			delete(oneShot, key)
+			return true
+		}
+	}
+	for key := range always {
+		if strings.Contains(line, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// killedCmdResult is what common.OsClient.RunCommand returns for a child the
+// SH15 soft timeout killed: no output, exit code -1 and a non-nil error —
+// exactly the (exitCode, err) pair agent.Reported calls "did not answer",
+// and the one thing a `dmsetup info` must never be allowed to read as "the
+// device is not there".
+func killedCmdResult() (string, string, int, error) {
+	return "", "signal: killed", -1, errors.New("signal: killed")
 }
 
 func (f *fakeNode) dispatch(
@@ -705,11 +908,71 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	return "", 0
 }
 
+// heldBy reports the dm device whose live table still maps path, i.e.
+// whoever holds it open — a migration destination's dm-clone over its side's
+// dm-linear, say. dm refuses to release a device something above it still
+// references.
+func (f *fakeNode) heldBy(path string) string {
+	devNo := f.devNo[path]
+	if devNo == "" {
+		return ""
+	}
+	for name, dm := range f.dms {
+		if f.devNo["/dev/mapper/"+name] == devNo {
+			continue
+		}
+		for _, line := range dmTargets(dm.table) {
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+			for _, field := range fields[3:] {
+				if field == devNo {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// flagValue returns the value that follows --flag in an argument list.
+func flagValue(args []string, flag string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 	if len(args) == 0 {
 		return "", 3
 	}
 	switch args[0] {
+	case "ls":
+		// The real tool prints "{name}\t({major}:{minor})" per device and the
+		// literal "No devices found" — still exit 0 — on an empty node. It is
+		// the root of the sweep's enumeration: what to remove is what exists
+		// minus what is wanted, and nothing else on the node can name a
+		// device the agent has no plan for.
+		names := make([]string, 0, len(f.dms)+len(f.lsGhosts))
+		for name := range f.dms {
+			names = append(names, name)
+		}
+		// A listing may name a device that is already gone (lsGhosts).
+		names = append(names, f.lsGhosts...)
+		if len(names) == 0 {
+			return "No devices found\n", 0
+		}
+		sort.Strings(names)
+		var sb strings.Builder
+		for _, name := range names {
+			fmt.Fprintf(&sb, "%s\t(%s)\n",
+				name, f.devNo["/dev/mapper/"+name])
+		}
+		return sb.String(), 0
 	case "info":
 		name := args[len(args)-1]
 		dm, ok := f.dms[name]
@@ -749,7 +1012,22 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		return "", 0
 	case "remove":
 		name := args[1]
-		if _, ok := f.dms[name]; !ok {
+		dm, ok := f.dms[name]
+		if !ok {
+			return "", 1
+		}
+		if dm.suspended {
+			// `dmsetup remove` does not succeed on a suspended device.
+			return "", 1
+		}
+		if holder := f.heldBy("/dev/mapper/" + name); holder != "" {
+			// A device another live table still maps is open, and the
+			// kernel refuses to remove it (-EBUSY). Modelling this is what
+			// makes a teardown that runs out of order fail a test rather
+			// than only a real node — and what lets a sweep test express
+			// "this device is pinned" at all.
+			f.dispatchStderr = "device-mapper: remove ioctl on " + name +
+				" failed: Device or resource busy (held by " + holder + ")"
 			return "", 1
 		}
 		delete(f.dms, name)
@@ -960,99 +1238,167 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 func (f *fakeNode) cmdNvme(args []string) (string, int) {
 	switch args[0] {
 	case "connect":
-		var nqn string
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "--nqn" {
-				nqn = args[i+1]
-			}
-		}
-		if nqn == "" {
-			return "", 3
-		}
-		idx := len(f.conns)
-		ctrl := fmt.Sprintf("nvme%d", idx)
-		device := ctrl + "n1"
-		subsys := fmt.Sprintf("nvme-subsys%d", idx)
-		conn := &fakeConn{
-			device: device, state: "live", ctrl: ctrl, subsys: subsys,
-		}
-		f.conns[nqn] = conn
-		f.devNo["/dev/"+device] = f.newDevNo()
-		f.addSubsysSysfs(conn, nqn, args)
-		return "", 0
+		return f.nvmeConnect(args)
 	case "disconnect":
-		var nqn string
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "--nqn" {
-				nqn = args[i+1]
-			}
-		}
-		conn, ok := f.conns[nqn]
-		if !ok {
-			return "", 1
-		}
-		delete(f.devNo, "/dev/"+conn.device)
-		f.dropSubsysSysfs(conn)
-		delete(f.conns, nqn)
-		return "", 0
+		return f.nvmeDisconnect(args)
 	}
 	return "", 3
 }
 
-// addSubsysSysfs materialises the /sys tree a real `nvme connect` creates:
-// the subsystem directory keyed by subsysnqn, holding the multipath namespace
-// node and the controller, and the controller's own directory with its
-// transport, state and hidden path device carrying ana_state.
-func (f *fakeNode) addSubsysSysfs(conn *fakeConn, nqn string, args []string) {
-	var trAddr, trSvcId, trType string
-	for i := 0; i+1 < len(args); i++ {
-		switch args[i] {
-		case "--traddr":
-			trAddr = args[i+1]
-		case "--trsvcid":
-			trSvcId = args[i+1]
-		case "--transport":
-			trType = args[i+1]
+// nvmeConnect attaches one controller. A second connect to an NQN the host
+// already holds adds a PATH to the same subsystem rather than a second
+// subsystem — the two sides of a migrating leg share one NQN ([D1]) — and
+// every index is drawn from a monotonic counter, so a disconnected
+// subsystem's /sys/class/nvme-subsystem path is never handed to a later one.
+func (f *fakeNode) nvmeConnect(args []string) (string, int) {
+	nqn := flagValue(args, "--nqn")
+	if nqn == "" {
+		return "", 3
+	}
+	conn, ok := f.conns[nqn]
+	if !ok {
+		idx := f.nextSubsys
+		f.nextSubsys++
+		conn = &fakeConn{
+			device: fmt.Sprintf("nvme%dn1", idx),
+			state:  "live",
+			subsys: fmt.Sprintf("nvme-subsys%d", idx),
+			nqn:    nqn,
+			idx:    idx,
+		}
+		f.conns[nqn] = conn
+		f.devNo["/dev/"+conn.device] = f.newDevNo()
+		f.addSubsysSysfs(conn)
+	}
+	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
+	f.nextCtrl++
+	ctrl := &fakeCtrl{
+		name:    ctrlName,
+		trAddr:  flagValue(args, "--traddr"),
+		trSvcId: flagValue(args, "--trsvcid"),
+		trType:  flagValue(args, "--transport"),
+		state:   conn.state,
+		pathDev: fmt.Sprintf("nvme%dc%sn1", conn.idx,
+			strings.TrimPrefix(ctrlName, "nvme")),
+		hostNqn: flagValue(args, "--hostnqn"),
+	}
+	conn.ctrls = append(conn.ctrls, ctrl)
+	f.addCtrlSysfs(conn, ctrl)
+	conn.refresh()
+	return "", 0
+}
+
+// nvmeDisconnect handles both forms. `--nqn` drops every controller of the
+// subsystem; `--device` drops exactly one, which is the only way to retire
+// the dead side of a migrating leg without killing the live one (SH20,
+// cnagent.md §2.3). Neither is idempotent: nvme-cli exits non-zero when it
+// finds nothing to disconnect.
+func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
+	if nqn := flagValue(args, "--nqn"); nqn != "" {
+		conn, ok := f.conns[nqn]
+		if !ok {
+			return "", 1
+		}
+		for _, ctrl := range append([]*fakeCtrl(nil), conn.ctrls...) {
+			f.dropCtrl(conn, ctrl)
+		}
+		return "", 0
+	}
+	dev := flagValue(args, "--device")
+	if dev == "" {
+		return "", 3
+	}
+	for _, conn := range f.conns {
+		for _, ctrl := range conn.ctrls {
+			if ctrl.name == dev {
+				f.dropCtrl(conn, ctrl)
+				return "", 0
+			}
 		}
 	}
+	return "", 1
+}
+
+// refresh keeps the legacy single-controller view pointing at the first
+// controller the subsystem still holds.
+func (c *fakeConn) refresh() {
+	c.ctrl = ""
+	if len(c.ctrls) > 0 {
+		c.ctrl = c.ctrls[0].name
+	}
+}
+
+// addSubsysSysfs materialises the subsystem half of the /sys tree a real
+// `nvme connect` creates: the directory keyed by subsysnqn, holding the
+// multipath namespace node.
+func (f *fakeNode) addSubsysSysfs(conn *fakeConn) {
 	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
-	ctrlDir := "/sys/class/nvme/" + conn.ctrl
-	pathDev := conn.ctrl + "c0n1"
 	f.dirs["/sys/class/nvme-subsystem"] = true
 	f.dirs["/sys/class/nvme"] = true
 	f.dirs[subsysDir] = true
 	f.dirs[subsysDir+"/"+conn.device] = true
-	f.dirs[subsysDir+"/"+conn.ctrl] = true
+	f.files[subsysDir+"/subsysnqn"] = conn.nqn + "\n"
+}
+
+// addCtrlSysfs materialises one controller: its link under the subsystem, its
+// own directory with transport, address and state, and the hidden path device
+// that is the only place ana_state lives.
+func (f *fakeNode) addCtrlSysfs(conn *fakeConn, ctrl *fakeCtrl) {
+	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
+	ctrlDir := "/sys/class/nvme/" + ctrl.name
+	f.dirs[subsysDir+"/"+ctrl.name] = true
 	f.dirs[ctrlDir] = true
-	f.dirs[ctrlDir+"/"+pathDev] = true
-	f.files[subsysDir+"/subsysnqn"] = nqn + "\n"
-	f.files[ctrlDir+"/transport"] = trType + "\n"
+	f.dirs[ctrlDir+"/"+ctrl.pathDev] = true
+	f.files[ctrlDir+"/transport"] = ctrl.trType + "\n"
 	f.files[ctrlDir+"/address"] = fmt.Sprintf(
-		"traddr=%s,trsvcid=%s\n", trAddr, trSvcId)
-	f.files[ctrlDir+"/state"] = conn.state + "\n"
-	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = "optimized\n"
+		"traddr=%s,trsvcid=%s\n", ctrl.trAddr, ctrl.trSvcId)
+	f.files[ctrlDir+"/state"] = ctrl.state + "\n"
+	f.files[ctrlDir+"/hostnqn"] = ctrl.hostNqn + "\n"
+	f.files[ctrlDir+"/"+ctrl.pathDev+"/ana_state"] = "optimized\n"
+}
+
+// dropCtrl removes one controller; the subsystem itself goes only with its
+// last path, which is what the kernel does.
+func (f *fakeNode) dropCtrl(conn *fakeConn, ctrl *fakeCtrl) {
+	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
+	ctrlDir := "/sys/class/nvme/" + ctrl.name
+	delete(f.dirs, subsysDir+"/"+ctrl.name)
+	deleteTree(f.dirs, ctrlDir)
+	deleteTree(f.files, ctrlDir)
+	var kept []*fakeCtrl
+	for _, held := range conn.ctrls {
+		if held != ctrl {
+			kept = append(kept, held)
+		}
+	}
+	conn.ctrls = kept
+	conn.refresh()
+	if len(kept) > 0 {
+		return
+	}
+	f.dropSubsysSysfs(conn)
+	delete(f.devNo, "/dev/"+conn.device)
+	delete(f.conns, conn.nqn)
 }
 
 func (f *fakeNode) dropSubsysSysfs(conn *fakeConn) {
 	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
-	ctrlDir := "/sys/class/nvme/" + conn.ctrl
-	for path := range f.dirs {
-		if path == subsysDir || path == ctrlDir ||
-			strings.HasPrefix(path, subsysDir+"/") ||
-			strings.HasPrefix(path, ctrlDir+"/") {
-			delete(f.dirs, path)
-		}
-	}
-	for path := range f.files {
-		if strings.HasPrefix(path, subsysDir+"/") ||
-			strings.HasPrefix(path, ctrlDir+"/") {
-			delete(f.files, path)
+	deleteTree(f.dirs, subsysDir)
+	deleteTree(f.files, subsysDir)
+}
+
+// deleteTree drops root and everything under it from a path-keyed map.
+func deleteTree[V any](set map[string]V, root string) {
+	for path := range set {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			delete(set, path)
 		}
 	}
 }
 
 // setConnState re-stamps a live connection's controller state, so a test can
-// make a path dead without disconnecting it.
+// make a path dead without disconnecting it. Every path of the subsystem
+// moves together; a single path is aged by dropping its controller.
 func (f *fakeNode) setConnState(nqn, state string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1061,5 +1407,8 @@ func (f *fakeNode) setConnState(nqn, state string) {
 		return
 	}
 	conn.state = state
-	f.files["/sys/class/nvme/"+conn.ctrl+"/state"] = state + "\n"
+	for _, ctrl := range conn.ctrls {
+		ctrl.state = state
+		f.files["/sys/class/nvme/"+ctrl.name+"/state"] = state + "\n"
+	}
 }

@@ -169,11 +169,11 @@ func (s *CnAgentServer) startLegProber(
 
 // stopLegProbers cancels the probers of legs that are no longer probed — a
 // primary→standby flip, a leg leaving the desired state, a level at or above
-// SP_LEVEL_NO_SIDE, or a teardown. A goroutine wedged in D state on a pathless
-// leg is released by the teardown's own disconnect (deleting the controller
-// errors its queued IO) — which the CN21 order guarantees runs before the
-// wrapper removal (removeLeg) — and is accepted as
-// unreclaimable until then (CN11).
+// SP_LEVEL_NO_SIDE, or a cntlr being dropped. A goroutine wedged in D state on
+// a pathless leg is released by the sweep's own disconnect (deleting the
+// controller errors its queued IO) — which the sweep's L10 runs before the
+// wrapper removal for exactly that reason — and is accepted as unreclaimable
+// until then (CN11).
 func (s *CnAgentServer) stopLegProbers(
 	st *cntlrState,
 	wanted map[uint64]struct{},

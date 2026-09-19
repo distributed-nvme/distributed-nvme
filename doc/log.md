@@ -441,12 +441,41 @@ etcd keys in dnv are already human-readable space-joined strings
   attempt logs, so duplicate records for retried transactions are expected and
   acceptable.
 
+### 5.4 Leftovers — emitted by the agents and by `dnv-worker`
+
+An agent decides what to REMOVE by comparing what its node actually holds
+with what the desired state wants (`architecture.md` §9.8), so "something is
+left over" is the verdict of one comparison, recomputed every pass and
+stored nowhere. Two records carry it, one on each side of the RPC; they are
+specified here rather than in one subsystem's document because an operator
+chasing a leaked device greps both logs for the same thing.
+
+| event | msg | required attrs |
+|---|---|---|
+| a sweep or read-only verdict that was not clean — `agent/sweep.go` | `sweep leftover` | the object's ids: `cluster_id` plus `cn_id`/`dn_id` for a node-level pass, plus `sp_id` and `cntlr_id`/`side_id` for an object-level one; then `leftover_cnt` (int), `leftovers` (the sorted `kind:name` entries joined by a space — `kind` is one of `dm`, `md`, `nvmet`, `nvmet_ns`, `nvme`, `record`), `failures` (the steps that could not prove the scope clean — an enumeration that did not answer, or a record the pass could not free — each rendered `what: error` and joined by `; `) |
+| a `Syncup*` reply carrying `ReplyCodeLeftover` — `worker/revision.go` | `syncup leftover` | the object's ids, `revision` (the one the request carried), `details` (the agent's own leftover text) |
+
+Both are Info: a leftover is a normal state for as long as a dead remote's
+failfast window lasts, and the next `Syncup*` sweeps it away. Nothing on the
+agent re-drives that sweep by itself — a `Check*` round recomputes the
+verdict and removes nothing — so what brings the removal back is the worker
+seeing the leftover code again and re-issuing the syncup (`dnv-worker.md`
+RW4 step 5). Both are emitted once per pass — the agent's on every sweep and
+every verdict that was not clean, the worker's on every such reply — so a
+leftover that does NOT go away is in both logs every round, which is exactly
+what distinguishes it from one the next pass removed. A clean pass emits
+nothing; `sweep leftover` is never a "nothing to report" record. The agent's
+record carries the FULL list, while `details` — in the reply and therefore in
+`syncup leftover` — shows at most eight leftover names before a `[+k more]`
+tail, so that one stuck node cannot fill the reply with names; the failure
+lines that follow them are not capped.
+
 ## 6. Example output
 
 ```json
-{"time":"2026-08-28T10:00:00.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-...-5-...","--table","0 2097152 error"],"stdin":"","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:00.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-...-c5-...","--table","0 2097152 error"],"stdin":"","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
 {"time":"2026-08-28T10:00:00.010Z","level":"INFO","msg":"etcd put","key":"dnv sp_rev 04 ebada5168620c5fe 0000000000000011","value":{"sp_name":"pool1","revision":7},"trace_id":"a1b2c3d4e5f60718"}
-{"time":"2026-08-28T10:00:00.020Z","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:00.020Z","level":"INFO","msg":"grpc client request","method":"/DiskNodeAgent/PushMigrBitmap","data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"migr_id":30,"bm_idx":1,"bitmap":"<131072 bytes>"},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
 ## 7. Tests and acceptance checklist

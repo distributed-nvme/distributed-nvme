@@ -551,6 +551,57 @@ func (n *Nvmet) ListNamespaces(
 	return nsids, true, nil
 }
 
+// ListSubsystems enumerates every subsystem in the target's configfs tree,
+// linked to a port or not: a partially removed subsystem has already lost its
+// port link and is exactly what a sweep must still find. An absent
+// /sys/kernel/config/nvmet/subsystems is "none" (the module may not be
+// loaded); a listing that did not answer is an error.
+func (n *Nvmet) ListSubsystems(ctx context.Context) ([]string, error) {
+	entries, _, err := n.listDir(ctx, NvmetRoot+"/subsystems")
+	return entries, err
+}
+
+// ListPortSubsystems is the subsystems currently linked to one port.
+func (n *Nvmet) ListPortSubsystems(
+	ctx context.Context,
+	portId int,
+) ([]string, error) {
+	linked, _, err := n.listDir(ctx, n.PortPath(portId)+"/subsystems")
+	return linked, err
+}
+
+// ListPorts enumerates the port ids present in the target's configfs tree.
+// A sweep on a node running several dn agents needs it to tell a subsystem
+// that is linked to ITS port from one linked to a sibling agent's.
+func (n *Nvmet) ListPorts(ctx context.Context) ([]int, error) {
+	entries, _, err := n.listDir(ctx, NvmetRoot+"/ports")
+	if err != nil {
+		return nil, err
+	}
+	var out []int
+	for _, entry := range entries {
+		portId, convErr := strconv.Atoi(entry)
+		if convErr != nil {
+			continue
+		}
+		out = append(out, portId)
+	}
+	return out, nil
+}
+
+// NsDevicePath reads one namespace's backing device path. It is how a sweep
+// attributes a host-facing subsystem, whose NQN is chosen by the user and
+// carries no ids of ours ([D15]) — so it reads through the strict probe: an
+// unreadable device_path must be an error, never an absence that would make
+// the subsystem look unowned and get it removed.
+func (n *Nvmet) NsDevicePath(
+	ctx context.Context,
+	nqn string,
+	nsid int,
+) (string, bool, error) {
+	return n.readAttrStrict(ctx, n.NsPath(nqn, nsid)+"/device_path")
+}
+
 // RemoveNamespace disables and removes one namespace, leaving its subsystem in
 // place (reverse build order, SH19). Absent objects are skipped.
 func (n *Nvmet) RemoveNamespace(
@@ -563,7 +614,9 @@ func (n *Nvmet) RemoveNamespace(
 	if err != nil || !exists {
 		return err
 	}
-	enable, ok, err := n.readAttr(ctx, nsPath+"/enable")
+	// Strict: a read that did not answer must not make this skip the
+	// `enable = 0` write and rmdir a namespace the kernel still has enabled.
+	enable, ok, err := n.readAttrStrict(ctx, nsPath+"/enable")
 	if err != nil {
 		return err
 	}
@@ -573,6 +626,18 @@ func (n *Nvmet) RemoveNamespace(
 		}
 	}
 	return n.rmdir(ctx, nsPath)
+}
+
+// NamespaceGone verifies one namespace's removal. `rmdir` may have been
+// killed after configfs had already dropped the directory, so the removal's
+// exit status is not evidence and this read is.
+func (n *Nvmet) NamespaceGone(
+	ctx context.Context,
+	nqn string,
+	nsid int,
+) (bool, error) {
+	exists, err := n.dirExists(ctx, n.NsPath(nqn, nsid))
+	return !exists, err
 }
 
 // SetNsAnaGrpId performs one ANA transition: a single attribute write, valid
@@ -660,7 +725,7 @@ func (n *Nvmet) RemoveSubsystem(
 	}
 	for _, ns := range namespaces {
 		nsPath := subsysPath + "/namespaces/" + ns
-		enable, ok, err := n.readAttr(ctx, nsPath+"/enable")
+		enable, ok, err := n.readAttrStrict(ctx, nsPath+"/enable")
 		if err != nil {
 			return err
 		}

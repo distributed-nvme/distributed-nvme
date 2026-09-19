@@ -1342,10 +1342,9 @@ message PushMigrBitmapRequest {
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
     SidePointer side_pointer = 3;
-    uint64 revision = 4;
-    uint64 migr_id = 5;
-    uint32 bm_idx = 6;
-    bytes bitmap = 7;
+    uint64 migr_id = 4;
+    uint32 bm_idx = 5;
+    bytes bitmap = 6;
 }
 
 message PushMigrBitmapReply {
@@ -1463,11 +1462,10 @@ message PushCloneBitmapRequest {
     uint64 cluster_id = 1;
     uint64 cn_id = 2;
     CntlrPointer cntlr_pointer = 3;
-    uint64 revision = 4;
-    uint64 clone_id = 5;
-    uint32 src_slice_idx = 6;
-    uint32 bm_idx = 7;
-    bytes bitmap = 8;
+    uint64 clone_id = 4;
+    uint32 src_slice_idx = 5;
+    uint32 bm_idx = 6;
+    bytes bitmap = 7;
 }
 
 message PushCloneBitmapReply {

@@ -44,6 +44,13 @@ type DnAgentServer struct {
 	// reason as fenceWait: no unit test can wait out the production value.
 	zeroRetryInterval time.Duration
 
+	// migrRetryInterval paces the DN8 background migration-connect retry
+	// (common.DnMigrConnectRetryInterval), a field for the same reason. It
+	// is what lets a test drive the successful connect from the RETRY LOOP
+	// rather than from an RPC, which is the only shape in which that
+	// converge runs on the loop's own cancellable context.
+	migrRetryInterval time.Duration
+
 	// bg tracks every background goroutine that owns a child process, so
 	// agent.Serve can join them after GracefulStop and no orphan
 	// `blkdiscard --zeroout` ever outlives the agent (§9.4, SH27).
@@ -86,19 +93,6 @@ type sideState struct {
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
 	// left over from an earlier migration are never applied to a new one.
 	chunkMigrId uint64
-	// applied* is the shape of the last converge, so resources that leave
-	// the desired state — a CN dropping out of standby_id_list, a migration
-	// role ending — can still be named when they are torn down.
-	appliedCnIds   []uint64
-	appliedMigrSrc *pb.SyncupSideRequest_MigrSrcConf
-	// appliedMigrSrcRaw is the source conf as received, deferred or not.
-	// appliedMigrSrc is nil for a deferred one — nothing was built — but the
-	// role still registered its migr_src_* rows, so the tracker cleanup has to
-	// key on this one or a role that ends while deferred leaks its entries and
-	// the next migration inherits their epoch (§11.2, SH14).
-	appliedMigrSrcRaw *pb.SyncupSideRequest_MigrSrcConf
-	appliedMigrDst    *pb.SyncupSideRequest_MigrDstConf
-
 	// retrying/cancel drive the DN8 background migration-connect retry.
 	retrying bool
 	cancel   context.CancelFunc
@@ -156,6 +150,7 @@ func NewDnAgentServer(
 		disk:              disk,
 		fenceWait:         common.SuspendSeconds * time.Second,
 		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
+		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
 		port: agent.PortConf{
 			PortId:  portId,
 			TrType:  trConf.GetTrType(),
@@ -305,7 +300,7 @@ func (s *DnAgentServer) GetDnInfo(
 		}, nil
 	}
 	return &pb.GetDnInfoReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.dnVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 		DnInfo:     s.probeDn(ctx, st),
 	}, nil
@@ -336,7 +331,7 @@ func (s *DnAgentServer) GetSideInfo(
 		return unknown, nil
 	}
 	return &pb.GetSideInfoReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: s.sideVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
 		SideInfo:   s.probeSide(ctx, st),
 	}, nil

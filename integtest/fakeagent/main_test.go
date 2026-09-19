@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -379,37 +380,111 @@ func TestGateStaleSyncupRevision(t *testing.T) {
 	}
 }
 
-// TestGateStalePushRevision covers §14.9's second rejection: a Push* with a
-// revision lower than the object's stored revision is
-// ReplyCodeStaleRevision, and the chunk is not recorded.
-func TestGateStalePushRevision(t *testing.T) {
+// TestPushIsNotGatedOnRevision is what [D13] left of §14.9's old second
+// rejection: a Push* carries no revision at all, so the fake's gatePushLocked
+// has nothing to compare and a chunk planned against a report the desired
+// state has since superseded is still recorded. The descriptor check is the
+// part a future edit cannot quietly undo — a revision field could only come
+// back by being added to the proto again.
+func TestPushIsNotGatedOnRevision(t *testing.T) {
 	agent := newTestAgent(t)
-	dnClient, _ := startAgent(t, agent)
+	dnClient, cnClient := startAgent(t, agent)
+	ctx := context.Background()
 	ptr := sidePtr(1, 3, 5)
 	syncupDn(t, dnClient, 2, ptr)
 	syncupSide(t, dnClient, ptr, 2, 30)
 
-	reply, err := dnClient.PushMigrBitmap(context.Background(),
-		&pb.PushMigrBitmapRequest{
-			ClusterId:   1,
-			DnId:        1,
-			SidePointer: ptr,
-			Revision:    1,
-			MigrId:      30,
-			BmIdx:       0,
-			Bitmap:      []byte{0xff, 0x00},
-		})
+	for _, req := range []proto.Message{
+		&pb.PushMigrBitmapRequest{}, &pb.PushCloneBitmapRequest{},
+	} {
+		desc := req.ProtoReflect().Descriptor()
+		if desc.Fields().ByName("revision") != nil {
+			t.Fatalf("%s still carries a revision field", desc.FullName())
+		}
+	}
+
+	// The side's stored revision moves far past the round the push below was
+	// planned in. Under the old gate this was the rejection; now it is a
+	// plain accept, because a chunk is position-addressed data keyed by an id
+	// that is never reused.
+	syncupDn(t, dnClient, 9, ptr)
+	syncupSide(t, dnClient, ptr, 9, 30)
+	reply, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
+		ClusterId:   1,
+		DnId:        1,
+		SidePointer: ptr,
+		MigrId:      30,
+		BmIdx:       0,
+		Bitmap:      []byte{0xff, 0x00},
+	})
 	if err != nil {
 		t.Fatalf("PushMigrBitmap: %v", err)
 	}
-	if got := reply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("stale push code = %d, want %d",
-			got, common.ReplyCodeStaleRevision)
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Fatalf("push code = %d (%s), want it accepted",
+			got, reply.GetAgentReply().GetDetails())
 	}
-	if got := syncupSide(t, dnClient, ptr, 2, 30).GetBmInfo().
-		GetBmIdxList(); len(got) != 0 {
-		t.Fatalf("bm_idx_list = %v after a rejected push, want none", got)
+	if got := syncupSide(t, dnClient, ptr, 9, 30).GetBmInfo().
+		GetBmIdxList(); !slices.Equal(got, []uint32{0}) {
+		t.Fatalf("bm_idx_list = %v, want the pushed chunk applied", got)
+	}
+
+	// The cn twin, through the same gate.
+	syncupCntlrFixture(t, cnClient, true)
+	pushCloneBm(t, cnClient, 41, 0, 0, 3)
+}
+
+// TestForcedReplyCodeCarriesLeftover pins the one lever the teardown suites
+// need from the fake: behavior.json's reply_code is passed through verbatim,
+// so an object can be made to answer common.ReplyCodeLeftover on a Syncup*, a
+// Check* round and a Get*Info alike. The fake does not MODEL a sweep — a
+// forced non-zero code still suppresses the apply, which a real leftover
+// reply never does — it only produces the code the worker must accept.
+func TestForcedReplyCodeCarriesLeftover(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, _ := startAgent(t, agent)
+	ctx := context.Background()
+	ptr := sidePtr(1, 3, 5)
+	syncupDn(t, dnClient, 1, ptr)
+	syncupSide(t, dnClient, ptr, 1, 30)
+
+	writeFile(t, agent, behaviorFileName,
+		fmt.Sprintf(`{"objects": {"side 1:3:5": {"reply_code": %d}}}`,
+			common.ReplyCodeLeftover))
+
+	if got := syncupSide(t, dnClient, ptr, 1, 30).GetAgentReply().
+		GetCode(); got != common.ReplyCodeLeftover {
+		t.Fatalf("SyncupSide code = %d, want %d",
+			got, common.ReplyCodeLeftover)
+	}
+	info, err := dnClient.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: 1, DnId: 1, SidePointer: ptr,
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := info.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeLeftover {
+		t.Fatalf("GetSideInfo code = %d, want %d",
+			got, common.ReplyCodeLeftover)
+	}
+	stream, err := dnClient.CheckSide(ctx)
+	if err != nil {
+		t.Fatalf("CheckSide: %v", err)
+	}
+	if err := stream.Send(&pb.CheckSideRequest{
+		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
+	}); err != nil {
+		t.Fatalf("CheckSide send: %v", err)
+	}
+	checkReply, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("CheckSide recv: %v", err)
+	}
+	if got := checkReply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeLeftover {
+		t.Fatalf("CheckSide code = %d, want %d",
+			got, common.ReplyCodeLeftover)
 	}
 }
 
@@ -426,7 +501,7 @@ func TestGateUnknownPushId(t *testing.T) {
 	syncupSide(t, dnClient, ptr, 2, 30)
 
 	reply, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 2,
+		ClusterId: 1, DnId: 1, SidePointer: ptr,
 		MigrId: 99, BmIdx: 0, Bitmap: []byte{0xff},
 	})
 	if err != nil {
@@ -440,13 +515,13 @@ func TestGateUnknownPushId(t *testing.T) {
 
 	// The known id is accepted and lands in the derived applied set.
 	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 2,
+		ClusterId: 1, DnId: 1, SidePointer: ptr,
 		MigrId: 30, BmIdx: 1, Bitmap: []byte{0xff, 0xff},
 	}); err != nil {
 		t.Fatalf("PushMigrBitmap: %v", err)
 	}
 	if _, err := dnClient.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
-		ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 2,
+		ClusterId: 1, DnId: 1, SidePointer: ptr,
 		MigrId: 30, BmIdx: 0, Bitmap: []byte{0xff, 0xff},
 	}); err != nil {
 		t.Fatalf("PushMigrBitmap: %v", err)
@@ -473,7 +548,7 @@ func TestGateUnknownPushId(t *testing.T) {
 	}
 	cloneReply, err := cnClient.PushCloneBitmap(ctx,
 		&pb.PushCloneBitmapRequest{
-			ClusterId: 1, CnId: 1, CntlrPointer: cPtr, Revision: 1,
+			ClusterId: 1, CnId: 1, CntlrPointer: cPtr,
 			CloneId: 42, SrcSliceIdx: 1, BmIdx: 0, Bitmap: []byte{0x01},
 		})
 	if err != nil {
@@ -579,7 +654,7 @@ func TestForcedReplyCodeRejects(t *testing.T) {
 		`{"objects": {"side 1:3:5": {"reply_code": 1}}}`)
 	pushReply, err := dnClient.PushMigrBitmap(context.Background(),
 		&pb.PushMigrBitmapRequest{
-			ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 1,
+			ClusterId: 1, DnId: 1, SidePointer: ptr,
 			MigrId: 30, BmIdx: 0, Bitmap: []byte{0x01},
 		})
 	if err != nil {
@@ -1122,7 +1197,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 	syncupSide(t, dnClient, ptr, 7, 30)
 	if _, err := dnClient.PushMigrBitmap(context.Background(),
 		&pb.PushMigrBitmapRequest{
-			ClusterId: 1, DnId: 1, SidePointer: ptr, Revision: 7,
+			ClusterId: 1, DnId: 1, SidePointer: ptr,
 			MigrId: 30, BmIdx: 1, Bitmap: []byte{0x01, 0x02, 0x03},
 		}); err != nil {
 		t.Fatalf("PushMigrBitmap: %v", err)
@@ -1169,7 +1244,7 @@ func TestStateSurvivesRestart(t *testing.T) {
 // which is what state.json records next to the pair.
 func pushCloneBm(
 	t *testing.T, client pb.ControllerNodeAgentClient,
-	revision, cloneId uint64, srcSliceIdx, bmIdx uint32, size int,
+	cloneId uint64, srcSliceIdx, bmIdx uint32, size int,
 ) {
 	t.Helper()
 	reply, err := client.PushCloneBitmap(context.Background(),
@@ -1177,7 +1252,6 @@ func pushCloneBm(
 			ClusterId:    1,
 			CnId:         1,
 			CntlrPointer: cntlrPtr(1, 1),
-			Revision:     revision,
 			CloneId:      cloneId,
 			SrcSliceIdx:  srcSliceIdx,
 			BmIdx:        bmIdx,
@@ -1226,11 +1300,11 @@ func TestCloneChunkKeysAndChunkIdList(t *testing.T) {
 	_, cnClient := startAgent(t, agent)
 	syncupCntlrFixture(t, cnClient, true)
 
-	pushCloneBm(t, cnClient, 5, 41, 2, 1, 4)
-	pushCloneBm(t, cnClient, 5, 41, 0, 1, 2)
-	pushCloneBm(t, cnClient, 5, 41, 2, 0, 5)
-	pushCloneBm(t, cnClient, 5, 41, 0, 0, 3)
-	pushCloneBm(t, cnClient, 5, 41, 0, 0, 8)
+	pushCloneBm(t, cnClient, 41, 2, 1, 4)
+	pushCloneBm(t, cnClient, 41, 0, 1, 2)
+	pushCloneBm(t, cnClient, 41, 2, 0, 5)
+	pushCloneBm(t, cnClient, 41, 0, 0, 3)
+	pushCloneBm(t, cnClient, 41, 0, 0, 8)
 
 	chunks := readStateChunks(t, agent, cntlrObjKey(cntlrPtr(1, 1)), 41)
 	want := map[string]uint64{"0:0": 8, "0:1": 2, "2:0": 5, "2:1": 4}
@@ -1259,8 +1333,8 @@ func TestCloneChunksSurviveRestart(t *testing.T) {
 	agent := newTestAgent(t)
 	_, cnClient := startAgent(t, agent)
 	syncupCntlrFixture(t, cnClient, true)
-	pushCloneBm(t, cnClient, 5, 41, 1, 0, 2)
-	pushCloneBm(t, cnClient, 5, 41, 0, 2, 3)
+	pushCloneBm(t, cnClient, 41, 1, 0, 2)
+	pushCloneBm(t, cnClient, 41, 0, 2, 3)
 
 	restarted, err := newFakeAgent(context.Background(), agent.dir, 4096)
 	if err != nil {
@@ -1303,7 +1377,7 @@ func TestAppliedSetOverrides(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
 	syncupCntlrFixture(t, cnClient, true)
-	pushCloneBm(t, cnClient, 5, 41, 0, 0, 2)
+	pushCloneBm(t, cnClient, 41, 0, 0, 2)
 
 	writeFile(t, agent, behaviorFileName,
 		`{"objects": {"cntlr 1:1": {"chunk_id_list": ["3:1", "0:5"]}}}`)

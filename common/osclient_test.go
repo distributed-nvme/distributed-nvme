@@ -356,7 +356,6 @@ func TestOsClientLogRecords(t *testing.T) {
 		ClusterId:   16981786240730056190,
 		DnId:        3,
 		SidePointer: &pb.SidePointer{SpId: 17, LegId: 21, SideId: 22},
-		Revision:    9,
 		MigrId:      30,
 		Bitmap:      []byte{1, 2, 3, 4},
 	}

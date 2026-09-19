@@ -41,67 +41,67 @@ func TestDmNames(t *testing.T) {
 
 	checkName(t, "DnErrorName",
 		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn),
-		"dnv-"+c+"-0000000000000003-0-0000000000000011-0000000000000016-0000000000000005")
+		"dnv-"+c+"-0000000000000003-d0-0000000000000011-0000000000000016-0000000000000005")
 	checkName(t, "DnLinearName",
 		nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn),
-		"dnv-"+c+"-0000000000000003-1-0000000000000011-0000000000000016-0000000000000005")
+		"dnv-"+c+"-0000000000000003-d1-0000000000000011-0000000000000016-0000000000000005")
 	checkName(t, "DnMigrSrcName",
 		nf.DnMigrSrcName(testCluster, testDn, testSp, testMigr),
-		"dnv-"+c+"-0000000000000003-2-0000000000000011-000000000000001e")
+		"dnv-"+c+"-0000000000000003-d2-0000000000000011-000000000000001e")
 	checkName(t, "DnMigrFinalName",
 		nf.DnMigrFinalName(testCluster, testDn, testSp, testMigr),
-		"dnv-"+c+"-0000000000000003-3-0000000000000011-000000000000001e")
+		"dnv-"+c+"-0000000000000003-d3-0000000000000011-000000000000001e")
 	checkName(t, "DnSideName",
 		nf.DnSideName(testCluster, testDn, testSp, testSide),
-		"dnv-"+c+"-0000000000000003-4-0000000000000011-0000000000000016")
+		"dnv-"+c+"-0000000000000003-d4-0000000000000011-0000000000000016")
 	checkName(t, "DnMigrMetaDmName",
 		nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigr),
-		"dnv-"+c+"-0000000000000003-5-0000000000000011-000000000000001e")
+		"dnv-"+c+"-0000000000000003-d5-0000000000000011-000000000000001e")
 
 	checkName(t, "CnPoolMetaName",
 		nf.CnPoolMetaName(testCluster, testCn, testSp, testSlice),
-		"dnv-"+c+"-0000000000000005-0-0000000000000011-0000000000000021")
+		"dnv-"+c+"-0000000000000005-c0-0000000000000011-0000000000000021")
 	checkName(t, "CnPoolDataName",
 		nf.CnPoolDataName(testCluster, testCn, testSp, testSlice),
-		"dnv-"+c+"-0000000000000005-1-0000000000000011-0000000000000021")
+		"dnv-"+c+"-0000000000000005-c1-0000000000000011-0000000000000021")
 	checkName(t, "CnPoolFinalName",
 		nf.CnPoolFinalName(testCluster, testCn, testSp, testSlice),
-		"dnv-"+c+"-0000000000000005-2-0000000000000011-0000000000000021")
+		"dnv-"+c+"-0000000000000005-c2-0000000000000011-0000000000000021")
 	checkName(t, "CnThinDevName",
 		nf.CnThinDevName(testCluster, testCn, testSp, testTd, testSlice),
-		"dnv-"+c+"-0000000000000005-3-0000000000000011-0000000000000031-0000000000000021")
+		"dnv-"+c+"-0000000000000005-c3-0000000000000011-0000000000000031-0000000000000021")
 	checkName(t, "CnRaid0Name",
 		nf.CnRaid0Name(testCluster, testCn, testSp, testTd),
-		"dnv-"+c+"-0000000000000005-4-0000000000000011-0000000000000031")
+		"dnv-"+c+"-0000000000000005-c4-0000000000000011-0000000000000031")
 	checkName(t, "CnErrorName",
 		nf.CnErrorName(testCluster, testCn, testSp, testTd),
-		"dnv-"+c+"-0000000000000005-5-0000000000000011-0000000000000031")
+		"dnv-"+c+"-0000000000000005-c5-0000000000000011-0000000000000031")
 	checkName(t, "CnNsDevName",
 		nf.CnNsDevName(testCluster, testCn, testSp, testNs),
-		"dnv-"+c+"-0000000000000005-6-0000000000000011-0000000000000032")
+		"dnv-"+c+"-0000000000000005-c6-0000000000000011-0000000000000032")
 	checkName(t, "CnCloneFinalName",
 		nf.CnCloneFinalName(testCluster, testCn, testSp, testClone),
-		"dnv-"+c+"-0000000000000005-7-0000000000000011-0000000000000041")
+		"dnv-"+c+"-0000000000000005-c7-0000000000000011-0000000000000041")
 	checkName(t, "CnXferFinalName",
 		nf.CnXferFinalName(testCluster, testCn, testSp, testXfer),
-		"dnv-"+c+"-0000000000000005-8-0000000000000011-0000000000000051")
+		"dnv-"+c+"-0000000000000005-c8-0000000000000011-0000000000000051")
 	// The three cn kinds added by cnagent.md §2.1: the [D1] leg wrapper,
 	// the RedundNone group device, and the kind-`b` clone-metadata wrapper
 	// that replaced the clone-VG metadata LV ([D14]).
 	checkName(t, "CnLegName",
 		nf.CnLegName(testCluster, testCn, testSp, testLeg),
-		"dnv-"+c+"-0000000000000005-9-0000000000000011-0000000000000015")
+		"dnv-"+c+"-0000000000000005-c9-0000000000000011-0000000000000015")
 	checkName(t, "CnGrpName",
 		nf.CnGrpName(testCluster, testCn, testSp, testGrp),
-		"dnv-"+c+"-0000000000000005-a-0000000000000011-0000000000000061")
+		"dnv-"+c+"-0000000000000005-ca-0000000000000011-0000000000000061")
 	checkName(t, "CnCloneMetaDmName",
 		nf.CnCloneMetaDmName(testCluster, testCn, testSp, testClone),
-		"dnv-"+c+"-0000000000000005-b-0000000000000011-0000000000000041")
+		"dnv-"+c+"-0000000000000005-cb-0000000000000011-0000000000000041")
 	// The `dmsetup ls` filter that rebuilds the allocator's used-unit map
 	// must be a strict prefix of the wrapper names it selects.
 	checkName(t, "CnCloneMetaDmPrefix",
 		nf.CnCloneMetaDmPrefix(testCluster, testCn),
-		"dnv-"+c+"-0000000000000005-b-")
+		"dnv-"+c+"-0000000000000005-cb-")
 
 	checkName(t, "DmPath", nf.DmPath("dnv-x"), "/dev/mapper/dnv-x")
 	checkName(t, "MdPath", nf.MdPath("dnv-x"), "/dev/md/dnv-x")

@@ -35,7 +35,7 @@ type healthObs int
 
 const (
 	// healthNone is "neither set nor clear": the reply said nothing about the
-	// object's health. Two things produce it — agent_reply.code != 0 (HL1's
+	// object's health. Two things produce it — a REJECTED agent_reply (HL1's
 	// last row and HL2's trailer), which triggers a re-sync instead (RW4), and
 	// a leg probe row that is neither ERROR nor OK (HL2's Leg row clears on an
 	// explicit RES_STATUS_OK and on nothing else, legObservation below).
@@ -53,8 +53,8 @@ const (
 	// healthErrorRow is a RES_STATUS_ERROR row in the object's latest known
 	// info.
 	healthErrorRow
-	// healthClean is a clean round: reply in time, code == 0, no ERROR row in
-	// the latest known info (HL5).
+	// healthClean is a clean round: reply in time, an accepted code, no
+	// ERROR row in the latest known info (HL5).
 	healthClean
 )
 
@@ -204,7 +204,8 @@ func (m *healthMonitor) observe(
 	case healthClean:
 		unhealthy, reason = false, reasonRecovered
 	default:
-		// HL1/HL2: PROVISIONING, MISSING and code != 0 neither set nor clear.
+		// HL1/HL2: PROVISIONING, MISSING and a rejected code neither set nor
+		// clear.
 		return
 	}
 	if m.known && m.unhealthy == unhealthy {
@@ -319,12 +320,27 @@ func newCnMonitor(
 	}
 }
 
+// accepted says whether an agent_reply's code is one the worker may read
+// rows out of. Code 0 and common.ReplyCodeLeftover are: a leftover reply is
+// an ACCEPTED request whose desired state is stored and whose wanted objects
+// were all converged — the node simply still holds something the desired
+// state does not want. Its *Info rows are a full probe of the wanted objects,
+// so they are evaluated exactly as for code 0; treating the code as a
+// rejection would freeze health, push planning and RW19 reporting for as long
+// as one leftover survived.
+//
+// The three rejection codes (stale revision, unknown object, invalid conf)
+// mean the request was NOT applied, so their replies carry no verdict.
+func accepted(code uint32) bool {
+	return code == 0 || code == common.ReplyCodeLeftover
+}
+
 // dnObservation applies the HL1 table to one CheckDn/SyncupDn reply (HL5:
 // info is the LATEST KNOWN DnInfo, not necessarily this reply's). The ERROR
 // sources are disk_info, meta_info and port_info — including meta_info's
 // "disk lacks Write Zeroes" (§9.4), which is a plain ERROR.
 func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
-	if code != 0 {
+	if !accepted(code) {
 		return healthNone, ""
 	}
 	if resName, bad := firstErrorRow(
@@ -340,7 +356,7 @@ func dnObservation(code uint32, info *pb.DnInfo) (healthObs, string) {
 // cnObservation applies the HL1 table to one CheckCn/SyncupCn reply. The
 // ERROR sources are port_info, tmpfs_info, tmp_file_info and loop_dev_info.
 func cnObservation(code uint32, info *pb.CnInfo) (healthObs, string) {
-	if code != 0 {
+	if !accepted(code) {
 		return healthNone, ""
 	}
 	if resName, bad := firstErrorRow(
@@ -461,7 +477,7 @@ func newSideMonitor(
 // reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
 // leg_id_to_leg, whose rows belong to the legs (below).
 func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
-	if code != 0 {
+	if !accepted(code) {
 		return healthNone, ""
 	}
 	maps := []struct {
@@ -504,7 +520,7 @@ func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 // side_dev_info, any cn_id_to_dm_error / cn_id_to_dm_linear / cn_id_to_nvmeof
 // row, and the migr_src_info / migr_dst_info rows.
 func sideObservation(code uint32, info *pb.SideInfo) (healthObs, string) {
-	if code != 0 {
+	if !accepted(code) {
 		return healthNone, ""
 	}
 	if resName, bad := firstErrorRow(
@@ -545,7 +561,7 @@ func legObservation(
 	info *pb.CntlrInfo,
 	legId uint64,
 ) (healthObs, string) {
-	if code != 0 {
+	if !accepted(code) {
 		return healthNone, ""
 	}
 	res, ok := info.GetLegIdToLeg()[legId]

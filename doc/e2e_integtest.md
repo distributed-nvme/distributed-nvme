@@ -891,7 +891,7 @@ change the sp's shape is the case.
 | 03 | `sp set-cntlid-slots --slots 0,2` → `INVALID_ARGUMENT` | `… drops slot 1, which cntlr`; and a refused call changed nothing |
 | 03 | `cntlr create --slot 2 --cn-white <spare cn>` | a third cntlr on that CN with `cntlid_slot 2`, **not** primary, **not** disabled; it connects every leg as a standby with no groups and no pools — on `WAIT_BUILD`, because a controller born now holds nothing and every leg is a fresh nvme-tcp connection, which is the standby half of a build rather than an incremental convergence; the cdc advertises the third transport — and being in the log is not the same as listening, so the export gate of §4.1 stage 10 runs over all three cntlrs before host0 reconnects, the two older ones answering on the first poll; host0's third path goes `live` and the namespace is `inaccessible` on it. **This half of the stage is skipped with a log line when no CN is free** — when every `--cn` guest already carries a cntlr of the sp — exactly as stage 08's CN half is; the refusals above still run and `SHA0` is re-read before the return. Neither skip can fire at an invocation the suite accepts (`--cn` is at least 3 and `CNTLR_CNT` is fixed at 2, so a spare CN always exists); both are guards against a shape a future flag could introduce, not branches the lab takes |
 | 03 | `cntlr delete --id <c3>` while enabled → `FAILED_PRECONDITION` | `is enabled; disable it first` |
-| 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs, and **host0's third path stops being usable for IO** — its state becomes anything but `live`. It is **not** asserted that the controller goes away, which is what this row used to claim and what cost the first `--slice-cnt 1` run a 60 s timeout (§8 item 18): the agent on that CN retires the host-facing subsystem, and when that leaves the port with none — as it did in that run, where both configfs directories were measured empty while host0 sat in `connecting` — the port stops listening, so the reconnect gets ECONNREFUSED, which *retries*. The controller then sits in `connecting` until `ctrl_loss_tmo`, a retry budget rather than a deadline, which no connect in this suite overrides and so is the kernel's 600 s default. The wait accepts `none` too, because a CN whose port still carried another subsystem would answer the reconnect with DNR and the kernel would delete the controller; which of the two happens is a property of that CN, and neither is this row's subject. The wait is given `WAIT_PROVISION`: what has to happen first is one incremental convergence by that agent, and `WAIT_HOST` is sized for the kernel-side transition that follows it. Every state but `live` ends it and a path that was never there reads `none`, so it could pass having measured nothing in three ways, and **two of them are closed by the witness**: a typo'd traddr and a misspelled NQN cannot produce the `nvme<X>` that the same host/NQN/traddr triple resolved to while the path was `live` a few lines above, and an empty or absent witness dies instead of passing — as does an empty *capture*, which is checked for both `''` and `none` where it is taken, since an empty reading means the driver-side jq did not run rather than that the path is absent. The **third is not** closed by it: the witness is a string captured before the disable and never re-read, so a host0 that had lost *every* controller for `ss0` in between would still hold a valid one and still read `none` on the first poll. That one is closed by a reading taken **after** the wait — the path to the primary is re-asserted `live`, the same assertion the step already makes before the delete, and nothing between them touches the primary |
+| 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs, and **host0's third path stops being usable for IO** — its state becomes anything but `live`. It is **not** asserted that the controller goes away, which is what this row used to claim and what cost the first `--slice-cnt 1` run a 60 s timeout (§8 item 18): the agent on that CN retires the host-facing subsystem, and when that leaves the port with none — as it did in that run, where both configfs directories were measured empty while host0 sat in `connecting` — the port stops listening, so the reconnect gets ECONNREFUSED, which *retries*. The controller then sits in `connecting` until `ctrl_loss_tmo`, a retry budget rather than a deadline, which no connect in this suite overrides and so is the kernel's 600 s default. The wait accepts `none` too, because a CN whose port still carried another subsystem would answer the reconnect with DNR and the kernel would delete the controller; which of the two happens is a property of that CN, and neither is this row's subject. The wait is given `WAIT_PROVISION`: what has to happen first is one incremental convergence by that agent, and `WAIT_HOST` is sized for the kernel-side transition that follows it. Every state but `live` ends it and a path that was never there reads `none`, so it could pass having measured nothing in three ways, and **two of them are closed by the witness**: a typo'd traddr and a misspelled NQN cannot produce the `nvme<X>` that the same host/NQN/traddr triple resolved to while the path was `live` a few lines above, and an empty or absent witness dies instead of passing — as does an empty *capture*, which is checked for both `''` and `none` where it is taken, since an empty reading means the driver-side jq did not run rather than that the path is absent. The **third is not** closed by it: the witness is a string captured before the disable and never re-read, so a host0 that had lost *every* controller for `ss0` in between would still hold a valid one and still read `none` on the first poll. That one is closed by a reading taken **after** the wait — the path to the primary is re-asserted `live`, the same assertion the step already makes before the delete, and nothing between them touches the primary. The step then **disconnects the surviving controller by device** and waits for its path to read `none`: a controller left in `connecting` keeps the hidden path device it made while it was live, an nvme namespace head lives as long as any path device references it, and so stage 90's `wait_dev_gone` could never succeed while it sat there — which is what it did, identically, at `02b303c` and with teardown-by-sweep applied. That cleanup is this step's, not stage 90's, because this is the step that creates the zombie |
 | 04 | `sp inspect-side --id <a side>`, `dn inspect`, `cn inspect`, `cntlr inspect` | the side's data device OK and `zeroed_ext_cnt == total_ext_cnt`, `applied_revision ≥ 1`; the DN's three rows OK with `port_info.res_name` still its own port id; the primary CN's four node rows OK; the primary cntlr's pools and groups OK |
 | 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe. Every rung is bounded by `WAIT_BUILD` and not `WAIT_PROVISION`: `DISABLE` suppresses everything CN19 names, so the CN tears the whole stack down and the climb back builds all 32 pools and all 64 arrays again — the same work setup pays for. One budget for all of them, because the cheap rungs return on their first poll and cost nothing |
 | 05 | after the ladder | host0 discovers and connects again — but **not** because `DISABLE` took its controllers away, which is what this row used to say. `DISABLE` removes the host-facing subsystem on *both* cntlrs, and `ss0` is the only subsystem either CN's port carries — the case issues no second `ss create`, no `xfer create` and no `clone create` at any step — so each port loses its **last** subsystem and stops listening; by §8 item 18 the reconnect is then ECONNREFUSED rather than refused with DNR, and host0's controllers sit in `connecting` on `ctrl_loss_tmo`'s 600 s retry budget. Whether the climb back lands inside that budget — in which case the kernel re-attaches them itself — or outside it decides what the connect-all finds to do, and neither ending is this row's subject. What **is**: the connect-all cannot prove the outcome, because `connect_verdict` fires only on a zero controller count and a controller that has been `connecting` since `DISABLE` still counts (so would `connect_added_ctrl`, which asks about the controller object — the very thing that survives). The step therefore waits for **`live` on both transports** afterwards, which is false of a controller still retrying. All of it behind the export gate over **every** cntlr, because the ladder is sp-scoped and the standby tore its own export down and rebuilt it too while `ops_set_level`'s wait watched only the primary. That gate is the **only** wait covering the standby here, and what it is waiting for there is a from-nothing rebuild, so it is given `WAIT_BUILD` rather than the default `WAIT_PROVISION`: `build()` is sequential with legs first and the subsystem among the last rows, so the standby's `ss_id_to_subsystem` cannot go `RES_STATUS_OK` until every leg has been reconnected — the same piece of work the rung above spends a `WAIT_BUILD` on for the primary. The primary returns on the first poll, so the wider budget costs nothing when nothing is wrong. Then the verdict, the two `live` waits, and ANA first, device second; `SHA0` |
@@ -1388,16 +1388,16 @@ carrying the stack it is `disconnect_prefix` over up to 128 side connections at
 **The CN timeouts now have a candidate and still have no confirmed cause.**
 `md_stop_all` is one function in the shared node body, so the no-op of §8 item
 17 was on the CN too, and `cn_cleanup_phase2` places its `md_stop_all` between
-the top-of-stack dm kinds and the kind `a`/`9`/`b` wrappers precisely to unpin
-the leg wrappers: with the stop doing nothing, every kind-`9` leg wrapper under
-a live array — up to 128 at this shape — went the long way round through
-`dm_force_remove`. That is a mechanism, and it is more than "nothing explains
-it" ever was. It is not a finding, and what it leaves open is narrower than
-"two CNs and not one": `CNTLR_CNT` is 2 and `--cn` is at least 3 (three in the
-lab, §2), so at least one CN carries no cntlr of this sp and its
-`cn_cleanup_phase2` walks empty `dmsetup ls` output — the spare CN finishing
+the top-of-stack dm kinds and the kind `ca`/`c9`/`cb` wrappers precisely to
+unpin the leg wrappers: with the stop doing nothing, every kind-`c9` leg
+wrapper under a live array — up to 128 at this shape — went the long way round
+through `dm_force_remove`. That is a mechanism, and it is more than "nothing
+explains it" ever was. It is not a finding, and what it leaves open is
+narrower than "two CNs and not one": `CNTLR_CNT` is 2 and `--cn` is at least
+3 (three in the lab, §2), so at least one CN carries no cntlr of this sp and
+its `cn_cleanup_phase2` walks empty `dmsetup ls` output — the spare CN finishing
 fast is the shape, not a clue. Of the two
-that are heavy (128 kind-`9` leg wrappers and 128 `:2:` connections each), only
+that are heavy (128 kind-`c9` leg wrappers and 128 `:2:` connections each), only
 the **primary** has arrays, because CN12 gives a standby no groups. So the md
 no-op is a mechanism for whichever CN was primary and **not** for the standby,
 whose overrun is the part still unexplained. The next run is what settles it,
@@ -1458,6 +1458,30 @@ plus `mdadm --detail --no-devices --export` for an `inactive` array, which udev
 has no `MD_NAME` for at all, and the members-in-`/proc/mdstat` reading for the
 array neither command names.
 
+**One class of debris this sweep cannot see at all**, and no timeout or gate
+will ever say so. Every dm verb here that removes or enumerates by name works
+by kind — `dm_remove_kind` takes one — and `dm_names`, which `dm_kind_names`,
+`dm_remove_all`, `dm_cnt`, `cn_residue` and `dn_residue` are all built on,
+matches the kind field as a **role letter plus a hex digit** (`c0`…`cb` on a
+CN, `d0`…`d5` on a DN; `common/name_fmt.go`). The one pair that does not is
+the suspend pair: `resume_suspended` and `suspended_dms` match the bare `dnv`
+prefix (`^dnv…:..s`), deliberately looser than `dm_names` so that they also
+sweep debris an older run left on a shared lab guest. Residue an older binary
+left under the single-digit spelling that field used to carry matches none of
+the kind verbs: stage 91 does not report it, and it goes on holding the loop
+device under it open for as long as the guest lives. The suspend pair is the
+only code here that reaches it at all, and only while it is *suspended*:
+`resume_suspended` resumes such a device during the sweep and §7's dump lists
+it among that guest's suspended devices, but no verb here removes it. This
+suite has no *lab* wipe of its own — its own `wipe` verb (§4.6 step 2) sweeps
+NQNs on the host guests and touches no dm device — and the clearing verb for
+this debris is the agent suites' `--wipe` (`cnagent_test.sh`,
+`dnagent_test.sh`; their §16), which reads no kind at all, takes a pair of ssh
+targets, runs no case and no preflight. It has to be run
+once per guest and **alone**: it removes every `dnv*` dm device and every
+`nqn.2024-01.io.dnv*` subsystem on the node whoever created them, and its
+`nvme disconnect-all` takes every fabrics controller there, dnv's or not.
+
 The order:
 
 1. **Hosts first.** They hold the controllers over this suite's subsystems. A
@@ -1496,12 +1520,12 @@ The order:
 
    The md stop in the middle of that list is **load-bearing and not
    bookkeeping**: a live raid1 array holds its members open, and its members
-   are the kind-`9` leg wrappers (`CnLegName`, "what md/groups consume as the
-   member device"), so the `a`/`9` pass after it cannot do its work until it
-   has done its own. Kind `a` is not pinned by an array at all — `CnGrpName` is
-   the **RedundNone** group device, and a RedundMdRaid1 group has the md device
-   in its place and no kind-`a` name — so at this suite's default `--redund
-   raid1` it is the 128 leg wrappers that are at stake. It is the same
+   are the kind-`c9` leg wrappers (`CnLegName`, "what md/groups consume as the
+   member device"), so the `ca`/`c9` pass after it cannot do its work until it
+   has done its own. Kind `ca` is not pinned by an array at all — `CnGrpName`
+   is the **RedundNone** group device, and a RedundMdRaid1 group has the md
+   device in its place and no kind-`ca` name — so at this suite's default
+   `--redund raid1` it is the 128 leg wrappers that are at stake. It is the same
    `md_stop_all` the DN runs, from the same shared helper body, and it was the
    same no-op until 2026-09-17 (§8 item 17).
 
@@ -1523,14 +1547,15 @@ The order:
    assembles an array.** Because something else can, and did: an unmasked DN
    guest assembles the leg superblocks the CN wrote through the side export
    (§8 item 15). Such an array sits on *top* of the DN's stack holding one of
-   this suite's own dm devices open — the side (kind 4), or the per-CN linear
-   (kind 1) that maps the side 1:1 and therefore carries the same superblock at
-   the same offset; the lab reading named a dm *minor* and settles nothing
-   between them, and a pinned kind-1 linear holds the kind-4 side open in its
-   turn, so the side is unremovable either way. A held dm device does not come
-   back: `dmsetup remove` fails, and `dm_force_remove`'s fallback — resume,
-   then `remove --force --retry`, bounded at 10 + 10 + 15 s — only swaps an
-   error table in and leaves the device where it was. So every pinned device
+   this suite's own dm devices open — the side (kind `d4`), or the per-CN
+   linear (kind `d1`) that maps the side 1:1 and therefore carries the same
+   superblock at the same offset; the lab reading named a dm *minor* and
+   settles nothing between them, and a pinned kind-`d1` linear holds the
+   kind-`d4` side open in its turn, so the side is unremovable either way. A
+   held dm device does not come back: `dmsetup remove` fails, and
+   `dm_force_remove`'s fallback — resume, then `remove --force --retry`,
+   bounded at 10 + 10 + 15 s — only swaps an error table in and leaves the
+   device where it was. So every pinned device
    costs the best part of half a minute and survives anyway — twice over where
    the array sits on the linear, once for the linear and once for the side it
    goes on holding — which is how a verb that removes dozens of them runs past
@@ -1757,11 +1782,12 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
    `react` are skipped with a log line, because a RedundNone group has one leg,
    no md array and no redundancy to repair.
 8. **The two md halves of the residue check ask different questions, and BOTH
-   ARE STILL BLIND — this is open, not closed.** Both grep `mdadm --detail
-   --scan` for a `dnv-` array name — `cn_residue` inside the helper,
-   `dn_md_residue` through a one-line read-only ssh. On a CN the question is
-   whether the agent's own arrays went with the sp, which is teardown. On a DN
-   the question is whether an array exists that *nothing in this suite
+   ARE NOW REAL — both run `md_names` (`/proc/mdstat` plus `MD_NAME`), so the
+   `--detail --scan` blindness is closed in the code and left only in the
+   wording.** `cn_residue` calls it inside the helper, `dn_md_residue` through
+   the dying `helper_dn` over the same shared node body. On a CN the question
+   is whether the agent's own arrays went with the sp, which is teardown. On a
+   DN the question is whether an array exists that *nothing in this suite
    assembles on purpose* — the stray assembly of item 15 — which makes it the
    assertion that the DN's md mask worked, and not a formality.
    This paragraph used to say it "had two ways to be blind and both are now
@@ -1769,19 +1795,32 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
    on a DN where the tool is missing, and the probe goes through the *dying*
    `ssh_dn` with the caller dying on a non-zero status, so an ssh or sudo that
    fails at that moment is a failure rather than an empty pass. Both of those
-   remain true, and **there was a third, which neither closed and which is the
-   one that matters**: `mdadm --detail --scan` does not print a name at all on
-   these guests (item 17), so the `name=…dnv-…` grep on both halves matches
-   nothing, always, and each half passes on every guest whatever it holds.
-   `md_stop_all` had exactly the same defect and is fixed; these two probes are
-   **not** fixed, and the same third blindness sits on `cnagent_test.sh`'s
-   `residue`, whose md line is the same grep. Until they are moved to `MD_NAME`
-   the way `md_stop_all` was, read a green stage-91 md assertion as "not
-   asked". The other qualification stands: it is not a general "no md on this
-   guest" check either, since a lab guest's own arrays are outside the name
-   filter on both roles, deliberately. Neither half ran in either of the two
-   lab runs so far, because both died before a case reached stage 91 — the
-   first run's stray arrays were found by hand.
+   remain true, and **there was a third, which neither closed and which was the
+   one that mattered**: `mdadm --detail --scan` does not print a name at all on
+   these guests (item 17), so the `name=…dnv-…` grep both halves used to run
+   matched nothing, always, and each half passed on every guest whatever it
+   held. `md_stop_all` had exactly the same defect, and the fix reached all
+   three probes with it: `cn_residue` and `dn_md_residue` here and `residue` in
+   `cnagent_test.sh` all filter `md_names` now — `/proc/mdstat` plus `MD_NAME`
+   from `udevadm info`, falling back to `mdadm --detail --no-devices --export`
+   — so no `mdadm --detail --scan` grep survives in any probe and a green
+   stage-91 md assertion is a check that was taken. What was not updated is the
+   prose around it, which still reads as though nothing had changed:
+   `case_residue`'s lead comment still says "both probes below still grep
+   `mdadm --detail --scan`", the `dn_md_residue` assertion string still reads
+   "NOT ASKED", the CN wait label still calls `cn_residue`'s md list "the blind
+   probe", the closing log line still says the md third was NOT ASKED, and
+   `cn_residue`'s own header still declares "ITS md LINE IS BLIND AND IS NOT
+   FIXED HERE". Only `dn_md_residue`'s header records the fix; the stage 91
+   banner names md plainly and needs no change. Two qualifications stand. It is
+   not a general "no md on this guest" check, since a lab guest's own arrays
+   are outside the name filter on both roles, deliberately; and neither name
+   source reaches an array that is **both** `inactive` and standing over
+   members `mdadm` cannot read, which is the one corner item 17 leaves to an
+   operator. Both halves ran for the first time in the first `--slice-cnt 1`
+   run (`c8162b9`, which is after the `md_names` move), whose `smoke` case
+   reached stage 91 and passed it; the three runs before it all died before a
+   case got there, and the first run's stray arrays were found by hand.
 9. **A blocked probe leaves an unkillable `dd` behind.** When `host_sha_probe`
    answers `blocked` the reader is in D state, where `timeout` cannot reach it;
    the resume that unwedges the device reaps it. That is the price of learning
@@ -1888,15 +1927,17 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     **Which device, exactly, is not established, and the suite no longer says
     it is.** The evidence below names a dm *minor* (`dm-76`) and not a dm kind.
     Two of this suite's devices carry that superblock at the same offset: the
-    side (kind 4), and the per-CN dm-linear (kind 1) that the nvmet namespace
-    actually exports (`agent/dnagent/syncup_side.go:597`), which `ensureDmLinear`
-    builds over the side at offset 0 for its whole length (`:529-566`). udev
+    side (kind `d4`), and the per-CN dm-linear (kind `d1`) that the nvmet
+    namespace actually exports (`agent/dnagent/syncup_side.go:597`), which
+    `ensureDmLinear` builds over the side at offset 0 for its whole length
+    (`:529-566`). udev
     probes both and `mdadm -I` takes whichever raised its event first.
-    Operationally it does not change the remedy — `dn_cleanup` removes kind 1
-    before kind 4, and a kind-1 linear that will not go holds the kind-4 side
-    open in its turn, so the side survives either way — but an operator sent to
-    look for "an array over a side device" would not recognise one over a
-    `dnv-…-1-…` linear, which is why the messages name both.
+    Operationally it does not change the remedy — `dn_cleanup` removes kind
+    `d1` before kind `d4`, and a kind-`d1` linear that will not go holds the
+    kind-`d4` side open in its turn, so the side survives either way — but an
+    operator sent to look for "an array over a side device" would not
+    recognise one over a `dnv-…-d1-…` linear, which is why the messages name
+    both.
 
     The evidence, from the lab on 2026-09-17 between the first run (`deca203`)
     and the second (`078de79`):
@@ -2167,9 +2208,14 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     its holder lets go. With the stop working the busy case should not arise
     from md at all.
 
-    **The same defect is still live in three residue probes** — `cn_residue`
-    and `dn_md_residue` here, `residue` in `cnagent_test.sh` — which grep the
-    same absent `name=` field and therefore assert nothing (item 8).
+    **The same fix went into the three residue probes** — `cn_residue` and
+    `dn_md_residue` here, `residue` in `cnagent_test.sh` — which all read
+    `md_names` now, so the md third of the stage-91 assertion is asked. What is
+    left is text rather than code: `cn_residue`'s own comment still declares
+    its md line blind and unfixed, added by the same commit that fixed it, and
+    `case_residue`'s comment, its DN assertion label, its CN wait label and its
+    closing log line all still report the md third as not asked. Only
+    `dn_md_residue`'s comment records the fix (item 8).
 
 18. **A host controller does not go away when the target stops listening, and
     the DNR rule that says otherwise needs a port that is still up.** Read out
@@ -2278,6 +2324,39 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     two.) That site now waits for `live` on **both**
     transports instead; `connect_added_ctrl` would have been vacuous there for
     the same reason, since the controller object is what survives.
+
+    **And then the zombie is dropped, which is the half this item was missing
+    until a teardown stage proved it mattered.** Everything above establishes
+    that the controller SURVIVES the delete, in `connecting`, for the whole
+    600 s `ctrl_loss_tmo`. What none of it said is that the survivor is not
+    inert: it keeps the hidden per-controller path device (`nvme1c3n1`,
+    `hidden=1`) it created while it was live, and an nvme multipath namespace
+    **head** — and with it the `/dev/disk/by-id/nvme-uuid.*` link — lives as
+    long as any path device references it. So a later `ns delete` cannot take
+    that link away inside any budget this suite uses, however correctly the
+    surviving CNs remove the namespace, and `case_teardown`'s `wait_dev_gone 0
+    "$UUID1"` was unsatisfiable on **every** build: a 2026-09-18 run at
+    `02b303c` and one of the same case with teardown-by-sweep applied both died
+    at `it-ops-90` on the same 60 s wait, with host0 in exactly this shape
+    (nvme1 live, nvme2 live, nvme3 connecting, one by-id link, the `hidden=1`
+    path device present). The two steps had simply been written against each
+    other — this one proves the path stops carrying IO, that one assumed no
+    path was left at all.
+
+    Stage 03 therefore ends by disconnecting the survivor **by device**
+    (`nvme disconnect -d`), which takes that one controller and leaves the two
+    live paths `ns delete` is actually proved over — the same
+    `--device`-not-`--nqn` rule a migrating leg's dead side needs — and then
+    waits on `host_path_is_none`, the strict end of `host_path_not_live`: only
+    a path that is **gone** releases the head, so "not live" is the wrong
+    demand here. The disconnect is `|| true`, because the DNR ending
+    `host_wait_path_not_live` also accepts leaves nothing to disconnect and
+    `nvme disconnect` exits non-zero on it; the wait after it is what asserts,
+    not the verb. `host_path_is_none` asks for the literal `none` rather than
+    testing for emptiness, for `host_path_not_live`'s reason: `path_field` ends
+    `first // "none"` and answers `""` only when the driver-side jq did not
+    run, and "the path is gone" is the wrong way for a failed measurement to
+    resolve.
 
     **Not implicated:** the four `host_path_gone` sites. Each is preceded by
     `disconnect_prefix`, and each of those verbs discards every disconnect's
@@ -2496,7 +2575,7 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   are touched. (That narrow sentence still holds — but the premise that the md
   chain is a DN story does not. The 2026-09-17 `md_stop_all` entry below, item
   4, supplies a candidate for the CN carrying the stack: arrays on the **CN**,
-  left standing by the same no-op, pinning that verb's own kind-`9` leg
+  left standing by the same no-op, pinning that verb's own kind-`c9` leg
   wrappers. See §6. It covers a primary and not a standby, so the CN question
   is narrower than it is here, not closed.) The repeat
   invocation finished on all ten guests, CNs included, but it does not settle
@@ -2683,10 +2762,11 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
      teardown, and the **agent** stops the arrays on that path — in the agent's
      code, not in an assertion: `syncup_cntlr.go`'s retire walks the plan's
      groups into `removeGroup`, which is `mdadm --stop` for a raid1 group
-     (`agent/cnagent/md.go`). The suite asserts nothing about it. After
+     (`agent/cnagent/md.go`). No assertion names that call. After
      `cn_drop 1; cn_drop 2` each case runs only `assert_no_residue`, whose md
-     line is the same blind `mdadm --detail --scan` grep, so the probe that
-     would have covered the drop is the vacuous one. (`redund`'s demote stage
+     line is the same `md_names` read this change gave `residue`, so the probe
+     that covers the drop is a real one now — it asserts the arrays are gone
+     rather than the `mdadm --stop` itself. (`redund`'s demote stage
      *does* assert `mdadm --stop` twice, and that is evidence the agent's stop
      works — but demote is a `SyncupCntlr` with `primary = false`, a different
      path from the `syncup-cn` with an empty cntlr list that `cn_drop` sends.)
@@ -2713,15 +2793,15 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   4. **The CN timeouts have a candidate now and still no confirmed cause.**
      `md_stop_all` is one function in the shared node body, so
      `cn_cleanup_phase2`'s own call — which sits between the top-of-stack dm
-     kinds and the `a`/`9`/`b` pass exactly to unpin the kind-`9` leg wrappers
-     — stopped nothing either, and up to 128 leg wrappers per CN would then
-     have taken the fallback. It is a mechanism and not a finding, and what it
-     leaves open is the **standby**, not "two CNs and not one": `CNTLR_CNT` is
-     2 and `--cn` is at least 3 (§2), so a spare CN holds no cntlr of the
-     sp and nothing for `cn_cleanup_phase2` to remove — two heavy CNs and a
-     spare one is the shape, not an anomaly. Of the two heavy ones only the
-     primary has arrays (CN12: a standby has no groups), so the md no-op
-     explains the primary's overrun and not the standby's.
+     kinds and the `ca`/`c9`/`cb` pass exactly to unpin the kind-`c9` leg
+     wrappers — stopped nothing either, and up to 128 leg wrappers per CN would
+     then have taken the fallback. It is a mechanism and not a finding, and
+     what it leaves open is the **standby**, not "two CNs and not one":
+     `CNTLR_CNT` is 2 and `--cn` is at least 3 (§2), so a spare CN holds no
+     cntlr of the sp and nothing for `cn_cleanup_phase2` to remove — two heavy
+     CNs and a spare one is the shape, not an anomaly. Of the two heavy ones
+     only the primary has arrays (CN12: a standby has no groups), so the md
+     no-op explains the primary's overrun and not the standby's.
      `CLEANUP_TIMEOUT` stays at 600 s until a run measures it, and the gate's
      `cn*` remedy says "no confirmed cause" rather than "no recorded cause"
      (§6).
@@ -2737,31 +2817,43 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
      array neither read could name, and — for that last case — how to identify
      it from its members in `/proc/mdstat` instead.
 
-  **Left open, and named rather than fixed:** the three residue probes that
-  carry the identical defect — `cn_residue` and `dn_md_residue` in this suite,
-  `residue` in `cnagent_test.sh` — still grep `mdadm --detail --scan` for a
-  `name=` that is not there, so the md half of the stage-91 teardown assertion
-  matches nothing on every guest and passes whatever is held. §8 item 8 no
-  longer claims that probe's blindness is closed, and stage 91's own banner,
-  its `dn_md_residue` assertion text and its closing log line now say the md
-  third is **not asked**, so a green stage does not read as a check that was
-  taken.
+  **Also fixed, and only half-announced:** the three residue probes that
+  carried the identical defect — `cn_residue` and `dn_md_residue` in this
+  suite, `residue` in `cnagent_test.sh` — were moved to `md_names` in this same
+  change, a new function in the shared node body (sourced for both roles) that
+  walks `/proc/mdstat` and reads each array's `MD_NAME` by `md_stop_all`'s
+  route. The md half of the stage-91 teardown assertion is therefore real, and
+  on a DN so is the assertion that the md mask worked.
 
-  Three sentences in `doc/cnagent_integtest.md` are stale and that document is
-  outside this one's remit, so they are named here for the next sweep — but
-  they are **not** all the same kind of stale:
+  What was **not** updated is the prose around them, so a green stage still
+  reads as a check that was not taken: `case_residue`'s header still opens
+  "READ THE md THIRD OF THIS STAGE AS 'NOT ASKED'" and says both probes "still
+  grep `mdadm --detail --scan`"; the DN assertion text still ends "(NOT ASKED,
+  §8 item 17)"; the CN wait label still calls `cn_residue`'s md list "the blind
+  probe"; the closing log line still says "the md third was NOT ASKED"; and
+  `cn_residue`'s own header still opens "ITS md LINE IS BLIND AND IS NOT FIXED
+  HERE". Stage 91's banner is not among them — it names md as a plain claim,
+  which is now what it is. §8 item 8 reads the same way.
+
+  Three sentences in `doc/cnagent_integtest.md` were left behind by this change
+  and that document is outside this one's remit, so they are named here for the
+  next sweep — but they are **not** all the same kind of stale:
 
   * §16 step 7 specifies that suite's cleanup order as "`mdadm --stop` every
     array whose `mdadm --detail --scan` name starts `dnv-`". That is
     `md_stop_all`, the function this change rewrote, so it is a live doc/code
     contradiction and not a recorded open item: the filter is now
-    `/proc/mdstat` plus `MD_NAME`.
-  * §5's binary list still omits `udevadm`, which `cnagent_test.sh`'s preflight
+    `/proc/mdstat` plus `MD_NAME`. (Corrected there since.)
+  * §4's binary list still omits `udevadm`, which `cnagent_test.sh`'s preflight
     now requires (for `udevadm control --reload` and for the `MD_NAME` read).
     That divergence is **new, created by this change**.
   * the residue oracle and the diagnostics dump are described as reading an
-    "`mdadm --detail --scan` name". Those two match the probes left blind on
-    purpose above, and are stale in the same way §8 item 8 is.
+    "`mdadm --detail --scan` name". The diagnostics dump's is right — §17's
+    dump is `diag`, which still runs that command. The residue oracle's is
+    **not**: this same change moved `residue`'s md line to `md_names`
+    (`/proc/mdstat` plus `MD_NAME`), so §11 step 7's "`mdadm --detail --scan`
+    lists no `dnv-{sp id}-*` array" is a live doc/code contradiction, not a
+    description of a probe left blind on purpose.
 
 * **2026-09-17 — the first `--slice-cnt 1` run, and the predicate it broke.**
   The suite was run at the smallest shape (`--slice-cnt 1 --redund raid1`) at

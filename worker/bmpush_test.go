@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -33,6 +34,10 @@ type pushRecorder struct {
 	gate chan struct{}
 	// entered is signalled once per delivery, before the gate.
 	entered chan bmPart
+	// attempts counts every delivery ENTERED, including the ones that fail:
+	// "the plan ended" is a statement about what was attempted, and a failed
+	// delivery leaves no part behind in parts.
+	attempts int
 	// reply is the AgentReply code of the next delivery.
 	code uint32
 	err  error
@@ -52,6 +57,7 @@ func (r *pushRecorder) deliver(
 	part bmPart,
 ) (uint32, string, error) {
 	r.mu.Lock()
+	r.attempts++
 	r.inFlight[part.resId]++
 	if r.inFlight[part.resId] > 1 {
 		r.maxOne = false
@@ -103,6 +109,12 @@ func (r *pushRecorder) peakInFlight() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.peak
+}
+
+func (r *pushRecorder) attemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
 }
 
 func (r *pushRecorder) setCode(code uint32) {
@@ -258,10 +270,9 @@ func TestBmGrownChunkMemo(t *testing.T) {
 		{SliceIdx: 2, Idx: 1, ModRev: 20},
 	}
 	p.submit(&bmPlan{
-		resId:    spCloneId,
-		name:     spCloneNm,
-		revision: 9,
-		parts:    p.missing(spCloneId, chunks, nil),
+		resId: spCloneId,
+		name:  spCloneNm,
+		parts: p.missing(spCloneId, chunks, nil),
 	})
 	waitFor(t, "both chunks pushed", func() bool {
 		return len(rec.delivered()) == 2
@@ -309,9 +320,8 @@ func TestBmGrownChunkMemo(t *testing.T) {
 
 // TestBmAscendingOneInFlight checks BM3: the parts of one object go out in
 // ascending (src_slice_idx, bm_idx) — lexicographic ACROSS source slices, not
-// by bm_idx alone — one at a time, each carrying the object's synced revision;
-// a plan submitted while one is running replaces the pending one instead of
-// starting a second runner.
+// by bm_idx alone — one at a time; a plan submitted while one is running
+// replaces the pending one instead of starting a second runner.
 func TestBmAscendingOneInFlight(t *testing.T) {
 	captureLogs(t)
 	rec := newPushRecorder()
@@ -323,13 +333,13 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 		{SliceIdx: 0, Idx: 0, ModRev: 10},
 	}, nil)
 	p.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7, parts: parts,
+		resId: spCloneId, name: spCloneNm, parts: parts,
 	})
 	// The first delivery is in flight; a second submit must not start a
 	// second runner.
 	<-rec.entered
 	p.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7,
+		resId: spCloneId, name: spCloneNm,
 		parts: []model.BmChunk{{SliceIdx: 2, Idx: 0, ModRev: 13}},
 	})
 	close(rec.gate)
@@ -345,7 +355,7 @@ func TestBmAscendingOneInFlight(t *testing.T) {
 		t.Fatalf("delivered %v, want %v", bmAddrs(rec.delivered()), want)
 	}
 	for i, part := range rec.delivered() {
-		if part.revision != 7 || part.resId != spCloneId {
+		if part.resId != spCloneId {
 			t.Fatalf("part = %+v", part)
 		}
 		// The fetch stub serves the pair it was asked for (BM1): a part whose
@@ -366,7 +376,7 @@ func TestBmObjectsPushIndependently(t *testing.T) {
 	p := newTestPusher(t, bmTestDeps(t), rec)
 	for _, resId := range []uint64{spCloneId, spCloneId + 1} {
 		p.submit(&bmPlan{
-			resId: resId, name: spCloneNm, revision: 7,
+			resId: resId, name: spCloneNm,
 			parts: []model.BmChunk{{Idx: 0, ModRev: 10}},
 		})
 	}
@@ -380,71 +390,189 @@ func TestBmObjectsPushIndependently(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BM6 — failure
+// [D13] — a failed push is logged, and nothing else
 // ---------------------------------------------------------------------------
 
-// TestBmRejectedPushSetsResync checks BM6: a rejected push (code != 0) raises
-// the resync flag the child turns into an equal-revision Syncup*, and the rest
-// of the plan is abandoned — the next reply's diff decides again.
-func TestBmRejectedPushSetsResync(t *testing.T) {
-	logs := captureLogs(t)
-	rec := newPushRecorder()
-	rec.setCode(common.ReplyCodeStaleRevision)
-	p := newTestPusher(t, bmTestDeps(t), rec)
-	p.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7,
-		parts: []model.BmChunk{
-			{SliceIdx: 2, Idx: 0, ModRev: 10},
-			{SliceIdx: 2, Idx: 1, ModRev: 11},
-		},
+// TestPushFailureIsLoggedOnly pins what replaced BM6: a push that fails — for
+// any of the three reasons there are — is LOGGED, ends the rest of that plan,
+// and arms nothing. There is no flag left to raise: the diff a push comes from
+// is computed from the agent's own acknowledged set in the next Syncup* reply,
+// so a chunk that did not land is simply missing again next round and is
+// re-planned there. BM6's extra equal-revision re-sync only hastened that by
+// one round and cost a full re-apply of the object to do it.
+//
+// The sub-cases are the three failure paths of pushOne, plus the end-to-end
+// negative: nothing the push path does makes the child issue a Syncup*.
+func TestPushFailureIsLoggedOnly(t *testing.T) {
+	t.Run("transport error", func(t *testing.T) {
+		logs := captureLogs(t)
+		rec := newPushRecorder()
+		rec.setErr(errors.New("connection refused"))
+		p := newTestPusher(t, bmTestDeps(t), rec)
+		p.submit(&bmPlan{
+			resId: spCloneId, name: spCloneNm,
+			parts: []model.BmChunk{
+				{SliceIdx: 2, Idx: 0, ModRev: 10},
+				{SliceIdx: 2, Idx: 1, ModRev: 11},
+			},
+		})
+		waitFor(t, "the failure record", func() bool {
+			return len(logs.withMsg(msgBitmapPushFailed)) > 0
+		})
+		// No AgentReply, so no "bitmap pushed" record to carry a code.
+		if got := len(logs.withMsg(msgBitmapPushed)); got != 0 {
+			t.Fatalf("%d bitmap pushed records without a reply", got)
+		}
+		rec0 := logs.withMsg(msgBitmapPushFailed)[0]
+		if rec0["error"] != "connection refused" {
+			t.Fatalf("error = %v, want the transport error", rec0["error"])
+		}
+		if rec0["kind"] != bmKindClone {
+			t.Fatalf("kind = %v", rec0["kind"])
+		}
+		if got := rec.attemptCount(); got != 1 {
+			t.Fatalf("%d deliveries attempted, want the plan to end after "+
+				"the failed one", got)
+		}
 	})
-	waitFor(t, "the resync flag", func() bool { return p.takeFailed() })
-	if got := len(rec.delivered()); got != 1 {
-		t.Fatalf("%d parts delivered, want the plan abandoned after the "+
-			"rejected one", got)
-	}
-	// takeFailed clears the flag: one resync per failure (BM6).
-	if p.takeFailed() {
-		t.Fatalf("the resync flag was not cleared")
-	}
-	records := logs.withMsg(msgBitmapPushed)
-	if len(records) != 1 {
-		t.Fatalf("%d bitmap pushed records, want one", len(records))
-	}
-	if records[0]["kind"] != bmKindClone {
-		t.Fatalf("kind = %v", records[0]["kind"])
-	}
-	if code, _ := records[0]["code"].(float64); uint32(code) !=
-		common.ReplyCodeStaleRevision {
-		t.Fatalf("code = %v", records[0]["code"])
-	}
-	// The §12 record addresses the chunk by the whole pair (BM3).
-	if idx, _ := records[0]["src_slice_idx"].(float64); uint32(idx) != 2 {
-		t.Fatalf("src_slice_idx = %v", records[0]["src_slice_idx"])
-	}
-	if idx, _ := records[0]["bm_idx"].(float64); uint32(idx) != 0 {
-		t.Fatalf("bm_idx = %v", records[0]["bm_idx"])
-	}
-}
 
-// TestBmFailedPushSetsResync checks BM6 for a transport failure: no
-// AgentReply, so no "bitmap pushed" record, and the flag is raised all the
-// same.
-func TestBmFailedPushSetsResync(t *testing.T) {
-	logs := captureLogs(t)
-	rec := newPushRecorder()
-	rec.setErr(errors.New("connection refused"))
-	p := newTestPusher(t, bmTestDeps(t), rec)
-	p.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7,
-		parts: []model.BmChunk{{Idx: 0, ModRev: 10}},
+	t.Run("chunk not found", func(t *testing.T) {
+		logs := captureLogs(t)
+		rec := newPushRecorder()
+		p := newBmPusher(bmPusherParams{
+			deps:     bmTestDeps(t),
+			seed:     seedOf(4),
+			kind:     bmKindMigr,
+			addrPort: spDnC,
+			idAttr:   "migr_id",
+			ids:      []slog.Attr{slog.Uint64("dn_id", spDnIdC)},
+			fetch: func(
+				ctx context.Context, name string, sliceIdx uint32, bmIdx uint32,
+			) ([]byte, bool, error) {
+				return nil, false, nil
+			},
+			deliver: rec.deliver,
+		})
+		t.Cleanup(p.stop)
+		p.submit(&bmPlan{
+			resId: spMigrId, name: spMigrName,
+			parts: []model.BmChunk{
+				{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 11},
+			},
+		})
+		waitFor(t, "the failure record", func() bool {
+			return len(logs.withMsg(msgBitmapPushFailed)) > 0
+		})
+		if got := rec.attemptCount(); got != 0 {
+			t.Fatalf("%d deliveries attempted without a chunk value", got)
+		}
+		rec0 := logs.withMsg(msgBitmapPushFailed)[0]
+		if rec0["error"] != "chunk not found" {
+			t.Fatalf("error = %v, want \"chunk not found\"", rec0["error"])
+		}
+		if rec0["migr_id"] == nil {
+			t.Fatalf("the record does not name the migration: %v", rec0)
+		}
 	})
-	waitFor(t, "the resync flag", func() bool { return p.takeFailed() })
-	if got := len(logs.withMsg(msgBitmapPushed)); got != 0 {
-		t.Fatalf("%d bitmap pushed records without a reply", got)
-	}
-	waitFor(t, "the failure record", func() bool {
-		return len(logs.withMsg(msgBitmapPushFailed)) > 0
+
+	t.Run("non-zero reply code", func(t *testing.T) {
+		logs := captureLogs(t)
+		rec := newPushRecorder()
+		rec.setCode(common.ReplyCodeUnknownObject)
+		p := newTestPusher(t, bmTestDeps(t), rec)
+		p.submit(&bmPlan{
+			resId: spCloneId, name: spCloneNm,
+			parts: []model.BmChunk{
+				{SliceIdx: 2, Idx: 0, ModRev: 10},
+				{SliceIdx: 2, Idx: 1, ModRev: 11},
+			},
+		})
+		waitFor(t, "the failure record", func() bool {
+			return len(logs.withMsg(msgBitmapPushFailed)) > 0
+		})
+		if got := rec.attemptCount(); got != 1 {
+			t.Fatalf("%d deliveries attempted, want the plan to end after "+
+				"the refused one", got)
+		}
+		// The §12 "bitmap pushed" record carries the code and the chunk's
+		// whole address (BM3); the failure record next to it carries the
+		// AGENT's own explanation, which is the only thing that says WHY.
+		pushed := logs.withMsg(msgBitmapPushed)
+		if len(pushed) != 1 {
+			t.Fatalf("%d bitmap pushed records, want one", len(pushed))
+		}
+		if code, _ := pushed[0]["code"].(float64); uint32(code) !=
+			common.ReplyCodeUnknownObject {
+			t.Fatalf("code = %v", pushed[0]["code"])
+		}
+		if idx, _ := pushed[0]["src_slice_idx"].(float64); uint32(idx) != 2 {
+			t.Fatalf("src_slice_idx = %v", pushed[0]["src_slice_idx"])
+		}
+		if idx, _ := pushed[0]["bm_idx"].(float64); uint32(idx) != 0 {
+			t.Fatalf("bm_idx = %v", pushed[0]["bm_idx"])
+		}
+		failed := logs.withMsg(msgBitmapPushFailed)[0]
+		if failed["details"] != "rejected" {
+			t.Fatalf("details = %v, want the agent's own explanation",
+				failed["details"])
+		}
+		if code, _ := failed["code"].(float64); uint32(code) !=
+			common.ReplyCodeUnknownObject {
+			t.Fatalf("failure code = %v", failed["code"])
+		}
+	})
+
+	// The end-to-end negative, through a real cntlr child: a refused push must
+	// not make the child re-sync. The agent is one revision behind for its
+	// FIRST round only, so exactly one SyncupCntlr is owed — the one that
+	// plans the push — and every later round matches. The desired state never
+	// changes here either (RW3/RW6 are the only other source of a Syncup*), so
+	// a second one could only be something the push path re-armed.
+	t.Run("no re-sync follows", func(t *testing.T) {
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		for _, chunk := range spCloneChunks {
+			h.store.seed(t,
+				model.CloneBitmapKey(
+					testCid, testSpId, spCloneNm, chunk.SliceIdx, chunk.Idx,
+				),
+				&pb.CloneBitmap{Bitmap: []byte{1}},
+			)
+		}
+		var rounds atomic.Int64
+		h.cntlrs[spCnA].checkReply = func(
+			req *pb.CheckCntlrRequest,
+		) *pb.CheckCntlrReply {
+			if rounds.Add(1) == 1 {
+				return &pb.CheckCntlrReply{Revision: req.GetRevision() - 1}
+			}
+			return &pb.CheckCntlrReply{Revision: req.GetRevision()}
+		}
+		// No bm_info_list: every chunk of the fixture clone is missing (BM2).
+		h.cntlrs[spCnA].syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+		}
+		h.cntlrs[spCnA].pushCode = common.ReplyCodeUnknownObject
+		h.start()
+
+		waitFor(t, "the refused push", func() bool {
+			return len(h.cntlrs[spCnA].pushes()) > 0
+		})
+		waitFor(t, "the failure record", func() bool {
+			return len(h.logs.withMsg(msgBitmapPushFailed)) > 0
+		})
+		h.advanceUntil("three more check rounds", roundInterval, func() bool {
+			return rounds.Load() >= 4
+		})
+		if got := len(h.cntlrs[spCnA].syncups()); got != 1 {
+			t.Fatalf("%d SyncupCntlr calls, want only the one that planned "+
+				"the push: a refused push re-arms nothing", got)
+		}
+		if got := len(h.cntlrs[spCnA].pushes()); got != 1 {
+			t.Fatalf("%d pushes, want the rest of the plan abandoned", got)
+		}
 	})
 }
 
@@ -458,7 +586,7 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 	rec := newPushRecorder()
 	p := newTestPusher(t, bmTestDeps(t), rec)
 	p.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7,
+		resId: spCloneId, name: spCloneNm,
 		parts: []model.BmChunk{{Idx: 0, ModRev: 10}, {Idx: 1, ModRev: 11}},
 	})
 	waitFor(t, "both chunks pushed", func() bool {
@@ -485,7 +613,7 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 	}
 	failing := newTestPusher(t, d, newPushRecorder())
 	failing.submit(&bmPlan{
-		resId: spCloneId, name: spCloneNm, revision: 7,
+		resId: spCloneId, name: spCloneNm,
 		parts: []model.BmChunk{{Idx: 0, ModRev: 10}},
 	})
 	waitFor(t, "the connect failure record", func() bool {
@@ -496,38 +624,6 @@ func TestBmPushRecordsCarryATraceId(t *testing.T) {
 	if !strings.HasPrefix(traceId, want+"-") {
 		t.Fatalf("connect failure trace_id = %q, want the %q prefix",
 			traceId, want)
-	}
-}
-
-// TestBmMissingChunkSetsResync checks BM6's other abort: a chunk value that
-// cannot be read raises the flag too, because a diff only ever comes from a
-// Syncup* reply and nothing else would ever retry.
-func TestBmMissingChunkSetsResync(t *testing.T) {
-	captureLogs(t)
-	rec := newPushRecorder()
-	d := bmTestDeps(t)
-	p := newBmPusher(bmPusherParams{
-		deps:     d,
-		seed:     seedOf(4),
-		kind:     bmKindMigr,
-		addrPort: spDnC,
-		idAttr:   "migr_id",
-		ids:      []slog.Attr{slog.Uint64("dn_id", spDnIdC)},
-		fetch: func(
-			ctx context.Context, name string, sliceIdx uint32, bmIdx uint32,
-		) ([]byte, bool, error) {
-			return nil, false, nil
-		},
-		deliver: rec.deliver,
-	})
-	t.Cleanup(p.stop)
-	p.submit(&bmPlan{
-		resId: spMigrId, name: spMigrName, revision: 7,
-		parts: []model.BmChunk{{Idx: 0, ModRev: 10}},
-	})
-	waitFor(t, "the resync flag", func() bool { return p.takeFailed() })
-	if got := len(rec.delivered()); got != 0 {
-		t.Fatalf("%d parts delivered without a chunk value", got)
 	}
 }
 
@@ -580,10 +676,6 @@ func TestBmMigrTargetIsDestinationDn(t *testing.T) {
 	if push.GetDnId() != spDnIdC ||
 		push.GetSidePointer().GetSideId() != spSideDst {
 		t.Fatalf("push addressed %v", push)
-	}
-	if push.GetRevision() != testSpRev {
-		t.Fatalf("push revision = %d, want the synced one",
-			push.GetRevision())
 	}
 	if len(push.GetBitmap()) != 2 || push.GetBitmap()[0] != 1 {
 		t.Fatalf("push bitmap = %v", push.GetBitmap())

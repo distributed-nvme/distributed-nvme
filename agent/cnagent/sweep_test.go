@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -89,7 +90,7 @@ func syncupCntlrAt(
 // leak the activation sweep exists to heal: the per-td `delete` is gated on
 // plan.wantPool, so the one fan-out that both removes the td and takes the
 // pool away — a demote coalesced with a delete (RW3) — sends nothing, and
-// afterwards no cntlr's st.applied remembers the td at all. The gate itself is
+// afterwards nothing remembers the td at all. The gate itself is
 // correct (a standby has no pool device, and only the primary may write pool
 // metadata), which is why the fix is the sweep and not the removal of this
 // behavior.
@@ -403,5 +404,67 @@ func TestStartupReconcileDefersSweep(t *testing.T) {
 	}
 	if sweepPending(fresh, testSlice) {
 		t.Fatalf("the completed sweep left the slice armed")
+	}
+}
+
+// TestUnverifiedPoolRemovalKeepsArming applies the layer stop rule to a STATE
+// mutation rather than to a device.
+//
+// L8 drops a pool's CN14 arming on the reasoning that "the pool device's life
+// ended, so its arming does too". That reasoning fails in exactly the branch
+// where `removeDms` reports a leftover: there the re-probe could NOT confirm
+// the device is gone, so the pass reports the pool as surviving and would, in
+// the same breath, forget the thin-id sweep it still owes.
+//
+// The cost of getting it wrong is unrecoverable rather than merely late. Once
+// the device really goes and the level comes back up, ensurePool finds no
+// device and re-arms — but if the device is still there, the next converge
+// takes the probe-match path, which arms nothing, and sweepThinIds never runs
+// again for that pool: every thin id deleted meanwhile keeps its data blocks
+// for the life of the pool. Keeping an arming too long costs one idempotent
+// sweep.
+func TestUnverifiedPoolRemovalKeepsArming(t *testing.T) {
+	srv, node := newTestServer(t)
+	pool := poolName(srv)
+	tds := []*pb.ThinDevice{createdTd(testTd, sweepLiveDevId)}
+
+	// A stray id makes the arming mean something: it is what the sweep the
+	// arming defers would delete.
+	node.holdThinIds(pool, sweepLiveDevId, sweepStrayDevId)
+	scriptDump(srv, node, sweepDump(sweepLiveDevId, sweepStrayDevId))
+	node.failCmd["cmd thin_dump"] = "thin_dump: metadata device is busy"
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+	if !sweepPending(srv, testSlice) {
+		t.Fatal("fixture is wrong: the slice was never armed")
+	}
+
+	// SP_LEVEL_DISABLE wants nothing, so L8 reaches the pool — and its
+	// removal is killed, so the device is still there when the layer
+	// re-probes.
+	node.Reset()
+	// killCmdNoEffect, not killCmdAlways: the latter models "killed but the
+	// kernel completed it", which would really remove the device and make
+	// the re-probe agree it is gone. The branch under test is the other one
+	// — the removal did not happen and the probe still finds the pool.
+	node.killCmdNoEffectAlways["dmsetup remove "+pool] = true
+	// Not syncupCntlrAt: that helper fails the test on any non-zero code,
+	// and a non-zero code is what this pass is supposed to return.
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, tds: tds,
+		level: pb.SpLevel_SP_LEVEL_DISABLE}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+
+	if got := reply.GetAgentReply().GetCode(); got != common.ReplyCodeLeftover {
+		t.Errorf("code = %d, want ReplyCodeLeftover (%d): the pool did not go",
+			got, common.ReplyCodeLeftover)
+	}
+	if _, ok := node.dms[pool]; !ok {
+		t.Fatal("fixture is wrong: the pool was removed after all")
+	}
+	if !sweepPending(srv, testSlice) {
+		t.Error("the arming was dropped although the pool removal was never " +
+			"verified: the thin-id sweep is now owed by nobody")
 	}
 }

@@ -476,17 +476,6 @@ func transportHealth(
 	return pb.ResStatus_RES_STATUS_OK, details
 }
 
-// removeLeg tears one leg down: the connection first, then the wrapper
-// (CN21). A probe wedged on a pathless leg holds an
-// open fd on the wrapper, so `dmsetup remove` before the disconnect fails
-// EBUSY; deleting the controllers errors the queued IO, the fd closes, and the
-// removal then succeeds. A whole-NQN disconnect is fine here — every path of
-// the leg is being retired.
-func (s *CnAgentServer) removeLeg(ctx context.Context, lp *legPlan) {
-	s.disconnect(ctx, lp.nqn)
-	s.removeDm(ctx, lp.name)
-}
-
 // disconnect drops an nvme host connection, probing first so tearing down
 // something that never connected stays silent.
 func (s *CnAgentServer) disconnect(ctx context.Context, nqn string) {
@@ -497,7 +486,9 @@ func (s *CnAgentServer) disconnect(ctx context.Context, nqn string) {
 			slog.String("error", err.Error()))
 		return
 	}
-	if !view.found {
+	// A subsystem the kernel has kept after its last controller went holds
+	// nothing open; disconnecting it again would be a command per round.
+	if !view.found || len(view.ctrls) == 0 {
 		return
 	}
 	if err := s.host.Disconnect(ctx, nqn); err != nil {
@@ -558,8 +549,23 @@ func (s *CnAgentServer) connectRetryLoop(
 			return
 		case <-ticker.C:
 		}
-		s.reconvergeCntlr(ctx, key, st)
-		if ctx.Err() != nil {
+		// The attempt runs on rootCtx, never on this loop's ctx, for the
+		// reason dnagent's migrRetryLoop carries in full: a converge that
+		// finally connects calls stopConnectRetry, which cancels exactly
+		// this loop's ctx, so an attempt running on it would cancel ITSELF
+		// and abandon the rest of the pass.
+		//
+		// Unlike the dn's, this one was not yet producing a failure — do not
+		// go looking for one. Both of this agent's stopConnectRetry sites
+		// sit where nothing that matters follows them: one is the last
+		// statement of convergeCntlr, the other is the SP_LEVEL_DISABLE arm,
+		// whose sweep has already run and whose build has nothing to do. It
+		// is the SHAPE that is wrong — correct only by statement order, one
+		// edit away from the dn's stall — and the two agents must not differ
+		// here, because this loop is written as "the DN13 pattern" and
+		// whichever copy a reader meets first is the one they will follow.
+		s.reconvergeCntlr(s.rootCtx, key, st)
+		if ctx.Err() != nil || s.rootCtx.Err() != nil {
 			return
 		}
 	}

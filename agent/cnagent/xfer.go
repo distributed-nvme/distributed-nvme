@@ -146,13 +146,6 @@ func (s *CnAgentServer) ensureXferNamespace(
 	return s.nvmet.EnsureNamespace(ctx, s.xferNsConf(plan, xp, anaGrpId))
 }
 
-// removeXfer tears one transfer down top-down: the nvmet export releases the
-// dm device, then the device goes.
-func (s *CnAgentServer) removeXfer(ctx context.Context, xp *xferPlan) {
-	s.removeExport(ctx, xp.nqn)
-	s.removeDm(ctx, xp.finalName)
-}
-
 func (s *CnAgentServer) dropXferKeys(st *cntlrState, xferId uint64) {
 	st.tracker.Drop(resKeyOf(resKeyXferDmFmt, xferId))
 	st.tracker.Drop(resKeyOf(resKeyXferSsFmt, xferId))

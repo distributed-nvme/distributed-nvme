@@ -172,10 +172,54 @@ pressure while leaving ample parallelism.
 * Exit-code mapping: `err == nil` → 0; `*exec.ExitError` →
   `ExitError.ExitCode()` (note: a signal-killed process reports `-1` here,
   with a non-nil error — acceptable); any other error (start failure, ctx
-  canceled before start) → `-1`.
+  canceled before start) → `-1`. The §4.1 semaphore refusal returns `-1`
+  with the ctx error as well, and logs no record, because no command ran.
 * Return `err` exactly as produced (non-nil for non-zero exit, signal death,
   start failure, or ctx cancellation). Do not wrap stderr into the error; the
   caller already receives stderr separately.
+* **"Did not answer" is not "absent".** The mapping above yields exactly two
+  classes of outcome, and every caller MUST keep them apart:
+  * `exitCode > 0`, always with a non-nil error — the tool RAN and answered.
+    For a probe that answer is "no": the array is not running, the dm device
+    does not exist, the directory is not there.
+  * `exitCode == -1` with a non-nil error — the process never reported:
+    SIGTERMed at the caller's soft timeout, SIGKILLed at the hard one,
+    failed to start, ctx cancelled, or refused a semaphore slot. The caller
+    learned NOTHING about the object.
+
+  A killed command may still have completed in the kernel — the ioctl or the
+  configfs write runs to the end regardless of the signal that hit the
+  process waiting on it — so neither "it happened" nor "it did not" follows
+  from the kill, and only a fresh probe afterwards can say which it was.
+  Reading the second class as the first is what let an agent teardown skip
+  `mdadm --stop` for an array whose `mdadm --detail` was killed at the soft
+  timeout (a `--detail` opens the members, so it blocks until the leg's
+  `fast_io_fail_tmo` expires, which is longer than `CmdSoftTimeout`), leave
+  the array pinning its two leg wrappers, and forget it for ever; on the DN
+  the same conflation would free an extent record while the device still
+  mapped those extents, and the next allocation would hand them out twice.
+
+  `agent.Reported(exitCode, err)` (`agent/oswrap.go`) is the one predicate —
+  `err == nil || exitCode > 0` — and `osBase.runProbe` is the only place it
+  is applied: `Md.Detail`, `Md.HasSuperblock`, `Dm.Info`, `osBase.listDir` /
+  `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
+  listings) all probe through it, each returning "absent" only for a
+  reported non-zero exit and an error otherwise. The enumerators a removal
+  decision is taken from — `Dm.List`, `Md.ListArrays`,
+  `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
+  probe that judges a stop, propagate that error to their caller instead of
+  answering "nothing there", and the agents' sweeps record an enumeration
+  that did not answer as a failure of the pass (`SweepResult.Fail`, which
+  keeps it from being clean exactly as a leftover object does), because a
+  listing that failed cannot prove a node holds nothing. `Dm.List` goes one
+  step further and treats every non-zero exit as an error: `dmsetup ls`
+  exits 0 and prints `No devices found` on an empty node, so a failure there
+  is never an empty listing. The file-read half of the same rule is
+  `osBase.readAttrStrict` over §4.3's `ReadFile`: only `fs.ErrNotExist` is
+  "absent", every other error propagates, which is what keeps a stalled
+  sysfs or configfs read (`NvmeHost.readTrimmed`, the `enable` reads of
+  `Nvmet.RemoveNamespace` / `RemoveSubsystem`) from making a live object
+  read as an absent one.
 
 ### 4.3 ReadFile / WriteFile / WriteFileDirect
 
@@ -866,7 +910,7 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 ## 7. Example log output
 
 ```json
-{"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-ebada5168620c5fe-0000000000000003-4-0000000000000011-0000000000000016"],"stdin":"0 20480 linear 253:0 524288\n","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-ebada5168620c5fe-0000000000000003-d4-0000000000000011-0000000000000016"],"stdin":"0 20480 linear 253:0 524288\n","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
 {"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/tmp/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":34,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"side_conf":{"ext_cnt":10,"cntlid_slot":1,"primary_cn_id":5,"standby_id_list":[6]}},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
@@ -880,8 +924,8 @@ itself, not by an `OsClient` (§4.5.1). Both halves carry the *same* trace id,
 the fresh per-attempt id of `cnagent.md` CN2:
 
 ```json
-{"time":"2026-08-28T10:00:03.010Z","level":"INFO","msg":"probe write block","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
-{"time":"2026-08-28T10:00:03.014Z","level":"INFO","msg":"probe read block direct","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
+{"time":"2026-08-28T10:00:03.010Z","level":"INFO","msg":"probe write block","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-c9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
+{"time":"2026-08-28T10:00:03.014Z","level":"INFO","msg":"probe read block direct","path":"/dev/mapper/dnv-ebada5168620c5fe-0000000000000005-c9-0000000000000011-0000000000000015","offset":0,"length":4096,"trace_id":"77f0c2b9a1d3e408"}
 ```
 
 ## 8. Tests and acceptance checklist
@@ -949,17 +993,23 @@ available):
 Acceptance: `go vet ./common/...` and `go test ./common/...` pass;
 `DefaultOsClientLimit` exists in `constants.go`; a repo-wide grep for
 `os/exec` that excludes `*_test.go` shows no usage outside
-`common/osclient.go` — the five excluded hits are the four etcd test fixtures
-(`gateway`, `worker` and `model`'s `etcdenv_test.go` plus
-`etcdutil/etcdutil_test.go`), which start and stop a real `etcd` binary for
-their package's tests, and `common/log_test.go`, which re-runs the test binary
-itself as the child of `TestDefaultLoggerWritesStderr`. `etcdutil_test.go`
-likewise re-runs the test binary itself, as the child of
-`TestStderrStaysOneJsonRecordPerLine`, which asserts from outside that the
-child's stdout stayed empty and that every line of its stderr parses as one
-JSON record (the pin for `log.md` §7's `etcdutil/etcdutil.go` carve-out). No production code path spawns any of
-them, so routing them through an `OsClient` would buy neither the §1 logging
-nor the `FakeOsClient` testability the rule exists for;
+`common/osclient.go` — the excluded hits fall in six files. Five of them are
+helper-process fixtures: the four etcd test fixtures (`gateway`, `worker` and
+`model`'s `etcdenv_test.go` plus `etcdutil/etcdutil_test.go`), which start and
+stop a real `etcd` binary for their package's tests, and `common/log_test.go`,
+which re-runs the test binary itself as the child of
+`TestDefaultLoggerWritesStderr`. `etcdutil_test.go` likewise re-runs the test
+binary itself, as the child of `TestStderrStaysOneJsonRecordPerLine`, which
+asserts from outside that the child's stdout stayed empty and that every line
+of its stderr parses as one JSON record (the pin for `log.md` §7's
+`etcdutil/etcdutil.go` carve-out). No production code path spawns any of them,
+so routing them through an `OsClient` would buy neither the §1 logging nor the
+`FakeOsClient` testability the rule exists for. The sixth file,
+`agent/probe_test.go`, is not a helper-process fixture at all: it names
+`os/exec` on two lines (the import and a comment) and uses it only for
+`exec.LookPath("sh")` and the `*exec.ExitError` assertions of §4.2's
+`Reported` pin — both of its children are spawned through the production
+`LimitedOsClient.RunCommand`;
 `grep -rn "ReadBlockDirect" common/` hits only the exported helper
 `ReadBlockDirectAt` (and its test) — the `OsClient` interface,
 `LimitedOsClient` and `FakeOsClient` no longer carry the method;

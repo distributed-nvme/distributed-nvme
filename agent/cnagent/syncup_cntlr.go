@@ -44,8 +44,8 @@ func (s *CnAgentServer) syncupCntlr(
 	// stripe_size become the dm thin-pool's and raid0's own arguments, and
 	// bitmap_chunk_block_cnt the md bitmap's. This is the last point with
 	// literally zero side effects: refusing here skips the desired-state
-	// promotion below, the whole converge (whose retire phase alone rewrites
-	// ANA states, reloads ns-dev linears and removes dm devices) and the
+	// promotion below, the whole converge (whose sweep alone rewrites ANA
+	// states, reloads ns-dev linears and removes dm devices) and the
 	// local-store Save, so a bad request cannot even be replayed by the next
 	// Reconcile. The stored revision is echoed back, not the request's, so
 	// the worker sees the request was not accepted.
@@ -73,7 +73,7 @@ func (s *CnAgentServer) syncupCntlr(
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
-	info := s.convergeCntlr(ctx, st)
+	info, sweep := s.convergeCntlr(ctx, st)
 
 	ptr := req.GetCntlrPointer()
 	path := s.nf.LocalCntlrPath(req.GetClusterId(), req.GetCnId(),
@@ -84,17 +84,25 @@ func (s *CnAgentServer) syncupCntlr(
 			slog.String("error", err.Error()))
 	}
 	return &pb.SyncupCntlrReply{
-		AgentReply: agent.OkReply(),
+		AgentReply: sweep.Reply(),
 		Revision:   req.GetRevision(),
 		CntlrInfo:  info,
 		BmInfoList: s.bitmapInfoList(st),
 	}
 }
 
-// convergeCntlr is the CN9 converge pass: one retire phase top-down, then one
-// build phase bottom-up. That phase order is what implements §11.1 without
-// special cases — a primary→standby flip is nothing but "the desired set shrank
-// to the standby shape", and standby→primary is "it grew".
+// convergeCntlr is the CN9 converge pass: one sweep top-down, then one build
+// phase bottom-up. That phase order is what implements §11.1 without special
+// cases — a primary→standby flip is nothing but "the desired set shrank to
+// the standby shape", and standby→primary is "it grew".
+//
+// The sweep replaced a retire phase that diffed the plan it applied last time
+// against this one. That diff could name a removal only once: a removal that
+// failed was forgotten together with the old plan, and these are exactly the
+// flows — a level change, a spare switch, a finished migration — where the
+// remote end is dead and a removal DOES fail. The sweep derives the same work
+// from what the node actually holds, so a failed removal is simply found
+// again next pass.
 //
 // `migr_list` is carried in the request and read by nothing: the CN's whole
 // part in a migration is that a leg's side_list temporarily holds two sides
@@ -102,13 +110,13 @@ func (s *CnAgentServer) syncupCntlr(
 func (s *CnAgentServer) convergeCntlr(
 	ctx context.Context,
 	st *cntlrState,
-) *pb.CntlrInfo {
+) (*pb.CntlrInfo, *agent.SweepResult) {
 	// The same §7 refusal as syncupCntlr's, for the two entrances that do not
 	// come through it: the startup Reconcile, which converges from a file an
 	// older build may have persisted with zeros, and the background connect
 	// retry, which re-enters with the request it already holds. Refusing
-	// before newCntlrPlan leaves st.applied untouched, so a later teardown
-	// still plans from the last shape this agent actually built.
+	// before newCntlrPlan touches nothing at all: the sweep is name-driven
+	// and needs no plan of this cntlr to find its objects later.
 	if err := agent.ValidateBdevConf(st.req.GetBdevConf()); err != nil {
 		ptr := st.req.GetCntlrPointer()
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
@@ -117,14 +125,24 @@ func (s *CnAgentServer) convergeCntlr(
 			slog.Uint64("sp_id", ptr.GetSpId()),
 			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
 			slog.String("error", err.Error()))
-		return newCntlrInfo()
+		// Nothing was converged and nothing enumerated, so the pass has no
+		// verdict to give: the reply's code is the §7 refusal, not this.
+		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, st.req)
 	info := newCntlrInfo()
-	s.retire(ctx, st, plan, info)
+	sweep := s.sweepCntlr(ctx, st, plan, true)
+	if !plan.wantAny {
+		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
+		// cntlr-scoped object has just gone, but the store file and the
+		// in-memory desired state stay (CN19). What the sweep cannot do is
+		// stop the background connect retry or forget the resource
+		// histories, because neither is an object on the node.
+		s.stopConnectRetry(st)
+		s.dropAllResKeys(st, plan)
+	}
 	s.build(ctx, st, plan, info)
-	st.applied = plan
-	return info
+	return info, sweep
 }
 
 func newCntlrInfo() *pb.CntlrInfo {
@@ -149,197 +167,6 @@ func newCntlrInfo() *pb.CntlrInfo {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Retire phase, top-down (CN9)
-// ---------------------------------------------------------------------------
-
-// retire removes, top-down, everything the new desired state (level-adjusted,
-// CN19) no longer wants. The step order **is** §11.1 old_primary steps 1-3:
-// ANA first, then the ns-dev reloads onto dm-error (whose internal suspend
-// flushes the in-flight IO), then the nvmet and dm removals, `mdadm --stop`,
-// and outbound disconnects last.
-func (s *CnAgentServer) retire(
-	ctx context.Context,
-	st *cntlrState,
-	plan *cntlrPlan,
-	info *pb.CntlrInfo,
-) {
-	old := st.applied
-	if !plan.wantAny {
-		// SP_LEVEL_DISABLE: every cntlr-scoped object goes, but the store
-		// files and the in-memory desired state stay (CN19) — which is the
-		// one difference from the CN21 teardown below.
-		if old != nil {
-			s.teardownCntlrResources(ctx, st, old)
-		}
-		s.teardownCntlrResources(ctx, st, plan)
-		s.dropAllResKeys(st, old)
-		s.dropAllResKeys(st, plan)
-		return
-	}
-
-	// (1) Every namespace leaving service moves to the inaccessible group.
-	// The provisioning deferral needs no case of its own here: a provisioning-deferred
-	// namespace's anaGrpId is already inaccessible (CN16's fourth conjunct),
-	// so this loop parks it on the very first converge of a fresh SP.
-	for _, np := range plan.namespaces {
-		if np.anaGrpId == common.AnaGrpIdInaccessible {
-			s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
-		}
-	}
-	for _, xp := range plan.xfers {
-		if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible {
-			s.setAnaLogged(ctx, xp.nqn, int(xp.xfer.GetOriNsIdx()))
-		}
-	}
-	for _, np := range removedNamespaces(old, plan) {
-		s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
-	}
-	for _, xp := range removedXfers(old, plan) {
-		s.setAnaLogged(ctx, xp.nqn, int(xp.xfer.GetOriNsIdx()))
-	}
-
-	// (2) Every ns-dev that must stop serving is reloaded onto its dm-error —
-	// the survivors the loop below selects and every removed namespace's as
-	// well (CN9).
-	// A provisioning-deferred namespace is covered by the same test, because
-	// CN16 rule 0 makes its backing the td's errorName; so is an effectively
-	// suspended one, because rule 1 (parked) does — which is how the park
-	// lands here, after step (1)'s ANA write and before anything the build
-	// phase does (§11.6).
-	// The reload's internal suspend is what flushes the in-flight IO. A
-	// namespace whose *old* td is leaving `td_list` is parked too, even when
-	// its new backing is a live raid0: its table still maps the departing
-	// td's raid0, and the removal below would fail EBUSY behind it.
-	for _, np := range plan.namespaces {
-		if (np.td != nil && np.backingName == np.td.errorName) ||
-			mapsRemovedTd(old, plan, np) {
-			s.parkNsDevLogged(ctx, np)
-		}
-	}
-	// A namespace leaving `ns_list` is parked here rather than in step (3):
-	// CN9 puts the reload before the nvmet removal, so the ns-dev stops
-	// mapping the stack under it first. CN21's older rationale — a suspended
-	// device blocks the nvmet disable above it — now applies only to a device
-	// an older build or an interrupted reload left suspended, which this
-	// reload resumes. `np` is the *old* plan's, and its td's
-	// `CnErrorName` still exists: td teardown is step (6) of this same phase.
-	// A namespace that never had a backing td has no dm-error to park on, and
-	// keeps `removeDm`'s own resume below as its backstop.
-	for _, np := range removedNamespaces(old, plan) {
-		if np.td == nil {
-			continue
-		}
-		s.parkNsDevLogged(ctx, np)
-	}
-
-	// (3) nvmet objects that must go entirely, then the ns-devs under them.
-	// The ns-devs come off before the transfer and clone stacks they may
-	// still map — the retire phase is strictly top-down.
-	for _, ssp := range removedSubsystems(old, plan) {
-		s.removeExport(ctx, ssp.nqn)
-		st.tracker.Drop(resKeyOf(resKeySubsysFmt, ssp.ssId))
-	}
-	for _, np := range removedNamespaces(old, plan) {
-		if plan.ssByNqn(np.ss.nqn) == nil {
-			continue // its whole subsystem is gone already
-		}
-		if err := s.nvmet.RemoveNamespace(
-			ctx, np.ss.nqn, np.nsIdx); err != nil {
-			slog.ErrorContext(ctx, "removing nvmet namespace failed",
-				slog.String("nqn", np.ss.nqn),
-				slog.String("error", err.Error()))
-		}
-	}
-	for _, np := range removedNamespaces(old, plan) {
-		s.removeDm(ctx, np.devName)
-		st.tracker.Drop(resKeyOf(resKeyNsDevFmt, np.nsId))
-		st.tracker.Drop(resKeyOf(resKeyNamespaceFmt, np.nsId))
-	}
-
-	// (4) transfers: first demote every device this cntlr no longer serves,
-	// then remove the ones that left `xfer_list`. The demotion is what makes
-	// the rest of the retire possible — a CnXferFinalName still mapping the
-	// origin td's raid0 holds it open, so the raid0's removal in step (6)
-	// would fail EBUSY and take the thin volumes, the pool, the concats and
-	// `mdadm --stop` down with it (CN17, CN19's NO_THINPOOL row).
-	for _, xp := range plan.xfers {
-		if plan.xferServed(xp) {
-			continue
-		}
-		s.demoteXfer(ctx, old, xp)
-	}
-	for _, xp := range retiredXfers(old, plan) {
-		s.removeXfer(ctx, xp)
-		s.dropXferKeys(st, xp.xferId)
-	}
-
-	// (5) clones, in the strict CN18 order (ns-devs off the dm-clone, the
-	// dm-clone before its source connection dies, then the metadata wrapper).
-	for _, cp := range retiredClones(old, plan) {
-		s.retireClone(ctx, st, plan, cp)
-	}
-
-	// (6) per-td devices. A td that left td_list is **deleted**: its thin
-	// volume ids go back to the pool. Everything else is only deactivated.
-	for _, tp := range removedTds(old, plan) {
-		s.removeDm(ctx, tp.raid0Name)
-		s.removeDm(ctx, tp.errorName)
-		for _, sp := range plan.slices {
-			s.removeDm(ctx, plan.thinName(tp.tdId, sp.sliceId))
-			if plan.wantPool {
-				s.deleteThinId(ctx, sp, tp.td.GetDevId())
-			}
-		}
-		s.dropTdKeys(st, plan, tp)
-	}
-	if !plan.wantPool {
-		for _, tp := range unionTds(old, plan) {
-			s.removeDm(ctx, tp.raid0Name)
-			for _, sp := range unionSlices(old, plan) {
-				s.removeDm(ctx, plan.thinName(tp.tdId, sp.sliceId))
-			}
-		}
-	}
-	// (7) pool concats and thin-pools.
-	for _, sp := range retiredSlices(old, plan) {
-		s.removeDm(ctx, sp.poolFinalName)
-		s.removeDm(ctx, sp.poolMetaName)
-		s.removeDm(ctx, sp.poolDataName)
-		st.tracker.Drop(resKeyOf(resKeyPoolFmt, sp.sliceId))
-		st.tracker.Drop(resKeyOf(resKeyPoolMetaFmt, sp.sliceId))
-		st.tracker.Drop(resKeyOf(resKeyPoolDataFmt, sp.sliceId))
-		// The pool device's life ends here, so its arming does too: a later
-		// re-creation re-arms on its own Create branch, and dropping the
-		// entry keeps the map from carrying dead slices.
-		delete(st.pendingSweep, sp.sliceId)
-	}
-
-	// (8) group devices — `mdadm --stop` for arrays, `dmsetup remove` for
-	// RedundNone linears.
-	for _, gp := range retiredGrps(old, plan) {
-		s.removeGroup(ctx, gp)
-		st.tracker.Drop(resKeyOf(resKeyGrpFmt, gp.grpId))
-	}
-
-	// (9) probers, then the outbound disconnects, then the leg wrappers, last
-	// — the CN21 order (removeLeg).
-	wantedProbers := make(map[uint64]struct{})
-	if plan.primary && plan.wantLeg {
-		for _, lp := range plan.legs {
-			if lp.provisioning {
-				continue // [D15]: no wrapper to probe, so no prober
-			}
-			wantedProbers[lp.legId] = struct{}{}
-		}
-	}
-	s.stopLegProbers(st, wantedProbers)
-	for _, lp := range retiredLegs(old, plan) {
-		s.removeLeg(ctx, lp)
-		st.tracker.Drop(resKeyOf(resKeyLegFmt, lp.legId))
-	}
-}
-
 // setAnaLogged moves a namespace to the inaccessible group, probe-first.
 func (s *CnAgentServer) setAnaLogged(
 	ctx context.Context,
@@ -360,52 +187,6 @@ func (s *CnAgentServer) parkNsDevLogged(ctx context.Context, np *nsPlan) {
 			slog.String("dm", np.devName),
 			slog.String("error", err.Error()))
 	}
-}
-
-// demoteXfer reloads a live transfer device onto an error table of its own
-// size — the CN17 shape for a cntlr that does not serve it. The size falls
-// back to the previous plan's when the origin namespace has meanwhile gone,
-// so a transfer whose origin td was deleted in the same request still lets go
-// of that td's raid0.
-func (s *CnAgentServer) demoteXfer(
-	ctx context.Context,
-	old *cntlrPlan,
-	xp *xferPlan,
-) {
-	dev, err := s.dm.Info(ctx, xp.finalName)
-	if err != nil || dev == nil {
-		return
-	}
-	sectors := xp.sectors
-	if sectors == 0 && old != nil {
-		if prev := old.xferById[xp.xferId]; prev != nil {
-			sectors = prev.sectors
-		}
-	}
-	if sectors == 0 {
-		return
-	}
-	if err := s.ensureDmError(ctx, xp.finalName, sectors); err != nil {
-		slog.ErrorContext(ctx, "demoting a transfer device failed",
-			slog.String("dm", xp.finalName),
-			slog.String("error", err.Error()))
-	}
-}
-
-// mapsRemovedTd reports whether a surviving namespace's live table still maps
-// a td that is leaving `td_list` — an `UpdateNamespaceDev` repoint and the
-// origin's deletion arriving in one full sync.
-func mapsRemovedTd(old, plan *cntlrPlan, np *nsPlan) bool {
-	if old == nil {
-		return false
-	}
-	for _, prev := range old.namespaces {
-		if prev.nsId != np.nsId {
-			continue
-		}
-		return prev.td != nil && plan.tdById[prev.td.tdId] == nil
-	}
-	return false
 }
 
 func (s *CnAgentServer) dropTdKeys(
@@ -866,103 +647,6 @@ func (s *CnAgentServer) reportCloneSuppressed(
 		detailsSpLevel)
 }
 
-// ---------------------------------------------------------------------------
-// CN21 — cntlr teardown
-// ---------------------------------------------------------------------------
-
-// teardownCntlr is used by CN7 (pointer removed), CN2 (orphan file) and
-// CN19's SP_LEVEL_DISABLE. Strictly top-down, parking every ns-dev on its
-// CnErrorName **before** anything else, so nothing above or below it is
-// removed while its table still maps the stack. The same reload resumes a
-// device an older build or an interrupted reload left suspended — a suspended
-// device blocks both the nvmet disable above it and its own removal.
-//
-// Thin volumes are only **deactivated** — no `delete` messages — because the
-// pool metadata lives on the DN legs and the next hosting CN must find the
-// thin volumes intact (CN14).
-func (s *CnAgentServer) teardownCntlr(
-	ctx context.Context,
-	key string,
-	st *cntlrState,
-) {
-	plan := st.applied
-	if plan == nil {
-		plan = newCntlrPlan(s.nf, st.req)
-	}
-	s.teardownCntlrResources(ctx, st, plan)
-
-	paths := []string{s.nf.LocalCntlrPath(
-		plan.clusterId, plan.cnId, plan.spId, plan.cntlrId)}
-	paths = append(paths, s.allChunkPaths(st, plan)...)
-	if err := s.store.Remove(ctx, paths...); err != nil {
-		slog.ErrorContext(ctx, "removing cntlr state files failed",
-			slog.String("error", err.Error()))
-	}
-	s.dropCntlr(key)
-	s.locks.DropObj(key)
-}
-
-// teardownCntlrResources removes every cntlr-scoped resource, strictly
-// top-down, and leaves the local store alone. CN21 adds the file deletion on
-// top; the SP_LEVEL_DISABLE row of CN19 uses it bare, because there the
-// desired state must persist. The tail is the CN21 leg order:
-// cancel the probers, disconnect, then remove the wrappers
-// (removeLeg).
-func (s *CnAgentServer) teardownCntlrResources(
-	ctx context.Context,
-	st *cntlrState,
-	plan *cntlrPlan,
-) {
-	for _, np := range plan.namespaces {
-		s.parkNsDevLogged(ctx, np)
-	}
-	for _, ssp := range plan.subsystems {
-		s.removeExport(ctx, ssp.nqn)
-	}
-	for _, xp := range plan.xfers {
-		s.removeExport(ctx, xp.nqn)
-	}
-	for _, np := range plan.namespaces {
-		s.removeDm(ctx, np.devName)
-	}
-	for _, xp := range plan.xfers {
-		s.removeDm(ctx, xp.finalName)
-	}
-	s.stopConnectRetry(st)
-	for _, cp := range plan.clones {
-		s.removeDm(ctx, cp.finalName)
-		// Under cloneMetaMu like every other registry mutation (CN18): this
-		// teardown runs on one cntlr while another cntlr of the same CN may be
-		// enumerating and allocating.
-		s.removeCloneMetaDm(ctx, cp.metaDmName)
-		s.disconnect(ctx, cp.clone.GetSrcNqn())
-	}
-	for _, tp := range plan.tds {
-		s.removeDm(ctx, tp.raid0Name)
-		s.removeDm(ctx, tp.errorName)
-	}
-	for _, tp := range plan.tds {
-		for _, sp := range plan.slices {
-			s.removeDm(ctx, plan.thinName(tp.tdId, sp.sliceId))
-		}
-	}
-	for _, sp := range plan.slices {
-		s.removeDm(ctx, sp.poolFinalName)
-		s.removeDm(ctx, sp.poolMetaName)
-		s.removeDm(ctx, sp.poolDataName)
-	}
-	// Every pool device of this cntlr is gone, so no slice is sweep-pending
-	// any more; a re-creation re-arms on its own Create branch.
-	clear(st.pendingSweep)
-	for _, gp := range plan.grps {
-		s.removeGroup(ctx, gp)
-	}
-	s.stopLegProbers(st, nil)
-	for _, lp := range plan.legs {
-		s.removeLeg(ctx, lp)
-	}
-}
-
 // dropAllResKeys forgets every resource history of one shape, so a later
 // rebuild reports a fresh epoch (SH14).
 func (s *CnAgentServer) dropAllResKeys(st *cntlrState, plan *cntlrPlan) {
@@ -999,215 +683,4 @@ func (s *CnAgentServer) dropAllResKeys(st *cntlrState, plan *cntlrPlan) {
 		t.Drop(resKeyOf(resKeyCloneDmFmt, cp.cloneId))
 		t.Drop(resKeyOf(resKeyCloneMetaFmt, cp.cloneId))
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Old-vs-new diffs used by the retire phase
-// ---------------------------------------------------------------------------
-
-func (p *cntlrPlan) ssByNqn(nqn string) *ssPlan {
-	for _, ssp := range p.subsystems {
-		if ssp.nqn == nqn {
-			return ssp
-		}
-	}
-	return nil
-}
-
-func removedNamespaces(old, plan *cntlrPlan) []*nsPlan {
-	if old == nil {
-		return nil
-	}
-	keep := make(map[uint64]struct{}, len(plan.namespaces))
-	for _, np := range plan.namespaces {
-		keep[np.nsId] = struct{}{}
-	}
-	var out []*nsPlan
-	for _, np := range old.namespaces {
-		if _, ok := keep[np.nsId]; !ok {
-			out = append(out, np)
-		}
-	}
-	return out
-}
-
-func removedSubsystems(old, plan *cntlrPlan) []*ssPlan {
-	if old == nil {
-		return nil
-	}
-	keep := make(map[string]struct{}, len(plan.subsystems))
-	for _, ssp := range plan.subsystems {
-		keep[ssp.nqn] = struct{}{}
-	}
-	var out []*ssPlan
-	for _, ssp := range old.subsystems {
-		if _, ok := keep[ssp.nqn]; !ok {
-			out = append(out, ssp)
-		}
-	}
-	return out
-}
-
-func removedXfers(old, plan *cntlrPlan) []*xferPlan {
-	if old == nil {
-		return nil
-	}
-	var out []*xferPlan
-	for _, xp := range old.xfers {
-		if plan.xferById[xp.xferId] == nil {
-			out = append(out, xp)
-		}
-	}
-	return out
-}
-
-// retiredXfers are the transfers whose resources must go: removed from the
-// request, or suppressed because nothing cntlr-scoped survives this level.
-func retiredXfers(old, plan *cntlrPlan) []*xferPlan {
-	out := removedXfers(old, plan)
-	if plan.wantAny {
-		return out
-	}
-	seen := make(map[uint64]struct{}, len(out))
-	for _, xp := range out {
-		seen[xp.xferId] = struct{}{}
-	}
-	for _, xp := range plan.xfers {
-		if _, ok := seen[xp.xferId]; !ok {
-			out = append(out, xp)
-		}
-	}
-	return out
-}
-
-func retiredClones(old, plan *cntlrPlan) []*clonePlan {
-	var out []*clonePlan
-	seen := make(map[uint64]struct{})
-	add := func(cp *clonePlan) {
-		if _, ok := seen[cp.cloneId]; ok {
-			return
-		}
-		seen[cp.cloneId] = struct{}{}
-		out = append(out, cp)
-	}
-	if old != nil {
-		for _, cp := range old.clones {
-			if !plan.wantClone || plan.cloneById[cp.cloneId] == nil {
-				add(cp)
-			}
-		}
-	}
-	if !plan.wantClone {
-		for _, cp := range plan.clones {
-			add(cp)
-		}
-	}
-	return out
-}
-
-func removedTds(old, plan *cntlrPlan) []*tdPlan {
-	if old == nil {
-		return nil
-	}
-	var out []*tdPlan
-	for _, tp := range old.tds {
-		if plan.tdById[tp.tdId] == nil {
-			out = append(out, tp)
-		}
-	}
-	return out
-}
-
-func unionTds(old, plan *cntlrPlan) []*tdPlan {
-	out := append([]*tdPlan(nil), plan.tds...)
-	if old == nil {
-		return out
-	}
-	for _, tp := range old.tds {
-		if plan.tdById[tp.tdId] == nil {
-			out = append(out, tp)
-		}
-	}
-	return out
-}
-
-func unionSlices(old, plan *cntlrPlan) []*slicePlan {
-	out := append([]*slicePlan(nil), plan.slices...)
-	if old == nil {
-		return out
-	}
-	for _, sp := range old.slices {
-		if plan.sliceById[sp.sliceId] == nil {
-			out = append(out, sp)
-		}
-	}
-	return out
-}
-
-// retiredSlices are the pools that must go: their slice left the request, or
-// the level/role no longer wants thin pools at all.
-func retiredSlices(old, plan *cntlrPlan) []*slicePlan {
-	if plan.wantPool {
-		if old == nil {
-			return nil
-		}
-		var out []*slicePlan
-		for _, sp := range old.slices {
-			if plan.sliceById[sp.sliceId] == nil {
-				out = append(out, sp)
-			}
-		}
-		return out
-	}
-	return unionSlices(old, plan)
-}
-
-func retiredGrps(old, plan *cntlrPlan) []*grpPlan {
-	if plan.wantGrp {
-		if old == nil {
-			return nil
-		}
-		var out []*grpPlan
-		for _, gp := range old.grps {
-			if plan.grpById[gp.grpId] == nil {
-				out = append(out, gp)
-			}
-		}
-		return out
-	}
-	out := append([]*grpPlan(nil), plan.grps...)
-	if old == nil {
-		return out
-	}
-	for _, gp := range old.grps {
-		if plan.grpById[gp.grpId] == nil {
-			out = append(out, gp)
-		}
-	}
-	return out
-}
-
-func retiredLegs(old, plan *cntlrPlan) []*legPlan {
-	if plan.wantLeg {
-		if old == nil {
-			return nil
-		}
-		var out []*legPlan
-		for _, lp := range old.legs {
-			if plan.legById[lp.legId] == nil {
-				out = append(out, lp)
-			}
-		}
-		return out
-	}
-	out := append([]*legPlan(nil), plan.legs...)
-	if old == nil {
-		return out
-	}
-	for _, lp := range old.legs {
-		if plan.legById[lp.legId] == nil {
-			out = append(out, lp)
-		}
-	}
-	return out
 }

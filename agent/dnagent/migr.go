@@ -3,7 +3,6 @@ package dnagent
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -353,42 +352,6 @@ func (s *DnAgentServer) ensureHydration(
 	return s.dm.Message(ctx, name, 0, "enable_hydration")
 }
 
-// teardownMigrDst removes the destination role's resources top-down: the
-// dm-clone, then the nvme connection and its retry loop, then the metadata
-// wrapper and its slot. The dm-clone goes first because the connection is its
-// source device and the wrapper its metadata device (DN6): removing either
-// from under a live dm-clone would leave in-flight hydration IO with nowhere
-// to go, and `dmsetup remove` on the wrapper fails EBUSY anyway.
-//
-// It reports whether the dm-clone is really gone. A clone that would not go
-// stops the teardown where it stands — every remaining step is one the live
-// clone still depends on — and leaves st.appliedMigrDst naming the role, so
-// the next converge retries the whole thing. The caller is responsible for
-// the layer *above*: see retireMigrDst.
-func (s *DnAgentServer) teardownMigrDst(
-	ctx context.Context,
-	st *sideState,
-	plan *sidePlan,
-) bool {
-	s.stopMigrRetry(st)
-	if !s.removeDm(ctx, plan.migrFinalName()) {
-		return false
-	}
-	s.disconnect(ctx, plan.srcNqnOfDst())
-	// The slot is released only once its wrapper is really gone; a record
-	// left behind is retried by the DN6 orphan sweep.
-	if s.removeDm(ctx, plan.migrMetaDmName()) {
-		if err := s.meta.FreeCloneMeta(
-			ctx, plan.spId, plan.migrDst.GetMigrId()); err != nil {
-			slog.ErrorContext(ctx, "freeing the clone-metadata slot failed",
-				slog.String("error", err.Error()))
-		}
-	}
-	st.tracker.Drop(resKeyMigrDstTarget)
-	st.tracker.Drop(resKeyMigrDstClone)
-	return true
-}
-
 // ---------------------------------------------------------------------------
 // DN8 background connect retry
 // ---------------------------------------------------------------------------
@@ -437,8 +400,7 @@ func (s *DnAgentServer) migrRetryLoop(
 	key string,
 	st *sideState,
 ) {
-	ticker := time.NewTicker(
-		common.DnMigrConnectRetryInterval * time.Second)
+	ticker := time.NewTicker(s.migrRetryInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -446,8 +408,25 @@ func (s *DnAgentServer) migrRetryLoop(
 			return
 		case <-ticker.C:
 		}
-		s.reconvergeSide(ctx, key, st)
-		if ctx.Err() != nil {
+		// THE ATTEMPT RUNS ON rootCtx, NEVER ON THIS LOOP'S ctx, and that is
+		// not a detail. The attempt is the converge that will finally
+		// connect, and a converge that connects calls stopMigrRetry — which
+		// cancels exactly this loop's ctx. Running the attempt on it made
+		// that converge cancel ITSELF halfway: every OS call after the
+		// stopMigrRetry failed on the dead context, so the dm-clone was
+		// never created, and with `retrying` already false nothing ticked
+		// again. The side then sat at `dm_clone: RES_STATUS_MISSING, target
+		// not connected` for ever while the controller it names was `live` —
+		// which is what an e2e `copy` case measured on 2026-09-19 after one
+		// transient connect failure (the fence timer already reconverges on
+		// rootCtx for the same reason).
+		//
+		// Cancelling therefore ends the LOOP, not the attempt: the ctx.Err()
+		// check below is what reads it, one tick late at worst. Shutdown is
+		// unaffected, because rootCtx is cancelled before WaitBackground
+		// joins (SH27), so an attempt in flight then still aborts.
+		s.reconvergeSide(s.rootCtx, key, st)
+		if ctx.Err() != nil || s.rootCtx.Err() != nil {
 			return
 		}
 	}

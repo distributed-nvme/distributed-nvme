@@ -48,7 +48,9 @@ build is policy and belongs in `dnagent`/`cnagent`.
 SH9), `locks.go` (§2.6),
 `resinfo.go` (§2.7), `oswrap.go`/`dm.go`/`nvmet.go`/
 `nvmehost.go` (OS wrappers, §2.8 — `oswrap.go` is the shared command/configfs
-plumbing the other three sit on), `bitmap.go` (§2.9), plus colocated
+plumbing the other three sit on), `bitmap.go` (§2.9), `sweep.go` (the part of
+DN6's sweep both roles share: the leftover kinds, the result value a pass
+accumulates, its log record and the `AgentReply` it becomes), plus colocated
 `_test.go` files.
 
 `conf.go` is a **deliberate second copy** of `model`'s stored-conf rules.
@@ -76,7 +78,18 @@ boundaries are binding, file names are not.
 ### 2.2 Additions to `common`
 
 The following enter the existing files `common/constants.go` and
-`common/name_fmt.go` (no new files — `layout.md` §7.5 still holds). The const
+`common/name_fmt.go`, plus one file that joins them,
+`common/name_parse.go`: DN6's sweep has to look at a name the kernel hands
+back and say whether it is ours, of which kind and of which sp, so the two
+name shapes the sweep has to decode gained their inverses there —
+`ParseDmName` for the dm device names (every `DmKind`) and `ParseNqn` for the
+dnv-format NQNs (every `NqnKind`). The rest of `name_fmt.go` has no inverse:
+the `/dev` and local-store paths, the tmpfs paths and the md names are
+formatted only — an md array is attributed by its members' dm names instead
+(`cnagent.md` CN21) — and the hashed forms (`DnNsIdentity`, `NvmeHostId`,
+`CnMdDevName`'s short id) could not have one. Parsing is strict: a name that
+does not decode exactly is "not a dnv name", never a half-decoded one, because
+the caller's next move is a removal. The const
 listing is a condensed, topic-grouped quote rather than a byte-for-byte one:
 its three groups live in three separate places of `common/constants.go`'s
 single `const` block, in a different order; the `SuspendSeconds` comment there
@@ -114,6 +127,18 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 	// is the conf that is unusable, which is why it is neither of the two
 	// above.
 	ReplyCodeInvalidConf = 3
+	// ReplyCodeLeftover reports an ACCEPTED request with residue: the
+	// desired state is stored and every wanted object was converged, but the
+	// node still holds objects the desired state does not want, or an
+	// enumeration of what exists did not answer. It is the one thing that
+	// travels in agent_reply rather than in the *Info rows, because a
+	// leftover by definition has no row — nothing wanted names it.
+	//
+	// It is not a rejection: the worker evaluates the reply's rows exactly as
+	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)
+	// until the code changes. "Pending" is never stored anywhere; the code is
+	// recomputed by enumerating the node on every Syncup* and every Check*.
+	ReplyCodeLeftover = 4
 
 	// Seconds between background retries of a pending migration-destination
 	// nvme connect (dnagent.md DN13; the loop is SH27's "DN8 retry", so
@@ -324,7 +349,18 @@ SH4. The store holds exactly what `architecture.md` §9.1/§4.6 prescribes: the
      `Push*BitmapRequest` chunk, written via `OsClient.WriteProto` (atomic
      replace) at the `Local*Path` locations, read back via `ReadProto`.
 
-SH5. A `Syncup*Request` is persisted **after** its converge pass completes.
+SH5. An **object** request (`SyncupSide`/`SyncupCntlr`) is persisted after
+     its converge pass completes. A **parent** request
+     (`SyncupDn`/`SyncupCn`) is persisted as soon as it has passed the gates
+     and become the desired state — before the converge, and so before the
+     sweep that removes the resources of a pointer which has just left the
+     list (DN6). The parent's pointer list is the authoritative record of
+     which objects still exist, and the sweep that acts on a shortened one
+     can block for a whole failfast window on a dead remote: a request
+     cancelled inside that window used to skip the save entirely, and the
+     next startup reconcile then rebuilt the object from the **old** list,
+     against sides that no longer exist. With the new list on disk first, a
+     crash mid-sweep is nothing worse than a startup sweep.
      Per-resource `RES_STATUS_ERROR` outcomes do not block persistence — the
      errors travel in the `*Info` and the worker's health loop drives repair
      (equal-revision re-syncs re-apply idempotently). Protocol rejections —
@@ -336,10 +372,17 @@ SH6. Enumeration on startup: `RunCommand(ctx, "ls", []string{"-1", prefix},
      `side-`, `migr-bm-`; cn: `cn-`, `cntlr-`, `clone-bm-`). File names are
      used only for discovery; the ids come from the decoded protos.
 
-SH7. When an object is torn down (removed from its parent's pointer list),
-     its request file and its bitmap-chunk files are deleted with
-     `RunCommand("rm", ["-f", …])` after the resources are gone — a crash in
-     between re-runs the teardown on restart (idempotent).
+SH7. When an object's pointer leaves its parent's list, its state is dropped
+     **at that moment** and nothing of it is removed from the node yet: its
+     request file and its bitmap-chunk files are deleted with
+     `RunCommand("rm", ["-f", …])`, its memory entry and object lock go, and
+     its goroutines are stopped. The resources are found afterwards **by
+     name**, by the sweep that runs later in the same pass (DN6), so no file
+     has to be kept as a to-be-deleted list. Keeping it until the resources
+     were gone is what the sweep replaced, and it was the opposite of
+     idempotent: the removal pass only logged its failures and the file was
+     deleted regardless, so the one record naming the object was destroyed
+     exactly when the object had failed to go.
 
 ### 2.5 Revision gate — `revision.go`
 
@@ -372,7 +415,10 @@ SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a `details`
      normal gRPC reply (`AgentReply.code != 0`), never a gRPC error status —
      only `GetDnSize`/`GetCnSize` and `Get*Bm` report failure through the
      status (§9.1). A rejected request is never persisted (SH5), whichever
-     kind it is.
+     kind it is. `ReplyCodeLeftover` is **not** one of these: it reports an
+     accepted request whose node still holds unwanted objects (DN19), so it
+     is the one non-zero code that leaves the request stored and its rows
+     worth reading.
 
 ### 2.6 Concurrency — `locks.go`
 
@@ -395,8 +441,9 @@ func (l *LockSet) DropObj(key string)
 ```
 
 SH10. Node **write** lock: the startup reconcile and the node-level syncup
-      (`SyncupDn`/`SyncupCn` — they diff the pointer list and may tear
-      objects down).
+      (`SyncupDn`/`SyncupCn` — they diff the pointer list and run the
+      node-level sweep, which enumerates the whole node and may remove the
+      resources of any object **of this agent** on it).
 
 SH11. Node **read** lock + the object's lock: every object-scoped RPC
       (`SyncupSide`/`SyncupCntlr`, `Push*Bitmap`, `GetSideInfo`/
@@ -424,7 +471,14 @@ SH14. A per-object in-memory tracker turns probe outcomes into
       *deliberately not created yet, healthy, no action needed*: it is what a
       resource waiting behind DN9's provisioning gate reports, and unlike
       `RES_STATUS_ERROR` it never feeds `err_epoch` (§9.5, §10.2-§10.4).
-      Tracker state is in-memory; after a
+      A resource that leaves the desired state must lose its history, or the
+      next object built with the same id would inherit a dead one's epoch and
+      read as unchanged since. An object whose own converge derives a
+      per-resource key set — a side (DN6), a cntlr (`cnagent.md` CN9) —
+      therefore has its tracker pruned the way its devices are: `Keep(wanted)`
+      drops every key that set does not name, derived from the wanted set
+      rather than from a diff against a remembered plan. Tracker state is
+      in-memory; after a
       restart epochs restart at the reconcile time — acceptable, the epoch
       means "last observed change".
 
@@ -443,6 +497,38 @@ SH15. Every wrapper call wraps its ctx with
       package that calls the `OsClient` directly instead of through a
       wrapper — the `cnagent.md` CN12 sysfs leg walk — takes the same bound
       from the exported `agent.CmdCtx`.
+
+      **A command that was killed did not answer, and "did not answer" is not
+      "absent".** `OsClient.RunCommand` returns `exitCode == -1` with a
+      non-nil error when the process never reported — killed at the soft
+      timeout, killed at the hard timeout, failed to start, ctx cancelled,
+      semaphore refused — and `exitCode > 0` when the tool ran and answered
+      "no". `agent.Reported(exitCode, err)` (`err == nil || exitCode > 0`) is
+      the single test, and `osBase.runProbe` is the single place that applies
+      it: a probe that did not answer returns an **error**, never a "not
+      there". The distinction is not cosmetic. A killed command may still
+      have completed in the kernel — the ioctl finishes regardless of the
+      signal — so the only thing a caller learns from a kill is that it must
+      probe again; and a caller that reads a kill as "absent" skips the
+      removal, forgets the object and never enumerates it again, which is the
+      leak the sweep exists to end (DN6).
+
+      Five primitives must honour it, because each one's caller answers an
+      "absent" with a removal or with a decision that destroys data:
+      `Dm.Info` (`agent/dm.go`, whose `nil, nil` gates `meta.FreeSide` and
+      `meta.FreeCloneMeta` — see DN6's record rule), `osBase.listDir` and the
+      `dirExists` above it (`agent/oswrap.go`, which `Nvmet.RemoveSubsystem`
+      and `RemovePortLink` walk their children through), `Md.Detail` and
+      `Md.HasSuperblock` (`cnagent.md` CN12: `--detail` and `--examine` both
+      open the array's member devices, so on a leg whose DN side is gone they
+      block past the soft timeout and get killed — and a killed `--examine`
+      read as "no superblock" would make `assembleGroup` run `mdadm --create
+      --assume-clean` over live data). `NvmeHost.readTrimmed` follows the
+      same rule from the other side of the fence: it reads sysfs rather than
+      running a tool, so **only** `fs.ErrNotExist` is "absent" and every
+      other read failure is an error — `/sys/class/nvme*` can stall while a
+      controller is mid-reset, and a stalled read taken as absence would
+      report a live subsystem as not connected (SH20).
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
       state and mutates only differences; an equal-revision re-apply on a
@@ -499,7 +585,13 @@ SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
         namespace because the target group always exists.
       * subsystem/namespace lifecycle helpers follow the Appendix A order;
         teardown is reverse order (port link removed first, then ns disable,
-        rmdir ns, allowed-hosts unlink, rmdir subsystem).
+        rmdir ns, allowed-hosts unlink, rmdir subsystem). Absent objects are
+        skipped so a re-run after a crash is a no-op, but the `enable` read
+        that decides whether the disable is needed is a **strict** one
+        (SH15): a read that did not answer must not let the pass skip
+        `enable = 0` and then `rmdir` a namespace the kernel still has
+        enabled. `RemoveSubsystem` and `RemoveNamespace` both read it that
+        way, and both propagate the error instead of continuing.
 
 SH20. `nvmehost.go`: `Connect` always passes
       `--fast_io_fail_tmo {DefaultNvmeFastIoFailTmo} --ctrl-loss-tmo -1`,
@@ -754,7 +846,9 @@ connect-retry registry), `fence.go` (the DN12 two-phase fence: window
 bookkeeping, timer, adoption, settle), `zeroing.go` (the DN9
 side-provisioning registry and its `blkdiscard --zeroout` batches),
 `push_migr_bm.go`,
-`check.go`, `probe.go` (DnInfo/SideInfo probing). Colocated `_test.go` files.
+`sweep.go` (DN6: the node's enumeration, the two scopes' wanted sets, the
+claim rules, the layers and the record gate), `check.go`, `probe.go`
+(DnInfo/SideInfo probing). Colocated `_test.go` files.
 
 ### 4.2 Server type and lock mapping
 
@@ -806,21 +900,35 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      a converge would bury the conf fault under an identity error on every
      side of that DN instead of one record naming the field. Loading rather
      than skipping is what keeps the fault harmless: with no DN state in
-     memory, that node's `side-*` files would take the pointer-absent branch
-     below and be torn down (DN6) — a conf fault must not destroy resources.
+     memory every `side-*` file of that node takes the pointer-absent branch
+     below, and its request and its bitmap chunks are deleted on the spot
+     (SH7) — the agent would forget every side it hosts, and every bitmap
+     chunk it holds for them, because one field of its parent is zero. It
+     would not even remove their resources in exchange: a DN that was never
+     loaded gets no node-level sweep of its own (DN6), and no other DN's
+     sweep reaches them either — that sweep's enumeration is filtered to its
+     own dn id, and an export whose namespace names another node's kind-`d1`
+     linear reads as **foreign** — so the dm devices, exports and records
+     would simply sit there with nothing on the node naming them. A conf
+     fault must destroy neither the desired state nor the resources.
      So every side still in that DN's stored pointer list is left **exactly
-     as the restart found it**, neither converged nor torn down: its
+     as the restart found it**, neither converged nor swept: its
      exports, dm devices, store file and extent record stay, and its stored
      `migr-bm-*` chunks are loaded but applied to nothing. A side whose
-     pointer already left the list is torn down as usual (DN6) — the pointer
-     check runs before the conf check. The DN6 orphan sweep stays silent (it
-     needs a confirmed disk, and DN5's identity check never ran here). There
+     pointer already left the list still has its **state** dropped as usual
+     (SH7) — the pointer check runs before the conf check — but the
+     node-level sweep of that DN is skipped along with everything else of it,
+     so its dm devices and its records are not removed until the conf is
+     fixed: a leak, which is the side of the trade a conf fault is allowed to
+     fall on. The record step stays silent for a second reason too (it needs
+     a confirmed disk, and DN5's identity check never ran here). There
      is no compat shim: a cluster whose stored conf carries zeros is refused
-     loudly everywhere and has to be recreated. Then each
-     `side-*` file: if its pointer is absent from the stored
-     `SyncupDnRequest.side_pointer_list`, tear the side down (DN6) — it was
-     removed mid-teardown; otherwise re-run the SyncupSide converge (§4.6)
-     from the stored request — a converge that finds not-yet-zeroed extents
+     loudly everywhere and has to be recreated. The order over the whole
+     store is: every side whose pointer is absent from its DN's stored
+     `side_pointer_list` is dropped, then each usable DN's node-level sweep
+     removes what those sides left behind by name, then the remaining
+     `side-*` files re-run the SyncupSide converge (§4.6) from the stored
+     request — a converge that finds not-yet-zeroed extents
      (re)starts that side's DN9 zeroing goroutine, which is how provisioning
      resumes after a restart. Then re-apply every `migr-bm-*` chunk (SH21-
      SH23) — except the orphans, which are **deleted** here: a chunk whose
@@ -890,7 +998,7 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
 
        A successful identity check is what makes the disk **writable** at all:
        every later mutation (allocate, free, the DN9 zeroed-bit updates, the
-       DN6 orphan sweep) refuses on a disk whose identity this node has not
+       DN6 record step) refuses on a disk whose identity this node has not
        confirmed.
        The guard has to live at that layer rather than in the caller, because
        a failed DN converge does not stop the side converges that follow
@@ -921,85 +1029,244 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        check this is a **health** signal, never a write gate (DN19): a DN
        already carrying sides must keep serving them.
 
-DN6. Diff `side_pointer_list` against the local `side-*` files (§9.1 full
-     sync). A pointer in the request without local state needs nothing yet —
-     resources come with its first `SyncupSide`; the persisted request is
-     what makes the pointer *known*. A local side file whose pointer left the
-     list is torn down **top-down**, and *before* its first step every fenced
-     per-CN dm-linear is resumed (DN12). The nvmet port-link/ns/subsystem(s)
-     (including a migration-source export) go first; then the DN8
-     connect-retry registration is dropped and the DN9 zeroing goroutine is
-     cancelled **and waited for** — a running `blkdiscard --zeroout` child
-     holds `DnSideName` open, so what its position has to guarantee is that
-     it precedes every `dmsetup remove`, not that it precedes the exports,
-     which do not touch that fd. Then the dm devices, each ahead of the ones
-     it maps onto: the per-CN `DnLinearName`, the dm-clone
-     `DnMigrFinalName`, `nvme disconnect` of a migration-destination
-     connection (after the clone, because pulling the source out from under a
-     live dm-clone strands in-flight hydration IO), `DnMigrSrcName`, the
-     per-CN `DnErrorName`, the `DnMigrMetaDmName` wrapper and the release of
-     its metadata slot, the `DnSideName` device and the release of its extent
-     record; then delete its `side-*` and `migr-bm-*` files and `DropObj` its
-     lock (SH7).
+DN6. **Removal is a sweep of actual minus desired, never a memory.**
+     `side_pointer_list` is authoritative (§9.1 full sync). A pointer in the
+     request without local state needs nothing yet — resources come with its
+     first `SyncupSide`; the persisted request is what makes the pointer
+     *known*. A local side whose pointer has **left** the list is dropped on
+     the spot (SH7): its DN8 connect-retry registration goes, its DN9 zeroing
+     goroutine is cancelled **and waited for**, its §11.2 fence is cleared,
+     and its `side-*` and `migr-bm-*` files, memory entry and object lock are
+     deleted. Nothing of it is removed from the node at that point.
 
-     The per-CN dm-linears go **before** the dm-clone, and the dm-clone
-     before the wrapper and the side device, because each of those is a
-     table target of the one above it and `dmsetup remove` on a device
-     another live dm device still maps fails EBUSY. Getting this backwards
-     does not merely log an error: the clone survives, so its wrapper and
-     the side device under it survive too, and no later empty side list can
-     remove them either — the side leaks until the node is scrubbed by hand.
+     What to remove is derived afterwards from the node itself: enumerate
+     what exists — `dmsetup ls`, the configfs subsystem listing, the
+     `/sys/class/nvme-subsystem` walk — subtract what the desired state
+     wants, remove the rest top-down, and verify every removal with a probe.
+     `architecture.md` §9.8 states the principle both roles share — including
+     why nothing about a failed removal may be remembered — and what follows
+     is the dn's instance of it. Every dnv name carries its own ids, so a side
+     the agent has already forgotten is still found by name — which is what
+     makes dropping the state first safe, and what the old teardown could
+     not do: it deleted the same state after a best-effort removal pass whose
+     every step only logged its failure, and nothing ever enumerated the
+     object again.
 
-     **Orphan sweep.** Immediately after the pointer diff (and at the end of
-     the startup reconcile), under the node write lock, a volume-table record
-     whose owner is **provably** gone has its dm device removed and its space
-     freed. This closes the crash window between a teardown's resource
-     removal and its table update.
+     **Scope 1, node-level.** Under the node write lock, in `SyncupDn` after
+     the DN converge and in the startup reconcile after every DN has
+     converged. Its wanted set is empty for every side that is not in any
+     authoritative list: a `DnErrorName`/`DnLinearName`/`DnSideName` device
+     whose `(sp_id, side_id)` appears in no synced DN's `side_pointer_list`
+     **and** in no locally stored side goes, together with the migration
+     objects no stored side claims and the exports this agent can attribute
+     to itself that name no side it must keep — a `SideToCnNqn` export
+     carries no dn id, so it is attributed before it is judged (below), or
+     the sweep would take a sibling agent's. It never touches a side that
+     **is** in a pointer list, even when that side's file is absent (DN8): a
+     node that lost `--local-store` but kept its disk must rebuild those
+     sides from their records, and sweeping them would free the extents and
+     send the next `SyncupSide` through the §9.4 provisioning protocol again,
+     zeroing live data. When no DN has been synced or reloaded at all nothing
+     is authoritative and the sweep does nothing.
 
-     "Provably" is load-bearing, because the volume table — not the local
-     store — is authoritative for extent placement ([D13]): a `SideRecord` is
-     an orphan only when its `(sp_id, side_id)` appears in **no** synced DN's
-     authoritative `side_pointer_list` and in no locally stored side. Missing
-     local state is *not* proof: a node that lost `--local-store` but kept
-     its disk still has every side in its DN's pointer list and must rebuild
-     those sides from their records — sweeping them would free the extents,
-     and the next `SyncupSide` then either re-allocates them and zeroes live
-     data away (`provisioned = false`) or, at `provisioned = true`, refuses to
-     allocate and reports the side permanently dead (`"record missing"`,
-     DN9). Both outcomes lose the data. When no DN has been synced or
-     reloaded at all, nothing is authoritative and the sweep does nothing. A
-     side the sweep does remove has its zeroing goroutine cancelled and waited
-     for first, exactly as in the teardown above.
+     **Scope 2, side-level.** Inside `convergeSide` and ahead of its build
+     phase (§4.6), under whatever DN1 locks that caller holds (SH10/SH11).
+     Its wanted set is exactly what the build phase would ensure for this
+     side's plan, with the §11.2 source deferral already applied:
+     `DnSideName` at every level (DN11), the per-CN `DnErrorName` and
+     `DnLinearName` while `sp_level` keeps the dm layer, the `SideToCnNqn`
+     exports while it keeps the export layer, `DnMigrSrcName` and its
+     `MigrSrcNqn` export while an **effective** `migr_src_conf` is set — each
+     still under the level gate above it (DN12) — and `DnMigrFinalName`,
+     `DnMigrMetaDmName` and the `:3:` host connection while a destination
+     role is wanted (DN13). Everything of that side which the node holds and
+     that set does not name is removed.
 
-     A `CloneMetaRecord` is an orphan only when no live destination role
-     claims its `(sp_id, migr_id)` — both the currently requested and the
-     last applied `migr_dst_conf` count, so a converge that has not run yet
-     never loses its slot — **and** every side of that `sp_id` the node may
-     host is one whose local state the agent actually holds. Otherwise a side
-     it has not heard from yet could still own the slot, and freeing it would
-     strand an in-flight migration whose hydration is supposed to resume from
-     disk (§11.2). The dm-clone goes **before** the disconnect
-     that removes its source device: pulling the source out from under a
-     live dm-clone leaves in-flight hydration IO with nowhere to go, and the
-     `dmsetup remove` that follows then blocks until the `architecture.md` §7 hard timeout.
-     (The `sp_level`/end-of-migration teardown of a destination role follows
-     the same order — DN11, DN13.) Ids are never reused, so a deleted side
-     never comes back.
+     The node write lock excludes every side-level sweep while the node-level
+     one runs, so the two scopes never race. Two side-level sweeps of
+     different sides of one sp can both see the same unclaimed migration
+     object, because a migration belongs to no side (below); a second removal
+     is harmless — its probe simply finds the device already gone, which is
+     the same answer it gives for any object that vanished between the
+     enumeration and the removal.
 
-     **Finishing a migration is not a top-down teardown.** When a
+     **Objects whose name carries no side.** A migration device
+     (`DnMigrSrcName`, `DnMigrFinalName`, `DnMigrMetaDmName`) is keyed by
+     `(sp_id, migr_id)`, a `SideToCnNqn` export by `(cluster, sp, leg, cn)`,
+     and the `MigrSrcNqn` a destination connects to carries the **source**
+     DN's id — none of them names the side that built it. Two questions have
+     to be answered about such an object, and in this order: *is it mine*,
+     and *does anything still want it*. The first is not the same as the
+     second, and skipping it is how a sweep takes a sibling agent's live
+     object (`architecture.md` §9.8).
+
+     For the three migration dm devices the first question is already
+     answered by the enumeration — their names carry this cluster and this
+     dn, as the `MigrSrcNqn` export's own name does — so for those the claim
+     rule below is the whole test. The `:2:` export carries no dn id at all
+     and the `:3:` connection carries only the **source** DN's, so neither
+     names the agent holding it; both are visible to every agent sharing the
+     kernel, so each needs attributing first. A `:2:` export is attributed
+     by the per-CN dm-linear its namespace backs: one naming another dn
+     agent's kind-`d1` linear is **foreign** and is never touched; one naming
+     ours belongs to the side in that name, and survives for as long as that
+     side is in an authoritative list, which is what keeps a side that must
+     be rebuilt from its record exporting (DN8) even though no stored side
+     claims it. An export holding no namespace at all is attributed by the
+     nvmet **port** it is linked to, each agent converging exactly one port
+     id; one linked to no port either exports nothing and holds nothing
+     open, so whoever finds it may remove it — unless a stored side still
+     claims it, which is the claim rule again. A `:3:` connection is
+     attributed by its controller's `hostnqn`
+     (`/sys/class/nvme/nvmeN/hostnqn`): the nvme host namespace is per
+     kernel, and since the NQN names the **source** DN, the host NQN it was
+     opened with is the only field that names the agent holding it.
+
+     What that leaves is judged by the **claim rule**: the object goes unless
+     some side this agent holds state for still wants it, read from that
+     side's stored request — its **effective** `migr_src_conf` (a source
+     whose destination has not provisioned claims nothing, §11.2), its
+     `migr_dst_conf` under a wanted destination role, its export under a
+     wanted export layer.
+
+     **A claim carries its claimant's gate, and the source needs two of
+     them.** A claim is not "this object exists"; it is "somebody still WANTS
+     it", so it is recorded only under the same condition that keeps the
+     object in the wanted set. The migration source is the one role whose two
+     objects part company: the `d2` linear is wanted under the dm layer, its
+     `:3:` export under the export layer, and `SP_LEVEL_NO_SIDE` sits exactly
+     between them. A single ungated claim made both permanently unsweepable —
+     the wanted set dropped them correctly, but every sweep skips what the
+     claim map holds, so they were neither removed NOR reported, the reply
+     stayed OK, and an sp taken to `NO_SIDE` went on exporting its migration
+     source until `migr_src_conf` itself was dropped. Being skipped rather
+     than named is what makes this class silent: a leftover at least
+     re-drives. A side's request is stored before its converge
+     builds anything, so no live claim can be invisible to the rule; and the
+     claim is recomputed from the requests every pass, never read from what a
+     converge left behind. That
+     is what lets a **finished** migration's objects go in the same pass that
+     drops its conf, with no "applied destination" to remember — the field
+     that used to hold it was overwritten by the very converge that was
+     supposed to retry the removal.
+
+     **The layers.** Each scope removes its unwanted objects in one order,
+     top-down. Every position is a dependency, not a preference:
+
+     *Before the first layer*, every unwanted per-CN dm-linear that is
+     suspended is resumed. L1 disables the nvmet namespace above it, and that
+     write closes the namespace's backing device — which does not complete on
+     a suspended dm target, whose bios queue with no timeout and no error
+     path ([D12]). The §11.2 cutover leaves exactly such devices behind, so a
+     side torn down inside the grace window is torn down over them.
+
+| | removed | why here |
+|---|---|---|
+| L1 | the `SideToCnNqn` exports, the `MigrSrcNqn` export | an enabled nvmet namespace holds its backing device open, and removing the subsystem is what disables it: nothing below can go while an export still names it |
+| L2 | the per-CN `DnLinearName` | every device below is one of its table targets, and `dmsetup remove` on a device another live dm device still maps fails EBUSY |
+| L3 | `DnMigrFinalName`, then the `:3:` host connection | the connection is the dm-clone's source device: pulling it out from under a live clone strands the clone's in-flight hydration IO |
+| L4 | `DnMigrSrcName` | it maps the side device, so it goes before L7; nothing local maps it once its own export is gone |
+| L5 | the per-CN `DnErrorName` | nothing maps a dm-error once the linear that targeted it is gone |
+| L6 | `DnMigrMetaDmName`, then its `CloneMetaRecord` | it is the dm-clone's metadata device and cannot go before the clone |
+| L7 | `DnSideName`, then its `SideRecord` | everything above maps it |
+
+     Getting this backwards does not merely log an error: a clone that
+     survives keeps its metadata wrapper and the side device under it alive
+     too, and no later empty side list can remove them either — the side
+     leaks until the node is scrubbed by hand (IR4).
+
+     **Finish the layer, never descend below one that left something.** Every
+     removal of a layer is attempted; if anything of that layer is still
+     there afterwards, the layers below are **reported** as leftovers and not
+     touched. Continuing would disconnect a live clone's source, or attempt
+     a device something still maps; stopping at the first failure inside a
+     layer would lose the rest of its names from the report. Nothing is lost
+     by waiting: the pass is re-run on the next round, by which time the
+     failfast window has passed and no command blocks.
+
+     **"Gone" is probe-verified.** Every removal is followed by a re-probe —
+     `dmsetup info` for a dm device, the configfs directory for a subsystem,
+     the sysfs walk for a connection — and that probe, never the removal
+     command's exit status, is the evidence. A killed command may have
+     completed in the kernel, and a killed probe proves nothing at all
+     (SH15). For a connection the question that walk asks is whether any
+     **controller** is left, not whether the subsystem is: the kernel keeps
+     the `/sys/class/nvme-subsystem` entry after the last controller of an
+     NQN is deleted, and an entry with no controller holds nothing open, so
+     waiting for the directory itself would report a leftover that never
+     goes.
+
+     **The record rule.** An allocation record is released **only** after the
+     sweep has verified its device is gone **and** the authoritative pointer
+     lists prove its owner is gone. Both halves are load-bearing, and the
+     second one is where "provably" has to be taken literally, because the
+     volume table — not the local store — is authoritative for extent
+     placement ([D13]). A `SideRecord` is an orphan
+     only when its `(sp_id, side_id)` appears in no synced DN's
+     `side_pointer_list` and in no locally stored side. Missing local state
+     is *not* proof: a node that lost `--local-store` but kept its disk still
+     has every side in its DN's pointer list, and freeing those extents makes
+     the next `SyncupSide` either re-allocate them and zero live data away
+     (`provisioned = false`) or, at `provisioned = true`, refuse to allocate
+     and report the side permanently dead (`"record missing"`, DN9) — both
+     outcomes lose the data. A `CloneMetaRecord`
+     is an orphan only when no stored side claims its `(sp_id, migr_id)`
+     **and** every side of that `sp_id` this node may host is one whose local
+     state the agent actually holds — otherwise a side it has not heard from
+     yet could still own the slot, and freeing it would strand an in-flight
+     migration whose hydration is supposed to resume from disk (§11.2).
+     Freeing a record while its device still maps those extents is not a leak
+     but a corruption path: the next allocation hands the same extents to
+     another side, which zeroes them and serves them as its own. In this
+     agent that is where reading a killed `dmsetup info` as "the device is
+     gone" destroys data rather than leaking a device, and it is why SH15's
+     rule is a rule.
+
+     **The record step.** The same proof, run over the volume table itself
+     rather than over the devices the enumeration found, closes the crash
+     window between a removal and its table update. It runs on every
+     node-level pass — after the pointer drop in `SyncupDn`, and after the
+     DNs converge in the startup reconcile. It removes **no** device: the
+     layers do that, in the order the kernel needs and stopping the descent
+     where something above will not go, and a removal issued from here would
+     jump that order. What is left for this step is the record, and the only
+     record it frees is one whose owner is provably gone **and** whose device
+     it has probed and found already gone. A record whose device is still
+     there — or whose `dmsetup info` did not answer, which is not an absence
+     (SH15) — is reported as a leftover and stays allocated until a later
+     pass finds the device gone; freeing extents a live device still maps is
+     the corruption path above, not a leak. Cancelling the zeroing goroutine
+     is not this step's business either: the node-level pass cancels and
+     waits for the goroutine of every side device it is **about to remove**,
+     ahead of the layers, because a live `blkdiscard --zeroout` child holds
+     `DnSideName` open and `dmsetup remove` on an open device fails EBUSY
+     (§9.4). The whole step refuses on a disk whose identity this node has
+     not confirmed, as every mutation of the table does (DN5).
+
+     Ids are never reused, so a swept side never comes back.
+
+     **Finishing a migration is not a teardown of the side.** When a
      `SyncupSide` drops `migr_dst_conf` while the side keeps exporting
-     (§11.2 dst finish), the per-CN dm-linears are not removed — they are
-     *reloaded* off the dm-clone onto the plain `DnSideName`. The
-     destination role is therefore retired **after** the per-CN dm layer has
-     converged, never in the up-front teardown pass that precedes it: at
-     that point every linear still maps the clone. The retirement is
-     idempotent and self-healing — a pass that cannot remove the clone
-     leaves the applied `migr_dst_conf` in place, so the next converge
-     retries the whole sequence rather than continuing past a live clone to
-     disconnect its source.
+     (§11.2 dst finish), the per-CN dm-linears are **wanted** — they are not
+     in the chain at all — while the dm-clone they still map is not. The
+     sweep therefore repoints before it removes: a wanted per-CN linear whose
+     **live table** maps a device this pass is about to remove is reloaded
+     onto the backing the plan wants, first, so that L3 does not find the
+     clone pinned under it and lose the whole chain to the stop rule for a
+     round (DN13). The live table is read, not remembered — the reload's
+     target is `linearBacking` with no live clone, which is what the build
+     phase would give it anyway. A fenced (suspended) wanted linear is left
+     alone: that suspension is deliberate and ending it is the fence's own
+     job (DN12).
 
-DN7. Persist the request (SH5); reply `agent_reply`, `revision` (= the stored
-     revision after this call), `dn_info`.
+     **The verdict.** Whatever a pass could not remove, plus any enumeration
+     that did not answer, is what the reply's `agent_reply` carries (DN19).
+     It is one comparison's result, recomputed every round and stored
+     nowhere.
+
+DN7. The request was persisted before the converge (SH5) and the node-level
+     sweep has run (DN6); reply `agent_reply` — the sweep's verdict (DN19) —
+     `revision` (= the stored revision after this call) and `dn_info`.
 
 ### 4.6 `SyncupSide`
 
@@ -1126,10 +1393,11 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      * zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included
        (DN11): it is bottom-layer provisioning, exactly as the trim it
        replaced was.
-     * cancellation: side teardown (DN6, which is also where a cancelled
+     * cancellation: the drop of a side whose pointer left the list (DN6,
+       which is also where a cancelled
        migration lands — `CancelMigration` reaches the agent as the side
        pointer leaving the list) **cancels the goroutine and waits for it**
-       before the dm device is removed, because the running child holds
+       before the sweep removes the dm device, because the running child holds
        `DnSideName` open and `dmsetup remove` would fail EBUSY. Process exit
        is SH27's `WaitBackground`, so no orphan `blkdiscard` ever outlives the
        agent.
@@ -1234,11 +1502,23 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       * A side whose linears are suspended but whose window start is unknown
         — an agent restart mid-window — is treated as **elapsed**, and phase 2
         runs on the first converge. Restarting never opens a second window.
-      * The role ending (`migr_src_conf` gone) clears the window and returns
-        the linears to their normal targets, resumed.
-      * `teardownSide` resumes every fenced linear **before** its first step,
-        because disabling an nvmet namespace closes its backing device and
-        `dmsetup remove` does not succeed on a suspended one.
+      * The role ending clears the window and returns the linears to their
+        normal targets, resumed. The condition is a **state**, not an event:
+        every converge of a side whose *effective* `migr_src_conf` is absent
+        — dropped, or deferred behind `dst_provisioned = false` — clears the
+        window and resumes every per-CN dm-linear of that side it finds
+        suspended, so nothing has to remember that a window was ever opened.
+        The set comes from the **enumeration** of what the node holds, not
+        from the plan's cn list: a linear built for a CN that has since left
+        `standby_id_list` is exactly the one a remembered list would miss,
+        and leaving it suspended would queue bios with no timeout. The
+        resume alone is enough — the queued IO drains against whatever table
+        is live, here the pre-fence one, and the build phase then reloads the
+        linear onto the target the new desired state wants.
+      * The sweep resumes every suspended per-CN linear it is about to
+        remove **before** its first layer (DN6), because disabling an nvmet
+        namespace closes its backing device and that write does not complete
+        on a suspended dm target.
       * A converge that stops at the side-device gate — *any* DN9 outcome
         short of ready: still provisioning (zeroing, or zeroed and not yet
         released by the CP), or a side-device fault (an unreadable disk,
@@ -1264,6 +1544,18 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       window)"`: it is an expected, time-bounded state, and the probe expects
       the **pre-fence** table there rather than the dm-error, so a healthy
       cutover never reports a table mismatch.
+
+      **Ending the role removes nothing directly.** `DnMigrSrcName` and its
+      `MigrSrcNqn` export simply stop being wanted, and the sweep takes them
+      (DN6 L4 and L1). The linear is keyed by `(sp_id, migr_id)` and the
+      export by `(cluster, dn, sp_id, migr_id)`; neither names a side, so
+      both are judged by the claim rule — no stored side of this DN still
+      names that `migr_src_conf` — rather than by an "applied source" the
+      converge would have overwritten on its way past. Deferral is the same
+      condition: while `dst_provisioned` is `false` the effective source conf
+      is absent, so anything an earlier pass built for it is unwanted and
+      goes, which is what makes "behaves exactly as if `migr_src_conf` were
+      absent" true of the removal half as well.
 
 DN13. **Migration destination** (`migr_dst_conf` set).
 
@@ -1324,7 +1616,63 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       failure it records `target_info = RES_STATUS_ERROR` and registers the
       side in a background retry registry that re-runs the destination
       converge every `DnMigrConnectRetryInterval` seconds under the DN1
-      locks, until success or teardown.
+      locks. It is deregistered on success, by the sweep's pre-step as soon
+      as a destination role stops being wanted, and by the drop of a side
+      whose pointer has left the list (DN6) — always by the state, never by
+      remembering that it was once registered.
+
+      **The deregistration runs inside the very converge it is ending, and
+      that is the sharp edge.** Registering creates a cancellable context and
+      deregistering cancels it — so the attempt the retry loop runs must not
+      be the thing that context governs. It used to be: the loop converged on
+      its own context, and the pass that finally connected reached the
+      deregistration, cancelled itself, and then failed every remaining OS
+      call of that pass on the dead context. The dm-clone was never created,
+      `retrying` was already `false` so nothing ticked again, and the side sat
+      at `dm_clone = RES_STATUS_MISSING, "target not connected"` **for ever**
+      — while the controller that reading names was `live`. One transient
+      connect failure was enough, which is why it survived: the unit test for
+      the retry drove its second converge from an RPC, and an RPC-driven
+      converge runs on the gRPC context, which the cancel cannot touch.
+
+      So the loop's context governs the **loop**, not the attempt: each
+      attempt reconverges on `rootCtx`, exactly as the §11.2 fence timer
+      already did, and the cancel is read by the loop's own check one tick
+      later at worst. Shutdown still stops an attempt in flight, because
+      `rootCtx` is cancelled before `WaitBackground` joins (SH27). The
+      regression test has to drive the successful connect **from the loop**,
+      since that is the only shape in which "connect succeeded" and "cancel
+      everything" happen in one pass in that order.
+
+      **Retiring the role is the sweep's, and it starts with a repoint.**
+      When `migr_dst_conf` goes — the §11.2 finish, a level at or above
+      `SP_LEVEL_NO_MIGRATION`, or the side leaving its DN's list —
+      `DnMigrFinalName`, `DnMigrMetaDmName` and the `:3:` connection stop
+      being wanted and DN6's layers take them, clone before connection and
+      wrapper after both. All three are identified by `(sp_id, migr_id)` —
+      the `:3:` NQN carries the **source** DN's id, not this node's, so that
+      pair is the only part of it which names the migration. Nothing in that
+      NQN names *this* agent either, and the nvme host namespace is per
+      kernel, so the connection is attributed first by its controller's
+      `hostnqn` (`/sys/class/nvme/nvmeN/hostnqn`, DN6): a controller some
+      other dn agent on this node opened is not a candidate at all. What
+      that leaves is decided by the claim rule: no stored side of this DN
+      still names that `migr_dst_conf` under a wanted destination role. That
+      is the whole replacement for the "applied destination" this used to
+      diff against — a field the converge overwrote on its way past, so a
+      removal that failed was forgotten by the pass that was meant to retry
+      it.
+
+      On the finish path the per-CN dm-linears are **kept** and still map the
+      clone, so the sweep repoints each one onto the plain `DnSideName`
+      first, deciding that it needs the repoint by reading the linear's
+      **live table** rather than by remembering what it applied last time
+      (DN6). Without that the clone's removal
+      fails EBUSY under the linear and the whole chain waits a round for the
+      build phase to repoint it. The metadata slot is released only after the
+      wrapper's removal has been **verified**, and only when the record rule
+      (DN6) also proves the slot orphaned; a slot whose wrapper would not go
+      stays allocated and is retried by the next pass.
 
       **Chunks of a previous migration on the same side are quarantined.**
       The side records the `migr_id` its stored chunks belong to, and a
@@ -1350,17 +1698,23 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       `migr_dst_info` rows — the dn twin of the cn arena ceiling in
       `cnagent.md` CN18.
 
-DN14. Persist (SH5); reply `agent_reply`, `revision`, `side_info` — including
+DN14. Persist (SH5); reply `agent_reply` — the side-level sweep's verdict
+      (DN19) — `revision`, `side_info` — including
       `zeroed_ext_cnt`/`total_ext_cnt`, filled on every reply (DN9) — and
       `bm_info` (the applied set, SH21).
 
 ### 4.7 `PushMigrBitmap`
 
-DN15. Gate: the side file must exist and its
+DN15. Gate: the side must be known and its
       `migr_dst_conf.migr_id` must equal the request's `migr_id`
       (`ReplyCodeUnknownObject` otherwise — only a destination side accepts
-      chunks); revision gate (SH8) against the stored side revision (a push
-      never updates the stored revision). Then SH21-SH23: persist the chunk
+      chunks). There is **no revision gate**: the request carries no
+      `revision` field at all. A chunk is position-addressed data keyed by
+      ids that are never reused, and applying one never advances the stored
+      revision, so a push the worker planned against a report the agent has
+      since superseded is harmless — while rejecting it threw away work the
+      worker had already done and had to be re-driven by a whole re-sync
+      (`dnv-worker.md` BM3). Then SH21-SH23: persist the chunk
       at `LocalMigrBmPath(cluster, dn, sp, migr_id, bm_idx)`, recompute from
       all present chunks (shift by the leg's `meta_blocks`), `blkdiscard` the
       fully-skippable regions of `DnMigrFinalName`. If the dm-clone does not
@@ -1378,16 +1732,41 @@ DN15. Gate: the side file must exist and its
 
 DN16. Read-only: probe fresh under the DN1 locks and reply `agent_reply`,
       `revision`, the info. An unknown DN (no `dn-*` file) or side pointer ⇒
-      `ReplyCodeUnknownObject` with `revision = 0`. Never mutates — in
+      `ReplyCodeUnknownObject` with `revision = 0`.
+
+      For a **known** object the `agent_reply` is the **verdict**: the sweep
+      of DN6 run with its removals left out — the same enumeration, the same
+      wanted set, the same comparison, nothing touched — so `GetDnInfo`
+      replies `ReplyCodeLeftover` while the node holds node-level leftovers
+      and `GetSideInfo` while that side does, and both reply 0 otherwise.
+      A DN's verdict covers node-level leftovers only and a side's covers its
+      own; each drives its own `Syncup*`. The verdict is recomputed on every
+      call and stored nowhere, so a leftover that has since gone stops being
+      reported without anyone clearing a flag. A DN whose stored
+      `extent_size` is unusable has **no** verdict — §7 says it converges
+      nothing and sweeps nothing, so naming leftovers there would report
+      objects this agent has deliberately refused to touch — and neither has
+      a side whose DN is unknown or in that state, since its own geometry
+      comes from the DN.
+
+      Never mutates — in
       particular a `Get*Info` or `Check*` round never allocates a record and
       never registers a DN9 zeroing goroutine (registration happens only on a
       converge path), and it reports `RES_STATUS_MISSING` for a side whose
-      record the converge has not written yet.
+      record the converge has not written yet. That holds for the verdict
+      too: it enumerates and compares, and removes nothing.
 
 ### 4.9 `CheckDn` / `CheckSide`
 
 DN17. Instantiate the SH24-SH26 loop with the §4.10 probes; one round takes
-      the DN1 locks of the corresponding `Get*Info`.
+      the DN1 locks of the corresponding `Get*Info` and carries the same
+      read-only verdict in its `agent_reply` (DN16). That is what makes the
+      retry worker-driven: while leftovers exist every round replies
+      `ReplyCodeLeftover`, the worker re-issues the `Syncup*` that owns them
+      (`dnv-worker.md` RW4), and the sweep inside it tries again — including
+      after a restart, where the first Check round is what reports what the
+      startup sweep could not remove. No agent-side retry loop exists,
+      because the one the worker already runs is enough.
 
 ### 4.10 Probing and error capture — `probe.go`
 
@@ -1412,8 +1791,26 @@ DN18. Probe map (all via SH17 conventions; `res_name` and probe per
 DN19. Error capture (§9.1): a failed command marks that resource
       `RES_STATUS_ERROR` with the command output in `details` and the
       converge pass **continues** with the remaining resources — the agent
-      converges as much as it can; protocol-level failures are the only
-      things reported through `agent_reply`.
+      converges as much as it can.
+
+      **Leftovers are the one non-protocol outcome that travels in
+      `agent_reply`**, and the reason is structural: the `*Info` rows are
+      keyed by the ids of **wanted** objects, and a leftover is by definition
+      something nothing wanted names, so it has no row to ride in. A pass
+      whose sweep (DN6) could not remove everything, or whose enumeration did
+      not answer, replies `ReplyCodeLeftover` with `details` = `leftover(n):
+      kind:name, kind:name, …` — at most eight names, then `[+k more]` — and
+      `enumeration failed: <what>: <err>` for each listing that did not
+      answer. The full list goes to the agent log once per pass as the
+      `sweep leftover` record (`log.md`), so a lingering leftover is visible
+      every round rather than once.
+
+      It is **not** a rejection (SH9). The request was applied, the desired
+      state is stored, and the `*Info` rows are the converge's full account
+      of every wanted object, so the worker evaluates them exactly as it does
+      for code 0 and simply re-issues the `Syncup*` every round until the code
+      changes (`dnv-worker.md` RW5, HL1). Everything else reported through
+      `agent_reply` is still a protocol-level refusal.
 
 ## 5. Amendments applied to companion documents
 
@@ -1513,7 +1910,7 @@ Recorded for traceability; the edits are already applied.
   sites.
 * `dnagent.md` §2.1/SH17/§7 item 6 ([D14]) — LVM left the **cn**
   too ([D14]: the clone VG became a slot allocator over one loop device with
-  kind-`b` wrapper linears), so this document's dn-only statements are
+  kind-`cb` wrapper linears), so this document's dn-only statements are
   generalized: no dnv agent runs any LVM command, SH17 lists no LVM report
   option, and the acceptance grep is repo-wide instead of `agent/ cmd/`.
 * `dnagent.md` SH20 + `cnagent.md` §2.3 —
@@ -1585,23 +1982,50 @@ Unit tests use `common.FakeOsClient` (scripted `RunCommandFn`/`ReadFileFn`/…
 recording every call) and, for RPC-level tests, `bufconn` with the generated
 `DiskNodeAgent` client — no root, no real devices.
 
+**The fake honours the context**, as of 2026-09-19, because not honouring it
+made a whole class of bug invisible by construction. The production client
+runs every command through `exec.CommandContext` and tests `ctx.Err()` at the
+head of each file operation, so a converge whose context dies part-way stops
+doing work there; the fake used to ignore the context entirely, so the same
+converge ran to completion under test. A DN8 retry pass that cancelled its
+own context (see §5 DN13) therefore stalled a real lab for ever while its
+unit test passed. A cancelled context now returns that error from
+`runCommand` and `readFile`, which is what makes the regression test for it
+able to fail.
+
 1. **Fresh SyncupDn**: scripted empty probes; assert the DN5 sequence
    (`readblock` of the header, `writeblock` of table slot A, `writeblock`
    of the header — DN5's slot-A-first order — then the port attrs,
    `mkdir ana_groups/2`+`3`, the three
-   one-time `ana_state` writes) and the `WriteProto` to `LocalDnPath`
-   afterwards (SH5). No LVM string (`pvcreate`/`vgcreate`/`lvcreate`/…)
-   appears anywhere in the recorded calls.
+   one-time `ana_state` writes), with the `WriteProto` to `LocalDnPath`
+   recorded **first**, ahead of the whole converge (SH5). No LVM string
+   (`pvcreate`/`vgcreate`/`lvcreate`/…) appears anywhere in the recorded
+   calls.
 2. **Revision gate**: lower ⇒ `ReplyCodeStaleRevision` and zero mutating
    calls; equal ⇒ full idempotent pass; higher ⇒ apply + persist.
 3. **Probe-first idempotency** (SH16): equal-revision `SyncupSide` against
    probes reporting a fully converged side issues no mutating command — which
    now also proves the disk-metadata re-load issues no `writeblock` — and, on
    a side whose `zeroed_bits` are all set, no `blkdiscard` of any form.
-4. **Pointer diff**: `SyncupDn` dropping a side ⇒ DN6 top-down teardown
-   sequence (exports, per-CN dms, `DnSideName`, the record's slot write) +
-   `rm` of its files; `SyncupSide` for an unknown pointer ⇒
+4. **Pointer diff**: `SyncupDn` dropping a side ⇒ the `rm` of its files
+   **first**, then DN6's sweep finding its resources by name and removing
+   them top-down (export, per-CN dm-linear, per-CN dm-error, `DnSideName`,
+   the record's slot write) — the whole order is the assertion, because the
+   teardown this replaced deleted the file **after** a removal pass whose
+   failures it discarded; `SyncupSide` for an unknown pointer ⇒
    `ReplyCodeUnknownObject`.
+   **Co-hosted agents** (`cohost_test.go`) pin the other half of DN6's
+   attribution rule, the half a suite in which every object belongs to the
+   agent under test cannot reach: a node-level sweep run over a configfs tree
+   and an nvme host namespace that also hold a SIBLING agent's objects. A
+   `:2:` export whose namespace backs onto another dn's kind-`d1` linear, and
+   one with no namespace linked to another agent's nvmet port, both survive;
+   a `:3:` connection opened with another dn's host NQN is not disconnected.
+   Each is paired with the same fixture built under this agent's own ids,
+   which **is** removed, so no arm can pass by sweeping nothing — and the
+   fixture converges a side of its own first, because the sp of that side is
+   what puts the sibling's export past the enumeration's cheap `hosted` gate
+   and in front of the attribution rule at all.
 5. **Side provisioning (zeroing) protocol** (DN9): the allocation slot write
    (a record whose `zeroed_bits` are all 0), the `dmsetup create` of
    `DnSideName` (stdin table form), then one
@@ -1644,9 +2068,10 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     returns without waiting, and the info reports OK with the grace-window
     detail; a probe inside the window mutates nothing. With the window
     elapsed they are reloaded onto their dm-errors and resumed. A timer ends
-    the window unattended; cancelling the role, tearing the side down, and
-    restarting the agent all end it without leaving anything suspended, and a
-    teardown inside the window resumes before it disables any namespace. A
+    the window unattended; cancelling the role, dropping the side from its
+    DN's list, and restarting the agent all end it without leaving anything
+    suspended, and a sweep inside the window resumes before it disables any
+    namespace. A
     fence **adopted** across a restart settles even when the converge that
     adopts it stops at the DN9 gate: every per-CN linear is reloaded onto its
     dm-error and resumed, and no timer is armed for a window that is already
@@ -1658,11 +2083,25 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     resolve to the wrapper and the side device, and that the created table
     carries **`2 no_hydration no_discard_passdown`** — the dn role package's
     copy of the assertion the cn package already makes;
-    teardown asserts
+    removal is asserted on both paths that reach it — the whole order
     clone removal → disconnect → wrapper removal → the `FreeCloneMeta` slot
-    write → side-device removal. The source sequence asserts
+    write → side-device removal when the side leaves its DN's list, and
+    clone-before-disconnect with the wrapper and its slot gone when the
+    destination role ends while the side stays, that one with the primary's
+    dm-linear repointed onto `DnSideName` first (DN6, DN13).
+    The source sequence asserts
     ana_grpid-inaccessible → the per-CN dm-linear **reload onto its
     dm-error** → the migr-src create, with nothing left suspended ([D12]).
+    The **DN8 retry** is pinned twice, and the pair is the point. One test
+    drives the second converge from an RPC and asserts the transition it
+    produces (dm-clone create → dm-linear reload → `ana_grpid` optimized); the
+    other issues **no second RPC at all** and waits for the retry LOOP to get
+    there, asserting only that the dm-clone exists. Only the second can fail
+    when the pass that connects cancels its own context (DN13), because an
+    RPC-driven converge runs on the gRPC context, which that cancel cannot
+    reach — and it can only fail because the fake honours the context (§6
+    preamble). `migrRetryInterval` is a server field for this, the way
+    `zeroRetryInterval` already was.
 13. **`diskmeta`** (`diskmeta_test.go`, on the fake's segment store): format
     and load round-trip; probe-first idempotency (zero `WriteBlock` on a
     formatted disk); identity mismatch refused; corrupt-header refusal; A/B
@@ -1710,10 +2149,11 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     comes no sooner than `common.DnZeroRetryInterval` — shortened through the
     same field-not-constant trick DN12's fence wait uses — never a hot loop;
     the following success clears the error back to `PROVISIONING`.
-19. **Cancel and wait**: tearing the side down (DN6) while a batch is in
+19. **Cancel and wait**: dropping the side from its DN's list (DN6) while a
+    batch is in
     flight cancels the goroutine and **waits** for it; the ordering assertion
     is that the `dmsetup remove` of `DnSideName` is recorded strictly after
-    the in-flight `blkdiscard` returned, and the teardown's node **write** lock
+    the in-flight `blkdiscard` returned, and the pass's node **write** lock
     never deadlocks against the goroutine's table update (DN9's try-acquire
     rule). The same path reached on a migration destination still zeroing
     (DN13) has no test of its own. SH27's join is asserted at the mechanism
@@ -1768,7 +2208,8 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
 3. The §2.2 additions exist: `NvmetPortId`, `AnaGrpId*`, `ReplyCode*`,
    `DnMigrConnectRetryInterval`, `DnZeroBatchExtCnt`, `DnZeroRetryInterval` in
    `common/constants.go`; `DnNsIdentity` in `common/name_fmt.go`. `common/`
-   still contains exactly the six files of `layout.md` §2.
+   contains the six files of `layout.md` §2 plus `name_parse.go` (§2.2), and
+   nothing else.
 4. `WriteFileDirect` is implemented per the amended `osclient.md`; a
    repo-wide grep finds no `WriteFile(` call whose path argument is under
    `/sys/kernel/config`, and no `ana_state` write outside `EnsurePort`.
@@ -1798,6 +2239,13 @@ recording every call) and, for RPC-level tests, `bufconn` with the generated
     on its listener-failure and reconcile-failure return paths — no Go test
     drives a zeroing goroutine or a `blkdiscard` child through `Serve`
     (§6 test 19).
+12. No probe reads "did not answer" as "absent" (SH15): `Dm.Info`,
+    `osBase.listDir`, `Md.Detail` and `Md.HasSuperblock` all take their
+    answer from `osBase.runProbe` (exposed to the role packages as
+    `Cmd.RunProbe`), the one place `agent.Reported` is applied, and
+    `NvmeHost.readTrimmed` reads through `readAttrStrict`, which calls
+    absence only on `fs.ErrNotExist`. None of the five turns a non-nil error
+    into a nil-and-not-found.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 
@@ -1819,11 +2267,14 @@ test that fails without the fix.
   per-CN `DnErrorName` goes after the clone, because nothing maps onto a
   dm-error once its linear is gone); the §11.2 *finish* path really did remove
   it first, hit EBUSY and leaked the clone, its metadata wrapper and the side
-  device under them — unrecoverable by any later empty side list. DN6 now
-  states the layering rule and the finish carve-out, and the retirement is
-  idempotent: a pass that cannot remove the clone keeps the applied
-  `migr_dst_conf` so the next converge retries, rather than continuing on to
-  disconnect a live clone's source.
+  device under them — unrecoverable by any later empty side list. DN6 states
+  the layering rule and the finish carve-out, and the removal is idempotent:
+  a pass that cannot remove the clone descends no further, so it never
+  disconnects a live clone's source, and the next pass derives the same work
+  from the node again. The "keeps the applied `migr_dst_conf` so the next
+  converge retries" this rule once relied on is gone with the field: what
+  makes the retry happen is that nothing was remembered in the first place
+  (DN6).
 * **IR5 (SH17)** — `device_uuid`/`device_nguid` are compared through the shared
   `agent.SameNsId` (strip `-`, fold case), never byte-wise. SH17's "tolerate
   normalized read-back" rule now names both cases it covers.

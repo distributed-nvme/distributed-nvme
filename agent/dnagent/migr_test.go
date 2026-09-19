@@ -641,15 +641,95 @@ func TestMigrationSourceSequence(t *testing.T) {
 // 7. PushMigrBitmap (DN15, SH21-SH23)
 // ---------------------------------------------------------------------------
 
+// pushReq is one chunk on its way to the destination side. A push carries no
+// revision ([D13]): it is position-addressed data keyed by an id that is never
+// reused, so there is nothing for the side's stored revision to be compared
+// with.
 func pushReq(bmIdx uint32, migrId uint64, bitmap []byte) *pb.PushMigrBitmapRequest {
 	return &pb.PushMigrBitmapRequest{
 		ClusterId:   testCluster,
 		DnId:        testDn,
 		SidePointer: sidePtr(testSide),
-		Revision:    2,
 		MigrId:      migrId,
 		BmIdx:       bmIdx,
 		Bitmap:      bitmap,
+	}
+}
+
+// TestPushHasNoRevisionGate is the dn twin of the cn agent's test of the same
+// name: PushMigrBitmap carries no revision and the handler compares none, so a
+// chunk the worker planned against a report the side's stored revision has
+// since superseded is applied rather than discarded. The old gate refused
+// exactly that, and refusing it only ever threw away work that was about to be
+// redone. The refusal that survives is the object one — a migration the stored
+// request does not name is ReplyCodeUnknownObject with a message the worker
+// logs.
+func TestPushHasNoRevisionGate(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	// Revision 2 is the report the push below is planned from...
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	// ...and the side moves on to 5 before the push arrives.
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(5, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("advancing the stored revision: %v", err)
+	}
+
+	// Nothing on the wire can carry a revision any more, so no later edit can
+	// reintroduce the gate without changing the proto.
+	if (&pb.PushMigrBitmapRequest{}).ProtoReflect().Descriptor().
+		Fields().ByName("revision") != nil {
+		t.Fatal("PushMigrBitmapRequest still carries a revision field")
+	}
+
+	node.Reset()
+	reply, err := srv.PushMigrBitmap(ctx, pushReq(0, testMigrId, []byte{0x05}))
+	if err != nil {
+		t.Fatalf("PushMigrBitmap: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("push code = %d (%s), want it accepted",
+			reply.GetAgentReply().GetCode(),
+			reply.GetAgentReply().GetDetails())
+	}
+	// Persisted AND applied: the chunk reached the file and the dm-clone.
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+	assertOrder(t, node,
+		"writeproto "+nf.LocalMigrBmPath(
+			testCluster, testDn, testSp, testMigrId, 0),
+		"cmd blkdiscard --offset 3145728 --length 1048576 "+
+			nf.DmPath(cloneName),
+	)
+	// And it is in the applied set the next reply reports, which is the only
+	// thing that stops the worker re-pushing it.
+	sideReply, err := srv.SyncupSide(ctx,
+		migrDstReq(6, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if got := sideReply.GetBmInfo().GetBmIdxList(); len(got) != 1 ||
+		got[0] != 0 {
+		t.Fatalf("applied set = %v, want the pushed chunk 0", got)
+	}
+
+	// The object refusal is untouched, message and all.
+	unknown, err := srv.PushMigrBitmap(ctx,
+		pushReq(0, testMigrId+1, []byte{0x05}))
+	if err != nil {
+		t.Fatalf("unknown migration: %v", err)
+	}
+	if got := unknown.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeUnknownObject {
+		t.Fatalf("unknown migration: code = %d, want %d",
+			got, common.ReplyCodeUnknownObject)
+	}
+	if unknown.GetAgentReply().GetDetails() == "" {
+		t.Fatal("the refusal carried no message for the worker to log")
 	}
 }
 
@@ -1225,7 +1305,7 @@ func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 }
 
 // The same for the other half of the bookkeeping: when the source role ends,
-// the linears go back into service from teardownForbidden itself, rather than
+// the linears go back into service from the sweep's own pre-step, rather than
 // from an ensureCnDm the DN9 gate may never let run.
 func TestFenceClearedOnARoleEndWithABrokenSideDevice(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -1462,5 +1542,74 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	}
 	if st.fenceTimer != nil {
 		t.Error("the gated pass armed a timer for an adopted fence")
+	}
+}
+
+// TestMigrationConnectSucceedsFromTheRetryLoop pins the DN8 loop's one
+// non-obvious property: the converge that finally connects must survive its
+// own call to stopMigrRetry.
+//
+// The existing retry test above drives the second converge from an RPC, and
+// an RPC-driven converge runs on the gRPC context — which stopMigrRetry's
+// cancel cannot touch. That is why it passed for as long as the bug was
+// there. The retry LOOP's converge is the only one that runs on the very
+// context stopMigrRetry cancels, so it is the only shape in which "connect
+// succeeded" and "cancel everything" happen in the same pass, in that order.
+// Before the fix every OS call after the stopMigrRetry failed on the dead
+// context: the dm-clone was never created, `retrying` was already false so
+// nothing ticked again, and the side sat at `dm_clone: RES_STATUS_MISSING,
+// target not connected` for ever while the controller it names was `live`.
+// An e2e `copy` case measured exactly that on 2026-09-19, after one transient
+// connect failure.
+//
+// The assertion is the dm-clone's existence, not a call order: what the bug
+// destroyed was the REST of the converge, so the thing to pin is that the
+// rest of it ran.
+func TestMigrationConnectSucceedsFromTheRetryLoop(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	srv.migrRetryInterval = 5 * time.Millisecond
+	syncupBoth(t, srv, 1, testSide)
+
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+
+	// One transient failure, exactly as the lab produced: the first connect
+	// is refused, every later one succeeds.
+	node.failCmd["nvme connect"] = "failed to write to nvme-fabrics device"
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	srv.mu.Lock()
+	retrying := st.retrying
+	srv.mu.Unlock()
+	if !retrying {
+		t.Fatal("fixture is wrong: no background retry was registered")
+	}
+	if dmPresent(node, cloneName) {
+		t.Fatal("fixture is wrong: the dm-clone was built despite the " +
+			"refused connect")
+	}
+
+	// No further RPC. The retry loop alone has to get there.
+	deadline := time.Now().Add(5 * time.Second)
+	for !dmPresent(node, cloneName) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !dmPresent(node, cloneName) {
+		srv.mu.Lock()
+		retrying = st.retrying
+		srv.mu.Unlock()
+		t.Fatalf("the retry loop connected but never built %s "+
+			"(retrying = %v): the converge that called stopMigrRetry "+
+			"cancelled its own context", cloneName, retrying)
+	}
+	srv.mu.Lock()
+	retrying = st.retrying
+	srv.mu.Unlock()
+	if retrying {
+		t.Error("the retry registration survived a successful connect")
 	}
 }
