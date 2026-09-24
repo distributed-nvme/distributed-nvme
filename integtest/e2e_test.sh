@@ -1100,9 +1100,12 @@ parameters:
                       common.MaxSliceCntPerSp; 1..$SLICE_CNT_DEFAULT)
   --redund raid1|none redundancy of every group (default raid1)
   --dns-per-vm N      dnagents per DN VM; the default is the placement bound
-                      ceil(legs x 2 x slice_cnt / (V - legs + 1)) over the
-                      V --dn guests, 43 for the default shape on 4 DN VMs.
-                      Below the bound is allowed and warns.
+                      floor(min(legs, d) x (2 x slice_cnt + 2) / d) + 1 over
+                      the V --dn guests, for d = V - legs + 1: 45 for the
+                      default shape on 4 DN VMs and 3 at --slice-cnt 1. It
+                      covers the create AND the two grows of ops step 2,
+                      whose step 8 then needs legs side-less DNs on legs
+                      different VMs. Below the bound is allowed and warns.
   --only <case>       run one case: ${CASES[*]}
   --cleanup-only      run the start cleanup on every guest and stop
 
@@ -1285,7 +1288,7 @@ derive_params() {
 	# the storage pool.
 	#
 	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
-	# four daemon logs, 175 agent logs, the CN thin metadata and md bitmaps,
+	# four daemon logs, 183 agent logs, the CN thin metadata and md bitmaps,
 	# the host pattern files, and each case's own writes, which §7.8 bounds at
 	# under 1 GiB. Run 5 measured 586 MiB of it after the smoke case, the
 	# heaviest contributors being the cp at 296 MiB and cn0 at 79 MiB; 4 GiB
@@ -1295,8 +1298,8 @@ derive_params() {
 	RUN_SLACK_BYTES=$((4 << 30))
 	RUN_CAP_BYTES=$((SP_DATA_BYTES + RUN_SLACK_BYTES))
 
-	# Every one of the LEGS*GRP_CNT sides lands on a DISTINCT disk node: the
-	# create's black list starts as the request's and grows with every pick
+	# Every one of the CREATE's LEGS*GRP_CNT sides lands on a DISTINCT disk node:
+	# the create's black list starts as the request's and grows with every pick
 	# (gateway/storagepool.go:393-403), so 128 sides at the default shape need
 	# 128 DNs that have never been picked.
 	#
@@ -1305,53 +1308,146 @@ derive_params() {
 	# sides from LEGS DIFFERENT VMs and a pick fails the moment fewer than LEGS
 	# VMs still hold an unpicked DN (gateway/alloc.go:99-103).
 	#
-	# COUNTING ARGUMENT for the bound. Emptying (V - LEGS + 1) VMs takes
-	# (V - LEGS + 1) x N picks. Only LEGS*GRP_CNT - LEGS picks happen before the
-	# last group's scan. So if (V - LEGS + 1) x N > LEGS*GRP_CNT - LEGS, no scan
-	# can ever see fewer than LEGS VMs with a DN left, and the create cannot be
-	# starved. N = ceil(LEGS*GRP_CNT / (V - LEGS + 1)) satisfies that with at
-	# most one DN per VM to spare — the exact minimum is
-	# ceil((LEGS*GRP_CNT - LEGS + 1) / (V - LEGS + 1)) — and both give 43 for
-	# 4 VMs, 32 slices, raid1. (Do NOT justify this with a "two-VM tail"
-	# argument: when two VMs remain both are drawn every step, so they drain in
-	# lockstep and the one that entered the tail behind stays behind. Lockstep
-	# preserves the difference, it does not close it; the counting argument
-	# above is the whole proof.)
+	# THE BOUND IS SIZED BY ops STEP 8 AND NOT BY THE CREATE, because the sp
+	# the create builds is not the widest state the run passes through. Both
+	# demands below are counting arguments over N = the agents on one VM,
+	# V = DN_VM_CNT and divisor = V - LEGS + 1, and both are charged with the
+	# same per-group cap, which the scan rule above hands over: a group's LEGS
+	# sides go to LEGS DIFFERENT VMs, so any set of m VMs receives at most
+	# min(LEGS, m) sides PER GROUP however the picks fall. Over G groups that is
+	# min(LEGS, m)*G, and for the m = divisor VMs that have to be starved the
+	# multiplier is CAP = min(LEGS, divisor): LEGS on three VMs or more at
+	# raid1, and 1 on exactly two, where one VM cannot hold both legs of
+	# anything.
+	#
+	#  (a) THE CREATE MUST NOT STARVE. A pick fails once fewer than LEGS VMs
+	#      hold an unpicked DN, i.e. once divisor VMs are drained, which costs
+	#      divisor x N picks; only GRP_CNT - 1 groups are placed before the last
+	#      group's scan, so those VMs can have absorbed at most
+	#      CAP*(GRP_CNT - 1) of them, and divisor x N > CAP*(GRP_CNT - 1) is
+	#      enough. (Do NOT justify this with a "two-VM tail" argument: when two
+	#      VMs remain both are drawn every step, so they drain in lockstep and
+	#      the one that entered the tail behind stays behind. Lockstep
+	#      preserves the difference, it does not close it; the counting
+	#      argument is the whole proof.)
+	#
+	#  (b) ops STEP 8 MUST FIND LEGS VMs THAT STILL HOLD A SIDE-LESS DN.
+	#      ops_pick_free_dns takes at most ONE free DN per VM and ops_disabled
+	#      dies below LEGS of them, because its white list has to be LEGS free
+	#      DNs on LEGS different VMs for the disabled one to be the difference
+	#      between a grow that could succeed and one that cannot. By then ops
+	#      step 2 has grown the sp TWICE, and a grow does not avoid the DNs the
+	#      sp already uses: GrowSlice passes a nil black list and a nil
+	#      ExcludeLocs (gateway/storagepool.go:1132-1139), so a grown group may
+	#      take fresh DNs and the sp stands at GRP_CNT + 2 groups. Step 8 comes
+	#      up short — FEWER than LEGS, which is LEGS-1 and not zero; the run
+	#      that forced this bound found exactly one — only if divisor VMs are
+	#      FULL, which costs divisor x N occupied DNs against the at most
+	#      CAP*(GRP_CNT + 2) that can ever be occupied there, so
+	#      divisor x N > CAP*(GRP_CNT + 2) makes it impossible.
+	#
+	# (b)'s right side exceeds (a)'s, so (b) implies (a) and the bound is the
+	# least N satisfying (b): floor(CAP*(GRP_CNT + 2) / divisor) + 1. That is 45
+	# for 4 VMs, 32 slices, raid1 and 3 for one slice on the same four. The
+	# create-only ceil(LEGS*GRP_CNT / divisor) this replaced gave 43 and 2 — and
+	# the 2 is a run that died: at one slice the create's 4 sides plus the two
+	# grows' 4 filled 7 of the 8 DNs, one VM was left with a free one, and step
+	# 8 needed two (observed 2026-09-18, and the create itself was never in
+	# trouble). CAP is what keeps the replacement from over-charging raid1 on
+	# exactly two DN VMs, where the OLD bound was already about twice what the
+	# create can consume.
+	#
+	# WHAT THIS BOUND IS NOT DERIVED FROM. react's AR6 grow and AR8 spare leg
+	# add sides of their own, and AR8 wants a DN carrying exactly one side of
+	# the sp; copy's migration and spare-leg stages want a DN on a VM outside
+	# the group. None of those needs a SIDE-LESS DN — an occupied DN still
+	# reports free_ext_cnt > 0 — so none of them enters the count above, and
+	# each states and checks its own precondition. They are not INDEPENDENT of
+	# the bound either: the headroom it leaves is what keeps E2E4's tier-2
+	# relaxation out of reach, which is why a sub-bound value warns about them
+	# too.
 	local divisor=$((DN_VM_CNT - LEGS + 1))
-	DNS_PER_VM_BOUND=$(((LEGS * GRP_CNT + divisor - 1) / divisor))
+	local cap=$LEGS
+	[ "$divisor" -ge "$LEGS" ] || cap=$divisor
+	DNS_PER_VM_BOUND=$((cap * (GRP_CNT + 2) / divisor + 1))
+	# (a)'s own least N, kept only for the warning below: an override between
+	# this and DNS_PER_VM_BOUND builds the sp fine and dies in ops step 8. It
+	# is 43 at the default shape — the value the whole bound used to be.
+	local create_bound=$((cap * (GRP_CNT - 1) / divisor + 1))
 
 	if [ -n "$DNS_PER_VM_OPT" ]; then
 		DNS_PER_VM=$DNS_PER_VM_OPT
 		if [ "$DNS_PER_VM" -lt "$DNS_PER_VM_BOUND" ]; then
 			# E2E3: below the bound is a warning, not an error — but say what
-			# it risks. At exactly LEGS*GRP_CNT/V per VM (32 here) a simulation
-			# of the real algorithm fails about four creates in five, and a run
-			# that does succeed leaves every VM at zero free DNs, so every
-			# later migration destination and spare leg has nowhere anti-affine
-			# to go: FindDnCandidatesAntiAffine then RELAXES (model/alloc.go:202-228)
-			# and can put both sides of one leg on one kernel, where
-			# SideToCnNqn — which carries no dn_id (common/name_fmt.go:541-557)
-			# — collides between the two agents.
+			# it risks, and the two demands above fail at different depths, so
+			# the message names both. Both are SUFFICIENT conditions, so a
+			# value under either one loses the proof rather than predicting the
+			# failure: the default shape sat between the two bounds for every
+			# run before this one and step 8 never starved there. Between the
+			# create's own bound and the full one the create is safe and ops
+			# step 8 is what is at risk; below
+			# the create's bound a simulation of the real algorithm fails about
+			# four creates in five at LEGS*GRP_CNT/V per VM (32 for the default
+			# shape), and a create that does succeed there leaves every VM at
+			# zero free DNs, so every later migration destination and spare leg
+			# has nowhere anti-affine to go: FindDnCandidatesAntiAffine then
+			# RELAXES (model/alloc.go:202-228) and can put both sides of one
+			# leg on one kernel, where SideToCnNqn — which carries no dn_id
+			# (common/name_fmt.go:541-557) — collides between the two agents.
 			log "WARNING: --dns-per-vm $DNS_PER_VM is below the placement" \
 				"bound $DNS_PER_VM_BOUND for $DN_VM_CNT DN VMs,"
-			log "         $SLICE_CNT slices and $REDUND. The create may fail" \
-				"RESOURCE_EXHAUSTED, and a create that"
-			log "         succeeds may leave no DN for a migration or spare" \
-				"leg, which lets the allocator put two"
-			log "         sides of one leg on one kernel."
+			log "         $SLICE_CNT slices and $REDUND. The ops case's step" \
+				"8 needs $LEGS side-less disk nodes on"
+			log "         $LEGS different VMs after its two grows, and it" \
+				"DIES without them."
+			if [ "$DNS_PER_VM" -lt "$create_bound" ]; then
+				log "         It is also below the create's own bound" \
+					"$create_bound, so \`sp create\` may itself fail"
+				log "         RESOURCE_EXHAUSTED, and a create that succeeds" \
+					"may leave no DN for a migration or"
+				log "         spare leg, which lets the allocator put two" \
+					"sides of one leg on one kernel."
+			fi
 		fi
 	else
 		DNS_PER_VM=$DNS_PER_VM_BOUND
 	fi
 
 	# The cap is a per-kernel sanity limit (D10), and it is also what keeps the
-	# DN gRPC block below CN_GRPC_PORT. More VMs is the answer: the divisor
-	# above grows with V, so the bound falls.
+	# DN gRPC block below CN_GRPC_PORT. More VMs is the remedy — but NOT
+	# necessarily one more, and "add --dn guests" on its own would be a hint
+	# that can leave the operator exactly where they were: CAP rises with the
+	# divisor across the d=1 -> d=2 step, so at raid1 two DN VMs and three
+	# carry the SAME bound, GRP_CNT + 3, and the first guest that lowers
+	# anything is the one that makes V >= LEGS + 2. So the die computes the
+	# V this shape actually needs rather than telling anyone to add guests one
+	# at a time and try again. The bound falls to 1 as V grows, so the search
+	# always terminates inside its span.
 	if [ "$DNS_PER_VM" -gt "$MAX_DNS_PER_VM" ]; then
+		local v d c want=0
+		for ((v = DN_VM_CNT + 1; v <= DN_VM_CNT + MAX_DNS_PER_VM; v++)); do
+			d=$((v - LEGS + 1))
+			c=$LEGS
+			[ "$d" -ge "$LEGS" ] || c=$d
+			if [ $((c * (GRP_CNT + 2) / d + 1)) -le "$MAX_DNS_PER_VM" ]; then
+				want=$v
+				break
+			fi
+		done
 		die "$DNS_PER_VM dnagents per VM exceeds MAX_DNS_PER_VM" \
-			"($MAX_DNS_PER_VM): this shape needs $((LEGS * GRP_CNT))" \
-			"distinct DNs spread over $DN_VM_CNT DN VM(s) —" \
-			"add --dn guests"
+			"($MAX_DNS_PER_VM): this shape occupies up to" \
+			"$((LEGS * (GRP_CNT + 2))) distinct DNs — the create's" \
+			"$((LEGS * GRP_CNT)) plus ops step 2's two grows — spread over" \
+			"$DN_VM_CNT DN VM(s), and ops step 8 then needs $LEGS of those" \
+			"VMs to still hold a side-less one." \
+			"$(if [ "$want" -gt 0 ]; then
+				echo "It needs at least $want --dn guests at" \
+					"$SLICE_CNT slices and $REDUND; adding fewer" \
+					"may not lower the bound at all."
+			else
+				echo "Use fewer slices: no number of --dn guests" \
+					"brings this shape under the cap."
+			fi)"
 	fi
 
 	DN_TOTAL=$((DN_VM_CNT * DNS_PER_VM))
@@ -2344,7 +2440,7 @@ space() {
 
 # logtail prints the tail of each named file with a banner. It takes the files
 # from the driver rather than globbing $WORK itself, because a DN VM can hold
-# 43 agent logs and dumping all of them is not a diagnostic, it is a flood.
+# 45 agent logs and dumping all of them is not a diagnostic, it is a flood.
 logtail() { # <lines> <file…>
 	local n=$1 f
 	shift
@@ -2948,12 +3044,12 @@ mdstat() {
 # with it. The narrow rule is exactly as wide as the damage.
 #
 # THE WRITE IS CONDITIONAL AND THE RELOAD IS NOT, and the asymmetry is the
-# point. dn_up calls this once per instance — 43 times on one DN VM in the
+# point. dn_up calls this once per instance — 45 times on one DN VM in the
 # default shape — and systemd-udevd watches the rules directories, so an
-# unconditional `cat >` would truncate and rewrite a watched file 43 times
+# unconditional `cat >` would truncate and rewrite a watched file 45 times
 # during agent startup, each truncation a window in which the mask is empty.
 # (That is the one difference from cnagent_test.sh's copy, which installs once
-# per VM and needs no such care.) But the reload is exactly what those 43 calls
+# per VM and needs no such care.) But the reload is exactly what those 45 calls
 # used to retry for free: its status is discarded here, so if the write became
 # conditional AND the reload went with it, one failed reload would leave the
 # mask byte-correct on disk and stale in udevd for the rest of the run, with
@@ -4308,7 +4404,7 @@ stop_cp_daemons() {
 #
 # The write_zeroes gate is dn_up's, not this function's — it must refuse
 # BEFORE the agent is launched, since an agent that formats a disk with no
-# fast Write Zeroes would materialise the whole sparse file (43 x 2 GiB on a
+# fast Write Zeroes would materialise the whole sparse file (45 x 2 GiB on a
 # 80 GiB guest) and the dn agent itself only TAGS that case
 # (agent/dnagent/syncup_dn.go:503-517).
 start_dn_instance() { # <v> <k>
@@ -4423,7 +4519,7 @@ stop_cn_agent() { # <v> [secs]
 # /proc/meminfo's KiB is converted on the driver — one unit everywhere).
 #
 # MEM_MIN_BYTES is §7.3's 2 GiB. cnagent_test.sh:1522 asks 1.5 GiB for two
-# agents; a DN VM here runs DNS_PER_VM of them (43 in the default lab shape)
+# agents; a DN VM here runs DNS_PER_VM of them (45 in the default lab shape)
 # and a CN VM holds 64 md arrays and 32 thin pools, so the floor is raised
 # rather than copied.
 MEM_MIN_BYTES=$((2 << 30))
@@ -4455,8 +4551,8 @@ FREE_MIN_CP=$((2 << 30))
 # the remains of a run that stopped part way.
 #
 # TWO VERBS ARE HEAVY, and only one of them is understood.
-#   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 43 in the
-#     default shape — of nvmet ports with their ana_groups, 43 loop teardowns
+#   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 45 in the
+#     default shape — of nvmet ports with their ana_groups, 45 loop teardowns
 #     (a 4 KiB dd, a wipefs and a losetup -d each), the dm devices of every
 #     kind, and now md_stop_all over any stray array the mask did not catch —
 #     a bounded `udevadm info` read per array in /proc/mdstat, a bounded
@@ -4538,8 +4634,8 @@ DIAG_TIMEOUT=60
 # Lines of each log the failure dump carries (§7.9 says 200).
 DIAG_LOG_LINES=200
 # How many of one DN VM's agent logs the dump tails in full. A DN VM runs
-# DNS_PER_VM agents (43 in the default shape); tailing all of them on all four
-# VMs is 34 000 lines, which is a flood and not a diagnostic. Every log that
+# DNS_PER_VM agents (45 in the default shape); tailing all of them on all four
+# VMs is 36 000 lines, which is a flood and not a diagnostic. Every log that
 # holds an ERROR record is still NAMED, whatever this is.
 DIAG_MAX_DN_LOGS=6
 
@@ -5191,8 +5287,8 @@ preflight_loop_devices() {
 					"start_dn_vm $v did not run"
 			devs="$devs $dev"
 		done
-		# One read-only ssh per VM, not one per device: 43 devices x 4 VMs
-		# would be 172 round trips for a gate that is already held twice.
+		# One read-only ssh per VM, not one per device: 45 devices x 4 VMs
+		# would be 180 round trips for a gate that is already held twice.
 		out=$(ssh_dn "$v" "for d in $devs; do" \
 			"printf '%s=%s\\n' \"\$d\"" \
 			"\"\$(cat /sys/class/block/\${d##*/}/queue/write_zeroes_max_bytes" \
@@ -5639,8 +5735,8 @@ reset_control_plane() {
 #     which is when a guest command hangs; each dump is `timeout
 #     $DIAG_TIMEOUT bash $HELPER …`.
 #
-# A DN VM holds DNS_PER_VM agent logs (43 in the default shape). Dumping all
-# 172 is not a diagnostic, so the DN logs are selected: every log with an ERROR
+# A DN VM holds DNS_PER_VM agent logs (45 in the default shape). Dumping all
+# 180 is not a diagnostic, so the DN logs are selected: every log with an ERROR
 # record is named, and the instances a case registered with diag_note_dn are
 # dumped in full.
 # ---------------------------------------------------------------------------
@@ -13433,7 +13529,7 @@ case_react() {
 #
 # THE COST IS KNOWN AND ACCEPTED, and it is not small: this repeats, in full,
 # the sweep case_space_guard ran seconds earlier in the same case_finish — one
-# `alloc` over every backing file of each DN VM (DNS_PER_VM paths per VM, 43 at
+# `alloc` over every backing file of each DN VM (DNS_PER_VM paths per VM, 45 at
 # the default shape) plus one `space` verb, a `du -s --block-size=1` over
 # $WORK, on all ten guests. At the §1.2 shape that is fourteen extra ssh round
 # trips per case (4 alloc + 4 + 3 + 2 + 1 space). It buys
@@ -13619,7 +13715,7 @@ log_topology() {
 	log "              react           $THR_REACT"
 	log "              (reacting: AR5/AR7/AR8 must fire inside a bound, so" \
 		"react's own build may react too)"
-	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (F4 bound" \
+	log "  placement: $DNS_PER_VM dnagent(s) per DN VM (E2E3 bound" \
 		"$DNS_PER_VM_BOUND), $DN_TOTAL disk nodes on $DN_VM_CNT DN VM(s)"
 	log "  sizes:     extent $EXTENT_SIZE, stripe $STRIPE_SIZE," \
 		"td unit $TD_UNIT, backing $BACKING_SIZE per disk node"

@@ -124,7 +124,7 @@ The default lab shape is ten guests: 1 cp, 3 cn, 4 dn, 2 host.
 |---|---|---|
 | `--slice-cnt N` | 32 (`SLICE_CNT_DEFAULT`, mirroring `common.MaxSliceCntPerSp`) | slices per sp; accepted range 1..32, checked in `parse_args` rather than 200 lines into setup |
 | `--redund raid1\|none` | `raid1` | `LEGS` = 2 for raid1 (`common.MaxAllocLegPerGrp`), 1 for none |
-| `--dns-per-vm N` | the placement bound of §2.4 (43 for the default lab shape) | dn agents per DN VM; below the bound warns, never errors |
+| `--dns-per-vm N` | the placement bound of §2.4 (45 for the default lab shape, 3 at `--slice-cnt 1`) | dn agents per DN VM; below the bound warns, never errors |
 | `--only <case>` | all four | `smoke`, `ops`, `copy`, `react` |
 | `--cleanup-only` | — | ship the helpers, run the start cleanup on every guest, stop |
 
@@ -132,7 +132,7 @@ Derived, all in `derive_params`:
 
 ```
 GRP_CNT   = 2 × SLICE_CNT                 one meta group and one data group per slice
-DNS_PER_VM_BOUND = ceil(LEGS × GRP_CNT / (DN_VM_CNT − LEGS + 1))
+DNS_PER_VM_BOUND = floor(min(LEGS, d) × (GRP_CNT + 2) / d) + 1,  d = DN_VM_CNT − LEGS + 1
 DN_TOTAL  = DN_VM_CNT × DNS_PER_VM
 TD_UNIT   = SLICE_CNT × STRIPE_SIZE       every `td create --size` against sp0 is a
                                           positive multiple of it
@@ -234,7 +234,7 @@ provisioning, for the drain and for a hydration) is now three different ones:
 * `WAIT_BUILD` bounds a **whole cntlr stack built from nothing** — 32 pools, 64
   arrays and 128 legs on one CN — **and the other from-nothing convergence in
   the suite**: setup's first wait, all 128 sides `blkdiscard`-zeroed across the
-  172 DN agents before any of them can be exported. The line between the two big
+  180 DN agents before any of them can be exported. The line between the two big
   budgets is *from nothing* against *an increment*, not *a cntlr stack* against
   everything else; that wait has never been timed on its own (the first run
   passed it and then died in the stack wait), so it carries the generous budget
@@ -276,13 +276,13 @@ dnvctl's own `--timeout` is 30 s by default here (its built-in 10 s is not
 enough), raised to 180 s for the `sp create` of setup and 120 s for the
 fallback pool's.
 
-### 2.4 The placement bound, and why it is 43
+### 2.4 The placement bound, and why it is 45
 
-Every side of the sp lands on a **distinct** disk node: `CreateStoragePool`
-starts its DN black list as the request's and grows it with every pick, so all
-`LEGS × GRP_CNT` sides — 128 at the default shape — need 128 disk nodes that
-have never been picked. That is why a DN VM runs dozens of agents: four guests
-cannot otherwise supply 128 nodes.
+Every side of the sp **as created** lands on a **distinct** disk node:
+`CreateStoragePool` starts its DN black list as the request's and grows it with
+every pick, so all `LEGS × GRP_CNT` sides — 128 at the default shape — need 128
+disk nodes that have never been picked. That is why a DN VM runs dozens of
+agents: four guests cannot otherwise supply 128 nodes.
 
 Placement is per **location**, not per node. Every dn agent of VM *v*
 registers `--location dn<v>`, and a candidate scan keeps at most one candidate
@@ -290,38 +290,125 @@ per location, so a group draws its `LEGS` sides from `LEGS` *different VMs*,
 and a pick fails `RESOURCE_EXHAUSTED` the moment fewer than `LEGS` VMs still
 hold an unpicked DN.
 
-The bound is a counting argument and nothing else:
+The bound is a counting argument and nothing else — but it is sized by **two**
+demands, and the create is the smaller of them. Write `V` for the number of DN
+VMs, `N` for the agents on each and `d = V − LEGS + 1` for the number of VMs
+that have to be starved before anything fails.
 
-* emptying `(V − LEGS + 1)` VMs costs `(V − LEGS + 1) × N` picks, where `V` is
-  the number of DN VMs and `N` the agents on each;
-* only `LEGS × GRP_CNT − LEGS` picks happen before the **last** group's scan;
-* so if `(V − LEGS + 1) × N > LEGS × GRP_CNT − LEGS`, no scan can ever see
-  fewer than `LEGS` VMs with a DN left, and the create cannot be starved.
+Both demands are charged with the same per-group cap, and it comes from the scan
+rule above: a group's `LEGS` sides go to `LEGS` **different** VMs, so any set of
+`m` VMs receives at most `min(LEGS, m)` sides *per group*, however the picks
+fall. Over `G` groups that is `min(LEGS, m) × G`, and for the `d` VMs at issue
+the multiplier is
 
-At `V = 4`, `LEGS = 2`, `GRP_CNT = 64`: `3N > 126`, i.e. `N ≥ 43`. The suite
-computes `N = ceil(LEGS × GRP_CNT / (V − LEGS + 1)) = ceil(128/3) = 43`, which
-satisfies the inequality with at most one DN per VM to spare; the exact
-minimum, `ceil((LEGS × GRP_CNT − LEGS + 1) / (V − LEGS + 1)) = ceil(127/3)`, is
-the same 43 here. At `--redund none` on the same four VMs the bound is
-`ceil(64/4) = 16`.
+```
+CAP = min(LEGS, d)        = LEGS on three DN VMs or more at raid1,
+                          = 1    on exactly two, where one VM cannot hold
+                                 both legs of anything
+```
 
-**Do not justify this with a "two-VM tail" argument.** When exactly two VMs
+**(a) The create must not starve.**
+
+* a pick fails once fewer than `LEGS` VMs hold an unpicked DN, i.e. once `d` VMs
+  are drained, which costs `d × N` picks;
+* only `GRP_CNT − 1` groups are placed before the **last** group's scan, so
+  those `d` VMs can have absorbed at most `CAP × (GRP_CNT − 1)` of them;
+* so if `d × N > CAP × (GRP_CNT − 1)`, no scan can ever see fewer than `LEGS`
+  VMs with a DN left, and the create cannot be starved.
+
+At `V = 4`, `LEGS = 2`, `GRP_CNT = 64` that is `3N > 126`, i.e. `N ≥ 43` — the
+value the whole bound used to be.
+
+**(b) `ops` stage 08 must find `LEGS` VMs that still hold a side-less DN.** Its
+white list has to be `LEGS` free disk nodes on `LEGS` different VMs
+(§4.3 stage 08), `ops_pick_free_dns` takes at most **one** per VM, and
+`ops_disabled` **dies** below `LEGS` of them. By then `ops` stage 02 has grown
+the sp twice, and a grow does not avoid the DNs the sp already uses: `GrowSlice`
+passes a nil black list and a nil `ExcludeLocs`, so a grown group may take fresh
+DNs and the sp stands at `GRP_CNT + 2` groups. Stage 08 comes up short —
+*fewer than* `LEGS`, which is `LEGS − 1` and not zero; the run that forced this
+bound found exactly one — only if `d` VMs are **full**, which costs `d × N`
+occupied DNs against the at most `CAP × (GRP_CNT + 2)` that can ever be
+occupied there, so
+`d × N > CAP × (GRP_CNT + 2)` makes that impossible. At the default shape:
+`3N > 132`, i.e. `N ≥ 45`.
+
+(b)'s right side exceeds (a)'s, so **(b) implies (a)** and the suite computes
+the least `N` satisfying (b):
+
+```
+DNS_PER_VM_BOUND = floor(CAP × (GRP_CNT + 2) / d) + 1
+                 = floor(132/3) + 1 = 45          default shape
+                 = floor(8/3)   + 1 = 3           --slice-cnt 1 on the same four VMs
+                 = floor(66/4)  + 1 = 17          --redund none, 32 slices, four VMs
+                 = floor(26/1)  + 1 = 27          raid1, 12 slices, two DN VMs (CAP = 1)
+```
+
+That last line is why `CAP` is in the formula rather than a flat `LEGS`.
+Charging a two-VM raid1 shape `LEGS` sides per group would put the bound at 53
+there, refusing at `MAX_DNS_PER_VM` a shape whose create can only ever consume
+24 DNs per VM — one per group, since with two locations every group puts exactly
+one leg on each — and which never holds more than 26 even after the two grows.
+
+**Do not justify (a) with a "two-VM tail" argument.** When exactly two VMs
 still hold DNs, both are returned by every scan and both are picked, so they
 drain in lockstep — and lockstep *preserves* the difference between their
 counts rather than closing it. The VM that entered the tail behind stays
 behind and empties first. The counting argument above is the whole proof, and
 the suite's comment says so where the code computes it.
 
+**Both demands are sufficient, not necessary.** A shape below the bound is
+*unguaranteed*, which is not the same as doomed — §8 item 19 is about a default
+shape that failed (b) by three DNs and ran anyway. Nothing here licenses reading
+a sub-bound value as a prediction of failure, only as the loss of the proof.
+
+**What the bound is not derived from.** `react`'s AR6 grow and AR8 spare leg
+place sides of their own, and AR8 wants a DN carrying exactly *one* side of the
+sp; `copy`'s migration and spare-leg stages want a DN on a VM outside the group.
+None of those needs a **side-less** DN — an occupied DN still reports
+`free_ext_cnt > 0`, the first of the two clauses §4.4 answers the design's
+in-that-branch "+2" with — so none of them enters the count above, and each of
+those stages states and checks its own precondition. They are not *independent*
+of the bound either: the headroom it leaves is what keeps E2E4's tier-2
+relaxation out of reach (§8, item 5), which is why the sub-bound warning names
+them too.
+
 Two consequences the suite acts on:
 
 * `--dns-per-vm` below the bound is a **warning**, not an error, and the
-  warning names what it risks: at exactly `LEGS × GRP_CNT / V` per VM (32 here)
-  the create fails about four runs in five, and a run that *does* succeed
-  leaves every VM at zero free DNs — which is where the anti-affinity relaxes
-  and two sides of one leg can land on one kernel (§8, item 5).
-* `DNS_PER_VM` above `MAX_DNS_PER_VM = 50` is a **die**, with the hint "add
-  `--dn` guests": more VMs raises the divisor and lowers the bound. The same
-  cap keeps the DN gRPC block below the CN port (`29900 + 49 = 29949 < 29950`).
+  warning names what it risks at the depth the value reaches. Between (a)'s own
+  bound and (b)'s the sp builds fine and `ops` stage 08 is what is at risk —
+  the paragraph above applies: that band is where every run before this one sat
+  at the default shape, and stage 08 never starved there; below (a)'s bound — at exactly `LEGS × GRP_CNT / V` per VM, 32 for
+  the default shape — the create itself fails about four runs in five, and a
+  run that *does* succeed leaves every VM at zero free DNs, which is where the
+  anti-affinity relaxes and two sides of one leg can land on one kernel
+  (§8, item 5).
+* `DNS_PER_VM` above `MAX_DNS_PER_VM = 50` is a **die**, and it names the
+  number of `--dn` guests the shape needs rather than saying "add some": more
+  VMs lowers the bound, but **not one at a time**. `CAP` rises with `d` across
+  the `d = 1 → d = 2` step, so at `raid1` two DN VMs and three carry the
+  *identical* bound `GRP_CNT + 3`, and the first guest that lowers anything is
+  the one that makes `V ≥ LEGS + 2`. An operator told only to "add `--dn`
+  guests" at `raid1`/24 slices on two VMs would add one and meet the same 51.
+  The same cap keeps
+  the DN gRPC block below the CN port (`29900 + 49 = 29949 < 29950`). Raising
+  the bound moved **four** shapes across that cap, none of them a shape this
+  lab runs: `--redund none` at 24 and 25 slices on **one** DN VM (48 → 51,
+  50 → 53) and `raid1` at 24 and 25 slices on **three** (the same two values).
+  The two `--redund none` shapes were already dead, and **not** because a grow
+  fails: a grow black-lists nothing and an occupied DN still reports
+  `free_ext_cnt > 0`, so at one location both grows simply reuse DNs the create
+  took. They die because the create alone takes every DN of the single VM, so
+  stage 08 finds **zero** side-less DNs where it needs one — (b) failing by the
+  widest margin the formula has, with nothing left to chance. The two `raid1`
+  shapes are the honest cost of the change: each satisfies (a) at its old bound
+  and fails (b) there, so neither was ever *guaranteed*, but starving stage 08
+  on three VMs would take 46 of the 24-slice shape's 50 groups — 48 of 52 at 25
+  slices — to draw both legs from the same two VMs, which random picking does
+  not do. They would in practice have run, and they now die in `parse_args`
+  instead. `--slice-cnt 24` on four DN VMs needs 34 agents and is
+  unaffected, which is what the die's hint points at.
 
 ### 2.5 Ports, paths and processes
 
@@ -366,7 +453,7 @@ that is where md's metadata **lands**: the leg superblocks the CN writes travel
 the side export onto the DN's own storage, and an unmasked DN assembles them
 there (§8 item 15). Installing is idempotent — the helper writes only when the
 content differs — which is what keeps `dn_up`, which runs once per instance and
-so 43 times on one DN VM, from truncating and rewriting a file udev is watching
+so 45 times on one DN VM, from truncating and rewriting a file udev is watching
 at every one of them.
 
 **Port ownership.** Nothing above is *bound* by any other suite in this repo:
@@ -475,7 +562,7 @@ Two facts about the ids themselves, both verified rather than assumed:
   the file. Every control-plane read and every mutation is the shipped
   `$WORK/bin/dnvctl`, run on cp over ssh — one ssh per invocation, and many
   hundreds of them over a run, which is what the wall clock is mostly made of.
-  At the default shape setup registers each of the 172 disk nodes with its own
+  At the default shape setup registers each of the 180 disk nodes with its own
   `dn create`, polls each one to readiness with its own `dn inspect`, and the
   shared ending reads each one back with its own `dn get`: more than 500 round
   trips before any case-specific invocation, and before a single poll has had
@@ -485,10 +572,17 @@ Two facts about the ids themselves, both verified rather than assumed:
 
 * **E2E3 — `DNS_PER_VM` defaults to the placement bound.**
   `ceil(legs × 2 × slice_cnt / (V − legs + 1))`; an override below it is a
-  warning, not an error. **HOLDS, and the suite adds a hard ceiling.**
+  warning, not an error. **CORRECTED — that formula sizes the create alone,
+  and the suite now uses the larger of the two demands**,
+  `floor(min(legs, d) × (2 × slice_cnt + 2) / d) + 1` for
+  `d = V − legs + 1`, which also covers `ops` stage 02's two grows and stage
+  08's `legs` side-less DNs on `legs` different VMs (§2.4). The create-only
+  form is what the **second** `--slice-cnt 1` run derived, and stage 08 died on
+  it (§9, §8 item 19); the first never reached that stage. The override rule
+  holds, and the suite adds a hard ceiling:
   `DNS_PER_VM > MAX_DNS_PER_VM` (50) is a die with the hint "add `--dn`
-  guests". The warning text names the failure it risks, not merely
-  "the create may starve" (§2.4).
+  guests". The warning text names the failure it risks at the depth the value
+  reaches, not merely "the create may starve" (§2.4).
 
 * **E2E4 — every dnagent of a VM registers `--location <vm role>`.** *As
   designed:* every group therefore straddles VMs and no two sides of one leg
@@ -903,7 +997,7 @@ change the sp's shape is the case.
 | 07 | `ns set-suspended --suspended=false` | `optimized` again; `SHA0` |
 | 07 | `ns set-dev --idx 1 --td t1` | host0 reads the digest of 4 MiB of zeros — computed on the host from `/dev/zero`, not merely asserted to differ |
 | 07 | `ns set-dev --idx 1 --td t0` | `SHA0` |
-| 08 | `dn set-disabled --addr <a DN with no side> --disabled`, then `sp grow-slice … --dn-white <LEGS free DNs on LEGS VMs, one of them the disabled one>` → `RESOURCE_EXHAUSTED` | `disabled` is a scheduling flag and invisible to the agent, so the only proof is a refused allocation. The white list is exactly `LEGS` DNs on `LEGS` different VMs: one fewer, or two on one VM, and the step would prove nothing |
+| 08 | `dn set-disabled --addr <a DN with no side> --disabled`, then `sp grow-slice … --dn-white <LEGS free DNs on LEGS VMs, one of them the disabled one>` → `RESOURCE_EXHAUSTED` | `disabled` is a scheduling flag and invisible to the agent, so the only proof is a refused allocation. The white list is exactly `LEGS` DNs on `LEGS` different VMs: one fewer, or two on one VM, and the step would prove nothing. **This stage is what sizes `DNS_PER_VM`** — those side-less DNs have to survive the create *and* stage 02's two grows, and `ops_disabled` dies rather than skips without them, which is demand (b) of §2.4 |
 | 08 | `cn set-disabled --addr <spare cn> --disabled`, then `cntlr create --slot 2 --cn-white <that cn>` → `RESOURCE_EXHAUSTED` | `no controller node`; **skipped with a log line when every CN already carries a cntlr** |
 | 08 | re-enable both; `sp get` | neither refusal wrote anything: both happen before the transaction |
 | 09 | `td delete s0`, `td delete t1` | only `t0` is left for the teardown; `SHA0` |
@@ -1376,7 +1470,7 @@ absence is the whole of E2E6 at the start.
 
 The bound sizes **two** heavy verbs, and the suite comment now says so rather
 than only naming the DN. `dn_cleanup` on one DN VM is up to `DNS_PER_VM`
-instances' worth — 43 nvmet ports with their ana_groups, 43 loop teardowns, the
+instances' worth — 45 nvmet ports with their ana_groups, 45 loop teardowns, the
 dm devices of every kind and `md_stop_all`, which is a bounded `udevadm info`
 read per array in `/proc/mdstat`, a bounded `mdadm --detail` read for each
 array udev could not name, and a bounded `mdadm --stop` for each `dnv-` one. `cn_cleanup_phase2` is at least as
@@ -1706,7 +1800,7 @@ including, since the second run, those same two md readings, each labelled
 *a DN must show none*, and an `ls` of the md mask file, because the stray
 arrays that wedged that run's cleanup had to be found by hand over ssh after
 the dump had already said nothing about them — plus a **selected** log dump
-— a DN VM holds up to 43 agent logs, so every
+— a DN VM holds up to 45 agent logs, so every
 log carrying an ERROR record is *named* with its count and only the first few,
 plus the instances the case registered, are tailed in full.
 
@@ -2369,6 +2463,60 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     strictly stronger form, "host <h> holds no controller for this NQN at all",
     is not what those sites ask today.
 
+19. **The placement bound sized the create and nothing after it, so the
+    smallest shape starved `ops` stage 08.** Measured 2026-09-18 at `c50f80f`,
+    `--slice-cnt 1 --redund raid1` on four DN VMs with no `--dns-per-vm`:
+    `smoke` passed in full and `ops` stages 01-07 passed, then stage 08 died
+    with "step 8 needs 2 disk nodes on 2 different VMs that carry no side of
+    sp0, and only 1 VM(s) have one free".
+
+    Nothing in the gateway, the worker or an agent misbehaved, and the die was
+    arithmetically right. The old bound,
+    `ceil(LEGS × GRP_CNT / (V − LEGS + 1))`, derived 2 for that shape — eight
+    disk nodes for a create that needs exactly four — and its whole derivation
+    was the create's growing black list. What the derivation left out is the
+    part of `ops` that runs before stage 08: stage 02 grows the sp twice, and
+    `GrowSlice` passes a nil black list and a nil `ExcludeLocs`, so a grown
+    group may reuse a DN that already carries a side and may equally take a
+    fresh one. In the failed run the create's four sides and the two grows'
+    four landed on **seven** of the eight DNs — `.48:29901` carried two, one
+    from a create group and one from a grown group — leaving a single side-less
+    DN on a single VM where stage 08 needs two VMs.
+
+    The failure was not a flake to re-roll. At two DNs per VM the eight sides
+    can occupy anywhere from four to eight distinct DNs; a *perfect* spread
+    leaves zero side-less DNs and dies too, so passing needs **two**
+    double-bookings — and they need not sit on two different VMs, nor on the
+    VMs that end up with the free DN. Groups on VM pairs (A,B), (A,B), (A,C),
+    (A,D), with each grow reusing one of A's two DNs, fills A and B and leaves
+    C and D one each, and stage 08 passes. What makes it not a flake is that
+    the sides have to collide at all: the create places its four on four
+    distinct DNs by construction, so every collision needs a **grow** side —
+    and a grow is placed by a scan that walks the capacity index
+    free-descending, so it is handed a location's *fullest* DN, which at two
+    per VM is the one the create already took. That is what the failed run did:
+    `grp 4` (create) and `grp 22` (grow) both landed on `.48:29901`.
+
+    §2.4 now derives the bound from stage 08 instead, which subsumes the
+    create, and the `--dns-per-vm` warning names which of the two demands a
+    given override falls under.
+
+    **The default shape had the same hole and hid it.** At 43 per VM, filling
+    three of the four VMs costs 129 occupied DNs and at most 132 can ever be
+    occupied, so the guarantee failed there too — by 3 out of 132, where at one
+    slice it failed by 2 out of 8. Nothing made the default shape *safe*, and
+    what made it survive is the **create's** spread rather than anything about
+    the grows: each of the 64 created groups takes two of the four VMs, so the
+    create's 128 sides land about 32 per VM and leave about 11 free DNs on
+    every one of them. Reaching three full VMs from there would need at least
+    63 of the 66 groups to draw both legs from the same three VMs, leaving the
+    fourth with three sides or fewer — which random picking over four
+    locations does not do, and which the two grows' four picks cannot
+    manufacture from 11 DNs of slack. The bound is 45 at that shape now, which
+    is the first value that makes it impossible rather than improbable. This is
+    why the smallest shape is the one that found it: there the slack and the
+    pool are the same size, so the improbable becomes the ordinary.
+
 ---
 
 ## 9. Changelog
@@ -2535,7 +2683,7 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   **What changed, in the suite:** the `63-dnv-md.rules` mask now goes on DN
   guests as well as CN guests, installed by `dn_up` exactly as `cn_up` installs
   it — the helper moved into the body both node roles share and writes only
-  when the content differs, since `dn_up` runs 43 times per DN VM against a
+  when the content differs, since `dn_up` runs 45 times per DN VM against a
   directory udev is watching (§2.5); `dn_cleanup` stops every `dnv-` array
   *before* it removes any dm device of this suite's, and drops the mask after
   the loop teardown (§6); preflight checks `/proc/mdstat` and the stock rule's
@@ -2916,3 +3064,65 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   counts. So that site now waits for `live` on both transports, which is the
   property the connect was there to produce and is false of a controller still
   retrying (§8 item 18, §4.3 stage 05).
+
+* **2026-09-18 — the second `--slice-cnt 1` run, and the bound it broke.** The
+  suite was run at the smallest shape again at `c50f80f`, with no
+  `--dns-per-vm`, so the value was **derived**: 2 per VM, 8 disk nodes. `smoke`
+  passed in full, `ops` stages 01-07 passed — including stage 03, the predicate
+  the previous run rewrote — and `ops` stage 08 died on its own precondition,
+  with one side-less disk node where it needs two on two VMs. §8 item 19 has
+  the placement that produced it, measured from the `sp get` in the failure
+  dump rather than reasoned about.
+
+  The fault was in this suite's arithmetic and not in anything it was testing,
+  which is the whole of the change:
+
+  1. **`DNS_PER_VM_BOUND` is derived from `ops` stage 08, not from
+     `sp create`.** `floor(min(LEGS, d) × (GRP_CNT + 2) / d) + 1` for
+     `d = V − LEGS + 1` — the least `N` for which `d` VMs cannot all be full
+     when at most `min(LEGS, d) × (GRP_CNT + 2)` disk nodes can ever be
+     occupied on them. It exceeds the create's own demand on the right-hand
+     side and therefore implies it, so there is still one bound and one
+     formula. 45 for the default shape (was 43), 3 at one slice (was 2), 17 at
+     `--redund none` on four VMs (was 16), and — because `min(LEGS, d)` is 1
+     when only two DN VMs make `LEGS` legs possible at all — 27 rather than 53
+     for `raid1` at 12 slices on two, where the old bound's 48 was already
+     about twice what such a shape's create can consume. §2.4 carries both
+     demands, the per-group cap they share and the derivation of each.
+  2. **The sub-bound warning names the demand the value falls under.** An
+     override between the create's bound and the full one builds the sp fine
+     and puts stage 08 at risk, which the old text — "the create may fail
+     `RESOURCE_EXHAUSTED`" — described not at all, so that wording is now the
+     second half, printed only below the create's own bound, and stage 08 is
+     the first. "At risk" and not "fails": both demands are sufficient
+     conditions, and the default shape sat in exactly that band on every run
+     before this one.
+  3. **The `MAX_DNS_PER_VM` die states the demand it failed and the remedy
+     that works.** It printed the create's `LEGS × GRP_CNT` DNs and the hint
+     "add `--dn` guests"; it now prints the occupied total, names the two grows
+     as the difference, names stage 08's extra VMs, and computes **how many**
+     `--dn` guests the shape needs — because `CAP` rises with `d` across the
+     `d = 1 → 2` step, so at `raid1` one more guest can leave the bound exactly
+     where it was (§2.4).
+  4. **Four narrow shapes now die in `parse_args`, and two of them are a real
+     if narrow loss.** `--redund none` at 24 and 25 slices on one DN VM and
+     `raid1` at 24 and 25 on three cross the 50-agent cap on the way up. The
+     two `--redund none` shapes were already dead — their create alone takes
+     every DN of the single VM, the two grows then reuse those DNs rather than
+     failing, and stage 08 finds no side-less DN at all. The two `raid1` shapes
+     were merely *unguaranteed*, exactly as the default shape was, and would in
+     practice have run; they are refused now.
+     `--slice-cnt 24` on four DN VMs is unaffected at 34 agents, which is what
+     the die's "add `--dn` guests" points at. §2.4 records the list, the
+     argument and the cost.
+
+  Re-derived while checking the fix, and recorded in §8 item 19 because it
+  changes what the previous runs proved: **the default 32-slice shape was never
+  guaranteed either.** At 43 per VM three full VMs cost 129 occupied DNs and at
+  most 132 can ever be occupied — the same hole, 3 DNs out of 132 where one
+  slice had 2 out of 8. It survived on the create's own spread, which leaves
+  about 11 free DNs on every VM and which the two grows' four picks cannot
+  undo, not on the arithmetic. Both demands in §2.4 are sufficient conditions,
+  so "below the bound" means the proof is gone and not that the run will fail —
+  a distinction the fix's own §2.4 now states, because item 4 above turns on
+  it.
