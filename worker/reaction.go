@@ -22,12 +22,14 @@
 //     and no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and
 //     all three can hold indefinitely — a grow deferred on the CN, the §8.5
 //     ceiling — so ending the pass would disable AR7 and AR8 for as long as
-//     they do); and AR8's leg_has_two_sides and spare_list_full, which move
-//     the scan to the next candidate leg (a migration lasts hours and only
-//     an operator frees a spare slot, §0 item 17). Everything else ends the
-//     pass as AR2 says: every model.ErrPrecondition, every empty allocator
-//     scan, every transient op failure, and AR8 step 2's "wait for the
-//     pending spare", which clears itself within a provisioning.
+//     they do); and AR8's leg_has_two_sides, spare_list_full and step 2's
+//     "wait for the pending spare", which move the scan to the next
+//     candidate leg (a migration lasts hours, only an operator frees a spare
+//     slot, §0 item 17, and a spare that cannot be connected stays pending
+//     for up to leg_unhealthy — one that is never reported at all, for good).
+//     Everything else ends the pass as AR2 says: every
+//     model.ErrPrecondition, every empty allocator scan and every transient
+//     op failure.
 //  2. AR7 and AR8 do not say which of several eligible cntlrs / legs to take.
 //     Both use the smallest id, the rule AR5 states explicitly, so a pass is
 //     deterministic and two overlapping owners choose the same target.
@@ -1155,15 +1157,18 @@ type repairTarget struct {
 // tryLegRepair is AR8: one step per pass on the group of the unhealthy leg
 // with the smallest leg_id. It reports whether the pass ends here.
 //
-// AR8's two PER-LEG preconditions — "the leg has exactly one side" and step
-// 4's full spare list — are part of the candidate test, not reasons to end the
-// pass. Both are properties of ONE leg and ONE group, and both can hold for a
-// very long time: a two-sided leg has a user migration in flight (hours), and
-// only DeleteSpareLeg by an operator frees a spare slot (§0 item 17). Ending
-// the pass on either would leave every OTHER group of the SP degraded on a
-// single md-raid1 member for exactly as long, so a further failure there is
-// data loss. Each is still recorded per leg for visibility (§14.11 case D
-// step 9 greps `reason=spare_list_full`) and the scan moves on.
+// AR8's three holds — "the leg has exactly one side" (this leg), step 2's
+// wait for a pending spare and step 4's full spare list (this group) — are
+// part of the candidate test, not reasons to end the pass. Each is a property of ONE leg
+// or ONE group, and each can hold for a very long time: a two-sided leg has a
+// user migration in flight (hours), a spare that cannot be connected stays
+// pending until its leg has been unhealthy for leg_unhealthy (and one the
+// primary never reports stays pending for good), and only DeleteSpareLeg by
+// an operator frees a spare slot (§0 item 17). Ending the pass on any of them
+// would leave every OTHER group of the SP degraded on a single md-raid1 member
+// for exactly as long, so a further failure there is data loss. Each is still
+// recorded per leg for visibility (§14.11 case D step 9 greps
+// `reason=spare_list_full`) and the scan moves on.
 func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 	for _, target := range repairCandidates(p) {
 		ids := []slog.Attr{
@@ -1192,19 +1197,22 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 		if spare := readySpare(target.grp, p.info); spare != nil {
 			return w.switchSpare(ctx, target, spare, ids)
 		}
-		if spare := pendingSpare(target.grp, p.info); spare != nil {
+		if spare := pendingSpare(p, target.grp); spare != nil {
 			// The kind names the step of the AR8 procedure that is being
 			// deferred: here the switch, which runs as soon as the spare is
 			// ready. Every other AR8 skip names the create — the step the
 			// procedure would otherwise have started with.
 			//
-			// This one DOES end the pass: AR8 step 2 is "wait for it", and
-			// the wait is bounded by the spare's provisioning — unlike the
-			// two preconditions above, it clears itself.
+			// The wait holds THIS group only (see the header): it used to
+			// end the pass on the premise that it clears within one
+			// provisioning, which a spare whose leg keeps reading ERROR
+			// outlives by up to leg_unhealthy. Another unhealthy leg of the
+			// same group finds the same pending spare and waits too, so the
+			// scan cannot create a second spare for the group here.
 			w.reactionSkipped(ctx, reactionSpareSwitch, reasonSparePending,
 				withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
 			)
-			return true
+			continue
 		}
 		if len(target.grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
 			// §0 item 17: the worker never deletes a parked leg; only
@@ -1308,22 +1316,46 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 	return nil
 }
 
-// pendingSpare is AR8 step 2: a spare that is on its way — its leg and its
-// side are both healthy — but is not ready yet, either still provisioning or
-// not yet reported OK by the primary. A spare with an err_epoch of its own is
-// neither ready nor pending: it is a dead spare, and a PARKED old leg is the
-// commonest one, which is what makes a second repair of the same group create
-// a second spare rather than wait for one that will never arrive.
-func pendingSpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
+// pendingSpare is AR8 step 2: a spare that is on its way — not ready yet,
+// either still provisioning or not yet reported OK by the primary — and not
+// dead. A DEAD spare is never pending — it can still be READY, since
+// spareReady ignores every err_epoch, and step 1 has then switched it in
+// already — and a PARKED old leg is the commonest one, which is what makes a
+// second repair of the same group create a second spare rather than wait for
+// one that will never arrive. A spare is dead when its side has an err_epoch —
+// the worker cannot reach its DN or the side reports an ERROR row (AR8 case
+// 2's condition), which is how a leg parked by case 2 was retired — or when
+// its leg has been unhealthy for leg_unhealthy, which is how a leg parked by
+// case 1 was. Dead is a current state, not an identity: a parked leg whose DN
+// comes back, or that recovers and fails again, is pending again by the same
+// tests, and holds its group's next repair until it reads OK or times out.
+//
+// The leg's err_epoch is held to AR8 case 1's threshold (legNeedsRepair)
+// rather than read as a verdict, because HL2 probes spares too: the moment a
+// fresh spare's side is provisioned the primary starts connecting to it and
+// may report the leg ERROR until the connect completes, which stamps the
+// leg's err_epoch at once, with no grace (healthMonitor.observe). Read bare,
+// that transient turned the very spare this step waits for into a dead one,
+// and a pass landing inside it created a SECOND spare for one repair —
+// measured in the e2e suite's react case, a transient of 4.7 to 6.4 s against
+// a 5 s pass — contrary to step 2, and holding an extent and a connection per
+// cntlr for a spare no failure asked for.
+//
+// A spare whose leg keeps reading ERROR is dead after leg_unhealthy — the wait
+// AR8 already gives an active leg before it repairs one — and step 3 replaces
+// it while the group has a free slot. The wait holds only this group
+// (tryLegRepair). A spare that never gets a leg err_epoch at all — never
+// provisioned, or never reported — has no such bound and stays pending.
+func pendingSpare(p *spPass, grp *pb.Group) *pb.Leg {
 	for _, spare := range sortedLegs(grp.GetSpareLegList()) {
-		if spare.GetErrEpoch() != 0 {
+		if reached(p.now, spare.GetErrEpoch(), p.th.GetLegUnhealthy()) {
 			continue
 		}
 		side := singleSide(spare)
 		if side == nil || side.GetErrEpoch() != 0 {
 			continue
 		}
-		if spareReady(spare, info) {
+		if spareReady(spare, p.info) {
 			continue
 		}
 		return spare

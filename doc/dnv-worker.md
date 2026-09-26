@@ -1389,11 +1389,15 @@ AR2. **One action per SP per pass** — "action" meaning a *reaction*
      none" and would otherwise be unreachable); AR6's `grow_pending`,
      `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
      grow deferred on the CN, the `architecture.md` §8.5 ceiling — and must not disable
-     AR7/AR8 for the duration); and AR8's `leg_has_two_sides` and
-     `spare_list_full`, which move the scan to the next candidate leg.
+     AR7/AR8 for the duration); and AR8's `leg_has_two_sides`,
+     `spare_list_full` and step 2's wait for a pending spare
+     (`spare_pending`), which move the scan to the next candidate leg — a
+     spare that cannot be connected stays pending until its leg has been
+     unhealthy for `leg_unhealthy`, and one the primary never reports has no
+     bound at all. *Amended 2026-09-23:* the pending wait used to end the
+     pass, on the premise that it clears within one provisioning.
      Everything else ends the pass as before: every `ErrPrecondition`, every
-     empty allocator scan, every transient op failure, and AR8 step 2's wait
-     for a pending spare (which clears itself within one provisioning). Two
+     empty allocator scan and every transient op failure. Two
      owners overlapping on one SP (§0 item 4) cannot apply an action twice:
      the second STM fails its precondition.
 
@@ -1520,9 +1524,34 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         connected and probed, its `err_epoch` still set, never repaired again
         (only `leg_list` legs are); a user-created ready spare is used the
         same way — that is what spares are for;
-     2. else a **pending** spare exists — a spare whose leg and side both
-        have `err_epoch == 0` and that is not ready yet (provisioning, or
-        not yet reported `OK`) ⇒ wait for it;
+     2. else a **pending** spare exists — a spare that is not ready yet
+        (provisioning, or not yet reported `OK`) and not dead: its side has
+        `err_epoch == 0`, and its leg has `err_epoch == 0` **or has had it
+        for less than `leg_unhealthy`** ⇒ wait for it — on this group only;
+        the scan goes on to the next candidate leg (AR2). *Amended
+        2026-09-23:* the leg's `err_epoch` used to disqualify a spare
+        outright. HL2 probes spares too, so a fresh spare can read `ERROR`
+        from the moment its side is provisioned until the primary's connect
+        to it completes, and its leg then carries an `err_epoch` a few
+        seconds old; read bare, that made the spare this step waits for a
+        dead one, and a pass landing inside the transient ran step 3 and
+        created a second spare for one repair (`e2e_integtest.md` §9,
+        2026-09-23). That spare is usable — the group's next repair switches
+        it in — so no repair was lost, but no failure asked for it, it holds
+        an extent and a connection per cntlr, and it is not what this step
+        says. `leg_unhealthy` is AR8 case 1's own threshold: a spare whose leg
+        keeps reading `ERROR` that long is dead, and step 3 replaces it while
+        the group has a slot. The side test stays bare — a side with an
+        `err_epoch` is one whose DN the worker cannot reach or that reports
+        an `ERROR` row (case 2's condition), which is how a leg parked by
+        case 2 was retired; a leg parked by case 1 was retired after
+        `leg_unhealthy`, so it starts out dead by the leg test. Neither stays
+        dead by identity: a parked leg is still probed, so one whose DN comes
+        back (side `err_epoch` cleared) while its leg still reads `ERROR`, or
+        one that recovers and later fails again (a fresh leg `err_epoch`), is
+        a pending spare again by this same rule, and holds this group's next
+        repair until it reads `OK` (step 1 then switches it in) or its leg
+        has been unhealthy for `leg_unhealthy`;
      3. else `len(spare_leg_list) < MaxSpareLegPerGrp` ⇒ internal
         `CreateSpareLeg` on a fresh DN: `FindDnCandidatesAntiAffine(candExt =
         group.ext_cnt, candCnt = dn_batch_size, requiredCnt = 1, black = the
@@ -3106,6 +3135,15 @@ durable, so nothing is lost — convergence is delayed, not skipped
   a shorter chunk at the agent (cost: extra copying, never correctness).
 * **A group's spare list can fill with parked legs** (AR8 step 4); the
   worker never frees a slot itself.
+* **A spare that never connects holds its own group's repair for
+  `leg_unhealthy`.** AR8 step 2 waits for a pending spare, and a spare whose
+  leg keeps reading `ERROR` stays pending until it has been unhealthy that
+  long (step 2's 2026-09-23 amendment) — each replacement spare the same
+  again, until `spare_list_full`. A parked leg is such a spare again once
+  its DN comes back or once it recovers and fails again (step 2). The wait
+  holds that group only; the scan repairs the others (AR2). A spare the
+  primary never reports at all stays pending with no bound, which is older
+  than the amendment.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and
   the migration that could have moved a readable-but-sick side is an
   operator's tool (`CreateMigration`), not a reaction (§0 item 12).

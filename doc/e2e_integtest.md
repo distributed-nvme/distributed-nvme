@@ -1186,7 +1186,7 @@ assertion.
 | 04 | — | the replacement connects every leg as a standby with no groups and no pools, on `WAIT_BUILD` for the same reason the third cntlr of §4.3 gets it; the discovery log has lost the dead CN's transport and gained the replacement's — which is what makes `connect-all` safe again, though being in the log is not being ready, so the export gate runs over both cntlrs first and the new primary answers on its first poll; host0's new path is `live` and the sp's namespace is `inaccessible` on it, and its path to the primary is still `live` |
 | 04 | restart the killed cn agent | its node rows come back; its `cntlr_ptr_list` is **empty**; and it tears down the md arrays, dm devices and nvmet exports its dead predecessor left in that kernel — which the end-of-run cleanup would also do, but only at the end of the run, and the residue check runs before that |
 | 05 | kill a dn agent **and drop its nvmet port** | killing the agent alone triggers nothing: its nvmet subsystem, port and dm-linear live in the kernel and outlive it, so the primary's probe IO still succeeds, the leg stays OK, `Leg.err_epoch` stays 0 and AR8 never fires. Both planes are needed — the gRPC rounds fail (side unhealthy) and the data path goes away (leg unhealthy). The leg is chosen so that its single side sits on a DN carrying exactly one side of the whole sp, because AR8 repairs the smallest unhealthy leg id and a DN with two sides would make two legs unhealthy |
-| 05 | wait for AR8 | **one more spare than the group had**, read before the kill together with the ids themselves, so a group that already carried one cannot satisfy the wait on its first poll — which is what the old `== 1` form would have done, passing the step without AR8 having acted. Exactly one entry of `spare_leg_list` is new against that id set, and it has one side. Then the switch: the dead leg is out of `leg_list` **and** the group's parked set is exactly what it started with plus the dead leg, and the sp holds one more parked leg than when AR8 started — one more and not two, because `SwitchSpareLeg` takes the promoted spare out as it puts the dead leg in. Both halves are asserted, because either alone is also what a half-applied transaction looks like, and the promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it. One honest limit, unchanged in kind from the old form: AR8 acts once per pass, so the create and the switch are different passes, but a poll that lands after both would find the *dead* leg as the new entry — the two assertions hold either way and only the log line would name the wrong leg |
+| 05 | wait for AR8 | **at least one more spare than the group had**, read before the kill together with the ids themselves, so a group that already carried one cannot satisfy the wait on its first poll — which is what the old `== 1` form would have done, passing the step without AR8 having acted. *At least*, not exactly: if the wait's first grown reading lands after a double create, it reads `before + 2`, never `before + 1`, and an equality wait would die as a `WAIT_REACT` timeout instead of on the assertion that names it (§9, 2026-09-23). Exactly one entry of `spare_leg_list` is new against that id set, and it has one side. Then the switch: the dead leg is out of `leg_list` **and** the group's parked set is exactly what it started with plus the dead leg, and the sp holds one more parked leg than when AR8 started — one more and not two, because `SwitchSpareLeg` takes the promoted spare out as it puts the dead leg in. Both halves are asserted, because either alone is also what a half-applied transaction looks like, and the promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it. One honest limit, unchanged in kind from the old form: AR8 acts once per pass, so the create and the switch are different passes, but a poll that lands after both would find the *dead* leg as the new entry — the two assertions hold either way and only the log line would name the wrong leg |
 | 05 | — | the spare is not on the dead node, not on a DN the group occupies, and not on a VM it occupies when `DN_VM_CNT > LEGS` — where "the group occupies" is read over its active legs **and its spare legs**, which is what the worker black-lists and therefore the statement AR8 actually makes; md finishes rebuilding onto it (a fresh spare has never been an md member, so this is a full recovery), gated on the applied revision as in the copy case; `SHA0` |
 | 05 | restart the dn agent | it recreates **its own** nvmet port, not `ports/1`; the primary reports every leg again, the parked one included. It has to come back: the parked leg's side still occupies an extent, and only a live agent can retire it when the sp drains |
 | 06 | `ns delete --idx 2`, `td delete a0` | only `t0` is left for the teardown; `SHA0` |
@@ -3126,3 +3126,61 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   so "below the bound" means the proof is gone and not that the run will fail —
   a distinction the fix's own §2.4 now states, because item 4 above turns on
   it.
+
+* **2026-09-23 — react stage 05's first run, and the worker defect it found.**
+  The 2026-09-18 re-run at the fixed bound passed `smoke`, `ops` and `copy`
+  in full and `react` stages 01-04 (AR6, AR5, AR7), then failed in stage 05 —
+  the first recorded run of this suite to reach it, every earlier one having
+  died before `react`. It is also the first place AR8's create → wait →
+  switch runs against a **real** primary: the worker suite drives it over
+  `fakeagent`, whose primary reports a fresh spare `OK` at once, the unit
+  tests over a fake reactor, and `copy` stage 05 drives spares as operator
+  verbs. AR8 created a **second** spare for the same repair while the
+  first was still connecting, then switched the first one in — the switch
+  itself was correct — so the group's parked set read `[27, 10]` where the
+  assertion wanted `[10]`.
+
+  The assertion was right. HL2 probes spare legs too, and the primary
+  reported the fresh spare's leg `ERROR` from the moment its side was
+  provisioned until its connect completed, which stamps the leg's
+  `err_epoch` at once. From the suite's own `sp get` polls, the spare's leg
+  read `err_epoch` 0 at 06:11:21.15 (side 26 not yet provisioned),
+  1789798281 (06:11:21) at 06:11:21.93 and still at 06:11:26.66, and 0 again
+  at 06:11:27.50, so the transient lasted between 4.7 and 6.4 s, against a
+  5 s pass. `pendingSpare` read any leg `err_epoch` as
+  a dead spare — a rule written for a parked leg — so AR8 step 2's wait did
+  not engage, the ladder passed the `MaxSpareLegPerGrp` check at 1 < 2, and
+  step 3 created leg 27 in the next pass, between the polls at 06:11:25.92
+  and 06:11:26.66 — five seconds before the switch at 06:11:31.40.
+
+  **What that cost, stated exactly.** Leg 27 is a usable spare: the group's
+  next leg failure switches it in, so no repair was lost — the group reaches
+  `spare_list_full` after the same two repairs it would have without the
+  defect. What it did cost is a spare no failure asked for, holding an extent
+  and a connection per cntlr, and a departure from AR8 step 2. It is a race
+  and not a certainty: a pass that misses the transient creates nothing, and
+  a group that already holds a parked leg has no free slot to spend.
+
+  The fix is in the worker (`dnv-worker.md` AR8 step 2 and AR2, amended the
+  same day): a spare's leg `err_epoch` is held to `leg_unhealthy`, AR8 case
+  1's own threshold, instead of being read as a verdict, while the side test
+  stays bare; and the step 2 wait now holds only its own group, since a spare
+  whose leg keeps reading `ERROR` can stay pending for `leg_unhealthy`. One
+  change in this suite goes with it:
+
+  1. **The create wait is an at-least wait** (`react_spare_cnt_reaches`, was
+     `react_spare_cnt_is`). Under the old equality, a wait whose *first*
+     grown reading lands after both creates reads `before + 2`, never
+     `before + 1`, and dies as a timeout naming the wait; now it stops at the
+     first grown count and the assertions after it name the fault. That is
+     defensive rather than observed: the two creates are separate passes at
+     least one `cntlr_interval` apart and the wait polls from before the
+     first, so only a poll stalled for more than a pass gets there — in this
+     run the equality form read `before + 1`.
+
+  The parked-set comparison after the switch is what caught it, and it is
+  unchanged. The "exactly one spare leg is new since AR8 started" check
+  *passed* in that run, because its poll, at 06:11:16.88, landed 9.0 to
+  9.8 s before leg 27 was created —
+  a timing observation, not a proof, which is why the comparison after the
+  switch, where every spare is necessarily visible, carries the invariant.

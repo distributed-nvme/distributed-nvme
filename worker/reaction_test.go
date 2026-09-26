@@ -1733,6 +1733,52 @@ func TestReactionLegRepairWalksPastUnrepairableLegs(t *testing.T) {
 		h.wantApplied(reactionSpareCreate)
 	})
 
+	// AR8 step 2's wait holds its own group only. The meta group's failed
+	// leg has the smaller leg_id and a spare on its way; the data group must
+	// still be repaired in the same pass. Two shapes of "on its way": a spare
+	// reading ERROR while it connects, which stays pending for up to
+	// leg_unhealthy, and one the primary has never reported, which has no
+	// bound at all.
+	pendingShapes := []struct {
+		name  string
+		setup func(h *reactHarness)
+	}{
+		{"connecting", func(h *reactHarness) {
+			h.legOf(700).ErrEpoch = h.ago(common.DefaultLegUnhealthy - 1)
+			h.setLegRow(700, pb.ResStatus_RES_STATUS_ERROR)
+		}},
+		{"never reported", func(h *reactHarness) {}},
+	}
+	for _, shape := range pendingShapes {
+		t.Run("pending spare does not hide another group ("+shape.name+")",
+			func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.metaGrp().SpareLegList = append(h.metaGrp().SpareLegList,
+					&pb.Leg{
+						LegId:  700,
+						LegIdx: 2,
+						SideList: []*pb.Side{{
+							SideId:      800,
+							AddrPort:    reactDnC,
+							Provisioned: true,
+						}},
+					},
+				)
+				shape.setup(h)
+				h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+				h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+				h.dnCands(reactDnD)
+				h.pass()
+				calls := h.wantOps("create_spare")
+				if calls[0].grpId != reactDataGrp {
+					t.Fatalf("create_spare = %+v, want the data group",
+						calls[0])
+				}
+				h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+				h.wantApplied(reactionSpareCreate)
+			})
+	}
+
 	t.Run("still one action per pass", func(t *testing.T) {
 		// Nothing blocks either leg: the walk stops at the first repairable
 		// candidate, so AR2's invariant survives the scan being able to
@@ -1831,9 +1877,119 @@ func TestReactionSpareReadiness(t *testing.T) {
 		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
 	})
 
+	// THE FRESH-SPARE TRANSIENT. HL2 probes spares too, so a spare whose side
+	// has just been provisioned reads ERROR while the primary connects to it,
+	// and its leg carries an err_epoch seconds old. That is a spare on its way,
+	// not a dead one: counting it dead made AR8 create a second spare for one
+	// repair (the e2e suite's react case, 2026-09-18).
+	t.Run("fresh spare still connecting", func(t *testing.T) {
+		h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, 0)
+		h.legOf(spareLegId).ErrEpoch = h.ago(5)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+	})
+
+	// The wait is bounded by AR8 case 1's threshold, pinned on both sides.
+	t.Run("spare leg below leg_unhealthy", func(t *testing.T) {
+		h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, 0)
+		h.legOf(spareLegId).ErrEpoch = h.ago(common.DefaultLegUnhealthy - 1)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+	})
+
+	t.Run("spare leg at leg_unhealthy", func(t *testing.T) {
+		h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, 0)
+		h.legOf(spareLegId).ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.pass()
+		h.wantOps("create_spare")
+		h.wantApplied(reactionSpareCreate)
+	})
+
+	// The threshold is the SP's STORED leg_unhealthy, not the default: the
+	// react case stores 30 s, and a spare there is dead at 30, not at 1200.
+	t.Run("stored leg_unhealthy", func(t *testing.T) {
+		const legUnhealthy = 30
+		for _, tc := range []struct {
+			age  uint64
+			want []string
+		}{
+			{legUnhealthy - 1, nil},
+			{legUnhealthy, []string{"create_spare"}},
+		} {
+			h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, 0)
+			h.state.Conf.EventThreshold = &pb.EventThreshold{
+				LegUnhealthy: legUnhealthy,
+			}
+			h.legOf(spareLegId).ErrEpoch = h.ago(tc.age)
+			h.pass()
+			h.wantOps(tc.want...)
+		}
+	})
+
+	// AR8's SECOND repair of a group: the leg the first switch parked, dead,
+	// plus the fresh spare this repair created, still connecting. The list
+	// is full, yet the group is waiting for a spare and not for an operator,
+	// so the record names the wait — and the scan must not stop at the dead
+	// entry that sorts first. Both ways a leg gets parked, since they are
+	// dead by different tests.
+	for _, shape := range []struct {
+		name            string
+		legErr, sideErr func(h *reactHarness) uint64
+	}{
+		{"parked by case 1", // dead by its LEG
+			func(h *reactHarness) uint64 { return h.ago(9000) },
+			func(h *reactHarness) uint64 { return 0 }},
+		{"parked by case 2", // dead by its SIDE, its leg below the threshold
+			func(h *reactHarness) uint64 {
+				return h.ago(common.DefaultLegUnhealthy - 1)
+			},
+			func(h *reactHarness) uint64 { return h.ago(9000) }},
+	} {
+		t.Run("second repair waits for the fresh spare ("+shape.name+")",
+			func(t *testing.T) {
+				h := newReactHarness(t, reactFixture(t))
+				h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+				h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList,
+					&pb.Leg{
+						LegId: 700, LegIdx: 2, ErrEpoch: shape.legErr(h),
+						SideList: []*pb.Side{{
+							SideId: 800, AddrPort: reactDnC,
+							Provisioned: true, ErrEpoch: shape.sideErr(h),
+						}},
+					},
+					&pb.Leg{
+						LegId: 701, LegIdx: 3, ErrEpoch: h.ago(5),
+						SideList: []*pb.Side{{
+							SideId: 801, AddrPort: reactDnD, Provisioned: true,
+						}},
+					},
+				)
+				h.setLegRow(700, pb.ResStatus_RES_STATUS_ERROR)
+				h.setLegRow(701, pb.ResStatus_RES_STATUS_ERROR)
+				h.pass()
+				h.wantOps()
+				h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+			})
+	}
+
+	// The SIDE test stays bare: a side with an err_epoch is one whose DN the
+	// worker cannot reach or that reports an ERROR row (AR8 case 2's
+	// condition) — how a leg parked by case 2 was retired — and it is dead at
+	// once.
+	t.Run("spare side failing", func(t *testing.T) {
+		h := build(t, true, pb.ResStatus_RES_STATUS_PROVISIONING, 0)
+		h.legOf(spareLegId).SideList[0].ErrEpoch = h.ago(1)
+		h.pass()
+		h.wantOps("create_spare")
+		h.wantApplied(reactionSpareCreate)
+	})
+
 	t.Run("dead spare makes room for another", func(t *testing.T) {
-		// A parked leg — err_epoch set, side provisioned — is neither ready
-		// nor pending, so the group gets a second spare instead of waiting.
+		// A parked leg — err_epoch set long ago, side provisioned — is
+		// neither ready nor pending, so the group gets a second spare instead
+		// of waiting.
 		h := build(t, true, pb.ResStatus_RES_STATUS_ERROR, uint64(1))
 		h.pass()
 		calls := h.wantOps("create_spare")

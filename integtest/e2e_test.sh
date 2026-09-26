@@ -12405,7 +12405,21 @@ react_cn_has_no_cntlr() { # <cn addr_port>
 	[ "$n" = 0 ]
 }
 
-react_spare_cnt_is() { # <want>
+# react_spare_cnt_reaches is the wait for AR8's create: true once the group
+# holds AT LEAST <want> spare legs. At least, and not exactly, so that a double
+# create fails on the assertion that names it and not as a timeout: if AR8
+# creates two spares for one repair — which it did until 2026-09-23, see
+# pendingSpare in worker/reaction.go — and the wait's FIRST grown reading lands
+# after both, the count goes from before straight to before + 2, and an
+# equality wait burns its whole WAIT_REACT and dies naming the wait instead of
+# the fault. That is defensive rather than observed: the creates are separate
+# passes at least one cntlr_interval apart (AR2) and this wait polls from before
+# the first, so only a poll stalled for more than a pass gets there (in the run
+# that found the double create, the equality form read before + 1). Stopping at
+# the first grown count hands the verdict to the assertions after it, "exactly
+# one spare leg is new since AR8 started" and the parked-set comparison after
+# the switch, which exist to catch that fault.
+react_spare_cnt_reaches() { # <want>
 	local n
 	if ! ctl_try sp get; then
 		return 1
@@ -12418,7 +12432,7 @@ react_spare_cnt_is() { # <want>
 		REACT_SPARE_LAST=$n
 		log "  group $REACT_GRP_ID holds $n spare leg(s)"
 	fi
-	[ "$n" = "$1" ]
+	[ "$n" -ge "$1" ]
 }
 
 # react_spare_switched is AR8 step 1 seen from the record: SwitchSpareLeg puts
@@ -13211,7 +13225,7 @@ react_leg_repair() {
 	# threshold set and the first real run produced a spare_create during setup
 	# (see the section header). Asserting "the group holds no spare leg" would
 	# fail a run that behaved exactly as designed — and, worse, the wait below
-	# used to be `react_spare_cnt_is 1`, which on a group that ALREADY held one
+	# used to be an exact `== 1`, which on a group that ALREADY held one
 	# would have returned true on its first poll and passed this step without
 	# AR8 having done anything at all.
 	#
@@ -13336,7 +13350,7 @@ react_leg_repair() {
 	# ONE MORE than the group had, so a group that already carried a spare
 	# cannot satisfy this on the first poll.
 	wait_until "$WAIT_REACT" "$msg" \
-		react_spare_cnt_is "$((before_spare_cnt + 1))"
+		react_spare_cnt_reaches "$((before_spare_cnt + 1))"
 	SP_JSON=$CTL_OUT
 	# `fresh` is the spare AR8 just minted: the entries whose leg_id was not in
 	# the before set. Naming it that way rather than by index is what makes the
