@@ -573,6 +573,20 @@ func assertProvisioning(t *testing.T, info *pb.ResInfo, label string) {
 	}
 }
 
+// assertPending is the CN11 row of a primary's leg whose prober has not
+// completed a round: RES_STATUS_PENDING "health probe pending". It is what a
+// converge reply carries here for a primary's freshly built legs: a prober's
+// first round runs one CnLegProbeInterval of real time after it starts, and
+// no test waits that long — probeAllLegs runs rounds by hand.
+func assertPending(t *testing.T, info *pb.ResInfo, label string) {
+	t.Helper()
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_PENDING ||
+		info.GetDetails() != detailsProbePending {
+		t.Fatalf("%s: status %v, details %q, want PENDING/%q",
+			label, info.GetStatus(), info.GetDetails(), detailsProbePending)
+	}
+}
+
 // assertMissingSpLevel is the CN19 row: the operator's level says the resource
 // must not exist, which is a stronger statement than [D15]'s "it is coming" — so
 // a resource that is both level-suppressed and provisioning-deferred reports
@@ -1063,8 +1077,8 @@ func TestPrimaryConvergeOrder(t *testing.T) {
 	}
 
 	info := reply.GetCntlrInfo()
-	assertOk(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
-	assertOk(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
+	assertPending(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
+	assertPending(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
 	assertOk(t, info.GetGrpIdToMdRaid()[testMetaGrp], "grp meta")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToMeta()[testSlice], "pool meta")
@@ -2133,6 +2147,9 @@ func TestCheckCnRounds(t *testing.T) {
 func TestCheckCntlrRounds(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	// Steady state includes a completed probe round per leg; before it the
+	// legs read PENDING (CN11).
+	probeAllLegs(t, srv)
 
 	node.Reset()
 	req := &pb.CheckCntlrRequest{
@@ -2337,7 +2354,7 @@ func TestProvisioningDeferredGroup(t *testing.T) {
 		info.GetTdIdToThinInfo()[testTd].GetSliceIdToDmThin()[testSlice],
 		"thin")
 	assertProvisioning(t, info.GetTdIdToRaid0()[testTd], "raid0")
-	assertOk(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
+	assertPending(t, info.GetLegIdToLeg()[testMetaLeg], "leg meta")
 	assertOk(t, info.GetGrpIdToMdRaid()[testMetaGrp], "grp meta")
 	// The td's dm-error and the host-facing subsystem are real resources and
 	// stay OK — PROVISIONING marks only what is deferred.
@@ -2708,7 +2725,7 @@ func TestUnprovisionedSpareDefersOnlyItself(t *testing.T) {
 
 	info := reply.GetCntlrInfo()
 	assertProvisioning(t, info.GetLegIdToLeg()[testSpareLeg], "spare leg")
-	assertOk(t, info.GetLegIdToLeg()[testDataLeg], "member leg")
+	assertPending(t, info.GetLegIdToLeg()[testDataLeg], "member leg")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToData()[testSlice], "pool data")
 	assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
@@ -2738,7 +2755,7 @@ func TestMixedLegConnectsProvisionedSideOnly(t *testing.T) {
 			connects, strings.Join(node.Calls(), "\n"))
 	}
 	info := reply.GetCntlrInfo()
-	assertOk(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
+	assertPending(t, info.GetLegIdToLeg()[testDataLeg], "leg data")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
 

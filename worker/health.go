@@ -37,8 +37,12 @@ const (
 	// healthNone is "neither set nor clear": the reply said nothing about the
 	// object's health. Two things produce it — a REJECTED agent_reply (HL1's
 	// last row and HL2's trailer), which triggers a re-sync instead (RW4), and
-	// a leg probe row that is neither ERROR nor OK (HL2's Leg row clears on an
-	// explicit RES_STATUS_OK and on nothing else, legObservation below).
+	// a leg probe row that is neither ERROR nor OK, or absent (HL2's Leg row
+	// clears on an explicit RES_STATUS_OK and on nothing else, legObservation
+	// below). Among them RES_STATUS_PENDING, a leg whose prober has not
+	// completed a round yet (cnagent.md CN11), which is what a just-promoted
+	// primary reports for its wrapped legs: clearing on it would wipe a dead
+	// leg's err_epoch at every promotion.
 	//
 	// RES_STATUS_PROVISIONING and MISSING rows are deliberately NOT healthNone
 	// for a node, a side or a cntlr: they are simply not ERROR rows, so a

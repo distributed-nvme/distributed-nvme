@@ -1197,10 +1197,17 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      | `Leg.err_epoch` | the **primary** cntlr's `leg_id_to_leg[leg] == RES_STATUS_ERROR` (the §3.6 probe; spares included). A standby's leg row is logged, never recorded | the primary reports the row `RES_STATUS_OK` |
      | `Side.err_epoch` | its `CheckSide` stream cannot be opened / breaks / misses a round, or `side_dev_info` or any `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` row is `RES_STATUS_ERROR`, or a `migr_src_info` / `migr_dst_info` row is `ERROR` | its next round is clean |
 
-     `PROVISIONING`, `MISSING` and a rejection code never set any of the
-     three. `ReplyCodeLeftover` is not a rejection: its rows are evaluated
-     exactly as a `code == 0` reply's — here, and in the RW18/RW19 reports
-     the same replies carry — for HL1's reason.
+     `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any
+     of the three, and `Leg.err_epoch` clears on the primary's
+     `RES_STATUS_OK` alone. *Amended 2026-09-26:* `PENDING` is the
+     primary's leg row while its prober for the leg has not completed a
+     round (or none is registered yet), and a fresh prober starts at every
+     promotion and agent restart (`cnagent.md` CN11). That row used to
+     read `OK`, so every promotion's fresh probers cleared a dead leg's
+     `err_epoch` and restarted AR8 case 1's `leg_unhealthy` clock.
+     `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly
+     as a `code == 0` reply's — here, and in the RW18/RW19 reports the same
+     replies carry — for HL1's reason.
 
 HL3. **Transitions only.** A record is written when the observed health
      changes (healthy → unhealthy sets the epoch once — the threshold clock
@@ -1523,10 +1530,16 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         old leg is **parked** in `spare_leg_list` (§0 item 17) — still
         connected and probed, its `err_epoch` still set, never repaired again
         (only `leg_list` legs are); a user-created ready spare is used the
-        same way — that is what spares are for;
+        same way — that is what spares are for. *Amended 2026-09-26:*
+        "probed" now holds literally — the primary reports a leg whose
+        prober has not completed a round as `RES_STATUS_PENDING`
+        (`cnagent.md` CN11), where it used to report `OK` and let a fresh
+        spare be switched in before any probe had run; such a spare is not
+        ready, and step 2 waits for it unless it is dead;
      2. else a **pending** spare exists — a spare that is not ready yet
-        (provisioning, or not yet reported `OK`) and not dead: its side has
-        `err_epoch == 0`, and its leg has `err_epoch == 0` **or has had it
+        (provisioning, or not yet reported `OK` — `PENDING` included) and
+        not dead: its side has `err_epoch == 0`, and its leg has
+        `err_epoch == 0` **or has had it
         for less than `leg_unhealthy`** ⇒ wait for it — on this group only;
         the scan goes on to the next candidate leg (AR2). *Amended
         2026-09-23:* the leg's `err_epoch` used to disqualify a spare
@@ -2478,10 +2491,15 @@ sent it (RW10). Rules:
   ```
 
   Per object: `status` (the default for every row), `details`, `rows`
-  (per-row override, key = `<map>.<id>` or `<field>`), `zeroed_ext_cnt` /
-  `total_ext_cnt` (sides; default `total = ext_cnt` of the request and
-  `zeroed = total` — instant provisioning), `thin_ok` (cntlr) and
-  `thin_missing_slices` (a partial map for the created-flip negative),
+  (per-row override, key = `<map>.<id>` or `<field>`; a status, here as in
+  `status`, is one of `UNKNOWN`, `MISSING`, `ERROR`, `OK`, `PROVISIONING`,
+  `PENDING`, case-insensitive, with or without the proto's `RES_STATUS_`
+  prefix — `PENDING` *added 2026-09-26*, so a case can plant the leg row of
+  a primary whose prober has not completed a round, `cnagent.md` CN11),
+  `zeroed_ext_cnt` / `total_ext_cnt` (sides; default `total = ext_cnt` of
+  the request and `zeroed = total` — instant provisioning), `thin_ok`
+  (cntlr) and `thin_missing_slices` (a partial map for the created-flip
+  negative),
   `bm_idx_list` (override of a MIGRATION's derived applied set),
   `chunk_id_list` (the same lever for a CLONE: a list of the `"s:b"` pair
   strings state.json uses, e.g. `["0:0", "2:1"]` — absent means derive from

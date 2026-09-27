@@ -118,7 +118,7 @@ type legProber struct {
 	lastErr       error
 }
 
-// snapshot is the lock-free readers' view: {lastOk, lastErr, inflightSince}.
+// snapshot is the lock-free readers' view: {inflightSince, completed, lastErr}.
 func (p *legProber) snapshot() (time.Time, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -253,8 +253,13 @@ func healthBlockPayload(cnId uint64, unixNano int64) []byte {
 
 // legProbeOutcome is the CN28 rule: an attempt in flight longer than
 // CnLegProbeStallSeconds is an error; otherwise the last completed outcome;
-// before any completion the leg is reported OK as "pending", because the
-// wrapper exists and nothing has failed yet.
+// before any completion — a prober not registered yet included — the leg is
+// RES_STATUS_PENDING "health probe pending": the wrapper exists and no round
+// of this cntlr's current prober has said anything about the leg yet (a
+// promotion and an agent restart start a fresh one, whatever an earlier
+// prober reported). It was OK until 2026-09-26, and an OK row clears
+// Leg.err_epoch (HL2): every promotion's fresh probers cleared a dead leg's
+// err_epoch, and an unprobed spare read ready to AR8.
 func (s *CnAgentServer) legProbeOutcome(
 	st *cntlrState,
 	lp *legPlan,
@@ -264,14 +269,14 @@ func (s *CnAgentServer) legProbeOutcome(
 	stall := s.probeStall
 	s.mu.Unlock()
 	if prober == nil {
-		return pb.ResStatus_RES_STATUS_OK, detailsProbePending
+		return pb.ResStatus_RES_STATUS_PENDING, detailsProbePending
 	}
 	inflightSince, completed, lastErr := prober.snapshot()
 	if !inflightSince.IsZero() && s.now().Sub(inflightSince) > stall {
 		return pb.ResStatus_RES_STATUS_ERROR, detailsProbeStalled
 	}
 	if !completed {
-		return pb.ResStatus_RES_STATUS_OK, detailsProbePending
+		return pb.ResStatus_RES_STATUS_PENDING, detailsProbePending
 	}
 	if lastErr != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, lastErr.Error()

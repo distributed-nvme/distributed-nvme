@@ -251,6 +251,22 @@ assert_provisioning_or_ok() { # json path label
 	esac
 }
 
+# assert_leg_pending reads a primary's leg row in the reply of the SyncupCntlr
+# that started the leg's CN11 prober, and pins it exactly: RES_STATUS_PENDING
+# "health probe pending", with no race. ensureLegs builds the row one
+# wrapper-table check after startLegProber registers the prober, whose first
+# round runs one CnLegProbeInterval (5 s) later, and nothing later in the
+# converge rewrites the row. OK comes only from a prober an earlier converge
+# registered; converge_check asserts it once the round is in.
+assert_leg_pending() { # json legid label
+	local row
+	row=".cntlr_info.leg_id_to_leg[\"$(d16 "$2")\"]"
+	assert_eq "$(jq_of "$1" "$row.status // \"ABSENT\"")" \
+		RES_STATUS_PENDING "$3 leg_id_to_leg[$2]"
+	assert_eq "$(jq_of "$1" "$row.details // \"ABSENT\"")" \
+		"health probe pending" "$3 leg_id_to_leg[$2] details"
+}
+
 # assert_provisioning is the exact form, for the rows the matrix pins to
 # PROVISIONING with no race: the resources a deferred side or leg deliberately
 # does not create. RES_STATUS_PROVISIONING is a *healthy* status, so it
@@ -2347,14 +2363,36 @@ cn_drop_until_clean() { # cnidx secs
 	done
 }
 
+# wait_legs_probed polls a cntlr's GetCntlrInfo until no leg row reads
+# RES_STATUS_PENDING — CN11's "the prober has not completed a round", which a
+# primary reports for every leg whose prober has just started (a build, a
+# promotion, an agent restart) until the first CnLegProbeInterval tick plus the
+# probe itself. A standby never reports it, so there the first poll returns.
+wait_legs_probed() { # cnidx sp cntlr secs label
+	local deadline=$((SECONDS + $4)) out pending
+	while :; do
+		out=$(cnctl "$1" get-cntlr-info --sp "$2" --cntlr "$3")
+		pending=$(jq_of "$out" \
+			'[(.cntlr_info.leg_id_to_leg // {})[] | select(.status == "RES_STATUS_PENDING")] | length')
+		[ "$pending" = 0 ] && return 0
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$5: cn$1 still reports $pending leg(s) RES_STATUS_PENDING after $4s"
+		sleep 1
+	done
+}
+
 # converge_check runs the §9 check-cn/check-cntlr round pair and asserts that
-# each reply echoes the revision the agent actually stored.
+# each reply echoes the revision the agent actually stored. A primary's steady
+# state includes a completed probe round on every leg, so the cntlr round waits
+# out CN11's PENDING window first (wait_legs_probed) — a stage that built or
+# promoted a primary a few seconds earlier would otherwise race it.
 converge_check() { # cnidx sp cntlr cntlrrev
 	local idx=$1 out
 	out=$(cnctl "$idx" check-cn --revision "${CNSYNC[$idx]}" --show-info)
 	assert_cn_info_ok "$out" "cn$idx check-cn"
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "${CNSYNC[$idx]}" \
 		"cn$idx check-cn revision"
+	wait_legs_probed "$idx" "$2" "$3" 20 "cn$idx check-cntlr"
 	out=$(cnctl "$idx" check-cntlr --revision "$4" --show-info \
 		--sp "$2" --cntlr "$3")
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "$4" \
@@ -2438,8 +2476,8 @@ case_smoke() {
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}
 	out=$(cn_syncup_cntlr "$cn" "$req")
-	assert_map_ok "$out" leg_id_to_leg "$S_MLEG" smoke
-	assert_map_ok "$out" leg_id_to_leg "$S_DLEG" smoke
+	assert_leg_pending "$out" "$S_MLEG" smoke
+	assert_leg_pending "$out" "$S_DLEG" smoke
 	assert_map_ok "$out" grp_id_to_md_raid "$S_MGRP" smoke
 	assert_map_ok "$out" grp_id_to_md_raid "$S_DGRP" smoke
 	assert_map_ok "$out" slice_id_to_meta "$S_SLICE" smoke
@@ -3619,6 +3657,8 @@ case_clone_xfer() {
 	# destination bitmaps and re-applies the chunk before it answers.
 	out=$(cnctl 2 get-cn-size --wait 120)
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "clone_xfer cn2 size"
+	# The restarted agent's probers start over, and cn2 is sp2's primary.
+	wait_legs_probed 2 "$sp2" "$cntlr" 20 "clone_xfer post-wipe"
 	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
 	assert_all_ok "$out" .cntlr_info "clone_xfer post-wipe cntlr"
 	# The reconcile mints its own trace id, so the freshly rotated log is the
@@ -3806,6 +3846,10 @@ case_restart() {
 	assert_eq "$(sha_range "$hv" "$dev" 4)" "$want" "restart pre-restart readback"
 
 	stage snapshot "record the pre-restart infos"
+	# The post-restart snapshot is taken once cn1's legs have been probed
+	# again, so this one must be too: a leg reads RES_STATUS_PENDING until
+	# its prober's first round (CN11), and the build was seconds ago.
+	wait_legs_probed 1 "$sp" "$c1" 20 "restart pre-snapshot"
 	cnctl 1 get-cn-info >"$snap/cn1.pre.raw"
 	cnctl 2 get-cn-info >"$snap/cn2.pre.raw"
 	cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1" >"$snap/cntlr1.pre.raw"
@@ -3836,14 +3880,16 @@ case_restart() {
 
 	stage reconcile "the reloaded state deep-equals the pre-restart snapshot"
 	# ResInfo.epoch is the time of the last observed status change and the
-	# trackers are in-memory; leg_id_to_leg[].details is the CN11 leg verdict
-	# — the block prober's on a primary, the sysfs transport report on a
-	# standby — and a restarted primary reports "health probe pending" there
-	# until its first post-restart probe completes.
-	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)
-		| if .cntlr_info.leg_id_to_leg then
-		    .cntlr_info.leg_id_to_leg |= with_entries(.value |= del(.details))
-		  else . end'
+	# trackers are in-memory, so it is the one field left out. The leg rows
+	# are compared whole, status and details, which is the stage's point: the
+	# restarted primary's probers start over and read RES_STATUS_PENDING
+	# "health probe pending" until their first post-restart round, so the
+	# snapshot waits that out first; after it a primary's OK row reads "" and
+	# a standby's the sysfs transport report of kernel state the restart
+	# leaves alone. (Until 2026-09-26 the leg details were left out too, for
+	# the restarted primary's old OK "health probe pending" row.)
+	wait_legs_probed 1 "$sp" "$c1" 20 "restart post-snapshot"
+	local norm='walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
 	cnctl 1 get-cn-info >"$snap/cn1.post.raw"
 	cnctl 2 get-cn-info >"$snap/cn2.post.raw"
 	cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1" >"$snap/cntlr1.post.raw"

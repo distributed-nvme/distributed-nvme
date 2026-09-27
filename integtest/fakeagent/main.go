@@ -204,11 +204,12 @@ var resStatusNames = map[string]pb.ResStatus{
 	"ERROR":        pb.ResStatus_RES_STATUS_ERROR,
 	"OK":           pb.ResStatus_RES_STATUS_OK,
 	"PROVISIONING": pb.ResStatus_RES_STATUS_PROVISIONING,
+	"PENDING":      pb.ResStatus_RES_STATUS_PENDING,
 }
 
 // parseResStatus accepts both the short spelling of §14.9 ("OK", "ERROR",
-// "MISSING", "PROVISIONING", "UNKNOWN") and the full proto enum name
-// ("RES_STATUS_ERROR"), case-insensitively.
+// "MISSING", "PROVISIONING", "PENDING", "UNKNOWN") and the full proto enum
+// name ("RES_STATUS_ERROR"), case-insensitively.
 func parseResStatus(name string) (pb.ResStatus, error) {
 	key := strings.ToUpper(strings.TrimSpace(name))
 	key = strings.TrimPrefix(key, "RES_STATUS_")

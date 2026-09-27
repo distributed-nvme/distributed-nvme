@@ -117,6 +117,12 @@ const (
 	// PROVISIONING means deliberately not created / being prepared;
 	// healthy; no action needed
 	ResStatus_RES_STATUS_PROVISIONING ResStatus = 4
+	// PENDING means the primary's health prober for the leg has not
+	// completed a round since it started (at the leg's build, a
+	// promotion or an agent restart), or no prober is registered yet:
+	// no verdict, no action needed. Produced only by the cn agent's
+	// leg report on a primary (cnagent.md CN11).
+	ResStatus_RES_STATUS_PENDING ResStatus = 5
 )
 
 // Enum value maps for ResStatus.
@@ -127,6 +133,7 @@ var (
 		2: "RES_STATUS_ERROR",
 		3: "RES_STATUS_OK",
 		4: "RES_STATUS_PROVISIONING",
+		5: "RES_STATUS_PENDING",
 	}
 	ResStatus_value = map[string]int32{
 		"RES_STATUS_UNKNOWN":      0,
@@ -134,6 +141,7 @@ var (
 		"RES_STATUS_ERROR":        2,
 		"RES_STATUS_OK":           3,
 		"RES_STATUS_PROVISIONING": 4,
+		"RES_STATUS_PENDING":      5,
 	}
 )
 
@@ -15205,13 +15213,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x12SP_LEVEL_NO_REDUND\x10@\x12\x19\n" +
 	"\x15SP_LEVEL_NO_MIGRATION\x10P\x12\x14\n" +
 	"\x10SP_LEVEL_NO_SIDE\x10`\x12\x14\n" +
-	"\x10SP_LEVEL_DISABLE\x10p*\x81\x01\n" +
+	"\x10SP_LEVEL_DISABLE\x10p*\x99\x01\n" +
 	"\tResStatus\x12\x16\n" +
 	"\x12RES_STATUS_UNKNOWN\x10\x00\x12\x16\n" +
 	"\x12RES_STATUS_MISSING\x10\x01\x12\x14\n" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
-	"\x17RES_STATUS_PROVISIONING\x10\x042\xee \n" +
+	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
+	"\x12RES_STATUS_PENDING\x10\x052\xee \n" +
 	"\aGateway\x12=\n" +
 	"\rCreateCluster\x12\x15.CreateClusterRequest\x1a\x13.CreateClusterReply\"\x00\x12=\n" +
 	"\rDeleteCluster\x12\x15.DeleteClusterRequest\x1a\x13.DeleteClusterReply\"\x00\x124\n" +

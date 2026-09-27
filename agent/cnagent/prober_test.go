@@ -195,10 +195,12 @@ func TestLegProberPendingAndStalled(t *testing.T) {
 	lp := planLeg(t, srv, testDataLeg)
 	prober := st.probers[testDataLeg]
 
-	// Before any completion the leg is OK/"pending": the wrapper exists and
-	// nothing has failed yet.
+	// Before any completion the leg is PENDING "health probe pending": the
+	// wrapper exists and no round has said anything yet. Never OK — an OK
+	// clears Leg.err_epoch (HL2), so a promotion's fresh probers used to
+	// clear a dead leg's.
 	status, details := srv.legProbeOutcome(st, lp)
-	if status != pb.ResStatus_RES_STATUS_OK ||
+	if status != pb.ResStatus_RES_STATUS_PENDING ||
 		details != detailsProbePending {
 		t.Fatalf("a fresh prober reports %v/%q", status, details)
 	}
@@ -207,9 +209,11 @@ func TestLegProberPendingAndStalled(t *testing.T) {
 	// case a blocked leg produces, where no completion will ever arrive.
 	prober.begin(clock.Now())
 	clock.advance(common.CnLegProbeStallSeconds * time.Second)
-	if status, _ = srv.legProbeOutcome(st, lp); status !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Fatalf("an in-flight probe inside the bound reports %v", status)
+	status, details = srv.legProbeOutcome(st, lp)
+	if status != pb.ResStatus_RES_STATUS_PENDING ||
+		details != detailsProbePending {
+		t.Fatalf("an in-flight probe inside the bound reports %v/%q",
+			status, details)
 	}
 	clock.advance(time.Second)
 	status, details = srv.legProbeOutcome(st, lp)
@@ -224,6 +228,60 @@ func TestLegProberPendingAndStalled(t *testing.T) {
 	if status != pb.ResStatus_RES_STATUS_ERROR ||
 		details != "input/output error" {
 		t.Fatalf("a failed probe reports %v/%q", status, details)
+	}
+
+	// Once a round has completed, a later round in flight inside the bound
+	// reports the last completed outcome — PENDING is the first round's alone.
+	prober.begin(clock.Now())
+	clock.advance(common.CnLegProbeStallSeconds * time.Second)
+	status, details = srv.legProbeOutcome(st, lp)
+	if status != pb.ResStatus_RES_STATUS_ERROR ||
+		details != "input/output error" {
+		t.Fatalf("a round in flight after a failure reports %v/%q",
+			status, details)
+	}
+	prober.finish(nil)
+	prober.begin(clock.Now())
+	status, details = srv.legProbeOutcome(st, lp)
+	if status != pb.ResStatus_RES_STATUS_OK || details != "" {
+		t.Fatalf("a round in flight after a success reports %v/%q",
+			status, details)
+	}
+
+	// A leg with no prober in the registry at all — the wrapper exists and
+	// startLegProber has not registered one — is pending too, not OK.
+	srv.mu.Lock()
+	delete(st.probers, testDataLeg)
+	srv.mu.Unlock()
+	prober.cancel()
+	status, details = srv.legProbeOutcome(st, lp)
+	if status != pb.ResStatus_RES_STATUS_PENDING ||
+		details != detailsProbePending {
+		t.Fatalf("an unregistered prober reports %v/%q", status, details)
+	}
+}
+
+// probeAllLegs completes one successful round of every prober the test cntlr
+// registered: the steady state in which a primary's leg rows read OK. Until
+// then a freshly converged primary reports them RES_STATUS_PENDING (CN11).
+func probeAllLegs(t *testing.T, srv *CnAgentServer) {
+	t.Helper()
+	st := legState(t, srv)
+	srv.mu.Lock()
+	probers := make([]*legProber, 0, len(st.probers))
+	for _, prober := range st.probers {
+		probers = append(probers, prober)
+	}
+	srv.mu.Unlock()
+	if len(probers) == 0 {
+		t.Fatalf("the cntlr registered no prober")
+	}
+	for _, prober := range probers {
+		srv.runLegProbe(context.Background(), prober, testCn)
+		if _, completed, err := prober.snapshot(); !completed || err != nil {
+			t.Fatalf("leg %d: probe round completed=%v err=%v",
+				prober.legId, completed, err)
+		}
 	}
 }
 

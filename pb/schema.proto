@@ -182,6 +182,12 @@ enum ResStatus {
     // PROVISIONING means deliberately not created / being prepared;
     // healthy; no action needed
     RES_STATUS_PROVISIONING = 4;
+    // PENDING means the primary's health prober for the leg has not
+    // completed a round since it started (at the leg's build, a
+    // promotion or an agent restart), or no prober is registered yet:
+    // no verdict, no action needed. Produced only by the cn agent's
+    // leg report on a primary (cnagent.md CN11).
+    RES_STATUS_PENDING = 5;
 }
 
 message ResInfo {

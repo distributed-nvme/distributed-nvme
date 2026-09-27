@@ -849,11 +849,22 @@ CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
       `path`/`offset`/`length`, never `data`) on the prober's fresh
       per-attempt trace id (CN2). The loop is single-flight: a blocked IO
       simply delays the next round. Probers publish
-      `{lastOk, lastErr, inflightSince}`; the CN28 probe reports, per leg:
+      `{inflightSince, completed, lastErr}`; the CN28 probe reports, per leg:
       an attempt in flight longer than `CnLegProbeStallSeconds` ⇒
       `RES_STATUS_ERROR` `"health probe stalled"`; else the last completed
-      outcome; before any completion ⇒ `RES_STATUS_OK`
-      `"health probe pending"` when the wrapper exists. A **standby** (and
+      outcome; before any completion — or before a prober is registered —
+      ⇒ `RES_STATUS_PENDING` `"health probe pending"` when the wrapper
+      exists (*amended 2026-09-26*, was `RES_STATUS_OK`: an `OK` clears
+      `Leg.err_epoch`, so a dead leg's was cleared at every promotion, whose
+      probers start over, and an unprobed spare read ready to the worker's
+      leg repair — `dnv-worker.md` HL2, AR8). For a registered prober the
+      window is one `CnLegProbeInterval` tick plus the probe itself, and a
+      fresh wrapper, a promotion and an agent restart each open it. A leg
+      whose wrapper exists but whose converge fails before its prober
+      registers — on a promoted or restarted primary whose connect is
+      refused, say — reads `PENDING` in every probe round until a converge
+      registers one, while each failing converge marks the leg
+      `RES_STATUS_ERROR` (CN10). A **standby** (and
       spare legs on it) reports the transport probe instead:
       the sysfs walk of §5 shows a live controller per desired
       (provisioned) side and, **for a leg with exactly one desired side**,
@@ -1889,7 +1900,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
 | `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: `mdadm --detail` — active (degraded included) ⇒ OK with the state/rebuild line in `details`; RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
-| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
+| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
 | `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here |
 | `clone_id_to_dm_clone[c]` | `CnCloneFinalName` | `dmsetup status`; `details` carries the raw status line (§9.5 — hydration progress; `DeleteClone`'s force check reads it). `RES_STATUS_ERROR` `"metadata wrapper missing"` when the arena could not supply the slot (CN18 step 2) |
@@ -1902,7 +1913,9 @@ CN29. Error capture (§9.1): a failed command marks that resource
       `dumpThinMetadata` (the CN25 bitmap reads, the CN14 activation sweep
       and the §11.5 dst-bitmap read of CN18 step 4), never
       from `probe.go`. `RES_STATUS_PROVISIONING` is never produced by this
-      path: it is assigned by the CN9 gate, not by a failed command.
+      path: it is assigned by the CN9 gate, not by a failed command; and
+      `RES_STATUS_PENDING` is produced by the CN11 registry alone, never by
+      a failed command (*amended 2026-09-26*).
 
       Two kinds of thing travel in `agent_reply` rather than in the rows:
       protocol failures (the CN8 gates, CN22's), and **leftovers**. A
@@ -2155,6 +2168,14 @@ contradicts them.
   `ensureDmSingle`, and the resumes left in `ensureNsDev`, `parkNsDev`,
   `removeDm` and CN21 are guards for a device an older build or an
   interrupted reload left suspended.
+* `dnagent.md` §2.7 SH14 + `architecture.md` §9.5 / §10.3 + `dnv-worker.md`
+  HL2 / AR8 / §14.9 (2026-09-26) — `ResStatus` gains
+  `RES_STATUS_PENDING = 5` for the CN11 row of a primary's leg whose
+  prober has not completed a round, which used to read `RES_STATUS_OK`: an
+  `OK` clears `Leg.err_epoch`, so every promotion cleared a dead leg's and
+  an unprobed spare read ready to the AR8 leg repair. `PENDING` neither sets
+  nor clears it, and SH14's status list grew by it — the cn agent emits it
+  on a primary's leg rows alone.
 
 ## 6. Tests
 
@@ -2340,7 +2361,13 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
 15. **Leg prober** (CN11): registry logic under a fake clock with a **fake
     `LegProbeIO`** (§2.2 — the prober never touches the server's `oc`: a
     round records no `writeblock`/`readblockdirect` `OsClient` call at all),
-    stall reporting after `CnLegProbeStallSeconds`, `Write` offset =
+    `RES_STATUS_PENDING` `"health probe pending"` for a fresh prober, for
+    its first round in flight inside the stall bound and for a leg with no
+    registered prober (*amended 2026-09-26*, was `RES_STATUS_OK`), the last
+    completed outcome, never `PENDING`, for a round in flight after the
+    first completion, the converge replies of a just-built primary carrying
+    `PENDING` leg rows, stall reporting after `CnLegProbeStallSeconds`,
+    `Write` offset =
     `meta_blocks × block_size − 4096`, `ReadDirect` read-back of the same
     range, primary-only (a standby converge starts no prober), and — the
     central carve-out property — a probe scripted to **block indefinitely** does not

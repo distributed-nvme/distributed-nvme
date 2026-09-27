@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,6 +196,31 @@ func TestParseBehaviorBothStatusSpellings(t *testing.T) {
 	if !slices.Equal(chunkPairs(cntlr.chunkIdList),
 		[][2]uint32{{2, 1}, {0, 3}}) {
 		t.Errorf("chunk_id_list = %v", chunkPairs(cntlr.chunkIdList))
+	}
+}
+
+// TestParseResStatusNames pins the §14.9 status vocabulary: every ResStatus
+// value parses in both spellings, so a behavior file can plant any row a real
+// agent can report — PENDING included, the cn agent's leg row before its
+// prober completes a round (cnagent.md CN11).
+func TestParseResStatusNames(t *testing.T) {
+	for value, name := range pb.ResStatus_name {
+		want := pb.ResStatus(value)
+		short := strings.TrimPrefix(name, "RES_STATUS_")
+		for _, spelling := range []string{short, name, strings.ToLower(name)} {
+			got, err := parseResStatus(spelling)
+			if err != nil || got != want {
+				t.Errorf("parseResStatus(%q) = %v, %v; want %v",
+					spelling, got, err, want)
+			}
+		}
+	}
+	for _, spelling := range []string{"PENDING", "RES_STATUS_PENDING"} {
+		if got, err := parseResStatus(spelling); err != nil ||
+			got != pb.ResStatus_RES_STATUS_PENDING {
+			t.Errorf("parseResStatus(%q) = %v, %v; want PENDING",
+				spelling, got, err)
+		}
 	}
 }
 

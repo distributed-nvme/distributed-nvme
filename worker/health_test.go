@@ -299,6 +299,7 @@ func TestHealthLegTable(t *testing.T) {
 			1: resErr("leg1", "io"),
 			2: resOk("leg2"),
 			3: resStatus("leg3", pb.ResStatus_RES_STATUS_PROVISIONING),
+			5: resStatus("leg5", pb.ResStatus_RES_STATUS_PENDING),
 		},
 	}
 	if obs, res := legObservation(0, info, 1); obs != healthErrorRow ||
@@ -310,6 +311,12 @@ func TestHealthLegTable(t *testing.T) {
 	}
 	if obs, _ := legObservation(0, info, 3); obs != healthNone {
 		t.Fatalf("leg 3 obs = %v, want none", obs)
+	}
+	// A leg whose prober has not completed a round (cnagent.md CN11): it
+	// must not clear, or every promotion's fresh probers would wipe a dead
+	// leg's err_epoch and restart AR8's leg_unhealthy clock.
+	if obs, _ := legObservation(0, info, 5); obs != healthNone {
+		t.Fatalf("PENDING leg obs = %v, want none", obs)
 	}
 	// A leg the reply does not mention at all.
 	if obs, _ := legObservation(0, info, 4); obs != healthNone {

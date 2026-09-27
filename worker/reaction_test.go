@@ -1855,6 +1855,27 @@ func TestReactionSpareReadiness(t *testing.T) {
 		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
 	})
 
+	// A spare the primary has connected and wrapped but not probed yet reads
+	// PENDING (cnagent.md CN11). It used to read OK "health probe pending"
+	// and was switched in before any probe had run; now it is a pending
+	// spare, so the pass waits for it and creates nothing.
+	t.Run("probe pending", func(t *testing.T) {
+		h := build(t, true, pb.ResStatus_RES_STATUS_PENDING, 0)
+		info := h.w.cntlrs[reactCntlrA].driver.lastInfo
+		spare := h.legOf(spareLegId)
+		if spareReady(spare, info) {
+			t.Fatalf("a PENDING spare is ready")
+		}
+		th := model.ResolveEventThreshold(h.state.Conf.GetEventThreshold())
+		p := &spPass{state: h.state, th: th, now: h.now(), info: info}
+		if got := pendingSpare(p, h.dataGrp()); got != spare {
+			t.Fatalf("pendingSpare = %v, want leg %d", got, spareLegId)
+		}
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+	})
+
 	t.Run("not reported at all", func(t *testing.T) {
 		h := build(t, true, pb.ResStatus_RES_STATUS_UNKNOWN, 0)
 		h.pass()

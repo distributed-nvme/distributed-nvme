@@ -466,8 +466,14 @@ SH14. A per-object in-memory tracker turns probe outcomes into
       `pb.ResInfo{res_name, status, details, epoch}` per `architecture.md`
       §9.5: `epoch` = unix seconds of the last **status** change (a `details`
       change alone does not bump it); the agent emits
-      `MISSING`/`ERROR`/`OK`/`PROVISIONING` and never `UNKNOWN`
-      (worker-only). `RES_STATUS_PROVISIONING` means
+      `MISSING`/`ERROR`/`OK`/`PROVISIONING`, the cn agent also `PENDING` on
+      a primary's leg rows (`cnagent.md` CN11), and never `UNKNOWN`
+      (worker-only). *Amended 2026-09-26:* `RES_STATUS_PENDING` means *the
+      primary's prober for the leg has not completed a round since it
+      started (a build, a promotion or an agent restart) — no verdict*, and
+      it neither sets nor clears `Leg.err_epoch` (§9.5, §10.3); the row read
+      `OK` before, and an `OK` clears it, so every promotion cleared a dead
+      leg's. `RES_STATUS_PROVISIONING` means
       *deliberately not created yet, healthy, no action needed*: it is what a
       resource waiting behind DN9's provisioning gate reports, and unlike
       `RES_STATUS_ERROR` it never feeds `err_epoch` (§9.5, §10.2-§10.4).

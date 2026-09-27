@@ -10,7 +10,8 @@ import (
 // ResTracker turns probe outcomes into pb.ResInfo values per
 // architecture.md §9.5 / dnagent.md SH14: epoch is the unix second of the
 // last *status* change — a details-only change does not bump it. The agent
-// emits MISSING/ERROR/OK/PROVISIONING and never UNKNOWN (that one is
+// emits MISSING/ERROR/OK/PROVISIONING, the cn agent also PENDING on a
+// primary's leg rows (cnagent.md CN11), and never UNKNOWN (that one is
 // worker-only).
 //
 // One tracker belongs to one synced object (a DN, a side, …). State is
@@ -61,8 +62,9 @@ func (t *ResTracker) Set(
 	}
 }
 
-// Ok / Missing / Err / Provisioning are the four outcomes an agent may
-// report.
+// Ok / Missing / Err / Provisioning are the four outcomes every agent may
+// report. The fifth, RES_STATUS_PENDING, has no helper: only the cn agent's
+// primary leg report produces it, through Set (cnagent.md CN11).
 func (t *ResTracker) Ok(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_OK, details)
 }

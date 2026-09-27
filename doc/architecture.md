@@ -2339,7 +2339,10 @@ record's runs ⇒ `RES_STATUS_ERROR`.
 the node — set by *workers*, never by the agent itself), `MISSING`(agent hasn't created
 it), `ERROR`(tried and failed; `details` = why / command output — *needs
 intervention*), `OK`, `PROVISIONING`(deliberately not created / being prepared —
-**healthy, not ready, no action needed**). `epoch` = unix
+**healthy, not ready, no action needed**), `PENDING`(the primary's prober for the leg
+— started at the leg's build, a promotion or an agent restart — has not completed a
+round, or none is registered yet; **no verdict, no action needed**; produced only by
+the primary's leg report, `cnagent.md` CN11; *added 2026-09-26*). `epoch` = unix
 seconds of the last status change. The `revision` returned next to an `*Info`
 (`Syncup*`, `Check*`, `Get*Info` replies) = last fully applied revision. Map keys in
 `SideInfo`/`CntlrInfo` are the obvious owner ids (`cn_id` for a side's per-CN export
@@ -2350,8 +2353,16 @@ dm-clone `details`
 strings carry the raw `dmsetup status` line so hydration progress is visible through
 `Inspect*`. `CntlrInfo.leg_id_to_leg` reflects the §3.6 health check: on the primary, the
 block-probe IO — a leg whose probe write/read fails (or stays in flight past the
-probe's stall bound) is reported `RES_STATUS_ERROR` with the IO error in `details`;
-on a standby, transport liveness + expected ana_state (§3.6, `cnagent.md` CN11).
+probe's stall bound) is reported `RES_STATUS_ERROR` with the IO error in `details`,
+and a leg reads `RES_STATUS_PENDING` until its prober's first completed round (the
+prober registers when the leg's converge succeeds and starts over at a promotion and at
+an agent restart; a leg whose wrapper exists but whose converge fails before its prober
+registers reads `PENDING` in the probe rounds until a converge registers one, while
+each failing converge marks it `ERROR`); on a standby, transport liveness + expected
+ana_state (§3.6, `cnagent.md` CN11). *Amended 2026-09-26:* a leg whose prober had not
+completed a round read `OK` `"health probe pending"`; an `OK` clears `Leg.err_epoch`
+(§10.3), so every promotion wiped a dead leg's `err_epoch` and an unprobed spare read
+ready to the §10.4 leg repair. `PENDING` neither sets nor clears it.
 
 `RES_STATUS_PROVISIONING` **never** sets `err_epoch` (§10.2/§10.3) and never counts as
 a bad status for the capacity keys of §5.6: it marks a resource excluded from the
@@ -2797,7 +2808,9 @@ feed health: set/clear `err_epoch` on
 `Cntlr`, `Leg`, `Side` records accordingly (STM, no rev bump) — in particular a
 failing §3.6 health-check block turns into `Leg.err_epoch` (and `Side.err_epoch` when
 the side path itself is the failing part). `RES_STATUS_PROVISIONING` entries never set
-`err_epoch` on any of the three ([D15], §9.5).
+`err_epoch` on any of the three ([D15], §9.5), and a `RES_STATUS_PENDING` leg row — its
+prober has not completed a round yet — neither sets nor clears `Leg.err_epoch` (§9.5,
+*amended 2026-09-26*).
 
 **Provisioning gate ([D15], §9.4).** The sp-worker fills `SideConf.provisioned` from
 the etcd `Side.provisioned`, and `MigrSrcConf.dst_provisioned` from the migration's

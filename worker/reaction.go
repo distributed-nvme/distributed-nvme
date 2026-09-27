@@ -1289,7 +1289,9 @@ func legNeedsRepair(p *spPass, leg *pb.Leg) bool {
 
 // spareReady is AR8 step 1's readiness test on one spare: its single side is
 // provisioned (§9.4) and the PRIMARY's latest report has its leg
-// RES_STATUS_OK — connected and probed (§8.12).
+// RES_STATUS_OK — connected and probed (§8.12). A leg whose prober on the
+// primary has not completed a round reads RES_STATUS_PENDING (cnagent.md
+// CN11), so a fresh spare is not ready before its first probe.
 //
 // Leg.err_epoch is deliberately NOT part of it: a leg the primary reports OK
 // has had its err_epoch cleared by HL2 already, so a parked leg that recovers

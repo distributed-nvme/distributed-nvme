@@ -588,6 +588,19 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   assertion that means "must be ERROR" compares against `RES_STATUS_ERROR`
   explicitly, and the genuinely two-valued phase-(a) checks use
   `assert_provisioning_or_ok` — never `assert_not_ok`.
+  `RES_STATUS_PENDING` (*added 2026-09-26*, `cnagent.md` CN11) is a fifth: a
+  primary's leg row until its prober completes a round, one
+  `CnLegProbeInterval` (5 s) after the prober starts — at a build, a
+  promotion or an agent restart — plus the probe itself. The reply of the
+  `syncup-cntlr` that registered a primary's probers carries it on those
+  legs with no race: each leg's row is built one wrapper-table check after
+  its prober registers, a full interval before the first round, and
+  nothing later in the converge rewrites it — so case S step 2 checks it
+  exactly, with `assert_leg_pending` (status and details). Every other
+  read of a primary's leg rows waits it out first with `wait_legs_probed`,
+  which polls `get-cntlr-info` until no leg row reads `RES_STATUS_PENDING`
+  (20 s bound): the converge check below, case C stage 6's post-wipe
+  `get-cntlr-info` (§13) and both case D snapshots (§14).
 - **Failover script order** (case A step 4; the safe serialization of the
   §11.1 revision fan-out): demote the old primary (`syncup-cntlr`
   `primary=false`) → flip every side (`syncup-side` with the new
@@ -603,7 +616,11 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   and one `check-cntlr` round with `--show-info` asserts code 0, matching
   revision, and every expected `ResInfo.status == RES_STATUS_OK`. Check
   rounds only ever run at steady state, i.e. after the two-phase flip above,
-  so `RES_STATUS_PROVISIONING` must never appear in one. Case T is the one
+  so `RES_STATUS_PROVISIONING` must never appear in one. Steady state also
+  means every leg has completed a probe round, so the `check-cntlr` round
+  first waits out the `RES_STATUS_PENDING` window (`wait_legs_probed`, the
+  Status-assertions bullet above; *amended 2026-09-26*) — a primary built or
+  promoted a few seconds earlier would otherwise race it. Case T is the one
   exception to the convention and runs no check round at all: each of its
   stages asserts the shape it built from the `syncup-cntlr` replies and
   `/proc/mdstat` and then tears it straight down, and what that case pins is
@@ -646,11 +663,15 @@ is `sprintf("%016x", slice_id)` per §9.3.)
    (§9(a)'s two-valued race), after phase (c) both report OK.
 2. CN side: `syncup-cn` CN1 (CNREV1++) with cntlr `(0x3a1, 0x1)`;
    `syncup-cntlr` CN1 with the §8 request (CNREV1++). Assert code 0 and,
-   in `cntlr_info`: `leg_id_to_leg[0x4,0x7]`, `grp_id_to_md_raid[0x3,0x6]`
+   in `cntlr_info`: `grp_id_to_md_raid[0x3,0x6]`
    (RedundNone linears), `slice_id_to_{meta,data,dm_pool}[0x2]`,
    `td_id_to_{raid0,dm_error}[0x9]`, thin `[0x9][0x2]`,
    `ns_id_to_{namespace,dm_linear}[0xb]`, `ss_id_to_subsystem[0xa]` all
-   OK. On VM1: `dmsetup ls` shows the kind-`c9`/`ca` devices; configfs
+   OK, and `leg_id_to_leg[0x4,0x7]` `PENDING` `health probe pending` — the
+   CN11 probers have just started, and each row is built before its
+   prober's first round (§9 Status assertions; *amended 2026-09-26*, was
+   OK; step 5's check round asserts them OK). On VM1: `dmsetup ls` shows the
+   kind-`c9`/`ca` devices; configfs
    `attr_allow_any_host == 1` for the ss, and its `allowed_hosts/` directory
    is separately asserted empty — the request sends an empty `allowed_hosts`
    list, which the agent converges into allow-any with no host links, and the
@@ -979,7 +1000,9 @@ agent; `get-cn-size --wait 120` — the listener opens only after the startup
 reconcile returns, and here that reconcile is the whole §11.5 recovery
 (reconnect, re-read the destination bitmaps, re-apply the chunk), so the
 wait-up budget is the recovery's, not a process start's. Assert the
-reconcile rebuilt everything from the store: `get-cntlr-info` all OK; the
+reconcile rebuilt everything from the store: `get-cntlr-info` all OK, read
+once the restarted primary's legs have left `RES_STATUS_PENDING`
+(`wait_legs_probed`, §9; *amended 2026-09-26*); the
 fresh `cn-agent.log` shows the §11.5 order — the arena-unit `blkdiscard` +
 `dmsetup create` of the fresh kind-`cb` wrapper, then the `dmsetup create`
 of the `dnv-*-c7-*` dm-clone (hydration disabled), then
@@ -1042,10 +1065,15 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
 4 MiB pattern written and verified.
 
 1. Snapshot: `get-cn-info` + `get-cntlr-info` on both CNs (jq-normalized;
-   excluded from later comparison: every `ResInfo.epoch`, and
-   `leg_id_to_leg[].details` — it carries no timestamp, but the CN11
-   probers restart with the agent and a just-restarted primary reports
-   `health probe pending` until its first probe completes).
+   excluded from later comparison: every `ResInfo.epoch`). The leg rows
+   stay in the comparison whole, status and details, so the snapshot is
+   taken once CN1's legs have left `RES_STATUS_PENDING`
+   (`wait_legs_probed`, §9) — the build was seconds ago. *Amended
+   2026-09-26:* `leg_id_to_leg[].details` was excluded too, for the
+   just-restarted primary's `OK` `health probe pending` row; with both
+   snapshots taken after the wait, a primary's `OK` row reads `""` and a
+   standby's the sysfs transport report of kernel state the restart leaves
+   alone, so the exclusion is dropped.
 2. Restart both cn agents: `pkill -f 'dnv-agent cn'`; wait for exit; `mv
    cn-agent.log cn-agent.pre-restart.log`; relaunch; `get-cn-size --wait 60`
    — the listener opens only after the startup reconcile returns, so the
@@ -1058,7 +1086,13 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    restart, the host's read of the 4 MiB test data succeeds — the data
    path does not depend on the agent process.
 4. Reconcile assertions: `get-cn-info`/`get-cntlr-info` on both CNs
-   deep-equal the step 1 snapshots (modulo the step 1 exclusions); the
+   deep-equal the step 1 snapshots (modulo the step 1 exclusion), taken
+   once CN1's legs have left `RES_STATUS_PENDING` again (`wait_legs_probed`,
+   20 s): the CN11 probers restart with the agent, and a just-restarted
+   primary reports `RES_STATUS_PENDING` `health probe pending` until its
+   first probe completes (*amended 2026-09-26*: that row used to read `OK`
+   `health probe pending`, which the since-dropped `details` exclusion
+   absorbed); the
    post-restart logs show `mdadm --detail`-style probing only — an active
    array is recognized, not re-assembled.
 5. **Idempotency (mutation-free re-apply)**: re-send the *same-revision*
@@ -1370,7 +1404,7 @@ records can be pulled from the JSON logs on either VM.
 | `SyncupCntlr` | S, A, T, B, C, D | full primary/standby converges, failover order, readonly, snapshot, xfer/clone lifecycle, `sp_level` gate, equal-rev idempotency, `bm_info_list`, created-td rebuild with no device-set-mutating pool message — only the activation sweep's reserve/release pair (B, CN14) |
 | `PushCloneBitmap` | C | reply code 0; effects via the stage 4/9 layers |
 | `GetCnInfo` | teardown checks, T, D | statuses, snapshot equality, the leftover verdict recomputed by a read-only path that issued no syncup (T, CN30) |
-| `GetCntlrInfo` | S, C polling + recovery, D | pool-status details format, `ParseCloneStatus` hydration, snapshot equality |
+| `GetCntlrInfo` | S, C polling + recovery, D; every case but T through `wait_legs_probed` (§9) | pool-status details format, `ParseCloneStatus` hydration, snapshot equality, no leg row left `RES_STATUS_PENDING` |
 | `GetThinDeviceBm` | B, C | exact bitmaps incl. paging window; the B rebuild mapping proof; the C stage 9 skip proof |
 | `GetLegBm` | B | data-group span arithmetic; meta-group all-zero rule |
 | `CheckCn` | every case but T (§9 converge-check convention) | stream round: code 0, revision echo, show_info statuses |
@@ -1516,6 +1550,20 @@ another document or the harness cites can shift.
   standby rule 1→2, C's clone-gone rule 5→6); case B cites none. Case D is
   untouched and, note, carries no effectively suspended
   namespace at all, so it is not park coverage.
+- **`RES_STATUS_PENDING` until a leg's prober completes a round** (2026-09-26;
+  `cnagent.md` CN11, `dnv-worker.md` HL2/AR8). A primary's leg row reads
+  `RES_STATUS_PENDING` `"health probe pending"` until its prober completes a
+  round; it read `RES_STATUS_OK` with the same details, which cleared a dead
+  leg's `err_epoch` at every promotion and let an unprobed spare read ready.
+  Every read of a primary's leg rows could meet it: case S step 2's
+  `syncup-cntlr` reply now asserts `PENDING` exactly (`assert_leg_pending`:
+  the reply of the converge that registers a leg's prober carries it), and
+  the §9 converge check, case C stage 6's post-wipe read and case D's two
+  snapshots first wait until no leg row reads `PENDING`
+  (`wait_legs_probed`, 20 s). Case D keeps the leg status in its
+  comparison and now compares the leg `details` too: the `details`
+  exclusion that absorbed the old `OK` `health probe pending` row is
+  dropped.
 
 ## Appendix A — lab gotchas baked into this plan
 
