@@ -323,7 +323,8 @@ points other than the check streams of `check.go` and the bitmap reads of
 machines of CN16), `syncup_cn.go`, `syncup_cntlr.go`, `leg.go` (CN10 side
 connections + wrappers), `healthcheck.go` (the CN11 [D6] probers and their
 §2.2 `LegProbeIO` — direct syscalls, never the `OsClient`), `md.go`
-(mdadm wrapper + the §11.1.1 assembly cases), `clonemeta.go` (the §3.2
+(mdadm wrapper, the `/sys/block` reads of the arrays — CN12 — and the
+§11.1.1 assembly cases), `clonemeta.go` (the §3.2
 base-state wrappers — tmpfs mount, `truncate`, `losetup
 --associated`/`--find --show` — plus the CN18 clone-metadata slot allocator:
 unit accounting over the single loop device, the `blkdiscard` recycle guard,
@@ -905,7 +906,24 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
            unavailable this pass ("only k of n legs available and none
            carries a superblock"), because creating over a subset would mint
            a fresh array while an absent leg may carry the real one (pinned
-           by `TestGroupNeverCreatesOverASubsetOfLegs`).
+           by `TestGroupNeverCreatesOverASubsetOfLegs`). Nor while
+           `/dev/md/{CnMdDevName}` already resolves to a device
+           (`Md.NameInUse`, an `lsblk` of the node, which reads no member;
+           one that did not answer is an error that refuses the create this
+           pass, like a killed `--examine` below): the array is found by its
+           members (below), so one that runs under the group's name holding
+           none of its `leg_list` wrappers — both legs switched out, parked
+           or released, while this cntlr was not converging — reads as
+           absent and reaches case 1 with fresh legs, where a create would
+           put a second array under the name the pool's concat resolves
+           ("an array runs under … holding none of the group's legs", pinned
+           by `TestGroupNeverCreatesBesideARunningArray`, a killed `lsblk`
+           included, and `TestMdNameInUseKilledIsAnError`; *amended
+           2026-09-26*, when finding the array by member replaced finding it
+           by name). The guard errs only towards refusing, and a false
+           refusal needs a stale node of this very name — which, short of
+           the case the guard exists for, a group whose legs carry no
+           superblock has never had an array to leave.
            `--assume-clean` is **always** correct here: a side is never
            exported before the §9.4 **provisioning** protocol has zeroed it
            whole (`blkdiscard --zeroout` per batch of extents, tracked in the
@@ -914,23 +932,148 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
            freshly provisioned side, and both members are all-zero because
            zeros were **written**, not because a discard was assumed to read
            back as zeros ([D15]).
-        2. Some have one ⇒ `mdadm --assemble` with those; then
-           `mdadm --detail` and `--add --failfast` any available member the
-           array left out (freshly provisioned additions and stale-metadata
-           re-adds both land here; §11.1.1 cases 1.2/1.3/2 — with a single
-           available member mdadm itself decides whether a degraded start
-           is safe, and a refusal leaves the group `RES_STATUS_ERROR`).
+        2. Some have one ⇒ `mdadm --assemble` with those; then the sysfs
+           read of the array (below) and `--add --failfast` any available
+           member the array left out (freshly provisioned additions and
+           stale-metadata re-adds both land here; §11.1.1 cases 1.2/1.3/2 —
+           with a single available member mdadm itself decides whether a
+           degraded start is safe, and a refusal leaves the group
+           `RES_STATUS_ERROR`).
         A leg is **available** iff its multipath namespace has a path that
         is both `live` and `optimized` (§11.1.1, probed from **sysfs** — §5).
+        **The array is read from sysfs** (*amended 2026-09-26*, the failover
+        ping-pong; it was `mdadm --detail /dev/md/{CnMdDevName}`, which
+        opens a member — see below). `Md.Walk` lists `/sys/block` for the
+        array nodes and each array's `md/` directory, reading every member's
+        `md/dev-*/block/dm/name`, as the sweep's `ListArrays` does — once
+        per converge or Check pass, shared by all of the pass's groups: a
+        listing is an `ls` per array, and a walk per group would list every
+        array once per group (4160 listings a round at 32 slices, 64 groups
+        over 64 arrays). An array node is `md[0-9]+`, or `md_<name>`: the
+        node mdadm puts `/dev/md/<name>` on when mdadm.conf says `CREATE
+        names=yes`, which `architecture.md` §4.3 sizes `CnMdDevName` for
+        (*amended 2026-09-26*: both listings took `md[0-9]+` alone, and once
+        the md rows were read from the walk a named node would have read
+        every group's running array as absent — `MISSING` on every Check
+        round, a refused re-assembly on every converge); `mdN` below stands
+        for either. The walk reads every array on the node, other sps'
+        included, so an array whose `md/` listing or a member's dm name did
+        not answer — the `ls` killed at the soft timeout, a read held past it
+        on the agent's `OsClient` semaphore, which every cntlr it serves
+        shares, ctx cancelled, or a read failing with an errno other than
+        `ENOENT` — is recorded as **unanswered** instead of failing the
+        walk: failing this pass for another sp's array would turn this sp's
+        md rows `ERROR` — which count toward cntlr health — for a fault that
+        is not this sp's (*amended 2026-09-26*; the reason first given, that
+        an array another cntlr is stopping reads `ENODEV`, was false). An
+        array another cntlr is stopping never reads as unanswered: md
+        removes a member's `block` link as it unbinds it, so that member's
+        dm name reads `ENOENT` and the member is recorded with no dm name,
+        which no group's names match; an `md/` that went makes its `ls`
+        answer "no" and drops the array. The sweep's `ListArrays` reads such
+        an array as foreign while a member is unbound, but not for the
+        whole stop (*amended 2026-09-26*: this claimed it for the whole
+        stop, and the kernel says otherwise): from the moment md marks the
+        array deleted until its `md/` goes, `array_state` reads
+        `EBUSY`, and `ListArrays`' strict rule fails that pass's md
+        enumeration — a Leftover the worker re-drives. By default md marks
+        it when the stopped array's last reference goes — a close, or the
+        end of a read of one of its `md/` attributes, whichever is last —
+        after its `dev-*` directories are gone; with the md module's
+        `legacy_async_del_gendisk=0` it marks it in the stop itself, while
+        the unbound `dev-*` directories are still there. The walk reads no
+        `array_state` and is unaffected. Only a `/sys/block` listing that
+        did not answer fails the walk. After an assembly `Md.Refresh` lists
+        `/sys/block` again, drops the nodes that went (recorded or
+        unanswered), and re-walks only a node that is new, was recorded with
+        no member or as unanswered, or has a recorded member directory that
+        is gone, carries another dm name or did not answer the check —
+        another cntlr's converge may have stopped an array and freed the
+        very `mdN` this one's assembly took; a re-walk that does not answer
+        drops the node's record and records it as unanswered. The check
+        reads each recorded member's `dev-*/block/dev` and
+        `dev-*/block/dm/name`, never its own `state`: when another cntlr
+        stops an array or removes a member, md unbinds the member by
+        removing its `block` link, and the `dev-*` directory stays until md
+        deletes it, every attribute of its own reading `ENODEV` meanwhile. A
+        check that did not answer is not an error of this group: it only
+        makes `Refresh` walk that node again, and a walk of it that does not
+        answer records it as unanswered.
+        `Md.Detail` takes from the walk the one array whose members include
+        a wrapper of the group's `leg_list`. Spares are not keys: a leg
+        switched out into `spare_leg_list` is an extra, found through the
+        member that stays. No such array is "absent" and runs the assembly
+        above — unless an array of the walk is unanswered, which may be the
+        group's own: then no answering array proves absence, the group's
+        error names the unanswered array, and nothing is created or
+        assembled. Only an `ls` of an array's `md/` that did not report
+        (killed, never started, refused by the semaphore), or a member
+        dm-name read failing with something other than `ENOENT`, makes an
+        array unanswered; a foreign array's non-dm member reads `ENOENT` and
+        is recorded, so a foreign array cannot hold an assembly off for
+        good. Nothing re-drives the refused assembly either
+        (*amended 2026-09-26*): the group's error is a row, not a reply code
+        (CN29), it registers no CN10 background retry, and the Check verdict
+        reports a leftover (a reply code the worker re-drives) only while
+        its own enumeration, `ListArrays`, still fails — so the group stays
+        unassembled, its row `MISSING` on the Check rounds after the array
+        answers, until the cntlr's next converge for some other reason (§7,
+        known limits). Beside an answering match an unanswered array is
+        left alone (it cannot be told from another sp's array whose read was
+        cut off; the one thing it hides is a second array of this group).
+        Two answering arrays are an error; a member with no dm name (a
+        foreign member) of the matched array is an error. Of that array it
+        reads `md/array_state` first and then, for a **running** array
+        only, `md/degraded`, `md/sync_action` and `md/sync_completed` — an
+        `inactive` array has none of the three, and its members read a bare
+        `spare` — and each
+        member's `dev-*/state` (a flag list, `in_sync,failfast` on a healthy
+        dnv member) and `dev-*/block/dev`. Running means `array_state` is
+        `clean`, `active`, `active-idle`, `write-pending`, `readonly` or
+        `read-auto`; an array in any other state (`inactive`, `broken`, …)
+        is left exactly as it is and its state is the group's error. A
+        read of the matched array that did not answer is an error, never
+        absent. A matched array whose `array_state` has gone by that read
+        (stopped since the walk) reads absent — unless an array of the walk
+        is unanswered, which makes it the same error as no match (*amended
+        2026-09-26*): absent always means every array of the walk answered.
         **Member reconciliation** covers `SwitchSpareLeg` with no extra
-        mechanism: a `--detail`-listed member that is no longer in
-        `leg_list` is `--fail`ed and `--remove`d; a `leg_list` member the
-        array lacks is `--add --failfast`ed (md then resyncs — a bitmap
-        catch-up for a briefly absent leg, a full rebuild for a promoted
-        spare). The cn agent never runs `mdadm --zero-superblock`: a leg
-        only ever leaves an array into the spare list (where a stale
-        superblock makes a later re-add cheap) or out of existence with its
-        side.
+        mechanism: a member the array holds — its `dev-*/block/dm/name`,
+        compared with the names of the `leg_list` wrappers; no `lsblk` —
+        that is no longer in `leg_list` is `--fail`ed and `--remove`d by
+        the dm path sysfs named; an available `leg_list` member the array
+        lacks is `--add --failfast`ed (md then resyncs — a bitmap catch-up
+        for a briefly absent leg, a full rebuild for a promoted spare).
+        Every `leg_list` name is wanted, available or not: a leg this pass
+        cannot use (no path both `live` and `optimized`, or its connect or
+        wrapper failing) is never added, and a member md still holds for it is
+        neither failed nor removed.
+        *Amended 2026-09-26:* the comparison was by device number, and an
+        `lsblk` of a `leg_list` wrapper that did not answer read as "not
+        wanted" and failed and removed that in-sync member. `--fail` and
+        `--remove` open the member's path (no IO) and act on its device
+        number. A `--remove` issued within seconds of the member's side
+        dying, while a superblock write is stuck on that member, sleeps in
+        md's suspend until the write fails at the path's error recovery
+        (up to ~8 s after the side died, measured), so it can be killed at
+        the soft timeout with the member still held: that pass reports the
+        group `ERROR` and does not reach the promoted spare's `--add
+        --failfast` either, because extras leave before promotions arrive.
+        Nothing remembers the failure, and nothing schedules another
+        converge for it: the group's error is a row, not a reply code
+        (CN29), so the worker does not re-drive it, and it registers no
+        CN10 background retry (a failed connect does, CN10/CN18, and so
+        does a clone recovery whose destination bitmaps were not applied);
+        later Check rounds read the running array `OK`, degraded. The
+        switched-out member stays held and the spare stays out until the
+        cntlr's next converge, for whatever other reason it runs (a
+        `SyncupCntlr` for a revision bump or a non-zero reply code, an agent
+        restart's CN2 re-run, a background retry registered for something
+        else), which removes the member in milliseconds and adds the spare
+        (§7, known limits). The cn agent never runs
+        `mdadm --zero-superblock`: a leg only ever leaves an array into the
+        spare list (where a stale superblock makes a later re-add cheap) or
+        out of existence with its side.
         A group whose non-spare `leg_list` holds a provisioning leg (CN9) is
         **deferred**: none of `--examine`, `--create`, `--assemble`, `--add`,
         `--fail` or `--remove` runs, no `CnGrpName` is built, and
@@ -943,40 +1086,67 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         still assembles its array normally — it is the concat that waits, not
         the md layer (CN13).
 
-      **What a killed mdadm means.** `Md.Detail`'s non-zero exit means the
-      array is not running — "absent", not a failure, since assembly is what
-      fixes it. A run that did **not answer** (killed at the soft timeout,
-      never started, ctx cancelled: `agent.Reported` is false) is an
-      **error** and must never read as absent. `mdadm --detail` opens the
-      array's member devices and loads a superblock from one of them, so on a
-      leg whose DN side has gone that read sits in the multipath head's
-      requeue list until `fast_io_fail_tmo` expires — past the 3 s soft
-      timeout — and the process is killed. Reading that kill as "the array is
-      not there" is precisely what let the old teardown skip `mdadm --stop`
-      and leave a live array pinning its two leg wrappers for ever.
-      `Md.HasSuperblock` (`mdadm --examine`) follows the same rule for the
-      same reason and is the sharper case: `--examine` opens the member too,
-      and a killed run read as "no superblock" would send the assembly into
-      case 1 and `--create --assume-clean` over live data. It returns
-      `(bool, error)`, and an unanswered probe aborts the whole assembly —
-      with no answer this pass cannot tell case 1 from case 2, and guessing
-      case 1 is destructive.
+      **What a killed mdadm means.** A run that did **not answer** (killed
+      at the soft timeout, never started, ctx cancelled: `agent.Reported`
+      is false) is an **error** and must never read as absent.
+      `Md.HasSuperblock` (`mdadm --examine`) is the sharp case: `--examine`
+      opens and reads the member, so on a leg whose DN side has gone it
+      blocks until failfast and is killed, and a killed run read as "no
+      superblock" would send the assembly into case 1 and `--create
+      --assume-clean` over live data. It returns `(bool, error)`, and an
+      unanswered probe aborts the whole assembly — with no answer this pass
+      cannot tell case 1 from case 2, and guessing case 1 is destructive.
+      The rule started at `Md.Detail`, which ran `mdadm --detail` until
+      2026-09-26: a killed run read as "the array is not there" is
+      precisely what let the old teardown skip `mdadm --stop` and leave a
+      live array pinning its two leg wrappers for ever. It now reads sysfs,
+      under the same rule.
 
-      **No sweep runs `mdadm --detail` at all** (CN21). What a sweep needs it
-      reads from **sysfs**, which touches no member device and therefore
-      cannot block on a dead leg: `ListArrays` walks `/sys/block` for
-      `md[0-9]+`, reads each array's `array_state`, and names each member
+      **Nothing in the agent runs `mdadm --detail`** (CN21, CN28;
+      *amended 2026-09-26*: no sweep ever did, and `ensureGroup` and
+      `probeGroup` did until then). It loads the superblock from the first
+      array member that opens; when that member's DN side has gone, the
+      read sits in the multipath head's requeue list until the path's
+      failfast expires — measured ~13 s after the side died: the
+      controller stays `live` until its keep-alive times out, error
+      recovery starts a second later, and `fast_io_fail_tmo` runs from the
+      reconnect that follows — far past the 3 s soft timeout. A Check
+      round's probe was killed, the group's row read `ERROR` for a member
+      fault the leg row already reports, and that row counts toward cntlr
+      health: it failed the primary over, the first failover of the
+      failover ping-pong found 2026-09-24. What the sweeps, the member
+      reconciliation and the md rows need about an array they read from
+      **sysfs**, which touches no member device and therefore cannot block
+      on a dead leg (of the md probes, only the assembly's `--examine`
+      above still reads a member, and only an available leg's):
+      `ListArrays` walks `/sys/block` for the array nodes (`md[0-9]+` or
+      `md_<name>`, CN12; *amended 2026-09-26*: it took `md[0-9]+` alone, so
+      a sweep never stopped an array on a named node), reads each array's
+      `array_state`, and names each member
       through `/sys/block/mdN/md/dev-*/block/dm/name` — which is what
       attributes an array to an sp, and a member with no such attribute is
-      not a dm device at all. `Gone` verifies a stop from the same
-      `array_state`: only an absent directory or `clear` counts, never
-      `inactive`, which is an assembled-but-not-running array that pins its
-      members just as hard. `mdadm --detail --scan` is deliberately not the
-      enumerator: it loads superblocks. The node a sweep stops is the one
-      sysfs named, `/dev/mdN` — never `/dev/md/{CnMdDevName}`, which depends
-      on udev having run. `ensureGroup` and `probeGroup` still call
-      `Md.Detail` for *wanted* arrays, where the member read is affordable
-      and a killed call is now an `ERROR` row instead of a phantom "absent".
+      not a dm device at all. `Md.Walk` makes the same listings and dm-name
+      reads (not `array_state`), once per pass for the md groups (above),
+      under a different rule for an array that did not answer (*amended
+      2026-09-26*, so that another sp's array cannot turn this sp's md rows
+      `ERROR`): `ListArrays` keeps the strict one — one array whose
+      `array_state`, `md/` listing or member dm name did not answer fails
+      the whole md enumeration, because a removal decision needs the whole
+      node; that is the sweep's `enumeration failed: md arrays …` and a
+      `ReplyCodeLeftover`, never a row, and the worker counts a Leftover
+      reply as accepted, so it does not reach cntlr health — while
+      `Md.Walk` records such an array as unanswered.
+      `Gone` verifies a stop from the same `array_state`: only an absent
+      directory or `clear` counts, never `inactive`, which is an
+      assembled-but-not-running array that pins its members just as hard.
+      A read that fails is an error, never gone — the `EBUSY` a stopped
+      array's `array_state` reads until its `md/` goes (above) included:
+      `stopArrayVerified` logs `verifying an md stop failed` and reports the
+      array as a Leftover, which the worker re-drives.
+      `mdadm --detail --scan` is deliberately not the enumerator: it loads
+      superblocks. The node a sweep stops is the one sysfs named,
+      `/dev/mdN` or `/dev/md_<name>` — never `/dev/md/{CnMdDevName}`, which
+      depends on udev having run.
 
 CN13. **Per-slice pools** (`pool.go`; primary only). Per slice of
       `id_to_slice`: the multi-target dm-linears `CnPoolMetaName` (meta
@@ -1583,9 +1753,11 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
 
       **Enumeration.** `dmsetup ls` (name → `major:minor`, which is also how
       a live table's device argument is resolved back to a name), the sysfs
-      md walk of CN12, the sysfs subsystem walk for nvme host connections,
-      and `ls` of the nvmet `subsystems` tree — linked to the port or not, a
-      partially removed subsystem is unlinked but present. An enumerator that
+      md enumeration of CN12 (`ListArrays`, strict: one array that did not
+      answer fails it — never `Md.Walk`'s unanswered rule), the sysfs
+      subsystem walk for nvme host connections, and `ls` of the nvmet
+      `subsystems` tree — linked to the port or not, a partially removed
+      subsystem is unlinked but present. An enumerator that
       **did not answer** leaves its part of the snapshot empty and is
       reported as `enumeration failed`; it never reads as "there is nothing
       there". The snapshot is thrown away at the end of the pass: it decides
@@ -1879,12 +2051,14 @@ CN27. `GetLegBm`: locate the leg's group and slice in the stored
 CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
       for mounts, `stat --format %s` for plain files,
       `losetup --associated` for loops, `dmsetup ls` + `dmsetup table` for
-      the clone-metadata arena and every other dm device, `mdadm --detail`
-      for arrays, and the §5 **sysfs walk** — never `nvme list-subsys` — for
-      every outbound nvme connection). Every row reports against the
-      **effective** desired state (CN9): a resource the provisioning gate
-      excluded is `RES_STATUS_PROVISIONING` with `details = "provisioning"`,
-      never `RES_STATUS_ERROR`, and it never feeds `err_epoch`.
+      the clone-metadata arena and every other dm device, CN12's
+      `/sys/block/mdN/md/` read for arrays — never `mdadm --detail`
+      (*amended 2026-09-26*) — and the §5 **sysfs walk** — never `nvme
+      list-subsys` — for every outbound nvme connection). Every row reports
+      against the **effective** desired state (CN9): a resource the
+      provisioning gate excluded is `RES_STATUS_PROVISIONING` with `details
+      = "provisioning"`, never `RES_STATUS_ERROR`, and it never feeds
+      `err_epoch`.
 
 | `ResInfo` | `res_name` | probe |
 |---|---|---|
@@ -1899,7 +2073,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `td_id_to_thin_info[td].slice_id_to_dm_thin[slice]` | `CnThinDevName` | `dmsetup table` (pool + dev_id) |
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
-| `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: `mdadm --detail` — active (degraded included) ⇒ OK with the state/rebuild line in `details`; RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
+| `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: the array holding the group's `leg_list` wrappers, read from `/sys/block/mdN/md/` — `array_state`, and for a running array `degraded`, `sync_action` and `sync_completed`, plus `dev-*/{state,block/dev,block/dm/name}` — never `mdadm --detail`, which opens a member and can block on a dead one for ~13 s (CN12; *amended 2026-09-26*, the failover ping-pong: the killed probe read `ERROR` for a leg's fault). A running array (degraded included) ⇒ OK with `details` = `array_state`, then `degraded` while `md/degraded` is non-zero, then the word of a sync that is running (`recovering`, `resyncing`, `checking`, `repairing`, `reshaping`; none while `sync_completed` reads `none`) followed by its `(<done> / <total>)` sectors — e.g. `clean, degraded, recovering (32768 / 2093056)`. The words follow mdadm's State line, which the suites grep, and `repairing` is ours; the state and the sectors are sysfs's (mdadm prints its progress as a separate `Rebuild Status` line). No answering array holds the group's legs (none matched, or the match stopped between the walk and its read) and no array of the walk is unanswered, or `array_state` `clear` ⇒ `RES_STATUS_MISSING`; an array that is not running (`inactive`, `broken`, …) ⇒ `RES_STATUS_ERROR` with the state as `details`; a foreign member of the matched array, two answering arrays holding the group's legs, a `/sys/block` listing or a read of the matched array that did not answer, or no match — or a match that stopped since the walk — while another array of the walk did not answer (it may be the group's own; `details` name it) ⇒ `RES_STATUS_ERROR`. Beside a match, an array of the walk that did not answer is ignored and the row reads the match (CN12, *amended 2026-09-26*: a read of another sp's array that did not answer must not turn this row `ERROR`). RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
 | `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
 | `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here |
@@ -1915,7 +2089,20 @@ CN29. Error capture (§9.1): a failed command marks that resource
       from `probe.go`. `RES_STATUS_PROVISIONING` is never produced by this
       path: it is assigned by the CN9 gate, not by a failed command; and
       `RES_STATUS_PENDING` is produced by the CN11 registry alone, never by
-      a failed command (*amended 2026-09-26*).
+      a failed command (*amended 2026-09-26*). The group row's probe opens
+      no md member device: it is CN12's sysfs read, so a dead member of an
+      array that keeps another in-sync member no longer turns the row
+      `ERROR` — it reads `OK`, with `degraded` once md has failed the member
+      (an IO to it that errors does, and so does CN12's reconciliation
+      failing it out as an extra; until then the dead member does not count
+      in `md/degraded`), and the fault is its leg row's, from the CN11
+      prober's own IO. md does not fail the last in-sync member of a mirror
+      (dnv never sets md's `fail_last_dev`): an error it charges to that
+      member — a failed superblock or bitmap write, which array writes
+      bring, is one — marks the array broken instead. The array then
+      refuses every write for as long as it runs, its `array_state` reads
+      `broken` wherever it would read `clean`, and CN28 reports that as
+      `ERROR` (*amended 2026-09-26*, the failover ping-pong).
 
       Two kinds of thing travel in `agent_reply` rather than in the rows:
       protocol failures (the CN8 gates, CN22's), and **leftovers**. A
@@ -2038,6 +2225,36 @@ contradicts them.
   per path, never under the multipath head). Availability is
   `state == "live" && ana_state == "optimized"`: a `connecting` path keeps
   its last-known ANA state. `clone_id_to_target` uses the same walk.
+* `cnagent.md` CN12/CN28/CN29 (2026-09-26, the failover ping-pong) — the md
+  arrays of `ensureGroup` and `probeGroup` are read from **sysfs** too, as the
+  sweep's always were: one walk of the `/sys/block` array nodes per pass
+  (`Md.Walk`; an array node is `md[0-9]+`, or `md_<name>` under mdadm.conf
+  `CREATE names=yes` — the walk and the sweep's `ListArrays` both took
+  `md[0-9]+` alone at first, which would have read a named node's running
+  array as absent on the md rows), from which `Md.Detail` takes the array
+  holding a wrapper of the group's `leg_list` (by
+  `md/dev-*/block/dm/name`) and reads
+  `md/array_state`, then for a running array `md/degraded`,
+  `md/sync_action` and `md/sync_completed`, and per member
+  `md/dev-*/state` and `md/dev-*/block/dev`. It replaced `mdadm --detail`,
+  which loads the superblock from the first member that opens and, when that
+  member's side had gone, blocked until the path's failfast expired (~13 s
+  after the side died), was killed at the soft timeout and turned the group
+  row `ERROR` — a row that counts toward cntlr health. Measured on the lab
+  kernel (7.0, mdadm 4.5) before coding: an `inactive` array has no
+  `md/degraded`, `md/sync_action` or `md/sync_completed` at all and its
+  members read a bare `spare`; `dev-*/state` is a flag list and, while the
+  array runs, dnv's members carry `failfast` (`in_sync,failfast`,
+  `faulty,failfast`, `faulty,blocked,failfast`, `spare,failfast`);
+  `md/sync_completed` reads
+  `none` exactly when no sync runs, while `md/sync_action` can read
+  `recover` for seconds with nothing to rebuild onto; `md/degraded` counts a
+  failed member still held, a member being rebuilt and an empty slot alike;
+  `array_state` read `clean`, `active`, `write-pending`, `readonly` and
+  `inactive` there, never `clear` (a stopped array's `/sys/block/mdN` goes at
+  once). Finding the array by member instead of by name adds the case-1
+  guard of CN12 against an array that runs under the group's name holding
+  none of its legs.
 * `cnagent.md` CN18 step 3 — the dm-clone's two feature args are spelled out
   as `no_hydration no_discard_passdown` (Appendix A's `2 no_hydration …`).
   dm-clone enables discard passdown whenever the destination's discard
@@ -2176,6 +2393,21 @@ contradicts them.
   an unprobed spare read ready to the AR8 leg repair. `PENDING` neither sets
   nor clears it, and SH14's status list grew by it — the cn agent emits it
   on a primary's leg rows alone.
+* `dnagent.md` §2.8 SH15 + §7 item 12, `osclient.md` §4.2, `architecture.md`
+  §11.1.1 case 1.3 + Appendix A (2026-09-26, the failover ping-pong) —
+  `Md.Detail` no longer runs `mdadm --detail` through `runProbe`: it is a
+  lookup in an `Md.Walk` of `/sys/block`, whose listings go through
+  `listDir` and whose attributes through `readAttrStrict`, under the same
+  "did not answer" rule (CN12) — except that another array that does not
+  answer is recorded as unanswered rather than failing the walk, and can
+  only turn a lookup that found nothing into an error. `Md.NameInUse`, the
+  `lsblk` of CN12's case-1 guard, joins SH15's primitives (five became six)
+  and item 12's, and takes `Md.Detail`'s place in `osclient.md`'s list of
+  `runProbe` users; `Md.Walk` / `Md.Detail` join that section's reads that
+  never answer "nothing there", with the unanswered-array exception stated
+  there too. Case 1.3 reads the assembled array's members from sysfs, and
+  the crib sheet's probing list names `mdadm --examine` and
+  `/sys/block/md*` in place of `mdadm --detail`.
 
 ## 6. Tests
 
@@ -2234,13 +2466,39 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    "no sweep reads a member device". Re-sync back to primary rebuilds via
    `mdadm --assemble` (superblocks present — CN12 case 2), never
    `--create`.
-7. **§11.1.1 / member reconciliation**: scripted `--examine`/`--detail`
-   outcomes drive: no superblocks ⇒ create+assume-clean; one ⇒ assemble +
-   add; both-with-one-left-out ⇒ assemble + re-add; single available leg ⇒
+7. **§11.1.1 / member reconciliation**: scripted `--examine` outcomes and
+   the fake's sysfs view of the array drive: no superblocks ⇒
+   create+assume-clean; one ⇒ assemble + add; both-with-one-left-out ⇒
+   assemble + re-add, whichever leg is left out (the array is found through
+   the one it holds, `TestGroupFoundByItsHigherLeg`); single available leg ⇒
    assemble, and a scripted mdadm refusal leaves the group
-   `RES_STATUS_ERROR`; a `SwitchSpareLeg`-shaped request (`leg_list`
-   swapped with a spare) ⇒ `--fail` + `--remove` + `--add --failfast`, and
-   never `--zero-superblock`.
+   `RES_STATUS_ERROR`; a `SwitchSpareLeg`-shaped request (one leg of the
+   two-leg group swapped with a spare) ⇒ `--fail` + `--remove` of the
+   switched-out leg + `--add --failfast` of the spare, in that order and
+   never `--zero-superblock`, whether md still holds the switched-out member
+   `in_sync` or has already failed it (`faulty,failfast`, what an errored IO
+   to a dead side leaves), and when that leg is unavailable too — AR8's
+   switch, whose switched-out side is dead: its controller `connecting`
+   with its last-known `optimized` ana_state kept (what a dead side's path
+   reads), or its connect failing, as when the side's nvmet port is gone —
+   because a parked member is an extra whatever its leg's availability
+   (`TestSwitchSpareLeg`; the unavailable cases *added 2026-09-26*); a
+   killed `--fail`, `--remove` or `--add` in that switch — killed before
+   the tool touched anything, or after the kernel completed it — leaves
+   the group `RES_STATUS_ERROR` with the kill's error, a killed `--fail` or
+   `--remove` runs no `--add` in that pass, and the next converge completes
+   the switch (`TestSwitchSpareLegKilledVerb`, *added 2026-09-26*); both legs
+   swapped for fresh ones, the old ones parked or gone, while the array runs
+   under the group's name ⇒ `RES_STATUS_ERROR` "an array runs under …
+   holding none of the group's legs", no `--create` and no
+   `--fail`/`--remove`/`--add` against it — and when the `lsblk` that asks
+   whether an array runs under the name did not answer, `RES_STATUS_ERROR`
+   with the kill's error as details and the same absence of
+   `--create`/`--fail`/`--remove`/`--add`
+   (`TestGroupNeverCreatesBesideARunningArray`; the primitive's own answer
+   is `TestMdNameInUseKilledIsAnError`'s: a killed `lsblk` is an error,
+   never "not in use"). Each group test here also asserts that no
+   `mdadm --detail` is recorded (*amended 2026-09-26*, CN12).
 8. **Namespace states** (CN16): `suspended = true` ⇒ `ana_grpid = 3` write
    then the ns-dev reload onto the td's dm-error, live; resume path reversed
    (reload onto the raid0, then `ana_grpid = 1`); a device found dm-suspended
@@ -2581,6 +2839,140 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     table it wants, suspended ⇒ a bare `dmsetup resume` and **no** reload —
     which is the one remaining reason `ensureNsDev` reads `dmsetup info`'s
     suspend bit at all.
+30. **The md array is read from sysfs** (CN12/CN28, *added 2026-09-26*;
+    `agent/cnagent/mdprobe_test.go` and `cnagent_test.go`). The fake
+    publishes what the lab kernel does — `md/degraded`, `md/sync_action` and
+    `md/sync_completed` for a running array only, `dev-*/state` as a flag
+    list (`in_sync,failfast` by default, a bare `spare` in an array that has
+    not started) and `dev-*/block/dev`. `TestMdDetailFromSysfsOnly`: `Detail`
+    finds the array by either leg's dm name and by no other, reads state,
+    degraded count, sync action and progress and each member's devno, dm
+    name and state, and runs no mdadm; a member with no dm name makes it
+    foreign; two arrays holding legs of the group are an error; an
+    unanswered listing or read — of `/sys/block`, of every array's `md/`
+    or dm names at once (so no array answers and matches), or of the
+    matched array's `array_state`, each of `degraded`, `sync_action` and
+    `sync_completed`, a member's `state` or a member's `block/dev` — is an
+    error, never absent, and so is a member's `block/dev` that vanished
+    between the walk and the read (another array that did not answer
+    beside a match is `TestMdWalkUnansweredArray`'s case, below).
+    `TestMdListArraysFromSysfsOnly`: the sweep's enumerator runs no mdadm,
+    reads an array with a non-dm member as foreign, drops a node listed
+    with no `md/`, and fails — never drops the array — when the
+    `/sys/block` listing, one array's `md/` listing, one member's dm name
+    or one array's `array_state` does not answer (CN21's strict rule);
+    for the `md/` listing and the dm name, `Md.Walk` over the same node
+    records the array as unanswered instead.
+    `TestMdNamedKernelNode`: an array on the kernel node `md_<name>`
+    (mdadm.conf `CREATE names=yes`) beside a numbered one is found by
+    `Detail`, listed by `ListArrays` and not `Gone`.
+    `TestSweepStopsANamedArrayNode`: the sweep stops such an array by
+    `mdadm --stop /dev/md_<name>`, never the `/dev/md/<name>` symlink, and
+    verifies the stop from `/sys/block/md_<name>` — for the hex
+    `md_<CnMdDevName>` and for the non-hex `md_<CnMdArrayName>` an
+    `--assemble --scan` or incremental assembly names from the superblock.
+    `TestMdBlockEntryPattern`: `md0`, `md127`, `md_d0` and `md_<name>` are
+    array nodes, a non-hex name included (`md_dnv-0000000000000002-00-00`,
+    and `md_dnv-0000000000000002-00-00_0` after a name conflict); `md`,
+    `mdp`, `md0p1`, `dm-0`, `nvme0n1`, `nvme0c0n1`, `sda`, `loop0` and
+    `xmd0` are not.
+    `TestMdDetailInactiveArray`: an `inactive` array reads present with
+    that state and no running-only attribute read. `TestMdStateLine`: the
+    details composition, including `sync_action` `recover` with
+    `sync_completed` `none` (no word) and a finished re-add (`recovering
+    (2093056 / 2093056)`).
+    `TestGroupProbeIsSysfsOnly`: a primary Check round over an array with
+    one member `faulty,failfast` and `md/degraded` 1 reports `OK` `clean,
+    degraded`, a rebuild `clean, degraded, recovering (32768 / 2093056)`,
+    an `inactive` array `ERROR` `inactive` — each round with no mdadm
+    command at all — and a converge over the inactive array reports its
+    state and runs no mdadm.
+    `TestGroupProbeArrayStates`: every `array_state` through a Check round,
+    and every one but `clear` through a converge — `clean`, `active`,
+    `active-idle`, `write-pending`, `readonly` and `read-auto` read `OK`
+    `<state>, degraded` and the converge `--add`s the `leg_list` member the
+    array lacks; `inactive`, `suspended`, `broken` and an unknown value read
+    `ERROR` with the state, and the converge runs no mdadm; `clear` reads
+    `MISSING` on the Check round (md reads `clear` only for an array with no
+    member, which no group's `Detail` can match).
+    `TestGroupForeignMemberIsAnError`: a Check round and a converge over an
+    array holding the group's wrappers plus a non-dm member both report
+    `ERROR` naming that member's devno, and neither runs mdadm.
+    `TestGroupUnansweredSysfsReadIsAnError`: a killed read of every
+    array's member dm names (the walk, which leaves no array answering),
+    or of the matched array's `md/array_state`, `md/degraded` or a
+    member's `dev-*/block/dev`, reads `ERROR`, never
+    `MISSING`, on a Check round and on a converge, which runs no mdadm —
+    read as absent, the first two would assemble beside the running array.
+    `TestGroupMembersComparedByName`: with the `lsblk` of either leg
+    wrapper killed, an equal-revision converge of a healthy two-leg array
+    runs no `--fail`, `--remove` or `--add` and reads `OK` — keyed by
+    device number, the unanswered `lsblk` left that wrapper out of the
+    wanted set, and the converge failed and removed its in-sync member.
+    `TestGroupUnavailableLegMemberStaysWanted`: with leg 2's path
+    `inaccessible` or `non-optimized`, or its connect failing with the
+    wrapper of the earlier pass still there, an equal-revision converge
+    runs no `--fail`, `--remove` or `--add`, leaves the array's members as
+    they were and reads `OK` — a held member of an unavailable `leg_list`
+    leg stays wanted. `TestGroupHeldFaultyMemberStaysHeld`: with leg 2's
+    member `faulty,failfast` and its leg available, an equal-revision
+    converge runs no `--fail`, `--remove` or `--add` and reads `OK` — every
+    member sysfs lists is held, whatever its state (§7's "a member md
+    failed stays failed"). `TestGroupNeverAddsAnUnavailableLeg`: with leg 2
+    missing from the array and its path `non-optimized`, the converge runs
+    no `--add` and no `lsblk` of either leg wrapper and reads `OK`; with
+    the path `optimized` again, the next converge adds it.
+    `TestGroupProbeWalksOnce`: a Check round over four arrays lists
+    `/sys/block` and each array's `md/` exactly twice — the verdict's
+    enumeration and the one walk the md rows share — and lists or reads
+    nothing of the `dm-N`, `nvme*`, `sda` and `loop0` entries beside them.
+    `TestGroupConvergeWalksOnce`: an equal-revision converge over the same
+    four arrays lists `/sys/block` and each `md/` exactly twice too — the
+    sweep's enumeration and the one walk the groups share — and touches no
+    entry that is not an array node either.
+    `TestMdWalkRefresh`: a stale walk misses, and `Refresh` finds, an array
+    assembled under an `mdN` another array held, under an `mdN` recorded
+    with no member, and under a member directory that now carries another
+    dm name; it picks up a new node, drops one that went (so the array now
+    holding its leg is the only match) and re-lists no unchanged array.
+    `TestMdWalkRefreshUnanswered`: an unanswered node that went is dropped
+    (a name no array holds reads absent again); a node still listed whose
+    `md/` has gone — unseen, recorded (its leg since assembled under a new
+    node, which is then the one match) or unanswered — is dropped and not
+    recorded as unanswered; and a recorded node whose
+    check fails and whose re-walk does not answer — its member's dm name
+    unreadable, or its dm minor reused by another wrapper under a killed
+    `md/` listing — loses its record: the lookup of the old dm name is a
+    did-not-answer error, never the stale array.
+    `TestGroupAssemblyBesideAnArrayMidStop`: an assembly beside another
+    sp's array whose member's `state` reads an error with its `block` link
+    still there (md between clearing the member's array pointer and
+    removing the link), or whose check does not answer at all, reports
+    every md row `OK`; the second case re-walks that array.
+    `TestMdWalkUnboundMember` / `TestGroupBesideAnUnboundMember`: the
+    member md has fully unbound — `block/dev` and `block/dm/name` reading
+    `ENOENT`, its `state` an error — is recorded with no dm name, never the
+    array as unanswered: the lookup of its old name reads absent (a
+    republish of the array keeps the member unbound), in that shape — not
+    for the whole stop, CN12 — the sweep's `ListArrays` answers and reads
+    the array foreign, a group not
+    built yet is created beside it with every md row `OK` and a clean
+    reply, and a built group's Check round and converge read `OK`, reply
+    clean and run no mdadm.
+    `TestMdWalkUnansweredArray` / `TestGroupBesideAnUnansweredArray`:
+    another array whose member dm name does not answer (a read error other
+    than `ENOENT`) or whose `md/` listing is killed leaves the walk
+    standing; beside the group's own array a Check round and a converge
+    read every md row `OK` and run no mdadm — both replying a Leftover
+    naming the md enumeration, because the sweep's `ListArrays` fails on
+    the same array (CN21) — and with the group's array not built yet the
+    lookup is an error naming the unanswered array — no create, no
+    assembly; the test's next `SyncupCntlr`, after the array answers,
+    assembles it (nothing in the agent re-drives it, CN12). A match whose
+    `md/` went after the walk (a stop removes it whole) is that same error
+    beside an unanswered array; once every array answers, `Refresh` drops
+    it and its names read absent, and with no `Refresh` in between a walk
+    every array answered reads such a match absent too.
 
 ## 7. Acceptance checklist
 
@@ -2659,6 +3051,45 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     nothing at all — concatenation is the migration placement rule (SH23),
     and applying it to clone chunks would put every chunk past a gap at the
     wrong offset. `agent.ChunkSet` is reachable only from `agent/dnagent/`.
+12. The md reads are sysfs (CN12, *added 2026-09-26*): `grep -rn
+    '"--detail"' agent/cnagent/*.go` finds nothing — tests included — and
+    `grep -rn 'parseMdExportDevices\|devNoSet' agent/cnagent/` finds
+    nothing at all.
+
+### Known limits
+
+* **A member md failed stays failed** (2026-09-26): `reconcileMembers` adds
+  only a member the array does not hold, so a held `faulty` member is not
+  re-added when its side returns (the array stays degraded until a spare
+  switch or a re-assembly; pinned by `TestGroupHeldFaultyMemberStaysHeld`);
+  the follow-up is `--remove` then `--add` of a held wanted member whose
+  `MdMember.State` has the `faulty` flag, tested by membership
+  (`faulty,failfast`). The `--remove` must come first: mdadm opens an
+  `--add`ed device `O_EXCL`, and md keeps its claim on a faulty member
+  until the member is removed, so an `--add` alone is refused.
+* **A killed `--remove` leaves a spare switch half done** (2026-09-26): a
+  switch applied within seconds of the switched-out leg's side dying can
+  have its `--remove` killed at the soft timeout while a superblock write is
+  stuck on that member (CN12). The pass reports the group `ERROR` and does
+  not add the promoted spare, and nothing re-drives it: the worker re-syncs
+  on a revision or a reply code, never on a row, and a group error
+  registers no CN10 background retry. The array runs on its surviving
+  member until the cntlr's next converge for some other reason; the
+  follow-up is to register the background retry when member reconciliation
+  fails.
+* **An unanswered array can leave a group unassembled** (2026-09-26): a
+  group with no answering array while another array of the walk did not
+  answer is neither created nor assembled that pass (CN12), and the error
+  is a row, which nothing re-drives; the Check verdict stays non-zero only
+  while its own enumeration, `ListArrays`, still fails. Once the array
+  answers, the group waits, its row `MISSING`, for the cntlr's next
+  converge for some other reason — and the groups this can hit include
+  those a new primary's first converge must assemble, whose slice layers
+  cannot be built meanwhile. The follow-up is the same background retry
+  as the killed `--remove`'s, registered when a group lookup or assembly
+  fails for a reason that is not the group's own — a retry keyed on
+  unavailable legs would not cover it, since the group's legs may all be
+  available.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

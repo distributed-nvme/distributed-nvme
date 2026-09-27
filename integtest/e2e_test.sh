@@ -10484,22 +10484,27 @@ side_hydrated() { # <side id>
 
 # grp_md_clean is "md has finished rebuilding onto the promoted spare".
 #
-# WHAT THE ROW ACTUALLY CARRIES: probeGroup returns mdadm's `State:` line
-# verbatim as the details of grp_id_to_md_raid, and RES_STATUS_ERROR only when
-# that line contains "inactive" (agent/cnagent/md.go:371-394 for probeGroup,
-# :55 for the `State:` value it reports). So a rebuilding array is
-# RES_STATUS_OK with a details of "clean, degraded, recovering" — the status
-# alone proves nothing about the resync, which is why this reads the words.
+# WHAT THE ROW ACTUALLY CARRIES: probeGroup composes the details of
+# grp_id_to_md_raid from sysfs (mdStateLine in agent/cnagent/md.go;
+# cnagent.md CN28, amended 2026-09-26 — it used to be mdadm's `State:` line):
+# md/array_state, then "degraded" while md/degraded is non-zero, then the
+# word of a sync that is running with its "(<done> / <total>)" sectors. A
+# running array of the group's own legs is RES_STATUS_OK, however degraded (a
+# foreign member or a second array holding the group's legs is
+# RES_STATUS_ERROR). So a rebuilding array is RES_STATUS_OK with a details of
+# "clean, degraded, recovering (32768 / 2093056)" — the status alone proves
+# nothing about the resync, which is why this reads the words.
 #
-# The three words below are mdadm's own: `degraded` while a member is missing
-# or not yet in sync, `recovering` while it is being rebuilt, `resyncing`
-# while the array re-reads itself. Absence of all three plus RES_STATUS_OK is
-# the array md prints when it is whole.
+# The three words below are mdadm's State-line words, which the composition
+# keeps: `degraded` while a member is missing, failed or still being rebuilt
+# (md/degraded counts all three), `recovering` while one is rebuilt,
+# `resyncing` while the array re-reads itself. Absence of all three plus
+# RES_STATUS_OK is the array whole.
 #
 # The final non-empty test is not decoration either: an EMPTY details means
-# the `State:` line was not found in mdadm's output at all, and "we could not
-# read the state" must never pass for "the rebuild finished". It is only
-# reachable under raid1, which is the only arm that calls this.
+# the row carried no state at all, and "we could not read the state" must
+# never pass for "the rebuild finished". It is only reachable under raid1,
+# which is the only arm that calls this.
 #
 # THE REVISION ARGUMENT IS WHAT MAKES THIS A WAIT AND NOT A COIN FLIP.
 # `spare switch` changes WHICH legs the group has, not HOW MANY, so in the
@@ -11733,11 +11738,11 @@ copy_spare() {
 	assert_field "$SP_JSON" "$COPY_GRP0.leg_list | length" "$LEGS" \
 		"the group still has $LEGS active legs"
 
-	# md rebuilds onto the promoted spare. grp_md_clean reads mdadm's own
-	# State line out of the row's details, because RES_STATUS_OK alone is
-	# true throughout a recovery — and it is given the SpRev the switch
-	# bumped to, because the leg COUNT did not change and the pre-switch
-	# array also reads "clean".
+	# md rebuilds onto the promoted spare. grp_md_clean reads the state words
+	# out of the row's details, because RES_STATUS_OK alone is true
+	# throughout a recovery — and it is given the SpRev the switch bumped
+	# to, because the leg COUNT did not change and the pre-switch array also
+	# reads "clean".
 	rev=$(sp_field '.sp_rev.revision')
 	case "$rev" in
 	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
@@ -12292,6 +12297,23 @@ react_pool_grew() { # <cntlr id> <slice id> <old total>
 	'' | *[!0-9]*) return 1 ;;
 	esac
 	[ "$total" -gt "$3" ]
+}
+
+# worker_failover_cnt prints how many failovers the worker has applied so far:
+# the `reaction applied` records with kind failover in its log (dnv-worker.md
+# §12). The react case has one sp, so the count is that sp's. A log that
+# cannot be read is fatal rather than a zero: a zero read at both ends would
+# pass the caller's unchanged-count assertion without having read the log (and
+# by stage 05 the count is not zero: stage 03's AR5 failover is already in it).
+worker_failover_cnt() {
+	local n
+	n=$(ssh_cp "grep -c '\"msg\":\"reaction applied\".*\"kind\":\"failover\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot count the failovers in $WORK/worker/worker.log on $CP_IP"
+	case "$n" in
+	'' | *[!0-9]*) die "the worker log's failover count read '$n'" ;;
+	esac
+	echo "$n"
 }
 
 # react_primary_moved is AR5's whole observable: EXACTLY one cntlr is primary
@@ -13212,10 +13234,22 @@ react_leg_repair() {
 	local n i sideid saddr hits out rev grpid msg
 	local before_addrs before_vms spareaddr sparevm
 	local before_spares before_spare_cnt before_sp_spares fresh
+	local before_primary before_failovers
 
 	sp_refresh
 	sp_read_roles
 	sp_totals
+	# The primary this whole stage must keep, and the count of failovers the
+	# worker has applied so far, which must not grow (both asserted at its
+	# end). A dead member is a LEG fault: the primary's md row reads it from
+	# sysfs as OK (degraded once md or the spare switch has failed the
+	# member; cnagent.md CN28, amended 2026-09-26). While that row came from
+	# `mdadm --detail`, the probe could block on the dead member past its
+	# timeout and read ERROR, and AR5 failed the primary over — the first
+	# failover of the ping-pong the run that found it died of, in this
+	# stage's AR8 wait, with the worker flipping the primary for 48 hours.
+	before_primary=$PRIMARY_CNTLR_ID
+	before_failovers=$(worker_failover_cnt)
 	grpid=$(sp_field "$COPY_GRP0.grp_id")
 	assert_eq "$grpid" "$REACT_GRP_ID" \
 		"slice 0's first data group is still the one step 01 recorded"
@@ -13453,11 +13487,12 @@ react_leg_repair() {
 
 	# md rebuilds onto the promoted spare. A fresh spare has never been an md
 	# member, so this is a FULL recovery of the group (§8.12), and
-	# RES_STATUS_OK alone proves nothing about it: probeGroup reports mdadm's
-	# `State:` line verbatim and only "inactive" is an ERROR, so a rebuilding
-	# array is OK with "clean, degraded, recovering". grp_md_clean reads the
-	# words, and takes the SpRev the switch bumped to so that the array it
-	# reads is the new one.
+	# RES_STATUS_OK alone proves nothing about it: probeGroup reports the
+	# array's sysfs state in mdadm's words, and a running array of the
+	# group's own legs is OK however degraded (grp_md_clean's header has the
+	# ERROR cases), so a rebuilding one is OK with "clean, degraded,
+	# recovering (…)". grp_md_clean reads the words, and takes the SpRev the
+	# switch bumped to so that the array it reads is the new one.
 	rev=$(sp_field '.sp_rev.revision')
 	case "$rev" in
 	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
@@ -13489,6 +13524,21 @@ react_leg_repair() {
 	log "  the parked leg $REACT_LEG_ID is connected again; the sp drain at" \
 		"teardown is what releases its extent (model/drain.go:369-375" \
 		"releases spare legs with the active ones)"
+
+	# No failover during the stage: the dead disk node took one leg, which
+	# AR8 repaired, and nothing about it is the primary's fault. Both are
+	# asserted — the primary at the end is the one the stage started with,
+	# and the worker applied no failover in between, which the endpoint
+	# comparison alone cannot see: with CNTLR_CNT=2 an even number of
+	# failovers ends on the same cntlr.
+	sp_refresh
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$before_primary" \
+		"the primary after AR8 is the one the stage started with (a dead leg must not fail the primary over)"
+	assert_eq "$(worker_failover_cnt)" "$before_failovers" \
+		"the worker's applied failovers across the stage (a dead leg must not fail the primary over)"
+	log "  no failover during the stage: the worker applied $before_failovers" \
+		"before it and none since"
 }
 
 # --- step 6 -----------------------------------------------------------------

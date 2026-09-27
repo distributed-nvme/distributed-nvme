@@ -201,17 +201,29 @@ pressure while leaving ample parallelism.
 
   `agent.Reported(exitCode, err)` (`agent/oswrap.go`) is the one predicate —
   `err == nil || exitCode > 0` — and `osBase.runProbe` is the only place it
-  is applied: `Md.Detail`, `Md.HasSuperblock`, `Dm.Info`, `osBase.listDir` /
+  is applied: `Md.HasSuperblock`, `Md.NameInUse` (an `lsblk` of
+  `/dev/md/<name>` whose "not in use" lets `cnagent.md` CN12's case 1 run
+  `mdadm --create`; since 2026-09-26), `Dm.Info`, `osBase.listDir` /
   `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
   listings) all probe through it, each returning "absent" only for a
   reported non-zero exit and an error otherwise. The enumerators a removal
   decision is taken from — `Dm.List`, `Md.ListArrays`,
   `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
   probe that judges a stop, propagate that error to their caller instead of
-  answering "nothing there", and the agents' sweeps record an enumeration
-  that did not answer as a failure of the pass (`SweepResult.Fail`, which
-  keeps it from being clean exactly as a leftover object does), because a
-  listing that failed cannot prove a node holds nothing. `Dm.List` goes one
+  answering "nothing there". `Md.Walk` / `Md.Detail`, which since
+  2026-09-26 read the md groups from the same sysfs tree (`cnagent.md`
+  CN12), never answer "nothing there" for a read that did not answer
+  either: a `/sys/block` listing or a read of the matched array that did
+  not answer is an error; an array whose `md/` listing or member dm-name
+  read did not answer is recorded as unanswered rather than failing the
+  walk, and `Md.Detail` returns that error only when no answering array
+  holds the group's legs — none matched, or the match stopped since the
+  walk — and beside a match it leaves it alone, so that a read of another
+  sp's array never turns this sp's md rows `ERROR`. The
+  agents' sweeps record an enumeration that did not answer as a failure of
+  the pass (`SweepResult.Fail`, which keeps it from being clean exactly as
+  a leftover object does), because a listing that failed cannot prove a
+  node holds nothing. `Dm.List` goes one
   step further and treats every non-zero exit as an error: `dmsetup ls`
   exits 0 and prints `No devices found` on an empty node, so a failure there
   is never an empty listing. The file-read half of the same rule is

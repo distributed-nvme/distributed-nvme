@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1215,6 +1216,9 @@ func TestFailoverBackToPrimaryAssembles(t *testing.T) {
 			strings.Join(node.Calls(), "\n"))
 	}
 	assertNoCall(t, node, "cmd mdadm --create")
+	// The re-promotion reads its arrays from sysfs (CN12): a `mdadm
+	// --detail` opens a member and can block on a dead one.
+	assertNoCall(t, node, "cmd mdadm --detail")
 	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testMetaGrp],
 		"grp meta")
 }
@@ -1242,6 +1246,7 @@ func TestGroupCreateAssumeClean(t *testing.T) {
 		}
 	}
 	assertNoCall(t, node, "--zero-superblock")
+	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
 func TestGroupAssembleRefusalIsAnError(t *testing.T) {
@@ -1263,6 +1268,7 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("a refused assembly left status %v", info.GetStatus())
 	}
+	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
 // §11.1.1 case 1.2: exactly one member of a two-leg group carries a
@@ -1287,6 +1293,7 @@ func TestGroupAssembleThenAddMissingMember(t *testing.T) {
 	if got := len(node.arrays[mdDev].members); got != 2 {
 		t.Fatalf("the array has %d members, want 2", got)
 	}
+	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
 // §11.1.1 case 1.3: both members carry a superblock but mdadm leaves one out
@@ -1314,60 +1321,1252 @@ func TestGroupReaddsLeftOutMember(t *testing.T) {
 	)
 	assertNoCall(t, node, "--zero-superblock")
 	assertNoCall(t, node, "cmd mdadm --create")
+	assertNoCall(t, node, "cmd mdadm --detail")
+}
+
+// TestGroupFoundByItsHigherLeg is TestGroupReaddsLeftOutMember with the other
+// leg left out: the assembly holds only the group's leg_idx 1 leg, which is
+// case 2's shape whenever leg 0's side is the dead one. It pins that
+// Md.Detail is keyed on the whole leg_list, not its first leg: keyed on leg 0
+// alone, the assembled array reads "did not start", and every later pass
+// reads it absent and assembles again over members the array holds.
+func TestGroupFoundByItsHigherLeg(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := func(revision uint64, primary bool) reqOpts {
+		return reqOpts{revision: revision, primary: primary, raid1: true,
+			twoLegs: true}
+	}
+	syncupBoth(t, srv, opts(2, true))
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts(3, false))); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	leg0 := srv.nf.DmPath(legName(srv, testDataLeg))
+	node.assembleDrop[leg0] = true
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+		"grp data after the promotion")
+	assertOrder(t, node,
+		"cmd mdadm --assemble "+mdDev,
+		"cmd mdadm "+mdDev+" --add --failfast "+leg0,
+	)
+	assertNoCall(t, node, "cmd mdadm --create")
+	assertNoCall(t, node, "cmd mdadm --detail")
+
+	node.Reset()
+	_, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 4,
+	}, nil)
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data, check round")
+	node.Reset()
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true))); err != nil {
+		t.Fatalf("re-converge: %v", err)
+	}
+	assertNoCall(t, node, "cmd mdadm --assemble")
 }
 
 // TestSwitchSpareLeg is the CN12 member reconciliation: a leg_list swapped
 // with a spare is failed, removed and the promoted spare added — never
-// zero-superblocked.
+// zero-superblocked. The group is the product's two-leg mirror and one leg is
+// switched, which is what SwitchSpareLeg does: the array is found through the
+// leg that stays (Md.Detail keys on leg_list), and the switched-out leg is
+// the extra it still holds.
+//
+// The switched-out member is taken the ways md holds it. In sync, as an
+// operator's switch finds it; and faulty — md marks a member whose side died
+// "faulty,failfast" on its first IO that errors yet still lists it under
+// dev-*, so the extras loop, which walks every member sysfs lists, must take
+// it whatever its state: an extra left in the array would have the promoted
+// spare added beside it, where extras leave before promotions arrive. (The
+// held set counting a faulty leg_list member is
+// TestGroupHeldFaultyMemberStaysHeld's.) AR8's own shape is the faulty
+// member whose leg is unavailable too — its side is dead, so its path is not
+// both live and optimized (the controller reads connecting and keeps its
+// last-known optimized ana_state), or its connect fails, as when the side's
+// nvmet port is gone: a parked member is an extra whatever its leg's
+// availability, unlike a leg_list member
+// (TestGroupUnavailableLegMemberStaysWanted).
 func TestSwitchSpareLeg(t *testing.T) {
-	srv, node := newTestServer(t)
-	spareLeg := uint64(0x77)
-	spareSide := uint64(0x78)
-
-	withSpare := func(revision uint64, promoted bool) *pb.SyncupCntlrRequest {
-		req := cntlrReq(reqOpts{
-			revision: revision, primary: true, raid1: true})
-		slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
-		grp := slice.GetDataGrpList()[0]
-		member := legOf(testDataLeg, sideOf(testDataSide, testIp, testSvcId))
-		spare := legOf(spareLeg, sideOf(spareSide, testIp2, testSvcId2))
-		if promoted {
-			grp.LegList = []*pb.Leg{spare}
-			grp.SpareLegList = []*pb.Leg{member}
-		} else {
-			grp.LegList = []*pb.Leg{member}
-			grp.SpareLegList = []*pb.Leg{spare}
+	connecting := func(srv *CnAgentServer, node *fakeNode) {
+		node.setCtrlState(srv.nf.SideToCnNqn(testCluster, testSp,
+			testDataLeg, testCn), testIp, testSvcId, "connecting")
+	}
+	connectFails := func(srv *CnAgentServer, node *fakeNode) {
+		nqn := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg, testCn)
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		subsys := node.subsystems[nqn]
+		for _, ctrl := range slices.Clone(subsys.ctrls) {
+			node.dropCtrl(subsys, ctrl)
 		}
-		return req
+		node.failCmdAlways["--nqn "+nqn+" --hostnqn"] =
+			"nvme connect: Connection refused"
 	}
+	for _, tc := range []struct {
+		name  string
+		state string // the switched-out member's dev-*/state; "" is in_sync
+		// unavail makes the switched-out leg unavailable; nil leaves its
+		// path live and optimized.
+		unavail func(srv *CnAgentServer, node *fakeNode)
+	}{
+		{"in sync", "", nil},
+		{"faulty", "faulty,failfast", nil},
+		{"faulty, path connecting", "faulty,failfast", connecting},
+		{"faulty, connect fails", "faulty,failfast", connectFails},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
+				t.Fatalf("SyncupCn: %v", err)
+			}
+			if _, err := srv.SyncupCntlr(
+				ctx, switchSpareReq(2, false)); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			// A spare is connected, wrapped and probed but never an md
+			// member.
+			if !node.hasCall(
+				"cmd dmsetup create " + legName(srv, switchSpareLeg)) {
+				t.Fatalf("the spare leg was not wrapped")
+			}
+			for _, call := range node.callsMatching("cmd mdadm --create") {
+				if strings.Contains(call, legName(srv, switchSpareLeg)) {
+					t.Fatalf("a spare leg became an md member: %s", call)
+				}
+			}
+			if tc.state != "" {
+				mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+					testCluster, testCn, testSp, 0, 0, false))
+				node.setMdSync(mdDev, 1, "idle", "none")
+				node.setMemberState(mdDev,
+					srv.nf.DmPath(legName(srv, testDataLeg)), tc.state)
+			}
+			if tc.unavail != nil {
+				tc.unavail(srv, node)
+			}
 
-	ctx := context.Background()
-	if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
-		t.Fatalf("SyncupCn: %v", err)
+			node.Reset()
+			reply, err := srv.SyncupCntlr(ctx, switchSpareReq(3, true))
+			if err != nil {
+				t.Fatalf("SwitchSpareLeg: %v", err)
+			}
+			assertOrder(t, node,
+				"--fail "+srv.nf.DmPath(legName(srv, testDataLeg)),
+				"--remove "+srv.nf.DmPath(legName(srv, testDataLeg)),
+				"--add --failfast "+
+					srv.nf.DmPath(legName(srv, switchSpareLeg)),
+			)
+			assertNoCall(t, node, "--zero-superblock")
+			assertNoCall(t, node, "cmd mdadm --detail")
+			assertNoCall(t, node,
+				"--remove "+srv.nf.DmPath(legName(srv, testDataLeg2)))
+			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+				"grp data after the switch")
+		})
 	}
-	if _, err := srv.SyncupCntlr(ctx, withSpare(2, false)); err != nil {
+}
+
+// switchSpareLeg / switchSpareSide are the spare of switchSpareReq.
+const (
+	switchSpareLeg  = uint64(0x77)
+	switchSpareSide = uint64(0x78)
+)
+
+// switchSpareReq is the two-leg raid1 request with a spare leg, before the
+// switch (the spare in spare_leg_list) or after it (the spare promoted into
+// testDataLeg's place, testDataLeg parked in spare_leg_list).
+func switchSpareReq(revision uint64, promoted bool) *pb.SyncupCntlrRequest {
+	req := cntlrReq(reqOpts{revision: revision, primary: true,
+		raid1: true, twoLegs: true})
+	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
+	grp := slice.GetDataGrpList()[0]
+	member := grp.GetLegList()[0]
+	spare := legOf(switchSpareLeg, sideOf(switchSpareSide, testIp2,
+		testSvcId2))
+	spare.LegIdx = 2
+	if promoted {
+		grp.LegList[0] = spare
+		grp.SpareLegList = []*pb.Leg{member}
+	} else {
+		grp.SpareLegList = []*pb.Leg{spare}
+	}
+	return req
+}
+
+// TestSwitchSpareLegKilledVerb pins CN12's killed-verb rule for the switch:
+// a `--fail`, `--remove` or `--add` that did not answer leaves the group row
+// ERROR with the kill's error, whether the kernel completed the command or
+// the tool was killed before touching anything. A killed `--fail` or
+// `--remove` leaves the pass before the add loop — extras leave before
+// promotions arrive, so the promoted spare is never added beside a member md
+// may still hold — and the next converge completes the switch. An error
+// swallowed here would read the row OK over a half-done switch.
+func TestSwitchSpareLegKilledVerb(t *testing.T) {
+	for _, verb := range []string{" --fail ", " --remove ", " --add "} {
+		for _, noEffect := range []bool{true, false} {
+			name := strings.TrimSpace(verb) + ", completed"
+			if noEffect {
+				name = strings.TrimSpace(verb) + ", no effect"
+			}
+			t.Run(name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				ctx := context.Background()
+				if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
+					t.Fatalf("SyncupCn: %v", err)
+				}
+				if _, err := srv.SyncupCntlr(
+					ctx, switchSpareReq(2, false)); err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
+					testCluster, testCn, testSp, 0, 0, false))
+
+				node.mu.Lock()
+				if noEffect {
+					node.killCmdNoEffectAlways[verb] = true
+				} else {
+					node.killCmdAlways[verb] = true
+				}
+				node.mu.Unlock()
+				node.Reset()
+				reply, err := srv.SyncupCntlr(ctx, switchSpareReq(3, true))
+				if err != nil {
+					t.Fatalf("SwitchSpareLeg: %v", err)
+				}
+				row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+				if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+					!strings.Contains(row.GetDetails(), "killed") {
+					t.Fatalf("the switch with %s killed read %v %q, "+
+						"want ERROR with the kill", strings.TrimSpace(verb),
+						row.GetStatus(), row.GetDetails())
+				}
+				if !node.hasCall("cmd mdadm " + mdDev + verb) {
+					t.Fatalf("the switch ran no %s; the case is vacuous",
+						strings.TrimSpace(verb))
+				}
+				if verb != " --add " {
+					assertNoCall(t, node, "--add --failfast")
+				}
+				assertNoCall(t, node, "cmd mdadm --detail")
+
+				node.mu.Lock()
+				clear(node.killCmdNoEffectAlways)
+				clear(node.killCmdAlways)
+				node.mu.Unlock()
+				node.Reset()
+				if reply, err = srv.SyncupCntlr(
+					ctx, switchSpareReq(4, true)); err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				assertOk(t,
+					reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+					"grp data after the next converge")
+				assertNoCall(t, node, "cmd mdadm --detail")
+				got := slices.Sorted(slices.Values(
+					node.arrays[mdDev].members))
+				want := slices.Sorted(slices.Values([]string{
+					srv.nf.DmPath(legName(srv, testDataLeg2)),
+					srv.nf.DmPath(legName(srv, switchSpareLeg)),
+				}))
+				if !slices.Equal(got, want) {
+					t.Fatalf("after the next converge the array holds %v, "+
+						"want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestGroupNeverCreatesBesideARunningArray is the both-legs-replaced shape
+// (CN12, 2026-09-26): an array runs under the group's name holding none of
+// the wrappers leg_list now names — both legs switched out while this cntlr
+// was not converging, parked in spare_leg_list or already released. Md.Detail
+// finds an array by its leg_list members only, so it reads the group as
+// absent and the assembly runs; the fresh legs carry no superblock, which is
+// case 1, and a create there would put a second array under the name the
+// pool's concat resolves. The outcome must be an error that touches nothing:
+// no create, and no fail, remove or add against the running array — which a
+// Detail keyed on the parked spares too would have reached, failing and
+// removing the only members holding the group's data. The refusal holds when
+// the lsblk that asks whether an array runs under the name did not answer,
+// too: read as "no", a kill would create beside the running array.
+func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		parked        bool
+		killNameProbe bool
+	}{
+		{"parked", true, false},
+		{"released", false, false},
+		{"name probe killed", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true})
+			mdDev := srv.nf.MdPath(
+				srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+			held := append([]string(nil), node.arrays[mdDev].members...)
+
+			req := cntlrReq(reqOpts{
+				revision: 3, primary: true, raid1: true, twoLegs: true})
+			grp := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)].
+				GetDataGrpList()[0]
+			fresh := legOf(0x71, sideOf(0x72, testIp, testSvcId))
+			fresh2 := legOf(0x73, sideOf(0x74, testIp2, testSvcId2))
+			fresh2.LegIdx = 1
+			if tc.parked {
+				grp.SpareLegList = grp.GetLegList()
+				for i, leg := range grp.SpareLegList {
+					leg.LegIdx = uint32(2 + i)
+				}
+			}
+			grp.LegList = []*pb.Leg{fresh, fresh2}
+			// Keyed on the md node: the dm wrappers' devno reads are lsblk
+			// runs of the same form.
+			want := "holding none of the group's legs"
+			if tc.killNameProbe {
+				node.mu.Lock()
+				node.killCmdAlways["lsblk --nodeps --noheadings "+
+					"--output MAJ:MIN "+mdDev] = true
+				node.mu.Unlock()
+				want = "signal: killed"
+			}
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(), req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			info := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+			if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.Contains(info.GetDetails(), want) {
+				t.Fatalf("the group reported %v %q, want ERROR %q",
+					info.GetStatus(), info.GetDetails(), want)
+			}
+			assertNoCall(t, node, "cmd mdadm --create")
+			assertNoCall(t, node, "cmd mdadm --detail")
+			for _, verb := range []string{"--fail", "--remove", "--add"} {
+				assertNoCall(t, node, "cmd mdadm "+mdDev+" "+verb)
+			}
+			array := node.arrays[mdDev]
+			if array == nil || !slices.Equal(array.members, held) {
+				t.Fatalf("the running array changed: %+v, want members %v",
+					array, held)
+			}
+		})
+	}
+}
+
+// TestGroupProbeWalksOnce pins the cost of the sysfs md read (CN12): a Check
+// round lists /sys/block and each array's md/ directory once for all of its
+// groups, not once per group. A listing is an `ls` — a process — and a walk
+// per group lists every array of the node per group: at 32 slices, 64 groups
+// over 64 arrays, 4160 listings a round where the whole round has 5 s. The
+// round's other listing is the verdict's own (CN30), which enumerates the
+// node exactly as the sweep does. Neither lists or reads any /sys/block entry
+// that is not an array node: a CN's dm devices and nvme heads outnumber its
+// arrays many times over.
+func TestGroupProbeWalksOnce(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, raid1: true, twoSlices: true})
+	var arrays []string
+	for _, array := range node.arrays {
+		arrays = append(arrays, array.node)
+	}
+	if len(arrays) != 4 {
+		t.Fatalf("the fixture built %d arrays, want 4", len(arrays))
+	}
+	others := seedNonArrayEntries(node)
+	node.Reset()
+	_, info := srv.checkCntlrRound(context.Background(),
+		&pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+	if len(info.GetGrpIdToMdRaid()) != 4 {
+		t.Fatalf("the round reported %d md rows, want 4",
+			len(info.GetGrpIdToMdRaid()))
+	}
+	if got := countCalls(node, "cmd ls -1 "+sysfsBlockDir); got != 2 {
+		t.Errorf("the round listed %s %d times, want 2 (the verdict's and "+
+			"the md rows' one walk)", sysfsBlockDir, got)
+	}
+	for _, array := range arrays {
+		dir := sysfsBlockDir + "/" + array + "/md"
+		if got := countCalls(node, "cmd ls -1 "+dir); got != 2 {
+			t.Errorf("the round listed %s %d times, want 2", dir, got)
+		}
+	}
+	assertNoNonArrayRead(t, node, others, "the round")
+}
+
+// seedNonArrayEntries puts the block devices a CN really has beside its
+// arrays at the top of the fake's /sys/block — the fake publishes arrays
+// alone there otherwise — so a reader that stopped filtering for array nodes
+// has something to list. dm-0 is given an md/ directory it never has on a
+// real node, which a missing filter would list and record as an array.
+func seedNonArrayEntries(node *fakeNode) []string {
+	names := []string{"dm-0", "dm-7", "nvme0n1", "nvme0c0n1", "sda", "loop0"}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	for _, name := range names {
+		node.dirs[sysfsBlockDir+"/"+name] = true
+	}
+	node.dirs[sysfsBlockDir+"/dm-0/md"] = true
+	return names
+}
+
+// assertNoNonArrayRead fails on any listing or read of, or under, a
+// /sys/block entry seedNonArrayEntries planted.
+func assertNoNonArrayRead(
+	t *testing.T, node *fakeNode, names []string, label string,
+) {
+	t.Helper()
+	for _, name := range names {
+		dir := sysfsBlockDir + "/" + name
+		for _, call := range node.Calls() {
+			if call == "cmd ls -1 "+dir ||
+				strings.HasPrefix(call, "cmd ls -1 "+dir+"/") ||
+				strings.HasPrefix(call, "read "+dir+"/") {
+				t.Errorf("%s touched %s, which is no array node: %s",
+					label, dir, call)
+			}
+		}
+	}
+}
+
+// countCalls counts the recorded calls that are exactly line — a listing of
+// /sys/block is a prefix of every listing below it.
+func countCalls(node *fakeNode, line string) int {
+	n := 0
+	for _, call := range node.Calls() {
+		if call == line {
+			n++
+		}
+	}
+	return n
+}
+
+// TestGroupConvergeWalksOnce is TestGroupProbeWalksOnce for the converge
+// (CN12): build hands every group of the pass the same walk too. An
+// equal-revision SyncupCntlr over the same four arrays assembles nothing, so
+// no Refresh runs, and it lists /sys/block and each array's md/ directory
+// exactly twice — the sweep's ListArrays enumeration and the one walk the
+// groups share — and no /sys/block entry that is not an array node. A walk
+// per group would list each five times.
+func TestGroupConvergeWalksOnce(t *testing.T) {
+	srv, node := newTestServer(t)
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoSlices: true}
+	syncupBoth(t, srv, opts)
+	var arrays []string
+	for _, array := range node.arrays {
+		arrays = append(arrays, array.node)
+	}
+	if len(arrays) != 4 {
+		t.Fatalf("the fixture built %d arrays, want 4", len(arrays))
+	}
+	others := seedNonArrayEntries(node)
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(opts))
+	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
-	// A spare is connected, wrapped and probed but never an md member.
-	if !node.hasCall("cmd dmsetup create " + legName(srv, spareLeg)) {
-		t.Fatalf("the spare leg was not wrapped")
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
-	for _, call := range node.callsMatching("cmd mdadm --create") {
-		if strings.Contains(call, legName(srv, spareLeg)) {
-			t.Fatalf("a spare leg became an md member: %s", call)
+	if len(reply.GetCntlrInfo().GetGrpIdToMdRaid()) != 4 {
+		t.Fatalf("the converge reported %d md rows, want 4",
+			len(reply.GetCntlrInfo().GetGrpIdToMdRaid()))
+	}
+	assertNoCall(t, node, "cmd mdadm")
+	if got := countCalls(node, "cmd ls -1 "+sysfsBlockDir); got != 2 {
+		t.Errorf("the converge listed %s %d times, want 2 (the sweep's "+
+			"and the groups' one walk)", sysfsBlockDir, got)
+	}
+	for _, array := range arrays {
+		dir := sysfsBlockDir + "/" + array + "/md"
+		if got := countCalls(node, "cmd ls -1 "+dir); got != 2 {
+			t.Errorf("the converge listed %s %d times, want 2", dir, got)
 		}
+	}
+	assertNoNonArrayRead(t, node, others, "the converge")
+}
+
+// TestGroupAssemblyBesideAnArrayMidStop: after an assembly, Md.Refresh checks
+// every array the pass's walk recorded, another sp's among them, and another
+// cntlr may be stopping that one at that very moment (CN12). md unbinds a
+// member by clearing its array pointer and removing its block link, and
+// until it deletes the dev-* directory every attribute of the member's own
+// reads ENODEV. Both cases here keep the block link: the member's state
+// failing is the instant between md clearing the pointer and removing the
+// link, and its block/dev failing too is a check that did not answer at all.
+// That array is no business of this group: the check reads no attribute of
+// the member's own, and a check that did not answer only makes Refresh walk
+// that node again — the assembled groups read OK either way. The member with
+// its block link gone is TestGroupBesideAnUnboundMember's.
+func TestGroupAssemblyBesideAnArrayMidStop(t *testing.T) {
+	const leg = "/dev/mapper/other-sp-leg"
+	var listed []int
+	for _, tc := range []struct {
+		name string
+		fail []string // the other array's member attributes that fail
+	}{
+		{"member state unreadable", []string{"/state"}},
+		{"check unanswered", []string{"/state", "/block/dev"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			node.seedArray("/dev/md/other", "other", leg)
+			for _, attr := range tc.fail {
+				node.failReadAlways["/dev-"+node.kernelName(leg)+attr] = true
+			}
+			reply := syncupBoth(t, srv,
+				reqOpts{revision: 2, primary: true, raid1: true})
+			rows := reply.GetCntlrInfo().GetGrpIdToMdRaid()
+			if len(rows) != 2 {
+				t.Fatalf("the converge reported %d md rows, want 2",
+					len(rows))
+			}
+			for grp, row := range rows {
+				assertOk(t, row, fmt.Sprintf("grp %#x", grp))
+			}
+			other := node.mdNode("/dev/md/other")
+			listed = append(listed, countCalls(node,
+				"cmd ls -1 "+sysfsBlockDir+strings.TrimPrefix(other, "/dev")+
+					"/md"))
+		})
+	}
+	// Non-vacuity: with block/dev failing too, the check did not answer and
+	// Refresh walked the other array again after each of the two assemblies.
+	if len(listed) == 2 && listed[1] != listed[0]+2 {
+		t.Errorf("the other array's md/ was listed %d and %d times, want "+
+			"the second two more (the re-walks)", listed[0], listed[1])
+	}
+}
+
+// TestGroupBesideAnUnboundMember pins the kernel's own shape of another sp's
+// array mid-stop (CN12): md has unbound its member, so the member's block
+// link is gone — dev-*/block/dev and dev-*/block/dm/name read ENOENT — and
+// its dev-*/state reads ENODEV until md deletes the dev-* directory
+// (fakeNode.unbindMember). The walk records that member with no dm name,
+// which no group's names match, and never the array as unanswered; at this
+// instant the sweep's ListArrays reads the array as foreign and leaves it
+// alone. So a group not built yet — a new primary's first converge
+// overlapping another sp's teardown — is created beside it with every md row
+// OK and a clean reply, and a built group's Check round and converge read OK
+// and run no mdadm. A walk that read the missing block/dev as "did not
+// answer" would refuse that assembly, which nothing re-drives, and a
+// ListArrays that did would fail the sweep's md enumeration at this instant
+// too (later in the stop, once md marks the array deleted, its array_state
+// reads EBUSY and ListArrays does fail that pass — CN12).
+func TestGroupBesideAnUnboundMember(t *testing.T) {
+	ctx := context.Background()
+	const leg = "/dev/mapper/other-sp-leg"
+	opts := reqOpts{revision: 2, primary: true, raid1: true}
+	assertRows := func(t *testing.T, rows map[uint64]*pb.ResInfo, label string) {
+		t.Helper()
+		if len(rows) != 2 {
+			t.Fatalf("%s reported %d md rows, want 2", label, len(rows))
+		}
+		for grp, row := range rows {
+			assertOk(t, row, fmt.Sprintf("%s grp %#x", label, grp))
+		}
+	}
+	unbound := func(t *testing.T, node *fakeNode) {
+		t.Helper()
+		node.seedArray("/dev/md/other", "other", leg)
+		node.unbindMember("/dev/md/other", leg)
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		mdDir := sysfsBlockDir + "/" + node.arrays["/dev/md/other"].node + "/md"
+		devDir := mdDir + "/dev-" + node.kernelName(leg)
+		if !node.dirs[devDir] || node.dirs[devDir+"/block"] {
+			t.Fatalf("the unbound member's dev-* directory must stay and " +
+				"its block link go; the case is vacuous otherwise")
+		}
+	}
+
+	t.Run("not built", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		if reply, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil ||
+			reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("SyncupCn: %v %v", reply.GetAgentReply(), err)
+		}
+		unbound(t, node)
+		node.Reset()
+		reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("the converge beside the unbound member replied %v, "+
+				"want a clean reply", reply.GetAgentReply())
+		}
+		assertRows(t, reply.GetCntlrInfo().GetGrpIdToMdRaid(), "converge")
+		if got := len(node.callsMatching("cmd mdadm --create")); got != 2 {
+			t.Fatalf("the converge created %d arrays, want both groups'",
+				got)
+		}
+		if node.arrayGone("/dev/md/other") {
+			t.Fatalf("the sweep stopped the other sp's array")
+		}
+	})
+
+	t.Run("built", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, opts)
+		probeAllLegs(t, srv)
+		unbound(t, node)
+		node.Reset()
+		check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+		if check.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("the Check round beside the unbound member replied "+
+				"%v, want a clean verdict", check.GetAgentReply())
+		}
+		assertRows(t, info.GetGrpIdToMdRaid(), "check")
+		reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("the converge beside the unbound member replied %v, "+
+				"want a clean reply", reply.GetAgentReply())
+		}
+		assertRows(t, reply.GetCntlrInfo().GetGrpIdToMdRaid(), "converge")
+		assertNoCall(t, node, "cmd mdadm")
+	})
+}
+
+// TestGroupBesideAnUnansweredArray pins that another sp's array never turns
+// the md row of a group whose own array answered ERROR. The pass's walk reads
+// every array on the node, and another array's md/ listing or member dm-name
+// read can fail to answer (the fake kills the ls, or fails the read with an
+// error that is not ENOENT); an md row counts toward cntlr health, so an
+// error there would fail this sp's primary over for a read of another sp's
+// array — the very fault a failover cannot fix. With the group's array built,
+// a Check round and a converge read OK and run no mdadm; both reply a
+// Leftover all the same, because the sweep's ListArrays keeps the strict
+// rule (CN21) and the same fault fails its md enumeration — a reply code,
+// never a row. With it not built yet, the unanswered array may be the
+// group's own, so the converge neither creates nor assembles (ERROR); the
+// test's next SyncupCntlr, once the array answers, assembles it — nothing
+// re-drives that converge by itself (CN12).
+func TestGroupBesideAnUnansweredArray(t *testing.T) {
+	ctx := context.Background()
+	const leg = "/dev/mapper/other-sp-leg"
+	opts := reqOpts{revision: 2, primary: true, raid1: true}
+	for _, tc := range []struct {
+		name string
+		kill func(node *fakeNode)
+	}{
+		{"member dm name", func(node *fakeNode) {
+			node.failReadAlways["/dev-"+node.kernelName(leg)+
+				"/block/dm/name"] = true
+		}},
+		{"md listing", func(node *fakeNode) {
+			node.killCmdAlways["ls -1 "+sysfsBlockDir+strings.TrimPrefix(
+				node.mdNode("/dev/md/other"), "/dev")+"/md"] = true
+		}},
+	} {
+		t.Run(tc.name+", built", func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, opts)
+			probeAllLegs(t, srv)
+			node.seedArray("/dev/md/other", "other", leg)
+			tc.kill(node)
+			// The same fault under the sweep's strict rule (CN21): the md
+			// enumeration of the Check verdict and of the converge's sweep
+			// fails, which is a Leftover reply, never a row.
+			assertMdLeftover := func(label string, reply *pb.AgentReply) {
+				t.Helper()
+				if reply.GetCode() != common.ReplyCodeLeftover ||
+					!strings.Contains(reply.GetDetails(),
+						"enumeration failed") ||
+					!strings.Contains(reply.GetDetails(), "md arrays") {
+					t.Fatalf("the %s replied %v, want a Leftover naming "+
+						"the md enumeration", label, reply)
+				}
+			}
+			node.Reset()
+			check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr(), Revision: 2,
+			}, nil)
+			rows := info.GetGrpIdToMdRaid()
+			if len(rows) != 2 {
+				t.Fatalf("the Check round reported %d md rows, want 2",
+					len(rows))
+			}
+			for grp, row := range rows {
+				assertOk(t, row, fmt.Sprintf("check grp %#x", grp))
+			}
+			assertMdLeftover("Check round", check.GetAgentReply())
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			for grp, row := range reply.GetCntlrInfo().GetGrpIdToMdRaid() {
+				assertOk(t, row, fmt.Sprintf("converge grp %#x", grp))
+			}
+			assertNoCall(t, node, "cmd mdadm")
+			assertMdLeftover("converge", reply.GetAgentReply())
+		})
+		t.Run(tc.name+", not built", func(t *testing.T) {
+			srv, node := newTestServer(t)
+			// The node's own sweep refuses to run over an enumeration that
+			// did not answer (CN21), so the cn is synced first.
+			if reply, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil ||
+				reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("SyncupCn: %v %v", reply.GetAgentReply(), err)
+			}
+			node.seedArray("/dev/md/other", "other", leg)
+			tc.kill(node)
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			rows := reply.GetCntlrInfo().GetGrpIdToMdRaid()
+			if len(rows) != 2 {
+				t.Fatalf("the converge reported %d md rows, want 2",
+					len(rows))
+			}
+			for grp, row := range rows {
+				if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+					!strings.Contains(row.GetDetails(), "did not answer") {
+					t.Fatalf("grp %#x beside an unanswered array, with "+
+						"its own not built, read %v %q, want ERROR "+
+						"naming it", grp, row.GetStatus(), row.GetDetails())
+				}
+			}
+			assertNoCall(t, node, "cmd mdadm --create")
+			assertNoCall(t, node, "cmd mdadm --assemble")
+
+			clear(node.failReadAlways)
+			clear(node.killCmdAlways)
+			if reply, err = srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			for grp, row := range reply.GetCntlrInfo().GetGrpIdToMdRaid() {
+				assertOk(t, row, fmt.Sprintf("answering grp %#x", grp))
+			}
+		})
+	}
+}
+
+// TestGroupProbeIsSysfsOnly pins the trigger of the failover ping-pong at the
+// probe itself (CN28). A primary's Check round over an array md has failed a
+// member of (md/degraded 1, the member faulty) reports the md row from sysfs:
+// OK with "degraded" in its details, and not one mdadm command — the old
+// `mdadm --detail` loaded a superblock from a member, blocked on a dead one
+// past the soft timeout, and turned the row ERROR, which counts toward cntlr
+// health and failed the primary over. A rebuild reads in mdadm's own words
+// with sysfs's progress. An array that is not running (inactive here, the
+// other states in TestGroupProbeArrayStates) reads ERROR with its state as
+// details, and a converge leaves it alone.
+func TestGroupProbeIsSysfsOnly(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, raid1: true, twoLegs: true})
+	probeAllLegs(t, srv)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	node.setMdSync(mdDev, 1, "idle", "none")
+	node.setMemberState(mdDev, srv.nf.DmPath(legName(srv, testDataLeg2)),
+		"faulty,failfast")
+	req := &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 2,
+	}
+	round := func(label string) *pb.ResInfo {
+		t.Helper()
+		node.Reset()
+		_, info := srv.checkCntlrRound(context.Background(), req, nil)
+		for _, call := range node.Calls() {
+			if strings.Contains(call, "cmd mdadm") {
+				t.Fatalf("%s: the check round ran mdadm: %s", label, call)
+			}
+		}
+		return info.GetGrpIdToMdRaid()[testDataGrp]
+	}
+
+	row := round("degraded")
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+		row.GetDetails() != "clean, degraded" {
+		t.Fatalf("a degraded array reported %v %q, want OK \"clean, "+
+			"degraded\"", row.GetStatus(), row.GetDetails())
+	}
+
+	node.setMdSync(mdDev, 1, "recover", "32768 / 2093056")
+	row = round("recovering")
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+		row.GetDetails() != "clean, degraded, recovering (32768 / 2093056)" {
+		t.Fatalf("a rebuilding array reported %v %q", row.GetStatus(),
+			row.GetDetails())
+	}
+
+	node.setArrayState(mdDev, "inactive")
+	row = round("inactive")
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		row.GetDetails() != "inactive" {
+		t.Fatalf("an inactive array reported %v %q, want ERROR \"inactive\"",
+			row.GetStatus(), row.GetDetails())
+	}
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 2, primary: true, raid1: true, twoLegs: true}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	info := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(info.GetDetails(), "inactive") {
+		t.Fatalf("a converge over an inactive array reported %v %q",
+			info.GetStatus(), info.GetDetails())
+	}
+	// Not one mdadm command: no --add, --fail or --remove against the
+	// array, no assembly, and no probe of it either.
+	assertNoCall(t, node, "cmd mdadm")
+}
+
+// TestGroupProbeArrayStates pins which array_state values are a running array
+// (CN12, CN28), through the verdict and, every state but "clear", through the
+// converge's gate. The six running ones read OK with the state and the
+// "degraded" of a failed member. write-pending is the one the fault lives in
+// — md shows it while a superblock write is stuck on a dead member, and the
+// lab read it in exactly that window — so an ERROR there would bring the
+// failover trigger back through the verdict. Every other state reads ERROR
+// with the state as details, and "clear", which the lab never showed (a
+// stopped array's /sys/block/mdN goes at once), reads MISSING like an absent
+// array on the Check round. No converge is driven over "clear": md reads
+// clear only for an array with no member at all, which no group's Detail can
+// match. A converge reconciles a running array whatever its state — here the
+// --add of the leg_list member it lacks — and runs no mdadm against an array
+// in any other state it is driven over.
+func TestGroupProbeArrayStates(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	probeAllLegs(t, srv)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+	req := &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 2,
+	}
+	const (
+		ok      = pb.ResStatus_RES_STATUS_OK
+		failed  = pb.ResStatus_RES_STATUS_ERROR
+		missing = pb.ResStatus_RES_STATUS_MISSING
+	)
+	for _, tc := range []struct {
+		state   string
+		status  pb.ResStatus
+		details string
+	}{
+		{"clean", ok, "clean, degraded"},
+		{"active", ok, "active, degraded"},
+		{"active-idle", ok, "active-idle, degraded"},
+		{"write-pending", ok, "write-pending, degraded"},
+		{"readonly", ok, "readonly, degraded"},
+		{"read-auto", ok, "read-auto, degraded"},
+		{"inactive", failed, "inactive"},
+		{"suspended", failed, "suspended"},
+		{"broken", failed, "broken"},
+		{"no-such-state", failed, "no-such-state"},
+		{"clear", missing, ""},
+	} {
+		// md failed and removed the second leg: the array lacks a leg_list
+		// member it could re-add.
+		node.mu.Lock()
+		array := node.arrays[mdDev]
+		array.members = slices.DeleteFunc(array.members,
+			func(member string) bool { return member == leg2 })
+		node.mu.Unlock()
+		node.setMdSync(mdDev, 1, "idle", "none")
+		node.setArrayState(mdDev, tc.state)
+
+		node.Reset()
+		_, info := srv.checkCntlrRound(ctx, req, nil)
+		row := info.GetGrpIdToMdRaid()[testDataGrp]
+		if row.GetStatus() != tc.status || row.GetDetails() != tc.details {
+			t.Errorf("%s: the check round reported %v %q, want %v %q",
+				tc.state, row.GetStatus(), row.GetDetails(), tc.status,
+				tc.details)
+		}
+		assertNoCall(t, node, "cmd mdadm")
+		if tc.status == missing {
+			continue
+		}
+
+		node.Reset()
+		reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+		if err != nil {
+			t.Fatalf("%s: SyncupCntlr: %v", tc.state, err)
+		}
+		row = reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+		added := node.hasCall("cmd mdadm " + mdDev + " --add --failfast " +
+			leg2)
+		switch {
+		case tc.status == ok && (row.GetStatus() != ok || !added):
+			t.Errorf("%s: the converge reported %v %q and added the "+
+				"missing member: %v, want OK and an --add", tc.state,
+				row.GetStatus(), row.GetDetails(), added)
+		case tc.status == failed && (row.GetStatus() != failed ||
+			!strings.Contains(row.GetDetails(), " is "+tc.state)):
+			t.Errorf("%s: the converge reported %v %q, want ERROR naming "+
+				"the state", tc.state, row.GetStatus(), row.GetDetails())
+		case tc.status == failed && node.hasCall("cmd mdadm"):
+			t.Errorf("%s: the converge ran mdadm on an array that is not "+
+				"running: %v", tc.state, node.callsMatching("cmd mdadm"))
+		}
+	}
+}
+
+// TestGroupForeignMemberIsAnError: an array that holds the group's leg
+// wrappers and a member that is not a dm device is not ours to reconcile
+// (CN12), and its md row reads ERROR naming that member (CN28) — on a Check
+// round and on a converge alike, with no mdadm run. Without the converge's
+// guard the foreign member is an extra with no dm name, and reconcileMembers
+// would --fail and --remove "/dev/mapper/".
+func TestGroupForeignMemberIsAnError(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	probeAllLegs(t, srv)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	held := append(append([]string(nil), node.arrays[mdDev].members...),
+		"/dev/sdb1")
+	node.seedArray(mdDev, node.arrays[mdDev].name, held...)
+	want := "foreign member " + node.devNo["/dev/sdb1"]
+	check := func(label string, row *pb.ResInfo) {
+		t.Helper()
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			!strings.Contains(row.GetDetails(), want) {
+			t.Fatalf("%s: the md row reported %v %q, want ERROR %q", label,
+				row.GetStatus(), row.GetDetails(), want)
+		}
+		assertNoCall(t, node, "cmd mdadm")
 	}
 
 	node.Reset()
-	if _, err := srv.SyncupCntlr(ctx, withSpare(3, true)); err != nil {
-		t.Fatalf("SwitchSpareLeg: %v", err)
+	_, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 2,
+	}, nil)
+	check("check round", info.GetGrpIdToMdRaid()[testDataGrp])
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
 	}
-	assertOrder(t, node,
-		"--fail "+srv.nf.DmPath(legName(srv, testDataLeg)),
-		"--remove "+srv.nf.DmPath(legName(srv, testDataLeg)),
-		"--add --failfast "+srv.nf.DmPath(legName(srv, spareLeg)),
-	)
-	assertNoCall(t, node, "--zero-superblock")
+	check("converge", reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp])
+	if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+		t.Fatalf("the array's members changed to %v, want %v", got, held)
+	}
+}
+
+// TestGroupUnansweredSysfsReadIsAnError is "did not answer is not absent"
+// (CN12, CN28) at the callers, where TestMdDetailFromSysfsOnly pins it at
+// Md: a Check round whose walk left no array answering (the kill hits every
+// array's member names), or whose read of the matched array did not answer,
+// reports the md row ERROR, never MISSING, and a converge refuses with
+// no mdadm at all. Read as absent, a killed member name or array_state would
+// send the group into an assembly beside its running array — the shape a
+// killed `mdadm --detail` once had. A member's block/dev, which only names a
+// foreign member now that members are compared by dm name
+// (TestGroupMembersComparedByName), keeps the same rule.
+func TestGroupUnansweredSysfsReadIsAnError(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	probeAllLegs(t, srv)
+	req := &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 2,
+	}
+	for _, key := range []string{
+		// Md.Walk's member names: every array reads unanswered and none
+		// matches, so Detail fails
+		"/block/dm/name",
+		"/md/degraded", // readDetail: the walk answers, Detail fails
+		// readDetail's first read: absent would assemble beside the array
+		"/md/array_state",
+		// readDetail's member devno, which names a foreign member
+		"/block/dev",
+	} {
+		node.mu.Lock()
+		node.killReadAlways[key] = true
+		node.mu.Unlock()
+
+		node.Reset()
+		_, info := srv.checkCntlrRound(ctx, req, nil)
+		row := info.GetGrpIdToMdRaid()[testDataGrp]
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+			t.Errorf("%s killed: the check round reported %v %q, want ERROR",
+				key, row.GetStatus(), row.GetDetails())
+		}
+		assertNoCall(t, node, "cmd mdadm")
+
+		node.Reset()
+		reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+		if err != nil {
+			t.Fatalf("%s killed: SyncupCntlr: %v", key, err)
+		}
+		row = reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+			t.Errorf("%s killed: the converge reported %v %q, want ERROR",
+				key, row.GetStatus(), row.GetDetails())
+		}
+		assertNoCall(t, node, "cmd mdadm")
+
+		node.mu.Lock()
+		delete(node.killReadAlways, key)
+		node.mu.Unlock()
+	}
+}
+
+// TestGroupMembersComparedByName pins CN12's member comparison (amended
+// 2026-09-26): the held set is the dm names sysfs gave the array's members,
+// compared with the leg_list wrapper names, and reconcileMembers runs no
+// lsblk. Keyed by device number, an lsblk of a leg_list wrapper that did not
+// answer left that wrapper out of the wanted set, its in-sync member counted
+// as an extra, and an equal-revision converge --failed and --removed it — the
+// add loop skipped it for the same reason, and the mirror ran on one member
+// until some unrelated converge.
+func TestGroupMembersComparedByName(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	held := slices.Clone(node.arrays[mdDev].members)
+	if len(held) != 2 {
+		t.Fatalf("the converged array holds %v, want both legs", held)
+	}
+	for _, legId := range []uint64{testDataLeg, testDataLeg2} {
+		lsblk := "lsblk --nodeps --noheadings --output MAJ:MIN " +
+			srv.nf.DmPath(legName(srv, legId))
+		node.mu.Lock()
+		node.killCmdAlways[lsblk] = true
+		node.mu.Unlock()
+
+		node.Reset()
+		reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+		if err != nil {
+			t.Fatalf("leg %#x's lsblk killed: SyncupCntlr: %v", legId, err)
+		}
+		for _, verb := range []string{"--fail", "--remove", "--add"} {
+			assertNoCall(t, node, "cmd mdadm "+mdDev+" "+verb)
+		}
+		assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+			fmt.Sprintf("grp data, leg %#x's lsblk killed", legId))
+		if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+			t.Fatalf("leg %#x's lsblk killed: the array's members changed "+
+				"to %v, want %v", legId, got, held)
+		}
+
+		node.mu.Lock()
+		delete(node.killCmdAlways, lsblk)
+		node.mu.Unlock()
+	}
+}
+
+// TestGroupUnavailableLegMemberStaysWanted pins the other half of CN12's
+// member comparison: the wanted set is every leg_list wrapper name, available
+// or not. A leg this pass cannot use — its path inaccessible or
+// non-optimized, or its connect failing with the wrapper of an earlier pass
+// still there — is never added, but the member md still holds for it stays
+// wanted. Counted as an extra, an equal-revision converge would --fail and
+// --remove an in-sync member because one side's path was briefly unusable,
+// and run the mirror on the other.
+func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		unavail func(srv *CnAgentServer, node *fakeNode)
+		legErr  bool // leg 2's row reads ERROR: ensureLeg failed
+	}{
+		{"inaccessible", func(srv *CnAgentServer, node *fakeNode) {
+			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
+				testDataLeg2, testCn), testIp2, testSvcId2, "inaccessible")
+		}, false},
+		{"non-optimized", func(srv *CnAgentServer, node *fakeNode) {
+			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
+				testDataLeg2, testCn), testIp2, testSvcId2, "non-optimized")
+		}, false},
+		{"connect fails", func(srv *CnAgentServer, node *fakeNode) {
+			nqn := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2,
+				testCn)
+			node.mu.Lock()
+			defer node.mu.Unlock()
+			subsys := node.subsystems[nqn]
+			for _, ctrl := range slices.Clone(subsys.ctrls) {
+				node.dropCtrl(subsys, ctrl)
+			}
+			node.failCmdAlways["--nqn "+nqn+" --hostnqn"] =
+				"nvme connect: Connection refused"
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			opts := reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true}
+			syncupBoth(t, srv, opts)
+			mdDev := srv.nf.MdPath(
+				srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+			held := slices.Clone(node.arrays[mdDev].members)
+			if len(held) != 2 {
+				t.Fatalf("the converged array holds %v, want both legs",
+					held)
+			}
+			tc.unavail(srv, node)
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			for _, verb := range []string{"--fail", "--remove", "--add"} {
+				assertNoCall(t, node, "cmd mdadm "+mdDev+" "+verb)
+			}
+			assertOk(t,
+				reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+				"grp data")
+			legRow := reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg2]
+			if tc.legErr != (legRow.GetStatus() ==
+				pb.ResStatus_RES_STATUS_ERROR) {
+				t.Fatalf("leg 2's row read %v %q, want ERROR %v",
+					legRow.GetStatus(), legRow.GetDetails(), tc.legErr)
+			}
+			if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+				t.Fatalf("the array's members changed to %v, want %v",
+					got, held)
+			}
+		})
+	}
+}
+
+// TestGroupHeldFaultyMemberStaysHeld pins the held set of CN12's member
+// comparison: every member sysfs lists counts as held, whatever its
+// dev-*/state. Leg 2's member reads "faulty,failfast" while its leg is
+// available again, and an equal-revision converge runs no --fail, --remove
+// or --add and reads OK — the known limit "a member md failed stays failed"
+// (cnagent.md §7). A held set of in-sync members only would --add a member
+// md still holds, which mdadm refuses (it opens the device O_EXCL, and md
+// keeps its claim on a faulty member until the member is removed), and the
+// group row would read ERROR on every converge; the follow-up that re-adds a
+// faulty member must --remove it first.
+func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	held := slices.Clone(node.arrays[mdDev].members)
+	if len(held) != 2 {
+		t.Fatalf("the converged array holds %v, want both legs", held)
+	}
+	node.setMdSync(mdDev, 1, "idle", "none")
+	node.setMemberState(mdDev, srv.nf.DmPath(legName(srv, testDataLeg2)),
+		"faulty,failfast")
+	detail, err := mdLookup(ctx, srv.md, legName(srv, testDataLeg2))
+	if err != nil || !detail.Exists {
+		t.Fatalf("the array read (%+v, %v)", detail, err)
+	}
+	faulty := false
+	for _, member := range detail.Members {
+		faulty = faulty || member.DmName == legName(srv, testDataLeg2) &&
+			strings.Contains(member.State, "faulty")
+	}
+	if !faulty {
+		t.Fatalf("leg 2's member read %+v, want it faulty; the case is "+
+			"vacuous otherwise", detail.Members)
+	}
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	for _, verb := range []string{"--fail", "--remove", "--add"} {
+		assertNoCall(t, node, "cmd mdadm "+mdDev+" "+verb)
+	}
+	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+		"grp data, leg 2 faulty")
+	if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+		t.Fatalf("the array's members changed to %v, want %v", got, held)
+	}
+}
+
+// TestGroupNeverAddsAnUnavailableLeg pins the add loop's one guard now that
+// members are compared by dm name (CN12): a leg_list member the array lacks
+// is added only when its leg is available. Leg 2's wrapper is built but its
+// path is non-optimized, so an --add would put a member on a path this pass
+// may not use; the degraded array is left running on leg 1 and reads OK.
+// reconcileMembers runs no lsblk for either leg. Once the path is optimized
+// again, the next converge adds it.
+func TestGroupNeverAddsAnUnavailableLeg(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
+	syncupBoth(t, srv, opts)
+	mdDev := srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, false))
+	leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
+	nqn2 := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2, testCn)
+	node.mu.Lock()
+	array := node.arrays[mdDev]
+	array.members = slices.DeleteFunc(slices.Clone(array.members),
+		func(member string) bool { return member == leg2 })
+	array.degraded = 1
+	node.publishArray(array)
+	node.mu.Unlock()
+	node.setAnaState(nqn2, testIp2, testSvcId2, "non-optimized")
+
+	node.Reset()
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
+	for _, legId := range []uint64{testDataLeg, testDataLeg2} {
+		assertNoCall(t, node, "lsblk --nodeps --noheadings --output "+
+			"MAJ:MIN "+srv.nf.DmPath(legName(srv, legId)))
+	}
+	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+		"grp data, leg 2 unavailable")
+
+	// Non-vacuity: available again, the same converge adds it.
+	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
+	node.Reset()
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if !node.hasCall("cmd mdadm " + mdDev + " --add --failfast " + leg2) {
+		t.Fatalf("leg 2, available again, was not added")
+	}
 }
 
 // ---------------------------------------------------------------------------

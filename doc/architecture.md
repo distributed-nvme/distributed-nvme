@@ -3006,8 +3006,10 @@ bitmap/failfast/data-offset options):
       and the superblock check is the evidence the CN actually has, [D15]).
    2. Exactly one has a superblock ⇒ `mdadm --assemble` with that leg, then
       `mdadm --add` the other.
-   3. Both have superblocks ⇒ `mdadm --assemble` with both, then `mdadm --detail`; if
-      one leg was left out for stale metadata, `mdadm --add` it again.
+   3. Both have superblocks ⇒ `mdadm --assemble` with both, then read the array's
+      members (from sysfs, `cnagent.md` CN12; *amended 2026-09-26*, was `mdadm
+      --detail`, which opens a member and can block on a dead one past the command
+      timeout); if one leg was left out for stale metadata, `mdadm --add` it again.
 2. One leg available ⇒ `mdadm --assemble` **without** `--run`; mdadm decides:
    success ⇒ the group is available (degraded), failure ⇒ it is not.
 3. No leg available ⇒ the group is not available.
@@ -3495,9 +3497,10 @@ copier is future work outside dnvctl v1).
 ## Appendix A — command-pattern crib sheet
 
 Agents converge with stock tooling; the exact invocations below are normative patterns
-(placeholders in `{}`). Probing uses `mdadm --detail`, `dmsetup status/table/ls`,
-`losetup --associated`, sysfs walks under `/sys/class/nvme*`, and configfs reads for
-nvmet.
+(placeholders in `{}`). Probing uses `dmsetup status/table/ls`, `losetup
+--associated`, `mdadm --examine` (the §11.1.1 superblock test), sysfs walks under
+`/sys/class/nvme*` and `/sys/block/md*` (md arrays; *amended 2026-09-26*, was `mdadm
+--detail`, `cnagent.md` CN12), and configfs reads for nvmet.
 
 **[D13] DN disk metadata:** there are no shell commands here. The dn agent reads and
 writes the header block, the two volume-table slots and the dm-clone metadata slots

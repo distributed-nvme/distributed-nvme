@@ -10,13 +10,13 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases: smoke, redund, teardown, thinbm, clone_xfer, restart — §10-§14, plus
-# `teardown`, which is the teardown-by-sweep plan's §4.2 case and is the one
-# that injects faults (a pinned dm device, an iptables partition of the
-# nvme-tcp port, a background writer). Cleanup runs unconditionally at the
-# start and, on success only, at the end: a failing run leaves every
-# dm/md/nvmet object and all four agent logs in place and dumps diagnostics
-# (§17). cleanup_phase1 releases every case-T fault injector unconditionally,
-# so a failed run of that case cannot poison the next one.
+# `teardown`, which is the teardown-by-sweep plan's §4.2 case and injects the
+# faults (a pinned dm device, an iptables partition of the nvme-tcp port, a
+# background writer); case A's `degrade` stage reuses the partition. Cleanup
+# runs unconditionally at the start and, on success only, at the end: a
+# failing run leaves every dm/md/nvmet object and all four agent logs in place
+# and dumps diagnostics (§17). cleanup_phase1 releases every fault injector
+# unconditionally, so a failed run of either case cannot poison the next one.
 #
 # The uutils dd rule of §4 is absolute: this script never passes iflag= or
 # oflag= to dd. Writes use conv=fsync, reads that must hit the media are
@@ -537,18 +537,29 @@ leg_wait_ana() { # cnvm sp leg cn dnidx want secs
 }
 
 # leg_wait_not_live is leg_wait_ana's negative twin and the only barrier in the
-# suite that waits for a path to DIE. It exists for the partition stage of case
-# T: an ANA probe is the wrong instrument there, because a leg is connected
-# with ctrl_loss_tmo = -1 (agent/nvmehost.go), so its controller never goes
-# away and its per-path ana_state attribute keeps reading whatever the last ANA
-# log carried, while `State` moves to `connecting` within one keep-alive
-# interval. The polling itself is the VM's (one ssh round trip, not one per
-# sample), exactly as wait_ana's is.
+# suite that waits for a path to DIE. It exists for the partition stages (case
+# T's S4, case A's degrade): an ANA probe is the wrong instrument there,
+# because a leg is connected with ctrl_loss_tmo = -1 (agent/nvmehost.go), so
+# its controller never goes away and its per-path ana_state attribute keeps
+# reading whatever the last ANA log carried, while `State` moves to
+# `connecting` within one keep-alive interval. The polling itself is the
+# VM's (one ssh round trip, not one per sample), exactly as wait_ana's is.
 leg_wait_not_live() { # cnvm sp leg cn dnidx secs
 	local nqn
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$2" "$3" "$4")
 	helper "$1" "wait_path_not_live '$nqn' '${IP[$5]}' '$6'" ||
 		die "cn$4's path to dn$5 of leg $3 never left the 'live' state"
+}
+
+# leg_wait_live is leg_wait_not_live's positive twin: the barrier that a
+# partitioned path came back (case A's degrade). It reads `State` for the
+# same reason — ana_state kept reading `optimized` through the partition, so
+# a wait on it passes at its first sample.
+leg_wait_live() { # cnvm sp leg cn dnidx secs
+	local nqn
+	nqn=$(side_to_cn_nqn "$CLUSTER" "$2" "$3" "$4")
+	helper "$1" "wait_path_live '$nqn' '${IP[$5]}' '$6'" ||
+		die "cn$4's path to dn$5 of leg $3 never came back to 'live'"
 }
 
 # ---------------------------------------------------------------------------
@@ -562,8 +573,10 @@ sha_range() { # vm path countMiB [skipMiB]
 	sshv "$1" "dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
 }
 
+# write_range's status is dd's: `&& sync`, never `; sync`, whose 0 would
+# hide a write that failed (case A's degrade waits on one in the background).
 write_range() { # vm src dst countMiB [seekMiB]
-	sshv "$1" "dd if=$2 of=$3 bs=1M count=$4 seek=${5:-0} conv=fsync status=none; sync"
+	sshv "$1" "dd if=$2 of=$3 bs=1M count=$4 seek=${5:-0} conv=fsync status=none && sync"
 }
 
 make_pattern() { # vm path countMiB
@@ -775,7 +788,8 @@ NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
 UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
 TMPFS_DIR=/tmp/dnv-tmpfs
 # TR_SVC_ID mirrors the driver's constant of the same name: the nvme-tcp port
-# every agent listens on, and so the only port the case-T partition blocks.
+# every agent listens on, and so the only port the partition stages block
+# (case T's S4, case A's degrade).
 # It is duplicated here because this heredoc is quoted — nothing of the
 # driver's expands into it — and a partition aimed at the wrong port would
 # black-hole nothing and report success.
@@ -851,6 +865,22 @@ wait_path_not_live() {
 		sleep 0.5
 	done
 	echo "the path via $2 is still '$got' after $3s" >&2
+	return 1
+}
+
+# wait_path_live <nqn> <traddr> <secs> — wait_path_not_live's positive twin:
+# polls one path's State until it is `live` again, and prints it.
+wait_path_live() {
+	local got=none i
+	for ((i = 0; i < $3 * 2; i++)); do
+		got=$(path_field "$1" "$2" State)
+		if [ "$got" = live ]; then
+			echo "$got"
+			return 0
+		fi
+		sleep 0.5
+	done
+	echo "the path via $2 is '$got' after $3s" >&2
 	return 1
 }
 
@@ -1003,13 +1033,14 @@ mdstat() { cat /proc/mdstat 2>/dev/null || true; }
 # path can be disconnected by device instead of by NQN (Appendix A).
 ctrl_of() { path_field "$1" "$2" Name; }
 
-# --- fault injection (case T) -------------------------------------------------
+# --- fault injection (case T; the partition also case A's degrade) -----------
 #
-# The teardown-by-sweep case needs three things no other case does: a dm device
-# that cannot be removed, a leg whose remote stops answering without ever being
-# taken down cleanly, and host IO in flight across a teardown. All three live
-# here rather than in the case, because all three are VM-side state that
-# outlives the stage that created it — cleanup_phase1 releases every one of
+# The teardown-by-sweep case needs three things the other cases do not (case
+# A's degrade stage reuses the second, the partition): a dm device that cannot
+# be removed, a leg whose remote stops answering without ever being taken down
+# cleanly, and host IO in flight across a teardown. All three live here rather
+# than in the case, because all three are VM-side state that outlives the
+# stage that created it — cleanup_phase1 releases every one of
 # them unconditionally, on every run, whether this run used them or not.
 
 # pin_dev <dm name> — holds an open fd on one dm device, so `dmsetup remove`
@@ -1098,7 +1129,7 @@ unpin_all() {
 # binary lives in /usr/sbin and every command here arrives through `sudo bash
 # -c`, whose secure_path is not the invoking user's: a partition that silently
 # ran nothing would look exactly like a fabric that never noticed the loss,
-# which is the one failure this stage must not be able to mistake for a pass.
+# which is the one failure a partition stage must not mistake for a pass.
 iptables_bin() {
 	if command -v iptables >/dev/null 2>&1; then
 		echo iptables
@@ -1109,19 +1140,22 @@ iptables_bin() {
 	fi
 }
 
-# have_iptables reports the partition stage's one lab prerequisite. The stage
-# asks before it partitions anything, so a VM without the binary fails with a
-# sentence instead of with a path that simply never goes down.
+# have_iptables reports the partition stages' one lab prerequisite (case T's
+# S4 on VM2, case A's degrade on VM1). Each stage asks before it partitions
+# anything, so a VM without the binary fails with a sentence instead of with
+# a path that simply never goes down.
 have_iptables() {
 	if [ -n "$(iptables_bin)" ]; then echo yes; else echo no; fi
 }
 
 # partition_from <ip> — drops every packet this VM receives from <ip> aimed at
 # the nvme-tcp port. One direction and one port, deliberately: it takes the
-# legs the other VM's cn agent holds into THIS VM's sides and nothing else, so
-# the gRPC control plane both drivers need, this VM's own outbound connections
-# (their replies carry the port as the SOURCE, not the destination) and the
-# emulated host's paths all keep working.
+# legs the other VM's cn agent holds into THIS VM's sides, and the gRPC
+# control plane both drivers need and this VM's own outbound connections
+# (their replies carry the port as the SOURCE, not the destination) keep
+# working. The emulated host's paths keep working when the host runs on THIS
+# VM (case T's S4); partitioned from the host's VM (case A's degrade), the
+# host's path into this VM's cn agent goes as well.
 partition_from() {
 	local ipt
 	ipt=$(iptables_bin)
@@ -1267,8 +1301,9 @@ cn_events() { events "$CN_LOG" "${1:-}"; }
 # its log record outright, and the package-level `ReadBlockDirectAt` that
 # replaced it logs nothing at all (osclient.md §4.5.1, §8 acceptance).
 # Probe commands (lsblk, dmsetup info|table|status|ls, ls, findmnt, stat,
-# losetup --associated, mdadm --detail|--examine, nvme list-subsys) are
-# expected and deliberately not in the list.
+# losetup --associated, mdadm --examine, nvme list-subsys) are expected and
+# deliberately not in the list; the cn agent no longer runs `mdadm --detail`
+# at all (its md reads are sysfs since 2026-09-26), which is a read too.
 mutations() {
 	local trace=${1:-} log=${2:-$CN_LOG}
 	jq -r --arg t "$trace" '
@@ -1636,7 +1671,8 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role cn >/dev/null
 	kill_role dn >/dev/null
 
-	# The case-T fault injectors, first and unconditionally. Each of them
+	# The fault injectors (case T's three, and the partition case A's
+	# degrade stage reuses), first and unconditionally. Each of them
 	# outlives the stage that installed it and each would be diagnosed as
 	# something else entirely: a pin makes the dm passes below fail on a
 	# device nothing is testing, a partition rule black-holes the next run's
@@ -1945,8 +1981,9 @@ wipe_all() {
 cleanup_all() {
 	local idx pid pids=()
 	for idx in 1 2; do
-		# The other VM's ip is what the case-T partition rule names, and only
-		# this VM can remove it, so each VM is told which address to clear.
+		# The other VM's ip is what a partition rule names (case T's S4 on
+		# VM2, case A's degrade on VM1), and only this VM can remove it, so
+		# each VM is told which address to clear.
 		helper_ok "$idx" \
 			"cleanup_phase1 $(hex16 "${CNID[$idx]}") ${IP[$((3 - idx))]}" &
 		pids+=($!)
@@ -2544,7 +2581,7 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case A — redund (§11): raid1, failover, readonly
+# Case A — redund (§11): raid1, failover, dead leg, readonly
 # ---------------------------------------------------------------------------
 
 case_redund() {
@@ -2556,6 +2593,7 @@ case_redund() {
 	local uuid=22222222-2222-4222-8222-222222222222
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
+	local writer deadline mkey dkey lkey mst dst ldet n rules
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -2710,6 +2748,114 @@ case_redund() {
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund post-failover write"
+
+	stage degrade "a dead leg: the md rows stay OK, read from sysfs"
+	# CN28 as amended 2026-09-26: the md row is read from /sys/block/mdN/md,
+	# never from `mdadm --detail`, which loads the superblock from a member
+	# device and, when that member's DN side has gone, blocks until the
+	# path's failfast expires — ~13 s after the side died, past the 3 s soft
+	# timeout. The kill turned the md row ERROR, an md row counts toward
+	# cntlr health, and that failed the primary over: the first failover of
+	# the ping-pong found 2026-09-24. The partition (case T's, on VM1's
+	# INPUT from VM2 to the nvme-tcp port) takes CN2's two legs into DN1
+	# away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
+	# disk 0 of their arrays, the member the old `--detail` loaded its
+	# superblock from. It also cuts the emulated host's path to CN1, the
+	# standby's, inaccessible since the failover; nothing below reads it,
+	# and it reconnects once the rule goes.
+	assert_eq "$(helper 1 have_iptables)" yes \
+		"degrade: vm1 needs iptables to partition the nvme-tcp port"
+	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
+		"degrade: the partition rule was not installed"
+	# md learns that a member is dead only from an IO to it. This write goes
+	# to both data legs; the one into DN1 sits in the multipath head until
+	# the failfast expires, then fails, md fails that member (--failfast) and
+	# the write completes on DN2's. It runs in the background so that the
+	# check rounds below read the array while that write is stuck. The MiB
+	# is a fresh one, so the readback at the end of the stage can tell it
+	# from the one stage failover left at 9.
+	make_pattern "$hv" "$WORK/probe-redund.bin" 1
+	got=$(sha_range "$hv" "$WORK/probe-redund.bin" 1)
+	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9 &
+	writer=$!
+	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+	mkey=$(d16 "$A_MGRP")
+	dkey=$(d16 "$A_DGRP")
+	deadline=$((SECONDS + 90))
+	while :; do
+		out=$(cnctl 2 check-cntlr --revision "$rev2" --show-info \
+			--sp "$sp" --cntlr "$c2")
+		mst=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
+		dst=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$dkey\"].status // \"ABSENT\"")
+		# Every round, not just the last: the window this stage exists for
+		# is the one where the member is dead and md has not failed it yet.
+		[ "$mst" = RES_STATUS_OK ] && [ "$dst" = RES_STATUS_OK ] ||
+			die "degrade: an md row read meta $mst / data $dst with a dead" \
+				"member: $(jq_of "$out" '.cntlr_info.grp_id_to_md_raid')"
+		ldet=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$dkey\"].details // \"\"")
+		n=0
+		for lkey in "$(d16 "${A_MLEG[1]}")" "$(d16 "${A_DLEG[1]}")"; do
+			[ "$(jq_of "$out" \
+				".cntlr_info.leg_id_to_leg[\"$lkey\"].status // \"\"")" = \
+				RES_STATUS_ERROR ] && n=$((n + 1))
+		done
+		case "$ldet" in
+		*degraded*) [ "$n" = 2 ] && break ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "degrade: after 90 s the data md row reads '$ldet' and" \
+				"$n of the two dead legs read RES_STATUS_ERROR"
+		sleep 1
+	done
+	log "  degraded: data md row '$ldet'"
+	deadline=$((SECONDS + 60))
+	while kill -0 "$writer" 2>/dev/null; do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "degrade: the host write never completed on the surviving leg"
+		sleep 1
+	done
+	wait "$writer" || die "degrade: the host write through DN2's leg failed"
+	# No md probe of this stage ran mdadm — not `--detail`, not anything:
+	# the check rounds read /sys/block. The listing is the positive control
+	# that the rounds' commands are under this trace at all.
+	seq=$(helper 2 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" '^ls -1 /sys/block$')" != 0 ] ||
+		die "degrade: no sysfs walk of the check rounds is under this trace"
+	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
+		"degrade: a check round ran mdadm (the md row must come from sysfs)"
+	# Restored before the readonly stage, which needs every leg serving.
+	assert_eq "$(helper 1 "unpartition_from ${IP[2]}")" unpartitioned \
+		"degrade: the partition rule was not removed"
+	rules=$(helper 1 "partition_rules ${IP[2]}")
+	[ -z "$rules" ] || die "degrade: vm1 still holds partition rules: $rules"
+	leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
+	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+	# The leg rows clear on their probers' next completed round. The md
+	# member md failed stays failed — CN12 re-adds a leg only when the array
+	# lacks it (cnagent.md §7 known limits) — so the data array stays
+	# degraded, and OK, for the rest of the case.
+	deadline=$((SECONDS + 60))
+	while :; do
+		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2")
+		n=0
+		for lkey in "$(d16 "${A_MLEG[1]}")" "$(d16 "${A_DLEG[1]}")"; do
+			[ "$(jq_of "$out" \
+				".cntlr_info.leg_id_to_leg[\"$lkey\"].status // \"\"")" = \
+				RES_STATUS_OK ] && n=$((n + 1))
+		done
+		[ "$n" = 2 ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "degrade: $n of the two restored legs read RES_STATUS_OK" \
+				"after 60 s"
+		sleep 1
+	done
+	# $got is the digest of the fresh MiB the background write carried,
+	# which could land on DN2's member alone: md had failed DN1's.
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund degraded readback"
 
 	stage readonly "SP_LEVEL_READONLY: reads served, writes error ([D11])"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READONLY"'
@@ -3901,12 +4047,14 @@ case_restart() {
 		diff -u "$snap/$name.pre.json" "$snap/$name.post.json" >&2 ||
 			die "restart: $name differs across the restart"
 	done
-	# An active array is recognized, not re-assembled.
+	# An active array is recognized, not re-assembled. It is read from
+	# /sys/block (CN12, 2026-09-26), so a `--detail` here is as wrong as a
+	# mutation and is no longer excluded.
 	for idx in 1 2; do
 		got=$(helper "$idx" cn_events | grep -E '^mdadm ' |
-			grep -Ev -- '--detail|--examine' || true)
+			grep -Ev -- '--examine' || true)
 		[ -z "$got" ] ||
-			die "restart: cn$idx ran a mutating mdadm:"$'\n'"$got"
+			die "restart: cn$idx ran an mdadm other than --examine:"$'\n'"$got"
 	done
 
 	stage idempotent "same-revision re-applies must mutate nothing"

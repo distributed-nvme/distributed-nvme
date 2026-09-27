@@ -1062,9 +1062,10 @@ func (s *CnAgentServer) deleteThinIdByName(
 }
 
 // stopArrayVerified stops one array and verifies it from sysfs. The node it
-// stops is the one sysfs named — /dev/mdN, never /dev/md/<name>, which
-// depends on udev having run — and nothing here runs `mdadm --detail`, whose
-// member reads block until failfast on a leg whose DN side has gone.
+// stops is the one sysfs named — /dev/mdN (or /dev/md_<name>), never
+// /dev/md/<name>, which depends on udev having run — and nothing here runs
+// `mdadm --detail`, whose member reads block until failfast on a leg whose DN
+// side has gone.
 func (s *CnAgentServer) stopArrayVerified(
 	ctx context.Context,
 	array MdArray,

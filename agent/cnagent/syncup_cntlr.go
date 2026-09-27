@@ -224,8 +224,10 @@ func (s *CnAgentServer) build(
 		}
 	}
 
-	// Groups (CN12) — a standby has none (§3.4).
+	// Groups (CN12) — a standby has none (§3.4). One /sys/block walk serves
+	// every group of the pass (Md.Walk).
 	if plan.wantGrp {
+		walks := &mdWalkOnce{md: s.md}
 		for _, gp := range plan.grps {
 			if gp.deferred {
 				// [D15]: a leg of leg_list is still provisioning, so there is no
@@ -236,7 +238,7 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			err := s.ensureGroup(ctx, gp, available)
+			err := s.ensureGroup(ctx, gp, available, walks)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
 		}

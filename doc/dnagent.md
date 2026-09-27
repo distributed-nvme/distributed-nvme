@@ -519,20 +519,27 @@ SH15. Every wrapper call wraps its ctx with
       removal, forgets the object and never enumerates it again, which is the
       leak the sweep exists to end (DN6).
 
-      Five primitives must honour it, because each one's caller answers an
+      Six primitives must honour it, because each one's caller answers an
       "absent" with a removal or with a decision that destroys data:
       `Dm.Info` (`agent/dm.go`, whose `nil, nil` gates `meta.FreeSide` and
       `meta.FreeCloneMeta` — see DN6's record rule), `osBase.listDir` and the
       `dirExists` above it (`agent/oswrap.go`, which `Nvmet.RemoveSubsystem`
-      and `RemovePortLink` walk their children through), `Md.Detail` and
-      `Md.HasSuperblock` (`cnagent.md` CN12: `--detail` and `--examine` both
-      open the array's member devices, so on a leg whose DN side is gone they
-      block past the soft timeout and get killed — and a killed `--examine`
-      read as "no superblock" would make `assembleGroup` run `mdadm --create
-      --assume-clean` over live data). `NvmeHost.readTrimmed` follows the
-      same rule from the other side of the fence: it reads sysfs rather than
-      running a tool, so **only** `fs.ErrNotExist` is "absent" and every
-      other read failure is an error — `/sys/class/nvme*` can stall while a
+      and `RemovePortLink` walk their children through), `Md.Detail` —
+      since 2026-09-26 a lookup in an `Md.Walk` of `/sys/block`, through
+      `listDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
+      sends `ensureGroup` into an assembly — `Md.HasSuperblock`
+      (`cnagent.md` CN12: `--examine` opens the member device, so on a leg
+      whose DN side is gone it blocks past the soft timeout and gets killed
+      — and a killed `--examine` read as "no superblock" would make
+      `assembleGroup` run `mdadm --create --assume-clean` over live data)
+      and `Md.NameInUse` (`cnagent.md` CN12, since 2026-09-26: an `lsblk`
+      of `/dev/md/{CnMdDevName}` whose "not in use" is what lets
+      `assembleGroup` run `mdadm --create --assume-clean` beside an array
+      already running under that name).
+      `NvmeHost.readTrimmed` follows the same rule from the other side of
+      the fence: it reads sysfs rather than running a tool, so **only**
+      `fs.ErrNotExist` is "absent" and every other read failure is an
+      error — `/sys/class/nvme*` can stall while a
       controller is mid-reset, and a stalled read taken as absence would
       report a live subsystem as not connected (SH20).
 
@@ -2246,12 +2253,15 @@ able to fail.
     drives a zeroing goroutine or a `blkdiscard` child through `Serve`
     (§6 test 19).
 12. No probe reads "did not answer" as "absent" (SH15): `Dm.Info`,
-    `osBase.listDir`, `Md.Detail` and `Md.HasSuperblock` all take their
-    answer from `osBase.runProbe` (exposed to the role packages as
-    `Cmd.RunProbe`), the one place `agent.Reported` is applied, and
-    `NvmeHost.readTrimmed` reads through `readAttrStrict`, which calls
-    absence only on `fs.ErrNotExist`. None of the five turns a non-nil error
-    into a nil-and-not-found.
+    `osBase.listDir`, `Md.HasSuperblock` and `Md.NameInUse` (the `lsblk`
+    of CN12's case-1 guard, since 2026-09-26) take their answer from
+    `osBase.runProbe` (exposed to the role packages as `Cmd.RunProbe`), the
+    one place `agent.Reported` is applied; `NvmeHost.readTrimmed` reads
+    through `readAttrStrict`, which calls absence only on
+    `fs.ErrNotExist`; and `Md.Detail` with the `Md.Walk` it reads from, the
+    sysfs md read since 2026-09-26 (`cnagent.md` CN12), goes through both —
+    `listDir` for the listings, `readAttrStrict` for the attributes. None of
+    the six turns a non-nil error into a nil-and-not-found.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

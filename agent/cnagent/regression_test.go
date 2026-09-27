@@ -203,6 +203,7 @@ func TestGroupNeverCreatesOverASubsetOfLegs(t *testing.T) {
 	if info.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("the group reported %v, want ERROR", info.GetStatus())
 	}
+	assertNoCall(t, node, "cmd mdadm --detail")
 }
 
 // CN13: a GrowSlice that appends only meta groups changes nothing in the

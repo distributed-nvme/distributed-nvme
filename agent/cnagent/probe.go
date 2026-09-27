@@ -59,7 +59,8 @@ func (s *CnAgentServer) probeCntlr(
 		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, nil)
 	}
 
-	// Groups.
+	// Groups — one /sys/block walk for all of them (Md.Walk).
+	walks := &mdWalkOnce{md: s.md}
 	for _, gp := range plan.grps {
 		key := resKeyOf(resKeyGrpFmt, gp.grpId)
 		switch {
@@ -67,7 +68,7 @@ func (s *CnAgentServer) probeCntlr(
 			info.GrpIdToMdRaid[gp.grpId] = t.Provisioning(
 				key, gp.resName, detailsProvisioning)
 		case plan.wantGrp:
-			status, details := s.probeGroup(ctx, gp)
+			status, details := s.probeGroup(ctx, gp, walks)
 			info.GrpIdToMdRaid[gp.grpId] = t.Set(
 				key, gp.resName, status, details)
 		case plan.primary:

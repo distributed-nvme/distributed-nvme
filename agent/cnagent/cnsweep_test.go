@@ -99,10 +99,10 @@ func cnSweepForget(t *testing.T, srv *CnAgentServer, node *fakeNode) {
 	delete(node.protos, path)
 }
 
-// cnSweepMdNode is the /dev/mdN a sweep sees for one group's array. It must be
-// read BEFORE the pass that stops the array: a stopped array has no sysfs
-// node left to name, and the sweep never uses the /dev/md/<name> spelling
-// because that one depends on udev having run.
+// cnSweepMdNode is the /dev/mdN (or /dev/md_<name>) a sweep sees for one
+// group's array. It must be read BEFORE the pass that stops the array: a
+// stopped array has no sysfs node left to name, and the sweep never uses the
+// /dev/md/<name> spelling because that one depends on udev having run.
 func cnSweepMdNode(
 	t *testing.T,
 	srv *CnAgentServer,
@@ -293,6 +293,77 @@ func TestRemovedCntlrKilledButCompleted(t *testing.T) {
 	cnSweepNoDmLeft(t, node)
 	if len(node.subsystems) != 0 {
 		t.Fatalf("nvme connections survived the sweep: %v", node.subsystems)
+	}
+}
+
+// TestSweepStopsANamedArrayNode pins the sweep's stop of an array on a named
+// kernel node (CN12, CN21; amended 2026-09-26). With mdadm.conf `CREATE
+// names=yes` the group's array runs on md_<name>, which /sys/block lists
+// under that name; ListArrays names it /dev/md_<name>, and that is the node
+// `mdadm --stop` gets and Gone reads — never the /dev/md/<name> symlink,
+// which depends on udev having run. The fake resolves the symlink's spelling
+// too, so only the exact command tells the two apart. Two node names are
+// run: md_<CnMdDevName>, hex, which the agent's own `--create` and
+// `--assemble` of /dev/md/<CnMdDevName> give it, and md_<CnMdArrayName>, not
+// hex, which an `--assemble --scan` or incremental assembly gives it from the
+// superblock name.
+func TestSweepStopsANamedArrayNode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		node func(nf *common.NameFmt) string
+	}{
+		{"dev name", func(nf *common.NameFmt) string {
+			return "md_" + nf.CnMdDevName(
+				testCluster, testCn, testSp, 0, 0, false)
+		}},
+		{"superblock name", func(nf *common.NameFmt) string {
+			return "md_" + nf.CnMdArrayName(testSp, 0, 0, false)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true})
+			name := srv.nf.CnMdDevName(
+				testCluster, testCn, testSp, 0, 0, false)
+			kernelNode := tc.node(srv.nf)
+			node.mu.Lock()
+			array := node.arrays[srv.nf.MdPath(name)]
+			if array == nil {
+				node.mu.Unlock()
+				t.Fatalf("the data group has no array at %s",
+					srv.nf.MdPath(name))
+			}
+			node.unpublishArray(array)
+			array.node = kernelNode
+			node.publishArray(array)
+			node.mu.Unlock()
+			dataDev := cnSweepMdNode(t, srv, node, 0, false)
+			if dataDev != "/dev/"+kernelNode {
+				t.Fatalf("the data group's array is at %s, want /dev/%s; "+
+					"the case is vacuous otherwise", dataDev, kernelNode)
+			}
+
+			node.Reset()
+			reply := cnSweepSyncup(t, srv, 3, false)
+			cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
+
+			stopped := node.indexOfCall("cmd mdadm --stop " + dataDev)
+			if stopped < 0 {
+				t.Fatalf("the named node was never stopped:\n%s",
+					strings.Join(node.Calls(), "\n"))
+			}
+			assertNoCall(t, node, "cmd mdadm --stop /dev/md/")
+			if node.indexOfCallFrom("read "+sysfsBlockDir+"/"+kernelNode+
+				"/md/array_state", stopped) < 0 {
+				t.Fatalf("the stop of %s was not verified from its own "+
+					"node:\n%s", dataDev, strings.Join(node.Calls(), "\n"))
+			}
+			if !node.arrayGone(dataDev) {
+				t.Fatalf("%s survived the sweep", dataDev)
+			}
+			cnSweepNoDmLeft(t, node)
+		})
 	}
 }
 

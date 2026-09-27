@@ -1053,7 +1053,7 @@ slice from it.
 | 04 | `migr create --name m1 --src-side <the previous destination>`, then `migr cancel --name m1` | a migrated-onto side is an ordinary side; the cancel leaves one side, the source, untouched; the same ANA wait, then `SHA0` |
 | 05 | `spare create --grp <slice 0's data group>` | one spare leg with one side, the **active** leg list unchanged (a spare is not an md member); the same DN and VM exclusions as the migration destination; its side provisions, and both cntlrs connect it — the leg-row count now includes spare legs, which is why the general `sp_totals`-driven predicate exists |
 | 05 | `spare switch --grp … --spare … --target …` | the reply's `curr_active_leg_id` / `curr_spare_leg_id`; the promoted spare is in the active list and the replaced leg is parked; the group still has `LEGS` active legs |
-| 05 | wait for md | `RES_STATUS_OK` alone proves nothing — a rebuilding array is OK with a `State:` of "clean, degraded, recovering" — so the words are read, and the wait is additionally gated on the CN having applied the `SpRev` the switch bumped to, because a switch changes *which* legs the group has and not how many, and the pre-switch array also reads "clean" |
+| 05 | wait for md | `RES_STATUS_OK` alone proves nothing — a rebuilding array is OK with `details` of "clean, degraded, recovering (…)" — so the words are read (`degraded`, `recovering`, `resyncing`: mdadm's State-line words, which the row's sysfs composition keeps — `cnagent.md` CN28, *amended 2026-09-26*; it used to be mdadm's `State:` line itself), and the wait is additionally gated on the CN having applied the `SpRev` the switch bumped to, because a switch changes *which* legs the group has and not how many, and the pre-switch array also reads "clean" |
 | 05 | `spare delete --grp … --leg <the parked one>` | no spare leg; the primary drops its row; `SHA0`. **The whole stage is skipped with a log line under `--redund none`**, where the gateway would refuse it anyway |
 
 **The clone source, and its fallback.** The source is a transfer of the *same*
@@ -1189,6 +1189,7 @@ assertion.
 | 05 | wait for AR8 | **at least one more spare than the group had**, read before the kill together with the ids themselves, so a group that already carried one cannot satisfy the wait on its first poll — which is what the old `== 1` form would have done, passing the step without AR8 having acted. *At least*, not exactly: if the wait's first grown reading lands after a double create, it reads `before + 2`, never `before + 1`, and an equality wait would die as a `WAIT_REACT` timeout instead of on the assertion that names it (§9, 2026-09-23). Exactly one entry of `spare_leg_list` is new against that id set, and it has one side. Then the switch: the dead leg is out of `leg_list` **and** the group's parked set is exactly what it started with plus the dead leg, and the sp holds one more parked leg than when AR8 started — one more and not two, because `SwitchSpareLeg` takes the promoted spare out as it puts the dead leg in. Both halves are asserted, because either alone is also what a half-applied transaction looks like, and the promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it. One honest limit, unchanged in kind from the old form: AR8 acts once per pass, so the create and the switch are different passes, but a poll that lands after both would find the *dead* leg as the new entry — the two assertions hold either way and only the log line would name the wrong leg |
 | 05 | — | the spare is not on the dead node, not on a DN the group occupies, and not on a VM it occupies when `DN_VM_CNT > LEGS` — where "the group occupies" is read over its active legs **and its spare legs**, which is what the worker black-lists and therefore the statement AR8 actually makes; md finishes rebuilding onto it (a fresh spare has never been an md member, so this is a full recovery), gated on the applied revision as in the copy case; `SHA0` |
 | 05 | restart the dn agent | it recreates **its own** nvmet port, not `ports/1`; the primary reports every leg again, the parked one included. It has to come back: the parked leg's side still occupies an extent, and only a live agent can retire it when the sp drains |
+| 05 | — | **no failover during the stage** (*added 2026-09-26*): after the restarted agent is back, a fresh `sp get` still names as primary the cntlr the stage read at its start, **and** the worker log holds as many `reaction applied` records with kind `failover` as it did at the stage's start (`worker_failover_cnt`, a `grep -c` on the cp; the react case has one sp). The count is what makes it a statement about the stage rather than its two ends: with `cntlr_cnt` 2 an even number of failovers ends on the same cntlr. The dead node took one leg, which is the leg row's to report and AR8's to repair; the primary's md row reads the group from sysfs as `OK` — with `degraded` once md has failed the dead member, on an IO to it that errors or when the spare switch fails it out (`cnagent.md` CN28, CN29). While that row came from `mdadm --detail`, the probe could block on the dead member and be killed at the soft timeout, the row read `ERROR`, AR5 failed the primary over, and the run that found it died in this stage's AR8 wait with AR5 flipping the primary on every pass (§9, 2026-09-26) |
 | 06 | `ns delete --idx 2`, `td delete a0` | only `t0` is left for the teardown; `SHA0` |
 
 ### 4.6 The ending every case shares
@@ -3184,3 +3185,28 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   9.8 s before leg 27 was created —
   a timing observation, not a proof, which is why the comparison after the
   switch, where every spare is necessarily visible, carries the invariant.
+
+* **2026-09-26 — the md row from sysfs, and react stage 05 asserts no
+  failover during it.** The failover ping-pong: a run at the react case's
+  shape died in stage 05's AR8 wait. The primary's `mdadm --detail`
+  probe of the group with the dead member blocked on it past the soft
+  timeout and was killed, the group's md row read `ERROR`, which counts
+  toward cntlr health, and AR5 failed the primary over; the promotion then
+  raced the sides' ANA flip and never completed inside `primary_unhealthy`,
+  so AR5 applied a failover on every pass for 48 hours and AR8 never ran.
+  The cn agent now reads the md row from `/sys/block/mdN/md/` (`cnagent.md`
+  CN12/CN28), and a running array with a dead member reads `OK`, with
+  `degraded` in its `details` once md has failed that member. Two changes in
+  this suite go with it:
+
+  1. **Stage 05 asserts that no failover happened during it**, after the
+     restarted dn agent is back: the primary at its end is the one it
+     started with, and the worker log's count of `reaction applied`
+     records with kind `failover` is unchanged across the stage (the
+     endpoint comparison alone would pass an even number of failovers).
+  2. **`grp_md_clean`'s words are the sysfs composition's** — `array_state`,
+     `degraded` while `md/degraded` is non-zero, and the word of a running
+     sync with its `(<done> / <total>)` sectors — which keeps mdadm's
+     `degraded`/`recovering`/`resyncing`, so the predicate is unchanged; its
+     comment and the copy stage 05 row above no longer call the `details`
+     mdadm's `State:` line.

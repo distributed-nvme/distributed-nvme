@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"google.golang.org/protobuf/proto"
 
@@ -62,10 +63,11 @@ type fakeNode struct {
 
 	// md arrays, keyed by the /dev/md/{name} path
 	arrays map[string]*fakeArray
-	// nextMdMinor names the kernel node an array is published under. An
-	// array has two spellings: the /dev/md/{name} symlink mdadm created it
-	// with, and the /dev/mdN the kernel owns — and a sweep only ever has the
-	// second one, because it enumerates /sys/block (md.go ListArrays).
+	// nextMdMinor numbers the kernel node, mdN, an array is published under
+	// when the test set no fakeArray.node. An array has two spellings: the
+	// /dev/md/{name} symlink mdadm created it with, and the /dev/mdN (or
+	// /dev/md_<name>) the kernel owns — and a sweep only ever has the second
+	// one, because it enumerates /sys/block (md.go ListArrays).
 	nextMdMinor int
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
@@ -86,6 +88,10 @@ type fakeNode struct {
 	dirs  map[string]bool
 	files map[string]string
 	links map[string]string
+	// errFiles are attributes that exist and whose read fails — an unbound
+	// md member's dev-*/state reads ENODEV. They belong to the tree they are
+	// published in and go with it, unlike the failRead* hooks below.
+	errFiles map[string]error
 
 	// local store (WriteProto/ReadProto)
 	protos map[string][]byte
@@ -169,16 +175,30 @@ type fakeDm struct {
 type fakeArray struct {
 	name    string // the mdadm --name value
 	members []string
-	// state is the `mdadm --detail` State line ("clean", "clean, degraded").
-	state string
-	// node is the kernel's own name for the array, "mdN": what /sys/block
-	// publishes it under and the only spelling a sweep ever sees.
+	// node is the kernel's own name for the array: mdN by default
+	// (installArray numbers it from nextMdMinor), or md_<name> when a test
+	// sets it, as mdadm.conf `CREATE names=yes` makes it. It is what
+	// /sys/block publishes the array under and the only spelling a sweep
+	// ever sees.
 	node string
-	// arrayState is /sys/block/{node}/md/array_state, a different vocabulary
-	// from state: "clean"/"active" for a running array, "inactive" for one
-	// that is assembled but not running — which still pins its members —
-	// and "clear" for one that is gone.
+	// arrayState is /sys/block/{node}/md/array_state: "clean"/"active" for a
+	// running array, "inactive" for one that is assembled but not running —
+	// which still pins its members — and "clear" for one that is gone.
 	arrayState string
+	// degraded, syncAction and syncCompleted are md/degraded,
+	// md/sync_action and md/sync_completed, scripted (setMdSync). They are
+	// published only while arrayState is a running one: the kernel has none
+	// of the three for an inactive array.
+	degraded      int
+	syncAction    string
+	syncCompleted string
+	// memberState scripts dev-*/state per member path; a member without an
+	// entry reads what the kernel shows for dnv's members (memberStateOf).
+	memberState map[string]string
+	// unbound are the members md has unbound (fakeNode.unbindMember). A
+	// republish keeps them unbound; an mdadm --add or --remove of the
+	// member, or a stop, ends it.
+	unbound map[string]bool
 }
 
 type fakeSubsys struct {
@@ -212,6 +232,7 @@ func newFakeNode() *fakeNode {
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
 		links:         make(map[string]string),
+		errFiles:      make(map[string]error),
 		protos:        make(map[string][]byte),
 		subsystems:    make(map[string]*fakeSubsys),
 		anaOf:         make(map[string]string),
@@ -398,6 +419,9 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
 	}
 	if err := f.readHookErr(path); err != nil {
+		return "", err
+	}
+	if err, ok := f.errFiles[path]; ok {
 		return "", err
 	}
 	data, ok := f.files[path]
@@ -1407,12 +1431,11 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 		return f.mdCreate(args)
 	case contains(args, "--assemble"):
 		return f.mdAssemble(args)
-	case contains(args, "--detail"):
-		return f.mdDetail(args)
 	case contains(args, "--stop"):
 		// Both spellings are accepted: the named /dev/md/{name} symlink the
-		// build path uses, and the /dev/mdN a sweep stops — a sweep gets its
-		// arrays from /sys/block and never learns the name.
+		// build path uses, and the /dev/mdN (or /dev/md_<name>) a sweep
+		// stops — a sweep gets its arrays from /sys/block and never learns
+		// the name.
 		dev := args[len(args)-1]
 		key, array := f.arrayByDev(dev)
 		if array == nil {
@@ -1435,7 +1458,7 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 	case contains(args, "--add"):
 		return f.mdAdd(args)
 	case contains(args, "--fail"):
-		return "", 0
+		return f.mdFail(args)
 	case contains(args, "--remove"):
 		return f.mdRemove(args)
 	}
@@ -1474,8 +1497,7 @@ func (f *fakeNode) mdCreate(args []string) (string, int) {
 		members = append(members, member)
 		f.superblocks[member] = true
 	}
-	f.installArray(dev, &fakeArray{name: name, members: members,
-		state: "clean", arrayState: "clean"})
+	f.installArray(dev, &fakeArray{name: name, members: members})
 	f.devNo[dev] = f.newDevNo()
 	f.devSize[dev] = f.arraySize(members)
 	f.publishArray(f.arrays[dev])
@@ -1498,11 +1520,7 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	if len(members) == 0 {
 		return "", 1
 	}
-	array := &fakeArray{name: name, members: members,
-		state: "clean, degraded", arrayState: "clean"}
-	if len(members) > 1 {
-		array.state = "clean"
-	}
+	array := &fakeArray{name: name, members: members}
 	f.installArray(dev, array)
 	f.devNo[dev] = f.newDevNo()
 	f.devSize[dev] = f.arraySize(members)
@@ -1521,33 +1539,6 @@ func (f *fakeNode) arraySize(members []string) uint64 {
 	return f.devSize[members[0]]
 }
 
-func (f *fakeNode) mdDetail(args []string) (string, int) {
-	dev := args[len(args)-1]
-	_, array := f.arrayByDev(dev)
-	if array == nil {
-		return "", 1
-	}
-	if contains(args, "--export") {
-		var sb strings.Builder
-		sb.WriteString("MD_LEVEL=raid1\n")
-		fmt.Fprintf(&sb, "MD_DEVICES=%d\n", len(array.members))
-		fmt.Fprintf(&sb, "MD_NAME=%s\n", array.name)
-		for i, member := range array.members {
-			key := strings.NewReplacer("/", "_", "-", "_").Replace(
-				strings.TrimPrefix(member, "/"))
-			fmt.Fprintf(&sb, "MD_DEVICE_%s_ROLE=%d\n", key, i)
-			fmt.Fprintf(&sb, "MD_DEVICE_%s_DEV=%s\n", key, member)
-		}
-		return sb.String(), 0
-	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s:\n", dev)
-	fmt.Fprintf(&sb, "        Version : 1.2\n")
-	fmt.Fprintf(&sb, "          State : %s\n", array.state)
-	fmt.Fprintf(&sb, "           Name : %s\n", array.name)
-	return sb.String(), 0
-}
-
 func (f *fakeNode) mdAdd(args []string) (string, int) {
 	dev := args[0]
 	_, array := f.arrayByDev(dev)
@@ -1556,8 +1547,29 @@ func (f *fakeNode) mdAdd(args []string) (string, int) {
 	}
 	member := args[len(args)-1]
 	array.members = append(array.members, member)
+	delete(array.memberState, member)
+	delete(array.unbound, member)
 	f.superblocks[member] = true
-	array.state = "clean"
+	f.publishArray(array)
+	return "", 0
+}
+
+// mdFail marks a member faulty, as SET_DISK_FAULTY does: it stays held, and
+// its dev-*/state keeps the failfast flag beside the new one.
+func (f *fakeNode) mdFail(args []string) (string, int) {
+	dev := args[0]
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return "", 1
+	}
+	member := args[len(args)-1]
+	if !contains(array.members, member) {
+		return "", 1
+	}
+	if array.memberState == nil {
+		array.memberState = make(map[string]string)
+	}
+	array.memberState[member] = "faulty,failfast"
 	f.publishArray(array)
 	return "", 0
 }
@@ -1576,6 +1588,8 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 		}
 	}
 	array.members = kept
+	delete(array.memberState, member)
+	delete(array.unbound, member)
 	f.publishArray(array)
 	return "", 0
 }
@@ -1583,22 +1597,32 @@ func (f *fakeNode) mdRemove(args []string) (string, int) {
 // ---------------------------------------------------------------------------
 // The /sys/block view of md
 //
-// Md.ListArrays and Md.Gone read arrays out of sysfs alone, because every
-// mdadm probe opens a member device and a leg whose DN side is gone blocks
+// Md.ListArrays, Md.Gone and Md.Detail read arrays out of sysfs alone, because
+// an mdadm probe opens a member device and one whose DN side is gone blocks
 // until failfast — past the soft timeout. So the fake has to publish what the
 // kernel publishes:
 //
-//	/sys/block/{node}                             the array node, mdN
-//	/sys/block/{node}/md/array_state              clean / inactive / clear
-//	/sys/block/{node}/md/dev-{kname}              one per member
+//	/sys/block/{node}                               the array node, mdN or md_<name>
+//	/sys/block/{node}/md/array_state                clean / inactive / clear
+//	/sys/block/{node}/md/degraded                   running arrays only
+//	/sys/block/{node}/md/sync_action                running arrays only
+//	/sys/block/{node}/md/sync_completed             running arrays only
+//	/sys/block/{node}/md/dev-{kname}                one per member
+//	/sys/block/{node}/md/dev-{kname}/state          "in_sync,failfast", …
+//	/sys/block/{node}/md/dev-{kname}/block/dev      the member's major:minor
 //	/sys/block/{node}/md/dev-{kname}/block/dm/name  the member's DM NAME
 //
 // The last one is absent for a member that is not a dm device, which is how
-// an array of ours is told from a foreign one (MdArray.Foreign).
+// an array of ours is told from a foreign one (MdArray.Foreign). The three
+// "running arrays only" attributes are what the lab kernel really does: an
+// inactive array has none of them, and a Detail that read them regardless
+// would turn the "inactive" verdict into a read error.
 //
 // It all lives in the ordinary dirs/files maps, exactly like the configfs and
 // nvme-subsystem trees, so `ls -1 /sys/block` picks the arrays up through
 // children() and anything else a test puts under /sys/block keeps listing.
+//
+// "mdN" below stands for either spelling, as in md.go.
 // ---------------------------------------------------------------------------
 
 // arrayByDev resolves either spelling of an array node: the /dev/md/{name}
@@ -1630,6 +1654,12 @@ func (f *fakeNode) installArray(dev string, array *fakeArray) {
 	if array.arrayState == "" {
 		array.arrayState = "clean"
 	}
+	if array.syncAction == "" {
+		array.syncAction = "idle"
+	}
+	if array.syncCompleted == "" {
+		array.syncCompleted = "none"
+	}
 	f.arrays[dev] = array
 }
 
@@ -1642,10 +1672,26 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 	f.dirs[sysfsBlockDir+"/"+array.node] = true
 	f.dirs[mdDir] = true
 	f.files[mdDir+"/array_state"] = array.arrayState + "\n"
+	if mdRunning(array.arrayState) {
+		f.files[mdDir+"/degraded"] = strconv.Itoa(array.degraded) + "\n"
+		f.files[mdDir+"/sync_action"] = array.syncAction + "\n"
+		f.files[mdDir+"/sync_completed"] = array.syncCompleted + "\n"
+	}
 	for _, member := range array.members {
 		devDir := mdDir + "/dev-" + f.kernelName(member)
 		f.dirs[devDir] = true
+		if array.unbound[member] {
+			// No block link, and an attribute of the member's own reads
+			// ENODEV (unbindMember).
+			f.errFiles[devDir+"/state"] = &fs.PathError{
+				Op: "read", Path: devDir + "/state", Err: syscall.ENODEV}
+			continue
+		}
 		f.dirs[devDir+"/block"] = true
+		f.files[devDir+"/state"] = f.memberStateOf(array, member) + "\n"
+		if devNo := f.devNo[member]; devNo != "" {
+			f.files[devDir+"/block/dev"] = devNo + "\n"
+		}
 		dmName, ok := strings.CutPrefix(member, "/dev/mapper/")
 		if !ok {
 			// Not a dm device: the whole dm/ directory is absent, which is
@@ -1655,6 +1701,21 @@ func (f *fakeNode) publishArray(array *fakeArray) {
 		f.dirs[devDir+"/block/dm"] = true
 		f.files[devDir+"/block/dm/name"] = dmName + "\n"
 	}
+}
+
+// memberStateOf is a member's dev-*/state: the scripted one, else what the
+// lab kernel shows for dnv's members — "in_sync,failfast" in a running array
+// (every member is created or added with --failfast, and the flag lives in
+// the superblock, so an assembly keeps it) and a bare "spare" in one that
+// has not started.
+func (f *fakeNode) memberStateOf(array *fakeArray, member string) string {
+	if state, ok := array.memberState[member]; ok {
+		return state
+	}
+	if mdRunning(array.arrayState) {
+		return "in_sync,failfast"
+	}
+	return "spare"
 }
 
 func (f *fakeNode) unpublishArray(array *fakeArray) {
@@ -1670,6 +1731,11 @@ func (f *fakeNode) unpublishArray(array *fakeArray) {
 	for entry := range f.files {
 		if strings.HasPrefix(entry, root+"/") {
 			delete(f.files, entry)
+		}
+	}
+	for entry := range f.errFiles {
+		if strings.HasPrefix(entry, root+"/") {
+			delete(f.errFiles, entry)
 		}
 	}
 }
@@ -1698,7 +1764,9 @@ func (f *fakeNode) mdNode(dev string) string {
 }
 
 // setArrayState scripts /sys/block/{node}/md/array_state — "inactive" for an
-// assembled-but-not-running array, which Md.Gone must NOT accept as gone.
+// assembled-but-not-running array, which Md.Gone must NOT accept as gone —
+// and republishes the subtree, so the running-only attributes come and go
+// with it.
 func (f *fakeNode) setArrayState(dev, state string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1707,7 +1775,90 @@ func (f *fakeNode) setArrayState(dev, state string) {
 		return
 	}
 	array.arrayState = state
-	f.files[sysfsBlockDir+"/"+array.node+"/md/array_state"] = state + "\n"
+	f.publishArray(array)
+}
+
+// setMdSync scripts md/degraded, md/sync_action and md/sync_completed.
+func (f *fakeNode) setMdSync(
+	dev string, degraded int, action, completed string,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	array.degraded = degraded
+	array.syncAction = action
+	array.syncCompleted = completed
+	f.publishArray(array)
+}
+
+// setMemberState scripts one member's dev-*/state, verbatim.
+func (f *fakeNode) setMemberState(dev, member, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	if array.memberState == nil {
+		array.memberState = make(map[string]string)
+	}
+	array.memberState[member] = state
+	f.publishArray(array)
+}
+
+// unbindMember models the instant md has unbound one member of an array
+// another cntlr is stopping (or removing the member from): md clears the
+// member's array pointer and removes its `block` link, so dev-*/block/dev and
+// dev-*/block/dm/name read ENOENT, while the dev-* directory stays until md
+// deletes it at its next unlock and every attribute of the member's own —
+// dev-*/state among them — reads ENODEV meanwhile (a read error that is not
+// ENOENT). The fake holds that instant: a later republish (setMdSync,
+// setMemberState, mdFail, …) keeps the member unbound, and only an mdadm
+// --add or --remove of the member, or a stop, ends it.
+func (f *fakeNode) unbindMember(dev, member string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	if array.unbound == nil {
+		array.unbound = make(map[string]bool)
+	}
+	array.unbound[member] = true
+	f.publishArray(array)
+}
+
+// dropMdDir removes an array's /sys/block/{node}/md subtree and keeps
+// /sys/block/{node}: a stopping array's md/ goes before its node does (the
+// kernel deletes the md kobject, then the gendisk), so a walk can list the
+// node and find no md/ in it.
+func (f *fakeNode) dropMdDir(dev string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, array := f.arrayByDev(dev)
+	if array == nil {
+		return
+	}
+	root := sysfsBlockDir + "/" + array.node + "/md"
+	for entry := range f.dirs {
+		if entry == root || strings.HasPrefix(entry, root+"/") {
+			delete(f.dirs, entry)
+		}
+	}
+	for entry := range f.files {
+		if strings.HasPrefix(entry, root+"/") {
+			delete(f.files, entry)
+		}
+	}
+	for entry := range f.errFiles {
+		if strings.HasPrefix(entry, root+"/") {
+			delete(f.errFiles, entry)
+		}
+	}
 }
 
 // arrayGone is the assertion side of a stop: neither mdadm nor sysfs still
@@ -1727,12 +1878,17 @@ func (f *fakeNode) arrayGone(dev string) bool {
 // left behind by a previous incarnation, or a foreign one whose members are
 // not dm devices at all (`seedArray("/dev/md/other", "other", "/dev/sdb")`).
 // Unlike mdCreate it stamps no superblocks: a foreign array's members are not
-// ours to claim.
+// ours to claim. A member the node has no device number for gets one, since
+// every block device the kernel holds in an array has a dev-*/block/dev.
 func (f *fakeNode) seedArray(dev, name string, members ...string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	array := &fakeArray{name: name, members: members,
-		state: "clean", arrayState: "clean"}
+	for _, member := range members {
+		if _, ok := f.devNo[member]; !ok {
+			f.devNo[member] = f.newDevNo()
+		}
+	}
+	array := &fakeArray{name: name, members: members}
 	f.installArray(dev, array)
 	if _, ok := f.devNo[dev]; !ok {
 		f.devNo[dev] = f.newDevNo()
@@ -1986,6 +2142,26 @@ func (f *fakeNode) setAnaState(nqn, trAddr, trSvcId, state string) {
 		ctrl.anaState = state
 		f.files[sysfsNvmeCtrlDir+"/"+ctrl.name+"/"+ctrl.pathDev+
 			"/ana_state"] = state + "\n"
+	}
+}
+
+// setCtrlState re-stamps a path's controller state and leaves its ana_state
+// alone, which is how a dead side looks to the host: the controller goes
+// resetting, then connecting, and ana_state keeps its last-known value for
+// the whole outage.
+func (f *fakeNode) setCtrlState(nqn, trAddr, trSvcId, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	subsys, ok := f.subsystems[nqn]
+	if !ok {
+		return
+	}
+	for _, ctrl := range subsys.ctrls {
+		if ctrl.trAddr != trAddr || ctrl.trSvcId != trSvcId {
+			continue
+		}
+		ctrl.state = state
+		f.files[sysfsNvmeCtrlDir+"/"+ctrl.name+"/state"] = state + "\n"
 	}
 }
 

@@ -21,17 +21,20 @@ machines, driven over gRPC from the developer machine, **against real
 and has its own passing suite; this suite asserts dn health once at setup
 and then treats it as infrastructure). All 10 `ControllerNodeAgent` RPCs are
 exercised (§18). Happy-path correctness only; error-path testing is out of
-scope (§19) except two probes their own cases structurally require: case D's
-stale-revision rejection, and the `ReplyCodeLeftover` case T induces with a
+scope (§19) except three probes their own cases structurally require: case
+D's stale-revision rejection, the `ReplyCodeLeftover` case T induces with a
 pinned dm device (§15) — which is not a rejection at all but an accepted
-request reporting residue.
+request reporting residue — and case A's dead leg (§11 step 5, `degrade`;
+*added 2026-09-26*, because the md rows are read from sysfs, `cnagent.md`
+CN12/CN28), whose leg rows must read `RES_STATUS_ERROR` while both md rows
+stay `RES_STATUS_OK`.
 
 Test cases:
 
 | case | name | what it proves |
 |---|---|---|
 | S | `smoke` | end-to-end plumbing: one primary cntlr, RedundNone, one td/ss/ns, host IO round-trip host → CN → DN |
-| A | `redund` | md-raid1 groups across two DNs, primary + standby cntlrs, failover, `SP_LEVEL_READONLY` |
+| A | `redund` | md-raid1 groups across two DNs, primary + standby cntlrs, failover, a dead leg's md rows read from sysfs, `SP_LEVEL_READONLY` |
 | T | `teardown` | teardown by sweep (§15): five removal windows over one A-shaped raid1 stack, a distinct sp per stage — sides gone, paths long dead, IO in flight, a partitioned DN, and a pinned leg wrapper reported as `ReplyCodeLeftover` (4) and cleared by re-sending the same request at the same revision |
 | B | `thinbm` | thin snapshots; `GetThinDeviceBm`/`GetLegBm` arithmetic against a known write pattern |
 | C | `clone_xfer` | §11.3 transfer + clone live move across two SPs, `PushCloneBitmap`, CN wipe + §11.5 recovery |
@@ -239,8 +242,9 @@ nothing is absent there, a present device lacks a capability):
     asserted directly on the device the dn agent reads.
   - ports 29528, 29529 and 4200 not listening (`ss -ltn`).
 
-One lab prerequisite is deliberately **not** checked here: `iptables` on VM2,
-which §15's partition stage needs. It belongs to one stage of one case and is
+One lab prerequisite is deliberately **not** checked here: `iptables` — on
+VM2 for §15's partition stage, and on VM1 for §11's `degrade` step (*added
+2026-09-26*). It belongs to one stage in each of those two cases and is
 asserted inside that stage (`have_iptables`), so a VM without the binary
 names the stage that wants it instead of failing a run that was never going
 to reach the case.
@@ -646,8 +650,10 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   `healthcheck.go` is no longer a block-IO caller at all, so a converged CN
   emits zero `os write block` records and the msg can simply be listed.
   Probe commands (`lsblk`, `dmsetup info|table|status|ls`, `ls`, `findmnt`,
-  `stat`, `losetup --associated`, `mdadm --detail|--examine`,
-  `nvme list-subsys`) are expected and deliberately not in the list; the LVM
+  `stat`, `losetup --associated`, `mdadm --examine`,
+  `nvme list-subsys`) are expected and deliberately not in the list (the cn
+  agent no longer runs `mdadm --detail` at all — its md reads are sysfs,
+  `cnagent.md` CN12, *amended 2026-09-26* — and that is a read too); the LVM
   verbs that used to appear on both halves of this list
   (`pvcreate|vgcreate|lvcreate|lvremove` mutating, `vgs|lvs` probing) are
   gone with [D14].
@@ -711,7 +717,7 @@ is `sprintf("%016x", slice_id)` per §9.3.)
 Success proves: both ctl binaries, both agents, pointer gating, the full
 §3.3 primary stack on real devices, host IO, declarative teardown.
 
-## 11. Case A — `redund` (raid1, failover, readonly)
+## 11. Case A — `redund` (raid1, failover, dead leg, readonly)
 
 1. DN side: 4 sides (§5 table) on DN1+DN2, each `primary_cn_id 0x11`,
    `standby_id_list [0x12]`, each through `dn_side` (the §9 two-phase
@@ -756,6 +762,30 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
 5. Host: CN2 path → `optimized`, CN1 path → `inaccessible`; read the 8 MiB
    back (sha equal — the data crossed the failover through md), write 1
    MiB more at `seek=9`, read back.
+
+   **A dead leg (`degrade`; *added 2026-09-26*, `cnagent.md` CN12/CN28).**
+   The md rows are read from sysfs, never from `mdadm --detail`, which loads
+   the superblock from a member and blocks on a dead one until its path's
+   failfast expires — the probe the failover ping-pong started from. On VM1,
+   `partition_from <VM2's ip>` (§15's S4 rule, the other way round) takes
+   CN2's two legs into DN1 away without the DN agent — meta leg 1 and data
+   leg 1, `leg_idx` 0, so disk 0 of their arrays — and with them the host's
+   path to CN1, which is inaccessible anyway and reconnects afterwards. The
+   host writes a fresh 1 MiB at `seek=9` in the background, so the array
+   has a write stuck on the dead member; `check-cntlr` rounds on CN2
+   (≤ 90 s, one per second) must read **both** `grp_id_to_md_raid` rows
+   `RES_STATUS_OK` on every round, until the data row's `details` holds
+   `degraded` and both dead legs' `leg_id_to_leg` rows read
+   `RES_STATUS_ERROR`; the background write must then complete, and
+   succeed (`dd`'s own status), on DN2's leg; CN2's log under the stage's
+   trace id must hold the rounds' `ls -1 /sys/block` (the positive control
+   that they are under it) and **no** `mdadm` command at all. Then
+   `unpartition_from`, no rule left, both legs' paths on CN2 `live` again
+   (≤ 60 s each — `State`, not `ana_state`, which kept reading `optimized`
+   through the partition), both leg rows `RES_STATUS_OK` again (≤ 60 s —
+   their probers' next round) and the fresh 1 MiB at 9 reads back. The
+   member md failed stays failed (`cnagent.md` §7 known limits), so the
+   data array stays degraded — and `OK` — through steps 6 and 7.
 6. **Readonly**: `syncup-cntlr` CN2 (CNREV2++, `sp_level
    SP_LEVEL_READONLY`, still primary). No dn calls — the level has no
    DN-side behavior below `NO_MIGRATION` ([D11]). Assert: VM2
@@ -1093,8 +1123,9 @@ fully zeroed before the step 1 snapshot), host VM2 connected to both paths,
    first probe completes (*amended 2026-09-26*: that row used to read `OK`
    `health probe pending`, which the since-dropped `details` exclusion
    absorbed); the
-   post-restart logs show `mdadm --detail`-style probing only — an active
-   array is recognized, not re-assembled.
+   post-restart logs show no `mdadm` command but `--examine` — an active
+   array is recognized, not re-assembled (*amended 2026-09-26*: the md reads
+   are sysfs, `cnagent.md` CN12, so `--detail` is no longer excluded).
 5. **Idempotency (mutation-free re-apply)**: re-send the *same-revision*
    `syncup-cn` and `syncup-cntlr` to both CNs; assert code 0; then assert
    `mutations()` (§9) finds **zero** records in each post-restart
@@ -1252,7 +1283,8 @@ across **both** VMs (a clone on one VM holds a source on the other):
 1. `pkill -f 'dnv-agent cn'`, then `pkill -f 'dnv-agent dn'` (kills the
    retry loops and probers with the agents), then release §15's three fault
    injectors — stop the background writer, unpin every pinned dm device, and
-   remove the partition rule against the other VM — **unconditionally**,
+   remove the partition rule against the other VM, which covers §11's
+   `degrade` rule too — **unconditionally**,
    never gated on this run having installed them. Each outlives the stage
    that installed it and each would be diagnosed as something else entirely:
    a pin fails a dm pass below on a device nothing is testing, a partition
@@ -1412,7 +1444,8 @@ records can be pulled from the JSON logs on either VM.
 
 ## 19. Out of scope (v1)
 
-Negative/error-path testing beyond the case D stale probe; QoS (explicitly
+Negative/error-path testing beyond the case D stale probe and case A's
+`degrade` step (§11 step 5); QoS (explicitly
 deferred — `cnagent.md` CN6 — so there is nothing to observe); `GrowSlice`
 online pool growth; spare legs and `SwitchSpareLeg`; a CN watching a leg
 gain/lose its second side (migration multipath — the dn suite's cases B/C
@@ -1428,9 +1461,11 @@ is unit-tested instead, `cnagent.md` §6 test 26);
 cntlid-slot exhaustion; dnv-cdc/host auto-discovery; TLS/auth;
 performance/soak; fault injection beyond the three injectors §15's
 `teardown` case installs in its own teardown window (an iptables INPUT DROP
-on the nvme-tcp port, partitioning one CN's legs from one DN; an open fd
-pinning a leg wrapper so its `dmsetup remove` fails EBUSY; and a detached
-host writer writing across the whole teardown); **CN-side
+on the nvme-tcp port, partitioning one CN's legs from one DN — installed
+once more, outside that window, by §11's `degrade` step, on VM1 against
+VM2's ip (*added 2026-09-26*); an open fd pinning a leg wrapper so its
+`dmsetup remove` fails EBUSY; and a detached host writer writing across the
+whole teardown); **CN-side
 provisioning deferral** (a group whose `leg_list` holds an unprovisioned leg
 is skipped and reports `RES_STATUS_PROVISIONING`, together with the CN16 ANA
 conjunct that keeps its namespace `inaccessible`) — every side here is fully
@@ -1564,6 +1599,18 @@ another document or the harness cites can shift.
   comparison and now compares the leg `details` too: the `details`
   exclusion that absorbed the old `OK` `health probe pending` row is
   dropped.
+- **The md rows are read from sysfs** (2026-09-26; `cnagent.md` CN12/CN28,
+  the failover ping-pong). `ensureGroup` and `probeGroup` read the array
+  from `/sys/block/mdN/md/` instead of `mdadm --detail`, whose member read
+  blocked on a dead leg past the soft timeout and turned the md row
+  `RES_STATUS_ERROR`. Case A gains the `degrade` stage of §11 step 5 (a
+  partition of CN2's legs into DN1: both md rows stay `OK` on every
+  check round, the data row reaches `degraded`, the dead legs' rows
+  `RES_STATUS_ERROR`, and no `mdadm` command runs under the stage's trace);
+  case D's restart grep no longer excludes `--detail` (§14 step 4); the §9
+  probe-command list drops it; §4, §16 and §19 count the `degrade`
+  partition in, and §1 and its case table name the stage — §1 as a third
+  in-scope error path.
 
 ## Appendix A — lab gotchas baked into this plan
 

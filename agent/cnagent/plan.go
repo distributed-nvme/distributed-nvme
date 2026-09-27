@@ -246,6 +246,18 @@ type grpPlan struct {
 	dataOffsetKiB     uint64
 }
 
+// legNames are the dm names of the group's leg_list wrappers — the key
+// Md.Detail finds the group's array by. Spares are left out: a spare is never
+// a member (§8.12), and a leg switched out into the spare list is an extra
+// that reconcileMembers removes, found through the leg_list member that stays.
+func (gp *grpPlan) legNames() []string {
+	out := make([]string, 0, len(gp.legs))
+	for _, lp := range gp.legs {
+		out = append(out, lp.name)
+	}
+	return out
+}
+
 // legPlan is one leg: its side connections and the cn-local dm-linear wrapper
 // over the single nvme multipath namespace they share ([D1], CN10).
 type legPlan struct {
