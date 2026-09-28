@@ -2972,15 +2972,29 @@ everything it has seen):
 
 **new_primary** — on a `SyncupCntlr` saying it is primary (highest revision):
 
-1. Make sure all groups are available (§11.1.1).
+1. Make sure all groups are available (§11.1.1). A group whose member is not yet
+   available is retried by the agent (`cnagent.md` CN10) until it is; the worker is
+   not involved (*amended 2026-09-26*, the failover ping-pong: the unordered fan-out
+   of [D16] regularly lands this `SyncupCntlr` before the sides' ANA flips have
+   reached the new primary, and nothing re-sent it).
 2. Create the pools, thin volumes and raid0 devices (§3.3 steps 3-5).
 3. Reload every td's `CnNsDevName` from `CnErrorName` onto its raid0 (or dm-clone,
    for an in-flight clone — after the §11.5 recovery if the clone state was lost).
-4. Move all namespaces from `inaccessible` to `optimized`.
+4. Move all namespaces from `inaccessible` to `optimized`. Step 4 does not wait for
+   steps 1-3 to succeed: a converge in which a member not yet available (step 1)
+   kept the stack from being built moves the namespaces to `optimized` all the same,
+   over the td's `CnErrorName` (`cnagent.md` CN16's ANA rule reads the plan, not the
+   stack), and host IO on that path fails — target-internal (DNR), not a path
+   error — until the agent's retry has built the stack (*amended 2026-09-26*, the
+   failover ping-pong: before that retry existed it lasted until the next revision
+   bump; `cnagent.md` §7, known limits).
 
 **Host-visible errors when the old primary is alive but CP-unreachable
-([D16]).** The common failover — a dead CN — is clean from the host's side:
-its paths drop, IO queues, and the new primary's `optimized` flip releases it.
+([D16]).** The common failover — a dead CN — is clean from the host's side
+once the new primary's stack is built: its paths drop, IO queues, and the new
+primary's `optimized` flip releases it. A promotion that outruns the sides' ANA
+flips (step 1) can make that flip over dm-error, and the released IO then fails
+until the agent's retry builds the stack (step 4, *amended 2026-09-26*).
 An old primary that keeps running while only its **control-plane**
 connectivity is lost cannot apply the syncup that demotes it: its host-facing
 namespaces stay in the `optimized` ANA group while the sides fence its data

@@ -96,9 +96,11 @@ gains, `common/name_parse.go`:
 	LegHealthBlockSize = 4096
 	LegHealthMagic     = "DNVHLTH1"
 
-	// Seconds between background retries of a pending cn outbound nvme
-	// connect — leg side connections and clone source connections
-	// (cnagent.md CN10/CN18); the cn twin of DnMigrConnectRetryInterval.
+	// Seconds between background retries of a cn cntlr's converge
+	// (cnagent.md CN10): after a leg or a clone source failed to converge, a
+	// clone recovery whose destination bitmaps were not applied (CN18), or a
+	// leg_list member that is not available (CN12); the cn twin of
+	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 ```
 
@@ -825,8 +827,21 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       from the desired state, never from probing the device. A connect
       failure marks that leg `RES_STATUS_ERROR` and registers the cntlr in a
       background retry registry that re-runs the converge every
-      `CnConnectRetryInterval` seconds under the CN1 locks until success or
-      teardown (the DN13 pattern). **Dead paths**: a controller of the leg
+      `CnConnectRetryInterval` seconds under the CN1 locks until a pass
+      registers it no more, or teardown (the DN13 pattern). Four things
+      register it: a leg that failed to converge — its connect, its
+      multipath namespace or its wrapper (above) — a clone source whose
+      connection failed and a clone recovery whose destination bitmaps were
+      not applied (CN18), and a `leg_list` member of a group that is not
+      available (CN12;
+      *amended 2026-09-26*, the failover ping-pong: a promotion whose first
+      converge read its legs before the sides' ANA flips had reached this
+      CN's sysfs left its md groups unassembled — and a RedundNone SP's
+      pools unbuilt — until the next revision bump, because nothing re-ran
+      that converge). Every attempt mints its own
+      trace id (CN2) and is a whole converge, which decides afresh whether
+      any of the four still holds; the first converge that finds none stops
+      the retry. **Dead paths**: a controller of the leg
       NQN whose `traddr`/`trsvcid` matches no desired side (the src side
       after `FinishMigration` — its controller died with DNR and will never
       reconnect) is disconnected by **device** (§2.3), never by NQN.
@@ -941,6 +956,40 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
            `RES_STATUS_ERROR`).
         A leg is **available** iff its multipath namespace has a path that
         is both `live` and `optimized` (§11.1.1, probed from **sysfs** — §5).
+        A `leg_list` member that is **not** available this pass — whether
+        its group was left unassembled (`no available leg`, `only k of n
+        legs available …`), started degraded without it, holds the array
+        while the member reconciliation below skips its `--add`, or runs the
+        array with md still holding the member (its side died under the
+        array — AR8's case — or its path is otherwise no longer both `live`
+        and `optimized`; the reconciliation below leaves such a member
+        held) — registers the cntlr for the CN10 background retry, as a
+        failed connect does
+        (*amended 2026-09-26*, the failover ping-pong: the worker fans a
+        promotion's `SyncupCntlr` and the sides' `SyncupSide` out unordered,
+        [D16], so the new primary's first converge regularly reads its paths
+        before the sides' ANA flips have reached them, and the worker
+        re-syncs on a revision or a reply code, never on a row). Only
+        availability counts, and only for a wanted group's members: a
+        standby wants no group, nor does a primary whose `sp_level`
+        suppresses its groups (CN19); a deferred group (below) never
+        counts, spares are not members, and a held member md has failed on
+        a leg that is available is not late (§7, known limits). A RedundNone
+        group's leg counts too, although its dm-linear (above) is built
+        whatever the leg's availability: the layers over it do IO through
+        it — the pool create (CN13) reads the pool's metadata through the
+        meta group — and a side that has not flipped to this CN yet exports
+        dm-error to it (§11.1.1), so a pool over a late meta leg, and every
+        layer above that pool, is built only by a later converge. No log
+        record of its own: the rows already report it — an
+        md group's error, or `degraded` once a probe reads the array, the
+        error of a layer above a RedundNone group, and the member's own leg
+        row. The retry runs a converge every `CnConnectRetryInterval`
+        seconds for as long as a member stays unavailable, each under the
+        cntlr's object lock, which every `CheckCntlr` round takes too
+        (CN1): on a wide SP an attempt can hold a Check round past the
+        worker's round timeout, and the primary then reads unreachable
+        (§7, known limits).
         **The array is read from sysfs** (*amended 2026-09-26*, the failover
         ping-pong; it was `mdadm --detail /dev/md/{CnMdDevName}`, which
         opens a member — see below). `Md.Walk` lists `/sys/block` for the
@@ -1012,9 +1061,13 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         array unanswered; a foreign array's non-dm member reads `ENOENT` and
         is recorded, so a foreign array cannot hold an assembly off for
         good. Nothing re-drives the refused assembly either
-        (*amended 2026-09-26*): the group's error is a row, not a reply code
-        (CN29), it registers no CN10 background retry, and the Check verdict
-        reports a leftover (a reply code the worker re-drives) only while
+        (*amended 2026-09-26*) — unless the same pass registers the CN10
+        retry for something else (any of CN10's four, among them a
+        `leg_list` member of any group of this cntlr that is not available,
+        above), whose next attempt is a whole converge and tries the group
+        again: the group's error is a row, not a reply code (CN29), the
+        error itself registers no CN10 background retry, and the Check
+        verdict reports a leftover (a reply code the worker re-drives) only while
         its own enumeration, `ListArrays`, still fails — so the group stays
         unassembled, its row `MISSING` on the Check rounds after the array
         answers, until the cntlr's next converge for some other reason (§7,
@@ -1062,15 +1115,26 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         Nothing remembers the failure, and nothing schedules another
         converge for it: the group's error is a row, not a reply code
         (CN29), so the worker does not re-drive it, and it registers no
-        CN10 background retry (a failed connect does, CN10/CN18, and so
-        does a clone recovery whose destination bitmaps were not applied);
-        later Check rounds read the running array `OK`, degraded. The
-        switched-out member stays held and the spare stays out until the
-        cntlr's next converge, for whatever other reason it runs (a
-        `SyncupCntlr` for a revision bump or a non-zero reply code, an agent
-        restart's CN2 re-run, a background retry registered for something
-        else), which removes the member in milliseconds and adds the spare
-        (§7, known limits). The cn agent never runs
+        CN10 background retry (a leg that failed to converge does, CN10,
+        and so does a clone source whose connection failed or a clone
+        recovery whose destination bitmaps were not applied, CN18, and so
+        does a `leg_list` member that is not available — above,
+        *amended 2026-09-26* — which is cntlr-wide: any such member of any
+        group of this cntlr registers it, and the retry finishes the switch,
+        the first of its attempts that finds the promoted spare available
+        adding it; the trigger includes the promoted spare if it is not
+        available yet, or, when the switched-out leg's whole DN died,
+        another group's leg still on that DN (AR8 switches one leg per
+        pass), while the switched-out member itself never counts, since it
+        has left `leg_list`); later Check rounds read the running array
+        `OK`, degraded. The switched-out member stays held and the spare
+        stays out until the cntlr's next converge, for whatever other reason
+        it runs (a `SyncupCntlr` for a revision bump or a non-zero reply
+        code, an agent restart's CN2 re-run, a background retry registered
+        for something else), which removes the member in milliseconds and
+        adds the spare — or, while the spare is not available yet, leaves
+        its `--add` to the retry that the late spare registers (§7, known
+        limits). The cn agent never runs
         `mdadm --zero-superblock`: a leg only ever leaves an array into the
         spare list (where a stale superblock makes a later re-add cheap) or
         out of existence with its side.
@@ -2408,6 +2472,18 @@ contradicts them.
   there too. Case 1.3 reads the assembled array's members from sysfs, and
   the crib sheet's probing list names `mdadm --examine` and
   `/sys/block/md*` in place of `mdadm --detail`.
+* `architecture.md` §11.1 **new_primary** steps 1 and 4 and the
+  "Host-visible errors" paragraph (2026-09-26, the failover ping-pong) — a
+  group whose member is not yet available is retried by the agent until it
+  is (CN10/CN12), and the worker is not involved: the promotion's first
+  converge regularly runs before the sides' ANA flips have reached the new
+  primary's sysfs ([D16]'s unordered fan-out), and the worker re-syncs on
+  a revision or a reply code, never on a row. Step 4 does not wait for
+  steps 1-3: when the late members kept the stack from being built, that
+  first converge moves the namespaces to `optimized` over the td's
+  `CnErrorName` all the same (CN16's ANA rule), so a dead-CN failover
+  whose promotion outruns the sides' flip is not clean from the host's
+  side until the retry has built the stack (§7, known limits).
 
 ## 6. Tests
 
@@ -2472,7 +2548,9 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    assemble + re-add, whichever leg is left out (the array is found through
    the one it holds, `TestGroupFoundByItsHigherLeg`); single available leg ⇒
    assemble, and a scripted mdadm refusal leaves the group
-   `RES_STATUS_ERROR`; a `SwitchSpareLeg`-shaped request (one leg of the
+   `RES_STATUS_ERROR` and, with every leg available, registers no CN10
+   retry (*amended 2026-09-26*, CN12: a group's error by itself is not a
+   late member); a `SwitchSpareLeg`-shaped request (one leg of the
    two-leg group swapped with a spare) ⇒ `--fail` + `--remove` of the
    switched-out leg + `--add --failfast` of the spare, in that order and
    never `--zero-superblock`, whether md still holds the switched-out member
@@ -2911,17 +2989,24 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     wanted set, and the converge failed and removed its in-sync member.
     `TestGroupUnavailableLegMemberStaysWanted`: with leg 2's path
     `inaccessible` or `non-optimized`, or its connect failing with the
-    wrapper of the earlier pass still there, an equal-revision converge
+    wrapper of the earlier pass still there, or with leg 1's path
+    `non-optimized` beside an available leg 2, an equal-revision converge
     runs no `--fail`, `--remove` or `--add`, leaves the array's members as
     they were and reads `OK` — a held member of an unavailable `leg_list`
-    leg stays wanted. `TestGroupHeldFaultyMemberStaysHeld`: with leg 2's
+    leg stays wanted — and registers the CN10 retry, which the converge
+    before it, with both legs available, did not (*amended 2026-09-26*; the
+    leg 1 case because the late verdict reads the group's whole
+    `leg_list`, not its last member).
+    `TestGroupHeldFaultyMemberStaysHeld`: with leg 2's
     member `faulty,failfast` and its leg available, an equal-revision
     converge runs no `--fail`, `--remove` or `--add` and reads `OK` — every
     member sysfs lists is held, whatever its state (§7's "a member md
-    failed stays failed"). `TestGroupNeverAddsAnUnavailableLeg`: with leg 2
+    failed stays failed") — and registers no retry: the member is not late
+    (CN12). `TestGroupNeverAddsAnUnavailableLeg`: with leg 2
     missing from the array and its path `non-optimized`, the converge runs
-    no `--add` and no `lsblk` of either leg wrapper and reads `OK`; with
-    the path `optimized` again, the next converge adds it.
+    no `--add` and no `lsblk` of either leg wrapper, reads `OK` and
+    registers the retry; with the path `optimized` again, the next
+    converge adds it and stops the retry.
     `TestGroupProbeWalksOnce`: a Check round over four arrays lists
     `/sys/block` and each array's `md/` exactly twice — the verdict's
     enumeration and the one walk the md rows share — and lists or reads
@@ -2967,12 +3052,64 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     naming the md enumeration, because the sweep's `ListArrays` fails on
     the same array (CN21) — and with the group's array not built yet the
     lookup is an error naming the unanswered array — no create, no
-    assembly; the test's next `SyncupCntlr`, after the array answers,
-    assembles it (nothing in the agent re-drives it, CN12). A match whose
+    assembly and no CN10 retry registered; the test's next `SyncupCntlr`,
+    after the array answers, assembles it (with every leg available nothing
+    in the agent re-drives it, CN12). A match whose
     `md/` went after the walk (a stop removes it whole) is that same error
     beside an unanswered array; once every array answers, `Refresh` drops
     it and its names read absent, and with no `Refresh` in between a walk
     every array answered reads such a match absent too.
+31. **A late `leg_list` member registers the CN10 retry** (CN10/CN12,
+    *added 2026-09-26*, the failover ping-pong;
+    `agent/cnagent/cnagent_test.go`). The registration is
+    `cntlrState.retrying`, read under `s.mu`; an attempt is run by hand
+    with `reconvergeCntlr` on `rootCtx`, exactly the call the loop makes,
+    and the tests set a `retryInterval` no test outlives, so every attempt
+    is one the test ran. `TestLateMembersRegisterTheRetry`: a standby
+    promoted while the paths of both groups' legs — or of the meta group's
+    alone, which the pass converges before the data group — read
+    `non-optimized` (the sides not flipped yet) reports each group left
+    with no available leg `ERROR` `no available leg`, runs no `mdadm
+    --create`, and no `--assemble` but the data group's where that group
+    is whole, and registers the retry; an attempt while the paths still
+    read `non-optimized` assembles nothing and keeps it; with the paths
+    `optimized`, one attempt runs one `mdadm --assemble` per late group,
+    the probed md, raid0 and ns-dev rows read `OK`, and the retry has
+    stopped. `TestLateMemberRefusedStartIsAssembledByTheRetry`: the same
+    promotion after a clean demote with only one of a two-leg group's
+    members unavailable — mdadm refuses the start from the other alone
+    ([D16]; the fake has no Array State gate, so the test injects the
+    refusal), the row reads `ERROR` with mdadm's words, no `mdadm
+    --create` runs and the retry is registered; an attempt before the flip
+    is refused again, runs no `--create` either and keeps the retry; the
+    attempt after the path reads `optimized` assembles the array from both
+    members, runs no `--add` and stops the retry.
+    `TestLateMemberIsAddedByTheRetry`: the same with the late member
+    failed and removed before the demote, so the start from the other
+    alone is one mdadm allows — the row reads `OK`, no `--add`
+    runs and the retry is registered, an attempt before the flip adds
+    nothing and keeps it, and the attempt after the flip adds the member
+    and stops the retry. `TestLateRedundNoneLegRegistersTheRetry`: a
+    RedundNone standby promoted while its legs' paths read `non-optimized`
+    builds the group linear, reads the group `OK` and registers the retry
+    (on a real node the pool create over a side that has not flipped
+    fails; the fake does not model dm-error IO, so the test pins the
+    registration); an attempt before the flip keeps it, and the attempt
+    after the flip stops it. `TestLateMemberRetryScope`: an unavailable
+    leg registers nothing on a standby (every path `non-optimized`), on a
+    primary whose `sp_level` (`NO_REDUND`, `NO_SIDE`) suppresses its
+    groups, in a deferred group (its provisioned member `non-optimized`
+    beside the provisioning one), or as a spare (`non-optimized`).
+    `TestLateMemberRetryScopeWantedGroups`: a late member does register the
+    retry at an `sp_level` that wants the groups but no pool
+    (`NO_THINPOOL`; the group reads `ERROR` `only 1 of 2 legs available`),
+    and in a group past [D15]'s prefix cut (CN9) — built and `OK`, not yet
+    a concat target — because only a deferred group is excluded, not every
+    group outside the effective concat.
+    `TestFailedConnectRegistersTheRetryWithoutALateMember`: a refused
+    connect of a standby's leg, or of a primary's spare, registers the
+    retry although neither leg is a late member — build ORs its
+    late-member verdict into `ensureLegs`' and never overwrites it.
 
 ## 7. Acceptance checklist
 
@@ -3066,30 +3203,124 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   `MdMember.State` has the `faulty` flag, tested by membership
   (`faulty,failfast`). The `--remove` must come first: mdadm opens an
   `--add`ed device `O_EXCL`, and md keeps its claim on a faulty member
-  until the member is removed, so an `--add` alone is refused.
+  until the member is removed, so an `--add` alone is refused. Nor does the
+  late-member retry (CN12) reach it: lateness is availability alone, and
+  the held faulty member's leg is available again.
 * **A killed `--remove` leaves a spare switch half done** (2026-09-26): a
   switch applied within seconds of the switched-out leg's side dying can
   have its `--remove` killed at the soft timeout while a superblock write is
   stuck on that member (CN12). The pass reports the group `ERROR` and does
   not add the promoted spare, and nothing re-drives it: the worker re-syncs
   on a revision or a reply code, never on a row, and a group error
-  registers no CN10 background retry. The array runs on its surviving
+  registers no CN10 background retry (the CN10 retry does finish the
+  switch when the same pass registers it for something else, such as a
+  failed leg connect or any `leg_list` member of the cntlr that is not
+  available — the promoted spare or, after a whole DN died, another
+  group's leg still on it, CN12). With no such trigger left — a lone switched-out
+  leg, or the last switch off a dead DN — the array runs on its surviving
   member until the cntlr's next converge for some other reason; the
   follow-up is to register the background retry when member reconciliation
   fails.
 * **An unanswered array can leave a group unassembled** (2026-09-26): a
   group with no answering array while another array of the walk did not
   answer is neither created nor assembled that pass (CN12), and the error
-  is a row, which nothing re-drives; the Check verdict stays non-zero only
-  while its own enumeration, `ListArrays`, still fails. Once the array
+  is a row, which nothing re-drives by itself; the Check verdict stays
+  non-zero only while its own enumeration, `ListArrays`, still fails.
+  Once the array
   answers, the group waits, its row `MISSING`, for the cntlr's next
   converge for some other reason — and the groups this can hit include
   those a new primary's first converge must assemble, whose slice layers
   cannot be built meanwhile. The follow-up is the same background retry
   as the killed `--remove`'s, registered when a group lookup or assembly
-  fails for a reason that is not the group's own — a retry keyed on
-  unavailable legs would not cover it, since the group's legs may all be
-  available.
+  fails for a reason that is not the group's own — the late-member retry
+  of CN12 does not reliably cover it: it runs only while some `leg_list`
+  member of the cntlr is not available, and the group's own legs, like
+  every other leg, may all be available.
+* **A member that stays unavailable costs a converge every 5 s, under the
+  lock every Check round needs** (2026-09-26): the late-member retry
+  (CN10/CN12) runs the whole converge
+  of the cntlr every `CnConnectRetryInterval` seconds until every
+  `leg_list` member is available. On members that are genuinely dead
+  that lasts until the worker's leg repair (`dnv-worker.md` AR8) has
+  switched the last of them out of `leg_list`, since the retry is
+  cntlr-wide and AR8 takes one step per pass of the SP (AR2), one pass
+  every `cntlr_interval`: for a dead DN, `side_unhealthy` (600 s by
+  default), then, for each of the SP's `leg_list` legs on that DN, a spare
+  create (unless its group has a ready or pending spare already) and a
+  switch, at least one pass each (the spares' provisioning overlaps). It
+  has no bound when AR8 does not switch a late member: a RedundNone leg
+  (AR8 only logs for one, and the gateway's `CreateSpareLeg` refuses its
+  group a spare: "no redundancy to repair"), a leg with two sides (a
+  migration in flight, which AR8 leaves alone, `leg_has_two_sides`; it has
+  no available path once the dst's DN is dead, or the src's before the
+  dst's path is `optimized`, `architecture.md` §11.2 dst step 5), a full
+  spare list (`spare_list_full`, AR8 step 4), an SP whose reactions are
+  suppressed (AR3), no DN to place a spare on (step 3), or a pending spare
+  that step 2 keeps waiting for (one the primary never reports). The retry
+  then runs until the DN returns or an operator acts.
+  Each attempt is a full converge of a built cntlr — probes, the sweep's
+  enumerations, no creates — the profile the connect retry already has
+  while a side's connect fails (a leg's controller is connected with
+  `--ctrl-loss-tmo -1`, SH20, so a side that dies while its controller
+  survives is late rather than a failed connect; once the controller is
+  gone — its reconnect refused with DNR, as when the side's port link is
+  gone while the port still listens, or lost to a CN reboot — the next
+  converge's `nvme connect` fails while the side stays down, and registers
+  the same retry). The cost is not CPU alone (*amended 2026-09-26*, found
+  reviewing the late-member retry): an attempt holds the cntlr's object
+  lock for its whole converge, and every `CheckCntlr` round takes that
+  lock too (CN1). The worker waits for a round's reply at most
+  `cntlr_interval` (`dnv-worker.md` RW8; 5 s by default, as
+  `CnConnectRetryInterval` is); a round that waits behind an attempt past
+  that is a missed round, which stamps `Cntlr.err_epoch` (HL2), and once
+  that has aged `primary_unhealthy` (5 s by default) AR5 can fail over a
+  primary whose only fault is a dead leg — and the new primary inherits
+  the same late member, and with it the same retry. The connect retry has
+  always held that lock too, but only while a side's connect fails; a dead
+  DN whose controllers survive registers the retry only as a late member,
+  so before the late-member retry such a DN caused no attempt at all. How
+  long an attempt holds the lock grows with the slice count. Counted on
+  the unit tests' fake node at the e2e suite's shape (md-raid1, two legs
+  per group, one leg late, one thin device), an attempt spawns 21 + 53
+  processes per slice (1,717 at 32 slices) and a Check round 18 + 28 per
+  slice (914); each further thin device adds about 5 per slice to both.
+  At the one spawn rate measured on a lab cn guest, about 240 a second
+  (`e2e_integtest.md` §8 item 12), that is about 7 s for an attempt and
+  about 4 s for a Check round at 32 slices, and an attempt plus a Check
+  round passes 5 s from about 15 slices on. An attempt that outlasts
+  `CnConnectRetryInterval` finds the loop's next tick already due and is
+  followed by the next at once, so the lock is then almost always held,
+  and a Check round waits out the rest of the attempt in progress before
+  its own probe. None of this is measured on the lab yet: the one-slice
+  suites cannot show it (an attempt there is about 75 spawns), and the
+  e2e `react` case's stage 05 — a dead DN at 32 slices, asserting no
+  failover during it (`e2e_integtest.md` §4.5) — is the run that will.
+  The guard against this failover, not an optimization, is a pre-check
+  that runs the converge, and takes the object lock for it, only when the
+  converge has something to act on — a late member available again, a
+  provisioned side with no controller, CN18's clone triggers — read from
+  the desired state and sysfs with nothing remembered. It is not done now,
+  so that the cn retry loop stays the DN13 pattern (the comment on
+  `connectRetryLoop` says why the two copies must not drift apart); that
+  stage 05 run decides whether it must be.
+* **A promotion that outruns the sides' flip serves IO errors until the
+  retry builds the stack** (2026-09-26): CN16's ANA rule reads the plan —
+  primary, not disabled, not effectively suspended, not deferred — and not
+  the stack, so the promotion's own converge moves its namespaces to
+  `optimized` even when its late members kept the stack from being built
+  — a group with no available leg, a pool over a side that still exports
+  dm-error — and the ns-dev reload onto the raid0 (CN16 rule 6) failed
+  with the raid0 missing: the ns-dev stays on the td's `CnErrorName`, the
+  standby table of rule 2. A host's IO on that path fails with
+  target-internal (DNR) errors, not path errors — the IO it queued while
+  no path served included — until the first CN10 retry attempt after the
+  sides' flips have reached this CN's sysfs builds the stack and reloads
+  the ns-dev onto the raid0, within about one `CnConnectRetryInterval` of
+  that. Before the late-member retry it lasted until the cntlr's next
+  converge for some other reason, usually the next revision bump
+  (`architecture.md` §11.1 new_primary step 4). The follow-up is a
+  [D15]-style ANA conjunct — `optimized` only once the ns-dev is on the
+  backing it wants — which is not done here.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

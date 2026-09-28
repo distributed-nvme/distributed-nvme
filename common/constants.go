@@ -296,9 +296,11 @@ const (
 	LegHealthBlockSize = 4096
 	LegHealthMagic     = "DNVHLTH1"
 
-	// Seconds between background retries of a pending cn outbound nvme
-	// connect — leg side connections and clone source connections
-	// (cnagent.md CN10/CN18); the cn twin of DnMigrConnectRetryInterval.
+	// Seconds between background retries of a cn cntlr's converge
+	// (cnagent.md CN10): after a leg or a clone source failed to converge, a
+	// clone recovery whose destination bitmaps were not applied (CN18), or a
+	// leg_list member that is not available (CN12); the cn twin of
+	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
 	// SuspendSeconds is the §11.2 src-cutover grace window: a migration

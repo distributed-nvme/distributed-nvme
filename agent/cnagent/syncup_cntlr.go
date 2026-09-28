@@ -226,6 +226,7 @@ func (s *CnAgentServer) build(
 
 	// Groups (CN12) — a standby has none (§3.4). One /sys/block walk serves
 	// every group of the pass (Md.Walk).
+	late := false
 	if plan.wantGrp {
 		walks := &mdWalkOnce{md: s.md}
 		for _, gp := range plan.grps {
@@ -241,12 +242,32 @@ func (s *CnAgentServer) build(
 			err := s.ensureGroup(ctx, gp, available, walks)
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, "", err)
+			if gp.hasLateMember(available) {
+				late = true
+			}
 		}
 	} else if plan.primary {
 		for _, gp := range plan.grps {
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.Missing(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, detailsSpLevel)
 		}
+	}
+	if late {
+		// CN12 as amended 2026-09-26: a group's leg_list member that is not
+		// available this pass is the same class of transient as a connect
+		// that failed — the side's ANA flip has not reached this CN's sysfs
+		// yet (a promotion fans out SyncupCntlr and SyncupSide unordered,
+		// [D16]), its DN is rebooting, its path is mid-reconnect — and
+		// nothing else re-drives the converge that would assemble it, add it
+		// or build the pool over it: the worker re-syncs on a revision or a
+		// reply code, never on a row. So it registers the CN10 retry, which
+		// re-runs the whole converge until every such member is available.
+		// There is no record of its own: the rows already report it — an md
+		// group's error, or "degraded" once a probe reads the array, the
+		// error of a layer above a RedundNone group, and the member's own leg
+		// row.
+		s.startConnectRetry(st, plan)
+		retryNeeded = true
 	}
 
 	// Per-slice pools (CN13) and thin volumes (CN14).

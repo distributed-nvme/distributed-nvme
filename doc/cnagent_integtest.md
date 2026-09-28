@@ -21,20 +21,23 @@ machines, driven over gRPC from the developer machine, **against real
 and has its own passing suite; this suite asserts dn health once at setup
 and then treats it as infrastructure). All 10 `ControllerNodeAgent` RPCs are
 exercised (§18). Happy-path correctness only; error-path testing is out of
-scope (§19) except three probes their own cases structurally require: case
+scope (§19) except four probes their own cases structurally require: case
 D's stale-revision rejection, the `ReplyCodeLeftover` case T induces with a
 pinned dm device (§15) — which is not a rejection at all but an accepted
-request reporting residue — and case A's dead leg (§11 step 5, `degrade`;
+request reporting residue — case A's dead leg (§11 step 5, `degrade`;
 *added 2026-09-26*, because the md rows are read from sysfs, `cnagent.md`
 CN12/CN28), whose leg rows must read `RES_STATUS_ERROR` while both md rows
-stay `RES_STATUS_OK`.
+stay `RES_STATUS_OK`, and case A's early promotion (§11 step 6,
+`lateflip`; *added 2026-09-26*, because a late `leg_list` member registers
+the agent's own retry, `cnagent.md` CN10/CN12), whose md rows must read
+`RES_STATUS_ERROR` `no available leg` until the sides flip.
 
 Test cases:
 
 | case | name | what it proves |
 |---|---|---|
 | S | `smoke` | end-to-end plumbing: one primary cntlr, RedundNone, one td/ss/ns, host IO round-trip host → CN → DN |
-| A | `redund` | md-raid1 groups across two DNs, primary + standby cntlrs, failover, a dead leg's md rows read from sysfs, `SP_LEVEL_READONLY` |
+| A | `redund` | md-raid1 groups across two DNs, primary + standby cntlrs, failover, a dead leg's md rows read from sysfs, `SP_LEVEL_READONLY`, a promotion that outruns the sides' flip and completes on the agent's retry |
 | T | `teardown` | teardown by sweep (§15): five removal windows over one A-shaped raid1 stack, a distinct sp per stage — sides gone, paths long dead, IO in flight, a partitioned DN, and a pinned leg wrapper reported as `ReplyCodeLeftover` (4) and cleared by re-sending the same request at the same revision |
 | B | `thinbm` | thin snapshots; `GetThinDeviceBm`/`GetLegBm` arithmetic against a known write pattern |
 | C | `clone_xfer` | §11.3 transfer + clone live move across two SPs, `PushCloneBitmap`, CN wipe + §11.5 recovery |
@@ -547,7 +550,11 @@ is `sprintf("%016x", slice_id)` per §9.3.)
 - **Ordering**: `syncup-cn` introduces a cntlr pointer before its first
   `syncup-cntlr` (else `code 2`); a side pointer likewise via `syncup-dn`
   (dn suite rule). The DN sides of a case are converged before the cn
-  primary, so legs have optimized paths when md assembles (§11.1.1).
+  primary, so legs have optimized paths when md assembles (§11.1.1) —
+  except in case A's `lateflip` stage (§11 step 6), which promotes CN1
+  before any side flips on purpose, to prove that the agent's CN10 retry
+  finishes the assembly once they do (*amended 2026-09-26*, `cnagent.md`
+  CN10/CN12).
 - **Two-phase DN side setup (the worker's `provisioned` flip, played by the
   script).** A side is exported only when the
   request carries `provisioned = true` **and** every extent's `zeroed_bits`
@@ -612,7 +619,12 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   SP's legs to report ANA `optimized`** → promote the new primary. That
   barrier is not cosmetic: the flip is asynchronous, and a promote that
   arrives while a leg is still `non-optimized` finds that member
-  unavailable and fails the md assembly (§11.1.1). Host IO is quiesced from
+  unavailable and fails the md assembly (§11.1.1) of its own converge.
+  Since 2026-09-26 the agent's CN10 retry finishes that assembly once the
+  member is available (`cnagent.md` CN12) — case A's `lateflip` stage
+  (§11 step 6) runs exactly that order on purpose — but case A step 4
+  asserts both `--assemble`s under the promote's own trace id, which
+  holds only behind the barrier. Host IO is quiesced from
   before the demote until the new primary's path reports `optimized` —
   between those points the namespace can have no serving path, and
   ANA-inaccessible paths queue IO and have no `/dev` node.
@@ -657,6 +669,14 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   verbs that used to appear on both halves of this list
   (`pvcreate|vgcreate|lvcreate|lvremove` mutating, `vgs|lvs` probing) are
   gone with [D14].
+- `cn_log_lines`, `cn_cmds_since <mark> <prefix>` and `cn_requests_since
+  <mark> <method> <sp> <cntlr>` (*added 2026-09-26*, case A `lateflip`) —
+  read a cn-agent log from a mark (its line count) instead of by trace id,
+  for records no RPC of the stage caused: the CN10 retry mints a trace id
+  per attempt (`cnagent.md` CN2). The second prints each `os command`
+  whose `cmd args…` starts with the prefix as `<trace_id> cmd args…`; the
+  third counts the `grpc server request` records of one unary method for
+  one cntlr, the ids in decimal as the log renders them.
 
 ## 10. Case S — `smoke`
 
@@ -717,7 +737,7 @@ is `sprintf("%016x", slice_id)` per §9.3.)
 Success proves: both ctl binaries, both agents, pointer gating, the full
 §3.3 primary stack on real devices, host IO, declarative teardown.
 
-## 11. Case A — `redund` (raid1, failover, dead leg, readonly)
+## 11. Case A — `redund` (raid1, failover, dead leg, readonly, late flip)
 
 1. DN side: 4 sides (§5 table) on DN1+DN2, each `primary_cn_id 0x11`,
    `standby_id_list [0x12]`, each through `dn_side` (the §9 two-phase
@@ -785,13 +805,45 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    through the partition), both leg rows `RES_STATUS_OK` again (≤ 60 s —
    their probers' next round) and the fresh 1 MiB at 9 reads back. The
    member md failed stays failed (`cnagent.md` §7 known limits), so the
-   data array stays degraded — and `OK` — through steps 6 and 7.
+   data array stays degraded — and `OK` — on CN2 through step 6's
+   readonly half, until `lateflip` assembles it anew on CN1.
 6. **Readonly**: `syncup-cntlr` CN2 (CNREV2++, `sp_level
    SP_LEVEL_READONLY`, still primary). No dn calls — the level has no
    DN-side behavior below `NO_MIGRATION` ([D11]). Assert: VM2
    `dmsetup table` of the ns-dev shows `flakey … error_writes`; host read
    of block 9 succeeds; host `dd` write of 1 MiB fails non-zero; ana still
    `optimized`. Back to `readwrite` (CNREV2++): write succeeds again.
+
+   **A promotion that outruns the sides' flip (`lateflip`; *added
+   2026-09-26*, `cnagent.md` CN10/CN12).** A failover fans `SyncupCntlr`
+   and the sides' `SyncupSide` out unordered (`architecture.md` [D16]), so
+   a promoted standby can read its legs before any side has flipped; a
+   `leg_list` member that is not available registers the agent's own CN10
+   retry, and nothing else re-runs that converge. With host IO quiesced
+   (the promotion moves CN1's namespace to `optimized` over the td's
+   dm-error until a converge has built the stack, `cnagent.md` §7 known
+   limits) and the host's path to CN1 `live` again (the `degrade`
+   partition cut it): mark CN1's log; `syncup-cntlr` CN2 (CNREV2++, `primary=false`);
+   then `syncup-cntlr` CN1 (CNREV1++, `primary=true`) **before any side
+   flips**, and assert both `grp_id_to_md_raid` rows of its reply
+   `RES_STATUS_ERROR` with `no available leg` in `details` and no `mdadm
+   --assemble` or `--create` under the stage's trace id. Then 4×
+   `syncup-side` (DNREV++, `primary_cn_id 0x11`, `standby_id_list
+   [0x12]`), the four legs `optimized` on CN1 (≤ 20 s each), and
+   `get-cntlr-info` on CN1 once a second for ≤ 15 s until both md rows
+   read `RES_STATUS_OK` — degraded or not: the data array's DN1 member is
+   the one md failed in step 5, which md kicks from the assembly and CN12
+   adds back — with the raid0 and ns-dev rows `OK` beside them. Every
+   `mdadm --assemble` CN1's log holds since the mark runs under a trace id
+   other than the stage's (a retry attempt's, CN2) and both arrays' names
+   appear among them (an attempt between two flips may add a run mdadm
+   refused: a lone member whose superblock still counts both, [D16]); the
+   log holds exactly one `SyncupCntlr` request for CN1's cntlr since the
+   mark. The retry then stops: CN1 runs no command under any trace id but
+   the stage's for a whole 7 s window (≤ 30 s to find one; a window spans
+   more than one 5 s retry tick). Host: CN1 path
+   `optimized`, CN2 path `inaccessible`; the 8 MiB of step 3 read back,
+   and a fresh 1 MiB written at `seek=9` reads back.
 7. `check-cn`/`check-cntlr` rounds on both CNs; teardown: host disconnect,
    empty cntlr lists both CNs, empty side lists both DNs; assert no
    `0x3b1` residue on either VM — dm devices of the SP, md arrays (no
@@ -1445,7 +1497,7 @@ records can be pulled from the JSON logs on either VM.
 ## 19. Out of scope (v1)
 
 Negative/error-path testing beyond the case D stale probe and case A's
-`degrade` step (§11 step 5); QoS (explicitly
+`degrade` and `lateflip` steps (§11 steps 5 and 6); QoS (explicitly
 deferred — `cnagent.md` CN6 — so there is nothing to observe); `GrowSlice`
 online pool growth; spare legs and `SwitchSpareLeg`; a CN watching a leg
 gain/lose its second side (migration multipath — the dn suite's cases B/C
@@ -1611,6 +1663,22 @@ another document or the harness cites can shift.
   probe-command list drops it; §4, §16 and §19 count the `degrade`
   partition in, and §1 and its case table name the stage — §1 as a third
   in-scope error path.
+- **A late `leg_list` member registers the agent's retry** (2026-09-26;
+  `cnagent.md` CN10/CN12, the failover ping-pong). A `leg_list` member
+  that is not available registers the CN10 background retry, so a
+  promotion whose first converge ran before the sides' ANA flips completes
+  without a second `SyncupCntlr`. Case A gains the `lateflip` stage of
+  §11 step 6 (CN1 promoted before any side flips: `no available leg` in
+  the reply, the arrays assembled under a retry attempt's trace id, one
+  `SyncupCntlr`, the retry quiet afterwards, the data read back through
+  CN1); step 5's degraded data array now lasts until that stage, `stage
+  check` compares the revisions it leaves, the VM helper gains
+  `cn_log_lines`, `cn_cmds_since` and `cn_requests_since` (log reads from a
+  mark rather than by trace id), and §1, its case table and §19 name the
+  stage — §1 as a fourth in-scope error path. §9's Ordering and Failover
+  script order bullets name `lateflip` as their exception, and
+  Appendix A's mdadm bullet no longer says no case depends on a degraded
+  start: it records the two mdadm behaviors the stage relies on.
 
 ## Appendix A — lab gotchas baked into this plan
 
@@ -1663,8 +1731,21 @@ another document or the harness cites can shift.
 - **mdadm gates degraded assembly** on the explicit-devlist path by the
   survivor's recorded Array State — a single-leg `--assemble` may
   legitimately refuse; the agent reports the group `RES_STATUS_ERROR`
-  rather than forcing (`cnagent.md` CN12), and no case here depends on a
-  degraded start.
+  rather than forcing (`cnagent.md` CN12). Case A's `lateflip` stage (§11
+  step 6) depends on both halves of that gate (*amended 2026-09-26*,
+  because a late `leg_list` member now registers the agent's retry,
+  `cnagent.md` CN10/CN12; it used to say no case here depends on a
+  degraded start). First, the data array's DN1 member is the one md
+  failed in step 5: md kicks it as non-fresh, and mdadm starts the array
+  degraded from DN2's member only because that member's Array State no
+  longer counts the failed one; CN12 then `--add`s DN1's member back.
+  Second, `dn_side` flips DN1's legs first, so a retry attempt between the
+  flips runs a single-leg `--assemble` of a member whose superblock still
+  counts both, and mdadm refuses it. That refusal must leave no inactive
+  array: `ensureGroup` leaves a non-running array alone and reports it
+  `ERROR`, so a leftover would hold the row `ERROR` past the stage's 15 s
+  poll. Both are mdadm behaviors [D16] makes load-bearing; re-verify them
+  when the deployed mdadm version changes.
 - **dm-flakey `<num_features>` counts the feature name** — the readonly
   table is `… flakey <dev> 0 0 1 1 error_writes`. Case A's readonly stage
   greps the live ns-dev table for `flakey` and for `error_writes` as two

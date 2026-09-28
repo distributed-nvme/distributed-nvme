@@ -885,10 +885,18 @@ func (s *CnAgentServer) assembleGroup(
 // long as a superblock write is stuck on the member — seconds after its side
 // dies with a write in flight — and the soft timeout then kills it with the
 // member still held: this pass fails before the add loop, so the promoted
-// spare is not added either, and nothing schedules the converge that finishes
-// the switch — the group's error is a row, not a reply code, and registers no
-// background retry. The next converge of this cntlr, whatever brings it,
-// removes the member in milliseconds and adds the spare. Nothing here
+// spare is not added either. The group's error is a row, not a reply code,
+// and registers no background retry of its own. The retry finishes the switch
+// only when the same pass registers it for something else (cnagent.md CN10's
+// list), such as a leg that failed to converge or any leg_list member of this
+// cntlr that is not available — build's late flag is cntlr-wide: the
+// promoted spare if it is not available yet, or, after the switched-out leg's
+// whole DN died, another group's leg still on it (AR8 switches one leg per
+// pass); the switched-out member itself has left leg_list and never counts.
+// Otherwise nothing schedules the converge that finishes the switch. The next
+// converge of this cntlr, whatever brings it, removes the member in
+// milliseconds and adds the spare — a spare that is not available yet is
+// added by the first retry attempt that finds it available. Nothing here
 // remembers the failure (cnagent.md §7, known limits).
 func (s *CnAgentServer) reconcileMembers(
 	ctx context.Context,

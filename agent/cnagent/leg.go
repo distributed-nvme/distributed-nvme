@@ -226,8 +226,10 @@ func (s *CnAgentServer) readSysfs(
 // ensureLegs converges every leg of every group of every slice — spare legs
 // included, both roles. It reports which legs are **available** (§11.1.1),
 // which is what CN12 assembly needs, records each leg's ResInfo, and says
-// whether any connect failed — which is what registers the cntlr for the
-// background retry.
+// whether any leg failed to converge — its connect, its multipath namespace
+// or its wrapper — which registers the cntlr for the background retry (build
+// registers it too for a group's leg_list member that is not available,
+// CN12).
 func (s *CnAgentServer) ensureLegs(
 	ctx context.Context,
 	st *cntlrState,
@@ -502,10 +504,13 @@ func (s *CnAgentServer) disconnect(ctx context.Context, nqn string) {
 // CN10/CN18 background connect retry (the DN13 pattern)
 // ---------------------------------------------------------------------------
 
-// startConnectRetry registers a cntlr whose outbound connect failed — a leg
-// side or a clone source. A goroutine re-runs the whole converge every
-// CnConnectRetryInterval seconds under the CN1 locks until it succeeds or the
-// cntlr is torn down; the RPC itself never blocks on a connect.
+// startConnectRetry registers a cntlr for the CN10 background retry: a leg or
+// a clone source failed to converge (CN10/CN18), a clone recovery's
+// destination bitmaps were not applied (CN18), or a group's leg_list holds a
+// member that is not available (CN12). A goroutine re-runs the whole
+// converge every CnConnectRetryInterval seconds under the CN1 locks until a
+// pass registers none of these (build's stopConnectRetry) or the cntlr is
+// torn down; the RPC itself never blocks on a connect.
 func (s *CnAgentServer) startConnectRetry(
 	st *cntlrState,
 	plan *cntlrPlan,

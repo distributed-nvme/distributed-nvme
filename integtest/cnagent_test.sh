@@ -296,6 +296,20 @@ assert_map_ok() { # json field id label
 	assert_ok "$1" ".cntlr_info.$2[\"$key\"].status" "$4 $2[$3]"
 }
 
+# assert_map_status is assert_map_ok's exact form for a row that must NOT be
+# OK: the status itself, and a substring its details must hold.
+assert_map_status() { # json field id status details-substring label
+	local key got det
+	key=$(d16 "$3")
+	got=$(jq_of "$1" ".cntlr_info.$2[\"$key\"].status // \"ABSENT\"")
+	det=$(jq_of "$1" ".cntlr_info.$2[\"$key\"].details // \"\"")
+	[ "$got" = "$4" ] || die "$6 $2[$3]: status is $got ($det), want $4"
+	case "$det" in
+	*"$5"*) ;;
+	*) die "$6 $2[$3]: details '$det' do not hold '$5'" ;;
+	esac
+}
+
 # assert_thin_ok checks td_id_to_thin_info[td].slice_id_to_dm_thin[slice].
 assert_thin_ok() { # json td slice label
 	assert_ok "$1" \
@@ -526,9 +540,15 @@ leg_state() { # cnvm sp leg cn dnidx
 	helper "$1" "path_field '$nqn' '${IP[$5]}' State"
 }
 
-# leg_wait_ana is the §9 ordering barrier of a failover: a promoted CN may only
-# converge once its legs have optimized paths, or md would find them
-# unavailable (§11.1.1).
+# leg_wait_ana waits for one leg's path on one CN to reach an ANA state. In a
+# failover it is the §9 ordering barrier: a promote that converges before its
+# legs have optimized paths finds them unavailable (§11.1.1) and fails the md
+# assembly of its own converge. Since 2026-09-26 the agent's CN10 retry
+# finishes that assembly once they are optimized (cnagent.md CN12), but case
+# A's promote stage asserts its md rows OK and both --assembles under the
+# promote's own trace id, which holds only behind the barrier. Case A's
+# lateflip stage promotes before any side flips on purpose and calls this
+# afterwards, only to wait for the flips to land.
 leg_wait_ana() { # cnvm sp leg cn dnidx want secs
 	local nqn
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$2" "$3" "$4")
@@ -1287,6 +1307,42 @@ events() {
 }
 
 cn_events() { events "$CN_LOG" "${1:-}"; }
+
+# cn_log_lines — the cn log's length in lines, a mark the two readers below
+# start after. A stage reads "since" a mark instead of by trace id when the
+# records it wants were not caused by its own RPCs: the CN10 background retry
+# mints a fresh trace id per attempt (CN2), which no stage knows in advance.
+cn_log_lines() {
+	local n
+	n=$({ wc -l <"$CN_LOG"; } 2>/dev/null) || n=0
+	echo $((n))
+}
+
+# cn_cmds_since <mark> <prefix> — the os command records after line <mark>
+# whose "cmd args…" starts with <prefix> (empty: every one), each printed as
+# "<trace_id> cmd args…", in log order.
+cn_cmds_since() {
+	tail -n "+$(($1 + 1))" "$CN_LOG" 2>/dev/null | jq -r --arg p "$2" '
+	    select(.msg == "os command")
+	    | (.cmd + " " + ((.args // []) | join(" "))) as $e
+	    | select($e | startswith($p))
+	    | .trace_id + " " + $e' 2>/dev/null || true
+}
+
+# cn_requests_since <mark> <method> <sp> <cntlr> — how many `grpc server
+# request` records of one unary method for one cntlr follow line <mark>. The
+# ids are decimal, as the log renders a request's uint64 fields.
+cn_requests_since() {
+	local n
+	n=$(tail -n "+$(($1 + 1))" "$CN_LOG" 2>/dev/null | jq -r --arg m "$2" \
+	    --argjson sp "$3" --argjson c "$4" '
+	    select(.msg == "grpc server request")
+	    | select((.method | split("/") | last) == $m)
+	    | select(.data.cntlr_pointer.sp_id == $sp
+	        and .data.cntlr_pointer.cntlr_id == $c)
+	    | .trace_id' 2>/dev/null | wc -l)
+	echo $((n))
+}
 
 # mutations [trace] [log] — every mutating operation in a cn agent log (§9,
 # case D step 5). An empty trace means the whole log; naming one scopes the
@@ -2581,7 +2637,7 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case A — redund (§11): raid1, failover, dead leg, readonly
+# Case A — redund (§11): raid1, failover, dead leg, readonly, late flip
 # ---------------------------------------------------------------------------
 
 case_redund() {
@@ -2593,7 +2649,7 @@ case_redund() {
 	local uuid=22222222-2222-4222-8222-222222222222
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
-	local writer deadline mkey dkey lkey mst dst ldet n rules
+	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -2761,8 +2817,9 @@ case_redund() {
 	# away without the DN agent: meta leg 1 and data leg 1 — leg_idx 0, so
 	# disk 0 of their arrays, the member the old `--detail` loaded its
 	# superblock from. It also cuts the emulated host's path to CN1, the
-	# standby's, inaccessible since the failover; nothing below reads it,
-	# and it reconnects once the rule goes.
+	# standby's, inaccessible since the failover; it reconnects once the
+	# rule goes, and the lateflip stage waits for it to be live before it
+	# reads through it.
 	assert_eq "$(helper 1 have_iptables)" yes \
 		"degrade: vm1 needs iptables to partition the nvme-tcp port"
 	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
@@ -2836,7 +2893,8 @@ case_redund() {
 	# The leg rows clear on their probers' next completed round. The md
 	# member md failed stays failed — CN12 re-adds a leg only when the array
 	# lacks it (cnagent.md §7 known limits) — so the data array stays
-	# degraded, and OK, for the rest of the case.
+	# degraded, and OK, on CN2 through the readonly stage; the lateflip
+	# stage assembles the arrays anew on CN1.
 	deadline=$((SECONDS + 60))
 	while :; do
 		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2")
@@ -2880,6 +2938,119 @@ case_redund() {
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund readwrite again"
 	assert_eq "$(helper "$hv" "write_probe '$dev' 9")" ok \
 		"redund write after readwrite"
+
+	stage lateflip "a promotion that outruns the sides' flip completes on the retry"
+	# CN12 as amended 2026-09-26, link 1 of the failover ping-pong: a
+	# failover fans SyncupCntlr and the sides' SyncupSide out unordered
+	# ([D16]), so a promoted standby can read its legs before any side has
+	# flipped. Every path is then live but still non-optimized, no leg is
+	# available, and both groups report "no available leg". Nothing re-drives
+	# that converge — the worker re-syncs on a revision or a reply code, never
+	# on a row — so the agent's CN10 retry, registered for the late members,
+	# must finish it. This stage promotes CN1 BEFORE it flips any side, then
+	# flips them all: the arrays must be assembled by a retry attempt, under a
+	# trace id of its own, and CN1 must see no second SyncupCntlr. CN1
+	# assembles from the members' superblocks, where the data array's DN1
+	# leg is the member md failed on CN2 in the degrade stage: md kicks that
+	# stale member from the assembly, and CN12's member reconciliation adds
+	# it back. An attempt that runs between two flips sees one member of a
+	# group available: mdadm refuses to start the array from a member whose
+	# superblock still counts both ([D16]), or starts it degraded from the
+	# fresher one and a later attempt adds the other. Either way the rows
+	# end OK, degraded or not, and that is all this stage asserts of them.
+	# The readonly stage restored READWRITE on req2, and req1 never left it.
+	# Host IO is quiesced from the demote until the rows read OK: the build
+	# moves CN1's namespace to optimized with the promotion itself (CN16's
+	# ANA rule does not wait for the stack), over the td's dm-error until a
+	# converge has built the raid0. The host's path to CN1 went down with the
+	# degrade stage's partition; it must be back for the readback below.
+	helper "$hv" "wait_path_live '$nqn' '${IP[1]}' 30" ||
+		die "lateflip: the host path to cn1 is not live again"
+	mark=$(helper 1 cn_log_lines)
+	req_set "$req2" '.cntlr.primary = false'
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund lateflip demoted"
+	req_set "$req1" '.cntlr.primary = true'
+	bump_cn_rev 1
+	rev1=${CNREV[1]}
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_status "$out" grp_id_to_md_raid "$A_MGRP" RES_STATUS_ERROR \
+		"no available leg" "redund lateflip promoted"
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"no available leg" "redund lateflip promoted"
+	seq=$(helper 1 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" '^mdadm --(assemble|create) ')" 0 \
+		"redund lateflip: the promotion assembled nothing"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "${CNID[1]}" "${CNID[2]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "${CNID[1]}" "${CNID[2]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "${CNID[1]}" "${CNID[2]}"
+	for i in 1 2; do
+		leg_wait_ana 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i" optimized 20
+		leg_wait_ana 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i" optimized 20
+	done
+	# The retry re-runs the converge every CnConnectRetryInterval (5 s); an
+	# attempt holds the cntlr's lock, which GetCntlrInfo takes too, so a row
+	# read here is never one from the middle of an attempt.
+	mkey=$(d16 "$A_MGRP")
+	dkey=$(d16 "$A_DGRP")
+	deadline=$((SECONDS + 15))
+	while :; do
+		out=$(cnctl 1 get-cntlr-info --sp "$sp" --cntlr "$c1")
+		mst=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
+		dst=$(jq_of "$out" \
+			".cntlr_info.grp_id_to_md_raid[\"$dkey\"].status // \"ABSENT\"")
+		[ "$mst" = RES_STATUS_OK ] && [ "$dst" = RES_STATUS_OK ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "lateflip: 15 s after the flip the md rows read meta $mst /" \
+				"data $dst: $(jq_of "$out" '.cntlr_info.grp_id_to_md_raid')"
+		sleep 1
+	done
+	assert_map_ok "$out" td_id_to_raid0 "$A_TD" "redund lateflip retried"
+	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund lateflip retried"
+	log "  after the retry: data md row" \
+		"'$(jq_of "$out" ".cntlr_info.grp_id_to_md_raid[\"$dkey\"].details")'"
+	# Who assembled: every `mdadm --assemble` CN1 ran since the demote, with
+	# the trace id it ran under. None may be the promotion's, and each array
+	# must have been assembled (an attempt between two flips may add a run
+	# that mdadm refused, above).
+	cmds=$(helper 1 "cn_cmds_since $mark 'mdadm --assemble '")
+	[ -n "$cmds" ] || die "lateflip: cn1 ran no mdadm --assemble since the demote"
+	[ "$(event_cnt "$cmds" "^$TRACE ")" = 0 ] ||
+		die "lateflip: an mdadm --assemble ran under the promotion's" \
+			"trace $TRACE: $cmds"
+	for name in "$(jq_of "$mdmeta" .array_name)" \
+		"$(jq_of "$mddata" .array_name)"; do
+		[ "$(event_cnt "$cmds" " --name $name ")" != 0 ] ||
+			die "lateflip: no retry attempt assembled array $name: $cmds"
+	done
+	assert_eq "$(helper 1 "cn_requests_since $mark SyncupCntlr $(d16 "$sp") $(d16 "$c1")")" \
+		1 "lateflip: SyncupCntlr requests for cntlr $c1 on cn1 since the demote"
+	# The retry stops once no member is late (and no connect fails): after
+	# the attempt that is still due, if any, CN1 runs no command under any
+	# trace id but this stage's own for a whole retry interval.
+	deadline=$((SECONDS + 30))
+	while :; do
+		mark=$(helper 1 cn_log_lines)
+		sleep 7
+		cmds=$(helper 1 "cn_cmds_since $mark ''" | grep -v "^$TRACE " || true)
+		[ -z "$cmds" ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "lateflip: cn1 still runs converges of its own: $cmds"
+	done
+	host_wait_ana "$hv" "$nqn" 1 optimized 30
+	assert_eq "$(host_ana "$hv" "$nqn" 2)" inaccessible \
+		"redund lateflip demoted primary path"
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" "redund lateflip readback"
+	make_pattern "$hv" "$WORK/probe-redund.bin" 1
+	got=$(sha_range "$hv" "$WORK/probe-redund.bin" 1)
+	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund lateflip write"
 
 	stage check "converge check rounds on both CNs"
 	converge_check 1 "$sp" "$c1" "$rev1"

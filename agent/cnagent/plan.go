@@ -258,6 +258,32 @@ func (gp *grpPlan) legNames() []string {
 	return out
 }
 
+// hasLateMember reports whether a group's leg_list holds a member this pass
+// may not use — not available (§11.1.1: no path both live and optimized, or
+// its connect, its multipath namespace or its wrapper failed). In an md group
+// that leaves the group unassembled, assembled degraded without it, with its
+// --add skipped by reconcileMembers, or running with md still holding it —
+// its side died under the array (AR8's case), or its path is otherwise no
+// longer both live and optimized; reconcileMembers keeps a held leg_list
+// member (CN12). A RedundNone group builds its dm-linear whatever its leg's
+// availability, and its leg is late all the same: the layers above do IO
+// through it — the pool create (CN13) reads the pool's metadata through the
+// meta group — and a side that has not flipped to this CN yet exports
+// dm-error to it (a non-optimized path), so a pool over a late meta leg is
+// built only by a later converge. Only availability decides: a held member md
+// has failed on a leg that is available again is not late (cnagent.md §7,
+// known limits). Spares are not members (§8.12), so a spare is never late. A
+// provisioning leg defers its whole group ([D15]), so the build never asks
+// about one; it is excluded all the same rather than trusting the caller.
+func (gp *grpPlan) hasLateMember(available map[uint64]bool) bool {
+	for _, lp := range gp.legs {
+		if !lp.provisioning && !available[lp.legId] {
+			return true
+		}
+	}
+	return false
+}
+
 // legPlan is one leg: its side connections and the cn-local dm-linear wrapper
 // over the single nvme multipath namespace they share ([D1], CN10).
 type legPlan struct {
