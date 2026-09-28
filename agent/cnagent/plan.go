@@ -37,17 +37,17 @@ const (
 	resKeyCloneMetaFmt = "clone_meta/%016x"
 )
 
-// detailsSpLevel is what a resource suppressed by the sp_level reports (CN19);
+// detailsSpLevel is what a resource suppressed by the sp_level reports (CN19),
+// shared through common with the worker's settle (dnv-worker.md HL2);
 // detailsParked is the expected state of an effectively suspended ns-dev
 // (CN28): **live**, its table a dm-linear over the td's dm-error (§11.6).
-// detailsSuspended is what the generic single-device probes report for a
-// device they find dm-suspended. A converge and a probe of one cntlr take the
-// same lock, so CN14's quiesce bracket is never observable from outside; what
-// makes the state reachable is an interrupted pass or an agent killed inside
-// that bracket. No ns-dev is ever expected in it. None of the three is a
-// fault.
+// detailsSuspended is what the generic single-device probes report for a device
+// they find dm-suspended. A converge and a probe of one cntlr take the same
+// lock, so CN14's quiesce bracket is never observable from outside; what makes
+// the state reachable is an interrupted pass or an agent killed inside that
+// bracket. No ns-dev is ever expected in it. None of the three is a fault.
 const (
-	detailsSpLevel   = "sp_level"
+	detailsSpLevel   = common.ResDetailsSpLevel
 	detailsParked    = "parked"
 	detailsSuspended = "suspended"
 	// detailsProvisioning is what a provisioning-deferred resource reports:

@@ -395,6 +395,12 @@ func (s *Server) DeleteCntlr(
 // warning would need a pre-read, and dnvctl issues no RPC the operator did not
 // type (dnvctl.md §0 #10). It is deferred until this reply carries the hint.
 //
+// Enabling a cntlr that is still the primary also marks it settling
+// (dnv-worker.md HL2): its cn agent converged the standby shape while it was
+// disabled (cnagent.md CN9) and now builds the primary stack from it, the work
+// a promotion does, so AR5 must not judge that build by primary_unhealthy
+// alone.
+//
 // A request that asks for the state already stored writes NOTHING and bumps
 // NOTHING (§0 #17): a no-op that bumped SpRev would invalidate every client's
 // token and make every agent re-sync for a change that did not happen. A token
@@ -428,6 +434,10 @@ func (s *Server) UpdateCntlrEnabled(
 		}
 		cntlr.Disabled = want
 		if req.GetEnabled() {
+			// A re-enabled primary settles again (HL2), as a promoted one.
+			if cntlr.GetPrimary() {
+				cntlr.Settling = true
+			}
 			err = addCdcTrConf(stm, sc, cntlr.GetNvmeTrConf())
 		} else {
 			err = dropCdcTrConf(stm, sc, cntlr.GetNvmeTrConf())

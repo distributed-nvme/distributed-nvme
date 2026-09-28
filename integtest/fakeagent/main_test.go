@@ -240,6 +240,15 @@ func TestParseBehaviorMalformed(t *testing.T) {
 		{"non-decimal chunk id",
 			`{"objects": {"cntlr 1:1": {"chunk_id_list": ["0:0x1"]}}}`},
 		{"trailing data", `{} {}`},
+		// when_primary gates on a cntlr's role, which nothing else has.
+		{"when_primary on a dn",
+			`{"objects": {"dn": {"rows": {"disk_info":
+			  {"status": "ERROR", "when_primary": true}}}}}`},
+		{"when_primary on a side",
+			`{"objects": {"side 1:3:5": {"rows": {"side_dev_info":
+			  {"status": "ERROR", "when_primary": true}}}}}`},
+		{"when_primary in default",
+			`{"default": {"rows": {"disk_info": {"when_primary": true}}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := parseBehavior([]byte(tc.data)); err == nil {
@@ -851,6 +860,58 @@ func TestCntlrInfoDerivation(t *testing.T) {
 		reply.GetBmInfoList()[0].GetResId() != 41 {
 		t.Errorf("bm_info_list = %v, want one entry for clone 41",
 			reply.GetBmInfoList())
+	}
+}
+
+// TestCntlrInfoWhenPrimary is §14.9's when_primary: the row override applies
+// only while the cntlr's last applied request carries cntlr.primary = true,
+// and an ungated override beside it applies either way.
+func TestCntlrInfoWhenPrimary(t *testing.T) {
+	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
+	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",
+	                            "when_primary": true},
+	  "slice_id_to_meta.1": {"status": "ERROR", "details": "always"}
+	}}}}`
+	if _, err := parseBehavior([]byte(behavior)); err != nil {
+		t.Fatalf("parseBehavior: %v, want when_primary accepted on a cntlr",
+			err)
+	}
+	for _, tc := range []struct {
+		name     string
+		primary  bool
+		wantPool pb.ResStatus
+	}{
+		{"standby", false, pb.ResStatus_RES_STATUS_OK},
+		{"primary", true, pb.ResStatus_RES_STATUS_ERROR},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newTestAgent(t)
+			_, cnClient := startAgent(t, agent)
+			writeFile(t, agent, behaviorFileName, behavior)
+			info := syncupCntlrFixture(t, cnClient, tc.primary).GetCntlrInfo()
+			pool := info.GetSliceIdToDmPool()[1]
+			if pool.GetStatus() != tc.wantPool {
+				t.Errorf("slice_id_to_dm_pool.1 status = %v, want %v",
+					pool.GetStatus(), tc.wantPool)
+			}
+			wantDetails := ""
+			if tc.primary {
+				wantDetails = "settling test"
+			}
+			if pool.GetDetails() != wantDetails {
+				t.Errorf("slice_id_to_dm_pool.1 details = %q, want %q",
+					pool.GetDetails(), wantDetails)
+			}
+			if got := info.GetSliceIdToDmPool()[2].GetStatus(); got !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Errorf("slice_id_to_dm_pool.2 status = %v, want OK", got)
+			}
+			if got := info.GetSliceIdToMeta()[1].GetStatus(); got !=
+				pb.ResStatus_RES_STATUS_ERROR {
+				t.Errorf("slice_id_to_meta.1 status = %v, want the ungated "+
+					"ERROR", got)
+			}
+		})
 	}
 }
 

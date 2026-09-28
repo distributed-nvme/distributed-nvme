@@ -757,7 +757,8 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   a moved capacity key above all — returns before the first `Put`, not
   merely before the commit. The write set is then one `Slice` per slice
   (every `Side` `provisioned: false`), one `Cntlr` per pick
-  (first = `primary`, `cntlid_slot` = next unused slot in list order),
+  (first = `primary` and, *amended 2026-09-26*, `settling` —
+  `dnv-worker.md` HL2; `cntlid_slot` = next unused slot in list order),
   `SpConf` (that `bdev_conf`; `event_threshold` exactly as the request sent
   it — one of GW11's two read-time exceptions; lists, `next_id`,
   `next_dev_id: 1`, `deleting: false`), `SpName` and
@@ -853,7 +854,10 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   every CdcEntry); `BumpSpRev`. Reply `cntlr_id`.
 * **UpdateCntlrEnabled** — STM: resolve; token; no-op when already at the
   requested state (§0 #17); else `disabled = !enabled`, add (enable) or
-  remove (disable) the tr conf in every CdcEntry, `BumpSpRev`. Reply
+  remove (disable) the tr conf in every CdcEntry — an enable of a cntlr that
+  is still `primary` also sets `settling` (*amended 2026-09-26*,
+  `dnv-worker.md` HL2: the re-enabled primary builds its stack from the
+  standby shape, as a promoted one does) — `BumpSpRev`. Reply
   `cntlr_id, enabled`.
 * **InspectCntlr** — STM: resolve; Cntlr by id (`NOT_FOUND`), keep its
   `addr_port` and the CnConf's `cn_id` (read `CnConfKey(cid, addr)` in the

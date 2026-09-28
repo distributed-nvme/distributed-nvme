@@ -50,6 +50,7 @@ const (
 	msgSyncupLeftover = "syncup leftover"
 
 	msgHealthChanged = "health changed"
+	msgCntlrSettled  = "cntlr settled"
 )
 
 // Config is everything cmd/dnv-worker passes to Run (CM1, CM4).

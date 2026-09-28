@@ -21,6 +21,9 @@ const (
 	fixtureDnAddrC = "dn-c:9000"
 	fixtureCnAddrA = "cn-a:9000"
 	fixtureCnAddrB = "cn-b:9000"
+	// fixtureSpRevision is the fixture's SpRev revision: not 1, so a loader
+	// that reports anything but the key's value shows.
+	fixtureSpRevision = uint64(12)
 )
 
 // fixtureSpConf is the SpConf every sub-object below is listed in.
@@ -47,6 +50,9 @@ func writeSp(t *testing.T, cli *etcdutil.Client, cid uint64) {
 	t.Helper()
 	conf := fixtureSpConf()
 	mustPut(t, cli, SpConfKey(cid, fixtureSpName), conf)
+	mustPut(t, cli, SpRevKey(conf.GetShardCode(), cid, fixtureSpId), &pb.SpRev{
+		SpName: fixtureSpName, Revision: fixtureSpRevision,
+	})
 	mustPut(t, cli, CntlrKey(cid, fixtureSpId, 21), &pb.Cntlr{
 		AddrPort: fixtureCnAddrA,
 		Primary:  true,
@@ -202,6 +208,10 @@ func TestLoadSpHappyPath(t *testing.T) {
 	if state.Conf.GetSpId() != fixtureSpId {
 		t.Errorf("Conf.sp_id = %d", state.Conf.GetSpId())
 	}
+	if state.SpRevision != fixtureSpRevision {
+		t.Errorf("SpRevision = %d, want the SpRev key's %d",
+			state.SpRevision, fixtureSpRevision)
+	}
 	if len(state.Missing) != 0 {
 		t.Errorf("Missing = %v, want none", state.Missing)
 	}
@@ -313,8 +323,13 @@ func TestLoadSpMissing(t *testing.T) {
 		MigrationKey(cid, fixtureSpId, "migr0"),
 		CnConfKey(cid, fixtureCnAddrA),
 	}
+	// The absent SpRev key is not a listed sub-object: no Missing entry,
+	// only a zero SpRevision.
 	if !equalStrings(state.Missing, want) {
 		t.Errorf("Missing = %v, want %v", state.Missing, want)
+	}
+	if state.SpRevision != 0 {
+		t.Errorf("SpRevision = %d without a rev key, want 0", state.SpRevision)
 	}
 	if len(state.Cntlrs) != 1 || state.Cntlrs[21] == nil {
 		t.Errorf("Cntlrs = %v, want only the one that exists", state.Cntlrs)

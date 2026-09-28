@@ -111,6 +111,22 @@ Appendix B carries the cross-component one as **[D17]**.
 19. **The integration suite runs on one server as a plain user** (§14): real
     etcd, three real workers, fake agents driven by a behavior file, etcd
     driven by a fake-gateway CLI, assertions over the JSON logs.
+20. **A promoted primary settles before it is judged** (AR5, HL2):
+    `Cntlr.settling` is set wherever the product makes a cntlr primary
+    (`CreateStoragePool`, `Failover`, a primary `ReplaceCntlr`, and the
+    gateway's `UpdateCntlrEnabled` re-enabling a cntlr that is still
+    primary; the suite's `workerctl set-cntlr` is a raw rewrite that does
+    not, §14.8) and cleared by the worker's first clean observation of the
+    cntlr as an enabled primary at the revision it drives that shows its
+    stack built, the rows its `sp_level` suppresses aside — no row outside
+    `leg_id_to_leg` and `grp_id_to_md_raid` reading `PROVISIONING`, or
+    `MISSING` other than `cnagent.md` CN19's `"sp_level"` (or by the
+    failover that demotes it first); while it is set, AR5 judges the
+    primary's `err_epoch` against `cntlr_unhealthy` instead of
+    `primary_unhealthy` when that is the longer. *Added 2026-09-26*
+    (the failover ping-pong): a promotion that had not completed read
+    unhealthy at its first reports, and AR5 failed it back to the peer it
+    had just demoted `primary_unhealthy` later, on every pass for 48 hours.
 
 ---
 
@@ -221,7 +237,7 @@ code path at all (only as fixture values in the §13 tests): the gateway
 resolves those two at write time (`architecture.md` §7), and the worker uses what is stored
 or refuses it (RW9, RW14, AR1).
 
-### 2.2 `pb/schema.proto` — one added message (applied at implementation time)
+### 2.2 `pb/schema.proto` — one added message (applied at implementation time), one added field (2026-09-26)
 
 ```proto
 // {dnv_prefix} worker {role} {seed}
@@ -237,9 +253,27 @@ Placed after `SpName`, the last stored message (`pb/schema.proto`), and
 regenerated with `make gen` under the pinned toolchain (README:
 protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2), the generated
 `schema.pb.go`/`schema_grpc.pb.go` being committed with it (§16 item 3).
-Nothing else in the schema changed for this document; in particular
-`Migration` gained no field, because the §10.4 migration reaction is
-withdrawn (§0 item 12).
+Nothing else in the schema changed for this document until the
+2026-09-26 field below; in particular `Migration` gained no field, because
+the §10.4 migration reaction is withdrawn (§0 item 12).
+
+*Amended 2026-09-26* (§0 item 20): `message Cntlr` gained the flag HL2
+clears and AR5 reads, after `err_epoch`:
+
+```proto
+    // settling is true from the moment this cntlr becomes primary (or,
+    // still primary, is re-enabled) until the worker first observes it
+    // clean in that role with its stack built — no row outside
+    // leg_id_to_leg and grp_id_to_md_raid PROVISIONING, or MISSING but
+    // for the sp_level's (dnv-worker.md HL2) — or a failover demotes it.
+    // AR5 holds a settling primary to cntlr_unhealthy instead of
+    // primary_unhealthy when that is the longer. Existing records decode
+    // false = settled.
+    bool settling = 7;
+```
+
+regenerated the same way. A record written before the field existed
+decodes `false`: settled, and judged by `primary_unhealthy` as before.
 
 ---
 
@@ -427,6 +461,7 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      ```go
      type SpState struct {
      	Rev        int64                        // the store revision of the snapshot
+     	SpRevision uint64                       // the SP's SpRev.revision in that snapshot; 0 when the key is absent
      	Conf       *pb.SpConf
      	Cntlrs     map[uint64]*pb.Cntlr         // by cntlr_id, from Conf.cntlr_id_list
      	Slices     map[uint64]*pb.Slice         // by slice_id, from Conf.slice_id_list
@@ -445,7 +480,9 @@ MD3. **SP snapshot.** `LoadSp(ctx, cli, cid uint64, spName string) (*SpState,
      A missing `SpConf` returns `ErrNotFound` (the SP is being deleted; the
      rev key's delete follows). A listed sub-object whose key is missing is
      reported in `SpState.Missing` and logged by the caller; the load still
-     succeeds. Bitmap **values** are never loaded here — pushes read one chunk
+     succeeds. `SpRevision` is the revision the loaded state belongs to
+     (*added 2026-09-26*, for RW14's revision guard); the rev key is not a
+     listed sub-object, so an absent one is no `Missing` entry. Bitmap **values** are never loaded here — pushes read one chunk
      at a time (BM3). Bitmap indexes come from a keys-only scan
      (`RangeKeysAtRev`, EU2) performed **outside** the STM at the same store
      revision (`clientv3.WithRev(state.Rev)`): the STM cannot range, and the
@@ -510,13 +547,13 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | op | preconditions (re-validated in the STM) | effects |
      |---|---|---|
      | `SetDnErrEpoch(cid, addrPort, epoch, cc)` / `SetCnErrEpoch` | record exists | if `epoch != 0`: set only when the stored value is 0 (the threshold clock never restarts); if `epoch == 0`: clear. `Maintain*Capacity(old, new)`. **No rev bump** (§5.5). No write when unchanged |
-     | `SetCntlrErrEpoch(cid, spId, cntlrId, epoch)` | record exists | same set/clear rule on `Cntlr`; no bump |
+     | `SetCntlrErrEpoch(cid, spId, cntlrId, epoch, settle)` | record exists | same set/clear rule on `Cntlr`; when `settle` and `epoch == 0`, also `settling = false` in the same STM (HL2; *amended 2026-09-26*) — a `settle` with a nonzero epoch clears nothing; no bump; no write when unchanged |
      | `SetLegErrEpoch(cid, spId, sliceId, legId, epoch)` / `SetSideErrEpoch(..., sideId, epoch)` | slice exists, leg/side found in any group's `leg_list`/`spare_leg_list` | same rule on the embedded record; rewrite the `Slice`; no bump |
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
-     | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥ primary_unhealthy`; `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; bump `SpRev` (§10.4) |
+     | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥` (`old.settling && cntlr_unhealthy > primary_unhealthy ? cntlr_unhealthy : primary_unhealthy`) — "primary_unhealthy not reached" resp. "cntlr_unhealthy not reached for a settling primary" (AR5, *amended 2026-09-26*); `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; set `new.settling`, clear `old.settling` (HL2); bump `SpRev` (§10.4) |
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
-     | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false}` with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
+     | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
@@ -842,7 +879,9 @@ RW2. **State**: `desired` (the revision to reach plus the inputs the request
      reply omits an unchanged `*Info` and health is evaluated on the latest
      known one (HL5); and the §9 health state, as the last verdict WRITTEN
      — which is exactly what HL3's transitions-only rule has to compare the
-     next observation against. (BM5's `mod_revision` memo survives rounds
+     next observation against — a cntlr's settle memo included (*amended
+     2026-09-26*, HL2: the record's `settling` as the last plan loaded it,
+     cleared by the write that clears it in etcd). (BM5's `mod_revision` memo survives rounds
      too, but it belongs to the §10 pusher; and the memos of what was
      LOGGED — RW9's two, plus, on a cntlr child, the last standby leg row
      logged per leg, so HL2's standing row does not repeat every round —
@@ -1065,6 +1104,23 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       driving the plan built from the last good conf, because a conf that
       cannot be read is not a reason to stop serving IO.
 
+      *Amended 2026-09-26* (§0 item 20, the failover ping-pong): a load
+      whose `SpRevision` (MD3) is ahead of the revision the coordinator was
+      delivered builds nothing either — no request, and no child started,
+      stopped or updated — and arms no retry, because the newer revision's
+      own delivery is a desired change, which re-enters the fan-out. A load
+      runs ahead whenever it follows a bump that has not been delivered
+      yet: a tick's fan-out (the idle re-resolution, or a retry the fan-out
+      armed) between a bump's commit and its delivery, say, or a new
+      owner's first fan-out from its parent's older value. Every request is
+      labelled with the delivered revision (RW15/RW16), so the plan built
+      then would pair that label with a newer role: a promotion labelled
+      with the revision its agent applied as a standby restarts the child
+      (its request changed, its revision did not), the agent answers the
+      first Check at that revision with a clean standby shape, RW4 step 5
+      finds nothing to re-sync, and HL2 would settle the promoted cntlr on
+      that reply.
+
 RW15. **Side request.** `SyncupSideRequest{cluster_id, dn_id,
       side_pointer{sp_id, leg_id, side_id}, revision = SpRev.revision,
       side_conf{ext_cnt = group.ext_cnt, cntlid_slot = side.cntlid_slot,
@@ -1191,29 +1247,132 @@ HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
 HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      `SetLegErrEpoch` / `SetSideErrEpoch`:
 
-     | record | set to `now` (if 0) when | cleared when |
-     |---|---|---|
-     | `Cntlr.err_epoch` | its `CheckCntlr` stream cannot be opened / breaks / misses a round, or any `RES_STATUS_ERROR` row in its `CntlrInfo` **other than** `leg_id_to_leg` | its next round is clean |
-     | `Leg.err_epoch` | the **primary** cntlr's `leg_id_to_leg[leg] == RES_STATUS_ERROR` (the §3.6 probe; spares included). A standby's leg row is logged, never recorded | the primary reports the row `RES_STATUS_OK` |
-     | `Side.err_epoch` | its `CheckSide` stream cannot be opened / breaks / misses a round, or `side_dev_info` or any `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` row is `RES_STATUS_ERROR`, or a `migr_src_info` / `migr_dst_info` row is `ERROR` | its next round is clean |
+     | record | set to `now` (if 0) when | cleared when | settle: `Cntlr.settling` cleared when |
+     |---|---|---|---|
+     | `Cntlr.err_epoch` | its `CheckCntlr` stream cannot be opened / breaks / misses a round, or any `RES_STATUS_ERROR` row in its `CntlrInfo` **other than** `leg_id_to_leg` | its next round is clean | the record is settling and a clean round (the previous column's) is a reply of the cntlr as an enabled **primary** at the revision its child drives — the child's plan says `primary` and the record it carries is not `disabled` (the agent's own effective role, `cnagent.md` CN9), and the reply's `revision` equals the plan's, and the reply shows the stack built: no row of the maps this row is judged by (every map but `leg_id_to_leg`), `grp_id_to_md_raid` aside, reads `PROVISIONING`, or `MISSING` with details other than `cnagent.md` CN19's `"sp_level"`; with the `err_epoch` clear in one write, or in a write of its own when `err_epoch` is already 0 |
+     | `Leg.err_epoch` | the **primary** cntlr's `leg_id_to_leg[leg] == RES_STATUS_ERROR` (the §3.6 probe; spares included). A standby's leg row is logged, never recorded | the primary reports the row `RES_STATUS_OK` | — |
+     | `Side.err_epoch` | its `CheckSide` stream cannot be opened / breaks / misses a round, or `side_dev_info` or any `cn_id_to_dm_error` / `cn_id_to_dm_linear` / `cn_id_to_nvmeof` row is `RES_STATUS_ERROR`, or a `migr_src_info` / `migr_dst_info` row is `ERROR` | its next round is clean | — |
 
      `PROVISIONING`, `PENDING`, `MISSING` and a rejection code never set any
      of the three, and `Leg.err_epoch` clears on the primary's
      `RES_STATUS_OK` alone. *Amended 2026-09-26:* `PENDING` is the
      primary's leg row while its prober for the leg has not completed a
-     round (or none is registered yet), and a fresh prober starts at every
-     promotion and agent restart (`cnagent.md` CN11). That row used to
+     round (or none is registered yet) — a first round stalled past
+     `CnLegProbeStallSeconds` reads `ERROR` — and a fresh prober starts at
+     every promotion and agent restart (`cnagent.md` CN11). That row used to
      read `OK`, so every promotion's fresh probers cleared a dead leg's
      `err_epoch` and restarted AR8 case 1's `leg_unhealthy` clock.
      `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly
      as a `code == 0` reply's — here, and in the RW18/RW19 reports the same
      replies carry — for HL1's reason.
 
+     **The settle** (*added 2026-09-26*, §0 item 20). `Cntlr.settling` is
+     set by the op that makes the cntlr primary (`Failover`, a primary
+     `ReplaceCntlr`, MD6; the gateway's `CreateStoragePool` for the SP's
+     first primary, and its `UpdateCntlrEnabled` when it re-enables a cntlr
+     that is still primary — its agent then builds the primary stack from
+     the standby shape it held while disabled) and cleared by
+     `SetCntlrErrEpoch(…, 0, settle = true)` on the table's settle
+     condition. The revision gate is load-bearing: when the promotion's
+     `SyncupCntlr` never reached the agent (a transport failure before the
+     agent stored the request), the next Check round's reply carries the
+     previous revision and describes the **standby** shape — clean, and
+     meaningless for the promotion (RW4 step 5 re-syncs it). One the agent
+     applied but whose reply was lost leaves the agent at the driven
+     revision, and its Check reply then reports the primary shape. Rounds
+     and syncups run on the child's one goroutine (RW1), and a revision
+     carries one set of roles: a role change is agent-visible desired state,
+     which bumps `SpRev` (`architecture.md` §5.5), and RW14 builds no plan
+     from a state newer than the revision it labels the plan with (an etcd
+     restore, which can hand a revision number out twice, aside). So an
+     accepted reply at the driven revision from a cntlr that is primary and
+     not disabled is a report of the primary shape; a disabled primary
+     converges the standby shape (`cnagent.md` CN9), so its clean reply
+     settles nothing. Nor does a reply whose stack is not built yet
+     (*amended 2026-09-26*, the same day, `primaryShapeBuilt`): a new SP's
+     primary reports a slice's pool rows, and the thin volumes in that pool,
+     `PROVISIONING` until every leg of the groups under it has a provisioned
+     side, and its raid0s — with the ns-devs, namespaces, clones and
+     transfers over them — until no slice is deferred
+     (`cnagent.md` CN9; the ns-devs, on the td's dm-error, their namespaces
+     and a transfer's device, subsystem and namespace are built meanwhile
+     but read `PROVISIONING` all the same, CN16 rule 0, CN17): clean, and no
+     proof of the build that follows, and settling on it left that build to
+     `primary_unhealthy`, the loop of `e2e_integtest.md` §8 item 13. A
+     `MISSING` row of the maps the settle reads holds it for the same
+     reason, unless its details are `"sp_level"` (below). A converge that
+     finds a member not available — a promotion ahead of the sides' ANA
+     flips, a provisioned flip ahead of a side's export ([D16]) — reports
+     the groups and pools it could not build `ERROR` and leaves them to the
+     CN10 retry, whose first attempt comes 5 s later; a Check round in
+     between probes those devices absent and reports them `MISSING` `""`,
+     not `ERROR`, and in an SP with no td, as a new SP is until one is
+     created, that reply has no `ERROR` row outside `leg_id_to_leg` (a td's
+     raid0 row reads `ERROR` while its thins are absent; a leg row reads
+     the CN11 prober, which fails on a path still `non-optimized`). Every
+     other `MISSING` the cn agent reports is likewise a device not built,
+     or a clone whose source is not connected (CN18), so a primary showing
+     one stays settling, held to the longer threshold, until it clears —
+     for as long as a clone's source stays unconnected. Leg rows do not
+     count: a spare still zeroing reads `PROVISIONING` there for as long as
+     it zeroes. Nor do group rows, for a grow's sake: a grow appends its new
+     groups to their lists, and while their sides zero they stay out of the
+     live concat (CN9's prefix cut), so their group rows alone read
+     `PROVISIONING`, beside a serving pool, for minutes. Nothing else needs
+     them: an SP is created with one group per list (`architecture.md`
+     §8.4), so a group of a new SP that is still provisioning defers its
+     whole slice, whose pool rows say so, and a group a converge could not
+     assemble leaves the pool rows over it `ERROR` or `MISSING`. A primary
+     of an SP still in that first zeroing therefore stays settling, judged
+     by the longer threshold, until the build that follows it reports its
+     stack built and clean — indefinitely if a side never finishes, since a
+     leg still provisioning never sets an `err_epoch` for AR8 to repair it
+     by. So does a primary that takes the role (promoted, re-enabled, or
+     created as primary by AR7) while a leg of the first group of its list
+     has as its only side a migration destination that `FinishMigration`
+     forced before that side's RW18 flip: the cn agent cannot tell that leg
+     from one still in its first zeroing, so it defers the whole slice and
+     every td with it (CN9) — until that flip, and without end if the side
+     never finishes. In a later group, one the pool's concat already spans,
+     the same leg reads as a fault instead: the concat under the thin-pool
+     cannot shrink, so a pool row reads `ERROR`, which holds the settle as
+     any fault does. A row the `sp_level` suppresses reads `MISSING`
+     `"sp_level"`, not `PROVISIONING` (`cnagent.md` CN19), and holds
+     nothing, so a primary does not wait for a layer its level suppresses. CN9's deferral does not depend on the
+     level, though: from `SP_LEVEL_NO_THINPOOL` through `NO_SIDE` the pool,
+     thin, raid0 and clone rows read `"sp_level"` (the group rows too from
+     `NO_REDUND`, the leg rows at `NO_SIDE`), but while a slice is deferred
+     the ns-dev, namespace and transfer rows still read `PROVISIONING` (CN16
+     rule 0, CN17). So at those levels a primary with a namespace or a
+     transfer settles only once the zeroing ends, and one with neither — or
+     any primary at `SP_LEVEL_DISABLE`, where every row reads `"sp_level"`
+     — settles on a reply that shows no pool built, possibly before its
+     sides are even zeroed; AR3 suppresses AR5 at all of those levels, so
+     the longer hold changes no reaction there. That settle is final —
+     `UpdateStoragePoolLevel` re-arms nothing — so the build that follows
+     a lowered level is judged by `primary_unhealthy`, as any settled
+     primary's is. The child keeps a memo of the flag, seeded from the
+     record in every plan it takes (RW14's plan copies it), so the settle
+     is normally written once and logged as `cntlr settled` (§12): a plan
+     loaded after the settle write clears the memo; one loaded before it
+     costs one redundant write that changes nothing and one extra
+     `cntlr settled` record; a failed write keeps the memo and is retried
+     on the next reply (RW12). The flag steers AR5 alone
+     — and `Failover`, which re-validates AR5 in its STM — and is re-read
+     from etcd on every pass: health bookkeeping of the same kind as
+     `err_epoch`, not a memo of a failed step.
+
 HL3. **Transitions only.** A record is written when the observed health
      changes (healthy → unhealthy sets the epoch once — the threshold clock
      of §11 never restarts; unhealthy → healthy clears it). The op re-reads
      the record inside its STM, so two owners observing the same transition
-     write once. Health never bumps a revision (§5.5).
+     write once. Health never bumps a revision (§5.5). *Amended 2026-09-26:*
+     HL2's settle is the one write that can be issued with no health
+     transition behind it — a standby that was clean, is promoted and
+     reports clean at once has no edge to write on; when a transition is
+     due, the settle rides in that same write (HL2) — and it too is written
+     once per memo, the op re-reading the record so that a second owner's
+     settle writes nothing.
 
 HL4. A `Syncup*` reply's `*Info` is processed exactly like a `Check*`
      reply's (the secondary signal, §9.7). A `Syncup*` gRPC failure is not by
@@ -1434,7 +1593,8 @@ AR4. **Thresholds.** `now − err_epoch ≥ T` with `T` the SP's
 ### 11.2 Failover
 
 AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
-     err_epoch ≥ primary_unhealthy`: candidate = the cntlr with the smallest
+     err_epoch ≥ primary_unhealthy` — `cntlr_unhealthy`, when that is the
+     longer, while it is **settling** (HL2): candidate = the cntlr with the smallest
      `cntlr_id` among those with `primary == false`, `disabled == false`,
      `err_epoch == 0`; none ⇒ `reaction skipped` (`no candidate`) and the pass
      continues (AR2); else
@@ -1447,6 +1607,30 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      eligible candidate re-emits `reaction skipped` / `no candidate` once per
      pass, for as long as it takes an operator to enable a standby or add a
      cntlr.
+
+     *Amended 2026-09-26* (§0 item 20, the failover ping-pong): a settling
+     primary — one that has not yet reported its stack built and clean as
+     primary since it acquired the role (HL2) — is held to
+     `cntlr_unhealthy`, the threshold the worker already gives a cntlr
+     before giving up on it. The hold lasts until that report: the
+     promotion's, or, while a new SP's sides are still being zeroed, the
+     end of its first build (HL2's settle paragraph); a primary that never
+     makes it is failed over at the same threshold AR7 would replace the
+     cntlr at.
+     The hold applies only where `cntlr_unhealthy` is the longer, as it is
+     at the defaults: nothing orders the two thresholds (AR4), and an SP
+     stored with a shorter `cntlr_unhealthy` would otherwise have its
+     settling primaries failed over sooner than its settled ones. Before, a
+     promotion that raced the sides' ANA flips read `ERROR` at its first
+     reply and was failed back `primary_unhealthy` later, to the peer its
+     own promotion had just made clean, on every pass. `model.Failover`
+     re-validates the same selection inside its STM (MD6/MD7, reason
+     "cntlr_unhealthy not reached for a settling primary"). The `disabled`
+     trigger and the candidate rule are unchanged — `failoverEligible` never
+     reads the flag. A settling primary with no candidate reaches the
+     no-candidate skip only at the longer of the two thresholds, and AR7's
+     sole-primary variant, which waits `cntlr_unhealthy` either way,
+     replaces it; the replacement is created settling in turn.
 
 ### 11.3 Thin-pool auto-grow
 
@@ -1497,9 +1681,14 @@ AR7. When a cntlr has `err_epoch != 0`, `now − err_epoch ≥ cntlr_unhealthy`,
      candCnt = cn_batch_size, black = {the old cntlr's addr_port}, spCnAddrs
      = the SP's other cntlrs' endpoints)`; pick one; internal
      `ReplaceCntlr(old, pick, asPrimary = old.primary)` — same `cntlid_slot`,
-     `primary = true` only in the sole-primary variant, `disabled = false`,
-     `err_epoch = 0`. The old CN is black-listed even when the node itself is
-     healthy: its cntlr is what failed. None ⇒ `reaction skipped`.
+     `primary = true` and `settling = true` only in the sole-primary
+     variant, `disabled = false`, `err_epoch = 0` (`settling` *amended
+     2026-09-26*, HL2: a primary replacement is created settling, as a
+     promoted primary is, and AR5 judges it by the settling threshold until
+     it reports its stack built and clean as primary — the failover
+     ping-pong). The old CN is
+     black-listed even when the node itself is healthy: its cntlr is what
+     failed. None ⇒ `reaction skipped`.
 
 ### 11.5 Leg repair
 
@@ -1532,8 +1721,9 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         (only `leg_list` legs are); a user-created ready spare is used the
         same way — that is what spares are for. *Amended 2026-09-26:*
         "probed" now holds literally — the primary reports a leg whose
-        prober has not completed a round as `RES_STATUS_PENDING`
-        (`cnagent.md` CN11), where it used to report `OK` and let a fresh
+        prober has not completed a round as `RES_STATUS_PENDING` (a first
+        round stalled past `CnLegProbeStallSeconds` reads `ERROR`,
+        `cnagent.md` CN11), where it used to report `OK` and let a fresh
         spare be switched in before any probe had run; such a spare is not
         ready, and step 2 waits for it unless it is dead;
      2. else a **pending** spare exists — a spare that is not ready yet
@@ -1990,6 +2180,7 @@ parses them.
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
 | `syncup leftover` | ids, `revision`, `details` (the agent's leftover names, `leftover(n): kind:name, … [+k more]` and/or `enumeration failed: …`) | RW5, on an accepted reply carrying `ReplyCodeLeftover` — one record per `Syncup*`, so a leftover that does not go away is in the log every round |
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions |
+| `cntlr settled` | `role` (`sp`), `cluster_id`, `sp_id`, `cn_id`, `cntlr_pointer`, `revision` (the reply's, which the settle requires to be the one the child drives) | *added 2026-09-26:* HL2's settle written — at most once per acquisition of the primary role, the re-enable of a primary counting as one (none when the cntlr is demoted before it settles), plus a repeat for a plan loaded before the write landed (HL2) or for a second owner in an overlap (§0 item 4) |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
 | `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
 | `bitmap push failed` | the `bitmap pushed` attributes up to `bm_idx` (`src_slice_idx` and `bm_idx` 0 for a push that never reached a chunk), then either `error` (transport, fetch, `chunk not found`) **or** `code` + `details` — the agent's own explanation, which the `bitmap pushed` record beside it cannot carry because it holds the code alone | BM6. Non-normative in the §12 sense: it names no decision, it exists because a push that produced no `AgentReply` has no code to report and must not be logged as a `bitmap pushed` with an invented 0 |
@@ -2051,10 +2242,58 @@ does).
   `TestSpCloneBitmapWiringCarriesThePair` — the clone `fetch` reads the key
   of the whole pair and `deliver` sets `src_slice_idx` as well as `bm_idx`,
   the applied set is read from `chunk_id_list`, and a `bm_idx_list` set on a
-  clone's `BitmapInfo` is ignored (BM2).
+  clone's `BitmapInfo` is ignored (BM2);
+  `TestSpCntlrPlanCarriesSettling` and `TestSpCntlrSettle` (*added
+  2026-09-26*, HL2) — the plan copies each record's `settling`; a cntlr
+  child settles on an accepted clean reply as primary at the revision it
+  drives, and not on a clean reply at the previous revision (the case that
+  fails if the revision comparison is dropped), a rejected one, a
+  standby's or a disabled primary's (the case that fails if the `disabled`
+  conjunct is dropped), nor on a reply at the driven revision whose pool
+  reads `PROVISIONING` (the case that fails if `primaryShapeBuilt` is
+  dropped) — one whose group reads `ERROR` beside that pool still sets
+  `err_epoch` (the case that fails if the build check gates HL2's verdict
+  too) — while a built one with a grow's group and a zeroing spare's leg
+  row `PROVISIONING` settles (the case that fails if the group rows are
+  judged), nor on a td-less reply at the driven revision whose groups,
+  concats and pool read `MISSING` `""`, as a Check round probes a build
+  that failed on unavailable members (the case that fails if `MISSING`
+  holds nothing), while one that reads them `MISSING` `"sp_level"`
+  settles (the case that fails if every `MISSING` holds); it logs `cntlr
+  settled` with its attributes and re-seeds its
+  memo from every plan it takes, both ways — a plan that says
+  settling re-arms it and one that does not clears it, each pinned by a
+  case that fails without it; `TestSpFanOutWaitsForItsRevision` (*added
+  2026-09-26*, RW14) — a tick's fan-out whose load is ahead of the
+  delivered revision restarts no child and neither re-syncs nor settles
+  the cntlr the load shows promoted; the delivery then sends that cntlr
+  its primary request, whose reply settles it.
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
   standby leg rows ignored; the DN `err_epoch` write failing on a missing
-  and on an invalid cluster conf alike.
+  and on an invalid cluster conf alike; `TestHealthSettle` (*added
+  2026-09-26*) — a clean observation the driver judges to prove the primary
+  role writes `settle` with epoch 0 once, with or without a transition, and
+  clears the memo; an unhealthy observation, a rejected one and a failed
+  write keep it, the next observation retrying; a monitor with no memo
+  never settles. `TestPrimaryShapeBuilt` (*added 2026-09-26*) — a
+  `PROVISIONING` row, or a `MISSING` one with details other than
+  `"sp_level"`, in any map HL2 judges a cntlr by, a per-td thin map
+  included, keeps the settle waiting, except in `grp_id_to_md_raid`; a
+  leg row does not, nor a `MISSING` `"sp_level"` row or a row of any other
+  status in any map. It, and
+  three tests beside it, take the maps from `CntlrInfo`'s descriptor
+  rather than a list of their own, so a map added to the proto is judged
+  by them at once, each row placed beside others in its map or, for a
+  thin map, in a second td: `TestHealthCntlrEveryMap` — an `ERROR` row in
+  any map but `leg_id_to_leg` is HL2's error row, named by its map when it
+  has no `res_name`; `TestHealthCntlrFirstErrorOrder` — of several `ERROR`
+  rows the verdict names the first in `CntlrInfo`'s field order, the thin
+  maps last and by ascending td, the lowest key first within a map;
+  `TestHealthMarkCntlrUnknownCoversEveryMap` — a dead stream marks every
+  row of every map `UNKNOWN` (HL1). `TestCntlrSettleWritesThroughModel`
+  (`etcd_test.go`, *added 2026-09-26*) runs the cntlr monitor over the real
+  `modelHealthWriter` and etcd: its epoch and its settle both reach
+  `SetCntlrErrEpoch` (HL2, HL3).
 * **bmpush.go** — `TestBmMissingDiff` (BM2 over the whole pair: an
   acknowledged `(0, 1)` never satisfies etcd's `(2, 1)`),
   `TestBmAscendingOneInFlight` (ascending `(src_slice_idx, bm_idx)`
@@ -2071,6 +2310,16 @@ does).
 * **reaction.go** — priority and one-per-pass; every suppression; AR5's two
   triggers (an unhealthy primary past `primary_unhealthy`, and a `disabled`
   primary with no threshold wait — `TestReactionDisabledPrimaryFailsOver`);
+  AR5's settling threshold (`TestReactionSettlingPrimary`, *added
+  2026-09-26*: a settling primary is not failed over at `primary_unhealthy`
+  — no op, no skip record, the pass goes on to AR6 — nor one second short
+  of `cntlr_unhealthy`, and is at it; a settled one is at
+  `primary_unhealthy`; a disabled settling one at once; where
+  `cntlr_unhealthy` is the shorter, a settling one is still held to
+  `primary_unhealthy`; the selection mutation-tested in both directions,
+  and in `model` the same selection in `Failover`'s STM, the inverted
+  thresholds included, the flag moving with the role there and in a primary
+  `ReplaceCntlr`, and `SetCntlrErrEpoch`'s settle);
   the AR6 parser on a real status line and on garbage; the pending rule
   before and after a grow becomes visible (data and meta units); AR7's
   sole-primary variant and old-CN black list; AR8 cases 1 and 2, the
@@ -2153,7 +2402,7 @@ failure the worker is specified to handle; error paths of etcd itself
 | A | `revision` | bumps, a moved endpoint without a delete, stale/unknown replies, a deleted rev key |
 | B | `health` | `err_epoch` set/cleared with the capacity keys; hang, kill, `PROVISIONING`, the sp-object table |
 | C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, a rejected syncup that blocks the diff, arms nothing, and is re-driven only by the `Check*` reply's own code, primary change |
-| D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression |
+| D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression, the settle and a settling primary held to `cntlr_unhealthy` (*added 2026-09-26*) |
 | G | `drain` | the §11.6 sp drain by the real coordinator: D1 once, one D2 batch per slice, D3, every ledger restored; resume after a fleet restart from `SpConf` alone; the `MaxDelGrpPerTxn` batch bound (the data-before-meta pop order itself is a §13 unit test, `TestDrainSpSliceBatchSizeAndOrder`); the §11.7 clone drain in two batches, CLD5's exclusion seen from the CN, resume from the surviving chunk keys |
 | E | `vote` | exact single ownership, join (~¼ moves, the rest stable), `SIGKILL`, `SIGTERM`, `SIGSTOP`/`SIGCONT` with the self-fence, attribution by trace id |
 | F | `handoff` | a killed owner's shards are re-driven at the same revision; a flip mid-handoff happens once |
@@ -2325,7 +2574,7 @@ configured the way production is, not because a case needs it.
 |---|---|---|
 | `--vote-interval` / `--vote-grace-time` | 2 / 6 | dead detection after 4 s, commit 6 s later; a fresh worker drives after 6 s |
 | `health_check_conf.*_interval` | 1 | one round per second on every stream (`MinHealthCheckInterval`) |
-| `event_threshold` (`primary`, `cntlr`, `side`, `leg`) | 2, 4, 3, 6 | `leg > side` as `architecture.md` §7 requires; every reaction fires within seconds. Case B step 8 alone overrides them with `3600,3600,3600,3600`, so the ERROR rows it injects — D's reaction triggers — fire nothing |
+| `event_threshold` (`primary`, `cntlr`, `side`, `leg`) | 2, 4, 3, 6 | `leg > side` as `architecture.md` §7 requires; every reaction fires within seconds. Case B step 8 overrides them with `3600,3600,3600,3600`, so the ERROR rows it injects — D's reaction triggers — fire nothing; case D step 12 puts its own `sp2` on `2,15,3,6`, a `cntlr_unhealthy` wide enough to watch the settling hold (*amended 2026-09-26*) |
 | `low_water_mark_pct` | 50 (case D sets it per step) | |
 | `extent_size` | 64 MiB (`MinDnExtSize`) | irrelevant to fakes; keeps `GrowSlice` math small |
 | `block_size` / `bitmap_chunk_block_cnt` | 1 MiB (`DefaultDmPoolDataBlockSize`) / 128 blocks (`DefaultChunkBlockCnt`) | the `--block-size` / `--chunk-blocks` every case's cluster is created with (all eight go through `new_cluster`, and none overrides them); with `extent_size` they are the cluster half of the §3.6 geometry below, the group half being its own `ext_cnt` and redundancy kind |
@@ -2379,10 +2628,10 @@ print a plain JSON object of their own. Exit non-zero on any error.
 | `bump-rev` | `dn\|cn\|sp --id --shard` | `revision += 1` in place (never delete + put), prints the new value |
 | `move-dn` | `--id --shard --addr <new>` | rewrites `DnRev.addr_port` and moves `DnConf`/`DnCapacity` to the new endpoint in one STM (the §5.5 moved-node case) |
 | `del-rev` | `dn\|cn\|sp --id --shard` | deletes the rev key only |
-| `put-sp` | `--name --id --shard --slots 0,1,2 --level N --thresholds p,c,s,l --lwm N --cntlr id:cn_id:slot:primary…  --slice id:idx…  --group slice:grp:meta\|data:ext_cnt:none\|raid1…  --leg grp:leg:idx…  --side leg:side:dn_id:slot…` | `SpConf` (+ `next_id` past every id), `SpName`, every `Cntlr`, every `Slice` (sides `provisioned = false`), `SpRev{revision = 1, sp_name}`; the DN/CN pointer lists, budgets, capacity keys and `DnRev`/`CnRev` bumps — the `CreateStoragePool` STM with explicit placement |
+| `put-sp` | `--name --id --shard --slots 0,1,2 --level N --thresholds p,c,s,l --lwm N --cntlr id:cn_id:slot:primary…  --slice id:idx…  --group slice:grp:meta\|data:ext_cnt:none\|raid1…  --leg grp:leg:idx…  --side leg:side:dn_id:slot…` | `SpConf` (+ `next_id` past every id), `SpName`, every `Cntlr`, every `Slice` (sides `provisioned = false`), `SpRev{revision = 1, sp_name}`; the DN/CN pointer lists, budgets, capacity keys and `DnRev`/`CnRev` bumps — the `CreateStoragePool` STM with explicit placement. A `--cntlr` marked primary is created `settling`, as `CreateStoragePool`'s primary is (HL2; *amended 2026-09-26*): `put-sp` builds its own `Cntlr` records rather than calling the gateway's code, so it sets the flag itself |
 | `put-td`, `put-ss`, `put-clone`, `put-xfer`, `put-migr` | the message's fields (`--migr name:id:src_side:dst_side` also appends the dst `Side` to the leg) | the record + the `SpConf` list entry; bump `SpRev` |
 | `put-bitmap` | `--kind clone\|migr --sp --name [--src-slice-idx] --bm-idx --hex` | the chunk (+ `bm_cnt` on a migration's parent); bump `SpRev` |
-| `set-cntlr` | `--sp --id --primary=… --disabled=…` | rewrites the `Cntlr`; bump `SpRev` |
+| `set-cntlr` | `--sp --id --primary=… --disabled=…` | rewrites the `Cntlr`; bump `SpRev`. A raw rewrite, neither a failover nor the gateway's `UpdateCntlrEnabled`: `--primary` and `--disabled` flip those flags alone and leave `settling` as it was, a primary re-enabled here included (*noted 2026-09-26*) |
 | `set-level` | `--sp --level N` | `SpConf.sp_level`; bump `SpRev` |
 | `set-lwm` | `--sp --pct N` | `SpConf.bdev_conf.dm_pool_conf.low_water_mark_pct`; bump `SpRev` |
 | `set-free` | `dn\|cn --id --free-ext N` | rewrites `free_ext_cnt` + capacity key; no rev bump |
@@ -2495,7 +2744,17 @@ sent it (RW10). Rules:
   `status`, is one of `UNKNOWN`, `MISSING`, `ERROR`, `OK`, `PROVISIONING`,
   `PENDING`, case-insensitive, with or without the proto's `RES_STATUS_`
   prefix — `PENDING` *added 2026-09-26*, so a case can plant the leg row of
-  a primary whose prober has not completed a round, `cnagent.md` CN11),
+  a primary whose prober has not completed a round, `cnagent.md` CN11; and
+  a row of a **cntlr** object may carry `"when_primary": true`, *added
+  2026-09-26* — the override then applies only while the cntlr's last
+  applied request carries `cntlr.primary = true`, so a row planted on a
+  standby bites the moment a failover promotes it and not before: the fake
+  reports a standby's pool and md rows too — every row but the
+  primary-only thin rows above — where the real cn agent reports those
+  for a primary only, so an ungated `ERROR` row would make the standby
+  unhealthy — and no failover candidate — before the failover.
+  `when_primary` on any other object, or under `default`, makes the file
+  malformed),
   `zeroed_ext_cnt` / `total_ext_cnt` (sides; default `total = ext_cnt` of
   the request and `zeroed = total` — instant provisioning), `thin_ok`
   (cntlr) and `thin_missing_slices` (a partial map for the created-flip
@@ -2693,7 +2952,7 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    within `WAIT_SHORT` cn1 receives all three pairs; cn0 none after the
    change.
 
-**D — `reaction`** (thresholds 2/4/3/6; `lwm` set per step)
+**D — `reaction`** (thresholds 2/4/3/6, step 12's `sp2` 2/15/3/6; `lwm` set per step)
 
 1. `put-cluster it-reaction --dn-batch 16 --cn-batch 16`; DNs 1..4 on
    dn0..dn3 with `--free-ext 8`, CNs 1..3 on cn0..cn2 with `--free-ext 64`.
@@ -2707,10 +2966,17 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    cn 3's budgets, cn 3's rev): the
    replacement lands ~2 s after the failover, while this step still polls,
    so cn 1 must be healthy and allocatable BEFORE it runs — otherwise an
-   empty budget, not AR7's black list, is what excludes it. Then cn0
+   empty budget, not AR7's black list, is what excludes it. `put-sp` wrote
+   `C1` settling and its first clean reply as primary in step 1 settled
+   it; this step times the SETTLED threshold, so it first waits for `C1
+   settling false` (*added 2026-09-26*, HL2 — step 12 is the settling
+   one). Then cn0
    `cntlr 1:1 rows ss_id_to_subsystem.<ss> ERROR` ⇒
    `Cntlr.err_epoch` on `C1`; within `2 + WAIT_SHORT` s: `get-cntlr` `C2
-   primary true`, `C1 primary false`; `reaction applied kind=failover`;
+   primary true`, `C1 primary false` — or `C1` already gone with a
+   `reaction applied kind=replace_cntlr` counted, since step 3's
+   replacement follows the failover by 2 s and can land before this read
+   (*amended 2026-09-26*); `reaction applied kind=failover`;
    `SyncupSide primary_cn_id 2` at both DNs; `SyncupCntlr cntlr.primary`
    true at cn1. Before the threshold (`assert_none_for 1`) nothing flips.
 3. **Replacement.** Keep `C1` unhealthy (cn 1 itself is healthy and
@@ -2727,7 +2993,8 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    `reaction applied kind=replace_cntlr`.
 4. **Sole primary.** `put-sp sp1` (id 2): one cntlr `C1'` on cn 2 slot 0
    primary; one slice, `RedundNone` data group ext 1 with a side on dn 3.
-   cn1 `cntlr 2:1 rows ss_id_to_subsystem… ERROR` ⇒ after 4 s: replaced by a
+   Once `C1'` reads `settling false` (as in step 2; *added 2026-09-26*), cn1 `cntlr 2:1 rows
+   ss_id_to_subsystem… ERROR` ⇒ after 4 s: replaced by a
    new **primary** cntlr on cn 3 (`set-free cn 1 0` beforehand so cn 3 is
    the only candidate) with slot 0; `reaction skipped kind=failover
    reason=no candidate` recorded first.
@@ -2791,6 +3058,40 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
     standby `primary true`, the disabled cntlr `primary false`; `err_epoch
     0` on both, so the flag is the only trigger the failover can have come
     from; a `SyncupCntlr` with `cntlr.primary true` at the new primary's CN.
+12. **Settling** (AR5, HL2; *added 2026-09-26*). A fresh `sp2` (id 3) on
+    thresholds of its own, 2/15/3/6, so the settling window is wide enough
+    to watch: `C1` cn 1 slot 0 primary, `C2` cn 2 slot 1, one slice, one
+    `RedundNone` data group ext 1 with its side on dn 4 (`set-free cn 1 64`,
+    `cn 2 64`, `dn 4 8` first — and `cn 3 0`, which leaves AR7 no candidate
+    for sp2, cn 1 and cn 2 already hosting its cntlrs: `C2` is an unhealthy
+    standby past `cntlr_unhealthy` the moment the fail-back below demotes
+    it, and must not race its own clear against a replacement).
+    (1) **The creation settle**: provisioned, then within `WAIT_SYNCUP` a
+    `cntlr settled` record for `C1`, and `C1` and `C2` both `settling
+    false` — the record is the proof `put-sp` wrote `C1` settling, since
+    the worker writes one only for a record it read as settling.
+    (2) cn1 `cntlr 3:2 rows slice_id_to_dm_pool.1 ERROR when_primary`
+    (§14.9) ⇒ `assert_none_for 3` `C2`'s `err_epoch` set: inert on a
+    standby. (3) cn0 `cntlr 3:1 rows slice_id_to_dm_pool.1 ERROR` ⇒ within
+    `2 + WAIT_SHORT` `reaction applied kind=failover`, `C2 primary true`
+    and `settling true`, then `C2`'s `err_epoch` set by its first
+    primary-shape reply; clear cn0 ⇒ `C1`'s `err_epoch` back to 0.
+    (4) **The hold**: `C1` is an eligible candidate, so a worker judging
+    `C2` by `primary_unhealthy` would fail back 2 s after `C2`'s
+    `err_epoch`;
+    `assert_none_for` a second failover until 2 s short of `C2`'s
+    `err_epoch` + 15 s on the server's clock (skipped, with a log line,
+    when the polls above ran past that). (5) **The release**: within
+    `15 + WAIT_SHORT` the fail-back, its `reaction applied` record stamped
+    no earlier than `C2`'s `err_epoch` + 15; `C1 primary true`; `C2
+    settling false` (`Failover` clears the demoted one) and its
+    `err_epoch` back to 0 within `WAIT_SHORT`, the planted row being inert
+    again; a further `cntlr settled` for `C1` — settling again after the
+    fail-back, and clean at once — and `C1 settling false`;
+    `assert_none_for 3` a third failover. (6) Clear cn1. Not kept in the
+    suite, run once by hand when this step changes: the same script with
+    cn1's row cleared during (4) must see no second failover at all — `C2`
+    settles instead — which pins the threshold's sense.
 
 **G — `drain`** (§11.6; the gateway suite owns the LATCH and stands the drain
 in with `wctl drain-sp`, this case owns the real coordinator)
@@ -2952,7 +3253,7 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | SW4 | unit tests only (compaction) |
 | RW1-RW12 | S, A, B; RW10 by E/F attribution; RW11 by every fleet restart |
 | RW13-RW21 | S (builders), A (moved endpoint), C (migration confs), D (grow, spare confs) |
-| HL1-HL6 | B |
+| HL1-HL6 | B; HL2's settle by D steps 2, 4 and 12 (*added 2026-09-26*) |
 | BM1-BM6 | C |
 | AR1-AR9 | D |
 | SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
@@ -3072,7 +3373,8 @@ All three landed with the implementation:
    `go list -deps ./cmd/dnv-worker | grep etcd` finds the client; `model`
    imports none of `gateway`, `worker`, `agent`, `cdc`, `ctl`.
 3. `common/constants.go` carries the §2.1 block; `pb/schema.proto` carries
-   `WorkerReg` with the key comment of §2.2 and the generated files are
+   `WorkerReg` with the key comment of §2.2 — and, since 2026-09-26,
+   `Cntlr.settling` with its comment — and the generated files are
    committed from `make gen`.
 4. `dnv-worker --help` lists exactly the CM1 flags; `DNV_WORKER_ROLES=dn`
    is honoured (CM2).
@@ -3162,6 +3464,24 @@ durable, so nothing is lost — convergence is delayed, not skipped
   holds that group only; the scan repairs the others (AR2). A spare the
   primary never reports at all stays pending with no bound, which is older
   than the amendment.
+* **A primary that never settles is failed over or replaced no earlier
+  than `cntlr_unhealthy`**, unless it is disabled (AR5, HL2; *added
+  2026-09-26*) — nor failed over before `primary_unhealthy`, AR5 taking the
+  longer of the two. A primary that never reports its stack built and
+  clean as primary — a new primary that is itself dead, a build that keeps
+  it unhealthy longer than that, a new SP whose first zeroing never
+  finishes, which keeps its pools `PROVISIONING`, a migration destination
+  that `FinishMigration` forced before its RW18 flip and that never
+  finishes zeroing while it is the only side of a leg in the first group
+  of its list, which keeps that slice's pools and every td `PROVISIONING`
+  the same way, or a clone whose source stays unconnected, which keeps its
+  target row `MISSING` (HL2) — keeps the SP on it that long once it is unhealthy, where a settled primary is
+  judged by `primary_unhealthy` alone (600 s against 5 s at the
+  defaults); an old primary that recovered meanwhile gets the role back
+  only then. A *settled* primary can still be failed
+  over on one bad round at the defaults (`primary_unhealthy` =
+  `cntlr_interval` = 5 s); such a failover now costs one settle rather
+  than a loop.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and
   the migration that could have moved a readable-but-sick side is an
   operator's tool (`CreateMigration`), not a reaction (§0 item 12).
@@ -3172,7 +3492,22 @@ durable, so nothing is lost — convergence is delayed, not skipped
 * **Log volume**: every round logs a `grpc client send`/`recv` pair per
   object (`grpc.md` L6) and every heartbeat an `etcd put`; with 5 s rounds
   and thousands of objects this is the dominant log stream of the control
-  plane, as it is for the agents. Health transitions (`health changed`,
-  the `unreachable` reason included — the `RES_STATUS_UNKNOWN` marking
-  itself is in-memory and logs nothing, HL1) are the only records the
-  worker adds per object.
+  plane, as it is for the agents. The worker's own per-object records are
+  mostly event-driven: health transitions (`health changed`, the
+  `unreachable` reason included — the `RES_STATUS_UNKNOWN` marking itself
+  is in-memory and logs nothing, HL1), a `syncup result` per `Syncup*`
+  (§12), and, since 2026-09-26, a cntlr's `cntlr settled`, about once per
+  acquisition of the primary role (§12). Among those that recur every
+  round for as long as their cause lasts: an unreachable object's `check
+  stream open failed`, `check stream send failed` or `check round failed`
+  (the revision loop's, not §12 records); the `syncup result` of each
+  `Syncup*` that RW4 step 5 re-issues, paired with a `syncup leftover` or a
+  `syncup rejected` while the leftover or the rejection persists (RW5) — a
+  stale revision after an etcd restore repeats its `syncup rejected` at
+  `Error` every round until the revision in etcd reaches the agent's; a
+  `dn conf missing` / `cn conf missing` while the node's `DnConf` /
+  `CnConf` is absent (RW13, §8.3); and a `health write failed` while a
+  health write keeps failing (RW12). The sp coordinator's pass adds its
+  own, once per pass rather than per object — AR5's `reaction skipped` /
+  `no candidate`, say, for as long as a primary due for failover has no
+  eligible candidate.

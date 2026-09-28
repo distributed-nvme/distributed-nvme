@@ -106,6 +106,7 @@ environment variables; see §13):
 | **location** | Free-form failure-domain string per node (rack/zone), stored in `DnConf`/`CnConf` (a copy rides in the capacity-key value for scan efficiency [D5]). Used for anti-affinity during allocation (§6). |
 | **creation_epoch** | `time.Now().UnixNano()` of the moment the cluster was created, stored in `ClusterConf.creation_epoch`. Gateway-generated (not a request field), immutable, and the second input of the `cluster_id` hash (§5.2). Unrelated to `err_epoch`, which is in unix **seconds**. |
 | **err_epoch** | Unix seconds when the object was last detected unhealthy by a worker; `0` = healthy. Compared against `EventThreshold` to trigger the automatic reactions of §10.4. A node with `err_epoch != 0` also loses its capacity key (§5.6). |
+| **settling** | `Cntlr.settling`: true from the moment a cntlr becomes primary — created as one by `CreateStoragePool`, promoted by a failover, created as one by a sole-primary replacement, or re-enabled by `UpdateCntlrEnabled` while still primary (§8.6) — until the worker first observes it clean in that role, enabled, at the revision it drives and with its stack built, the rows its `sp_level` suppresses aside, or until a failover demotes it first. Its stack is built when no row outside `leg_id_to_leg` and `grp_id_to_md_raid` reads `PROVISIONING`, or `MISSING` with details other than `"sp_level"`, the mark of a row the level suppresses (`cnagent.md` CN19): a new SP's primary reports its pools `PROVISIONING` until the sides under them are zeroed, and a Check round between a converge that found members not yet available and the retry that builds over them reports the absent devices `MISSING`, while a grow's group reads `PROVISIONING` beside a serving pool and holds nothing up. The §10.4 failover holds an unhealthy settling primary to `cntlr_unhealthy` instead of `primary_unhealthy` when that is the longer; a `disabled` one still fails over at once. Health bookkeeping of the same kind as `err_epoch`: set by the op that makes the cntlr primary, cleared by the observation that proves the role, in a write that bumps no revision, or by the failover that demotes it (`dnv-worker.md` HL2; *added 2026-09-26*, the failover ping-pong). |
 
 Ownership hierarchy (etcd side):
 
@@ -1406,7 +1407,8 @@ Action:
    `bdev_conf` (resolved), `event_threshold` (as sent), `cntlid_slot_list`,
    `sp_level = SP_LEVEL_READWRITE`, `deleting = false`, id/name lists filled); `SpName`;
    one `Cntlr` per picked CN, created in pick order (the first created — smallest
-   `cntlr_id` — gets `primary = true`, the rest `primary = false`; all
+   `cntlr_id` — gets `primary = true` and `settling = true` (§2, *amended
+   2026-09-26*), the rest `primary = false`; all
    `disabled = false`; `cntlid_slot` = the next unused entry of `cntlid_slot_list` in
    list order — §11.8 requires all cntlr slots of one SP distinct; `addr_port` +
    `nvme_tr_conf` copied from the CN); one `Slice` per slice
@@ -1585,8 +1587,11 @@ the cn agent tears down its stack. Reply `cntlr_id`.
 
 **UpdateCntlrEnabled** —
 Action: STM set `Cntlr.disabled = !request.enabled`; on disable remove / on enable
-append the CN's `nvme_tr_conf` in every `CdcEntry`; bump `SpRev`. Idempotent. A
-disabled cntlr leaves primary eligibility and its namespaces go ANA-inaccessible;
+append the CN's `nvme_tr_conf` in every `CdcEntry`; an enable of a cntlr that is still
+`primary` also sets `settling` (§2, *amended 2026-09-26*: its cn agent held the standby
+shape while it was disabled and now builds the primary stack, the work of a promotion);
+bump `SpRev`. Idempotent. A disabled cntlr leaves primary eligibility and its
+namespaces go ANA-inaccessible;
 disabling the current primary triggers the §10.4 primary re-election; disabling the
 last enabled cntlr is allowed but stops IO (no warning in v1: dnvctl issues no RPC the
 operator did not type, so it cannot pre-read to detect the case — dnvctl.md §0 #10 defers
@@ -2892,13 +2897,18 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
 * `primary_unhealthy` (5 s): the primary cntlr is unhealthy — or the primary is
   `disabled` (§8.6), with no threshold wait — ⇒ pick the healthy, enabled
   cntlr with the smallest `cntlr_id`, flip the `primary` booleans. This *is* the
-  failover trigger of §11.1.
+  failover trigger of §11.1. An unhealthy *settling* primary (one that has not yet
+  reported its stack built and clean as primary since it acquired the role, §2) is held to
+  `cntlr_unhealthy` instead when that is the longer; the `disabled` trigger is
+  unchanged — *amended 2026-09-26* (the failover ping-pong: a promotion that had
+  not completed read unhealthy at its first reports and was failed back
+  `primary_unhealthy` later, on every pass).
 * `cntlr_unhealthy` (600 s): a cntlr stays unhealthy — a non-primary one, or the
   primary of an SP with no failover candidate (the sole-cntlr SP, or every other cntlr
   unhealthy or disabled; otherwise AR5 moves the role away first) ⇒ replace it:
   internal `DeleteCntlr` (skipping the enabled check) + internal
-  `CreateCntlr` on a fresh CN with the same `cntlid_slot`, primary iff the old one was
-  (`dnv-worker.md` AR7).
+  `CreateCntlr` on a fresh CN with the same `cntlid_slot`, primary iff the old one was,
+  and then created settling (§2, *amended 2026-09-26*; `dnv-worker.md` AR7).
 * `side_unhealthy` (600 s) and `leg_unhealthy` (1200 s) — **leg repair**, one procedure
   with two triggers (`dnv-worker.md` §11.5). The sp-worker believes a leg needs replacing
   when either (1) the leg has been unhealthy from the cntlr's perspective for
@@ -2988,6 +2998,12 @@ everything it has seen):
    error — until the agent's retry has built the stack (*amended 2026-09-26*, the
    failover ping-pong: before that retry existed it lasted until the next revision
    bump; `cnagent.md` §7, known limits).
+
+The worker marks the new primary *settling* in the failover's own transaction and,
+until it has reported its stack built and clean as primary, fails it over for being unhealthy only at
+`cntlr_unhealthy` instead of `primary_unhealthy` when that is the longer (as it is at
+the defaults), unless it is disabled (§10.4; *amended 2026-09-26*, the failover
+ping-pong; `dnv-worker.md` HL2, AR5).
 
 **Host-visible errors when the old primary is alive but CP-unreachable
 ([D16]).** The common failover — a dead CN — is clean from the host's side

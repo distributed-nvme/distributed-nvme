@@ -90,6 +90,7 @@ type healthWriter interface {
 		spId uint64,
 		cntlrId uint64,
 		epoch uint64,
+		settle bool,
 	) error
 	setLegErrEpoch(
 		ctx context.Context,
@@ -139,8 +140,11 @@ func (w *modelHealthWriter) setCntlrErrEpoch(
 	spId uint64,
 	cntlrId uint64,
 	epoch uint64,
+	settle bool,
 ) error {
-	return model.SetCntlrErrEpoch(ctx, w.cli, cid, spId, cntlrId, epoch)
+	return model.SetCntlrErrEpoch(
+		ctx, w.cli, cid, spId, cntlrId, epoch, settle,
+	)
 }
 
 func (w *modelHealthWriter) setLegErrEpoch(
@@ -171,7 +175,8 @@ func (w *modelHealthWriter) setSideErrEpoch(
 
 // healthMonitor is one object's health bookkeeping (HL3): it remembers the
 // last state it WROTE and issues an etcd write only on an observed
-// transition. Two owners of the same object (the accepted overlap of §0
+// transition — or, for a cntlr, for HL2's settle, once per memo (see
+// observeSettle). Two owners of the same object (the accepted overlap of §0
 // item 4) therefore write at most once each, and the model op re-reads the
 // record inside its STM so the second write is a no-op — the §11 threshold
 // clock never restarts.
@@ -185,11 +190,17 @@ type healthMonitor struct {
 	// attrs are the object's ids as the §12 "health changed" record carries
 	// them, between cluster_id and record.
 	attrs []slog.Attr
-	// write performs the MD6 op for this record kind.
-	write func(ctx context.Context, epoch uint64) error
+	// write performs the MD6 op for this record kind. settle asks a cntlr's
+	// op to clear the record's settling flag as well (HL2); the other kinds
+	// have no such flag and ignore it.
+	write func(ctx context.Context, epoch uint64, settle bool) error
 
 	known     bool
 	unhealthy bool
+	// settlePending is a cntlr's memo of its record's settling flag (HL2):
+	// seeded from every plan the driver takes, cleared by the settle write.
+	// Always false for the other kinds.
+	settlePending bool
 }
 
 // observe folds one observation into the object's health (HL1/HL2, HL3).
@@ -198,6 +209,23 @@ func (m *healthMonitor) observe(
 	obs healthObs,
 	resName string,
 ) {
+	m.observeSettle(ctx, obs, resName, false)
+}
+
+// observeSettle folds one observation into the object's health (HL1/HL2,
+// HL3) and, for a cntlr, clears its settling flag on a clean observation
+// that proves the primary role: canSettle is the driver's judgement that the
+// reply describes the PRIMARY shape, built (primaryShapeBuilt), at the
+// driven revision. It reports whether the flag was cleared. A settle is
+// written even without a health transition, because a standby that was
+// clean, is promoted and reports clean at once has no edge for HL3 to write
+// on.
+func (m *healthMonitor) observeSettle(
+	ctx context.Context,
+	obs healthObs,
+	resName string,
+	canSettle bool,
+) bool {
 	var unhealthy bool
 	var reason string
 	switch obs {
@@ -210,28 +238,37 @@ func (m *healthMonitor) observe(
 	default:
 		// HL1/HL2: PROVISIONING, MISSING and a rejected code neither set nor
 		// clear.
-		return
+		return false
 	}
-	if m.known && m.unhealthy == unhealthy {
-		return
+	transition := !(m.known && m.unhealthy == unhealthy)
+	doSettle := canSettle && !unhealthy && m.settlePending
+	if !transition && !doSettle {
+		return false
 	}
 	var epoch uint64
 	if unhealthy {
 		epoch = m.deps.clk.nowUnix()
 	}
-	if err := m.write(ctx, epoch); err != nil {
+	if err := m.write(ctx, epoch, doSettle); err != nil {
 		// Left for the next round (RW12): nothing is remembered, so the
-		// transition is retried. The etcdutil records carry the details.
+		// transition — and the settle — is retried. The etcdutil records
+		// carry the details.
 		slog.ErrorContext(ctx, "health write failed",
 			slog.String("role", m.role),
 			slog.Uint64("cluster_id", m.cid),
 			slog.String("record", m.record),
 			slog.String("error", err.Error()),
 		)
-		return
+		return false
 	}
 	m.known = true
 	m.unhealthy = unhealthy
+	if doSettle {
+		m.settlePending = false
+	}
+	if !transition {
+		return doSettle
+	}
 
 	attrs := make([]any, 0, len(m.attrs)+6)
 	attrs = append(attrs,
@@ -250,6 +287,7 @@ func (m *healthMonitor) observe(
 		attrs = append(attrs, slog.String("res_name", resName))
 	}
 	slog.InfoContext(ctx, msgHealthChanged, attrs...)
+	return doSettle
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +324,7 @@ func newDnMonitor(
 		record: healthRecordDn,
 		cid:    cid,
 		attrs:  []slog.Attr{slog.Uint64("dn_id", dnId)},
-		write: func(ctx context.Context, epoch uint64) error {
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			cc, ok := d.conf.get(cid)
 			if !ok {
 				return fmt.Errorf(
@@ -318,7 +356,7 @@ func newCnMonitor(
 		record: healthRecordCn,
 		cid:    cid,
 		attrs:  []slog.Attr{slog.Uint64("cn_id", cnId)},
-		write: func(ctx context.Context, epoch uint64) error {
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setCnErrEpoch(ctx, cid, addrPort(), epoch)
 		},
 	}
@@ -419,8 +457,10 @@ func newCntlrMonitor(
 			slog.Uint64("sp_id", spId),
 			slog.Uint64("cntlr_id", cntlrId),
 		},
-		write: func(ctx context.Context, epoch uint64) error {
-			return d.health.setCntlrErrEpoch(ctx, cid, spId, cntlrId, epoch)
+		write: func(ctx context.Context, epoch uint64, settle bool) error {
+			return d.health.setCntlrErrEpoch(
+				ctx, cid, spId, cntlrId, epoch, settle,
+			)
 		},
 	}
 }
@@ -445,7 +485,7 @@ func newLegMonitor(
 			slog.Uint64("slice_id", sliceId),
 			slog.Uint64("leg_id", legId),
 		},
-		write: func(ctx context.Context, epoch uint64) error {
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setLegErrEpoch(ctx, cid, spId, sliceId, legId, epoch)
 		},
 	}
@@ -469,7 +509,7 @@ func newSideMonitor(
 			slog.Uint64("slice_id", sliceId),
 			slog.Uint64("side_id", sideId),
 		},
-		write: func(ctx context.Context, epoch uint64) error {
+		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setSideErrEpoch(
 				ctx, cid, spId, sliceId, sideId, epoch,
 			)
@@ -477,17 +517,17 @@ func newSideMonitor(
 	}
 }
 
-// cntlrObservation applies the HL2 cntlr row to one CheckCntlr/SyncupCntlr
-// reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
-// leg_id_to_leg, whose rows belong to the legs (below).
-func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
-	if !accepted(code) {
-		return healthNone, ""
-	}
-	maps := []struct {
-		label string
-		rows  map[uint64]*pb.ResInfo
-	}{
+// cntlrRowMap is one labelled map of a CntlrInfo.
+type cntlrRowMap struct {
+	label string
+	rows  map[uint64]*pb.ResInfo
+}
+
+// cntlrHealthMaps are the CntlrInfo maps HL2 judges a cntlr by: every map but
+// leg_id_to_leg, whose rows belong to the legs (below), the per-td thin maps
+// included.
+func cntlrHealthMaps(info *pb.CntlrInfo) []cntlrRowMap {
+	maps := []cntlrRowMap{
 		{"ss_id_to_subsystem", info.GetSsIdToSubsystem()},
 		{"ns_id_to_namespace", info.GetNsIdToNamespace()},
 		{"ns_id_to_dm_linear", info.GetNsIdToDmLinear()},
@@ -504,20 +544,95 @@ func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 		{"clone_id_to_dm_clone", info.GetCloneIdToDmClone()},
 		{"clone_id_to_meta", info.GetCloneIdToMeta()},
 	}
-	for _, m := range maps {
+	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
+		maps = append(maps, cntlrRowMap{
+			"slice_id_to_dm_thin",
+			info.GetTdIdToThinInfo()[tdId].GetSliceIdToDmThin(),
+		})
+	}
+	return maps
+}
+
+// cntlrObservation applies the HL2 cntlr row to one CheckCntlr/SyncupCntlr
+// reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
+// leg_id_to_leg, whose rows belong to the legs (below).
+func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
+	if !accepted(code) {
+		return healthNone, ""
+	}
+	for _, m := range cntlrHealthMaps(info) {
 		if resName, bad := firstErrorInMap(m.label, m.rows); bad {
 			return healthErrorRow, resName
 		}
 	}
-	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
-		thin := info.GetTdIdToThinInfo()[tdId]
-		if resName, bad := firstErrorInMap(
-			"slice_id_to_dm_thin", thin.GetSliceIdToDmThin(),
-		); bad {
-			return healthErrorRow, resName
+	return healthClean, ""
+}
+
+// primaryShapeBuilt reports whether a primary's reply shows its stack built,
+// the rows its sp_level suppresses aside: no row of the maps HL2 judges a
+// cntlr by, grp_id_to_md_raid aside, reads RES_STATUS_PROVISIONING, or
+// RES_STATUS_MISSING with details other than CN19's "sp_level"
+// (common.ResDetailsSpLevel, the cn agent's own value). HL2's settle requires
+// it (*amended 2026-09-26*). A new SP's primary reports a slice's pool rows,
+// and the thin volumes in that pool, PROVISIONING until every leg of the
+// groups under it has a provisioned side, and its raid0s — with the ns-devs,
+// namespaces, clones and transfers over them — until no slice is deferred
+// (cnagent.md CN9, [D15]; the ns-devs, on the td's dm-error, their namespaces
+// and a transfer's device, subsystem and namespace are built meanwhile but
+// read PROVISIONING all the same): a clean reply that says nothing about the
+// build still to come, and a settle on it would leave that build to be judged
+// by primary_unhealthy, which at 32 slices failed the building primary over
+// (e2e_integtest.md §8 item 13). MISSING is the other half. A converge that
+// finds a member not available (a promotion ahead of the sides' ANA flips, a
+// provisioned flip ahead of the side's export) reports the groups and pools it
+// could not build ERROR and leaves them to the CN10 retry, whose first pass
+// comes 5 s later; a Check round in between probes the absent devices and
+// reports them MISSING "", not ERROR, and in an SP with no td, as a new SP is
+// until one is created, that reply has no ERROR row outside leg_id_to_leg (a
+// td's raid0 row reads ERROR while its thins are absent; a leg row reads the
+// CN11 prober, which fails on a path still non-optimized). Every other MISSING
+// the cn agent reports is likewise a device not built, or a clone whose
+// source is not connected (CN18), so a primary showing one stays settling,
+// held to cntlr_unhealthy, until it clears — for as long as a clone's source
+// stays unconnected. Leg rows are left out: a spare whose side is still
+// zeroing reads PROVISIONING there for as long as it zeroes. So are group
+// rows, for a grow: its new groups are appended to their lists and stay out
+// of the live concat while their sides zero (CN9's prefix cut), so their
+// group rows alone read PROVISIONING, beside a serving pool, for minutes.
+// Nothing else needs them: a new SP has one group per list (the gateway's
+// planSpGroups), so a group of its that is still provisioning defers its
+// whole slice, whose pool rows say so, and a group a converge could not
+// assemble leaves the pool rows over it ERROR or MISSING. A leg that a forced
+// FinishMigration left with an unprovisioned destination as its only side is,
+// to the agent, a leg still zeroing: in the first group of its list it defers
+// the whole slice and every td with it, as a new SP's first zeroing does, so
+// a primary that takes the role meanwhile stays settling until that side's
+// RW18 flip, and indefinitely if the side never finishes; in a later group,
+// one the pool's concat already spans, the concat under the thin-pool cannot
+// shrink and a pool row reads ERROR. A row the sp_level suppresses reads
+// MISSING "sp_level" (CN19) and holds nothing, so a primary does not wait for
+// the layers its level suppresses. Yet a primary whose level suppresses its
+// pools settles before the zeroing ends only at SP_LEVEL_DISABLE, or with no
+// namespace and no transfer: [D15]'s deferral does not depend on the level,
+// and its ns-devs, namespaces and transfers read PROVISIONING while a slice
+// is deferred.
+func primaryShapeBuilt(info *pb.CntlrInfo) bool {
+	for _, m := range cntlrHealthMaps(info) {
+		if m.label == "grp_id_to_md_raid" {
+			continue
+		}
+		for _, res := range m.rows {
+			switch res.GetStatus() {
+			case pb.ResStatus_RES_STATUS_PROVISIONING:
+				return false
+			case pb.ResStatus_RES_STATUS_MISSING:
+				if res.GetDetails() != common.ResDetailsSpLevel {
+					return false
+				}
+			}
 		}
 	}
-	return healthClean, ""
+	return true
 }
 
 // sideObservation applies the HL2 side row to one CheckSide/SyncupSide reply:

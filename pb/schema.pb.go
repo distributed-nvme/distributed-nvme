@@ -3125,13 +3125,22 @@ func (x *SpConf) GetMigrNameList() []string {
 
 // {dnv_prefix} cntlr {cluster_id} {sp_id} {cntlr_id}
 type Cntlr struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AddrPort      string                 `protobuf:"bytes,1,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
-	NvmeTrConf    *NvmeTrConf            `protobuf:"bytes,2,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
-	CntlidSlot    uint32                 `protobuf:"varint,3,opt,name=cntlid_slot,json=cntlidSlot,proto3" json:"cntlid_slot,omitempty"`
-	Primary       bool                   `protobuf:"varint,4,opt,name=primary,proto3" json:"primary,omitempty"`
-	Disabled      bool                   `protobuf:"varint,5,opt,name=disabled,proto3" json:"disabled,omitempty"`
-	ErrEpoch      uint64                 `protobuf:"varint,6,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	AddrPort   string                 `protobuf:"bytes,1,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
+	NvmeTrConf *NvmeTrConf            `protobuf:"bytes,2,opt,name=nvme_tr_conf,json=nvmeTrConf,proto3" json:"nvme_tr_conf,omitempty"`
+	CntlidSlot uint32                 `protobuf:"varint,3,opt,name=cntlid_slot,json=cntlidSlot,proto3" json:"cntlid_slot,omitempty"`
+	Primary    bool                   `protobuf:"varint,4,opt,name=primary,proto3" json:"primary,omitempty"`
+	Disabled   bool                   `protobuf:"varint,5,opt,name=disabled,proto3" json:"disabled,omitempty"`
+	ErrEpoch   uint64                 `protobuf:"varint,6,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	// settling is true from the moment this cntlr becomes primary (or,
+	// still primary, is re-enabled) until the worker first observes it
+	// clean in that role with its stack built — no row outside
+	// leg_id_to_leg and grp_id_to_md_raid PROVISIONING, or MISSING but
+	// for the sp_level's (dnv-worker.md HL2) — or a failover demotes it.
+	// AR5 holds a settling primary to cntlr_unhealthy instead of
+	// primary_unhealthy when that is the longer. Existing records decode
+	// false = settled.
+	Settling      bool `protobuf:"varint,7,opt,name=settling,proto3" json:"settling,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3206,6 +3215,13 @@ func (x *Cntlr) GetErrEpoch() uint64 {
 		return x.ErrEpoch
 	}
 	return 0
+}
+
+func (x *Cntlr) GetSettling() bool {
+	if x != nil {
+		return x.Settling
+	}
+	return false
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}
@@ -14343,7 +14359,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\bnqn_list\x18\r \x03(\tR\anqnList\x12&\n" +
 	"\x0fclone_name_list\x18\x0e \x03(\tR\rcloneNameList\x12$\n" +
 	"\x0exfer_name_list\x18\x0f \x03(\tR\fxferNameList\x12$\n" +
-	"\x0emigr_name_list\x18\x10 \x03(\tR\fmigrNameList\"\xc7\x01\n" +
+	"\x0emigr_name_list\x18\x10 \x03(\tR\fmigrNameList\"\xe3\x01\n" +
 	"\x05Cntlr\x12\x1b\n" +
 	"\taddr_port\x18\x01 \x01(\tR\baddrPort\x12-\n" +
 	"\fnvme_tr_conf\x18\x02 \x01(\v2\v.NvmeTrConfR\n" +
@@ -14352,7 +14368,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"cntlidSlot\x12\x18\n" +
 	"\aprimary\x18\x04 \x01(\bR\aprimary\x12\x1a\n" +
 	"\bdisabled\x18\x05 \x01(\bR\bdisabled\x12\x1b\n" +
-	"\terr_epoch\x18\x06 \x01(\x04R\berrEpoch\"|\n" +
+	"\terr_epoch\x18\x06 \x01(\x04R\berrEpoch\x12\x1a\n" +
+	"\bsettling\x18\a \x01(\bR\bsettling\"|\n" +
 	"\x05Slice\x12\x1b\n" +
 	"\tslice_idx\x18\x01 \x01(\rR\bsliceIdx\x12*\n" +
 	"\rmeta_grp_list\x18\x02 \x03(\v2\x06.GroupR\vmetaGrpList\x12*\n" +

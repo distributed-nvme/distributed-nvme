@@ -1033,7 +1033,7 @@ slice from it.
 | stage | command | assertion |
 |---|---|---|
 | 01 | `xfer create --name x0 --ori-nqn <ss0> --ori-idx 1 --hosts <host1> --auto-suspend` | `xfer get` echoes the id, origin, `auto_suspend`, `allowed_hosts`; `xfer_name_list` names it; host0's ns 1 goes **`inaccessible` with its head disk intact** (an effective suspend is a park) |
-| 01 | host1 `nvme connect -n <XferNqn>` to the primary's transport | first the export gate, `wait_xfer_exported` on the primary's `xfer_id_to_subsystem` and `xfer_id_to_namespace` rows — **and the park that precedes it is not that gate**: a cntlr converges in one retire phase top-down and then one build phase bottom-up, and the origin namespace's park belongs to the retire half while the transfer's subsystem belongs to the build half, so host0's ns 1 can already read `inaccessible` while `XferNqn` does not exist on that CN yet. Then the connect and its verdict; ANA `optimized`, then the device; the path is `live`; host1 reads `SHA0` through it — the transfer exports `t0`'s raid0 |
+| 01 | host1 `nvme connect -n <XferNqn>` to the primary's transport | first the export gate, `wait_xfer_exported` on the primary's `xfer_id_to_subsystem` and `xfer_id_to_namespace` rows — **and the park that precedes it is not that gate**: a cntlr converges in one sweep top-down and then one build phase bottom-up, and the origin namespace's park belongs to the sweep (`cnagent.md` CN9's pre-steps) while the transfer's subsystem belongs to the build phase, so host0's ns 1 can already read `inaccessible` while `XferNqn` does not exist on that CN yet. Then the connect and its verdict; ANA `optimized`, then the device; the path is `live`; host1 reads `SHA0` through it — the transfer exports `t0`'s raid0 |
 | 02 | `td create --name c0` (the destination), wait for its raid0 | the dm-clone's `dest` argument needs the raid0, which `created` does not cover |
 | 02 | `xfer set-hosts --name x0 --hosts <host1>,<every CN's CnHostNqn>` | `allowed_hosts` is host1 plus all CN host nqns (the list *replaces*, so host1 is repeated or it loses its connection); **then the kernel's own answer is waited for** — the `allowed_hosts` symlink under the transfer's nvmet subsystem on the primary CN — so the clone's first connect is not refused for want of a link that is still only a record |
 | 02 | `clone create --name k0 --dst-td c0 --src-nqn <XferNqn> --src-idx 1 --src-slices … --src-stripe … --src-block … --src-tr-* … --auto-resume` | `clone get` echoes every geometry field; all four `--src-tr-*` are passed, because those flags declare **defaults** (tcp/ipv4/127.0.0.1/4420) rather than empty strings and an omitted one would silently send the loopback |
@@ -1157,7 +1157,11 @@ spent watching one named controller is the setup hang moved, not fixed: for the
 whole of that rebuild AR5 can fire *again*, because AR7 has by then minted the
 replacement on an idle CN and a healthy non-primary cntlr is all
 `failoverEligible` asks for — while the rebuild is exactly the work that makes
-the node doing it miss a 5 s `primary_unhealthy`. Pinned, the wait would then be
+the node doing it miss health rounds. Since 2026-09-26 the elected cntlr is
+*settling* until it reports its stack built and clean as primary, and AR5 holds a settling primary
+to `cntlr_unhealthy` — 20 s in this set — rather than to the 5 s
+`primary_unhealthy` it used to miss (`dnv-worker.md` HL2, AR5); a rebuild that
+stays unhealthy that long still moves the role. Pinned, the wait would then be
 comparing a standby against 32 pools and 64 groups, the `legs 129/128` shape of
 §8 item 12 one role over. So stage 03 uses `react_new_primary_ready`: it follows
 the role for its progress line, like setup's, but **dies the moment the role
@@ -1178,8 +1182,8 @@ assertion.
 | 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
 | 02 | read back | every strided chunk after a cache drop; `SHA0` for ns 1 too |
 | 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not. **Both waits are on the disconnect and both run before the kill**, which is what makes `gone` the right demand at each: what they observe is host0's own `nvme disconnect -n <ss0>`, and that deletes the controller objects, so the two paths leave `nvme list-subsys` outright. The disconnect verb discards every status, so these two waits are the only thing carrying the invariant. Nothing weaker would do, and nothing like ops stage 03's "not `live`" belongs here: after the kill the dead agent removes **nothing**, its CN's port keeps every subsystem it had, and a controller host0 had not disconnected would stay `live` — so asserting that a path went away *because of the kill* would be asserting the opposite of what happens (§8 item 18) |
-| 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 writes two `primary` flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
-| 03 | wait for the new primary (`WAIT_BUILD`, `react_new_primary_ready`) | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s; and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet. A second AR5 during that rebuild **stops the run there**, naming both controllers, for the reason above the table; the two smaller waits after it stay pinned to the same controller, since by then the spawn storm is over and a wrong target costs `WAIT_PROVISION` rather than `WAIT_BUILD` |
+| 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 rewrites the two cntlrs' `primary` (and, *since 2026-09-26*, `settling`) flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
+| 03 | wait for the new primary (`WAIT_BUILD`, `react_new_primary_ready`) | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s — the first of those waits, the stack's, also requires the elected cntlr's `sp get` entry to read `settling == false`, the worker's own statement that it saw the cntlr's stack built and clean as primary, which ends the `cntlr_unhealthy` hold (*added 2026-09-26*; the field is a literal `false`, never absent, since dnvctl emits unpopulated fields, and the entry is found by its index in `cntlr_id_list`, as the AR5 wait finds the primary); and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet. A second AR5 during that rebuild **stops the run there**, naming both controllers, for the reason above the table; the two smaller waits after it stay pinned to the same controller, since by then the spawn storm is over and a wrong target costs `WAIT_PROVISION` rather than `WAIT_BUILD` |
 | 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; the export gate is the `cntlr_level_ready` wait in the row above, which asks the same question over every row of the cntlr rather than two of them, so no second poll was added — the connect is still followed by its verdict; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
 | 04 | leave the agent dead; wait for AR7 | the dead cntlr's id is gone from `cntlr_id_list` and the sp is back to `CNTLR_CNT` cntlrs. AR7 can only act on a cntlr AR5 has already demoted — it skips a primary while a failover candidate exists, and the model refuses it again inside its own STM — which is what makes the two reactions distinguishable at all. Then, before any assertion below: the primary is still the controller AR5 elected in stage 03, or the run stops. Every row below resolves the replacement by elimination from the primary, so a second AR5 in the window between the two steps would point them at the wrong controller |
 | 04 | — | the replacement is on a CN that carried **no** cntlr when the kill happened (membership, not equality: with more than one such CN the pick is random); it has a **new** cntlr id, inherits the dead one's `cntlid_slot`, is a standby (a replacement carries the old cntlr's role, and AR5 had demoted it) and is enabled |
@@ -1980,6 +1984,44 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
       the four cases now build under thresholds a case has no ordinary way to
       reach, and `react`, which needs short ones, takes its assertions as
       deltas from a snapshot of the shape its own build left (§4.5).
+
+    *Amended 2026-09-26* — the build is held to the longer threshold.
+    `Cntlr.settling` (`dnv-worker.md` HL2, AR5) holds a primary that has not
+    yet reported its stack built and clean as primary to `cntlr_unhealthy`
+    — 600 s by default, 20 s in `react`'s set — instead of
+    `primary_unhealthy`, whenever `cntlr_unhealthy` is the longer, as it is
+    in both. An sp's first primary is created settling, and a reply in
+    which any row outside `leg_id_to_leg` and `grp_id_to_md_raid` reads
+    `PROVISIONING`, or `MISSING` with details other than `"sp_level"`, does
+    not settle it: a new sp's cntlr reports each slice's pool rows
+    `PROVISIONING` from its first converge until the sides under that
+    slice's groups are flipped provisioned (`cnagent.md` CN9), and a
+    converge that then finds a member not yet available leaves its group,
+    and the pools over that group, to the CN10 retry, and a Check round
+    before the retry's first attempt reports them `MISSING` — in an sp
+    with no td yet, as setup's is until its td step, with no `ERROR` row
+    outside `leg_id_to_leg`. So while the sp stays at the `READWRITE` it is created
+    with, the build that follows the provisioned flip is judged by
+    `cntlr_unhealthy`. (As
+    first written the settle took any clean reply of the cntlr as an
+    enabled primary at the driven revision, and the first one, sent at
+    creation with every row `PROVISIONING`, settled the primary before its
+    build began; the built-stack condition was added the same day for this
+    item, and its `MISSING` half later, when a review showed such a Check
+    round settling the primary.) A cntlr that failover promotes is settling
+    too, and rebuilds the stack under the same hold instead of handing the
+    role back 5 s later. Whether a 32-slice build fits the default 600 s is
+    not measured: item 12's 525 s is a window with two failovers in it, not
+    one uninterrupted build. `react`'s set gives a settling primary only
+    20 s, far shorter than a 32-slice build. A `--slice-cnt 32` run of
+    `react` on 2026-09-27, on a tree without settling, timed out its setup
+    wait after 1200 s, 29 failovers, 28 cntlr replacements and 63 spare
+    creates into it, every promoted primary starting the build from
+    nothing (the worker, left running until the cleanup, logged 32, 32 and
+    65 in all); with settling each promotion is held 20 s, which such a
+    build still outlasts. That is why the snapshot rule above stays, and
+    why the ping-pong fix is verified with `react` at the issue's own
+    shape, `--slice-cnt 1`, rather than at 32 slices.
 14. **`react` cannot assert an absolute count of reactions.** Because its own
     build runs under the aggressive set, a failover or a spare leg that the
     case did not provoke can be there before its first stage. Every count it
@@ -3210,3 +3252,59 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
      `degraded`/`recovering`/`resyncing`, so the predicate is unchanged; its
      comment and the copy stage 05 row above no longer call the `details`
      mdadm's `State:` line.
+
+* **2026-09-26 — the failover ping-pong.** The whole fix, of which the
+  entry above is one part: four changes, each landing with its own
+  amendments.
+
+  1. **A leg whose probe has not run is `PENDING`, not `OK`.** The primary's
+     leg row reads a new status, `RES_STATUS_PENDING` (5), until its prober
+     for the leg — started at the leg's build, a promotion, an agent
+     restart — completes a round, and while none is registered yet, unless
+     that first round stays in flight past `CnLegProbeStallSeconds`, which
+     reads `ERROR` "health probe stalled" as before (`cnagent.md` CN11).
+     `OK` cleared `Leg.err_epoch`, so every promotion used to wipe a dead
+     leg's `err_epoch` and restart AR8's `leg_unhealthy` clock, and a fresh
+     spare read ready before any probe had run; `PENDING` neither sets nor
+     clears it, and a spare that reads it is not ready.
+  2. **The md row is read from sysfs** (the entry above). The agent walks
+     `/sys/block/md*/md/` once per pass for all groups and finds each
+     group's array by its members' device-mapper names, reads
+     `array_state`, `degraded`, `sync_action`, `sync_completed` and each
+     member's state there, and never opens a member device to read them;
+     members are reconciled by dm name, so a failed device-number lookup can
+     no longer fail an in-sync member out of the array (`cnagent.md` CN12,
+     CN28).
+     An array of another sp whose read did not answer no longer fails the
+     walk, so it no longer turns this sp's rows `ERROR` beside an answering
+     array of their own. A running array with a dead member reads `OK`;
+     that was the trigger.
+  3. **A late md member re-drives the build.** A primary whose wanted group
+     has a member that is not available this pass — its path not both
+     `live` and `optimized` — registers the background retry a failed
+     connect already used, which re-runs the whole converge every 5 s
+     until every such member is available (`cnagent.md` CN10); a standby,
+     a spare and a group still provisioning never register it. The
+     promotion's `SyncupCntlr` can land before the sides' ANA flips have
+     reached the new primary; it then reported every group `no available
+     leg` and received no second request until the next revision bump —
+     the next failover.
+  4. **A promoted primary settles before AR5 judges it.** `Cntlr.settling`
+     is set by `CreateStoragePool`, `Failover`, a primary `ReplaceCntlr`
+     and an `UpdateCntlrEnabled` that re-enables a primary, and cleared by
+     the worker's first clean observation of the cntlr as an enabled
+     primary at the revision it drives that shows its stack built (no row
+     outside `leg_id_to_leg` and `grp_id_to_md_raid` `PROVISIONING`, or
+     `MISSING` with details other than `"sp_level"`); while
+     it is set, AR5 judges the primary's `err_epoch` against
+     `cntlr_unhealthy` instead of `primary_unhealthy` when that is the
+     longer (`dnv-worker.md` HL2, AR5, §0 item 20). A promotion that raced the ANA flips now gets the time
+     change 3's retry needs instead of being failed back 5 s later.
+
+  In this suite: stage 05 asserts no failover during it, by the primary at
+  its two ends and by the worker log's count of `reaction applied` records
+  with kind `failover`, unchanged across the stage (the entry above);
+  stage 03's rebuild wait, `react_new_primary_ready`, also waits for the
+  elected cntlr's `settling == false`, and its stop message names the
+  `cntlr_unhealthy` hold (§4.5); and §8 item 13 records what settling does
+  and does not change about a build's failovers.

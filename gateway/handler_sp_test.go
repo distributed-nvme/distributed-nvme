@@ -600,6 +600,12 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 			t.Errorf("cntlr %d: primary %v at index %d",
 				cntlrId, cntlr.GetPrimary(), idx)
 		}
+		// dnv-worker.md HL2: the first primary is created settling, the
+		// standbys are not.
+		if cntlr.GetSettling() != (idx == 0) {
+			t.Errorf("cntlr %d: settling %v at index %d",
+				cntlrId, cntlr.GetSettling(), idx)
+		}
 		if cntlr.GetDisabled() {
 			t.Errorf("cntlr %d must be enabled from birth", cntlrId)
 		}
@@ -2849,6 +2855,9 @@ func TestCreateCntlr(t *testing.T) {
 	if cntlr.GetPrimary() {
 		t.Errorf("a new cntlr is a standby, not the primary")
 	}
+	if cntlr.GetSettling() {
+		t.Errorf("a new standby is not settling (dnv-worker.md HL2)")
+	}
 	if cntlr.GetDisabled() {
 		t.Errorf("a new cntlr is enabled from birth")
 	}
@@ -3292,6 +3301,9 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 	if rev := env.spRev(0, spId); rev != 3 {
 		t.Errorf("sp_rev: got %d, want 3", rev)
 	}
+	if env.cntlr(spId, standbyId).GetSettling() {
+		t.Errorf("a re-enabled standby must not be settling (dnv-worker.md HL2)")
+	}
 
 	_, err = env.srv.UpdateCntlrEnabled(
 		env.ctx, &pb.UpdateCntlrEnabledRequest{
@@ -3302,6 +3314,39 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 			Enabled:     false,
 		})
 	sptWantCode(t, err, codes.NotFound)
+
+	// Re-enabling the PRIMARY marks it settling again (dnv-worker.md HL2):
+	// its agent rebuilds the primary stack from the standby shape it held
+	// while disabled. It is planted settled first, as a primary the worker
+	// has already seen clean, and the disable leaves the flag alone.
+	primaryId := conf.GetCntlrIdList()[0]
+	settled := env.cntlr(spId, primaryId)
+	settled.Settling = false
+	mustPut(t, env.cli, model.CntlrKey(env.cid, spId, primaryId), settled)
+	for _, tc := range []struct {
+		rev      uint64
+		enabled  bool
+		settling bool
+	}{
+		{rev: 3, enabled: false, settling: false},
+		{rev: 4, enabled: true, settling: true},
+	} {
+		if _, err := env.srv.UpdateCntlrEnabled(
+			env.ctx, &pb.UpdateCntlrEnabledRequest{
+				ClusterName: env.name,
+				SpName:      sptSpName,
+				SpRev:       &pb.SpRev{Revision: tc.rev},
+				CntlrId:     primaryId,
+				Enabled:     tc.enabled,
+			}); err != nil {
+			t.Fatalf("UpdateCntlrEnabled primary enabled=%v: %v",
+				tc.enabled, err)
+		}
+		if got := env.cntlr(spId, primaryId).GetSettling(); got != tc.settling {
+			t.Errorf("primary after enabled=%v: settling %v, want %v",
+				tc.enabled, got, tc.settling)
+		}
+	}
 }
 
 // TestUpdateCntlrEnabledNoWrite pins §0 #17: a request that asks for the state

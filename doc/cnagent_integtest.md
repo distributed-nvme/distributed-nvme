@@ -1640,7 +1640,9 @@ another document or the harness cites can shift.
 - **`RES_STATUS_PENDING` until a leg's prober completes a round** (2026-09-26;
   `cnagent.md` CN11, `dnv-worker.md` HL2/AR8). A primary's leg row reads
   `RES_STATUS_PENDING` `"health probe pending"` until its prober completes a
-  round; it read `RES_STATUS_OK` with the same details, which cleared a dead
+  round, unless that first round stays in flight past
+  `CnLegProbeStallSeconds` (`ERROR` `"health probe stalled"`, as before); it
+  read `RES_STATUS_OK` with the same details, which cleared a dead
   leg's `err_epoch` at every promotion and let an unprobed spare read ready.
   Every read of a primary's leg rows could meet it: case S step 2's
   `syncup-cntlr` reply now asserts `PENDING` exactly (`assert_leg_pending`:

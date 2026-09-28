@@ -446,7 +446,8 @@ func (s *fakeStore) has(key string) bool {
 // Fake health writer
 // ---------------------------------------------------------------------------
 
-// healthWrite is one recorded err_epoch write (HL3).
+// healthWrite is one recorded err_epoch write (HL3). settle is a cntlr
+// write's request to clear the record's settling flag too (HL2).
 type healthWrite struct {
 	record  string
 	cid     uint64
@@ -455,6 +456,7 @@ type healthWrite struct {
 	sliceId uint64
 	objId   uint64
 	epoch   uint64
+	settle  bool
 }
 
 // fakeHealthWriter records the MD6 ops health.go would have run.
@@ -501,11 +503,16 @@ func (w *fakeHealthWriter) setCnErrEpoch(
 }
 
 func (w *fakeHealthWriter) setCntlrErrEpoch(
-	ctx context.Context, cid uint64, spId uint64, cntlrId uint64, epoch uint64,
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cntlrId uint64,
+	epoch uint64,
+	settle bool,
 ) error {
 	return w.record(healthWrite{
 		record: healthRecordCntlr, cid: cid, spId: spId,
-		objId: cntlrId, epoch: epoch,
+		objId: cntlrId, epoch: epoch, settle: settle,
 	})
 }
 

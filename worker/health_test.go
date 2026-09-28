@@ -3,9 +3,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -453,6 +456,153 @@ func TestHealthWriteFailureIsRetried(t *testing.T) {
 	}
 }
 
+// TestHealthSettle pins HL2's settle half of the cntlr monitor: a clean
+// observation the driver judges to prove the primary role (canSettle) clears
+// the record's settling flag once, in the same write as any err_epoch clear —
+// and with a write of its own when there is no health transition to ride on,
+// which HL3's transitions-only rule would otherwise swallow.
+func TestHealthSettle(t *testing.T) {
+	ctx := context.Background()
+	settleWrite := healthWrite{
+		record: healthRecordCntlr, cid: 7, spId: 1, objId: 2,
+		epoch: 0, settle: true,
+	}
+	newMonitor := func(t *testing.T) (*healthMonitor, *fakeHealthWriter) {
+		t.Helper()
+		d, writer := healthTestDeps(t)
+		monitor := newCntlrMonitor(d, 7, 1, 2)
+		monitor.settlePending = true
+		return monitor, writer
+	}
+
+	t.Run("settle without a transition", func(t *testing.T) {
+		logs := captureLogs(t)
+		monitor, writer := newMonitor(t)
+		// Known healthy first, through the plain observe: never a settle.
+		monitor.observe(ctx, healthClean, "")
+		monitor.observe(ctx, healthClean, "")
+		// Clean, but not a report of the primary shape: nothing to write.
+		if monitor.observeSettle(ctx, healthClean, "", false) {
+			t.Fatalf("settled without canSettle")
+		}
+		if got := writer.all(); len(got) != 1 || got[0].settle {
+			t.Fatalf("writes = %+v, want the one recovery write only", got)
+		}
+		if !monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("a clean canSettle observation did not settle")
+		}
+		writes := writer.all()
+		if len(writes) != 2 || writes[1] != settleWrite {
+			t.Fatalf("writes = %+v, want the settle write %+v last",
+				writes, settleWrite)
+		}
+		if monitor.settlePending {
+			t.Fatalf("the memo survived the settle write")
+		}
+		// The memo is cleared: a second clean observation writes nothing.
+		if monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("settled twice")
+		}
+		if got := len(writer.all()); got != 2 {
+			t.Fatalf("%d writes after the memo cleared, want 2", got)
+		}
+		// The settle is not a health transition: one record, the recovery.
+		if got := len(logs.withMsg(msgHealthChanged)); got != 1 {
+			t.Fatalf("%d health changed records, want 1", got)
+		}
+	})
+
+	t.Run("first observation settles with the recovery write", func(t *testing.T) {
+		monitor, writer := newMonitor(t)
+		if !monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("did not settle")
+		}
+		if got := writer.all(); len(got) != 1 || got[0] != settleWrite {
+			t.Fatalf("writes = %+v, want one combined write %+v",
+				got, settleWrite)
+		}
+	})
+
+	t.Run("unhealthy keeps the memo", func(t *testing.T) {
+		monitor, writer := newMonitor(t)
+		if monitor.observeSettle(ctx, healthErrorRow, "pool", true) {
+			t.Fatalf("an ERROR row settled the cntlr")
+		}
+		writes := writer.all()
+		if len(writes) != 1 || writes[0].epoch == 0 || writes[0].settle {
+			t.Fatalf("writes = %+v, want the epoch write alone", writes)
+		}
+		if !monitor.settlePending {
+			t.Fatalf("an unhealthy observation cleared the memo")
+		}
+		// The next clean one clears err_epoch and settles in one write.
+		if !monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("the recovery did not settle")
+		}
+		writes = writer.all()
+		if len(writes) != 2 || writes[1] != settleWrite {
+			t.Fatalf("writes = %+v, want %+v last", writes, settleWrite)
+		}
+	})
+
+	t.Run("neither set nor clear never settles", func(t *testing.T) {
+		monitor, writer := newMonitor(t)
+		if monitor.observeSettle(ctx, healthNone, "", true) {
+			t.Fatalf("a rejected reply settled the cntlr")
+		}
+		if got := writer.all(); len(got) != 0 {
+			t.Fatalf("writes = %+v, want none", got)
+		}
+		if !monitor.settlePending {
+			t.Fatalf("a rejected reply cleared the memo")
+		}
+		// The next clean one settles, in the first write of all.
+		if !monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("the next observation did not settle")
+		}
+		if got := writer.all(); len(got) != 1 || got[0] != settleWrite {
+			t.Fatalf("writes = %+v, want the settle %+v", got, settleWrite)
+		}
+	})
+
+	t.Run("a failed write keeps the memo", func(t *testing.T) {
+		captureLogs(t)
+		monitor, writer := newMonitor(t)
+		monitor.observe(ctx, healthClean, "")
+		writer.err = errors.New("etcd down")
+		if monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("a failed write reported a settle")
+		}
+		if !monitor.settlePending {
+			t.Fatalf("a failed write cleared the memo")
+		}
+		writer.err = nil
+		if !monitor.observeSettle(ctx, healthClean, "", true) {
+			t.Fatalf("the next observation did not retry the settle")
+		}
+		writes := writer.all()
+		if len(writes) != 2 || writes[1] != settleWrite {
+			t.Fatalf("writes = %+v, want the retried settle last", writes)
+		}
+	})
+
+	t.Run("no memo never settles", func(t *testing.T) {
+		monitor, writer := newMonitor(t)
+		monitor.settlePending = false
+		monitor.observeSettle(ctx, healthClean, "", true)
+		monitor.observeSettle(ctx, healthErrorRow, "pool", true)
+		monitor.observeSettle(ctx, healthClean, "", true)
+		for _, write := range writer.all() {
+			if write.settle {
+				t.Fatalf("writes = %+v, want no settle", writer.all())
+			}
+		}
+		if got := len(writer.all()); got != 3 {
+			t.Fatalf("%d writes, want the three transitions", got)
+		}
+	})
+}
+
 // TestHealthDnWriteNeedsClusterConf checks HL1 against MD6's SetDnErrEpoch
 // row: the op maintains the DnCapacity key in the same STM, and MD4 computes
 // that key's bin index from the cluster's dn_bin_conf. A cluster deleted from
@@ -638,4 +788,296 @@ func TestHealthMonitorAttrsAreStable(t *testing.T) {
 		}
 	}
 	var _ slog.Attr = monitor.attrs[0]
+}
+
+// cntlrRowField is one map of ResInfo rows in a CntlrInfo, found by
+// reflection: a top-level map, or one nested in td_id_to_thin_info's per-td
+// message. name is the proto name of the map that holds the rows.
+type cntlrRowField struct {
+	name string
+	// put stores res under key in this map: under td tdId for a nested map,
+	// which a top-level map ignores. The row is stored, not copied.
+	put func(info *pb.CntlrInfo, tdId uint64, key uint64, res *pb.ResInfo)
+}
+
+// cntlrRowFields walks CntlrInfo's descriptor rather than a hand-kept list,
+// so a map added to the proto is covered by the tests below the day it
+// lands: every field must be a uint64-keyed map of ResInfo, or of a message
+// whose every field is one.
+func cntlrRowFields(t *testing.T) []cntlrRowField {
+	t.Helper()
+	resInfo := (&pb.ResInfo{}).ProtoReflect().Descriptor().FullName()
+	uint64Map := func(fd protoreflect.FieldDescriptor) bool {
+		return fd.IsMap() && fd.MapKey().Kind() == protoreflect.Uint64Kind &&
+			fd.MapValue().Message() != nil
+	}
+	rowMap := func(fd protoreflect.FieldDescriptor) bool {
+		return uint64Map(fd) && fd.MapValue().Message().FullName() == resInfo
+	}
+	key := func(id uint64) protoreflect.MapKey {
+		return protoreflect.ValueOfUint64(id).MapKey()
+	}
+	row := func(res *pb.ResInfo) protoreflect.Value {
+		return protoreflect.ValueOfMessage(res.ProtoReflect())
+	}
+	var out []cntlrRowField
+	fields := (&pb.CntlrInfo{}).ProtoReflect().Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if rowMap(fd) {
+			out = append(out, cntlrRowField{
+				name: string(fd.Name()),
+				put: func(
+					info *pb.CntlrInfo, _ uint64, id uint64, res *pb.ResInfo,
+				) {
+					info.ProtoReflect().Mutable(fd).Map().Set(key(id), row(res))
+				},
+			})
+			continue
+		}
+		if !uint64Map(fd) {
+			t.Fatalf("CntlrInfo.%s is not a map of rows: teach this test",
+				fd.Name())
+		}
+		nested := fd.MapValue().Message().Fields()
+		for j := 0; j < nested.Len(); j++ {
+			nfd := nested.Get(j)
+			if !rowMap(nfd) {
+				t.Fatalf("CntlrInfo.%s.%s is not a map of rows: teach this "+
+					"test", fd.Name(), nfd.Name())
+			}
+			out = append(out, cntlrRowField{
+				name: string(nfd.Name()),
+				put: func(
+					info *pb.CntlrInfo, tdId uint64, id uint64, res *pb.ResInfo,
+				) {
+					info.ProtoReflect().Mutable(fd).Map().Mutable(key(tdId)).
+						Message().Mutable(nfd).Map().Set(key(id), row(res))
+				},
+			})
+		}
+	}
+	return out
+}
+
+// TestHealthCntlrEveryMap pins the maps HL2 judges a cntlr by
+// (cntlrHealthMaps) against CntlrInfo itself: an ERROR row in any map but
+// leg_id_to_leg, the per-td thin maps included, is an error row, and a row
+// with no res_name of its own is named by its map — so a map dropped from the
+// list, or mislabelled, fails here, as does a map added to the proto and not
+// to the list. The row is the second of its map, in the second td for a thin
+// map: every row and every td is judged. A leg row never is (HL2's leg row).
+func TestHealthCntlrEveryMap(t *testing.T) {
+	for _, f := range cntlrRowFields(t) {
+		info := &pb.CntlrInfo{}
+		f.put(info, 3, 1, resOk("first"))
+		f.put(info, 5, 2, &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR})
+		obs, res := cntlrObservation(0, info)
+		if f.name == "leg_id_to_leg" {
+			if obs != healthClean {
+				t.Errorf("%s: obs = %v, want clean", f.name, obs)
+			}
+			continue
+		}
+		if obs != healthErrorRow || res != f.name {
+			t.Errorf("%s: obs = %v, res = %q, want an error row named %q",
+				f.name, obs, res, f.name)
+		}
+	}
+}
+
+// TestHealthCntlrFirstErrorOrder pins which ERROR row HL2's verdict names
+// when several are, and so the res_name of the §12 "health changed" record:
+// the maps in CntlrInfo's field order, then the per-td thin maps by ascending
+// td id, the lowest key first within a map. Each named row is cleared in turn
+// and the next one read; map order is random, so the walk is repeated.
+func TestHealthCntlrFirstErrorOrder(t *testing.T) {
+	for round := 0; round < 3; round++ {
+		info := &pb.CntlrInfo{}
+		rows := make(map[string]*pb.ResInfo)
+		var want []string
+		put := func(f cntlrRowField, tdId uint64, id uint64, name string) {
+			rows[name] = resErr(name, "x")
+			f.put(info, tdId, id, rows[name])
+		}
+		var thin []cntlrRowField
+		for _, f := range cntlrRowFields(t) {
+			switch f.name {
+			case "leg_id_to_leg":
+				continue
+			case "slice_id_to_dm_thin":
+				thin = append(thin, f)
+				continue
+			}
+			put(f, 0, 7, f.name+" 7")
+			put(f, 0, 2, f.name+" 2")
+			want = append(want, f.name+" 2", f.name+" 7")
+		}
+		if len(thin) != 1 {
+			t.Fatalf("%d thin maps", len(thin))
+		}
+		for _, tdId := range []uint64{12, 3, 9, 5} {
+			put(thin[0], tdId, 1, fmt.Sprintf("thin %d", tdId))
+		}
+		for _, tdId := range []uint64{3, 5, 9, 12} {
+			want = append(want, fmt.Sprintf("thin %d", tdId))
+		}
+		for i, name := range want {
+			obs, res := cntlrObservation(0, info)
+			if obs != healthErrorRow || res != name {
+				t.Fatalf("round %d, step %d: obs = %v, res = %q, want %q",
+					round, i, obs, res, name)
+			}
+			rows[name].Status = pb.ResStatus_RES_STATUS_OK
+		}
+		if obs, res := cntlrObservation(0, info); obs != healthClean {
+			t.Fatalf("round %d: obs = %v (%q) with every row cleared", round,
+				obs, res)
+		}
+	}
+}
+
+// TestHealthMarkCntlrUnknownCoversEveryMap pins markCntlrUnknown's list
+// against CntlrInfo itself: a dead stream leaves no row of any map, leg rows
+// and every td's thin rows included, at its last reported status (§9.5).
+func TestHealthMarkCntlrUnknownCoversEveryMap(t *testing.T) {
+	for _, f := range cntlrRowFields(t) {
+		info := &pb.CntlrInfo{}
+		first, second := resErr("first", "x"), resErr("second", "x")
+		f.put(info, 3, 1, first)
+		f.put(info, 5, 2, second)
+		markCntlrUnknown(info)
+		for _, res := range []*pb.ResInfo{first, second} {
+			if res.GetStatus() != pb.ResStatus_RES_STATUS_UNKNOWN {
+				t.Errorf("%s: %s reads %v after markCntlrUnknown", f.name,
+					res.GetResName(), res.GetStatus())
+			}
+		}
+	}
+}
+
+// TestPrimaryShapeBuilt pins which rows keep HL2's settle waiting, against
+// CntlrInfo itself: a PROVISIONING row, or a MISSING row whose details are
+// not CN19's "sp_level", in any map HL2 judges a cntlr by, the per-td thin
+// maps included, except grp_id_to_md_raid, where a grow's group reads
+// PROVISIONING beside a serving pool; never a leg row (a zeroing spare); and
+// never a row of any other status, or a MISSING "sp_level" one, in any map.
+func TestPrimaryShapeBuilt(t *testing.T) {
+	fields := cntlrRowFields(t)
+	notJudged := map[string]bool{
+		"leg_id_to_leg":     true,
+		"grp_id_to_md_raid": true,
+	}
+	status := func(s pb.ResStatus) *pb.ResInfo { return &pb.ResInfo{Status: s} }
+	missing := func(details string) *pb.ResInfo {
+		return &pb.ResInfo{
+			Status: pb.ResStatus_RES_STATUS_MISSING, Details: details,
+		}
+	}
+	ok := pb.ResStatus_RES_STATUS_OK
+	prov := pb.ResStatus_RES_STATUS_PROVISIONING
+	if !primaryShapeBuilt(&pb.CntlrInfo{}) {
+		t.Errorf("empty: not built")
+	}
+	// Every other status, in every map at once: built. MISSING is read with
+	// CN19's details, the one MISSING that says a row must not exist.
+	values := prov.Descriptor().Values()
+	for i := 0; i < values.Len(); i++ {
+		s := pb.ResStatus(values.Get(i).Number())
+		if s == prov {
+			continue
+		}
+		info := &pb.CntlrInfo{}
+		for _, f := range fields {
+			res := func() *pb.ResInfo { return status(s) }
+			if s == pb.ResStatus_RES_STATUS_MISSING {
+				res = func() *pb.ResInfo { return missing("sp_level") }
+			}
+			f.put(info, 3, 1, res())
+			f.put(info, 5, 2, res())
+		}
+		if !primaryShapeBuilt(info) {
+			t.Errorf("%v in every map: not built", s)
+		}
+	}
+	// One holding row in each map in turn, the third of four keys — in the
+	// second td for a thin map — beside OK rows in every map: PROVISIONING,
+	// the probe's MISSING "" for a wanted device it finds absent, and a
+	// converge's MISSING with details of its own. Map order is random, so
+	// each reading is taken several times.
+	holds := []struct {
+		label string
+		res   func() *pb.ResInfo
+	}{
+		{"PROVISIONING", func() *pb.ResInfo { return status(prov) }},
+		{`MISSING ""`, func() *pb.ResInfo { return missing("") }},
+		{`MISSING "thin pool missing"`, func() *pb.ResInfo {
+			return missing("thin pool missing")
+		}},
+	}
+	for _, hold := range holds {
+		for _, f := range fields {
+			info := &pb.CntlrInfo{}
+			for _, other := range fields {
+				other.put(info, 3, 1, status(ok))
+			}
+			for id := uint64(1); id <= 4; id++ {
+				if id == 3 {
+					f.put(info, 5, id, hold.res())
+				} else {
+					f.put(info, 5, id, status(ok))
+				}
+			}
+			want := notJudged[f.name]
+			for i := 0; i < 8; i++ {
+				if got := primaryShapeBuilt(info); got != want {
+					t.Fatalf("%s %s: primaryShapeBuilt = %v, want %v",
+						f.name, hold.label, got, want)
+				}
+			}
+		}
+	}
+	// The two shapes the group exclusion tells apart: a new SP's group,
+	// whose slice is deferred with it, and a grow's, beside a serving pool.
+	newSp := &pb.CntlrInfo{
+		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: status(prov)},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: status(prov)},
+	}
+	if primaryShapeBuilt(newSp) {
+		t.Errorf("a new SP's deferred slice reads built")
+	}
+	grow := &pb.CntlrInfo{
+		GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+			1: status(ok), 2: status(prov),
+		},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: status(ok)},
+	}
+	if !primaryShapeBuilt(grow) {
+		t.Errorf("a grow's zeroing group holds the settle")
+	}
+	// The two MISSING shapes: a td-less primary probed between a converge
+	// that left its members unavailable and the retry — groups, concats and
+	// pool absent, no ERROR row anywhere — and a primary whose sp_level
+	// suppresses its pools.
+	unbuilt := &pb.CntlrInfo{
+		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing(""), 2: missing("")},
+		SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("")},
+		SliceIdToData:   map[uint64]*pb.ResInfo{1: missing("")},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: missing("")},
+		SsIdToSubsystem: map[uint64]*pb.ResInfo{1: status(ok)},
+	}
+	if primaryShapeBuilt(unbuilt) {
+		t.Errorf("a td-less primary's absent pools read built")
+	}
+	suppressed := &pb.CntlrInfo{
+		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
+		SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
+		SliceIdToData:   map[uint64]*pb.ResInfo{1: missing("sp_level")},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{1: missing("sp_level")},
+		SsIdToSubsystem: map[uint64]*pb.ResInfo{1: status(ok)},
+	}
+	if !primaryShapeBuilt(suppressed) {
+		t.Errorf("a primary whose sp_level suppresses its pools reads " +
+			"unbuilt")
+	}
 }

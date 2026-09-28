@@ -2119,6 +2119,25 @@ EOF
 
 cntlr_is_primary() { [ "$(cntlr_field "$1" "$2" primary)" = true ]; }
 cntlr_not_primary() { [ "$(cntlr_field "$1" "$2" primary)" = false ]; }
+# cntlr_settled is the stored half of HL2's settle: `settling` false. get-cntlr
+# prints protojson with unpopulated fields, so a settled cntlr reads a literal
+# false rather than a missing key.
+cntlr_settled() { [ "$(cntlr_field "$1" "$2" settling)" = false ]; }
+
+# settled_cnt counts the §12 `cntlr settled` records of one cntlr — the
+# worker's own statement that it observed the cntlr clean as primary, its
+# stack built, at the revision it drives (HL2). The sp_id and the pointer's
+# cntlr_id are JSON numbers in the worker log, hence tostring.
+settled_cnt() { # <sp id> <cntlr id>
+	wcount 'select(.msg == "cntlr settled")
+		| select((.sp_id | tostring) == $sp
+			and (.cntlr_pointer.cntlr_id | tostring) == $c)' \
+		--arg sp "$1" --arg c "$2"
+}
+
+settled_ge() { # <sp id> <cntlr id> <n>
+	[ "$(settled_cnt "$1" "$2")" -ge "$3" ]
+}
 
 # cntlr_gone is §14.11 D3's "C1 gone from cntlr_id_list". It reads the LIST
 # rather than probing the Cntlr key: `! ctl get-cntlr …` cannot tell "the key
@@ -2254,6 +2273,11 @@ EOF
 	cn3_free_before=$(cn_free 3)
 	cn3_rev_before=$(cn_rev 3)
 	assert_eq "$cn1_free_before" 64 "cn 1 free_ext_cnt before the failing row"
+	# put-sp creates C1 settling (HL2) and a settling primary is held to
+	# cntlr_unhealthy, not primary_unhealthy (AR5). Its first clean reply as
+	# primary settled it during step 1; this step times the SETTLED threshold,
+	# so it says so before the row lands. Step 12 is the settling one.
+	wait_until "$WAIT_SHORT" "C1 settled (settling false)" cntlr_settled sp0 1
 	set_behavior cn0 <<EOF
 {"objects": {"cntlr 1:1": {"thin_ok": true, "rows": {"ss_id_to_subsystem.$((SS_ID))":
   {"status": "ERROR", "details": "subsystem gone"}}}}}
@@ -2267,7 +2291,22 @@ EOF
 	wait_until $((2 + WAIT_SHORT)) "reaction applied kind=failover" \
 		reaction_ge $((failovers + 1)) failover
 	wait_until "$WAIT_SHORT" "C2 primary true" cntlr_is_primary sp0 2
-	assert_eq "$(cntlr_field sp0 1 primary)" false "C1 primary after the failover"
+	# C1 is no longer primary. The replacement above hangs off the same
+	# err_epoch, cntlr_unhealthy - primary_unhealthy = 2 s after the
+	# failover, so by the time these polls return it may already have
+	# deleted C1's record — a C1 that AR7 replaced is as demoted as one that
+	# reads primary false, and only a record gone with no replacement is a
+	# failure (*amended 2026-09-26*: the settle write that follows a
+	# failover left this read losing that race in 2 runs of 3).
+	local c1_primary
+	c1_primary=$(cntlr_field sp0 1 primary 2>/dev/null || true)
+	if [ -z "$c1_primary" ]; then
+		reaction_ge $((replaces + 1)) replace_cntlr ||
+			die "C1's record is gone and no replace_cntlr reaction was applied"
+		log "  C1 already replaced (AR7) when read: demoted"
+	else
+		assert_eq "$c1_primary" false "C1 primary after the failover"
+	fi
 	wait_until "$WAIT_SHORT" "dn0: SyncupSide with primary_cn_id 2" \
 		req_ge 1 dn0 SyncupSide '(.side_conf.primary_cn_id | tostring) == "2"'
 	wait_until "$WAIT_SHORT" "dn1: SyncupSide with primary_cn_id 2" \
@@ -2341,6 +2380,10 @@ EOF
 	sp1_next=$(ctl get-sp --sp sp1 | "$JQ" -r .sp_conf.next_id)
 	sp1_replaces=$(reaction_cnt replace_cntlr)
 	sp1_skips=$(reaction_skip_cnt failover "no candidate")
+	# As in step 2: the skip below is timed against the settled primary's
+	# primary_unhealthy, and sp1's sole cntlr was created settling.
+	wait_until "$WAIT_SHORT" "sp1: its primary settled (settling false)" \
+		cntlr_settled sp1 1
 	set_behavior cn1 <<EOF
 {"objects": {"cntlr 2:1": {"rows": {"ss_id_to_subsystem.$((SS_ID))":
   {"status": "ERROR", "details": "subsystem gone"}}}}}
@@ -2788,6 +2831,114 @@ EOF
 	wait_until "$WAIT_SHORT" "$standby_dir: SyncupCntlr with cntlr.primary true" \
 		req_ge $((standby_syncups + 1)) "$standby_dir" SyncupCntlr \
 		'.cntlr.primary == true'
+
+	stage 12 "settling: a promoted primary is held to cntlr_unhealthy (HL2, AR5)"
+	# A fresh SP on thresholds of its own (primary 2, cntlr 15) so the
+	# settling window is wide enough to watch: C1 on cn 1 (fake cn0) primary,
+	# C2 on cn 2 (fake cn1) standby, one RedundNone data group on dn 4.
+	#
+	# cn 3 gets a zero budget first, which takes AR7 out of the picture for
+	# sp2: cn 1 and cn 2 already host its cntlrs (§6.4), so cn 3 is its only
+	# replacement candidate. Without that, C2 — an unhealthy STANDBY already
+	# past cntlr_unhealthy the moment the fail-back below demotes it — would
+	# race its own err_epoch clear against the next pass's AR7. sp0's cntlr on
+	# cn 3 is disabled and sp1's is healthy, so neither needs cn 3's budget.
+	ctl set-free cn --id 1 --free-ext 64
+	ctl set-free cn --id 2 --free-ext 64
+	ctl set-free cn --id 3 --free-ext 0
+	ctl set-free dn --id 4 --free-ext 8
+	ctl put-sp --name sp2 --id 3 --shard 00 --slots 0,1 --level 0 \
+		--thresholds 2,15,3,6 --lwm "$LWM" \
+		--cntlr 1:1:0:true --cntlr 2:2:1:false \
+		--slice 1:0 \
+		--group 1:1:data:1:none \
+		--leg 1:1:0 \
+		--side 1:1:4:0
+	# put-sp writes C1 settling, as CreateStoragePool does (§14.8). The
+	# worker's first round may already have settled it by the time this read
+	# lands, so it is logged, not asserted: the `cntlr settled` record below is
+	# the proof, because the worker writes one only for a record it read as
+	# settling.
+	log "  sp2 C1 settling right after put-sp: $(cntlr_field sp2 1 settling)"
+	wait_until "$WAIT_SYNCUP" "sp2: the side provisioned" all_provisioned sp2 1
+	wait_until "$WAIT_SYNCUP" "sp2: cntlr settled for C1 (the creation settle)" \
+		settled_ge 3 1 1
+	assert_eq "$(cntlr_field sp2 1 settling)" false \
+		"sp2 C1 settling after its creation settle"
+	assert_eq "$(cntlr_field sp2 2 settling)" false \
+		"sp2 C2, a standby, is never settling"
+
+	log "  12.2: a row that bites only as primary, planted on the standby"
+	# §14.9 when_primary: the fake reports a standby's pool rows too, so an
+	# ungated ERROR row would make C2 unhealthy — and no failover candidate —
+	# before the failover this step needs.
+	set_behavior cn1 <<'EOF'
+{"objects": {"cntlr 3:2": {"rows": {"slice_id_to_dm_pool.1":
+  {"status": "ERROR", "details": "settling test", "when_primary": true}}}}}
+EOF
+	assert_none_for 3 "sp2 C2 err_epoch set by a when_primary row on a standby" \
+		cntlr_epoch_set sp2 2
+
+	log "  12.3: fail the settled C1; C2 is promoted settling and reports ERROR"
+	local sp2_failovers c2_epoch c1_settles hold back_at
+	sp2_failovers=$(reaction_cnt failover)
+	set_behavior cn0 <<'EOF'
+{"objects": {"cntlr 3:1": {"rows": {"slice_id_to_dm_pool.1":
+  {"status": "ERROR", "details": "pool gone"}}}}}
+EOF
+	wait_until $((2 + WAIT_SHORT)) "sp2: reaction applied kind=failover" \
+		reaction_ge $((sp2_failovers + 1)) failover
+	wait_until "$WAIT_SHORT" "sp2 C2 primary true" cntlr_is_primary sp2 2
+	# Not a race: C2 cannot settle while every primary-shape reply it sends
+	# carries the planted ERROR row.
+	assert_eq "$(cntlr_field sp2 2 settling)" true \
+		"sp2 C2 settling after its promotion (model.Failover sets it)"
+	wait_until "$WAIT_SHORT" "sp2 C2 err_epoch set by its first primary-shape reply" \
+		cntlr_epoch_set sp2 2
+	c2_epoch=$(cntlr_field sp2 2 err_epoch)
+	clear_behavior cn0
+	wait_until "$WAIT_SHORT" "sp2 C1 err_epoch cleared" cntlr_epoch_clear sp2 1
+
+	log "  12.4: the hold — no fail-back inside cntlr_unhealthy (15 s)"
+	# C1 is a healthy, enabled standby now, so a worker that judged C2 by
+	# primary_unhealthy (2 s) would already have failed back. The window runs
+	# until 2 s short of C2's err_epoch + 15 s on the SERVER's clock — a fixed
+	# length would have to guess how long the polls above took — and the
+	# fail-back's own record is checked against the same epoch in 12.5.
+	hold=$(awk -v e="$c2_epoch" -v n="$(ts_epoch "$(server_now)")" \
+		'BEGIN { printf "%d", e + 15 - n - 2 }')
+	if [ "$hold" -ge 1 ]; then
+		assert_none_for "$hold" \
+			"a fail-back inside cntlr_unhealthy (15 s) while sp2 C2 is settling" \
+			reaction_ge $((sp2_failovers + 2)) failover
+	else
+		log "  NOTE: the polls above ran past err_epoch + 13 s, so the live" \
+			"negative is skipped; the fail-back's record time is still" \
+			"checked against err_epoch + 15 s in 12.5."
+	fi
+
+	log "  12.5: the release — the fail-back at cntlr_unhealthy, C1 settles again"
+	c1_settles=$(settled_cnt 3 1)
+	wait_until $((15 + WAIT_SHORT)) "sp2: the fail-back (reaction applied kind=failover)" \
+		reaction_ge $((sp2_failovers + 2)) failover
+	back_at=$(reaction_epochs failover | sed -n "$((sp2_failovers + 2))p")
+	[ -n "$back_at" ] || die "no fail-back record to time"
+	ts_ge "$back_at" $((c2_epoch + 15)) ||
+		die "the sp2 fail-back ran at $back_at, before C2's err_epoch $c2_epoch + the 15s cntlr_unhealthy a settling primary is held to"
+	wait_until "$WAIT_SHORT" "sp2 C1 primary again" cntlr_is_primary sp2 1
+	assert_eq "$(cntlr_field sp2 2 settling)" false \
+		"sp2 C2 settling after the fail-back (model.Failover clears the demoted one)"
+	wait_until "$WAIT_SHORT" "sp2 C2 err_epoch cleared (the planted row is inert on a standby)" \
+		cntlr_epoch_clear sp2 2
+	wait_until "$WAIT_SHORT" "sp2: cntlr settled for C1 after the fail-back" \
+		settled_ge 3 1 $((c1_settles + 1))
+	assert_eq "$(cntlr_field sp2 1 settling)" false \
+		"sp2 C1 settling after its second settle"
+	assert_none_for 3 "a third sp2 failover once both cntlrs are clean" \
+		reaction_ge $((sp2_failovers + 3)) failover
+
+	log "  12.6: clean up"
+	clear_behavior cn1
 }
 
 reaction_skip_ge() { # <n> <kind> <reason>

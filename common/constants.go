@@ -303,6 +303,13 @@ const (
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
+	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
+	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the
+	// resource must not exist, where every other MISSING the cn agent reports
+	// says it does not exist yet. The cn agent writes it and the worker's
+	// settle reads it (dnv-worker.md HL2), so the two take it from here.
+	ResDetailsSpLevel = "sp_level"
+
 	// SuspendSeconds is the §11.2 src-cutover grace window: a migration
 	// source's per-CN dm-linears are held suspended for at least this long
 	// before they are reloaded onto their dm-errors, so IO the old primary

@@ -159,9 +159,19 @@ func sortChunkIdList(chunkIdList []*pb.BmChunkId) {
 
 // rowBehavior overrides one row of an object's *Info. Both fields are
 // optional: a row may set only the status, only the details, or both.
+//
+// WhenPrimary gates the override on the cntlr's role: it applies only while
+// the cntlr's last applied request carries cntlr.primary = true, so a row
+// planted on a standby bites the moment a failover promotes it and not
+// before (§14.9; the settling step of §14.11 case D). The fake reports a
+// standby's pool and md rows too — every row but the primary-only thin rows —
+// where the real cn agent reports those for a primary only, so an ungated
+// ERROR row would make the standby unhealthy — and ineligible — before the
+// failover. Only a cntlr object has a role: validate rejects it anywhere else.
 type rowBehavior struct {
-	Status  *string `json:"status,omitempty"`
-	Details *string `json:"details,omitempty"`
+	Status      *string `json:"status,omitempty"`
+	Details     *string `json:"details,omitempty"`
+	WhenPrimary bool    `json:"when_primary,omitempty"`
 
 	// status is Status parsed once by validate.
 	status pb.ResStatus
@@ -224,8 +234,10 @@ func parseResStatus(name string) (pb.ResStatus, error) {
 // chunk addresses of its chunk_id_list override. An unparseable one makes the
 // whole file malformed, which the caller logs and ignores — a silently
 // misspelled status or chunk address would otherwise fail a test far from its
-// cause.
-func (ob *objectBehavior) validate(where string) error {
+// cause. cntlr says whether the entry is a cntlr object's: a row's
+// when_primary anywhere else is refused the same way, since it could never
+// apply there.
+func (ob *objectBehavior) validate(where string, cntlr bool) error {
 	if ob == nil {
 		return nil
 	}
@@ -252,7 +264,15 @@ func (ob *objectBehavior) validate(where string) error {
 		}
 	}
 	for key, row := range ob.Rows {
-		if row == nil || row.Status == nil {
+		if row == nil {
+			continue
+		}
+		if row.WhenPrimary && !cntlr {
+			return fmt.Errorf(
+				"%s: rows[%q]: when_primary on a non-cntlr object",
+				where, key)
+		}
+		if row.Status == nil {
 			continue
 		}
 		resStatus, err := parseResStatus(*row.Status)
@@ -277,11 +297,13 @@ func parseBehavior(data []byte) (*behaviorFile, error) {
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("trailing data after the top-level object")
 	}
-	if err := parsed.Default.validate("default"); err != nil {
+	if err := parsed.Default.validate("default", false); err != nil {
 		return nil, err
 	}
 	for key, ob := range parsed.Objects {
-		if err := ob.validate("objects[" + key + "]"); err != nil {
+		err := ob.validate(
+			"objects["+key+"]", strings.HasPrefix(key, cntlrObjPrefix))
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -658,7 +680,20 @@ func (a *fakeAgent) sizeLocked() uint64 {
 // its "rows" overrides, applied in the order the keys are given (the last key
 // is the most specific and becomes res_name). epoch is the unix second of the
 // last status change, so it only moves when the status actually moves.
+//
+// It serves the dn, cn and side objects, whose rows cannot carry
+// when_primary (validate), so no override is gated; a cntlr's rows go through
+// resolveCntlrRow.
 func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
+	return a.resolveCntlrRow(objKey, true, keys...)
+}
+
+// resolveCntlrRow is resolveRow for a cntlr object: a row override marked
+// when_primary is skipped while primary — the cntlr.primary of the cntlr's
+// last applied request — is false (§14.9).
+func (a *fakeAgent) resolveCntlrRow(
+	objKey string, primary bool, keys ...string,
+) *pb.ResInfo {
 	resStatus := pb.ResStatus_RES_STATUS_OK
 	details := ""
 	if a.beh != nil && a.beh.Default != nil {
@@ -678,7 +713,7 @@ func (a *fakeAgent) resolveRow(objKey string, keys ...string) *pb.ResInfo {
 		}
 		for _, key := range keys {
 			row := ob.Rows[key]
-			if row == nil {
+			if row == nil || (row.WhenPrimary && !primary) {
 				continue
 			}
 			if row.Status != nil {
@@ -872,12 +907,14 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // clone and per xfer. td_id_to_thin_info is filled only when the request's
 // cntlr.primary is true and behavior.json's thin_ok says so (architecture.md
 // §10.3, cnagent CN14 "primary only"), minus any thin_missing_slices — the
-// created-flip negative of §14.11 case S step 6.
+// created-flip negative of §14.11 case S step 6. The same cntlr.primary gates
+// every when_primary row override (resolveCntlrRow).
 func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	req, _ := a.requestLocked(key).(*pb.SyncupCntlrRequest)
 	if req == nil {
 		return nil
 	}
+	primary := req.GetCntlr().GetPrimary()
 	info := &pb.CntlrInfo{
 		SsIdToSubsystem:   make(map[uint64]*pb.ResInfo),
 		NsIdToNamespace:   make(map[uint64]*pb.ResInfo),
@@ -899,12 +936,12 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	}
 	sliceIdList := sliceIdList(req)
 	for _, sliceId := range sliceIdList {
-		info.SliceIdToDmPool[sliceId] = a.resolveRow(
-			key, rowKey("slice_id_to_dm_pool", sliceId))
-		info.SliceIdToMeta[sliceId] = a.resolveRow(
-			key, rowKey("slice_id_to_meta", sliceId))
-		info.SliceIdToData[sliceId] = a.resolveRow(
-			key, rowKey("slice_id_to_data", sliceId))
+		info.SliceIdToDmPool[sliceId] = a.resolveCntlrRow(
+			key, primary, rowKey("slice_id_to_dm_pool", sliceId))
+		info.SliceIdToMeta[sliceId] = a.resolveCntlrRow(
+			key, primary, rowKey("slice_id_to_meta", sliceId))
+		info.SliceIdToData[sliceId] = a.resolveCntlrRow(
+			key, primary, rowKey("slice_id_to_data", sliceId))
 	}
 	for _, slice := range req.GetIdToSlice() {
 		grpList := make([]*pb.Group, 0,
@@ -912,15 +949,15 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		grpList = append(grpList, slice.GetMetaGrpList()...)
 		grpList = append(grpList, slice.GetDataGrpList()...)
 		for _, grp := range grpList {
-			info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveRow(
-				key, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
+			info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
+				key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
 			legList := make([]*pb.Leg, 0,
 				len(grp.GetLegList())+len(grp.GetSpareLegList()))
 			legList = append(legList, grp.GetLegList()...)
 			legList = append(legList, grp.GetSpareLegList()...)
 			for _, leg := range legList {
-				info.LegIdToLeg[leg.GetLegId()] = a.resolveRow(
-					key, rowKey("leg_id_to_leg", leg.GetLegId()))
+				info.LegIdToLeg[leg.GetLegId()] = a.resolveCntlrRow(
+					key, primary, rowKey("leg_id_to_leg", leg.GetLegId()))
 			}
 		}
 	}
@@ -935,11 +972,11 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	}
 	for _, td := range req.GetTdList() {
 		tdId := td.GetTdId()
-		info.TdIdToRaid0[tdId] = a.resolveRow(
-			key, rowKey("td_id_to_raid0", tdId))
-		info.TdIdToDmError[tdId] = a.resolveRow(
-			key, rowKey("td_id_to_dm_error", tdId))
-		if !req.GetCntlr().GetPrimary() || !thinOk {
+		info.TdIdToRaid0[tdId] = a.resolveCntlrRow(
+			key, primary, rowKey("td_id_to_raid0", tdId))
+		info.TdIdToDmError[tdId] = a.resolveCntlrRow(
+			key, primary, rowKey("td_id_to_dm_error", tdId))
+		if !primary || !thinOk {
 			continue
 		}
 		thinKey := rowKey("td_id_to_thin_info", tdId)
@@ -950,38 +987,39 @@ func (a *fakeAgent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 			if thinMissing[sliceId] {
 				continue
 			}
-			thin.SliceIdToDmThin[sliceId] = a.resolveRow(key, thinKey,
+			thin.SliceIdToDmThin[sliceId] = a.resolveCntlrRow(
+				key, primary, thinKey,
 				thinKey+"."+strconv.FormatUint(sliceId, 10))
 		}
 		info.TdIdToThinInfo[tdId] = thin
 	}
 	for _, subsystem := range req.GetNqnToSubsystem() {
-		info.SsIdToSubsystem[subsystem.GetSsId()] = a.resolveRow(
-			key, rowKey("ss_id_to_subsystem", subsystem.GetSsId()))
+		info.SsIdToSubsystem[subsystem.GetSsId()] = a.resolveCntlrRow(
+			key, primary, rowKey("ss_id_to_subsystem", subsystem.GetSsId()))
 		for _, ns := range subsystem.GetNsList() {
-			info.NsIdToNamespace[ns.GetNsId()] = a.resolveRow(
-				key, rowKey("ns_id_to_namespace", ns.GetNsId()))
-			info.NsIdToDmLinear[ns.GetNsId()] = a.resolveRow(
-				key, rowKey("ns_id_to_dm_linear", ns.GetNsId()))
+			info.NsIdToNamespace[ns.GetNsId()] = a.resolveCntlrRow(
+				key, primary, rowKey("ns_id_to_namespace", ns.GetNsId()))
+			info.NsIdToDmLinear[ns.GetNsId()] = a.resolveCntlrRow(
+				key, primary, rowKey("ns_id_to_dm_linear", ns.GetNsId()))
 		}
 	}
 	for _, clone := range req.GetCloneList() {
 		cloneId := clone.GetCloneId()
-		info.CloneIdToTarget[cloneId] = a.resolveRow(
-			key, rowKey("clone_id_to_target", cloneId))
-		info.CloneIdToDmClone[cloneId] = a.resolveRow(
-			key, rowKey("clone_id_to_dm_clone", cloneId))
-		info.CloneIdToMeta[cloneId] = a.resolveRow(
-			key, rowKey("clone_id_to_meta", cloneId))
+		info.CloneIdToTarget[cloneId] = a.resolveCntlrRow(
+			key, primary, rowKey("clone_id_to_target", cloneId))
+		info.CloneIdToDmClone[cloneId] = a.resolveCntlrRow(
+			key, primary, rowKey("clone_id_to_dm_clone", cloneId))
+		info.CloneIdToMeta[cloneId] = a.resolveCntlrRow(
+			key, primary, rowKey("clone_id_to_meta", cloneId))
 	}
 	for _, xfer := range req.GetXferList() {
 		xferId := xfer.GetXferId()
-		info.XferIdToDmLinear[xferId] = a.resolveRow(
-			key, rowKey("xfer_id_to_dm_linear", xferId))
-		info.XferIdToSubsystem[xferId] = a.resolveRow(
-			key, rowKey("xfer_id_to_subsystem", xferId))
-		info.XferIdToNamespace[xferId] = a.resolveRow(
-			key, rowKey("xfer_id_to_namespace", xferId))
+		info.XferIdToDmLinear[xferId] = a.resolveCntlrRow(
+			key, primary, rowKey("xfer_id_to_dm_linear", xferId))
+		info.XferIdToSubsystem[xferId] = a.resolveCntlrRow(
+			key, primary, rowKey("xfer_id_to_subsystem", xferId))
+		info.XferIdToNamespace[xferId] = a.resolveCntlrRow(
+			key, primary, rowKey("xfer_id_to_namespace", xferId))
 	}
 	return info
 }

@@ -435,6 +435,41 @@ func (e *opsEnv) setCntlrErr(cntlrId uint64, epoch uint64) {
 	mustPut(e.t, e.cli, CntlrKey(e.cid, opsSpId, cntlrId), cntlr)
 }
 
+// setCntlrSettling sets one cntlr's settling flag directly, bypassing the ops.
+func (e *opsEnv) setCntlrSettling(cntlrId uint64, settling bool) {
+	cntlr := e.cntlr(cntlrId)
+	cntlr.Settling = settling
+	mustPut(e.t, e.cli, CntlrKey(e.cid, opsSpId, cntlrId), cntlr)
+}
+
+// setThresholds stores the SP's primary_unhealthy and cntlr_unhealthy, the
+// other two left to their defaults.
+func (e *opsEnv) setThresholds(primary uint32, cntlr uint32) {
+	conf := e.spConf()
+	conf.EventThreshold = &pb.EventThreshold{
+		PrimaryUnhealthy: primary,
+		CntlrUnhealthy:   cntlr,
+	}
+	mustPut(e.t, e.cli, SpConfKey(e.cid, opsSpName), conf)
+}
+
+// modRev is one key's mod_revision, which tells a no-op op (no put) from one
+// that rewrote the same value.
+func (e *opsEnv) modRev(key string) int64 {
+	e.t.Helper()
+	keys, _, err := e.cli.RangeKeys(e.ctx, key)
+	if err != nil {
+		e.t.Fatalf("RangeKeys %s: %v", key, err)
+	}
+	for _, kr := range keys {
+		if kr.Key == key {
+			return kr.ModRev
+		}
+	}
+	e.t.Fatalf("RangeKeys %s: not found", key)
+	return 0
+}
+
 // addSpare appends one spare leg to the fixture's data group.
 func (e *opsEnv) addSpare(provisioned bool) {
 	slice := e.slice()
@@ -814,7 +849,7 @@ func TestSetCntlrErrEpoch(t *testing.T) {
 	env := newOpsEnv(t)
 	revBefore := env.spRev()
 	if err := SetCntlrErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 1000,
+		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 1000, false,
 	); err != nil {
 		t.Fatalf("SetCntlrErrEpoch: %v", err)
 	}
@@ -822,7 +857,7 @@ func TestSetCntlrErrEpoch(t *testing.T) {
 		t.Errorf("err_epoch: got %d, want 1000", got)
 	}
 	if err := SetCntlrErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 2000,
+		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 2000, false,
 	); err != nil {
 		t.Fatalf("SetCntlrErrEpoch again: %v", err)
 	}
@@ -830,7 +865,7 @@ func TestSetCntlrErrEpoch(t *testing.T) {
 		t.Errorf("the threshold clock must not restart: got %d", got)
 	}
 	if err := SetCntlrErrEpoch(
-		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 0,
+		env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, 0, false,
 	); err != nil {
 		t.Fatalf("SetCntlrErrEpoch clear: %v", err)
 	}
@@ -840,8 +875,72 @@ func TestSetCntlrErrEpoch(t *testing.T) {
 	if got := env.spRev(); got != revBefore {
 		t.Errorf("health must not bump SpRev: got %d, want %d", got, revBefore)
 	}
-	err := SetCntlrErrEpoch(env.ctx, env.cli, env.cid, opsSpId, 999, 1)
+	err := SetCntlrErrEpoch(env.ctx, env.cli, env.cid, opsSpId, 999, 1, false)
 	wantPrecondition(t, err, opSetCntlrErrEpoch)
+}
+
+// TestSetCntlrErrEpochSettle pins the settle half of the op (HL2): the flag
+// is cleared only by settle = true with a zero epoch, in the same STM as the
+// err_epoch clear, and a call that changes nothing writes nothing.
+func TestSetCntlrErrEpochSettle(t *testing.T) {
+	env := newOpsEnv(t)
+	key := CntlrKey(env.cid, opsSpId, opsCntlrA)
+	env.setCntlrSettling(opsCntlrA, true)
+	env.setCntlrErr(opsCntlrA, 1000)
+	revBefore := env.spRev()
+	set := func(epoch uint64, settle bool) {
+		t.Helper()
+		if err := SetCntlrErrEpoch(
+			env.ctx, env.cli, env.cid, opsSpId, opsCntlrA, epoch, settle,
+		); err != nil {
+			t.Fatalf("SetCntlrErrEpoch(%d, %v): %v", epoch, settle, err)
+		}
+	}
+	// A settle with a nonzero epoch proves no role: nothing changes.
+	modBefore := env.modRev(key)
+	set(2000, true)
+	if !env.cntlr(opsCntlrA).GetSettling() {
+		t.Errorf("a settle with a nonzero epoch must not clear the flag")
+	}
+	if got := env.modRev(key); got != modBefore {
+		t.Errorf("a call that changes nothing must not put: mod_revision "+
+			"%d -> %d", modBefore, got)
+	}
+	// settle = false clears err_epoch and leaves the flag.
+	set(0, false)
+	got := env.cntlr(opsCntlrA)
+	if got.GetErrEpoch() != 0 || !got.GetSettling() {
+		t.Errorf("settle=false: got err_epoch %d settling %v, want 0 true",
+			got.GetErrEpoch(), got.GetSettling())
+	}
+	// settle = true with epoch 0 on a record already clean clears the flag
+	// alone: the settle is a write of its own.
+	set(0, true)
+	got = env.cntlr(opsCntlrA)
+	if got.GetErrEpoch() != 0 || got.GetSettling() {
+		t.Errorf("settle=true: got err_epoch %d settling %v, want 0 false",
+			got.GetErrEpoch(), got.GetSettling())
+	}
+	// Again on a settled record: a no-op, no put.
+	modBefore = env.modRev(key)
+	set(0, true)
+	if got := env.modRev(key); got != modBefore {
+		t.Errorf("settling an already settled record must not put: "+
+			"mod_revision %d -> %d", modBefore, got)
+	}
+	// The flag and err_epoch clear together in one write.
+	env.setCntlrSettling(opsCntlrA, true)
+	env.setCntlrErr(opsCntlrA, 3000)
+	set(0, true)
+	got = env.cntlr(opsCntlrA)
+	if got.GetErrEpoch() != 0 || got.GetSettling() {
+		t.Errorf("combined clear: got err_epoch %d settling %v, want 0 false",
+			got.GetErrEpoch(), got.GetSettling())
+	}
+	if got := env.spRev(); got != revBefore {
+		t.Errorf("a settle must not bump SpRev: got %d, want %d",
+			got, revBefore)
+	}
 }
 
 func TestSetLegErrEpoch(t *testing.T) {
@@ -1159,6 +1258,14 @@ func TestFailover(t *testing.T) {
 	if got := env.cntlr(opsCntlrA).GetErrEpoch(); got != 1000 {
 		t.Errorf("failover must not touch err_epoch: got %d", got)
 	}
+	// HL2: the new primary settles before AR5 judges it; the old one does
+	// not carry the flag into its standby role.
+	if !env.cntlr(opsCntlrB).GetSettling() {
+		t.Errorf("the new primary must be settling")
+	}
+	if env.cntlr(opsCntlrA).GetSettling() {
+		t.Errorf("the demoted cntlr must not be settling")
+	}
 	if got := env.spRev(); got != revBefore+1 {
 		t.Errorf("SpRev: got %d, want %d", got, revBefore+1)
 	}
@@ -1204,6 +1311,52 @@ func TestFailoverDisabledPrimary(t *testing.T) {
 	}
 }
 
+// TestFailoverSettlingPrimary pins the settling threshold in the STM (AR5,
+// HL2): a settling primary fails over at cntlr_unhealthy, not before, and the
+// op moves the flag with the role.
+func TestFailoverSettlingPrimary(t *testing.T) {
+	env := newOpsEnv(t)
+	env.setCntlrErr(opsCntlrA, 1000)
+	env.setCntlrSettling(opsCntlrA, true)
+	if err := Failover(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrA, opsCntlrB, 1000+common.DefaultCntlrUnhealthy,
+	); err != nil {
+		t.Fatalf("Failover at cntlr_unhealthy: %v", err)
+	}
+	old, fresh := env.cntlr(opsCntlrA), env.cntlr(opsCntlrB)
+	if old.GetPrimary() || !fresh.GetPrimary() {
+		t.Fatalf("the role must move: old %v, new %v", old, fresh)
+	}
+	if old.GetSettling() {
+		t.Errorf("the demoted cntlr's settling flag must be cleared")
+	}
+	if !fresh.GetSettling() {
+		t.Errorf("the new primary must be settling")
+	}
+}
+
+// TestFailoverSettlingShorterCntlrUnhealthy pins the other half of the
+// selection: nothing orders the two thresholds (AR4), and where
+// cntlr_unhealthy is the SHORTER a settling primary is still held to
+// primary_unhealthy — the hold only ever lengthens the wait. The refusal
+// short of it is TestFailoverPreconditions'.
+func TestFailoverSettlingShorterCntlrUnhealthy(t *testing.T) {
+	env := newOpsEnv(t)
+	env.setThresholds(60, 10)
+	env.setCntlrErr(opsCntlrA, 1000)
+	env.setCntlrSettling(opsCntlrA, true)
+	if err := Failover(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrA, opsCntlrB, 1000+60,
+	); err != nil {
+		t.Fatalf("Failover at primary_unhealthy: %v", err)
+	}
+	if !env.cntlr(opsCntlrB).GetPrimary() {
+		t.Fatalf("the role did not move")
+	}
+}
+
 func TestFailoverPreconditions(t *testing.T) {
 	now := uint64(1000 + common.DefaultPrimaryUnhealthy)
 	for _, tc := range []struct {
@@ -1228,6 +1381,42 @@ func TestFailoverPreconditions(t *testing.T) {
 			oldId:  opsCntlrA,
 			newId:  opsCntlrB,
 			now:    1000 + common.DefaultPrimaryUnhealthy - 1,
+			reason: "primary_unhealthy not reached",
+		},
+		{
+			name: "settling old at primary_unhealthy",
+			setup: func(env *opsEnv) {
+				env.setCntlrErr(opsCntlrA, 1000)
+				env.setCntlrSettling(opsCntlrA, true)
+			},
+			oldId:  opsCntlrA,
+			newId:  opsCntlrB,
+			now:    now,
+			reason: "cntlr_unhealthy not reached for a settling primary",
+		},
+		{
+			name: "settling old just short of cntlr_unhealthy",
+			setup: func(env *opsEnv) {
+				env.setCntlrErr(opsCntlrA, 1000)
+				env.setCntlrSettling(opsCntlrA, true)
+			},
+			oldId:  opsCntlrA,
+			newId:  opsCntlrB,
+			now:    1000 + common.DefaultCntlrUnhealthy - 1,
+			reason: "cntlr_unhealthy not reached for a settling primary",
+		},
+		{
+			// cntlr_unhealthy the shorter: the settling primary is held to
+			// primary_unhealthy, never to less.
+			name: "settling old past a shorter cntlr_unhealthy",
+			setup: func(env *opsEnv) {
+				env.setThresholds(60, 10)
+				env.setCntlrErr(opsCntlrA, 1000)
+				env.setCntlrSettling(opsCntlrA, true)
+			},
+			oldId:  opsCntlrA,
+			newId:  opsCntlrB,
+			now:    1000 + 60 - 1,
 			reason: "primary_unhealthy not reached",
 		},
 		{
@@ -1914,6 +2103,9 @@ func TestReplaceCntlr(t *testing.T) {
 	if fresh.GetPrimary() || fresh.GetDisabled() || fresh.GetErrEpoch() != 0 {
 		t.Errorf("the new cntlr must be a healthy, enabled standby: %v", fresh)
 	}
+	if fresh.GetSettling() {
+		t.Errorf("a standby replacement must not be settling (HL2)")
+	}
 	conf := env.spConf()
 	if conf.GetNextId() != opsNextId+1 {
 		t.Errorf("next_id: got %d, want %d", conf.GetNextId(), opsNextId+1)
@@ -1998,6 +2190,9 @@ func TestReplaceCntlrSolePrimary(t *testing.T) {
 	fresh := env.cntlr(newId)
 	if !fresh.GetPrimary() {
 		t.Errorf("the replacement of a sole primary must be primary")
+	}
+	if !fresh.GetSettling() {
+		t.Errorf("a primary replacement must be settling (HL2)")
 	}
 	if fresh.GetCntlidSlot() != 0 {
 		t.Errorf("cntlid_slot: got %d, want the old cntlr's 0",

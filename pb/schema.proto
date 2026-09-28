@@ -405,6 +405,15 @@ message Cntlr {
     bool primary = 4;
     bool disabled = 5;
     uint64 err_epoch = 6;
+    // settling is true from the moment this cntlr becomes primary (or,
+    // still primary, is re-enabled) until the worker first observes it
+    // clean in that role with its stack built — no row outside
+    // leg_id_to_leg and grp_id_to_md_raid PROVISIONING, or MISSING but
+    // for the sp_level's (dnv-worker.md HL2) — or a failover demotes it.
+    // AR5 holds a settling primary to cntlr_unhealthy instead of
+    // primary_unhealthy when that is the longer. Existing records decode
+    // false = settled.
+    bool settling = 7;
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}

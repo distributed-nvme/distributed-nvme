@@ -983,6 +983,101 @@ func TestReactionDisabledPrimaryFailsOver(t *testing.T) {
 	}
 }
 
+// TestReactionSettlingPrimary pins AR5's threshold selection (HL2): a
+// SETTLING primary — one that has not yet reported its stack built and clean
+// as primary since it acquired the role — is held to cntlr_unhealthy instead
+// of primary_unhealthy when that is the longer; a settled one is judged as
+// before; and the disabled trigger ignores the flag. The fixture's thresholds
+// are the product defaults (5 s and 600 s), so the two readings cannot
+// coincide; the last case inverts them.
+func TestReactionSettlingPrimary(t *testing.T) {
+	t.Run("settling, primary_unhealthy reached", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		primary := h.state.Cntlrs[reactCntlrA]
+		primary.Settling = true
+		primary.ErrEpoch = h.ago(common.DefaultPrimaryUnhealthy)
+		// AR6 is armed so that the pass going on is observable.
+		total := reactDataBlocks(t, 2)
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(1, 1000, total, total))
+		h.dnCands(reactDnC, reactDnD)
+		h.pass()
+		h.wantOps("grow")
+		h.wantApplied(reactionGrowData)
+		h.wantNoSkip()
+	})
+
+	t.Run("settling, just short of cntlr_unhealthy", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		primary := h.state.Cntlrs[reactCntlrA]
+		primary.Settling = true
+		primary.ErrEpoch = h.ago(common.DefaultCntlrUnhealthy - 1)
+		h.pass()
+		h.wantOps()
+		h.wantApplied()
+		h.wantNoSkip()
+	})
+
+	t.Run("settling, cntlr_unhealthy reached", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		primary := h.state.Cntlrs[reactCntlrA]
+		primary.Settling = true
+		primary.ErrEpoch = h.ago(common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrB {
+			t.Fatalf("failover %d -> %d", calls[0].oldId, calls[0].newId)
+		}
+		h.wantApplied(reactionFailover)
+	})
+
+	t.Run("settled, primary_unhealthy reached", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy)
+		h.pass()
+		h.wantOps("failover")
+		h.wantApplied(reactionFailover)
+	})
+
+	t.Run("disabled settling primary", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		primary := h.state.Cntlrs[reactCntlrA]
+		primary.Settling = true
+		primary.Disabled = true
+		h.pass()
+		h.wantOps("failover")
+		h.wantApplied(reactionFailover)
+		h.wantNoSkip()
+	})
+
+	// Nothing orders the two thresholds (AR4): where cntlr_unhealthy is the
+	// SHORTER, a settling primary is still held to primary_unhealthy — the
+	// hold never shortens the wait.
+	t.Run("settling, cntlr_unhealthy the shorter", func(t *testing.T) {
+		const primaryUnhealthy, cntlrUnhealthy = 60, 10
+		for _, tc := range []struct {
+			age  uint64
+			want []string
+		}{
+			{cntlrUnhealthy, nil},
+			{primaryUnhealthy - 1, nil},
+			{primaryUnhealthy, []string{"failover"}},
+		} {
+			h := newReactHarness(t, reactFixture(t))
+			h.state.Conf.EventThreshold = &pb.EventThreshold{
+				PrimaryUnhealthy: primaryUnhealthy,
+				CntlrUnhealthy:   cntlrUnhealthy,
+			}
+			primary := h.state.Cntlrs[reactCntlrA]
+			primary.Settling = true
+			primary.ErrEpoch = h.ago(tc.age)
+			h.pass()
+			h.wantOps(tc.want...)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // AR6 — the `dmsetup status` parser
 // ---------------------------------------------------------------------------

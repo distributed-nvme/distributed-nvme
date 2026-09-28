@@ -102,7 +102,20 @@ gains, `common/name_parse.go`:
 	// leg_list member that is not available (CN12); the cn twin of
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
+
+	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
+	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the
+	// resource must not exist, where every other MISSING the cn agent reports
+	// says it does not exist yet. The cn agent writes it and the worker's
+	// settle reads it (dnv-worker.md HL2), so the two take it from here.
+	ResDetailsSpLevel = "sp_level"
 ```
+
+`ResDetailsSpLevel` was *added 2026-09-26* (the failover ping-pong): CN19's
+`"sp_level"` had been the cn agent's own constant, and the worker's settle
+now tells a suppressed row from an unbuilt one by it, so a value that
+drifted on one side would keep every primary whose level suppresses a row
+the settle reads settling for as long as that level stands.
 
 `CnCloneMetaAreaSize` is the rename of the old `DefaultCloneVgSize` (same
 1 GiB); `DefaultCloneVgPrefix`, `DefaultCloneVgExtSize` and the
@@ -1728,7 +1741,8 @@ CN19. **`sp_level` gating** (§11.7; numeric comparisons — the enum values
       and the build phase rebuilds them. There is no level-specific teardown
       code anywhere. Bitmap chunks stay applied-by-file throughout (SH21).
       A resource suppressed by the level is reported `RES_STATUS_MISSING`
-      with `details = "sp_level"`. A resource *deferred* by CN9's
+      with `details = "sp_level"` (`common.ResDetailsSpLevel`, §2.1, which
+      the worker's settle reads). A resource *deferred* by CN9's
       provisioning gate is a different thing —
       `RES_STATUS_PROVISIONING` with `details = "provisioning"`, at every
       level — and where both apply, the level wins (CN9).
@@ -2681,7 +2695,11 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     `NO_THINPOOL` keeps namespaces exported on error backing;
     `NO_MIGRATION` is a no-op relative to `NO_REDUND`; `NO_SIDE` drops leg
     connections; `DISABLE` leaves only base state and keeps the store
-    files; lowering rebuilds.
+    files; lowering rebuilds. `TestSuppressedCloneReportsSpLevel` (*added
+    2026-09-26*, the failover ping-pong): a clone in `clone_list` reads its
+    three rows `MISSING` `"sp_level"` at `NO_CLONE` and at `DISABLE`, on
+    the converge and on the probe alike — rows the worker's settle
+    (`dnv-worker.md` HL2) reads, where any other `MISSING` holds it.
 12. **Check streams** (CN24): first reply full info; unchanged
     `show_info = false` round omits it; `show_info = true` re-includes it;
     unknown object ⇒ code 2 with the stream kept open; a round never
@@ -3075,7 +3093,15 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     read `non-optimized` assembles nothing and keeps it; with the paths
     `optimized`, one attempt runs one `mdadm --assemble` per late group,
     the probed md, raid0 and ns-dev rows read `OK`, and the retry has
-    stopped. `TestLateMemberRefusedStartIsAssembledByTheRetry`: the same
+    stopped. `TestLateMembersProbeMissingWithoutTd` (*added 2026-09-26*):
+    the same promotion, both groups late, in an SP with no td and no
+    subsystem reads both groups `ERROR` `no available leg` and registers
+    the retry, and a Check round at the driven revision before any attempt
+    answers an accepted code and reads the groups, the pool concats and the
+    pool `MISSING` `""`, the probe finding them absent, with no row outside
+    `leg_id_to_leg` `ERROR` or `PROVISIONING`: the reply the worker's
+    settle must not take for a built stack (`dnv-worker.md` HL2).
+    `TestLateMemberRefusedStartIsAssembledByTheRetry`: the same
     promotion after a clean demote with only one of a two-leg group's
     members unavailable — mdadm refuses the start from the other alone
     ([D16]; the fake has no Array State gate, so the test injects the

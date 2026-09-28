@@ -45,6 +45,11 @@ type BmChunk struct {
 type SpState struct {
 	// Rev is the store revision every field below was read at.
 	Rev int64
+	// SpRevision is the SP's SpRev.revision, read in the same snapshot; 0
+	// when that key is absent. It is the revision the loaded state belongs to,
+	// which the sp role's fan-out compares with the one it was delivered
+	// (dnv-worker.md RW14).
+	SpRevision uint64
 	// Conf is the SP's configuration; it is never nil.
 	Conf *pb.SpConf
 	// Cntlrs is keyed by cntlr_id, from Conf.cntlr_id_list.
@@ -182,6 +187,12 @@ func loadSpConf(
 	}
 	state.Conf = conf
 	spId := conf.GetSpId()
+	// The rev key is not a listed sub-object: an absent one is no Missing
+	// entry, it leaves SpRevision 0.
+	spRev := &pb.SpRev{}
+	if s.Get(SpRevKey(conf.GetShardCode(), cid, spId), spRev) {
+		state.SpRevision = spRev.GetRevision()
+	}
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		key := CntlrKey(cid, spId, cntlrId)
 		cntlr := &pb.Cntlr{}

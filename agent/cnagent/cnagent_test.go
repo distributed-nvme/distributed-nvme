@@ -2805,6 +2805,95 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 	}
 }
 
+// TestLateMembersProbeMissingWithoutTd pins the agent half of the worker's
+// settle (dnv-worker.md HL2, primaryShapeBuilt): a primary with no td whose
+// promotion found its members late reads its groups and pool ERROR in the
+// SyncupCntlr reply, but a Check round before the retry's first attempt
+// probes those devices absent and reads them MISSING "", not ERROR. That
+// reply, at the driven revision with an accepted code, then carries no ERROR
+// and no PROVISIONING row outside the leg rows: only its MISSING rows say the
+// stack is not built. A td would keep an ERROR row, its raid0 over the absent
+// thins, which is why this SP has none.
+func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.retryInterval = time.Hour
+	ctx := context.Background()
+	opts := func(revision uint64, primary bool) reqOpts {
+		return reqOpts{revision: revision, primary: primary, raid1: true,
+			tds: []*pb.ThinDevice{}, subsys: map[string]*pb.Subsystem{}}
+	}
+	syncupBoth(t, srv, opts(2, true))
+	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts(3, false))); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp, legId,
+			testCn), testIp, testSvcId, "non-optimized")
+	}
+	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	}
+	for _, grpId := range []uint64{testMetaGrp, testDataGrp} {
+		assertErrorDetails(t,
+			reply.GetCntlrInfo().GetGrpIdToMdRaid()[grpId],
+			"no available leg", fmt.Sprintf("grp %d in the promotion", grpId))
+	}
+	if !retrying(t, srv) {
+		t.Fatalf("the promotion registered no retry")
+	}
+
+	check, info := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn,
+		CntlrPointer: cntlrPtr(), Revision: 4,
+	}, nil)
+	if code := check.GetAgentReply().GetCode(); (code != 0 &&
+		code != common.ReplyCodeLeftover) || check.GetRevision() != 4 {
+		t.Fatalf("check round: code %d, revision %d, want an accepted "+
+			"code at revision 4", code, check.GetRevision())
+	}
+	for label, res := range map[string]*pb.ResInfo{
+		"grp meta":  info.GetGrpIdToMdRaid()[testMetaGrp],
+		"grp data":  info.GetGrpIdToMdRaid()[testDataGrp],
+		"pool meta": info.GetSliceIdToMeta()[testSlice],
+		"pool data": info.GetSliceIdToData()[testSlice],
+		"pool":      info.GetSliceIdToDmPool()[testSlice],
+	} {
+		if res.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+			res.GetDetails() != "" {
+			t.Fatalf("probed %s: %v/%q, want MISSING/\"\"", label,
+				res.GetStatus(), res.GetDetails())
+		}
+	}
+	rows := []map[uint64]*pb.ResInfo{
+		info.GetSsIdToSubsystem(), info.GetNsIdToNamespace(),
+		info.GetNsIdToDmLinear(), info.GetTdIdToRaid0(),
+		info.GetTdIdToDmError(), info.GetSliceIdToDmPool(),
+		info.GetSliceIdToMeta(), info.GetSliceIdToData(),
+		info.GetGrpIdToMdRaid(), info.GetXferIdToDmLinear(),
+		info.GetXferIdToSubsystem(), info.GetXferIdToNamespace(),
+		info.GetCloneIdToTarget(), info.GetCloneIdToDmClone(),
+		info.GetCloneIdToMeta(),
+	}
+	for _, thin := range info.GetTdIdToThinInfo() {
+		rows = append(rows, thin.GetSliceIdToDmThin())
+	}
+	for _, m := range rows {
+		for id, res := range m {
+			switch res.GetStatus() {
+			case pb.ResStatus_RES_STATUS_ERROR,
+				pb.ResStatus_RES_STATUS_PROVISIONING:
+				t.Fatalf("probed row %d (%s): %v/%q, want neither ERROR "+
+					"nor PROVISIONING", id, res.GetResName(),
+					res.GetStatus(), res.GetDetails())
+			}
+		}
+	}
+}
+
 // TestLateMemberRefusedStartIsAssembledByTheRetry is
 // TestLateMembersRegisterTheRetry with one member of a two-leg group late
 // after a clean demote, the shape a failover leaves ([D16]). The demote stops
@@ -3581,9 +3670,9 @@ func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
 		t.Fatalf("transfer: %v", err)
 	}
 	// The transfer-driven twin of TestNamespaceSuspend. Both steps are the
-	// retire phase's: CN16 rule 1 makes the origin's backing the td's
-	// dm-error, so step (2) of the retire phase parks it — ahead of the build
-	// phase, which is where the xfer device is created. What §11.3 makes
+	// sweep's pre-steps (CN9): CN16 rule 1 makes the origin's backing the
+	// td's dm-error, so pre-step 2 parks it — ahead of the build phase, which
+	// is where the xfer device is created. What §11.3 makes
 	// load-bearing is the first edge: ANA inaccessible *before* the device is
 	// touched, so no host IO is behind the reload.
 	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
@@ -3793,7 +3882,7 @@ func TestRemovedSuspendedNamespaceIsParkedBeforeNvmetRemoval(t *testing.T) {
 	})
 
 	// The steady state after 2026-09-16: converge A already parked the ns-dev,
-	// so the retire phase finds the table it wants on a live device and
+	// so the sweep's park pre-step finds the table it wants on a live device and
 	// `parkNsDev` returns before it issues anything. The nvmet disable and the
 	// removal then work on a device nobody ever suspended — which is the whole
 	// point of the park, and what the two sub-cases above can no longer show.

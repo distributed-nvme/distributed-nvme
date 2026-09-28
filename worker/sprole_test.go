@@ -104,6 +104,9 @@ func srcTrConf() *pb.NvmeTrConf {
 func spFixture() *model.SpState {
 	state := &model.SpState{
 		Rev: 7,
+		// The revision the harness delivers: a load ahead of it would build
+		// nothing (RW14).
+		SpRevision: testSpRev,
 		Conf: &pb.SpConf{
 			SpId:      testSpId,
 			ShardCode: testShard,
@@ -530,6 +533,333 @@ func TestSpCntlrRequestGolden(t *testing.T) {
 		ref.TdId != spTdOpen {
 		t.Fatalf("td candidate = %+v", ref)
 	}
+}
+
+// TestSpCntlrPlanCarriesSettling checks that buildPlan copies each cntlr
+// record's settling flag into its plan (HL2): the child seeds its settle memo
+// from it.
+func TestSpCntlrPlanCarriesSettling(t *testing.T) {
+	captureLogs(t)
+	state := spFixture()
+	state.Cntlrs[spCntlrPrimary].Settling = true
+	plan := spTestWorker(nil).buildPlan(context.Background(), state)
+	for cntlrId, want := range map[uint64]bool{
+		spCntlrPrimary:  true,
+		spCntlrStandby:  false,
+		spCntlrDisabled: false,
+	} {
+		if got := plan.cntlrs[cntlrId].settling; got != want {
+			t.Fatalf("cntlr %d plan settling = %v, want %v",
+				cntlrId, got, want)
+		}
+	}
+}
+
+// settleDriver builds one cntlr child's driver outside any loop, the way the
+// coordinator's startCntlrChild does, over a recording health writer: plan
+// (settlePlan's shape, driving revision 7) and a clean stored CntlrInfo. Its
+// report channel is spTestWorker's buffered one, since send would block
+// forever on a nil channel.
+func settleDriver(
+	t *testing.T,
+	plan *cntlrPlan,
+) (*cntlrDriver, *fakeHealthWriter, *logCapture) {
+	t.Helper()
+	logs := captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	hw := &fakeHealthWriter{}
+	d.health = hw
+	driver := newCntlrDriver(spTestWorker(d), nil, plan)
+	driver.storeInfo(&pb.CntlrInfo{
+		GrpIdToMdRaid: map[uint64]*pb.ResInfo{1: resOk("md")},
+	})
+	return driver, hw, logs
+}
+
+// settlePlan is the plan settleDriver drives: revision 7, the fixture's
+// primary cntlr.
+func settlePlan(primary bool, settling bool) *cntlrPlan {
+	return &cntlrPlan{
+		addr:     spCnA,
+		cnId:     spCnIdA,
+		cntlrId:  spCntlrPrimary,
+		primary:  primary,
+		settling: settling,
+		req: &pb.SyncupCntlrRequest{
+			ClusterId: testCid,
+			CnId:      spCnIdA,
+			CntlrPointer: &pb.CntlrPointer{
+				SpId:    testSpId,
+				CntlrId: spCntlrPrimary,
+			},
+			Revision: 7,
+		},
+	}
+}
+
+// settleWrites returns the recorded writes that asked for a settle.
+func settleWrites(hw *fakeHealthWriter) []healthWrite {
+	var out []healthWrite
+	for _, write := range hw.all() {
+		if write.settle {
+			out = append(out, write)
+		}
+	}
+	return out
+}
+
+// TestSpCntlrSettle pins the driver's settle gate (HL2): only an accepted,
+// clean reply of an ENABLED PRIMARY at the revision the child drives settles
+// it, and that write is what the §12 `cntlr settled` record reports. The
+// revision half is load-bearing: a clean reply at the previous revision
+// describes the standby shape the promotion's failed SyncupCntlr left behind.
+// So is the disabled half: a disabled primary converges the standby shape
+// (cnagent.md CN9). So is the built half (primaryShapeBuilt): a clean reply
+// whose pools are still PROVISIONING, or probed MISSING after a failed
+// build, describes a build still to come. The
+// memo follows every plan the child takes, both ways: a plan that says
+// settling re-arms it, one that does not clears it.
+func TestSpCntlrSettle(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("primary", func(t *testing.T) {
+		driver, hw, logs := settleDriver(t, settlePlan(true, true))
+		// The previous revision: clean, but the standby shape.
+		driver.observe(ctx, &replyState{revision: 6, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("settled on a revision-6 reply: %+v", got)
+		}
+		// The driven revision, but rejected: no verdict at all.
+		driver.observe(ctx, &replyState{
+			revision: 7, code: common.ReplyCodeStaleRevision,
+		})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("settled on a rejected reply: %+v", got)
+		}
+		// Accepted, clean, at the driven revision.
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		got := settleWrites(hw)
+		want := healthWrite{
+			record: healthRecordCntlr, cid: testCid, spId: testSpId,
+			objId: spCntlrPrimary, epoch: 0, settle: true,
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("settle writes = %+v, want [%+v]", got, want)
+		}
+		recs := logs.withMsg(msgCntlrSettled)
+		if len(recs) != 1 {
+			t.Fatalf("%d cntlr settled records, want 1", len(recs))
+		}
+		rec := recs[0]
+		if rec["role"] != common.WorkerRoleSp {
+			t.Fatalf("role = %v", rec["role"])
+		}
+		for attr, want := range map[string]uint64{
+			"cluster_id": testCid,
+			"sp_id":      testSpId,
+			"cn_id":      spCnIdA,
+			"revision":   7,
+		} {
+			if got, _ := rec[attr].(float64); uint64(got) != want {
+				t.Fatalf("%s = %v, want %d", attr, rec[attr], want)
+			}
+		}
+		ptr, _ := rec["cntlr_pointer"].(map[string]any)
+		if ptr == nil {
+			t.Fatalf("cntlr_pointer = %v", rec["cntlr_pointer"])
+		}
+		// The memo is cleared: another clean round writes nothing.
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := len(hw.all()); got != 2 {
+			t.Fatalf("writes = %+v, want the recovery and the settle only",
+				hw.all())
+		}
+		// Taking a plan re-seeds the memo from its record: one loaded
+		// before the settle write landed costs one redundant settle.
+		driver.install(settlePlan(true, true))
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := len(settleWrites(hw)); got != 2 {
+			t.Fatalf("%d settle writes after a stale plan, want 2", got)
+		}
+	})
+
+	t.Run("stack not built yet", func(t *testing.T) {
+		// A new SP's primary reports its pools PROVISIONING until its sides
+		// are zeroed: clean, at the driven revision, and no proof of the
+		// build still to come (primaryShapeBuilt). Leg rows do not count: a
+		// spare that is still zeroing reads PROVISIONING there. Nor do group
+		// rows: a grow's group reads PROVISIONING beside a serving pool.
+		driver, hw, logs := settleDriver(t, settlePlan(true, true))
+		provisioning := &pb.ResInfo{
+			ResName: "md", Status: pb.ResStatus_RES_STATUS_PROVISIONING,
+		}
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: provisioning},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: provisioning},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		all := hw.all()
+		if len(all) != 1 || all[0].epoch != 0 || all[0].settle {
+			t.Fatalf("writes on an all-PROVISIONING reply = %+v, want the "+
+				"recovery alone", all)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records before the build", got)
+		}
+		// A build that fails partway: one group ERROR while its slice's pool
+		// is still PROVISIONING. HL2 judges the ERROR row all the same.
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: resErr("md", "boom")},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: provisioning},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		all = hw.all()
+		if len(all) != 2 || all[1].epoch == 0 || all[1].settle {
+			t.Fatalf("writes on a failed build = %+v", all)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records on a failed build", got)
+		}
+		// Built, with a grow's group and a spare's leg row still
+		// PROVISIONING: settles, with the recovery in the same write.
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+				1: resOk("md"),
+				2: {
+					ResName: "grown",
+					Status:  pb.ResStatus_RES_STATUS_PROVISIONING,
+				},
+			},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: resOk("pool")},
+			LegIdToLeg: map[uint64]*pb.ResInfo{9: {
+				ResName: "spare",
+				Status:  pb.ResStatus_RES_STATUS_PROVISIONING,
+			}},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		got := settleWrites(hw)
+		if len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("settle writes on the built reply = %+v, want one", got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 1 {
+			t.Fatalf("%d cntlr settled records on the built reply", got)
+		}
+	})
+
+	t.Run("stack probed missing after a failed build", func(t *testing.T) {
+		// A td-less primary whose converge at the driven revision found its
+		// members not available: the SyncupCntlr reply reads its groups and
+		// pool ERROR, and the Check round before the agent's retry probes
+		// the devices absent and reads them MISSING "" — clean, at the
+		// driven revision, and no proof of the build the retry still has to
+		// do (primaryShapeBuilt). A row the sp_level suppresses reads
+		// MISSING "sp_level" and holds nothing.
+		driver, hw, logs := settleDriver(t, settlePlan(true, true))
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+				1: resErr("md", "no available leg"),
+			},
+			SliceIdToMeta:   map[uint64]*pb.ResInfo{1: resErr("meta", "x")},
+			SliceIdToData:   map[uint64]*pb.ResInfo{1: resErr("data", "x")},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: resErr("pool", "x")},
+			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		missing := func(name string, details string) *pb.ResInfo {
+			return &pb.ResInfo{
+				ResName: name,
+				Status:  pb.ResStatus_RES_STATUS_MISSING,
+				Details: details,
+			}
+		}
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing("md", "")},
+			SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("meta", "")},
+			SliceIdToData:   map[uint64]*pb.ResInfo{1: missing("data", "")},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{1: missing("pool", "")},
+			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		all := hw.all()
+		if len(all) != 2 || all[0].epoch == 0 || all[1].epoch != 0 ||
+			all[0].settle || all[1].settle {
+			t.Fatalf("writes on a failed build and its MISSING probe = %+v, "+
+				"want the error and the recovery alone", all)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records on the MISSING probe", got)
+		}
+		// The level raised to suppress the md and the pools: settles.
+		driver.storeInfo(&pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+				1: missing("md", "sp_level"),
+			},
+			SliceIdToMeta: map[uint64]*pb.ResInfo{
+				1: missing("meta", "sp_level"),
+			},
+			SliceIdToData: map[uint64]*pb.ResInfo{
+				1: missing("data", "sp_level"),
+			},
+			SliceIdToDmPool: map[uint64]*pb.ResInfo{
+				1: missing("pool", "sp_level"),
+			},
+			SsIdToSubsystem: map[uint64]*pb.ResInfo{1: resOk("ss")},
+		})
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 1 || got[0].epoch != 0 {
+			t.Fatalf("settle writes on the suppressed reply = %+v, want one",
+				got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 1 {
+			t.Fatalf("%d cntlr settled records on the suppressed reply", got)
+		}
+	})
+
+	t.Run("plan loaded after the settle", func(t *testing.T) {
+		// The memo is seeded true, then a plan built after another writer
+		// settled the record arrives: taking it clears the memo, so a clean
+		// primary-shape reply writes no settle.
+		driver, hw, logs := settleDriver(t, settlePlan(true, true))
+		driver.install(settlePlan(true, false))
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("settled after a settled plan: %+v", got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records after a settled plan", got)
+		}
+	})
+
+	t.Run("standby", func(t *testing.T) {
+		driver, hw, logs := settleDriver(t, settlePlan(false, true))
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("a standby settled: %+v", got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records for a standby", got)
+		}
+	})
+
+	t.Run("disabled primary", func(t *testing.T) {
+		// The record says primary, but the agent converges the standby
+		// shape for a disabled cntlr: its clean reply at the driven
+		// revision proves nothing about the role.
+		plan := settlePlan(true, true)
+		plan.req.Cntlr = &pb.Cntlr{
+			Primary: true, Disabled: true, Settling: true,
+		}
+		driver, hw, logs := settleDriver(t, plan)
+		driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+		if got := settleWrites(hw); len(got) != 0 {
+			t.Fatalf("a disabled primary settled: %+v", got)
+		}
+		if got := len(logs.withMsg(msgCntlrSettled)); got != 0 {
+			t.Fatalf("%d cntlr settled records for a disabled primary", got)
+		}
+	})
 }
 
 // TestSpRequestsAreIndependentCopies checks that no two children share a
@@ -1136,9 +1466,12 @@ func (s *stubCntlrAgent) pushes() []*pb.PushCloneBitmapRequest {
 // fakeSpOps is the §13 stand-in for model: a fixture SpState and a record of
 // every flip the coordinator ran.
 type fakeSpOps struct {
-	mu          sync.Mutex
-	state       *model.SpState
-	err         error
+	mu    sync.Mutex
+	state *model.SpState
+	err   error
+	// loads counts loadSp calls — the fan-out's and the reaction pass's —
+	// so a test can tell that ticks have run.
+	loads       int
 	provisioned [][]model.SideRef
 	created     [][]model.TdRef
 	// applySides / applyTds decide what the STM reports back as WRITTEN. nil
@@ -1165,10 +1498,17 @@ func (o *fakeSpOps) loadSp(
 ) (*model.SpState, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.loads++
 	if o.err != nil {
 		return nil, o.err
 	}
 	return o.state, nil
+}
+
+func (o *fakeSpOps) loadCnt() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.loads
 }
 
 func (o *fakeSpOps) flipProvisioned(
@@ -1535,6 +1875,103 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 	}
 	if stopped != 1 {
 		t.Fatalf("%d side children stopped, want only the moved one", stopped)
+	}
+}
+
+// TestSpFanOutWaitsForItsRevision checks RW14's revision guard: a fan-out
+// whose load is ahead of the revision the coordinator was delivered builds
+// nothing. The case is the one the guard exists for (HL2): a Failover
+// committed N+1 and the SpRev watch has not delivered it when a tick re-fans
+// the SP. Built, that plan would label the promotion N — the revision the
+// standby's agent applied as a standby — and restart the standby's child,
+// whose first Check the agent answers at N with a clean standby shape: the
+// promoted cntlr would settle without ever being sent the primary request.
+func TestSpFanOutWaitsForItsRevision(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	// The spare's DN has no DnConf: one idle side, so every tick re-fans.
+	state := spFixture()
+	delete(state.DnByAddr, spDnD)
+	h.ops.setState(state)
+	// Every cntlr agent answers a Check at the revision it last applied, as
+	// the cn agent does, with a clean CntlrInfo.
+	for _, stub := range h.cntlrs {
+		stub.checkReply = func(*pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+			var rev uint64
+			if reqs := stub.syncups(); len(reqs) > 0 {
+				rev = reqs[len(reqs)-1].GetRevision()
+			}
+			return &pb.CheckCntlrReply{Revision: rev, CntlrInfo: &pb.CntlrInfo{}}
+		}
+	}
+	w := h.start()
+	waitFor(t, "the standby synced at N", func() bool {
+		return len(h.cntlrs[spCnB].syncups()) > 0
+	})
+	before := len(h.cntlrs[spCnB].syncups())
+
+	// model.Failover committed N+1; the watch has not delivered it.
+	next := spFixture()
+	delete(next.DnByAddr, spDnD)
+	next.SpRevision = testSpRev + 1
+	next.Cntlrs[spCntlrPrimary].Primary = false
+	next.Cntlrs[spCntlrStandby].Primary = true
+	next.Cntlrs[spCntlrStandby].Settling = true
+	h.ops.setState(next)
+	loads := h.ops.loadCnt()
+	// One tick: a fan-out load, then a reaction-pass load. A child that
+	// fan-out restarts is stopped, and logs it, before the pass loads.
+	h.advanceUntil("a tick", roundInterval, func() bool {
+		return h.ops.loadCnt() >= loads+2
+	})
+	if got := len(h.logs.withMsg(msgRevisionWorkerStopped)); got != 0 {
+		t.Fatalf("%d children restarted ahead of the revision", got)
+	}
+	// More ticks, and rounds on the clock the children share: the standby's
+	// child keeps its standby plan, so its agent's clean answer at N settles
+	// nothing and re-syncs nothing.
+	for i := 0; i < 3; i++ {
+		h.clk.advance(roundInterval)
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := settleWrites(h.hw); len(got) != 0 {
+		t.Fatalf("settled ahead of the revision: %+v", got)
+	}
+	if got := len(h.logs.withMsg(msgCntlrSettled)); got != 0 {
+		t.Fatalf("%d cntlr settled records ahead of the revision", got)
+	}
+	if got := len(h.cntlrs[spCnB].syncups()); got != before {
+		t.Fatalf("the standby was re-synced %d times ahead of the revision",
+			got-before)
+	}
+
+	// The delivery re-fans at N+1: the promoted cntlr is sent the primary
+	// request, and its reply to that settles it.
+	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+	// The record is logged after the settle write returns, on the child's
+	// goroutine: waiting for the write alone would race it.
+	waitFor(t, "the settle", func() bool {
+		return len(h.logs.withMsg(msgCntlrSettled)) > 0
+	})
+	promoted := false
+	for _, req := range h.cntlrs[spCnB].syncups()[before:] {
+		if req.GetRevision() == testSpRev+1 && req.GetCntlr().GetPrimary() {
+			promoted = true
+		}
+	}
+	if !promoted {
+		t.Fatalf("settled without a primary request at N+1")
+	}
+	got := settleWrites(h.hw)
+	if len(got) != 1 || got[0].objId != spCntlrStandby {
+		t.Fatalf("settle writes = %+v, want the promoted cntlr's", got)
+	}
+	recs := h.logs.withMsg(msgCntlrSettled)
+	if len(recs) != 1 {
+		t.Fatalf("%d cntlr settled records, want 1", len(recs))
+	}
+	if rev, _ := recs[0]["revision"].(float64); uint64(rev) != testSpRev+1 {
+		t.Fatalf("cntlr settled at revision %v, want N+1", recs[0]["revision"])
 	}
 }
 

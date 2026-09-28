@@ -330,6 +330,50 @@ func TestDisabledCntlrProbeReportsTheSuppressedRows(t *testing.T) {
 	}
 }
 
+// TestSuppressedCloneReportsSpLevel: a clone in clone_list at a level that
+// suppresses clones reads its three rows MISSING / "sp_level" on both
+// channels (CN19) — at SP_LEVEL_NO_CLONE, CN18's staged gate, and at
+// SP_LEVEL_DISABLE, where reportSuppressed leaves the clones to the same
+// function. The worker's settle (dnv-worker.md HL2) is held by every other
+// MISSING, so a clone row that lost its "sp_level" would keep a primary with a
+// clone settling for as long as the level stands.
+func TestSuppressedCloneReportsSpLevel(t *testing.T) {
+	srv, _ := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	for i, level := range []pb.SpLevel{
+		pb.SpLevel_SP_LEVEL_NO_CLONE,
+		pb.SpLevel_SP_LEVEL_DISABLE,
+	} {
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+			revision: uint64(3 + i), primary: true,
+			clones: []*pb.Clone{cloneOf()}, level: level}))
+		if err != nil {
+			t.Fatalf("%v: %v", level, err)
+		}
+		assertCloneSuppressed(t, reply.GetCntlrInfo(), level.String()+
+			" converged")
+
+		probe, err := srv.GetCntlrInfo(context.Background(),
+			&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr()})
+		if err != nil {
+			t.Fatalf("%v: GetCntlrInfo: %v", level, err)
+		}
+		assertCloneSuppressed(t, probe.GetCntlrInfo(), level.String()+
+			" probed")
+	}
+}
+
+func assertCloneSuppressed(t *testing.T, info *pb.CntlrInfo, label string) {
+	t.Helper()
+	assertMissingSpLevel(t, info.GetCloneIdToTarget()[testClone],
+		label+" clone_id_to_target")
+	assertMissingSpLevel(t, info.GetCloneIdToDmClone()[testClone],
+		label+" clone_id_to_dm_clone")
+	assertMissingSpLevel(t, info.GetCloneIdToMeta()[testClone],
+		label+" clone_id_to_meta")
+}
+
 // TestCloneWithUnresolvableDstTdAgrees: a clone whose dst_td_id is not in
 // td_list is the CN18 error the converge reports on all three rows. The probe
 // used to fall through to the live-source / dm-clone / wrapper probes and

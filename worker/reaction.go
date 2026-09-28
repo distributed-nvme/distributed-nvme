@@ -715,10 +715,26 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	// §10.4 primary re-election") and fires immediately — disabling is
 	// explicit operator intent and the disabled primary has already stopped
 	// serving — so no threshold is waited out. Only an enabled primary has
-	// to have been unhealthy for primary_unhealthy. The candidate rule is
-	// unchanged (failoverEligible): a disabled cntlr is never elected.
+	// to have been unhealthy for a threshold: primary_unhealthy, or, while it
+	// is settling, the longer of that and cntlr_unhealthy (below). The
+	// candidate rule is unchanged (failoverEligible): a disabled cntlr is
+	// never elected.
+	threshold := p.th.GetPrimaryUnhealthy()
+	if p.primary.GetSettling() && p.th.GetCntlrUnhealthy() > threshold {
+		// AR5: a primary that has not yet reported its stack built and clean
+		// in that role (HL2, primaryShapeBuilt) is given cntlr_unhealthy, the
+		// threshold the worker already gives a cntlr before giving up on it.
+		// The hold lasts until that report — the promotion's or, while a new
+		// SP's sides are still being zeroed, the end of its first build — and
+		// a primary that never makes it is failed over at the same threshold
+		// AR7 would replace the cntlr at. Only when it is the longer wait:
+		// nothing orders the two thresholds (AR4), and the hold must never
+		// shorten the settled one. model.Failover re-validates the same
+		// selection inside its STM (MD6/MD7).
+		threshold = p.th.GetCntlrUnhealthy()
+	}
 	if !p.primary.GetDisabled() &&
-		!reached(p.now, p.primary.GetErrEpoch(), p.th.GetPrimaryUnhealthy()) {
+		!reached(p.now, p.primary.GetErrEpoch(), threshold) {
 		return false
 	}
 	if p.failoverCand == 0 {

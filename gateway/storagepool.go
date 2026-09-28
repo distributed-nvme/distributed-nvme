@@ -574,6 +574,12 @@ func (s *Server) CreateStoragePool(
 					Primary:    idx == 0,
 					Disabled:   false,
 					ErrEpoch:   0,
+					// dnv-worker.md HL2: the first primary is created
+					// settling, so AR5 judges it by primary_unhealthy alone
+					// only once it has reported its stack built and clean
+					// as primary; its first replies, which read its pools
+					// PROVISIONING until the sides are zeroed, do not.
+					Settling: idx == 0,
 				})
 			}
 			for idx, slice := range builtSlices {

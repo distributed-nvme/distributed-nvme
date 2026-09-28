@@ -183,7 +183,10 @@ type cntlrPlan struct {
 	cnId    uint64
 	cntlrId uint64
 	primary bool
-	req     *pb.SyncupCntlrRequest
+	// settling is the loaded record's flag (HL2): the child seeds its
+	// monitor's memo from it whenever it takes this plan.
+	settling bool
+	req      *pb.SyncupCntlrRequest
 	// sliceIds are the SP's slice ids, ascending: RW19's condition (3)
 	// compares them with a reply's slice_id_to_dm_thin key set.
 	sliceIds []uint64
@@ -468,6 +471,20 @@ func (w *spWorker) fanOut() {
 			slog.String("sp_name", w.desired.handle),
 			slog.String("error", err.Error()),
 		)
+		return
+	}
+	if state.SpRevision > w.desired.revision {
+		// RW14: the SP has moved past the revision this coordinator was
+		// delivered — a tick's fan-out ran before the watch delivered a bump,
+		// say, or a new owner started from its parent's older value — and
+		// every request is labelled with the delivered one (RW15/RW16). A plan
+		// built now would pair that label with a newer role: a promotion
+		// labelled with the revision the agent applied as a standby restarts
+		// the child, whose first Check is answered at that revision with the
+		// standby shape — a reply HL2 would take for the primary's and settle
+		// on, and one RW4 step 5 never re-syncs. Nothing is built, and no
+		// child is started, stopped or updated; the bump's own delivery is a
+		// desired change, which re-enters the fan-out, so no retry is armed.
 		return
 	}
 	if len(state.Missing) > 0 {
@@ -916,10 +933,11 @@ func (w *spWorker) buildCntlrPlans(
 			continue
 		}
 		out := &cntlrPlan{
-			addr:    cntlr.GetAddrPort(),
-			cnId:    cnId,
-			cntlrId: cntlrId,
-			primary: cntlr.GetPrimary(),
+			addr:     cntlr.GetAddrPort(),
+			cnId:     cnId,
+			cntlrId:  cntlrId,
+			primary:  cntlr.GetPrimary(),
+			settling: cntlr.GetSettling(),
 			req: &pb.SyncupCntlrRequest{
 				ClusterId: w.cid,
 				CnId:      cnId,
@@ -1726,6 +1744,7 @@ func newCntlrDriver(
 		legLogged: make(map[uint64]pb.ResStatus),
 	}
 	d.health = newCntlrMonitor(w.deps, w.cid, w.spId, p.cntlrId)
+	d.health.settlePending = p.settling
 	d.pusher = newBmPusher(bmPusherParams{
 		deps:     w.deps,
 		seed:     w.seed,
@@ -1817,13 +1836,20 @@ func (d *cntlrDriver) install(p *cntlrPlan) {
 	d.mu.Unlock()
 }
 
-// current is the plan the child drives; see sideDriver.current.
+// current is the plan the child drives; see sideDriver.current. Taking a new
+// plan re-seeds the settle memo from its record (HL2): the record is the
+// truth, so a plan loaded after the settle write clears the memo, and one
+// loaded before it costs at most one redundant, no-op settle write. It is
+// seeded here rather than in install because the monitor belongs to the
+// child's goroutine (RW1), the only caller of current, while install runs on
+// the coordinator's.
 func (d *cntlrDriver) current() *cntlrPlan {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.next != nil {
 		d.plan = d.next
 		d.next = nil
+		d.health.settlePending = d.plan.settling
 	}
 	return d.plan
 }
@@ -1943,19 +1969,52 @@ func (d *cntlrDriver) diffBitmaps(
 }
 
 // observe folds one CheckCntlr/SyncupCntlr reply into the cntlr's health
-// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg), the RW19
-// created candidates and the leg rows the coordinator records. A failed push
-// is not re-armed here: it is logged and left to the next Syncup* reply.
+// (HL2 — every ERROR row of the CntlrInfo OTHER than leg_id_to_leg), the
+// settling flag, the RW19 created candidates and the leg rows the coordinator
+// records. A failed push is not re-armed here: it is logged and left to the
+// next Syncup* reply.
 func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
+	plan := d.current()
 	info := d.info()
 	obs, res := cntlrObservation(r.code, info)
-	d.health.observe(ctx, obs, res)
+	// HL2: only a clean reply of the PRIMARY at the revision the child drives
+	// settles it. The revision gate is load-bearing: when the promotion's
+	// SyncupCntlr never reached the agent, the next Check reply carries the
+	// previous revision and describes the standby shape — clean, and
+	// meaningless for the promotion (one the agent applied but whose reply
+	// was lost leaves the agent at the driven revision). Rounds and syncups
+	// run on this child's one goroutine, and a revision carries one set of
+	// roles: a role change bumps SpRev (architecture.md §5.5) and the fan-out
+	// builds no plan from a state newer than its label (RW14), an etcd
+	// restore, which can reuse a revision, aside. So an accepted reply at the
+	// driven revision of an ENABLED primary is a report of the primary shape.
+	// The role gate is the cn agent's own (cnagent.md CN9: primary iff
+	// primary && !disabled): a disabled primary converges the standby shape,
+	// so its clean reply proves nothing, and the gateway's UpdateCntlrEnabled
+	// marks a primary it re-enables settling again. And the report must show
+	// the stack built (primaryShapeBuilt): a new SP's primary reports its
+	// pools and what is over them PROVISIONING, clean, until its sides are
+	// zeroed, and a Check round between a converge that left members
+	// unavailable and the retry that builds over them reports the unbuilt
+	// devices MISSING, clean too when the SP has no td; settling on either
+	// would leave the build that follows to primary_unhealthy.
+	canSettle := plan.primary && !plan.req.GetCntlr().GetDisabled() &&
+		r.revision == plan.req.GetRevision() && primaryShapeBuilt(info)
+	if d.health.observeSettle(ctx, obs, res, canSettle) {
+		slog.InfoContext(ctx, msgCntlrSettled,
+			slog.String("role", common.WorkerRoleSp),
+			slog.Uint64("cluster_id", d.cid),
+			slog.Uint64("sp_id", d.spId),
+			slog.Uint64("cn_id", d.cnId),
+			slog.Any("cntlr_pointer", common.PbToLogValue(d.ptr)),
+			slog.Uint64("revision", r.revision),
+		)
+	}
 	if !accepted(r.code) {
 		// HL2/RW19: a rejected request neither sets health nor completes a
 		// td. A leftover reply is accepted and evaluated like code 0.
 		return
 	}
-	plan := d.current()
 	rep := spReport{createdTdIds: completedTds(info, plan.sliceIds)}
 	if plan.primary {
 		rep.legRows = d.legRows(info)

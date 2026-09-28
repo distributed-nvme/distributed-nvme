@@ -76,6 +76,68 @@ func TestHealthWritesThroughModel(t *testing.T) {
 	}
 }
 
+// TestCntlrSettleWritesThroughModel checks HL2's settle against real etcd:
+// the cntlr monitor's write reaches model.SetCntlrErrEpoch with both its epoch
+// and its settle, so an unhealthy observation sets err_epoch and keeps the
+// record settling, the recovery clears err_epoch alone when the driver does
+// not judge the reply to prove the primary role, and the next observation
+// that does clears settling in a write of its own (HL3). The fake health
+// writer of the other settle tests only records the bool.
+func TestCntlrSettleWritesThroughModel(t *testing.T) {
+	cli := newTestClient(t)
+	captureLogs(t)
+	ctx := context.Background()
+	cid := testClusterId()
+	key := model.CntlrKey(cid, 3, 1)
+
+	err := cli.Put(ctx, key, &pb.Cntlr{Primary: true, Settling: true})
+	if err != nil {
+		t.Fatalf("seed Cntlr: %v", err)
+	}
+
+	clk := newFakeClock()
+	d := newTestDeps(testConfig(common.WorkerRoleSp), newFakeStore(), clk)
+	d.cli = cli
+	d.health = &modelHealthWriter{cli: cli}
+	m := newCntlrMonitor(d, cid, 3, 1)
+	m.settlePending = true
+
+	stored := &pb.Cntlr{}
+	load := func() {
+		t.Helper()
+		if _, err := cli.Get(ctx, key, stored); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+	}
+
+	m.observeSettle(ctx, healthUnreachable, "", true)
+	load()
+	if got, want := stored.GetErrEpoch(), clk.nowUnix(); got != want {
+		t.Fatalf("err_epoch = %d, want %d", got, want)
+	}
+	if !stored.GetSettling() {
+		t.Fatalf("an unhealthy observation cleared settling")
+	}
+
+	m.observeSettle(ctx, healthClean, "", false)
+	load()
+	if stored.GetErrEpoch() != 0 || !stored.GetSettling() {
+		t.Fatalf("recovery without canSettle: err_epoch %d settling %v, "+
+			"want 0 true", stored.GetErrEpoch(), stored.GetSettling())
+	}
+
+	if !m.observeSettle(ctx, healthClean, "", true) {
+		t.Fatalf("a clean canSettle observation did not settle")
+	}
+	load()
+	if stored.GetSettling() {
+		t.Fatalf("still settling after the settle write")
+	}
+	if !stored.GetPrimary() {
+		t.Fatalf("the settle rewrote primary")
+	}
+}
+
 // TestConfCacheAgainstEtcd runs the RW21 cache over the real client: scan,
 // watch, key -> id derivation, delete, and the §7 rule that the value a reader
 // gets is the value that was written — no default is applied on the way out.

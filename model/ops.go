@@ -709,8 +709,13 @@ func SetCnErrEpoch(
 }
 
 // SetCntlrErrEpoch sets or clears a cntlr's err_epoch (MD6, HL2) under the
-// same set/clear rule. A Cntlr has no capacity key and health never bumps a
-// revision, so this is the whole mutation.
+// same set/clear rule and, when settle is true, clears its settling flag in
+// the same STM: the worker passes settle only with epoch == 0, on a clean
+// observation of the cntlr as primary at the revision it drives that shows its
+// stack built (HL2), and a settle with a nonzero epoch clears nothing — an
+// unhealthy observation proves no role. A no-op when nothing changes. A Cntlr
+// has no capacity key and health never bumps a revision, so this is the whole
+// mutation.
 func SetCntlrErrEpoch(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -718,6 +723,7 @@ func SetCntlrErrEpoch(
 	spId uint64,
 	cntlrId uint64,
 	epoch uint64,
+	settle bool,
 ) error {
 	return cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		key := CntlrKey(cid, spId, cntlrId)
@@ -726,10 +732,14 @@ func SetCntlrErrEpoch(
 			return fail(opSetCntlrErrEpoch, "cntlr not found")
 		}
 		value, changed := applyErrEpoch(cntlr.GetErrEpoch(), epoch)
+		cntlr.ErrEpoch = value
+		if settle && epoch == 0 && cntlr.GetSettling() {
+			cntlr.Settling = false
+			changed = true
+		}
 		if !changed {
 			return nil
 		}
-		cntlr.ErrEpoch = value
 		s.Put(key, cntlr)
 		return nil
 	})
@@ -989,11 +999,13 @@ func failoverCandidate(
 }
 
 // Failover moves the primary role from oldId to newId (MD6, AR5, §10.4): the
-// old primary has been unhealthy for primary_unhealthy seconds — or is
-// `disabled`, which triggers on its own and immediately (§8.6) — and the new
+// old primary has been unhealthy for primary_unhealthy seconds — for the
+// longer of that and cntlr_unhealthy while it is settling (HL2) — or is
+// `disabled`, which triggers on its own and immediately (§8.6), and the new
 // one is the healthy, enabled, non-primary cntlr with the smallest cntlr_id.
-// Both primary booleans flip in one STM and SpRev is bumped once; the
-// data-plane choreography is §11.1's and belongs to the agents.
+// Both primary booleans flip in one STM, the new primary is marked settling,
+// and SpRev is bumped once; the data-plane choreography is §11.1's and
+// belongs to the agents.
 //
 // Every precondition is re-validated here, election included: two owners
 // overlapping on one SP (§0 item 4) cannot both apply it, because the second
@@ -1028,16 +1040,22 @@ func Failover(
 		}
 		// The in-STM re-validation mirrors AR5's two triggers: a `disabled`
 		// primary is a trigger in its own right (§8.6), with no threshold
-		// wait, so only an enabled one is held to primary_unhealthy.
+		// wait, so only an enabled one is held to primary_unhealthy — or,
+		// while it is settling (HL2), to cntlr_unhealthy when that is the
+		// longer, as AR5 is.
 		if !old.GetDisabled() {
 			if old.GetErrEpoch() == 0 {
 				return fail(opFailover, "old cntlr is healthy and enabled")
 			}
-			if !thresholdReached(
-				now, old.GetErrEpoch(),
-				uint64(threshold.GetPrimaryUnhealthy()),
-			) {
-				return fail(opFailover, "primary_unhealthy not reached")
+			limit := uint64(threshold.GetPrimaryUnhealthy())
+			reason := "primary_unhealthy not reached"
+			if old.GetSettling() &&
+				uint64(threshold.GetCntlrUnhealthy()) > limit {
+				limit = uint64(threshold.GetCntlrUnhealthy())
+				reason = "cntlr_unhealthy not reached for a settling primary"
+			}
+			if !thresholdReached(now, old.GetErrEpoch(), limit) {
+				return fail(opFailover, reason)
 			}
 		}
 		newKey := CntlrKey(cid, spId, newId)
@@ -1059,8 +1077,14 @@ func Failover(
 		if failoverCandidate(s, cid, conf) != newId {
 			return fail(opFailover, "new cntlr is not the smallest candidate")
 		}
+		// The new primary is settling until it reports its stack built and
+		// clean as primary, and AR5 judges it by primary_unhealthy alone only
+		// after that (HL2); a standby's flag steers nothing, so the old one's
+		// is cleared only for tidiness.
 		old.Primary = false
+		old.Settling = false
 		fresh.Primary = true
+		fresh.Settling = true
 		s.Put(oldKey, old)
 		s.Put(newKey, fresh)
 		return BumpSpRev(s, opFailover, shard, cid, spId)
@@ -1413,9 +1437,9 @@ func chargeSpCns(
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
 // that CN gets its pointer removed, the SP footprint back, its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with
-// cntlr_id = SpConf.next_id++ and its CN charged the same way; every CdcEntry
-// of the SP loses the old nvme_tr_conf and gains the new one; SpConf is
-// rewritten and SpRev bumped once.
+// cntlr_id = SpConf.next_id++ and settling iff asPrimary, and its CN charged
+// the same way; every CdcEntry of the SP loses the old nvme_tr_conf and
+// gains the new one; SpConf is rewritten and SpRev bumped once.
 func ReplaceCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1509,6 +1533,8 @@ func ReplaceCntlr(
 		}
 		newId = SpNextId(conf)
 		conf.NextId = newId + 1
+		// A primary replacement is created settling, as Failover's new
+		// primary is (HL2).
 		s.Put(CntlrKey(cid, spId, newId), &pb.Cntlr{
 			AddrPort:   newCn.AddrPort,
 			NvmeTrConf: cn.GetNvmeTrConf(),
@@ -1516,6 +1542,7 @@ func ReplaceCntlr(
 			Primary:    asPrimary,
 			Disabled:   false,
 			ErrEpoch:   0,
+			Settling:   asPrimary,
 		})
 		newCnConf := proto.Clone(cn).(*pb.CnConf)
 		newCnConf.CntlrPtrList = append(

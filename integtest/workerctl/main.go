@@ -2398,6 +2398,9 @@ func cmdPutSp(g *globals, args []string) {
 				Primary:    spec.primary,
 				Disabled:   false,
 				ErrEpoch:   0,
+				// As CreateStoragePool: the primary is created settling
+				// (dnv-worker.md HL2, §14.8).
+				Settling: spec.primary,
 			})
 			cntlrIds = append(cntlrIds, spec.cntlrId)
 		}
