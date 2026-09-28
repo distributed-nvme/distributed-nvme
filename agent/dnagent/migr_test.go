@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1612,4 +1613,175 @@ func TestMigrationConnectSucceedsFromTheRetryLoop(t *testing.T) {
 	if retrying {
 		t.Error("the retry registration survived a successful connect")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// DN13 step (3): the wait for the source namespace
+// ---------------------------------------------------------------------------
+
+// dnClock is a fake clock for the dn server's two seams: its sleep moves it
+// on by exactly the duration asked for, and every call is counted.
+type dnClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	sleeps int
+}
+
+func (c *dnClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *dnClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	c.sleeps++
+	return ctx.Err()
+}
+
+// withDnClock puts the server, and the fake node's configfs stamps, on one
+// fake clock.
+func withDnClock(srv *DnAgentServer, node *fakeNode) *dnClock {
+	clock := &dnClock{now: time.Unix(1<<30, 0)}
+	srv.now = clock.Now
+	srv.sleep = clock.Sleep
+	node.mu.Lock()
+	node.clock = clock.Now
+	node.mu.Unlock()
+	return clock
+}
+
+// TestMigrationDestinationAwaitsTheSourceNamespace pins DN13 step (3)'s wait:
+// the kernel returns from `nvme connect` once the controller is live and only
+// queues the scan that adds the namespace node, so the destination's single
+// re-read used to find a controller and no namespace and fail the target
+// "controller has no namespace" for a device milliseconds away. The pass now
+// re-reads, in DnMigrDstNsPause steps, until the device is there — still with
+// exactly one connect, so the dm-clone is built on the first reply and no DN8
+// retry is registered.
+func TestMigrationDestinationAwaitsTheSourceNamespace(t *testing.T) {
+	for _, misses := range []int{1, 3} {
+		t.Run(fmt.Sprintf("namespace after %d missed read(s)", misses),
+			func(t *testing.T) {
+				srv, node := newTestServer(t)
+				ctx := context.Background()
+				syncupBoth(t, srv, 1, testSide)
+				clock := withDnClock(srv, node)
+				srcNqn := srv.nf.MigrSrcNqn(
+					testCluster, testSrcDn, testSp, testMigrId)
+				node.mu.Lock()
+				node.nsMisses[srcNqn] = misses
+				node.mu.Unlock()
+				start := clock.Now()
+
+				node.Reset()
+				reply, err := srv.SyncupSide(ctx,
+					migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+				if err != nil {
+					t.Fatalf("SyncupSide: %v", err)
+				}
+				info := reply.GetSideInfo().GetMigrDstInfo()
+				if target := info.GetTargetInfo(); target.GetStatus() !=
+					pb.ResStatus_RES_STATUS_OK {
+					t.Fatalf("target_info = %v %q, want OK: the namespace "+
+						"came %d read(s) after the connect",
+						target.GetStatus(), target.GetDetails(), misses)
+				}
+				if dm := info.GetDmCloneInfo(); dm.GetStatus() !=
+					pb.ResStatus_RES_STATUS_OK {
+					t.Fatalf("dm_clone_info = %v %q, want OK",
+						dm.GetStatus(), dm.GetDetails())
+				}
+				if n := len(node.callsMatching(
+					"cmd nvme connect ")); n != 1 {
+					t.Fatalf("%d connects, want exactly 1 (DN13)", n)
+				}
+				if got, want := clock.Now().Sub(start), time.Duration(
+					misses)*common.DnMigrDstNsPause; got != want {
+					t.Fatalf("the pass waited %v, want %d pause(s), %v",
+						got, misses, want)
+				}
+				st := srv.getSide(sideKey(testCluster, testDn, testSp,
+					testSide))
+				if st.retrying {
+					t.Fatalf("a connect whose namespace came registered " +
+						"the DN8 retry")
+				}
+			})
+	}
+
+	// The wait is bounded: a namespace that never comes costs the pass
+	// DnMigrDstNsWait and ends it exactly as the single re-read did — the
+	// target reads "controller has no namespace" and the DN8 loop takes over.
+	t.Run("namespace never comes", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		syncupBoth(t, srv, 1, testSide)
+		clock := withDnClock(srv, node)
+		srcNqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+		node.mu.Lock()
+		node.nsMisses[srcNqn] = 1000
+		node.mu.Unlock()
+		start := clock.Now()
+
+		reply, err := srv.SyncupSide(ctx,
+			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		target := reply.GetSideInfo().GetMigrDstInfo().GetTargetInfo()
+		if target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			target.GetDetails() != "controller has no namespace" {
+			t.Fatalf("target_info = %v %q, want ERROR "+
+				"\"controller has no namespace\"",
+				target.GetStatus(), target.GetDetails())
+		}
+		if got := clock.Now().Sub(start); got != common.DnMigrDstNsWait {
+			t.Fatalf("the pass waited %v, want the bound %v", got,
+				common.DnMigrDstNsWait)
+		}
+		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+		if !st.retrying {
+			t.Fatalf("no DN8 retry was registered")
+		}
+	})
+
+	// A read that fails ends the wait at once: no pause, and the target
+	// carries the read's error.
+	t.Run("a failed read ends the wait", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		syncupBoth(t, srv, 1, testSide)
+		clock := withDnClock(srv, node)
+		srcNqn := srv.nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+		node.mu.Lock()
+		node.nsMisses[srcNqn] = 1000
+		node.mu.Unlock()
+		// The source's subsystem is the only one this host holds, and it
+		// exists only from the connect on: the read that fails is the
+		// wait's.
+		setHook(node, node.failReadAlways, "nvme-subsystem/nvme-subsys")
+		start := clock.Now()
+
+		reply, err := srv.SyncupSide(ctx,
+			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		target := reply.GetSideInfo().GetMigrDstInfo().GetTargetInfo()
+		if target.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			!strings.Contains(target.GetDetails(), "input/output error") {
+			t.Fatalf("target_info = %v %q, want ERROR with the read's error",
+				target.GetStatus(), target.GetDetails())
+		}
+		if n := len(node.callsMatching("cmd nvme connect ")); n != 1 {
+			t.Fatalf("%d connects, want 1", n)
+		}
+		if waited := clock.Now().Sub(start); waited != 0 {
+			t.Fatalf("the pass waited %v after a failed read, want none",
+				waited)
+		}
+	})
 }

@@ -1,5 +1,7 @@
 package common
 
+import "time"
+
 const (
 	ValidStrPattern = `^[a-zA-Z0-9\-_/.:]+$`
 	MaxStrSize      = 64
@@ -263,6 +265,30 @@ const (
 	// nicknamed for the DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
 
+	// The migration destination's wait for the source namespace (dnagent.md
+	// DN13 step (3)). The kernel returns from `nvme connect` once the
+	// controller is live and only QUEUES the namespace scan that adds the
+	// namespace node, so right after a connect that succeeded the pass
+	// re-reads the subsystem until the device is there, pausing
+	// DnMigrDstNsPause between reads and DnMigrDstNsWait in all (the reads
+	// themselves are not counted). It is not a connect retry: one connect per
+	// pass stays DN13's rule, and the DN8 loop above stays the retry. Unlike
+	// the whole-second integers above them, these two are time.Durations.
+	DnMigrDstNsWait  = 1 * time.Second
+	DnMigrDstNsPause = 50 * time.Millisecond
+
+	// DnExportOrphanGrace is the age an unattributable :2: export must exceed
+	// before a sweep may remove it (dnagent.md DN6): one with no namespace,
+	// linked to no nvmet port or only to this agent's own. That shape is
+	// ALSO every export's shape between its subsystem `mkdir` and its
+	// namespace `mkdir`, and on a kernel shared by several dn agents the
+	// build in that window may be a sibling's, whose request this agent
+	// cannot see; only age tells an abandoned one from one in flight. The
+	// age is read from the node — the subsystem directory's mtime, `stat -c
+	// %Y`, in whole seconds — and never remembered. A time.Duration, like the
+	// two above.
+	DnExportOrphanGrace = 30 * time.Second
+
 	// Side provisioning ([D15], architecture.md §9.4,
 	// dnagent.md DN9): the background zeroing goroutine zeroes
 	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
@@ -302,6 +328,25 @@ const (
 	// leg_list member that is not available (CN12); the cn twin of
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
+
+	// The connect step's one wait budget per converge pass (cnagent.md CN10,
+	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr, the startup
+	// reconcile or an attempt of the background retry above runs it — gets
+	// one budget of CnConnectPassBudget, shared by every leg and every clone
+	// source it connects, and exactly three things draw on it: a failed
+	// `nvme connect`'s own elapsed time; the CnConnectRetryPause before each
+	// in-pass retry of a failed connect; and the CnNsScanPause steps of the
+	// wait for the multipath namespace head after a connect this pass made.
+	// A pause starts only while it fits in what is left; a failed connect is
+	// charged after it ran, so a slow one can overdraw the budget, and none
+	// of this bounds a side's first connect, which every pass makes. Once it
+	// is spent the pass behaves as it did without it: the leg or the clone
+	// source fails with the same error and registers the background retry.
+	// Unlike the whole-second integers above them, these three are
+	// time.Durations.
+	CnConnectPassBudget = 1 * time.Second
+	CnConnectRetryPause = 100 * time.Millisecond
+	CnNsScanPause       = 50 * time.Millisecond
 
 	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
 	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the

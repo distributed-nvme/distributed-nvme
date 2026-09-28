@@ -106,6 +106,15 @@ func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 	srv := NewCnAgentServer(node.osClient(), nf,
 		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId)
 	srv.probeIO = node.probeIO()
+	// The CN10 pass budget's pauses do not really sleep here: a fixture whose
+	// connect fails for good would otherwise spend the whole
+	// CnConnectPassBudget of wall time on every pass. The budget still draws
+	// each pause at its full length (agent.WaitBudget.Pause), so the pass
+	// retries exactly as often as it would on a real clock. The tests that
+	// pin the budget itself put the server on a fakeClock (withPassClock).
+	srv.sleep = func(ctx context.Context, _ time.Duration) error {
+		return ctx.Err()
+	}
 	return srv
 }
 

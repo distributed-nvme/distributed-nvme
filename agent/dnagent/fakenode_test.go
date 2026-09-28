@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -47,12 +48,34 @@ type fakeNode struct {
 	dirs  map[string]bool
 	files map[string]string
 	links map[string]string
+	// mtimes is each directory's mtime in whole seconds, what `stat -c %Y`
+	// answers (DN6's orphan age). cmdMkdir stamps a directory it creates
+	// with the fake's clock, and — as the lab's 7.0 kernel does — a read or
+	// a write of one of a subsystem's own `attr_*` files stamps that
+	// subsystem's directory again (configfs instantiates the attribute's
+	// inode on every lookup and stamps the parent when it does). A directory
+	// with no entry, which is how a test seeds one straight into dirs, reads
+	// as created "now": YOUNG. A fixture that means an old one says so with
+	// ageDir.
+	mtimes map[string]int64
+	// clock is the fake's own "now" for those stamps; time.Now unless a test
+	// hands it the server's fake clock.
+	clock func() time.Time
 
 	// local store (WriteProto/ReadProto)
 	protos map[string][]byte
 
 	// nvme host connections, keyed by subsystem nqn
 	conns map[string]*fakeConn
+	// nsMisses defers a connection's namespace node, keyed by NQN: the
+	// connect that creates the subsystem adds its controller, and the
+	// namespace node (and its block device) appear only after that many
+	// listings of the subsystem directory have missed it — the kernel's
+	// namespace scan, which `nvme connect` only queues.
+	nsMisses map[string]int
+	// pendingNs are the namespaces nsMisses deferred, keyed by the
+	// subsystem's sysfs directory.
+	pendingNs map[string]*pendingNs
 	// nextSubsys and nextCtrl are monotonic and never reused. Sizing the
 	// index off len(conns) let a disconnect hand the next connect an index a
 	// live subsystem was still using, so two subsystems collided on one
@@ -165,6 +188,12 @@ type fakeConn struct {
 	ctrls []*fakeCtrl
 }
 
+// pendingNs is one namespace node the kernel's scan has not added yet.
+type pendingNs struct {
+	misses int // listings of the subsystem directory still to miss it
+	conn   *fakeConn
+}
+
 // fakeCtrl is one controller (one path) of a subsystem.
 type fakeCtrl struct {
 	name    string // "nvme3"
@@ -190,8 +219,12 @@ func newFakeNode() *fakeNode {
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
 		links:         make(map[string]string),
+		mtimes:        make(map[string]int64),
+		clock:         time.Now,
 		protos:        make(map[string][]byte),
 		conns:         make(map[string]*fakeConn),
+		nsMisses:      make(map[string]int),
+		pendingNs:     make(map[string]*pendingNs),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
 
@@ -269,7 +302,7 @@ func (f *fakeNode) Reset() {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "cmd lsblk ",
+	"cmd ls ", "cmd lsblk ", "cmd stat ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	// `dmsetup ls` is the root of the sweep's enumeration and changes
 	// nothing; without it here every SH16 no-mutation assertion would fail
@@ -342,6 +375,7 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 	if err := f.readHookErr(path); err != nil {
 		return "", err
 	}
+	f.touchAttrParent(path)
 	data, ok := f.files[path]
 	if !ok {
 		// The absent-file error MUST wrap fs.ErrNotExist. The production
@@ -409,8 +443,47 @@ func (f *fakeNode) writeFileDirect(
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
 	}
+	f.touchAttrParent(path)
 	f.files[path] = configfsNormalize(path, data)
 	return nil
+}
+
+// touchAttrParent is the lab kernel's configfs stamp: a lookup of one of an
+// nvmet subsystem's own attribute files — every read and every write of an
+// `attr_*` directly under subsystems/<nqn> — moves that subsystem directory's
+// mtime to now. Namespace attributes live one level down and stamp nothing
+// the sweep reads.
+func (f *fakeNode) touchAttrParent(path string) {
+	rest, ok := strings.CutPrefix(path, agent.NvmetRoot+"/subsystems/")
+	if !ok {
+		return
+	}
+	nqn, attr, ok := strings.Cut(rest, "/")
+	if !ok || strings.Contains(attr, "/") ||
+		!strings.HasPrefix(attr, "attr_") {
+		return
+	}
+	dir := agent.NvmetRoot + "/subsystems/" + nqn
+	if f.dirs[dir] {
+		f.mtimes[dir] = f.clock().Unix()
+	}
+}
+
+// ageDir backdates one directory's mtime by d: the only way a fixture gets an
+// export OLDER than DnExportOrphanGrace, since every directory the fake
+// creates, or a test seeds, starts young.
+func (f *fakeNode) ageDir(path string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mtimes[path] = f.clock().Add(-d).Unix()
+}
+
+// mtimeOf is what `stat -c %Y` reads for an existing directory.
+func (f *fakeNode) mtimeOf(path string) int64 {
+	if mtime, ok := f.mtimes[path]; ok {
+		return mtime
+	}
+	return f.clock().Unix()
 }
 
 // configfsNormalize models how the nvmet kernel module stores an attribute
@@ -701,8 +774,26 @@ func (f *fakeNode) dispatch(
 		return f.cmdDmsetup(args, stdin)
 	case "nvme":
 		return f.cmdNvme(args)
+	case "stat":
+		return f.cmdStat(args)
 	}
 	return "", 127
+}
+
+// cmdStat answers `stat -c %Y <path>`, the one form the agent runs, for a
+// directory: its mtime in whole seconds, or exit 1 with coreutils' words when
+// it does not exist.
+func (f *fakeNode) cmdStat(args []string) (string, int) {
+	if len(args) != 3 || args[0] != "-c" || args[1] != "%Y" {
+		return "", 1
+	}
+	path := args[2]
+	if !f.dirs[path] {
+		f.dispatchStderr = "stat: cannot stat '" + path +
+			"': No such file or directory"
+		return "", 1
+	}
+	return strconv.FormatInt(f.mtimeOf(path), 10) + "\n", 0
 }
 
 func (f *fakeNode) children(path string) []string {
@@ -756,6 +847,14 @@ func (f *fakeNode) cmdLs(args []string) (string, int) {
 	if !f.dirs[path] {
 		return "", 2
 	}
+	if pending := f.pendingNs[path]; pending != nil {
+		if pending.misses > 0 {
+			pending.misses--
+		} else {
+			f.addNsSysfs(pending.conn)
+			delete(f.pendingNs, path)
+		}
+	}
 	return strings.Join(f.children(path), "\n") + "\n", 0
 }
 
@@ -779,6 +878,7 @@ func (f *fakeNode) cmdMkdir(args []string) (string, int) {
 		cur += "/" + part
 		if !f.dirs[cur] {
 			f.dirs[cur] = true
+			f.mtimes[cur] = f.clock().Unix()
 			f.autoCreate(cur)
 		}
 	}
@@ -825,6 +925,7 @@ func (f *fakeNode) cmdRmdir(args []string) (string, int) {
 			}
 		}
 	}
+	deleteTree(f.mtimes, path)
 	for entry := range f.files {
 		if strings.HasPrefix(entry, prefix) {
 			delete(f.files, entry)
@@ -1267,8 +1368,13 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 			idx:    idx,
 		}
 		f.conns[nqn] = conn
-		f.devNo["/dev/"+conn.device] = f.newDevNo()
 		f.addSubsysSysfs(conn)
+		if misses := f.nsMisses[nqn]; misses > 0 {
+			f.pendingNs["/sys/class/nvme-subsystem/"+conn.subsys] =
+				&pendingNs{misses: misses, conn: conn}
+		} else {
+			f.addNsSysfs(conn)
+		}
 	}
 	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
@@ -1329,15 +1435,22 @@ func (c *fakeConn) refresh() {
 }
 
 // addSubsysSysfs materialises the subsystem half of the /sys tree a real
-// `nvme connect` creates: the directory keyed by subsysnqn, holding the
-// multipath namespace node.
+// `nvme connect` creates: the directory keyed by subsysnqn. Its multipath
+// namespace node is addNsSysfs's, which the connect runs at once unless the
+// test deferred it (nsMisses).
 func (f *fakeNode) addSubsysSysfs(conn *fakeConn) {
 	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
 	f.dirs["/sys/class/nvme-subsystem"] = true
 	f.dirs["/sys/class/nvme"] = true
 	f.dirs[subsysDir] = true
-	f.dirs[subsysDir+"/"+conn.device] = true
 	f.files[subsysDir+"/subsysnqn"] = conn.nqn + "\n"
+}
+
+// addNsSysfs is the kernel's namespace scan landing: the multipath namespace
+// node under the subsystem directory, and its block device.
+func (f *fakeNode) addNsSysfs(conn *fakeConn) {
+	f.dirs["/sys/class/nvme-subsystem/"+conn.subsys+"/"+conn.device] = true
+	f.devNo["/dev/"+conn.device] = f.newDevNo()
 }
 
 // addCtrlSysfs materialises one controller: its link under the subsystem, its
@@ -1385,6 +1498,7 @@ func (f *fakeNode) dropSubsysSysfs(conn *fakeConn) {
 	subsysDir := "/sys/class/nvme-subsystem/" + conn.subsys
 	deleteTree(f.dirs, subsysDir)
 	deleteTree(f.files, subsysDir)
+	delete(f.pendingNs, subsysDir)
 }
 
 // deleteTree drops root and everything under it from a path-keyed map.

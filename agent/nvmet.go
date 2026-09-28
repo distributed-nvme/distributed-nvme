@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -587,6 +588,26 @@ func (n *Nvmet) ListPorts(ctx context.Context) ([]int, error) {
 		out = append(out, portId)
 	}
 	return out, nil
+}
+
+// SubsysMtime is the mtime of one subsystem's configfs directory, the age a
+// sweep judges an unattributable export by (dnagent.md DN6); ok is false when
+// the subsystem is gone. On the lab's 7.0 kernel the mtime is set at `mkdir`
+// and moved to "now" by every lookup of one of the subsystem's OWN attribute
+// files — a read, a write, even a stat of `attr_*`: configfs instantiates an
+// attribute's inode on each lookup and, in that kernel, stamps the parent
+// directory when it does. Adding an allowed-host link or a namespace directory
+// under it does not move it, and neither does listing it. So it reads "time
+// since the subsystem was created or an attribute of it was last touched":
+// a build in flight writes the attributes and reads young, and an export
+// nobody touches ages. A kernel that stamps the directory only when a
+// directory or a link is created under it (7.3 moved configfs's stamp there)
+// reads the mkdir time instead, the plain age of the subsystem.
+func (n *Nvmet) SubsysMtime(
+	ctx context.Context,
+	nqn string,
+) (time.Time, bool, error) {
+	return n.dirMtime(ctx, n.SubsysPath(nqn))
 }
 
 // NsDevicePath reads one namespace's backing device path. It is how a sweep

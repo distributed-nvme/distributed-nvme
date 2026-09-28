@@ -2629,13 +2629,18 @@ cannot forget in that way: while the device is there, the next enumeration finds
   by the live dm-clone that maps it. What cannot be attributed to any of the node's own
   objects is *unowned*. The one unowned kind only the node-level pass removes is a
   host-facing subsystem no request claims and no namespace attributes, because only its
-  write lock makes "nobody here wants it" stable. Two are removed by BOTH scopes,
-  because for them that question is settled from state already stable under the node
-  READ lock: a clone-source connection, tested against every stored cntlr's request —
-  persisted before that converge issues any `nvme connect` — and against the live
-  dm-clone tables; and a `:2:` export holding no namespace and linked to no port but
-  ours, tested the same way against every stored side's request, and harmless to remove
-  in any case because it exports nothing and holds nothing open. A `cb` clone-metadata
+  write lock makes "nobody here wants it" stable. Two are removed by BOTH scopes. For a
+  clone-source connection that question is settled from state already stable under the
+  node READ lock: it is tested against every stored cntlr's request — persisted before
+  that converge issues any `nvme connect` — and against the live dm-clone tables. For a
+  `:2:` export holding no namespace and linked to no port but ours it is not, and no
+  lock of this agent's can make it so (*amended 2026-09-28*): it is tested the same way
+  against every stored side's request — the object-level pass judging only its own
+  leg's — and it exports nothing and holds nothing open, but every export passes
+  through that very shape while it is being built, the build may be a sibling agent's
+  on the same kernel, and no request of this agent's can show that build. So it is
+  removed only once its configfs directory is older than `DnExportOrphanGrace`, its age
+  being the one evidence that can (`dnagent.md` DN6). A `cb` clone-metadata
   wrapper no stored cntlr's `clone_list` names is swept by the node-level pass too,
   across every sp at once — but it is not unowned: a `cb` name carries its sp, so a
   cntlr's own pass already removes the ones of its sp that its `clone_list` no longer
@@ -2650,8 +2655,13 @@ cannot forget in that way: while the device is there, the next enumeration finds
   * a `:2:` export whose namespace backs ANOTHER dn's per-cn dm-linear is that agent's
     and is never touched; one with no namespace at all is judged by the nvmet **port**
     it is linked to, since each agent converges exactly one port id; and one linked to
-    no port while holding no namespace exports nothing and holds nothing open, so
-    removing it is harmless whoever built it;
+    no port, or only to ours, while holding no namespace exports nothing and holds
+    nothing open, but is not thereby nobody's: every export is in that shape between
+    its subsystem `mkdir` and its namespace `mkdir`, from its host-link step on already
+    carrying the CN's host link, and removing a sibling's there strips its build, which
+    only some later converge of that side would rebuild. So it goes only once it is
+    older than `DnExportOrphanGrace`, age being the one thing that tells an abandoned
+    build from a sibling's in flight (*amended 2026-09-28*, `dnagent.md` DN6);
   * a `:3:` host connection is judged by the controller's `hostnqn`, because the dn id
     inside a `MigrSrcNqn` is the SOURCE dn's and the connection could have been opened
     by any agent on the node;

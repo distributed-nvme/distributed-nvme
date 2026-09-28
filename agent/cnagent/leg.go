@@ -229,12 +229,14 @@ func (s *CnAgentServer) readSysfs(
 // whether any leg failed to converge — its connect, its multipath namespace
 // or its wrapper — which registers the cntlr for the background retry (build
 // registers it too for a group's leg_list member that is not available,
-// CN12).
+// CN12). budget is the pass's one CN10 wait budget, shared by every leg and
+// by the clone sources after them.
 func (s *CnAgentServer) ensureLegs(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
+	budget *agent.WaitBudget,
 ) (map[uint64]bool, bool) {
 	available := make(map[uint64]bool, len(plan.legs))
 	retryNeeded := false
@@ -251,7 +253,7 @@ func (s *CnAgentServer) ensureLegs(
 			available[lp.legId] = false
 			continue
 		}
-		view, err := s.ensureLeg(ctx, plan, lp)
+		view, err := s.ensureLeg(ctx, plan, lp, budget)
 		if err != nil {
 			info.LegIdToLeg[lp.legId] = st.tracker.Err(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, err.Error())
@@ -272,10 +274,19 @@ func (s *CnAgentServer) ensureLegs(
 // share one subsystem NQN, so the kernel merges them into a single multipath
 // namespace ([D1]); the wrapper is a whole-device dm-linear over it, sized
 // from the desired state and never from probing the device.
+//
+// The connect step waits, briefly and boundedly, for what it has just asked
+// for (CN10): a failed connect is tried again within the pass
+// (connectWithin), and after a connect this pass made the subsystem is
+// re-read until the kernel has added the multipath namespace head
+// (awaitNsHead). Both draw on budget, the pass's one wait budget; once it is
+// spent the leg fails as it always did, with the same error, and ensureLegs
+// registers the background retry.
 func (s *CnAgentServer) ensureLeg(
 	ctx context.Context,
 	plan *cntlrPlan,
 	lp *legPlan,
+	budget *agent.WaitBudget,
 ) (*subsysView, error) {
 	view, err := s.readSubsys(ctx, lp.nqn, sideNsid)
 	if err != nil {
@@ -295,7 +306,7 @@ func (s *CnAgentServer) ensureLeg(
 		if view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
 			continue
 		}
-		if err := s.host.Connect(ctx, agent.TrConf{
+		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),
@@ -306,7 +317,8 @@ func (s *CnAgentServer) ensureLeg(
 		connected = true
 	}
 	if connected {
-		if view, err = s.readSubsys(ctx, lp.nqn, sideNsid); err != nil {
+		if view, err = s.awaitNsHead(
+			ctx, budget, lp.nqn, sideNsid); err != nil {
 			return nil, err
 		}
 	}
@@ -323,6 +335,76 @@ func (s *CnAgentServer) ensureLeg(
 
 // sideNsid is the single namespace id every side of a leg exports (§3.1).
 const sideNsid = 1
+
+// connectWithin is the CN10 connect of one side of a leg, and the CN18
+// connect of one clone-source path: `nvme connect`, and again after a
+// CnConnectRetryPause whenever it failed, for as long as the pass's budget
+// covers the pause. Every failed attempt is charged its own elapsed time, so
+// a connect to a disk node whose VM is down — about 3 s, the kernel's SYN
+// retries or CmdSoftTimeout — spends the whole budget at once and is never
+// retried in the pass.
+//
+// The error is never classified. The same failure is what a disk node that
+// has not linked the export into its port yet answers — refused at TCP by a
+// port that does not listen yet, rejected by one that does ("failed to write
+// to nvme-fabrics device") — for as long as its SyncupSide takes after the
+// worker's unordered fan-out ([D16]), and what a permanently rejected export
+// or a dead disk node answers; only the first goes away within a pass, and
+// the budget is what caps how often the other two are retried. The last
+// attempt's error is the one returned, so a leg that stays unconnected reads
+// exactly as it did before the retry existed.
+func (s *CnAgentServer) connectWithin(
+	ctx context.Context,
+	budget *agent.WaitBudget,
+	tr agent.TrConf,
+	nqn string,
+	hostNqn string,
+) error {
+	for {
+		start := budget.Now()
+		err := s.host.Connect(ctx, tr, nqn, hostNqn)
+		if err == nil {
+			return nil
+		}
+		budget.Charge(budget.Now().Sub(start))
+		if !budget.Pause(ctx, common.CnConnectRetryPause) {
+			return err
+		}
+	}
+}
+
+// awaitNsHead re-reads one subsystem after a connect this pass made, until
+// its multipath namespace head is there or the pass's budget no longer
+// covers another CnNsScanPause (CN10). The kernel returns from `nvme connect`
+// as soon as the controller is live and only QUEUES the namespace scan, which
+// adds the hidden per-path disk first and the head after it; a single re-read
+// right after the connect can therefore miss a head that is milliseconds
+// away. Only a connect made in this pass is waited for: a subsystem that was
+// already connected and has no head — a leg whose only path is ANA
+// inaccessible never gets one — is judged on the one read, as before.
+func (s *CnAgentServer) awaitNsHead(
+	ctx context.Context,
+	budget *agent.WaitBudget,
+	nqn string,
+	nsIdx uint32,
+) (*subsysView, error) {
+	for {
+		view, err := s.readSubsys(ctx, nqn, nsIdx)
+		if err != nil || view.nsDev != "" {
+			return view, err
+		}
+		if !budget.Pause(ctx, common.CnNsScanPause) {
+			return view, nil
+		}
+	}
+}
+
+// newPassBudget is one converge pass's CN10 wait budget: created once per
+// convergeCntlr and handed down to every leg and clone-source connect of that
+// pass, never kept across passes or shared between cntlrs.
+func (s *CnAgentServer) newPassBudget() *agent.WaitBudget {
+	return agent.NewWaitBudget(common.CnConnectPassBudget, s.now, s.sleep)
+}
 
 // disconnectDeadPaths retires a controller of the leg NQN whose transport
 // matches no desired side — the src side after FinishMigration, whose
@@ -510,7 +592,10 @@ func (s *CnAgentServer) disconnect(ctx context.Context, nqn string) {
 // member that is not available (CN12). A goroutine re-runs the whole
 // converge every CnConnectRetryInterval seconds under the CN1 locks until a
 // pass registers none of these (build's stopConnectRetry) or the cntlr is
-// torn down; the RPC itself never blocks on a connect.
+// torn down. The RPC itself retries a connect, or waits for its namespace
+// head, only as far as the pass's CnConnectPassBudget allows: an in-pass
+// retry, or a step of that wait, starts only while the budget still covers
+// its pause (connectWithin, awaitNsHead).
 func (s *CnAgentServer) startConnectRetry(
 	st *cntlrState,
 	plan *cntlrPlan,

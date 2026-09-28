@@ -108,8 +108,11 @@ func (s *DnAgentServer) ensureMigrDst(
 		return false
 	}
 
-	// (3) one connect attempt per pass; "retrying until success" (§11.2) is
-	// the DN8 background registry, so the RPC never blocks on it.
+	// (3) one connect attempt per pass, never retried inside the RPC:
+	// "retrying until success" (§11.2) is the DN8 background registry. The
+	// only other wait here comes after a connect that succeeded: for the
+	// source's namespace node, which the kernel adds from a scan the connect
+	// only queued, pausing DnMigrDstNsWait at most (awaitMigrSrcNs).
 	state, err := s.host.ListSubsys(ctx, nqn)
 	if err == nil && !state.Found {
 		if connErr := s.host.Connect(ctx, agent.TrConf{
@@ -120,7 +123,7 @@ func (s *DnAgentServer) ensureMigrDst(
 		}, nqn, plan.dnHostNqn()); connErr != nil {
 			err = connErr
 		} else {
-			state, err = s.host.ListSubsys(ctx, nqn)
+			state, err = s.awaitMigrSrcNs(ctx, nqn)
 		}
 	}
 	switch {
@@ -179,6 +182,32 @@ func (s *DnAgentServer) ensureMigrDst(
 	// §9.5: the raw dmsetup status line carries hydration progress.
 	dstInfo.DmCloneInfo = t.Ok(resKeyMigrDstClone, cloneName, raw)
 	return true
+}
+
+// awaitMigrSrcNs re-reads the migration source's subsystem after a connect
+// this pass made, until its namespace device is there, pausing
+// DnMigrDstNsPause between reads and DnMigrDstNsWait in all — the reads
+// themselves are not counted (DN13 step (3)). The kernel returns from
+// `nvme connect` as soon as the controller is live and only QUEUES the
+// namespace scan that adds the device, so the single re-read this replaced
+// could find the controller and no namespace yet, failing the target with
+// "controller has no namespace" for a device milliseconds away.
+// A ListSubsys that fails ends the wait at once. It connects nothing: one
+// connect per pass stays DN13's rule, and the DN8 loop stays the retry.
+func (s *DnAgentServer) awaitMigrSrcNs(
+	ctx context.Context,
+	nqn string,
+) (*agent.SubsysState, error) {
+	budget := agent.NewWaitBudget(common.DnMigrDstNsWait, s.now, s.sleep)
+	for {
+		state, err := s.host.ListSubsys(ctx, nqn)
+		if err != nil || state.DevicePath != "" {
+			return state, err
+		}
+		if !budget.Pause(ctx, common.DnMigrDstNsPause) {
+			return state, nil
+		}
+	}
 }
 
 // ensureMigrMeta reserves this migration's dm-clone metadata slot and builds
@@ -359,7 +388,9 @@ func (s *DnAgentServer) ensureHydration(
 // startMigrRetry registers a side whose migration-source connect failed. A
 // goroutine re-runs the destination converge every
 // DnMigrConnectRetryInterval seconds under the DN1 locks, until it succeeds
-// or the side is torn down — the RPC itself never blocks on the connect.
+// or the side is torn down — the RPC itself never retries a connect (it
+// waits only for the namespace of one that succeeded, pausing
+// DnMigrDstNsWait at most: awaitMigrSrcNs).
 //
 // The loop is enrolled in the server's WaitGroup so WaitBackground covers the
 // connect retries too, not just zeroing (SH27). Like startZeroing it

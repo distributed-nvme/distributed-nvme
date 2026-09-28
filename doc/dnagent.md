@@ -145,6 +145,20 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 	// nicknamed for the DN8-gated converge it re-runs).
 	DnMigrConnectRetryInterval = 5
 
+	// The migration destination's wait for the source namespace after a
+	// connect that succeeded (DN13 step (3)): re-read, pausing
+	// DnMigrDstNsPause between reads and DnMigrDstNsWait in all. Not a
+	// connect retry — one connect per pass stays the rule. time.Durations,
+	// unlike the integers above them.
+	DnMigrDstNsWait  = 1 * time.Second
+	DnMigrDstNsPause = 50 * time.Millisecond
+
+	// DnExportOrphanGrace is the age a namespace-less :2: export linked to
+	// no port but the agent's own must exceed before a sweep removes it (DN6):
+	// until then it may be a sibling agent's build in flight. The age is the
+	// subsystem directory's mtime, read from the node. A time.Duration.
+	DnExportOrphanGrace = 30 * time.Second
+
 	// Side provisioning ([D15], architecture.md §9.4, dnagent.md DN9): the
 	// background zeroing goroutine zeroes DnZeroBatchExtCnt logical extents
 	// per `blkdiscard --zeroout` command, through the side's dm-linear, and
@@ -1079,8 +1093,10 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      node that lost `--local-store` but kept its disk must rebuild those
      sides from their records, and sweeping them would free the extents and
      send the next `SyncupSide` through the §9.4 provisioning protocol again,
-     zeroing live data. When no DN has been synced or reloaded at all nothing
-     is authoritative and the sweep does nothing.
+     zeroing live data. It also takes the namespace-less exports nobody can
+     attribute, once they are older than `DnExportOrphanGrace` (below). When
+     no DN has been synced or reloaded at all nothing is authoritative and
+     the sweep does nothing.
 
      **Scope 2, side-level.** Inside `convergeSide` and ahead of its build
      phase (§4.6), under whatever DN1 locks that caller holds (SH10/SH11).
@@ -1093,10 +1109,21 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      still under the level gate above it (DN12) — and `DnMigrFinalName`,
      `DnMigrMetaDmName` and the `:3:` host connection while a destination
      role is wanted (DN13). Everything of that side which the node holds and
-     that set does not name is removed.
+     that set does not name is removed. Of the `SideToCnNqn` exports it
+     judges only its **own leg's** (*amended 2026-09-28*): the NQN names the
+     leg, so another leg's export is skipped by name, before anything of it
+     is read. It is another side's business — that side's own `SyncupSide`,
+     or Scope 1 once the side has left the list — and this pass holds only
+     the node read lock, beside every other side's converge on this kernel,
+     a sibling agent's included: judging the whole sp is how one agent's
+     side-level sweep stripped a sibling's half-built export of another leg
+     of its host link and namespace in an e2e run.
 
      The node write lock excludes every side-level sweep while the node-level
-     one runs, so the two scopes never race. Two side-level sweeps of
+     one runs, so the two scopes never race. Those locks are per process:
+     they order nothing between the sibling dn agents of one kernel, whose
+     builds can be in flight while this agent sweeps (below). Two side-level
+     sweeps of
      different sides of one sp can both see the same unclaimed migration
      object, because a migration belongs to no side (below); a second removal
      is harmless — its probe simply finds the device already gone, which is
@@ -1127,10 +1154,55 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      be rebuilt from its record exporting (DN8) even though no stored side
      claims it. An export holding no namespace at all is attributed by the
      nvmet **port** it is linked to, each agent converging exactly one port
-     id; one linked to no port either exports nothing and holds nothing
-     open, so whoever finds it may remove it — unless a stored side still
-     claims it, which is the claim rule again. A `:3:` connection is
-     attributed by its controller's `hostnqn`
+     id: linked to a sibling's port, it is that sibling's. One linked to no
+     port, or only to ours, exports nothing and holds nothing open — but it
+     is not therefore nobody's (*amended 2026-09-28*). It is also the shape
+     of **every** export between its subsystem `mkdir` and its namespace
+     `mkdir` — an export is built subsystem first, with its attributes and
+     then its allowed hosts, then its namespace, then its port link — and
+     from the build's host-link step on, that half-built export already
+     carries the CN's host link. On a kernel several dn agents share, the
+     build in that window may be a sibling's, whose request no claim of
+     ours can show. Removing it there takes the sibling's host link — and
+     any namespace it adds meanwhile — from under its build, and a broken dn
+     export is rebuilt only by some later converge of its side, which the
+     breakage itself never triggers: an e2e run lost a leg that way. Only
+     age tells an abandoned half-built export from one in flight, so such an
+     export is removed only
+     once its configfs subsystem directory is older than
+     `DnExportOrphanGrace` (30 s) — unless a stored side still claims it,
+     which is the claim rule again. A younger one is left alone that pass:
+     not removed, not a leftover, not a failure, so the reply code is
+     unaffected; each later pass judges it again, until it either has a
+     namespace, and so an owner, or the age of an export nobody is
+     building. The age is read from the node, never remembered: the
+     directory's mtime (`stat -c %Y`) against the agent's clock. A `stat`
+     that fails makes the export foreign for that pass, as every other
+     failed read of the attribution does: one that did not answer is named
+     as a failed enumeration, so the verdict is not clean, and one that
+     found the directory gone is simply passed over. The mtime is set at
+     `mkdir`, and adding an allowed-host link or a namespace directory under
+     it does not move it; but on the lab's 7.0 kernel every lookup of one
+     of the subsystem's own `attr_*` files does — a read, a write, even a
+     `stat` of one — because configfs instantiates an attribute's inode on
+     each lookup and, in that kernel, stamps the parent directory when it
+     does. So the age reads "since the subsystem was created or an
+     attribute of it was last touched". A first build is young from its
+     `mkdir` on, and its attribute writes only keep it so; on that kernel
+     the stamp also protects a rebuild — an owner rebuilding, more than the
+     grace after its first `mkdir`, an export whose first build stopped
+     before its namespace makes it young again with the rebuild's attribute
+     reads. A kernel that no longer stamps on an attribute lookup (7.3
+     stamps the directory only when a directory or a link is created under
+     it) reads the plain time since the `mkdir`, and there such a rebuild
+     reads old. Nothing a sweep does touches an export's attributes (it
+     lists the namespaces and the port links and stats the directory), so
+     an abandoned export ages, and the first sweep that finds it older than
+     the grace settles it: a Syncup's removes it, and a read-only Check
+     round's reports it as a leftover, which brings that Syncup. Anything
+     else that keeps reading its attributes keeps it young for as long as it
+     does. A `:3:` connection is attributed by its
+     controller's `hostnqn`
      (`/sys/class/nvme/nvmeN/hostnqn`): the nvme host namespace is per
      kernel, and since the NQN names the **source** DN, the host NQN it was
      opened with is the only field that names the agent holding it.
@@ -1625,8 +1697,18 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       dm-error/`AnaGrpIdInaccessible` shape and step (5)'s *reload* occur
       only while the connect is still retrying across passes.
       "Retrying until success" (§11.2) is implemented without
-      blocking the RPC: a converge pass attempts the connect **once**; on
-      failure it records `target_info = RES_STATUS_ERROR` and registers the
+      retrying inside the RPC: a converge pass attempts the connect
+      **once**, and after a connect that succeeded it re-reads the subsystem
+      until the source's namespace device is there, pausing
+      `DnMigrDstNsPause` (50 ms) between reads and `DnMigrDstNsWait` (1 s) in
+      all — the kernel returns from the
+      connect once the controller is live and only queues the namespace scan
+      that adds the device, so a single re-read could fail the target
+      `"controller has no namespace"` for a device milliseconds away
+      (*amended 2026-09-28*, the dn twin of `cnagent.md` CN10's head wait);
+      a read that fails ends that wait at once. When the connect fails, or
+      the namespace has still not appeared, the pass records
+      `target_info = RES_STATUS_ERROR` and registers the
       side in a background retry registry that re-runs the destination
       converge every `DnMigrConnectRetryInterval` seconds under the DN1
       locks. It is deregistered on success, by the sweep's pre-step as soon
@@ -2038,7 +2120,32 @@ able to fail.
    which **is** removed, so no arm can pass by sweeping nothing — and the
    fixture converges a side of its own first, because the sp of that side is
    what puts the sibling's export past the enumeration's cheap `hosted` gate
-   and in front of the attribution rule at all.
+   and in front of the attribution rule at all. The namespace-less export on
+   this agent's own port is removed only when it is seeded **older** than
+   `DnExportOrphanGrace` — the fake reads every directory it did not stamp
+   itself as created now, so a fixture that means an old one says so with
+   `ageDir` — and its young twin is kept (*amended 2026-09-28*).
+   **The age gate** (DN6, *added 2026-09-28*;
+   `TestHalfBuiltExportAgeGate`) runs in both scopes — a `SyncupDn` over a
+   sibling leg's export, a `SyncupSide` over an export of the side's own leg
+   to a cn it does not export to — a namespace-less export linked to no
+   port, with and without its allowed-host link: young, it is not removed,
+   its host link survives, and neither the pass nor the read-only verdict
+   reports it; old, the read-only verdict names it as a leftover and the
+   pass removes it, host link and all. The fake models the lab kernel's
+   stamp (a read or a write of an `attr_*` moves the subsystem directory's
+   mtime), so a sweep that read an orphan's attributes before judging its
+   age would keep it young for ever and fail the old arms.
+   `TestHalfBuiltExportAgeUnreadIsForeign`: an old export whose `stat` does
+   not answer is kept, the verdict names
+   the unread age, and the next pass, with the `stat` answering, removes
+   it. **The own-leg rule** (`TestSideScopeJudgesItsOwnLegOnly`): a
+   side-level pass leaves another leg's export alone in every shape — an
+   old orphan with no port link or on this agent's port, a young one, one
+   backing this agent's `d1` of a side in no list, one backing a
+   sibling's — and issues not one call naming it, while the node-level
+   pass that follows removes exactly the three it owns or can prove
+   abandoned.
 5. **Side provisioning (zeroing) protocol** (DN9): the allocation slot write
    (a record whose `zeroed_bits` are all 0), the `dmsetup create` of
    `DnSideName` (stdin table form), then one
@@ -2115,6 +2222,19 @@ able to fail.
     reach — and it can only fail because the fake honours the context (§6
     preamble). `migrRetryInterval` is a server field for this, the way
     `zeroRetryInterval` already was.
+    **The wait for the source namespace** (DN13 step (3), *added
+    2026-09-28*; `TestMigrationDestinationAwaitsTheSourceNamespace`) runs on
+    a fake clock through the server's `now`/`sleep` seams, with the fake
+    host's namespace node deferred by N listings of its subsystem
+    directory (`nsMisses`): a namespace that appears after one or after
+    three missed reads leaves `target_info` and `dm_clone_info` `OK` on the
+    first reply after exactly one connect and exactly that many
+    `DnMigrDstNsPause`s, and registers no DN8 retry; one that never appears
+    costs exactly `DnMigrDstNsWait` of pauses and ends as the single re-read
+    did,
+    `"controller has no namespace"` with the retry registered; and a read
+    that fails after the connect ends the wait with no pause, the target
+    carrying the read's error.
 13. **`diskmeta`** (`diskmeta_test.go`, on the fake's segment store): format
     and load round-trip; probe-first idempotency (zero `WriteBlock` on a
     formatted disk); identity mismatch refused; corrupt-header refusal; A/B

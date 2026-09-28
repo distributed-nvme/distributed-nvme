@@ -59,13 +59,15 @@ type CnAgentServer struct {
 	rootCtx context.Context
 
 	// probeInterval / probeStall / retryInterval are fields rather than
-	// constants, and now — like probeIO above — is overridable, so tests can
-	// drive the CN11 prober on a short fake clock and off the real syscalls;
-	// nothing else changes them.
+	// constants, and now and sleep — like probeIO above — are overridable, so
+	// tests can drive the CN11 prober on a short fake clock and off the real
+	// syscalls, and run a converge pass's CN10 connect budget (newPassBudget)
+	// on a fake clock too; nothing else changes them.
 	probeInterval time.Duration
 	probeStall    time.Duration
 	retryInterval time.Duration
 	now           func() time.Time
+	sleep         func(context.Context, time.Duration) error
 }
 
 // cnState is one synced CN: its last fully applied SyncupCnRequest plus the
@@ -157,6 +159,7 @@ func NewCnAgentServer(
 		probeStall:    common.CnLegProbeStallSeconds * time.Second,
 		retryInterval: common.CnConnectRetryInterval * time.Second,
 		now:           time.Now,
+		sleep:         agent.SleepCtx,
 	}
 }
 

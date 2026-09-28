@@ -23,12 +23,14 @@ const detailsCloneMetaMissing = "metadata wrapper missing"
 // ensureClone runs the CN18 sequence for one clone and reports whether the
 // source connection still needs the background retry. Every step captures its
 // own failure into the clone's ResInfos and lets the pass continue (CN29).
+// budget is the pass's one CN10 wait budget, the one its legs drew on.
 func (s *CnAgentServer) ensureClone(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	cp *clonePlan,
 	info *pb.CntlrInfo,
+	budget *agent.WaitBudget,
 ) bool {
 	tgtKey := resKeyOf(resKeyCloneTgtFmt, cp.cloneId)
 	dmKey := resKeyOf(resKeyCloneDmFmt, cp.cloneId)
@@ -56,7 +58,7 @@ func (s *CnAgentServer) ensureClone(
 
 	// (1) the source connection: one controller per source cntlr, all in one
 	// subsystem, so the source's own ANA picks the serving path.
-	srcDev, view, err := s.ensureCloneSource(ctx, plan, cp)
+	srcDev, view, err := s.ensureCloneSource(ctx, plan, cp, budget)
 	if err != nil {
 		info.CloneIdToTarget[cp.cloneId] = st.tracker.Err(
 			tgtKey, cp.clone.GetSrcNqn(), err.Error())
@@ -181,11 +183,15 @@ func (s *CnAgentServer) ensureClone(
 }
 
 // ensureCloneSource connects to every entry of src_tr_conf_list and returns
-// the source namespace device.
+// the source namespace device. Its connect step is CN10's, on the same pass
+// budget the legs drew on (CN18): a failed connect is tried again while the
+// budget covers the pause, and after a connect this pass made the subsystem
+// is re-read until the source namespace is there.
 func (s *CnAgentServer) ensureCloneSource(
 	ctx context.Context,
 	plan *cntlrPlan,
 	cp *clonePlan,
+	budget *agent.WaitBudget,
 ) (string, *subsysView, error) {
 	nqn := cp.clone.GetSrcNqn()
 	nsIdx := cp.clone.GetSrcNsIdx()
@@ -198,7 +204,7 @@ func (s *CnAgentServer) ensureCloneSource(
 		if view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
 			continue
 		}
-		if err := s.host.Connect(ctx, agent.TrConf{
+		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),
@@ -209,7 +215,7 @@ func (s *CnAgentServer) ensureCloneSource(
 		connected = true
 	}
 	if connected {
-		if view, err = s.readSubsys(ctx, nqn, nsIdx); err != nil {
+		if view, err = s.awaitNsHead(ctx, budget, nqn, nsIdx); err != nil {
 			return "", nil, err
 		}
 	}

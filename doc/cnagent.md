@@ -103,6 +103,16 @@ gains, `common/name_parse.go`:
 	// DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
+	// The connect step's one wait budget per converge pass (cnagent.md CN10,
+	// CN18), shared by every leg and clone source of the pass and drawn on
+	// by exactly three things: a failed connect's own elapsed time, the
+	// pause before each in-pass retry, and the steps of the wait for the
+	// namespace head after a connect this pass made. time.Durations, unlike
+	// the whole-second integers around them.
+	CnConnectPassBudget = 1 * time.Second
+	CnConnectRetryPause = 100 * time.Millisecond
+	CnNsScanPause       = 50 * time.Millisecond
+
 	// ResDetailsSpLevel is the details of a CntlrInfo row the sp_level
 	// suppresses (cnagent.md CN19): RES_STATUS_MISSING that says the
 	// resource must not exist, where every other MISSING the cn agent reports
@@ -837,13 +847,57 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       subsystem directory ⇒ `/dev/{entry}`. On top of it the **leg wrapper**
       `CnLegName`, a whole-device dm-linear of
       `(meta_blocks + data_blocks) × block_size / 512` sectors — sizes come
-      from the desired state, never from probing the device. A connect
-      failure marks that leg `RES_STATUS_ERROR` and registers the cntlr in a
-      background retry registry that re-runs the converge every
+      from the desired state, never from probing the device.
+      **The connect step waits, briefly and boundedly, for what it has just
+      asked for** (*amended 2026-09-28*: an e2e react run's automatic grow
+      failed a settled primary over because the primary's connect to a new
+      side reached the disk node 18–26 ms before its export was linked into
+      the port — the worker fans the side's `SyncupSide` and the primary's
+      `SyncupCntlr` out unordered, [D16] — and the single re-read after a
+      connect can equally come before the kernel has added the head). Each
+      converge pass — one `convergeCntlr`, whether a `SyncupCntlr`, the
+      startup reconcile or an attempt of the background retry below runs it
+      — gets **one wait budget**, `CnConnectPassBudget` (1 s), made at the
+      start of that pass, shared by every leg and by the clone sources of
+      CN18, and never carried into another pass or another cntlr. Exactly
+      three things draw on it. (1) Every failed `nvme connect` is charged
+      its own elapsed time. (2) After a failed connect to a provisioned
+      side the pass pauses `CnConnectRetryPause` (100 ms) and connects
+      again — an **in-pass retry** — as long as the budget still covers the
+      pause. The error is not classified: a disk node that has not linked
+      the export into its port yet refuses the connect at TCP, or, when the
+      port already listens for another export, rejects it with the same
+      `failed to write to nvme-fabrics device` a permanently rejected export
+      gets, and a disk node that is down refuses it too, or does not answer
+      at all; every failed connect is a candidate until the budget is gone.
+      A connect to a disk node whose VM is down takes about 3 s (the
+      kernel's SYN retries, or `CmdSoftTimeout`), spends the whole budget
+      at once and so is never retried in the pass. (3) After a connect made
+      **in this pass**, the
+      subsystem is re-read every `CnNsScanPause` (50 ms) until its
+      multipath head is there, as long as the budget covers the step:
+      `nvme connect` returns once the controller is live and only queues
+      the namespace scan that adds the head. A subsystem that was already
+      connected and has no head — a leg whose only path is ANA inaccessible
+      never gets one — is judged on its one read. A pause starts only while
+      it fits in what is left, and a failed connect is charged after it has
+      run, so a retried connect that runs long can overdraw the budget;
+      nothing bounds the first connect of a side, which a pass makes as it
+      always did. Once the budget is spent the pass behaves exactly as it
+      did without one: every connect it makes is made once, the first that
+      fails still ends its leg's converge (the leg's other unconnected sides
+      wait for a later pass), and a leg that did not connect, or whose head
+      did not appear, fails with the same error as before. The waiting holds
+      the cntlr's object lock, which every `CheckCntlr` round takes too
+      (CN1), which is why the budget is one per pass and not one per leg.
+      A connect failure marks that leg `RES_STATUS_ERROR` and registers the
+      cntlr in a background retry registry that re-runs the converge every
       `CnConnectRetryInterval` seconds under the CN1 locks until a pass
-      registers it no more, or teardown (the DN13 pattern). Four things
-      register it: a leg that failed to converge — its connect, its
-      multipath namespace or its wrapper (above) — a clone source whose
+      registers it no more, or teardown (the DN13 pattern); the RPC itself
+      retries a connect, or waits for its head, only as far as the pass's
+      budget allows. Four things register it: a leg that failed to converge
+      — its connect, its multipath namespace or its wrapper (above) — a
+      clone source whose
       connection failed and a clone recovery whose destination bitmaps were
       not applied (CN18), and a `leg_list` member of a group that is not
       available (CN12;
@@ -1579,7 +1633,14 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          source's own ANA picks the serving path), hostnqn `CnHostNqn`,
          SH20 flags; failures go to the CN10 retry registry. The source
          namespace device is found via sysfs like CN10, by `src_nqn` +
-         `nsid = src_ns_idx`.
+         `nsid = src_ns_idx`. The connect step is CN10's, drawing on the
+         same pass budget the legs drew on (*amended 2026-09-28*): a failed
+         connect is retried within the pass while the budget covers the
+         pause, and after a connect this pass made the subsystem is re-read
+         until the source namespace is there. With the budget spent — the
+         legs may have spent it — a source that did not connect, or whose
+         namespace did not appear, fails step 1 exactly as before
+         (`no namespace {src_ns_idx} on {src_nqn}` for the latter).
       2. Allocate the clone's metadata slot from the §2.1 arena:
          `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)` **contiguous**
          units with `region_cnt = td.size / block_size` (one byte per region
@@ -3136,6 +3197,40 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     connect of a standby's leg, or of a primary's spare, registers the
     retry although neither leg is a late member — build ORs its
     late-member verdict into `ensureLegs`' and never overwrites it.
+32. **The connect step's pass budget** (CN10/CN18, *added 2026-09-28*;
+    `agent/cnagent/connstep_test.go`). Every test runs the pass on a fake
+    clock through the server's `now`/`sleep` seams (`withPassClock`): a
+    pause moves it by exactly its length, and a connect the fake node
+    refuses (`connectFail`, N refusals per endpoint and then success) takes
+    no time unless the test makes it slow (`connectTakes`); the fake also
+    defers a subsystem's namespace head to the Nth listing of its directory
+    (`nsHeadAfter`). The other tests' servers keep the real clock and a
+    sleep that does not wait, so a connect that fails for good costs them
+    its retries but no wall time. `TestConnectRetriedWithinThePass`: a
+    standby leg refused twice is `OK` on the first reply after three
+    connects and two pauses, with no retry registered; a primary's grown
+    group whose one leg is refused once — the e2e react grow — gives a first
+    reply with no `ERROR` row at all, the grown group, the data concat and
+    the pool `OK`. `TestNsHeadAwaitedAfterConnect`: a head on the second or
+    third read leaves a standby leg `OK` after one or two scan pauses, and
+    the grow's first reply clean. `TestSlowFailedConnectIsNotRetried`: a
+    connect that takes `CmdSoftTimeout` and fails is made once, the leg
+    reads `ERROR` with the refusal and registers the retry, and the pass
+    takes exactly the connect's time with no pause.
+    `TestPassBudgetSharedByEveryLeg`: the meta leg, refused for good, is
+    connected eleven times (one, then one after each of the ten pauses 1 s
+    holds), so the data leg, refused once, is not retried and reads `ERROR`
+    — and a background retry attempt, a pass of its own, gives the meta leg
+    its eleven connects again.
+    `TestNoHeadWaitWithoutAConnect`: a connected leg whose head is gone
+    reads `ERROR` `no multipath namespace` with no connect, no pause and no
+    more listings of its subsystem than the same pass with the head there.
+    `TestCloneSourceConnectStep`: a clone source refused once, or whose
+    namespace appears on the second read, builds the dm-clone on the first
+    reply. `TestCloneSourceSharesThePassBudget`: with the meta leg having
+    spent the budget, the source's refused connect is made once and the
+    clone reports its step-1 failure: `clone_id_to_target` `ERROR` with the
+    refusal, `clone_id_to_dm_clone` `MISSING` `source not connected`.
 
 ## 7. Acceptance checklist
 
@@ -3302,7 +3397,10 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   that has aged `primary_unhealthy` (5 s by default) AR5 can fail over a
   primary whose only fault is a dead leg — and the new primary inherits
   the same late member, and with it the same retry. The connect retry has
-  always held that lock too, but only while a side's connect fails; a dead
+  always held that lock too, but only while a side's connect fails — and
+  since the CN10 pass budget (2026-09-28) such an attempt also spends about
+  `CnConnectPassBudget` more of it on in-pass retries and head waits — more
+  when a retried connect itself runs long; a dead
   DN whose controllers survive registers the retry only as a late member,
   so before the late-member retry such a DN caused no attempt at all. How
   long an attempt holds the lock grows with the slice count. Counted on

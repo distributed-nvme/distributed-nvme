@@ -743,8 +743,8 @@ func (s *DnAgentServer) buildSideChain(
 	chain.metas = unclaimedMigr(common.DmKindDnMigrMeta, claims.migrDst)
 	chain.migrSrcs = unclaimedMigr(common.DmKindDnMigrSrc, claims.migrSrcDm)
 
-	s.collectExports(ctx, plan.clusterId, plan.dnId, plan.spId, plan.sideId,
-		actual, claims, wanted, chain, &portLinks{}, res)
+	s.collectExports(ctx, plan.clusterId, plan.dnId, plan.spId, plan.legId,
+		plan.sideId, actual, claims, wanted, chain, &portLinks{}, res)
 	s.collectSrcConns(ctx, plan.clusterId, plan.dnId, plan.spId,
 		actual, claims, wanted, chain, res)
 	return chain
@@ -767,11 +767,27 @@ const (
 	// in the DN's pointer list keeps its export although no local state
 	// claims it, because such a side must be REBUILT from its record (DN8).
 	exportOurs
-	// exportOrphan: no namespace to read, and the subsystem is linked to our
-	// port or to no port at all. It exports nothing and holds nothing open —
-	// this is what our own half-finished RemoveSubsystem leaves behind, and
-	// leaving it would leak it for ever.
+	// exportOrphan: no namespace to read, the subsystem is linked to our port
+	// or to no port at all, and its directory is older than
+	// DnExportOrphanGrace. It exports nothing and holds nothing open — this
+	// is what our own half-finished RemoveSubsystem leaves behind, and what a
+	// build abandoned by an agent that died leaves — and leaving it would
+	// leak it for ever.
 	exportOrphan
+	// exportYoung: the orphan shape, but no older than the grace. It is not
+	// only debris: it is ALSO every export's shape between its subsystem
+	// `mkdir` and its namespace `mkdir` — carrying the CN's host link from
+	// the build's host-link step on — and on a kernel shared by several dn
+	// agents that build may be a sibling's, whose request no claim of ours
+	// can show. Removing it there strips the sibling's host link, and any
+	// namespace it adds meanwhile, from under the build, and a broken dn
+	// export is rebuilt only by some later converge of its side, which the
+	// breakage itself never triggers. Age is the only evidence that tells an
+	// abandoned export from one in flight, so a young one is left alone this
+	// pass — not removed, not a leftover, not a failure — and judged again by
+	// each later pass, until it has either a namespace (and so an owner) or
+	// the age of an export nobody is building.
+	exportYoung
 )
 
 // portLinks is the lazily built "which port is this subsystem linked to" map.
@@ -814,7 +830,8 @@ func (s *DnAgentServer) portLinksOf(
 
 // classifyExport attributes one :2: export. It reads the export's namespace
 // first — the cheap and usually conclusive evidence — and falls back to the
-// port links only when there is no namespace to read.
+// port links, and then to the subsystem directory's age, only when there is
+// no namespace to read.
 func (s *DnAgentServer) classifyExport(
 	ctx context.Context,
 	clusterId uint64,
@@ -872,15 +889,32 @@ func (s *DnAgentServer) classifyExport(
 			return exportForeign, 0, 0
 		}
 	}
+	// No namespace and no sibling's port: the orphan shape, which a build in
+	// flight has too (exportYoung). Its age is read from the node, never
+	// remembered: the subsystem directory's mtime against our clock.
+	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
+	if err != nil {
+		res.Fail("nvmet subsystem age of "+nqn, err)
+		return exportForeign, 0, 0
+	}
+	if !present {
+		// Removed between the listing and this read.
+		return exportForeign, 0, 0
+	}
+	if s.now().Sub(mtime) <= common.DnExportOrphanGrace {
+		return exportYoung, 0, 0
+	}
 	return exportOrphan, 0, 0
 }
 
-// collectExports adds the unwanted nvmet subsystems of one sp to a chain.
+// collectExports adds the unwanted nvmet subsystems of one side's scope to a
+// chain: the :2: exports of its own leg and the :3: exports of its sp.
 func (s *DnAgentServer) collectExports(
 	ctx context.Context,
 	clusterId uint64,
 	dnId uint64,
 	spId uint64,
+	legId uint64,
 	sideId uint64,
 	actual *dnActual,
 	claims *sideClaims,
@@ -901,25 +935,34 @@ func (s *DnAgentServer) collectExports(
 			if parts.Ids[0] != clusterId || parts.Ids[1] != spId {
 				continue
 			}
+			// The side-level scope judges its OWN leg's exports and nothing
+			// else: another leg's export is its own side's business — that
+			// side's SyncupSide, or the node-level pass once the side has
+			// left the list — and this pass holds only the node READ lock.
+			// The NQN names the leg ((cluster, sp, leg, cn)), so this costs
+			// no read, and it comes before every read: a sibling agent's
+			// export of another leg of this sp — built on this kernel in the
+			// same instant — is never even classified here.
+			if parts.Ids[2] != legId {
+				continue
+			}
 			if _, keep := wanted.nvmetSs[nqn]; keep {
 				continue
 			}
-			// The side-level scope judges its OWN side's exports and nothing
-			// else: another side's export is its own SyncupSide's business,
-			// and this pass holds only the node READ lock.
 			owner, ownerSp, ownerSide := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
-			case exportForeign:
+			case exportForeign, exportYoung:
 				continue
 			case exportOurs:
 				if ownerSp != spId || ownerSide != sideId {
 					continue
 				}
 			case exportOrphan:
-				// No namespace names it, so it belongs to no side this pass
-				// can judge — but a live side may still be building it, and
-				// its request is the one thing that says so.
+				// No namespace names it and it is older than the grace, so
+				// it belongs to no side this pass can judge — but a stored
+				// side of ours may still want it, and that side's request is
+				// the one thing that says so.
 				if _, held := claims.exports[nqn]; held {
 					continue
 				}
@@ -1195,14 +1238,16 @@ func (s *DnAgentServer) sweepDn(
 			owner, ownerSp, ownerSide := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
-			case exportForeign:
+			case exportForeign, exportYoung:
 				continue
 			case exportOurs:
 				if _, live := known[[2]uint64{ownerSp, ownerSide}]; live {
 					continue
 				}
 			case exportOrphan:
-				// Ours, half-removed, exporting nothing: it goes.
+				// No namespace, on no port but ours, no stored side claims
+				// it, and older than DnExportOrphanGrace: ours half-removed,
+				// or a build its agent abandoned. Exporting nothing, it goes.
 			}
 		case common.NqnKindMigrSrc:
 			if parts.Ids[0] != clusterId || parts.Ids[1] != dnId {

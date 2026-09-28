@@ -131,6 +131,10 @@ func (s *CnAgentServer) convergeCntlr(
 	}
 	plan := newCntlrPlan(s.nf, st.req)
 	info := newCntlrInfo()
+	// CN10: the pass's one wait budget, made here and nowhere else, so every
+	// entrance — the RPC, the startup reconcile, a background retry attempt
+	// — gets its own and no pass can spend another's.
+	budget := s.newPassBudget()
 	sweep := s.sweepCntlr(ctx, st, plan, true)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
@@ -141,7 +145,7 @@ func (s *CnAgentServer) convergeCntlr(
 		s.stopConnectRetry(st)
 		s.dropAllResKeys(st, plan)
 	}
-	s.build(ctx, st, plan, info)
+	s.build(ctx, st, plan, info, budget)
 	return info, sweep
 }
 
@@ -210,13 +214,14 @@ func (s *CnAgentServer) build(
 	st *cntlrState,
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
+	budget *agent.WaitBudget,
 ) {
 	retryNeeded := false
 
 	// Legs (CN10).
 	var available map[uint64]bool
 	if plan.wantLeg {
-		available, retryNeeded = s.ensureLegs(ctx, st, plan, info)
+		available, retryNeeded = s.ensureLegs(ctx, st, plan, info, budget)
 	} else {
 		for _, lp := range plan.legs {
 			info.LegIdToLeg[lp.legId] = st.tracker.Missing(
@@ -398,7 +403,7 @@ func (s *CnAgentServer) build(
 	// Clones (CN18), then transfers (CN17).
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			if s.ensureClone(ctx, st, plan, cp, info) {
+			if s.ensureClone(ctx, st, plan, cp, info, budget) {
 				retryNeeded = true
 			}
 		}

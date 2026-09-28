@@ -51,6 +51,14 @@ type DnAgentServer struct {
 	// converge runs on the loop's own cancellable context.
 	migrRetryInterval time.Duration
 
+	// now and sleep are the clock seams, real by default: DN6's orphan age
+	// gate compares a subsystem directory's mtime with now, and DN13's wait
+	// for the migration source's namespace paces itself through both
+	// (agent.WaitBudget). Fields for the same reason as the three above: a
+	// unit test runs them on a fake clock; nothing else changes them.
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) error
+
 	// bg tracks every background goroutine that owns a child process, so
 	// agent.Serve can join them after GracefulStop and no orphan
 	// `blkdiscard --zeroout` ever outlives the agent (§9.4, SH27).
@@ -151,6 +159,8 @@ func NewDnAgentServer(
 		fenceWait:         common.SuspendSeconds * time.Second,
 		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
 		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
+		now:               time.Now,
+		sleep:             agent.SleepCtx,
 		port: agent.PortConf{
 			PortId:  portId,
 			TrType:  trConf.GetTrType(),

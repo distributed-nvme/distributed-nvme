@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -105,6 +106,29 @@ type fakeNode struct {
 	anaOf map[string]string
 	// nsIdxOf is the nsid a subsystem's namespace reports (default 1).
 	nsIdxOf map[string]uint32
+	// connectFail refuses the first N `nvme connect`s to one endpoint, keyed
+	// by connectKey, and then lets them through: the disk node that links
+	// its export into its port a few milliseconds after the primary's first
+	// connect. Unlike failCmd*, the refusal is DISPATCHED —
+	// it reaches nvmeConnect, answers exit 1 with the kernel's words and
+	// leaves no controller behind — so it can be counted per endpoint and
+	// combined with connectTakes.
+	connectFail map[string]int
+	// connectTakes makes every `nvme connect` to one endpoint take a fake
+	// duration: nvmeConnect moves the clock the test handed it (advance) on
+	// by that much before it answers — a connect to a disk node whose VM is
+	// down spends CmdSoftTimeout. Without an advance it is inert.
+	connectTakes map[string]time.Duration
+	advance      func(time.Duration)
+	// nsHeadAfter defers a subsystem's multipath namespace head, keyed by
+	// NQN: the connect that creates the subsystem adds its controller but
+	// not the head, which appears on the Nth listing of the subsystem
+	// directory — the kernel's namespace scan, which `nvme connect` only
+	// queues. 0 or 1 is the ordinary connect.
+	nsHeadAfter map[string]int
+	// pendingHeads are the heads nsHeadAfter deferred, keyed by the
+	// subsystem's sysfs directory.
+	pendingHeads map[string]*pendingHead
 
 	// thinDumps is the scripted `thin_dump` output per pool metadata path;
 	// without one the fake synthesizes an empty document from the pool whose
@@ -207,6 +231,20 @@ type fakeSubsys struct {
 	ctrls []*fakeCtrl
 }
 
+// pendingHead is one namespace head the kernel's scan has not added yet.
+type pendingHead struct {
+	after int // the listing of the subsystem directory that shows it
+	reads int // listings so far
+	nsDev string
+	nsIdx uint32
+}
+
+// connectKey is the per-endpoint key of connectFail and connectTakes: one
+// side's (nqn, traddr, trsvcid), the triple a controller is connected by.
+func connectKey(nqn, trAddr, trSvcId string) string {
+	return nqn + "|" + trAddr + ":" + trSvcId
+}
+
 type fakeCtrl struct {
 	name     string // "nvme3"
 	trAddr   string
@@ -237,6 +275,10 @@ func newFakeNode() *fakeNode {
 		subsystems:    make(map[string]*fakeSubsys),
 		anaOf:         make(map[string]string),
 		nsIdxOf:       make(map[string]uint32),
+		connectFail:   make(map[string]int),
+		connectTakes:  make(map[string]time.Duration),
+		nsHeadAfter:   make(map[string]int),
+		pendingHeads:  make(map[string]*pendingHead),
 		thinDumps:     make(map[string]string),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
@@ -794,6 +836,13 @@ func (f *fakeNode) cmdLs(args []string) (string, int) {
 	path := args[len(args)-1]
 	if !f.dirs[path] {
 		return "", 2
+	}
+	if head := f.pendingHeads[path]; head != nil {
+		head.reads++
+		if head.reads >= head.after {
+			f.addNsHead(path, head.nsDev, head.nsIdx)
+			delete(f.pendingHeads, path)
+		}
 	}
 	return strings.Join(f.children(path), "\n") + "\n", 0
 }
@@ -2014,6 +2063,15 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	if nqn == "" {
 		return "", 3
 	}
+	key := connectKey(nqn, trAddr, trSvcId)
+	if took := f.connectTakes[key]; took > 0 && f.advance != nil {
+		f.advance(took)
+	}
+	if left := f.connectFail[key]; left > 0 {
+		f.connectFail[key] = left - 1
+		f.dispatchStderr = "could not add new controller: connection refused"
+		return "", 1
+	}
 	subsys, ok := f.subsystems[nqn]
 	if !ok {
 		subsys = &fakeSubsys{idx: f.nextSubsys, nqn: nqn}
@@ -2027,10 +2085,12 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 			nsIdx = want
 		}
 		nsDev := fmt.Sprintf("nvme%dn%d", subsys.idx, nsIdx)
-		f.dirs[dir+"/"+nsDev] = true
-		f.files[dir+"/"+nsDev+"/nsid"] = fmt.Sprintf("%d\n", nsIdx)
-		f.devNo["/dev/"+nsDev] = f.newDevNo()
-		f.devSize["/dev/"+nsDev] = 1 << 40
+		if after := f.nsHeadAfter[nqn]; after > 1 {
+			f.pendingHeads[dir] = &pendingHead{
+				after: after, nsDev: nsDev, nsIdx: nsIdx}
+		} else {
+			f.addNsHead(dir, nsDev, nsIdx)
+		}
 	}
 	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
@@ -2057,6 +2117,37 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	f.dirs[ctrlDir+"/"+pathDev] = true
 	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = ctrl.anaState + "\n"
 	return "", 0
+}
+
+// addNsHead publishes a subsystem's multipath namespace head: the nvmeXnY
+// directory with its nsid, and the block device behind it.
+func (f *fakeNode) addNsHead(dir, nsDev string, nsIdx uint32) {
+	f.dirs[dir+"/"+nsDev] = true
+	f.files[dir+"/"+nsDev+"/nsid"] = fmt.Sprintf("%d\n", nsIdx)
+	f.devNo["/dev/"+nsDev] = f.newDevNo()
+	f.devSize["/dev/"+nsDev] = 1 << 40
+}
+
+// dropNsHead takes a connected subsystem's namespace head away and leaves its
+// controllers: the shape of a subsystem whose only path is ANA inaccessible,
+// which never gets a head at all.
+func (f *fakeNode) dropNsHead(nqn string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	subsys, ok := f.subsystems[nqn]
+	if !ok {
+		return
+	}
+	dir := fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, subsys.idx)
+	for entry := range f.dirs {
+		name, ok := childOf(dir, entry)
+		if ok && nvmeNsEntryPattern.MatchString(name) {
+			delete(f.dirs, entry)
+			delete(f.files, entry+"/nsid")
+			delete(f.devNo, "/dev/"+name)
+			delete(f.devSize, "/dev/"+name)
+		}
+	}
 }
 
 func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
@@ -2119,6 +2210,7 @@ func (f *fakeNode) dropCtrl(subsys *fakeSubsys, ctrl *fakeCtrl) {
 		}
 	}
 	delete(f.dirs, subsysDir)
+	delete(f.pendingHeads, subsysDir)
 	nsDev := fmt.Sprintf("/dev/nvme%dn1", subsys.idx)
 	delete(f.devNo, nsDev)
 	delete(f.devSize, nsDev)

@@ -12687,6 +12687,68 @@ react_target() {
 		"write every $REACT_STRIDE_MIB MiB of the device lands in it"
 }
 
+# --- step 2: its waits fail fast when the primary role moves --------------
+#
+# react_grow_roles_hold is the check the three grow waits of stage 02 run
+# first, on every poll: AR6's append (react_grow_progress), the new sides'
+# provisioning (sp_sides_provisioned) and the grown pool (react_pool_grew).
+# The read-back waits on host0 after them are not guarded. The stage reads the
+# primary ONCE, at its start: react_pool_grew waits on that controller's pool,
+# and react_grow_progress reads its pool row for the progress it logs (the
+# other reads are the sp's own). A failover in the middle of the grow would
+# leave the pool wait watching a controller that is being demoted: a standby
+# holds no pool at all (CN13), so react_pool_grew would spend its whole
+# WAIT_PROVISION and then die with "want a total above N" about a node doing
+# exactly what a demoted primary should.
+#
+# AND IT DIES RATHER THAN FOLLOWING THE ROLE, where setup's waits follow it. A
+# failover of a healthy primary during a grow is itself the fault this stage
+# exists to expose: the grow's first converge on the primary can race the new
+# sides' disk nodes (the connect before the export is linked, the namespace
+# head before the kernel's scan adds it), report the unbuilt group — and with
+# it the pool — as ERROR, and AR5 fails the settled primary over on that one
+# round. Following the new primary would turn that into a silent pass. So the
+# roles are re-read the way primary_stack_ready reads them, and a move stops
+# the run at once, naming both controllers and the worker's own record of the
+# failover. A reply with no primary, with two, or with unequal lists is polled
+# through, for the reason primary_stack_ready's header gives.
+REACT_GROW_PRIMARY=""
+
+react_grow_roles_hold() {
+	local n ids prim
+	if ! ctl_try sp get; then
+		return 1
+	fi
+	n=$(jq_of "$CTL_OUT" '.cntlr_list | length')
+	ids=$(jq_of "$CTL_OUT" '.sp_conf.cntlr_id_list | length')
+	case "$n$ids" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$n" = "$ids" ] || return 1
+	prim=$(jq_of "$CTL_OUT" \
+		'[.sp_conf.cntlr_id_list, [.cntlr_list[].primary]]
+		 | transpose | map(select(.[1] == true) | .[0]) | join(",")')
+	case "$prim" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$prim" = "$REACT_GROW_PRIMARY" ] && return 0
+	log "!!! the primary role MOVED while stage 02 was waiting:" \
+		"cntlr $REACT_GROW_PRIMARY -> cntlr $prim."
+	die "AR5 fired during the grow: the primary moved from cntlr" \
+		"$REACT_GROW_PRIMARY to cntlr $prim while stage 02 was waiting on" \
+		"cntlr $REACT_GROW_PRIMARY. A failover of a healthy primary during a" \
+		"grow is the fault this stage exists to expose, so the run stops" \
+		"here instead of following the role. The worker's record of it, on" \
+		"$CP_IP: jq -c 'select(.msg == \"reaction applied\" and" \
+		".kind == \"failover\")' $WORK/worker/worker.log"
+}
+
+# react_grow_polls is one stage-02 predicate behind that check.
+react_grow_polls() { # <predicate> <args…>
+	react_grow_roles_hold || return 1
+	"$@"
+}
+
 # --- step 2 -----------------------------------------------------------------
 #
 # AR6. The chunk count is COMPUTED from the pool's own used/total pair and the
@@ -12720,6 +12782,9 @@ react_grow() {
 	sp_refresh
 	sp_read_roles
 	sp_totals
+	# The controller every wait below watches, and the one react_grow_polls
+	# dies over if the role leaves it.
+	REACT_GROW_PRIMARY=$PRIMARY_CNTLR_ID
 	before_grps=$SP_GRP_TOTAL
 	before_data=$(sp_field '.slice_list[0].data_grp_list | length')
 	case "$before_data" in
@@ -12766,7 +12831,7 @@ react_grow() {
 	REACT_POOL_LAST=""
 	msg="AR6 to append one more data group to slice 0 (the worker reads the"
 	msg="$msg primary's pool status once per 5s pass)"
-	wait_until "$WAIT_REACT" "$msg" \
+	wait_until "$WAIT_REACT" "$msg" react_grow_polls \
 		react_grow_progress "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID" \
 		"$((before_data + 1))"
 	sp_refresh
@@ -12807,7 +12872,7 @@ react_grow() {
 	SIDES_LEFT=-1
 	wait_until "$WAIT_PROVISION" \
 		"the $LEGS new side(s) of the grown group to be provisioned" \
-		sp_sides_provisioned
+		react_grow_polls sp_sides_provisioned
 	SP_JSON=$CTL_OUT
 	sp_totals
 	# A DELTA against this step's own `before` reading, not against GRP_CNT: the
@@ -12822,6 +12887,7 @@ react_grow() {
 	REACT_POOL_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the primary's slice-0 thin pool to report a data total above $total0 blocks" \
+		react_grow_polls \
 		react_pool_grew "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID" "$total0"
 	react_pool_read "$PRIMARY_CNTLR_ID" "$REACT_SLICE0_ID"
 	assert_ge "$REACT_POOL_TOTAL" "$((total0 + 1))" \

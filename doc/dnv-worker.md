@@ -1302,9 +1302,10 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      `MISSING` row of the maps the settle reads holds it for the same
      reason, unless its details are `"sp_level"` (below). A converge that
      finds a member not available — a promotion ahead of the sides' ANA
-     flips, a provisioned flip ahead of a side's export ([D16]) — reports
-     the groups and pools it could not build `ERROR` and leaves them to the
-     CN10 retry, whose first attempt comes 5 s later; a Check round in
+     flips, a provisioned flip ahead of a side's export ([D16]) that the
+     connect step's pass budget does not cover (`cnagent.md` CN10) —
+     reports the groups and pools it could not build `ERROR` and leaves them
+     to the CN10 retry, whose first attempt comes 5 s later; a Check round in
      between probes those devices absent and reports them `MISSING` `""`,
      not `ERROR`, and in an SP with no td, as a new SP is until one is
      created, that reply has no `ERROR` row outside `leg_id_to_leg` (a td's
