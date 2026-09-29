@@ -76,16 +76,15 @@ func clusterNameFlag(cmd *cobra.Command) {
 //
 // No client-side range check (CT8): the gateway bounds a non-zero extent_size
 // to [MinDnExtSize, MaxDnExtSize] itself, and dnvctl forwards whatever pflag
-// parsed. Only the command line is parsed, though. pflag turns the flag's
-// argument into a uint64 and refuses what does not fit (exit 2, no RPC),
-// while CT9's two other carriers hand viper their value unparsed and u64Of
-// is viper.GetUint64 — a cast that drops its error. So DNVCTL_EXTENT_SIZE=-1
-// (or an "abc" under that key in a --config file) reads back as 0 and sends
-// no dn_bin_conf at all, leaving the cluster on common.DefaultDnExtSize
-// rather than refusing. And a ClusterConf is write-once — no RPC updates one
-// — so that is the difference between a usage error and a cluster whose
-// extent size is permanently wrong. TestClusterCreateExtentSize pins both
-// sides of the asymmetry, on the flag and on the environment.
+// parsed. pflag turns the flag's argument into a uint64 and refuses what does
+// not fit (exit 2, no RPC), and the command line is the flag's only carrier
+// (CT9): DNVCTL_EXTENT_SIZE and an extent-size key in a --config file reach
+// no request. A ClusterConf is write-once — no RPC updates one — so a second
+// carrier would be the worst kind here: a stale variable would size every
+// cluster created under it, and text viper could not cast used to read back
+// as 0, leaving the cluster on common.DefaultDnExtSize for good.
+// TestClusterCreateExtentSize pins the flag's refusal and the environment's
+// silence.
 func clusterCreateCmd() *cobra.Command {
 	cmd := leaf("create", "create a cluster (CreateCluster)",
 		func() (job, error) {
@@ -157,8 +156,8 @@ func clusterGetCmd() *cobra.Command {
 //
 // Count is a uint32 on the wire and pageFlags declares --count as a Uint32
 // flag, so a --count above 2^32-1 dies as a pflag parse failure (exit 2, no
-// RPC issued) rather than being truncated; u32Of only narrows viper's uint64
-// read, which is lossless for any value the flag accepts.
+// RPC issued) rather than being truncated; u32Of reads that Uint32 flag
+// itself, so nothing is narrowed after the parse.
 func clusterListCmd() *cobra.Command {
 	cmd := leaf("list", "list cluster names (ListClusters)",
 		func() (job, error) {

@@ -121,9 +121,10 @@ func registerSp(root *cobra.Command) {
 // spCreateCmd is CreateStoragePool, the widest request in the service.
 //
 // What is always sent: bdev_conf, because its redund_conf always is — see
-// spRedundConf. What is sent only on demand: dm_raid0_conf and dm_pool_conf,
-// each built only when its size flag is non-zero, so an untuned create leaves
-// them absent and the control plane picks the geometry; and event_threshold,
+// spRedundConf. What is sent only on demand: dm_raid0_conf, built only when
+// --stripe-size is non-zero, and dm_pool_conf, built only when --block-size
+// or --low-water-mark-pct is, so an untuned create leaves them absent and the
+// control plane picks the geometry and the mark; and event_threshold,
 // built only when at least one of the four --thr-* values is non-zero, for the
 // same reason — an all-zero EventThreshold would say "default everything" the
 // long way.
@@ -162,9 +163,12 @@ func spCreateCmd() *cobra.Command {
 					StripeSize: stripeSize,
 				}
 			}
-			if blockSize := u64Of("block-size"); blockSize != 0 {
+			blockSize := u64Of("block-size")
+			lowWaterMark := u32Of("low-water-mark-pct")
+			if blockSize != 0 || lowWaterMark != 0 {
 				req.BdevConf.DmPoolConf = &pb.DmPoolConf{
-					DataBlockSize: blockSize,
+					DataBlockSize:   blockSize,
+					LowWaterMarkPct: lowWaterMark,
 				}
 			}
 			primary := u32Of("thr-primary")
@@ -210,6 +214,13 @@ func spCreateCmd() *cobra.Command {
 		"bdev_conf.dm_raid0_conf.stripe_size in bytes (0 = not sent)")
 	flags.Uint64("block-size", 0,
 		"bdev_conf.dm_pool_conf.data_block_size in bytes (0 = not sent)")
+	// The default is interpolated for --slice-cnt's reason; a zero takes the
+	// cluster's stored mark first and the constant only when that is zero
+	// too (architecture.md §8.4 Defaults, §7).
+	flags.Uint32("low-water-mark-pct", 0,
+		fmt.Sprintf("bdev_conf.dm_pool_conf.low_water_mark_pct (0 = not "+
+			"sent: the cluster's mark, else %d; above 100 turns the "+
+			"pool's auto-grow off)", common.DefaultPoolLowWatermarkPct))
 	flags.Uint32("thr-primary", 0,
 		"event_threshold.primary_unhealthy in seconds")
 	flags.Uint32("thr-cntlr", 0,

@@ -963,14 +963,17 @@ EOF
 	# CreateStoragePool carries no token, so the --rev 7 the §7.10 row types
 	# must leave no trace at all; and the always-present redund_md_raid1 is
 	# the one dnvctl-side default (§0 #11), with an EMPTY body because
-	# --bitmap-chunk-blocks was not given.
+	# --bitmap-chunk-blocks was not given. --low-water-mark-pct alone builds
+	# dm_pool_conf with no data_block_size key (--block-size was not given);
+	# the mark is a uint32, so it is recorded as a bare JSON number.
 	sweep_step 17 CreateStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
-		  \"bdev_conf\":{\"redund_conf\":{\"redund_md_raid1\":{}}},
+		  \"bdev_conf\":{\"dm_pool_conf\":{\"low_water_mark_pct\":30},
+		                 \"redund_conf\":{\"redund_md_raid1\":{}}},
 		  \"cntlid_slot_list\":[0,1],\"cntlr_cnt\":2,\"slice_cnt\":1,
 		  \"init_ext_cnt\":\"2\"}" \
 		sp create --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 2 \
-		--slots 0,1 --rev 7
+		--slots 0,1 --low-water-mark-pct 30 --rev 7
 	sweep_step 18 DeleteStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"}}" \

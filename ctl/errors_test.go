@@ -177,6 +177,10 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			[]string{"td", "create", "--name", "t0", "--rev", "zz"}},
 		{"negative --rev",
 			[]string{"td", "create", "--name", "t0", "--rev", "-1"}},
+		// Presence is the typed flag (§4), so an empty value is a typed
+		// --rev that does not parse — never a silently absent token.
+		{"empty --rev",
+			[]string{"td", "create", "--name", "t0", "--rev="}},
 		{"malformed --bm-hex",
 			[]string{"clone", "append-bm", "--name", "cl0",
 				"--bm-hex", "zz", "--rev", "7"}},
@@ -224,7 +228,7 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 				t.Errorf("stdout = %q, want empty", res.stdout)
 			}
 			if res.stderr == "" {
-				t.Errorf("stderr is empty, want cobra's message")
+				t.Errorf("stderr is empty, want the refusal's message")
 			}
 		})
 	}

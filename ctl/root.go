@@ -11,14 +11,22 @@
 // Two rules shape the whole package:
 //
 //   - CT8 — no client-side validation. dnvctl rejects only what fails to
-//     PARSE (exit 2); every parsed value is sent as typed and the gateway's
-//     validation is the only validator. Empty required fields, contradictory
-//     flags and unknown enum numbers are all forwarded.
-//   - CT9 — every value is read back through viper, never off the flag, so a
-//     DNVCTL_* environment variable or a --config file satisfies a value just
-//     as a flag does. That is why the comma-split list flags below are plain
-//     strings: viper's GetStringSlice does not split a single environment or
-//     config string on commas (the four daemons' splitList rationale).
+//     PARSE (exit 2), which for --timeout, a deadline rather than a request
+//     value, includes NaN and ±Inf (timeoutOf); every parsed value is sent as
+//     typed and the gateway's validation is the only validator. Empty
+//     required fields, contradictory flags and unknown enum numbers are all
+//     forwarded.
+//   - CT9 — only the env-backed globals (every §2.1 flag but --rev) have a
+//     second carrier: they are bound into viper, so a DNVCTL_* environment
+//     variable or a --config file supplies one just as the flag does. --rev
+//     and every leaf flag are read off the parsed command line and nothing
+//     else (§0 #15): a token, a force or a name is typed per command, and a
+//     leaf value is parsed before the dial — by pflag, or by the readers
+//     below and spParseLevel/spRedundConf for the flags pflag holds as
+//     strings — so text that does not fit is exit 2, never a cast that reads
+//     back as zero. The comma-split list flags below stay plain strings for
+//     §5.0's replace-on-each-occurrence rule, which pflag's own slice flags
+//     do not follow (they append).
 package ctl
 
 import (
@@ -27,6 +35,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -46,9 +55,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// envPrefix makes every flag settable as DNVCTL_<FLAG_WITH_UNDERSCORES>
-// (CT9). Mechanically that covers every flag; only the §2.1 globals are
-// documented for environment use.
+// envPrefix names the environment carrier of an env-backed global,
+// DNVCTL_<FLAG_WITH_UNDERSCORES> (CT9). No other flag has one.
 const envPrefix = "DNVCTL"
 
 // defaultTimeout is the per-invocation deadline in seconds (§2.1). It is a
@@ -159,7 +167,7 @@ func NewRootCmd() *cobra.Command {
 		// The binding must happen after cobra has merged the root's
 		// persistent flags into the invoked leaf's flag set, which
 		// ParseFlags does before PersistentPreRunE runs — so cmd.Flags()
-		// here is "persistent + local", exactly what CT9 asks for.
+		// here holds the globals bindViper looks up.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			return bindViper(cmd)
 		},
@@ -180,8 +188,8 @@ func NewRootCmd() *cobra.Command {
 	return root
 }
 
-// addGlobalFlags declares the §2.1 persistent flags. Only --cluster and --sp
-// fill request fields; the rest steer the invocation itself.
+// addGlobalFlags declares the §2.1 persistent flags. Only --cluster, --sp and
+// --rev fill request fields; the rest steer the invocation itself.
 func addGlobalFlags(root *cobra.Command) {
 	flags := root.PersistentFlags()
 	flags.String("gateway-address", "",
@@ -191,20 +199,34 @@ func addGlobalFlags(root *cobra.Command) {
 	flags.String("sp", "",
 		"sp_name of every request that has one")
 	flags.String("rev", "",
-		"revision token (base 0; omitted sends no token message at all)")
+		"revision token (base 0; command line only; omitted sends no "+
+			"token message at all)")
 	flags.Float64("timeout", defaultTimeout,
 		"per-invocation deadline, seconds")
 	flags.String("trace-id", "",
 		"override the per-invocation trace id mint")
-	flags.String("config", "", "optional viper config file")
+	flags.String("config", "",
+		"optional viper config file for the env-backed globals")
 }
 
-// bindViper wires flags, config file and environment together exactly as the
-// four daemons do (CT9). It binds the INVOKED command's full flag set, so
-// every leaf's local flags are bound alongside the root's persistent ones.
+// envGlobals are the §2.1 globals that have an environment and a config
+// carrier besides the flag: every persistent flag but --rev (CT9, §0 #15). A
+// revision token is per object and per write, so an exported DNVCTL_REV
+// would stamp one number on every later write that carries a token; it is
+// read off the command line alone, like every leaf flag (see invoked).
+var envGlobals = []string{
+	"gateway-address", "cluster", "sp", "timeout", "trace-id", "config",
+}
+
+// bindViper wires flags, config file and environment together the way the
+// four daemons do (CT9), for the env-backed globals only: it binds each of
+// them from the invoked command's flag set and binds nothing else, and no
+// other value is ever read through viper.
 func bindViper(cmd *cobra.Command) error {
-	if err := viper.BindPFlags(cmd.Flags()); err != nil {
-		return err
+	for _, name := range envGlobals {
+		if err := viper.BindPFlag(name, cmd.Flags().Lookup(name)); err != nil {
+			return err
+		}
 	}
 	viper.SetEnvPrefix(envPrefix)
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
@@ -260,6 +282,12 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	if address == "" {
 		return errors.New("missing required flag: --gateway-address")
 	}
+	budget, err := timeoutOf()
+	if err != nil {
+		return err
+	}
+	invoked = cmd.Flags()
+	defer func() { invoked = nil }()
 	j, err := build()
 	if err != nil {
 		return err
@@ -274,9 +302,7 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 		traceId = common.NewTraceId()
 	}
 	ctx := common.WithTraceId(context.Background(), traceId)
-	timeout := viper.GetFloat64("timeout")
-	ctx, cancel := context.WithTimeout(
-		ctx, time.Duration(timeout*float64(time.Second)))
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	client, closeConn, err := dialer(ctx, address)
@@ -405,28 +431,98 @@ func hexBitmapResult(bitmap []byte) map[string]any {
 }
 
 // ---------------------------------------------------------------------------
-// Reading values back through viper (CT9)
+// Reading values back (CT9)
 // ---------------------------------------------------------------------------
 
+// timeoutOf is --timeout, the one numeric env-backed global, as the budget
+// run hands context.WithTimeout. Its environment and config carriers hand
+// viper text, and viper's GetFloat64 casts text that is not a number to 0 — a
+// deadline that has already passed — so the text is parsed here, and text
+// that is not a number is refused as pflag refuses it as a flag argument: a
+// usage error, before any dial. Go's float parser, which is pflag's too, also
+// accepts NaN and ±Inf, which name no deadline, so those are refused the same
+// way from every carrier. Any other value is kept as typed — zero or negative
+// is a deadline already passed, and the call fails DEADLINE_EXCEEDED — but
+// saturated at time.Duration's range, about 292 years: out of range, Go
+// leaves the float-to-integer conversion to the implementation, and amd64
+// answers math.MinInt64, an expired deadline for --timeout 1e10.
+func timeoutOf() (time.Duration, error) {
+	raw := strings.TrimSpace(viper.GetString("timeout"))
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --timeout: %w", err)
+	}
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0, fmt.Errorf(
+			"invalid --timeout: %q is not a finite number of seconds", raw)
+	}
+	switch nanos := seconds * float64(time.Second); {
+	case nanos >= float64(math.MaxInt64):
+		return math.MaxInt64, nil
+	case nanos <= float64(math.MinInt64):
+		return math.MinInt64, nil
+	default:
+		return time.Duration(nanos), nil
+	}
+}
+
+// invoked is the flag set of the command being run: its own flags merged with
+// the root's persistent ones, as cobra's ParseFlags left them. run points it
+// at the leaf before calling build, and the leaf readers below (strOf and the
+// rest) read it, so --rev and every leaf value come off the parsed command
+// line and nothing else — never through viper, which is what keeps
+// DNVCTL_<LEAF> and a config-file key of the same name out of every request
+// (CT9). It is package state for the reason viper is (one invocation per
+// process), and it spares the twelve group files' build closures a
+// parameter.
+var invoked *pflag.FlagSet
+
+// leafValue reads one flag of the invoked command through pflag's typed
+// getter. pflag already parsed the value with the command line, so the only
+// errors left are a name the command does not declare or a reader of the
+// wrong type — bugs in this package, not operator errors, and the §7.10 sweep
+// drives every leaf — so it panics rather than reading back as a zero.
+func leafValue[T any](
+	name string, get func(*pflag.FlagSet, string) (T, error),
+) T {
+	if invoked == nil {
+		panic(fmt.Sprintf("dnvctl: --%s read outside run", name))
+	}
+	value, err := get(invoked, name)
+	if err != nil {
+		panic(fmt.Sprintf("dnvctl: reading --%s: %v", name, err))
+	}
+	return value
+}
+
 // strOf is one string value.
-func strOf(name string) string { return viper.GetString(name) }
+func strOf(name string) string {
+	return leafValue(name, (*pflag.FlagSet).GetString)
+}
 
 // boolOf is one boolean value. A boolean that must be turned off is written
 // --enabled=false; --enabled false would be parsed as a positional argument
 // and rejected by cobra.NoArgs.
-func boolOf(name string) bool { return viper.GetBool(name) }
+func boolOf(name string) bool {
+	return leafValue(name, (*pflag.FlagSet).GetBool)
+}
 
 // u64Of is one plain uint64 (a size or a count), decimal.
-func u64Of(name string) uint64 { return viper.GetUint64(name) }
+func u64Of(name string) uint64 {
+	return leafValue(name, (*pflag.FlagSet).GetUint64)
+}
 
-// u32Of is one plain uint32 (an index).
-func u32Of(name string) uint32 { return uint32(viper.GetUint64(name)) }
+// u32Of is one plain uint32 (an index or a count), off a Uint32 flag, so a
+// value above 2^32-1 is pflag's parse error rather than a narrowing here.
+func u32Of(name string) uint32 {
+	return leafValue(name, (*pflag.FlagSet).GetUint32)
+}
 
 // hexOf is an id value: Go base-0, so 17 and 0x11 are the same number. An
 // unset flag is the empty string and reads as 0; a malformed one is a usage
 // error (exit 2), which is the whole of dnvctl's input checking (CT8).
 func hexOf(name string) (uint64, error) {
-	raw := strings.TrimSpace(viper.GetString(name))
+	raw := strings.TrimSpace(strOf(name))
 	if raw == "" {
 		return 0, nil
 	}
@@ -439,7 +535,7 @@ func hexOf(name string) (uint64, error) {
 
 // hex32Of is hexOf for a 32-bit field.
 func hex32Of(name string) (uint32, error) {
-	raw := strings.TrimSpace(viper.GetString(name))
+	raw := strings.TrimSpace(strOf(name))
 	if raw == "" {
 		return 0, nil
 	}
@@ -456,7 +552,7 @@ func hex32Of(name string) (uint32, error) {
 // meaningful "clear it".
 func strListOf(name string) []string {
 	var out []string
-	for _, item := range strings.Split(viper.GetString(name), ",") {
+	for _, item := range strings.Split(strOf(name), ",") {
 		if item = strings.TrimSpace(item); item != "" {
 			out = append(out, item)
 		}
@@ -467,7 +563,7 @@ func strListOf(name string) []string {
 // idListOf is a comma-split base-0 numeric list (--ids).
 func idListOf(name string) ([]uint64, error) {
 	var out []uint64
-	for _, item := range strings.Split(viper.GetString(name), ",") {
+	for _, item := range strings.Split(strOf(name), ",") {
 		if item = strings.TrimSpace(item); item == "" {
 			continue
 		}
@@ -483,7 +579,7 @@ func idListOf(name string) ([]uint64, error) {
 // u32ListOf is a comma-split base-0 numeric list of 32-bit values (--slots).
 func u32ListOf(name string) ([]uint32, error) {
 	var out []uint32
-	for _, item := range strings.Split(viper.GetString(name), ",") {
+	for _, item := range strings.Split(strOf(name), ",") {
 		if item = strings.TrimSpace(item); item == "" {
 			continue
 		}
@@ -501,7 +597,7 @@ func u32ListOf(name string) ([]uint32, error) {
 // non-empty one is a usage error (exit 2), per §5.9's note on
 // `clone append-bm`.
 func hexBytesOf(name string) ([]byte, error) {
-	raw := strings.TrimSpace(viper.GetString(name))
+	raw := strings.TrimSpace(strOf(name))
 	if raw == "" {
 		return nil, nil
 	}
@@ -518,8 +614,9 @@ func hexBytesOf(name string) ([]byte, error) {
 
 // clusterOf fills `cluster_name`. It is the global for 55 of the 58 requests
 // that carry the field; only the `cluster` group's own three commands
-// override it, through clusterNameOf.
-func clusterOf() string { return strOf("cluster") }
+// override it, through clusterNameOf. Like spOf it reads an env-backed
+// global, so it reads viper, where bindViper put the flag's carriers (CT9).
+func clusterOf() string { return viper.GetString("cluster") }
 
 // clusterNameOf is the `cluster` group's rule: its own --name wins, and an
 // empty --name falls back to the global --cluster. A `cluster` command is the
@@ -533,7 +630,7 @@ func clusterNameOf() string {
 
 // spOf fills `sp_name` on the 41 requests that carry it, `sp create`
 // included.
-func spOf() string { return strOf("sp") }
+func spOf() string { return viper.GetString("sp") }
 
 // ---------------------------------------------------------------------------
 // Revision tokens (CT3, §4)
@@ -549,12 +646,14 @@ func spOf() string { return strOf("sp") }
 //	                               deliberate always-stale probe: a stored
 //	                               revision starts at 1 and only grows
 //
-// The flag is a string rather than a numeric type precisely so that "not
-// given" survives the trip through viper — a numeric flag's zero value would
-// be indistinguishable from an explicit 0, and those two mean opposite things.
+// "Given" is pflag's Changed bit — the flag was typed on this command line —
+// never a value from some other carrier: --rev has none (CT9, §0 #15), so an
+// exported DNVCTL_REV cannot put a token on a write nobody typed it for. A
+// typed --rev must parse, an empty one included (`--rev "$REV"` with REV
+// unset is a usage error, not an ungated write).
 func revToken() (uint64, bool, error) {
-	raw := strings.TrimSpace(viper.GetString("rev"))
-	if raw == "" {
+	raw := strings.TrimSpace(strOf("rev"))
+	if !invoked.Changed("rev") {
 		return 0, false, nil
 	}
 	value, err := strconv.ParseUint(raw, 0, 64)

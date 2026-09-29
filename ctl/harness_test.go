@@ -4,7 +4,7 @@
 //
 // The one rule that shapes this file is that dnvctl's configuration lives in
 // a GLOBAL: viper is a process-wide singleton, bindViper binds the invoked
-// command's whole flag set into it, and AutomaticEnv reads the live
+// command's env-backed globals into it, and AutomaticEnv reads the live
 // environment. A flag bound by one test is therefore visible to the next one
 // unless the singleton is cleared, and a test that passes because of a
 // leftover binding is a lie rather than a pass. So every entry point here
@@ -30,7 +30,7 @@ import (
 )
 
 // TestMain clears the DNVCTL_* environment before any test runs. The CLI
-// reads every value through viper's AutomaticEnv (CT9), so a developer with
+// reads the env-backed globals via AutomaticEnv (CT9), so a developer with
 // DNVCTL_CLUSTER or DNVCTL_GATEWAY_ADDRESS exported in their shell would
 // otherwise get a different request out of every table row — and on the
 // machine where the variable happens to hold the value a row expects, a green

@@ -256,6 +256,7 @@ var leafFlags = map[string][]string{
 	// §5.4
 	"sp create": {"cntlr-cnt", "slice-cnt", "init-ext-cnt", "slots",
 		"redund", "bitmap-chunk-blocks", "stripe-size", "block-size",
+		"low-water-mark-pct",
 		"thr-primary", "thr-cntlr", "thr-side", "thr-leg",
 		"dn-black", "dn-white", "cn-black", "cn-white"},
 	"sp delete":           {},
@@ -368,11 +369,19 @@ func TestRootPersistentFlags(t *testing.T) {
 		t.Errorf("the root declares %v, want %v", got, want)
 	}
 
-	// §2.1's default column. --timeout is the only one that is not empty,
-	// and --rev's emptiness is load-bearing: it is what makes "not given"
-	// survive the trip through viper as something other than an explicit 0
-	// (§4), so a numeric default here would collapse the token trio into a
-	// pair.
+	// CT9's env-backed set is every global but --rev (§0 #15), so a global
+	// added to the root has to be placed on one side or the other here.
+	envBacked := slices.DeleteFunc(slices.Clone(want),
+		func(name string) bool { return name == "rev" })
+	gotEnv := slices.Sorted(slices.Values(envGlobals))
+	if !slices.Equal(gotEnv, envBacked) {
+		t.Errorf("the env-backed globals are %v, want %v", gotEnv, envBacked)
+	}
+
+	// §2.1's default column. --timeout is the only one that is not empty.
+	// --rev's empty default is not what makes "not given" (§4) — that is
+	// pflag's Changed bit, read in revToken — but a string flag keeps the
+	// value's base-0 parse, and its usage error, next to that rule.
 	for name, want := range map[string]string{
 		"gateway-address": "",
 		"cluster":         "",

@@ -4,10 +4,10 @@
 // — possibly another cluster — can read the bytes; transfer + clone is the
 // §11.3 cross-SP live migration of a volume.
 //
-// Everything here follows root.go's contract: `build` reads its values back
-// through viper (CT9), returns a usage error for anything that fails to PARSE
-// (CT8, exit 2, no RPC issued), and the returned job does nothing but call the
-// client method.
+// Everything here follows root.go's contract: `build` reads its flags and
+// --rev off the parsed command line and --cluster/--sp through viper (CT9),
+// returns a usage error for anything that fails to PARSE (CT8, exit 2, no RPC
+// issued), and the returned job does nothing but call the client method.
 package ctl
 
 import (

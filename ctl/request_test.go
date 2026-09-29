@@ -16,7 +16,12 @@
 package ctl
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -168,14 +173,17 @@ var sweepRows = []sweepRow{
 	// ---- §5.4 sp ----
 	{17, "CreateStoragePool",
 		[]string{"sp", "create", "--cntlr-cnt", "2", "--slice-cnt", "1",
-			"--init-ext-cnt", "2", "--slots", "0,1", "--rev", "7"},
+			"--init-ext-cnt", "2", "--slots", "0,1",
+			"--low-water-mark-pct", "30", "--rev", "7"},
 		// bdev_conf is ALWAYS sent with a redund_conf (§0 #11); --rev is
-		// ignored because the request carries no token; dm_raid0_conf,
-		// dm_pool_conf and event_threshold stay absent.
+		// ignored because the request carries no token; dm_pool_conf
+		// carries the mark alone, --block-size being untyped; dm_raid0_conf
+		// and event_threshold stay absent.
 		&pb.CreateStoragePoolRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
 			BdevConf: &pb.BdevConf{
+				DmPoolConf: &pb.DmPoolConf{LowWaterMarkPct: 30},
 				RedundConf: &pb.RedundConf{
 					RedunKind: &pb.RedundConf_RedundMdRaid1{
 						RedundMdRaid1: &pb.RedundMdRaid1{},
@@ -1066,9 +1074,11 @@ func TestSpCreateAlwaysSendsRedundConf(t *testing.T) {
 	}
 }
 
-// TestSpCreateOptionalConfs covers the other half of §5.4: dm_raid0_conf and
-// dm_pool_conf appear only when their size flag is non-zero, and
-// event_threshold only when at least one --thr-* is.
+// TestSpCreateOptionalConfs covers the other half of §5.4: dm_raid0_conf
+// appears only when --stripe-size is non-zero, dm_pool_conf only when
+// --block-size or --low-water-mark-pct is (the mark's half is
+// TestSpCreateLowWaterMark's), and event_threshold only when at least one
+// --thr-* is.
 func TestSpCreateOptionalConfs(t *testing.T) {
 	req := runArgv(t, "CreateStoragePool", "sp", "create",
 		"--stripe-size", "16384", "--block-size", "1048576",
@@ -1088,6 +1098,38 @@ func TestSpCreateOptionalConfs(t *testing.T) {
 		if req.EventThreshold == nil {
 			t.Errorf("%s 5 sent no event_threshold", flag)
 		}
+	}
+}
+
+// TestSpCreateLowWaterMark pins --low-water-mark-pct, the dm_pool_conf member
+// that had no flag, so every pool dnvctl created took its cluster's mark —
+// the default 50 on any cluster dnvctl created — and nothing driven through
+// dnvctl could move a pool's grow point or switch its auto-grow off. The
+// flag builds dm_pool_conf on its own, travels beside --block-size when both
+// are given, and a zero is "not given" like the message's other member. A
+// mark above 100 switches auto-grow off and is forwarded as typed (CT8).
+func TestSpCreateLowWaterMark(t *testing.T) {
+	alone := runArgv(t, "CreateStoragePool", "sp", "create",
+		"--low-water-mark-pct", "30").(*pb.CreateStoragePoolRequest)
+	wantRequest(t, alone.GetBdevConf().GetDmPoolConf(),
+		&pb.DmPoolConf{LowWaterMarkPct: 30})
+
+	both := runArgv(t, "CreateStoragePool", "sp", "create",
+		"--block-size", "1048576",
+		"--low-water-mark-pct", "30").(*pb.CreateStoragePoolRequest)
+	wantRequest(t, both.GetBdevConf().GetDmPoolConf(),
+		&pb.DmPoolConf{DataBlockSize: 1048576, LowWaterMarkPct: 30})
+
+	off := runArgv(t, "CreateStoragePool", "sp", "create",
+		"--low-water-mark-pct", "101").(*pb.CreateStoragePoolRequest)
+	wantRequest(t, off.GetBdevConf().GetDmPoolConf(),
+		&pb.DmPoolConf{LowWaterMarkPct: 101})
+
+	zero := runArgv(t, "CreateStoragePool", "sp", "create",
+		"--low-water-mark-pct", "0").(*pb.CreateStoragePoolRequest)
+	if zero.GetBdevConf().GetDmPoolConf() != nil {
+		t.Errorf("--low-water-mark-pct 0 sent dm_pool_conf %v, want it absent",
+			zero.GetBdevConf().GetDmPoolConf())
 	}
 }
 
@@ -1132,10 +1174,10 @@ func TestSpLevelSpellings(t *testing.T) {
 // second `cluster create` row can exist. What the row stopped saying is
 // asserted here — a bare `cluster create` sends no dn_bin_conf — together
 // with the three things it never could: an explicit --extent-size 0 sends
-// none either, an out-of-range value still travels, and the flag's CT9
-// carriers disagree about text that is not a uint64. The row's argv is not
-// repeated here; it asserts its value against a whole CreateClusterRequest,
-// which is strictly more than this test does.
+// none either, an out-of-range value still travels, and the command line is
+// the flag's only carrier (CT9). The row's argv is not repeated here; it
+// asserts its value against a whole CreateClusterRequest, which is strictly
+// more than this test does.
 //
 // The shifts: DnBinConf's four are proto3 scalars, so a shift dnvctl sent as
 // a literal 0 would be indistinguishable on the wire from one it did not send
@@ -1174,28 +1216,20 @@ func TestClusterCreateExtentSize(t *testing.T) {
 		"--name", "c1", "--extent-size", "1").(*pb.CreateClusterRequest)
 	wantRequest(t, tiny.DnBinConf, &pb.DnBinConf{ExtentSize: 1})
 
-	// CT9's three carriers do not agree about text that is not a uint64, and
-	// only the command line is loud about it: pflag parses the flag's
-	// argument and refuses what does not fit, while an environment or
-	// --config value reaches viper unparsed and u64Of is viper.GetUint64, a
-	// cast that drops its error. A ClusterConf is write-once, so for this
-	// flag the gap between the two is the gap between a usage error and a
-	// cluster whose extent size is permanently the gateway default.
-	t.Run("the environment supplies a value", func(t *testing.T) {
-		t.Setenv("DNVCTL_EXTENT_SIZE", "67108864")
-		fromEnv := runArgv(t, "CreateCluster", "cluster", "create",
-			"--name", "c1").(*pb.CreateClusterRequest)
-		wantRequest(t, fromEnv.DnBinConf, &pb.DnBinConf{ExtentSize: 67108864})
-	})
-
-	t.Run("the environment swallows a bad one", func(t *testing.T) {
-		t.Setenv("DNVCTL_EXTENT_SIZE", "-1")
-		fromEnv := runArgv(t, "CreateCluster", "cluster", "create",
-			"--name", "c1").(*pb.CreateClusterRequest)
-		if fromEnv.DnBinConf != nil {
-			t.Errorf("DNVCTL_EXTENT_SIZE=-1 sent dn_bin_conf %v, want it "+
-				"absent: viper's cast fails and reads back 0",
-				fromEnv.DnBinConf)
+	// The command line is this flag's only carrier (CT9, §0 #15), and a
+	// ClusterConf is write-once, so a second one would do its worst here: a
+	// stale DNVCTL_EXTENT_SIZE would size every cluster created under it,
+	// and text viper could not cast used to read back as 0 — the gateway
+	// default, permanently — where pflag refuses the same text below.
+	t.Run("the environment is not a carrier", func(t *testing.T) {
+		for _, value := range []string{"67108864", "-1"} {
+			t.Setenv("DNVCTL_EXTENT_SIZE", value)
+			fromEnv := runArgv(t, "CreateCluster", "cluster", "create",
+				"--name", "c1").(*pb.CreateClusterRequest)
+			if fromEnv.DnBinConf != nil {
+				t.Errorf("DNVCTL_EXTENT_SIZE=%s sent dn_bin_conf %v, want "+
+					"it absent", value, fromEnv.DnBinConf)
+			}
 		}
 	})
 
@@ -1255,8 +1289,8 @@ func TestClusterNameFallback(t *testing.T) {
 }
 
 // TestGlobalsAreIgnoredWhereTheFieldIsAbsent is the other half of §2.1: a
-// global left empty is sent empty, and a command whose request lacks the
-// field simply ignores it (CT8). The proof that `cluster list`,
+// --cluster or --sp left empty is sent empty, and a command whose request
+// lacks the field simply ignores it (CT8). The proof that `cluster list`,
 // `sp list` and `sp find-names` ignore --sp is structural — their requests
 // have no sp_name field — so what is asserted here is that naming the globals
 // does not turn into some OTHER field of those requests.
@@ -1272,14 +1306,15 @@ func TestGlobalsAreIgnoredWhereTheFieldIsAbsent(t *testing.T) {
 	wantRequest(t, names, &pb.FindStoragePoolNamesRequest{
 		ClusterName: itCluster})
 
-	// Globals left empty travel as empty strings, not as anything invented.
+	// A --cluster and --sp left empty travel as empty strings, not as
+	// anything invented.
 	empty := runArgvFull(t, "GetStoragePool",
 		"--gateway-address", gatewayAddress, "sp", "get").(*pb.GetStoragePoolRequest)
 	wantRequest(t, empty, &pb.GetStoragePoolRequest{})
 }
 
 // TestEnvBinding is CT9's precedence, and the reason every test in this
-// package resets viper: the globals are env-backed through viper's
+// package resets viper: every global but --rev is env-backed through viper's
 // AutomaticEnv, so DNVCTL_CLUSTER is ambient context for every invocation and
 // an explicit flag beats it.
 func TestEnvBinding(t *testing.T) {
@@ -1295,6 +1330,228 @@ func TestEnvBinding(t *testing.T) {
 		"--cluster", "flagclu", "sp", "get").(*pb.GetStoragePoolRequest)
 	wantRequest(t, flagWins, &pb.GetStoragePoolRequest{
 		ClusterName: "flagclu", SpName: "envsp"})
+}
+
+// TestLeafFlagsIgnoreTheEnvironment is the other half of CT9 (§0 #15): only
+// the env-backed globals have an environment or config carrier. --rev and
+// every leaf flag are read off the command line alone, so a variable
+// exported for one command, or a key sitting in a config file, cannot put a
+// token, a name, a boolean such as a force, a count, an id, a list or a
+// bitmap into a request nobody typed it for. Each case leaves the flag
+// untyped, which is exactly when a second carrier would be consulted, and the
+// cases span every reader a flag reaches — string (--rev, --name), bool
+// (--force, --enabled), uint32 (--count) and the five built on strOf's text
+// (hexOf for --id, idListOf for --ids, u32ListOf for --slots, hexBytesOf for
+// --bm-hex, strListOf for --hosts); TestClusterCreateExtentSize holds the
+// uint64 one — because each reader could grow a fallback of its own, and
+// each of those five read viper itself before §0 #15.
+func TestLeafFlagsIgnoreTheEnvironment(t *testing.T) {
+	t.Run("DNVCTL_REV sends no token", func(t *testing.T) {
+		t.Setenv("DNVCTL_REV", "12")
+		req := runArgv(t, "CreateThinDevice",
+			"td", "create", "--name", "t0").(*pb.CreateThinDeviceRequest)
+		if req.SpRev != nil {
+			t.Errorf("DNVCTL_REV=12 sent sp_rev %v, want no token message",
+				req.SpRev)
+		}
+	})
+
+	t.Run("DNVCTL_FORCE forces nothing", func(t *testing.T) {
+		t.Setenv("DNVCTL_FORCE", "true")
+		req := runArgv(t, "DeleteClone",
+			"clone", "delete", "--name", "cl0").(*pb.DeleteCloneRequest)
+		if req.Force {
+			t.Errorf("DNVCTL_FORCE=true sent force=true, want false")
+		}
+	})
+
+	// `cluster get` with no --name falls back to the global --cluster; a
+	// DNVCTL_NAME must not step in between and redirect it.
+	t.Run("DNVCTL_NAME names nothing", func(t *testing.T) {
+		t.Setenv("DNVCTL_NAME", "other")
+		req := runArgv(t, "GetCluster",
+			"cluster", "get").(*pb.GetClusterRequest)
+		if req.ClusterName != itCluster {
+			t.Errorf("DNVCTL_NAME=other sent cluster_name %q, want the "+
+				"global %q", req.ClusterName, itCluster)
+		}
+	})
+
+	// --enabled defaults to true (§5.5); were the environment its carrier,
+	// an exported DNVCTL_ENABLED=false would disable a controller on every
+	// `set-enabled` typed without the flag.
+	t.Run("DNVCTL_ENABLED leaves --enabled at its default", func(t *testing.T) {
+		t.Setenv("DNVCTL_ENABLED", "false")
+		req := runArgv(t, "UpdateCntlrEnabled",
+			"cntlr", "set-enabled", "--id", "3").(*pb.UpdateCntlrEnabledRequest)
+		if !req.Enabled {
+			t.Errorf("DNVCTL_ENABLED=false sent enabled=false, want the " +
+				"flag default true")
+		}
+	})
+
+	t.Run("DNVCTL_COUNT pages nothing", func(t *testing.T) {
+		t.Setenv("DNVCTL_COUNT", "4")
+		req := runArgv(t, "ListStoragePools",
+			"sp", "list").(*pb.ListStoragePoolsRequest)
+		if req.Count != 0 {
+			t.Errorf("DNVCTL_COUNT=4 sent count %d, want 0", req.Count)
+		}
+	})
+
+	// hexOf (the id flags), idListOf, u32ListOf, hexBytesOf and strListOf
+	// parse strOf's text, and each read viper itself before §0 #15, so each
+	// is pinned on its own.
+	t.Run("the id, list and hex readers take nothing from the environment",
+		func(t *testing.T) {
+			t.Setenv("DNVCTL_ID", "3")
+			t.Setenv("DNVCTL_IDS", "4,5")
+			t.Setenv("DNVCTL_SLOTS", "0,1")
+			t.Setenv("DNVCTL_BM_HEX", "a5")
+			t.Setenv("DNVCTL_HOSTS", "h0")
+			wantRequest(t, runArgv(t, "DeleteCntlr", "cntlr", "delete"),
+				&pb.DeleteCntlrRequest{ClusterName: itCluster, SpName: itSp})
+			wantRequest(t, runArgv(t, "FindStoragePoolNames",
+				"sp", "find-names"),
+				&pb.FindStoragePoolNamesRequest{ClusterName: itCluster})
+			wantRequest(t, runArgv(t, "UpdateStoragePoolCntlidSlotList",
+				"sp", "set-cntlid-slots"),
+				&pb.UpdateStoragePoolCntlidSlotListRequest{
+					ClusterName: itCluster, SpName: itSp})
+			wantRequest(t, runArgv(t, "AppendCloneBitmap",
+				"clone", "append-bm", "--name", "cl0"),
+				&pb.AppendCloneBitmapRequest{
+					ClusterName: itCluster, SpName: itSp, CloneName: "cl0"})
+			wantRequest(t, runArgv(t, "UpdateSubsystemHosts",
+				"ss", "set-hosts", "--nqn", "n0"),
+				&pb.UpdateSubsystemHostsRequest{
+					ClusterName: itCluster, SpName: itSp, Nqn: "n0"})
+		})
+
+	t.Run("a config file supplies no leaf", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dnvctl.json")
+		if err := os.WriteFile(path,
+			[]byte(`{"rev": "12", "force": true}`), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		req := runArgv(t, "DeleteClone", "--config", path,
+			"clone", "delete", "--name", "cl0").(*pb.DeleteCloneRequest)
+		wantRequest(t, req, &pb.DeleteCloneRequest{
+			ClusterName: itCluster, SpName: itSp, CloneName: "cl0"})
+	})
+}
+
+// TestBadNumericEnvIsAUsageError is the refusal half of CT9: an env-backed
+// global keeps its environment and config carriers, so text there that is
+// not a number is what the same text as a flag argument is — a usage error
+// before any dial — never a cast that reads back as zero. --timeout is the
+// one numeric env-backed global, and a zero there is a deadline that has
+// already passed. NaN and ±Inf parse on every carrier, the flag's included,
+// and name no deadline, so each is refused from each; and a positive value
+// past time.Duration's range is saturated, not converted into a deadline
+// that has already passed. The dial seam records how often it was reached
+// and how far away the deadline was.
+func TestBadNumericEnvIsAUsageError(t *testing.T) {
+	type dialRecord struct {
+		dials  int
+		budget time.Duration
+	}
+	seam := func(rec *dialRecord, client pb.GatewayClient) dialFunc {
+		return func(ctx context.Context, _ string) (
+			pb.GatewayClient, func() error, error,
+		) {
+			rec.dials++
+			if deadline, ok := ctx.Deadline(); ok {
+				rec.budget = time.Until(deadline)
+			}
+			return client, func() error { return nil }, nil
+		}
+	}
+	refused := func(t *testing.T, what string, argv ...string) {
+		t.Helper()
+		var rec dialRecord
+		client := &recordingClient{}
+		res := runCLIWithDial(t, seam(&rec, client),
+			globalArgv(append(argv, "cluster", "list")...)...)
+		if res.code != 2 {
+			t.Errorf("%s exited %d with a deadline %v away, want 2 "+
+				"(stderr %q)", what, res.code, rec.budget, res.stderr)
+		}
+		if rec.dials != 0 || client.calls != 0 {
+			t.Errorf("%s dialed %d times and issued %d RPCs, want 0 and 0",
+				what, rec.dials, client.calls)
+		}
+		if !strings.Contains(res.stderr, "--timeout") {
+			t.Errorf("%s: stderr %q does not name --timeout", what, res.stderr)
+		}
+	}
+
+	t.Run("DNVCTL_TIMEOUT=abc", func(t *testing.T) {
+		t.Setenv("DNVCTL_TIMEOUT", "abc")
+		refused(t, "DNVCTL_TIMEOUT=abc")
+	})
+
+	config := func(t *testing.T, timeout string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "dnvctl.json")
+		if err := os.WriteFile(path,
+			[]byte(`{"timeout": "`+timeout+`"}`), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+
+	t.Run("the same text in a config file", func(t *testing.T) {
+		refused(t, `a config "timeout": "abc"`,
+			"--config", config(t, "abc"))
+	})
+
+	// strconv.ParseFloat, which pflag's Float64 flag calls too, takes these
+	// three, so the flag lets them through and only timeoutOf refuses them.
+	for _, text := range []string{"NaN", "Inf", "-Inf"} {
+		t.Run(text+" from every carrier", func(t *testing.T) {
+			refused(t, "--timeout "+text, "--timeout", text)
+			refused(t, `a config "timeout": "`+text+`"`,
+				"--config", config(t, text))
+			t.Setenv("DNVCTL_TIMEOUT", text)
+			refused(t, "DNVCTL_TIMEOUT="+text)
+		})
+	}
+
+	// The carrier itself stays: a parsable DNVCTL_TIMEOUT is the deadline.
+	t.Run("a number still applies", func(t *testing.T) {
+		t.Setenv("DNVCTL_TIMEOUT", "2.5")
+		var rec dialRecord
+		client := &recordingClient{want: "ListClusters"}
+		res := runCLIWithDial(t, seam(&rec, client),
+			globalArgv("cluster", "list")...)
+		if res.code != 0 {
+			t.Fatalf("DNVCTL_TIMEOUT=2.5 exited %d, want 0 (stderr %q)",
+				res.code, res.stderr)
+		}
+		if rec.budget <= 2*time.Second || rec.budget > 2500*time.Millisecond {
+			t.Errorf("DNVCTL_TIMEOUT=2.5 gave a deadline %v away, want "+
+				"just under 2.5s", rec.budget)
+		}
+	})
+
+	// 1e10 s is past time.Duration's reach (math.MaxInt64 ns, about 292
+	// years). Converted rather than saturated, it became math.MinInt64 on
+	// amd64: a deadline that had already passed.
+	t.Run("a value past time.Duration's range is saturated", func(t *testing.T) {
+		var rec dialRecord
+		client := &recordingClient{want: "ListClusters"}
+		res := runCLIWithDial(t, seam(&rec, client),
+			globalArgv("--timeout", "1e10", "cluster", "list")...)
+		if res.code != 0 {
+			t.Fatalf("--timeout 1e10 exited %d, want 0 (stderr %q)",
+				res.code, res.stderr)
+		}
+		if rec.dials != 1 || rec.budget < 290*365*24*time.Hour {
+			t.Errorf("--timeout 1e10 dialed %d times with a deadline %v "+
+				"away, want 1 and about 292 years", rec.dials, rec.budget)
+		}
+	})
 }
 
 // TestIdFlagsAcceptBase0 pins §5.0's id rule across the groups that declare
