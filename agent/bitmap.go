@@ -131,11 +131,11 @@ func BitmapUnsetRunFrom(
 	return run
 }
 
-// ChunkSet holds the migration bitmap chunks an agent currently has on disk
-// for one migration. bm_idx is the append sequence, so the set is
-// interpretable only as a ContiguousPrefix (SH23). The applied set reported
-// through BitmapInfo.bm_idx_list is always derived from it, so it survives
-// restarts (SH21). Clone chunks are addressed by the pair
+// ChunkSet holds the migration bitmap chunks of one migration that the agent
+// loaded from disk or received since. bm_idx is the append sequence, so the
+// set is interpretable only as a ContiguousPrefix (SH23). The applied set
+// reported through BitmapInfo.bm_idx_list is always derived from it, so it
+// survives restarts (SH21). Clone chunks are addressed by the pair
 // (src_slice_idx, bm_idx) and live in CloneChunkSet below.
 type ChunkSet struct {
 	chunks map[uint32][]byte
@@ -179,8 +179,8 @@ func (c *ChunkSet) Indexes() []uint32 {
 // bm_idx 0. Migration chunks are interpretable only as such a prefix: chunk
 // k's first bit sits at the summed bit length of chunks 0…k−1, so a gap makes
 // every later chunk unplaceable (SH23). The worker's ascending, one-in-flight
-// push makes gaps unreachable in practice; the applied set still reports
-// every file present.
+// push makes gaps unreachable in practice; the applied set (Indexes) still
+// reports every chunk in the set, not only this prefix.
 func (c *ChunkSet) ContiguousPrefix() []byte {
 	var out []byte
 	for bmIdx := uint32(0); ; bmIdx++ {

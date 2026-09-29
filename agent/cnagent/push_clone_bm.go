@@ -96,9 +96,9 @@ func findClone(req *pb.SyncupCntlrRequest, cloneId uint64) *pb.Clone {
 }
 
 // bitmapInfoList is the CN20 reply field: one BitmapInfo per clone of the
-// stored request, its chunk_id_list always derived from the files present
-// (SH21), so it survives an agent restart and the worker never re-pushes what
-// the node already holds. A clone reports its applied set as chunk_id_list
+// stored request, its chunk_id_list derived from the files present save any
+// the startup reload left unloaded (SH21), so it survives an agent restart and
+// the worker re-pushes no chunk the reload loaded. A clone reports its applied set as chunk_id_list
 // only — bm_idx_list is a migration field, and a flat index cannot name a
 // chunk the pair (src_slice_idx, bm_idx) addresses.
 func (s *CnAgentServer) bitmapInfoList(st *cntlrState) []*pb.BitmapInfo {

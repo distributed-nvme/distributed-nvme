@@ -27,9 +27,12 @@ const (
 // DN out of allocation.
 const tagNoWriteZeroes = "disk lacks Write Zeroes"
 
-// Reconcile is the SH1 startup pass (DN2): load the local store, converge
-// every stored DN, tear down sides whose pointer left their DN's list,
-// converge the rest, then re-apply every persisted bitmap chunk. It runs
+// Reconcile is the SH1 startup pass (DN2): load the local store — while a
+// dn-* file does not load, no side or chunk whose DN is not loaded is loaded
+// or deleted, and while a side-* file does not load, neither is a chunk whose
+// side is not loaded but whose loaded DN still names that side — converge
+// every loaded DN, tear down sides whose pointer left their DN's list,
+// converge the rest, then re-apply every bitmap chunk it loaded. It runs
 // under the node write lock with the caller's startup trace id (SH2), and
 // fails only when the local store itself is unreadable (SH3).
 func (s *DnAgentServer) Reconcile(ctx context.Context) error {
@@ -43,33 +46,64 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		return err
 	}
 
+	// unreadDn is set when a dn-* file did not load. Such a file names no DN
+	// — the ids come from the decoded request, never from the file name
+	// (SH6) — so any side whose DN is not loaded may be one its list still
+	// names, and nothing read here proves that it left that list.
+	unreadDn := false
 	for _, path := range files[agent.StoreKindDn] {
 		req := &pb.SyncupDnRequest{}
 		if err := s.store.Load(ctx, path, req); err != nil {
 			slog.ErrorContext(ctx, "skipping unreadable dn state file",
 				slog.String("path", path),
 				slog.String("error", err.Error()))
+			unreadDn = true
 			continue
 		}
 		// §7: a file an older build persisted with a zero extent size is
 		// LOADED, and refused below by convergeDn, rather than skipped here.
-		// Skipping it would drop the DN record, and the side loop further down
-		// reads a missing DN as "this side left its parent's list" and tears
-		// every one of them down — exports, dm devices and local state. A conf
-		// fault must not destroy resources, so the record is kept exactly as
-		// the restart found it and convergeDn is the single place that reports
-		// it, once per pass.
+		// Skipping it would drop the DN record, and with no dn-* file left
+		// unread the side loop further down reads a missing DN as "this side
+		// left its parent's list" and drops the local state of every one of
+		// them (DN2). A conf fault must not destroy the desired state, so the
+		// record is kept exactly as the restart found it and convergeDn is the
+		// single place that reports it, once per pass.
 		s.putDn(dnKey(req.GetClusterId(), req.GetDnId()), &dnState{
 			req:     req,
 			tracker: agent.NewResTracker(),
 		})
 	}
+	// unreadParent reports whether a side or a chunk of the DN (clusterId,
+	// dnId) goes with a dn-* file that did not load: its DN is not loaded
+	// while such a file exists. Those are skipped with their DN — neither
+	// loaded nor deleted. Loading them would hand them to the pointer-absent
+	// branch below, which reads a missing DN as "this side left its parent's
+	// list" and deletes the side's request and chunks for want of a list that
+	// could not be read. Out of memory, each such side answers its Check
+	// rounds with UnknownObject, so the worker keeps re-sending its
+	// SyncupSide, which DN8 admits once the re-sent SyncupDn has put its
+	// pointer back.
+	unreadParent := func(clusterId, dnId uint64) bool {
+		return unreadDn && s.getDn(dnKey(clusterId, dnId)) == nil
+	}
+	// unreadSide is unreadDn one level down: set when a side-* file did not
+	// load, which names no side either.
+	unreadSide := false
 	for _, path := range files[agent.StoreKindSide] {
 		req := &pb.SyncupSideRequest{}
 		if err := s.store.Load(ctx, path, req); err != nil {
 			slog.ErrorContext(ctx, "skipping unreadable side state file",
 				slog.String("path", path),
 				slog.String("error", err.Error()))
+			unreadSide = true
+			continue
+		}
+		if unreadParent(req.GetClusterId(), req.GetDnId()) {
+			slog.WarnContext(ctx,
+				"skipping side state file of an unloaded dn",
+				slog.String("path", path),
+				slog.Uint64("cluster_id", req.GetClusterId()),
+				slog.Uint64("dn_id", req.GetDnId()))
 			continue
 		}
 		key := sideKey(req.GetClusterId(), req.GetDnId(),
@@ -95,10 +129,38 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 				slog.String("error", err.Error()))
 			continue
 		}
+		// Not an orphan: nothing read here proves its side gone.
+		if unreadParent(chunk.GetClusterId(), chunk.GetDnId()) {
+			slog.WarnContext(ctx,
+				"skipping bitmap chunk file of an unloaded dn",
+				slog.String("path", path),
+				slog.Uint64("cluster_id", chunk.GetClusterId()),
+				slog.Uint64("dn_id", chunk.GetDnId()))
+			continue
+		}
 		key := sideKey(chunk.GetClusterId(), chunk.GetDnId(),
 			chunk.GetSidePointer().GetSpId(),
 			chunk.GetSidePointer().GetSideId())
 		st := s.getSide(key)
+		// Nor, while a side-* file did not load, is a chunk whose side is not
+		// loaded but whose loaded DN still names that side: the file may be
+		// this side's, so nothing read here proves the side gone. A chunk
+		// whose DN no longer names its side is an orphan whatever side-* file
+		// failed to decode — the side left the list, and its chunks go with
+		// it (SH7) — and so is one whose DN is not loaded (with no dn-* file
+		// unread, see above), which reads as a list that names no side.
+		if st == nil && unreadSide {
+			dn := s.getDn(dnKey(chunk.GetClusterId(), chunk.GetDnId()))
+			if dn != nil && pointerKnown(dn.req, chunk.GetSidePointer()) {
+				slog.WarnContext(ctx,
+					"skipping bitmap chunk file of an unloaded side",
+					slog.String("path", path),
+					slog.Uint64("sp_id", chunk.GetSidePointer().GetSpId()),
+					slog.Uint64("side_id",
+						chunk.GetSidePointer().GetSideId()))
+				continue
+			}
+		}
 		if st == nil || st.req.GetMigrDstConf().GetMigrId() !=
 			chunk.GetMigrId() {
 			orphans[path] = struct{}{}
@@ -127,7 +189,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	// attempt to remove its resources. The node-level sweep below finds them
 	// by name, which the teardown this replaced could not: it deleted the
 	// same state after a best-effort removal pass whose every step only
-	// logged its failure.
+	// logged its failure. A missing DN reads as a list that names no side —
+	// unless a dn-* file did not load, and then its sides never got this far
+	// (unreadParent).
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
 		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))

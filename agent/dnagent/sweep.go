@@ -31,12 +31,12 @@ import (
 //     gone, and only for a side or migration the authoritative pointer lists
 //     prove unwanted (the sweepOrphanRecords proof, unchanged);
 //   - migration objects are keyed by (sp, migr) and belong to no side, so
-//     they are judged by a claim rule over every locally stored side rather
+//     they are judged by a claim rule over every side this agent holds rather
 //     than by an sp id in the name. That is what lets a FINISHED migration's
 //     dm-clone go in the pass that repoints the linear off it, without any
 //     "applied destination" memory. Both passes judge them only once every
-//     side of their sp this node may host is locally stored: a side known
-//     by its pointer alone may be the one whose claim a lost store took.
+//     side of their sp this node may host is held: a side known by its
+//     pointer alone may be the one whose claim a lost store took.
 // ---------------------------------------------------------------------------
 
 // dnActual is one snapshot of everything on the node this agent could own,
@@ -122,14 +122,14 @@ func (a *dnActual) dmsOfKind(
 // Claims: who still wants a side, and who still wants a migration
 // ---------------------------------------------------------------------------
 
-// sideClaims is what the locally stored sides still want. It is recomputed on
+// sideClaims is what the sides this agent holds still want. It is recomputed on
 // every pass from the requests themselves — the one authoritative copy of the
 // desired state this agent holds — and never from anything the converge left
 // behind.
 type sideClaims struct {
 	// exports are the :2: subsystem NQNs some wanted side still exports.
 	exports map[string]struct{}
-	// migrSrcDm / migrSrcNqn are the (sp, migr) pairs some stored side still
+	// migrSrcDm / migrSrcNqn are the (sp, migr) pairs some held side still
 	// plays the SOURCE of, SPLIT BY THE GATE THAT KEEPS EACH OBJECT. The
 	// source has two, and they are not wanted at the same levels: the `d2`
 	// linear under wantDm, its `:3:` export under wantExport. A single claim
@@ -827,7 +827,7 @@ func (s *DnAgentServer) buildSideChain(
 	chain.errors = unwantedOfSide(common.DmKindDnError)
 	chain.sideDevs = unwantedOfSide(common.DmKindDnSide)
 
-	// Migration devices of this sp that no stored side claims.
+	// Migration devices of this sp that no held side claims.
 	ofSp := func(dn common.DmName) bool { return dn.Ids[0] == plan.spId }
 	unclaimedMigr := func(
 		kind common.DmKind,
@@ -1280,8 +1280,8 @@ func (s *DnAgentServer) dmMapsUnwanted(
 }
 
 // sweepDn is the node-level pass: everything of a side whose pointer has left
-// this DN's list, the migration objects no stored side claims (of an sp whose
-// every known side is stored), the exports no stored side claims, and the
+// this DN's list, the migration objects no held side claims (of an sp whose
+// every known side is held), the exports no held side claims, and the
 // allocation records the authoritative lists prove orphaned.
 //
 // The removing pass runs under the node write lock, so neither the DN set nor
@@ -1442,7 +1442,7 @@ func (s *DnAgentServer) sweepDn(
 				}
 				chain.exportLinears = append(chain.exportLinears, linear)
 			case exportOrphan:
-				// No namespace, on no port but ours, no stored side claims
+				// No namespace, on no port but ours, no held side claims
 				// it, and older than DnExportOrphanGrace: ours half-removed,
 				// or a build its agent abandoned. Exporting nothing, it goes.
 			}

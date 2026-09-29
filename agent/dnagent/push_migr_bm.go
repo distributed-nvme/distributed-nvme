@@ -52,10 +52,10 @@ func (s *DnAgentServer) pushMigrBitmap(
 	return &pb.PushMigrBitmapReply{AgentReply: agent.OkReply()}
 }
 
-// applyMigrBitmaps recomputes the skippable regions from every chunk present
-// and marks them hydrated on the dm-clone. A chunk whose dm-clone does not
-// exist yet still counts as applied; it is re-applied when the dm-clone is
-// (re)created (§9.6 step 2/4).
+// applyMigrBitmaps recomputes the skippable regions from every chunk of the
+// applied set and marks them hydrated on the dm-clone. A chunk whose dm-clone
+// does not exist yet still counts as applied; it is re-applied when the
+// dm-clone is (re)created (§9.6 step 2/4).
 func (s *DnAgentServer) applyMigrBitmaps(
 	ctx context.Context,
 	st *sideState,
@@ -100,8 +100,10 @@ func (s *DnAgentServer) applyChunks(
 	}
 }
 
-// bitmapInfo reports the applied set, always derived from the files present
-// (SH21), so it survives an agent restart.
+// bitmapInfo reports the applied set: the chunks this process loaded at
+// startup or received since. That is every file present (SH21) save those
+// DN2's reload skipped, so the set survives an agent restart, and a skipped
+// chunk is pushed again.
 func (s *DnAgentServer) bitmapInfo(st *sideState) *pb.BitmapInfo {
 	dst := st.req.GetMigrDstConf()
 	if dst == nil {

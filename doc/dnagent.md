@@ -426,12 +426,21 @@ SH7. When an object's pointer leaves its parent's list, its state is dropped
      replaced, and it was the opposite of idempotent: the removal pass only
      logged its failures and the file was deleted regardless, so the one
      record naming the object was destroyed exactly when the object had
-     failed to go.
+     failed to go. The exception is a file no
+     memory entry names — a chunk the startup reload skipped (DN2,
+     `cnagent.md` CN2) and no push has rewritten since, or the `side-*` or
+     `cntlr-*` file of an object it skipped that no `SyncupSide` or
+     `SyncupCntlr` has rebuilt: it is not deleted when its object's
+     pointer leaves the list. The sweep still removes the object's resources
+     by name, and a later restart that decodes the file finds the pointer
+     absent and deletes it.
 
 ### 2.5 Revision gate — `revision.go`
 
 SH8. Per `architecture.md` §9.1, with `stored` = revision of the last fully
-     applied request for the object (0 when none):
+     applied request for the object, as this process holds it (0 when it
+     holds none, as for an object whose file the startup reload did not
+     load):
 
 ```go
 // GateRevision returns nil when the request may be applied (incoming >=
@@ -740,12 +749,16 @@ SH20. `nvmehost.go`: `Connect` always passes
 
 SH21. Implements the agent side of §9.6: persist the received
       `Push*BitmapRequest` verbatim at its `Local*BmPath` (via `WriteProto`)
-      **before** applying; the applied set is always derived from the files
-      present — `BitmapInfo.bm_idx_list` for a migration, keyed by the append
+      **before** applying; the applied set is derived from the files
+      present, save those the startup reload leaves unloaded (below) —
+      `BitmapInfo.bm_idx_list` for a migration, keyed by the append
       index, and `BitmapInfo.chunk_id_list` for a clone, keyed by the
       `(src_slice_idx, bm_idx)` pair that addresses the chunk. The file name
       carries that pair too, but only as an address: the persisted request's
-      CONTENT is what the startup reload decodes it from.
+      CONTENT is what the startup reload decodes it from. A file that reload
+      leaves unloaded — one that does not decode, and DN2's skips while a
+      `dn-*` or `side-*` file does not load — is in no applied set until a
+      push rewrites it or a later restart loads it.
 
 SH22. The §11.4 math skeleton lives here: chunk placement (concatenated —
       migration — or self-positioned `(src_slice_idx, bm_idx)` chunk of fixed
@@ -760,9 +773,9 @@ SH22. The §11.4 math skeleton lives here: chunk placement (concatenated —
 
 SH23. Migration chunks are interpretable only as a contiguous prefix from
       `bm_idx = 0`; the apply computation uses the longest contiguous prefix
-      of the files present (the worker's ascending, one-in-flight push makes
-      gaps unreachable in practice). The applied set still reports every file
-      present.
+      of the applied set's chunks (SH21) — the worker's ascending,
+      one-in-flight push makes gaps unreachable in practice. The applied set
+      still reports every chunk in it, not only that prefix.
 
 ### 2.10 Check-stream rules
 
@@ -1020,10 +1033,11 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      a converge would bury the conf fault under an identity error on every
      side of that DN instead of one record naming the field. Loading rather
      than skipping is what keeps the fault harmless: with no DN state in
-     memory every `side-*` file of that node takes the pointer-absent branch
-     below, and its request and its bitmap chunks are deleted on the spot
-     (SH7) — the agent would forget every side it hosts, and every bitmap
-     chunk it holds for them, because one field of its parent is zero. It
+     memory and no `dn-*` file left unread, every `side-*` file of that node
+     takes the pointer-absent branch below, and its request and its bitmap
+     chunks are deleted on the spot (SH7) — the agent would forget every
+     side it hosts, and every bitmap chunk it holds for them, because one
+     field of its parent is zero. It
      would not even remove their resources in exchange: a DN that was never
      loaded gets no node-level sweep of its own (DN6), and no other DN's
      sweep reaches them either — that sweep's enumeration is filtered to its
@@ -1045,7 +1059,29 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      identity a DN5 converge has asked for, which this one stopped before
      asking (the probe above hands `DiskMeta` no identity). There
      is no compat shim: a cluster whose stored conf carries zeros is refused
-     loudly everywhere and has to be recreated. The order over the whole
+     loudly everywhere and has to be recreated. A `dn-*` file that does not
+     load — its read fails or it does not decode — is skipped, and while one
+     is unread, so is every `side-*` file and `migr-bm-*` chunk whose DN is
+     not loaded: a file that did not load names no DN (SH6), so any of those
+     sides may be one its list still names, and a list that could not be
+     read proves nothing about which sides left it. Skipped is neither
+     loaded nor deleted: none of them is converged, swept or applied, and
+     every one of those files stays on disk exactly as the restart found it
+     — loaded, each side would reach the pointer-absent branch below, which
+     would delete its request and its chunks for want of a list that could
+     not be read. Nor is anything hidden: with none of it in memory, the DN
+     and each of those sides answer their Check rounds
+     `ReplyCodeUnknownObject` (SH25), and the worker re-sends each `Syncup*`
+     (`dnv-worker.md` RW4). The `SyncupDn` rewrites the file, and from there
+     each skipped side the list still names is where a lost `--local-store`
+     leaves one — known by its pointer alone (DN6) — until its `SyncupSide`,
+     which DN8 admits only after that `SyncupDn`, converges from the request
+     it carries and rewrites its file; that reply's `bm_info` acknowledges
+     no chunk, so the worker pushes each chunk of the migration again
+     (DN15). A skipped side the re-sent list no longer names is in no
+     list and not loaded, so that DN's node-level sweep removes its resources
+     by name (DN6); its files wait for a later restart, whose pass finds its
+     pointer absent and drops them (SH7). The order over the rest of the
      store is: every side whose pointer is absent from its DN's stored
      `side_pointer_list` is dropped, then each usable DN's node-level sweep
      removes what those sides left behind by name, then the remaining
@@ -1053,15 +1089,24 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      request — a converge that finds not-yet-zeroed extents
      (re)starts that side's DN9 zeroing goroutine, which is how provisioning
      resumes after a restart. Then re-apply every `migr-bm-*` chunk (SH21-
-     SH23) — except the orphans, which are **deleted** here: a chunk whose
-     side is no longer in the store, and a chunk whose `migr_id` no longer
-     matches that side's stored `migr_dst_conf`. Every other deletion — with
-     the side that owns them (DN6, SH7), and on a destination's `migr_id`
-     change (DN13) — names the files from the side's in-memory chunk set,
-     keyed by the one `migr_id` that set is tracking, so a file this process
-     never loaded is invisible to all of them and a restart is the only
-     place that can collect it. All under the node write lock, with the SH2
-     trace id.
+     SH23) — except the orphans, which are **deleted** here: a chunk not
+     skipped with its DN whose side is not loaded, and a chunk whose
+     `migr_id` no longer matches that side's stored `migr_dst_conf`. A chunk
+     whose side is not loaded is no orphan while a `side-*` file does not
+     load and the chunk's loaded DN still names its side: that file names no
+     side, so it may be this side's, and the chunk is skipped like the files
+     of a DN that did not load — neither loaded nor deleted. The chunk's
+     side is then where a lost `--local-store` leaves one, as above, until
+     its `SyncupSide` rewrites its file and the worker pushes the chunk
+     again. A chunk whose loaded DN no longer names its side is an orphan
+     whatever `side-*` file failed to decode: the side has left the list,
+     and its chunks go with it (SH7).
+     Every other deletion — with the side that owns them (DN6, SH7), and on
+     a destination's `migr_id` change (DN13) — names the files from the
+     side's in-memory chunk set, keyed by the one `migr_id` that set is
+     tracking, so a file this process never loaded is invisible to all of
+     them and a restart is the only place that can collect it. All under the
+     node write lock, with the SH2 trace id.
 
 ### 4.4 `GetDnSize`
 
@@ -1194,11 +1239,16 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      `side_pointer_list` is authoritative (§9.1 full sync). A pointer in the
      request without local state needs nothing yet — resources come with its
      first `SyncupSide`; the persisted request is what makes the pointer
-     *known*. A local side whose pointer has **left** the list is dropped on
-     the spot (SH7): its DN8 connect-retry registration goes, its DN9 zeroing
-     goroutine is cancelled **and waited for**, its §11.2 fence is cleared,
-     and its `side-*` and `migr-bm-*` files, memory entry and object lock are
-     deleted. Nothing of it is removed from the node at that point.
+     *known*. A side this process holds whose pointer has **left** the list
+     is dropped on the spot (SH7): its DN8 connect-retry registration goes,
+     its DN9 zeroing goroutine is cancelled **and waited for**, its §11.2
+     fence is cleared, and its `side-*` and `migr-bm-*` files, memory entry
+     and object lock are deleted. Nothing of it is removed from the node at
+     that point. The files deleted are the ones its memory entry names —
+     the request's own path and its chunk set's files — so a chunk DN2's
+     reload skipped and no push has rewritten stays, as does every file of
+     a side DN2 skipped that no `SyncupSide` has rebuilt, which the process
+     does not hold at all; they wait for a later restart (SH7).
 
      What to remove is derived afterwards from the node itself: enumerate
      what exists — `dmsetup ls`, the configfs subsystem listing, the
@@ -1218,9 +1268,11 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      converged. Its wanted set is empty for every side that is not in any
      authoritative list: a `DnErrorName`/`DnLinearName`/`DnSideName` device
      whose `(sp_id, side_id)` appears in no synced DN's `side_pointer_list`
-     **and** in no locally stored side goes, together with the migration
-     objects no stored side claims (once every side of their sp this node
-     may host is stored, below) and the exports this agent can attribute
+     **and** in no side whose stored request this process holds (a side
+     whose file DN2's reload did not load is on disk but held by none until
+     its `SyncupSide`) goes, together with the migration objects no held
+     side claims (once every side of their sp this node may host is held,
+     below) and the exports this agent can attribute
      to itself that name no side it must keep — a `SideToCnNqn` export
      carries no dn id, so it is attributed before it is judged (below), or
      the sweep would take a sibling agent's. It never touches a side that
@@ -1327,7 +1379,7 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      agent's kind-`d1` linear is **foreign** and is never touched; one naming
      ours belongs to the side in that name, and survives for as long as that
      side is in an authoritative list, which is what keeps a side that must
-     be rebuilt from its record exporting (DN8) even though no stored side
+     be rebuilt from its record exporting (DN8) even though no held side
      claims it. The namespace is read by its id, `namespaces/1/device_path`
      — every side export has that one namespace and no other (§4.6) — and
      the namespaces are listed only when there is no namespace 1 (*amended
@@ -1335,7 +1387,7 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      cluster is foreign, whatever else it holds. The cost is the reason.
      Scope 1 attributes, on every pass — each Check round's verdict among
      them — every export of an sp this agent holds a device or a known side
-     of that no stored side of its own claims, which includes every
+     of that no held side of its own claims, which includes every
      sibling's export of that sp. Listing each one's namespaces cost an
      `ls` apiece, so the pass of every agent holding sides of an sp grew
      with all the other agents' exports of it: about s × (s − 1) × C
@@ -1366,7 +1418,7 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      age tells an abandoned half-built export from one in flight, so such an
      export is removed only
      once its configfs subsystem directory is older than
-     `DnExportOrphanGrace` (30 s) — unless a stored side still claims it,
+     `DnExportOrphanGrace` (30 s) — unless a held side still claims it,
      which is the claim rule again. A younger one is left alone that pass:
      not removed, not a leftover, not a failure, so the reply code is
      unaffected; each later pass judges it again, until it either has a
@@ -1511,14 +1563,16 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      volume table — not the local store — is authoritative for extent
      placement ([D13]). A `SideRecord` is an orphan
      only when its `(sp_id, side_id)` appears in no synced DN's
-     `side_pointer_list` and in no locally stored side. Missing local state
+     `side_pointer_list` and in no side whose stored request this process
+     holds (a side whose file DN2's reload did not load is held by none
+     until its `SyncupSide`). Missing local state
      is *not* proof: a node that lost `--local-store` but kept its disk still
      has every side in its DN's pointer list, and freeing those extents makes
      the next `SyncupSide` either re-allocate them and zero live data away
      (`provisioned = false`) or, at `provisioned = true`, refuse to allocate
      and report the side permanently dead (`"record missing"`, DN9) — both
      outcomes lose the data. A `CloneMetaRecord`
-     is an orphan only when no stored side claims its `(sp_id, migr_id)`
+     is an orphan only when no held side claims its `(sp_id, migr_id)`
      **and** every side of that `sp_id` this node may host is one whose local
      state the agent actually holds — otherwise a side it has not heard from
      yet could still own the slot, and freeing it would strand an in-flight
@@ -1590,7 +1644,9 @@ nvmet), tear down top-down, probe-first throughout (SH16).
 DN8. **Gating.** The pointer MUST be present in the stored
      `SyncupDnRequest.side_pointer_list` — else `ReplyCodeUnknownObject`
      (`SyncupDn` introduces pointers first, §9.2). Then the SH8 revision gate
-     against the stored `SyncupSideRequest`.
+     against the `SyncupSideRequest` this process holds — 0 while it holds
+     none, as for a side whose file DN2's reload did not load, whatever
+     revision that file carries.
 
      After a lost `--local-store`, the first `SyncupSide` of each listed
      side meets no stored request: there is no revision to gate it against,
@@ -1945,9 +2001,11 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       (DN6 L4 and L1) once every side of the sp this node may host is
       stored. The linear is keyed by `(sp_id, migr_id)` and the
       export by `(cluster, dn, sp_id, migr_id)`; neither names a side, so
-      both are judged by the claim rule — no stored side of this DN still
-      names that `migr_src_conf` — rather than by an "applied source" the
-      converge would have overwritten on its way past. Deferral is the same
+      both are judged by the claim rule — no side of this DN whose stored
+      request this process holds still names that `migr_src_conf` (it holds
+      none for a side DN2's reload skipped) — rather than by an "applied
+      source" the converge would have overwritten on its way past.
+      Deferral is the same
       condition: while `dst_provisioned` is `false` the effective source conf
       is absent, so anything an earlier pass built for it is unwanted and
       goes, which is what makes "behaves exactly as if `migr_src_conf` were
@@ -1997,7 +2055,7 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       no-op that §9.6 and [D7] assume. Knobs from
       `dm_clone_conf`); (5) reload the primary CN's dm-linear onto the
       dm-clone, move its namespace to `AnaGrpIdOptimized`, the standbys' to
-      `AnaGrpIdNonOptimized`; re-apply all locally present bitmap chunks
+      `AnaGrpIdNonOptimized`; re-apply every bitmap chunk of the applied set
       (SH21). The numbering above follows §11.2's logical steps; the
       implemented converge order differs without changing any end state
       (§4.6 builds bottom-up, pinned by §6 test 12's slot → connect → clone
@@ -2063,8 +2121,10 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       kernel, so the connection is attributed first by its controller's
       `hostnqn` (`/sys/class/nvme/nvmeN/hostnqn`, DN6): a controller some
       other dn agent on this node opened is not a candidate at all. What
-      that leaves is decided by the claim rule: no stored side of this DN
-      still names that `migr_dst_conf` under a wanted destination role. That
+      that leaves is decided by the claim rule: no side of this DN whose
+      stored request this process holds (it holds none for a side DN2's
+      reload skipped) still names that `migr_dst_conf` under a wanted
+      destination role. That
       is the whole replacement for the "applied destination" this used to
       diff against — a field the converge overwrote on its way past, so a
       removal that failed was forgotten by the pass that was meant to retry
@@ -2123,7 +2183,8 @@ DN15. Gate: the side must be known and its
       worker had already done and had to be re-driven by a whole re-sync
       (`dnv-worker.md` BM3). Then SH21-SH23: persist the chunk
       at `LocalMigrBmPath(cluster, dn, sp, migr_id, bm_idx)`, recompute from
-      all present chunks (shift by the leg's `meta_blocks`), `blkdiscard` the
+      every chunk of the applied set (shift by the leg's `meta_blocks`),
+      `blkdiscard` the
       fully-skippable regions of `DnMigrFinalName`. If the dm-clone does not
       currently exist — not built yet, suppressed by `sp_level`, or still
       behind DN13's provisioning gate — the file still counts as applied;
@@ -2138,8 +2199,11 @@ DN15. Gate: the side must be known and its
 ### 4.8 `GetDnInfo` / `GetSideInfo`
 
 DN16. Read-only: probe fresh under the DN1 locks and reply `agent_reply`,
-      `revision`, the info. An unknown DN (no `dn-*` file) or side pointer ⇒
-      `ReplyCodeUnknownObject` with `revision = 0`.
+      `revision`, the info. An unknown DN or side pointer — one this
+      process holds no request for, as when none was ever applied, or when
+      the startup reload could not load or skipped its file (DN2) and none
+      has been applied since — ⇒ `ReplyCodeUnknownObject` with
+      `revision = 0`.
 
       For a **known** object the `agent_reply` is the **verdict**: the sweep
       of DN6 run with its removals left out — the same enumeration, the same
@@ -2859,6 +2923,27 @@ able to fail.
     most `common.CmdSoftTimeout` away. The store calls the `OsClient`
     directly, not through an OS wrapper, so the bound is its own to apply
     (`osclient.md` §4.2).
+25. **An unreadable store file deletes nothing it might own** (DN2): a
+    `Reconcile` over a `dn-*` file that does not decode
+    (`TestReconcileKeepsTheSidesOfAnUnreadableDnFile`) mutates nothing: the
+    side's state file and its bitmap chunk stay byte for byte, and the DN
+    and the side reply `ReplyCodeUnknownObject` to their Check rounds — the
+    side still after the re-sent `SyncupDn`, whose save makes the file
+    decode again. The skip covers only a DN not loaded, and only while a
+    `dn-*` file did not load (`TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn`):
+    an undecodable `.tmp-*` file beside a readable `dn-*` file skips none of
+    that DN's sides — the side is loaded and its first `CheckSide` round is
+    clean — and with no `dn-*` file at all the side's state file and its
+    chunk go in one `rm`. One level down
+    (`TestReconcileKeepsTheChunksOfAnUnreadableSideFile`), beside a `side-*`
+    file that does not decode, the chunk of a side its DN still names is
+    kept byte for byte with no `rm` naming it, and the side replies
+    `ReplyCodeUnknownObject` to its Check round; the chunk is deleted, in
+    exactly one `rm`, when its DN no longer names its side, when its
+    side has no state file and no `side-*` file failed to load, and when
+    its DN has no file and no `dn-*` file failed to load; and an
+    undecodable `.tmp-*` file beside a loaded side's `side-*` file leaves
+    that side's chunk loaded, in its applied set, with no `rm` naming it.
 
 ## 7. Acceptance checklist
 

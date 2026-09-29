@@ -2321,9 +2321,22 @@ concatenation (§9.6, §11.4).
   The stored request contains the revision, so no separate
   revision record exists. On start the agent loads every file under its prefix,
   reconciles the system to it (full idempotent re-apply, §11.5 for clones), then
-  serves. When an object disappears from its parent's pointer list, the agent drops its
+  serves — except that a dn agent skips, neither loading nor deleting them, the files
+  that may belong under a file it cannot load: while a `dn-*` file does not load, the
+  `side-*` and `migr-bm-*` files of every DN it did not load; while a `side-*` file
+  does not load, each `migr-bm-*` chunk of a side it did not load that a loaded DN
+  still names. A file that did not load names no object, so it proves no owner gone
+  (`dnagent.md` DN2). The cn agent makes no such exception: the files under a `cn-*`
+  or `cntlr-*` file it cannot load are deleted as though that file's object were gone
+  (`cnagent.md` CN2).
+  When an object disappears from its parent's pointer list, the agent drops its
   file(s), its chunk files, its in-memory entry and its object lock in that same pass,
-  **before** anything of it is removed. It keeps no record of the object afterwards
+  **before** anything of it is removed — save a file a restart left unloaded that no
+  memory entry has named since (on either role a file that did not load; on a dn agent
+  also a file skipped as above): the §9.8 sweep removes its object's resources by name
+  in that pass, and the file stays until a later restart decodes it and finds
+  the pointer absent (`dnagent.md` DN2, `cnagent.md` CN2).
+  It keeps no record of the object afterwards
   because it needs none: the §9.8 sweep finds the object's resources by their names, and
   a record kept until they were gone would be a record of work owed — the very thing
   that let a failed teardown be forgotten.
@@ -2349,8 +2362,9 @@ concatenation (§9.6, §11.4).
   same way — the file is **loaded**, never skipped, and refused inside the converge: the
   dn agent's `convergeDn` records the refusal on the DN's meta row and leaves the port
   as found, and the sides of that DN are neither converged nor swept — a conf fault must
-  not destroy resources (skipping the file instead would make the side loop read every
-  side as having left its parent's list and drop its state, leaving the side's devices
+  not destroy resources (skipping the file instead, with no `dn-*` file left unread,
+  would make the side loop read every side as having left its parent's list and drop
+  its state, leaving the side's devices
   on the node with nothing left that names them — `dnagent.md` DN2); the cn agent
   refuses before it plans, and since the sweep needs a plan to know what is wanted, that
   cntlr builds nothing, sweeps nothing and leaves the node exactly as it found it
@@ -2384,11 +2398,13 @@ concatenation (§9.6, §11.4).
 * **Bitmap durability.** Received `Push*Bitmap` chunks are persisted per chunk under
   `LocalMigrBmPath`/`LocalCloneBmPath`; the applied sets reported through
   `bm_info.bm_idx_list` / `bm_info_list[…].chunk_id_list` are derived from the files
-  present, so they survive agent
-  restarts and the worker does not have to re-push after one. Re-applying a chunk is
-  always harmless — re-`blkdiscard`ing an already-hydrated dm-clone region is a no-op,
-  which holds only because every dnv dm-clone carries `no_discard_passdown` ([D7],
-  Appendix A). Full protocol: §9.6 [D7].
+  present, so they survive agent restarts and the worker does not have to re-push
+  after one — save a chunk whose own file, or whose owner's or that owner's parent's,
+  the restart could not load: it stays out of the applied set — left on disk or
+  deleted — so the worker pushes it again if it still wants it (`dnagent.md` DN2,
+  `cnagent.md` CN2). Re-applying a chunk is always harmless — re-`blkdiscard`ing
+  an already-hydrated dm-clone region is a no-op, which holds only because every dnv
+  dm-clone carries `no_discard_passdown` ([D7], Appendix A). Full protocol: §9.6 [D7].
 
 ### 9.2 `service DiskNodeAgent`
 
@@ -2677,16 +2693,19 @@ and the paged readers, not because bitmaps are inherently huge.)
    and the ids it names are the whole of its addressing.
 2. **Persist, then apply.** Write the chunk to its `LocalMigrBmPath` /
    `LocalCloneBmPath` file first (the §9.1 atomic, durable replace); then recompute
-   the fully-skippable dm-clone regions from **all** locally present chunks of that
-   migration/clone (§11.4 math; migrations first shift by the leg's `meta_blocks`,
-   §8.11) and apply them to the migration/clone dm-clone by `blkdiscard`ing
-   `DnMigrFinalName` / `CnCloneFinalName`. A clone's chunks are consumed IN PLACE,
-   with no reassembly buffer: bit *k* of source slice *s* is skippable iff chunk
+   the fully-skippable dm-clone regions from **all** chunks of that migration/clone in
+   the applied set (§9.1 Bitmap durability: the locally present ones, save those a
+   restart left unloaded and no push has rewritten since) (§11.4 math; migrations
+   first shift by the leg's `meta_blocks`, §8.11) and apply them to the
+   migration/clone dm-clone by `blkdiscard`ing `DnMigrFinalName` /
+   `CnCloneFinalName`. A clone's chunks are consumed IN PLACE, with no reassembly
+   buffer: bit *k* of source slice *s* is skippable iff chunk
    `b = k/(8·C)` of that slice is present, byte `(k mod 8·C)/8` is within its length,
    and that bit is `1` — absent chunk, short chunk or out-of-range slice all mean
    "written". If the dm-clone does not currently exist
    (not built yet, or suppressed by `sp_level`), the file still counts as applied —
-   the agent re-applies every local chunk whenever it (re)creates the owning dm-clone.
+   the agent re-applies every chunk of the applied set whenever it (re)creates the
+   owning dm-clone.
 3. **Reply.** The `Push*BitmapReply` carries only `AgentReply`; a `code = 0` reply is
    the acknowledgement the worker waits for before pushing the next part. A chunk whose
    persist **failed** is acked `code = 0` too — both agents log the error and reply OK:
@@ -2709,12 +2728,18 @@ and the paged readers, not because bitmaps are inherently huge.)
    bounded, correctness-neutral loss [D8] already accepts (migration chunks are
    immutable, so the DN side never hits it).
 4. **Restart / rebuild.** On start the agent reloads every `Local*BmPath` file under
-   its prefix and re-applies the chunks once the owning dm-clone is (re)built (agent
-   restart, §11.5 clone rebuild, `sp_level` lowering) — re-application is idempotent.
+   its prefix, save a chunk whose own file, or whose owner's or that owner's parent's,
+   it could not load, which follows §9.1 instead, and re-applies the chunks once the
+   owning dm-clone is (re)built (agent restart, §11.5 clone rebuild, `sp_level`
+   lowering) — re-application is idempotent.
    Because the applied sets in `bm_info`/`bm_info_list` are derived from the files on
-   disk, they survive restarts and the worker never re-pushes what the node already
-   holds. The files are deleted together with their object, by the same §9.8 sweep that
-   removes its devices: the local store is swept against the STORED REQUEST, so a clone
+   disk, they survive restarts and the worker otherwise never re-pushes what the node
+   already holds.
+   The files are deleted together with their object, by the same §9.8 sweep that
+   removes its devices — except a chunk a restart left unloaded (on a cn agent, only
+   one whose own file did not load) and no push has rewritten since, which waits for a
+   later restart that decodes it (§9.1, `dnagent.md` DN2, `cnagent.md` CN2): the local
+   store is swept against the STORED REQUEST, so a clone
    that has left `clone_list` (§8.9) and a side that is no longer the destination of the
    migration whose chunks it holds (§8.11) lose them in that pass, and a side whose
    pointer leaves the DN's list loses them with the rest of its local state. What a
@@ -2852,7 +2877,8 @@ cannot forget in that way: while the device is there, the next enumeration finds
   source, which the disconnect then deletes under it (`cnagent.md` Known limits). For a
   `:2:` export holding no namespace and linked to no port but ours it is not, and no
   lock of this agent's can make it so (*amended 2026-09-28*): it is tested the same way
-  against every stored side's request — the object-level pass judging only its own
+  against the request of every side the agent holds (`dnagent.md` DN6) — the
+  object-level pass judging only its own
   leg's — and it exports nothing and holds nothing open, but every export passes
   through that very shape while it is being built, the build may be a sibling agent's
   on the same kernel, and no request of this agent's can show that build. So it is
@@ -2895,7 +2921,10 @@ cannot forget in that way: while the device is there, the next enumeration finds
   and at 32 slices those were most of the commands estimated for one disk-node VM.
 * **State is dropped at pointer removal; the parent's list is persisted first.** An
   object whose pointer has left the list loses its file, its chunk files, its memory
-  entry and its object lock in the same pass, before anything of it is removed (§9.1).
+  entry and its object lock in the same pass, before anything of it is removed (§9.1)
+  — save a file a restart left unloaded that no memory entry has named
+  since, which outlives the object's resources until a later restart decodes it (§9.1,
+  `dnagent.md` DN2, `cnagent.md` CN2).
   The parent's own request is persisted **before** the sweep, not after it: a sweep can
   block for a whole `fast_io_fail_tmo` window on a dead remote — §3.3 step 1 connects
   every leg with `fast_io_fail_tmo = 5` and `ctrl-loss-tmo = -1`, which is also the
@@ -4139,7 +4168,9 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 * **[D7] Push-bitmap durability.** Every received `Push*Bitmap` chunk is persisted as
   its own file under `LocalMigrBmPath`/`LocalCloneBmPath` and the applied sets reported
   in `bm_info`/`bm_info_list` are derived from the files, so agent restarts never force
-  a re-push and a rebuilt dm-clone can re-apply src bitmaps locally (§9.6, §11.5).
+  a re-push (save a chunk whose own file, or whose owner's or that owner's parent's,
+  the restart could not load, §9.1) and a rebuilt dm-clone can re-apply src bitmaps
+  locally (§9.6, §11.5).
   Both dm-clone features — `no_hydration` **and** `no_discard_passdown` — are mandatory
   on **every** dnv dm-clone (cn clone and dn migration alike, Appendix A) because
   `blkdiscard` must stay metadata-only: with passdown enabled dm-clone also remaps the

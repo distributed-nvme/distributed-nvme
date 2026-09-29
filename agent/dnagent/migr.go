@@ -159,7 +159,7 @@ func (s *DnAgentServer) ensureMigrDst(
 		return false
 	}
 	if created {
-		// Re-apply every locally present chunk whenever the dm-clone is
+		// Re-apply every chunk of the applied set whenever the dm-clone is
 		// (re)created (§9.6 step 4).
 		s.applyChunks(ctx, st, plan)
 	}

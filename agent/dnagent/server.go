@@ -97,8 +97,10 @@ type dnState struct {
 	tracker *agent.ResTracker
 }
 
-// sideState is one synced side. chunks mirrors the migr-bm-* files on disk,
-// which stay the source of truth for the applied set (SH21).
+// sideState is one synced side. chunks mirrors the migr-bm-* files this
+// process loaded at startup or received since, which stay the source of
+// truth for the applied set (SH21); a side rebuilt after DN2's reload skipped
+// its files starts empty over them until the worker pushes them again.
 type sideState struct {
 	req     *pb.SyncupSideRequest
 	tracker *agent.ResTracker
