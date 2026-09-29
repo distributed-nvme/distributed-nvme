@@ -294,16 +294,29 @@ const (
 	DnExportOrphanGrace = 30 * time.Second
 
 	// Side provisioning ([D15], architecture.md §9.4,
-	// dnagent.md DN9): the background zeroing goroutine zeroes
+	// dnagent.md DN9): the background zeroing goroutine zeroes at most
 	// DnZeroBatchExtCnt logical extents per `blkdiscard --zeroout`
 	// command, through the side's dm-linear, and persists that batch's
 	// `zeroed_bits` after each success. The batch size assumes fast
-	// hardware Write Zeroes: batch × ext_size must stay inside
-	// CmdSoftTimeout. A failed or timed-out batch is retried no sooner
-	// than DnZeroRetryInterval seconds later — the zeroing twin of
+	// hardware Write Zeroes: batch × ext_size should zero inside
+	// CmdSoftTimeout at the disk's rate split DnZeroConcurrency ways. A
+	// failed or timed-out batch is retried no sooner than
+	// DnZeroRetryInterval seconds later — the zeroing twin of
 	// DnMigrConnectRetryInterval, never a hot loop.
 	DnZeroBatchExtCnt   = 10
 	DnZeroRetryInterval = 5
+	// DnZeroConcurrency caps the zeroing batches one agent runs at once,
+	// however many of its sides are zeroing: N concurrent batches split
+	// the disk's Write Zeroes rate N ways, so with no cap a busy DN would
+	// have every batch killed at CmdSoftTimeout and redone for ever. A batch
+	// the soft timeout killed halves the side's next batch, a success
+	// doubles it again up to DnZeroBatchExtCnt, and DnZeroKillBackoff
+	// kills in a row drop the side to one extent per batch. That rate
+	// control lives in the side's goroutine only — a restart begins again
+	// at DnZeroBatchExtCnt — and never decides what is zeroed: the bits
+	// do.
+	DnZeroConcurrency = 2
+	DnZeroKillBackoff = 2
 
 	// CN base state (architecture.md §3.2): the tmpfs that carries the
 	// clone-metadata arena file, sized 2 × CnCloneMetaAreaSize so that even

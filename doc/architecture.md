@@ -2350,19 +2350,26 @@ concatenation of the record's `run_list`, i.e. bytes `[i, i+1) × extent_size` o
 
 **Standing hardware assumption (v1).** DN disks support **fast Write Zeroes**: at the
 defaults, `DnZeroBatchExtCnt` = 10 × 1 GiB extents zero inside `CmdSoftTimeout` (3 s),
-i.e. ≳3.3 GiB/s effective. Zeroing commands run under the ordinary §7 command timeouts;
-there is no special zeroing timeout. Tuning for other hardware arrives later as
+i.e. ≳3.3 GiB/s effective for each of the at most `DnZeroConcurrency` = 2 batches a DN
+agent runs at once. Zeroing commands run under the ordinary §7 command timeouts;
+there is no special zeroing timeout. A slower or busier disk costs kills rather than
+stopping zeroing: a batch the timeout kills makes the side's next batch smaller, down to
+one extent (the goroutine rules below), so zeroing stalls only where one extent cannot
+zero inside `CmdSoftTimeout` at the disk's rate split `DnZeroConcurrency` ways. Tuning
+for other hardware arrives later as
 per-node agent flags — per-node because they describe hardware, while `ClusterConf` is
 write-once and cluster-wide. Operators must then respect
-`batch × extent_size ≤ WZ_rate × CmdSoftTimeout`; raising the global timeouts stretches
+`extent_size ≤ WZ_rate / DnZeroConcurrency × CmdSoftTimeout`, and a
+`batch × extent_size` above that bound can cost a kill and a retry interval each time a
+side tries it; raising the global timeouts stretches
 every command's bound, not just zeroing's.
 
 **Protocol (dn agent), four idempotent steps, restart-safe at every point:**
 
 1. Allocate the extent runs; persist the record with `zeroed_bits` all 0.
 2. Build `DnSideName` (the multi-target dm-linear over the runs).
-3. A **background zeroing goroutine** zeroes not-yet-zeroed extents in batches of
-   `DnZeroBatchExtCnt` = 10, in order, **through the dm-linear** — the side is
+3. A **background zeroing goroutine** zeroes not-yet-zeroed extents in batches of at
+   most `DnZeroBatchExtCnt` = 10, in order, **through the dm-linear** — the side is
    contiguous in device offsets there, so one command covers a batch regardless of
    physical fragmentation:
    `blkdiscard --zeroout --offset {done × extent_size} --length {min(batch, remaining) ×
@@ -2402,7 +2409,10 @@ above-the-side resource as `RES_STATUS_PROVISIONING` with details `"side provisi
 
 * Registry keyed by the side tuple; single-flight per side; created on demand by any
   converge (startup reconcile included) that finds zeroing needed; sides zero in
-  parallel (no global cap in v1 — the fast-WZ assumption).
+  parallel, but at most `DnZeroConcurrency` = 2 batches run at once per DN agent — N
+  concurrent batches split the disk's rate N ways, and enough of them would have every
+  batch killed and redone for ever. Waiting for a slot holds no lock and publishes no
+  error.
 * Each batch: a fresh trace id; the `blkdiscard` runs **lock-free** and goes through
   the normal OsClient under the standard §7 timeouts — unlike the CN11 leg probe IO it
   is a *killable child process*, so no semaphore carve-out is needed; the table update
@@ -2410,7 +2420,19 @@ above-the-side resource as `RES_STATUS_PROVISIONING` with details `"side provisi
 * Batch failure/timeout: the killed command's output goes into `side_dev_info`
   `RES_STATUS_ERROR` details, and the next successful batch clears it back to
   `PROVISIONING`; the retry is paced by `DnZeroRetryInterval` = 5 seconds — never a hot
-  loop. Partial zeros are harmless: the batch's bits stay unset and the batch is redone.
+  loop. Partial zeros are harmless: the batch's bits stay unset and its extents are
+  redone.
+* Adaptive batch: a batch the soft timeout killed makes the side's next batch half the
+  killed one (rounded down, at least one extent), a success doubles it again up to
+  `DnZeroBatchExtCnt`, and `DnZeroKillBackoff` = 2 kills in a row drop it to one extent
+  per batch; while that kill is outstanding, the `ERROR` of the bullet above — shown
+  only at `provisioned = false`; at `true` the row reads `"not zeroed"`, as in the
+  matrix — carries the killed command's output followed by the streak and the
+  one-extent rate. A batch the tool refused keeps the size and ends the streak. The
+  size and the kill streak are in-memory rate control of the side's goroutine: they
+  size the next command and never decide what is zeroed or whether the side is done —
+  the bits do — and every new goroutine, a restart's included, starts again at
+  `DnZeroBatchExtCnt`.
 * Cancellation: side teardown (the pointer is removed), process exit and
   `CancelMigration` **cancel the goroutine and wait for it** before removing the dm
   device (the child holds it open; removal would otherwise fail EBUSY). Zeroing
@@ -3737,9 +3759,10 @@ is superseded — `--zeroout` zeroes, discard did not):
 
 ```shell
 blkdiscard --zeroout --offset {done_ext × extent_size} \
-  --length {min(DnZeroBatchExtCnt, remaining) × extent_size} {DmPath(DnSideName)}
+  --length {min(batch, remaining) × extent_size} {DmPath(DnSideName)}
 # one batch per command, in order, through the dm-linear; each successful batch's
-# zeroed_bits are persisted before the next one starts (§9.4, [D15]).
+# zeroed_bits are persisted before the next one starts (§9.4, [D15]). batch starts at
+# DnZeroBatchExtCnt and follows the kills; each agent runs ≤ DnZeroConcurrency at once.
 # Fail-fast precondition: the disk's queue/write_zeroes_max_bytes must not read 0.
 ```
 

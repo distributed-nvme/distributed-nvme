@@ -21,9 +21,10 @@ const (
 // tagNoWriteZeroes is the DN5 fail-fast detail of §9.4's standing hardware
 // assumption: a disk whose write_zeroes_max_bytes is 0 would make the kernel
 // fall back to writing zero pages at bulk speed, so a DnZeroBatchExtCnt batch
-// could not finish inside CmdSoftTimeout and side provisioning would never
-// converge. Reporting it on meta_info is what flows into err_epoch →
-// capacity-key removal, taking the unsuitable DN out of allocation.
+// could not finish inside CmdSoftTimeout and side provisioning would crawl in
+// backed-off batches (DN9), if it converged at all. Reporting it on meta_info
+// is what flows into err_epoch → capacity-key removal, taking the unsuitable
+// DN out of allocation.
 const tagNoWriteZeroes = "disk lacks Write Zeroes"
 
 // Reconcile is the SH1 startup pass (DN2): load the local store, converge

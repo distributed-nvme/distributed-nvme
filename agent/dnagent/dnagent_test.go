@@ -3,6 +3,7 @@ package dnagent
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -96,7 +97,7 @@ func startTestServerOnPort(
 	// window itself, and TestFenceWindowDefault pins the production value.
 	srv.fenceWait = 0
 	// Likewise for the §9.4 retry pace: DnZeroRetryInterval is 5 s, and
-	// TestZeroingRetryIsPaced pins the production value.
+	// TestZeroRetryIntervalDefault pins the production value.
 	srv.zeroRetryInterval = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -1398,25 +1399,668 @@ func TestZeroingRetryIsPaced(t *testing.T) {
 			got.GetStatus(), got.GetDetails())
 	}
 
-	// And the next successful batch clears it back to PROVISIONING.
+	// And the next successful batch clears it back to PROVISIONING. The batch
+	// after it parks, so the row is read while the side is still zeroing: a
+	// fully zeroed side never consults the zeroing error, and a read then
+	// could not tell a cleared error from a stale one.
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	second := zerooutLine(nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide)),
+		common.DnZeroBatchExtCnt, common.DnZeroBatchExtCnt)
+	node.blockCmd(second)
+	t.Cleanup(func() { node.releaseCmd(second) })
 	node.mu.Lock()
 	delete(node.failCmdAlways, "blkdiscard --zeroout")
 	node.mu.Unlock()
-	waitZeroed(t, srv, testSide)
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(second)
+	}) {
+		t.Fatal("the zeroing loop never got past its first batch")
+	}
 	reply, err = srv.SyncupSide(ctx, unprovisionedSideReq(
 		3, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
+	healed := fmt.Sprintf(zeroingDetailsFmt, common.DnZeroBatchExtCnt,
+		testExtCnt)
 	if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("side_dev after the heal = %v/%q, want OK",
-			got.GetStatus(), got.GetDetails())
+		pb.ResStatus_RES_STATUS_PROVISIONING || got.GetDetails() != healed {
+		t.Errorf("side_dev after the heal = %v/%q, want PROVISIONING/%q",
+			got.GetStatus(), got.GetDetails(), healed)
+	}
+	node.releaseCmd(second)
+	waitZeroed(t, srv, testSide)
+}
+
+// zerooutLine is the recorded command of one §9.4 batch: count extents from
+// logical extent from, through the side's dm-linear.
+func zerooutLine(sideDevPath string, from, count uint64) string {
+	return fmt.Sprintf("cmd blkdiscard --zeroout --offset %d --length %d %s",
+		from*testExtentSize, count*testExtentSize, sideDevPath)
+}
+
+// assertZeroouts compares every zeroing batch the fake recorded with want —
+// how many there were as well as their order and ranges, because DN9's rate
+// control changes the number of batches a side takes.
+func assertZeroouts(t *testing.T, node *fakeNode, want []string) {
+	t.Helper()
+	got := node.callsMatching("cmd blkdiscard --zeroout")
+	for i := 0; i < len(got) || i < len(want); i++ {
+		var gotLine, wantLine string
+		if i < len(got) {
+			gotLine = got[i]
+		}
+		if i < len(want) {
+			wantLine = want[i]
+		}
+		if gotLine != wantLine {
+			t.Fatalf("zeroing batch %d = %q, want %q; every batch:\n%s",
+				i, gotLine, wantLine, strings.Join(got, "\n"))
+		}
 	}
 }
 
-// TestZeroRetryIntervalDefault pins the production pace, which every other
-// test shortens.
+// A batch the soft timeout killed is a rate signal (DN9): the side's next
+// batch is half the killed one, the success after it doubles the batch back,
+// and DnZeroBatchExtCnt bounds the doubling. One kill does not back the side
+// off: while the next batch runs, the side reports the killed command's
+// output alone, with no backoff note. A kill after a success starts a new
+// streak — it halves again rather than backing off — and a batch the tool
+// refused says nothing about the rate and is redone at its own size.
+//
+// killCmd is the fake's soft-timeout kill: the child is signalled after its
+// ioctl ran, so the killed range is zeroed on the node while its bits stay
+// unset, and the next batch starts at the same extent. The half batch parks
+// inside its child while the side is read, which holds the first kill's
+// report still. The side is four full batches long so the bound shows: the
+// success after the refused batch leaves the next one at DnZeroBatchExtCnt,
+// not twice that.
+func TestZeroingBatchHalvesAfterAKill(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	sideDevPath := nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))
+	const full = uint64(common.DnZeroBatchExtCnt)
+	const half = full / 2
+
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.mu.Lock()
+	node.killCmd[zerooutLine(sideDevPath, 0, full)] = true
+	node.killCmd[zerooutLine(sideDevPath, half, full)] = true
+	node.failCmd[zerooutLine(sideDevPath, full, full)] =
+		"blkdiscard: BLKZEROOUT ioctl failed: Input/output error"
+	node.mu.Unlock()
+	halved := zerooutLine(sideDevPath, 0, half)
+	node.blockCmd(halved)
+	t.Cleanup(func() { node.releaseCmd(halved) })
+	req := unprovisionedSideReq(1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	req.SideConf.ExtCnt = 4 * full
+	if _, err := srv.SyncupSide(ctx, req); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(halved)
+	}) {
+		t.Fatalf("no half batch after the kill; batches:\n%s", strings.Join(
+			node.callsMatching("cmd blkdiscard --zeroout"), "\n"))
+	}
+
+	// One kill does not back the side off: both reporting paths, the probe
+	// and the converge, carry the killed command's output and nothing after
+	// it.
+	killedOut := strings.TrimPrefix(zerooutLine(sideDevPath, 0, full),
+		"cmd ") + ": signal: killed"
+	checkOneKill := func(path string, got *pb.ResInfo) {
+		t.Helper()
+		if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			got.GetDetails() != killedOut {
+			t.Errorf("%s side_dev after one kill = %v/%q, want ERROR/%q",
+				path, got.GetStatus(), got.GetDetails(), killedOut)
+		}
+	}
+	info, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	checkOneKill("probe", info.GetSideInfo().GetSideDevInfo())
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	checkOneKill("converge", reply.GetSideInfo().GetSideDevInfo())
+	node.releaseCmd(halved)
+	waitZeroed(t, srv, testSide)
+
+	assertZeroouts(t, node, []string{
+		zerooutLine(sideDevPath, 0, full),      // killed
+		zerooutLine(sideDevPath, 0, half),      // half the killed batch
+		zerooutLine(sideDevPath, half, full),   // doubled back; killed again
+		zerooutLine(sideDevPath, half, half),   // halved: a new streak
+		zerooutLine(sideDevPath, full, full),   // refused
+		zerooutLine(sideDevPath, full, full),   // the refusal halved nothing
+		zerooutLine(sideDevPath, 2*full, full), // bounded, not 2 × full
+		zerooutLine(sideDevPath, 3*full, full),
+	})
+}
+
+// DnZeroKillBackoff kills in a row back a side off to one extent per batch —
+// straight there, not one more halving — and while that kill is outstanding
+// side_dev_info says so after the killed command's output (DN9); the first
+// success clears it back to PROVISIONING. From one extent every success
+// doubles the batch again, up to DnZeroBatchExtCnt.
+func TestZeroingBacksOffAfterRepeatedKills(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	sideDevPath := nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))
+
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// The streak: the first batch and each halving of it, every one killed.
+	var want []string
+	count := uint64(common.DnZeroBatchExtCnt)
+	node.mu.Lock()
+	for i := 0; i < common.DnZeroKillBackoff; i++ {
+		line := zerooutLine(sideDevPath, 0, count)
+		node.killCmd[line] = true
+		want = append(want, line)
+		count /= 2
+	}
+	node.mu.Unlock()
+	// The one-extent batch parks inside its child, which holds the published
+	// error still while side_dev_info is read.
+	backedOff := zerooutLine(sideDevPath, 0, 1)
+	node.blockCmd(backedOff)
+	t.Cleanup(func() { node.releaseCmd(backedOff) })
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(backedOff)
+	}) {
+		t.Fatalf("no one-extent batch after %d kills in a row; batches:\n%s",
+			common.DnZeroKillBackoff, strings.Join(
+				node.callsMatching("cmd blkdiscard --zeroout"), "\n"))
+	}
+
+	// Both reporting paths, the probe and the converge, carry the rate.
+	streak := fmt.Sprintf("%d batches killed in a row",
+		common.DnZeroKillBackoff)
+	checkBackoff := func(path string, got *pb.ResInfo) {
+		t.Helper()
+		if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			!strings.Contains(got.GetDetails(), "blkdiscard") ||
+			!strings.Contains(got.GetDetails(), streak) ||
+			!strings.Contains(got.GetDetails(), "1 extent per batch") {
+			t.Errorf("%s side_dev = %v/%q, want ERROR carrying the killed "+
+				"command, %q and the one-extent rate", path,
+				got.GetStatus(), got.GetDetails(), streak)
+		}
+	}
+	infoReq := &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	}
+	info, err := srv.GetSideInfo(ctx, infoReq)
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	checkBackoff("probe", info.GetSideInfo().GetSideDevInfo())
+	reply, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	checkBackoff("converge", reply.GetSideInfo().GetSideDevInfo())
+
+	// Released, the one-extent batch succeeds, and that success clears the
+	// outstanding kill and its rate with it. The row is read while the batch
+	// after it is parked in turn: only a side still zeroing consults the
+	// zeroing error at all, so a read after the last batch could not tell a
+	// cleared error from a stale one.
+	next := zerooutLine(sideDevPath, 1, 2)
+	node.blockCmd(next)
+	t.Cleanup(func() { node.releaseCmd(next) })
+	node.releaseCmd(backedOff)
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(next)
+	}) {
+		t.Fatalf("no two-extent batch after the one-extent success; "+
+			"batches:\n%s", strings.Join(
+			node.callsMatching("cmd blkdiscard --zeroout"), "\n"))
+	}
+	cleared := fmt.Sprintf(zeroingDetailsFmt, 1, testExtCnt)
+	checkCleared := func(path string, got *pb.ResInfo) {
+		t.Helper()
+		if got.GetStatus() != pb.ResStatus_RES_STATUS_PROVISIONING ||
+			got.GetDetails() != cleared {
+			t.Errorf("%s side_dev after the one-extent success = %v/%q, "+
+				"want PROVISIONING/%q", path, got.GetStatus(),
+				got.GetDetails(), cleared)
+		}
+	}
+	info, err = srv.GetSideInfo(ctx, infoReq)
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	checkCleared("probe", info.GetSideInfo().GetSideDevInfo())
+	reply, err = srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	checkCleared("converge", reply.GetSideInfo().GetSideDevInfo())
+
+	// The side climbs back: one extent, then every success doubles the
+	// batch, never past DnZeroBatchExtCnt.
+	node.releaseCmd(next)
+	waitZeroed(t, srv, testSide)
+	assertZeroouts(t, node,
+		append(want, zeroClimb(sideDevPath, 0, 1, testExtCnt)...))
+}
+
+// zeroClimb is the batches a side runs from extent from up to extent to once
+// nothing more is killed: batch extents first, each success doubling the size
+// up to DnZeroBatchExtCnt, the last batch cut short at to.
+func zeroClimb(sideDevPath string, from, batch, to uint64) []string {
+	var out []string
+	for from < to {
+		n := min(batch, to-from)
+		out = append(out, zerooutLine(sideDevPath, from, n))
+		from += n
+		batch = min(2*batch, common.DnZeroBatchExtCnt)
+	}
+	return out
+}
+
+// Three rules of DN9's rate control that the streak of
+// TestZeroingBacksOffAfterRepeatedKills cannot show. A batch the tool refused
+// ends the kill streak, so a kill after a refusal halves the batch again
+// instead of backing the side off to one extent; a kill halves the batch that
+// was killed, its own extent count, not the size the side was working at,
+// which differs when the killed batch was the side's short last one; and the
+// halving stops at one extent, so a killed one-extent batch that starts a
+// streak is redone at one extent. Half of one extent rounded down is none,
+// and a zero-extent batch zeroes nothing and doubles to zero: the side would
+// never finish.
+func TestZeroingHalvingRules(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	p := nf.DmPath(nf.DnSideName(testCluster, testDn, testSp, testSide))
+	if common.DnZeroBatchExtCnt != 10 || common.DnZeroKillBackoff != 2 ||
+		testExtCnt != 25 {
+		t.Fatal("the batches below are worked out for DnZeroBatchExtCnt = " +
+			"10, DnZeroKillBackoff = 2 and a 25-extent side; rework them")
+	}
+	for _, tc := range []struct {
+		name string
+		// kill and fail are the fake's killCmd and failCmd lines. The fake
+		// checks failCmd first, so a line in both is refused the first time
+		// it runs and killed the second.
+		kill []string
+		fail []string
+		want []string
+	}{{
+		name: "a refusal ends the streak",
+		kill: []string{zerooutLine(p, 0, 10), zerooutLine(p, 0, 5)},
+		fail: []string{zerooutLine(p, 0, 5)},
+		want: []string{
+			zerooutLine(p, 0, 10), // killed: the next batch is half of it
+			zerooutLine(p, 0, 5),  // refused: same size, and the streak ends
+			zerooutLine(p, 0, 5),  // killed: the first kill of a new streak
+			zerooutLine(p, 0, 2),  // so halved, not backed off to 1 extent
+			zerooutLine(p, 2, 4),
+			zerooutLine(p, 6, 8),
+			zerooutLine(p, 14, 10),
+			zerooutLine(p, 24, 1),
+		},
+	}, {
+		name: "a kill halves the killed batch",
+		kill: []string{zerooutLine(p, 20, 5)},
+		want: []string{
+			zerooutLine(p, 0, 10),
+			zerooutLine(p, 10, 10),
+			zerooutLine(p, 20, 5), // the short last batch, killed
+			zerooutLine(p, 20, 2), // half of those 5, not of the side's 10
+			zerooutLine(p, 22, 3),
+		},
+	}, {
+		// The first case's batches again, for the one-extent batch they
+		// end on: extent 24, the side's last, runs after a success, so its
+		// kill is the first of a streak and takes the halving, not the
+		// backoff.
+		name: "a killed one-extent batch is redone at one extent",
+		kill: []string{zerooutLine(p, 0, 10), zerooutLine(p, 0, 5),
+			zerooutLine(p, 24, 1)},
+		fail: []string{zerooutLine(p, 0, 5)},
+		want: []string{
+			zerooutLine(p, 0, 10), zerooutLine(p, 0, 5),
+			zerooutLine(p, 0, 5), zerooutLine(p, 0, 2),
+			zerooutLine(p, 2, 4), zerooutLine(p, 6, 8),
+			zerooutLine(p, 14, 10),
+			zerooutLine(p, 24, 1), // killed: the first kill of a streak
+			zerooutLine(p, 24, 1), // half of one extent is one, never zero
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			node.mu.Lock()
+			for _, line := range tc.kill {
+				node.killCmd[line] = true
+			}
+			for _, line := range tc.fail {
+				node.failCmd[line] =
+					"blkdiscard: BLKZEROOUT ioctl failed: Input/output error"
+			}
+			node.mu.Unlock()
+			if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+				1, testSide, testCn0, nil,
+				pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			waitZeroed(t, srv, testSide)
+			assertZeroouts(t, node, tc.want)
+		})
+	}
+}
+
+// However many of its sides are zeroing, an agent runs at most
+// DnZeroConcurrency batches at once (DN9): N concurrent streams would each get
+// 1/N of the disk, and with enough of them every batch would outlive the soft
+// timeout. The batches park inside their children, so none returns while the
+// count is taken and what the fake has recorded is exactly what is in flight.
+// A side queued for a slot is healthy, not failed: it reports PROVISIONING.
+func TestZeroingConcurrencyIsCapped(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	const zeroout = "cmd blkdiscard --zeroout"
+	sideIds := make([]uint64, 0, common.DnZeroConcurrency+2)
+	for i := uint64(0); i < common.DnZeroConcurrency+2; i++ {
+		sideIds = append(sideIds, testSide+i)
+	}
+
+	if _, err := srv.SyncupDn(ctx, dnReq(1, sideIds...)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.blockCmd(zeroout)
+	t.Cleanup(func() { node.releaseCmd(zeroout) })
+	for _, sideId := range sideIds {
+		if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+			1, sideId, testCn0, nil,
+			pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide %d: %v", sideId, err)
+		}
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return len(node.callsMatching(zeroout)) >= common.DnZeroConcurrency
+	}) {
+		t.Fatalf("fewer than %d zeroing batches ever started",
+			common.DnZeroConcurrency)
+	}
+	// Every loop is already running — each SyncupSide above started its own —
+	// so an uncapped agent has the rest in flight within milliseconds.
+	if waitFor(t, 500*time.Millisecond, func() bool {
+		return len(node.callsMatching(zeroout)) > common.DnZeroConcurrency
+	}) {
+		t.Fatalf("%d zeroing batches in flight at once, want at most %d:\n%s",
+			len(node.callsMatching(zeroout)), common.DnZeroConcurrency,
+			strings.Join(node.callsMatching(zeroout), "\n"))
+	}
+	for _, sideId := range sideIds {
+		reply, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+			ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(sideId),
+		})
+		if err != nil {
+			t.Fatalf("GetSideInfo %d: %v", sideId, err)
+		}
+		if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+			pb.ResStatus_RES_STATUS_PROVISIONING {
+			t.Errorf("side %d zeroing or queued = %v/%q, want PROVISIONING",
+				sideId, got.GetStatus(), got.GetDetails())
+		}
+	}
+
+	// Released, the queued sides take the slots the first ones hand back, and
+	// every side zeroes in its own batches, none of them redone.
+	node.releaseCmd(zeroout)
+	for _, sideId := range sideIds {
+		waitZeroed(t, srv, sideId)
+	}
+	perSide := len(zerooutBatches(nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide)), testExtCnt))
+	if got, want := len(node.callsMatching(zeroout)),
+		len(sideIds)*perSide; got != want {
+		t.Errorf("%d zeroing batches, want %d (%d per side)",
+			got, want, perSide)
+	}
+}
+
+// A side waiting out its retry pace holds no zeroing slot (DN9: only the
+// blkdiscard does), so DnZeroConcurrency sides whose every batch fails cannot
+// stop a healthy side on the same agent from zeroing. The pace is an hour, so
+// the failing sides spend the rest of the test inside it: each runs its first
+// batch once, is refused, and waits. A slot held through that wait would leave
+// the healthy side none until the pace ran out.
+func TestZeroingPacedSidesHoldNoSlot(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.zeroRetryInterval = time.Hour
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	const zeroout = "cmd blkdiscard --zeroout"
+	failing := make([]uint64, 0, common.DnZeroConcurrency)
+	for i := uint64(0); i < common.DnZeroConcurrency; i++ {
+		failing = append(failing, testSide+i)
+	}
+	healthy := testSide + common.DnZeroConcurrency
+	pathOf := func(sideId uint64) string {
+		return nf.DmPath(nf.DnSideName(testCluster, testDn, testSp, sideId))
+	}
+	zerooutsOf := func(sideId uint64) []string {
+		var out []string
+		for _, line := range node.callsMatching(zeroout) {
+			if strings.HasSuffix(line, " "+pathOf(sideId)) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+
+	if _, err := srv.SyncupDn(ctx,
+		dnReq(1, append(failing, healthy)...)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.mu.Lock()
+	for _, sideId := range failing {
+		node.failCmdAlways[zerooutLine(pathOf(sideId), 0,
+			common.DnZeroBatchExtCnt)] =
+			"blkdiscard: BLKZEROOUT ioctl failed: Input/output error"
+	}
+	node.mu.Unlock()
+	syncup := func(sideId uint64) {
+		t.Helper()
+		if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+			1, sideId, testCn0, nil,
+			pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide %d: %v", sideId, err)
+		}
+	}
+	for _, sideId := range failing {
+		syncup(sideId)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return len(node.callsMatching(zeroout)) >= common.DnZeroConcurrency
+	}) {
+		t.Fatalf("the failing sides never ran their first batch:\n%s",
+			strings.Join(node.callsMatching(zeroout), "\n"))
+	}
+
+	// Every failing side has been refused and paces for the rest of the
+	// test; the healthy side zeroes meanwhile, in its own batches.
+	syncup(healthy)
+	waitZeroed(t, srv, healthy)
+	for _, sideId := range failing {
+		want := zerooutLine(pathOf(sideId), 0, common.DnZeroBatchExtCnt)
+		if got := zerooutsOf(sideId); len(got) != 1 || got[0] != want {
+			t.Errorf("side %d zeroing batches = %q, want only %q", sideId,
+				got, want)
+		}
+	}
+	want := zerooutBatches(pathOf(healthy), testExtCnt)
+	if got := zerooutsOf(healthy); strings.Join(got, "\n") !=
+		strings.Join(want, "\n") {
+		t.Errorf("healthy side zeroing batches:\n%s\nwant:\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A side queued for a zeroing slot is torn down at once (DN9): dropping it
+// from the DN's list cancels its loop where it waits, and nothing in that wait
+// belongs to another side. The teardown runs under the node write lock, so a
+// slot wait the cancel could not reach would hold the whole agent until some
+// other side's batch returned — here, until the test released it.
+//
+// The first DnZeroConcurrency sides take every slot and park inside their
+// children before the last side starts, so which side queues is fixed. The
+// teardown starts only once that side's loop is parked in its slot wait: a
+// cancel that landed before the loop got there would never test whether the
+// wait itself answers a cancel.
+func TestZeroingQueuedSideTearsDownAtOnce(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	const zeroout = "cmd blkdiscard --zeroout"
+	kept := make([]uint64, 0, common.DnZeroConcurrency)
+	for i := uint64(0); i < common.DnZeroConcurrency; i++ {
+		kept = append(kept, testSide+i)
+	}
+	queued := testSide + common.DnZeroConcurrency
+	zerooutsOf := func(sideId uint64) int {
+		path := nf.DmPath(nf.DnSideName(testCluster, testDn, testSp, sideId))
+		n := 0
+		for _, line := range node.callsMatching(zeroout) {
+			if strings.HasSuffix(line, " "+path) {
+				n++
+			}
+		}
+		return n
+	}
+
+	if _, err := srv.SyncupDn(ctx,
+		dnReq(1, append(kept, queued)...)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.blockCmd(zeroout)
+	t.Cleanup(func() { node.releaseCmd(zeroout) })
+	syncup := func(sideId uint64) {
+		t.Helper()
+		if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+			1, sideId, testCn0, nil,
+			pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide %d: %v", sideId, err)
+		}
+	}
+	for _, sideId := range kept {
+		syncup(sideId)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return len(node.callsMatching(zeroout)) == common.DnZeroConcurrency
+	}) {
+		t.Fatalf("the first %d sides never had a batch each in flight:\n%s",
+			common.DnZeroConcurrency,
+			strings.Join(node.callsMatching(zeroout), "\n"))
+	}
+	syncup(queued)
+	if !waitFor(t, 5*time.Second, parkedInZeroSlot) {
+		t.Fatal("the last side's loop never parked in its slot wait")
+	}
+
+	// Drop the queued side while every slot is held by a parked batch.
+	done := make(chan error, 1)
+	go func() {
+		_, err := srv.SyncupDn(ctx, dnReq(2, kept...))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Let the teardown finish before failing, so it does not outlive the
+		// test holding the node write lock.
+		node.releaseCmd(zeroout)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatal("tearing down the queued side waited on another side's batch")
+	}
+	queuedName := nf.DnSideName(testCluster, testDn, testSp, queued)
+	if !node.hasCall("cmd dmsetup remove " + queuedName) {
+		t.Error("the queued side's device was never removed")
+	}
+	if srv.getSide(sideKey(testCluster, testDn, testSp, queued)) != nil {
+		t.Error("the queued side's state survived the teardown")
+	}
+	if got := len(node.callsMatching(zeroout)); got !=
+		common.DnZeroConcurrency {
+		t.Errorf("%d zeroing batches by the end of the teardown, want only "+
+			"the %d parked ones:\n%s", got, common.DnZeroConcurrency,
+			strings.Join(node.callsMatching(zeroout), "\n"))
+	}
+
+	// Released, the kept sides zero in their own batches, none redone, and
+	// the dropped side never runs one.
+	node.releaseCmd(zeroout)
+	for _, sideId := range kept {
+		waitZeroed(t, srv, sideId)
+	}
+	if n := zerooutsOf(queued); n != 0 {
+		t.Errorf("%d zeroing batches for the dropped side, want none", n)
+	}
+	perSide := len(zerooutBatches(nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide)), testExtCnt))
+	for _, sideId := range kept {
+		if n := zerooutsOf(sideId); n != perSide {
+			t.Errorf("side %d: %d zeroing batches, want %d", sideId, n,
+				perSide)
+		}
+	}
+}
+
+// parkedInZeroSlot reports whether some goroutine is blocked in zeroSlot,
+// read off the runtime's goroutine dump: a loop waiting for a slot has run no
+// command yet, so nothing the fake records can show that it got there.
+func parkedInZeroSlot() bool {
+	buf := make([]byte, 1<<20)
+	dump := string(buf[:runtime.Stack(buf, true)])
+	for _, g := range strings.Split(dump, "\n\n") {
+		header, _, _ := strings.Cut(g, "\n")
+		if strings.Contains(g, ").zeroSlot(") &&
+			!strings.Contains(header, "[running]") &&
+			!strings.Contains(header, "[runnable]") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestZeroRetryIntervalDefault pins the production pace, which
+// startTestServer shortens and some tests set for themselves.
 func TestZeroRetryIntervalDefault(t *testing.T) {
 	srv := NewDnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),

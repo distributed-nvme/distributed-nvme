@@ -301,9 +301,10 @@ Worst per-case draw: case B/C = 4 extents per VM (one 2-extent src side +
 one 2-extent dst side). Cases fit with >20 extents headroom. Sides are kept
 at 1–2 extents deliberately: every agent OS command runs under a hard-coded
 3 s soft / 5 s kill timeout, and side provisioning (§9.4)
-`blkdiscard --zeroout`s the side device in batches of
+`blkdiscard --zeroout`s the side device in batches of at most
 `DnZeroBatchExtCnt = 10` extents — 640 MiB per command at this extent size,
-so a 1–2 extent side is always a single batch, and on a loop device that
+so a 1–2 extent side is a single batch unless that batch is killed (DN9
+then halves it, never below one extent), and on a loop device that
 batch is `fallocate` on the backing file, i.e. microseconds. A failed or
 timed-out batch leaves its bits unset and is retried no sooner than
 `DnZeroRetryInterval = 5` seconds later, so the harness never has to reason

@@ -301,16 +301,27 @@ func (d *Dm) BlkDiscardRange(
 //
 // --zeroout is the first argument on purpose, so a `blkdiscard --offset` grep
 // keeps meaning dm-clone hydration marking only.
+//
+// answered is Reported's verdict on the run: false when the tool never
+// reported — typically killed at the SH15 soft timeout, which the zeroing loop
+// reads as a batch too big for the disk's current rate (dnagent.md DN9) — and
+// true when it ran, so that a non-nil err is the tool's own refusal.
 func (d *Dm) BlkZeroout(
 	ctx context.Context,
 	dev string,
 	offset uint64,
 	length uint64,
-) error {
-	return d.runOk(ctx, "blkdiscard", "--zeroout",
+) (answered bool, err error) {
+	args := []string{"--zeroout",
 		"--offset", strconv.FormatUint(offset, 10),
 		"--length", strconv.FormatUint(length, 10),
-		dev)
+		dev}
+	stdout, stderr, exitCode, err := d.run(ctx, "blkdiscard", args...)
+	if err != nil {
+		return reported(exitCode, err),
+			cmdError("blkdiscard", args, stdout, stderr, err)
+	}
+	return true, nil
 }
 
 // sysfsBlockDir is where the kernel publishes every block device's queue

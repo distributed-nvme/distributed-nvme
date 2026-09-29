@@ -200,13 +200,16 @@ pressure while leaving ample parallelism.
   mapped those extents, and the next allocation would hand them out twice.
 
   `agent.Reported(exitCode, err)` (`agent/oswrap.go`) is the one predicate —
-  `err == nil || exitCode > 0` — and `osBase.runProbe` is the only place it
-  is applied: `Md.HasSuperblock`, `Md.NameInUse` (an `lsblk` of
+  `err == nil || exitCode > 0` — and `osBase.runProbe` is the only probe
+  wrapper that applies it: `Md.HasSuperblock`, `Md.NameInUse` (an `lsblk` of
   `/dev/md/<name>` whose "not in use" lets `cnagent.md` CN12's case 1 run
   `mdadm --create`; since 2026-09-26), `Dm.Info`, `osBase.listDir` /
   `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
   listings) all probe through it, each returning "absent" only for a
-  reported non-zero exit and an error otherwise. The enumerators a removal
+  reported non-zero exit and an error otherwise. The predicate's one other
+  caller, `Dm.BlkZeroout`, is not a probe: it returns the verdict as
+  `answered`, so the `dnagent.md` DN9 zeroing loop can tell a batch the soft
+  timeout killed from one the tool refused. The enumerators a removal
   decision is taken from — `Dm.List`, `Md.ListArrays`,
   `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
   probe that judges a stop, propagate that error to their caller instead of

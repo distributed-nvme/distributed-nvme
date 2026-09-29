@@ -160,15 +160,23 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 	DnExportOrphanGrace = 30 * time.Second
 
 	// Side provisioning ([D15], architecture.md §9.4, dnagent.md DN9): the
-	// background zeroing goroutine zeroes DnZeroBatchExtCnt logical extents
-	// per `blkdiscard --zeroout` command, through the side's dm-linear, and
-	// persists that batch's `zeroed_bits` after each success. The batch size
-	// assumes fast hardware Write Zeroes: batch × ext_size must stay inside
-	// CmdSoftTimeout. A failed or timed-out batch is retried no sooner than
-	// DnZeroRetryInterval seconds later — the zeroing twin of
+	// background zeroing goroutine zeroes at most DnZeroBatchExtCnt logical
+	// extents per `blkdiscard --zeroout` command, through the side's
+	// dm-linear, and persists that batch's `zeroed_bits` after each success.
+	// The batch size assumes fast hardware Write Zeroes: batch × ext_size
+	// should zero inside CmdSoftTimeout at the disk's rate split
+	// DnZeroConcurrency ways. A failed or timed-out batch is retried no
+	// sooner than DnZeroRetryInterval seconds later — the zeroing twin of
 	// DnMigrConnectRetryInterval, never a hot loop.
 	DnZeroBatchExtCnt   = 10
 	DnZeroRetryInterval = 5
+	// At most DnZeroConcurrency zeroing batches run at once per agent. A
+	// batch the soft timeout killed halves the side's next batch, a success
+	// doubles it again up to DnZeroBatchExtCnt, and DnZeroKillBackoff kills
+	// in a row drop the side to one extent per batch — rate control in the
+	// side's goroutine only, never a record of what is zeroed.
+	DnZeroConcurrency = 2
+	DnZeroKillBackoff = 2
 
 	// The §11.2 src-cutover grace window: a migration source's per-CN
 	// dm-linears stay suspended at least this long before they are reloaded
@@ -525,14 +533,17 @@ SH15. Every wrapper call wraps its ctx with
       timeout, killed at the hard timeout, failed to start, ctx cancelled,
       semaphore refused — and `exitCode > 0` when the tool ran and answered
       "no". `agent.Reported(exitCode, err)` (`err == nil || exitCode > 0`) is
-      the single test, and `osBase.runProbe` is the single place that applies
-      it: a probe that did not answer returns an **error**, never a "not
-      there". The distinction is not cosmetic. A killed command may still
+      the single test, and `osBase.runProbe` is the one probe wrapper that
+      applies it: a probe that did not answer returns an **error**, never a
+      "not there". The distinction is not cosmetic. A killed command may still
       have completed in the kernel — the ioctl finishes regardless of the
       signal — so the only thing a caller learns from a kill is that it must
       probe again; and a caller that reads a kill as "absent" skips the
       removal, forgets the object and never enumerates it again, which is the
-      leak the sweep exists to end (DN6).
+      leak the sweep exists to end (DN6). `agent.Reported`'s one other
+      caller, `Dm.BlkZeroout`, is not a probe: it hands the verdict back as
+      `answered`, so DN9's zeroing loop can tell a batch the soft timeout
+      killed from one the tool refused.
 
       Six primitives must honour it, because each one's caller answers an
       "absent" with a removal or with a decision that destroys data:
@@ -904,9 +915,9 @@ type DnAgentServer struct {
 	disk  string          // --disk
 	port  agent.PortConf  // --tr-* + --nvmet-port-id as one value
 	// per-object resinfo trackers, pending-connect retry registry,
-	// per-side zeroing registry (DN9), and the SH27 background-task
-	// bookkeeping: the rootCtx captured at Reconcile plus a sync.WaitGroup
-	// that WaitBackground() waits on, …
+	// per-side zeroing registry and its zeroing slots (DN9), and the SH27
+	// background-task bookkeeping: the rootCtx captured at Reconcile plus a
+	// sync.WaitGroup that WaitBackground() waits on, …
 }
 ```
 
@@ -1087,8 +1098,11 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
      * **the Write Zeroes fail-fast**. DN9 zeroes whole
        sides with `blkdiscard --zeroout` under the ordinary SH15 timeouts,
        which only holds on hardware whose Write Zeroes is offloaded; a
-       kernel that has to emulate it writes zero pages at bulk speed and no
-       batch bound can survive. Resolve the disk's kernel name with
+       kernel that has to emulate it writes zero pages at bulk speed, so
+       §9.4's fast-Write-Zeroes assumption cannot hold: `DnZeroBatchExtCnt`
+       batches would overrun the soft timeout and the side would crawl in
+       DN9's backed-off batches, if it converged at all. Resolve the disk's
+       kernel name with
        `lsblk --nodeps --noheadings --output KNAME {--disk}` (the flag is
        documented as a `/dev/disk/by-uuid` symlink, whose basename is not a
        sysfs node) and read
@@ -1473,7 +1487,8 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
         `zeroed_bits` all 0 (above);
      2. `DnSideName` is built (above);
      3. a **background zeroing goroutine** (the registry below) zeroes the
-        not-yet-zeroed extents in batches of `common.DnZeroBatchExtCnt` (10),
+        not-yet-zeroed extents in batches of at most
+        `common.DnZeroBatchExtCnt` (10),
         **through the dm-linear** — the side is contiguous in that device's
         address space, so one command covers a whole batch whatever the
         physical fragmentation. Each batch starts at the **first extent whose
@@ -1527,8 +1542,12 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      * keyed by the side tuple `(cluster_id, dn_id, sp_id, side_id)`,
        single-flight per side, created on demand by any converge — the startup
        reconcile included (DN2) — that finds zeroing still needed. Sides zero
-       in **parallel**; v1 has no global cap, which the fast Write Zeroes
-       assumption (DN5) pays for.
+       in **parallel**, but at most `common.DnZeroConcurrency` (2) batches run
+       at once per agent: N concurrent batches split the disk's Write Zeroes
+       rate N ways, and enough of them would have every batch killed at the
+       soft timeout and redone for ever. Only the `blkdiscard` holds a slot;
+       waiting for one publishes no error, holds no lock, and a cancel
+       reaches it at once.
      * each batch mints a fresh trace id (SH2's `common.NewTraceId`); the
        `blkdiscard` itself runs **lock-free** and through the ordinary
        `OsClient` under the standard SH15 timeouts — it is a *killable child
@@ -1546,8 +1565,26 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
        `common.DnZeroRetryInterval` (5) seconds — never a hot loop. While such
        a failure is outstanding `ERROR` wins over the matrix's
        `PROVISIONING`; the next successful batch clears it. Partial zeros are
-       harmless: the batch's bits stay unset and the batch is redone, so a
+       harmless: the batch's bits stay unset and its extents are redone, so a
        restart simply resumes at the first unset bit.
+     * **the batch size follows the kills.** A batch the SH15 soft timeout
+       killed — the tool did not answer (`agent.Reported`) — makes the side's
+       next batch half the killed one (rounded down, at least one extent); a
+       success doubles it again, up to `common.DnZeroBatchExtCnt`;
+       `common.DnZeroKillBackoff` (2) kills in a row drop it straight to one
+       extent per batch, and while that kill is outstanding the bullet
+       above's `ERROR` — shown only on a side still at `provisioned = false`;
+       at `true` the row reads `"not zeroed"`, per the matrix — has the
+       details `"{output} ({k} batches killed in a row: backed off to 1
+       extent per batch)"`. A batch the tool refused (it ran and answered no)
+       keeps the size and ends the streak.
+       The size and the streak are the goroutine's own memory — rate control
+       derived from the kills it saw, never a record: the size caps the next
+       command and the streak also words the details above, and they decide
+       nothing else (which extents to zero, and whether the side is done,
+       only the bits decide). Every new goroutine for the side, a restart's
+       included, starts again at `common.DnZeroBatchExtCnt` with no kills
+       counted.
      * zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included
        (DN11): it is bottom-layer provisioning, exactly as the trim it
        replaced was.
@@ -2014,7 +2051,7 @@ DN18. Probe map (all via SH17 conventions; `res_name` and probe per
 | `DnInfo.disk_info` | the `--disk` path | `lsblk --bytes --nodeps` succeeds |
 | `DnInfo.meta_info` | the `--disk` path | `ReadBlock` of the 4 KiB header: magic, version, CRC and `cluster_id`/`dn_id`/`extent_size` identity — a header other than the one the loaded volume table came from (blank, corrupt, or valid with another identity or another `format_uuid`) also drops that table, so the next call re-reads the disk and nothing is handed out or written from the old one, and a blank disk is then formatted only as DN5 allows — until then every side's lookup finds no record (the `side_dev_info` row below); a read that did not answer changes nothing — **plus the DN5 Write-Zeroes check** (`/sys/class/block/{kname}/queue/write_zeroes_max_bytes` is absent, unreadable or ≠ 0). `details` = `"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d"` when OK — the last count is sides whose `zeroed_bits` are still incomplete (DN9); on failure the error text instead, `"disk lacks Write Zeroes"` for the WZ case |
 | `DnInfo.port_info` | the agent's port id as `%d` — `"1"` unless `--nvmet-port-id` says otherwise, so on a node running several agents the rows differ | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
-| `SideInfo.side_dev_info` | `DnSideName` | the volume-table record + its `zeroed_bits` + `dmsetup table`, judged by the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned = false` (no converge has allocated one yet, or the header has gone blank under the side: a blank header reads as an unformatted disk with no records, and the meta row's probe drops a table loaded before the header went blank — the side's device is still there all the same, and its DN9 goroutine, if one is running, ends at its next re-read of the record) and `RES_STATUS_ERROR`, details `"record missing"`, at `provisioned = true` (a lost or foreign disk, or that same blank header, under which the side's devices keep serving its data: nothing removes a device the side still wants, and DN5 will not format while they map the disk); bits incomplete ⇒ `RES_STATUS_PROVISIONING`, details `"zeroing {k}/{n}"`, at `false` and `RES_STATUS_ERROR`, details `"not zeroed"`, at `true`; an outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's output; a live table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`. The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every round |
+| `SideInfo.side_dev_info` | `DnSideName` | the volume-table record + its `zeroed_bits` + `dmsetup table`, judged by the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned = false` (no converge has allocated one yet, or the header has gone blank under the side: a blank header reads as an unformatted disk with no records, and the meta row's probe drops a table loaded before the header went blank — the side's device is still there all the same, and its DN9 goroutine, if one is running, ends at its next re-read of the record) and `RES_STATUS_ERROR`, details `"record missing"`, at `provisioned = true` (a lost or foreign disk, or that same blank header, under which the side's devices keep serving its data: nothing removes a device the side still wants, and DN5 will not format while they map the disk); bits incomplete ⇒ `RES_STATUS_PROVISIONING`, details `"zeroing {k}/{n}"`, at `false` and `RES_STATUS_ERROR`, details `"not zeroed"`, at `true`; at `false`, an outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's output, followed by the kill streak and the one-extent rate once DN9's backoff holds; a live table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`. The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every round |
 | `cn_id_to_dm_error[cn]` / `cn_id_to_dm_linear[cn]` | `DnErrorName` / `DnLinearName` | `dmsetup info` + `dmsetup table` (the linear's target — side device vs dm-error vs dm-clone — must match the desired role). Inside the §11.2 grace window the expected target is the **pre-fence** one and `details` is `"suspended (migration cutover grace window)"`; the probe never starts a window (DN16). While DN9's gate is closed no device is expected to exist and both report `RES_STATUS_PROVISIONING`, details `"side provisioning"` |
 | `cn_id_to_nvmeof[cn]` | the `SideToCnNqn` | configfs: subsystem present, ns enabled, `ana_grpid` as desired. `RES_STATUS_PROVISIONING`, details `"side provisioning"`, while DN9's gate is closed |
 | `migr_src_info.dm_linear_info` / `.nvmeof_info` | `DnMigrSrcName` / the `MigrSrcNqn` | `dmsetup status` / configfs. With `migr_src_conf.dst_provisioned = false` neither object exists by design (DN12) and both report `RES_STATUS_PROVISIONING`, details `"side provisioning"` |
@@ -2525,7 +2562,43 @@ able to fail.
     (`RES_STATUS_ERROR`, outranking `PROVISIONING`), and the next attempt
     comes no sooner than `common.DnZeroRetryInterval` — shortened through the
     same field-not-constant trick DN12's fence wait uses — never a hot loop;
-    the following success clears the error back to `PROVISIONING`.
+    the following success clears the error back to `PROVISIONING`, read
+    while the batch after it is parked by `blockCmd`: a fully zeroed side
+    never consults the zeroing error, so a read after the last batch could
+    not see the clear.
+    **The batch follows the kills** (`TestZeroingBatchHalvesAfterAKill`,
+    `TestZeroingBacksOffAfterRepeatedKills`, `TestZeroingHalvingRules`),
+    asserted as the exact list of batches, count included: a `killCmd` on a
+    batch makes the next one half of it, the success after that doubles it
+    back and `DnZeroBatchExtCnt` bounds the doubling, a kill after a success
+    halves again rather than backing off, a refused batch is redone at its
+    own size, a refusal between two kills ends the streak so the second
+    kill halves too, a killed short last batch is halved from its own
+    count, a killed one-extent batch is redone at one extent, never zero,
+    and `DnZeroKillBackoff` kills in a row drop the side to one extent per
+    batch. The side is also read while a batch is parked in its child, and
+    the probe and the converge agree every time: after one kill,
+    `RES_STATUS_ERROR` with the killed command's output alone, no backoff
+    note; after the backoff, `RES_STATUS_ERROR` whose details carry the
+    command output, the streak and the rate; and once the backed-off batch
+    has succeeded, with the batch after it parked in turn, `PROVISIONING`,
+    `"zeroing 1/n"`. **The concurrency cap**
+    (`TestZeroingConcurrencyIsCapped`): with every batch parked by
+    `blockCmd`, `DnZeroConcurrency + 2` zeroing sides put
+    `DnZeroConcurrency` batches in flight and no more within a 500 ms
+    window, every side reports `PROVISIONING` meanwhile, and once released
+    each side zeroes in its own batches, none redone. **Paced sides hold no
+    slot** (`TestZeroingPacedSidesHoldNoSlot`): with the retry pace at an
+    hour and the first batch of `DnZeroConcurrency` sides refused whenever
+    it runs, each of those sides runs it once and holds no slot while it
+    waits in the pace, so another side zeroes to completion in its own
+    batches meanwhile. **A queued side**
+    (`TestZeroingQueuedSideTearsDownAtOnce`): with every slot held by a
+    parked batch and the last side's loop parked in its slot wait (read off
+    the runtime's goroutine dump, since that loop has run no command), the
+    `SyncupDn` that drops that side returns within 2 s and removes its
+    `DnSideName`; the dropped side never runs a batch, and once released the
+    kept sides zero in their own batches, none redone.
 19. **Cancel and wait**: dropping the side from its DN's list (DN6) while a
     batch is in
     flight cancels the goroutine and **waits** for it; the ordering assertion
@@ -2583,8 +2656,9 @@ able to fail.
 2. `go list -deps ./cmd/dnv-agent | grep etcd` finds nothing (`layout.md`
    §3).
 3. The §2.2 additions exist: `NvmetPortId`, `AnaGrpId*`, `ReplyCode*`,
-   `DnMigrConnectRetryInterval`, `DnZeroBatchExtCnt`, `DnZeroRetryInterval` in
-   `common/constants.go`; `DnNsIdentity` in `common/name_fmt.go`. `common/`
+   `DnMigrConnectRetryInterval`, `DnZeroBatchExtCnt`, `DnZeroRetryInterval`,
+   `DnZeroConcurrency`, `DnZeroKillBackoff` in `common/constants.go`;
+   `DnNsIdentity` in `common/name_fmt.go`. `common/`
    contains the six files of `layout.md` §2 plus `name_parse.go` (§2.2), and
    nothing else.
 4. `WriteFileDirect` is implemented per the amended `osclient.md`; a
@@ -2620,7 +2694,9 @@ able to fail.
     `osBase.listDir`, `Md.HasSuperblock` and `Md.NameInUse` (the `lsblk`
     of CN12's case-1 guard, since 2026-09-26) take their answer from
     `osBase.runProbe` (exposed to the role packages as `Cmd.RunProbe`), the
-    one place `agent.Reported` is applied; `NvmeHost.readTrimmed` reads
+    one probe wrapper that applies `agent.Reported` (its only other caller,
+    `Dm.BlkZeroout`, is not a probe: it hands the verdict to DN9's zeroing
+    loop as `answered`); `NvmeHost.readTrimmed` reads
     through `readAttrStrict`, which calls absence only on
     `fs.ErrNotExist`; and `Md.Detail` with the `Md.Walk` it reads from, the
     sysfs md read since 2026-09-26 (`cnagent.md` CN12), goes through both —

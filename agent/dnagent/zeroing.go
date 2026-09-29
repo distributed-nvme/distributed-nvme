@@ -2,6 +2,7 @@ package dnagent
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -22,8 +23,11 @@ import (
 // freeze the entire DN agent (RWMutex writer preference) and block the side's
 // Check rounds. The registry is keyed by the side tuple, single-flight per
 // side, created on demand by any converge — the startup reconcile included —
-// that finds zeroing still needed, and sides zero in parallel with no global
-// cap (the fast-Write-Zeroes hardware assumption of §9.4).
+// that finds zeroing still needed, and sides zero in parallel, at most
+// common.DnZeroConcurrency batches at a time per agent: N concurrent batches
+// split the disk's Write Zeroes rate N ways, and with no cap a busy DN would
+// have every batch killed at the soft timeout and redone for ever. Each side
+// sizes its own batches from the kills it sees (zeroLoop).
 
 // zeroLockPoll is how often the loop retries a lock it could not take. The
 // loop must NEVER block on a lock: dropSideState and the DN6 record sweep
@@ -31,6 +35,13 @@ import (
 // a ctx does not release a goroutine parked in sync.RWMutex.RLock, so a
 // blocking acquire would hang the whole agent (DN9).
 const zeroLockPoll = 20 * time.Millisecond
+
+// zeroBackoffFmt follows the killed command's output in the error the loop
+// publishes for side_dev_info once DnZeroKillBackoff or more kills in a row
+// have backed the side off (DN9): the streak, and the rate the side now zeroes
+// at.
+const zeroBackoffFmt = "%w (%d batches killed in a row: backed off to 1 " +
+	"extent per batch)"
 
 // zeroJob is the geometry one zeroing loop works from. It is captured once, at
 // registration, rather than read from a *sidePlan on every batch: the loop
@@ -119,25 +130,44 @@ func (s *DnAgentServer) deregisterZeroing(st *sideState, done chan struct{}) {
 	}
 }
 
-// zeroLoop zeroes the side's not-yet-zeroed extents, DnZeroBatchExtCnt at a
-// time, until every bit is set or the ctx is done.
+// zeroLoop zeroes the side's not-yet-zeroed extents, at most
+// DnZeroBatchExtCnt at a time, until every bit is set or the ctx is done.
 //
 // Each batch is one traceable operation (SH2). The `blkdiscard --zeroout` runs
 // **lock-free** under the ordinary SH15 timeouts — unlike the probers' block
 // IO it is a
 // killable child process, so holding an OsClient semaphore slot is bounded by
 // CmdHardTimeout and needs no carve-out — and only the volume-table update
-// afterwards takes node-read plus the side's object lock.
+// afterwards takes node-read plus the side's object lock. The command alone
+// holds one of the agent's zeroing slots (zeroSlot); the record read, the
+// table update and the retry pace hold none.
 //
 // Persisting the bits *after* the command returned is what makes an
 // interrupted batch free: its bits stay 0, so the next pass simply redoes it.
 // Partial zeros are harmless — zeroing a range twice is idempotent.
+//
+// batch and kills are the side's rate control (DN9): a batch the soft timeout
+// killed makes the next one half its size, a success doubles it again up to
+// DnZeroBatchExtCnt, and DnZeroKillBackoff kills in a row drop it to one
+// extent, which the published error then carries after the killed command's
+// output for as long as that kill is outstanding. side_dev_info shows that
+// error only on a side still at provisioned = false; at true the row reads
+// "not zeroed" (the DN9 matrix), whatever this loop saw.
+// A batch the tool refused says nothing about the rate: it leaves the size
+// alone and only ends the streak. Both are this goroutine's locals: the size
+// caps the next command, the streak also words the published error, and they
+// decide nothing else — which extents to zero, and whether the side is done,
+// the bits alone decide. Being locals, they reset with every new goroutine
+// for the side, a restart's included: the size to DnZeroBatchExtCnt, the
+// streak to no kills.
 func (s *DnAgentServer) zeroLoop(
 	ctx context.Context,
 	key string,
 	st *sideState,
 	job zeroJob,
 ) {
+	batch := uint64(common.DnZeroBatchExtCnt)
+	kills := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -170,12 +200,31 @@ func (s *DnAgentServer) zeroLoop(
 			// There is nothing left to zero and nobody to report to.
 			return
 		}
-		from, count, more := sideNextZeroBatch(rec, common.DnZeroBatchExtCnt)
+		from, count, more := sideNextZeroBatch(rec, batch)
 		if !more {
 			return
 		}
-		if err := s.dm.BlkZeroout(attemptCtx, job.devPath,
-			from*job.extentSize, count*job.extentSize); err != nil {
+		freeSlot, ok := s.zeroSlot(ctx)
+		if !ok {
+			// Shutdown or teardown while every slot was in use.
+			return
+		}
+		answered, err := s.dm.BlkZeroout(attemptCtx, job.devPath,
+			from*job.extentSize, count*job.extentSize)
+		freeSlot()
+		if err != nil {
+			if answered {
+				kills = 0
+			} else {
+				// Killed: too big a batch for the disk's current rate. A
+				// streak reports the rate it backs off to with the output,
+				// so ERROR reads as a slow disk, not a broken one.
+				kills++
+				batch = zeroBatchAfterKill(count, kills)
+				if kills >= common.DnZeroKillBackoff {
+					err = fmt.Errorf(zeroBackoffFmt, err, kills)
+				}
+			}
 			// The killed command's output is what side_dev_info reports, and
 			// the pace below is what keeps a persistent failure from becoming
 			// a hot loop (§9.4).
@@ -185,6 +234,8 @@ func (s *DnAgentServer) zeroLoop(
 			}
 			continue
 		}
+		kills = 0
+		batch = min(2*batch, common.DnZeroBatchExtCnt)
 		release, ok := s.zeroAcquire(ctx, key)
 		if !ok {
 			// Shutdown or teardown; the batch's bits stay unset and the next
@@ -204,6 +255,38 @@ func (s *DnAgentServer) zeroLoop(
 		// A successful batch clears an outstanding failure: ERROR wins only
 		// while one is outstanding (DN9).
 		s.setZeroingErr(st, nil)
+	}
+}
+
+// zeroBatchAfterKill is a side's next batch size after the soft timeout killed
+// a batch of count extents, the kills-th kill in a row (DN9): half the killed
+// batch, rounded down but never below one extent, and one extent once
+// DnZeroKillBackoff kills in a row say that halving is not keeping up. Never
+// zero: a zero-extent batch zeroes nothing and doubles to zero, so the side
+// would never finish.
+func zeroBatchAfterKill(count uint64, kills int) uint64 {
+	if kills >= common.DnZeroKillBackoff {
+		return 1
+	}
+	return max(count/2, 1)
+}
+
+// zeroSlot takes one of the agent's DnZeroConcurrency zeroing slots, waiting
+// while every one is in use, and reports false as soon as ctx is done. It may
+// block where zeroAcquire must poll: a channel wait is released by the cancel,
+// so stopZeroing's cancel-and-wait reaches a loop parked here at once, and the
+// loop holds no lock while it waits.
+func (s *DnAgentServer) zeroSlot(
+	ctx context.Context,
+) (free func(), ok bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	select {
+	case <-ctx.Done():
+		return nil, false
+	case s.zeroSlots <- struct{}{}:
+		return func() { <-s.zeroSlots }, true
 	}
 }
 

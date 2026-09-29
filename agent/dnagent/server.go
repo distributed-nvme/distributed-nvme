@@ -44,6 +44,11 @@ type DnAgentServer struct {
 	// reason as fenceWait: no unit test can wait out the production value.
 	zeroRetryInterval time.Duration
 
+	// zeroSlots holds one token per §9.4 zeroing batch in flight, so at most
+	// common.DnZeroConcurrency of them run at once on this agent however many
+	// of its sides are zeroing (DN9).
+	zeroSlots chan struct{}
+
 	// migrRetryInterval paces the DN8 background migration-connect retry
 	// (common.DnMigrConnectRetryInterval), a field for the same reason. It
 	// is what lets a test drive the successful connect from the RETRY LOOP
@@ -165,6 +170,7 @@ func NewDnAgentServer(
 		disk:              disk,
 		fenceWait:         common.SuspendSeconds * time.Second,
 		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
+		zeroSlots:         make(chan struct{}, common.DnZeroConcurrency),
 		migrRetryInterval: common.DnMigrConnectRetryInterval * time.Second,
 		now:               time.Now,
 		sleep:             agent.SleepCtx,
