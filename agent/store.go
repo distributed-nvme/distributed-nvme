@@ -22,10 +22,10 @@ const (
 	StoreKindCloneBm = "clone-bm-"
 )
 
-// Store is the agent's local store (SH4-SH7): the last fully applied
-// Syncup*Request per object plus one file per received Push*Bitmap chunk,
-// all under the --local-store prefix. Writes go through OsClient.WriteProto
-// (atomic replace); reads through ReadProto.
+// Store is the agent's local store (SH4-SH7): per object, the last
+// Syncup*Request saved for it, plus one file per received Push*Bitmap chunk,
+// all under the --local-store prefix; Save says when each is saved. Writes go
+// through OsClient.WriteProto (atomic replace); reads through ReadProto.
 type Store struct {
 	oc     common.OsClient
 	prefix string
@@ -50,8 +50,10 @@ func (s *Store) List(
 	ctx context.Context,
 	kinds ...string,
 ) (map[string][]string, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
 	stdout, stderr, _, err := s.oc.RunCommand(
-		ctx, "ls", []string{"-1", s.prefix}, "")
+		cctx, "ls", []string{"-1", s.prefix}, "")
 	if err != nil {
 		return nil, fmt.Errorf(
 			"local store %s unreadable: %w: %s", s.prefix, err, stderr)
@@ -87,8 +89,12 @@ func (s *Store) Load(
 	return s.oc.ReadProto(ctx, path, msg)
 }
 
-// Save persists one store file. Callers save a Syncup*Request only after its
-// converge pass completed (SH5).
+// Save persists one store file. When to save is the caller's decision, but a
+// save always comes after the gates: a request a gate rejected is never saved
+// (SH5; for a chunk, DN15 and CN22). A parent request (SyncupDn/SyncupCn) is
+// saved as soon as it has passed them, before its converge; an object request
+// (SyncupSide/SyncupCntlr) when SH5 says; a bitmap chunk before it is applied
+// (SH21).
 func (s *Store) Save(
 	ctx context.Context,
 	path string,
@@ -97,14 +103,20 @@ func (s *Store) Save(
 	return s.oc.WriteProto(ctx, path, msg)
 }
 
-// Remove deletes store files after the resources they describe are gone
-// (SH7); a crash in between simply re-runs the teardown on restart.
+// Remove deletes store files (rm -f: a file already gone is no error). No
+// store file is kept as a record of what is left to remove: the sweep finds
+// an object's resources by name (SH7), so an object's request and chunk files
+// go the moment its pointer leaves its parent's list, before any of its
+// resources is removed, and a crash in between is nothing worse than a
+// startup sweep.
 func (s *Store) Remove(ctx context.Context, paths ...string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 	args := append([]string{"-f"}, paths...)
-	_, stderr, _, err := s.oc.RunCommand(ctx, "rm", args, "")
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	_, stderr, _, err := s.oc.RunCommand(cctx, "rm", args, "")
 	if err != nil {
 		return fmt.Errorf("rm %v: %w: %s", paths, err, stderr)
 	}

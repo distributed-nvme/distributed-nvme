@@ -235,6 +235,85 @@ func TestFileRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAtomicWriteSyncsTheDirAfterTheRename: the rename that publishes a
+// replacement is a change to the DIRECTORY, and nothing makes it survive a
+// crash until the directory is fsynced — before that the old file can come
+// back, or, for a first write, no file at all, whatever the temp file's own
+// fsync promised. So every WriteFile and WriteProto fsyncs the file's own
+// directory exactly once, after the rename (the seam finds the new bytes
+// already at path), and a directory fsync that fails fails the write.
+func TestAtomicWriteSyncsTheDirAfterTheRename(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state")
+
+	type dirSync struct {
+		dir  string
+		held string // what path held when the directory was fsynced
+	}
+	var syncs []dirSync
+	var failWith error
+	prev := syncDir
+	t.Cleanup(func() { syncDir = prev })
+	syncDir = func(d string) error {
+		held, err := os.ReadFile(path)
+		if err != nil {
+			held = []byte("<" + err.Error() + ">")
+		}
+		syncs = append(syncs, dirSync{dir: d, held: string(held)})
+		if failWith != nil {
+			return failWith
+		}
+		return prev(d)
+	}
+	expectOneSync := func(what string, want string) {
+		t.Helper()
+		if len(syncs) != 1 {
+			t.Fatalf("%s: %d directory fsyncs, want exactly 1", what,
+				len(syncs))
+		}
+		if syncs[0].dir != dir {
+			t.Errorf("%s: fsynced %q, want the file's own directory %q",
+				what, syncs[0].dir, dir)
+		}
+		if syncs[0].held != want {
+			t.Errorf("%s: at the directory fsync the file held %q, want "+
+				"%q — the fsync ran before the rename", what,
+				syncs[0].held, want)
+		}
+		syncs = nil
+	}
+
+	if err := client.WriteFile(ctx, path, "first version"); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	expectOneSync("first write", "first version")
+	if err := client.WriteFile(ctx, path, "second version"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	expectOneSync("overwrite", "second version")
+
+	msg := &pb.SyncupDnRequest{ClusterId: 1, DnId: 3, Revision: 7}
+	raw, err := proto.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := client.WriteProto(ctx, path, msg); err != nil {
+		t.Fatalf("WriteProto: %v", err)
+	}
+	expectOneSync("WriteProto", string(raw))
+
+	// The rename happened, but nothing says it survives a crash, and the
+	// callers' crash protocols depend on exactly that.
+	failWith = errors.New("injected directory fsync failure")
+	if err := client.WriteFile(ctx, path, "third version"); !errors.Is(
+		err, failWith) {
+		t.Errorf("a failed directory fsync returned %v, want it", err)
+	}
+	expectOneSync("failed directory fsync", "third version")
+}
+
 func TestProtoRoundTrip(t *testing.T) {
 	client := NewLimitedOsClient(0)
 	ctx := context.Background()
@@ -648,6 +727,51 @@ func TestWriteFileDirect(t *testing.T) {
 // Raw helpers — WriteBlockAt / ReadBlockDirectAt (osclient.md §4.5.1):
 // exported, unlogged, semaphore-free
 // ---------------------------------------------------------------------------
+
+// TestReadBlockDirectAtIsCloseOnExec: the descriptor the direct read opens is
+// close-on-exec. The probe can sit in its pread for as long as the leg queues
+// IO, and every command the agent forks meanwhile — the nvme disconnect that
+// will release the probe among them — would otherwise inherit the leg wrapper
+// open; one that outlives the probe keeps it open, and the teardown's dmsetup
+// remove fails EBUSY until that command exits. The flags are read off the
+// live descriptor through the rawOpen seam, before the helper closes it.
+func TestReadBlockDirectAtIsCloseOnExec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(path, make([]byte, 4096), 0o644); err != nil {
+		t.Fatalf("create backing file: %v", err)
+	}
+	var fdFlags []uintptr
+	prev := rawOpen
+	t.Cleanup(func() { rawOpen = prev })
+	rawOpen = func(p string, mode int, perm uint32) (int, error) {
+		fd, err := prev(p, mode, perm)
+		if err == nil {
+			flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL,
+				uintptr(fd), syscall.F_GETFD, 0)
+			if errno != 0 {
+				t.Errorf("fcntl(F_GETFD): %v", errno)
+			}
+			fdFlags = append(fdFlags, flags)
+		}
+		return fd, err
+	}
+
+	_, err := ReadBlockDirectAt(path, 0, 4096)
+	if errors.Is(err, syscall.EINVAL) {
+		t.Skipf("the temp dir does not support O_DIRECT: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("ReadBlockDirectAt: %v", err)
+	}
+	if len(fdFlags) != 1 {
+		t.Fatalf("%d opens through the seam, want exactly 1", len(fdFlags))
+	}
+	if fdFlags[0]&syscall.FD_CLOEXEC == 0 {
+		t.Errorf("the direct-read descriptor is not close-on-exec "+
+			"(F_GETFD = %#x): a child forked while the probe blocks "+
+			"inherits the leg wrapper open", fdFlags[0])
+	}
+}
 
 // TestReadBlockDirectAt covers the exported raw helpers of osclient.md
 // §4.5.1: the write + O_DIRECT read-back the §3.6 leg health probe

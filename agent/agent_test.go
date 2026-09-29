@@ -324,6 +324,44 @@ func TestStoreListUnreadablePrefixIsFatal(t *testing.T) {
 	}
 }
 
+// TestStoreCommandsCarryTheSoftTimeout: the store's two commands, SH6's `ls`
+// and SH7's `rm`, reach the OsClient on a ctx carrying the §7 soft timeout
+// (SH15). The caller owns that deadline and the LimitedOsClient adds none
+// (osclient.md §4.2), so without the wrap a wedged `ls` would hold the
+// startup reconcile, node lock and all, for ever, and a wedged `rm` the pass
+// that drops an object.
+func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
+	var cmds, unbounded []string
+	oc := &common.FakeOsClient{
+		RunCommandFn: func(
+			ctx context.Context, name string, args []string, stdin string,
+		) (string, string, int, error) {
+			cmds = append(cmds, name)
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) >
+				common.CmdSoftTimeout*time.Second {
+				unbounded = append(unbounded, name)
+			}
+			return "", "", 0, nil
+		},
+	}
+	store := NewStore(oc, "/store")
+	if _, err := store.List(context.Background(), StoreKindDn); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if err := store.Remove(
+		context.Background(), "/store/dn-1", "/store/side-2"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if got := strings.Join(cmds, " "); got != "ls rm" {
+		t.Fatalf("commands = %q, want exactly one ls and one rm", got)
+	}
+	if len(unbounded) != 0 {
+		t.Errorf("store commands without the SH15 soft timeout: %v",
+			unbounded)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bitmap chunk store and skip-range math (SH21-SH23, §11.4)
 // ---------------------------------------------------------------------------

@@ -251,9 +251,9 @@ helpers exported from `common/osclient.go` (recorded in §5, edit applied to
 ```go
 	// Raw, unlimited, no ctx, no logging, no cached fd — a fresh open per
 	// call. WriteBlockAt is a buffered pwrite followed by fsync;
-	// ReadBlockDirectAt opens O_RDONLY | O_DIRECT with a 4096-aligned
-	// buffer, so offset and length MUST be multiples of 4096 and a short
-	// read is an error.
+	// ReadBlockDirectAt opens O_RDONLY | O_DIRECT | O_CLOEXEC with a
+	// 4096-aligned buffer, so offset and length MUST be multiples of 4096
+	// and a short read is an error.
 	func WriteBlockAt(path string, offset uint64, data []byte) error
 	func ReadBlockDirectAt(path string, offset uint64, length uint64) (data []byte, err error)
 ```

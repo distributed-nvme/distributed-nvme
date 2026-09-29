@@ -2254,7 +2254,8 @@ concatenation (§9.6, §11.4).
   `SyncupSideRequest` at `LocalSidePath`, `SyncupCnRequest` at `LocalCnPath`,
   `SyncupCntlrRequest` at `LocalCntlrPath` — plus one file per received bitmap chunk at
   `LocalMigrBmPath`/`LocalCloneBmPath` (§4.6, §9.6). Every write goes to a temp file in
-  the same dir, fsync, rename. The stored request contains the revision, so no separate
+  the same dir, fsync, rename, fsync the dir (until then a crash can undo the rename).
+  The stored request contains the revision, so no separate
   revision record exists. On start the agent loads every file under its prefix,
   reconciles the system to it (full idempotent re-apply, §11.5 for clones), then
   serves. When an object disappears from its parent's pointer list, the agent drops its
@@ -2611,7 +2612,7 @@ and the paged readers, not because bitmaps are inherently huge.)
    MaxCloneBmCnt`). There is no revision gate: the request carries no revision (§9.1),
    and the ids it names are the whole of its addressing.
 2. **Persist, then apply.** Write the chunk to its `LocalMigrBmPath` /
-   `LocalCloneBmPath` file first (temp file + fsync + rename, §9.1); then recompute
+   `LocalCloneBmPath` file first (the §9.1 atomic, durable replace); then recompute
    the fully-skippable dm-clone regions from **all** locally present chunks of that
    migration/clone (§11.4 math; migrations first shift by the leg's `meta_blocks`,
    §8.11) and apply them to the migration/clone dm-clone by `blkdiscard`ing

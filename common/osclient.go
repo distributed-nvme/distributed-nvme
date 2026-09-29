@@ -70,7 +70,10 @@ type OsClient interface {
 	// WriteFile creates or overwrites a file at the specified path with
 	// string data using default file permissions. The replacement is atomic:
 	// a temp file in the same directory is written, fsynced and renamed onto
-	// path, so readers never observe a partial file (architecture.md §9.1).
+	// path, so readers never observe a partial file, and the directory is
+	// fsynced after the rename, so a replacement that returned nil survives a
+	// crash (architecture.md §9.1). A failed directory fsync fails the write,
+	// with the new file already in place at path.
 	WriteFile(ctx context.Context, path string, data string) (err error)
 
 	// WriteFileDirect writes data straight into the file at path with a
@@ -365,6 +368,11 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 	return f.Close()
 }
 
+// rawOpen is the open(2) behind ReadBlockDirectAt. It is package state so a
+// test can swap the seam and read the flags of the descriptor it returns;
+// production never touches it.
+var rawOpen = syscall.Open
+
 // ReadBlockDirectAt reads exactly length bytes at byte offset with O_DIRECT,
 // so the read is served by the device and not by the page cache: the §3.6 leg
 // health probe writes a block through a device and must read it back *from the
@@ -384,6 +392,13 @@ func WriteBlockAt(path string, offset uint64, data []byte) error {
 // commands need. The only sanctioned direct caller is the CN11 leg health
 // prober, and it must never run under a lock (osclient.md §4.5.1,
 // cnagent.md CN1/CN11).
+//
+// The descriptor is opened O_CLOEXEC, as os.OpenFile opens every one;
+// syscall.Open does not add it. The read can block for as long as the device
+// queues IO, and every command the agent forks meanwhile would otherwise
+// inherit the descriptor: one that outlives the probe — an nvme disconnect
+// stalled on its target, say — keeps the leg wrapper open, and the teardown's
+// dmsetup remove fails EBUSY until that command exits.
 func ReadBlockDirectAt(
 	path string,
 	offset uint64,
@@ -395,7 +410,8 @@ func ReadBlockDirectAt(
 			"read block direct: %s offset=%d length=%d not %d-aligned",
 			path, offset, length, align)
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECT, 0)
+	fd, err := rawOpen(
+		path, syscall.O_RDONLY|syscall.O_DIRECT|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -476,8 +492,28 @@ func (c *LimitedOsClient) WriteProto(
 	return err
 }
 
-// atomicWrite implements the temp-file + fsync + rename protocol of
-// architecture.md §9.1: readers never observe a partial file.
+// syncDir fsyncs a directory, which is what makes a rename inside it
+// durable. It is package state so a test can swap the seam; production never
+// touches it.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// atomicWrite implements the temp-file + fsync + rename + directory-fsync
+// protocol of architecture.md §9.1: readers never observe a partial file, and
+// a write that returned nil survives a crash. The rename is a change to the
+// directory, so until the directory itself is fsynced a crash can undo it —
+// bring the old file back or, for a first write, leave none — however durable
+// the temp file's own fsync made the bytes. A failed directory fsync fails the
+// write, with the new file already in place at path.
 func atomicWrite(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
@@ -503,5 +539,8 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.Chmod(tmpPath, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
 }

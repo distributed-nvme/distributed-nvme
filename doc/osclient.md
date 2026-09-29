@@ -5,8 +5,8 @@ Status: **normative**. Read `log.md` first — this document reuses its helpers
 (one Info record per operation, typed attributes, ctx propagation).
 
 Required background: `architecture.md` §7 (command timeouts), §9.1 (agent local
-store, temp+fsync+rename), §9.4 and Appendix A (the commands agents run),
-`constants.go`, `name_fmt.go` (the `Local*Path` files that go through
+store, temp+fsync+rename+dir fsync), §9.4 and Appendix A (the commands agents
+run), `constants.go`, `name_fmt.go` (the `Local*Path` files that go through
 `ReadProto`/`WriteProto`).
 
 ---
@@ -244,8 +244,14 @@ pressure while leaving ample parallelism.
 * `ReadFile`: `os.ReadFile(path)`, return `string(data)`.
 * `WriteFile`: **atomic replace** — write to a temp file in the same
   directory, `Sync`, `Close`, `Chmod(0o644)` ("default file permissions"),
-  then `os.Rename` onto `path`. This makes the agents' §9.1 requirement
-  ("temp file in the same dir, fsync, rename") automatic for every state
+  then `os.Rename` onto `path`, then open the directory and `Sync` it. The
+  rename is a change to the directory, so until the directory is fsynced a
+  crash can undo it — bring the old file back or, for a first write, leave
+  none — however durable the temp file's own `Sync` made the bytes; a failed
+  directory `Sync` therefore fails the write, although the rename has already
+  happened: readers see the new file at `path`, and only whether it survives
+  a crash is unknown. This makes the agents' §9.1 requirement ("temp file in
+  the same dir, fsync, rename, fsync the dir") automatic for every state
   file, and is the right default for every regular-file write.
 * `WriteFileDirect`: plain in-place write — `os.WriteFile(path,
   []byte(data), 0o644)`, no temp file, no fsync, no rename. It exists for
@@ -262,7 +268,8 @@ pressure while leaving ample parallelism.
 * `WriteProto`: `proto.Marshal(msg)`, then the same atomic replace as
   `WriteFile`.
 * These are the methods the agents use for the `Local*Path` files of
-  `architecture.md` §4.6/§9.1 (last applied `Syncup*Request`s and received
+  `architecture.md` §4.6/§9.1 (per object, the last `Syncup*Request` saved
+  for it — `dnagent.md` SH5 says when — and the received
   `Push*BitmapRequest` chunks).
 
 ### 4.5 ReadBlock / WriteBlock
@@ -318,12 +325,13 @@ semaphore slot (below). The two raw bodies are exported from
 func WriteBlockAt(path string, offset uint64, data []byte) error
 
 // ReadBlockDirectAt preads exactly length bytes at byte offset with
-// O_RDONLY|O_DIRECT into a 4096-aligned bounce buffer (allocate
+// O_RDONLY|O_DIRECT|O_CLOEXEC into a 4096-aligned bounce buffer (allocate
 // length+4096, slice to the first aligned boundary, copy out), then
 // closes. offset and length MUST be multiples of 4096 and length != 0 —
 // checked **before** the open, so a misaligned caller never touches the
-// device. A short read is an error, exactly like ReadBlock. A fresh fd per
-// call.
+// device. A short read is an error, exactly like ReadBlock. A fresh
+// close-on-exec fd per call: no command started while the read blocks
+// inherits it.
 func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error)
 ```
 
@@ -356,6 +364,13 @@ sanctioned direct-syscall path in dnv:
   prober to finish** — cancel and move on, never cancel-and-wait. (Contrast
   the dn §9.4 zeroing goroutines, which *are* waited for: their
   `blkdiscard` is a killable child process, not a blocked syscall.)
+* *Its descriptor is close-on-exec.* `ReadBlockDirectAt` opens with
+  `O_CLOEXEC`, as `os.OpenFile` opens every descriptor (`WriteBlockAt`'s
+  included); a bare `syscall.Open` does not add it. Every command the agent
+  forks while a probe is blocked would otherwise inherit the leg wrapper's
+  descriptor, and one that outlives the probe — an `nvme disconnect` stalled
+  on its target — keeps the wrapper open, so the teardown's `dmsetup remove`
+  fails `EBUSY` until that command exits.
 * *It must never run under a lock.* CN1 already keeps the probers out of the
   lock hierarchy; a wedged probe under the node or object lock would freeze
   every converge and Check round on the node.
@@ -666,8 +681,28 @@ func (c *LimitedOsClient) WriteProto(
 	return err
 }
 
-// atomicWrite implements the temp-file + fsync + rename protocol of
-// architecture.md §9.1: readers never observe a partial file.
+// syncDir fsyncs a directory, which is what makes a rename inside it
+// durable. It is package state so a test can swap the seam; production never
+// touches it.
+var syncDir = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// atomicWrite implements the temp-file + fsync + rename + directory-fsync
+// protocol of architecture.md §9.1: readers never observe a partial file, and
+// a write that returned nil survives a crash. The rename is a change to the
+// directory, so until the directory itself is fsynced a crash can undo it —
+// bring the old file back or, for a first write, leave none — however durable
+// the temp file's own fsync made the bytes. A failed directory fsync fails the
+// write, with the new file already in place at path.
 func atomicWrite(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
@@ -693,7 +728,10 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.Chmod(tmpPath, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
 }
 
 func (c *LimitedOsClient) ReadBlock(
@@ -748,12 +786,19 @@ func (c *LimitedOsClient) WriteBlock(
 	return err
 }
 
+// rawOpen is the open(2) behind ReadBlockDirectAt. It is package state so a
+// test can swap the seam and read the flags of the descriptor it returns;
+// production never touches it.
+var rawOpen = syscall.Open
+
 // ReadBlockDirectAt is the §4.5.1 O_DIRECT read: pread into a 4096-aligned
 // buffer so the read is served by the device, not the page cache (the leg
 // health probe's read-back would otherwise observe nothing). It is NOT an
 // OsClient method: it takes no semaphore slot and logs nothing, because it may
 // block for as long as the device queues IO. Its only caller is the cn agent's
-// lock-free prober, which logs `probe read block direct` itself.
+// lock-free prober, which logs `probe read block direct` itself. The
+// descriptor is O_CLOEXEC, so no command started while the read blocks
+// inherits it and keeps the leg wrapper open through it (§4.5.1).
 func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error) {
 	const align = 4096
 	if offset%align != 0 || length%align != 0 || length == 0 {
@@ -761,7 +806,8 @@ func ReadBlockDirectAt(path string, offset uint64, length uint64) ([]byte, error
 			"read block direct: %s offset=%d length=%d not %d-aligned",
 			path, offset, length, align)
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECT, 0)
+	fd, err := rawOpen(
+		path, syscall.O_RDONLY|syscall.O_DIRECT|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -966,7 +1012,11 @@ available):
    already-canceled ctx returns `context.Canceled` immediately.
 5. **File round-trip**: `WriteFile` then `ReadFile` returns identical data;
    overwriting an existing file replaces it; the directory contains no
-   leftover `*.tmp-*` files afterwards.
+   leftover `*.tmp-*` files afterwards. Through the `syncDir` seam
+   (`TestAtomicWriteSyncsTheDirAfterTheRename`): a first `WriteFile`, an
+   overwrite and a `WriteProto` each fsync the file's own directory exactly
+   once, after the rename — the seam already finds the new bytes at `path` —
+   and a failed directory fsync fails the write.
 6. **Proto round-trip**: `WriteProto` a populated `SyncupSideRequest` (or any
    generated message), `ReadProto` into a fresh instance,
    `proto.Equal` holds.
@@ -999,7 +1049,11 @@ available):
     direct` no longer exists anywhere in `common`). The `OsClient` interface,
     `LimitedOsClient` and `FakeOsClient` no longer carry
     `ReadBlockDirect`/`ReadBlockDirectFn` at all, so there is no
-    interface-level dispatch test for it.
+    interface-level dispatch test for it. Through the `rawOpen` seam
+    (`TestReadBlockDirectAtIsCloseOnExec`), `fcntl(F_GETFD)` on the
+    descriptor the helper opened, taken before the helper closes it, reads
+    `FD_CLOEXEC`; like the round trip, that test skips where the open fails
+    with `EINVAL`.
 11. **Exported write helper**: `common.WriteBlockAt` is exercised by item 9
     through `WriteBlock`; assert additionally that calling it directly writes
     and fsyncs without emitting any record (the `os write block` record
@@ -1026,7 +1080,7 @@ so routing them through an `OsClient` would buy neither the §1 logging nor the
 `Reported` pin — both of its children are spawned through the production
 `LimitedOsClient.RunCommand`;
 `grep -rn "ReadBlockDirect" common/` hits only the exported helper
-`ReadBlockDirectAt` (and its test) — the `OsClient` interface,
+`ReadBlockDirectAt` (and its tests) — the `OsClient` interface,
 `LimitedOsClient` and `FakeOsClient` no longer carry the method;
 `grep -rn "os read block direct" .` finds nothing
 outside historical documents.

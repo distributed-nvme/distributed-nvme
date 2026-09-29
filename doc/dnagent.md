@@ -391,21 +391,24 @@ SH5. An **object** request (`SyncupSide`/`SyncupCntlr`) is persisted after
      reach persistence.
 
 SH6. Enumeration on startup: `RunCommand(ctx, "ls", []string{"-1", prefix},
-     "")`, filtering by the role's `Local*Path` kind prefixes (dn: `dn-`,
-     `side-`, `migr-bm-`; cn: `cn-`, `cntlr-`, `clone-bm-`). File names are
-     used only for discovery; the ids come from the decoded protos.
+     "")` on a ctx carrying the SH15 soft timeout (the store calls the
+     `OsClient` directly, so it applies that bound itself), filtering by the
+     role's `Local*Path` kind prefixes (dn: `dn-`, `side-`, `migr-bm-`; cn:
+     `cn-`, `cntlr-`, `clone-bm-`). File names are used only for discovery;
+     the ids come from the decoded protos.
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
      **at that moment** and nothing of it is removed from the node yet: its
      request file and its bitmap-chunk files are deleted with
-     `RunCommand("rm", ["-f", …])`, its memory entry and object lock go, and
-     its goroutines are stopped. The resources are found afterwards **by
-     name**, by the sweep that runs later in the same pass (DN6), so no file
-     has to be kept as a to-be-deleted list. Keeping it until the resources
-     were gone is what the sweep replaced, and it was the opposite of
-     idempotent: the removal pass only logged its failures and the file was
-     deleted regardless, so the one record naming the object was destroyed
-     exactly when the object had failed to go.
+     `RunCommand("rm", ["-f", …])` under the same bound as SH6's `ls`, its
+     memory entry and object lock go, and its goroutines are stopped. The
+     resources are found afterwards **by name**, by the sweep that runs later
+     in the same pass (DN6), so no file has to be kept as a to-be-deleted
+     list. Keeping it until the resources were gone is what the sweep
+     replaced, and it was the opposite of idempotent: the removal pass only
+     logged its failures and the file was deleted regardless, so the one
+     record naming the object was destroyed exactly when the object had
+     failed to go.
 
 ### 2.5 Revision gate — `revision.go`
 
@@ -2649,6 +2652,12 @@ able to fail.
     `model.ValidateClusterConf`, in `model/capacity_test.go`; the two
     assertions together are what keep the two copies of the rule in step
     (§2.1).
+24. **Store commands are bounded** (SH6, SH7, SH15; `agent`'s
+    `TestStoreCommandsCarryTheSoftTimeout`): one `List` and one `Remove`
+    issue exactly one `ls` and one `rm`, each on a ctx whose deadline is at
+    most `common.CmdSoftTimeout` away. The store calls the `OsClient`
+    directly, not through an OS wrapper, so the bound is its own to apply
+    (`osclient.md` §4.2).
 
 ## 7. Acceptance checklist
 
