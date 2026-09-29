@@ -125,7 +125,11 @@ func (d *dnDriver) openStream(
 
 // syncup issues one SyncupDn (RW5, RW13). Per syncup it reads the DN's
 // DnConf at DnConfKey(cluster_id, addr_port) with a plain Get; a missing
-// record is logged and skipped, and the next round retries.
+// record is logged and skipped, and the next round retries. The read is a load
+// of the DN's record, so it re-seeds the health memo (HL3): an err_epoch
+// another observer wrote, or cleared, since this monitor's last write makes
+// the verdict on this syncup's reply a transition when the two disagree. A
+// quiet DN never syncs; its monitor's refresh reads the record instead.
 func (d *dnDriver) syncup(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -148,6 +152,7 @@ func (d *dnDriver) syncup(
 		)
 		return nil, nil
 	}
+	d.health.seedRecord(dnConf.GetErrEpoch())
 	reply, err := pb.NewDiskNodeAgentClient(conn).SyncupDn(
 		ctx, dnSyncupRequest(d.cid, d.dnId, d.revision, dnConf, cc),
 	)

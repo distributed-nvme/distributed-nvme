@@ -518,6 +518,7 @@ type spPass struct {
 // must see the err_epochs this same worker wrote since (HL3), and model.LoadSp
 // is one Snapshot (EU4) even though it loads more than a pass reads.
 func (w *spWorker) reactionPass(ctx context.Context) {
+	seqs := w.healthSeqs()
 	state, err := w.ops.loadSp(ctx, w.cid, w.desired.handle)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
@@ -532,6 +533,12 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		}
 		return
 	}
+	// HL3: the health memos are a cache of the records this load read. A
+	// health write bumps no revision (§5.5), so no fan-out ever reloads for
+	// one; this pass, every cntlr_interval, is the load that sees an epoch
+	// another observer wrote or cleared, whatever the gates below decide.
+	// The children's write counts were read before the load (healthSeqs).
+	w.reseedHealth(state, seqs)
 	// CLD7: the clone drain runs ALONGSIDE the reactions rather than instead of
 	// them — the SP is healthy and its other children must keep converging —
 	// and ahead of EVERY gate below, because none of them applies to it. It

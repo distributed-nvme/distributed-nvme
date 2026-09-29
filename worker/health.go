@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -173,15 +175,21 @@ func (w *modelHealthWriter) setSideErrEpoch(
 // The transitions-only monitor (HL3)
 // ---------------------------------------------------------------------------
 
-// healthMonitor is one object's health bookkeeping (HL3): it remembers the
-// last state it WROTE and issues an etcd write only on an observed
-// transition — or, for a cntlr, for HL2's settle, once per memo (see
-// observeSettle). Two owners of the same object (the accepted overlap of §0
-// item 4) therefore write at most once each, and the model op re-reads the
-// record inside its STM so the second write is a no-op — the §11 threshold
-// clock never restarts.
+// healthMonitor is one object's health bookkeeping (HL3). Its memo is a cache
+// of the object's record: the state it last wrote, re-seeded from the record
+// by the loads HL3 names (seedRecord, offerRecord, refresh). It issues an etcd
+// write only on an observed transition from that memo — or, for a cntlr, for
+// HL2's settle, once per memo (see observeSettle). Two owners of the same
+// object (the accepted overlap of §0 item 4) that observe the same transition
+// therefore write at most once each, and the model op re-reads the record
+// inside its STM so the second write is a no-op — the §11 threshold clock
+// never restarts. An epoch written by an owner that saw something else, an
+// observer cut off from the agent say, is put right by the owner that
+// remains, at its first verdict after its next load.
 //
-// A monitor is owned by one object goroutine (RW1) and needs no locking.
+// A monitor is owned by one object goroutine (RW1) and needs no locking but
+// for the offered record and the count of its own writes, which the sp
+// coordinator fills and reads from its own.
 type healthMonitor struct {
 	deps   *deps
 	role   string
@@ -194,6 +202,11 @@ type healthMonitor struct {
 	// op to clear the record's settling flag as well (HL2); the other kinds
 	// have no such flag and ignore it.
 	write func(ctx context.Context, epoch uint64, settle bool) error
+	// load reads the object's record for a dn or cn monitor (refresh). Its
+	// only other load is the syncup's read, and a node whose revision stays
+	// put and whose agent keeps answering code 0 never syncs. nil for the sp
+	// kinds, which the sp coordinator's passes re-seed.
+	load func(ctx context.Context) (errEpoch uint64, found bool, err error)
 
 	known     bool
 	unhealthy bool
@@ -201,6 +214,108 @@ type healthMonitor struct {
 	// seeded from every plan the driver takes, cleared by the settle write.
 	// Always false for the other kinds.
 	settlePending bool
+	// loaded is when the memo last took the record's state: a read of the
+	// record (seedRecord) or a write of its own, after which the record holds
+	// what the memo does. refresh reads the record again once it is
+	// nodeRecordMaxAge old.
+	loaded time.Time
+
+	// offerMu guards the four fields below. offered is the record's err_epoch
+	// as the sp coordinator's latest pass loaded it (offerRecord), which the
+	// owning goroutine folds into the memo before its next observation
+	// (takeOffer). writeSeq counts the monitor's successful writes; the pass
+	// reads it before its load (loadSeq) and hands it back as offerSeq, so an
+	// offer whose load may predate the monitor's own latest write is dropped
+	// instead of folded in.
+	offerMu  sync.Mutex
+	offered  uint64
+	offerSeq uint64
+	hasOffer bool
+	writeSeq uint64
+}
+
+// nodeRecordMaxAge is how long a dn or cn monitor's memo may go without
+// reading or writing the node's record before a verdict re-reads it (HL3,
+// refresh). The syncup's read covers a node whose revision moves; this one
+// covers a quiet node, which never syncs — a DN another observer marked
+// unhealthy loses its capacity key with the mark (MD4), so nothing is
+// allocated on it and its revision stays put.
+const nodeRecordMaxAge = time.Minute
+
+// seedRecord re-seeds the memo from the object's stored record (HL3). The memo
+// caches the record rather than only remembering the monitor's own writes: a
+// load that finds the record holding what this monitor did not write — another
+// observer's err_epoch, or its clear — makes the next verdict that disagrees
+// with it a transition, and that write puts the record right. An empty memo
+// stays empty: a monitor that has written nothing yet writes its first verdict
+// whatever the record holds. The load must not predate the monitor's own
+// latest write. One on the monitor's own goroutine cannot — the syncup's read,
+// refresh's, the sp coordinator's pass for the leg monitors it keeps — and
+// offerRecord guards one on another goroutine.
+func (m *healthMonitor) seedRecord(errEpoch uint64) {
+	m.loaded = m.deps.clk.now()
+	if !m.known {
+		return
+	}
+	m.unhealthy = errEpoch != 0
+}
+
+// loadSeq is the count of the monitor's own writes, which the sp coordinator
+// reads before the load whose record it then offers (offerRecord).
+func (m *healthMonitor) loadSeq() uint64 {
+	m.offerMu.Lock()
+	defer m.offerMu.Unlock()
+	return m.writeSeq
+}
+
+// offerRecord is seedRecord for a caller on another goroutine: the sp
+// coordinator hands every side and cntlr child its record's err_epoch as each
+// reaction pass loads it, with the loadSeq it read before that load, and the
+// child folds it in before it judges its next reply or missed round. A newer
+// offer replaces one not yet folded in. An offer whose load may predate the
+// monitor's own latest write — the count moved since — is dropped: folded in,
+// it would hand back the state that write replaced, so a next verdict
+// reversing the write would write nothing and one repeating it would write
+// again. The next pass offers again.
+func (m *healthMonitor) offerRecord(errEpoch uint64, seq uint64) {
+	m.offerMu.Lock()
+	m.offered, m.offerSeq, m.hasOffer = errEpoch, seq, true
+	m.offerMu.Unlock()
+}
+
+// takeOffer folds the record last offered into the memo, on the owning
+// goroutine (RW1), before an observation is compared with it.
+func (m *healthMonitor) takeOffer() {
+	m.offerMu.Lock()
+	errEpoch := m.offered
+	ok := m.hasOffer && m.offerSeq == m.writeSeq
+	m.hasOffer = false
+	m.offerMu.Unlock()
+	if ok {
+		m.seedRecord(errEpoch)
+	}
+}
+
+// refresh re-reads a dn or cn monitor's record before a verdict once the memo
+// has gone nodeRecordMaxAge without reading or writing it (HL3). A monitor
+// that has written nothing yet needs none: its first verdict is written
+// whatever the record holds. A read that fails leaves the memo as it is, and
+// the next verdict retries (RW12); an absent record re-seeds nothing.
+func (m *healthMonitor) refresh(ctx context.Context) {
+	if m.load == nil || !m.known ||
+		m.deps.clk.now().Sub(m.loaded) < nodeRecordMaxAge {
+		return
+	}
+	errEpoch, found, err := m.load(ctx)
+	if err != nil {
+		// The "etcd get" record carries the error.
+		return
+	}
+	if !found {
+		m.loaded = m.deps.clk.now()
+		return
+	}
+	m.seedRecord(errEpoch)
 }
 
 // observe folds one observation into the object's health (HL1/HL2, HL3).
@@ -226,6 +341,7 @@ func (m *healthMonitor) observeSettle(
 	resName string,
 	canSettle bool,
 ) bool {
+	m.takeOffer()
 	var unhealthy bool
 	var reason string
 	switch obs {
@@ -240,6 +356,7 @@ func (m *healthMonitor) observeSettle(
 		// clear.
 		return false
 	}
+	m.refresh(ctx)
 	transition := !(m.known && m.unhealthy == unhealthy)
 	doSettle := canSettle && !unhealthy && m.settlePending
 	if !transition && !doSettle {
@@ -261,8 +378,16 @@ func (m *healthMonitor) observeSettle(
 		)
 		return false
 	}
+	// The count moves only once the write has landed, under the lock loadSeq
+	// takes: a pass that reads it after this began its load after the write,
+	// so its record holds the write, and an offer from one that read it
+	// before is dropped (takeOffer).
+	m.offerMu.Lock()
+	m.writeSeq++
+	m.offerMu.Unlock()
 	m.known = true
 	m.unhealthy = unhealthy
+	m.loaded = m.deps.clk.now()
 	if doSettle {
 		m.settlePending = false
 	}
@@ -311,7 +436,8 @@ var errNoClusterConf = errors.New("cluster conf missing")
 // It re-validates rather than trusting the loop's gate because it is not
 // COVERED by one: the gate checked the conf the round was built from, while
 // this closure uses a conf re-read from the cache per write, which the watch
-// goroutine may have replaced in between.
+// goroutine may have replaced in between. Its refresh reads the DnConf the
+// syncup reads (RW13).
 func newDnMonitor(
 	d *deps,
 	cid uint64,
@@ -338,12 +464,20 @@ func newDnMonitor(
 			}
 			return d.health.setDnErrEpoch(ctx, cid, addrPort(), epoch, cc)
 		},
+		load: func(ctx context.Context) (uint64, bool, error) {
+			conf := &pb.DnConf{}
+			found, err := d.store.Get(
+				ctx, model.DnConfKey(cid, addrPort()), conf,
+			)
+			return conf.GetErrEpoch(), found, err
+		},
 	}
 }
 
 // newCnMonitor builds the health monitor of one CN (HL1). Unlike the DN's, it
 // needs no ClusterConf: CN capacity keys carry no bin index, so nothing about
-// them depends on dn_bin_conf (MD4, §6.4).
+// them depends on dn_bin_conf (MD4, §6.4). Its refresh reads the CnConf the
+// syncup reads (§8.3).
 func newCnMonitor(
 	d *deps,
 	cid uint64,
@@ -358,6 +492,13 @@ func newCnMonitor(
 		attrs:  []slog.Attr{slog.Uint64("cn_id", cnId)},
 		write: func(ctx context.Context, epoch uint64, _ bool) error {
 			return d.health.setCnErrEpoch(ctx, cid, addrPort(), epoch)
+		},
+		load: func(ctx context.Context) (uint64, bool, error) {
+			conf := &pb.CnConf{}
+			found, err := d.store.Get(
+				ctx, model.CnConfKey(cid, addrPort()), conf,
+			)
+			return conf.GetErrEpoch(), found, err
 		},
 	}
 }

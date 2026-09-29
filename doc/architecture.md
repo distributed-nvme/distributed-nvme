@@ -4036,9 +4036,13 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   2 × interval before it can declare anyone dead; a fresh worker drives nothing for its
   first grace window; ownership changes overlap or gap by a few seconds across workers
   (safe because every `Syncup*` is idempotent under the agents' revision gate and every
-  etcd reaction is STM-guarded); and dead keys are garbage-collected by their observers
-  instead of expiring — which is also what lets a worker detect that the fleet has given
-  up on it (it sees its own key deleted) and rejoin as a fresh identity.
+  etcd reaction is STM-guarded; an `err_epoch` the overlap leaves stale is corrected by
+  the owner's first verdict after it next loads the record — within a pass and a round
+  for a side, a leg or a cntlr, within a minute and a round for a DN or a CN — though
+  at the default thresholds a pass can fail a primary over on it first, `dnv-worker.md`
+  HL3 and Appendix B); and dead keys are garbage-collected by their observers instead
+  of expiring — which is also what lets a worker detect that the fleet has given up on
+  it (it sees its own key deleted) and rejoin as a fresh identity.
 
 ## Appendix C — Amendments
 
@@ -4351,8 +4355,13 @@ exists.
   worker whose registry watch drops a peer's events while its own heartbeats still
   succeed sees that peer go stale and, after the grace window, claims its shards;
   correct peers see nothing wrong. The double-driving is bounded — the victim sees
-  its key deleted, fences and rejoins as a fresh identity, and every agent-side
-  effect is idempotent — but not prevented ([D17], `dnv-worker.md` Appendix B).
+  its key deleted, fences and rejoins as a fresh identity, and every agent-side effect
+  is idempotent — but not prevented ([D17], `dnv-worker.md` Appendix B). A health
+  epoch one driver leaves stale is corrected by the owner's first verdict after it
+  next loads the record (`dnv-worker.md` HL3): within a pass and a round for a side, a
+  leg or a cntlr — though at the default thresholds a pass can fail a healthy primary
+  over on it first — and within a minute and a round for a DN or a CN, which is out of
+  allocation meanwhile if the stale epoch marks it unhealthy.
 * **Undriven windows are part of the membership design.** A fresh worker drives
   nothing for its first `DefaultVoteWorkerGraceTime`; a crashed worker's shards are
   undriven for 2 × `DefaultVoteWorkerInterval` + the grace window (80 s with the

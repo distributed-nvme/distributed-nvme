@@ -1240,6 +1240,87 @@ func (w *spWorker) observeLeg(ctx context.Context, row legRow) {
 	monitor.observe(ctx, row.obs, row.resName)
 }
 
+// healthSeqs reads the write count of every side and cntlr child's health
+// monitor, BEFORE the load whose records reseedHealth then offers them (HL3):
+// a child that has written since cannot tell whether that load holds its
+// write, so it drops the offer (offerRecord). A child assembled by hand for a
+// pass-only test has no monitor.
+func (w *spWorker) healthSeqs() map[*healthMonitor]uint64 {
+	seqs := make(map[*healthMonitor]uint64, len(w.cntlrs)+len(w.sides))
+	for _, child := range w.cntlrs {
+		if child.driver != nil && child.driver.health != nil {
+			seqs[child.driver.health] = child.driver.health.loadSeq()
+		}
+	}
+	for _, child := range w.sides {
+		if child.driver != nil && child.driver.health != nil {
+			seqs[child.driver.health] = child.driver.health.loadSeq()
+		}
+	}
+	return seqs
+}
+
+// reseedHealth re-seeds every health memo of the SP from the records one load
+// read (HL3): each side and cntlr child is offered its record's err_epoch with
+// the write count healthSeqs read before the load, which the child folds in on
+// its own goroutine before it judges its next reply or missed round (RW1),
+// and the leg monitors, which are the coordinator's own, are re-seeded at
+// once. A record the load did not find leaves its memo as it is, and so does
+// a child the count was not read for.
+func (w *spWorker) reseedHealth(
+	state *model.SpState,
+	seqs map[*healthMonitor]uint64,
+) {
+	for cntlrId, child := range w.cntlrs {
+		cntlr, ok := state.Cntlrs[cntlrId]
+		if !ok || child.driver == nil {
+			continue
+		}
+		seq, ok := seqs[child.driver.health]
+		if !ok {
+			continue
+		}
+		child.driver.health.offerRecord(cntlr.GetErrEpoch(), seq)
+	}
+	legs := make(map[uint64]*pb.Leg)
+	sides := make(map[sideKey]*pb.Side)
+	for _, slice := range state.Slices {
+		for _, grp := range allGroups(slice) {
+			for _, list := range [][]*pb.Leg{
+				grp.GetLegList(),
+				grp.GetSpareLegList(),
+			} {
+				for _, leg := range list {
+					legs[leg.GetLegId()] = leg
+					for _, side := range leg.GetSideList() {
+						key := sideKey{
+							legId:  leg.GetLegId(),
+							sideId: side.GetSideId(),
+						}
+						sides[key] = side
+					}
+				}
+			}
+		}
+	}
+	for key, child := range w.sides {
+		side, ok := sides[key]
+		if !ok || child.driver == nil {
+			continue
+		}
+		seq, ok := seqs[child.driver.health]
+		if !ok {
+			continue
+		}
+		child.driver.health.offerRecord(side.GetErrEpoch(), seq)
+	}
+	for legId, monitor := range w.legs {
+		if leg, ok := legs[legId]; ok {
+			monitor.seedRecord(leg.GetErrEpoch())
+		}
+	}
+}
+
 // applyProvisionedFlip runs RW18's STM and logs the §12 record.
 func (w *spWorker) applyProvisionedFlip(
 	ctx context.Context,

@@ -64,7 +64,12 @@ Appendix B carries the cross-component one as **[D17]**.
    registration, so it drives nothing during its first grace window, and
    old and new owners switch within seconds of each other. The residual
    overlap/gap is accepted: every `Syncup*` is idempotent under the agents'
-   revision gate and every etcd reaction is STM-guarded.
+   revision gate, every etcd reaction is STM-guarded, and an `err_epoch`
+   the overlap leaves stale is corrected by the owner's first verdict after
+   it next loads the record — within a pass and a round for a side, a leg
+   or a cntlr, within a minute and a round for a DN or a CN — though at
+   the default thresholds a pass can fail a primary over on it first (HL3,
+   Appendix B).
 5. **Self-fence** (VW8): a worker whose own heartbeat has not reached etcd
    for 2 × interval, or is not echoed back by its own watch, or whose key is
    deleted by a peer, stops driving everything and rejoins as a **fresh
@@ -858,12 +863,16 @@ RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
      per side and per cntlr (sp role). The goroutine alone owns the object's
      `Check*` stream, its `Syncup*` calls and the loop's own state, which is
      what makes `architecture.md` §9.1's "one `Syncup*` at a time per
-     object" and §9.7's "one stream per object" hold by construction. Two
+     object" and §9.7's "one stream per object" hold by construction. Three
      deliberate carve-outs share the object: the `Push*Bitmap` calls run on
      the §10 pusher's own goroutines (BM3 — one in flight per
-     migration/clone, concurrently with this loop), and `lastInfo` is
+     migration/clone, concurrently with this loop); `lastInfo` is
      published by the stream's pump goroutine under a mutex so the sp
-     coordinator can snapshot it (AR1).
+     coordinator can snapshot it (AR1); and the sp coordinator's pass,
+     under a mutex of each side and cntlr child's health monitor, reads the
+     count of the monitor's own writes before its load and offers the
+     child its record's `err_epoch` after it, which only the child's own
+     goroutine folds into the memo, before its next verdict (HL3).
 
 RW2. **State**: `desired` (the revision to reach plus the inputs the request
      is built from), `stream`, `lastInfo` (the last `*Info` received), the
@@ -877,9 +886,12 @@ RW2. **State**: `desired` (the revision to reach plus the inputs the request
      something cleared. Two things a round produces do outlive it, and
      neither is such a record: `lastInfo`, because a `show_info = false`
      reply omits an unchanged `*Info` and health is evaluated on the latest
-     known one (HL5); and the §9 health state, as the last verdict WRITTEN
-     — which is exactly what HL3's transitions-only rule has to compare the
-     next observation against — a cntlr's settle memo included (*amended
+     known one (HL5); and the §9 health state, a cache of the record: the
+     last verdict WRITTEN, re-seeded from the record by the loads HL3
+     names — which is exactly what HL3's transitions-only rule has to
+     compare the next observation against — the time a DN's or a CN's
+     monitor last read or wrote the record, which paces HL3's re-read, and
+     a cntlr's settle memo included (*amended
      2026-09-26*, HL2: the record's `settling` as the last plan loaded it,
      cleared by the write that clears it in etcd). (BM5's `mod_revision` memo survives rounds
      too, but it belongs to the §10 pusher; and the memos of what was
@@ -1039,10 +1051,14 @@ RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
       `SyncupDnRequest{cluster_id, dn_id, revision, side_pointer_list =
       DnConf.side_ptr_list, extent_size = dn_bin_conf.extent_size}` to
       `addr_port`. Rounds send `CheckDnRequest{cluster_id, dn_id, revision,
-      show_info}`. Health per HL1. A put whose only change is `addr_port`
-      re-syncs the node at its new endpoint: the loop drops its stream and
-      connection reference and continues at the new address; no delete ever
-      reaches the agent (§10.2, [D10]).
+      show_info}`. Health per HL1, judged against a cache of the record's
+      `err_epoch` that the syncup's read re-seeds and that the health
+      monitor re-reads itself, with the same `Get`, before a verdict once a
+      minute has passed without its reading or writing the record (HL3). A
+      put whose only change is `addr_port` re-syncs the node at its new
+      endpoint: the loop drops its stream and connection reference and
+      continues at the new address; no delete ever reaches the agent
+      (§10.2, [D10]).
 
 ### 8.3 cn role — `worker/cnrole.go`
 
@@ -1364,10 +1380,45 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      `err_epoch`, not a memo of a failed step.
 
 HL3. **Transitions only.** A record is written when the observed health
-     changes (healthy → unhealthy sets the epoch once — the threshold clock
-     of §11 never restarts; unhealthy → healthy clears it). The op re-reads
-     the record inside its STM, so two owners observing the same transition
-     write once. Health never bumps a revision (§5.5). *Amended 2026-09-26:*
+     changes (healthy → unhealthy sets the epoch once — while the record
+     stays set, the threshold clock of §11 never restarts; unhealthy →
+     healthy clears it). The op re-reads the record inside its STM, so two
+     owners observing the same transition write once. Health never bumps a
+     revision (§5.5). What an observation is compared with is a cache of
+     the record, not only a memory of the monitor's own writes, and these
+     loads re-seed it: the sp coordinator's reaction pass, every
+     `cntlr_interval` (AR1), hands each side and cntlr child its record's
+     `err_epoch`, which the child folds in before it judges its next reply
+     or missed round, and re-seeds the leg monitors it keeps itself; the dn
+     and cn roles re-seed from the `DnConf` / `CnConf` every syncup reads
+     (RW13), and since a node whose revision stays put and whose agent
+     answers code 0 never syncs, a dn or cn monitor also re-reads the
+     record itself before a verdict once a minute has passed without its
+     reading or writing it — one `Get` a minute for a node that neither
+     syncs nor changes health, and one at each verdict while that `Get`
+     fails. A monitor that has written nothing yet — a child just started,
+     a new owner after a handoff — starts empty and writes its first
+     verdict whatever the record holds. So a record that says unhealthy
+     while the observation is clean is a transition and clears, and one
+     that says healthy while the observation is not sets a new epoch: an
+     `err_epoch` another observer wrote or cleared — the other owner of an
+     overlap (§0 item 4), a partitioned observer (Appendix B) — is
+     corrected at the owner's first verdict after its next load, a reply
+     that neither sets nor clears being no verdict (HL1, HL2): within a
+     pass and a round for a side, a leg or a cntlr — though at the default
+     thresholds a pass can fail a primary over on it first, as it can after
+     one bad round (Appendix B) — and within a minute and a round for a DN
+     or a CN. While two owners disagree, each puts the record back to its
+     own view after each of its loads, so the threshold clock of an object
+     one of them sees unhealthy restarts after each of the other's clears,
+     and a threshold longer than a pass and a round — every default but
+     `primary_unhealthy` (AR4) — is not reached meanwhile. A load that may
+     predate a side's or cntlr's own latest write is not folded in: the
+     pass reads the child's count of its own writes before it loads, and
+     the child drops an offer whose count has moved since. Folded in, such
+     an offer would hand back the state the write replaced, so a next
+     verdict reversing the write would write nothing and one repeating it
+     would write again. The next pass offers again. *Amended 2026-09-26:*
      HL2's settle is the one write that can be issued with no health
      transition behind it — a standby that was clean, is promoted and
      reports clean at once has no edge to write on; when a transition is
@@ -1507,7 +1558,8 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      SP — the records the reactions read, and the ones this worker itself
      writes the `err_epoch`s into — plus the in-memory latest `CntlrInfo` of
      the **primary** cntlr (pool usage, spare readiness) and `now` (unix
-     seconds).
+     seconds). The snapshot re-seeds the SP's health memos first, ahead of
+     every gate below (HL3).
 
      **Both** stored confs are validated before the reactions are evaluated
      — the cluster's with `model.ValidateClusterConf`, the SP's `bdev_conf`
@@ -2186,7 +2238,7 @@ parses them.
 | `syncup result` | ids, `revision`, `code`, `error?` | every `Syncup*` reply or failure (RW5) |
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
 | `syncup leftover` | ids, `revision`, `details` (the agent's leftover names, `leftover(n): kind:name, … [+k more]` and/or `enumeration failed: …`) | RW5, on an accepted reply carrying `ReplyCodeLeftover` — one record per `Syncup*`, so a leftover that does not go away is in the log every round |
-| `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions |
+| `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions, judged against the memo HL3 re-seeds from the record — the correction of an epoch another observer wrote or cleared included |
 | `cntlr settled` | `role` (`sp`), `cluster_id`, `sp_id`, `cn_id`, `cntlr_pointer`, `revision` (the reply's, which the settle requires to be the one the child drives) | *added 2026-09-26:* HL2's settle written — at most once per acquisition of the primary role, the re-enable of a primary counting as one (none when the cntlr is demoted before it settles), plus a repeat for a plan loaded before the write landed (HL2) or for a second owner in an overlap (§0 item 4) |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
 | `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
@@ -2274,7 +2326,19 @@ does).
   2026-09-26*, RW14) — a tick's fan-out whose load is ahead of the
   delivered revision restarts no child and neither re-syncs nor settles
   the cntlr the load shows promoted; the delivery then sends that cntlr
-  its primary request, whose reply settles it.
+  its primary request, whose reply settles it;
+  `TestOrphanedEpochIsClearedByTheOwner` (HL3) — on a live coordinator
+  whose SP stores a `primary_unhealthy` of 60 s, an `err_epoch` another
+  observer writes onto the records of a settled, healthy primary, of a
+  side, of a spare leg's side and of a leg, and then onto the standby's,
+  is cleared by the owner's first clean verdict after a pass loads it,
+  before a third pass has run; no reaction runs; each record is written
+  exactly twice, the first verdict and the correction, and clean rounds
+  after the correction write nothing. At the default 5 s it fails: the
+  first pass to load the primary's stamp, which finds it 5 s old in this
+  harness, fails the primary over before the correction lands — the
+  residual HL3 and Appendix B state — so a fix of that residual would be
+  pinned by running it at 5 s.
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
   standby leg rows ignored; the DN `err_epoch` write failing on a missing
   and on an invalid cluster conf alike; `TestHealthSettle` (*added
@@ -2300,7 +2364,24 @@ does).
   row of every map `UNKNOWN` (HL1). `TestCntlrSettleWritesThroughModel`
   (`etcd_test.go`, *added 2026-09-26*) runs the cntlr monitor over the real
   `modelHealthWriter` and etcd: its epoch and its settle both reach
-  `SetCntlrErrEpoch` (HL2, HL3).
+  `SetCntlrErrEpoch` (HL2, HL3). `TestOrphanedNodeEpochIsClearedByTheOwner`
+  (HL3) — through the real dn and cn loops: on a quiet node, an epoch
+  another observer wrote over the owner's clean verdict is cleared at the
+  first verdict a minute after the owner's write and not before, by one
+  read of the record and one write, and the next read, a minute on,
+  writes nothing; then the syncup's `DnConf` / `CnConf` read re-seeds the
+  memo both ways — an epoch written over the owner's clean verdict is
+  cleared, one cleared under its unhealthy verdict is set again — each by
+  one read and one write. `TestHealthNodeRecordRefresh` (HL3) — on the dn
+  monitor alone: no read before its first write however late, none short
+  of a minute after its last read or write, one at the minute, which
+  re-seeds the memo; a failed read re-seeds nothing and is retried at the
+  next verdict, and an absent record re-seeds nothing and counts as read.
+  `TestHealthOfferPredatingOwnWriteIsDropped` (HL3) — an offer whose write
+  count moved after the pass read it is dropped, in both orders of the
+  race, so the verdict that reverses the write the load missed is still
+  written; one whose count still matches is folded in, and a newer offer
+  replaces one not folded in yet.
 * **bmpush.go** — `TestBmMissingDiff` (BM2 over the whole pair: an
   acknowledged `(0, 1)` never satisfies etcd's `(2, 1)`),
   `TestBmAscendingOneInFlight` (ascending `(src_slice_idx, bm_idx)`
@@ -2327,6 +2408,13 @@ does).
   and in `model` the same selection in `Failover`'s STM, the inverted
   thresholds included, the flag moving with the role there and in a primary
   `ReplaceCntlr`, and `SetCntlrErrEpoch`'s settle);
+  HL3's re-seed by every pass (`TestReactionPassReseedsHealthEveryLoad`:
+  each of two passes in a row offers a cntlr child the stamp its load
+  read, and the child's next clean verdict clears it; the offer of a pass
+  whose load misses a write the child made after the pass read its write
+  count is dropped, so the clean verdict after it still clears the set —
+  it fails if every other pass skips the offer, if the count is read after
+  the load, or if the child folds that offer in);
   the AR6 parser on a real status line and on garbage; the pending rule
   before and after a grow becomes visible (data and meta units); AR7's
   sole-primary variant and old-CN black list; AR8 cases 1 and 2, the
@@ -3452,8 +3540,15 @@ durable, so nothing is lost — convergence is delayed, not skipped
   peer's is not distinguishable from that peer dying. The wrong commit
   deletes the peer's key; the peer sees it (VW8 c), fences and rejoins as a
   fresh identity; in between, both drive the same shards — bounded by the
-  grace window plus one round, and harmless to agents (idempotent
-  syncups) and to etcd (STM-guarded reactions), but not prevented.
+  grace window plus one round, harmless to agents (idempotent syncups),
+  but not prevented. In etcd every reaction is STM-guarded, but a health
+  epoch is a reaction input, and one the other driver left stale is
+  corrected by the owner's first verdict after it next loads the record
+  (HL3): within a pass and a round for a side, a leg or a cntlr — though
+  at the default thresholds a pass can fail a primary over on it before
+  that verdict lands, as it can after one bad round (below) — and within
+  a minute and a round for a DN or a CN, a stamped node being out of
+  allocation meanwhile (MD4).
 * **Overlap and gap at every ownership change** (§0 item 4): a few seconds
   of double driving or of no driving per shard per change. Accepted.
 * **Undriven windows**: a fresh worker's first grace window; 2I + G after a
@@ -3495,12 +3590,18 @@ durable, so nothing is lost — convergence is delayed, not skipped
 * **Reaction inputs are one pass old**: `err_epoch`s are read fresh each
   pass, but pool usage and spare readiness come from the primary's last
   Check reply (≤ one interval old). A reaction is at most one interval
-  late; never wrong, because the op re-validates.
+  late, and never wrong for that lateness, because the op re-validates;
+  an `err_epoch` another driver left stale is another matter, since the
+  op re-validates against that very record (the partitioned-observer
+  bullet above, HL3).
 * **Log volume**: every round logs a `grpc client send`/`recv` pair per
   object (`grpc.md` L6) and every heartbeat an `etcd put`; with 5 s rounds
   and thousands of objects this is the dominant log stream of the control
-  plane, as it is for the agents. The worker's own per-object records are
-  mostly event-driven: health transitions (`health changed`, the
+  plane, as it is for the agents. A DN or CN that neither syncs nor
+  changes health adds an `etcd get` a minute, HL3's re-read of its record,
+  and one at each verdict while that read fails.
+  The worker's own per-object records are mostly event-driven: health
+  transitions (`health changed`, the
   `unreachable` reason included — the `RES_STATUS_UNKNOWN` marking itself
   is in-memory and logs nothing, HL1), a `syncup result` per `Syncup*`
   (§12), and, since 2026-09-26, a cntlr's `cntlr settled`, about once per

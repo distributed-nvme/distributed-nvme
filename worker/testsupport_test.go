@@ -476,6 +476,15 @@ func (w *fakeHealthWriter) record(entry healthWrite) error {
 	return nil
 }
 
+// refusal is the error the fake fails every write with, nil while writes
+// succeed. A wrapper that also lands each write in a store of its own asks it
+// first, so that a write the fake fails lands nowhere.
+func (w *fakeHealthWriter) refusal() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.err
+}
+
 func (w *fakeHealthWriter) all() []healthWrite {
 	w.mu.Lock()
 	defer w.mu.Unlock()

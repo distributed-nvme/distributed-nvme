@@ -2231,6 +2231,407 @@ func TestSpLegRowsFromPrimaryOnly(t *testing.T) {
 	})
 }
 
+// orphanPrimaryUnhealthy is the primary_unhealthy of
+// TestOrphanedEpochIsClearedByTheOwner: longer than the owner's correction
+// takes — the pass that loads the record plus the round after it — so the
+// test pins the correction rather than a race with the reaction pass. At the
+// product default of 5 s, one pass, a pass may act on an orphaned epoch before
+// the correcting round lands, as it would on one bad round; here the first
+// pass to load the primary's stamp does, finding it 5 s old, so a fix of that
+// residual is pinned by running the test at 5.
+const orphanPrimaryUnhealthy = 60
+
+// spStateHealthWriter is a fake health writer whose cntlr, leg and side writes
+// also land in the harness's stored SpState, under MD6's set/clear rule, so
+// the reaction pass reads what the monitors wrote (AR1): the etcd of a
+// live-coordinator health test. A write lands in the state before it is
+// recorded: the test takes a recorded write as proof that the state holds it,
+// and another observer's stamp laid between the two would be overwritten by a
+// write the test had already seen. A write the fake fails lands nowhere.
+type spStateHealthWriter struct {
+	*fakeHealthWriter
+	ops *fakeSpOps
+}
+
+func (w *spStateHealthWriter) setCntlrErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	cntlrId uint64,
+	epoch uint64,
+	settle bool,
+) error {
+	if err := w.refusal(); err != nil {
+		return err
+	}
+	w.ops.putCntlrErrEpoch(cntlrId, epoch)
+	return w.fakeHealthWriter.setCntlrErrEpoch(
+		ctx, cid, spId, cntlrId, epoch, settle,
+	)
+}
+
+func (w *spStateHealthWriter) setLegErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	sliceId uint64,
+	legId uint64,
+	epoch uint64,
+) error {
+	if err := w.refusal(); err != nil {
+		return err
+	}
+	w.ops.putSliceErrEpoch(sliceId, legId, 0, epoch)
+	return w.fakeHealthWriter.setLegErrEpoch(
+		ctx, cid, spId, sliceId, legId, epoch,
+	)
+}
+
+func (w *spStateHealthWriter) setSideErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	sliceId uint64,
+	sideId uint64,
+	epoch uint64,
+) error {
+	if err := w.refusal(); err != nil {
+		return err
+	}
+	w.ops.putSliceErrEpoch(sliceId, 0, sideId, epoch)
+	return w.fakeHealthWriter.setSideErrEpoch(
+		ctx, cid, spId, sliceId, sideId, epoch,
+	)
+}
+
+// putCntlrErrEpoch applies MD6's set/clear rule — a nonzero epoch only onto a
+// stored 0, a zero always — to one stored Cntlr, copy-on-write: loadSp hands
+// the coordinator the stored state itself, so a record is replaced rather than
+// changed under a pass that may be reading it.
+func (o *fakeSpOps) putCntlrErrEpoch(cntlrId uint64, epoch uint64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	old, ok := o.state.Cntlrs[cntlrId]
+	if !ok || (epoch != 0 && old.GetErrEpoch() != 0) {
+		return
+	}
+	next := *o.state
+	next.Cntlrs = make(map[uint64]*pb.Cntlr, len(o.state.Cntlrs))
+	for id, cntlr := range o.state.Cntlrs {
+		next.Cntlrs[id] = cntlr
+	}
+	cntlr := proto.Clone(old).(*pb.Cntlr)
+	cntlr.ErrEpoch = epoch
+	next.Cntlrs[cntlrId] = cntlr
+	o.state = &next
+}
+
+// putSliceErrEpoch is putCntlrErrEpoch for the side sideId of a slice or, with
+// sideId 0, for its leg legId: both live inside the Slice record, which is
+// replaced by a clone.
+func (o *fakeSpOps) putSliceErrEpoch(
+	sliceId uint64,
+	legId uint64,
+	sideId uint64,
+	epoch uint64,
+) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	old, ok := o.state.Slices[sliceId]
+	if !ok {
+		return
+	}
+	slice := proto.Clone(old).(*pb.Slice)
+	field := sliceEpochField(slice, legId, sideId)
+	if field == nil || (epoch != 0 && *field != 0) {
+		return
+	}
+	*field = epoch
+	next := *o.state
+	next.Slices = make(map[uint64]*pb.Slice, len(o.state.Slices))
+	for id, stored := range o.state.Slices {
+		next.Slices[id] = stored
+	}
+	next.Slices[sliceId] = slice
+	o.state = &next
+}
+
+// cntlrErrEpoch is one stored Cntlr's err_epoch.
+func (o *fakeSpOps) cntlrErrEpoch(cntlrId uint64) uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.state.Cntlrs[cntlrId].GetErrEpoch()
+}
+
+// sliceErrEpoch is the stored err_epoch putSliceErrEpoch writes.
+func (o *fakeSpOps) sliceErrEpoch(
+	sliceId uint64,
+	legId uint64,
+	sideId uint64,
+) uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	field := sliceEpochField(o.state.Slices[sliceId], legId, sideId)
+	if field == nil {
+		return 0
+	}
+	return *field
+}
+
+// sliceEpochField finds the err_epoch of the side sideId anywhere in a slice
+// (side ids are unique within the SP) or, with sideId 0, of the leg legId, in
+// either list of either group; nil when the slice holds neither.
+func sliceEpochField(slice *pb.Slice, legId uint64, sideId uint64) *uint64 {
+	for _, grp := range allGroups(slice) {
+		for _, list := range [][]*pb.Leg{
+			grp.GetLegList(),
+			grp.GetSpareLegList(),
+		} {
+			for _, leg := range list {
+				if sideId == 0 && leg.GetLegId() == legId {
+					return &leg.ErrEpoch
+				}
+				for _, side := range leg.GetSideList() {
+					if sideId != 0 && side.GetSideId() == sideId {
+						return &side.ErrEpoch
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// reactWith gives a running coordinator a reactor over a recording model
+// surface: the production one holds the harness's nil etcd client, which any
+// reaction would dereference. It is safe until the clock first advances — a
+// pass runs only on a tick, or on the drain token only a pass arms, and the
+// tick's channel send orders this write before the pass reads it.
+func (h *spHarness) reactWith(w *spWorker, rops *fakeReactionOps) {
+	w.react = newReactor(rops)
+}
+
+// epochWrites is the err_epoch of every health write of one record, in order.
+func epochWrites(
+	hw *fakeHealthWriter,
+	record string,
+	objId uint64,
+) []uint64 {
+	var out []uint64
+	for _, write := range hw.all() {
+		if write.record == record && write.objId == objId {
+			out = append(out, write.epoch)
+		}
+	}
+	return out
+}
+
+// TestOrphanedEpochIsClearedByTheOwner pins HL3's cache rule end to end, on a
+// live coordinator with the fake clock. During the accepted ownership overlap
+// (§0 item 4) two drivers of one SP can hold different verdicts: here the
+// owner, whose rounds are clean, and another observer whose view differs — a
+// gRPC path broken while its etcd path works, say — which stamps an err_epoch
+// on records the owner sees healthy and then fences: the primary cntlr's, the
+// standby's, a side's, a spare leg's side's and a leg's. The owner's monitors
+// had written clean already and wrote only on a transition from what they had
+// written, so the orphaned epochs stayed: primary_unhealthy failed the
+// healthy primary over, and the demoted cntlr kept its epoch until AR7
+// replaced the cntlr; the leg's would have repaired a healthy leg at
+// leg_unhealthy (AR8). The memo is a cache of the record: the owner's next
+// pass re-seeds every monitor from its load, the next clean verdict on each
+// object is a transition and clears its epoch — before a third pass has run
+// — and no pass acts on any of them.
+func TestOrphanedEpochIsClearedByTheOwner(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	var primaryChecks atomic.Int64
+	for addr, stub := range h.cntlrs {
+		stub.checkReply = func(
+			req *pb.CheckCntlrRequest,
+		) *pb.CheckCntlrReply {
+			// Clean, at the revision asked: no syncup.
+			reply := &pb.CheckCntlrReply{Revision: req.GetRevision()}
+			if addr == spCnA {
+				primaryChecks.Add(1)
+				// The primary's probe of the meta leg, which HL2 records
+				// on the leg and leaves out of the cntlr's own health.
+				reply.CntlrInfo = &pb.CntlrInfo{
+					LegIdToLeg: map[uint64]*pb.ResInfo{
+						spLegMeta: resOk("leg-meta"),
+					},
+				}
+			}
+			return reply
+		}
+	}
+	for _, stub := range h.sides {
+		stub.checkReply = func(req *pb.CheckSideRequest) *pb.CheckSideReply {
+			return &pb.CheckSideReply{Revision: req.GetRevision()}
+		}
+	}
+	state := spFixture()
+	state.Conf.EventThreshold = &pb.EventThreshold{
+		PrimaryUnhealthy: orphanPrimaryUnhealthy,
+	}
+	h.ops.setState(state)
+	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
+	rops := &fakeReactionOps{}
+	h.reactWith(h.start(), rops)
+
+	// round lets one more pass and one more round of the primary run. The
+	// clock moves a second at a time, so that a round's reply is read long
+	// before the round's own timeout can fire (RW4 step 3); and the
+	// primary's agent sees a Check only once the previous round's reply has
+	// been observed, while the coordinator runs one pass at a time, so every
+	// earlier pass and every earlier round of the primary has finished once
+	// both counts moved.
+	round := func() {
+		t.Helper()
+		loads, checks := h.ops.loadCnt(), primaryChecks.Load()
+		h.advanceUntil("a pass and a round of the primary", time.Second,
+			func() bool {
+				return h.ops.loadCnt() > loads &&
+					primaryChecks.Load() > checks
+			})
+	}
+	type record struct {
+		name   string
+		kind   string
+		objId  uint64
+		stamp  func(epoch uint64)
+		stored func() uint64
+	}
+	cntlrRecord := func(name string, cntlrId uint64) record {
+		return record{name, healthRecordCntlr, cntlrId,
+			func(epoch uint64) { h.ops.putCntlrErrEpoch(cntlrId, epoch) },
+			func() uint64 { return h.ops.cntlrErrEpoch(cntlrId) }}
+	}
+	sliceRecord := func(
+		name string,
+		kind string,
+		legId uint64,
+		sideId uint64,
+	) record {
+		objId := legId
+		if sideId != 0 {
+			objId = sideId
+		}
+		return record{name, kind, objId,
+			func(epoch uint64) {
+				h.ops.putSliceErrEpoch(spSliceA, legId, sideId, epoch)
+			},
+			func() uint64 {
+				return h.ops.sliceErrEpoch(spSliceA, legId, sideId)
+			}}
+	}
+	// The standby is stamped on its own, after the others are put right: a
+	// standby with an epoch is no failover candidate (AR5), so stamped with
+	// the primary it would keep a pass from failing the primary over, and
+	// the test from seeing whether the stamp outlived the threshold.
+	primarySet := []record{
+		cntlrRecord("the primary", spCntlrPrimary),
+		sliceRecord("the meta side", healthRecordSide, 0, spSideMeta),
+		sliceRecord("the spare side", healthRecordSide, 0, spSideSpare),
+		sliceRecord("the meta leg", healthRecordLeg, spLegMeta, 0),
+	}
+	standbySet := []record{cntlrRecord("the standby", spCntlrStandby)}
+	records := append(append([]record(nil), primarySet...), standbySet...)
+
+	// The owner's first verdicts: clean, and written, because a monitor that
+	// has written nothing yet has an empty memo.
+	for _, rec := range records {
+		waitFor(t, "the owner's first verdict on "+rec.name, func() bool {
+			return len(epochWrites(h.hw, rec.kind, rec.objId)) == 1
+		})
+	}
+	// stampAndClear writes the other observer's epoch straight onto the
+	// stored records and waits for the owner to put them right. The first
+	// pass after the stamps loads them and hands them over, and the next
+	// verdict on each object after that clears its record (HL3). Two rounds
+	// see two passes, and the first has handed the stamps over once the
+	// second has loaded — one pass runs at a time — while every object's
+	// next round is due within one interval of that hand-over. Two more
+	// seconds of clock let a round whose timer was armed a second or two
+	// late still run, and stay short of a third pass.
+	stampAndClear := func(set []record) uint64 {
+		t.Helper()
+		orphan := h.clk.nowUnix()
+		for _, rec := range set {
+			rec.stamp(orphan)
+			if rec.stored() != orphan {
+				t.Fatalf("the stamp on %s did not land", rec.name)
+			}
+		}
+		round()
+		round()
+		for i := 0; i < 2; i++ {
+			h.clk.advance(time.Second)
+			time.Sleep(2 * time.Millisecond)
+		}
+		// A clear lands in the state before it is recorded, and the write
+		// counts below read the record.
+		for _, rec := range set {
+			waitFor(t, "the owner's clear of "+rec.name, func() bool {
+				return rec.stored() == 0 &&
+					len(epochWrites(h.hw, rec.kind, rec.objId)) >= 2
+			})
+		}
+		return orphan
+	}
+	orphan := stampAndClear(primarySet)
+	stampAndClear(standbySet)
+	for h.clk.nowUnix() < orphan+orphanPrimaryUnhealthy+10 {
+		round()
+	}
+
+	if recs := h.logs.withMsg(msgReactionApplied); len(recs) != 0 {
+		kinds := make([]any, 0, len(recs))
+		for _, rec := range recs {
+			kinds = append(kinds, rec["kind"])
+		}
+		t.Fatalf("reaction applied, kind %v: the healthy primary was "+
+			"failed over on the orphaned epoch", kinds)
+	}
+	if calls := rops.allCalls(); len(calls) != 0 {
+		t.Fatalf("reaction ops = %+v, want none", calls)
+	}
+	settled := make([]int, len(records))
+	for idx, rec := range records {
+		if got := rec.stored(); got != 0 {
+			t.Fatalf("stored err_epoch of %s = %d, want the orphaned %d "+
+				"cleared", rec.name, got, orphan)
+		}
+		// The clear is the owner's own write, and there is exactly one: an
+		// offer whose load may predate the monitor's latest write is
+		// dropped (offerRecord), so no pass hands the stamp back after the
+		// clear and makes the owner clear it twice.
+		writes := epochWrites(h.hw, rec.kind, rec.objId)
+		if len(writes) != 2 {
+			t.Fatalf("epoch writes of %s = %v, want the first verdict's "+
+				"clear and the orphan's", rec.name, writes)
+		}
+		for _, epoch := range writes {
+			if epoch != 0 {
+				t.Fatalf("epoch writes of %s = %v, want clears only",
+					rec.name, writes)
+			}
+		}
+		settled[idx] = len(writes)
+	}
+	// And the memo is a cache, not a reason to write every round: once the
+	// records agree, clean rounds and passes write nothing (HL3).
+	for i := 0; i < 3; i++ {
+		round()
+	}
+	for idx, rec := range records {
+		got := epochWrites(h.hw, rec.kind, rec.objId)
+		if len(got) != settled[idx] {
+			t.Fatalf("epoch writes of %s = %v, want no write after the %d "+
+				"that corrected the record", rec.name, got, settled[idx])
+		}
+	}
+}
+
 // TestSpDeletingKeepsChildren checks RW14: model.ErrNotFound means the SP is
 // being deleted, so the coordinator logs and keeps its children until the
 // SpRev delete arrives.

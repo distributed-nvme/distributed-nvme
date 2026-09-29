@@ -115,7 +115,9 @@ func (d *cnDriver) openStream(
 }
 
 // syncup issues one SyncupCn (RW5, §8.3). A missing CnConf is logged and
-// skipped, and the next round retries.
+// skipped, and the next round retries. The read re-seeds the health memo from
+// the CN's record, as the dn driver's does (HL3); a quiet CN never syncs, and
+// its monitor's refresh reads the record instead.
 func (d *cnDriver) syncup(
 	ctx context.Context,
 	conn *grpc.ClientConn,
@@ -137,6 +139,7 @@ func (d *cnDriver) syncup(
 		)
 		return nil, nil
 	}
+	d.health.seedRecord(cnConf.GetErrEpoch())
 	reply, err := pb.NewControllerNodeAgentClient(conn).SyncupCn(
 		ctx, cnSyncupRequest(d.cid, d.cnId, d.revision, cnConf, cc),
 	)

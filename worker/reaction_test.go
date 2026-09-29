@@ -1078,6 +1078,88 @@ func TestReactionSettlingPrimary(t *testing.T) {
 	})
 }
 
+// loadHookOps runs a hook inside the next loadSp, ahead of the load itself: a
+// write a child makes while a pass is between reading the children's write
+// counts and loading the SP.
+type loadHookOps struct {
+	*fakeSpOps
+	hook func()
+}
+
+func (o *loadHookOps) loadSp(
+	ctx context.Context,
+	cid uint64,
+	spName string,
+) (*model.SpState, error) {
+	if hook := o.hook; hook != nil {
+		o.hook = nil
+		hook()
+	}
+	return o.fakeSpOps.loadSp(ctx, cid, spName)
+}
+
+// TestReactionPassReseedsHealthEveryLoad pins the pass's half of HL3's
+// re-seed; TestHealthOfferPredatingOwnWriteIsDropped pins the monitor's. Every
+// pass offers each side and cntlr child — a cntlr child here — the err_epoch
+// its load read, and it reads the child's count of its own writes BEFORE that
+// load, so that a write the child makes in between voids the offer: a pass
+// that skipped the offer, or read the count after its load, would leave a
+// stamp in place or fold a stale record in.
+func TestReactionPassReseedsHealthEveryLoad(t *testing.T) {
+	ctx := context.Background()
+	h := newReactHarness(t, reactFixture(t))
+	hw := &fakeHealthWriter{}
+	h.deps.health = hw
+	standby := newCntlrMonitor(h.deps, testCid, testSpId, reactCntlrB)
+	h.w.cntlrs[reactCntlrB] = &cntlrChild{
+		driver: &cntlrDriver{health: standby},
+	}
+	// writes spells the standby's epoch writes in order, 0 for a clear and
+	// E for a set.
+	writes := func() string {
+		var out []string
+		for _, write := range hw.all() {
+			if write.epoch == 0 {
+				out = append(out, "0")
+			} else {
+				out = append(out, "E")
+			}
+		}
+		return fmt.Sprint(out)
+	}
+	standby.observe(ctx, healthClean, "")
+
+	// Every pass, not one in two: another observer stamps the standby
+	// before each of two passes, and the clean verdict after each pass
+	// clears the stamp. The fake writer leaves the state alone, so the test
+	// takes the stamp off itself.
+	for i, want := range []string{"[0 0]", "[0 0 0]"} {
+		h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(1)
+		h.pass()
+		standby.observe(ctx, healthClean, "")
+		if got := writes(); got != want {
+			t.Fatalf("pass %d: epoch writes = %s, want %s: the pass did "+
+				"not hand over the stamp it loaded", i+1, got, want)
+		}
+		h.state.Cntlrs[reactCntlrB].ErrEpoch = 0
+	}
+
+	// The child sets the epoch after the pass has read its count, and the
+	// load does not hold the write: the fake writer leaves the state alone,
+	// as a snapshot taken before the write landed would. Folded in, the
+	// offer of that load would make the clean verdict after it no
+	// transition, and the set would stay.
+	ops := &loadHookOps{fakeSpOps: h.ops}
+	h.w.ops = ops
+	ops.hook = func() { standby.observe(ctx, healthUnreachable, "") }
+	h.pass()
+	standby.observe(ctx, healthClean, "")
+	if got, want := writes(), "[0 0 0 E 0]"; got != want {
+		t.Fatalf("epoch writes = %s, want %s: an offer whose load "+
+			"predates the child's write was folded in", got, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // AR6 — the `dmsetup status` parser
 // ---------------------------------------------------------------------------

@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -420,6 +425,553 @@ func TestHealthTransitionsOnly(t *testing.T) {
 	}
 	if epoch, _ := recs[1]["err_epoch"].(float64); epoch != 0 {
 		t.Fatalf("recovery err_epoch = %v, want 0", recs[1]["err_epoch"])
+	}
+}
+
+// TestHealthOfferPredatingOwnWriteIsDropped pins offerRecord's guard (HL3).
+// The sp coordinator reads a side or cntlr child's write count before the load
+// whose record it offers, and the child drops the offer when it has written
+// since: that load may predate the write, and folding it in would hand the
+// memo back the state the write replaced. In both orders of the race the next
+// verdict reverses the write the load missed, and it must still be written;
+// with the stale offer folded in, the memo already equalled that verdict and
+// nothing was written. An offer whose count still matches is folded in, and a
+// newer offer replaces one not folded in yet.
+func TestHealthOfferPredatingOwnWriteIsDropped(t *testing.T) {
+	ctx := context.Background()
+	epochs := func(writer *fakeHealthWriter) []uint64 {
+		var out []uint64
+		for _, write := range writer.all() {
+			out = append(out, write.epoch)
+		}
+		return out
+	}
+
+	t.Run("the clear after one bad round", func(t *testing.T) {
+		d, writer := healthTestDeps(t)
+		monitor := newCntlrMonitor(d, 7, 1, 2)
+		monitor.observe(ctx, healthClean, "")
+		// A pass reads the count and loads the record, still clear; the
+		// child's unreachable round writes an epoch before the pass offers
+		// what its load found.
+		seq := monitor.loadSeq()
+		monitor.observe(ctx, healthUnreachable, "")
+		monitor.offerRecord(0, seq)
+		monitor.observe(ctx, healthClean, "")
+		got := epochs(writer)
+		if len(got) != 3 || got[0] != 0 || got[1] == 0 || got[2] != 0 {
+			t.Fatalf("epoch writes = %v, want clear, set, clear: the stale "+
+				"offer suppressed the clear", got)
+		}
+	})
+
+	t.Run("the set after one clean round", func(t *testing.T) {
+		d, writer := healthTestDeps(t)
+		monitor := newSideMonitor(d, 7, 1, 2, 3)
+		monitor.observe(ctx, healthErrorRow, "side")
+		stamped := epochs(writer)[0]
+		seq := monitor.loadSeq()
+		monitor.observe(ctx, healthClean, "")
+		monitor.offerRecord(stamped, seq)
+		monitor.observe(ctx, healthErrorRow, "side")
+		got := epochs(writer)
+		if len(got) != 3 || got[0] == 0 || got[1] != 0 || got[2] == 0 {
+			t.Fatalf("epoch writes = %v, want set, clear, set: the stale "+
+				"offer suppressed the set", got)
+		}
+	})
+
+	t.Run("an offer after the last write is folded in", func(t *testing.T) {
+		d, writer := healthTestDeps(t)
+		monitor := newCntlrMonitor(d, 7, 1, 2)
+		monitor.observe(ctx, healthClean, "")
+		// Another observer stamps the record; the next pass loads it.
+		monitor.offerRecord(d.clk.nowUnix(), monitor.loadSeq())
+		monitor.observe(ctx, healthClean, "")
+		if got := epochs(writer); len(got) != 2 || got[1] != 0 {
+			t.Fatalf("epoch writes = %v, want the stamp cleared", got)
+		}
+		// The record read stamped, then clear again: the newer offer
+		// replaces the older one, and a clean verdict writes nothing.
+		monitor.offerRecord(d.clk.nowUnix(), monitor.loadSeq())
+		monitor.offerRecord(0, monitor.loadSeq())
+		monitor.observe(ctx, healthClean, "")
+		if got := epochs(writer); len(got) != 2 {
+			t.Fatalf("epoch writes = %v, want 2: a replaced offer was "+
+				"folded in", got)
+		}
+	})
+}
+
+// recordReads counts the reads of one node's record through the store the
+// loop and its monitor use — the syncup's and the monitor's refresh alike
+// (HL3) — with the fake time of each.
+type recordReads struct {
+	etcdStore
+	clk *fakeClock
+	key string
+
+	mu    sync.Mutex
+	times []time.Time
+}
+
+func (s *recordReads) Get(
+	ctx context.Context,
+	key string,
+	msg proto.Message,
+) (bool, error) {
+	if key == s.key {
+		s.mu.Lock()
+		s.times = append(s.times, s.clk.now())
+		s.mu.Unlock()
+	}
+	return s.etcdStore.Get(ctx, key, msg)
+}
+
+func (s *recordReads) all() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]time.Time(nil), s.times...)
+}
+
+// nodeStoreHealthWriter is a fake health writer whose dn and cn writes also
+// land in the stored DnConf/CnConf under MD6's set/clear rule — a nonzero
+// epoch only onto a stored 0, a zero always — so the monitor's next read of
+// the record finds what it wrote: the etcd of a node refresh test. As in
+// spStateHealthWriter, a write lands in the store before it is recorded, so
+// that a stamp the test lays once it has seen a write is never overwritten by
+// that write; a write the fake fails lands nowhere.
+type nodeStoreHealthWriter struct {
+	*fakeHealthWriter
+	store *fakeStore
+}
+
+func (w *nodeStoreHealthWriter) setDnErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	addrPort string,
+	epoch uint64,
+	cc *pb.ClusterConf,
+) error {
+	if err := w.refusal(); err != nil {
+		return err
+	}
+	err := w.put(ctx, model.DnConfKey(cid, addrPort), &pb.DnConf{}, epoch)
+	if err != nil {
+		return err
+	}
+	return w.fakeHealthWriter.setDnErrEpoch(ctx, cid, addrPort, epoch, cc)
+}
+
+func (w *nodeStoreHealthWriter) setCnErrEpoch(
+	ctx context.Context,
+	cid uint64,
+	addrPort string,
+	epoch uint64,
+) error {
+	if err := w.refusal(); err != nil {
+		return err
+	}
+	err := w.put(ctx, model.CnConfKey(cid, addrPort), &pb.CnConf{}, epoch)
+	if err != nil {
+		return err
+	}
+	return w.fakeHealthWriter.setCnErrEpoch(ctx, cid, addrPort, epoch)
+}
+
+// put rewrites the err_epoch of the conf stored at key, straight in the fake
+// store: no read is counted and no watch event is sent.
+func (w *nodeStoreHealthWriter) put(
+	ctx context.Context,
+	key string,
+	conf proto.Message,
+	epoch uint64,
+) error {
+	found, err := w.store.Get(ctx, key, conf)
+	if err != nil || !found {
+		return err
+	}
+	var stored *uint64
+	switch typed := conf.(type) {
+	case *pb.DnConf:
+		stored = &typed.ErrEpoch
+	case *pb.CnConf:
+		stored = &typed.ErrEpoch
+	default:
+		return fmt.Errorf("no err_epoch in %T", conf)
+	}
+	if epoch != 0 && *stored != 0 {
+		return nil
+	}
+	*stored = epoch
+	data, err := proto.Marshal(conf)
+	if err != nil {
+		return err
+	}
+	w.store.mu.Lock()
+	w.store.rev++
+	w.store.kvs[key] = data
+	w.store.mu.Unlock()
+	return nil
+}
+
+// TestHealthNodeRecordRefresh pins a node monitor's refresh (HL3) on the
+// monitor alone: a verdict re-reads the record only once a minute has passed
+// since the monitor last read or wrote it, and that read re-seeds the memo, so
+// an epoch another observer set over a clean verdict is cleared at the first
+// verdict a minute after the monitor's own write and not before. A read that
+// fails re-seeds nothing and is retried at the next verdict; an absent record
+// re-seeds nothing and counts as read. A monitor that has written nothing yet
+// reads nothing, however long it has run.
+func TestHealthNodeRecordRefresh(t *testing.T) {
+	ctx := context.Background()
+	d, writer := healthTestDeps(t)
+	seedClusterConf(d, testCid)
+	store := d.store.(*fakeStore)
+	clk := d.clk.(*fakeClock)
+	key := model.DnConfKey(testCid, testAddr)
+	reads := &recordReads{etcdStore: store, clk: clk, key: key}
+	d.store = reads
+	stamp := func(epoch uint64) {
+		conf := dnTestConf()
+		conf.ErrEpoch = epoch
+		store.seed(t, key, conf)
+	}
+	stamp(0)
+	monitor := newDnMonitor(d, testCid, testDnId, func() string {
+		return testAddr
+	})
+	check := func(what string, wantReads int, wantWrites []uint64) {
+		t.Helper()
+		if got := len(reads.all()); got != wantReads {
+			t.Fatalf("%s: %d reads of the record, want %d",
+				what, got, wantReads)
+		}
+		var got []uint64
+		for _, write := range writer.all() {
+			got = append(got, write.epoch)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(wantWrites) {
+			t.Fatalf("%s: epoch writes = %v, want %v", what, got, wantWrites)
+		}
+	}
+
+	// HL3 says a minute; the steps below are written in minutes rather than
+	// in nodeRecordMaxAge, so they pin its value too.
+	minute := time.Minute
+
+	// An empty memo writes its first verdict without reading, however late.
+	clk.advance(2 * minute)
+	monitor.observe(ctx, healthClean, "")
+	check("the first verdict", 0, []uint64{0})
+
+	// Another observer stamps the record. Short of the minute nothing reads
+	// it; at the minute the verdict reads it first and clears the stamp.
+	stamp(clk.nowUnix())
+	clk.advance(minute - time.Second)
+	monitor.observe(ctx, healthClean, "")
+	check("short of the minute", 0, []uint64{0})
+	clk.advance(time.Second)
+	monitor.observe(ctx, healthClean, "")
+	check("at the minute", 1, []uint64{0, 0})
+	monitor.observe(ctx, healthClean, "")
+	check("right after the read", 1, []uint64{0, 0})
+
+	// A read that fails re-seeds nothing, and the next verdict reads again.
+	stamp(clk.nowUnix())
+	clk.advance(minute)
+	store.mu.Lock()
+	store.getErr = errors.New("etcd unavailable")
+	store.mu.Unlock()
+	monitor.observe(ctx, healthClean, "")
+	check("a failed read", 2, []uint64{0, 0})
+	store.mu.Lock()
+	store.getErr = nil
+	store.mu.Unlock()
+	monitor.observe(ctx, healthClean, "")
+	check("the read after it", 3, []uint64{0, 0, 0})
+
+	// An absent record re-seeds nothing, and counts as read.
+	store.mu.Lock()
+	delete(store.kvs, key)
+	store.mu.Unlock()
+	clk.advance(minute)
+	monitor.observe(ctx, healthClean, "")
+	monitor.observe(ctx, healthClean, "")
+	check("an absent record", 4, []uint64{0, 0, 0})
+}
+
+// orphanNode is one node role under TestOrphanedNodeEpochIsClearedByTheOwner:
+// its running revision worker and the knobs of its agent and its record.
+type orphanNode struct {
+	w      *revWorker
+	addr   string
+	record string
+	// checks counts the Check requests the agent received.
+	checks func() int
+	// syncupRevs is the revision of every Syncup* the agent received.
+	syncupRevs func() []uint64
+	// setBad switches the agent's Check replies between clean and one ERROR
+	// row.
+	setBad func(bad bool)
+	// putEpoch rewrites the err_epoch of the stored DnConf/CnConf, as another
+	// observer's write does.
+	putEpoch func(epoch uint64)
+}
+
+func startOrphanDn(t *testing.T, h *revHarness) *orphanNode {
+	var bad atomic.Bool
+	stub := &stubDnAgent{}
+	stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+		reply := &pb.CheckDnReply{Revision: req.GetRevision()}
+		if bad.Load() {
+			reply.DnInfo = &pb.DnInfo{DiskInfo: resErr("disk", "io error")}
+		}
+		return reply
+	})
+	h.fleet.addDn(t, testAddr, stub)
+	h.seedDnConf(testAddr, dnTestConf())
+	return &orphanNode{
+		w:      h.startDn(testAddr, 1),
+		addr:   testAddr,
+		record: healthRecordDn,
+		checks: stub.checkCount,
+		syncupRevs: func() []uint64 {
+			var out []uint64
+			for _, req := range stub.syncups() {
+				out = append(out, req.GetRevision())
+			}
+			return out
+		},
+		setBad: bad.Store,
+		putEpoch: func(epoch uint64) {
+			conf := dnTestConf()
+			conf.ErrEpoch = epoch
+			h.seedDnConf(testAddr, conf)
+		},
+	}
+}
+
+func startOrphanCn(t *testing.T, h *revHarness) *orphanNode {
+	var bad atomic.Bool
+	stub := &stubCnAgent{
+		checkReply: func(req *pb.CheckCnRequest) *pb.CheckCnReply {
+			reply := &pb.CheckCnReply{Revision: req.GetRevision()}
+			if bad.Load() {
+				reply.CnInfo = &pb.CnInfo{
+					TmpfsInfo: resErr("tmpfs", "no space"),
+				}
+			}
+			return reply
+		},
+	}
+	h.fleet.addCn(t, testCnAddr, stub)
+	key := model.CnConfKey(testCid, testCnAddr)
+	h.store.seed(t, key, cnTestConf())
+	return &orphanNode{
+		w:      h.startCn(testCnAddr, 1),
+		addr:   testCnAddr,
+		record: healthRecordCn,
+		checks: func() int {
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			return len(stub.checkReqs)
+		},
+		syncupRevs: func() []uint64 {
+			var out []uint64
+			for _, req := range stub.syncups() {
+				out = append(out, req.GetRevision())
+			}
+			return out
+		},
+		setBad: bad.Store,
+		putEpoch: func(epoch uint64) {
+			conf := cnTestConf()
+			conf.ErrEpoch = epoch
+			h.store.seed(t, key, conf)
+		},
+	}
+}
+
+// TestOrphanedNodeEpochIsClearedByTheOwner is the node twin of
+// TestOrphanedEpochIsClearedByTheOwner (HL3), through the real dn and cn
+// loops: the memo is a cache of the record, so an owner whose DnConf/CnConf
+// another observer rewrote after the owner's own write puts the record back
+// at its first verdict after it next reads it. The monitor used to compare
+// every verdict with the last one it had written, found no transition and
+// wrote nothing, so a DN kept an orphaned epoch — and no capacity key (MD4) —
+// until it genuinely flapped.
+//
+// First a quiet node: its revision does not move, so it never syncs, and the
+// monitor reads the record again only once a minute has passed since it last
+// read or wrote it. An epoch set over the owner's clean verdict is cleared at
+// the first verdict past that minute and not before, by one read and one
+// write, and the next read, a minute on, finds the record agreeing and writes
+// nothing. Then through a syncup's read (RW13), both ways: an epoch set over
+// the owner's clean verdict is cleared, and one cleared under its unhealthy
+// verdict is set again, each by one read and one write.
+func TestOrphanedNodeEpochIsClearedByTheOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		start func(t *testing.T, h *revHarness) *orphanNode
+	}{
+		{"dn", model.DnConfKey(testCid, testAddr), startOrphanDn},
+		{"cn", model.CnConfKey(testCid, testCnAddr), startOrphanCn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRevHarness(t)
+			h.defaultConf()
+			reads := &recordReads{etcdStore: h.store, clk: h.clk, key: tc.key}
+			h.deps.store = reads
+			h.deps.health = &nodeStoreHealthWriter{
+				fakeHealthWriter: h.hw,
+				store:            h.store,
+			}
+			node := tc.start(t, h)
+			epochs := func() []uint64 {
+				var out []uint64
+				for _, write := range h.hw.all() {
+					if write.record == node.record {
+						out = append(out, write.epoch)
+					}
+				}
+				return out
+			}
+			wantReads := func(what string, want int) []time.Time {
+				t.Helper()
+				got := reads.all()
+				if len(got) != want {
+					t.Fatalf("%s: %d reads of the record %v, want %d",
+						what, len(got), got, want)
+				}
+				return got
+			}
+			// round lets one more Check round reach the agent, the clock
+			// moving a second at a time so that a round's reply is read long
+			// before the round's own timeout can fire (RW4 step 3). The agent
+			// sees a Check only once the loop has observed everything before
+			// it — the previous round and any syncup since.
+			round := func() {
+				t.Helper()
+				checks := node.checks()
+				h.advanceUntil("a round", time.Second, func() bool {
+					return node.checks() > checks
+				})
+			}
+			// quietUntil runs rounds until one reaches the agent at or after
+			// the given time, whose verdict then follows at that time: the
+			// clock does not move again until the next round.
+			quietUntil := func(at time.Time) {
+				t.Helper()
+				for h.clk.now().Before(at) {
+					round()
+				}
+			}
+			// resync bumps the revision; the syncup reads the record, and
+			// its reply is the first verdict after that read.
+			resync := func(revision uint64) {
+				t.Helper()
+				node.w.update(desiredState{
+					revision: revision,
+					handle:   node.addr,
+				})
+				waitFor(t, "the syncup", func() bool {
+					revs := node.syncupRevs()
+					return len(revs) > 0 && revs[len(revs)-1] == revision
+				})
+				round()
+			}
+
+			// The owner's first verdict: clean, and written, because a
+			// monitor that has written nothing yet has an empty memo. The
+			// agent reports the revision driven, so there is no syncup, and
+			// nothing has read the record.
+			waitFor(t, "the owner's first verdict", func() bool {
+				return len(epochs()) == 1
+			})
+			written := h.clk.now()
+			wantReads("the first verdict", 0)
+
+			// Another observer stamps the record unhealthy, and the node
+			// stays quiet. The first verdict a minute after the owner's write
+			// reads the record and clears the stamp; none before it reads.
+			node.putEpoch(h.clk.nowUnix())
+			minute := written.Add(nodeRecordMaxAge)
+			quietUntil(minute)
+			waitFor(t, "the quiet node's clear", func() bool {
+				return len(epochs()) == 2
+			})
+			if got := epochs(); got[0] != 0 || got[1] != 0 {
+				t.Fatalf("epoch writes = %v, want the first verdict's "+
+					"clear and the orphaned epoch's", got)
+			}
+			read := wantReads("the quiet node's clear", 1)[0]
+			// The minute's exact edge is TestHealthNodeRecordRefresh's: a
+			// loaded loop can fall clock steps behind its timer here, and a
+			// refresh a round late never lands, the clock being frozen while
+			// the clear is awaited.
+			if read.Before(minute) {
+				t.Fatalf("the record was read at %v, before the minute "+
+					"at %v", read, minute)
+			}
+			// A minute on, the next read finds the record agreeing: no write.
+			quietUntil(read.Add(nodeRecordMaxAge))
+			waitFor(t, "the next read", func() bool {
+				return len(reads.all()) == 2
+			})
+			round()
+			if got := epochs(); len(got) != 2 {
+				t.Fatalf("epoch writes = %v, want 2: a read that found "+
+					"the record agreeing wrote", got)
+			}
+			if again := wantReads("the next read", 2)[1]; again.Sub(read) <
+				nodeRecordMaxAge {
+				t.Fatalf("the record was read at %v and again at %v, "+
+					"less than %v apart", read, again, nodeRecordMaxAge)
+			}
+
+			// Another observer stamps the record again, and a revision bump
+			// makes the owner sync: the syncup's read is the load.
+			node.putEpoch(h.clk.nowUnix())
+			resync(2)
+			if got := epochs(); len(got) != 3 || got[2] != 0 {
+				t.Fatalf("epoch writes = %v, want the syncup's clear of "+
+					"the stamp", got)
+			}
+			wantReads("the syncup", 3)
+			// Once: clean rounds after it write nothing (HL3).
+			round()
+			round()
+			if got := epochs(); len(got) != 3 {
+				t.Fatalf("epoch writes = %v, want 3: a clean round "+
+					"re-wrote the clear", got)
+			}
+
+			// The other way round: the node turns bad, the owner sets the
+			// epoch, and another observer clears it.
+			node.setBad(true)
+			h.advanceUntil("the owner's set", time.Second, func() bool {
+				return len(epochs()) == 4
+			})
+			if got := epochs(); got[3] == 0 {
+				t.Fatalf("epoch writes = %v, want a set last", got)
+			}
+			node.putEpoch(0)
+			// The syncup's reply carries no info, so its verdict is the
+			// latest known one's (HL5): still the ERROR row.
+			resync(3)
+			if got := epochs(); len(got) != 5 || got[4] == 0 {
+				t.Fatalf("epoch writes = %v, want the owner's set again "+
+					"over the other observer's clear", got)
+			}
+			round()
+			if got := epochs(); len(got) != 5 {
+				t.Fatalf("epoch writes = %v, want 5: an unhealthy round "+
+					"re-wrote the set", got)
+			}
+			wantReads("the second syncup", 4)
+		})
 	}
 }
 
