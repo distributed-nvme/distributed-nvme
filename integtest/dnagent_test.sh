@@ -246,7 +246,7 @@ helper_ok() {
 # runs dozens of OS commands, each with its own 3 s soft / 5 s hard budget
 # (§7) — enabling a migration destination alone creates a clone-metadata
 # wrapper, an nvme connection, a dm-clone and reloads the export stack, with
-# the two concurrent migrations converging on the node at once. Syncups get
+# the two concurrent migrations converging on both nodes at once. Syncups get
 # a much larger budget; a caller's own --timeout still wins, since it lands
 # later on the command line.
 ctl() {
@@ -382,8 +382,10 @@ write_range() { # vm src dst countMiB [seekMiB]
 vm_helper_source() {
 	cat <<'HELPER_EOF'
 #!/usr/bin/env bash
-# Shipped by integtest/dnagent_test.sh. Every function is best-effort by
-# design: cleanup must survive a crashed prior run.
+# Shipped by integtest/dnagent_test.sh. The teardown functions are best-effort
+# by design: cleanup must survive a crashed prior run. The absence helpers are
+# the opposite (see residue): an assertion that wants their output empty must
+# never read a tool that failed as a node that is clean.
 WORK=/var/tmp/dnv-integtest
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
@@ -391,17 +393,45 @@ NQN_PREFIX=nqn.2024-01.io.dnv
 # which cleanup removes wholesale, so a pin always outlives what it pins.
 PIN_PREFIX=/var/tmp/dnv-it-pin
 
+# nvme_ctrl_present — does this node hold any nvme controller at all? A glob
+# over the class directory cannot fail the way a tool can, which is why it is
+# what subsys_json checks an empty listing against.
+nvme_ctrl_present() {
+	local c
+	for c in /sys/class/nvme/nvme[0-9]*; do
+		[ -e "$c" ] && return 0
+	done
+	return 1
+}
+
+# subsys_json — the bare `nvme list-subsys -o json`. It prints nothing at all
+# on a node that holds no controller, and '[]' stands in for that shape. But
+# host_subsys_present, ctrl_of and ana_state answer "absent" out of this
+# output, so an empty listing, whatever its exit status, is taken for that
+# shape only when sysfs agrees that there is no controller, and the output of
+# a listing that failed is never used: either way the call fails instead.
 subsys_json() {
-	local json
-	json=$(nvme list-subsys -o json 2>/dev/null)
-	[ -n "${json//[[:space:]]/}" ] || json='[]'
+	local json rc=0
+	json=$(nvme list-subsys -o json 2>/dev/null) || rc=$?
+	if [ -z "${json//[[:space:]]/}" ]; then
+		if nvme_ctrl_present; then
+			echo "subsys_json: nvme list-subsys printed nothing (rc $rc), but this node holds nvme controllers" >&2
+			return 1
+		fi
+		json='[]'
+	elif [ "$rc" -ne 0 ]; then
+		echo "subsys_json: nvme list-subsys failed (rc $rc)" >&2
+		return 1
+	fi
 	printf '%s' "$json"
 }
 
 # path_field <nqn> <traddr> <field> — one field of the path a host holds to
 # one target address, e.g. State (live/connecting) or ANAState.
 path_field() {
-	subsys_json | jq -r --arg nqn "$1" --arg a "$2" --arg f "$3" '
+	local json
+	json=$(subsys_json) || return 1
+	printf '%s' "$json" | jq -r --arg nqn "$1" --arg a "$2" --arg f "$3" '
 	    [ .. | objects | select(has("NQN") and .NQN == $nqn) | .Paths[]?
 	      | select([.Address | split(",")[] | select(startswith("traddr="))]
 	               == ["traddr=" + $a])
@@ -411,10 +441,14 @@ path_field() {
 # ana_state <nqn> <traddr> — the ANA state of the path this host holds to one
 # target address. nvme-cli 2.16's `list-subsys -o json` does not carry it
 # (only `show-topology` does, keyed by namespace), so it is read straight off
-# the per-path sysfs attribute of the controller list-subsys names.
+# the per-path sysfs attribute of the controller list-subsys names. `none`
+# means that there is no such path, or that the path has no readable
+# ana_state, as between a connect and the namespace scan it queued. A
+# listing that did not answer is neither, so the call fails instead (see
+# residue).
 ana_state() {
 	local ctrl attr
-	ctrl=$(path_field "$1" "$2" Name)
+	ctrl=$(path_field "$1" "$2" Name) || return 1
 	[ "$ctrl" != none ] || {
 		echo none
 		return 0
@@ -490,19 +524,37 @@ subsys_present() {
 # "no `nvme connect` issued yet" clause of §12 step 6c is proved on DNdst,
 # where the gated reply carries no migr_dst_info at all and so cannot show it.
 host_subsys_present() {
-	local n
-	n=$(subsys_json | jq -r --arg nqn "$1" '
-	    [ .. | objects | select(has("NQN") and .NQN == $nqn) ] | length')
+	local json n
+	json=$(subsys_json) || return 1
+	n=$(printf '%s' "$json" | jq -r --arg nqn "$1" '
+	    [ .. | objects | select(has("NQN") and .NQN == $nqn) ] | length') ||
+		return 1
 	if [ "${n:-0}" -gt 0 ]; then echo yes; else echo no; fi
 }
 
 # residue <sp16> — everything still on this node for one storage pool; the
 # teardown assertions require empty output.
 # The dm-name pattern covers the side device too, now that it is dm kind d4.
+#
+# It is one of the absence helpers. residue, export_dms, dm_kind_names,
+# fenced_linears, the three agent-log readers below, host_subsys_present and
+# path_field over subsys_json, and ctrl_of and ana_state over path_field all
+# feed assertions on what they print, most of them that it is EMPTY. So each
+# one FAILS — an error on stderr and a non-zero status — when the tool it
+# enumerates with did not answer. Printing nothing instead would read "the
+# tool failed" as "nothing is there" and pass the assertion. Where the
+# driver takes one sample, a failed one fails its stage; wait_ana, which
+# polls ana_state, reads a failed sample as a state not reached yet, so a
+# listing that never answers times the poll out. (disconnect_kind and diag
+# read subsys_json too and go on past a failure: they are cleanup and
+# diagnostics, best-effort by design.)
 residue() {
-	dmsetup ls 2>/dev/null | awk '{print $1}' |
+	local dms subs
+	dms=$(dmsetup ls) || return 1
+	subs=$(ls "$NVMET/subsystems") || return 1
+	printf '%s\n' "$dms" | awk '{print $1}' |
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-$1-" || true
-	ls "$NVMET/subsystems" 2>/dev/null | grep -E ":$1:" || true
+	printf '%s\n' "$subs" | grep -E ":$1:" || true
 }
 
 # export_dms <sp16> <side16> — the per-CN *export stack* one side currently
@@ -520,7 +572,9 @@ residue() {
 # sides of one sp one after another, so a pool-wide pattern would match a
 # sibling side's already-live export and fail a correct run.
 export_dms() { # sp16 side16
-	agent_dm_names |
+	local names
+	names=$(agent_dm_names) || return 1
+	printf '%s\n' "$names" |
 		awk -F- -v sp="$1" -v side="$2" \
 			'($4 == "d0" || $4 == "d1") && $5 == sp && $6 == side'
 }
@@ -530,7 +584,9 @@ export_dms() { # sp16 side16
 # column is four positions (live, inactive, suspended, ro/rw), so a suspended
 # device matches ':.-s' — name, then '.', '-', 's'.
 fenced_linears() {
-	dmsetup info -c --noheadings -o name,attr 2>/dev/null |
+	local rows
+	rows=$(dmsetup info -c --noheadings -o name,attr) || return 1
+	printf '%s\n' "$rows" |
 		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-d1-$1-.*:.-s" || true
 }
 
@@ -538,19 +594,34 @@ fenced_linears() {
 # can be asserted against a real kernel and not only in the unit tests.
 clone_table() { dmsetup table "$1" 2>/dev/null || echo MISSING; }
 
+# The agent-log readers — clone_discards, any_clone_discards and mutations —
+# run each filter as ONE jq evaluation over the whole log (`jq -n` and
+# `inputs`), not once per record. Run once per record, jq reports an error
+# on one record and goes on to the next, and a C jq, which is what a
+# distro's `jq` package installs, then exits with the status of the last
+# record alone. So an error on any record but the last goes unnoticed: the
+# call exits 0, whatever that record should have printed is simply missing,
+# and an absence assertion reads that as "none". As one evaluation, an error
+# on any record, or a line that does not parse, fails the whole call, on a
+# C jq and on gojq alike.
+
 # clone_discards <clone dm name> — the blkdiscard records the agent logged
 # against one dm-clone device (§14 layer 4).
 clone_discards() {
-	jq -r --arg dev "/dev/mapper/$1" '
-	    select(.msg == "os command" and .cmd == "blkdiscard")
+	jq -rn --arg dev "/dev/mapper/$1" '
+	    inputs
+	    | select(.msg == "os command" and .cmd == "blkdiscard")
 	    | select(.args | index($dev)) | (.args | join(" "))' \
-		"$WORK/agent.log" 2>/dev/null || true
+		"$WORK/agent.log" || return 1
 }
 
 # any_clone_discards — every blkdiscard against any dm-clone device (§13).
 any_clone_discards() {
-	jq -r 'select(.msg == "os command" and .cmd == "blkdiscard")
-	       | (.args | join(" "))' "$WORK/agent.log" 2>/dev/null |
+	local lines
+	lines=$(jq -rn 'inputs
+	       | select(.msg == "os command" and .cmd == "blkdiscard")
+	       | (.args | join(" "))' "$WORK/agent.log") || return 1
+	printf '%s\n' "$lines" |
 		grep -E '/dev/mapper/dnv-[0-9a-f]{16}-[0-9a-f]{16}-d3-' || true
 }
 
@@ -558,25 +629,40 @@ any_clone_discards() {
 # Probe operations (lsblk, dmsetup info/table/status, ls, and the [D13]
 # "os read block") are expected and deliberately absent from the list, exactly
 # mirroring the unit tests' readOnlyPrefixes.
+#
+# The command and its verb are bound to variables BEFORE the verb lists: a
+# list piped into index() is the input its argument is evaluated against, so
+# `["blkdiscard"] | index(.cmd)` reads `.cmd` off the list and raises an error
+# on EVERY command record. That is how this helper once printed no command at
+# all: jq reported each error and went on to the next record, and the errors
+# went unseen behind a `2>/dev/null || true`. Dropping that alone would not
+# have failed the call under a C jq, which exits with the last record's
+# status (see the note above clone_discards): only a log that happened to end
+# in a command record would have. Run as one evaluation, the command pass
+# below fails on the first such error.
 mutations() {
 	local log=${1:-$WORK/agent.log}
-	jq -r '
-	    select(.msg == "os write file direct")
-	      | "write file direct " + .path' "$log" 2>/dev/null || true
-	jq -r '
-	    select(.msg == "os command")
+	jq -rn '
+	    inputs
+	    | select(.msg == "os write file direct")
+	      | "write file direct " + .path' "$log" || return 1
+	jq -rn '
+	    inputs
+	    | select(.msg == "os command")
+	    | .cmd as $cmd | .args[0] as $verb
 	    | select(
-	        (["blkdiscard"] | index(.cmd))
-	        or (.cmd == "dmsetup" and (["create","reload","remove","suspend",
-	              "resume","message"] | index(.args[0])))
-	        or (.cmd == "nvme" and (["connect","disconnect"] | index(.args[0])))
-	        or (["mkdir","rmdir","ln"] | index(.cmd))
-	        or (.cmd == "rm")
+	        (["blkdiscard"] | index($cmd))
+	        or ($cmd == "dmsetup" and (["create","reload","remove","suspend",
+	              "resume","message"] | index($verb)))
+	        or ($cmd == "nvme" and (["connect","disconnect"] | index($verb)))
+	        or (["mkdir","rmdir","ln"] | index($cmd))
+	        or ($cmd == "rm")
 	      )
-	    | .cmd + " " + (.args | join(" "))' "$log" 2>/dev/null || true
-	jq -r '
-	    select(.msg == "os write block") | "write block " + .path' \
-		"$log" 2>/dev/null || true
+	    | .cmd + " " + (.args | join(" "))' "$log" || return 1
+	jq -rn '
+	    inputs
+	    | select(.msg == "os write block") | "write block " + .path' \
+		"$log" || return 1
 }
 
 # ctrl_of <nqn> <traddr> — the controller device backing one path, so a dead
@@ -694,12 +780,22 @@ kill_pins() {
 
 # --- teardown ---------------------------------------------------------------
 
+# agent_dm_names and dm_kind_names fail when `dmsetup ls` does, like the
+# absence helpers (see residue): the teardown case asserts on dm_kind_names
+# being empty. cleanup only ever reads them inside a `$( )`, where a failure
+# leaves nothing to remove and cleanup goes on.
 agent_dm_names() {
-	dmsetup ls 2>/dev/null | awk '{print $1}' |
+	local out
+	out=$(dmsetup ls) || return 1
+	printf '%s\n' "$out" | awk '{print $1}' |
 		grep -E '^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-' || true
 }
 
-dm_kind_names() { agent_dm_names | awk -F- -v k="$1" '$4 == k'; }
+dm_kind_names() {
+	local names
+	names=$(agent_dm_names) || return 1
+	printf '%s\n' "$names" | awk -F- -v k="$1" '$4 == k'
+}
 
 # resume_suspended sweeps up suspended dm devices before anything reads them.
 # A migration source holds its per-CN dm-linears suspended for the
@@ -861,9 +957,16 @@ cleanup() {
 # needs. This one reads no kind at all — everything named `dnv*` goes, both
 # spellings and the pre-arena `dnv--clone--vg-*` LVM debris with it.
 #
-# That is also why it is not wired into cleanup: on a shared VM it would
-# destroy a CONCURRENT run's objects, and `nvme disconnect-all` takes every
-# fabrics controller on the node, dnv's or not. Run it once, alone.
+# That is also why it is not wired into cleanup — though not because it would
+# destroy a CONCURRENT run's objects: so does cleanup, which kills every
+# dnv-agent on the node whatever its role, removes every dnv dm device of
+# either role letter and the shared port's ana_groups. What only this adds is
+# reach further: every `dnv*` dm device in either kind spelling; every
+# `nqn.2024-01.io.dnv*` subsystem, not only the :2: and :3: ones cleanup drops
+# but the cn role's :4: exports and the suites' `nqn.2024-01.io.dnv-it:*` ones
+# too; every dnv md array; and, past dnv itself, `nvme disconnect-all`, which
+# takes every fabrics controller on the node, dnv's or not. Run it once,
+# alone.
 #
 # The order is §16's, generalized away from the kind list: arrays first (an
 # array holds its member wrappers open and is the one holder `dmsetup remove
@@ -995,8 +1098,18 @@ lab_wipe() {
 	# success. Everything this deliberately does not touch — $WORK, the loop
 	# devices, the udev rule, the nvmet port — belongs to the ordinary
 	# cleanup that runs after it and is not counted here.
-	local dm_left nvmet_left md_left
-	dm_left=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
+	#
+	# A `dmsetup ls` that did not answer is no evidence of a clean node: the
+	# dm residue is then reported as unknown, which fails the wipe just as a
+	# residue does. nvmet_left keeps its 2>/dev/null: like the removal loop
+	# above, it takes a missing $NVMET for a node that exports nothing.
+	local dms dm_left nvmet_left md_left
+	if dms=$(dmsetup ls); then
+		dm_left=$(printf '%s\n' "$dms" | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
+	else
+		echo "lab_wipe: dmsetup ls did not answer; the dm residue is unknown" >&2
+		dm_left="(unknown: dmsetup ls did not answer)"
+	fi
 	nvmet_left=$(ls "$NVMET/subsystems" 2>/dev/null | grep -F dnv | tr '\n' ' ')
 	md_left=$(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null | tr '\n' ' ')
 	echo wiped
@@ -1064,9 +1177,10 @@ wipe_all() {
 		[ "$rc" -eq 0 ] || bad+=("vm$idx (${IP[$idx]}) rc=$rc")
 	done
 	[ ${#bad[@]} -eq 0 ] ||
-		die "the lab wipe left objects behind on ${bad[*]} — the residue is" \
-			"printed above; re-run --wipe, and if the same names survive that" \
-			"something outside dnv is holding them"
+		die "the lab wipe did not leave ${bad[*]} clean — the residue, or the" \
+			"listing that did not answer, is printed above; re-run --wipe, and" \
+			"if the same names survive that something outside dnv is holding" \
+			"them"
 }
 
 # cleanup_all runs the two VMs concurrently: dismantling one node's nvmet
@@ -1161,7 +1275,7 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agent hardcodes the configfs path and neither mounts nor
 		# modprobes; the harness does both here and nothing else.
@@ -1842,9 +1956,13 @@ migr_connect_dst() { # m
 	# Same NQN, the other DN: the CN kernel merges the two connections into
 	# one multipath namespace with two paths (§3).
 	cn_connect "$vm" "${MDSTDN[$m]}" "$SP" "${MLEG[$m]}" "${MCN[$m]}"
-	local state
-	state=$(cn_ana_state "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "${MDSTDN[$m]}")
-	assert_eq "$state" inaccessible "migr $m dst path before cutover"
+	# Polled, like the other ANA checks that follow a connect: `nvme connect`
+	# returns before the namespace scan it only queued has created the path's
+	# device, and until then the path's ana_state reads `none`. Nothing moves
+	# the destination's ANA group in this window, so a wrong state stays wrong
+	# and still fails the poll.
+	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "${MDSTDN[$m]}" \
+		inaccessible 20
 }
 
 # migr_gate_src is the dst_provisioned = false half of the §11.2
@@ -1950,6 +2068,27 @@ migr_read_through() { # m lastMiB
 	want=$(sha_range "$vm" "$WORK/pattern-$m.bin" 1 "$skip")
 	got=$(sha_range "$vm" "$dev" 1 "$skip")
 	assert_eq "$got" "$want" "migr $m read-through of MiB $skip"
+}
+
+# migr_first_hydr is §14 layer 3: case C's skip jump, asserted on the first
+# hydration sample there is. The step 11 converge applies the pushed chunks,
+# enables hydration and only then reads the clone's `dmsetup status` into its
+# own reply, which migr_declare_dst filed under $REPLY_DIR — so the sample is
+# read out of that file, not polled for. A poll starts after the step 12 ANA
+# wait and the step 13 read-through, when a loop device has often hydrated
+# all 128 regions already, and a floor checked against 128/128 proves nothing.
+migr_first_hydr() { # m
+	local m=$1 out raw pair
+	out=$(cat "$REPLY_DIR/dst-$m.json")
+	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
+	# The same `dmsetup status` fields as migr_read_through, printed only
+	# when both counts are numbers.
+	pair=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { if (split($(i + 4), a, "/") == 2 && a[1] ~ /^[0-9]+$/ && a[2] ~ /^[0-9]+$/) print a[1], a[2]; exit }}')
+	[ -n "$pair" ] ||
+		die "migr $m: the step 11 reply carries no hydration count: '$raw'"
+	log "migr $m: first hydration sample ${pair% *}/${pair#* } (the step 11 reply)"
+	[ "${pair% *}" -ge "$MIN_FIRST" ] ||
+		die "migr $m: first hydration sample is ${pair% *}/${pair#* }, want >= $MIN_FIRST hydrated"
 }
 
 migr_finish_dst() { # m revision
@@ -2136,6 +2275,10 @@ run_migration_cases() {
 	migr_declare_dst 2 "$rev2" readwrite &
 	pids+=($!)
 	join_jobs "${pids[@]}"
+	# §14 layer 3 (case C): the skip jump, read off each step 11 reply.
+	if [ "$MIN_FIRST" -gt 0 ]; then
+		for m in 1 2; do migr_first_hydr "$m"; done
+	fi
 
 	stage stage3ana "the destination paths go optimized"
 	pids=()
@@ -2158,12 +2301,10 @@ run_migration_cases() {
 	stage stage3hydr "wait for full hydration"
 	pids=()
 	(ctl "${MDSTDN[1]}" wait-hydrated --sp "$SP" --leg "${MLEG[1]}" \
-		--side "${MDSTSIDE[1]}" --interval 0.5 --timeout 120 \
-		"${MIN_FIRST_ARGS[@]}") &
+		--side "${MDSTSIDE[1]}" --interval 0.5 --timeout 120) &
 	pids+=($!)
 	(ctl "${MDSTDN[2]}" wait-hydrated --sp "$SP" --leg "${MLEG[2]}" \
-		--side "${MDSTSIDE[2]}" --interval 0.5 --timeout 120 \
-		"${MIN_FIRST_ARGS[@]}") &
+		--side "${MDSTSIDE[2]}" --interval 0.5 --timeout 120) &
 	pids+=($!)
 	join_jobs "${pids[@]}"
 
@@ -2233,7 +2374,7 @@ case_migr_full() {
 	MID=("" 0x31 0x32)
 	BM_CNT=0
 	READ_THROUGH_MIB=127
-	MIN_FIRST_ARGS=()
+	MIN_FIRST=0
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		# No chunks at all (§13): the equal-revision re-send of the gated
@@ -2283,7 +2424,7 @@ case_migr_bitmap() {
 	MID=("" 0x41 0x42)
 	BM_CNT=2
 	READ_THROUGH_MIB=63
-	MIN_FIRST_ARGS=(--min-first 64)
+	MIN_FIRST=64
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		local revs=("" "$1" "$2") m out

@@ -646,8 +646,11 @@ func cmdCheckSide(args []string) {
 
 // cmdWaitHydrated polls GetSideInfo until the destination dm-clone reports
 // every region hydrated, parsing the raw `dmsetup status` line the agent puts
-// in migr_dst_info.dm_clone_info.details (§9.5). --min-first asserts the
-// bitmap jump: case C's first sample must already show >= 64/128 (§14).
+// in migr_dst_info.dm_clone_info.details (§9.5). --min-first asserts a floor
+// on the first sample this poll takes. Case C's bitmap jump (§14 layer 3) is
+// not checked with it: the suite polls only after the ANA wait and the
+// read-through probe, when hydration may be complete, so the script reads the
+// jump off the step 11 reply instead.
 func cmdWaitHydrated(args []string) {
 	var g globals
 	fs := flag.NewFlagSet("wait-hydrated", flag.ExitOnError)

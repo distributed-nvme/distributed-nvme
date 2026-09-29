@@ -69,8 +69,11 @@ bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \
   case, takes every dnv dm device, nvmet subsystem and md array on both VMs —
   including residue whose dm names carry the pre-role-letter kind spelling,
   which no cleanup verb here can see — and then runs the ordinary
-  start-of-run cleanup. It is destructive to anything else using those VMs,
-  which is why it is a flag and not a step.
+  start-of-run cleanup. That reach, past what the ordinary cleanup takes and
+  past dnv itself (`nvme disconnect-all` takes every fabrics controller on
+  the node, dnv's or not), is why it is a flag and not a step. Destroying a
+  concurrent dnv run's objects is not the reason: the ordinary cleanup does
+  that too (§16).
 - Fully automated: no prompts, exit 0 on success, non-zero on first failure.
 - Cleanup policy: best-effort cleanup at **start, always** (a crashed prior
   run must not break this one); cleanup at **end only on success** — on
@@ -158,7 +161,8 @@ without the `mv` the re-opened file would still carry every pre-restart
 
 Notes: there is no extent-size flag (extent size arrives in
 `SyncupDnRequest.extent_size`); logging is JSON on stderr only; shutdown is
-SIGTERM (graceful). Kill in cleanup with `pkill -x dnv-agent`.
+SIGTERM (graceful). Cleanup kills it with `pkill -x dnv-agent` and, for one
+still running 5 s later, `pkill -9 -x dnv-agent` (§16 step 1).
 
 ## 4. Assumptions and preflight checks
 
@@ -192,8 +196,11 @@ is only meaningful once a crashed prior run's agents are gone:
 - per VM, via `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new`:
   - `sudo -n true` succeeds.
   - binaries: `dmsetup`, `nvme`, `losetup`, `blkdiscard`, `lsblk`, `dd`,
-    `fallocate`, `sha256sum`, `cmp`, `pkill`, `jq`, `timeout`. No `lvm`: the
-    dn agent runs no LVM command ([D13]).
+    `fallocate`, `sha256sum`, `cmp`, `pkill`, `jq`, `timeout`, `setsid`,
+    `wipefs`, `ss`. `setsid` launches the agents (§3) and the `teardown`
+    case's device pins, `wipefs` unformats the loop device in §16 step 5,
+    and `ss` is the port check below, which without it would count no
+    listener and pass. No `lvm`: the dn agent runs no LVM command ([D13]).
   - `modprobe` (errors ignored, and **not** verified per module): `nvmet`,
     `nvmet_tcp`, `nvme_tcp`, `nvme_fabrics`, `dm_clone`, `loop`; then verify
     `/sys/kernel/config/nvmet` exists (mount configfs if absent) — the agent
@@ -383,7 +390,7 @@ Subcommands:
 | `push-migr-bm` | `--sp --leg --side`, `--migr`, `--bm-idx`, `--bitmap-hex` | a push carries no revision and is never gated on one (DN15): the agent takes it whenever it knows the migration. A chunk is addressed by `bm_idx` alone and never advances the stored revision, so one that crosses a converge is applied rather than discarded |
 | `get-dn-info` / `get-side-info` | (`--sp --leg --side`) | `get-side-info` prints the reply as protojson on **stdout** (unchanged — case D deep-equals it) plus a `dnagentctl: zeroed <k>/<n>` progress line on **stderr**, from `side_info.{zeroed_ext_cnt,total_ext_cnt}` |
 | `check-dn` / `check-side` | `--revision`, `--show-info` (+ side ptr) | opens the bidi stream, one request/reply round, closes |
-| `wait-hydrated` | side ptr, `--interval 0.5`, `--timeout 120`, `--min-first <n>` | polls `GetSideInfo`, parses `migr_dst_info.dm_clone_info.details` with `agent.ParseCloneStatus`; `--min-first` asserts the first sample's hydrated ≥ n; logs each sample to stderr and exits when hydrated == total, printing `{"first_hydrated":k,"first_total":n,"hydrated":n,"samples":s,"total":n}` on stdout — the `first_*` pair is the §14 layer-3 skip jump, kept in the exit line so a run log carries it even when nobody watched stderr |
+| `wait-hydrated` | side ptr, `--interval 0.5`, `--timeout 120`, `--min-first <n>` | polls `GetSideInfo`, parses `migr_dst_info.dm_clone_info.details` with `agent.ParseCloneStatus`; `--min-first` asserts the first sample's hydrated ≥ n; logs each sample to stderr and exits when hydrated == total, printing `{"first_hydrated":k,"first_total":n,"hydrated":n,"samples":s,"total":n}` on stdout. No case passes `--min-first`, and the `first_*` pair is only this poll's own first sample: the §14 layer-3 skip jump is read off the step 11 reply, because this poll starts after steps 12-13, when hydration can already be complete |
 | `wait-zeroed` | side ptr, `--interval 0.5`, `--timeout 120` | polls `GetSideInfo`, reads `side_info.zeroed_ext_cnt`/`total_ext_cnt`, logs each sample to stderr; exits when `zeroed == total > 0` (the `> 0` guard matters: before the allocation record exists `total_ext_cnt` is 0 and `zeroed >= total` would trivially succeed), printing `{"samples":k,"total":n,"zeroed":n}` on stdout (`encoding/json` sorts the keys); fails fast on `side_dev_info.status == RES_STATUS_ERROR`. Binds its globals with `withTimeout = false` and spends `--timeout` as its own polling budget, exactly like `wait-hydrated` |
 | `ns-id` | `--sp --leg` | prints uuid/nguid/serial via `common.DnNsIdentity` for CN device lookup, plus `by_id` = `/dev/disk/by-id/nvme-uuid.<uuid>` ready to use — the script reads that field and never assembles the path itself, so the by-id convention lives in one place |
 | `host-id` | `--hostnqn <nqn>` | prints `common.NvmeHostId(nqn)`; local, no gRPC. Every emulated `nvme connect` passes it as `--hostid` (§3) |
@@ -453,6 +460,24 @@ Subcommands:
   that means "must be ERROR" compares against `RES_STATUS_ERROR` explicitly,
   and the genuinely two-valued phase-(a) checks use
   `assert_provisioning_or_ok` — never `assert_not_ok`.
+- **A tool that did not answer is not a clean node.** The helpers behind the
+  absence and count assertions — `residue`, `export_dms`, `dm_kind_names`,
+  `fenced_linears`, the agent-log readers `mutations`, `clone_discards` and
+  `any_clone_discards`, and `host_subsys_present` and `ctrl_of` over
+  `nvme list-subsys` — fail the stage, instead of printing an empty or
+  absent answer (nothing, `no`, `none`), when the tool they read with did
+  not answer. `ana_state`, which finds a path's controller through the same
+  listing, fails the same way rather than print `none`, though no assertion
+  waits for `none`: where a check takes a single sample, that fails its
+  stage, and an ANA poll reads a failed sample as a state not reached yet,
+  so a listing that never answers times the poll out. (`subsys_present`
+  reads no tool: it is a bare `[ -d ]` stat under the nvmet configfs
+  directory the preflight verified. `allowed_host_cnt` still counts a
+  listing that failed as 0 hosts, which its one check, exactly one host per
+  subsystem, fails anyway.) `nvme list-subsys` prints nothing at all on a
+  node that holds no controller, so an empty listing, whatever its exit
+  status, is taken as that answer only when `/sys/class/nvme` holds no
+  controller either.
 - **Converge check**: after a case reaches steady state — cases S and A run
   both rounds, the B/C teardown runs `check-dn` only, case D proves its
   steady state by the §15 snapshot diff instead of check rounds (§18), and
@@ -535,10 +560,13 @@ Layout (§5): 4 legs; sides 0x11,0x12 on DN1 (primary CN 0x21, standby CN
 Both cases run **two concurrent migrations in opposite directions**
 (DN1→DN2 and DN2→DN1, §5), advanced stage-by-stage in lockstep; within each
 converge/poll stage the two per-migration `dnagentctl` calls run as
-background jobs joined with `wait`, so the same agent handles overlapping
-side converges (locks exercised) while each DN simultaneously plays src for
-one leg and dst for the other. (The bitmap-push stage is the exception:
-its per-chunk `push-migr-bm` calls run sequentially.)
+background jobs joined with `wait`, so both DNs converge at once while each
+plays src for one leg and dst for the other. (The bitmap-push stage is the
+exception: its per-chunk `push-migr-bm` calls run sequentially.) A stage runs
+the same step for both migrations, and the two have opposite roles on every
+DN, so its two calls always go to different agents: no agent ever serves two
+driver RPCs at once, and the suite does not exercise lock contention between
+two converges on one agent.
 
 Per migration (leg L: src side S1 slot 0 on DNsrc, dst side S2 slot 1 on
 DNdst, migr M, primary CN C hosted on the *other* VM from DNsrc):
@@ -592,8 +620,11 @@ the clone or connecting, so chunks can be pushed first)*
      `sp_level no_migration` — assert absence, not merely "not OK", since
      PROVISIONING would also pass a bare not-OK check, §9), no
      `nvme connect` issued yet.
-7. CN VM: connect the dst path (same NQN, `<ip_dst>`). Path appears with ns
-   `inaccessible` (no by-id node for it yet — expected); the multipath
+7. CN VM: connect the dst path (same NQN, `<ip_dst>`), then poll its sysfs
+   `ana_state` → `inaccessible` (≤20 s): `nvme connect` returns before the
+   namespace scan it queued has created the path's device, and until then
+   the path reads `none`, so a single sample here is a race. The path shows
+   ns `inaccessible` (no by-id node for it yet — expected); the multipath
    device still serves via src.
 8. **Case C only**: push bitmap chunks (§14), then re-send step 6c verbatim
    (equal revision — idempotent, `--provisioned=true` included per §9)
@@ -669,12 +700,16 @@ in parallel)**
     dm-clone-features assertion this suite can make against a real kernel:
     hydration *progress* is observed only through
     `migr_dst_info.dm_clone_info.details`, the raw `dmsetup status` line the
-    agent produced, parsed with `agent.ParseCloneStatus` (§8
-    `wait-hydrated`, steps 13-14, §14 layer 3), and a missing
+    agent produced, parsed with `agent.ParseCloneStatus` by §8
+    `wait-hydrated` (step 14) and by the script's own `awk` at step 13 and
+    for §14 layer 3, and a missing
     `no_discard_passdown` is invisible there — with the pair mandatory the dn migration
     dm-clone carries both features, exactly like the cn clone dm-clone, so
     that a §11.4 skip `blkdiscard` stays metadata-only instead of reaching
-    the destination disk.
+    the destination disk. (C:) This reply's own `dm_clone_info.details` is
+    the first hydration sample there is — the converge reads the clone's
+    status right after enabling hydration — and case C asserts its skip jump
+    on it (§14 layer 3).
 12. CN VM: poll until dst path `optimized` (≤30 s; typically immediate).
 13. **Mid-hydration read-through probe**: read the *last* must-copy MiB via
     the CN device (`dd bs=1M skip=<K> count=1`; B: K=127, C: K=63) and
@@ -687,7 +722,9 @@ in parallel)**
     log a warning `window missed` but do not fail — loop-device hydration of
     ≤128 MiB can outrun the script.
 14. `wait-hydrated` DNdst S2 until `hydrated == total` (=128), timeout 120 s.
-    Case C passes `--min-first 64` (§14).
+    No floor is asserted on this poll's first sample: by now hydration can
+    already be complete, so case C asserts its skip jump on the step 11
+    reply instead (§14 layer 3).
 
 **Stage 4 — finish (production order: dst first, then src)**
 15. `syncup-side` DNdst S2 (REVdst++): side_conf only (still slot 1),
@@ -782,11 +819,17 @@ The four assertion layers:
    implements both through `fallocate`.)
 2. **API**: step 8 `bm_info.res_id == M`, `bm_idx_list == [0,1]`; both
    `push-migr-bm` replies code 0.
-3. **Hydration counter**: `wait-hydrated --min-first 64` — the first status
-   sample after enable must already show ≥ 64/128 hydrated (the skip jump;
-   background copying has barely started at batch size 1). If this proves
-   racy in practice, keep ≥ 64 but drop the implicit < 128 expectation —
-   the hard floor is what matters.
+3. **Hydration counter**: the first status sample after enable must already
+   show ≥ 64/128 hydrated (the skip jump; background copying has barely
+   started at batch size 1). That sample is the step 11 reply's own
+   `migr_dst_info.dm_clone_info.details`: the converge applies the chunks,
+   enables hydration and only then reads the clone's `dmsetup status`, so no
+   sample can come earlier, and the script parses it out of the reply
+   `migr_declare_dst` filed. A `wait-hydrated` sample would not do: its first
+   one comes after the step 12 ANA wait and the step 13 read-through, by
+   when a loop device has often hydrated all 128 regions, and ≥ 64 against
+   128/128 proves nothing. The floor is the whole assertion — a sample
+   already at 128/128 passes too.
 4. **Log arithmetic (meta_blocks proof)**: on DNdst,
    `grep '"blkdiscard"' agent.log` must contain exactly one record for the
    dm-clone device `dnv-*-d3-{sp}-{migr}` with `--offset 67108864
@@ -873,11 +916,14 @@ by `sp_level no_migration`.
 Best-effort (`|| true` throughout), per VM, in this order — the order is
 load-bearing:
 
-1. `pkill -x dnv-agent` (also kills the 5 s migration-connect retry loops
-   and any §9.4 side-zeroing goroutine; the agent's `Serve`
-   waits for those after `GracefulStop`, so no orphan `blkdiscard` child
-   outlives it — but a run killed mid-batch can still leave the side device
-   briefly busy, which the step 4 retry sweep already absorbs).
+1. `pkill -x dnv-agent`, wait up to 5 s for it to go, then
+   `pkill -9 -x dnv-agent` for one that did not (the SIGTERM also stops the
+   5 s migration-connect retry loops and any §9.4 side-zeroing goroutine;
+   the agent's `Serve` waits for those after `GracefulStop`, so no orphan
+   `blkdiscard` child outlives a graceful stop — but after the `-9` an
+   in-flight one does, since the agent sets no parent-death signal on its
+   children, and that, or a run killed mid-batch, can still leave the side
+   device briefly busy, which the step 4 retry sweep already absorbs).
 2. Host-side `nvme disconnect` of every `nqn.2024-01.io.dnv:2:*` connection
    (CN roles) — nvmet controllers must die before nvmet teardown.
 3. nvmet configfs teardown of the side exports, inside-out and scoped to the
@@ -923,6 +969,14 @@ load-bearing:
    `$WORK` and stays on the VMs — it is the script running this cleanup, and
    every run re-ships it anyway.
 
+Right after step 1 the script kills every device pin on the node
+(`kill_pins`): the holder processes the `teardown` case's `pinned_side`
+stage leaves behind when it fails between pinning and unpinning, found by
+their pid files `/var/tmp/dnv-it-pin.<dm name>.pid`, each killed with
+`kill -9` and waited for, up to 5 s, until it has exited. An fd on a dm device
+outlives the agent, and nothing below can remove a device while it is open —
+`dmsetup remove --force` only swaps in an error table.
+
 The script additionally resumes every suspended `dnv-*` dm device before
 step 2 and again before the loop devices are unformatted (`resume_suspended`).
 This is load-bearing, not defensive: a migration source holds its per-CN
@@ -943,9 +997,12 @@ lab VM carries the old single-digit spelling, so neither can see it: it stays
 there for ever, holding the loop
 device under it open against step 6's `losetup -d`, and `residue` never
 reports it either. (An NQN's kind kept its bare digit and an md array name
-carries no kind field at all, so neither spelling changed and neither can
-leave residue the verbs above cannot see, which is why the blind spot is
-dm-only.) `lab_wipe` reads no kind at all.
+carries no kind field at all, so neither changed its spelling, which is why
+the spelling blind spot is dm-only. The verbs above miss more than an old
+spelling, though: they take no `nqn.2024-01.io.dnv*` subsystem but the `:2:`
+and `:3:` ones, and no dnv md array at all, since this cleanup has no md
+step. The wipe takes both; the end of this section says what else it
+reaches.) `lab_wipe` reads no kind at all.
 `--wipe` runs it on both VMs concurrently (for `cleanup_all`'s reason: a `:3:`
 export on one VM backs the other's migration connection), then runs the
 ordinary cleanup above, and runs no case. Its order is this section's,
@@ -998,25 +1055,33 @@ device left breaks out, so a clean node still costs one pass and not three.
 **The residue is the exit status, not just the report.** After the last pass
 `lab_wipe` prints what is left — dm names, nvmet subsystems, and every md
 array on the node whether ours or not — and **fails** if any dm device or
-nvmet subsystem survived; `--wipe` then dies naming the VM. It printed the
-report alone once, and since the driver runs both VMs concurrently and
-discarded their status, a wipe that left one VM full of debris showed the
-other VM's clean report and the run said PASS — against the same rule the
-sweep this suite tests lives by: what is left is reported, and reporting it is
-not success. The md line is reported and never counted, since a guest's own
-array is not ours to fail on.
+nvmet subsystem survived, or if `dmsetup ls` did not answer (the report then
+gives the dm residue as unknown, never as empty); `--wipe` then dies naming
+the VM. It printed the report alone once, and since the driver runs both VMs
+concurrently and discarded their status, a wipe that left one VM full of
+debris showed the other VM's clean report and the run said PASS — against the
+same rule the sweep this suite tests lives by: what is left is reported, and
+reporting it is not success. The md line is reported and never counted, since
+a guest's own array is not ours to fail on.
 
 It deliberately does not touch `$WORK`, the loop devices, the port-level
 nvmet objects (`hosts/*`, `ana_groups/{2,3}`, `ports/1`) or the disk-format
 header: those belong to the run, and the ordinary cleanup that `--wipe` runs
 afterwards — the tail of step 4, then steps 5 and 6 — is what takes them.
 
-Two warnings, and together they are why it is a flag and not a step. On a
-shared VM it destroys a **concurrent** run's objects — every `dnv*` dm device
-and every `nqn.2024-01.io.dnv*` subsystem on the node, whoever created them.
-And `nvme disconnect-all` takes every fabrics controller on the node, dnv's or
-not, including connections no dnv suite made. Run it once, alone, before the
-first run of the role-lettered binaries on a VM.
+Why it is a flag and not a step. Destroying a **concurrent** run's objects is
+not the reason: the ordinary cleanup above does that already — it kills every
+`dnv-agent` on the node whatever its role, removes every dnv dm device of
+either role letter and the shared port's `ana_groups` — so no two dnv runs
+may share a VM, `--wipe` or not. What only the wipe does is reach further:
+every `dnv*` dm device in either kind spelling (the LVM-era
+`dnv--clone--vg-*` debris included); every `nqn.2024-01.io.dnv*` subsystem,
+not only the `:2:` and `:3:` ones steps 3 and 4 drop but the cn role's `:4:`
+exports and the suites' own `nqn.2024-01.io.dnv-it:*` ones too; every dnv md
+array; and — past dnv itself — `nvme disconnect-all`, which takes every
+fabrics controller on the node, dnv's or not, including connections no dnv
+suite made. Run it once, alone, before the first run of the role-lettered
+binaries on a VM.
 
 ## 17. Failure diagnostics
 
@@ -1034,7 +1099,7 @@ JSON logs on either VM.
 |---|---|---|
 | `GetDnSize` | setup wait-up | exact data-area size 1879048192; liveness |
 | `SyncupDn` | every case + setup | reply code, dn_info statuses, declarative side add/remove, stale probe (D), `ReplyCodeLeftover` naming the pinned device and the same revision re-sent to completion (E) |
-| `SyncupSide` | S, A, B, C, E, D | side_info statuses, per-CN maps, migr confs, gated→enabled transition, equal-rev idempotency; the two-phase `provisioned` gate (§9) and the `dst_provisioned = false` equivalence probe (§12 step 8b) |
+| `SyncupSide` | S, A, B, C, E, D | side_info statuses, per-CN maps, migr confs, gated→enabled transition, equal-rev idempotency; the two-phase `provisioned` gate (§9) and the `dst_provisioned = false` equivalence probe (§12 step 8b); case C's first hydration sample, parsed off the step 11 reply's `migr_dst_info.dm_clone_info.details` (§14 layer 3) |
 | `PushMigrBitmap` | C, D | reply code 0; effects via §14 layers |
 | `GetDnInfo` | S teardown, E, D | statuses, snapshot equality; the leftover verdict recomputed on a read-only path (E) |
 | `GetSideInfo` | every case (the §9 two-phase helper samples it and `wait-zeroed` polls it on each first side converge), B/C hydration polling, D | dm_clone status parsing, snapshot equality; `zeroed_ext_cnt`/`total_ext_cnt` (polled by `wait-zeroed`) |
@@ -1097,9 +1162,10 @@ another document or the harness cites can shift.
   `dmsetup status` reports, and the agent never reloads the clone on feature
   drift. It is also the only on-hardware coverage the feature rule can get here —
   `SideInfo.migr_dst_info.dm_clone_info.details` (the raw `dmsetup status`
-  line, parsed with `agent.ParseCloneStatus`; §8 `wait-hydrated`, §12
-  steps 13-14, §14 layer 3) shows hydration progress and would not move at
-  all if `no_discard_passdown` were dropped. The cn suite carries the twin
+  line, parsed with `agent.ParseCloneStatus` by §8 `wait-hydrated` at §12
+  step 14 and by the script's own `awk` at step 13 and for §14 layer 3)
+  shows hydration progress and would not move at all if
+  `no_discard_passdown` were dropped. The cn suite carries the twin
   assertion (`cnagent_integtest.md` §13 stage 4, §20 U1-T4).
 - **U4-T6 ([D15])** — the §9.4 trim protocol
   is replaced by whole-side zeroing behind a `provisioned` gate. §4's
