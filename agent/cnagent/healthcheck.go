@@ -171,9 +171,9 @@ func (s *CnAgentServer) startLegProber(
 // primary→standby flip, a leg leaving the desired state, a level at or above
 // SP_LEVEL_NO_SIDE, or a cntlr being dropped. A goroutine wedged in D state on
 // a pathless leg is released by the sweep's own disconnect (deleting the
-// controller errors its queued IO) — which the sweep's L10 runs before the
-// wrapper removal for exactly that reason — and is accepted as unreclaimable
-// until then (CN11).
+// controller errors its queued IO) — which the sweep's L10 sets going before
+// the wrapper removal, off the pass, so the wrapper it holds normally goes on
+// a later pass — and is accepted as unreclaimable until then (CN11).
 func (s *CnAgentServer) stopLegProbers(
 	st *cntlrState,
 	wanted map[uint64]struct{},

@@ -734,8 +734,11 @@ is `sprintf("%016x", slice_id)` per §9.3.)
    auto-grow parses.
 6. Teardown: host disconnect (`-n`, both paths of the NQN are dying
    anyway); `syncup-cn` CN1 (CNREV1++) with an **empty cntlr list** →
-   declarative cntlr teardown (CN7/CN21); `syncup-dn` DN1 (DNREV1++) empty
-   side list. Assert on VM1, in this order: no `dnv-*-0000000000000011-*` dm
+   declarative cntlr teardown (CN7/CN21), re-sent at that revision until it
+   replies code 0 — the pass that sets the legs' disconnects going replies
+   `ReplyCodeLeftover` (4) naming them, since they run off its locks;
+   `syncup-dn` DN1 (DNREV1++) empty side list. Assert on VM1, in this
+   order: no `dnv-*-0000000000000011-*` dm
    devices (that one pattern covers the kind-`cb` clone-metadata wrappers too
    — the allocator's units are free again exactly when the wrappers are
    gone) and no `dnv-it` subsystem in configfs — that configfs half is what
@@ -1169,7 +1172,10 @@ xfer removed, ns `suspended: true` (= `DeleteTransfer(force=false)`
 semantics — the source stays retired). Assert on VM1: "retired" is now a
 **parked** device, not a suspended one — the same two asserts and the same
 bounded open as stages 1 and 2. `syncup-cntlr` CN2 (CNREV2++):
-clone removed, ns `suspended: false` (= `DeleteClone`). Assert on VM2:
+clone removed, ns `suspended: false` (= `DeleteClone`). The reply is
+`ReplyCodeLeftover` naming the `:4:` connection, whose disconnect runs off
+the sweep's locks (`cnagent.md` CN21), and the same request re-sent replies
+code 0 once that disconnect has returned. Assert on VM2:
 ns-dev back on the raid0; the dm-clone and its kind-`cb` metadata wrapper are
 both gone (`dmsetup ls | grep -- '-cb-'` empty for this CN, which is also the
 allocator's proof that the units are free again — the tables are the
@@ -1385,9 +1391,10 @@ the other side of the lock.
    behind (CN30). The residue while pinned is asserted to be **exactly** that
    one wrapper and nothing else: the leg wrappers are the last layer of the
    descent, so everything above is already gone, and the wrapper's own leg
-   was disconnected in that same layer — the connection and the wrapper are
-   two objects and only one is stuck. After the unpin the retry is the same
-   request at the same revision, since the agent kept no note of the failure;
+   had its disconnect set going in that same layer — the connection and the
+   wrapper are two objects and only one is stuck. After the unpin the retry
+   is the same request at the same revision, since the agent kept no note of
+   the failure;
    that is what the worker sends every round while the code is non-zero. S5
    runs last because it is the only stage that pins a dm device open, and a
    pin left behind by an earlier stage's failure would otherwise sit under

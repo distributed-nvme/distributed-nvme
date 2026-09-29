@@ -895,17 +895,27 @@ func TestCloneTeardownOrder(t *testing.T) {
 	node.Reset()
 	// DeleteClone: the clone leaves clone_list and the namespace's stored
 	// suspended flag goes back to false.
-	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
-		revision: 3, primary: true})); err != nil {
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true}))
+	if err != nil {
 		t.Fatalf("delete clone: %v", err)
 	}
+	// The source's disconnect runs off the pass's locks (CN21), so it is the
+	// pass's one leftover, and it is set going only once the clone and its
+	// metadata wrapper are gone.
+	cnSweepOnlyDisconnects(t, reply.GetAgentReply(), "delete clone")
+	cnSweepAssertDetails(t, reply.GetAgentReply(), testSrcNqn, "delete clone")
+	awaitDisconnects(t, srv)
 	assertOrder(t, node,
 		"cmd dmsetup reload "+nsDevName(srv, testNs),
 		"cmd dmsetup remove "+cloneName(srv, testClone),
 		"cmd dmsetup remove "+cloneMetaName(srv, testClone),
-		"cmd nvme disconnect --nqn "+testSrcNqn,
 		"cmd rm -f "+srv.nf.LocalCloneBmPath(
 			testCluster, testCn, testSp, testClone, 0, 0),
+	)
+	assertOrder(t, node,
+		"cmd dmsetup remove "+cloneMetaName(srv, testClone),
+		"cmd nvme disconnect --nqn "+testSrcNqn,
 	)
 	// The ns-dev is back on the raid0, all data local.
 	table := node.dms[nsDevName(srv, testNs)].table
@@ -974,6 +984,9 @@ func TestCloneMetaFirstFitAndRecycling(t *testing.T) {
 		clones: []*pb.Clone{second}})); err != nil {
 		t.Fatalf("retire the first clone: %v", err)
 	}
+	// Its source's disconnect runs off the pass (CN21) and changes the node
+	// under the reads below.
+	awaitDisconnects(t, srv)
 	if _, ok := node.dms[firstDm]; ok {
 		t.Fatalf("the retired clone kept its metadata wrapper")
 	}

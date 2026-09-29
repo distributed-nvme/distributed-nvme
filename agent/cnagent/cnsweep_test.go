@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -167,6 +168,91 @@ func subsysDirPresent(node *fakeNode, nqn string) bool {
 	return node.dirs[agent.NvmetRoot+"/subsystems/"+nqn]
 }
 
+// awaitDisconnects waits until every `nvme disconnect` a pass has set going
+// in the background has returned: CN10's disconnect registry is empty. An
+// entry lives exactly as long as its goroutine, so one that outlives its
+// command — a failed disconnect remembered — fails here by name.
+func awaitDisconnects(t *testing.T, srv *CnAgentServer) {
+	t.Helper()
+	inFlight := func() []string {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		var nqns []string
+		for nqn := range srv.disconnecting {
+			nqns = append(nqns, nqn)
+		}
+		return nqns
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(inFlight()) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("disconnects never left the registry: %v", inFlight())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// cnSweepOnlyDisconnects is the reply of a pass that disconnects anything:
+// ReplyCodeLeftover naming nvme host connections and nothing else — no other
+// leftover, no enumeration failure. The disconnects run off the pass's locks
+// (CN21), so every connection the pass sets disconnecting is still there when
+// it replies, and only a later pass's own probe finds it gone.
+func cnSweepOnlyDisconnects(t *testing.T, reply *pb.AgentReply, label string) {
+	t.Helper()
+	cnSweepAssertCode(t, reply, common.ReplyCodeLeftover, label)
+	_, names, ok := strings.Cut(reply.GetDetails(), "): ")
+	if !ok || strings.Contains(names, "; ") ||
+		strings.Contains(names, " more]") {
+		t.Fatalf("%s: details %q are not a plain leftover list",
+			label, reply.GetDetails())
+	}
+	for _, name := range strings.Split(names, ", ") {
+		if !strings.HasPrefix(name, agent.LeftoverKindNvme+":") {
+			t.Fatalf("%s: %q is left over besides the disconnects (%q)",
+				label, name, reply.GetDetails())
+		}
+	}
+}
+
+// cnSweepSyncupSettled is cnSweepSyncup for a teardown that disconnects,
+// seen the way the worker sees it: the pass names the connections it set
+// disconnecting and nothing else, and the re-sync at the same revision, once
+// they have returned, is the reply that says what the sweep achieved.
+func cnSweepSyncupSettled(
+	t *testing.T,
+	srv *CnAgentServer,
+	revision uint64,
+	withCntlr bool,
+) *pb.SyncupCnReply {
+	t.Helper()
+	cnSweepOnlyDisconnects(t,
+		cnSweepSyncup(t, srv, revision, withCntlr).GetAgentReply(),
+		"the pass that disconnects")
+	awaitDisconnects(t, srv)
+	return cnSweepSyncup(t, srv, revision, withCntlr)
+}
+
+// syncupCntlrSettled is the same for a cntlr-level pass.
+func syncupCntlrSettled(
+	t *testing.T,
+	srv *CnAgentServer,
+	o reqOpts,
+) *pb.SyncupCntlrReply {
+	t.Helper()
+	send := func() *pb.SyncupCntlrReply {
+		t.Helper()
+		reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		return reply
+	}
+	cnSweepOnlyDisconnects(t, send().GetAgentReply(),
+		"the pass that disconnects")
+	awaitDisconnects(t, srv)
+	return send()
+}
+
 // TestRemovedCntlrSweptByName is the design's headline: removal is derived
 // from the live system, not from a plan.
 //
@@ -175,15 +261,16 @@ func subsysDirPresent(node *fakeNode, nqn string) bool {
 // single one of its objects — exactly the state §9.8's drop-at-pointer-removal
 // leaves behind when a pointer disappears, and exactly the state an agent restarted in the middle
 // of a teardown wakes up in. Everything of that sp must still go, by name,
-// and the reply must be a plain OK: an agent that could only remove what it
-// still remembered would leak the whole stack here and say nothing.
+// and the reply must be a plain OK once the leg disconnects the pass set
+// going have returned: an agent that could only remove what it still
+// remembered would leak the whole stack here and say nothing.
 func TestRemovedCntlrSweptByName(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	cnSweepForget(t, srv, node)
 
 	node.Reset()
-	reply := cnSweepSyncup(t, srv, 3, false)
+	reply := cnSweepSyncupSettled(t, srv, 3, false)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 	cnSweepNoDmLeft(t, node)
@@ -248,7 +335,7 @@ func TestRemovedCntlrLeftoverReported(t *testing.T) {
 	// re-enumerates and finds the same array — which is the point: the first
 	// pass stored no "pending" flag anywhere for it to consult.
 	node.Reset()
-	reply = cnSweepSyncup(t, srv, 3, false)
+	reply = cnSweepSyncupSettled(t, srv, 3, false)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "the re-sync")
 	if !node.arrayGone(dataDev) {
 		t.Fatalf("the re-sync left %s assembled", dataDev)
@@ -279,7 +366,7 @@ func TestRemovedCntlrKilledButCompleted(t *testing.T) {
 	node.Reset()
 	// Killed, but dispatched first: the ioctl completed in the kernel.
 	node.killCmd["mdadm --stop "+dataDev] = true
-	reply := cnSweepSyncup(t, srv, 3, false)
+	reply := cnSweepSyncupSettled(t, srv, 3, false)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 	if !node.hasCall("cmd mdadm --stop " + dataDev) {
@@ -345,7 +432,7 @@ func TestSweepStopsANamedArrayNode(t *testing.T) {
 			}
 
 			node.Reset()
-			reply := cnSweepSyncup(t, srv, 3, false)
+			reply := cnSweepSyncupSettled(t, srv, 3, false)
 			cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 			stopped := node.indexOfCall("cmd mdadm --stop " + dataDev)
@@ -381,7 +468,7 @@ func TestPersistBeforeSweep(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 
 	node.Reset()
-	reply := cnSweepSyncup(t, srv, 3, false)
+	reply := cnSweepSyncupSettled(t, srv, 3, false)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 	saved := node.indexOfCall("writeproto " +
@@ -512,6 +599,9 @@ func TestReconcileSweepsAtStartup(t *testing.T) {
 		node.Reset()
 		fresh := newCnServer(node)
 		reconcileForTest(t, fresh)
+		// The legs' disconnects run off the startup pass (CN21) and change
+		// the node under the reads below.
+		awaitDisconnects(t, fresh)
 		cnSweepNoDmLeft(t, node)
 		if subsysDirPresent(node, testNqn) {
 			t.Fatalf("the host-facing subsystem survived the startup sweep")
@@ -563,8 +653,9 @@ func TestDisableLevelSweepsEverything(t *testing.T) {
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 
 	node.Reset()
-	syncupCntlrAt(t, srv, reqOpts{
+	reply := syncupCntlrSettled(t, srv, reqOpts{
 		revision: 3, primary: true, level: pb.SpLevel_SP_LEVEL_DISABLE})
+	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SP_LEVEL_DISABLE")
 
 	cnSweepNoDmLeft(t, node)
 	if subsysDirPresent(node, testNqn) {
@@ -710,12 +801,9 @@ func TestRetireByEnumeration(t *testing.T) {
 	// The retry, at the same revision, with nothing remembered from the pass
 	// that failed.
 	node.Reset()
-	reply, err = srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+	reply = syncupCntlrSettled(t, srv, reqOpts{
 		revision: 3, primary: true, raid1: true,
-		level: pb.SpLevel_SP_LEVEL_NO_THINPOOL}))
-	if err != nil {
-		t.Fatalf("re-sync: %v", err)
-	}
+		level: pb.SpLevel_SP_LEVEL_NO_THINPOOL})
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "the re-sync")
 	if !node.arrayGone(goneDev) {
 		t.Fatalf("the re-sync left %s assembled", goneDev)
@@ -957,7 +1045,7 @@ func TestUnownedXferConnectionSwept(t *testing.T) {
 	dmClone.table = strings.Join(fields, " ")
 
 	node.Reset()
-	reply := cnSweepSyncup(t, srv, 3, true)
+	reply := cnSweepSyncupSettled(t, srv, 3, true)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 	if _, ok := node.subsystems[stray]; ok {
@@ -1042,7 +1130,7 @@ func TestForeignMdArrayUntouched(t *testing.T) {
 	}
 
 	node.Reset()
-	reply := cnSweepSyncup(t, srv, 3, false)
+	reply := cnSweepSyncupSettled(t, srv, 3, false)
 	cnSweepAssertCode(t, reply.GetAgentReply(), 0, "SyncupCn")
 
 	// Non-vacuous: the same pass stopped our own array.
@@ -1811,7 +1899,10 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 				if err != nil {
 					t.Fatalf("SyncupCntlr: %v", err)
 				}
-				cnSweepAssertCode(t, reply.GetAgentReply(), 0,
+				// The clone's source goes with it: its disconnect runs off
+				// the pass (CN10), so the pass's only leftover is that
+				// connection, and the pass after it is clean.
+				cnSweepOnlyDisconnects(t, reply.GetAgentReply(),
 					"the pass whose listings answer")
 				for _, ns := range shape.want {
 					reload := "cmd dmsetup reload " +
@@ -1836,6 +1927,13 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 							"pass, want 1", ns.nsIdx, got)
 					}
 				}
+				awaitDisconnects(t, srv)
+				reply, err = srv.SyncupCntlr(ctx, cntlrReq(shape.to))
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				cnSweepAssertCode(t, reply.GetAgentReply(), 0,
+					"the pass after the disconnect")
 			})
 		}
 	}

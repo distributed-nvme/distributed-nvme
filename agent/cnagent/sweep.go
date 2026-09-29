@@ -870,7 +870,8 @@ func (s *CnAgentServer) runChain(
 				left := false
 				// A prober wedged on a pathless leg holds an open fd on the
 				// wrapper, so it has to go before the removal; the disconnect
-				// below is what releases one stuck in D state (CN11).
+				// set going below is what releases one stuck in D state
+				// (CN11).
 				if st != nil && plan != nil {
 					s.stopLegProbers(st, wantedProbers(plan))
 				}
@@ -880,9 +881,11 @@ func (s *CnAgentServer) runChain(
 						left = true
 					}
 				}
-				// A wrapper is removed even when its own connection is stuck:
-				// they are two different objects, and the connection is what
-				// the next round retries.
+				// A wrapper is removed without waiting for its connection,
+				// whose disconnect runs off the pass or is stuck: they are
+				// two different objects. One a wedged prober still holds
+				// fails EBUSY until that disconnect has errored the prober's
+				// IO, so it normally goes on a later pass.
 				if s.removeDms(ctx, res, chain.legDms) {
 					left = true
 				}
@@ -1111,18 +1114,26 @@ func (s *CnAgentServer) stopArrayVerified(
 	return gone
 }
 
-// disconnectVerified drops an nvme host connection and re-probes sysfs for
-// it. "Gone" is the absence of any CONTROLLER, not the absence of the
+// disconnectVerified reports whether an nvme host connection is gone, and
+// sets its disconnect going when it is not. The probe is all the pass does
+// under its locks: the `nvme disconnect` itself runs off them
+// (startDisconnect), because a controller delete whose target vanished
+// mid-delete does not return for the kernel's admin timeout, and so a
+// connection that still has a controller is a leftover of THIS pass however
+// fast its disconnect turns out to be — a later pass's probe is what finds
+// it gone. A disconnect already in flight is not issued a second time.
+//
+// "Gone" is the absence of any CONTROLLER, not the absence of the
 // subsystem directory: the kernel keeps /sys/class/nvme-subsystem/nvme-subsysN
 // around after its last controller is deleted, with its attributes readable
 // and its namespace and controller nodes gone. Such a subsystem holds nothing
 // open — no block device, no path — and waiting for the directory itself
-// would report a leftover for ever and re-drive the worker every round.
+// would report a leftover for ever and re-drive the worker every round;
+// disconnecting it again would be a command per round.
 func (s *CnAgentServer) disconnectVerified(
 	ctx context.Context,
 	nqn string,
 ) bool {
-	s.disconnect(ctx, nqn)
 	state, err := s.host.ListSubsys(ctx, nqn)
 	if err != nil {
 		slog.ErrorContext(ctx, "verifying an nvme disconnect failed",
@@ -1130,7 +1141,11 @@ func (s *CnAgentServer) disconnectVerified(
 			slog.String("error", err.Error()))
 		return false
 	}
-	return !state.Found || len(state.Paths) == 0
+	if !state.Found || len(state.Paths) == 0 {
+		return true
+	}
+	s.startDisconnect(ctx, nqn)
+	return false
 }
 
 // sweepCloneChunks deletes the bitmap chunk files of every clone this cntlr
@@ -1200,7 +1215,12 @@ func (s *CnAgentServer) sweepCloneChunks(
 // The stored-request half is what makes this safe to run outside the node
 // write lock: a cntlr's request is stored (putCntlr) before its converge
 // issues any `nvme connect`, so a source cannot be connected by a build whose
-// request is not yet visible here.
+// request is not yet visible here. The disconnect of a source found unused
+// can land after the pass's locks are released (startDisconnect), and a build
+// that finds it still in flight neither adopts nor connects that source
+// (disconnectInFlight). A build whose request is stored after this read, and
+// whose step 1 runs before the disconnect is registered, still adopts the
+// source (cnagent.md Known limits).
 func (s *CnAgentServer) srcNqnsInUse(
 	ctx context.Context,
 	clusterId uint64,
@@ -1680,7 +1700,10 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // sweepCn is the node-level pass: everything of an sp whose pointer has left
 // this CN's list, plus the objects no sp can be read off at all. It runs
 // under the node write lock, so no cntlr converge, no Check round and no push
-// runs beside it — which is what makes removing an UNOWNED object safe.
+// runs beside it — which is what makes judging an UNOWNED object safe. A
+// disconnect it sets going (startDisconnect) can land after the lock is
+// released; the connect steps' registry check (disconnectInFlight) keeps a
+// converge from adopting that connection meanwhile.
 //
 // An sp that IS in the pointer list is never touched here, even when it has
 // no cntlr file: CN8 introduces the pointer before the SyncupCntlr, and after

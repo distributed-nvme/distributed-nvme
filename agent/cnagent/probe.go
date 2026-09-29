@@ -56,6 +56,16 @@ func (s *CnAgentServer) probeCntlr(
 				key, lp.name, detailsProvisioning)
 			continue
 		}
+		// ensureLeg's registry gate (CN10), answered the way the converge
+		// answers it: that leg fails before it reads anything, so a row
+		// judged from what the probe finds of a leg still being torn down
+		// would flip against the converge's, and move its epoch, every
+		// round the disconnect runs.
+		if s.disconnectInFlight(lp.nqn) {
+			info.LegIdToLeg[lp.legId] = t.Err(
+				key, lp.name, detailsDisconnectInFlight(lp.nqn))
+			continue
+		}
 		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, nil)
 	}
 
@@ -220,6 +230,13 @@ func (s *CnAgentServer) probeCntlr(
 		view, err := s.readSubsys(
 			ctx, cp.clone.GetSrcNqn(), cp.clone.GetSrcNsIdx())
 		switch {
+		case s.disconnectInFlight(cp.clone.GetSrcNqn()):
+			// ensureCloneSource's registry gate (CN10): the converge
+			// reports this row ERROR naming the disconnect, whatever the
+			// dying controller still shows.
+			info.CloneIdToTarget[cp.cloneId] = t.Err(
+				tgtKey, cp.clone.GetSrcNqn(),
+				detailsDisconnectInFlight(cp.clone.GetSrcNqn()))
 		case err != nil:
 			info.CloneIdToTarget[cp.cloneId] = t.Err(
 				tgtKey, cp.clone.GetSrcNqn(), err.Error())
@@ -245,7 +262,7 @@ func (s *CnAgentServer) probeCntlr(
 		// `clone_id_to_dm_clone` MISSING "source not connected" and leaves the
 		// meta row to cloneMetaInfo, the very helper this loop falls through
 		// to below, so that row already agrees without this branch.
-		if cloneSourceConnected(view, cp) {
+		if s.cloneSourceConnected(view, cp) {
 			if details, refused := s.probeCloneArenaCannotSupply(
 				ctx, plan, cp); refused {
 				info.CloneIdToMeta[cp.cloneId] = t.Err(
@@ -336,18 +353,26 @@ func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 }
 
 // cloneSourceConnected reports whether ensureCloneSource would get past CN18
-// step 1 on this view **without connecting anything**: every configured
-// endpoint already has a controller — whatever its state, since the converge
-// only connects the ones that are missing — and the source namespace device is
-// there. It is deliberately not cloneSourceLive: that one answers the
+// step 1 on this view **without connecting anything**: no sweep's disconnect
+// of the source is in flight (disconnectInFlight, which stops that step
+// whatever the view shows), every configured endpoint already has a
+// controller — whatever its state, since the converge only connects the ones
+// that are missing — and the source namespace device is there. It is
+// deliberately not cloneSourceLive: that one answers the
 // clone_id_to_target row, this one answers "did the converge reach step 2",
 // which is what makes a step 2 verdict comparable between the two channels at
 // all. A view that still needs a connect is not connected here, because whether
 // that connect would succeed is exactly what a read-only probe may not find out
 // (CN23) — and a converge whose connect fails stops at step 1 and reports that
 // on these rows instead.
-func cloneSourceConnected(view *subsysView, cp *clonePlan) bool {
+func (s *CnAgentServer) cloneSourceConnected(
+	view *subsysView,
+	cp *clonePlan,
+) bool {
 	if view == nil || !view.found || view.nsDev == "" {
+		return false
+	}
+	if s.disconnectInFlight(cp.clone.GetSrcNqn()) {
 		return false
 	}
 	for _, tr := range cp.clone.GetSrcTrConfList() {

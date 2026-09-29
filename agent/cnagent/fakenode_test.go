@@ -189,6 +189,16 @@ type fakeNode struct {
 	killReadAlways map[string]bool
 	// gate blocks a command until the channel is closed (lock tests).
 	gate map[string]chan struct{}
+	// hardGate blocks a command until the channel is closed and — unlike gate
+	// — ignores ctx cancellation, modelling the real child of
+	// common/osclient.go: a child in an uninterruptible kernel wait (an
+	// `nvme disconnect` whose controller delete waits out the admin timeout)
+	// is signalled at the soft and hard timeouts and still does not return
+	// until the kernel does. The dn twin of this fake carries the same knob.
+	hardGate map[string]chan struct{}
+	// traceOf records, per recorded command line, the trace id its ctx
+	// carried ("" for none). nil leaves it off.
+	traceOf map[string]string
 }
 
 type fakeDm struct {
@@ -306,7 +316,8 @@ func newFakeNode() *fakeNode {
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
 
-		gate: make(map[string]chan struct{}),
+		gate:     make(map[string]chan struct{}),
+		hardGate: make(map[string]chan struct{}),
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
@@ -315,6 +326,31 @@ func newFakeNode() *fakeNode {
 	// arrays", so the fake must not model a missing directory by default.
 	f.dirs[sysfsBlockDir] = true
 	return f
+}
+
+// blockCmd parks every command whose recorded line contains key until
+// releaseCmd, ignoring ctx cancellation (see hardGate).
+func (f *fakeNode) blockCmd(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.hardGate[key]; ok {
+		return
+	}
+	f.hardGate[key] = make(chan struct{})
+}
+
+// releaseCmd lets a blockCmd'd command finish. It is idempotent, so a test may
+// both release it inline and register a cleanup that releases it again — which
+// it must, or a command parked by a test that failed early would hold its
+// goroutine, and every lock that goroutine holds, for the rest of the run.
+func (f *fakeNode) releaseCmd(key string) {
+	f.mu.Lock()
+	ch, ok := f.hardGate[key]
+	delete(f.hardGate, key)
+	f.mu.Unlock()
+	if ok {
+		close(ch)
+	}
 }
 
 // osClient is the cn role's OsClient double. Its block-write half is left
@@ -715,10 +751,21 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	f.record("%s", line)
+	if f.traceOf != nil {
+		tid, _ := common.TraceIdFromCtx(ctx)
+		f.traceOf[line] = tid
+	}
 	var gate chan struct{}
 	for key, ch := range f.gate {
 		if strings.Contains(line, key) {
 			gate = ch
+			break
+		}
+	}
+	var hard chan struct{}
+	for key, ch := range f.hardGate {
+		if strings.Contains(line, key) {
+			hard = ch
 			break
 		}
 	}
@@ -756,6 +803,10 @@ func (f *fakeNode) runCommand(
 		case <-ctx.Done():
 			return "", "", -1, ctx.Err()
 		}
+	}
+	// No ctx arm: a hard gate is a child that outlives the cancel.
+	if hard != nil {
+		<-hard
 	}
 
 	f.mu.Lock()

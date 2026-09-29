@@ -250,6 +250,11 @@ func cloneBuiltThisPass(info *pb.CntlrInfo, np *nsPlan) bool {
 // matches no entry, so an entry it alone serves is connected again — a
 // duplicate the host refuses while that controller lives — and nothing is
 // disconnected, since this step retires no path.
+//
+// A source a sweep is still disconnecting is neither adopted nor connected
+// (disconnectInFlight): a dm-clone built on it would lose its source when
+// that disconnect lands, and every read of a region not yet hydrated would
+// fail until a later converge reloaded the table.
 func (s *CnAgentServer) ensureCloneSource(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -258,6 +263,9 @@ func (s *CnAgentServer) ensureCloneSource(
 ) (string, *subsysView, error) {
 	nqn := cp.clone.GetSrcNqn()
 	nsIdx := cp.clone.GetSrcNsIdx()
+	if s.disconnectInFlight(nqn) {
+		return "", nil, fmt.Errorf("%s", detailsDisconnectInFlight(nqn))
+	}
 	view, err := s.readSubsys(ctx, nqn, nsIdx)
 	if err != nil {
 		return "", nil, err

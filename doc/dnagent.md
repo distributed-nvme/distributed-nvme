@@ -236,32 +236,44 @@ SH27. **Background tasks and process exit** (added by amendment;
       goroutines outside any RPC: the DN8 migration-connect retry (so
       nicknamed for the DN8-gated converge it re-runs; the retry loop itself
       is specified in DN13), the DN12
-      fence timer, the DN9 side-zeroing workers, the cn's connect retry and
-      the CN11 leg probers. Every one of them derives its ctx from the
+      fence timer, the DN9 side-zeroing workers, the cn's connect retry, the
+      CN11 leg probers and the cn sweep's background `nvme disconnect`
+      (`cnagent.md` CN10). Every one of them derives its ctx from the
       server's **`rootCtx`** — the process-lifetime ctx captured at
       `Reconcile`, which `Serve` derives from its own ctx and cancels before
-      returning — and mints a fresh trace id per attempt
-      (`common.NewTraceId`), taking the SH11 locks for the attempt only,
-      never across the whole task.
+      returning — and, the background disconnect aside, mints a fresh trace
+      id per attempt (`common.NewTraceId`), taking the SH11 locks for the
+      attempt only, never across the whole task. The background disconnect
+      is one command of the pass that set it going: it carries that pass's
+      trace id instead of minting one and, like the CN11 probers, takes no
+      SH11 lock at all.
 
       A background task may additionally run a **child process**, and DN9's
       `blkdiscard --zeroout` batches are the first that does. Such a child
-      must never outlive the agent, so the server registers every goroutine
-      that owns one in a `sync.WaitGroup` before it starts and exposes a
-      `WaitBackground()` that waits for them; `Serve` takes it as its
-      `waitBackground` parameter, cancels the task ctx after `GracefulStop`
-      and then waits. Cancellation kills the in-flight child through the SH15
-      soft/hard timeout machinery (`osclient.md` §4.2 sends SIGTERM then
-      SIGKILL), so the wait is bounded by `CmdHardTimeout` per in-flight
-      command.
+      must not outlive the agent — the cn sweep's background
+      `nvme disconnect` (below) is allowed to — so the dn server registers
+      every goroutine that owns one in a `sync.WaitGroup` before it starts
+      and exposes a `WaitBackground()` that waits for them; `Serve` takes it
+      as its `waitBackground` parameter, cancels the task ctx after
+      `GracefulStop` and then waits. Cancellation kills the in-flight child
+      through the SH15 soft/hard timeout machinery (`osclient.md` §4.2 sends
+      SIGTERM then SIGKILL), so the wait is bounded by `CmdHardTimeout` per
+      in-flight command — unless the child sits in an uninterruptible kernel
+      wait, which no signal ends: the join then lasts until the kernel
+      returns (SH15).
 
       **Only child-owning tasks are waited for.** The cn passes
       `waitBackground = nil`: a CN11 prober's IO is a direct, uninterruptible
       syscall (`cnagent.md` §2.2), so joining it could hang shutdown forever
-      — cancelling is the whole contract there. Object-scoped tasks that hold
-      a device open are additionally cancelled **and waited for** at teardown,
-      before the resources they hold are removed (DN6, DN9): a live child
-      keeps an fd on the dm device and `dmsetup remove` would fail EBUSY.
+      — cancelling is the whole contract there. Nor is the child of the cn
+      sweep's background `nvme disconnect` joined (`cnagent.md` CN10): it
+      holds nothing a restarted agent needs, a delete already in the kernel
+      finishes whether or not anybody waits for it, and a join could hold
+      shutdown for the kernel's whole admin timeout. Object-scoped tasks
+      that hold a device open are additionally cancelled **and waited for**
+      at teardown, before the resources they hold are removed (DN6, DN9): a
+      live child keeps an fd on the dm device and `dmsetup remove` would
+      fail EBUSY.
 
       One deliberate carve-out from "every goroutine that owns one": the
       DN12 fence timer's `AfterFunc` callback — which runs a full side
@@ -300,13 +312,16 @@ import (
 // via signal.NotifyContext in cmd/dnv-agent).
 //
 // waitBackground (may be nil) is joined after GracefulStop has drained every
-// RPC, so no background goroutine — and, more to the point, no child process
-// one of them owns, such as the §9.4 zeroing `blkdiscard` — outlives the
-// agent (dnagent.md SH27). Only a role whose background work holds a
-// long-running child passes one: the dn passes its WaitGroup join, the cn
-// passes nil because its CN11 probers are stopped by cancellation and never
-// joined (a wedged pread is uninterruptible, so waiting would hang shutdown
-// forever — the very starvation the probe-IO carve-out exists to prevent).
+// RPC, so no background goroutine it covers — and, more to the point, no
+// child process one of them owns, such as the §9.4 zeroing `blkdiscard` —
+// outlives the agent (dnagent.md SH27). Only a role whose background work
+// holds a long-running child that must not outlive it passes one: the dn
+// passes its WaitGroup join, the cn passes nil because its CN11 probers are
+// stopped by cancellation and never joined (a wedged pread is
+// uninterruptible, so waiting would hang shutdown forever — the very
+// starvation the probe-IO carve-out exists to prevent) and the child of its
+// sweep's background `nvme disconnect` holds nothing a restarted agent needs
+// (cnagent.md CN10).
 //
 // The cancel-then-join pair is deferred, so *every* return path takes it, not
 // just the one through grpcServer.Serve: reconcile has already armed the
@@ -362,7 +377,8 @@ func Serve(
 		slog.String("address", address))
 	// GracefulStop has drained every RPC by the time Serve returns; the
 	// deferred cancel-and-join above then stops the background workers and
-	// waits for them, so no orphan child process outlives the agent (§9.4).
+	// waits for the ones waitBackground covers, so no orphan child process of
+	// theirs outlives the agent (§9.4).
 	return grpcServer.Serve(lis)
 }
 ```
@@ -485,8 +501,13 @@ SH12. Node **read** lock only: node-scoped reads (`GetDnInfo`/`GetCnInfo`,
       one `CheckDn`/`CheckCn` round). `GetDnSize`/`GetCnSize` take no lock.
 
 SH13. Lock order is node → object, never nested object locks. Probing under a
-      lock is acceptable: every OS call is bounded by `CmdSoftTimeout`/
-      `CmdHardTimeout` (§2.8 SH15).
+      lock is acceptable: every OS command is bounded by `CmdSoftTimeout`/
+      `CmdHardTimeout` (§2.8 SH15) except a child in an uninterruptible
+      kernel wait (SH15) — which is why the cn sweep's `nvme disconnect`
+      runs off the locks (`cnagent.md` CN21) — and an in-process `OsClient`
+      file or block call is bounded only up to its syscall: its ctx is
+      checked once, before it (`osclient.md` §4.3), so a sysfs, configfs or
+      device access the kernel holds returns only when the kernel does.
 
 ### 2.7 `ResInfo` tracking — `resinfo.go`
 
@@ -530,7 +551,17 @@ SH15. Every wrapper call wraps its ctx with
       `ReadBlock`/`WriteBlock` calls of the [D13] metadata path too. A role
       package that calls the `OsClient` directly instead of through a
       wrapper — the `cnagent.md` CN12 sysfs leg walk — takes the same bound
-      from the exported `agent.CmdCtx`.
+      from the exported `agent.CmdCtx`. The bound holds in full only for a
+      child the signals end. An in-process `OsClient` call — a file, proto
+      or block read or write — is bounded only until its syscall starts:
+      its ctx is checked once, before it (`osclient.md` §4.3). A child
+      blocked in an uninterruptible kernel wait is not bounded at all: both
+      signals are delivered, and the call returns, and gives back its
+      `OsClient` slot, only when the kernel does (an `nvme disconnect` whose
+      target vanishes mid-delete waits out the kernel's 60 s admin timeout;
+      `cnagent.md` CN21 runs the cn sweep's off the locks, while the cn
+      build's dead-path disconnect and the dn sweep's `:3:` one still run
+      under them — `cnagent.md` Known limits).
 
       **A command that was killed did not answer, and "did not answer" is not
       "absent".** `OsClient.RunCommand` returns `exitCode == -1` with a
@@ -843,7 +874,8 @@ CM4. Each subcommand's `RunE`: bind viper, then run CM3's two checks —
      with the role's reconcile, a register func that calls
      `pb.RegisterDiskNodeAgentServer` (resp. `...ControllerNode...`), and the
      role's SH27 background waiter — the dn passes `srv.WaitBackground`, the
-     cn passes `nil` (its probers are cancelled, never joined).
+     cn passes `nil` (its probers are cancelled, never joined, and its
+     sweep's background `nvme disconnect` is not joined either — SH27).
      Transport is plaintext (`grpc.md` §4); log level stays the default Info
      (`log.md` R6 — the agent calls nothing).
 
@@ -1613,9 +1645,10 @@ DN9. **Side device and the §9.4 side provisioning protocol.** Look up
        reaches it at once.
      * each batch mints a fresh trace id (SH2's `common.NewTraceId`); the
        `blkdiscard` itself runs **lock-free** and through the ordinary
-       `OsClient` under the standard SH15 timeouts — it is a *killable child
-       process*, so a semaphore slot is held for at most `CmdHardTimeout` and
-       no `LimitedOsClient` carve-out is needed (unlike the CN11 probe IO,
+       `OsClient` under the standard SH15 timeouts — it is a *child process*,
+       so a semaphore slot is held for at most `CmdHardTimeout`, or for as
+       long as an uninterruptible kernel wait holds the child past it (SH15),
+       and no `LimitedOsClient` carve-out is needed (unlike the CN11 probe IO,
        `cnagent.md` §2.2). Only the volume-table update afterwards takes the
        DN1 locks (node read + the side's object lock) on top of `diskmeta`'s
        own writer serialization, and it takes them with **try-acquire and a

@@ -456,7 +456,10 @@ chasing a leaked device greps both logs for the same thing.
 | a `Syncup*` reply carrying `ReplyCodeLeftover` — `worker/revision.go` | `syncup leftover` | the object's ids, `revision` (the one the request carried), `details` (the agent's own leftover text) |
 
 Both are Info: a leftover is a normal state for as long as a dead remote's
-failfast window lasts, and the next `Syncup*` sweeps it away. Nothing on the
+failfast window lasts, on the pass of a cn teardown that sets
+`nvme disconnect`s going (they run off the pass, `cnagent.md` CN10), and for
+as long as such a delete waits out the kernel's admin timeout; a later
+`Syncup*` sweeps it away. Nothing on the
 agent re-drives that sweep by itself — a `Check*` round recomputes the
 verdict and removes nothing — so what brings the removal back is the worker
 seeing the leftover code again and re-issuing the syncup (`dnv-worker.md`

@@ -22,13 +22,16 @@ import (
 // via signal.NotifyContext in cmd/dnv-agent).
 //
 // waitBackground (may be nil) is joined after GracefulStop has drained every
-// RPC, so no background goroutine — and, more to the point, no child process
-// one of them owns, such as the §9.4 zeroing `blkdiscard` — outlives the
-// agent (dnagent.md SH27). Only a role whose background work holds a
-// long-running child passes one: the dn passes its WaitGroup join, the cn
-// passes nil because its CN11 probers are stopped by cancellation and never
-// joined (a wedged pread is uninterruptible, so waiting would hang shutdown
-// forever — the very starvation the probe-IO carve-out exists to prevent).
+// RPC, so no background goroutine it covers — and, more to the point, no
+// child process one of them owns, such as the §9.4 zeroing `blkdiscard` —
+// outlives the agent (dnagent.md SH27). Only a role whose background work
+// holds a long-running child that must not outlive it passes one: the dn
+// passes its WaitGroup join, the cn passes nil because its CN11 probers are
+// stopped by cancellation and never joined (a wedged pread is
+// uninterruptible, so waiting would hang shutdown forever — the very
+// starvation the probe-IO carve-out exists to prevent) and the child of its
+// sweep's background `nvme disconnect` holds nothing a restarted agent needs
+// (cnagent.md CN10).
 //
 // The cancel-then-join pair is deferred, so *every* return path takes it, not
 // just the one through grpcServer.Serve: reconcile has already armed the
@@ -84,6 +87,7 @@ func Serve(
 		slog.String("address", address))
 	// GracefulStop has drained every RPC by the time Serve returns; the
 	// deferred cancel-and-join above then stops the background workers and
-	// waits for them, so no orphan child process outlives the agent (§9.4).
+	// waits for the ones waitBackground covers, so no orphan child process of
+	// theirs outlives the agent (§9.4).
 	return grpcServer.Serve(lis)
 }

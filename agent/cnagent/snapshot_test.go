@@ -225,7 +225,8 @@ func TestSnapshotMessagesWithoutTheOriginDevice(t *testing.T) {
 				revision: 2, primary: true, twoSlices: true})
 			// CN21: the teardown removes every device and sends no `delete`,
 			// so the pool metadata on the DN legs keeps dev_id 1.
-			cnSyncup(t, srv, 3, false)
+			cnSweepAssertCode(t, cnSweepSyncupSettled(t, srv, 3, false).
+				GetAgentReply(), 0, "the teardown")
 			cnSyncup(t, srv, 4, true)
 
 			node.Reset()

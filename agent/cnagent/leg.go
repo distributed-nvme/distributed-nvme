@@ -327,12 +327,20 @@ func (s *CnAgentServer) ensureLegs(
 // (awaitNsHead). Both draw on budget, the pass's one wait budget; once it is
 // spent the leg fails as it always did, with the same error, and ensureLegs
 // registers the background retry.
+//
+// A leg whose subsystem a sweep is still disconnecting fails before any of
+// that (disconnectInFlight): its controllers are being deleted, so there is
+// nothing to adopt, and a controller connected beside them could go with
+// them, since the disconnect is by NQN.
 func (s *CnAgentServer) ensureLeg(
 	ctx context.Context,
 	plan *cntlrPlan,
 	lp *legPlan,
 	budget *agent.WaitBudget,
 ) (*subsysView, error) {
+	if s.disconnectInFlight(lp.nqn) {
+		return nil, fmt.Errorf("%s", detailsDisconnectInFlight(lp.nqn))
+	}
 	view, err := s.readSubsys(ctx, lp.nqn, sideNsid)
 	if err != nil {
 		return nil, err
@@ -618,26 +626,107 @@ func transportHealth(
 	return pb.ResStatus_RES_STATUS_OK, details
 }
 
-// disconnect drops an nvme host connection, probing first so tearing down
-// something that never connected stays silent.
-func (s *CnAgentServer) disconnect(ctx context.Context, nqn string) {
-	view, err := s.readSubsys(ctx, nqn, 0)
-	if err != nil {
-		slog.ErrorContext(ctx, "probing nvme subsystems failed",
-			slog.String("nqn", nqn),
-			slog.String("error", err.Error()))
+// startDisconnect issues the CN21 sweep's `nvme disconnect --nqn` from a
+// goroutine on rootCtx and returns at once (CN10's disconnect registry). The
+// pass that calls it holds its CN1 locks, and a controller delete can outlast
+// every one of them: when the target vanishes mid-delete the kernel cannot
+// enter error recovery on a DELETING controller, so the controller's shutdown
+// command waits out the admin timeout (60 s), and `nvme disconnect` waits
+// with it in an uninterruptible write of the controller's `delete_controller`
+// attribute. No SH15 signal ends that child — SIGTERM at the soft timeout and
+// SIGKILL at the hard one are delivered, and it still returns only when the
+// kernel does — so issued inline it held the cntlr's object lock, and with it
+// every CheckCntlr round of the cntlr (CN1), for the whole minute.
+//
+// The registry is bookkeeping of work in progress, never memory of work that
+// failed: an entry lives exactly as long as its goroutine, and it does two
+// things. It keeps a later pass from issuing a second disconnect of a
+// subsystem whose first one is still in the kernel, and it keeps the connect
+// steps off a controller that is being deleted under them
+// (disconnectInFlight). Whether the subsystem is still a leftover is never
+// read from it: the caller reports one for as long as the node's own
+// enumeration shows a controller, and a disconnect that failed is issued
+// again by the first pass that finds the controller still there after the
+// goroutine has gone.
+//
+// The goroutine carries the pass's trace id — the command is that pass's own,
+// only not waited for — and takes none of the CN1 locks. It is not joined at
+// exit (`dnagent.md` SH27): the child holds nothing a restarted agent needs,
+// and a delete already in the kernel finishes whether or not anybody waits
+// for it.
+//
+// At most disconnectConcurrency of them run at once. The rest wait for a
+// slot and stay registered while they wait, so a queued disconnect keeps the
+// connect steps off its subsystem and is not issued twice either. Inline, a
+// pass issued its disconnects one at a time; uncapped, one L10 of many legs
+// or one pool drain would set them all going together, and each delete a
+// vanished target stalls holds an OsClient slot for the admin timeout. Enough
+// of those would leave no slot for the node's converges and Check rounds,
+// whose OS calls would then be refused at the soft timeout and report ERROR
+// rows on healthy objects.
+func (s *CnAgentServer) startDisconnect(ctx context.Context, nqn string) {
+	s.mu.Lock()
+	if _, inFlight := s.disconnecting[nqn]; inFlight {
+		s.mu.Unlock()
 		return
 	}
-	// A subsystem the kernel has kept after its last controller went holds
-	// nothing open; disconnecting it again would be a command per round.
-	if !view.found || len(view.ctrls) == 0 {
-		return
+	s.disconnecting[nqn] = struct{}{}
+	s.mu.Unlock()
+	traceId, ok := common.TraceIdFromCtx(ctx)
+	if !ok {
+		traceId = common.NewTraceId()
 	}
-	if err := s.host.Disconnect(ctx, nqn); err != nil {
-		slog.ErrorContext(ctx, "nvme disconnect failed",
-			slog.String("nqn", nqn),
-			slog.String("error", err.Error()))
-	}
+	bgCtx := common.WithTraceId(s.rootCtx, traceId)
+	slots := s.disconnectSlots
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.disconnecting, nqn)
+			s.mu.Unlock()
+		}()
+		select {
+		case slots <- struct{}{}:
+		case <-bgCtx.Done():
+			return
+		}
+		defer func() { <-slots }()
+		if err := s.host.Disconnect(bgCtx, nqn); err != nil {
+			slog.ErrorContext(bgCtx, "nvme disconnect failed",
+				slog.String("nqn", nqn),
+				slog.String("error", err.Error()))
+		}
+	}()
+}
+
+// disconnectConcurrency is how many of the sweep's background disconnects run
+// at once (startDisconnect): a quarter of the node's OsClient slots, so a
+// batch of deletes stuck in the kernel leaves the rest to everything else.
+const disconnectConcurrency = common.DefaultOsClientLimit / 4
+
+// detailsDisconnectInFlight is the ResInfo details of a leg or a clone source
+// whose connect step the registry stopped. The converge and the CN28 probe
+// report the same string, so the two channels do not flip the row against
+// each other while the disconnect runs.
+func detailsDisconnectInFlight(nqn string) string {
+	return fmt.Sprintf("a sweep's disconnect of %s is still in flight", nqn)
+}
+
+// disconnectInFlight reports whether a sweep's background disconnect of nqn
+// is still running, or waiting for a slot (CN10's disconnect registry). The
+// connect steps ask it before they read the subsystem, because the pass's
+// locks no longer cover the delete: the controller they would find at a
+// wanted address — and adopt, since they connect only the addresses that
+// have none — is about to go, taking the device a leg wrapper or a dm-clone
+// would be built on with it. A step that finds one in flight fails for the
+// pass, which registers the CN10/CN18 connect retry, and the first pass after
+// the goroutine has gone reads the subsystem afresh and connects whatever is
+// missing. The CN28 probe asks it too, so the Check round reports that step
+// the way the converge does.
+func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.disconnecting[nqn]
+	return ok
 }
 
 // ---------------------------------------------------------------------------

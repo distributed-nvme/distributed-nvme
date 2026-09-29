@@ -221,6 +221,8 @@ func runCn(cmd *cobra.Command, args []string) error {
 		// The cn passes nil: its CN11 leg probers are stopped by cancelling
 		// rootCtx and are deliberately never joined — a probe wedged in an
 		// uninterruptible pread would hang shutdown forever, which is the very
-		// starvation the probe-IO carve-out exists to prevent.
+		// starvation the probe-IO carve-out exists to prevent. Nor is the child
+		// of its sweep's background `nvme disconnect`: it holds nothing a
+		// restarted agent needs (cnagent.md CN10).
 		nil)
 }

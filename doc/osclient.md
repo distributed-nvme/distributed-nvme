@@ -169,6 +169,13 @@ pressure while leaving ample parallelism.
     process ignores SIGTERM, it is SIGKILLed after this grace, i.e. at the
     hard timeout relative to the soft one. `WaitDelay` also prevents `Wait`
     from hanging on inherited pipes.
+  * Neither signal bounds a child blocked in an uninterruptible kernel wait.
+    Both are delivered, but the child exits only when the kernel returns, and
+    `Wait` reaps it before anything else: the call returns, and gives back
+    the §4.1 semaphore slot it holds, only then. An `nvme disconnect` whose
+    target vanishes mid-delete waits out the kernel's 60 s admin timeout this
+    way, which is why the cn sweep issues it off its locks (`cnagent.md`
+    CN21).
 * Exit-code mapping: `err == nil` → 0; `*exec.ExitError` →
   `ExitError.ExitCode()` (note: a signal-killed process reports `-1` here,
   with a non-nil error — acceptable); any other error (start failure, ctx
@@ -185,7 +192,9 @@ pressure while leaving ample parallelism.
   * `exitCode == -1` with a non-nil error — the process never reported:
     SIGTERMed at the caller's soft timeout, SIGKILLed at the hard one,
     failed to start, ctx cancelled, or refused a semaphore slot. The caller
-    learned NOTHING about the object.
+    learned NOTHING about the object. (A child in an uninterruptible kernel
+    wait comes back this way only when the kernel lets it go, however long
+    after the hard timeout that is.)
 
   A killed command may still have completed in the kernel — the ioctl or the
   configfs write runs to the end regardless of the signal that hit the
@@ -238,9 +247,12 @@ pressure while leaving ample parallelism.
 
 ### 4.3 ReadFile / WriteFile / WriteFileDirect
 
-* Check `ctx.Err()` after acquiring the semaphore and return it if non-nil
-  (plain file I/O on local disks is not further cancelable; this is
-  best-effort cancellation and is sufficient).
+* Check `ctx.Err()` after acquiring the semaphore and return it if non-nil.
+  That is the call's last cancellation point: the I/O itself is not
+  cancelable. For plain file I/O on local disks this best-effort
+  cancellation is sufficient; a sysfs or configfs access the kernel holds
+  returns only when the kernel does, however far past the caller's deadline
+  (`dnagent.md` SH13, SH15).
 * `ReadFile`: `os.ReadFile(path)`, return `string(data)`.
 * `WriteFile`: **atomic replace** — write to a temp file in the same
   directory, `Sync`, `Close`, `Chmod(0o644)` ("default file permissions"),
@@ -363,7 +375,9 @@ sanctioned direct-syscall path in dnv:
   per-attempt trace id into the records below), and **nothing ever waits for a
   prober to finish** — cancel and move on, never cancel-and-wait. (Contrast
   the dn §9.4 zeroing goroutines, which *are* waited for: their
-  `blkdiscard` is a killable child process, not a blocked syscall.)
+  `blkdiscard` is a child process SIGKILL ends, not a blocked syscall of the
+  agent's own — though one in an uninterruptible kernel wait dies only when
+  the kernel returns, §4.2.)
 * *Its descriptor is close-on-exec.* `ReadBlockDirectAt` opens with
   `O_CLOEXEC`, as `os.OpenFile` opens every descriptor (`WriteBlockAt`'s
   included); a bare `syscall.Open` does not add it. Every command the agent

@@ -39,11 +39,21 @@ type CnAgentServer struct {
 	capacity uint64
 	port     agent.PortConf
 
-	// mu guards the in-memory mirrors of the local store below. It is a leaf
-	// lock: never held across an OS call.
+	// mu guards the in-memory mirrors of the local store below, and the CN10
+	// disconnect registry, which mirrors nothing. It is a leaf lock: never
+	// held across an OS call.
 	mu     sync.Mutex
 	cns    map[string]*cnState
 	cntlrs map[string]*cntlrState
+	// disconnecting is the CN10 disconnect registry: the subsystem NQNs whose
+	// sweep `nvme disconnect` is running in the background right now, or
+	// queued for one of disconnectSlots (startDisconnect). An entry lives
+	// exactly as long as its goroutine; it is never persisted.
+	disconnecting map[string]struct{}
+	// disconnectSlots caps the registry's disconnects that run at once at
+	// disconnectConcurrency: a goroutine holds one of its buffer slots for
+	// the whole `nvme disconnect`. It is a field so a test can shrink it.
+	disconnectSlots chan struct{}
 
 	// cloneMetaMu serializes the CN clone-metadata allocator ([D14]): the
 	// registry is the kernel's dm table set, and two cntlrs of the same CN
@@ -54,8 +64,8 @@ type CnAgentServer struct {
 	cloneMetaMu sync.Mutex
 
 	// rootCtx is the process lifetime ctx, captured at Reconcile; the
-	// CN10/CN18 connect retries and the CN11 probers hang off it so shutdown
-	// stops them.
+	// CN10/CN18 connect retries, the CN10 background disconnects and the CN11
+	// probers hang off it, so shutdown cancels them.
 	rootCtx context.Context
 
 	// probeInterval / probeStall / retryInterval are fields rather than
@@ -152,14 +162,16 @@ func NewCnAgentServer(
 			TrAddr:  trConf.GetTrAddr(),
 			TrSvcId: trConf.GetTrSvcId(),
 		},
-		cns:           make(map[string]*cnState),
-		cntlrs:        make(map[string]*cntlrState),
-		rootCtx:       context.Background(),
-		probeInterval: common.CnLegProbeInterval * time.Second,
-		probeStall:    common.CnLegProbeStallSeconds * time.Second,
-		retryInterval: common.CnConnectRetryInterval * time.Second,
-		now:           time.Now,
-		sleep:         agent.SleepCtx,
+		cns:             make(map[string]*cnState),
+		cntlrs:          make(map[string]*cntlrState),
+		disconnecting:   make(map[string]struct{}),
+		disconnectSlots: make(chan struct{}, disconnectConcurrency),
+		rootCtx:         context.Background(),
+		probeInterval:   common.CnLegProbeInterval * time.Second,
+		probeStall:      common.CnLegProbeStallSeconds * time.Second,
+		retryInterval:   common.CnConnectRetryInterval * time.Second,
+		now:             time.Now,
+		sleep:           agent.SleepCtx,
 	}
 }
 

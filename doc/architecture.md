@@ -1286,7 +1286,11 @@ capacity keys maintained per §5.6; reverse on delete.
   zero in a clone's simply leaves the dm-clone target's own default in place (§8.9).
 * `CmdSoftTimeout` = 3 s / `CmdHardTimeout` = 5 s: agents SIGTERM a shell command at the
   soft timeout and SIGKILL at the hard timeout, reporting `RES_STATUS_ERROR` with the
-  command output in `details`.
+  command output in `details`. A child blocked in an uninterruptible kernel wait is not
+  bounded: both signals are delivered, and the command returns only when the kernel does
+  — an `nvme disconnect` whose target vanishes mid-delete waits out the kernel's 60 s
+  admin timeout, which is why the cn sweep runs its disconnects off its locks
+  (`cnagent.md` CN21).
 
 ---
 
@@ -2441,8 +2445,9 @@ above-the-side resource as `RES_STATUS_PROVISIONING` with details `"side provisi
   error.
 * Each batch: a fresh trace id; the `blkdiscard` runs **lock-free** and goes through
   the normal OsClient under the standard §7 timeouts — unlike the CN11 leg probe IO it
-  is a *killable child process*, so no semaphore carve-out is needed; the table update
-  afterwards takes the node-read plus the side's object lock.
+  is a *child process*, whose semaphore slot the hard timeout frees unless the child
+  sits in an uninterruptible kernel wait (§7), so no semaphore carve-out is needed; the
+  table update afterwards takes the node-read plus the side's object lock.
 * Batch failure/timeout: the killed command's output goes into `side_dev_info`
   `RES_STATUS_ERROR` details, and the next successful batch clears it back to
   `PROVISIONING`; the retry is paced by `DnZeroRetryInterval` = 5 seconds — never a hot
@@ -2784,7 +2789,13 @@ cannot forget in that way: while the device is there, the next enumeration finds
   write lock makes "nobody here wants it" stable. Two are removed by BOTH scopes. For a
   clone-source connection that question is settled from state already stable under the
   node READ lock: it is tested against every stored cntlr's request — persisted before
-  that converge issues any `nvme connect` — and against the live dm-clone tables. For a
+  that converge issues any `nvme connect` — and against the live dm-clone tables; and a
+  converge that finds a source whose disconnect is still in flight — which can complete
+  after the pass's locks are released — neither adopts nor reconnects it until that
+  disconnect has returned (`cnagent.md` CN10). One narrow window stays open between the
+  pass's read of the stored requests and its setting the disconnect going: another
+  cntlr's converge whose request is stored in that window can adopt the still-connected
+  source, which the disconnect then deletes under it (`cnagent.md` Known limits). For a
   `:2:` export holding no namespace and linked to no port but ours it is not, and no
   lock of this agent's can make it so (*amended 2026-09-28*): it is tested the same way
   against every stored side's request — the object-level pass judging only its own
@@ -2884,7 +2895,14 @@ cannot forget in that way: while the device is there, the next enumeration finds
   otherwise be reported as a leftover for ever. On the
   DN the consequence is sharper than a leak: a side's or a migration's allocation record
   is released only once its device is **verified** gone, because freeing extents a live
-  device still maps hands the same blocks to the next side.
+  device still maps hands the same blocks to the next side. On the CN the
+  `nvme disconnect` itself runs off the pass's locks, because a delete whose target
+  vanishes mid-delete waits out the kernel's admin timeout (§7): all the pass does with a
+  connection is probe it, a connection that still has a controller is a leftover of the
+  pass that sets its disconnect going, and a later pass's probe finds it gone. What the
+  cn keeps meanwhile is only which disconnects are still running or waiting to run, so
+  that none is issued twice and no converge adopts a connection being deleted — never a
+  list of removals owed (`cnagent.md` CN10, CN21).
 * **Top-down, and the descent stops at the first layer that left something behind.**
   The layers are the §3.1/§3.3 stack read downwards. Every unwanted object of a layer
   is attempted, but the layer below is skipped when this one left anything: a leg
@@ -4562,12 +4580,16 @@ exists.
   intended mitigation. Steady state is one fan-out per user mutation.
 * **The agent node lock has head-of-line blocking.** A pending node write
   (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
-  slowest in-flight object converge. Converges are bounded per command (§7),
-  but on a node where many commands run to their timeouts, one sick object
-  can delay every other object's converge and Check round by up to a whole
-  converge pass. Accepted: object locks keep steady-state concurrency, and
-  the §9.4 zeroing loop's try-acquire rule keeps the one long-running
-  background writer out of that queue.
+  slowest in-flight object converge. Converges are bounded per command (§7)
+  wherever the command's child can be killed; one blocked in an uninterruptible
+  kernel wait is not (§7), nor is an in-process sysfs, configfs or device access
+  once its syscall has started (`dnagent.md` SH15), and the cn sweep's
+  `nvme disconnect`, whose delete can wait out the kernel's 60 s admin timeout, runs
+  off the locks for that reason (`cnagent.md` CN21). On a node where many commands
+  run to their timeouts, one sick object can delay every other object's converge and
+  Check round by up to a whole converge pass. Accepted: object locks keep steady-state
+  concurrency, and the §9.4 zeroing loop's try-acquire rule keeps the one
+  long-running background writer out of that queue.
 * **No thin-metadata repair path is specified.** Pool metadata is redundant
   at the block layer (meta groups can be RedundMdRaid1), but there is no
   `thin_check`-on-activate or `thin_repair` flow for a pool whose dm-thin

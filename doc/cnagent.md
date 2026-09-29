@@ -336,10 +336,11 @@ CN-CM2. `runCn` mirrors `runDn` (CM4): bind viper, require the common
      portId)`, and call `agent.Serve` with the role's reconcile, a
      register func that
      calls `pb.RegisterControllerNodeAgentServer`, and `nil` for the SH27
-     background waiter — the cn owns no long-running child process, and its
-     CN11 probers are cancelled at `rootCtx`, never joined (§2.2: a wedged
-     direct read would hang shutdown forever). This replaces the
-     placeholder `"the cn role is not implemented yet"` error.
+     background waiter — the cn joins no background task: a sweep's
+     background `nvme disconnect` (CN10) holds nothing a restarted agent
+     needs, and its CN11 probers are cancelled at `rootCtx`, never joined
+     (§2.2: a wedged direct read would hang shutdown forever). This
+     replaces the placeholder `"the cn role is not implemented yet"` error.
 
 ## 4. The cn role — package `cnagent` [cn]
 
@@ -396,8 +397,12 @@ type CnAgentServer struct {
 	// in-memory mirrors of the local store: cn requests, cntlr states
 	// (applied request, ResInfo tracker, a per-clone agent.CloneChunkSet
 	// keyed by (src_slice_idx, bm_idx), connect
-	// retry registry, leg-prober registry), guarded by a leaf mutex.
-	// rootCtx anchors the CN10/CN18 retry loops and CN11 probers.
+	// retry registry, leg-prober registry), guarded by a leaf mutex, which
+	// also guards the CN10 disconnect registry — in memory only, never
+	// persisted. A buffered channel of disconnectConcurrency slots caps how
+	// many of the registry's disconnects run at once.
+	// rootCtx anchors the CN10/CN18 retry loops, the CN10 background
+	// disconnects and the CN11 probers.
 	// cloneMetaMu serializes the CN18 allocator (CN5): the registry is the
 	// kernel's dm tables, so enumerate → discard → create must be one
 	// critical section. It is the one cn lock held across OS calls — a leaf
@@ -418,7 +423,10 @@ CN1. Lock mapping (instantiates SH10-SH13): `SyncupCn` and the startup
      `OsClient` semaphore slot**: their IO is issued by the §2.2
      direct-syscall path, so a wedged prober can starve neither the lock
      hierarchy nor the node's 32-slot OS-command budget — which is what keeps
-     the teardown `nvme disconnect` that releases it runnable.
+     the teardown `nvme disconnect` that releases it runnable. That
+     disconnect takes no lock either: the sweep issues it through the CN10
+     disconnect registry, and under its locks the pass only probes the
+     connection.
 
 ### 4.3 Startup reconcile
 
@@ -918,12 +926,13 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       registers it no more, or teardown (the DN13 pattern); the RPC itself
       retries a connect, or waits for its head, only as far as the pass's
       budget allows. Four things register it: a leg that failed to converge
-      — its connect, its multipath namespace or its wrapper (above), or an
-      unknown controller (below) — a clone source whose
-      connection failed, a clone recovery whose destination bitmaps were
-      not applied or another clone failure CN18 lists (never a failed
-      allocation or replacement of its metadata wrapper), and a
-      `leg_list` member of a group that is not available (CN12;
+      — its connect, its multipath namespace or its wrapper (above), an
+      unknown controller or a disconnect of its subsystem still in flight
+      (below) — a clone source whose connection failed, or whose disconnect
+      is still in flight (below), a clone recovery whose destination bitmaps
+      were not applied or another clone failure CN18 lists (never a failed
+      allocation or replacement of its metadata wrapper), and a `leg_list`
+      member of a group that is not available (CN12;
       *amended 2026-09-26*, the failover ping-pong: a promotion whose first
       converge read its legs before the sides' ANA flips had reached this
       CN's sysfs left its md groups unassembled — and a RedundNone SP's
@@ -949,6 +958,52 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       controller is **gone**, no side's path: it is not unknown and never
       retired as a dead path, and a side it alone served reads unconnected
       and is connected again.
+      **The disconnect registry.** The CN21 sweep's `nvme disconnect --nqn` —
+      L10's legs, L5's clone sources and the node-level pass's unowned sources
+      — is never run inline: when the target vanishes mid-delete the kernel
+      cannot enter error recovery on a DELETING controller, the controller's
+      shutdown command waits out the admin timeout (60 s), and
+      `nvme disconnect` waits with it in an uninterruptible write that no
+      SH15 signal ends (`dnagent.md` SH15). Inline, that held the cntlr's object
+      lock — and every `CheckCntlr` round of the cntlr with it (CN1) — for the
+      whole minute, and the worker's `SyncupCntlr` ran into its own 60 s
+      deadline. So the pass probes the connection under its locks and nothing
+      more: one with no controller is gone; one the probe could not read is a
+      leftover and nothing is issued for it; one with a controller is a
+      leftover of that pass, which sets its disconnect going — unless one
+      already runs — from a goroutine on `rootCtx` that carries the pass's
+      trace id and takes none of the CN1 locks. A later pass's probe is what
+      finds it gone. At most `disconnectConcurrency` of these disconnects —
+      a quarter of `DefaultOsClientLimit`, 8 — run at once; the rest wait
+      for a slot and stay registered while they wait. Inline, a pass issued
+      its disconnects one at a time; uncapped, one L10 of many legs or one
+      pool drain would set them all going together, and each delete a
+      vanished target stalls holds an `OsClient` slot for the admin timeout
+      — enough of them, and the node's converges and Check rounds are
+      refused a slot at the soft timeout and report `ERROR` rows on healthy
+      objects. The registry is a server-wide set of subsystem NQNs under
+      the leaf mutex, and it is bookkeeping of work in progress, never memory
+      of work that failed: an entry lives exactly as long as its goroutine,
+      and it is read for two things. A later pass issues no second disconnect
+      of a subsystem whose first one is still running or waiting for a slot.
+      And the connect steps read it too: a converge that wants a subsystem
+      whose disconnect is still in flight neither adopts nor connects it —
+      the controller it would adopt is about to be deleted under it, and one
+      connected beside it could go with it, the disconnect being by NQN — so
+      the step fails, the CN10/CN18 retry registers, and the first pass after
+      the goroutine has gone reads the subsystem afresh and connects whatever
+      is missing. The CN28 probe asks the same question: while the
+      disconnect is in flight it reports the leg's row, or the clone's
+      target row, `ERROR` with the converge's own details, and it does not
+      judge that clone's step 2 — so the two channels neither flip those
+      rows, and their epochs, against each other nor disagree on how far
+      the clone got. Whether a connection is left over is never read from
+      the registry, only off the node — so a disconnect that failed is
+      issued again by the next pass that still finds the controller. The
+      goroutine is not joined at exit (`dnagent.md` SH27).
+      The dead-path `nvme disconnect --device` above is the build's, not the
+      sweep's, and runs in the pass, so it can still meet the same wait under
+      the object lock (Known limits).
       `Side.err_epoch` is CP bookkeeping and is ignored.
 
 CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
@@ -1001,8 +1056,10 @@ CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
       teardown's own disconnect (deleting the controller errors its queued
       IO) and is accepted as unreclaimable until then. Because that wedged
       probe holds an **open fd on the leg wrapper**, the teardown order is
-      cancel the prober → **disconnect the leg** → remove the wrapper
-      (CN21): a `dmsetup remove` issued before the disconnect fails EBUSY.
+      cancel the prober → **set the leg's disconnect going** → remove the
+      wrapper (CN21): a `dmsetup remove` fails EBUSY until the disconnect,
+      which runs off the pass (CN10), has errored the queued IO, so such a
+      wrapper normally goes on a later pass.
       Cancellation is never a join — the direct read is uninterruptible,
       so waiting for it would hang shutdown forever (§2.2, `dnagent.md`
       SH27). A wedged prober costs nothing else: it holds no lock (CN1) and
@@ -1737,7 +1794,11 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          entry it alone serves reads unconnected and is connected again — a
          duplicate the host refuses while that controller lives, which
          fails step 1 once the budget is spent — and nothing is
-         disconnected, since step 1 retires no path.
+         disconnected, since step 1 retires no path. A source whose
+         disconnect a sweep has set going is neither adopted nor connected
+         while that disconnect runs (*amended 2026-09-29*): step 1 fails
+         naming it, and the retry reads the source afresh once the
+         disconnect has returned (CN10's disconnect registry).
       2. Allocate the clone's metadata slot from the §2.1 arena:
          `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)` **contiguous**
          units with `region_cnt = td.size / block_size` (one byte per region
@@ -1945,10 +2006,13 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
         them and nothing is written.
       * **L5** disconnects the source subsystem — the third object, and the
         one only a clone that has left `clone_list` loses (`--nqn` is safe
-        here: every path of it is going). The set of unowned sources is
-        computed at L5 rather than when the chain was built, because until L3
-        has actually removed it the dm-clone still maps its own source and
-        would keep it claimed.
+        here: every path of it is going). The disconnect runs off the pass
+        (CN10), so the connection is that pass's leftover until a later pass
+        finds it gone, and a clone created on the same source meanwhile
+        waits for it rather than adopt it (step 1). The set of unowned
+        sources is computed at L5 rather than when the chain was built,
+        because until L3 has actually removed it the dm-clone still maps its
+        own source and would keep it claimed.
       The clone's `clone-bm-*` files are **not** part of that chain. They are
       swept separately, at the end of the cntlr-level sweep (CN21), against
       the stored `clone_list` (SH7) — a clone that left the list loses them, one
@@ -2028,8 +2092,12 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
         under the node **write** lock: every sp that appears on the node and
         is **not** in the stored `cntlr_pointer_list` — wanted set empty —
         plus the cross-sp objects of the attribution rules below. The write
-        lock is what makes removing an *unowned* object safe: no cntlr
-        converge, no Check round and no push runs beside it.
+        lock is what makes judging an *unowned* object safe: no cntlr
+        converge, no Check round and no push runs beside the pass. A
+        disconnect the pass sets going can complete after the lock is
+        released (CN10), so it is CN10's registry, read by the CN10/CN18
+        connect steps, that keeps a converge from adopting that connection
+        meanwhile.
       * **cntlr-level**, in `convergeCntlr` in the old retire phase's place,
         under that converge's CN1 locks — node **read** plus that cntlr's
         object lock on the `SyncupCntlr` and connect-retry paths, the node
@@ -2041,7 +2109,14 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
         safe because "in use" is read from **every** stored cntlr's request
         (and from the live tables), and a cntlr's request is stored before
         its converge issues any `nvme connect`, so a source another cntlr is
-        about to use is already claimed.
+        about to use is already claimed; and a converge that finds a source
+        whose disconnect is still in flight neither adopts nor reconnects it
+        until that disconnect has returned (CN10). One window stays open.
+        Another cntlr's request can be stored after this pass has read the
+        stored requests, and that cntlr's CN18 step 1 can run before this
+        pass has set the disconnect going. That converge finds the source
+        still connected and adopts it, and the disconnect then deletes the
+        source under the new dm-clone (Known limits).
       An sp that **is** in the pointer list gets **no chain of its own** at
       node level, even with no cntlr file: CN8 introduces the pointer before
       the `SyncupCntlr`, and after a lost `--local-store` the resources exist
@@ -2167,7 +2242,10 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       * **L5** — `:4:` source connections that nothing maps any more. The set
         is evaluated **here**, not when the chain was built: a snapshot taken
         before L3 still shows the dm-clone this pass is removing mapping its
-        own source, and deciding early would never disconnect it.
+        own source, and deciding early would never disconnect it. Their
+        disconnects run off the pass (CN10), so a pass that sets one going
+        leaves it behind and, by the stop rule below, the layers under L5
+        wait for the pass that finds it gone.
       * **L6** — per-td raid0s and dm-errors.
       * **L7** — each thin volume removed and then, only if its pool is one
         the desired state still wants, the pool-side `delete` of its id
@@ -2176,14 +2254,18 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       * **L9** — md arrays (`mdadm --stop` on the node **sysfs** named, CN12)
         and `CnGrpName` linears.
       * **L10** — legs, in the one order that is deliberately **not**
-        top-down: **cancel the probers, then disconnect the legs**
-        (whole-NQN is fine here: every path of an unwanted leg is going),
-        **then remove the leg wrappers**. A wedged prober holds an open fd on
-        the wrapper, so removing the wrapper first fails EBUSY; the
-        disconnect errors the queued IO, the prober's fd closes, and the
-        removal then succeeds (§2.2, CN11). A wrapper is removed even when
-        its own connection would not go: they are two different objects, and
-        the connection is what the next round retries.
+        top-down: **cancel the probers, then set the legs' disconnects
+        going** (whole-NQN is fine here: every path of an unwanted leg is
+        going; off the pass, through the CN10 disconnect registry), **then
+        remove the leg wrappers** without waiting for them. A wedged prober
+        holds an open fd on the wrapper, so its removal fails EBUSY until the
+        disconnect has errored the queued IO and the prober's fd has closed
+        (§2.2, CN11); setting the disconnects going first only gives a quick
+        one the chance to release such a wrapper within the pass — otherwise
+        it goes on a later pass. A wrapper is removed even when its own
+        connection is still there: they are two different objects, and the
+        connection is a leftover of this pass that a later pass's probe
+        finds gone.
       No `delete` message is ever sent for a thin volume whose pool is itself
       going (CN14: this is deactivation, the metadata on the legs is the next
       CN's to find), and nothing in any layer runs `mdadm --detail` (CN12).
@@ -2414,9 +2496,9 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
 | `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: the array holding the group's `leg_list` wrappers, read from `/sys/block/mdN/md/` — `array_state`, and for a running array `degraded`, `sync_action` and `sync_completed`, plus `dev-*/{state,block/dev,block/dm/name}` — never `mdadm --detail`, which opens a member and can block on a dead one for ~13 s (CN12; *amended 2026-09-26*, the failover ping-pong: the killed probe read `ERROR` for a leg's fault). A running array (degraded included) ⇒ OK with `details` = `array_state`, then `degraded` while `md/degraded` is non-zero, then the word of a sync that is running (`recovering`, `resyncing`, `checking`, `repairing`, `reshaping`; none while `sync_completed` reads `none`) followed by its `(<done> / <total>)` sectors — e.g. `clean, degraded, recovering (32768 / 2093056)`. The words follow mdadm's State line, which the suites grep, and `repairing` is ours; the state and the sectors are sysfs's (mdadm prints its progress as a separate `Rebuild Status` line). No answering array holds the group's legs (none matched, or the match stopped between the walk and its read) and no array of the walk is unanswered, or `array_state` `clear` ⇒ `RES_STATUS_MISSING`; an array that is not running (`inactive`, `broken`, …) ⇒ `RES_STATUS_ERROR` with the state as `details`; a foreign member of the matched array, two answering arrays holding the group's legs, a `/sys/block` listing or a read of the matched array that did not answer, or no match — or a match that stopped since the walk — while another array of the walk did not answer (it may be the group's own; `details` name it) ⇒ `RES_STATUS_ERROR`. Beside a match, an array of the walk that did not answer is ignored and the row reads the match (CN12, *amended 2026-09-26*: a read of another sp's array that did not answer must not turn this row `ERROR`). RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
-| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed |
+| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed. A leg whose subsystem's sweep disconnect is still in flight (CN10's disconnect registry) reports `RES_STATUS_ERROR` with the converge's own details and is not probed |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
-| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here |
+| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here. While a sweep's disconnect of `src_nqn` is in flight (CN10's disconnect registry) it is `RES_STATUS_ERROR` with the converge's own details, whatever the walk shows |
 | `clone_id_to_dm_clone[c]` | `CnCloneFinalName` | `dmsetup status`; `details` carries the raw status line (§9.5 — hydration progress; `DeleteClone`'s force check reads it). `RES_STATUS_ERROR` `"metadata wrapper missing"` when the arena could not supply the slot (CN18 step 2) |
 | `clone_id_to_meta[c]` | `CnCloneMetaDmName` | `dmsetup table` of the kind-`cb` wrapper: present, length = the CN18-computed unit count × `CnCloneMetaUnit` / 512 sectors, and the table's backing device equals the **currently probed** loop path; any mismatch (e.g. a tmpfs remounted under a live agent) ⇒ `RES_STATUS_ERROR`, whose repair path is the §11.5 clone rebuild (CN18 step 2) |
 
@@ -2949,9 +3031,11 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    to: the arena is per CN, but a wrapper of *this* sp that no clone of this
    sp's request names is exactly what CN21's L4 removes); removal asserts
    CN9's pre-step park and CN21's L3 → L4 → L5 — ns-dev reload → clone
-   remove → **wrapper remove** → disconnect — in that order, followed by the
-   `rm -f` of the clone's chunk file (CN18), and leaves the ns-dev back on
-   the raid0 where the build phase put it. The fresh build's reply also pins
+   remove → **wrapper remove** → disconnect — in that order, the pass's
+   `rm -f` of the clone's chunk file (CN18) after the wrapper removal, the
+   source connection as the pass's one leftover (its disconnect runs off the
+   pass, CN10), and leaves the ns-dev back on the raid0 where the build
+   phase put it. The fresh build's reply also pins
    the CN20 shape: one `BitmapInfo` for the clone whose `chunk_id_list` is
    exactly the pushed pair and whose `bm_idx_list` is **empty** — a clone
    never fills the migration field.
@@ -2961,8 +3045,10 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     forgotten before anything is removed (CN7's drop-then-sweep split,
     `architecture.md` §9.8) — then the ns-dev park, the subsystem `rmdir`,
     the ns-dev, the raid0, the thin volume, the pool and a
-    leg wrapper; and for one leg, its `nvme disconnect --nqn` strictly before
-    that wrapper's removal (CN21 L10). No `0 delete ` message is sent at all
+    leg wrapper; the two leg connections, and nothing else, named as the
+    pass's leftovers (their disconnects run off the pass, CN10 and CN21
+    L10); each leg disconnected exactly once; and the re-sync once the
+    disconnects have returned replying 0. No `0 delete ` message is sent at all
     (CN14: an sp leaving the node deactivates, it never deletes thin ids), no
     dm device of the node survives, and the §3.2 base state does — the tmpfs
     is still mounted and its single loop device still attached, which is the
@@ -3104,7 +3190,45 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     mutates.
 13. **Lock smoke** (CN1): a `SyncupCntlr` blocked in a slow scripted
     command blocks a same-cntlr `SyncupCntlr` but not a `CheckCn` round or
-    another cntlr's converge.
+    another cntlr's converge. `TestAStuckDisconnectDoesNotHoldTheCheckRound`
+    (CN10's disconnect registry): with every `nvme disconnect` parked by the
+    fake's `blockCmd` — a child that ignores its ctx the way one in an
+    uninterruptible kernel wait ignores SIGTERM and SIGKILL — the pass that
+    drops a standby's two legs (`SP_LEVEL_NO_SIDE`) returns with both
+    connections named as leftovers, a `CheckCntlr` round of the same cntlr
+    gets through, a re-sync issues no second disconnect of either subsystem
+    (counted), and once the kernel lets go the next Check round and the
+    next re-sync reply 0. `TestAFailedDisconnectIsIssuedAgain`: a background
+    disconnect that fails leaves the registry with its goroutine, the
+    connection stays a leftover because the node still holds its
+    controller, and the next pass issues the disconnect again — exactly
+    once more. `TestAStuckDisconnectDoesNotHoldTheNodeLock`: the same
+    parked disconnects under a `SyncupCn` that drops the cntlr's pointer
+    (the pool drain's shape, under the node write lock) — the pass replies
+    naming both connections, a `CheckCn` round gets through, and the
+    re-sync once the kernel lets go replies 0 with each leg disconnected
+    exactly once. `TestADisconnectOutlivesTheRpcCtx`: a disconnect held on
+    the fake's ctx-honouring gate still completes after the RPC's ctx is
+    cancelled, as gRPC cancels it when the handler returns — the goroutine
+    runs on `rootCtx`. `TestARecreatedCloneNeverAdoptsADyingSource` and
+    `TestARestoredLegNeverAdoptsADyingConnection`: a clone re-created on a
+    source whose disconnect is parked, and a level lowered back below
+    `SP_LEVEL_NO_SIDE` while the legs' disconnects are parked, build
+    nothing and connect nothing while the disconnect runs — the leg rows
+    are `ERROR` naming it, in the converge's reply and a Check round's
+    alike — and once it has returned the connect retry builds each over a
+    fresh connection, connected exactly once.
+    `TestTheCheckRoundMirrorsTheDisconnectGate`: with that source's
+    disconnect parked and the arena then filled, a Check round reports the
+    dm-clone `MISSING` as the converge did, not the step 2 refusal pair,
+    and the clone's target row with the converge's status and details.
+    `TestABackgroundDisconnectCarriesThePassTraceId`: each leg's background
+    disconnect runs under the trace id of the pass that set it going.
+    `TestTheBackgroundDisconnectsRunAFewAtATime`: the cap is a quarter of
+    `DefaultOsClientLimit`; shrunk to one with both leg disconnects parked,
+    one is issued and the other waits, registered — the re-sync issues no
+    disconnect — and once they are released each subsystem is disconnected
+    exactly once and the next re-sync replies 0.
 14. **Thin bitmaps** (CN25-CN27): scripted `thin_dump` XML drives: reserve
     → dump → release ordering, release also on a scripted dump failure and
     after an "already reserved" retry; the wire inversion (mapped ⇒ 0);
@@ -3135,9 +3259,11 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     `OsClient` at all, and is pinned by §7 acceptance 5 plus that
     no-`OsClient`-call assertion. Single flight needs no assertion of its
     own: `legProbeLoop` runs each round inline on its ticker, so a blocked
-    round can only delay the next one. The teardown ordering assertion is
-    explicit: the leg's `nvme disconnect` is recorded **before** the
-    `dmsetup remove` of its wrapper (CN21).
+    round can only delay the next one. The teardown ordering of CN21's L10
+    has no completion order left to assert: the leg's `nvme disconnect` is
+    set going before the `dmsetup remove` of its wrapper and runs off the
+    pass (test 13), so a wedged prober's wrapper normally goes on a later
+    pass.
 16. **cmd**: the `architecture.md` §13 example `dnv-agent cn …` invocation parses; `--disk`
     is rejected for `cn`; `--capacity` reaches `GetCnSize` verbatim; env
     `DNV_AGENT_CAPACITY` overrides the flag default (CM3).
@@ -3845,6 +3971,49 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   bump, a non-zero reply code, an agent restart). The follow-up is a
   `clone_id_to_dm_clone` row that says the build is unfinished, which needs
   a decision on how the worker's health pass treats it.
+* **A controller delete whose target vanishes mid-delete waits out the
+  kernel's admin timeout** (2026-09-29): when a disk node removes a side's
+  export while this CN's `nvme disconnect` of the leg is mid-delete — the
+  two ends of a leg removal, or of a pool drain, are separate RPCs to
+  separate agents — the kernel cannot enter error recovery on the DELETING
+  controller, so its shutdown command waits out `nvme_core.admin_timeout`
+  (60 s), and the disconnect with it, in an uninterruptible write that no
+  SH15 signal ends. The e2e runs of 2026-09-28 hit it three times in four at
+  slice counts up to 4. The sweep issues the disconnect off its locks
+  (CN10's disconnect registry), so the stall no longer holds the cntlr's
+  object lock and its Check rounds, a `SyncupCn`'s node write lock, or the
+  worker's `SyncupCntlr` past its deadline; the connection reads as a
+  leftover until the kernel lets go, and the child keeps one of the node's
+  `DefaultOsClientLimit` `OsClient` slots for the whole wait
+  (`osclient.md` §4.2). The pool drain keeps its cross-role race for now —
+  it deletes an sp's cntlrs and then its slices and waits on no agent
+  (`dnv-worker.md` SPD13) — and how often it hits the stall is to be
+  measured. A drain that catches many deletes in the kernel at once holds
+  at most `disconnectConcurrency` (8) of those slots (CN10), and the rest
+  of its disconnects wait for one: their connections stay leftovers, and a
+  converge that wants one of them back waits as well, about a minute for
+  every eight stuck deletes ahead of it. Two
+  disconnects still run inline and can meet the same wait under their
+  locks: the build's dead-path `nvme disconnect --device` of a migration's
+  retired side (CN10) — the source after `FinishMigration`, the
+  destination after `CancelMigration` — whose disk node tears that side's
+  export down in the same fan-out, and the dn sweep's disconnect of a `:3:`
+  migration-source connection (`dnagent.md` DN6), whose source disk node
+  drops the migration export in the same fan-out. Neither is moved off its
+  locks yet.
+* **A clone source judged unused can be adopted before its disconnect is
+  registered** (2026-09-29): a cntlr-level L5 reads the stored requests and
+  the live dm-clone tables, probes the source, and only then sets its
+  disconnect going (CN10). Another cntlr of the same CN converges beside it
+  under its own object lock. That cntlr's request can be stored after the
+  read, and its CN18 step 1 can pass the registry check before the
+  disconnect is registered; it then adopts the still-connected source and
+  builds its dm-clone on it, and the disconnect deletes the source
+  underneath. Reads of regions not yet hydrated then fail until a later
+  converge of that cntlr connects the source afresh and reloads the table.
+  The window runs from that read to the registration; while the disconnect
+  ran inline under the lock, it lasted the whole disconnect as well. Not
+  closed here.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

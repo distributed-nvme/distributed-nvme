@@ -699,9 +699,9 @@ func (s *DnAgentServer) dropRemovedSides(
 // /dev/mapper/{DnSideName} open, and `dmsetup remove` on a device with an
 // open fd fails EBUSY, so the sweep that follows would find the side device
 // pinned by this very process. The wait is bounded — the child is SIGTERMed
-// at CmdSoftTimeout and SIGKILLed at CmdHardTimeout — and the loop never
-// blocks on a lock, so waiting here under the node write lock cannot deadlock
-// (DN9).
+// at CmdSoftTimeout and SIGKILLed at CmdHardTimeout, a child in an
+// uninterruptible kernel wait aside (SH15) — and the loop never blocks on a
+// lock, so waiting here under the node write lock cannot deadlock (DN9).
 func (s *DnAgentServer) dropSideState(
 	ctx context.Context,
 	key string,

@@ -4365,7 +4365,7 @@ func TestSpLevelLadder(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	revision := uint64(2)
-	resync := func(level pb.SpLevel) *pb.SyncupCntlrReply {
+	send := func(level pb.SpLevel) *pb.SyncupCntlrReply {
 		t.Helper()
 		revision++
 		node.Reset()
@@ -4375,6 +4375,11 @@ func TestSpLevelLadder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("level %v: %v", level, err)
 		}
+		return reply
+	}
+	resync := func(level pb.SpLevel) *pb.SyncupCntlrReply {
+		t.Helper()
+		reply := send(level)
 		if reply.GetAgentReply().GetCode() != 0 {
 			t.Fatalf("level %v rejected: %v", level, reply.GetAgentReply())
 		}
@@ -4417,7 +4422,11 @@ func TestSpLevelLadder(t *testing.T) {
 		t.Fatalf("NO_MIGRATION mutated relative to NO_REDUND: %q", call)
 	}
 
-	resync(pb.SpLevel_SP_LEVEL_NO_SIDE)
+	// CN21: the legs' disconnects run off the pass's locks, so the pass that
+	// sets them going names the connections as leftovers.
+	cnSweepOnlyDisconnects(t,
+		send(pb.SpLevel_SP_LEVEL_NO_SIDE).GetAgentReply(), "NO_SIDE")
+	awaitDisconnects(t, srv)
 	if _, ok := node.dms[legName(srv, testMetaLeg)]; ok {
 		t.Fatalf("a leg wrapper survived NO_SIDE")
 	}
@@ -4463,12 +4472,15 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncupCn: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("rejected: %v", reply.GetAgentReply())
+	// CN21: the legs' disconnects run off the pass's locks, so the pass that
+	// sets them going names the two connections, and nothing else, as
+	// leftovers.
+	cnSweepOnlyDisconnects(t, reply.GetAgentReply(), "the teardown")
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		cnSweepAssertDetails(t, reply.GetAgentReply(), legNqn(srv, legId),
+			"the teardown")
 	}
-	// The top-down chain. The leg rows are a subsequence over two legs, so
-	// they cannot pin the per-leg order — the CN21 flip is asserted on the
-	// meta leg's own two calls below.
+	// The top-down chain.
 	assertOrder(t, node,
 		// The cntlr is FORGOTTEN first — file, chunks, memory entry —
 		// and its resources are then found by name by the node-level sweep.
@@ -4485,16 +4497,21 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 		"cmd dmsetup remove "+poolName(srv),
 		"cmd dmsetup remove "+legName(srv, testMetaLeg),
 	)
-	// CN21: one leg disconnects *before* its wrapper
-	// is removed — a probe wedged on a pathless leg holds an open fd on the
-	// wrapper, and only the disconnect errors its queued IO.
-	metaNqn := srv.nf.SideToCnNqn(testCluster, testSp, testMetaLeg, testCn)
-	disconnected := node.indexOfCall("cmd nvme disconnect --nqn " + metaNqn)
-	unwrapped := node.indexOfCall(
-		"cmd dmsetup remove " + legName(srv, testMetaLeg))
-	if disconnected < 0 || unwrapped < 0 || disconnected > unwrapped {
-		t.Fatalf("CN21 order: disconnect at %d, wrapper removal at %d\n%s",
-			disconnected, unwrapped, strings.Join(node.Calls(), "\n"))
+	// CN21: each leg is disconnected exactly once, and the worker's re-sync
+	// once the disconnects have returned finds nothing left.
+	awaitDisconnects(t, srv)
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		if n := len(node.callsMatching(
+			"cmd nvme disconnect --nqn " + legNqn(srv, legId))); n != 1 {
+			t.Fatalf("leg %#x was disconnected %d times", legId, n)
+		}
+	}
+	reply, err = srv.SyncupCn(context.Background(), cnReq(3, false))
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("the re-sync: %v", reply.GetAgentReply())
 	}
 	// CN14: a teardown deactivates, it never deletes thin device ids.
 	assertNoCall(t, node, "0 delete ")

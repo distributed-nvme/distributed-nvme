@@ -794,10 +794,10 @@ req_set() { # file jq-filter
 
 # cn_syncup_cntlr posts one request file at the CN's current revision. The
 # caller bumps the counter first, in the parent shell (§9), so this is safe
-# inside a command substitution.
-cn_syncup_cntlr() { # cnidx file
+# inside a command substitution. Extra arguments go to cnagentctl.
+cn_syncup_cntlr() { # cnidx file [cnagentctl args...]
 	req_set "$2" ".revision = \"${CNREV[$1]}\""
-	cnctl "$1" syncup-cntlr --req "$2"
+	cnctl "$1" syncup-cntlr --req "$2" "${@:3}"
 }
 
 # ---------------------------------------------------------------------------
@@ -2588,24 +2588,27 @@ dn_drop_until_clean() { # dnidx secs
 }
 
 # cn_drop empties a CN's cntlr pointer list, which is the declarative cntlr
-# teardown of CN7/CN21.
+# teardown of CN7/CN21. The sweep sets its leg disconnects going off its locks
+# (CN21), so the pass that does replies ReplyCodeLeftover naming the
+# connections, and the same request is clean once they have returned: the
+# worker's re-send, which is cn_drop_until_clean at the new revision.
 cn_drop() { # cnidx
-	local out
 	bump_cn_sync "$1"
-	out=$(cnctl "$1" syncup-cn --revision "${CNREV[$1]}")
-	assert_cn_info_ok "$out" "cn$1 teardown"
+	cn_drop_until_clean "$1" 30
 }
 
-# cn_drop_until_clean is cn_drop's retrying twin — see dn_drop_until_clean for
-# why it re-sends rather than bumps, why only code 4 is tolerated in between,
-# and why the first reply is logged.
+# cn_drop_until_clean is the retrying half of cn_drop — see
+# dn_drop_until_clean for why it re-sends rather than bumps, why only code 4 is
+# tolerated in between, and why the first reply is logged.
 #
 # The request it sends is cn_drop's, an empty cntlr pointer list, at ${CNSYNC},
-# the revision SyncupCn last stored on that node. That is the same revision the
-# shape's own SyncupCn used, so the first call here is an equal-revision
-# re-apply whose body happens to have lost the cntlr pointer — legal, and
-# precisely the shape the sp-worker produces when it deletes a cntlr record
-# without waiting for anybody (plan §1.1).
+# the revision SyncupCn last stored on that node. Called directly (case T's CN1
+# drops), that is the revision the shape's own SyncupCn used, so the first call
+# is an equal-revision re-apply whose body happens to have lost the cntlr
+# pointer — legal, and precisely the shape the sp-worker produces when it
+# deletes a cntlr record without waiting for anybody (plan §1.1). Called from
+# cn_drop, CNSYNC has just been bumped: the first call is the new revision and
+# the rest are the worker's re-sends of it.
 cn_drop_until_clean() { # cnidx secs
 	local idx=$1 secs=$2 out code details deadline first=1
 	deadline=$((SECONDS + secs))
@@ -3680,9 +3683,10 @@ s5_pinned_wrapper() {
 	# The D8 rule on hardware: a layer that leaves something behind stops the
 	# descent, and the leg wrappers are the LAST layer — so everything above
 	# this wrapper is already gone and the wrapper is all that is left. Its own
-	# leg was disconnected in that same layer: the connection and the wrapper
-	# are two different objects, and only one of them is stuck. An assert_eq
-	# and not a grep, because "exactly this and nothing else" is the assertion.
+	# leg's disconnect was set going in that same layer: the connection and
+	# the wrapper are two different objects, and only one of them is stuck. An
+	# assert_eq and not a grep, because "exactly this and nothing else" is the
+	# assertion.
 	got=$(helper 1 "cn_residue $(hex16 "${CNID[1]}")")
 	assert_eq "$got" "$pinned" \
 		"s5: the residue while pinned must be exactly the pinned wrapper"
@@ -3948,7 +3952,7 @@ case_clone_xfer() {
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
-	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel
+	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel deadline
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -4332,9 +4336,22 @@ case_clone_xfer() {
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
-	out=$(cn_syncup_cntlr 2 "$req2")
+	# The source's disconnect runs off the sweep's locks (CN21), so this pass
+	# names the :4: connection as a leftover; the worker's re-send of the same
+	# request is clean once the disconnect has returned.
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4)
 	assert_map_ok "$out" td_id_to_raid0 "$S_TD" "clone_xfer finalized"
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer finalized"
+	case "$(jq_of "$out" '.agent_reply.details // ""')" in
+	*"$NQN_PREFIX:4:"*) ;;
+	*) die "clone_xfer: the finalize leftover is not the source connection" ;;
+	esac
+	deadline=$((SECONDS + 30))
+	until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: the source connection outlived 30 s"
+		sleep 2
+	done
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"

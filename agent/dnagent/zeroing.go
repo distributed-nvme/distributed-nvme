@@ -95,7 +95,9 @@ func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 // point: the `blkdiscard --zeroout` child holds /dev/mapper/{DnSideName} open,
 // and `dmsetup remove` on a device with an open fd fails EBUSY. It is bounded
 // by CmdHardTimeout (the OsClient SIGTERMs the child at CmdSoftTimeout and
-// SIGKILLs it CmdHardTimeout−CmdSoftTimeout later) plus one zeroLockPoll.
+// SIGKILLs it CmdHardTimeout−CmdSoftTimeout later) plus one zeroLockPoll —
+// unless the child sits in an uninterruptible kernel wait, which no signal
+// ends (SH15): the wait then lasts until the kernel returns.
 //
 // s.mu is a leaf lock never held across an OS call, so the cancel and the wait
 // happen outside it — the stopMigrRetry / stopLegProbers shape.
@@ -136,8 +138,9 @@ func (s *DnAgentServer) deregisterZeroing(st *sideState, done chan struct{}) {
 // Each batch is one traceable operation (SH2). The `blkdiscard --zeroout` runs
 // **lock-free** under the ordinary SH15 timeouts — unlike the probers' block
 // IO it is a
-// killable child process, so holding an OsClient semaphore slot is bounded by
-// CmdHardTimeout and needs no carve-out — and only the volume-table update
+// child process, so holding an OsClient semaphore slot is bounded by
+// CmdHardTimeout, unless the child sits in an uninterruptible kernel wait
+// (SH15), and needs no carve-out — and only the volume-table update
 // afterwards takes node-read plus the side's object lock. The command alone
 // holds one of the agent's zeroing slots (zeroSlot); the record read, the
 // table update and the retry pace hold none.
