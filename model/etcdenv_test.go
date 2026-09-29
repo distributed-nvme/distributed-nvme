@@ -106,7 +106,9 @@ func startEtcd(bin string) (string, func(), error) {
 		// below CreateStoragePool's 967-compare maximum shape, which is what
 		// SIZES the requirement (gateway.md §2.1), and below the 486 compares
 		// one maximum-shape sp-drain batch reaches (SPD13) — and THIS package
-		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14).
+		// commits that batch, in TestDrainSpSliceAtTheCeiling (SPD14), as it
+		// commits the created flip's 514-compare transactions (RW19) in
+		// TestFlipCreatedAtTheTdCeiling.
 		// (DeleteClone's rectangle sweep — then 256 keys, at the 16-slice
 		// ceiling of the time — was this flag's founding justification and is
 		// gone; the clone drain's batches fit the default, CLD11.)

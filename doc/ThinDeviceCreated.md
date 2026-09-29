@@ -51,7 +51,7 @@ decision, not an assumption.
 | R3 | A td deleted and recreated under the same name is a **different td**: new `td_id` (from `next_id`), new `dev_id` (from `next_dev_id`), `created = false`. | ids are never reused (§8.7); the key is rewritten, not updated. |
 | R4 | Flip predicate: `agent_reply.code == 0`, and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
-| R6 | One STM and one bump **per reply**, covering every td that reply completes (batching allowed). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
+| R6 | One STM and one bump **per reply** for up to `MaxFlipCreatedPerTxn` (256) completed tds (batching allowed); a reply that completes n > 256 costs ⌈n / `MaxFlipCreatedPerTxn`⌉ STMs and at most as many bumps, in list order (U3-S3 step 4). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
 | R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; an ns-dev needs no gate — CN16's backing rules never read `created`, so an uncreated td's ns-dev takes whatever backing CN16 picks: its raid0 in the converge that builds it, unless a clone targets the td or the namespace is parked (U2-S4) — and clone destinations are empty tds ([D3]). |
 | R8 | `DeleteThinDevice` of an origin is refused while any snapshot of it has `created == false`, found by reading the SP's tds in a read-only plan that the deciding STM verifies by the pool's identity (`cluster_id`, `sp_id`) and revision (no reverse index, no counter on the origin). | Retire runs before build (CN9): an origin leaving `td_list` in the converge that first materializes its snapshot sends `delete {ori dev_id}` before `create_snap` and loses the snapshot for good. `ListThinDevices` already reads the same set in one STM. |
 | R9 | The cn agent **uses** the flag: `created == true` means "never send a `create_thin`/`create_snap` for this td again" (the `delete {dev_id}` a td leaving `td_list` triggers stays ungated — R2/N4). | A failover sends zero device-set-mutating pool messages instead of one failing `create_thin`/`create_snap` per td × slice (the rebuild's only `dmsetup message` traffic is the CN14 sweep's reserve/release pair — R14), and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what the unconditional `create_thin` before this change did. |
@@ -317,7 +317,8 @@ completes no candidate causes no etcd traffic at all — steady state costs
 nothing, and the re-sync that follows a bump (below) finds its own tds
 already `true`.
 
-**U3-S3 One STM per reply (R5, R6).** If the candidate set is non-empty:
+**U3-S3 One STM per reply, one per `MaxFlipCreatedPerTxn` candidates of a
+larger one (R5, R6).** If the candidate set is non-empty:
 
 1. For each candidate, re-read `{p} thin_device {cluster_id} {sp_id}
    {td_name}`. Skip it when the key is absent (deleted meanwhile), when its
@@ -331,6 +332,15 @@ already `true`.
    change and there is no bump.
 3. Log per log.md §5.3 (`etcd get`/`etcd put` records inside the STM; a
    retried transaction logs twice, which is expected).
+4. A set of more than `MaxFlipCreatedPerTxn` (256, `dnv-worker.md` §2.1)
+   candidates runs steps 1–3 once per that many of them, in list order,
+   each its own STM. One STM compares every key it read and every key it
+   wrote, at most `2 × 256 + 2` = 514, within `EtcdMaxTxnOps`. (Taking
+   the MAY below would add to the STM it folds into a read of the `Slice`
+   of each side the `provisioned` flip lists and a write of each `Slice` it
+   changes, up to `2 × MaxSliceCntPerSp` more.) One STM over the whole set
+   would exceed `EtcdMaxTxnOps` past 511 candidates, and etcd would refuse
+   it again on every round, so nothing would ever flip.
 
 The bump re-fans the SP: `SyncupSide` to every side and `SyncupCntlr` to
 every cntlr with the new `td_list` (§10.3). That is the delivery path of
@@ -339,17 +349,19 @@ its own bump, so the re-sync's reply — which reports the same rows `OK` —
 finds no candidate. Two workers or two replies racing on one td meet at step
 1 and only one writes.
 
-Several tds completed by one reply share the one STM and the one bump (R6);
-the worker MAY also fold a pending `provisioned` flip of the same SP into
-the same transaction — the two rules are independent and both bump once.
-(The implementation does not take the MAY: the two flips run as two
-consecutive STMs.) Replies do not get one STM each either: the sp worker
-drains every report pending on its channel at that moment — across replies
-and across cntlrs — and folds all their candidates into the one
-`FlipCreated` call. Only the primary fills thin rows, so one reply per
-round per SP remains the common case; the fold is at most one STM and one
-bump regardless, and the flag is monotonic, so the batching is
-observationally equivalent.
+Several tds completed by one reply share one STM and one bump (R6), up to
+`MaxFlipCreatedPerTxn` of them; the worker MAY also fold a pending
+`provisioned` flip of the same SP into one of those transactions, at the
+cost step 4 names — the two rules are independent and both bump once. (The
+implementation does not take the MAY: the provisioned flip runs as its own
+STM, right before the created flip's STM or STMs.) Replies do not get one
+STM each either: the sp worker drains every report pending on its channel
+at that moment — across replies and across cntlrs — and folds all their
+candidates into the one `FlipCreated` call. Only the primary fills thin
+rows, so one reply per round per SP remains the common case; the fold is at
+most one STM and one bump per `MaxFlipCreatedPerTxn` candidates regardless
+(step 4), and the flag is monotonic, so the batching is observationally
+equivalent.
 
 **U3-S4 Ownership and restarts.** The flip is idempotent and driven by
 observation, so a worker restart or a shard-ownership change (§10.1) needs
@@ -365,7 +377,9 @@ healthy, not ready, no `err_epoch`, and — here — not created.
 
 **Tests (worker; landed in `worker/sprole_test.go` (`TestSpCompletedTds`,
 `TestSpCreatedFlipOnlyForUncreatedTds`, `TestSpFlipRecordsOnlyAppliedRefs`,
-…) and `model/ops_test.go` (`TestFlipCreated`) — dnv-worker.md §13
+…) and `model/ops_test.go` (`TestFlipCreated`,
+`TestFlipCreatedAtTheTdCeiling`, `TestFlipCreatedStopsAtTheFailingTxn`) —
+dnv-worker.md §13
 is the inventory of record and re-scoped this list, §9 item 5. The Check
 stream is consumed in `worker/revision.go`; no `worker/check.go` exists.)**
 
@@ -391,6 +405,17 @@ stream is consumed in `worker/revision.go`; no `worker/check.go` exists.)**
   revision) with complete rows ⇒ flips; no revision comparison is made.
 * **U3-T7** The re-sync triggered by a flip's own bump does not bump again
   (steady-state cost is zero).
+* **U3-T8** 600 candidates at once — past the 511 one STM could carry —
+  against an etcd at `--max-txn-ops=EtcdMaxTxnOps` ⇒ every one flipped, in
+  STMs of exactly `MaxFlipCreatedPerTxn`, `MaxFlipCreatedPerTxn` and the
+  remaining 88 candidates, in list order, one bump each
+  (`TestFlipCreatedAtTheTdCeiling`, which reads each td key's mod_revision
+  back); `gateway/txnbudget_test.go`'s `TestFlipCreatedTxnBudget` pins the
+  514 compares one such STM costs.
+* **U3-T9** The same 600 with one td value that no message decodes, in the
+  second STM ⇒ the call ends there with the error, returning the first
+  STM's `MaxFlipCreatedPerTxn` tds, which stay `created`; nothing else is
+  flipped and `SpRev` is bumped once (`TestFlipCreatedStopsAtTheFailingTxn`).
 
 ---
 
@@ -609,7 +634,8 @@ below is what shows the bare creates attached the existing ids).
   limit of Appendix D.
 * **One more fan-out per td creation.** Every flip bumps `SpRev` (R5), so
   creating a td costs two full fan-outs of the SP instead of one; per-reply
-  batching (R6) keeps bulk creation at one extra fan-out per reply. Appendix
+  batching (R6) keeps bulk creation at one extra fan-out per reply, or per
+  `MaxFlipCreatedPerTxn` tds for a reply that completes more. Appendix
   D's "revision granularity is the SP" entry covers the cost model.
 * **A snapshot request between creation and flip is refused, not queued.**
   Clients retry after `ListThinDevices` shows `created == true` (R13). At a
@@ -663,7 +689,12 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
   (four clauses, no revision comparison), U3-S2 candidates, U3-S3 one STM
   per reply with the `td_id` re-read guard and the single `SpRev` bump,
   the no-loop argument, the allowance to fold several tds and a pending
-  `provisioned` flip into one STM, and U3-S5.
+  `provisioned` flip into one STM, and U3-S5. (Both one-STM clauses have
+  since been rewritten in place: one STM, bumping `SpRev` once if it
+  wrote, per `MaxFlipCreatedPerTxn` candidates in list order, and a
+  `provisioned` flip folded into one of those STMs adds its `Slice` reads
+  and writes to that STM's 514-compare bound — U3-S3 step 4,
+  `dnv-worker.md` RW19.)
 * Appendix C — new bullet: "`ThinDeviceCreated.md` U1-U5 — `ThinDevice`
   gains `created`; §8.7 gates snapshot creation and origin deletion on it;
   §10.3 gains the materialization flip; §3.3 and `cnagent.md` CN14 record

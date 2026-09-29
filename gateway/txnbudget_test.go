@@ -100,12 +100,13 @@ func TestCloneDrainBatchBudget(t *testing.T) {
 	}
 	// Prose, not a requirement (CLD11): 68 also fits etcd's DEFAULT cap, so no
 	// clone transaction in the system needs the raised flag any more. The
-	// deployment requirement stays EtcdMaxTxnOps for the sake of the two
-	// transactions that do exceed the default — CreateStoragePool's
+	// deployment requirement stays EtcdMaxTxnOps for the sake of the
+	// transactions that do exceed the default — among them CreateStoragePool's
 	// 967-compare maximum shape, which is the one the number is now SIZED by
-	// (TestCreateStoragePoolBudget below), and the SP drain's 486-compare D2
-	// batch — and this assertion is what would notice if the clone half
-	// stopped being free of it.
+	// (TestCreateStoragePoolBudget below), the SP drain's 486-compare D2
+	// batch and the created flip's 514-compare transaction
+	// (TestFlipCreatedTxnBudget below) — and this assertion is what would
+	// notice if the clone half stopped being free of it.
 	const etcdDefaultMaxTxnOps = 128
 	if budget > etcdDefaultMaxTxnOps {
 		t.Errorf("one clone drain batch is %d compares, over etcd's own default "+
@@ -580,5 +581,96 @@ func TestSliceCeilingFitsTheMdNames(t *testing.T) {
 				"constant edit",
 			common.MaxSliceCntPerSp, common.MaxSliceCntPerSp-1,
 			mdNameMaxSliceIdx, mdNameMaxSliceIdx+1)
+	}
+}
+
+// The factors of ONE created-flip transaction, transcribed by hand from the
+// STM model.FlipCreated commits for each MaxFlipCreatedPerTxn candidates: a
+// Get of each candidate's td key — an absent key still costs its compare —
+// and a Put of each one it flips, plus BumpSpRev's read and put of SpRev. The
+// worst case is a transaction that flips every candidate it carries. Like the
+// sets above these are transcribed, and nothing in this file reads that STM:
+// model/ops_test.go's TestFlipCreatedAtTheTdCeiling is the half that commits
+// it against a real etcd — but only once the true count passes
+// EtcdMaxTxnOps, and 514 leaves 510 ops of slack: one more key read or
+// written per candidate (770) still commits there. Nor does this file see
+// the chunk FlipCreated really commits, only the constant: that same model
+// test pins it, from the mod_revision of every td key it flipped.
+const (
+	flipCreatedReadsPerTd  = 1 // the td key
+	flipCreatedWritesPerTd = 1 // the td key, created = true
+	flipCreatedReadsFixed  = 1 // SpRev
+	flipCreatedWritesFixed = 1 // SpRev
+	// flipCreatedMaxTds is today's ceiling and flipCreatedMaxCompares the
+	// worst-case compare count the factors above produce at it. Separate
+	// assertions, for the clone tripwire's reason: a ceiling change and a
+	// retyped factor must not fail alike.
+	flipCreatedMaxTds      = 256
+	flipCreatedMaxCompares = 514
+)
+
+// TestFlipCreatedTxnBudget is the created flip's arithmetic tripwire (RW19):
+// one transaction of model.FlipCreated must fit inside the transaction size
+// dnv requires of every etcd. The candidate list the sp worker hands it holds
+// every td one drain of its reports completed, which only MaxTdCntPerSp
+// bounds, so what bounds the transaction is T = MaxFlipCreatedPerTxn:
+//
+//	reads    = flipCreatedReadsFixed  + flipCreatedReadsPerTd  x T
+//	writes   = flipCreatedWritesFixed + flipCreatedWritesPerTd x T
+//	compares = their sum          <- what etcd checks
+//
+// It is independent of MaxTdCntPerSp, which moves the transaction COUNT and
+// never a transaction's legality. Unlike the clone drain's batch, 514 does not
+// fit etcd's default cap of 128: the created flip is one of the transactions
+// the deployment flag exists for.
+func TestFlipCreatedTxnBudget(t *testing.T) {
+	const perTd = flipCreatedReadsPerTd + flipCreatedWritesPerTd
+	const budget = flipCreatedReadsFixed + flipCreatedWritesFixed +
+		perTd*common.MaxFlipCreatedPerTxn
+
+	// The CEILING, exactly: it may be moved, but not by accident, and not
+	// without re-pinning what it makes one transaction cost.
+	if common.MaxFlipCreatedPerTxn != flipCreatedMaxTds {
+		t.Errorf(
+			"the created-flip CEILING moved: common.MaxFlipCreatedPerTxn is "+
+				"%d, want the pinned %d. Re-pin flipCreatedMaxTds and "+
+				"flipCreatedMaxCompares together, the latter at %d per td x "+
+				"tds + %d fixed, and with them every carrier that quotes the "+
+				"count — common/constants.go's MaxFlipCreatedPerTxn comment "+
+				"and the doc prose `grep -rn %d` turns up",
+			common.MaxFlipCreatedPerTxn, flipCreatedMaxTds, perTd,
+			flipCreatedReadsFixed+flipCreatedWritesFixed,
+			flipCreatedMaxCompares)
+	}
+	// The TRANSCRIPTION, evaluated at the PINNED ceiling so that a ceiling
+	// change cannot reach it: it fires when one of the four factors above is
+	// edited without re-deriving flipCreatedMaxCompares, and is blind to
+	// anything that happens inside the STM itself.
+	if compares := flipCreatedReadsFixed + flipCreatedWritesFixed +
+		perTd*flipCreatedMaxTds; compares != flipCreatedMaxCompares {
+		t.Errorf(
+			"the created-flip factors no longer add up: fixed %d (reads %d "+
+				"+ writes %d) + per td %d (reads %d + writes %d) x %d tds = "+
+				"%d compares, want the pinned %d. Re-read model.FlipCreated's "+
+				"STM against the four factors above and re-pin "+
+				"flipCreatedMaxCompares once the one that moved is the one "+
+				"you meant to move",
+			flipCreatedReadsFixed+flipCreatedWritesFixed,
+			flipCreatedReadsFixed, flipCreatedWritesFixed, perTd,
+			flipCreatedReadsPerTd, flipCreatedWritesPerTd, flipCreatedMaxTds,
+			compares, flipCreatedMaxCompares)
+	}
+	// The BUDGET. The two assertions above pin `budget` at
+	// flipCreatedMaxCompares exactly; this one is what a transaction must
+	// satisfy even after a deliberate re-pin, and it is the deployment
+	// requirement itself.
+	if budget > common.EtcdMaxTxnOps {
+		t.Errorf(
+			"one created-flip transaction is %d compares (fixed %d + per td "+
+				"%d x MaxFlipCreatedPerTxn %d), over the %d dnv requires etcd "+
+				"to allow: lower MaxFlipCreatedPerTxn or raise EtcdMaxTxnOps "+
+				"and the --max-txn-ops of every etcd that serves dnv",
+			budget, flipCreatedReadsFixed+flipCreatedWritesFixed, perTd,
+			common.MaxFlipCreatedPerTxn, common.EtcdMaxTxnOps)
 	}
 }

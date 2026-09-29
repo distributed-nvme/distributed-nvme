@@ -922,21 +922,54 @@ func containsId(ids []uint64, id uint64) bool {
 }
 
 // FlipCreated sets ThinDevice.created on every listed candidate that still
-// needs it and bumps SpRev exactly once if at least one was written (MD6,
-// RW19, §10.3 / ThinDeviceCreated.md U3). It returns the candidates it
-// ACTUALLY wrote, in the order they were listed; the MD6 count is len() of
-// that slice.
+// needs it (MD6, RW19, §10.3 / ThinDeviceCreated.md U3). It returns the
+// candidates it ACTUALLY wrote, in the order they were listed; the MD6 count
+// is len() of that slice.
 //
 // The refs and not a bare count, for FlipProvisioned's reason: the caller logs
-// one §12 "flip applied" record per td, naming it, and a skipped candidate was
-// never created by this worker.
+// one §12 "flip applied" record per td it wrote, naming it, and a skipped
+// candidate was never created by this worker. (The sp worker logs them only
+// for a call that succeeded, RW19.)
 //
 // A candidate is skipped — never an error — when its key is absent (the td was
 // deleted meanwhile), when its td_id differs (deleted and re-created under the
 // same name), or when created is already true (another worker or a concurrent
 // reply got there first). Nothing written ⇒ no bump, and a call whose whole
 // batch is skipped leaves etcd untouched.
+//
+// The list is committed common.MaxFlipCreatedPerTxn candidates at a time, in
+// list order, one STM each, and each STM that wrote bumps SpRev once. The list
+// is as long as the tds one drain of the worker's reports completed, which
+// only MaxTdCntPerSp bounds, and one STM over all of it was refused by etcd
+// past 511 candidates — on every round, so nothing flipped. An error ends the
+// call at the STM that failed: those before it stay committed, and the refs
+// they wrote are returned with the error (TestFlipCreatedStopsAtTheFailingTxn).
 func FlipCreated(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	cands []TdRef,
+) ([]TdRef, error) {
+	var created []TdRef
+	for start := 0; start < len(cands); start += common.MaxFlipCreatedPerTxn {
+		end := min(start+common.MaxFlipCreatedPerTxn, len(cands))
+		wrote, err := flipCreatedTxn(ctx, cli, cid, shard, spId,
+			cands[start:end])
+		if err != nil {
+			return created, err
+		}
+		created = append(created, wrote...)
+	}
+	return created, nil
+}
+
+// flipCreatedTxn is one FlipCreated STM, over at most
+// common.MaxFlipCreatedPerTxn candidates: at worst a Get and a Put of each
+// td key plus the SpRev read and put, 2 x 256 + 2 = 514 compares
+// (gateway/txnbudget_test.go's TestFlipCreatedTxnBudget).
+func flipCreatedTxn(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,

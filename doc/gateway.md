@@ -1414,7 +1414,11 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    leave in exactly `⌈512 / MaxDelBmPerTxn⌉` = 8 batches, none of which
    rewrote the record (the test computes the rectangle from the two
    constants; 512 and 8 are what they come to at the 2026-09-17 ceilings).
-   Only the second one can catch a batch that grew a write.
+   Only the second one can catch a batch that grew a write. The created
+   flip's transaction bound (`dnv-worker.md` RW19) has its arithmetic
+   tripwire here too, `TestFlipCreatedTxnBudget`:
+   `2 × MaxFlipCreatedPerTxn + 2` = 514 compares within `EtcdMaxTxnOps`,
+   its proof being `model`'s `TestFlipCreatedAtTheTdCeiling`.
 4. **Agent-path tests**: an in-process fake implementing the generated
    `DiskNodeAgent`/`ControllerNodeAgent` servers on `127.0.0.1:0` — size
    consumed by CreateDiskNode/CreateControllerNode; `Inspect*`
@@ -1520,8 +1524,9 @@ present; ≥ 1 GiB free under `/var/tmp`; none of the §10.3 ports listening.
 That etcd MUST be started with **`--max-txn-ops`** at `common.EtcdMaxTxnOps`
 (§2.1, 1024 today): every etcd serving dnv must, for `CreateStoragePool`'s
 967-compare maximum shape — the transaction the number is sized by — and for
-the sp drain's 486-compare D2 batch (dnv-worker.md §11.6), the second bounded
-transaction that constant has to cover. The suite is shell and cannot import
+the sp drain's 486-compare D2 batch (dnv-worker.md §11.6) and the created
+flip's 514-compare transaction (dnv-worker.md RW19), bounded transactions
+that constant has to cover as well. The suite is shell and cannot import
 it, and it does not type the number either: `preflight_driver` runs the
 `workerctl` it has just built — `constants` opens no etcd client and takes no
 `--cluster`, so it runs on the DRIVER, before setup ships anything to the

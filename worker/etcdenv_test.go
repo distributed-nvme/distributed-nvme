@@ -92,11 +92,12 @@ func startEtcd(bin string) (string, func(), error) {
 		"--initial-cluster-token", name,
 		// dnv-worker.md §14.4: dnv requires --max-txn-ops=common.EtcdMaxTxnOps
 		// of every etcd it runs against; the server's own default is 128,
-		// below both transactions that need the flag — CreateStoragePool's
-		// 967-compare maximum shape, which is what SIZES the requirement
-		// (gateway.md §2.1), and the 486 compares the sp drain's
+		// below the transactions that need the flag — among them
+		// CreateStoragePool's 967-compare maximum shape, which is what SIZES
+		// the requirement (gateway.md §2.1), the 486 compares the sp drain's
 		// maximum-shape D2 batch reaches (§11.6, SPD13; SPD14 is the tripwire
-		// pair that keeps it so). DeleteClone's rectangle sweep — then 256
+		// pair that keeps it so) and the 514 of one created-flip transaction
+		// (RW19, MaxFlipCreatedPerTxn). DeleteClone's rectangle sweep — then 256
 		// keys, at the 16-slice ceiling of the time — was this flag's founding
 		// justification and is gone: the clone drain's 68-op batches fit the
 		// default (CLD11).

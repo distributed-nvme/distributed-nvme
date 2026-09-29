@@ -62,19 +62,21 @@ ETCD_TAR="$CACHE_DIR/$ETCD_DIST.tar.gz"
 # `workerctl constants`, which prints the Go constants as JSON, so this suite
 # launches etcd with whatever common/constants.go now says.
 #
-# TWO transactions in dnv are above etcd's default cap of 128 with a size that
-# named constants bound. The one that SIZES the requirement is
+# Several transactions in dnv are above etcd's default cap of 128 with a size
+# that named constants bound. The one that SIZES the requirement is
 # CreateStoragePool at its widest shape — MaxSliceCntPerSp slices,
 # MaxAllocLegPerGrp legs per group (raid1) and MaxCntlrCntPerSp cntlrs
-# (architecture.md §8.4) — and the sp drain's D2 batch is the second
-# (dnv-worker.md §11.6). Both compare counts, and the factors that multiply
-# into them, are asserted from the named constants in
-# gateway/txnbudget_test.go, not restated here. This suite's own creates and
-# drains stay far under the ceiling: it creates SP_SLICE_CNT-slice pools, and
-# `wctl drain-sp` is asserted to take 2 + SP_SLICE_CNT steps, which is one D2
-# batch per slice and therefore a whole slice's groups inside a single batch,
-# and its `wctl drain-clone` removes three chunk keys where CLD11 allows
-# MaxDelBmPerTxn and fits etcd's default anyway.
+# (architecture.md §8.4); the sp drain's D2 batch (dnv-worker.md §11.6) and a
+# created-flip transaction of MaxFlipCreatedPerTxn tds (dnv-worker.md RW19)
+# are two more. Their compare counts, and the factors that multiply into them,
+# are asserted from the named constants in gateway/txnbudget_test.go, not
+# restated here. This suite's own creates and drains stay far under the
+# ceiling: it creates SP_SLICE_CNT-slice pools, and `wctl drain-sp` is
+# asserted to take 2 + SP_SLICE_CNT steps, which is one D2 batch per slice and
+# therefore a whole slice's groups inside a single batch, and its
+# `wctl drain-clone` removes three chunk keys where CLD11 allows
+# MaxDelBmPerTxn and fits etcd's default anyway. So do its created flips:
+# `wctl set-created` flips one td per call.
 ETCD_MAX_TXN_OPS=
 
 WORK=/var/tmp/dnv-gateway-integtest

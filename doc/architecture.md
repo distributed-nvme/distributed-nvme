@@ -139,9 +139,9 @@ ClusterConf
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
-| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; SIZED by `CreateStoragePool`'s widest shape, 967 compares — §8.4/§13, tripwired by `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget`; the sp drain's 486-compare batch is the second bounded one, dnv-worker.md §11.6) | 1024 |
+| `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; SIZED by `CreateStoragePool`'s widest shape, 967 compares — §8.4/§13, tripwired by `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget`; the sp drain's 486-compare batch and the created flip's 514-compare transaction are bounded ones over etcd's default too, dnv-worker.md §11.6 / RW19) | 1024 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
-| `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | | |
+| `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | `MaxFlipCreatedPerTxn` (tds one created-flip transaction carries, 514 compares at most with no `provisioned` flip folded in, §10.3 / dnv-worker.md RW19) | 256 |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
 
 ---
@@ -1982,8 +1982,8 @@ one of them has (`MaxSliceCntPerSp` doubled on 2026-09-17). A drain batch is
 and never the transaction's legality; at today's ceilings a maximum-shape drain is
 `⌈512 / MaxDelBmPerTxn⌉` = eight batches. Every clone transaction in the system still
 fits etcd's DEFAULT cap of 128, so nothing on the clone path needs the raised flag any
-more; the `--max-txn-ops=1024` requirement is `CreateStoragePool`'s (§8.4) and the sp
-drain's D2 batch's (§13).
+more; the `--max-txn-ops=1024` requirement is `CreateStoragePool`'s (§8.4), the sp
+drain's D2 batch's (§13) and the created flip's (§10.3).
 
 **GetClone** — STM read. **UpdateCloneTrConf** — STM replace `src_tr_conf_list`, bump
 `SpRev` (used when the source SP's cntlrs moved); the primary reconnects.
@@ -2958,22 +2958,32 @@ suffice, because §9.7 delivers the `*Info` whenever any resource changed status
 
 *Candidates* are the tds of `R` that are complete and that the worker's loaded state of
 `S` shows `created == false`. A reply that completes no candidate causes no etcd traffic
-at all. If the candidate set is non-empty the worker runs **one STM**: for each
-candidate re-read `{p} thin_device {cluster_id} {sp_id} {td_name}` and skip it when the
+at all. If the candidate set is non-empty the worker runs **one STM** per
+`MaxFlipCreatedPerTxn` (256) candidates, in list order: for each candidate re-read
+`{p} thin_device {cluster_id} {sp_id} {td_name}` and skip it when the
 key is absent (deleted meanwhile), when its `td_id` differs (deleted and re-created
 under the same name), or when `created` is already `true` (another worker or a
 concurrent reply got there first) — otherwise set `created = true` and write the record;
 then, if at least one record was written, bump `SpRev` **once** (the key is id-based and
 is updated, never deleted and re-created, §5.5). Nothing written ⇒ no bump. Several tds
-completed by one reply share the one STM and the one bump, and a pending `provisioned`
-flip of the same SP MAY be folded into the same transaction — the two rules are
-independent and both bump once. The reads and writes log as ordinary `etcd
-get`/`etcd put` records inside the STM (`log.md` §5.3); a retried transaction
-logs them twice, which is expected. Replies do not get one STM each: the sp
+completed by one reply share one STM and one bump, up to `MaxFlipCreatedPerTxn` of them,
+and a pending `provisioned` flip of the same SP MAY be folded into one of those
+transactions — the two rules are independent and both bump once. The reads and writes
+log as ordinary `etcd get`/`etcd put` records inside the STM (`log.md` §5.3); a retried
+transaction logs them twice, which is expected. Replies do not get one STM each: the sp
 worker drains every report pending on its channel at that moment — across
-replies and across cntlrs — and folds all their candidates into the one STM.
+replies and across cntlrs — and folds all their candidates into one `FlipCreated` call.
 Only the primary fills thin rows, so one reply per round per SP remains the
-common case, and the fold is at most one STM and one bump regardless.
+common case, and the fold is at most one STM and one bump per `MaxFlipCreatedPerTxn`
+candidates regardless. That bound is the transaction's, not the fold's: one STM
+compares every key it read and every key it wrote, at most `2 × 256 + 2` = 514 (§13),
+while the fold is bounded only by `MaxTdCntPerSp` — an SP whose tds were all created
+before its pool came up can complete every one of them in one reply — and a single STM
+over it would exceed `EtcdMaxTxnOps` past 511 candidates and be refused on every round.
+A folded `provisioned` flip would add a read of the `Slice` of each side it lists and a
+write of each `Slice` it changes, up to `2 × MaxSliceCntPerSp` compares over the 514;
+the sp worker does not take that MAY, and runs the `provisioned` flip as an STM of its
+own.
 
 The bump re-fans the SP, which is how `created` reaches the cn agent (`cnagent.md`
 CN14). It cannot loop: the worker reloads the SP on its own bump, and the re-sync's
@@ -3646,10 +3656,13 @@ distinct DN and 8 per cntlr's CN, at `MaxSliceCntPerSp` slices × 2 groups per s
 
 which 1024 clears by 57. `init_ext_cnt` moves `ext_cnt` VALUES, never key counts, so
 that shape is bounded by those three constants alone, and `gateway/txnbudget_test.go`'s
-`TestCreateStoragePoolBudget` is its tripwire (§8.4). The SECOND bounded transaction
-above the default, and no longer the one that sizes the number, is the sp drain's D2
-batch, `6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 compares
-at the maximum shape (§8.4, dnv-worker.md §11.6, `TestSpDrainBatchBudget`).
+`TestCreateStoragePoolBudget` is its tripwire (§8.4). Other bounded transactions
+exceed the default too. The sp drain's D2 batch, no longer the one that sizes the
+number, is `6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp)` = 486 compares
+at the maximum shape (§8.4, dnv-worker.md §11.6, `TestSpDrainBatchBudget`). The created
+flip (§10.3) commits at most `MaxFlipCreatedPerTxn` candidates per transaction,
+`2 × MaxFlipCreatedPerTxn + 2` = 514 compares (dnv-worker.md RW19,
+`TestFlipCreatedTxnBudget`).
 DeleteClone's `MaxSliceCntPerSp × MaxCloneBmCnt` rectangle sweep — then 256 keys, at
 the 16-slice ceiling of the time — was the requirement's founding justification and is
 gone: since 2026-09-16 the clone drain removes those keys in 68-op batches, which fit

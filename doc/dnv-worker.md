@@ -200,8 +200,9 @@ authoritative for comment text (as it is for `dnagent.md` §2.2's block).
 // dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
 // another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
 // arithmetic tripwired against it is that section's for CreateStoragePool
-// and DeleteThinDevice and dnv-worker.md §11.6's and §11.7's for the two
-// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+// and DeleteThinDevice, dnv-worker.md §8.4's for the created flip (RW19)
+// and §11.6's and §11.7's for the two drains — SPD13/SPD14 for the sp
+// drain, CLD11 for the clone drain.
 const (
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -220,9 +221,16 @@ const (
 	// The transaction this number is SIZED by is CreateStoragePool at its
 	// widest shape — 967 compares, every factor of it a ceiling constant,
 	// tripwired by TestCreateStoragePoolBudget (gateway.md §2.1, which owns
-	// this constant). SPD13's 486-compare D2 batch is the second bounded
+	// this constant). SPD13's 486-compare D2 batch is another bounded
 	// transaction the number has to cover, tripwired by SPD14.
 	EtcdMaxTxnOps = 1024
+	// The most candidates ONE created-flip transaction carries (RW19):
+	// model.FlipCreated commits its list this many at a time, one STM each,
+	// and each STM that wrote bumps SpRev once. At worst a Get and a Put per
+	// candidate plus SpRev's, 2 x 256 + 2 = 514 compares: over etcd's
+	// default 128, so the created flip is one more bounded transaction the
+	// number above has to cover, tripwired by TestFlipCreatedTxnBudget.
+	MaxFlipCreatedPerTxn = 256
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"
@@ -543,7 +551,8 @@ MD5. **Allocator** (`architecture.md` §6.3/§6.4 verbatim). `FindDnCandidates(c
      `ErrPrecondition{"candidate changed"}` ⇒ the caller rescans and retries
      the scan + STM as one unit (`architecture.md` §8.4 step 2).
 
-MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
+MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one
+     per `MaxFlipCreatedPerTxn` candidates, RW19), re-validates every
      precondition it lists (MD7), and bumps exactly the revisions
      `architecture.md` §8/§10 assign to the equivalent RPC. `now` is the
      caller's unix seconds; thresholds are resolved inside from
@@ -563,7 +572,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `SetCntlrErrEpoch(cid, spId, cntlrId, epoch, settle)` | record exists | same set/clear rule on `Cntlr`; when `settle` and `epoch == 0`, also `settling = false` in the same STM (HL2; *amended 2026-09-26*) — a `settle` with a nonzero epoch clears nothing; no bump; no write when unchanged |
      | `SetLegErrEpoch(cid, spId, sliceId, legId, epoch)` / `SetSideErrEpoch(..., sideId, epoch)` | slice exists, leg/side found in any group's `leg_list`/`spare_leg_list` | same rule on the embedded record; rewrite the `Slice`; no bump |
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
-     | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3: skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; bump once iff any was written; the return lists the tds actually flipped, as above |
+     | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3, one STM per `MaxFlipCreatedPerTxn` candidates in list order (RW19): skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; each STM bumps once iff it wrote; the return lists the tds actually flipped, as above — on an error, those of the STMs that committed before the failing one, which the sp worker does not log (RW19) |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥` (`old.settling && cntlr_unhealthy > primary_unhealthy ? cntlr_unhealthy : primary_unhealthy`) — "primary_unhealthy not reached" resp. "cntlr_unhealthy not reached for a settling primary" (AR5, *amended 2026-09-26*); `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; set `new.settling`, clear `old.settling` (HL2); bump `SpRev` (§10.4) |
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
@@ -577,9 +586,11 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
 
 MD7. **`ErrPrecondition`.** `type ErrPrecondition struct{ Op, Reason string }`;
      returned from inside the STM callback, it aborts without commit (EU4).
-     An op never writes partially, never sleeps, and never retries a
-     precondition failure — the caller logs `reaction skipped` (LG) and
-     re-evaluates on its next pass.
+     An op never writes partially (`FlipCreated` is the exception: its STMs,
+     RW19, each commit whole, and an error in one leaves those before it
+     committed), never sleeps, and never retries a precondition failure —
+     the caller logs `reaction skipped` (LG) and re-evaluates on its next
+     pass.
 
 MD8. **Gateway reuse (non-normative).** The public RPCs of `architecture.md`
      §8 are the same STM bodies plus request validation (`architecture.md` §7), the public
@@ -1278,8 +1289,30 @@ RW19. **Created flip** (§10.3, `ThinDeviceCreated.md` U3, verbatim). Every
       when `cntlr_info.td_id_to_thin_info[X.td_id]` exists, its
       `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
       every row is `RES_STATUS_OK`. Candidates go to `model.FlipCreated`; a
-      reply that completes none causes no etcd traffic. A pending
-      provisioned flip of the same SP MAY share the STM.
+      reply that completes none causes no etcd traffic. The call commits
+      them `MaxFlipCreatedPerTxn` (§2.1) at a time, in list order, one STM
+      each, and each STM that wrote bumps `SpRev` once: the coordinator
+      folds every td one drain of its reports completed into one call, a
+      set only `MaxTdCntPerSp` bounds, and one STM over all of it would
+      exceed `EtcdMaxTxnOps` past 511 candidates and be refused again on
+      every round. One such STM compares every key it read and every key it
+      wrote — a Get of each candidate's td key, a Put of each one it flips,
+      and `SpRev`'s read and put — so it costs at most
+      `2 × MaxFlipCreatedPerTxn + 2` compares, `514 ≤ EtcdMaxTxnOps = 1024`
+      today: `gateway/txnbudget_test.go`'s `TestFlipCreatedTxnBudget`
+      asserts that from the named constants, and `model`'s
+      `TestFlipCreatedAtTheTdCeiling` commits such STMs against a real etcd
+      and pins which candidates each one carried. A pending provisioned flip
+      of the same SP MAY share one of those STMs; that STM then also reads
+      the `Slice` of each side the provisioned flip lists and writes each
+      `Slice` it changes, up to `2 × MaxSliceCntPerSp` compares over the
+      514, which an implementation taking the MAY must add to
+      `TestFlipCreatedTxnBudget`. This one does not take it: RW18's flip
+      runs as an STM of its own, before the created flip's. When a call
+      fails at its second STM or a later one, the coordinator logs that
+      failure and no `flip applied` record (§12), not even for the tds the
+      earlier STMs committed: those stay `created` in etcd, and the refs
+      `model.FlipCreated` returns with the error go unlogged.
 
 RW20. Health of sides and cntlrs per HL2; pushes per §10; the reaction pass
       runs on the coordinator's own ticker (AR1).
@@ -2161,11 +2194,12 @@ SPD13. **Asynchrony.** No drain STM waits on, calls or verifies any agent.
       today, so `486 ≤ EtcdMaxTxnOps = 1024`. Sides contribute one DN each
       because a latched SP has no migrations and therefore no two-side legs.
       D1 (≤ ~100), D3 (≤ 8) and the latch (5) are trivially legal. SPD14 is
-      the tripwire pair that keeps it so. This batch is the SECOND bounded
-      transaction above etcd's default cap of 128, not the one `EtcdMaxTxnOps`
-      is sized by: that is `CreateStoragePool`'s widest shape, 967 compares
-      (`gateway.md` §2.1), which was already the larger of the two at 503
-      while `MaxSliceCntPerSp` was 16.
+      the tripwire pair that keeps it so. This batch is one of the bounded
+      transactions above etcd's default cap of 128 — the created flip's
+      514-compare transaction (RW19) is another — and not the one
+      `EtcdMaxTxnOps` is sized by: that is `CreateStoragePool`'s widest
+      shape, 967 compares (`gateway.md` §2.1), which was already larger than
+      this batch, at 503, while `MaxSliceCntPerSp` was 16.
 
 SPD14. **Tripwires.** The budget of SPD13 is kept legal by a pair of tests:
       an arithmetic assertion over the NAMED constants
@@ -2353,11 +2387,12 @@ CLD11. **Transaction budget, and its tripwire pair.** Ledger-free, so one line
       latch is strictly smaller than the transaction it replaced. 68 also fits
       etcd's DEFAULT `--max-txn-ops` of 128 — prose, not a deployment change:
       the requirement stays `EtcdMaxTxnOps` for the transactions that do NOT
-      fit 128, `CreateStoragePool`'s 967-compare maximum shape, which is what
-      that number is sized by (`gateway.md` §2.1), and the sp drain's
-      486-compare D2 batch (§11.6). `gateway/txnbudget_test.go` asserts all
-      three compare counts — this batch's 68 and those two — from the named
-      constants, and `gateway/clonedrain_test.go` drains the whole 32x16
+      fit 128, such as `CreateStoragePool`'s 967-compare maximum shape,
+      which is what that number is sized by (`gateway.md` §2.1), the sp
+      drain's 486-compare D2 batch (§11.6) and the created flip's
+      514-compare transaction (RW19). `gateway/txnbudget_test.go` asserts
+      all four compare counts — this batch's 68 and those three — from the
+      named constants, and `gateway/clonedrain_test.go` drains the whole 32x16
       rectangle against a real etcd to pin the batch COUNT.
 
 ---
@@ -2438,6 +2473,18 @@ does).
   fan-out after a repair starting the children it owed;
   RW18/RW19 candidate selection (all four `created`
   conditions, the partial-map and `PROVISIONING` negatives);
+  RW19's transaction bound — in `model`, `TestFlipCreatedAtTheTdCeiling`:
+  600 candidates, past the 511 one STM could carry, all flip against
+  `--max-txn-ops=EtcdMaxTxnOps`, in transactions of exactly
+  `MaxFlipCreatedPerTxn`, `MaxFlipCreatedPerTxn` and the remaining 88, in
+  list order (read back from each td key's mod_revision), `SpRev` moving
+  once per transaction; `TestFlipCreatedStopsAtTheFailingTxn` — a td value
+  no message decodes fails the second of the call's three transactions and
+  the third never runs: the call returns its error together with the first
+  transaction's `MaxFlipCreatedPerTxn` tds, which stay `created`, every
+  other td stays uncreated, and `SpRev` moves once; in
+  `gateway/txnbudget_test.go`, `TestFlipCreatedTxnBudget` pins the 514
+  compares one such STM costs;
   `TestLeftoverCodeIsAccepted` — the five observation functions give a
   `ReplyCodeLeftover` reply the same verdict as a `code == 0` one and still
   none for the three rejection codes, and end to end through a cntlr child
@@ -2811,7 +2858,8 @@ The suite brings its own etcd, so it owns etcd's deployment requirements
 too: the §14.3 launch line passes `--max-txn-ops` at 1024 because every etcd
 serving dnv must (`common.EtcdMaxTxnOps`; `CreateStoragePool` at its widest
 shape is 967 compares and is what that number is sized by, the sp drain's D2
-batch is the second at 486, while etcd's default cap is 128 — `DeleteClone`'s
+batch is another at 486 and the created flip's transaction (RW19) one more at
+514, while etcd's default cap is 128 — `DeleteClone`'s
 rectangle sweep, then 256 keys at the 16-slice ceiling of the time, was the
 founding justification and is gone since 2026-09-16, §11.7's batches being 68
 ops). The script does not type that number: a shell suite cannot import
@@ -2825,7 +2873,8 @@ is the one that reaches the create's shape, committing `CreateStoragePool` at
 against the 967 the constant is sized by (`e2e_integtest.md` §1). The
 worker's own cases stay far below the
 cap — case G's widest slice pops 21 groups, not the 20 x 4 DNs a maximum batch
-touches, and its clone batches are 64 deletes; the create's shape is out of
+touches, its clone batches are 64 deletes, and a created flip carries one td,
+no pool in the suite holding a second; the create's shape is out of
 reach here too, since `put-sp` (§14.8) commits that same STM with explicit
 placement but no `put-sp` in the suite plants more than one slice, against the
 32 the 967 is counted at — so the flag is there to run against an etcd
@@ -2868,7 +2917,7 @@ configured the way production is, not because a case needs it.
 | §3.6 group geometry (`meta_blocks`, `data_blocks`) | read at preflight from `workerctl geometry`, not written down | case D asserts a new group's geometry and feeds the matching totals back as a thin-pool status line (§14.11 D5/D6), and it is the only case that does. `read_geometry` calls the driver twice at the three values above, with one `geometry_json` helper that hard-wires `--raid1` and varies only the count — `--raid1 --ext-cnt 2` for a data group and `--raid1 --ext-cnt 1` for a meta group, both of case D's sp0 groups being `:raid1` — so the numbers come out of `model.GroupBlocks` (MD6), the same call `GrowSlice` makes. At these values that is `meta_blocks 3` for both kinds, `data_blocks` 125 and 61 |
 | `THIN_META_BLOCK_SIZE` | 4096 | dm-thin's metadata block size, fixed by the kernel: the metadata fraction of a status line counts THESE blocks, not `block_size` ones (§11.3's `× block_size / 4096`). The shell derives a meta group's contribution to that fraction as `data_blocks × block_size / 4096` = 15616; `model.GroupBlocks` knows nothing about it, which is why this one stays in the script |
 | `WAIT_SHORT` / `WAIT_MEMBERSHIP` / `WAIT_SYNCUP` | 5 / 20 / 65 s | polling budgets: a round is 1 s; a membership change needs ≤ 10 s; a syncup deadline is 60 s |
-| etcd `--max-txn-ops` | `common.EtcdMaxTxnOps` (1024), read at preflight into `ETCD_MAX_TXN_OPS`, not typed in the script | the deployment requirement of §14.4: etcd's default 128 is below `CreateStoragePool`'s 967-compare maximum shape, which is what sizes the requirement (`gateway.md` §2.1), and below the sp drain's 486-compare D2 batch. (`DeleteClone`'s sweep — then 256 keys, at the 16-slice ceiling of the time — was the founding justification and is gone since 2026-09-16; §11.7's batches are 68 ops.) The compare counts themselves are asserted from the named constants in `gateway/txnbudget_test.go` (SPD14, CLD11 and `TestCreateStoragePoolBudget`, the create having no rule id here), not restated in the suite |
+| etcd `--max-txn-ops` | `common.EtcdMaxTxnOps` (1024), read at preflight into `ETCD_MAX_TXN_OPS`, not typed in the script | the deployment requirement of §14.4: etcd's default 128 is below `CreateStoragePool`'s 967-compare maximum shape, which is what sizes the requirement (`gateway.md` §2.1), below the sp drain's 486-compare D2 batch and below the created flip's 514-compare transaction (RW19). (`DeleteClone`'s sweep — then 256 keys, at the 16-slice ceiling of the time — was the founding justification and is gone since 2026-09-16; §11.7's batches are 68 ops.) The compare counts themselves are asserted from the named constants in `gateway/txnbudget_test.go` (SPD14, CLD11, RW19 and `TestCreateStoragePoolBudget`, the create having no rule id here), not restated in the suite |
 
 Every wait is a poll (`wait_until`, §14.10) — never a bare `sleep` except
 the deliberate "nothing must happen for N seconds" negative checks, which
@@ -3646,7 +3695,8 @@ All three landed with the implementation:
 * `pb/schema.proto`: the `WorkerReg` message of §2.2, regenerated with
   `make gen` (README toolchain) in the change that added `etcdutil/`.
 * `common/constants.go`: the §2.1 block, except `EtcdMaxTxnOps` — that one
-  is `gateway.md` §2.1's and was added into the same block later.
+  is `gateway.md` §2.1's and was added into the same block later — and
+  `MaxFlipCreatedPerTxn`, added 2026-09-29 with RW19's transaction bound.
 * `go.mod`: `go.etcd.io/etcd/client/v3` v3.6.14 (and its transitive
   requirements); `dependencies.md` lists it under "Current".
 

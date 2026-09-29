@@ -117,9 +117,10 @@ const (
 	// transaction's legality; at today's 32x16 a maximum-shape drain is
 	// ceil(512 / 64) = 8 batches. 68 also fits etcd's DEFAULT --max-txn-ops of
 	// 128 — prose, not a tripwire: the deployment requirement stays
-	// EtcdMaxTxnOps for the transactions that do NOT fit 128,
-	// CreateStoragePool's 967-compare maximum shape and the sp drain's
-	// 486-compare D2 batch (see EtcdMaxTxnOps below).
+	// EtcdMaxTxnOps for the transactions that do NOT fit 128, such as
+	// CreateStoragePool's 967-compare maximum shape, the sp drain's
+	// 486-compare D2 batch and the created flip's 514-compare transaction
+	// (see EtcdMaxTxnOps and MaxFlipCreatedPerTxn below).
 	MaxDelBmPerTxn = 64
 
 	CnCntlidSlotBase = 10000
@@ -374,8 +375,9 @@ const (
 	// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
 	// another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
 	// arithmetic tripwired against it is that section's for CreateStoragePool
-	// and DeleteThinDevice and dnv-worker.md §11.6's and §11.7's for the two
-	// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+	// and DeleteThinDevice, dnv-worker.md §8.4's for the created flip (RW19)
+	// and §11.6's and §11.7's for the two drains — SPD13/SPD14 for the sp
+	// drain, CLD11 for the clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -448,6 +450,33 @@ const (
 	// that start an etcd cannot import common, so they read it at preflight
 	// from workerctl's constants subcommand.
 	EtcdMaxTxnOps = 1024
+	// MaxFlipCreatedPerTxn is the most candidates ONE created-flip
+	// transaction carries (RW19, dnv-worker.md §8.4). model.FlipCreated
+	// commits its list this many at a time, in list order, one STM each, and
+	// each STM that wrote bumps SpRev once. The list is bounded only by
+	// MaxTdCntPerSp: the sp worker folds every td one drain of its reports
+	// completed into one call, and an SP whose tds were all created before
+	// its pool came up can complete them in one reply. One STM over the whole
+	// list outgrew EtcdMaxTxnOps past 511 candidates and was refused again on
+	// every round, so nothing flipped. Like MaxDelBmPerTxn it bounds
+	// transaction SIZE, not rate, and is a package constant rather than
+	// configuration for that reason.
+	//
+	// The arithmetic is one line. The STM compares every key it read and
+	// every key it wrote: a Get of the td key per candidate, a Put per
+	// candidate it flips, and the SpRev read and put. At worst every
+	// candidate flips, so
+	//
+	//	2 x MaxFlipCreatedPerTxn + 2 = 514 <= EtcdMaxTxnOps
+	//
+	// which gateway/txnbudget_test.go's TestFlipCreatedTxnBudget asserts from
+	// the named constants and model/ops_test.go's
+	// TestFlipCreatedAtTheTdCeiling commits against a real etcd. 514 is over
+	// etcd's default 128, so the created flip, like CreateStoragePool and the
+	// sp drain's D2 batch, needs the raised flag. 256 keeps a whole
+	// MaxTdCntPerSp of candidates to four transactions and at most four SpRev
+	// bumps.
+	MaxFlipCreatedPerTxn = 256
 
 	WorkerRoleDn = "dn"
 	WorkerRoleCn = "cn"

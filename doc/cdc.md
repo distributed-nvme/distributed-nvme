@@ -688,12 +688,13 @@ Aborts with a message on the first failure:
    suite starts carries `--max-txn-ops` at `common.EtcdMaxTxnOps` (1024
    today) like every other etcd serving dnv: the requirement is SIZED by
    `CreateStoragePool` at its widest shape (architecture.md §8.4) and also
-   has to cover the sp drain's D2 batch (dnv-worker.md §11.6). This suite
-   creates and drains no storage pools, so it drives neither, but the flag
-   is uniform across the fleet and the suite brings its own etcd. Neither
-   compare count is restated here: `gateway/txnbudget_test.go` asserts both
-   from the named constants. The number is not typed in the script either:
-   the driver preflight (§9.2) builds `workerctl` for this and reads
+   has to cover the sp drain's D2 batch (dnv-worker.md §11.6) and the
+   created flip's transaction (dnv-worker.md RW19). This suite creates and
+   drains no storage pools, and so flips no td either: it drives none of
+   them, but the flag is uniform across the fleet and the suite brings its
+   own etcd. No compare count is restated here: `gateway/txnbudget_test.go`
+   asserts each from the named constants. Nor is the number typed in the
+   script: the driver preflight (§9.2) builds `workerctl` for this and reads
    `ETCD_MAX_TXN_OPS` from the `EtcdMaxTxnOps` field of `workerctl constants`
    — no etcd, no server, no `--cluster` — before setup starts etcd with it.
    `worker_test.sh`, `gateway_test.sh` and `e2e_test.sh` take the same value

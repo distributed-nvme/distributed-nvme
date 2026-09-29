@@ -3,9 +3,13 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -1232,6 +1236,191 @@ func TestFlipCreated(t *testing.T) {
 	if got := env.spRev(); got != revBefore+2 {
 		t.Errorf("SpRev: got %d, want %d (one bump for the batch)", got, revBefore+2)
 	}
+}
+
+// TestFlipCreatedAtTheTdCeiling is RW19's transaction bound, committed against
+// the real etcd this package runs with --max-txn-ops=common.EtcdMaxTxnOps. The
+// sp worker folds every td one drain of its reports completed into ONE
+// FlipCreated call, and an SP whose tds were all created before its pool came
+// up can complete every one of them in one reply. One STM over such a list costs
+// a compare for every key it read and every key it wrote — the td key twice
+// per flipped candidate, SpRev twice — so past 511 candidates etcd refuses it,
+// and refuses the same STM again on every later round: nothing ever flips and
+// SpRev never moves. FlipCreated commits MaxFlipCreatedPerTxn candidates per
+// transaction instead, so every candidate flips and SpRev moves once per
+// transaction.
+//
+// 600 is past those 511, within MaxTdCntPerSp, and not a multiple of
+// MaxFlipCreatedPerTxn, so the last transaction is a short one and a loop that
+// dropped the remainder would leave tds uncreated.
+//
+// SpRev moving three times does not pin the chunk: every uniform chunk from
+// 200 to 299 moves it three times over 600 candidates, and one of 257 or more
+// breaks the 514 compares TestFlipCreatedTxnBudget pins. So the transactions
+// are read back from the td keys: one etcd transaction is one revision, and
+// the candidates, in list order, must fall into runs of exactly
+// MaxFlipCreatedPerTxn, MaxFlipCreatedPerTxn and the remainder, each run
+// sharing one mod_revision and the revisions ascending.
+func TestFlipCreatedAtTheTdCeiling(t *testing.T) {
+	const tdCnt = 600
+	// The fixture has to stay a reproduction: one STM over tdCnt candidates
+	// must exceed what etcd allows, and tdCnt must be a td count an SP can
+	// hold.
+	if 2*tdCnt+2 <= common.EtcdMaxTxnOps || tdCnt > common.MaxTdCntPerSp {
+		t.Fatalf("%d candidates no longer reproduce an oversized flip: one "+
+			"STM over them is %d compares against EtcdMaxTxnOps %d, and "+
+			"MaxTdCntPerSp is %d", tdCnt, 2*tdCnt+2, common.EtcdMaxTxnOps,
+			common.MaxTdCntPerSp)
+	}
+	env := newOpsEnv(t)
+	cands := env.seedFlipCands(tdCnt)
+	revBefore := env.spRev()
+
+	created, err := FlipCreated(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, cands,
+	)
+	if err != nil {
+		t.Fatalf("FlipCreated of %d candidates: %v (etcd's \"too many "+
+			"operations in txn request\" here means one transaction carried "+
+			"more of them than common.EtcdMaxTxnOps admits)", tdCnt, err)
+	}
+	if !equalTdRefs(created, cands) {
+		t.Errorf("created: got %d refs, want all %d in list order",
+			len(created), tdCnt)
+	}
+	for _, cand := range cands {
+		if !env.td(cand.Name).GetCreated() {
+			t.Errorf("%s (td_id %d) was not flipped", cand.Name, cand.TdId)
+		}
+	}
+	var want []int
+	for left := tdCnt; left > 0; left -= common.MaxFlipCreatedPerTxn {
+		want = append(want, min(left, common.MaxFlipCreatedPerTxn))
+	}
+	runs, runRevs := env.flipTxnRuns(cands)
+	if !slices.Equal(runs, want) || !slices.IsSorted(runRevs) {
+		t.Errorf("tds per transaction in list order (by mod_revision): got "+
+			"%v at revisions %v, want %v at ascending ones",
+			runs, runRevs, want)
+	}
+	txnCnt := uint64(len(want))
+	if got := env.spRev(); got != revBefore+txnCnt {
+		t.Errorf("SpRev: got %d, want %d (one bump per transaction of at "+
+			"most MaxFlipCreatedPerTxn = %d candidates)",
+			got, revBefore+txnCnt, common.MaxFlipCreatedPerTxn)
+	}
+}
+
+// TestFlipCreatedStopsAtTheFailingTxn is FlipCreated's error contract (MD6,
+// MD7): an error ends the call at the transaction that failed, the ones
+// before it stay committed, and the tds they wrote come back WITH the error.
+// One td value no message can be decoded from fails the second transaction;
+// 600 candidates leave a third one behind it, which must never run.
+func TestFlipCreatedStopsAtTheFailingTxn(t *testing.T) {
+	const tdCnt = 600
+	const per = common.MaxFlipCreatedPerTxn
+	if tdCnt <= 2*per || tdCnt > common.MaxTdCntPerSp {
+		t.Fatalf("%d candidates no longer leave a transaction behind the "+
+			"second one at MaxFlipCreatedPerTxn %d, within MaxTdCntPerSp %d",
+			tdCnt, per, common.MaxTdCntPerSp)
+	}
+	env := newOpsEnv(t)
+	cands := env.seedFlipCands(tdCnt)
+	// One past the second transaction's first candidate, so that the
+	// transaction the bad value aborts has staged writes of its own, which
+	// must not land.
+	bad := per + 1
+	mustPut(t, env.cli, ThinDeviceKey(env.cid, opsSpId, cands[bad].Name),
+		undecodable())
+	revBefore := env.spRev()
+
+	created, err := FlipCreated(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, cands,
+	)
+	if err == nil || !strings.Contains(err.Error(), "unmarshal") {
+		t.Fatalf("FlipCreated: got error %v, want the unmarshal failure of %s",
+			err, cands[bad].Name)
+	}
+	if !equalTdRefs(created, cands[:per]) {
+		t.Errorf("created %d refs with the error, want the first %d: those "+
+			"of the transaction that committed before the failing one",
+			len(created), per)
+	}
+	var wrong []string
+	for idx, cand := range cands {
+		if idx == bad {
+			continue // undecodable: env.td would fail the test on it
+		}
+		if got := env.td(cand.Name).GetCreated(); got != (idx < per) {
+			wrong = append(wrong,
+				fmt.Sprintf("#%d %s created=%v", idx, cand.Name, got))
+		}
+	}
+	if len(wrong) > 0 {
+		t.Errorf("%d tds carry the wrong created flag, want exactly the "+
+			"first %d true; e.g. %v", len(wrong), per,
+			wrong[:min(len(wrong), 3)])
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (one bump, by the one transaction "+
+			"that committed)", got, revBefore+1)
+	}
+}
+
+// seedFlipCands writes n uncreated tds, td_ids counting up from opsNextId,
+// and returns them as FlipCreated candidates in that order. Every name starts
+// with "td-", which keeps them apart from the fixture's td0 and td1.
+func (e *opsEnv) seedFlipCands(n int) []TdRef {
+	e.t.Helper()
+	cands := make([]TdRef, 0, n)
+	for idx := 0; idx < n; idx++ {
+		tdId := opsNextId + uint64(idx)
+		name := "td-" + idField(tdId)
+		mustPut(e.t, e.cli, ThinDeviceKey(e.cid, opsSpId, name),
+			&pb.ThinDevice{TdId: tdId, DevId: uint32(10 + idx), Size: 1 << 30})
+		cands = append(cands, TdRef{Name: name, TdId: tdId})
+	}
+	return cands
+}
+
+// flipTxnRuns reads back which transaction wrote each candidate. One etcd
+// transaction is one revision, so the candidates, in list order, fall into
+// runs that share a td key mod_revision: runs holds each run's length and
+// revs its revision. A candidate nothing rewrote keeps the revision of its
+// own seed put, and so is a run of its own.
+func (e *opsEnv) flipTxnRuns(cands []TdRef) ([]int, []int64) {
+	e.t.Helper()
+	keys, _, err := e.cli.RangeKeys(
+		e.ctx, ThinDeviceKey(e.cid, opsSpId, "td-"),
+	)
+	if err != nil {
+		e.t.Fatalf("RangeKeys: %v", err)
+	}
+	modRev := make(map[string]int64, len(keys))
+	for _, key := range keys {
+		modRev[key.Key] = key.ModRev
+	}
+	var runs []int
+	var revs []int64
+	for _, cand := range cands {
+		rev := modRev[ThinDeviceKey(e.cid, opsSpId, cand.Name)]
+		if len(revs) == 0 || rev != revs[len(revs)-1] {
+			runs = append(runs, 0)
+			revs = append(revs, rev)
+		}
+		runs[len(runs)-1]++
+	}
+	return runs, revs
+}
+
+// undecodable is a td value no message can be decoded from: one byte that
+// starts a varint and never ends it. It is carried as an unknown field, which
+// proto.Marshal emits verbatim, so it goes through etcdutil's typed Put like
+// every other fixture value and this package still imports no etcd client.
+func undecodable() proto.Message {
+	msg := &pb.ThinDevice{}
+	msg.ProtoReflect().SetUnknown(protoreflect.RawFields{0xff})
+	return msg
 }
 
 // ---------------------------------------------------------------------------
