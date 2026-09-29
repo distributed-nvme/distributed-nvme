@@ -422,6 +422,18 @@ func (s *CnAgentServer) build(
 	if plan.wantAny {
 		for _, np := range plan.namespaces {
 			err := s.ensureNsDev(ctx, np)
+			if err != nil && cloneBuiltThisPass(info, np) {
+				// Rule 5 after a build this pass finished: hydration is on,
+				// so whatever still keeps the td's hosts off the dm-clone is
+				// this ns-dev — left on a recovery's park (CN18 step 2),
+				// whose namespace stays optimized, or not created yet. CN18
+				// registered no retry for the clone, and the worker re-syncs
+				// on a revision or a reply code, never on a row, so this
+				// registers the CN10 retry: its next attempt reads the
+				// status and the table afresh.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
+			}
 			// A deferred namespace is built exactly as the effective plan
 			// wants it — on the td's dm-error — but nothing under it can
 			// serve, so it reports PROVISIONING rather than OK ([D15]).

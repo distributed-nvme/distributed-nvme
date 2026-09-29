@@ -321,6 +321,544 @@ func TestCloneRecovery(t *testing.T) {
 	}
 }
 
+// seedKilledCloneBuild leaves the node the way an agent killed after CN18 step
+// 3 created the dm-clone, and before step 5 enabled its hydration, leaves it:
+// the ns-dev parked on the td's dm-error by the killed pass's step 2, the
+// matching wrapper that pass kept, and the dm-clone its step 3 created with
+// hydration off — no destination bitmap applied, no chunk re-applied, the
+// chunk file still in the store. The destination pool's metadata has blocks
+// 0..3 mapped, so regions 0..3 are already copied and a recovery must
+// discard them (one 4 MiB discard at offset 0) before hydration starts. It
+// returns the dm-clone's name and the pool metadata path the recovery dumps.
+func seedKilledCloneBuild(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+) (string, string) {
+	t.Helper()
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
+	pushBitmap(t, srv, hexBytes(t, testSkipHex))
+	clone := cloneName(srv, testClone)
+
+	node.mu.Lock()
+	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+	node.dms[nsDevName(srv, testNs)].table =
+		agent.LinearTable(testTdSize/512, errNo, 0)
+	table := node.dms[clone].table
+	removeCloneDevice(node, srv)
+	_, code := node.dmCreate(
+		[]string{"create", clone, "--table", table}, "")
+	node.mu.Unlock()
+	if code != 0 || !node.dms[clone].noHydration {
+		t.Fatalf("seeding the killed pass's dm-clone failed (%d)", code)
+	}
+	assertParked(t, srv, node, testNs, testTd, "the killed pass")
+
+	metaPath := srv.nf.DmPath(srv.nf.CnPoolMetaName(
+		testCluster, testCn, testSp, testSlice))
+	node.thinDumps[metaPath] = `<superblock uuid="" time="0" ` +
+		`transaction="0" flags="0" version="2" data_block_size="2048" ` +
+		`nr_data_blocks="0">
+  <device dev_id="1" mapped_blocks="4" transaction="0" creation_time="0" snap_time="0">
+    <range_mapping origin_begin="0" data_begin="0" length="4" time="0"/>
+  </device>
+</superblock>
+`
+	return clone, metaPath
+}
+
+// TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps is the crash
+// window inside a build: an agent killed after CN18 step 3 created the
+// dm-clone and before step 4 applied the destination bitmaps leaves nothing
+// missing — the wrapper still matches and the dm-clone is up — so the one
+// sign that step 4 never finished is the dm-clone's own `no_hydration`. The
+// next pass must run the §11.5 recovery again before it enables hydration:
+// enabling it straight away re-fetches every region the destination already
+// owns, stale source bytes over newer local ones. The stale dm-clone may
+// also survive the recovery's removal (a refused `dmsetup remove`); the
+// bitmaps then land on the surviving device, because they belong to the
+// recovery, not to the create. And the device under the clone's name may
+// not show a dm-clone's status at all, which is no mark of step 5 either.
+func TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		survives bool
+		notClone bool
+	}{
+		{name: "the stale dm-clone is replaced"},
+		{name: "the stale dm-clone survives its removal", survives: true},
+		{name: "the device under the clone's name is not a dm-clone",
+			notClone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			clone, metaPath := seedKilledCloneBuild(t, srv, node)
+			metaDm := cloneMetaName(srv, testClone)
+			loop := loopDev(t, srv, node)
+			if tc.notClone {
+				// A status that does not parse as a dm-clone's shows no
+				// hydration (cloneHydrating) — a dm-clone in `Fail` mode
+				// prints `Fail` where its fields go, and an error table
+				// stands in for such a device here. Read as hydrating, it
+				// would skip the recovery: the table's reload would count as
+				// a create, and step 5 would follow step 4's source chunks
+				// alone.
+				node.mu.Lock()
+				node.dms[clone].table = agent.ErrorTable(testTdSize / 512)
+				node.mu.Unlock()
+			}
+			if tc.survives {
+				node.failCmd["dmsetup remove "+clone] =
+					"device-mapper: remove ioctl on " + clone +
+						" failed: Device or resource busy"
+			}
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+			if err != nil {
+				t.Fatalf("the pass after the kill: %v", err)
+			}
+			dev := "/dev/mapper/" + clone
+			dstDiscard := "cmd blkdiscard --offset 0 --length 4194304 " + dev
+			enable := "cmd dmsetup message " + clone + " 0 enable_hydration"
+			reload := "cmd dmsetup reload " + nsDevName(srv, testNs)
+			// (a) the destination regions — read from the destination pool's
+			// metadata snapshot — and the pushed source chunk are marked
+			// hydrated on the dm-clone before hydration is enabled, and only
+			// then does the ns-dev leave the park (CN18 steps 4-6).
+			assertOrder(t, node, dstDiscard, enable, reload)
+			assertOrder(t, node,
+				"cmd thin_dump --metadata-snap "+metaPath, dstDiscard)
+			assertOrder(t, node,
+				"cmd blkdiscard --offset 33554432 --length 33554432 "+dev,
+				enable)
+			if node.indexOfCall(reload) < node.indexOfCall(enable) {
+				t.Fatalf("the ns-dev left the park before hydration was " +
+					"enabled")
+			}
+			// (b) once each: one destination-bitmap read, one discard of its
+			// regions, one enable.
+			for _, call := range []string{"cmd thin_dump", dstDiscard, enable} {
+				if got := node.callsMatching(call); len(got) != 1 {
+					t.Fatalf("%q ran %d times, want 1: %v",
+						call, len(got), got)
+				}
+			}
+			// (c) the clone reads OK, and a pass that finished the build
+			// leaves no CN10 retry behind.
+			info := reply.GetCntlrInfo()
+			assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
+			assertOk(t, info.GetCloneIdToMeta()[testClone], "clone meta")
+			assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+			if retrying(t, srv) {
+				t.Fatalf("a recovery that finished registered the retry")
+			}
+			// The matching wrapper is left alone: re-punching it would wipe
+			// the dm-clone superblock the killed pass wrote (CN18).
+			assertNoCall(t, node, "cmd dmsetup create "+metaDm)
+			assertNoCall(t, node,
+				"cmd blkdiscard --offset 0 --length 8388608 "+loop)
+			// The stale dm-clone goes before a fresh one is created over the
+			// same wrapper (§11.5 steps 1-2); one whose removal is refused is
+			// kept, and the bitmaps above landed on it.
+			if tc.survives {
+				if !node.hasCall("cmd dmsetup remove " + clone) {
+					t.Fatalf("no removal of the stale dm-clone was tried; " +
+						"the case is vacuous")
+				}
+				assertNoCall(t, node, "cmd dmsetup create "+clone)
+			} else {
+				assertOrder(t, node,
+					"cmd dmsetup remove "+clone,
+					"cmd dmsetup create "+clone,
+					dstDiscard)
+			}
+		})
+	}
+}
+
+// TestCloneRecoveryNeverServesAnUnfinishedDmClone holds §11.5's "fully
+// applied before the dm-clone handles any IO" against a second fault. From
+// the state the kill leaves, one more failure stops the next pass short of
+// CN18 step 5: the arena listing does not answer, the dm-clone's status read
+// does not answer (once, or every time), the recovery's own `dmsetup create`
+// is killed after its ioctl ran, the destination bitmaps cannot be read while
+// the stale dm-clone refuses to go, or the enable is refused. Each leaves a
+// dm-clone up with hydration off, which is exactly what CN16 must not serve
+// through: the ns-dev stays parked (rule 5 takes the dm-clone only while its
+// status shows hydration on), the Check round reads that park as the state
+// CN16 wants — not as a table to repair — and the pass registers the CN10
+// retry, whose next attempt, the fault gone, finishes the recovery and moves
+// the ns-dev on. The refused enable runs once more at SP_LEVEL_READONLY,
+// where rule 7 puts the rule-5 backing under dm-flakey: the park is still
+// rule 1's plain dm-linear, never a flakey table over the td's dm-error.
+func TestCloneRecoveryNeverServesAnUnfinishedDmClone(t *testing.T) {
+	enableOf := func(clone string) string {
+		return "cmd dmsetup message " + clone + " 0 enable_hydration"
+	}
+	refuseEnable := func(node *fakeNode, clone string) {
+		node.failCmd[enableOf(clone)[len("cmd "):]] =
+			"device-mapper: message ioctl on " + clone +
+				" failed: Invalid argument"
+	}
+	enableRefused := func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+		clone string) {
+		// Step 4 finished; only the enable did not.
+		assertOrder(t, node,
+			"cmd blkdiscard --offset 0 --length 4194304 "+
+				"/dev/mapper/"+clone,
+			enableOf(clone))
+		assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+			"Invalid argument", "dm-clone")
+	}
+	for _, tc := range []struct {
+		name  string
+		level pb.SpLevel
+		fault func(node *fakeNode, clone string)
+		clear func(node *fakeNode)
+		// pass checks the failed pass beyond what every case shares.
+		pass func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+			clone string)
+		// nsErr is what the ns-dev row carries when the pass could not read
+		// the dm-clone's status at all; "" means the row reads OK.
+		nsErr string
+	}{
+		{
+			name: "the arena does not answer",
+			fault: func(node *fakeNode, _ string) {
+				node.killCmd["losetup --associated"] = true
+			},
+			clear: func(*fakeNode) {},
+			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+				clone string) {
+				// Step 2 stopped before it could tell a recovery: nothing is
+				// removed, created, read or enabled.
+				assertNoCall(t, node, "cmd dmsetup remove "+clone)
+				assertNoCall(t, node, "cmd dmsetup create "+clone)
+				assertNoCall(t, node, "cmd thin_dump")
+				assertNoCall(t, node, enableOf(clone))
+				assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+					"clone-metadata arena unavailable", "clone meta")
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					detailsCloneMetaMissing, "dm-clone")
+			},
+		},
+		{
+			name: "the status read does not answer",
+			fault: func(node *fakeNode, clone string) {
+				node.killCmd["dmsetup status "+clone] = true
+			},
+			clear: func(*fakeNode) {},
+			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+				clone string) {
+				// Step 2 decided nothing: no park-and-rebuild, no bitmap
+				// read, no enable, and both rows carry the read's failure.
+				assertNoCall(t, node, "cmd dmsetup remove "+clone)
+				assertNoCall(t, node, "cmd dmsetup create "+clone)
+				assertNoCall(t, node, "cmd thin_dump")
+				assertNoCall(t, node, enableOf(clone))
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					"signal: killed", "dm-clone")
+				assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+					"signal: killed", "clone meta")
+			},
+		},
+		{
+			name: "no status read answers",
+			fault: func(node *fakeNode, clone string) {
+				node.killCmdAlways["dmsetup status "+clone] = true
+			},
+			clear: func(node *fakeNode) {
+				clear(node.killCmdAlways)
+			},
+			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+				clone string) {
+				assertNoCall(t, node, "cmd dmsetup remove "+clone)
+				assertNoCall(t, node, "cmd dmsetup create "+clone)
+				assertNoCall(t, node, "cmd thin_dump")
+				assertNoCall(t, node, enableOf(clone))
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					"signal: killed", "dm-clone")
+				assertErrorDetails(t, info.GetCloneIdToMeta()[testClone],
+					"signal: killed", "clone meta")
+			},
+			nsErr: "signal: killed",
+		},
+		{
+			name: "the recovery's create does not answer",
+			fault: func(node *fakeNode, clone string) {
+				node.killCmd["dmsetup create "+clone+" "] = true
+			},
+			clear: func(*fakeNode) {},
+			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+				clone string) {
+				// The stale dm-clone went and the new one is up — the ioctl
+				// ran — with hydration off and not a bitmap applied.
+				assertOrder(t, node, "cmd dmsetup remove "+clone,
+					"cmd dmsetup create "+clone)
+				assertNoCall(t, node, "cmd thin_dump")
+				assertNoCall(t, node, enableOf(clone))
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					"signal: killed", "dm-clone")
+			},
+		},
+		{
+			name: "the bitmaps are unreadable and the stale dm-clone stays",
+			fault: func(node *fakeNode, clone string) {
+				node.failCmdAlways["dmsetup remove "+clone] =
+					"device-mapper: remove ioctl on " + clone +
+						" failed: Device or resource busy"
+				node.failCmdAlways["thin_dump"] = "thin_dump: bad checksum"
+			},
+			clear: func(node *fakeNode) {
+				clear(node.failCmdAlways)
+			},
+			pass: func(t *testing.T, node *fakeNode, info *pb.CntlrInfo,
+				clone string) {
+				// Step 4 failed closed, and its removal failed too: the
+				// stale dm-clone is still up.
+				if got := node.callsMatching(
+					"cmd dmsetup remove " + clone); len(got) != 2 {
+					t.Fatalf("want the step 2 and the step 4 removal, "+
+						"got %v", got)
+				}
+				assertNoCall(t, node, enableOf(clone))
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					"destination bitmaps not applied", "dm-clone")
+			},
+		},
+		{
+			name:  "the enable is refused",
+			fault: refuseEnable,
+			clear: func(*fakeNode) {},
+			pass:  enableRefused,
+		},
+		{
+			name:  "the enable is refused at SP_LEVEL_READONLY",
+			level: pb.SpLevel_SP_LEVEL_READONLY,
+			fault: refuseEnable,
+			clear: func(*fakeNode) {},
+			pass:  enableRefused,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			clone, _ := seedKilledCloneBuild(t, srv, node)
+			nsDev := nsDevName(srv, testNs)
+			tc.fault(node, clone)
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					level: tc.level, clones: []*pb.Clone{cloneOf()}}))
+			if err != nil {
+				t.Fatalf("the pass after the kill: %v", err)
+			}
+			info := reply.GetCntlrInfo()
+			tc.pass(t, node, info, clone)
+			// What every case shares: a dm-clone is up with hydration off,
+			// and the ns-dev never went near it.
+			if dm := node.dms[clone]; dm == nil || !dm.noHydration {
+				t.Fatalf("the case is vacuous: no dm-clone with hydration "+
+					"off is up (%v)", dm)
+			}
+			assertParked(t, srv, node, testNs, testTd, "the failed pass")
+			assertNoCall(t, node, "cmd dmsetup reload "+nsDev)
+			if tc.nsErr != "" {
+				assertErrorDetails(t, info.GetNsIdToDmLinear()[testNs],
+					tc.nsErr, "ns-dev")
+			} else {
+				assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+			}
+			if !retrying(t, srv) {
+				t.Fatalf("a pass that stopped short of the enable " +
+					"registered no retry")
+			}
+
+			// The Check round agrees with the converge: the park is what
+			// CN16 wants while hydration is off, and a probe never mutates.
+			node.Reset()
+			_, probed := srv.checkCntlrRound(context.Background(),
+				&pb.CheckCntlrRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(), Revision: 3,
+				}, nil)
+			if tc.nsErr != "" {
+				assertErrorDetails(t, probed.GetNsIdToDmLinear()[testNs],
+					tc.nsErr, "probed ns-dev")
+			} else {
+				assertOk(t, probed.GetNsIdToDmLinear()[testNs],
+					"probed ns-dev")
+			}
+			for _, call := range node.Mutations() {
+				t.Fatalf("the check round mutated: %q", call)
+			}
+
+			// The retry's next attempt, the fault gone, recovers the clone:
+			// the destination regions are discarded before the one enable,
+			// and only then does the ns-dev move onto the dm-clone.
+			tc.clear(node)
+			node.Reset()
+			retryAttempt(t, srv)
+			dstDiscard := "cmd blkdiscard --offset 0 --length 4194304 " +
+				"/dev/mapper/" + clone
+			assertOrder(t, node, dstDiscard, enableOf(clone),
+				"cmd dmsetup reload "+nsDev)
+			for _, call := range []string{"cmd thin_dump", dstDiscard,
+				enableOf(clone)} {
+				if got := node.callsMatching(call); len(got) != 1 {
+					t.Fatalf("the retry ran %q %d times, want 1: %v",
+						call, len(got), got)
+				}
+			}
+			cloneNo := node.devNo["/dev/mapper/"+clone]
+			want := agent.LinearTable(testTdSize/512, cloneNo, 0)
+			if tc.level == pb.SpLevel_SP_LEVEL_READONLY {
+				want = agent.FlakeyErrorWritesTable(testTdSize/512, cloneNo)
+			}
+			if got := node.dms[nsDev].table; got != want {
+				t.Fatalf("after the retry the ns-dev table is %q, want the "+
+					"dm-clone %q", got, want)
+			}
+			if retrying(t, srv) {
+				t.Fatalf("the retry outlived the recovery it finished")
+			}
+		})
+	}
+}
+
+// TestCloneRecoveryRetriesAReadAfterTheEnable holds the CN10 retry to the two
+// `dmsetup status` reads that follow a recovery's enable. From the state a
+// killed build leaves, one pass runs the recovery through CN18 step 5 and
+// then reads the dm-clone's status twice more: CN18's own read for the
+// dm-clone row (§9.5), then CN16's, which decides whether the ns-dev may
+// leave the park (rule 5). Either may not answer. Hydration is on by then,
+// so the next pass redoes nothing of the recovery — but the dm-clone row
+// the first read leaves ERROR, and the parked ns-dev the second leaves on
+// the td's dm-error under an `optimized` namespace, are both waiting for a
+// converge, and the worker re-syncs on a revision or a reply code, never on
+// a row. So either failure registers the retry, whose next attempt reads
+// again, moves what is left and stops.
+func TestCloneRecoveryRetriesAReadAfterTheEnable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// nth is the `dmsetup status` of the dm-clone the pass kills,
+		// counted from the pass's start: the recovery reads it at step 2,
+		// for step 3's knobs and for step 5's enable before these two.
+		nth int
+		// pass checks the failed pass beyond what both cases share.
+		pass func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+			info *pb.CntlrInfo, onClone string)
+		// reloads is how often the retry's attempt reloads the ns-dev: once
+		// for the one the failed pass left parked, never for one it moved.
+		reloads int
+	}{
+		{
+			name: "the dm-clone row's read does not answer",
+			nth:  4,
+			pass: func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+				info *pb.CntlrInfo, onClone string) {
+				assertErrorDetails(t, info.GetCloneIdToDmClone()[testClone],
+					"signal: killed", "dm-clone")
+				// CN16's own read answered: the ns-dev is on the dm-clone.
+				if got := node.dms[nsDevName(srv, testNs)].table; got !=
+					onClone {
+					t.Fatalf("the ns-dev table is %q, want the dm-clone %q",
+						got, onClone)
+				}
+				assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+			},
+		},
+		{
+			name: "the namespace step's read does not answer",
+			nth:  5,
+			pass: func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+				info *pb.CntlrInfo, _ string) {
+				assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
+				// The read licensed no move: the ns-dev keeps the park the
+				// recovery put it on, and its row names the read.
+				assertParked(t, srv, node, testNs, testTd, "the failed pass")
+				assertErrorDetails(t, info.GetNsIdToDmLinear()[testNs],
+					"signal: killed", "ns-dev")
+			},
+			reloads: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			clone, _ := seedKilledCloneBuild(t, srv, node)
+			nsDev := nsDevName(srv, testNs)
+			dev := "/dev/mapper/" + clone
+			enable := "cmd dmsetup message " + clone + " 0 enable_hydration"
+			node.killCmdNth["dmsetup status "+clone] = tc.nth
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					clones: []*pb.Clone{cloneOf()}}))
+			if err != nil {
+				t.Fatalf("the pass after the kill: %v", err)
+			}
+			if len(node.killCmdNth) != 0 {
+				t.Fatalf("the pass read the dm-clone's status fewer than "+
+					"%d times; the case is vacuous", tc.nth)
+			}
+			// The recovery itself ran in full, once, before the read that
+			// failed: hydration is on.
+			dstDiscard := "cmd blkdiscard --offset 0 --length 4194304 " + dev
+			for _, call := range []string{"cmd thin_dump", dstDiscard,
+				enable} {
+				if got := node.callsMatching(call); len(got) != 1 {
+					t.Fatalf("%q ran %d times, want 1: %v",
+						call, len(got), got)
+				}
+			}
+			if node.dms[clone].noHydration {
+				t.Fatalf("the recovery left hydration off")
+			}
+			onClone := agent.LinearTable(testTdSize/512,
+				node.devNo[dev], 0)
+			tc.pass(t, srv, node, reply.GetCntlrInfo(), onClone)
+			if !retrying(t, srv) {
+				t.Fatalf("a read after the enable that did not answer " +
+					"registered no retry")
+			}
+
+			// The retry's attempt redoes nothing of the recovery — hydration
+			// is on — and leaves the ns-dev on the dm-clone, every row OK,
+			// and no retry.
+			node.Reset()
+			retryAttempt(t, srv)
+			for _, call := range []string{"cmd thin_dump", "cmd blkdiscard",
+				enable, "cmd dmsetup remove " + clone,
+				"cmd dmsetup create " + clone} {
+				assertNoCall(t, node, call)
+			}
+			if got := node.dms[nsDev].table; got != onClone {
+				t.Fatalf("after the retry the ns-dev table is %q, want the "+
+					"dm-clone %q", got, onClone)
+			}
+			if got := node.callsMatching(
+				"cmd dmsetup reload " + nsDev); len(got) != tc.reloads {
+				t.Fatalf("the retry reloaded the ns-dev %d times, want %d: "+
+					"%v", len(got), tc.reloads, got)
+			}
+			info := probedCntlrInfo(t, srv)
+			assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
+			assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev")
+			if retrying(t, srv) {
+				t.Fatalf("the retry outlived the reads it re-ran")
+			}
+		})
+	}
+}
+
 func TestCloneMetadataSnapAlwaysReleased(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})

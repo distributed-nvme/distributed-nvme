@@ -154,6 +154,12 @@ type fakeNode struct {
 	// the node changed and the agent was told nothing.
 	killCmd       map[string]bool
 	killCmdAlways map[string]bool
+	// killCmdNth is killCmd counted: it kills only the Nth command matching
+	// its key, counting from when the key is set, and every match the fail
+	// hooks let through counts. It is how a test kills one read of a device
+	// the pass reads several times — the fourth `dmsetup status` of a
+	// dm-clone and not the first.
+	killCmdNth map[string]int
 	// killCmdNoEffect / killCmdNoEffectAlways are the same answer with the
 	// opposite truth underneath: killed before the tool touched anything.
 	//
@@ -285,6 +291,7 @@ func newFakeNode() *fakeNode {
 
 		killCmd:               make(map[string]bool),
 		killCmdAlways:         make(map[string]bool),
+		killCmdNth:            make(map[string]int),
 		killCmdNoEffect:       make(map[string]bool),
 		killCmdNoEffectAlways: make(map[string]bool),
 		failRead:              make(map[string]bool),
@@ -684,10 +691,11 @@ func (f *fakeNode) runCommand(
 	// and after them: a key registered in both fails rather than being
 	// killed. "No effect" returns before the dispatch; "killed" runs the
 	// dispatch and throws the answer away.
+	killedNth := takeKillNth(f.killCmdNth, line)
 	killedNoEffect := takeKill(f.killCmdNoEffect, f.killCmdNoEffectAlways, line)
 	var killed bool
 	if !killedNoEffect {
-		killed = takeKill(f.killCmd, f.killCmdAlways, line)
+		killed = takeKill(f.killCmd, f.killCmdAlways, line) || killedNth
 	}
 	f.mu.Unlock()
 	if killedNoEffect {
@@ -737,6 +745,25 @@ func takeKill(oneShot, always map[string]bool, line string) bool {
 		}
 	}
 	return false
+}
+
+// takeKillNth counts line against every counted kill hook it matches and
+// reports whether it is the Nth match of one, consuming that key. Every
+// matching key counts, so the answer never depends on map order.
+func takeKillNth(counted map[string]int, line string) bool {
+	fired := false
+	for key, n := range counted {
+		if !strings.Contains(line, key) {
+			continue
+		}
+		if n <= 1 {
+			delete(counted, key)
+			fired = true
+			continue
+		}
+		counted[key] = n - 1
+	}
+	return fired
 }
 
 // killedCmdResult is what common.OsClient.RunCommand returns for a child the

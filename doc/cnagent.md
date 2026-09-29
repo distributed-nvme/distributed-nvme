@@ -98,9 +98,9 @@ gains, `common/name_parse.go`:
 
 	// Seconds between background retries of a cn cntlr's converge
 	// (cnagent.md CN10): after a leg or a clone source failed to converge, a
-	// clone recovery whose destination bitmaps were not applied (CN18), or a
-	// leg_list member that is not available (CN12); the cn twin of
-	// DnMigrConnectRetryInterval.
+	// later step of a clone failed (CN18 says which) — a recovery's
+	// destination bitmaps not applied among them — or a leg_list member that
+	// is not available (CN12); the cn twin of DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
@@ -466,7 +466,9 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      `blkdiscard`s would then wait for the next event that re-applies the
      whole set: a create of that dm-clone, a converge reload of its table
      onto a changed length, devno or region size (step 4 runs on both —
-     the converge treats a reload exactly as a create), or another
+     the converge treats a reload exactly as a create), a §11.5 recovery
+     (step 4 runs on every one, also over an old dm-clone its removal left
+     in place), or another
      chunk's own push (CN22). Until then the clone re-copies regions it
      never needed to. A **decoded** chunk file whose cntlr is not among the
      loaded `cntlr-*` requests, or whose `clone_id` is absent from that cntlr's
@@ -488,10 +490,14 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      request: re-run the SyncupCntlr
      converge (§4.6) from the stored request — which, per CN18 step 4, runs
      the §11.5 recovery for a clone whose **dm-clone metadata** is missing
-     or unusable, or whose **dm-clone device** itself vanished while a
+     or unusable, whose **dm-clone device** itself vanished while a
      healthy wrapper stayed behind
-     (`TestCloneRecoveryWhenOnlyTheDmCloneVanished`); a dm-clone that is
-     present over a wrapper that still matches, but whose table has drifted
+     (`TestCloneRecoveryWhenOnlyTheDmCloneVanished`), or whose dm-clone is
+     up but does not show hydration enabled — what an agent killed between
+     CN18 steps 3 and 5 leaves behind
+     (`TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps`); a
+     dm-clone that is present over a wrapper that still matches, with
+     hydration enabled, but whose table has drifted
      — a changed length, devno or region size — is reloaded by step 3's
      probe-first converge (SH16) with step 4's locally held source chunks
      re-applied, and is not a §11.5 recovery; the same drifted table over a
@@ -500,8 +506,12 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      (A reboot
      clears the tmpfs, the loop device and every kind-`cb` wrapper together —
      the arena is volatile *with* the kernel's dm state — so the reconcile
-     starts from an empty arena; a plain agent restart preserves both and the
-     converge is a no-op re-apply). The pass order is therefore: load, then
+     starts from an empty arena; a plain agent restart preserves both, and
+     the converge is a no-op re-apply for a clone whose build had enabled
+     hydration, while a build the dead agent left short of that runs the
+     recovery again — a missing wrapper, a missing dm-clone and a dm-clone
+     with hydration still disabled are each a recovery trigger).
+     The pass order is therefore: load, then
      converge every `cn-*` base state, then drop the orphan cntlrs, then the
      node-level sweep per CN, then converge every remaining cntlr.
 
@@ -898,9 +908,10 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       budget allows. Four things register it: a leg that failed to converge
       — its connect, its multipath namespace or its wrapper (above) — a
       clone source whose
-      connection failed and a clone recovery whose destination bitmaps were
-      not applied (CN18), and a `leg_list` member of a group that is not
-      available (CN12;
+      connection failed, a clone recovery whose destination bitmaps were
+      not applied or another clone failure CN18 lists (never a failed
+      allocation or replacement of its metadata wrapper), and a
+      `leg_list` member of a group that is not available (CN12;
       *amended 2026-09-26*, the failover ping-pong: a promotion whose first
       converge read its legs before the sides' ANA flips had reached this
       CN's sysfs left its md groups unassembled — and a RedundNone SP's
@@ -1183,9 +1194,9 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         converge for it: the group's error is a row, not a reply code
         (CN29), so the worker does not re-drive it, and it registers no
         CN10 background retry (a leg that failed to converge does, CN10,
-        and so does a clone source whose connection failed or a clone
-        recovery whose destination bitmaps were not applied, CN18, and so
-        does a `leg_list` member that is not available — above,
+        and so does a clone source whose connection failed or another
+        clone failure CN18 lists, and so does a
+        `leg_list` member that is not available — above,
         *amended 2026-09-26* — which is cntlr-wide: any such member of any
         group of this cntlr registers it, and the retry finishes the switch,
         the first of its attempts that finds the promoted spare available
@@ -1507,7 +1518,29 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
          `dst_td_id == ns.td_id`) and `sp_level ≥ SP_LEVEL_NO_CLONE` ⇒ →
          `CnErrorName` (a raid0 with holes must never serve);
       5. a clone targets the td ⇒ → `CnCloneFinalName` (via dm-flakey when
-         rule 7 applies);
+         rule 7 applies) — only while that dm-clone's `dmsetup status` shows
+         hydration enabled, the mark CN18 step 5 alone sets, after step 4's
+         bitmaps (§11.5: they must be applied before the dm-clone handles
+         any IO). While it does not — a build or a recovery that has not
+         finished, whatever stopped it — the ns-dev gets the td's
+         `CnErrorName` instead, parked like rule 1: live, never under
+         dm-flakey. Every converge and every probe reads that status afresh
+         (`nsDevNow`); nothing is remembered. A read that fails or does not
+         answer moves the ns-dev nowhere: it keeps its table, and its
+         `ns_id_to_dm_linear` row is `RES_STATUS_ERROR`. The ANA rule below
+         does not look at any of this, so the namespace is `optimized` all
+         the same and a host takes IO errors — the recovery's own window
+         (CN18 step 4) — until a pass's read here finds hydration enabled
+         and the ns-dev moves onto the dm-clone. Most CN18 failures that
+         stop the build before step 5 has enabled hydration register the
+         CN10 retry that runs such a pass (CN18 lists which; a failed
+         allocation or replacement of the metadata wrapper does not), and
+         so does any failure to converge this ns-dev, this read and its
+         reload onto the dm-clone among them, in a pass whose CN18 finished
+         the build (the clone's `clone_id_to_dm_clone` row `OK`): the worker
+         re-syncs on a revision or a reply code, never on a row, so without
+         it the park a recovery left would stay until the cntlr's next
+         converge for another reason;
       6. otherwise ⇒ → `CnRaid0Name` (via dm-flakey when rule 7 applies);
       7. `SP_LEVEL_READONLY ≤ sp_level` (primary only): the table is the
          Appendix A flakey `error_writes` line over the rule-5/6 backing —
@@ -1705,13 +1738,29 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          matches (wrong length, or backed by something other than the
          **currently probed** loop path — a tmpfs remounted under a live
          agent) is removed and reallocated by the converge, after the
-         dm-clone above it is already gone so the removal cannot EBUSY; that
-         *is* the §11.5 rebuild path. On a recovery build (metadata missing
-         or unusable, or the dm-clone device gone) this step first parks the
+         dm-clone above it has been removed, so the removal does not EBUSY
+         (a dm-clone whose removal failed keeps its wrapper mapped, which
+         then cannot be replaced — below); that *is* the §11.5 rebuild
+         path. On a recovery build (metadata missing or unusable, the
+         dm-clone device gone, or a dm-clone that does not show hydration
+         enabled — step 4) this step first parks the
          dst td's ns-devs on `CnErrorName` (`parkTdNsDevs`, no ANA move),
          removes the old dm-clone if one is still present, and only then
          allocates a missing wrapper or replaces a mismatched one — a
-         matching wrapper is left alone.
+         matching wrapper is left alone. An old dm-clone whose removal fails
+         is kept: step 3 converges it like any existing dm-clone, and step 4
+         still applies every bitmap to it before step 5 (its wrapper
+         matches — a mismatched one cannot be replaced while the dm-clone
+         still maps it, and that failure ends this step). The
+         `dmsetup status` read that decides the third case is step 2's own;
+         when it fails or does not answer, step 2 fails exactly as on a
+         failed `dmsetup info` of the dm-clone — `clone_id_to_meta` and
+         `clone_id_to_dm_clone` `RES_STATUS_ERROR` (CN29) — the pass
+         recovers, removes and enables nothing for that clone, and it
+         registers the CN10 retry. CN16 reads the status again itself and
+         moves no ns-dev onto a dm-clone that does not show hydration
+         enabled (rule 5), so a td a killed build left parked stays parked
+         until a pass that can read the status has recovered the clone.
       3. dm-clone `CnCloneFinalName`: metadata = the step-2 wrapper, dest = the dst
          td's `CnRaid0Name`, source = the connected device, region size =
          `block_size / 512` sectors, created
@@ -1733,8 +1782,19 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          and every kind-`cb` wrapper together; a failover to a CN that never
          ran the clone; or the dm-clone device itself vanished while a
          healthy wrapper stayed behind —
-         `TestCloneRecoveryWhenOnlyTheDmCloneVanished`), first the **dst**
-         bitmaps: with every affected ns-dev parked
+         `TestCloneRecoveryWhenOnlyTheDmCloneVanished`; or the dm-clone is
+         up but its `dmsetup status` does not show hydration enabled —
+         `no_hydration` among its feature args, or a status that is not a
+         dm-clone's: step 5 alone enables hydration, so an agent killed
+         between steps 3 and 5 leaves exactly this, with step 4 perhaps half
+         done — `TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps` —
+         and so can a pass that failed between them without removing it,
+         for example through a create killed after its ioctl ran, a refused
+         enable, or step 4's fail-closed removal failing too —
+         `TestCloneRecoveryNeverServesAnUnfinishedDmClone`; a removal that
+         succeeds leaves the dm-clone gone instead, the vanished-device case
+         above),
+         first the **dst** bitmaps: with every affected ns-dev parked
          on `CnErrorName` (by CN9's pre-step 2 when the namespace is
          effectively suspended or the cntlr is standby, and otherwise by
          step 2 of a recovery build, before the old dm-clone is removed —
@@ -1743,15 +1803,45 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          recovery's own), read the td's mapping bitmap from every slice pool
          (the CN25 machinery, B-side of §11.4) and `blkdiscard` every
          mapped region. Mapped ⇔ already copied holds because the dst td
-         started empty [D3].
+         started empty [D3]. Dst bitmaps not applied in full — a read or a
+         `blkdiscard` that fails — fail the clone closed: the dm-clone is
+         removed, `clone_id_to_dm_clone` reads `RES_STATUS_ERROR`
+         `"destination bitmaps not applied: …"`, and the CN10 retry is
+         registered; a dm-clone whose removal fails there — as it may when
+         step 2 could not remove it either — stays up with hydration off,
+         which CN16 does not serve through (rule 5).
       5. `dmsetup message … enable_hydration` — only after step 4, so a
          recovered clone can never re-fetch a region the destination
          already owns (§11.5's staleness hazard).
       6. Put the dst td's ns-devs onto the dm-clone and set ANA per CN16 —
          a reload when they already exist (recovery, enable transitions); a
          fresh converge simply creates them in CN16 with the clone backing
-         (rule 5). With `auto_resume = false` the namespaces stay
-         effectively suspended until `UpdateNamespaceSuspended`.
+         (rule 5), which CN16 installs only once the dm-clone's status shows
+         the hydration step 5 enabled. With `auto_resume = false` the
+         namespaces stay effectively suspended until
+         `UpdateNamespaceSuspended`.
+      Any failure of step 1 registers the CN10 retry, and so do these later
+      ones, each of which stops the build before step 5 has enabled
+      hydration: the arena listing, step 2's `dmsetup info` or
+      `dmsetup status` of the dm-clone, anything step 3's converge of the
+      dm-clone fails on, step 4's dst bitmaps, and the enable (its own
+      status read included). So does a failed `dmsetup status` read after
+      the enable, whose line the dm-clone row carries (§9.5). The one other
+      failure of steps 2-5 that stops the build — of step 2's wrapper
+      allocation or replacement (`ensureCloneMeta`), the arena's refusal of
+      the slot among them — registers nothing and is left to its rows:
+      `clone_id_to_meta` `RES_STATUS_ERROR` and `clone_id_to_dm_clone`
+      `"metadata wrapper missing"`. Some failures stop nothing and are only
+      logged: step 2's failed removal of an old dm-clone (which is then
+      kept, above), a failed knob message of step 3 (the knob keeps the
+      value it had) and a failed source-chunk `blkdiscard` of step 4 (it
+      costs an extra copy). Step 6 is CN16's: in a pass that finished
+      steps 1-5 and the read after them (the dm-clone row `OK`), a failure
+      to converge a rule-5 ns-dev of the td registers the retry too
+      (CN16 rule 5). Whatever stopped a pass, CN16 puts the td's ns-devs on
+      the dm-clone only while its status shows hydration enabled (rule 5),
+      which no dm-clone shows before step 5 has run on it; a later pass —
+      the retry's, where one was registered — finishes the build.
       **Removing a clone** is not a step of its own: it is the CN21 sweep
       finding the clone's objects unwanted and taking them in layer order,
       which is exactly the order this stack needs. A clone that **left
@@ -2207,7 +2297,7 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `CnInfo.loop_dev_info` | the `CnTmpFilePath` | `losetup --associated` lists exactly one loop device — this row covers the whole arena; `CnInfo.clone_vg_info` (field 5) is deleted with the clone VG (`reserved 5;`, [D14]) and per-clone metadata health lives in `clone_id_to_meta` |
 | `ss_id_to_subsystem[ss]` | the subsystem NQN | configfs: present, cntlid range, serial/model (trimmed, SH17), allowed-hosts exactly as desired |
 | `ns_id_to_namespace[ns]` | `"{nqn}/{ns_idx}"` | nvmet ns enabled, `device_path`, `uuid`/`nguid` (compared through `agent.SameNsId` — configfs reads both back dash-separated and lower-cased whichever form was written, so a byte-wise compare fails a healthy namespace forever; `dnagent.md` SH17), `ana_grpid` as CN16 desires — `3` while the backing chain is provisioning-deferred (CN9), and the row itself is `RES_STATUS_PROVISIONING` then |
-| `ns_id_to_dm_linear[ns]` | `CnNsDevName` | `dmsetup table` matches the CN16 backing (flakey line included); an effectively suspended ns-dev is expected **live on the td's `CnErrorName`** and reports `RES_STATUS_OK`, `details = "parked"`; a dm-suspended ns-dev is `RES_STATUS_ERROR` `"unexpectedly suspended"` whatever the plan says; a provisioning-deferred one reports `RES_STATUS_PROVISIONING` over its permanent dm-error |
+| `ns_id_to_dm_linear[ns]` | `CnNsDevName` | `dmsetup table` matches the CN16 backing (flakey line included) — for a rule-5 ns-dev the one CN16 installs now, read the same way (`nsDevNow`): the td's `CnErrorName` while the dm-clone's status does not show hydration enabled, and `RES_STATUS_ERROR` with the read's error when that status read fails; an effectively suspended ns-dev is expected **live on the td's `CnErrorName`** and reports `RES_STATUS_OK`, `details = "parked"`; a dm-suspended ns-dev is `RES_STATUS_ERROR` `"unexpectedly suspended"` whatever the plan says; a provisioning-deferred one reports `RES_STATUS_PROVISIONING` over its permanent dm-error |
 | `td_id_to_raid0[td]` / `td_id_to_dm_error[td]` | `CnRaid0Name` / `CnErrorName` | `dmsetup table` |
 | `td_id_to_thin_info[td].slice_id_to_dm_thin[slice]` | `CnThinDevName` | `dmsetup table` (pool + dev_id) |
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
@@ -2671,7 +2761,51 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    reload; a rebuild with the metadata wrapper scripted absent additionally
    asserts the dst-bitmap reads (`reserve_metadata_snap` → `thin_dump` →
    `release_metadata_snap`) and their `blkdiscard`s **before**
-   `enable_hydration`, with the ns-devs parked on error throughout; a clone
+   `enable_hydration`, with the ns-devs parked on error throughout; a
+   rebuild over what an agent killed between CN18 steps 3 and 5 leaves —
+   the matching wrapper, the dm-clone up with hydration still disabled,
+   the ns-dev parked, a chunk file in the store — asserts the dst-bitmap
+   `thin_dump`, its `blkdiscard` and the chunk's before
+   `enable_hydration` and the ns-dev reload after it, the `thin_dump`, that
+   `blkdiscard` and `enable_hydration` exactly once each, the dm-clone,
+   meta and ns-dev rows OK, no CN10 retry left registered and the wrapper
+   neither re-created nor re-discarded, with
+   the stale dm-clone removed and created afresh first — and all of it
+   again, but with nothing re-created, when the stale dm-clone refuses its
+   `dmsetup remove` and is kept, and all of it once more, removal and
+   create included, when the device under the clone's name carries an
+   error table, whose status is not a dm-clone's
+   (`TestCloneRecoveryResumesAfterAKillBetweenCreateAndBitmaps`); from the
+   same state, a second fault that stops the pass before hydration is
+   enabled — the arena listing not answering, the dm-clone's status read
+   not answering once or every time, the recovery's `dmsetup create`
+   killed after its ioctl ran, the dst-bitmap `thin_dump` failing while
+   the stale dm-clone refuses both of its removals, the enable refused,
+   and the enable refused at `SP_LEVEL_READONLY` —
+   leaves a dm-clone up with hydration off and the ns-dev parked (a plain
+   dm-linear over the dm-error, never rule 7's dm-flakey) and never
+   reloaded, registers the CN10 retry, and a Check round then reads the
+   ns-dev row as the pass did — OK, or `RES_STATUS_ERROR` naming the read
+   when no status read answers — and mutates nothing; each case also pins
+   how far its pass got (the arena and the status cases removed, created,
+   read and enabled nothing, with both clone rows `RES_STATUS_ERROR`), and
+   one retry attempt with the fault gone then recovers the clone: one
+   `thin_dump` and one dst `blkdiscard` before the one `enable_hydration`,
+   then the ns-dev reload onto the dm-clone (through dm-flakey at
+   `SP_LEVEL_READONLY`), and no retry left
+   (`TestCloneRecoveryNeverServesAnUnfinishedDmClone`); from the same
+   state again, a pass that runs the recovery through the enable, but in
+   which one of the two `dmsetup status` reads of the dm-clone after it
+   does not answer (CN18's own read for the dm-clone row, or CN16's for
+   the ns-dev), runs the `thin_dump`, the dst `blkdiscard` and
+   `enable_hydration` once each and registers the CN10 retry, with the
+   dm-clone row `RES_STATUS_ERROR` and the ns-dev moved onto the dm-clone
+   in the first case, and the dm-clone row OK, the ns-dev still parked
+   and its row `RES_STATUS_ERROR` in the second; one retry attempt then
+   runs no `thin_dump`, `blkdiscard`, `enable_hydration`, dm-clone
+   removal or create, reloads the parked ns-dev onto the dm-clone once
+   (the moved one not at all), reads both rows OK and leaves no retry
+   (`TestCloneRecoveryRetriesAReadAfterTheEnable`); a clone
    allocated after another was torn down reuses the freed units and
    re-discards them first, while a surviving matching wrapper is **never**
    re-discarded; an arena with no contiguous free run of the required size ⇒
@@ -3445,6 +3579,34 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   (`architecture.md` §11.1 new_primary step 4). The follow-up is a
   [D15]-style ANA conjunct — `optimized` only once the ns-dev is on the
   backing it wants — which is not done here.
+* **A clone build that keeps failing with its dm-clone up shows only in its
+  Syncup rows** (2026-09-29): CN16 keeps a clone's td parked while its
+  dm-clone does not show hydration enabled (rule 5). A failed CN18 step that
+  stopped the build before step 5 enabled hydration registers the CN10 retry
+  (all but a failed allocation or replacement of the metadata wrapper, whose
+  `clone_id_to_meta` row does not read `OK`), which re-runs the converge
+  every `CnConnectRetryInterval` seconds until the build finishes. What
+  keeps failing may leave the dm-clone up with hydration off: among others a
+  refused enable, a `dmsetup create` killed after its ioctl ran, or a stale
+  dm-clone that will not go while a later step fails, such as the read of
+  its dst bitmaps. A Check round in between that can read the node and finds
+  the source's paths live then reads the parked ns-dev as the table CN16
+  wants and the clone's rows `OK` (the dm-clone row's raw status carries
+  `no_hydration`), so the worker's health pass sees a clean primary while a
+  host takes IO errors on the namespace, which stays `optimized`: the
+  recovery's own IO-error window (CN18 step 4), drawn out for as long as the
+  build keeps failing. These ways of failing do show in the Check rows: with
+  the dm-clone gone between attempts (step 4's fail-closed removal, a
+  refused create), `clone_id_to_dm_clone` reads `RES_STATUS_MISSING` and
+  `ns_id_to_dm_linear` `RES_STATUS_ERROR`, because the status read of an
+  absent dm-clone fails (`nsDevNow`); an arena listing or a status read that
+  keeps not answering leaves its rows `RES_STATUS_ERROR`; and a source whose
+  controllers are gone or not live reads `RES_STATUS_MISSING` or
+  `RES_STATUS_ERROR` in `clone_id_to_target`. Nothing but the retry re-runs
+  the build unless the cntlr is converged for another reason (a revision
+  bump, a non-zero reply code, an agent restart). The follow-up is a
+  `clone_id_to_dm_clone` row that says the build is unfinished, which needs
+  a decision on how the worker's health pass treats it.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

@@ -351,6 +351,10 @@ type nsPlan struct {
 	backingName string
 	flakey      bool
 	anaGrpId    int
+	// clone is the clone whose dm-clone rule 5 made backingName, and nil
+	// under every other rule. CN16 serves through that dm-clone only while
+	// its live status shows hydration on (nsDevNow).
+	clone *clonePlan
 	// deferred mirrors td.deferred: the fourth conjunct of the CN16 ANA rule
 	// as amended by [D15]. The ns-dev and the nvmet namespace still exist — over
 	// the td's permanent dm-error — but nothing under them can serve, so the
@@ -818,6 +822,10 @@ func (p *cntlrPlan) buildSubsystems() {
 			np.deferred = np.td != nil && np.td.deferred
 			np.suspended = p.effectiveSuspend(ns)
 			np.backingName, np.flakey = p.nsBacking(np)
+			if cp := p.cloneByTd[ns.GetTdId()]; cp != nil &&
+				np.backingName == cp.finalName {
+				np.clone = cp
+			}
 			np.anaGrpId = common.AnaGrpIdInaccessible
 			// CN16 as amended by [D15]: optimized iff primary ∧ not disabled
 			// (folded into p.primary) ∧ not effectively suspended ∧ the
@@ -900,8 +908,9 @@ func (p *cntlrPlan) nsBacking(np *nsPlan) (string, bool) {
 	if cloned && p.level >= pb.SpLevel_SP_LEVEL_NO_CLONE {
 		return np.td.errorName, false
 	}
-	// 5. the clone backing; 6. the plain raid0 — 7. under dm-flakey when the
-	// level is read-only.
+	// 5. the clone backing — which the ns-dev takes only while the dm-clone
+	// shows hydration on (nsDevNow); 6. the plain raid0 — 7. under dm-flakey
+	// when the level is read-only.
 	if cloned {
 		return clone.finalName, p.readOnly
 	}

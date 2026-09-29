@@ -324,9 +324,9 @@ const (
 
 	// Seconds between background retries of a cn cntlr's converge
 	// (cnagent.md CN10): after a leg or a clone source failed to converge, a
-	// clone recovery whose destination bitmaps were not applied (CN18), or a
-	// leg_list member that is not available (CN12); the cn twin of
-	// DnMigrConnectRetryInterval.
+	// later step of a clone failed (CN18 says which) — a recovery's
+	// destination bitmaps not applied among them — or a leg_list member that
+	// is not available (CN12); the cn twin of DnMigrConnectRetryInterval.
 	CnConnectRetryInterval = 5
 
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,

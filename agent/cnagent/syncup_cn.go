@@ -13,10 +13,12 @@ import (
 // Reconcile is the SH1 startup pass (CN2): load the local store, converge
 // every stored CN's §3.2 base state, tear down cntlrs whose pointer left their
 // CN's list, converge the rest — which, per CN18, runs the §11.5 recovery for
-// any clone whose metadata wrapper is gone or mismatched or whose dm-clone
-// has vanished (after a CN reboot the tmpfs arena and the dm state are both
-// empty; after a plain agent restart both survive and the converge is a
-// no-op re-apply) — and finally sweeps the kind-`b` wrappers no stored cntlr
+// any clone whose metadata wrapper is gone or mismatched, whose dm-clone has
+// vanished, or whose dm-clone does not show hydration enabled (after a CN
+// reboot the tmpfs arena and the dm state are both empty; after a plain agent
+// restart both survive, and the converge re-applies a clone whose build had
+// enabled hydration as a no-op and recovers one the dead agent left short of
+// that) — and finally sweeps the kind-`b` wrappers no stored cntlr
 // wants any more ([D14]). It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
 // unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a

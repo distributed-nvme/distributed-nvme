@@ -21,9 +21,19 @@ import (
 const detailsCloneMetaMissing = "metadata wrapper missing"
 
 // ensureClone runs the CN18 sequence for one clone and reports whether the
-// source connection still needs the background retry. Every step captures its
-// own failure into the clone's ResInfos and lets the pass continue (CN29).
-// budget is the pass's one CN10 wait budget, the one its legs drew on.
+// cntlr needs the CN10 background retry: the source did not connect, a later
+// step stopped the build before step 5 turned hydration on, or the status
+// read after that failed — except when ensureCloneMeta fails: its failures
+// (the arena's refusal of the slot among them) are left to their rows. A
+// failed knob message or source chunk stops nothing and is only logged. CN16
+// serves the destination td through the dm-clone only while its status shows
+// hydration on (rule 5, nsDevNow), and step 5 alone turns that on, so a build
+// or a recovery that stops short of step 5 leaves the td parked until a later
+// pass finishes it; when a pass that finished the build fails to converge a
+// rule-5 ns-dev of the td, CN16 registers the retry itself
+// (cloneBuiltThisPass). Every step captures its own failure into the clone's
+// ResInfos and lets the pass continue (CN29). budget is the pass's one CN10
+// wait budget, the one its legs drew on.
 func (s *CnAgentServer) ensureClone(
 	ctx context.Context,
 	st *cntlrState,
@@ -79,27 +89,44 @@ func (s *CnAgentServer) ensureClone(
 	// is not the test: a pass that created the wrapper and then failed to
 	// build the dm-clone (an agent restart, a raid0 not up yet) leaves a
 	// freshly discarded slot that dm-clone would format fresh, with nothing
-	// hydrated — so an absent dm-clone device is a recovery too. On a first
-	// build the destination td is empty by contract ([D3]), so the §11.5 read
-	// costs one metadata snapshot and discards nothing.
+	// hydrated — so an absent dm-clone device is a recovery too. Nor is a
+	// dm-clone that is up: a pass killed between step 3 and step 5 leaves one
+	// with hydration still off and step 4 perhaps unfinished, and so can a
+	// pass that failed there without removing it; enabling hydration on it
+	// would re-fetch every region the destination already owns. Only step 5
+	// turns hydration on, so a dm-clone whose status does not show it on is
+	// an unfinished build and gets the whole recovery again — re-applying the
+	// bitmaps is idempotent.
+	// A status read that fails or does not answer decides nothing: it fails
+	// the step like the `dmsetup info` before it, removes and enables
+	// nothing, and registers the retry; CN16 reads the status again and
+	// moves no ns-dev onto a dm-clone it has not seen hydrating (nsDevNow).
+	// On a first build the destination td is empty by contract ([D3]), so
+	// the §11.5 read costs one metadata snapshot and discards nothing.
 	arena, err := s.planArena(ctx, plan)
 	if err != nil {
 		info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
 			metaKey, metaName, err.Error())
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
 			dmKey, cp.finalName, detailsCloneMetaMissing)
-		return false
+		s.startConnectRetry(st, plan)
+		return true
 	}
 	metaOk := s.cloneMetaConverged(ctx, arena, cp)
 	dmDev, err := s.dm.Info(ctx, cp.finalName)
+	hydrating := false
+	if err == nil && dmDev != nil {
+		hydrating, err = s.cloneHydrating(ctx, cp)
+	}
 	if err != nil {
 		info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
 			metaKey, metaName, err.Error())
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
 			dmKey, cp.finalName, err.Error())
-		return false
+		s.startConnectRetry(st, plan)
+		return true
 	}
-	recovery := !metaOk || dmDev == nil
+	recovery := !metaOk || dmDev == nil || !hydrating
 	if recovery {
 		// §11.5 step 1 comes first: nothing may serve the td while the
 		// destination bitmaps are still being applied, or a read of an
@@ -108,10 +135,12 @@ func (s *CnAgentServer) ensureClone(
 		// local bytes.
 		s.parkTdNsDevs(ctx, plan, cp.dstTd.tdId)
 		s.removeDm(ctx, cp.finalName)
-		// Only now, with nothing mapping it, may a mismatched wrapper be
-		// replaced — and a *matching* one is left strictly alone: allocating
-		// is what hole-punches the slot, and re-punching a live slot would
-		// wipe a valid dm-clone superblock (CN18).
+		// Only now, once the dm-clone is gone, may a mismatched wrapper be
+		// replaced (a dm-clone whose removal failed still maps it, and
+		// ensureCloneMeta's removal of it then fails EBUSY and ends this
+		// step) — and a *matching* one is left strictly alone: allocating is
+		// what hole-punches the slot, and re-punching a live slot would wipe
+		// a valid dm-clone superblock (CN18).
 		if !metaOk {
 			if err := s.ensureCloneMeta(ctx, plan, cp); err != nil {
 				info.CloneIdToMeta[cp.cloneId] = st.tracker.Err(
@@ -125,12 +154,16 @@ func (s *CnAgentServer) ensureClone(
 	info.CloneIdToMeta[cp.cloneId] = st.tracker.Ok(metaKey, metaName, "")
 
 	// (3) the dm-clone, always created with hydration off so every bitmap
-	// lands before a single region is copied.
+	// lands before a single region is copied. A failure here may still leave
+	// a dm-clone behind with hydration off — a `dmsetup create` killed after
+	// its ioctl ran — which CN16 does not serve through, and which the
+	// retry's next pass recovers (step 2).
 	created, err := s.ensureDmClone(ctx, plan, cp, srcDev)
 	if err != nil {
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
 			dmKey, cp.finalName, err.Error())
-		return false
+		s.startConnectRetry(st, plan)
+		return true
 	}
 	if knobErr := s.ensureHydrationKnobs(ctx, cp); knobErr != nil {
 		slog.ErrorContext(ctx, "applying dm-clone hydration knobs failed",
@@ -138,16 +171,24 @@ func (s *CnAgentServer) ensureClone(
 			slog.String("error", knobErr.Error()))
 	}
 
-	if created {
+	if created || recovery {
 		// (4) destination bitmaps first on a recovery, then every locally
 		// present source chunk. The destination bitmaps must be applied in
 		// full before the dm-clone handles any IO (§11.5): a clone that
 		// hydrates without them re-fetches regions the destination already
 		// owns, overwriting newer local bytes with stale source bytes. A
-		// partial read therefore fails the clone closed — the device goes,
-		// so nothing can serve or hydrate through it, and the retry loop
-		// re-runs the converge. Source chunks carry no such hazard (they
-		// only ever cost an extra copy), so their failures stay logged.
+		// partial apply — a read or a discard that failed — therefore fails
+		// the clone closed: the device is removed, and even when that
+		// removal fails (as it may for a stale dm-clone step 2 already could
+		// not remove) its hydration stays off, so CN16 keeps the ns-devs
+		// parked (nsDevNow): nothing can serve or hydrate through it, and the
+		// retry loop re-runs the converge. Source chunks carry no such hazard
+		// (they only ever cost an extra copy), so their failures stay logged.
+		// A recovery runs this step even when step 3 created nothing: a
+		// stale dm-clone that survived its removal in step 2 (its `dmsetup
+		// remove` failed) is kept and converged by step 3 rather than
+		// created, hydration still off, and needs every bitmap before step 5
+		// just the same.
 		if recovery {
 			if err := s.applyDstBitmaps(ctx, plan, cp); err != nil {
 				s.removeDm(ctx, cp.finalName)
@@ -162,11 +203,14 @@ func (s *CnAgentServer) ensureClone(
 	}
 
 	// (5) hydration is enabled only after step 4, so a recovered clone can
-	// never re-fetch a region the destination already owns.
+	// never re-fetch a region the destination already owns. When the enable
+	// fails, hydration may still be off: CN16 then keeps the td parked, and
+	// the retry's next pass runs the recovery again (step 2).
 	if err := s.enableHydration(ctx, cp); err != nil {
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
 			dmKey, cp.finalName, err.Error())
-		return false
+		s.startConnectRetry(st, plan)
+		return true
 	}
 	// §9.5: the raw dm-clone status line carries hydration progress, which is
 	// what DeleteClone's force check reads.
@@ -174,12 +218,27 @@ func (s *CnAgentServer) ensureClone(
 	if err != nil {
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Err(
 			dmKey, cp.finalName, err.Error())
-		return false
+		s.startConnectRetry(st, plan)
+		return true
 	}
 	info.CloneIdToDmClone[cp.cloneId] = st.tracker.Ok(dmKey, cp.finalName, raw)
 	// (6) the dst td's ns-devs move onto the dm-clone in CN16, which runs
-	// after clones in the CN9 build order.
+	// after clones in the CN9 build order and reads the status once more
+	// before it does (nsDevNow).
 	return false
+}
+
+// cloneBuiltThisPass reports whether np is a rule-5 ns-dev whose clone this
+// pass's CN18 took through step 5 and the status read after it. That is the
+// one path on which ensureClone sets the clone's `clone_id_to_dm_clone` row
+// OK, so the row is the answer: every other outcome of the pass leaves it
+// ERROR, MISSING or PROVISIONING.
+func cloneBuiltThisPass(info *pb.CntlrInfo, np *nsPlan) bool {
+	if np.clone == nil {
+		return false
+	}
+	return info.GetCloneIdToDmClone()[np.clone.cloneId].GetStatus() ==
+		pb.ResStatus_RES_STATUS_OK
 }
 
 // ensureCloneSource connects to every entry of src_tr_conf_list and returns
@@ -361,6 +420,23 @@ func (s *CnAgentServer) enableHydration(
 		return nil
 	}
 	return s.dm.Message(ctx, cp.finalName, 0, "enable_hydration")
+}
+
+// cloneHydrating reports whether the live dm-clone's status shows hydration
+// on — the mark step 5 leaves, and nothing before it. A status that does not
+// parse as a dm-clone's shows no such mark either; only a read that failed is
+// an error. Step 2 reads it to find an unfinished build, and CN16 to decide
+// whether the dm-clone may serve (nsDevNow).
+func (s *CnAgentServer) cloneHydrating(
+	ctx context.Context,
+	cp *clonePlan,
+) (bool, error) {
+	raw, err := s.dm.Status(ctx, cp.finalName)
+	if err != nil {
+		return false, err
+	}
+	status, ok := agent.ParseCloneStatus(raw)
+	return ok && status.HydrationEnabled, nil
 }
 
 func (s *CnAgentServer) cloneStatus(

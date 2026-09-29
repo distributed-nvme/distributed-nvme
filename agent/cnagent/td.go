@@ -97,6 +97,36 @@ func nsDevTable(np *nsPlan, devNo string) string {
 	return agent.LinearTable(np.sectors, devNo, 0)
 }
 
+// nsDevNow is np with the backing CN16 installs on this node now. It is np
+// itself under every rule but 5: a dm-clone may serve only once CN18 step 5
+// has turned its hydration on, which follows step 4's bitmaps and nothing
+// before them (§11.5), so a rule-5 ns-dev whose dm-clone's live status does
+// not show hydration on — a build or a recovery that has not finished,
+// whatever stopped it — gets the td's dm-error instead: the table of rule
+// 1's park, live and never under dm-flakey, though with no ANA move.
+// Nothing is remembered: the status is read on every call. A read that
+// fails or does not answer is an error, which licenses neither the move onto
+// the dm-clone nor a park — the ns-dev keeps the table it has.
+func (s *CnAgentServer) nsDevNow(
+	ctx context.Context,
+	np *nsPlan,
+) (*nsPlan, error) {
+	if np.clone == nil {
+		return np, nil
+	}
+	hydrating, err := s.cloneHydrating(ctx, np.clone)
+	if err != nil {
+		return nil, err
+	}
+	if hydrating {
+		return np, nil
+	}
+	parked := *np
+	parked.backingName = np.td.errorName
+	parked.flakey = false
+	return &parked, nil
+}
+
 // ensureNsDev converges one namespace's own dm-linear (§3.3 step 5) onto the
 // CN16 backing. An effectively suspended namespace needs no step of its own
 // here: it is **parked**, and rule 1 of the backing state machine has already
@@ -113,6 +143,13 @@ func (s *CnAgentServer) ensureNsDev(
 	}
 	if np.sectors == 0 {
 		return fmt.Errorf("namespace size is 0")
+	}
+	// A rule-5 ns-dev gets the park's table while its dm-clone does not show
+	// hydration on, with no ANA move: its namespace stays optimized, as it
+	// does through a recovery's own park (CN18 step 2).
+	np, err := s.nsDevNow(ctx, np)
+	if err != nil {
+		return err
 	}
 	// The td's dm-error is the one backing that may not exist yet when a
 	// namespace is pointed at it — the sweep's park pre-step reaches here
@@ -340,6 +377,13 @@ func (s *CnAgentServer) probeNsDev(
 	}
 	if np.backingName == "" {
 		return pb.ResStatus_RES_STATUS_ERROR, "namespace has no thin device"
+	}
+	// The backing the converge installs, read the same way (nsDevNow): a
+	// rule-5 ns-dev parked because its dm-clone does not show hydration on is
+	// where CN16 wants it, and reports as the converge did.
+	np, err = s.nsDevNow(ctx, np)
+	if err != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.backingName))
 	if err != nil {

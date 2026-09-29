@@ -582,8 +582,10 @@ func (s *CnAgentServer) cloneMetaConverged(
 // `dmsetup create` would fail.
 //
 // A present-but-mismatched wrapper is removed and reallocated. That is safe
-// only in the CN18 order: the caller has already removed the dm-clone, so
-// nothing maps the wrapper and the removal cannot fail EBUSY.
+// only in the CN18 order: the caller has already tried to remove the
+// dm-clone, so nothing maps the wrapper once that removal succeeded; when it
+// failed, the dm-clone still maps the wrapper, this removal fails EBUSY, and
+// the error ends CN18 step 2.
 func (s *CnAgentServer) ensureCloneMeta(
 	ctx context.Context,
 	plan *cntlrPlan,

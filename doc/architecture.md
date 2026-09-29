@@ -3359,6 +3359,16 @@ skip the rebuild; `cnagent.md` CN18 step 4) — it MUST:
    and the td's dm-error while it is still effectively suspended (CN16 rule 1).
    Nothing is resumed: step 1 parked them live (§11.6).
 
+An existing dm-clone whose hydration is still disabled is an unfinished recovery:
+only step 5 enables it, so an agent killed anywhere between steps 2 and 5 leaves one
+behind, and so can a pass that failed there without removing it (a create killed after
+its ioctl ran, or a refused enable, among others), and the next (re)build that can read
+the dm-clone's status runs this list again from step 1 — re-applying the dst bitmaps is
+idempotent (`cnagent.md` CN18 step 4).
+Until then no ns-dev is put on it: the agent puts a td's ns-devs on its dm-clone only
+while the dm-clone's status shows hydration enabled, and parks them on the td's
+dm-error while it shows hydration disabled (`cnagent.md` CN16 rule 5).
+
 The dst bitmaps MUST be fully applied **before** the dm-clone handles any IO —
 otherwise a read of an already-copied (and possibly since-rewritten) region would be
 fetched from the source again, returning stale data over the newer local bytes. The
