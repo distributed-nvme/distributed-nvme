@@ -58,7 +58,7 @@ decision, not an assumption.
 | R10 | The snapshot pre-pass owns every message of an uncreated snapshot; the lazy `createSnapId` fallback and the `snapDone` handoff are removed; `td_list` order carries no meaning. | With the origin guaranteed materialized (R7/R8), same-pass origin-then-snapshot ordering can no longer occur, which was the only reason for both. |
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
 | R12 | Any cntlr's reply may flip. | Thin rows are only ever filled by a cntlr acting as primary at the revision it applied; the ids live in the shared pool metadata on the DN legs. Identity is guarded by the STM's `td_id` re-read. |
-| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`. No new RPC; `CreateThinDevice` never blocks. | §5.8 keeps every RPC short; `dnvctl`'s `td list` shows the field (`dnvctl.md` §5.6). |
+| R13 | Clients learn that a td can be snapshotted by polling `ListThinDevices` for `created == true`; for a td that a clone targets they also wait until that clone has been deleted (`DeleteClone`) and drained, `GetClone` ⇒ `NOT_FOUND` (U2-S1). No new RPC; `CreateThinDevice` never blocks. A client whose snapshot request carries a token re-reads it from `GetStoragePool` after its last poll (U2-S3). | §5.8 keeps every RPC short; `dnvctl`'s `td list` shows the field (`dnvctl.md` §5.6). Neither `ListThinDevices` nor `GetClone` returns a revision, while the flip bumps `SpRev` (R5), as do a clone's latch and every drain transaction (`dnv-worker.md` CLD12), so a token read before the last of them is stale. |
 | R14 | On-hardware coverage: `integtest/cnagent_test.sh` case B gains a teardown-and-rebuild stage asserting zero *device-set-mutating* pool messages with `created = true` — no `create_thin`, no `create_snap`, no `delete`; the rebuild's pool re-creation does run the CN14 activation sweep, whose `reserve_metadata_snap`/`release_metadata_snap` pair is the stage's only `dmsetup message` traffic. | It is the only place a real dm-thin pool proves that a bare `dmsetup create` on an existing id works without the message. |
 
 ---
@@ -179,6 +179,18 @@ transaction.
 * A snapshot of a snapshot follows the same rule: the *immediate* origin
   must be created. Its own materialization is what makes it eligible as an
   origin later.
+* A second refusal, evaluated after the `created` one: `FAILED_PRECONDITION`
+  when the origin is the destination of a clone — any `Clone.dst_td_id` of
+  the SP, found by walking `clone_name_list` in the same STM, a draining
+  clone included. Details: `origin {ori_name} is the destination of clone
+  {clone_name}`. Nothing is written, no `SpRev` bump. `created` says that
+  the destination's thin volumes exist, not that they hold everything a
+  host reads from it: while the clone hydrates they hold only the regions
+  hydrated so far, dm-clone serving the rest from the source, so a snapshot
+  would capture a partial copy. The gateway makes no agent call here and
+  cannot tell a hydrated clone from a hydrating one, so the refusal lasts
+  until the `Clone` key is gone (`architecture.md` §8.7). A snapshot
+  accepted before `CreateClone` named its origin is not covered (§7).
 
 **U2-S2 `DeleteThinDevice`.**
 
@@ -215,8 +227,16 @@ transaction.
 
 **U2-S3 `ListThinDevices`.** Unchanged; `name_to_td` now carries `created`.
 This is the client's wait primitive (R13): after `CreateThinDevice`, poll
-until `created == true` before creating a snapshot of the td. Typical
-latency is one fan-out: the `SpRev` bump of `CreateThinDevice` sends
+until `created == true` before creating a snapshot of the td; a snapshot
+of a td that a clone targets is refused until that clone has been deleted
+(`DeleteClone`) and drained as well (U2-S1), so the client then also polls
+`GetClone` until `NOT_FOUND`. The `ListThinDevices` reply carries no
+revision, and the flip bumps `SpRev` (R5), so a token read before the flip
+is stale: a client whose snapshot request carries a token re-reads it from
+`GetStoragePool` after its last poll (a clone's latch and drain bump
+`SpRev` too, and `GetClone` returns no revision either), and a request with
+an older one is refused `ABORTED` ("stale revision").
+Typical latency is one fan-out: the `SpRev` bump of `CreateThinDevice` sends
 `SyncupCntlr` to the primary, whose reply already reports every slice `OK`
 in the common case, so the flip lands in that same round (U3); worst case is
 one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7), and
@@ -638,9 +658,25 @@ below is what shows the bare creates attached the existing ids).
   `MaxFlipCreatedPerTxn` tds for a reply that completes more. Appendix
   D's "revision granularity is the SP" entry covers the cost model.
 * **A snapshot request between creation and flip is refused, not queued.**
-  Clients retry after `ListThinDevices` shows `created == true` (R13). At a
+  Clients retry after `ListThinDevices` shows `created == true` (a clone's
+  destination once `GetClone` also answers `NOT_FOUND`), re-reading a token
+  from `GetStoragePool` first when the retry carries one (R13). At a
   pool-suppressing `sp_level` the refusal lasts until the level is restored
   (U2-S5).
+* **A snapshot requested before a clone targets its origin is not refused**
+  (Appendix D). U2-S1's clone refusal applies only while a clone targets
+  the origin, and `CreateClone` does not look for an uncreated snapshot of
+  its destination: finding one means walking every td of the SP, the walk
+  U2-S2 keeps out of `DeleteThinDevice`'s transaction. The primary's
+  pre-pass sends every ready slice's `create_snap` before the same pass
+  builds the dm-clone (`cnagent.md` CN14, CN18), but a slice it skips (for
+  one, a pool that did not converge in that pass) or whose message fails is
+  retried on a later converge, which can come after hydration has begun.
+  That slice of the snapshot then holds whatever the copy has written into
+  the destination by then, while the slices messaged in time hold the empty
+  td, and the snapshot still flips to `created`. [D3]'s destination is
+  empty, so the exposure is a snapshot of an empty td, and only a snapshot
+  not yet created by the time a clone into that td is created.
 
 ---
 

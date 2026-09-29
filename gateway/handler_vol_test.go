@@ -832,6 +832,92 @@ func TestCreateThinDeviceSnapshotOfCreatedOrigin(t *testing.T) {
 	}
 }
 
+// TestCreateThinDeviceRefusesASnapshotOfACloneDestination is §8.7's second
+// snapshot refusal: a clone hydrates INTO its destination td, and while it
+// does, that td's thin volumes hold only the regions hydrated so far — dm-clone
+// serves every other read from the source (§8.9) — so a create_snap of them
+// would hand the client a partial copy as its snapshot.
+//
+// The destination starts uncreated, the fresh td [D3] asks for, so the first
+// request meets both refusals and must get the created one: it is checked
+// first. Once the sp-worker's flip lands the clone alone refuses, and since
+// the RPC never asks the CN about hydration it goes on refusing for as long as
+// the Clone key exists: through the latch, whose drain keeps the name in
+// clone_name_list, and not one transaction past the drain's last. No refusal
+// writes anything, for the created gate's reason: an id consumed there would
+// stay consumed.
+//
+// The refusal is about the clone that targets THIS origin, and never for a td
+// that no clone targets. The clone under test is listed between two unrelated
+// clones of the SP, so it is neither the first nor the last entry of
+// clone_name_list, and the message must name it. A created td that no clone
+// targets is snapshotted while all three clones live, and the destination's
+// own snapshot is accepted at the end although the unrelated clones still
+// exist.
+func TestCreateThinDeviceRefusesASnapshotOfACloneDestination(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst0", 899, 6, 0, false)
+	volCreateClone(env, "clone-0", "dst0")
+	env.putTd("other", 901, 8, 0, true)
+	env.putTd("dst", 900, 7, 0, false)
+	volCreateClone(env, "clone-a", "dst")
+	env.putTd("dst9", 902, 9, 0, false)
+	volCreateClone(env, "clone-9", "dst9")
+	snapshot := func() error {
+		_, err := env.srv.CreateThinDevice(env.ctx,
+			&pb.CreateThinDeviceRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				TdName:      "snap",
+				OriName:     "dst",
+			})
+		return err
+	}
+	wantRefused := func(stage string, want string) {
+		t.Helper()
+		before := env.spConf()
+		beforeRev := env.spRev()
+		msg := volWantCode(t, snapshot(), codes.FailedPrecondition)
+		if msg != want {
+			t.Errorf("%s: message %q, want %q", stage, msg, want)
+		}
+		env.wantUntouched(before, beforeRev)
+		if env.exists(
+			model.ThinDeviceKey(env.cid, volSpId, "snap"), &pb.ThinDevice{},
+		) {
+			t.Errorf("%s: the refused snapshot must not have a row", stage)
+		}
+	}
+	wantRefused("uncreated", fmt.Sprintf(msgOriginNotCreated, "dst"))
+	if _, err := model.FlipCreated(env.ctx, env.cli, env.cid, volShard,
+		volSpId, []model.TdRef{{Name: "dst", TdId: 900}}); err != nil {
+		t.Fatalf("FlipCreated: %v", err)
+	}
+	const cloneMsg = "origin dst is the destination of clone clone-a"
+	wantRefused("hydrating", cloneMsg)
+	if _, err := env.srv.CreateThinDevice(env.ctx,
+		&pb.CreateThinDeviceRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			TdName:      "other-snap",
+			OriName:     "other",
+		}); err != nil {
+		t.Fatalf("snapshot of a td no clone targets: %v", err)
+	}
+	volLatchClone(env, "clone-a")
+	wantRefused("draining", cloneMsg)
+	volDrainClone(env, "clone-a")
+	if err := snapshot(); err != nil {
+		t.Fatalf("CreateThinDevice once the clone is gone: %v", err)
+	}
+	if got := env.td("snap").GetOriId(); got != 7 {
+		t.Errorf("snapshot ori_id: got %d, want the destination's dev_id 7",
+			got)
+	}
+}
+
 // TestCreateThinDeviceRefusals is the §8.7 error table. Every row asserts the
 // code AND that the SP did not move, because each of these refusals returns
 // before the first Put and must therefore leave the store byte-identical.

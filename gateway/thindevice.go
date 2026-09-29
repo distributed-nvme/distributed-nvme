@@ -57,10 +57,11 @@ const msgSnapshotNotCreated = "snapshot %s of %s is not created yet"
 // geometry and on the origin, so it is state-dependent and runs inside the
 // transaction (gateway.md §5.6).
 //
-// The `created == false` refusal is the one place in this file that must write
-// literally nothing: §8.7 requires no key, no next_id / next_dev_id
-// consumption and no SpRev bump, so the check sits before the minter is ever
-// created and returns straight out of the closure, which leaves the whole
+// The two snapshot refusals — an origin with `created == false`, and an origin
+// that is the destination of a clone — are the places in this file that must
+// write literally nothing: §8.7 requires no key, no next_id / next_dev_id
+// consumption and no SpRev bump, so both checks sit before the minter is ever
+// created and return straight out of the closure, which leaves the whole
 // transaction uncommitted (EU4). Consuming an id there would be visible
 // forever — ids are never reused — for a request that failed.
 //
@@ -134,6 +135,23 @@ func (s *Server) CreateThinDevice(
 				// is gated.
 				return errPrecondition(
 					msgOriginNotCreated, req.GetOriName())
+			}
+			// A clone hydrates INTO its destination, and while it does, the
+			// destination's thin volumes hold only the regions hydrated so
+			// far, dm-clone serving every other read from the source: a
+			// create_snap of them would take a partial copy for a snapshot
+			// (§8.7). Hydration is known only to the primary's CN and this
+			// RPC is pure etcd, so the refusal holds for as long as the Clone
+			// key does — the delete guard's walk, drain included — and, like
+			// the created gate, it returns before anything is minted.
+			cloneName, found, err := tdCloneRef(stm, sc, origin.GetTdId())
+			if err != nil {
+				return err
+			}
+			if found {
+				return errPrecondition(
+					"origin %s is the destination of clone %s",
+					req.GetOriName(), cloneName)
 			}
 		}
 		// A nil origin reads as 0 here, which is exactly the "no origin"
@@ -418,8 +436,15 @@ func decideDeleteThinDevice(
 // This is the documented client wait primitive for `created` (§8.7): a client
 // that wants to snapshot a td polls this RPC until the origin reads
 // `created == true`, then calls CreateThinDevice, which is why the read must
-// be consistent rather than a page of independent Gets. It is unpaged — the
-// list is bounded by MaxTdCntPerSp — and takes no token, so it never bumps.
+// be consistent rather than a page of independent Gets. When a clone targets
+// the origin, the client also waits until that clone is deleted and drained,
+// GetClone answering NOT_FOUND, since CreateThinDevice refuses a clone's
+// destination while the Clone key exists. This RPC is unpaged — the list is
+// bounded by MaxTdCntPerSp — and takes no token, so it never bumps. Nor does
+// it return one, while the flip it waits for bumps SpRev: a client whose
+// CreateThinDevice carries a token reads it from GetStoragePool after its last
+// poll, because a token read before the flip — or before a clone's latch and
+// drain, which bump SpRev too — is stale.
 //
 // A listed key that is missing is §5.9's ABORTED and never a short map: the
 // wait primitive that silently omitted a td would read as "not created yet"
@@ -495,11 +520,13 @@ func tdNamespaceRef(
 	return "", 0, false, nil
 }
 
-// tdCloneRef is §8.7's second delete guard: the name of the first clone of the
-// SP whose dst_td_id is tdId.
+// tdCloneRef is §8.7's second delete guard, and the walk behind
+// CreateThinDevice's refusal to snapshot a clone destination: the name of the
+// first clone of the SP whose dst_td_id is tdId.
 //
 // A clone hydrates INTO its destination td, so deleting that td would leave a
-// dm-clone copying into a device the pool no longer holds. The walk is
+// dm-clone copying into a device the pool no longer holds, and a snapshot of
+// it would capture only the regions hydrated so far. The walk is
 // clone_name_list, bounded by MaxCloneCntPerSp; a listed clone whose key is
 // gone is ABORTED for the same reason as a missing subsystem.
 func tdCloneRef(

@@ -1678,6 +1678,16 @@ Inspect RPCs are the way to watch clone/migration hydration before
 Errors: `ALREADY_EXISTS` td key; `RESOURCE_EXHAUSTED` `len(td_name_list) ≥
 MaxTdCntPerSp`; `NOT_FOUND` `ori_name` set but absent; `FAILED_PRECONDITION` `ori_name`
 set and the origin's `created == false` (checked after `NOT_FOUND`);
+`FAILED_PRECONDITION` `ori_name` set and the origin is the destination of a clone (any
+`Clone.dst_td_id` of the SP, found by `DeleteThinDevice`'s `clone_name_list` walk in the
+same STM; checked after `created`; details `origin {ori_name} is the destination of
+clone {clone_name}`). While the clone hydrates, the destination's thin volumes hold
+only the regions hydrated so far, dm-clone serving the rest from the source (§8.9), so
+a snapshot would capture a partial copy; this RPC makes no agent call, so hydration
+is invisible to it: the refusal holds while the `Clone` key exists, drain included, and
+like the `created` one it writes nothing. It does not reach a snapshot accepted before
+`CreateClone` named its origin: a slice whose `create_snap` is retried after hydration
+began captures part of the copy (Appendix D, `ThinDeviceCreated.md` §7);
 `INVALID_ARGUMENT` `size == 0` or
 `size` not a multiple of `slice_cnt × DmRaid0Conf.stripe_size` (dm-striped needs equal,
 chunk-aligned members; sizes SHOULD also be multiples of `block_size`).
@@ -1738,7 +1748,15 @@ fails in the agent (`thin device {dev_id} not in the metadata snapshot`, CN26),
 which surfaces as `ABORTED` like any other agent RPC failure (§5.9).
 
 *The client's wait primitive* is `ListThinDevices`: poll until the td reads
-`created == true`, then snapshot it. `CreateThinDevice` never blocks (§5.8 keeps
+`created == true`, then snapshot it. A snapshot of a td that a clone targets is refused
+until that clone has also been deleted and drained, which only `DeleteClone` starts
+(refused until the copy is proven complete, unless forced); the client then polls
+`GetClone` until `NOT_FOUND` (§8.9). A client whose snapshot request carries a token
+re-reads it from `GetStoragePool` after its last poll: the flip bumps `SpRev` (§10.3),
+and so do the clone's latch and every drain transaction (§8.9, `dnv-worker.md` CLD12),
+while neither `ListThinDevices` nor `GetClone` returns a revision, so a request carrying
+a token read before the last of those writes is refused `ABORTED` ("stale revision",
+§5.5). `CreateThinDevice` never blocks (§5.8 keeps
 every RPC short). Typical latency is one fan-out — the `SpRev` bump of
 `CreateThinDevice` sends `SyncupCntlr` to the primary, whose reply already reports
 every slice `OK` in the common case, so the flip lands in the same round; worst
@@ -1795,7 +1813,8 @@ primary applies it with a `delete {dev_id}` message per slice pool. Reply `td_id
 
 **ListThinDevices** — one STM reads `SpConf` + every td in `td_name_list` into
 `name_to_td`; a missing listed key ⇒ `ABORTED`. `name_to_td` carries `created`; it is
-the client's wait primitive before snapshotting.
+the client's wait primitive before snapshotting (with `GetClone` for a clone's
+destination).
 
 ### 8.8 Subsystems, namespaces
 
@@ -1973,8 +1992,9 @@ entry holds at `MaxCloneCntPerSp`, that ceiling being `len(clone_name_list)` and
 ahead of the name, which is also why an UNRELATED `CreateClone` on a full SP fails for
 the whole drain; a second `CreateClone` onto the SAME destination td
 keeps failing `FAILED_PRECONDITION` ("already the destination of clone …"), because that
-scan walks `clone_name_list`; `DeleteThinDevice` of the destination td keeps failing for
-the same reason; and `DeleteStoragePool` keeps refusing (`storage pool … still holds 1
+scan walks `clone_name_list`; `DeleteThinDevice` of the destination td, and a
+`CreateThinDevice` snapshotting it (§8.7), keep failing for the same reason; and
+`DeleteStoragePool` keeps refusing (`storage pool … still holds 1
 clones`) while any clone drains. Top-down teardown therefore becomes delete-clone, poll
 until gone, then delete-td / delete-sp.
 
@@ -4542,6 +4562,16 @@ exists.
   (§8.7); delete and re-create it. `ThinDevice.created` certifies
   materialization, not point-in-time consistency: a torn snapshot still flips
   to `created` once every slice's volume exists.
+* **A snapshot accepted before a clone targets its origin can hold part of the
+  copy.** `CreateThinDevice` refuses a snapshot of a clone's destination while
+  the `Clone` key exists (§8.7), but `CreateClone` does not look for an
+  uncreated snapshot of its destination. The primary retries a slice's skipped
+  or failed `create_snap` on a later converge, which can come after hydration
+  has begun; that slice of the snapshot then holds whatever the copy has
+  written into the destination by then, and the snapshot still flips to
+  `created` (`ThinDeviceCreated.md` §7). [D3]'s destination is empty, so the
+  exposure is a snapshot of an empty td, and only a snapshot not yet created
+  by the time a clone into that td is created.
 * **A created td is never re-created by message.** A td the sp-worker has
   flipped to `created` is attached with a bare `dmsetup create`; if a pool no
   longer holds its id the row reads `RES_STATUS_ERROR` on every converge and

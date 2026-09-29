@@ -905,8 +905,12 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   `slice_id_list`). STM: resolve; token; `td_name` in `td_name_list` or key
   present ⇒ `ALREADY_EXISTS`; if `ori_name` set: read origin (`NOT_FOUND` if
   absent), `created == false` ⇒ `FAILED_PRECONDITION` **writing nothing**
-  (no id consumed, no bump — §8.7); mint `td_id = SpNextId`, `dev_id =
-  next_dev_id++`, `ori_id` = origin's `dev_id` or 0; put
+  (no id consumed, no bump — §8.7), then the origin named by any
+  `Clone.dst_td_id` (walk `clone_name_list` as DeleteThinDevice does, a
+  draining clone included) ⇒ `FAILED_PRECONDITION` naming the clone, also
+  writing nothing: while a clone hydrates, a snapshot of its destination
+  would capture only the regions hydrated so far; mint `td_id = SpNextId`,
+  `dev_id = next_dev_id++`, `ori_id` = origin's `dev_id` or 0; put
   `ThinDevice{…, created: false}`; append `td_name_list`; `BumpSpRev`. Reply
   `td_id, dev_id`.
 * **DeleteThinDevice** — a plan, then a deciding STM, looped as a GW9 unit.
@@ -934,7 +938,11 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   remove from list, `BumpSpRev`. Reply `td_id`.
 * **ListThinDevices** — one STM: SpConf + every listed td (missing ⇒
   `ABORTED`) into `name_to_td`. This is the documented client wait primitive
-  for `created`.
+  for `created`; a client snapshotting a clone's destination also waits
+  until the clone is deleted and drained, `GetClone` ⇒ `NOT_FOUND`. Neither
+  RPC returns a revision, while the flip bumps `SpRev` and so do a clone's
+  latch and drain, so a client whose snapshot request carries a token
+  re-reads it from `GetStoragePool` after its last poll (§8.7).
 
 ### 5.7 Subsystems and namespaces (§8.8)
 
@@ -1020,8 +1028,8 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   `clone_name_list` the surviving entry holds at `MaxCloneCntPerSp`, that
   ceiling being checked ahead of the name, which also fails an UNRELATED
   `CreateClone` for the whole drain; a `CreateClone` onto the same destination td,
-  and a `DeleteThinDevice` of that td, both keep failing
-  `FAILED_PRECONDITION` because their scans walk `clone_name_list`; and
+  a `DeleteThinDevice` of that td and a `CreateThinDevice` snapshotting it all
+  keep failing `FAILED_PRECONDITION` because their scans walk `clone_name_list`; and
   `DeleteStoragePool` keeps refusing while any clone drains.
 * **loadLiveClone** — the CLD1 gate the two clone mutators that ADDRESS an
   existing clone open with: `UpdateCloneTrConf` and `AppendCloneBitmap` answer
@@ -1339,6 +1347,13 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    gate of its own (both confs, after its snapshot and before the meta
    ladder) as well as through the scan — and `GrowSlice` and
    `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
+   `CreateThinDevice` refusing a snapshot of a clone's destination —
+   `FAILED_PRECONDITION` naming that clone (listed between two unrelated
+   ones), nothing written — while the clone hydrates and while it drains,
+   behind the `created` refusal that an uncreated destination meets first,
+   never refusing a snapshot of a td that no clone targets, and accepting
+   the destination's once the drain's last transaction has removed its
+   clone, the unrelated clones still there;
    `DeleteThinDevice` at the thin-device ceiling — `MaxTdCntPerSp` tds
    created through the RPC, then one of them deleted, committed against the
    real etcd — beside its arithmetic tripwire, which pins the deciding STM

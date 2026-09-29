@@ -104,9 +104,11 @@ func tdDeleteCmd() *cobra.Command {
 
 // tdListCmd is ListThinDevices — the `created` poll of ThinDeviceCreated.md
 // R13. The gateway always writes `created` false and only the sp-worker flips
-// it, so this command is how an operator learns a device is real enough to be
-// snapshotted; §3.1's EmitUnpopulated is what keeps the false visible in the
-// JSON rather than eliding it as a proto3 default.
+// it, so this command is how an operator learns a device is materialized, the
+// first condition for snapshotting it (a clone's destination also waits until
+// the clone has been deleted and drained, ThinDeviceCreated.md U2-S1);
+// §3.1's EmitUnpopulated is what keeps the false visible in the JSON rather
+// than eliding it as a proto3 default.
 //
 // The request is nothing but the two scope globals: ListThinDevices is one of
 // the List* RPCs with no pagination, so there are no page flags either (§5.6
