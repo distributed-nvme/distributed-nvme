@@ -215,10 +215,16 @@ pressure while leaving ample parallelism.
   `mdadm --create`; since 2026-09-26), `Dm.Info`, `osBase.listDir` /
   `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
   listings) all probe through it, each returning "absent" only for a
-  reported non-zero exit and an error otherwise. The predicate's one other
-  caller, `Dm.BlkZeroout`, is not a probe: it returns the verdict as
-  `answered`, so the `dnagent.md` DN9 zeroing loop can tell a batch the soft
-  timeout killed from one the tool refused. The enumerators a removal
+  reported non-zero exit and an error otherwise. `osBase.dirMtime`, the
+  `stat -c %Y` age of a subsystem directory (`dnagent.md` DN6), probes
+  through it the same way, and an answer that is not a number is an error
+  too. Since 2026-09-29 `CloneMeta.Mounted` and `CloneMeta.FileSize`, the
+  `findmnt` and the `stat` of `cnagent.md` CN5's clone-metadata arena,
+  probe through it as well: a run of either that did not answer is an
+  error, never "absent". The predicate's one other caller,
+  `Dm.BlkZeroout`, is not a probe: it returns the verdict as `answered`, so
+  the `dnagent.md` DN9 zeroing loop can tell a batch the soft timeout killed
+  from one the tool refused. The enumerators a removal
   decision is taken from — `Dm.List`, `Md.ListArrays`,
   `NvmeHost.ListAllSubsys`, `Nvmet.ListSubsystems` — and `Md.Gone`, the
   probe that judges a stop, propagate that error to their caller instead of
@@ -238,12 +244,14 @@ pressure while leaving ample parallelism.
   node holds nothing. `Dm.List` goes one
   step further and treats every non-zero exit as an error: `dmsetup ls`
   exits 0 and prints `No devices found` on an empty node, so a failure there
-  is never an empty listing. The file-read half of the same rule is
+  is never an empty listing. `CloneMeta.LoopDevices` does the same for
+  `losetup --associated`, which exits 0 with no output when nothing is
+  attached. The file-read half of the same rule is
   `osBase.readAttrStrict` over §4.3's `ReadFile`: only `fs.ErrNotExist` is
   "absent", every other error propagates, which is what keeps a stalled
-  sysfs or configfs read (`NvmeHost.readTrimmed`, the `enable` reads of
-  `Nvmet.RemoveNamespace` / `RemoveSubsystem`) from making a live object
-  read as an absent one.
+  sysfs or configfs read (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, the
+  `enable` reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`) from
+  making a live object read as an absent one.
 
 ### 4.3 ReadFile / WriteFile / WriteFileDirect
 

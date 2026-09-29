@@ -186,25 +186,43 @@ func (s *CnAgentServer) convergeCn(
 	cnId := req.GetCnId()
 
 	tmpfsPath := s.nf.CnTmpfsPath(clusterId, cnId)
-	info.TmpfsInfo = t.FromErr(resKeyTmpfs, tmpfsPath, "",
-		s.ensureTmpfs(ctx, tmpfsPath))
+	tmpfsErr := s.ensureTmpfs(ctx, tmpfsPath)
+	info.TmpfsInfo = t.FromErr(resKeyTmpfs, tmpfsPath, "", tmpfsErr)
 
+	// The file and the loop device are created only on a tmpfs this pass
+	// found or mounted at the path. Without one the mountpoint may be a bare
+	// directory — left in a /tmp a reboot kept, or made by the `mkdir -p` of
+	// a refused mount — and the file would land on the filesystem that holds
+	// it, the loop on that file; the next converge's mount would hide the
+	// file, and a fresh one and a second loop would follow (CN5).
+	tmpfsOk := tmpfsErr == nil
 	filePath := s.nf.CnTmpFilePath(clusterId, cnId)
 	info.TmpFileInfo = t.FromErr(resKeyTmpFile, filePath, "",
-		s.ensureTmpFile(ctx, filePath))
+		s.ensureTmpFile(ctx, filePath, tmpfsPath, tmpfsOk))
 
 	// The loop device is the whole of the clone-metadata arena: CN18 carves it
 	// into kind-`b` wrapper linears and needs no volume manager on top
 	// ([D14]).
-	loopDev, loopErr := s.ensureLoopDev(ctx, filePath)
+	loopDev, loopErr := s.ensureLoopDev(ctx, filePath, tmpfsPath, tmpfsOk)
 	info.LoopDevInfo = t.FromErr(resKeyLoopDev, filePath, loopDev, loopErr)
 
 	info.PortInfo = s.ensurePort(ctx, t)
 	return info
 }
 
+// ensureTmpfs mounts the arena's tmpfs when the probe answers that nothing is
+// mounted there. A probe that did not answer is run once more, from its first
+// call, in the same pass: all a caller learns from a kill is that it must ask
+// again (agent.Reported), and an answer to the second asking is as good as
+// one to the first — a tmpfs that really is absent, after a reboot, is then
+// mounted by this pass. When the second does not answer either, it is the
+// row's error and nothing is mounted: a mount over the live arena would stack
+// a second tmpfs on it (CN5).
 func (s *CnAgentServer) ensureTmpfs(ctx context.Context, path string) error {
 	mounted, fsType, err := s.cmeta.Mounted(ctx, path)
+	if err != nil {
+		mounted, fsType, err = s.cmeta.Mounted(ctx, path)
+	}
 	if err != nil {
 		return err
 	}
@@ -219,9 +237,22 @@ func (s *CnAgentServer) ensureTmpfs(ctx context.Context, path string) error {
 
 // ensureTmpFile creates the clone-metadata arena file sparse: tmpfs pages
 // materialize only as a dm-clone writes metadata through its wrapper, and the
-// allocator's hole-punch discard frees them again.
-func (s *CnAgentServer) ensureTmpFile(ctx context.Context, path string) error {
+// allocator's hole-punch discard frees them again. As in ensureTmpfs, a `stat`
+// that did not answer, or whose answer is not a size, is asked once more in
+// the same pass, and when that one fails too it is the row's error and
+// truncates nothing (CN5). An absent file is created only when tmpfsOk says
+// the tmpfs step found or mounted a tmpfs at tmpfsPath; otherwise it is the
+// row's error, and a file that is there is still probed and reported.
+func (s *CnAgentServer) ensureTmpFile(
+	ctx context.Context,
+	path string,
+	tmpfsPath string,
+	tmpfsOk bool,
+) error {
 	size, exists, err := s.cmeta.FileSize(ctx, path)
+	if err != nil {
+		size, exists, err = s.cmeta.FileSize(ctx, path)
+	}
 	if err != nil {
 		return err
 	}
@@ -232,12 +263,20 @@ func (s *CnAgentServer) ensureTmpFile(ctx context.Context, path string) error {
 		}
 		return nil
 	}
+	if !tmpfsOk {
+		return fmt.Errorf("%s is absent and not created: no tmpfs is "+
+			"confirmed at %s", path, tmpfsPath)
+	}
 	return s.cmeta.Truncate(ctx, path, common.CnCloneMetaAreaSize)
 }
 
+// ensureLoopDev attaches the one loop device to the arena file when none
+// backs it, and, like ensureTmpFile, only on a confirmed tmpfs (tmpfsOk).
 func (s *CnAgentServer) ensureLoopDev(
 	ctx context.Context,
 	path string,
+	tmpfsPath string,
+	tmpfsOk bool,
 ) (string, error) {
 	devs, err := s.cmeta.LoopDevices(ctx, path)
 	if err != nil {
@@ -245,6 +284,10 @@ func (s *CnAgentServer) ensureLoopDev(
 	}
 	switch len(devs) {
 	case 0:
+		if !tmpfsOk {
+			return "", fmt.Errorf("no loop device backs %s and none is "+
+				"attached: no tmpfs is confirmed at %s", path, tmpfsPath)
+		}
 		return s.cmeta.LoopAttach(ctx, path)
 	case 1:
 		return devs[0], nil

@@ -581,29 +581,62 @@ SH15. Every wrapper call wraps its ctx with
       `answered`, so DN9's zeroing loop can tell a batch the soft timeout
       killed from one the tool refused.
 
-      Six primitives must honour it, because each one's caller answers an
-      "absent" with a removal or with a decision that destroys data:
+      These primitives must honour it, because each one's caller answers an
+      "absent" with a removal, with a decision that can destroy data, with —
+      `CloneMeta.Mounted`'s — a mount that sends every clone on the CN into
+      a rebuild, or — `dirMtime`'s — with a clean verdict:
       `Dm.Info` (`agent/dm.go`, whose `nil, nil` gates `meta.FreeSide` and
       `meta.FreeCloneMeta` — see DN6's record rule), `osBase.listDir` and the
       `dirExists` above it (`agent/oswrap.go`, which `Nvmet.RemoveSubsystem`
-      and `RemovePortLink` walk their children through), `Md.Detail` —
+      and `RemovePortLink` walk their children through), `osBase.dirMtime`
+      beside them (the `stat -c %Y` behind `Nvmet.SubsysMtime`, DN6's
+      orphan-export age: a subsystem directory that reads absent is passed
+      over and is no leftover, so a `stat` that did not answer is named as a
+      failed enumeration instead, and the verdict is not clean), `Md.Detail` —
       since 2026-09-26 a lookup in an `Md.Walk` of `/sys/block`, through
       `listDir` and `readAttrStrict` (`cnagent.md` CN12), whose "absent"
       sends `ensureGroup` into an assembly — `Md.HasSuperblock`
       (`cnagent.md` CN12: `--examine` opens the member device, so on a leg
       whose DN side is gone it blocks past the soft timeout and gets killed
       — and a killed `--examine` read as "no superblock" would make
-      `assembleGroup` run `mdadm --create --assume-clean` over live data)
-      and `Md.NameInUse` (`cnagent.md` CN12, since 2026-09-26: an `lsblk`
+      `assembleGroup` run `mdadm --create --assume-clean` over live data),
+      `Md.NameInUse` (`cnagent.md` CN12, since 2026-09-26: an `lsblk`
       of `/dev/md/{CnMdDevName}` whose "not in use" is what lets
       `assembleGroup` run `mdadm --create --assume-clean` beside an array
-      already running under that name).
+      already running under that name), and `CloneMeta.Mounted` and
+      `CloneMeta.FileSize` (`cnagent.md` CN5, since 2026-09-29: the two
+      `findmnt` calls of the tmpfs probe, whose "absent" is answered with a
+      `mount`, which over the live clone-metadata arena stacks a second,
+      empty tmpfs that hides it — a fresh arena file and a second loop
+      device follow, and every clone on the CN is rebuilt — and the `stat`
+      of the arena file, whose "absent" is answered with a
+      `truncate --size {CnCloneMetaAreaSize}` of it: a no-op on the live
+      arena file, which the converge only ever creates at that size, but a
+      resize of one of any other size — on a shrink, the loss of its tail —
+      where the converge otherwise reports an `ERROR` and leaves the file
+      alone).
+      `CloneMeta.LoopDevices` (`cnagent.md` CN5) honours it without the split:
+      `losetup --associated` answers "none attached" with exit 0 and no
+      output, so every failure of it is an error — a "none" read off a
+      failure would attach a second loop device to the arena file.
       `NvmeHost.readTrimmed` follows the same rule from the other side of
       the fence: it reads sysfs rather than running a tool, so **only**
       `fs.ErrNotExist` is "absent" and every other read failure is an
       error — `/sys/class/nvme*` can stall while a
       controller is mid-reset, and a stalled read taken as absence would
-      report a live subsystem as not connected (SH20).
+      report a live subsystem as not connected (SH20). The read under it,
+      `osBase.readAttrStrict`, carries the rule for every other strict read
+      besides `Md.Detail`'s above:
+      `Nvmet.NsDevicePath` (a namespace's `device_path`, by which the cn
+      sweep attributes a host-facing subsystem no stored request claims:
+      one with no attributable namespace is unowned, and the node-level
+      sweep removes it — `cnagent.md` CN21), the
+      `enable` reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
+      "absent" would skip the `enable = 0` write and `rmdir` a namespace
+      the kernel still has enabled) and, through `Cmd.ReadAttr`, the md
+      sysfs reads of `Md.ListArrays` and `Md.Gone` (`cnagent.md` CN12: an
+      array read as absent, or as gone, would let the sweep disconnect a
+      leg under a live array).
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
       state and mutates only differences; an equal-revision re-apply on a
@@ -2867,18 +2900,24 @@ able to fail.
     on its listener-failure and reconcile-failure return paths — no Go test
     drives a zeroing goroutine or a `blkdiscard` child through `Serve`
     (§6 test 19).
-12. No probe reads "did not answer" as "absent" (SH15): `Dm.Info`,
-    `osBase.listDir`, `Md.HasSuperblock` and `Md.NameInUse` (the `lsblk`
-    of CN12's case-1 guard, since 2026-09-26) take their answer from
+12. None of the probes below reads "did not answer" as "absent" (SH15);
+    the cn leg walk still does, which is open: `readSubsys`
+    (`agent/cnagent/leg.go`) reads a failed `ls` of
+    `/sys/class/nvme-subsystem` as "no subsystem" and passes over a
+    subsystem whose `subsysnqn` read failed. `Dm.Info`,
+    `osBase.listDir`, `osBase.dirMtime`, `Md.HasSuperblock`,
+    `Md.NameInUse` (the `lsblk` of CN12's case-1 guard, since 2026-09-26)
+    and `CloneMeta.Mounted` / `CloneMeta.FileSize` (`cnagent.md` CN5's
+    `findmnt` and `stat`, since 2026-09-29) take their answer from
     `osBase.runProbe` (exposed to the role packages as `Cmd.RunProbe`), the
     one probe wrapper that applies `agent.Reported` (its only other caller,
     `Dm.BlkZeroout`, is not a probe: it hands the verdict to DN9's zeroing
-    loop as `answered`); `NvmeHost.readTrimmed` reads
-    through `readAttrStrict`, which calls absence only on
+    loop as `answered`); `NvmeHost.readTrimmed` and `Nvmet.NsDevicePath`
+    read through `readAttrStrict`, which calls absence only on
     `fs.ErrNotExist`; and `Md.Detail` with the `Md.Walk` it reads from, the
     sysfs md read since 2026-09-26 (`cnagent.md` CN12), goes through both —
     `listDir` for the listings, `readAttrStrict` for the attributes. None of
-    the six turns a non-nil error into a nil-and-not-found.
+    them turns a non-nil error into a nil-and-not-found.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

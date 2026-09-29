@@ -960,6 +960,352 @@ func TestFailedLosetupNeverAttachesASecondLoop(t *testing.T) {
 	}
 }
 
+// arenaKill is how a base-state probe goes unanswered in the tests below:
+// "once" kills only the first run of it, so the converge's second asking
+// answers; "every time" kills every run, so neither does (CN5).
+type arenaKill struct {
+	name   string
+	always bool
+}
+
+var arenaKills = []arenaKill{{"once", false}, {"every time", true}}
+
+func (k arenaKill) arm(node *fakeNode, probe string) {
+	if k.always {
+		node.killCmdAlways[probe] = true
+		return
+	}
+	node.killCmd[probe] = true
+}
+
+// TestKilledFindmntDoesNotRemountTheArena: a `findmnt` the soft timeout
+// killed did not answer, and "did not answer" is not "nothing is mounted
+// there" (CN5, SH15). Read as absence, it sends the converge into `mount`,
+// and a mount over the live arena stacks a second, empty tmpfs on it: the
+// arena file drops out of sight, the converge truncates a fresh one and
+// attaches a second loop device to it, and every kind-cb wrapper still maps
+// the first loop — so every clone on the CN reads a mismatched wrapper and is
+// rebuilt (CN28), all for one probe that did not answer. Either of Mounted's
+// two calls can be the one killed. The converge runs the probe once more,
+// from its first call, and only once: killed once, the second asking answers
+// and tmpfs_info reads OK; killed every time, tmpfs_info says which probe did
+// not answer.
+// Either way it mounts nothing, truncates nothing and keeps the one loop
+// device. A check round does not ask again: a kill there reads ERROR, where
+// it used to read MISSING.
+func TestKilledFindmntDoesNotRemountTheArena(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		probe string
+	}{
+		{"the type probe",
+			"findmnt --noheadings --output FSTYPE --target"},
+		{"the mountpoint probe",
+			"findmnt --noheadings --output TARGET --mountpoint"},
+	} {
+		for _, kill := range arenaKills {
+			t.Run(tc.name+" killed "+kill.name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+				probe := tc.probe + " " +
+					srv.nf.CnTmpfsPath(testCluster, testCn)
+				loop := loopDev(t, srv, node)
+
+				node.Reset()
+				kill.arm(node, probe)
+				reply, err := srv.SyncupCn(context.Background(),
+					cnReq(3, true))
+				if err != nil {
+					t.Fatalf("SyncupCn: %v", err)
+				}
+				if got := node.callsMatching("cmd mount "); len(got) != 0 {
+					t.Errorf("a tmpfs was mounted over the live arena: %v",
+						got)
+				}
+				if got := node.callsMatching("cmd truncate "); len(got) != 0 {
+					t.Errorf("the arena file was truncated: %v", got)
+				}
+				if got := loopDev(t, srv, node); got != loop {
+					t.Errorf("the arena file is behind %s now, was %s",
+						got, loop)
+				}
+				if n := callCnt(node, "cmd "+probe); n != 2 {
+					t.Errorf("%q ran %d times in the converge, want 2: "+
+						"the one killed and one more asking", probe, n)
+				}
+				info := reply.GetCnInfo()
+				if kill.always {
+					assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
+				} else {
+					assertOk(t, info.GetTmpfsInfo(), "tmpfs")
+				}
+				assertOk(t, info.GetTmpFileInfo(), "tmp_file")
+				assertOk(t, info.GetLoopDevInfo(), "loop_dev")
+
+				delete(node.killCmdAlways, probe)
+				node.Reset()
+				node.killCmd[probe] = true
+				check, _ := srv.checkCnRound(context.Background(),
+					&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
+						Revision: 3}, nil)
+				assertErrorDetails(t, check.GetCnInfo().GetTmpfsInfo(), probe,
+					"checked tmpfs")
+			})
+		}
+	}
+}
+
+// TestKilledStatDoesNotTruncateTheArenaFile is the backing file's half of the
+// same rule (CN5, SH15): a `stat` that did not answer is not "no such file",
+// and the converge must not answer it with a `truncate --size
+// CnCloneMetaAreaSize` of the live arena file — a no-op at that size, but a
+// resize of a file of any other size, which the converge otherwise refuses.
+// The converge asks once more, and exactly once: killed once, tmp_file_info
+// reads OK; killed every time, it names the probe. A check round reads the
+// same kill as ERROR, never MISSING.
+func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
+	for _, kill := range arenaKills {
+		t.Run("killed "+kill.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			probe := "stat --format %s " +
+				srv.nf.CnTmpFilePath(testCluster, testCn)
+			loop := loopDev(t, srv, node)
+
+			node.Reset()
+			kill.arm(node, probe)
+			reply, err := srv.SyncupCn(context.Background(), cnReq(3, true))
+			if err != nil {
+				t.Fatalf("SyncupCn: %v", err)
+			}
+			if got := node.callsMatching("cmd truncate "); len(got) != 0 {
+				t.Errorf("the arena file was truncated: %v", got)
+			}
+			if got := loopDev(t, srv, node); got != loop {
+				t.Errorf("the arena file is behind %s now, was %s", got, loop)
+			}
+			if n := callCnt(node, "cmd "+probe); n != 2 {
+				t.Errorf("%q ran %d times in the converge, want 2: "+
+					"the one killed and one more asking", probe, n)
+			}
+			info := reply.GetCnInfo()
+			assertOk(t, info.GetTmpfsInfo(), "tmpfs")
+			if kill.always {
+				assertErrorDetails(t, info.GetTmpFileInfo(), probe, "tmp_file")
+			} else {
+				assertOk(t, info.GetTmpFileInfo(), "tmp_file")
+			}
+			assertOk(t, info.GetLoopDevInfo(), "loop_dev")
+
+			delete(node.killCmdAlways, probe)
+			node.Reset()
+			node.killCmd[probe] = true
+			check, _ := srv.checkCnRound(context.Background(),
+				&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
+					Revision: 3}, nil)
+			assertErrorDetails(t, check.GetCnInfo().GetTmpFileInfo(), probe,
+				"checked tmp_file")
+		})
+	}
+}
+
+// TestAskingAgainBuildsAnAbsentArena is the other side of the same asking
+// (CN5): the base state a probe asked about may really be absent, and the
+// converge that learns nothing from a kill must still build it once a second
+// asking answers. A check round would not bring it back: it reads the absent
+// object MISSING, and the CheckCn verdict, the sweep's alone, re-sends no
+// SyncupCn for that — so a converge that stopped at the first kill would
+// leave the CN without a clone-metadata arena until its next converge.
+//
+// After a reboot the tmpfs is gone while the cn file survives: the startup
+// reconcile whose first `findmnt` is killed mounts the tmpfs exactly once,
+// and the first check round reads the base state OK. On a fresh CN the arena
+// file is not there yet: the first SyncupCn whose first `stat` of it is
+// killed truncates it exactly once and attaches the one loop device.
+func TestAskingAgainBuildsAnAbsentArena(t *testing.T) {
+	t.Run("the tmpfs after a reboot", func(t *testing.T) {
+		node := newFakeNode()
+		node.dirs[agent.NvmetRoot] = true
+		srv := newCnServer(node)
+		if err := node.writeProto(context.Background(),
+			srv.nf.LocalCnPath(testCluster, testCn),
+			cnReq(2, false)); err != nil {
+			t.Fatalf("seeding the cn file: %v", err)
+		}
+		probe := "findmnt --noheadings --output FSTYPE --target " +
+			srv.nf.CnTmpfsPath(testCluster, testCn)
+		node.killCmd[probe] = true
+		reconcileForTest(t, srv)
+
+		if n := callCnt(node, "cmd mount "); n != 1 {
+			t.Fatalf("%d mounts at the startup reconcile, want exactly 1", n)
+		}
+		if n := callCnt(node, "cmd "+probe); n != 2 {
+			t.Errorf("%q ran %d times, want 2: the one killed and one "+
+				"more asking", probe, n)
+		}
+		node.Reset()
+		check, _ := srv.checkCnRound(context.Background(),
+			&pb.CheckCnRequest{ClusterId: testCluster, CnId: testCn,
+				Revision: 2}, nil)
+		if code := check.GetAgentReply().GetCode(); code != 0 {
+			t.Errorf("check round code %d (%q), want 0",
+				code, check.GetAgentReply().GetDetails())
+		}
+		info := check.GetCnInfo()
+		assertOk(t, info.GetTmpfsInfo(), "checked tmpfs")
+		assertOk(t, info.GetTmpFileInfo(), "checked tmp_file")
+		assertOk(t, info.GetLoopDevInfo(), "checked loop_dev")
+		if got := node.Mutations(); len(got) != 0 {
+			t.Errorf("the check round mutated: %v", got)
+		}
+	})
+
+	t.Run("the arena file on a fresh cn", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		probe := "stat --format %s " +
+			srv.nf.CnTmpFilePath(testCluster, testCn)
+		node.killCmd[probe] = true
+		reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
+		if err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		if n := callCnt(node, "cmd truncate "); n != 1 {
+			t.Fatalf("%d truncates of the arena file, want exactly 1", n)
+		}
+		if n := callCnt(node, "cmd "+probe); n != 2 {
+			t.Errorf("%q ran %d times, want 2: the one killed and one "+
+				"more asking", probe, n)
+		}
+		info := reply.GetCnInfo()
+		assertOk(t, info.GetTmpfsInfo(), "tmpfs")
+		assertOk(t, info.GetTmpFileInfo(), "tmp_file")
+		assertOk(t, info.GetLoopDevInfo(), "loop_dev")
+		loopDev(t, srv, node)
+	})
+}
+
+// TestUnconfirmedTmpfsCreatesNoArena: the arena file and its loop device are
+// created only on a tmpfs the converge found or mounted at the path (CN5).
+// Where it has neither — both askings of `findmnt` unanswered, or a refused
+// `mount` — the mountpoint may be a bare directory: after a reboot that kept
+// `/tmp`, or after the `mkdir -p` of that refused mount. A `stat` there
+// answers "absent", and a `truncate` would put the arena file on the
+// filesystem underneath and `losetup --find` attach the loop to it; the next
+// converge mounts over that file, truncates a fresh one and attaches a second
+// loop, and every clone built meanwhile on the first loop is rebuilt — the
+// cascade the killed `findmnt` alone used to cause. So the pass creates
+// neither: the file and loop rows read ERROR, and the next SyncupCn, whose
+// commands answer, builds all three exactly once.
+func TestUnconfirmedTmpfsCreatesNoArena(t *testing.T) {
+	assertNothingCreated := func(t *testing.T, node *fakeNode) {
+		t.Helper()
+		for _, verb := range []string{
+			"cmd truncate ", "cmd losetup --find",
+		} {
+			if got := node.callsMatching(verb); len(got) != 0 {
+				t.Errorf("without a confirmed tmpfs the pass ran %v", got)
+			}
+		}
+	}
+	assertBuiltOnce := func(
+		t *testing.T,
+		node *fakeNode,
+		reply *pb.SyncupCnReply,
+	) {
+		t.Helper()
+		for _, verb := range []string{
+			"cmd mount ", "cmd truncate ", "cmd losetup --find",
+		} {
+			if n := callCnt(node, verb); n != 1 {
+				t.Errorf("%q ran %d times, want exactly 1", verb, n)
+			}
+		}
+		info := reply.GetCnInfo()
+		assertOk(t, info.GetTmpfsInfo(), "tmpfs")
+		assertOk(t, info.GetTmpFileInfo(), "tmp_file")
+		assertOk(t, info.GetLoopDevInfo(), "loop_dev")
+	}
+
+	t.Run("both askings of findmnt killed after a reboot", func(t *testing.T) {
+		node := newFakeNode()
+		node.dirs[agent.NvmetRoot] = true
+		srv := newCnServer(node)
+		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
+		file := srv.nf.CnTmpFilePath(testCluster, testCn)
+		node.dirs[tmpfs] = true
+		if err := node.writeProto(context.Background(),
+			srv.nf.LocalCnPath(testCluster, testCn),
+			cnReq(2, false)); err != nil {
+			t.Fatalf("seeding the cn file: %v", err)
+		}
+		probe := "findmnt --noheadings --output FSTYPE --target " + tmpfs
+		node.killCmdAlways[probe] = true
+		reconcileForTest(t, srv)
+		if got := node.callsMatching("cmd mount "); len(got) != 0 {
+			t.Errorf("the startup reconcile mounted: %v", got)
+		}
+		assertNothingCreated(t, node)
+		if _, ok := node.plain[file]; ok {
+			t.Errorf("the arena file %s exists under the bare mountpoint", file)
+		}
+
+		node.Reset()
+		reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
+		if err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		if got := node.callsMatching("cmd mount "); len(got) != 0 {
+			t.Errorf("the SyncupCn mounted: %v", got)
+		}
+		assertNothingCreated(t, node)
+		info := reply.GetCnInfo()
+		assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
+		assertErrorDetails(t, info.GetTmpFileInfo(), "no tmpfs is confirmed",
+			"tmp_file")
+		assertErrorDetails(t, info.GetLoopDevInfo(), "no tmpfs is confirmed",
+			"loop_dev")
+
+		delete(node.killCmdAlways, probe)
+		node.Reset()
+		reply, err = srv.SyncupCn(context.Background(), cnReq(2, false))
+		if err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		assertBuiltOnce(t, node, reply)
+		loopDev(t, srv, node)
+	})
+
+	t.Run("a refused mount", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
+		node.failCmd["mount -t tmpfs"] = "mount: permission denied"
+		reply, err := srv.SyncupCn(context.Background(), cnReq(1, false))
+		if err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		if n := callCnt(node, "cmd mkdir -p "+tmpfs); n != 1 {
+			t.Errorf("mkdir of the mountpoint ran %d times, want 1", n)
+		}
+		assertNothingCreated(t, node)
+		info := reply.GetCnInfo()
+		assertErrorDetails(t, info.GetTmpfsInfo(), "permission denied",
+			"tmpfs")
+		assertErrorDetails(t, info.GetTmpFileInfo(), "no tmpfs is confirmed",
+			"tmp_file")
+		assertErrorDetails(t, info.GetLoopDevInfo(), "no tmpfs is confirmed",
+			"loop_dev")
+
+		node.Reset()
+		reply, err = srv.SyncupCn(context.Background(), cnReq(1, false))
+		if err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		assertBuiltOnce(t, node, reply)
+		loopDev(t, srv, node)
+	})
+}
+
 // ---------------------------------------------------------------------------
 // §6.2 — the revision gate
 // ---------------------------------------------------------------------------

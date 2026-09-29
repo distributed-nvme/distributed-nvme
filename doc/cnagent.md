@@ -576,16 +576,54 @@ CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
        that filesystem instead of getting its own `DefaultCnTmpfsSize`.
        Absent ⇒ `mkdir -p` the mountpoint and
        `mount -t tmpfs -o size={DefaultCnTmpfsSize} tmpfs {path}`.
+       A `findmnt` that did not answer (`dnagent.md` SH15) — either of the
+       two — is not "absent": the converge runs the probe once more, from
+       its first call, in the same pass and acts on that answer, and when
+       that one does not answer either, `tmpfs_info` is an `ERROR` naming
+       the probe and nothing is mounted. A mount over the live arena would
+       stack a second, empty tmpfs on it: the arena file drops out of sight,
+       so the converge truncates a fresh one and attaches a second loop
+       device to it, and every kind-`cb` wrapper still maps the first loop,
+       so every clone on the CN is rebuilt (CN18 step 2). The price, when
+       both askings go unanswered, is a tmpfs that really is absent — after
+       a reboot, or on a new CN — and is not mounted by that pass. The two
+       steps below then create nothing either: they create the file and the
+       loop device only while `tmpfs_info` is `OK`, on a tmpfs this pass
+       found or mounted at the path. Without one the mountpoint may be a
+       bare directory — left in a `/tmp` that the reboot kept, or made by
+       the `mkdir -p` of a `mount` that then failed — where a `truncate`
+       would put the arena file on the filesystem that holds the directory
+       and `losetup --find` attach the loop device to that file; the next
+       converge's `mount` would hide that file and bring the cascade above:
+       a fresh file, a second loop device, and every clone built on the
+       first loop rebuilt. As after a failed `mount`, the arena then waits
+       for the CN's next `SyncupCn` or the agent's next start: a check round
+       reads what is absent `MISSING`, and the `CheckCn` verdict (CN30),
+       which is the sweep's alone, stays clean for it, so it does not make
+       the worker re-send `SyncupCn` — an open issue (§7, known limits).
      * **backing file** `CnTmpFilePath`: probe `stat --format %s`; absent ⇒
        `truncate --size {CnCloneMetaAreaSize} {path}` (sparse — tmpfs pages
        materialize only as clone metadata is written, and CN18's hole-punch
-       `blkdiscard` frees them again).
+       `blkdiscard` frees them again), but only while `tmpfs_info` is `OK`
+       (above); otherwise an absent file is an `ERROR` on `tmp_file_info`
+       saying no tmpfs is confirmed, and a file that is there is reported as
+       the probe finds it. A `stat` that did not answer is not
+       "absent" either: the converge asks once more in the same pass, and
+       when that does not answer either, `tmp_file_info` is an `ERROR`
+       naming it and nothing is truncated — a file that really is absent
+       then waits, as the tmpfs does, for the CN's next `SyncupCn` or the
+       agent's next start.
      * **loop device**: probe `losetup --associated {CnTmpFilePath}` (the
        loop path is re-learned from this probe on every converge **and every
        probe pass** — it is kernel-assigned state, never persisted, and a
        stale cached path is exactly what CN28's arena check must catch);
-       absent ⇒ `losetup --find --show {CnTmpFilePath}`. Exactly one loop
-       device: multiple attachments of the same file are unwanted.
+       absent ⇒ `losetup --find --show {CnTmpFilePath}`, only while
+       `tmpfs_info` is `OK`, as for the file; otherwise, with none attached,
+       `loop_dev_info` is an `ERROR` saying no tmpfs is confirmed. Exactly
+       one loop device: multiple attachments of the same file are unwanted.
+       "Absent" is an answer with no device in it: `losetup --associated`
+       exits 0 with no output when nothing is attached, so any failure of it
+       is an `ERROR` on `loop_dev_info` and attaches nothing.
      * **clone-metadata arena**: nothing to create. The arena *is* the loop
        device: `CnCloneMetaAreaSize / CnCloneMetaUnit` = 256 units of
        `CnCloneMetaUnit`, handed out to clones by the CN18 slot allocator.
@@ -2853,6 +2891,24 @@ contradicts them.
   An unanswered address now fails the leg's converge for the pass
   instead, naming the read, which registers the CN10 retry; a gone
   controller is passed over.
+* `dnagent.md` §2.8 SH15 + §7 item 12, `osclient.md` §4.2 (2026-09-29) —
+  `CloneMeta.Mounted` and `CloneMeta.FileSize`, the `findmnt` and `stat` of
+  CN5's clone-metadata arena, probe through `runProbe`: a run that did not
+  answer is an error, never "absent", and the converge asks once more in
+  the same pass; only when that asking goes unanswered too is the row an
+  `ERROR`, with nothing mounted or truncated. SH15's list ("six" became
+  "these"; its lead now names `Mounted`'s rebuild and `dirMtime`'s clean
+  verdict beside removals and data loss) and item 12 now also name
+  `osBase.dirMtime` and `CloneMeta.Mounted` / `FileSize`; SH15 adds
+  `CloneMeta.LoopDevices`, which needs no split, and names
+  `readAttrStrict`'s other readers: `Nvmet.NsDevicePath`, the `enable`
+  reads of `RemoveNamespace` / `RemoveSubsystem`, and `Md.ListArrays` /
+  `Md.Gone`; item 12 names `NsDevicePath` beside `NvmeHost.readTrimmed` as
+  a `readAttrStrict` reader, and records the cn leg walk's `readSubsys` as
+  still reading a failed listing as "no subsystem", which is open.
+  `osclient.md` §4.2 adds `dirMtime` and `Mounted` / `FileSize` to the
+  `runProbe` users, `LoopDevices` beside `Dm.List`, and `NsDevicePath` to
+  the strict readers.
 
 ## 6. Tests
 
@@ -2880,6 +2936,37 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    appears anywhere in the recorded calls (CN6), and **no LVM command
    appears at all** — the
    arena needs none (CN18).
+1b. **A base-state probe that did not answer is not "absent"** (CN5/CN28,
+   `dnagent.md` SH15). The fake models a mount over a mounted path the way
+   the kernel stacks it: the arena file under it drops out of sight and
+   `losetup --associated` stops listing the loop it backs.
+   `TestKilledFindmntDoesNotRemountTheArena` kills either of `Mounted`'s two
+   `findmnt` calls on a converged CN, once and on every run: the `SyncupCn`
+   runs the killed call exactly twice, issues no `mount` and no `truncate`
+   and keeps the one loop device, and `tmpfs_info` reads `OK` when the
+   second asking answered and `ERROR` naming the killed `findmnt` when it
+   did not, while the file and loop rows read `OK`; a check round with the
+   same kill reads `ERROR`, not `MISSING`.
+   `TestKilledStatDoesNotTruncateTheArenaFile` is the arena file's half: a
+   killed `stat` runs exactly twice and issues no `truncate`,
+   `tmp_file_info` reads `OK` or `ERROR` naming it in the same way, and a
+   check round with the kill reads `ERROR`.
+   `TestAskingAgainBuildsAnAbsentArena` is the other side: after a reboot, a
+   startup reconcile whose first `findmnt` is killed mounts the tmpfs
+   exactly once, and the first check round reads the tmpfs, file and loop
+   rows `OK` with code 0; on a fresh CN, a first `SyncupCn` whose first
+   `stat` of the arena file is killed truncates it exactly once and
+   attaches the one loop device. `TestUnconfirmedTmpfsCreatesNoArena` pins
+   the gate of the file and loop steps on a confirmed tmpfs: after a reboot
+   that left the mountpoint a bare directory, with every run of the `FSTYPE`
+   `findmnt` killed, neither the startup reconcile nor a `SyncupCn` issues
+   a `mount`, a `truncate` or a `losetup --find`, and the `SyncupCn`'s file
+   and loop rows read `ERROR` saying no tmpfs is confirmed; on a fresh CN
+   whose `mount` is refused after its `mkdir -p`, the `SyncupCn` issues no
+   `truncate` and no `losetup --find`, with the same rows. In both, the
+   next `SyncupCn`, whose commands answer, mounts, truncates and attaches
+   exactly once each. A failed `losetup --associated` is
+   `TestFailedLosetupNeverAttachesASecondLoop`.
 2. **Revision gate**: lower ⇒ `ReplyCodeStaleRevision` and zero mutating
    calls; equal ⇒ full idempotent pass; higher ⇒ apply + persist. Same for
    `SyncupCntlr`; `SyncupCntlr` for a pointer `SyncupCn` has not introduced
@@ -4014,6 +4101,20 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   The window runs from that read to the registration; while the disconnect
   ran inline under the lock, it lasted the whole disconnect as well. Not
   closed here.
+* **An absent clone-metadata arena waits for the next `SyncupCn`**
+  (2026-09-29): a tmpfs that really is absent — after a reboot, or on a new
+  CN — whose `findmnt` goes unanswered on both askings of a converge is not
+  mounted by that pass, and the arena file and loop device are not created
+  without it (CN5); an absent arena file whose `stat` goes unanswered on
+  both askings is not created either. A refused `mount`, `truncate` or
+  `losetup --find` leaves the arena short the same way. The error is a row,
+  which nothing re-drives by itself: a check round reads what is absent
+  `MISSING`, and the `CheckCn` verdict, the sweep's alone, stays clean
+  (CN30). The arena then waits for the CN's next `SyncupCn` or the agent's
+  next start, and until then CN18 has no loop device to allocate clone
+  metadata from, so no clone on the CN can be built. The follow-up is a
+  `CheckCn` verdict that is not clean while a base-state row reads
+  `MISSING`, which needs a decision.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

@@ -44,14 +44,21 @@ func NewCloneMeta(oc common.OsClient) *CloneMeta {
 // Mounted probes a mountpoint. `findmnt` exits non-zero when nothing is
 // mounted at the path, which is "absent", not a failure; a mounted path
 // reports its filesystem type so the probe can insist on tmpfs.
+//
+// A `findmnt` that did not answer — either of the two — is an error, never
+// "absent" (SH15, the runProbe split). ensureTmpfs answers "absent" with a
+// `mount`, and a mount over the live arena stacks a second, empty tmpfs on
+// it: the arena file drops out of sight, ensureTmpFile truncates a fresh one,
+// ensureLoopDev attaches a second loop to that, and every kind-cb wrapper
+// still maps the first loop, so every clone on the CN is rebuilt (CN5).
 func (c *CloneMeta) Mounted(
 	ctx context.Context,
 	path string,
 ) (bool, string, error) {
-	stdout, _, _, err := c.cmd.Run(ctx, "findmnt",
+	stdout, ok, err := c.cmd.RunProbe(ctx, "findmnt",
 		"--noheadings", "--output", "FSTYPE", "--target", path)
-	if err != nil {
-		return false, "", nil
+	if err != nil || !ok {
+		return false, "", err
 	}
 	fsType := strings.TrimSpace(stdout)
 	if idx := strings.IndexByte(fsType, '\n'); idx >= 0 {
@@ -63,10 +70,10 @@ func (c *CloneMeta) Mounted(
 	// --target resolves to the closest mountpoint, so a path that merely
 	// *lives* under another mount would answer that mount's type. Insist the
 	// mountpoint itself is the path.
-	source, _, _, err := c.cmd.Run(ctx, "findmnt",
+	source, ok, err := c.cmd.RunProbe(ctx, "findmnt",
 		"--noheadings", "--output", "TARGET", "--mountpoint", path)
-	if err != nil || strings.TrimSpace(source) == "" {
-		return false, "", nil
+	if err != nil || !ok || strings.TrimSpace(source) == "" {
+		return false, "", err
 	}
 	return true, fsType, nil
 }
@@ -84,14 +91,18 @@ func (c *CloneMeta) MountTmpfs(
 }
 
 // FileSize returns the size of a plain file; ok is false when it does not
-// exist.
+// exist. A `stat` that did not answer is an error, never "absent" (SH15):
+// ensureTmpFile answers "absent" with a `truncate --size
+// CnCloneMetaAreaSize`, which leaves a live arena file of that size as it is
+// but resizes one of any other size — cutting off its tail on a shrink —
+// where the converge otherwise reports an error and leaves the file alone.
 func (c *CloneMeta) FileSize(
 	ctx context.Context,
 	path string,
 ) (uint64, bool, error) {
-	stdout, _, _, err := c.cmd.Run(ctx, "stat", "--format", "%s", path)
-	if err != nil {
-		return 0, false, nil
+	stdout, ok, err := c.cmd.RunProbe(ctx, "stat", "--format", "%s", path)
+	if err != nil || !ok {
+		return 0, false, err
 	}
 	text := strings.TrimSpace(stdout)
 	size, convErr := strconv.ParseUint(text, 10, 64)

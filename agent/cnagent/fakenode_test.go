@@ -2076,8 +2076,26 @@ func (f *fakeNode) seedArray(dev, name string, members ...string) {
 // tmpfs / loop
 // ---------------------------------------------------------------------------
 
+// cmdMount mounts a fresh tmpfs at the path. Over a path that already carries
+// one, the new mount STACKS, as the kernel's does: the old tmpfs stays
+// mounted underneath with everything on it, and the path now shows an empty
+// filesystem. So a file under the path is gone from `stat`, and `losetup
+// --associated` stops listing the loop device it backs — losetup matches a
+// loop by the backing file's inode, and a file created there afterwards is a
+// new one — while the loop device itself stays. That is what a converge that
+// read a killed `findmnt` as "nothing mounted" does to the live arena (CN5),
+// and it is modelled so that such a regression shows what follows on a node:
+// a fresh `truncate` and a second loop device.
 func (f *fakeNode) cmdMount(args []string) (string, int) {
 	path := args[len(args)-1]
+	if _, stacked := f.mounts[path]; stacked {
+		for file := range f.plain {
+			if strings.HasPrefix(file, path+"/") {
+				delete(f.plain, file)
+				delete(f.loops, file)
+			}
+		}
+	}
 	f.mounts[path] = "tmpfs"
 	f.dirs[path] = true
 	return "", 0
