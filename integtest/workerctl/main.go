@@ -1221,8 +1221,10 @@ func cmdPing(g *globals, args []string) {
 //
 // The keys are the Go IDENTIFIERS, not this driver's usual snake_case, so that
 // one `grep EtcdMaxTxnOps` finds common/constants.go, this table and the shell
-// that reads it. The other four are the factors of the SPD13/CLD11 budgets a
-// suite may want to size a case against.
+// that reads it. Four more are the factors of the SPD13/CLD11 budgets a suite
+// may want to size a case against, and MaxSliceCntPerSp is the slice ceiling —
+// CreateClone's src_slice_cnt bound — that the gateway suite creates a clone
+// at, which is why that suite must read it rather than type it.
 //
 // It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
 // against the binary it has just built, before any host is contacted.
@@ -1236,6 +1238,7 @@ func cmdConstants(g *globals, args []string) {
 		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
 		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
 		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
+		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
 	})
 }
 

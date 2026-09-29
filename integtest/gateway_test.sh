@@ -94,17 +94,13 @@ ALL_PORTS=(15379 15380 29810 29811 29812 29820 29821 29822 29823 29830 29831 298
 # common.DnvPrefix — the first field of every dnv etcd key (§5.1).
 DNV_PREFIX=dnv
 
-# common.MaxSliceCntPerSp, mirrored by hand. It is CreateClone's
-# `src_slice_cnt` ceiling (§5.8, validateCloneGeometry) and stage 13 creates a
-# clone AT it, so it must track common/constants.go. `workerctl constants`
-# does not emit this one today — that is the whole reason the number is typed
-# here, and it is a gap, not a constraint: adding it to that emit and reading
-# it in read_constants(), exactly as ETCD_MAX_TXN_OPS is read, would end the
-# drift. Until then, note which way the drift is SILENT: a ceiling LOWERED
-# below this value fails stage 13 loudly with INVALID_ARGUMENT, while one
-# RAISED above it leaves stage 13 green and testing an interior geometry
-# instead of the boundary it is named for.
-MAX_SLICE_CNT=32
+# common.MaxSliceCntPerSp — CreateClone's `src_slice_cnt` ceiling (§5.8,
+# validateCloneGeometry), and stage 13 creates a clone AT it. Like
+# ETCD_MAX_TXN_OPS it is NOT typed here: read_constants() fills it at preflight
+# from `workerctl constants`. A typed copy would drift silently one way: a
+# ceiling RAISED above it would leave stage 13 green and testing an interior
+# geometry instead of the boundary it is named for.
+MAX_SLICE_CNT=
 
 # §10.5 identity plan.
 CLUSTER=itgw
@@ -368,22 +364,25 @@ cn_loc() { printf 'rack%d' "$1"; }
 # store_rev is the etcd store revision — the exact "was anything written?"
 # probe the §10.10 refusal brackets need. etcd advances it only for a
 # transaction that actually mutates the store, so an RPC that refuses (or an
-# idempotent Update* that writes nothing, §0 #17) leaves it untouched.
+# idempotent Update* that writes nothing, §0 #17) leaves it untouched. A read
+# that fails or holds no revision DIES: two such reads would compare equal.
 store_rev() {
-	local saved=$QUIET out
+	local saved=$QUIET out rev
 	QUIET=1
-	out=$(etcdctl_raw "endpoint status -w json")
+	out=$(etcdctl_raw "endpoint status -w json") ||
+		die "store_rev: \`etcdctl endpoint status\` failed; no revision to compare"
 	QUIET=$saved
-	jq_of "$out" '.[0].Status.header.revision'
+	rev=$(jq_of "$out" '.[0].Status.header.revision')
+	case $rev in '' | *[!0-9]*) die "store_rev: no revision in '$out'" ;; esac
+	printf '%s' "$rev"
 }
 
 # assert_no_write brackets a refusal: it captures the store revision, runs the
 # command, and requires the revision to be unchanged. This is what makes
 # "refusals write nothing" provable rather than asserted (§10.10).
 assert_no_write() { # <label> <cmd…>
-	local label=$1
+	local label=$1 before after
 	shift
-	local before after
 	before=$(store_rev)
 	"$@"
 	after=$(store_rev)
@@ -391,19 +390,20 @@ assert_no_write() { # <label> <cmd…>
 }
 
 # key_count counts the keys under a prefix — the non-SP-scoped form of the
-# refusal bracket, and the §10.11 step 17 "nothing left" audit.
-#
-# A bare §5.3 kind ("dn_capacity", "cdc", "sp_conf") is scoped to $CLUSTER by
-# workerctl, so it needs the cluster to exist; "dnv" scans the WHOLE store and
-# is the form to use once the cluster is gone. A failed read degrades to 0
-# rather than aborting the stage, which is what makes the post-teardown audit
-# expressible either way.
+# refusal bracket, and the §10.11 step 17 "nothing left" audit. A bare §5.3
+# kind is scoped to $CLUSTER by workerctl (all but cluster_conf, worker and
+# the three *_rev kinds, which are never scoped), so a scoped read FAILS once
+# the cluster is gone (`cluster "itgw" does not exist`); "dnv" scans the WHOLE
+# store and is the form to use then. A failed read DIES: `grep -c .` counts
+# a read that did not answer as 0 keys, which passes every "keys gone" audit.
 key_count() { # <prefix>
 	local saved=$QUIET out
 	QUIET=1
-	out=$(wctl list-keys --prefix "$1" | grep -c . || true)
+	out=$(wctl list-keys --prefix "$1") ||
+		die "key_count: \`workerctl list-keys --prefix $1\` failed;" \
+			"a read that did not answer is not zero keys"
 	QUIET=$saved
-	printf '%s' "$out"
+	printf '%s' "$out" | grep -c . || true
 }
 
 sp_json() { wctl get-sp --sp "$1"; }
@@ -547,13 +547,6 @@ stop_gw() { # <index>
 	dir=$(gw_dir "$1")
 	[ "${RUNNING[$dir]-}" = 1 ] || return 0
 	sig_dir "$dir" TERM
-	wait_gone "$dir" "$WAIT_SHORT"
-}
-
-kill_gw() { # <index>   -- SIGKILL, no drain (case D)
-	local dir
-	dir=$(gw_dir "$1")
-	sig_dir "$dir" KILL
 	wait_gone "$dir" "$WAIT_SHORT"
 }
 
@@ -885,7 +878,8 @@ read_constants() {
 	local json
 	json=$("$WORKERCTL_BIN" constants) ||
 		die "\`workerctl constants\` failed: this suite reads" \
-			"common.EtcdMaxTxnOps from it and must not guess it"
+			"common.EtcdMaxTxnOps and common.MaxSliceCntPerSp from it" \
+			"and must not guess them"
 	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
 	case "$ETCD_MAX_TXN_OPS" in
 	'' | *[!0-9]*)
@@ -894,6 +888,14 @@ read_constants() {
 		;;
 	esac
 	log "  --max-txn-ops = common.EtcdMaxTxnOps = $ETCD_MAX_TXN_OPS"
+	MAX_SLICE_CNT=$(jq_of "$json" .MaxSliceCntPerSp)
+	case "$MAX_SLICE_CNT" in
+	'' | *[!0-9]*)
+		die "workerctl constants: MaxSliceCntPerSp is" \
+			"'$MAX_SLICE_CNT' in $json"
+		;;
+	esac
+	log "  stage 13's --src-slices = common.MaxSliceCntPerSp = $MAX_SLICE_CNT"
 }
 
 preflight_driver() {
@@ -1092,9 +1094,16 @@ smoke_cn_cntlrs() { # <sp> <addr_port>
 
 # smoke_cap_cnt counts a node's capacity keys. §5.6 says a node has EXACTLY
 # one while it is allocatable and none while it is not, so this is both the
-# "the index exists" and the "the index was not duplicated" assertion.
+# "the index exists" and the "the index was not duplicated" assertion. A
+# failed read DIES, as key_count's does: awk prints 0 on empty input, so a
+# read that did not answer would otherwise pass stage 5's "key gone while
+# disabled".
 smoke_cap_cnt() { # <dn_capacity|cn_capacity> <addr_port>
-	wctl list-keys --prefix "$1" |
+	local keys
+	keys=$(wctl list-keys --prefix "$1") ||
+		die "smoke_cap_cnt: \`workerctl list-keys --prefix $1\` failed;" \
+			"a read that did not answer is not zero keys"
+	printf '%s\n' "$keys" |
 		awk -v a="$2" '$NF == a { n++ } END { print n + 0 }'
 }
 
@@ -1159,8 +1168,19 @@ smoke_check_cn() { # <sp> <addr_port> <want cn_rev>
 # smoke_grp_addrs lists the distinct DN addr_ports one group occupies, active
 # and spare legs alike — the set whose DnRev a group-touching op bumps, and
 # the set a placement must stay out of (§6.5's black list).
+#
+# A failed read DIES, as key_count's does: jq on empty input prints nothing
+# and exits 0, so a read that did not answer would otherwise come back as an
+# empty set, and stages 14 and 15's "landed on a DN the group did not already
+# occupy" would pass. Inside an assertion's own `$(…)` the die ends only that
+# subshell, not the run, so a negative captures the set first, in a
+# main-shell assignment (`grpBlack=$(smoke_grp_addrs …)`) that set -e stops.
 smoke_grp_addrs() { # <sp> <grp_id>
-	smoke_jq "$(sp_json "$1")" '
+	local json
+	json=$(sp_json "$1") ||
+		die "smoke_grp_addrs: \`workerctl get-sp --sp $1\` failed;" \
+			"a read that did not answer is not an empty DN set"
+	smoke_jq "$json" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
 		  | select(.grp_id == $g)
 		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?.addr_port ]
@@ -1177,9 +1197,16 @@ smoke_grp_field() { # <sp> <grp_id> <field>
 
 # smoke_side_field reads one field of one side by side_id, wherever in the SP
 # it lives. A side_id is unique inside an SP but carries no hint of its slice
-# or leg (§8.6), so every side assertion goes through this scan.
+# or leg (§8.6), so every side assertion goes through this scan. A failed read
+# DIES, for smoke_grp_addrs' reason and with its caveat: an empty field would
+# pass stage 14's "the destination side's cntlid_slot differs from the
+# source's".
 smoke_side_field() { # <sp> <side_id> <field>
-	smoke_jq "$(sp_json "$1")" '
+	local json
+	json=$(sp_json "$1") ||
+		die "smoke_side_field: \`workerctl get-sp --sp $1\` failed;" \
+			"a read that did not answer is not an empty field"
+	smoke_jq "$json" '
 		[ .slices[] | (.meta_grp_list[]?, .data_grp_list[]?)
 		  | (.leg_list[]?, .spare_leg_list[]?) | .side_list[]?
 		  | select(.side_id == $s) ][0] | .[$f]' --arg s "$2" --arg f "$3"
@@ -1214,8 +1241,16 @@ smoke_grp_spare_ids() { # <sp> <grp_id>
 # smoke_ns prints one stored namespace as JSON. A namespace is a field of its
 # Subsystem value and has no key of its own (§8.8), so every namespace
 # assertion digs it out of the subsystem the ground-truth reader returned.
+#
+# A failed read DIES, as key_count's does: stage 12's "the abort path leaves
+# the origin namespace untouched" compares two of these reads, and two that
+# did not answer would both be empty and compare equal.
 smoke_ns() { # <sp> <nqn> <ns_idx>
-	smoke_jq "$(sp_json "$1")" '
+	local json
+	json=$(sp_json "$1") ||
+		die "smoke_ns: \`workerctl get-sp --sp $1\` failed;" \
+			"a read that did not answer is not an unchanged namespace"
+	smoke_jq "$json" '
 		.subsystems[$n].ns_list[] | select(.ns_idx == ($i | tonumber))
 		| @json' --arg n "$2" --arg i "$3"
 }
@@ -2030,8 +2065,10 @@ EOF
 		"[\"$host2\",\"$host3\"]" "transfer allowed_hosts after the update"
 	# The abort path leaves the origin EXACTLY as it is, so the next syncup
 	# resumes it (§11.3): the whole namespace record must be byte-identical.
+	# An empty record would make that comparison vacuous.
 	local nsBefore
 	nsBefore=$(smoke_ns sp0 "$nqn" 1)
+	[ -n "$nsBefore" ] || die "sp0 lists no namespace 1 of $nqn to compare"
 	out=$(gw delete-xfer --sp sp0 --rev "$SP_REV" --name x0 --force)
 	refresh_rev sp0
 	assert_field "$out" '.xfer_id' "$xferId" "delete-xfer --force reply xfer_id"
@@ -2213,7 +2250,7 @@ EOF
 	# -------------------------------------------------------------------
 	stage 14 "migration on the first data group: create, bitmap, cancel, finish"
 	# -------------------------------------------------------------------
-	local dataGrp srcSide srcLeg srcAddr srcSlot dstSide dstAddr grpExt
+	local dataGrp srcSide srcLeg srcAddr srcSlot dstSide dstAddr dstSlot grpExt
 	dataGrp=$(sp_grp_id sp0 data 0)
 	srcLeg=$(sp_leg_id sp0 data 0 0)
 	srcSide=$(sp_side_id sp0 data 0 0)
@@ -2225,6 +2262,8 @@ EOF
 	# domain it is meant to leave.
 	local grpBlack
 	grpBlack=$(smoke_grp_addrs sp0 "$dataGrp")
+	# An empty set would make the black-list negative below vacuous.
+	[ -n "$grpBlack" ] || die "sp0's data group $dataGrp lists no DN"
 	for i in 0 1 2 3; do beforeRev[i]=$(dn_rev_of "$(dn_addr "$i")"); done
 	out=$(gw create-migr --sp sp0 --rev "$SP_REV" --name m0 --src-side "$srcSide")
 	refresh_rev sp0
@@ -2251,8 +2290,11 @@ EOF
 	assert_eq "$(printf '%s\n' "$grpBlack" | grep -cx "$dstAddr")" "0" \
 		"the destination landed on a DN the group did not already occupy"
 	# The destination exports under a DIFFERENT cntlid slot than the source,
-	# because both sides of the leg are exported at once (§11.2).
-	assert_ne "$(smoke_side_field sp0 "$dstSide" cntlid_slot)" "$srcSlot" \
+	# because both sides of the leg are exported at once (§11.2). The slot is
+	# captured first so that a read that did not answer stops the run instead
+	# of handing assert_ne an empty string.
+	dstSlot=$(smoke_side_field sp0 "$dstSide" cntlid_slot)
+	assert_ne "$dstSlot" "$srcSlot" \
 		"the destination side's cntlid_slot differs from the source's"
 	assert_eq "$(smoke_jq "$(sp_json sp0)" '.sp_conf.migr_name_list | @json')" \
 		'["m0"]' "sp0 migr_name_list"
@@ -2350,6 +2392,7 @@ EOF
 	# -------------------------------------------------------------------
 	local spareLeg spareSide spareAddr targetLeg targetPos targetAddr
 	grpBlack=$(smoke_grp_addrs sp0 "$dataGrp")
+	[ -n "$grpBlack" ] || die "sp0's data group $dataGrp lists no DN"
 	out=$(gw create-spare --sp sp0 --rev "$SP_REV" --grp "$dataGrp")
 	refresh_rev sp0
 	spareLeg=$(jq_of "$out" '.leg_id')
@@ -3731,8 +3774,17 @@ case_contention() {
 # a property of the SP, so leaving it in would make the "content is
 # identical" halves of the refusal brackets assert the same thing the
 # store_rev bracket already asserts — and nothing else.
+#
+# A failed read DIES, as key_count's does: the two snapshots of a step are
+# compared with each other, and two reads that did not answer would both be
+# empty and compare equal. Every caller captures the snapshot in a main-shell
+# assignment (`before=$(faults_sp_snapshot sp0)`), which set -e stops.
 faults_sp_snapshot() { # <sp name>
-	jq_of "$(sp_json "$1")" 'del(.store_rev) | @json'
+	local json
+	json=$(sp_json "$1") ||
+		die "faults_sp_snapshot: \`workerctl get-sp --sp $1\` failed;" \
+			"a read that did not answer is not an unchanged SP"
+	jq_of "$json" 'del(.store_rev) | @json'
 }
 
 # faults_nonprimary_cntlr prints the cntlr_id of one cntlr of the SP that is
@@ -3913,10 +3965,12 @@ faults_validation_battery() {
 		"count 0: a non-full page ends the listing"
 }
 
-# faults_notfound_battery is §10.14 step 2: one probe per resource group.
-# Every one of them resolves further than the previous group did — the
-# cluster probe never reaches an SP, the sp probe never reaches a td — which
-# is what makes "every group" a real statement about GW5's resolution order.
+# faults_notfound_battery is §10.14 step 2: one probe per missing id —
+# cluster / sp / dn / cn / td / nqn / ns_idx / clone / xfer / migr / cntlr /
+# side — plus the two spare ids. Every other id a probe names exists, so its
+# NOT_FOUND can only be the missing id's own — the cluster probe never
+# reaches an SP, the sp probe never reaches a td — which is what makes the
+# battery a statement about GW5's resolution order.
 faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	local ssNqn=$1 grp=$2 leg=$3
 
@@ -3941,7 +3995,10 @@ faults_notfound_battery() { # <ss nqn> <data grp id> <data leg id>
 	gwx NOT_FOUND get-xfer --sp sp0 --name nosuchxfer
 	gwx NOT_FOUND get-migr --sp sp0 --name nosuchmigr
 
-	# A side id that is in no leg of the SP (§5.5's id-addressed read).
+	# A cntlr id the SP does not list, and a side id that is in no leg of the
+	# SP (§5.5's id-addressed reads). Both are refused inside the snapshot,
+	# before any agent is dialed.
+	gwx NOT_FOUND inspect-cntlr --sp sp0 --id 0xdead
 	gwx NOT_FOUND inspect-side --sp sp0 --id 0xdead
 
 	# The spare ids, both of them. §8.12 makes SwitchSpareLeg check leg
@@ -4167,7 +4224,7 @@ case_faults() {
 	assert_eq "$after" "$before" "step 1: sp0's content must not change"
 
 	# -----------------------------------------------------------------
-	stage 2 "NOT_FOUND battery: one probe per resource group"
+	stage 2 "NOT_FOUND battery: one probe per missing id"
 	# -----------------------------------------------------------------
 	before=$(faults_sp_snapshot sp0)
 	assert_no_write "step 2: the NOT_FOUND battery" \
@@ -4696,6 +4753,59 @@ restart_assert_accounting() { # <sp name…>
 		"Σ CN free_ext_cnt with $sp_cnt storage pools alive"
 }
 
+# restart_killer_script prints the server half of step 2's SIGKILL, for
+# `bash` on the server. It polls gw1's log, sleeping 10 ms between reads, for
+# a create-sp request carrying this stage's trace id and SIGKILLs gw1 by its
+# recorded pid the moment one is there; after WAIT_SHORT x 100 polls (at least
+# WAIT_SHORT seconds) it gives up without killing anything. Such a record can
+# only exist once the race's barrier has released the jobs, so the kill can
+# never land before the barrier. The match is two fixed strings on one line —
+# the log is one JSON object per line, the trace id its last field — because
+# the server has no jq; the driver re-reads the same log with jq afterwards
+# (restart_assert_in_window).
+restart_killer_script() {
+	cat <<EOF
+log=$(gpath gw1)
+n=0
+until [ "\$(grep -F '"trace_id":"$TRACE"' "\$log" 2>/dev/null |
+	grep -c -F '"method":"/Gateway/CreateStoragePool"')" -gt 0 ]; do
+	n=\$((n + 1))
+	if [ "\$n" -gt $((WAIT_SHORT * 100)) ]; then
+		echo "no create-sp request of $TRACE reached gw1"
+		exit 1
+	fi
+	sleep 0.01
+done
+kill -KILL "\$(cat $WORK/gw1/pid)" && echo killed
+EOF
+}
+
+# restart_assert_in_window is step 2's proof that the SIGKILL landed INSIDE
+# the race: gw1's log must hold more create-sp requests of this stage than
+# replies. The gateway logs a request when its handler starts and the reply
+# when it returns, and a SIGKILLed process logs nothing more, so a request
+# with no reply is a create-sp gw1 died holding. Equal counts mean gw1 had
+# answered everything before the signal: step 3's audit would then pass with
+# nothing crashed at all.
+restart_assert_in_window() {
+	local filter reqs reps
+	filter='select(.msg == $m and .trace_id == $t
+		and (.method // "" | endswith("/CreateStoragePool")))'
+	reqs=$(count_recs "$(gpath gw1)" "$filter" \
+		--arg m "grpc server request" --arg t "$TRACE") ||
+		die "reading gw1's log for the in-window proof failed"
+	reps=$(count_recs "$(gpath gw1)" "$filter" \
+		--arg m "grpc server reply" --arg t "$TRACE") ||
+		die "reading gw1's log for the in-window proof failed"
+	[ "$reqs" -gt 0 ] ||
+		die "gw1's log holds no create-sp request of $TRACE at all"
+	[ "$reqs" -gt "$reps" ] ||
+		die "the SIGKILL landed outside the race: gw1 had answered all" \
+			"$reqs create-sp requests of $TRACE before it died"
+	log "  in the window: gw1 died holding $((reqs - reps)) of the $reqs" \
+		"create-sp requests it had received"
+}
+
 case_restart() {
 	CASE=restart
 
@@ -4717,10 +4827,14 @@ case_restart() {
 	# ② ground truth. The globals are the interesting part: `next_id` counts
 	# what has been MINTED and Σ shard_bucket what is ALIVE, and step 3 leans
 	# on the sp_global pair being trustworthy after a crash, so both are
-	# established here while nothing has crashed yet.
-	assert_ne "$(jq_of "$(raw_key "$(cluster_key)")" '.creation_epoch')" "0" \
+	# established here while nothing has crashed yet. The ClusterConf is read
+	# in the main shell before it is asserted on, so a read that did not
+	# answer stops the run; nested inside assert_ne's own `$(…)` it would
+	# hand assert_ne an empty string, which is "not 0".
+	local cluster_conf dn_global cn_global sp_global
+	cluster_conf=$(raw_key "$(cluster_key)")
+	assert_ne "$(jq_of "$cluster_conf" '.creation_epoch')" "0" \
 		"cluster_conf creation_epoch"
-	local dn_global cn_global sp_global
 	dn_global=$(raw_key "$DNV_PREFIX dn_global $(printf '%016x' "$CID")")
 	cn_global=$(raw_key "$DNV_PREFIX cn_global $(printf '%016x' "$CID")")
 	sp_global=$(raw_key "$DNV_PREFIX sp_global $(printf '%016x' "$CID")")
@@ -4763,37 +4877,48 @@ case_restart() {
 		jobs+=("{\"op\":\"create-sp\",\"params\":{\"sp\":\"${names[$i]}\",$shape}}")
 	done
 
-	# The race has to run in the BACKGROUND: its jobs are released against one
-	# barrier and then block on their RPCs, so the kill can only land while
-	# they are in flight if the driver is free to issue it. `gw race` runs
-	# gatewayctl on the SERVER over ssh and the gw wrapper passes stdin
-	# through, so the job lines travel down ssh's stdin.
-	local racefile racepid
-	racefile=$(mktemp)
-	(printf '%s\n' "${jobs[@]}" |
-		gw race --targets "$(gw_addr 0),$(gw_addr 1),$(gw_addr 2)" \
-			>"$racefile") &
-	racepid=$!
-	# Process control, not a wait for etcd content, so §10.10 permits it: the
-	# barrier has to have been released and the jobs have to have reached the
-	# gateways before a kill means anything at all.
-	sleep 0.5
-	kill_gw 1
+	# The kill has to land INSIDE the race: after the barrier has released
+	# the jobs, and while gw1 still holds one of its create-sp. That window
+	# closes as soon as gw1 has answered its last create-sp. The ten do
+	# commit one after another (each rewrites the cluster's SpGlobal and
+	# charges all four DNs), which stretches it, yet on a local copy of the
+	# setup gw1 had answered all of its creates within about 150 ms of the
+	# barrier, and a kill sent from the driver would have to open a whole
+	# ssh connection inside that. So the kill is ARMED ON THE SERVER:
+	# restart_killer_script is shipped into gw1's dir and started in the
+	# race's own ssh session, just before gatewayctl, and it SIGKILLs gw1 by
+	# recorded pid the moment gw1's log holds a create-sp request of this
+	# stage. The job lines travel down ssh's stdin to gatewayctl; the killer
+	# reads /dev/null and writes a file, so it holds no part of the ssh
+	# session. --timeout 30 is case A's, for case A's reason: ten allocating
+	# RPCs contend on the same keys, so a job's wall time is a retry queue,
+	# not one round trip.
+	restart_killer_script | sshw "cat > $WORK/gw1/killer.sh"
 	# The race's own exit status is deliberately ignored: it exits non-zero
 	# only on a HARNESS failure, and a job that came back UNAVAILABLE because
 	# we shot its gateway is the measurement, not an error.
-	wait "$racepid" || true
-	result=$(cat "$racefile")
-	rm -f "$racefile"
+	result=$(printf '%s\n' "${jobs[@]}" |
+		sshw "bash $WORK/gw1/killer.sh > $WORK/gw1/killer.out 2>&1" \
+			"< /dev/null &" \
+			"$WORK/bin/gatewayctl --cluster $CLUSTER --trace-id $TRACE" \
+			"--timeout 30 race --targets" \
+			"$(gw_addr 0),$(gw_addr 1),$(gw_addr 2)") || true
 
-	[ -n "$result" ] || die "the background race produced no output at all"
+	[ -n "$result" ] || die "the race produced no output at all"
 	assert_eq "$(jq_of "$result" 'length')" "${#names[@]}" \
 		"race results, one per job"
-	# kill_gw has already waited for the recorded pid to be gone; this is the
+	local killed
+	killed=$(sshw "cat $WORK/gw1/killer.out") ||
+		die "reading $WORK/gw1/killer.out failed"
+	[ "$killed" = killed ] ||
+		die "the SIGKILL armed on the server never fired: '$killed'"
+	wait_gone gw1 "$WAIT_SHORT"
+	# wait_gone has waited for the recorded pid to be gone; this is the
 	# other half of "the instance is gone" — it is not serving either.
 	if gw_ready 1; then
 		die "gw1 still answers a ping after kill -9"
 	fi
+	restart_assert_in_window
 	# ② and ③ for this stage are step 3 below: §10.15 splits the load from its
 	# audit, and the audit is the part that has to run against a settled
 	# store, after the last in-flight STM has either committed or died.
@@ -4900,21 +5025,23 @@ case_restart() {
 	log "  ${#survivors[@]} SPs survived the kill, ${#missing[@]} to re-drive"
 	if [ "${#missing[@]}" -eq 0 ]; then
 		# Not a failure: the either-or audit above is the assertion and it
-		# ran in full. But it means the SIGKILL landed after the last job had
-		# already committed, so this run exercised no in-flight crash — worth
-		# saying out loud rather than passing silently, because the split is
-		# timing-dependent and a run that never races proves less.
-		log "  NOTE: nothing was in flight when gw1 died; no job was lost"
+		# ran in full, and stage 2 has already proved gw1 died holding a
+		# create-sp. No SP missing means every create-sp routed to gw1 had
+		# reached it and committed, before the signal or from a transaction
+		# already in etcd when gw1 died: lost replies, not lost writes. That
+		# is worth saying out loud, because the split is timing-dependent.
+		log "  NOTE: every create-sp gw1 died holding committed all the same"
 	fi
 
 	# -----------------------------------------------------------------------
 	stage 4 "re-drive the lost SPs against gw0, sequentially"
 	# -----------------------------------------------------------------------
 	# ① Only the SPs whose write set is genuinely absent are re-driven. A job
-	# that reported a transport failure while its STM had already committed is
-	# a LOST REPLY, not a lost write, and re-driving it would (correctly) come
-	# back ALREADY_EXISTS — so the missing list, not the failed list, is what
-	# a client would retry, and step 3 has already proved the two coincide
+	# can report a transport failure and still commit, before the signal or
+	# from a transaction already in etcd when gw1 died. That is a LOST REPLY,
+	# not a lost write, and re-driving it would (correctly) come back
+	# ALREADY_EXISTS — so the missing list, not the failed list, is what a
+	# client would retry, and step 3 has already proved the two coincide
 	# except for that one case.
 	if [ "${#missing[@]}" -gt 0 ]; then
 		for name in "${missing[@]}"; do

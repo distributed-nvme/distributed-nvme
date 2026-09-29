@@ -1580,6 +1580,12 @@ comes near the cap — step 13's `delete-clone` latches and its `wctl
 drain-clone` removes three chunk keys, step 17's `wctl drain-sp` pops sp0's
 four groups — so the flag is what makes the suite run against an etcd
 configured the way production must be, not something a case needs.
+The same JSON's `MaxSliceCntPerSp` field fills `MAX_SLICE_CNT`, the source
+slice count §10.11 step 13 creates its clone at (`CreateClone`'s
+`src_slice_cnt` ceiling, §5.8). It is read rather than typed because a typed
+copy would go stale silently if the ceiling rose: step 13 would stay green on
+an interior geometry. A field that is missing or not a number fails the
+preflight.
 etcd readiness is `wait_until WAIT_SHORT` on
 `workerctl --endpoints 127.0.0.1:15379 ping`; each gateway's readiness on
 `gatewayctl --gateway 127.0.0.1:2981<k> ping`.
@@ -1729,7 +1735,9 @@ sp drain's last one deletes the key instead (§2.4).
   asserted too, and
   case C additionally compares a whole `wctl get-sp` snapshot before and
   after each of its steps 1-4 (step 5 mutates) — refusals write nothing,
-  provably.
+  provably. Each read of a bracket must answer: a revision or snapshot read
+  that fails stops the run, because two failed reads would both come back
+  empty and compare equal.
 * `assert_field <json> <jq> <want> <label>`; `assert_eq/ne/ge`; `wait_until`
   only for process readiness — the gateway itself is synchronous, so **no
   stage ever sleeps** waiting for etcd content.
@@ -1817,9 +1825,13 @@ happy path (that one runs in §10.12 steps 3 and 6 and §10.15 steps 3, 4 and
     RFC-4122 dashed form, nguid 32 hex; duplicate idx → `INVALID_ARGUMENT`;
     `set-ns-dev → t1`; `set-ns-suspended true`.
 12. `create-xfer x0` (origin ss0/1) → Transfer stored; `set-xfer-hosts`;
-    `delete-xfer --force` (abort: origin ns untouched); recreate;
-    `delete-xfer` (finalize: origin ns `suspended true` — asserted).
-13. `create-clone cl0` (dst t1, src bounds at their limits) → stored; then
+    `delete-xfer --force` (abort: origin ns untouched); recreate; resume the
+    origin (`set-ns-suspended --suspended=false`, asserted live) — step 11
+    left it suspended, so without the resume the finalize's flip could only
+    be asserted as a tautology; `delete-xfer` (finalize: origin ns
+    `suspended true` — asserted).
+13. `create-clone cl0` (dst t1, src bounds at their limits — the slice bound
+    is `MaxSliceCntPerSp`, read at preflight, §10.4) → stored; then
     three `append-clone-bm` calls that DISCRIMINATE the §5.8 PAIR addressing
     rather than merely exercising it:
     `--src-slice-idx 0 --bm-idx 0` → one chunk key;
@@ -1940,8 +1952,9 @@ it. The fixture's own RPCs are not counted in §10.18's matrix.
    `--meta --ext 2`, slots with dupes / value 8, `count` at both ends of
    its bound (0→64 accepted, 2000 → `INVALID_ARGUMENT`, never capped), bad page token,
    nonempty `bdev_feature_list`.
-2. `NOT_FOUND` battery: every group probed once against a missing cluster /
-   sp / dn / td / nqn / ns_idx / clone / xfer / migr / side / spare ids.
+2. `NOT_FOUND` battery: one probe per missing id — cluster / sp / dn / cn /
+   td / nqn / ns_idx / clone / xfer / migr / cntlr / side — plus the two
+   spare ids (`delete-spare`'s leg, `switch-spare`'s spare).
 3. Precondition battery on a live sp0 (each `FAILED_PRECONDITION`,
    bracketed): `delete-cluster` nonempty; `delete-dn` with sides;
    `delete-sp` with tds; `delete-ss` with ns; `delete-cntlr` primary, and
@@ -1970,15 +1983,38 @@ brackets), codes match GW7, agent-call budget is bounded — the settled (c).
 ### 10.15 Case D — `restart` (kill -9 under load)
 
 1. `create-cluster` + nodes (as A step 2, sequential is fine).
-2. Launch in background: `race` 10 × `create-sp spD0..spD9` across gw0-2.
-   While it runs, `kill -9` gw1 by recorded pid (no drain).
-3. Join; partition results: jobs routed to gw1 ∈ {OK, UNAVAILABLE/ABORTED
+2. `race` 10 × `create-sp spD0..spD9` across gw0-2, with `--timeout 30`
+   rather than §10.8's 10 s default (ten allocating RPCs contend on the same
+   keys, so a job's wall time is a retry queue), and `kill -9` gw1 by
+   recorded pid (no drain) INSIDE the race: after the barrier has released
+   the jobs, while gw1 still holds one of its create-sp in its handler. That
+   window closes as soon as gw1 has answered its last create-sp. The ten do
+   commit one after another (each rewrites the cluster's `SpGlobal` and
+   charges all four DNs), which stretches it, yet on a local copy of the
+   setup gw1 had answered all of its creates within about 150 ms of the
+   barrier, and a kill sent from the driver would have to open a whole ssh
+   connection inside that. The kill is therefore armed on the server: a
+   watcher started in the race's own ssh session polls gw1's log (sleeping
+   10 ms between reads) and fires the moment that log holds a create-sp
+   request of this stage, a record that can only exist once the barrier is
+   open. The stage then asserts that the kill fired, that gw1 is gone and
+   not serving, and that gw1's log holds more create-sp requests of the
+   stage than replies — a SIGKILLed process logs nothing more, so gw1 died
+   holding one — and prints `in the window: …`. A kill that lands after gw1
+   has answered everything fails the case instead of passing an audit that
+   crashed nothing.
+3. Partition results: jobs routed to gw1 ∈ {OK, UNAVAILABLE/ABORTED
    transport}; all others OK. For **every** spD*: either the complete §5.4
    write set exists (reuse S-step-6's `verify_sp` helper) or **no key of it
    at all** (`list-keys` audit per sp name + sp_id) — etcd transactionality
    means no third state. Recompute expected DN/CN frees from the survivor
    set and assert exactly.
-4. Re-drive every failed job against gw0 → OK; now 10 complete SPs.
+4. Re-drive against gw0, one at a time, every spD* that step 3 found
+   absent → OK. A gw1 job can fail and still commit — before the kill, or
+   because its transaction was already in etcd when gw1 died — and that is
+   a lost reply, not a lost write: re-driving it would come back
+   `ALREADY_EXISTS`, so the absent list, not the failed list, is what is
+   retried. Now 10 complete SPs.
 5. Restart gw1 with the identical command line → `ping` OK; one
    create/delete round-trip through gw1; assert `list-keys` full dump
    contains **only** `architecture.md` §5.3 kinds owned by the data — no gateway
@@ -2062,9 +2098,10 @@ the real coordinator for both.
   teardown this suite's gateway only starts, plus `set-deleting`, the worker
   suite's own latch (§2.4, §5.4); with the 2026-09-16 clone latch, their
   clone twins `set-clone-deleting` and `drain-clone` (§2.4, §5.8).
-* `doc/cdc.md` §"CdcEntry ownership": rename the RPC it calls
-  `UpdateSubsystemAllowedHosts` to the real name **`UpdateSubsystemHosts`**
-  (proto and architecture.md §8.8 agree; cdc.md is the outlier).
+* `doc/cdc.md` §1, its "Who writes what it reads" paragraph: rename the RPC
+  it calls `UpdateSubsystemAllowedHosts` to the real name
+  **`UpdateSubsystemHosts`** (proto and architecture.md §8.8 agree; cdc.md
+  is the outlier).
 * `README.md`: remove `gateway/` from the not-yet-implemented list (and the
   already-stale `cdc/` mention while there); add the gateway suite to the
   integtest enumeration.

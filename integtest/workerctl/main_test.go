@@ -7,6 +7,9 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -467,6 +470,53 @@ func TestKeyPrefix(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, " ") {
 		t.Fatalf("a scan prefix must end in the field separator")
+	}
+}
+
+// TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
+// which the shell suites read a Go constant (`geometry` is the other one, for
+// a computed value). The suites read three of its keys: every suite that
+// starts an etcd launches it with EtcdMaxTxnOps, e2e cross-checks
+// MaxAllocLegPerGrp and the gateway suite creates its stage-13 clone at
+// MaxSliceCntPerSp. One of those three dropped or renamed here would
+// otherwise surface only when a suite is run, at its preflight. The other
+// three keys are pinned as well, because a case may size itself against them.
+func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	saved := os.Stdout
+	os.Stdout = write
+	g := newGlobals()
+	cmdConstants(&g, nil)
+	os.Stdout = saved
+	write.Close()
+	out, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatalf("reading the constants output: %v", err)
+	}
+	var got map[string]uint64
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("constants printed %q, not one JSON object: %v", out, err)
+	}
+	want := map[string]uint64{
+		"EtcdMaxTxnOps":     common.EtcdMaxTxnOps,
+		"MaxDelGrpPerTxn":   common.MaxDelGrpPerTxn,
+		"MaxAllocLegPerGrp": common.MaxAllocLegPerGrp,
+		"MaxSpareLegPerGrp": common.MaxSpareLegPerGrp,
+		"MaxDelBmPerTxn":    common.MaxDelBmPerTxn,
+		"MaxSliceCntPerSp":  common.MaxSliceCntPerSp,
+	}
+	for key, value := range want {
+		if have, ok := got[key]; !ok || have != value {
+			t.Errorf("constants %s = %d (present %t), want %d",
+				key, have, ok, value)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("constants printed %d keys, want %d: %s",
+			len(got), len(want), out)
 	}
 }
 
