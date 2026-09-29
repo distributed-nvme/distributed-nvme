@@ -97,7 +97,13 @@ Concretely, a green run is the following five statements taken together.
 ### 2.1 Roles
 
 Every server comes from argv. Nothing is hardcoded, and the suite refuses to
-start when two roles name the same target.
+start when two roles name the same target — or, since 2026-09-28, when `--cp`
+names its guest by anything but an IPv4 address. That address becomes
+`dnv-cdc --tr-addr`, which takes an IP literal only, and the address both
+hosts discover against; a hostname used to pass every check and end the run
+in setup stage 02 on a 15 s wait for a port that never opened — the cdc's,
+or, when cp itself cannot bind the name, the gateway's, whose
+`--grpc-address` carries the same name.
 
 ```
 bash integtest/e2e_test.sh [--only <case>] [--cleanup-only] [--slice-cnt N]
@@ -241,15 +247,18 @@ provisioning, for the drain and for a hydration) is now three different ones:
   rather than a number nobody has. The sides waits of a *grow* keep
   `WAIT_PROVISION`: they are the `LEGS` sides one new group adds. It is 2.3 ×
   the 525 s window of §8 item 12, which leaves margin for a busier lab and for a
-  `react` build that loses a failover's worth of work and starts again. Seven
+  `react` build that loses a failover's worth of work and starts again. Eight
   waits carry it: setup's three — the sides, the primary's stack and the
   standby's shape (§4.1 stage 07); the new primary of §4.5 stage 03, which is
   that same build on a node that had only legs; the third controller of §4.3
   stage 03 and the AR7 replacement of §4.5 stage 04, because a controller born
   now holds nothing and every leg is a fresh connection — the standby half of a
-  build; and each rung of the `set-level` ladder of §4.3 stage 05, whose
+  build; each rung of the `set-level` ladder of §4.3 stage 05, whose
   `DISABLE` rung tears the whole stack down and whose climb back builds it
-  again.
+  again; and the export gate after that ladder, the one wait there that covers
+  the standby, whose own rebuild after `DISABLE` is from nothing too. (*Amended
+  2026-09-28*: this list said seven and left the gate out, although it has
+  carried `WAIT_BUILD` since the third lab run.)
 * `WAIT_PROVISION` bounds an **incremental** convergence on something that
   already exists: the handful of sides a grow adds, one grown group's md array
   and pool reload, a thin device's volumes and raid0, one leg reconnecting, and
@@ -271,6 +280,14 @@ provisioning, for the drain and for a hydration) is now three different ones:
 threshold — threshold plus a few 5 s worker passes — and every threshold it
 bounds belongs to `react`'s own short set, so nothing the build measurement
 says bears on it.
+
+`WAIT_HOST` has had a second job since 2026-09-28: it is also the watchdog
+over the host reads, writes and cache drops that E2E7 names
+(`ssh_host_watched`) — a `timeout` on one `ssh`, not a poll — so one of them
+that takes longer than 60 s dies as a wedged one. The exception is `react`
+stage 02's strided write, up to `REACT_MAX_CHUNKS` (128) 1 MiB writes that are
+each fsync'd on their own, whose watchdog is `WAIT_HOST` plus a second per
+chunk.
 
 dnvctl's own `--timeout` is 30 s by default here (its built-in 10 s is not
 enough), raised to 180 s for the `sp create` of setup and 120 s for the
@@ -542,7 +559,8 @@ Two facts about the ids themselves, both verified rather than assumed:
   nothing is hardcoded. **HOLDS.** `parse_args` accepts both `--flag value` and
   `--flag=value` for every flag and treats any positional word as a usage
   error; the arity rules of §2.1 are enforced; a target used for two roles is a
-  die naming the duplicate. The only addresses the run ever uses are the ones
+  die naming the duplicate, and a `--cp` whose address is not an IPv4 literal
+  is a die naming it (§2.1). The only addresses the run ever uses are the ones
   argv gave it, plus `127.0.0.1` for cp's own loopback to etcd; the example
   invocation in the header comment is a comment.
 
@@ -643,7 +661,24 @@ Two facts about the ids themselves, both verified rather than assumed:
   detached on the guest with the *group's* stdout redirected and answers
   `blocked` inside its own budget, because `timeout` cannot bound a task in D
   state and command substitution hangs on a background child that still holds
-  the ssh pipe.
+  the ssh pipe. Every other `dd` read on a host — `host_sha_range`, and
+  through it `host_sha_is` and `check_sha0`; `react_chunk_sha`, and through
+  it `react_chunks_are` — the cache drop in front of it, and the device
+  writes of `host_write_range` and `react_chunk_write` run, since
+  2026-09-28, under a watchdog on the **driver** (`ssh_host_watched`): a
+  `timeout --foreground` of `WAIT_HOST` around the local `ssh` — `WAIT_HOST`
+  plus a second per chunk for `react_chunk_write` (§2.3) — which, unlike the
+  `dd` on the guest, dies on the signal. IO that blocks where nothing said it
+  would — `react` stage 03 reads and writes over host0's only path, and a
+  second AR5 during either would leave the path inaccessible — has its
+  session abandoned and its caller dies: the two polling predicates through
+  `host_watch_verdict`, instead of polling again, and every other caller on
+  the failed status. The run ends with its diagnostics rather than hanging
+  where no EXIT trap ever runs, and the wedged task stays on the guest (§8
+  item 9). Three host `dd`s are not watched: `host_sha_probe`'s, which is
+  detached; `host_make_pattern`'s, which writes a file on the host's own disk;
+  and `host_write_probe`'s, the `READONLY` rung's write, which dm-flakey's
+  `error_writes` table fails rather than requeues.
 
 * **E2E8 — pids in files, signals by pid, `pkill` only from helper files with
   bracketed patterns.** **HOLDS.** The four cp daemons record `$!` in
@@ -987,7 +1022,7 @@ change the sp's shape is the case.
 | 03 | `cntlr delete --id <c3>` while enabled → `FAILED_PRECONDITION` | `is enabled; disable it first` |
 | 03 | `cntlr set-enabled --id <c3> --enabled=false`, then `cntlr delete` | the disabled cntlr's transport leaves the discovery log at once; after the delete the sp is back to two cntlrs, and **host0's third path stops being usable for IO** — its state becomes anything but `live`. It is **not** asserted that the controller goes away, which is what this row used to claim and what cost the first `--slice-cnt 1` run a 60 s timeout (§8 item 18): the agent on that CN retires the host-facing subsystem, and when that leaves the port with none — as it did in that run, where both configfs directories were measured empty while host0 sat in `connecting` — the port stops listening, so the reconnect gets ECONNREFUSED, which *retries*. The controller then sits in `connecting` until `ctrl_loss_tmo`, a retry budget rather than a deadline, which no connect in this suite overrides and so is the kernel's 600 s default. The wait accepts `none` too, because a CN whose port still carried another subsystem would answer the reconnect with DNR and the kernel would delete the controller; which of the two happens is a property of that CN, and neither is this row's subject. The wait is given `WAIT_PROVISION`: what has to happen first is one incremental convergence by that agent, and `WAIT_HOST` is sized for the kernel-side transition that follows it. Every state but `live` ends it and a path that was never there reads `none`, so it could pass having measured nothing in three ways, and **two of them are closed by the witness**: a typo'd traddr and a misspelled NQN cannot produce the `nvme<X>` that the same host/NQN/traddr triple resolved to while the path was `live` a few lines above, and an empty or absent witness dies instead of passing — as does an empty *capture*, which is checked for both `''` and `none` where it is taken, since an empty reading means the driver-side jq did not run rather than that the path is absent. The **third is not** closed by it: the witness is a string captured before the disable and never re-read, so a host0 that had lost *every* controller for `ss0` in between would still hold a valid one and still read `none` on the first poll. That one is closed by a reading taken **after** the wait — the path to the primary is re-asserted `live`, the same assertion the step already makes before the delete, and nothing between them touches the primary. The step then **disconnects the surviving controller by device** and waits for its path to read `none`: a controller left in `connecting` keeps the hidden path device it made while it was live, an nvme namespace head lives as long as any path device references it, and so stage 90's `wait_dev_gone` could never succeed while it sat there — which is what it did, identically, at `02b303c` and with teardown-by-sweep applied. That cleanup is this step's, not stage 90's, because this is the step that creates the zombie |
 | 04 | `sp inspect-side --id <a side>`, `dn inspect`, `cn inspect`, `cntlr inspect` | the side's data device OK and `zeroed_ext_cnt == total_ext_cnt`, `applied_revision ≥ 1`; the DN's three rows OK with `port_info.res_name` still its own port id; the primary CN's four node rows OK; the primary cntlr's pools and groups OK |
-| 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe. Every rung is bounded by `WAIT_BUILD` and not `WAIT_PROVISION`: `DISABLE` suppresses everything CN19 names, so the CN tears the whole stack down and the climb back builds all 32 pools and all 64 arrays again — the same work setup pays for. One budget for all of them, because the cheap rungs return on their first poll and cost nothing |
+| 05 | `sp set-level` down `READONLY → NO_CLONE → NO_THINPOOL → NO_REDUND → NO_MIGRATION → NO_SIDE → DISABLE` and back up to `READWRITE` | at each rung the stored `sp_level`, then **the documented shape**: every row of every map the level suppresses is present and `RES_STATUS_MISSING` with `details == "sp_level"`, and the rows it does not suppress are OK. A map with **no** rows is not accepted as "suppressed" — that is what a null `cntlr_info` looks like. `READONLY` has no `CntlrInfo` signature at all (the ns-dev is reloaded onto a dm-flakey `error_writes` table over its normal backing, which probes as the expected table), so that rung asserts the **host** instead: the data is still readable, through the blocking-safe probe, **and a write changes nothing on the media** — the half that tells `READONLY` from `READWRITE`, which reads alone cannot. The write is 1 MiB of zeros at offset 0, inside the `SHA0` window; its `dd` status is logged and not asserted, because a buffered write's error surfaces only at `conv=fsync` and whether uutils dd 0.8.0 passes that on has never been measured here; then a cache drop, whose `sync` pushes the refused write out of host0's page cache, and a second probe that must still read `SHA0`. Every rung is bounded by `WAIT_BUILD` and not `WAIT_PROVISION`: `DISABLE` suppresses everything CN19 names, so the CN tears the whole stack down and the climb back builds all 32 pools and all 64 arrays again — the same work setup pays for. One budget for all of them, because the cheap rungs return on their first poll and cost nothing |
 | 05 | after the ladder | host0 discovers and connects again — but **not** because `DISABLE` took its controllers away, which is what this row used to say. `DISABLE` removes the host-facing subsystem on *both* cntlrs, and `ss0` is the only subsystem either CN's port carries — the case issues no second `ss create`, no `xfer create` and no `clone create` at any step — so each port loses its **last** subsystem and stops listening; by §8 item 18 the reconnect is then ECONNREFUSED rather than refused with DNR, and host0's controllers sit in `connecting` on `ctrl_loss_tmo`'s 600 s retry budget. Whether the climb back lands inside that budget — in which case the kernel re-attaches them itself — or outside it decides what the connect-all finds to do, and neither ending is this row's subject. What **is**: the connect-all cannot prove the outcome, because `connect_verdict` fires only on a zero controller count and a controller that has been `connecting` since `DISABLE` still counts (so would `connect_added_ctrl`, which asks about the controller object — the very thing that survives). The step therefore waits for **`live` on both transports** afterwards, which is false of a controller still retrying. All of it behind the export gate over **every** cntlr, because the ladder is sp-scoped and the standby tore its own export down and rebuilt it too while `ops_set_level`'s wait watched only the primary. That gate is the **only** wait covering the standby here, and what it is waiting for there is a from-nothing rebuild, so it is given `WAIT_BUILD` rather than the default `WAIT_PROVISION`: `build()` is sequential with legs first and the subsystem among the last rows, so the standby's `ss_id_to_subsystem` cannot go `RES_STATUS_OK` until every leg has been reconnected — the same piece of work the rung above spends a `WAIT_BUILD` on for the primary. The primary returns on the first poll, so the wider budget costs nothing when nothing is wrong. Then the verdict, the two `live` waits, and ANA first, device second; `SHA0` |
 | 06 | `td create --name s0 --ori t0 --size 0` | a snapshot is the one case in which size 0 is legal; it inherits the origin's size and its `ori_id` is `t0`'s `dev_id` |
 | 06 | `td get-bm --name t0 --slice-idx 0 --start 0 --cnt 0` | `--cnt 0` is the whole slice; the reply is the hex map, `byte_cnt` renders as a **bare number** (a Go `int`, unlike every uint64 here), `bitmap_hex` is exactly two hex digits per byte, and **bit 0 of byte 0 is clear**. Mind the polarity, because it inverts the obvious assertion: `1 = unmapped` is the wire convention of every bitmap RPC, produced by the cn agent — which starts from an all-ones map and *clears* the range of every mapped extent, inverting thin metadata's native "mapped = written" exactly once at that boundary — and passed through verbatim by the gateway. So an allocated block is a **clear** bit, and "some bit is set" would pass on a thin device nobody has ever written. What the check pins is block 0 of slice 0: dm-striped maps chunk *c* of a td to slice *c* mod `slice_cnt`, so setup's write at offset 0 is block 0 of slice 0's thin volume at every shape, and bits are LSB-first within a byte, which puts that block in the low bit of the first two hex digits |
@@ -1182,14 +1217,14 @@ assertion.
 | 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
 | 02 | read back | every strided chunk after a cache drop; `SHA0` for ns 1 too |
 | 03 | **host0 disconnects from `ss0` first**, then the primary's cn agent is killed by its pid file | this act is not in the design and is not optional. nvmet objects outlive the agent that made them, so the dead CN goes on advertising its namespaces as `optimized` with nothing left to rewrite `ana_grpid`; the instant AR5 promotes the standby, host0 would hold two optimized paths to one namespace and a write down the stale one would allocate blocks in a dm-thin metadata image the new primary also owns. A real node failure takes that path down; a killed process does not. **Both waits are on the disconnect and both run before the kill**, which is what makes `gone` the right demand at each: what they observe is host0's own `nvme disconnect -n <ss0>`, and that deletes the controller objects, so the two paths leave `nvme list-subsys` outright. The disconnect verb discards every status, so these two waits are the only thing carrying the invariant. Nothing weaker would do, and nothing like ops stage 03's "not `live`" belongs here: after the kill the dead agent removes **nothing**, its CN's port keeps every subsystem it had, and a controller host0 had not disconnected would stay `live` — so asserting that a path went away *because of the kill* would be asserting the opposite of what happens (§8 item 18) |
-| 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 rewrites the two cntlrs' `primary` (and, *since 2026-09-26*, `settling`) flags and bumps `SpRev`, and a cntlr count can therefore never be this step's assertion |
+| 03 | wait for AR5 | exactly one cntlr is primary and it is not the killed one; it *is* the former standby (asserted only because `CNTLR_CNT == 2` makes the election predictable, and that assumption is itself asserted); the dead cntlr's **record survives**, listed as a non-primary — AR5 rewrites the two cntlrs' `primary` (and, *since 2026-09-26*, `settling`) flags and bumps `SpRev` and deletes no record, so the cntlr count can never be what shows that AR5 acted. **The record check is conditional**: it is asserted only when the winning poll's reply still lists the dead cntlr's id in `cntlr_id_list`. The demoted-but-listed state of a settled primary lasts `cntlr_unhealthy − primary_unhealthy`, 15 s in this set, before AR7 replaces the record, so a poll that first lands after AR7 skips it with a `NOTE` line — losing nothing about AR5, since AR7 acts on no primary while a failover candidate exists. What is asserted in both cases is that the cntlr count is still `CNTLR_CNT` — a guard, not the proof — which AR7 keeps too: it swaps one id for another in one transaction |
 | 03 | wait for the new primary (`WAIT_BUILD`, `react_new_primary_ready`) | it builds what a standby never had: one thin pool per slice and one device per group — counted from the current `sp get`, not from the shape setup created, since AR6 has already appended a group — plus every leg and both raid0s — the first of those waits, the stack's, also requires the elected cntlr's `sp get` entry to read `settling == false`, the worker's own statement that it saw the cntlr's stack built and clean as primary, which ends the `cntlr_unhealthy` hold (*added 2026-09-26*; the field is a literal `false`, never absent, since dnvctl emits unpopulated fields, and the entry is found by its index in `cntlr_id_list`, as the AR5 wait finds the primary); and then the whole `READWRITE` shape including the subsystem, namespace and ns-dev rows, because the cntlr builds bottom-up and a connect issued on the strength of the raid0 alone can be refused by a target that has not created the subsystem yet. A second AR5 during that rebuild **stops the run there**, naming both controllers, for the reason above the table; the two smaller waits after it stay pinned to the same controller, since by then the spawn storm is over and a wrong target costs `WAIT_PROVISION` rather than `WAIT_BUILD` |
 | 03 | host0 connects to the new primary **directly** | the cdc still advertises the dead CN until AR7; the export gate is the `cntlr_level_ready` wait in the row above, which asks the same question over every row of the cntlr rather than two of them, so no second poll was added — the connect is still followed by its verdict; `optimized` and a device for both namespaces; host0 holds **no** path to the dead CN; `SHA0`; then a fresh 4 MiB write at 1 MiB into `a0` (slices 1..4, so neither slice 0's accounting nor the strided chunks) and a read-back |
-| 04 | leave the agent dead; wait for AR7 | the dead cntlr's id is gone from `cntlr_id_list` and the sp is back to `CNTLR_CNT` cntlrs. AR7 can only act on a cntlr AR5 has already demoted — it skips a primary while a failover candidate exists, and the model refuses it again inside its own STM — which is what makes the two reactions distinguishable at all. Then, before any assertion below: the primary is still the controller AR5 elected in stage 03, or the run stops. Every row below resolves the replacement by elimination from the primary, so a second AR5 in the window between the two steps would point them at the wrong controller |
+| 04 | leave the agent dead; wait for AR7 | the dead cntlr's id is gone from `cntlr_id_list` and the sp still holds `CNTLR_CNT` cntlrs, since AR7 swaps one id for another in one transaction. AR7 can only act on a cntlr AR5 has already demoted — it skips a primary while a failover candidate exists, and the model refuses it again inside its own STM — which is what makes the two reactions distinguishable at all. Then, before any assertion below: the primary is still the controller AR5 elected in stage 03, or the run stops. Every row below resolves the replacement by elimination from the primary, so a second AR5 in the window between the two steps would point them at the wrong controller |
 | 04 | — | the replacement is on a CN that carried **no** cntlr when the kill happened (membership, not equality: with more than one such CN the pick is random); it has a **new** cntlr id, inherits the dead one's `cntlid_slot`, is a standby (a replacement carries the old cntlr's role, and AR5 had demoted it) and is enabled |
 | 04 | — | the replacement connects every leg as a standby with no groups and no pools, on `WAIT_BUILD` for the same reason the third cntlr of §4.3 gets it; the discovery log has lost the dead CN's transport and gained the replacement's — which is what makes `connect-all` safe again, though being in the log is not being ready, so the export gate runs over both cntlrs first and the new primary answers on its first poll; host0's new path is `live` and the sp's namespace is `inaccessible` on it, and its path to the primary is still `live` |
 | 04 | restart the killed cn agent | its node rows come back; its `cntlr_ptr_list` is **empty**; and it tears down the md arrays, dm devices and nvmet exports its dead predecessor left in that kernel — which the end-of-run cleanup would also do, but only at the end of the run, and the residue check runs before that |
-| 05 | kill a dn agent **and drop its nvmet port** | killing the agent alone triggers nothing: its nvmet subsystem, port and dm-linear live in the kernel and outlive it, so the primary's probe IO still succeeds, the leg stays OK, `Leg.err_epoch` stays 0 and AR8 never fires. Both planes are needed — the gRPC rounds fail (side unhealthy) and the data path goes away (leg unhealthy). The leg is chosen so that its single side sits on a DN carrying exactly one side of the whole sp, because AR8 repairs the smallest unhealthy leg id and a DN with two sides would make two legs unhealthy |
+| 05 | kill a dn agent **and drop its nvmet port** | killing the agent alone triggers nothing: its nvmet subsystem, port and dm-linear live in the kernel and outlive it, so the primary's probe IO still succeeds, the leg stays OK, `Leg.err_epoch` stays 0 and AR8 never fires. Both planes are needed — the gRPC rounds fail (side unhealthy) and the data path goes away (leg unhealthy). The leg is chosen so that its single side sits on a DN carrying exactly one side of the whole sp, because AR8 repairs the smallest unhealthy leg id and a DN with two sides would make two legs unhealthy. **Spare and parked legs' sides are counted too** (*since 2026-09-28*; the count walked the active legs only). A spare or parked leg on that DN is always another group's — the case creates no spare itself, and AR8's create black-lists every DN of the group's own legs and spares — and AR8 never repairs a spare, so an idle one going down changes nothing this stage asserts. What it can change is a spare that another group's repair is still waiting for: AR8 would read it as dead and could create that group a second one, and the sp would end the stage with two more spare-list entries than it started with, where the stage asserts one. Counting them keeps the kill to the one side this step names |
 | 05 | wait for AR8 | **at least one more spare than the group had**, read before the kill together with the ids themselves, so a group that already carried one cannot satisfy the wait on its first poll — which is what the old `== 1` form would have done, passing the step without AR8 having acted. *At least*, not exactly: if the wait's first grown reading lands after a double create, it reads `before + 2`, never `before + 1`, and an equality wait would die as a `WAIT_REACT` timeout instead of on the assertion that names it (§9, 2026-09-23). Exactly one entry of `spare_leg_list` is new against that id set, and it has one side. Then the switch: the dead leg is out of `leg_list` **and** the group's parked set is exactly what it started with plus the dead leg, and the sp holds one more parked leg than when AR8 started — one more and not two, because `SwitchSpareLeg` takes the promoted spare out as it puts the dead leg in. Both halves are asserted, because either alone is also what a half-applied transaction looks like, and the promoted leg is read out of the dead leg's **position** in `leg_list` after the switch, not out of `spare_leg_list` before it. One honest limit, unchanged in kind from the old form: AR8 acts once per pass, so the create and the switch are different passes, but a poll that lands after both would find the *dead* leg as the new entry — the two assertions hold either way and only the log line would name the wrong leg |
 | 05 | — | the spare is not on the dead node, not on a DN the group occupies, and not on a VM it occupies when `DN_VM_CNT > LEGS` — where "the group occupies" is read over its active legs **and its spare legs**, which is what the worker black-lists and therefore the statement AR8 actually makes; md finishes rebuilding onto it (a fresh spare has never been an md member, so this is a full recovery), gated on the applied revision as in the copy case; `SHA0` |
 | 05 | restart the dn agent | it recreates **its own** nvmet port, not `ports/1`; the primary reports every leg again, the parked one included. It has to come back: the parked leg's side still occupies an extent, and only a live agent can retire it when the sp drains |
@@ -1308,7 +1343,8 @@ that collected three problems and reported them together would still have to be
 re-run after the first was fixed.
 
 **Driver** (`preflight_driver`, before any guest is touched): `go`, `ssh`,
-`scp`, `curl`, `tar`, `sha256sum`, `awk`, `sed`, `mktemp`; a JSON parser —
+`scp`, `curl`, `tar`, `sha256sum`, `awk`, `sed`, `mktemp`, and `timeout` for
+the host IO watchdog (E2E7); a JSON parser —
 a system `jq`, else a `gojq` built into the gitignored `integtest/bin` with the
 Go toolchain the driver already needs, and every filter in the file is written
 to the intersection of the two; `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make
@@ -1923,8 +1959,11 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
 9. **A blocked probe leaves an unkillable `dd` behind.** When `host_sha_probe`
    answers `blocked` the reader is in D state, where `timeout` cannot reach it;
    the resume that unwedges the device reaps it. That is the price of learning
-   the answer at all, and the alternative — a foreground read — hangs the run
-   for ever.
+   the answer at all, and the alternative — an unwatched foreground read —
+   hangs the run for ever. A read, a write or a cache drop that the driver's
+   watchdog abandons (E2E7, *since 2026-09-28*) leaves its task behind the
+   same way; the run then dies, and the host's diagnostics list that task
+   among the ones in D state.
 10. **The suite occupies the whole lab.** Ten guests, and its cn agents mount
     their tmpfs at `/tmp/dnv-tmpfs`, the path `cnagent_test.sh` owns. Rule E2E9
     is an operator rule; nothing enforces it.
@@ -2021,7 +2060,10 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     65 in all); with settling each promotion is held 20 s, which such a
     build still outlasts. That is why the snapshot rule above stays, and
     why the ping-pong fix is verified with `react` at the issue's own
-    shape, `--slice-cnt 1`, rather than at 32 slices.
+    shape, `--slice-cnt 1`, rather than at 32 slices. (*Amended
+    2026-09-28*: at `97443d0` the whole suite, `react` included, passed at
+    `--slice-cnt` 1, 2 and 4, one run each (§9); 32 slices is still
+    unverified; item 20 records what the grow race still costs.)
 14. **`react` cannot assert an absolute count of reactions.** Because its own
     build runs under the aggressive set, a failover or a spare leg that the
     case did not provoke can be there before its first stage. Every count it
@@ -2535,10 +2577,21 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     C and D one each, and stage 08 passes. What makes it not a flake is that
     the sides have to collide at all: the create places its four on four
     distinct DNs by construction, so every collision needs a **grow** side —
-    and a grow is placed by a scan that walks the capacity index
-    free-descending, so it is handed a location's *fullest* DN, which at two
-    per VM is the one the create already took. That is what the failed run did:
-    `grp 4` (create) and `grp 22` (grow) both landed on `.48:29901`.
+    and a grow side collides only where it cannot help it. The scan walks the
+    capacity index bin by bin from the smallest bin that can hold the
+    request, each bin free-descending, and keeps one DN per location, so it
+    hands each location its *emptiest* DN within the smallest sufficient bin.
+    Every DN here has a disk of the same size, so they all start in one bin
+    and none holds enough sides to leave it: a VM that still has a side-less
+    DN hands over that one, and a grow side lands on an occupied DN only on a
+    VM whose DNs all carry a side already — at two per VM, a VM both of whose
+    DNs are taken. Everywhere else it takes one of the very DNs stage 08
+    counts on. That is what the failed run did: `grp 4` (create) and
+    `grp 22` (grow) both landed on `.48:29901`, which the scan hands over
+    only once `.48:29900` holds a side too. (*Amended 2026-09-28*: this
+    paragraph said the scan hands a location its *fullest* DN, which is the
+    reverse of the allocator's order; the bound and the counting argument do
+    not rest on it.)
 
     §2.4 now derives the bound from stage 08 instead, which subsumes the
     create, and the `--dns-per-vm` warning names which of the two demands a
@@ -2559,6 +2612,21 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
     is the first value that makes it impossible rather than improbable. This is
     why the smallest shape is the one that found it: there the slack and the
     pool are the same size, so the improbable becomes the ordinary.
+20. **The grow race is absorbed, not removed.** Since `97443d0` the cn agent
+    retries a failed connect, and waits for the namespace head after a
+    connect it made, inside one `CnConnectPassBudget` (1 s) per converge pass
+    (`cnagent.md` CN10; §9's `97443d0` entry). An export that a grown
+    group's disk node links after that budget has run out still leaves the
+    group unbuilt — `ERROR` in that converge's reply, `MISSING` in a Check
+    round after it (`ERROR` again under `--redund none`, whose probe needs
+    the leg's wrapper, which was not built either) — and the pool over it
+    `ERROR` in both until the CN10 retry, whose next attempt comes within
+    5 s, builds them; a settled primary can still be failed over on one bad
+    round (`dnv-worker.md` Appendix B); and `react` stage 02 then stops the
+    run, naming both controllers (§4.5) — the fault that stage exists to
+    expose, not a flake. Nothing measured how late an export can be linked
+    at 32 slices: the suite has not run at that shape since `97443d0`
+    (item 13).
 
 ---
 
@@ -3308,3 +3376,101 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   elected cntlr's `settling == false`, and its stop message names the
   `cntlr_unhealthy` hold (§4.5); and §8 item 13 records what settling does
   and does not change about a build's failovers.
+
+* **2026-09-28 — the grow race, and the suite green at `--slice-cnt` 1, 2
+  and 4.** Commit `97443d0`. A `react` run's AR6 grow failed a settled
+  primary over. At `97443d0` the worker sent the new sides' `SyncupSide` and
+  the primary's `SyncupCntlr` out unordered, so the primary's first converge
+  of the grown group could reach a new side's disk node before that node had
+  linked the export into its port — measured 18–26 ms early — and have its
+  connect refused; and the single re-read after a connect that did succeed
+  could equally come before the kernel's namespace scan had added the head.
+  Either way the converge reported the unbuilt group, and the pool over it,
+  `ERROR`, and AR5 failed the settled primary over on that one round. A
+  second race, also seen in an e2e run, was on the disk nodes: a dn agent's
+  side-level sweep judged every `:2:` export of the sp, took a co-hosted
+  sibling agent's half-built export of another leg for an orphan and
+  stripped it of its host link and namespace; a broken dn export is rebuilt
+  only by a later converge of its side, which the breakage never triggers,
+  so the run lost that leg.
+
+  The fixes are in the agents, each with its own amendments:
+
+  1. **The cn agent waits, briefly, for what it has just asked for**
+     (`cnagent.md` CN10, CN18). Each converge pass has one wait budget,
+     `CnConnectPassBudget` (1 s), shared by every leg and clone source of the
+     pass: a failed connect to a provisioned side is connected again after a
+     100 ms pause while the budget covers the pause, and after a connect this
+     pass made the subsystem is re-read every 50 ms until its namespace head
+     is there. Once the budget is spent the pass behaves as it did before.
+  2. **A migration destination waits for the source namespace** after a
+     connect that succeeded, 1 s in 50 ms steps — the dn twin of the head
+     wait (`dnagent.md` DN13).
+  3. **The dn sweep leaves alone what it cannot yet attribute**
+     (`dnagent.md` DN6, `architecture.md` §9.8): the side-level scope skips
+     another leg's exports by name, and a namespace-less export linked to no
+     port but the agent's own is removed only once its configfs directory is
+     older than `DnExportOrphanGrace` (30 s), since until then it may be a
+     sibling's build in flight.
+
+  In this suite, `97443d0` made one change: `react` stage 02's three grow
+  waits — AR6's append, the new sides' provisioning and the pool's growth —
+  re-read the roles on every poll and **stop the run the moment the primary
+  moves**, naming both controllers and the `jq` filter for the worker's
+  `failover` record, instead of watching the demoted controller until a
+  600 s `WAIT_PROVISION` timeout (§4.5). Following the new primary would
+  have turned the very fault the stage exists to expose into a silent pass.
+
+  With the three fixes the whole suite passed at `--slice-cnt` 1, 2 and 4,
+  one run each. The race itself is absorbed, not removed: the controller
+  agents' logs of all three runs still show refused and rejected connects to
+  fresh sides, each connected by an in-pass retry inside the 1 s budget.
+  32 slices was not run (§8 items 13 and 20).
+
+* **2026-09-28 — host IO under a watchdog, `--cp` by address, and react
+  stage 05's spare count.** Four changes in this suite, none in the tree it
+  tests, and a set of corrections to this document.
+
+  1. **A wedged host `dd` ends the run instead of hanging it** (E2E7, §8
+     item 9). Every foreground `dd` read on a host and the cache drop in
+     front of it, and the device writes of `host_write_range` and
+     `react_chunk_write`, run under `ssh_host_watched`: a driver-side
+     `timeout --foreground -k 5` of `WAIT_HOST` around the local `ssh`, and
+     of `WAIT_HOST` plus a second per chunk for the strided write (§2.3).
+     What it is for is `react` stage 03, which reads and writes over host0's
+     only path, where a second AR5 would leave that path inaccessible and
+     the `dd` in D state with nothing to end it. The watchdog abandons the
+     session instead; the two polling predicates turn that into a die
+     through `host_watch_verdict`, every other caller dies on the failed
+     status, and the exit handler takes the diagnostics, which list the
+     host's tasks in D state. The driver's preflight requires `timeout`
+     (§5).
+  2. **`--cp` names its guest by an IPv4 address** (§2.1, E2E1).
+     `parse_args` refuses anything else before a guest is touched. A
+     hostname used to pass every check and fail setup stage 02 on a 15 s
+     wait for a port that never opened — the cdc's, or the gateway's first
+     when cp cannot bind the name its `--grpc-address` carries:
+     `dnv-cdc --tr-addr` takes an IP literal only, and the same address is
+     what both hosts discover against.
+  3. **React stage 05's side count takes in spare and parked legs** (§4.5),
+     so the disk node it kills carries exactly the one side the stage
+     names. A spare on that node is always another group's, and it changes
+     nothing the stage asserts unless that group's repair is still waiting
+     for it — then AR8 could create the group a second spare, and the
+     sp-wide count would end one higher than the stage asserts.
+  4. **A failed `host_write_range` ends the run at the write.** Its remote
+     command ended in `; sync`, so the status ssh returned was the
+     `sync`'s: a `dd` that failed came back 0, and the read-back after it
+     failed instead, blaming the read. The `sync` is now chained with `&&`,
+     as `react_chunk_write` already ends each of its `dd`s with `|| exit 1`.
+
+  The corrections: §2.3 counts eight `WAIT_BUILD` waits, not seven, and
+  states `WAIT_HOST`'s second job; the §4.3 stage 05 row states the
+  `READONLY` rung's write check; the §4.5 stage 03 row states that the dead
+  cntlr's surviving record is checked only when the winning poll still lists
+  it, and that the cntlr count, which neither AR5 nor AR7 changes, is a
+  guard and not the proof, and the stage 04 row says the count holds rather
+  than comes back; §8 item 13 records the verification at 1, 2 and 4
+  slices, and the entry above records `97443d0` itself; §8 item 19's
+  allocator sentence had the scan's order reversed; and §8 item 20 records
+  that the grow race is absorbed, not removed.

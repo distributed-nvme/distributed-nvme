@@ -59,7 +59,12 @@
 #     suspend over one. `timeout` does not bound a read of a suspended dm
 #     device — it waits for the unkillable child — so a read that may block
 #     runs detached, with the GROUP's stdout redirected, or command
-#     substitution hangs with it.
+#     substitution hangs with it. Every other dd read on a host, and every
+#     write a host makes into a device except host_write_probe's (which
+#     dm-flakey fails rather than requeues), runs under a watchdog on the
+#     DRIVER (ssh_host_watched), whose child is the local ssh: IO that blocks
+#     where nothing said it would is abandoned there and the run dies with
+#     its diagnostics instead of hanging.
 #  6. `nvmf-connect@.service` is masked on both hosts for the whole run
 #     (E2E10): the kernel's own autoconnector matches the discovery AEN
 #     (NVME_AEN=0x70f002) and would connect behind the suite's back. Every
@@ -470,7 +475,12 @@ WAIT_REACT=120         # an automatic reaction to land after its threshold.
                        # Unchanged: it is threshold + a few 5s worker passes
                        # (D9's vote loop), and every threshold it bounds is
                        # react's own short set
-WAIT_HOST=60           # a host device/ANA state to appear
+WAIT_HOST=60           # a host device/ANA state to appear — and the
+                       # per-command watchdog of ssh_host_watched (the Host
+                       # IO section names what runs under it), so a watched
+                       # read, write or cache drop slower than this dies as
+                       # a wedged one; react_chunk_write adds a second per
+                       # chunk
 
 # How many times setup's stage 07 will wait out a whole stack before it calls
 # the sp non-convergent. It is a COUNT and not a budget: each round is two
@@ -1116,6 +1126,27 @@ EOF
 	exit 2
 }
 
+# is_ipv4 is the dotted-quad part of what dnv-cdc takes as an ipv4 --tr-addr
+# (checkTrAddr, cmd/dnv-cdc/main.go: net.ParseIP, then To4): four decimal
+# fields of 0-255, none with a leading zero, which net.ParseIP refuses. The
+# IPv4-mapped ::ffff: form the cdc also takes is refused here; this suite
+# never forms one.
+is_ipv4() { # <string>
+	local IFS=. field n=0
+	case "$1" in
+	'' | *[!0-9.]* | .* | *. | *..*) return 1 ;;
+	esac
+	for field in $1; do
+		n=$((n + 1))
+		case "$field" in
+		[0-9] | [1-9][0-9] | [1-9][0-9][0-9]) ;;
+		*) return 1 ;;
+		esac
+		[ "$field" -le 255 ] || return 1
+	done
+	[ "$n" -eq 4 ]
+}
+
 # parse_args follows the argument idiom of cnagent_test.sh:4288-4328 and
 # cdc_test.sh:2300-2341, extended to repeatable role flags. Both `--flag value`
 # and `--flag=value` are accepted for every flag; anything else, including any
@@ -1252,6 +1283,17 @@ parse_args() {
 	[ -z "$dup" ] || die "the same target is used for two roles: $dup"
 
 	CP_IP=${CP##*@}
+	# cp is named by its IPv4 address and never by a hostname: CP_IP becomes
+	# dnv-cdc's --tr-addr, which refuses a name (see is_ipv4), and it is the
+	# traddr the hosts discover against and the cleanup matches their
+	# discovery controllers by. A name used to pass every check and end the
+	# run in setup stage 02 on a 15 s wait for a port that never opened: the
+	# cdc's, or the gateway's (its --grpc-address carries the same name) when
+	# cp cannot bind the name itself.
+	is_ipv4 "$CP_IP" ||
+		die "--cp $CP: '$CP_IP' is not an IPv4 address. Name the cp guest" \
+			"by its address: it becomes dnv-cdc's --tr-addr, which takes" \
+			"an IP literal only, and the address both hosts discover against"
 	local i
 	CN_IP=()
 	for i in "${!CN[@]}"; do CN_IP[i]=${CN[$i]##*@}; done
@@ -2040,12 +2082,76 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 # is host IO, so none of them may run between an `ns set-suspended` or an
 # xfer's --auto-suspend and the matching resume. A read that might block anyway
 # is host_sha_probe's job, never host_sha_range's.
+#
+# AND IO NOTHING EXPECTED TO BLOCK CAN STILL BLOCK. React step 3 reads and
+# writes through the new primary over host0's ONLY path; a second AR5 during
+# either turns the path ANA-inaccessible, the dd requeues in D state,
+# and a foreground dd never returns — no EXIT trap, so no diagnostics either.
+# So every foreground read here — host_sha_range (and through it host_sha_is
+# and check_sha0), react_chunk_sha (and through it react_chunks_are) — the
+# cache drop in front of them, and the device writes of host_write_range and
+# react_chunk_write run under ssh_host_watched below. Three host dd's do
+# not: host_sha_probe detaches its own and answers inside its budget,
+# host_make_pattern writes a file on the host's own disk, and
+# host_write_probe writes only where dm-flakey fails the bio instead of
+# requeueing it (its header says why that is safe).
 # ---------------------------------------------------------------------------
 
+# ssh_host_watched is ssh_host under a watchdog on the DRIVER: WAIT_HOST
+# seconds — the budget host_sha_probe gives a read too — unless the caller
+# passes its own, which only react_chunk_write does. Rule 5's point that
+# `timeout` cannot bound a wedged read is about a timeout ON THE GUEST, whose
+# child is the reader itself; this timeout's child is the local ssh, an
+# ordinary process that dies on the TERM. Killing it abandons the session and
+# nothing more: the dd or the sync stays wedged on the guest, as a `blocked`
+# host_sha_probe leaves its reader, but the run goes on to die with its
+# diagnostics instead of never ending.
+#
+# --foreground keeps ssh in this shell's process group (in timeout's own it
+# would be a background job to the terminal), and stdin is /dev/null because
+# none of these commands takes input. The status is ssh's own, or
+# HOST_WATCH_RC when the watchdog fired — timeout's 124, or its 137 when the
+# TERM needed the KILL. It does not die itself: host_sha_range and
+# react_chunk_sha answer through a $( ), where a die would end only that
+# subshell. host_watch_verdict is the die, in the caller's shell.
+HOST_WATCH_RC=124
+
+ssh_host_watched() { # <h> <cmd> [secs]
+	local h=$1 cmd=$2 secs=${3:-$WAIT_HOST} rc=0
+	[ "$QUIET" -eq 1 ] || log "[${HOST[$h]##*@}] $cmd"
+	timeout --foreground -k 5 "$secs" \
+		ssh "${SSH_OPTS[@]}" "${HOST[$h]}" \
+		"sudo -n bash -c $(printf '%q' "$cmd")" </dev/null || rc=$?
+	case "$rc" in
+	124 | 137)
+		log "!!! host$h did not answer within ${secs}s, so the ssh" \
+			"session running this was abandoned: $cmd"
+		return "$HOST_WATCH_RC"
+		;;
+	esac
+	return "$rc"
+}
+
+# host_watch_verdict passes a watched call's status through and turns the
+# watchdog's into a die IN THE CALLING SHELL. The polling predicates need it:
+# to them a failed read is one more poll, and an abandoned read polled again
+# would only put a second unkillable reader beside the first. A caller that
+# dies on any failure — `|| die`, or set -e — needs nothing more. Its message
+# names WAIT_HOST because both of its callers' reads run on that budget.
+host_watch_verdict() { # <rc> <h> <what was running>
+	[ "$1" = "$HOST_WATCH_RC" ] || return "$1"
+	die "host$2: $3 did not finish within ${WAIT_HOST}s, and its ssh" \
+		"session was abandoned (rule 5). The likely cause is a task in D" \
+		"state on host$2 — IO to a path that went ANA-inaccessible under" \
+		"it, or to a suspended or parked device — which nothing can kill;" \
+		"host$2's diagnostics below list its tasks in D state"
+}
+
 # host_drop_caches makes the next read reach the device instead of the page
-# cache. `sync` first, because drop_caches never discards a DIRTY page.
+# cache. `sync` first, because drop_caches never discards a DIRTY page — and
+# that `sync` waits on every dirty page of the host, so it is watched too.
 host_drop_caches() { # <h>
-	ssh_host "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"
+	ssh_host_watched "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"
 }
 
 # host_make_pattern writes <countMiB> of /dev/urandom to a FILE on the host.
@@ -2060,9 +2166,18 @@ host_make_pattern() { # <h> <path> <countMiB>
 # seek is what the react case's AR6 trigger needs: with STRIPE_SIZE = 1 MiB a
 # 1 MiB write at every offset k x (SLICE_CNT x STRIPE_SIZE) lands in slice 0,
 # because dm-striped maps chunk c of a td to slice c mod slice_cnt.
+#
+# It runs under ssh_host_watched: a write over a path that went
+# ANA-inaccessible requeues exactly as a read does (the section header). Every
+# caller runs it bare, so set -e ends the run on any failure: the watchdog's,
+# ssh's and dd's own. dd's reaches it because the `sync` is chained with `&&`,
+# as react_chunk_write ends each of its dd's with `|| exit 1`. After a `;` the
+# remote shell returned the sync's status, so a dd that failed (EIO, ENOSPC, a
+# device node gone) came back 0, and the first thing to fail was the read-back
+# after it, which blamed the read.
 host_write_range() { # <h> <src> <dst> <countMiB> [seekMiB]
-	ssh_host "$1" \
-		"dd if=$2 of=$3 bs=1M count=$4 seek=${5:-0} conv=fsync status=none; sync"
+	ssh_host_watched "$1" \
+		"dd if=$2 of=$3 bs=1M count=$4 seek=${5:-0} conv=fsync status=none && sync"
 }
 
 # host_write_probe is host_write_range for a write that is SUPPOSED to fail:
@@ -2088,10 +2203,13 @@ host_write_probe() { # <h> <src> <dst> <countMiB> [seekMiB]
 #
 # This form is for a read that CANNOT block. If the device might be suspended,
 # parked on a dm-error or ANA-inaccessible, use host_sha_probe: this one would
-# hang the whole run, and `timeout` would not save it — timeout's SIGTERM does
-# nothing to a task in D state and timeout then waits for its child.
+# wedge its dd on the guest, and a `timeout` there would not save it —
+# timeout's SIGTERM does nothing to a task in D state and timeout then waits
+# for its child. The watchdog it runs under (ssh_host_watched) saves only the
+# RUN: it abandons the session so the run can end with its diagnostics. A
+# read that is expected to block and still has to be answered is the probe's.
 host_sha_range() { # <h> <path> <countMiB> [skipMiB]
-	ssh_host "$1" \
+	ssh_host_watched "$1" \
 		"dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
 }
 
@@ -4116,7 +4234,8 @@ preflight_driver() {
 	STAGE="preflight (driver)"
 	log "=== preflight: driver"
 	local tool
-	for tool in go ssh scp curl tar sha256sum awk sed mktemp; do
+	# timeout is ssh_host_watched's, the watchdog over host IO.
+	for tool in go ssh scp curl tar sha256sum awk sed mktemp timeout; do
 		need_local "$tool"
 	done
 	resolve_jq
@@ -4343,7 +4462,8 @@ start_worker() {
 # One cdc, serving every shard: --range is left at its default
 # (common.CdcRangeAll, cmd/dnv-cdc/main.go:75-77), which is what makes a
 # single instance answer for the whole cluster. Its listener is the address
-# both hosts discover against (D13).
+# both hosts discover against (D13). --tr-addr takes an IP literal only, which
+# is why parse_args refuses a --cp that is not one.
 start_cdc() {
 	remote_start "$CP" cdc cdc.log \
 		"$WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
@@ -6207,13 +6327,15 @@ SP_LEG_PATH="$SP_GRP_PATH | .leg_list[]"
 SP_SPARE_LEG_PATH="$SP_GRP_PATH | .spare_leg_list[]"
 SP_SIDE_PATH="$SP_LEG_PATH | .side_list[]"
 
-# Every side of the sp, PARKED AND SPARE LEGS INCLUDED. It exists for exactly
-# one thing — the "is anything still zeroing?" poll below — because a spare
+# Every side of the sp, PARKED AND SPARE LEGS INCLUDED. It exists for two
+# things. One is the "is anything still zeroing?" poll below: a spare
 # leg's side is created provisioned = false like any other and only the
 # sp-worker flips it, and model.SwitchSpareLeg refuses a spare whose side is
 # not provisioned ("spare side is not provisioned", model/ops.go:1905-1907).
 # A poll over SP_SIDE_PATH alone would answer "nothing left to do" the instant
-# `spare create` returned and the switch would then be refused.
+# `spare create` returned and the switch would then be refused. The other is
+# react step 5's choice of a disk node that carries exactly one side of the
+# sp, spare and parked legs' sides included (react_leg_repair says why).
 SP_ANY_SIDE_PATH="$SP_GRP_PATH | (.leg_list[], .spare_leg_list[]) | .side_list[]"
 
 # A side's DN VM. addr_port is "<ip>:<29900+k>" (dn_addr), and the suite only
@@ -7992,10 +8114,17 @@ RESIDUE_LAST=""
 # drops caches first, so the answer comes from the raid0-over-thin stack and
 # not from host <h>'s page cache, and it is for a read that CANNOT block — a
 # parked, suspended or ANA-inaccessible device needs host_sha_probe instead
-# (rule 5: `timeout` does not bound a wedged read).
+# (rule 5: `timeout` does not bound a wedged read). One that blocks anyway is
+# abandoned by the watchdog, and host_watch_verdict makes that a die here
+# rather than one more failed poll.
 host_sha_is() { # <h> <path> <countMiB> <want>
-	host_drop_caches "$1" >/dev/null || return 1
-	SHA_LAST=$(host_sha_range "$1" "$2" "$3") || return 1
+	local rc=0
+	host_drop_caches "$1" >/dev/null || rc=$?
+	host_watch_verdict "$rc" "$1" "the cache drop before reading $2" ||
+		return 1
+	SHA_LAST=$(host_sha_range "$1" "$2" "$3") || rc=$?
+	host_watch_verdict "$rc" "$1" "the read of the first $3 MiB of $2" ||
+		return 1
 	[ "$SHA_LAST" = "$4" ]
 }
 
@@ -9631,8 +9760,9 @@ ops_levels() {
 	# (architecture.md §11.7, [D11]). So the data must still be readable — and
 	# the read goes through host_sha_probe rather than host_sha_range because
 	# if this kernel's flakey target wedged the read instead of serving it,
-	# `timeout` could not bound it and the run would hang for ever; the probe
-	# answers `blocked` inside its budget and the assertion names what it got.
+	# host_sha_range's watchdog could only abandon the session and end the
+	# run; the probe answers `blocked` (or `ioerror`) inside its budget and
+	# the assertion names what it got.
 	#
 	# The cache drop before it is host IO too, and it is safe here for the one
 	# reason rule 5 cares about: nothing is suspended at READONLY. `sync` has
@@ -11834,7 +11964,8 @@ case_copy() {
 #  flipping both `primary` flags and the `settling` flags (the new primary
 #  settling, the old one cleared), then bumps SpRev; it deletes no key) and
 #  only then asserts AR7, which is what makes the two distinguishable at all:
-#  a cntlr COUNT never changes at AR5 and changes at AR7.
+#  the old id stays in cntlr_id_list at AR5 and leaves it at AR7. The COUNT
+#  changes at neither, since ReplaceCntlr swaps one id for another in one STM.
 #
 #  AR8 (leg repair). legNeedsRepair REQUIRES `Leg.err_epoch != 0` before either
 #  threshold is even looked at, and its own comment says why: "a side the
@@ -12117,6 +12248,9 @@ REACT_MAX_CHUNKS=128
 # (rule 1). `\$((…))` is what reaches the guest as `$((…))`; the driver expands
 # only $cnt, $stride and $start.
 
+# react_chunk_write runs under ssh_host_watched, for host_write_range's reason,
+# on a budget of WAIT_HOST plus a second per chunk: every chunk is its own
+# fsync'd write, and there may be up to REACT_MAX_CHUNKS of them.
 react_chunk_write() { # <h> <src> <dst> <cnt> <strideMiB> <startMiB>
 	local h=$1 src=$2 dst=$3 cnt=$4 stride=$5 start=$6 cmd
 	cmd="for ((k = 0; k < $cnt; k++)); do"
@@ -12124,7 +12258,7 @@ react_chunk_write() { # <h> <src> <dst> <cnt> <strideMiB> <startMiB>
 	cmd="$cmd seek=\$(($start + k * $stride))"
 	cmd="$cmd conv=fsync status=none || exit 1;"
 	cmd="$cmd done; sync"
-	ssh_host "$h" "$cmd" ||
+	ssh_host_watched "$h" "$cmd" "$((WAIT_HOST + cnt))" ||
 		die "host$h: writing $cnt x 1 MiB to $dst at ${start}+k*${stride} MiB failed"
 }
 
@@ -12133,22 +12267,29 @@ react_chunk_write() { # <h> <src> <dst> <cnt> <strideMiB> <startMiB>
 # pattern written at <cnt> offsets" is computed from the pattern file itself.
 #
 # A dd that fails inside the loop leaves the pipeline's digest short, so the
-# comparison fails; it cannot report success on a partial read.
+# comparison fails; it cannot report success on a partial read. It runs under
+# host_sha_range's watchdog, for host_sha_range's reason.
 react_chunk_sha() { # <h> <path> <cnt> <strideMiB> <startMiB>
 	local h=$1 path=$2 cnt=$3 stride=$4 start=$5 cmd
 	cmd="for ((k = 0; k < $cnt; k++)); do"
 	cmd="$cmd dd if=$path bs=1M count=1"
 	cmd="$cmd skip=\$(($start + k * $stride)) status=none;"
 	cmd="$cmd done | sha256sum | cut -d' ' -f1"
-	ssh_host "$h" "$cmd"
+	ssh_host_watched "$h" "$cmd"
 }
 
 # The predicate + bounded wait, because every data check in this file is a WAIT:
 # a mutator returns as soon as the gateway has written etcd, and an automatic
-# reaction is observed even later.
+# reaction is observed even later. An abandoned read is a die, as in
+# host_sha_is.
 react_chunks_are() { # <h> <path> <cnt> <strideMiB> <startMiB> <want>
-	host_drop_caches "$1" >/dev/null || return 1
-	REACT_CHUNK_LAST=$(react_chunk_sha "$1" "$2" "$3" "$4" "$5") || return 1
+	local rc=0
+	host_drop_caches "$1" >/dev/null || rc=$?
+	host_watch_verdict "$rc" "$1" "the cache drop before reading $2" ||
+		return 1
+	REACT_CHUNK_LAST=$(react_chunk_sha "$1" "$2" "$3" "$4" "$5") || rc=$?
+	host_watch_verdict "$rc" "$1" \
+		"the read of $3 x 1 MiB of $2 at ${5}+k*${4} MiB" || return 1
 	[ "$REACT_CHUNK_LAST" = "$6" ]
 }
 
@@ -12438,7 +12579,8 @@ react_new_primary_ready() { # <the cntlr AR5 elected>
 
 # react_cntlr_replaced is AR7's: the dead cntlr's id is gone from
 # cntlr_id_list (ReplaceCntlr deletes the old key and appends a NEW id,
-# model/ops.go:1526-1559) and the SP is back to its full cntlr count.
+# model/ops.go:1526-1559) and the SP still holds its full cntlr count, the
+# swap being one STM.
 react_cntlr_replaced() { # <old cntlr id>
 	local gone n
 	if ! ctl_try sp get; then
@@ -13035,8 +13177,9 @@ react_failover() {
 
 	# WHAT AR5 IS: two cntlr records rewritten in place (the `primary` and
 	# `settling` flags, model.Failover) plus the SpRev bump. The dead cntlr's
-	# RECORD survives — its disappearance is AR7's signature, which is why a
-	# cntlr count can never be this step's assertion.
+	# RECORD survives — its disappearance is AR7's signature. A change in the
+	# cntlr COUNT is neither's: AR7 swaps one id for another in one STM, so
+	# the count is asserted unchanged below, as a guard and not as the proof.
 	#
 	# THE DEMOTED-BUT-STILL-LISTED STATE IS TRANSIENT, and its whole lifetime
 	# is THR_CNTLR - THR_PRIMARY, 15s at §7.1's values: AR5 fires
@@ -13402,6 +13545,19 @@ react_leg_repair() {
 	# side of the sp is on a distinct DN at create (F2), but AR6's grow black-
 	# lists nothing, so its new group MAY have landed on an occupied node —
 	# hence the count rather than an assumption.
+	#
+	# The count walks SP_ANY_SIDE_PATH, SPARE AND PARKED LEGS INCLUDED, so the
+	# kill takes down exactly the one side this step names. A spare or parked
+	# leg on that node is always ANOTHER group's: this case never creates a
+	# spare itself, so every one is AR8's, and createSpare black-lists every DN
+	# of the group's own legs and spares (grpAddrs,
+	# worker/reaction.go:1468-1482). AR8 never repairs a spare either
+	# (repairCandidates walks leg_list only), so an idle one going down moves
+	# none of the deltas below. The one it can move is a spare that another
+	# group's repair is still waiting for: pendingSpare reads a spare whose
+	# side has an err_epoch as dead, AR8 can then create that group a second
+	# one, and the sp-wide count asserted below at before + 1 would end at
+	# before + 2.
 	n=$(sp_field "$COPY_GRP0.leg_list | length")
 	case "$n" in
 	'' | *[!0-9]*) die "slice 0's data group has leg_list length '$n'" ;;
@@ -13413,7 +13569,7 @@ react_leg_repair() {
 		fi
 		sideid=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].side_id")
 		saddr=$(sp_field "$COPY_GRP0.leg_list[$i].side_list[0].addr_port")
-		hits=$(sp_field "[$SP_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
+		hits=$(sp_field "[$SP_ANY_SIDE_PATH | select(.addr_port == \"$saddr\")] | length")
 		if [ "$hits" != 1 ]; then
 			continue
 		fi
@@ -13424,9 +13580,12 @@ react_leg_repair() {
 		break
 	done
 	msg="no leg of slice 0's first data group has a single side on a disk node"
-	msg="$msg that carries exactly one side of $SP; killing a node with two"
-	msg="$msg sides would make two legs unhealthy and AR8 repairs the smallest"
-	msg="$msg leg_id first, which this step could not name in advance"
+	msg="$msg that carries exactly one side of $SP, spare and parked legs'"
+	msg="$msg sides counted. A second active side there would give AR8 two"
+	msg="$msg legs to repair, smallest leg_id first, which this step could not"
+	msg="$msg name in advance; a spare's side there could be one another"
+	msg="$msg group's repair is waiting for, which AR8 would replace with a"
+	msg="$msg second create"
 	[ "$REACT_LEG_POS" -ge 0 ] || die "$msg"
 	case "$REACT_LEG_ID$REACT_SIDE_ID" in
 	'' | *[!0-9]*)
