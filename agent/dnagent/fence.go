@@ -29,7 +29,9 @@ import (
 // The window is a floor, not a schedule: phase 2 runs on the first converge
 // at or after the deadline. A timer arms that converge so the RPC never waits
 // (the §7 command timeouts are seconds, not minutes), and every converge is
-// idempotent, so an early one simply stays in phase 1.
+// idempotent, so an early one simply stays in phase 1 — unless it removes an
+// export above a fenced linear: the sweep's P0 runs phase 2 for that linear
+// first, and a level with no export layer ends the window (endFence).
 //
 // The bound is the safety property. A suspended dm target queues bios with no
 // timeout and no error path, so anything that reads it — a udev worker, an
@@ -46,14 +48,21 @@ import (
 //
 // A side whose linears are suspended but whose fenceAt is zero — an agent
 // restart inside the window — is treated as **elapsed**, not as a fresh
-// window. Restarting must never extend a suspension: the invariant is that no
-// dnv device stays suspended for more than the window plus one converge.
+// window, once adoptFence has found them so. Restarting must never extend a
+// suspension: the invariant is that no dnv device stays suspended for more
+// than the window plus one converge. DN12 rule 1's known limit breaks it: a
+// restart whose probes of the side's linears all went unanswered adopts
+// nothing, and then — unless the role ends first (clearFence), or a level
+// with no export layer ends the window (endFence) — a converge that stops at
+// the DN9 gate finds no window to settle (fenceStarted), and the first one
+// that gets here starts a fresh window over linears still suspended.
 func (s *DnAgentServer) beginFence(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if st.fenceAt.IsZero() {
-		if st.fenceRestarted {
-			// Adopted from a previous process; the window is over.
+		if st.fenceRestarted || st.fenceEnded {
+			// Adopted from a previous process, or ended early by the level
+			// (endFence); the window is over.
 			return false
 		}
 		st.fenceAt = time.Now()
@@ -63,7 +72,8 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 }
 
 // fenceStarted reports whether a window was ever started for this side — or
-// adopted, already elapsed, from a previous process. It is the guard
+// adopted, already elapsed, from a previous process, or ended early by the
+// level (endFence). It is the guard
 // settleFence needs: beginFence would *start* one, which a converge that
 // builds nothing must never do.
 //
@@ -75,7 +85,7 @@ func (s *DnAgentServer) beginFence(st *sideState) bool {
 func (s *DnAgentServer) fenceStarted(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !st.fenceAt.IsZero() || st.fenceRestarted
+	return !st.fenceAt.IsZero() || st.fenceRestarted || st.fenceEnded
 }
 
 // inFence reports whether a window is currently running, without starting
@@ -176,6 +186,30 @@ func (s *DnAgentServer) clearFence(st *sideState) {
 	st.fenceTimer = nil
 	st.fenceAt = time.Time{}
 	st.fenceRestarted = false
+	st.fenceEnded = false
+	s.mu.Unlock()
+	if timer != nil {
+		timer.Stop()
+	}
+}
+
+// endFence ends the window early: the source role stands, but its level has
+// no export layer any more (DN12). With the exports gone no IO can reach the
+// per-CN linears, so there is nothing left for the window to absorb, and the
+// sweep's P0 retires every suspended one onto its dm-error before L1 takes
+// the export off it. The window stays ended until the source role does
+// (clearFence) — neither cleared nor left running, since either would let a
+// later converge at an exporting level, the level coming back down, suspend
+// the linears again over the dm-errors phase 2 left them on, and a probe
+// would then expect the pre-fence table there. The mark is in memory, like
+// fenceAt, so an agent restart forgets it — DN12's known limit, the same one
+// a window phase 2 has already closed runs into.
+func (s *DnAgentServer) endFence(st *sideState) {
+	s.mu.Lock()
+	timer := st.fenceTimer
+	st.fenceTimer = nil
+	st.fenceAt = time.Time{}
+	st.fenceEnded = true
 	s.mu.Unlock()
 	if timer != nil {
 		timer.Stop()

@@ -43,6 +43,20 @@ type fakeNode struct {
 	// wrapper between the `ls` and the probe of that one name — and this is
 	// how the suite reproduces that window deterministically.
 	lsGhosts []string
+	// wedgedDisables names every nvmet namespace disable — an `enable` = 0
+	// write — issued while the dm device the namespace backs was suspended.
+	// That write first waits for every request in flight on the namespace,
+	// and one whose bio a suspended dm target holds never completes — the
+	// §11.2 window holds exactly those — so the agent would sit in D state
+	// with its locks held. The fake models no in-flight IO and cannot hang a
+	// test, so every such write lands and is named here instead.
+	wedgedDisables []string
+	// releasedOnto is, per dm device, the table live at each resume of it
+	// while it was suspended: what the bios it deferred were released
+	// against. [D12]'s property is that a fenced linear's go to its
+	// dm-error, never back onto the side's data — unless a request ends the
+	// source role, which resumes it onto its pre-fence table first.
+	releasedOnto map[string][]string
 
 	// configfs / directories
 	dirs  map[string]bool
@@ -216,6 +230,7 @@ func newFakeNode() *fakeNode {
 		nextMinor:     1,
 		blocks:        make(map[string][]fakeSegment),
 		dms:           make(map[string]*fakeDm),
+		releasedOnto:  make(map[string][]string),
 		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
 		files:         make(map[string]string),
 		links:         make(map[string]string),
@@ -298,6 +313,8 @@ func (f *fakeNode) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = nil
+	f.wedgedDisables = nil
+	f.releasedOnto = make(map[string][]string)
 }
 
 // readOnlyPrefixes are the probes; everything else changes the system.
@@ -442,6 +459,13 @@ func (f *fakeNode) writeFileDirect(
 	f.record("writedirect %s=%s", path, data)
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
+	}
+	if strings.HasSuffix(path, "/enable") && strings.TrimSpace(data) == "0" {
+		dev := strings.TrimSpace(f.files[parentDir(path)+"/device_path"])
+		if dm := f.dms[strings.TrimPrefix(dev, "/dev/mapper/")]; dm != nil &&
+			dm.suspended {
+			f.wedgedDisables = append(f.wedgedDisables, path)
+		}
 	}
 	f.touchAttrParent(path)
 	f.files[path] = configfsNormalize(path, data)
@@ -1108,6 +1132,9 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		dm, ok := f.dms[args[1]]
 		if !ok {
 			return "", 1
+		}
+		if args[0] == "resume" && dm.suspended {
+			f.releasedOnto[args[1]] = append(f.releasedOnto[args[1]], dm.table)
 		}
 		dm.suspended = args[0] == "suspend"
 		return "", 0

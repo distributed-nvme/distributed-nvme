@@ -718,18 +718,23 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 // The §11.2 fence window and the order the layers run in
 // ---------------------------------------------------------------------------
 
-// TestSuspendedLinearResumedBeforeNvmetDisable pins the sweep's P0 step: every
-// per-CN dm-linear it is about to remove is resumed BEFORE the nvmet
-// namespaces above them are disabled.
+// TestSuspendedLinearResumedBeforeNvmetDisable pins the sweep's P0 step for a
+// linear the pass removes: every suspended per-CN dm-linear it is about to
+// remove, or whose export it is about to remove, is put on its dm-error and
+// resumed BEFORE the nvmet namespace above it is disabled — for this standby,
+// whose pre-fence table already is its dm-error, the resume alone
+// (TestTeardownInsideTheFenceWindow and TestNoSideInsideTheFenceWindow pin
+// the primary's reload).
 //
-// Writing 0 to a namespace's `enable` closes its backing device, and that
-// write does not complete while the device is suspended — a suspended dm
-// target queues bios with no timeout and no error path, so the writer sits in
-// uninterruptible D state and the pass never returns. The §11.2 cutover fence
-// leaves exactly such devices behind for common.SuspendSeconds, and anything
-// the control plane retires inside that window is retired over them. Resuming
-// inside removeDm would be too late: by then the namespace above has already
-// been written.
+// Writing 0 to a namespace's `enable` first waits for every request in flight
+// on the namespace, and one whose bio a suspended dm target holds never
+// completes — such a target queues bios with no timeout and no error path —
+// so the writer sits in uninterruptible D state and the pass never returns.
+// The §11.2 cutover fence leaves exactly such devices behind for
+// common.SuspendSeconds, holding what the old primary had in flight, and
+// anything the control plane retires inside that window is retired over
+// them. Resuming inside removeDm would be too late: by then the namespace
+// above has already been written.
 //
 // The scope here is the SIDE's own sweep — a source side inside its window
 // whose standby is dropped — because the window belongs to a side that is

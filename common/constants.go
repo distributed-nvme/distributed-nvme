@@ -362,7 +362,10 @@ const (
 	// deferred bios are released against the dm-error table the reload
 	// installs, so they error at the end of the window instead of replaying
 	// onto the side's data ([D12]). It is a floor, not a deadline: the
-	// reload happens on the first converge at or after it.
+	// reload happens on the first converge at or after it, and sooner where
+	// an export above the linear is to go, since disabling a namespace waits
+	// for its in-flight IO, which a suspended device does not complete
+	// (dnagent.md DN12).
 	SuspendSeconds = 60
 
 	// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for

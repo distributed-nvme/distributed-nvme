@@ -121,9 +121,11 @@ type sideState struct {
 	// §11.2 src cutover; zero when no fence is in progress. fenceTimer
 	// re-runs the converge at the end of the window so the RPC never waits
 	// for it. Both are in-memory only: after a restart a suspended linear
-	// has no recorded start, and DN12 treats that as "the window is over"
-	// rather than starting a second one — the whole point of the bound is
-	// that no dnv device stays suspended indefinitely.
+	// has no recorded start, and DN12 treats a side in which the restart
+	// finds one as "the window is over" rather than starting a second one (a
+	// restart whose probes of the side's linears all went unanswered finds
+	// none: DN12's known limit) — the whole point of the bound is that no dnv
+	// device stays suspended indefinitely.
 	fenceAt    time.Time
 	fenceTimer *time.Timer
 	// fenceRestarted marks a side reloaded from the local store whose per-CN
@@ -132,6 +134,11 @@ type sideState struct {
 	// set only for those sides — a blanket flag would silently skip the first
 	// real cutover window after any restart (adoptFence).
 	fenceRestarted bool
+	// fenceEnded marks a window a level with no export layer ended early
+	// (endFence): over, as an adopted one is, until the source role ends, so
+	// no later converge of this process opens it again over linears phase 2
+	// has already retired. A restart forgets it (DN12's known limit).
+	fenceEnded bool
 }
 
 // NewDnAgentServer builds the dn role server. oc is the process's single

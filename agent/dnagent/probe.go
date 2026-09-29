@@ -235,7 +235,11 @@ func (s *DnAgentServer) probeAboveSideDev(
 		// Inside the §11.2 grace window the linear is still on its pre-fence
 		// target and suspended on purpose, so that — not dm-error — is what
 		// the probe must expect; reporting the window as a table mismatch
-		// would make a healthy cutover look broken for a minute.
+		// would make a healthy cutover look broken for a minute. The one
+		// window this misreads is DN12 rule 1's known-limit second one,
+		// which a restart opens over the dm-error phase 2 had already
+		// installed: there the primary's linear reads as a mismatch until
+		// phase 2 runs again.
 		backing := plan.linearBacking(cnId, cloneLive)
 		if fencing {
 			backing = plan.preFenceBacking(cnId, cloneLive)

@@ -2740,7 +2740,15 @@ cannot forget in that way: while the device is there, the next enumeration finds
   pulled out from under a live md array, or a migration source pulled out from under a
   live dm-clone, is destructive, while a pass that simply runs again next round costs
   nothing — by then the failfast window has passed and the same order succeeds. The
-  skipped layers' objects are reported as leftovers without being touched.
+  skipped layers' objects are reported as leftovers without being touched. On the dn,
+  one of the steps that run before the first layer puts a suspended per-cn dm-linear
+  that is about to go, or whose export is — as at `SP_LEVEL_NO_SIDE`, which keeps the
+  linear — on its dm-error and resumes it, because disabling an nvmet namespace waits
+  for every request in flight on it, and one whose IO a suspended device holds never
+  completes; a linear that step cannot prove out of suspension stops the descent
+  there. A request that also ends the source role resumes the linears onto their
+  pre-fence tables before that step, which is that role ending's own rule
+  (`dnagent.md` DN6, §11.2).
 * **The verdict is recomputed every time and stored nowhere.** "Something is left" is
   the result of one comparison, never a flag. The read-only paths run the same
   enumeration and the same comparison with nothing touched, so every `Check*` round and
@@ -3218,8 +3226,19 @@ goroutine and waits for it before the dm devices are removed (§9.4).
    The window is a floor, not a schedule: (b) runs on the first converge at or
    after the deadline, which a timer arranges so no RPC waits for it. It is also a
    hard bound — a device is never left suspended beyond it, including across an
-   agent restart, because a suspended dm target queues IO forever and wedges any
-   block-device scanner that touches it.
+   agent restart that finds it suspended, because a suspended dm target queues IO
+   forever and wedges any block-device scanner that touches it. A restart inside the
+   window whose probes of the linears all go unanswered does not find them suspended,
+   and their suspension can then outlast the window (`dnagent.md` DN12 rule 1's known
+   limit). The floor gives way wherever the export above a suspended linear is
+   removed — the side torn down, a CN dropped from the side's list, a level with no
+   export layer (`SP_LEVEL_NO_SIDE` and above) — because disabling an nvmet namespace
+   waits for every request in flight on it, and one whose IO a suspended device holds
+   never completes: (b) retires the linear first, never a bare resume, which would
+   replay the absorbed IO, and such a level ends the window rather than pausing it
+   (`dnagent.md` DN6, DN12). Only a request that also ends the source role resumes
+   the linears onto their pre-fence tables first, which is that role ending's own
+   rule.
 3. Build `DnMigrSrcName` (linear on the side device) and export it via `MigrSrcNqn`,
    `allowed_hosts = [DnHostNqn(cluster, migr_src_conf.dst_dn_id)]`.
 
@@ -3889,13 +3908,20 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   needs a reboot — and (b) `dmsetup remove` on it does not succeed —
   both measured on the lab kernel. The **dn** agent therefore: never suspends anywhere
   except this one window; never lets a device outlive it, including across an agent restart
-  (a linear found suspended with no recorded start is retired at once rather than
-  starting a second window); and resumes a fenced linear before any teardown step runs
-  over it. The §11.1 side failover has no window at all — it reloads onto dm-error
+  that finds it suspended (a linear found suspended with no recorded start is retired at
+  once rather than starting a second window; a restart whose probes of a side's linears
+  all go unanswered finds none so — `dnagent.md` DN12 rule 1's known limit); and, before
+  any teardown step runs over a fenced linear — the removal of its export included, all
+  that `SP_LEVEL_NO_SIDE` takes — retires it onto its dm-error, §11.2's step 2b brought
+  forward, rather than resuming it onto the table it was suspended with and replaying
+  what the window absorbed; only a request that also ends the source role resumes it
+  onto its pre-fence table first, which is that role ending's own rule (`dnagent.md`
+  DN6, DN12). The §11.1 side failover has no window at all — it reloads onto dm-error
   directly, and its old 300 s grace sleep is deleted with the suspension it protected.
   The residual exposure is external tooling — udev, `blkid`, an operator's `lsblk` —
-  reading a source's linears during those 60 s; no dnv agent scans block devices any
-  more ([D13] removed the dn agent's LVM commands and [D14] the cn agent's).
+  reading a source's linears during those 60 s, or longer under that known limit; no
+  dnv agent scans block devices any more ([D13] removed the dn agent's LVM commands and
+  [D14] the cn agent's).
 
   The transfer origin's ns-dev (§8.10, §11.3), and every §11.6-suspended namespace,
   used to be held dm-suspended for the life of the suspension — unbounded, with no

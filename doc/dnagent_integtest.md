@@ -700,11 +700,12 @@ in parallel)**
     exports", not as "finish the migration" (§9).
 16. `syncup-dn` DNsrc (REVsrc++): side list **minus** (sp,L,S1) → full src
     side teardown (export, dm stack, side device, extent record). If this
-    lands while the §11.2 grace window is still open, the agent resumes the
-    fenced linears before its first teardown step — disabling an nvmet
-    namespace closes its backing device, and `dmsetup remove` does not
-    succeed on a suspended one. The CN's src controller dies with
-    DNR and will not reconnect.
+    lands while the §11.2 grace window is still open, the agent puts the
+    fenced linears on their dm-errors and resumes them before its first
+    teardown step — disabling an nvmet namespace waits for its in-flight
+    IO, which a suspended device holds, and `dmsetup remove` does not
+    succeed on a suspended one. The CN's src controller dies with DNR and
+    will not reconnect.
 17. CN VM: explicitly `nvme disconnect` the dead src controller — identify
     it from `nvme list-subsys -o json` by `traddr == <ip_src>` and
     disconnect by device (`nvme disconnect -d /dev/<ctrl>`), **not** by NQN

@@ -283,6 +283,12 @@ type dnChain struct {
 	errors   []string // d0
 	metas    []string // d5
 	sideDevs []string // d4
+	// exportLinears are the per-CN linears the namespaces of `exports` back,
+	// as the attribution read them. No layer removes this list — at
+	// SP_LEVEL_NO_SIDE its linears are still wanted, and an unwanted one is
+	// in `linears` too — but each has to be out of suspension before L1
+	// disables the namespace above it (P0).
+	exportLinears []string
 }
 
 // removeDmVerified removes a dm device and RE-PROBES it. The probe, not the
@@ -377,15 +383,22 @@ func (s *DnAgentServer) runChain(
 	res *agent.SweepResult,
 	gate recordGate,
 ) {
-	// P0, before every layer: a suspended per-CN linear is resumed. L1
-	// disables the nvmet namespace above it, and that write closes the
-	// backing device — which does not complete on a suspended dm device. The
-	// §11.2 cutover fence leaves exactly such devices behind, and a side torn
-	// down inside the grace window is torn down over them ([D12]).
-	for _, name := range chain.linears {
-		s.resumeIfSuspended(ctx, name)
-	}
-	stuck := false
+	// P0, before every layer: every suspended per-CN linear this pass is
+	// about to remove, or whose export it is about to remove — wanted or
+	// not — is put on its dm-error and resumed, the fence's phase 2. L1
+	// disables the nvmet namespace above it, and that write first waits for
+	// every request in flight on the namespace; one whose bio a suspended dm
+	// device holds never completes, and holding such bios is what the §11.2
+	// window is for. The cutover fence leaves exactly such devices behind,
+	// and not only under a side torn down inside the grace window: a level
+	// raised to SP_LEVEL_NO_SIDE keeps the linears and takes only the exports
+	// off them ([D12]). A SyncupSide that also ends the source role gets here
+	// with the side's linears already resumed by its pre-step
+	// (unfenceLinears), against the tables they were suspended with — the
+	// role ending's own rule (DN12) — so P0 retires only one that resume left
+	// suspended. A linear P0 cannot prove out of suspension stops the descent
+	// before L1, as a layer that left something behind does.
+	stuck := !s.retireSuspended(ctx, chain)
 	layers := []struct {
 		run    func() bool
 		report func()
@@ -521,20 +534,79 @@ func (g recordGate) freeCloneMeta(spId, migrId uint64) bool {
 	return g.cloneMeta != nil && g.cloneMeta(spId, migrId)
 }
 
-// resumeIfSuspended resumes one dm device. A suspended dm target queues bios
-// with no timeout and no error path, so anything that touches it blocks in
-// uninterruptible D state; nothing above it can be disabled and it cannot
-// itself be removed.
-func (s *DnAgentServer) resumeIfSuspended(ctx context.Context, name string) {
-	dev, err := s.dm.Info(ctx, name)
-	if err != nil || dev == nil || !dev.Suspended {
-		return
+// retireSuspended is P0: retireIfSuspended over the chain's own per-CN
+// linears and the ones under its exports, every one attempted. It reports
+// whether all of them are now known not to be suspended.
+func (s *DnAgentServer) retireSuspended(
+	ctx context.Context,
+	chain *dnChain,
+) bool {
+	done := make(map[string]struct{})
+	ok := true
+	for _, names := range [][]string{chain.exportLinears, chain.linears} {
+		for _, name := range names {
+			if _, seen := done[name]; seen {
+				continue
+			}
+			done[name] = struct{}{}
+			if !s.retireIfSuspended(ctx, name) {
+				ok = false
+			}
+		}
 	}
-	if err := s.dm.Resume(ctx, name); err != nil {
-		slog.ErrorContext(ctx, "resuming a suspended dm device failed",
+	return ok
+}
+
+// retireIfSuspended puts one suspended per-CN dm-linear on its own dm-error
+// and resumes it — the fence's phase 2, whatever left it suspended; one
+// already mapping its dm-error, as a standby's does, is only resumed. A
+// suspended dm target queues bios with no timeout and no error path, so any
+// IO that reaches it waits in uninterruptible D state, and so does whatever
+// waits for that IO — the disable of the nvmet namespace above it among
+// them; `dmsetup remove` does not succeed on it either. A bare resume would
+// release it too, but against the table it was suspended with, replaying
+// what the §11.2 window absorbed onto the side's data; against the dm-error
+// the deferred bios fail instead ([D12]).
+//
+// It reports whether the device is now known not to be suspended — absent,
+// never suspended, or retired. A probe that did not answer is none of those.
+func (s *DnAgentServer) retireIfSuspended(
+	ctx context.Context,
+	name string,
+) bool {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		slog.ErrorContext(ctx, "probing a per-cn dm-linear failed",
 			slog.String("name", name),
 			slog.String("error", err.Error()))
+		return false
 	}
+	if dev == nil || !dev.Suspended {
+		return true
+	}
+	lin, ok := common.ParseDmName(name)
+	if !ok || lin.Kind != common.DmKindDnLinear {
+		return false
+	}
+	// The name carries every id of its dm-error's, and the live table the
+	// size: the node-level scope has no plan to read either from.
+	targets, err := s.dm.Table(ctx, name)
+	if err == nil && len(targets) != 1 {
+		err = fmt.Errorf("table has %d targets, want 1", len(targets))
+	}
+	if err == nil {
+		errName := s.nf.DnErrorName(lin.ClusterId, lin.NodeId,
+			lin.Ids[0], lin.Ids[1], lin.Ids[2])
+		err = s.ensureDmLinear(ctx, name, targets[0].Length,
+			s.nf.DmPath(errName))
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "retiring a suspended dm-linear failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()))
+		return false
+	}
+	return true
 }
 
 // freeSideOf releases the allocation record of a side device that has just
@@ -831,7 +903,8 @@ func (s *DnAgentServer) portLinksOf(
 // classifyExport attributes one :2: export. It reads the export's namespace
 // first — the cheap and usually conclusive evidence — and falls back to the
 // port links, and then to the subsystem directory's age, only when there is
-// no namespace to read.
+// no namespace to read. An export of ours also names the per-CN dm-linear its
+// namespace backs, which P0 has to have out of suspension before it goes.
 func (s *DnAgentServer) classifyExport(
 	ctx context.Context,
 	clusterId uint64,
@@ -839,15 +912,15 @@ func (s *DnAgentServer) classifyExport(
 	nqn string,
 	links *portLinks,
 	res *agent.SweepResult,
-) (owner exportOwner, spId uint64, sideId uint64) {
+) (owner exportOwner, spId uint64, sideId uint64, linear string) {
 	nsids, found, err := s.nvmet.ListNamespaces(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet namespaces of "+nqn, err)
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	if !found {
 		// Removed between the listing and this read.
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	sawNs := false
 	for _, nsid := range nsids {
@@ -855,13 +928,14 @@ func (s *DnAgentServer) classifyExport(
 		path, present, err := s.nvmet.NsDevicePath(ctx, nqn, nsid)
 		if err != nil {
 			res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsid), err)
-			return exportForeign, 0, 0
+			return exportForeign, 0, 0, ""
 		}
 		if !present {
 			continue
 		}
-		dn, parsed := common.ParseDmName(strings.TrimSpace(
-			strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/")))
+		name := strings.TrimSpace(
+			strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/"))
+		dn, parsed := common.ParseDmName(name)
 		if !parsed || dn.Kind != common.DmKindDnLinear ||
 			dn.ClusterId != clusterId {
 			continue
@@ -869,24 +943,24 @@ func (s *DnAgentServer) classifyExport(
 		if dn.NodeId != dnId {
 			// A per-CN linear of a SIBLING dn agent on this kernel. Its
 			// export is that agent's, and nothing here may touch it.
-			return exportForeign, 0, 0
+			return exportForeign, 0, 0, ""
 		}
-		return exportOurs, dn.Ids[0], dn.Ids[1]
+		return exportOurs, dn.Ids[0], dn.Ids[1], name
 	}
 	if sawNs {
 		// It has namespaces, but none of them names a device we can read an
 		// owner off. Somebody else's, or a shape this build did not write.
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	byNqn, err := s.portLinksOf(ctx, links)
 	if err != nil {
 		res.Fail("nvmet port links", err)
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	for _, portId := range byNqn[nqn] {
 		if portId != s.port.PortId {
 			// Linked to a sibling agent's port: its half-built export.
-			return exportForeign, 0, 0
+			return exportForeign, 0, 0, ""
 		}
 	}
 	// No namespace and no sibling's port: the orphan shape, which a build in
@@ -895,16 +969,16 @@ func (s *DnAgentServer) classifyExport(
 	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet subsystem age of "+nqn, err)
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	if !present {
 		// Removed between the listing and this read.
-		return exportForeign, 0, 0
+		return exportForeign, 0, 0, ""
 	}
 	if s.now().Sub(mtime) <= common.DnExportOrphanGrace {
-		return exportYoung, 0, 0
+		return exportYoung, 0, 0, ""
 	}
-	return exportOrphan, 0, 0
+	return exportOrphan, 0, 0, ""
 }
 
 // collectExports adds the unwanted nvmet subsystems of one side's scope to a
@@ -949,7 +1023,7 @@ func (s *DnAgentServer) collectExports(
 			if _, keep := wanted.nvmetSs[nqn]; keep {
 				continue
 			}
-			owner, ownerSp, ownerSide := s.classifyExport(
+			owner, ownerSp, ownerSide, linear := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
 			case exportForeign, exportYoung:
@@ -958,6 +1032,7 @@ func (s *DnAgentServer) collectExports(
 				if ownerSp != spId || ownerSide != sideId {
 					continue
 				}
+				chain.exportLinears = append(chain.exportLinears, linear)
 			case exportOrphan:
 				// No namespace names it and it is older than the grace, so
 				// it belongs to no side this pass can judge — but a stored
@@ -987,6 +1062,7 @@ func (s *DnAgentServer) collectExports(
 		chain.exports = append(chain.exports, nqn)
 	}
 	sort.Strings(chain.exports)
+	sort.Strings(chain.exportLinears)
 }
 
 // collectSrcConns adds the unwanted :3: host connections of one sp. The dn id
@@ -1055,6 +1131,13 @@ func (s *DnAgentServer) sidePreSteps(
 		// timeout ([D12]). The set comes from the enumeration, not from a
 		// remembered cn list.
 		s.unfenceLinears(ctx, plan, actual)
+	} else if !plan.wantExport {
+		// A source whose level has no export layer ENDS its window: nothing
+		// can reach the per-CN linears once their exports are gone, and P0
+		// retires the suspended ones onto their dm-errors before L1 takes
+		// the exports off them. Like the clear above it is a state, not an
+		// event, so it needs no memory of whether a window was running.
+		s.endFence(st)
 	}
 	// P-DN1, repoint: a wanted per-CN linear whose LIVE table still maps a
 	// device this pass is about to remove — a finished migration's dm-clone —
@@ -1235,7 +1318,7 @@ func (s *DnAgentServer) sweepDn(
 			if _, held := claims.exports[nqn]; held {
 				continue
 			}
-			owner, ownerSp, ownerSide := s.classifyExport(
+			owner, ownerSp, ownerSide, linear := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
 			case exportForeign, exportYoung:
@@ -1244,6 +1327,7 @@ func (s *DnAgentServer) sweepDn(
 				if _, live := known[[2]uint64{ownerSp, ownerSide}]; live {
 					continue
 				}
+				chain.exportLinears = append(chain.exportLinears, linear)
 			case exportOrphan:
 				// No namespace, on no port but ours, no stored side claims
 				// it, and older than DnExportOrphanGrace: ours half-removed,
@@ -1263,6 +1347,7 @@ func (s *DnAgentServer) sweepDn(
 		chain.exports = append(chain.exports, nqn)
 	}
 	sort.Strings(chain.exports)
+	sort.Strings(chain.exportLinears)
 
 	hostNqn := s.nf.DnHostNqn(clusterId, dnId)
 	for _, state := range actual.hostSubsys {

@@ -1251,9 +1251,10 @@ func breakSideDev(node *fakeNode, sideDevName string) {
 
 // The window has to end even when the converge that ends it cannot get past
 // the side device: [D12] promises no dnv device stays suspended for more than
-// the window plus one converge, and a suspended dm target queues bios with no
-// timeout, so the promise is the safety property — not a best effort that a
-// transient `dmsetup info` failure may drop.
+// the window plus one converge (DN12 rule 1's known limit aside), and a
+// suspended dm target queues bios with no timeout, so the promise is the
+// safety property — not a best effort that a transient `dmsetup info` failure
+// of the side device may drop.
 func TestFenceEndsEvenWhenTheSideDeviceIsBroken(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
@@ -1346,13 +1347,17 @@ func TestFenceClearedOnARoleEndWithABrokenSideDevice(t *testing.T) {
 }
 
 // A side torn down inside the window still tears down: `dmsetup remove` does
-// not succeed on a suspended device, so the teardown resumes it first.
+// not succeed on a suspended device, so the teardown retires it onto its
+// dm-error first — the phase-2 reload, which fails the IO the window absorbed
+// rather than replaying it onto a side that is going away.
 func TestTeardownInsideTheFenceWindow(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
 	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
 
 	srv.fenceWait = time.Hour
 	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
@@ -1366,20 +1371,698 @@ func TestTeardownInsideTheFenceWindow(t *testing.T) {
 	if _, err := srv.SyncupDn(ctx, dnReq(3)); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
-	// The resume comes before the nvmet teardown, not just before the
-	// remove: disabling a namespace closes its backing device.
+	// The reload comes before the nvmet teardown, not just before the
+	// remove: disabling a namespace waits for its in-flight IO, and a
+	// suspended linear does not complete what it holds.
 	assertOrder(t, node,
+		"cmd dmsetup reload "+linName,
 		"cmd dmsetup resume "+linName,
 		"writedirect "+agent.NvmetRoot+"/subsystems/"+
 			nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)+
 			"/namespaces/1/enable=0",
 		"cmd dmsetup remove "+linName,
 	)
+	node.mu.Lock()
+	released := append([]string(nil), node.releasedOnto[linName]...)
+	node.mu.Unlock()
+	if len(released) != 1 ||
+		!strings.HasSuffix(released[0], " linear "+errNo+" 0") {
+		t.Errorf("%s released its deferred IO against %q, want its "+
+			"dm-error %s, once", linName, released, errNo)
+	}
 	if _, ok := node.dms[linName]; ok {
 		t.Error("a suspended dm-linear survived the teardown")
 	}
 	if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); ok {
 		t.Error("the side's extents were not freed")
+	}
+}
+
+// A teardown inside the window whose primary export this pass cannot
+// attribute: the read of its namespace's device_path does not answer, so the
+// export stays out of the chain, and the linear under it is in the chain only
+// as a linear to remove, not as one under an export to remove. P0 has to
+// retire it all the same. Otherwise L2's removeDm finds it suspended and
+// resumes it onto its pre-fence table, replaying what the window absorbed
+// onto a side that is being deleted: writes the old primary is told
+// succeeded, which the destination never gets.
+func TestTeardownInsideTheFenceWindowOverAnUnreadExport(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+	nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !node.dms[linName].suspended {
+		t.Fatal("the cutover did not suspend the primary's dm-linear")
+	}
+
+	node.Reset()
+	setHook(node, node.killRead,
+		agent.NvmetRoot+"/subsystems/"+nqn+"/namespaces/1/device_path")
+	reply, err := srv.SyncupDn(ctx, dnReq(3))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// The premise: the pass could not attribute the export, so it kept it
+	// and named the read that failed.
+	if !subsysPresent(node, nqn) {
+		t.Fatalf("%s went although its namespace could not be read", nqn)
+	}
+	if got, details := reply.GetAgentReply().GetCode(),
+		reply.GetAgentReply().GetDetails(); got != common.ReplyCodeLeftover ||
+		!strings.Contains(details, "nvmet "+nqn+" ns 1 device_path") {
+		t.Errorf("code = %d (%s), want %d naming the unanswered "+
+			"device_path read", got, details, common.ReplyCodeLeftover)
+	}
+	node.mu.Lock()
+	released := append([]string(nil), node.releasedOnto[linName]...)
+	node.mu.Unlock()
+	if len(released) == 0 {
+		t.Errorf("%s was never brought out of suspension", linName)
+	}
+	for _, tb := range released {
+		if !strings.HasSuffix(tb, " linear "+errNo+" 0") {
+			t.Errorf("%s released its deferred IO against %q, not its "+
+				"dm-error %s", linName, tb, errNo)
+		}
+	}
+	// The retire comes before L2's removal reaches the linear.
+	assertOrder(t, node,
+		"cmd dmsetup reload "+linName,
+		"cmd dmsetup resume "+linName,
+		"cmd dmsetup remove "+linName,
+	)
+}
+
+// A level raise to SP_LEVEL_NO_SIDE inside the window takes the exports off
+// linears the fence holds suspended. At that level the linears stay wanted and
+// only the exports above them go, so a sweep that brought out of suspension
+// only the linears it was about to REMOVE touched none of them, and L1
+// disabled every namespace over a suspended device — a write that waits for
+// the namespace's in-flight IO, which is what the window holds, so it does
+// not return; it sits with the node read lock and the side's object lock
+// held, and the next SyncupDn, every Check round and the fence timer itself
+// queue behind it. The level change has to end the window the way its
+// deadline would have: each linear put on its dm-error and resumed before its
+// namespace is disabled, so the IO the window absorbed fails instead of
+// replaying onto the side's data, and nothing is left suspended for the build
+// phase or a later probe to find.
+func TestNoSideInsideTheFenceWindow(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	cnIds := []uint64{testCn0, testCn1}
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	for _, cnId := range cnIds {
+		name := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+		if !node.dms[name].suspended {
+			t.Fatalf("the cutover did not suspend %s", name)
+		}
+	}
+
+	node.Reset()
+	req := migrSrcReq(3)
+	req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	wedged := append([]string(nil), node.wedgedDisables...)
+	node.mu.Unlock()
+	for _, path := range wedged {
+		t.Errorf("namespace disabled over a suspended dm-linear, a write "+
+			"that waits on the IO the device holds: %s", path)
+	}
+
+	for _, cnId := range cnIds {
+		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+		errNo := node.devNo[nf.DmPath(
+			nf.DnErrorName(testCluster, testDn, testSp, testSide, cnId))]
+		nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, cnId)
+		disable := "writedirect " + agent.NvmetRoot + "/subsystems/" + nqn +
+			"/namespaces/1/enable=0"
+
+		// Phase 2: what the window deferred is released against the
+		// dm-error, never replayed through the pre-fence table...
+		node.mu.Lock()
+		released := append([]string(nil), node.releasedOnto[linName]...)
+		node.mu.Unlock()
+		if len(released) == 0 {
+			t.Errorf("%s was never brought out of suspension", linName)
+		}
+		for _, table := range released {
+			if !strings.HasSuffix(table, " linear "+errNo+" 0") {
+				t.Errorf("%s released its deferred IO against %q, not its "+
+					"dm-error %s", linName, table, errNo)
+			}
+		}
+		// ...and before the namespace above it is disabled.
+		resume := node.indexOfCall("cmd dmsetup resume " + linName)
+		if at := node.indexOfCall(disable); resume < 0 || at < 0 ||
+			resume > at {
+			t.Errorf("%s: resumed at %d, namespace disabled at %d; the "+
+				"resume must come first:\n%s", linName, resume, at,
+				strings.Join(node.Calls(), "\n"))
+		}
+		// The primary's linear gets there by exactly one reload; a
+		// standby's pre-fence table already is its dm-error, so its phase 2
+		// is the resume alone.
+		reloads := node.callsMatching("cmd dmsetup reload " + linName)
+		want := 0
+		if cnId == testCn0 {
+			want = 1
+		}
+		if len(reloads) != want {
+			t.Errorf("%s reloaded %d times, want %d: %q",
+				linName, len(reloads), want, reloads)
+		}
+		// The window is over: nothing re-suspended it, and it serves the
+		// dm-error the level leaves it on.
+		if node.dms[linName].suspended {
+			t.Errorf("%s is still suspended after the level change", linName)
+		}
+		if !strings.Contains(node.dms[linName].table, errNo) {
+			t.Errorf("%s is not on its dm-error: %q",
+				linName, node.dms[linName].table)
+		}
+		if subsysPresent(node, nqn) {
+			t.Errorf("SP_LEVEL_NO_SIDE kept the export %s", nqn)
+		}
+	}
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	if subsysPresent(node, srcNqn) {
+		t.Errorf("SP_LEVEL_NO_SIDE kept the migration-source export %s",
+			srcNqn)
+	}
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	if srv.inFence(st) {
+		t.Error("the level change did not end the grace window")
+	}
+	if st.fenceTimer != nil {
+		t.Error("the grace-window timer outlived the window")
+	}
+
+	// The pass completes, and the rows are the ones the level demands: the
+	// dm layer serving, no export layer. A probe agrees — one still expecting
+	// the pre-fence table would report the primary's linear as broken.
+	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	for _, got := range []struct {
+		what  string
+		reply *pb.AgentReply
+		info  *pb.SideInfo
+	}{
+		{"SyncupSide", reply.GetAgentReply(), reply.GetSideInfo()},
+		{"GetSideInfo", probe.GetAgentReply(), probe.GetSideInfo()},
+	} {
+		if got.reply.GetCode() != 0 {
+			t.Errorf("%s code = %d (%s), want 0", got.what,
+				got.reply.GetCode(), got.reply.GetDetails())
+		}
+		for _, cnId := range cnIds {
+			for _, row := range []struct {
+				name string
+				info *pb.ResInfo
+			}{
+				{"dm_error", got.info.GetCnIdToDmError()[cnId]},
+				{"dm_linear", got.info.GetCnIdToDmLinear()[cnId]},
+			} {
+				if row.info.GetStatus() != pb.ResStatus_RES_STATUS_OK ||
+					strings.Contains(row.info.GetDetails(), "grace window") {
+					t.Errorf("%s: cn %d %s = %v/%q, want OK outside the "+
+						"window", got.what, cnId, row.name,
+						row.info.GetStatus(), row.info.GetDetails())
+				}
+			}
+		}
+		if n := len(got.info.GetCnIdToNvmeof()); n != 0 {
+			t.Errorf("%s reported %d export rows at SP_LEVEL_NO_SIDE",
+				got.what, n)
+		}
+		src := got.info.GetMigrSrcInfo()
+		if src.GetDmLinearInfo().GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("%s: migr_src dm_linear = %v/%q, want OK", got.what,
+				src.GetDmLinearInfo().GetStatus(),
+				src.GetDmLinearInfo().GetDetails())
+		}
+		if src.GetNvmeofInfo() != nil {
+			t.Errorf("%s reported a migr_src export at SP_LEVEL_NO_SIDE: %v",
+				got.what, src.GetNvmeofInfo())
+		}
+	}
+}
+
+// P0 is the proof L1 needs, so a linear it cannot bring out of suspension
+// holds the whole descent: no namespace above a device that may still be
+// suspended is disabled, and the exports are named as leftovers, which is what
+// re-drives the pass. The build phase that follows still retires the linear —
+// the window is over at this level — so the next pass takes the exports. A
+// failed retire is never a bare resume: whatever releases the IO the window
+// absorbed releases it against the dm-error, not the pre-fence table. The
+// reload fails all three ways a command can: refused (it answered no), and
+// both halves of "did not answer" — killed before it touched anything, and
+// killed after its ioctl landed anyway.
+func TestNoSideRetireFailureHoldsTheExports(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(node *fakeNode, key string)
+	}{
+		{"refused", func(node *fakeNode, key string) {
+			node.failCmd[key] = "device-mapper: reload ioctl failed: " +
+				"Invalid argument"
+		}},
+		{"killed before it ran", func(node *fakeNode, key string) {
+			node.killCmdNoEffect[key] = true
+		}},
+		{"killed after it ran", func(node *fakeNode, key string) {
+			node.killCmd[key] = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			linName := nf.DnLinearName(
+				testCluster, testDn, testSp, testSide, testCn0)
+			errNo := node.devNo[nf.DmPath(nf.DnErrorName(
+				testCluster, testDn, testSp, testSide, testCn0))]
+			nqns := []string{
+				nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
+				nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1),
+				nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId),
+			}
+
+			srv.fenceWait = time.Hour
+			if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if !node.dms[linName].suspended {
+				t.Fatal("the cutover did not suspend the primary's dm-linear")
+			}
+
+			node.Reset()
+			node.mu.Lock()
+			tc.fail(node, "dmsetup reload "+linName)
+			node.mu.Unlock()
+			req := migrSrcReq(3)
+			req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+			reply, err := srv.SyncupSide(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			node.mu.Lock()
+			released := append([]string(nil), node.releasedOnto[linName]...)
+			suspended := node.dms[linName].suspended
+			table := node.dms[linName].table
+			node.mu.Unlock()
+			for _, tb := range released {
+				if !strings.HasSuffix(tb, " linear "+errNo+" 0") {
+					t.Errorf("%s released its deferred IO against %q, not "+
+						"its dm-error %s: a failed retire must never "+
+						"resume onto the pre-fence table", linName, tb, errNo)
+				}
+			}
+			if suspended || !strings.Contains(table, errNo) {
+				t.Errorf("the build phase did not retire %s after P0 "+
+					"failed: suspended=%v table=%q", linName, suspended,
+					table)
+			}
+			if node.hasCall("/enable=0") {
+				t.Errorf("L1 ran over a linear P0 could not retire:\n%s",
+					strings.Join(node.Calls(), "\n"))
+			}
+			for _, nqn := range nqns {
+				if !subsysPresent(node, nqn) {
+					t.Errorf("%s was removed although P0 held the descent", nqn)
+				}
+			}
+			if got := reply.GetAgentReply().GetCode(); got !=
+				common.ReplyCodeLeftover {
+				t.Errorf("code = %d (%s), want %d: the held exports must "+
+					"re-drive the pass", got,
+					reply.GetAgentReply().GetDetails(),
+					common.ReplyCodeLeftover)
+			}
+
+			node.Reset()
+			req = migrSrcReq(4)
+			req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+			reply, err = srv.SyncupSide(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := reply.GetAgentReply().GetCode(); got != 0 {
+				t.Errorf("re-driven pass: code = %d (%s), want 0", got,
+					reply.GetAgentReply().GetDetails())
+			}
+			for _, nqn := range nqns {
+				if subsysPresent(node, nqn) {
+					t.Errorf("the re-driven pass kept %s", nqn)
+				}
+			}
+			node.mu.Lock()
+			wedged := append([]string(nil), node.wedgedDisables...)
+			node.mu.Unlock()
+			for _, path := range wedged {
+				t.Errorf("namespace disabled over a suspended dm-linear: %s",
+					path)
+			}
+		})
+	}
+}
+
+// A P0 probe of a linear that does not answer proves nothing: the linear may
+// still be suspended, so the descent stops before L1 exactly as it does for a
+// failed reload, and the next pass, whose probe answers, retires the linear
+// onto its dm-error and takes the exports. The kill is the always form
+// because the pre-step's repoint probes the same linear first and would take
+// a one-shot kill; it also keeps the build phase from retiring the linear in
+// the same pass, so the retire this test sees is the next pass's P0.
+func TestNoSideProbeFailureHoldsTheExports(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+	nqns := []string{
+		nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0),
+		nf.SideToCnNqn(testCluster, testSp, testLeg, testCn1),
+		nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId),
+	}
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !node.dms[linName].suspended {
+		t.Fatal("the cutover did not suspend the primary's dm-linear")
+	}
+
+	node.Reset()
+	probe := "dmsetup info --columns --noheadings -o attr " + linName
+	setHook(node, node.killCmdNoEffectAlways, probe)
+	req := migrSrcReq(3)
+	req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if node.hasCall("/enable=0") {
+		t.Errorf("L1 ran over a linear P0 could not probe:\n%s",
+			strings.Join(node.Calls(), "\n"))
+	}
+	for _, nqn := range nqns {
+		if !subsysPresent(node, nqn) {
+			t.Errorf("%s was removed although P0 held the descent", nqn)
+		}
+	}
+	if got := reply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeLeftover {
+		t.Errorf("code = %d (%s), want %d: the held exports must "+
+			"re-drive the pass", got, reply.GetAgentReply().GetDetails(),
+			common.ReplyCodeLeftover)
+	}
+	for _, nqn := range nqns {
+		if !strings.Contains(reply.GetAgentReply().GetDetails(), nqn) {
+			t.Errorf("the held export %s is not named as a leftover: %s",
+				nqn, reply.GetAgentReply().GetDetails())
+		}
+	}
+	node.mu.Lock()
+	released := append([]string(nil), node.releasedOnto[linName]...)
+	suspended := node.dms[linName].suspended
+	node.mu.Unlock()
+	if len(released) != 0 || !suspended {
+		t.Errorf("%s left suspension in a pass that could not probe it: "+
+			"released against %q, suspended=%v", linName, released, suspended)
+	}
+
+	clearHook(node, node.killCmdNoEffectAlways, probe)
+	node.Reset()
+	req = migrSrcReq(4)
+	req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	reply, err = srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("re-driven pass: code = %d (%s), want 0", got,
+			reply.GetAgentReply().GetDetails())
+	}
+	node.mu.Lock()
+	wedged := append([]string(nil), node.wedgedDisables...)
+	released = append([]string(nil), node.releasedOnto[linName]...)
+	node.mu.Unlock()
+	for _, path := range wedged {
+		t.Errorf("namespace disabled over a suspended dm-linear: %s", path)
+	}
+	if len(released) != 1 ||
+		!strings.HasSuffix(released[0], " linear "+errNo+" 0") {
+		t.Errorf("the re-driven pass released %s's deferred IO against %q, "+
+			"want its dm-error %s, once", linName, released, errNo)
+	}
+	for _, nqn := range nqns {
+		if subsysPresent(node, nqn) {
+			t.Errorf("the re-driven pass kept %s", nqn)
+		}
+	}
+}
+
+// Lowering the level again, with the source role still standing, must not
+// reopen a window the level ended. The exports come back over linears phase 2
+// has already put on their dm-errors; a second window would suspend them there
+// again, and a probe — which inside a window expects the pre-fence table —
+// would report the primary's linear as broken for the whole of it.
+func TestNoSideThenLevelDownOpensNoSecondWindow(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	cnIds := []uint64{testCn0, testCn1}
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	noSide := migrSrcReq(3)
+	noSide.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	if _, err := srv.SyncupSide(ctx, noSide); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+
+	// The level comes back down; the migration still stands.
+	node.Reset()
+	reply, err := srv.SyncupSide(ctx, migrSrcReq(4))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("code = %d (%s), want 0", got,
+			reply.GetAgentReply().GetDetails())
+	}
+	suspends := node.callsMatching("cmd dmsetup suspend")
+	if len(suspends) != 0 {
+		t.Errorf("the level coming back down suspended %d times, want 0: %q",
+			len(suspends), suspends)
+	}
+	for _, cnId := range cnIds {
+		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
+		errNo := node.devNo[nf.DmPath(
+			nf.DnErrorName(testCluster, testDn, testSp, testSide, cnId))]
+		node.mu.Lock()
+		suspended := node.dms[linName].suspended
+		table := node.dms[linName].table
+		node.mu.Unlock()
+		if suspended || !strings.Contains(table, errNo) {
+			t.Errorf("%s: suspended=%v table=%q, want resumed on its "+
+				"dm-error %s", linName, suspended, table, errNo)
+		}
+	}
+
+	// A probe reads the rebuilt side as healthy, row by row: no window is
+	// running, so it expects the dm-errors the linears are on, and the
+	// exports, the migration source's included, are back.
+	probe, err := srv.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := probe.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("GetSideInfo code = %d (%s), want 0", got,
+			probe.GetAgentReply().GetDetails())
+	}
+	info := probe.GetSideInfo()
+	if n := len(info.GetCnIdToNvmeof()); n != len(cnIds) {
+		t.Errorf("GetSideInfo reported %d export rows, want %d",
+			n, len(cnIds))
+	}
+	type row struct {
+		name string
+		info *pb.ResInfo
+	}
+	rows := []row{
+		{"side_dev", info.GetSideDevInfo()},
+		{"migr_src dm_linear", info.GetMigrSrcInfo().GetDmLinearInfo()},
+		{"migr_src nvmeof", info.GetMigrSrcInfo().GetNvmeofInfo()},
+	}
+	for _, cnId := range cnIds {
+		rows = append(rows,
+			row{fmt.Sprintf("cn %d dm_error", cnId),
+				info.GetCnIdToDmError()[cnId]},
+			row{fmt.Sprintf("cn %d dm_linear", cnId),
+				info.GetCnIdToDmLinear()[cnId]},
+			row{fmt.Sprintf("cn %d nvmeof", cnId),
+				info.GetCnIdToNvmeof()[cnId]})
+	}
+	for _, r := range rows {
+		if r.info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("GetSideInfo: %s = %v/%q, want OK", r.name,
+				r.info.GetStatus(), r.info.GetDetails())
+		}
+	}
+}
+
+// The mark a level with no export layer leaves ends with the source role, as
+// the restart mark does: the side's next migration is entitled to its whole
+// window. A mark that outlived the role would skip that window and error the
+// old primary's in-flight writes in the same pass that moved its namespaces
+// away — what TestFenceWindowSurvivesAnUnrelatedAgentRestart pins for the
+// restart mark.
+func TestFenceEndedDoesNotOutliveTheRole(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideNo := node.devNo[nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))]
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	noSide := migrSrcReq(3)
+	noSide.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	if _, err := srv.SyncupSide(ctx, noSide); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	// The migration is cancelled and the level lowered: the role ends.
+	if _, err := srv.SyncupSide(ctx, sideReq(4, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+
+	// The side's next migration.
+	node.Reset()
+	next := migrSrcReq(5)
+	next.MigrSrcConf.MigrId = testMigrId + 1
+	if _, err := srv.SyncupSide(ctx, next); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	node.mu.Lock()
+	suspended := node.dms[linName].suspended
+	table := node.dms[linName].table
+	node.mu.Unlock()
+	if !suspended {
+		t.Error("the next cutover skipped its grace window")
+	}
+	if reloads := node.callsMatching(
+		"cmd dmsetup reload " + linName); len(reloads) != 0 {
+		t.Errorf("phase 2 ran inside the next window: %q", reloads)
+	}
+	if !strings.Contains(table, sideNo) {
+		t.Errorf("phase 1 moved the primary's table off the side device: %q",
+			table)
+	}
+}
+
+// A retire P0 could not finish, in a pass that then stops at the side-device
+// gate. The level has ended the window and stopped its timer, so the gate's
+// fence bookkeeping is what finishes phase 2 in this pass, as it does for a
+// window that has elapsed: [D12] bounds a suspension at the window plus one
+// converge, and the next one is whenever the worker re-drives the leftovers.
+func TestNoSideRetireFailureAtTheGate(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	errNo := node.devNo[nf.DmPath(
+		nf.DnErrorName(testCluster, testDn, testSp, testSide, testCn0))]
+
+	srv.fenceWait = time.Hour
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !node.dms[linName].suspended {
+		t.Fatal("the cutover did not suspend the primary's dm-linear")
+	}
+
+	breakSideDev(node, sideDevName)
+	setHook(node, node.killCmdNoEffect, "dmsetup reload "+linName)
+	node.Reset()
+	req := migrSrcReq(3)
+	req.SideConf.SpLevel = pb.SpLevel_SP_LEVEL_NO_SIDE
+	reply, err := srv.SyncupSide(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	// As in TestFenceAdoptedSettlesAtTheGate: a `dmsetup create` of the side
+	// device is attempted only when the converge found it unreadable, so the
+	// pass took the DN9 gate rather than retiring the linear in ensureCnDm.
+	if !node.hasCall("cmd dmsetup create " + sideDevName) {
+		t.Fatalf("the converge never took the DN9 gate:\n%s",
+			strings.Join(node.Calls(), "\n"))
+	}
+	if node.hasCall("/enable=0") {
+		t.Errorf("L1 ran over a linear P0 could not retire:\n%s",
+			strings.Join(node.Calls(), "\n"))
+	}
+	if got := reply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeLeftover {
+		t.Errorf("code = %d (%s), want %d", got,
+			reply.GetAgentReply().GetDetails(), common.ReplyCodeLeftover)
+	}
+	node.mu.Lock()
+	suspended := node.dms[linName].suspended
+	table := node.dms[linName].table
+	released := append([]string(nil), node.releasedOnto[linName]...)
+	node.mu.Unlock()
+	if suspended {
+		t.Errorf("%s left suspended by a pass that stopped at the gate "+
+			"after the level ended its window", linName)
+	}
+	if !strings.Contains(table, errNo) {
+		t.Errorf("%s is not on its dm-error: %q", linName, table)
+	}
+	for _, tb := range released {
+		if !strings.HasSuffix(tb, " linear "+errNo+" 0") {
+			t.Errorf("%s released its deferred IO against %q, not its "+
+				"dm-error %s", linName, tb, errNo)
+		}
 	}
 }
 

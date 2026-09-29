@@ -172,7 +172,8 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 
 	// The §11.2 src-cutover grace window: a migration source's per-CN
 	// dm-linears stay suspended at least this long before they are reloaded
-	// onto their dm-errors (DN12, [D12]).
+	// onto their dm-errors — sooner where an export above one is to go (DN12,
+	// [D12]).
 	SuspendSeconds = 60
 
 	// dnv DN disk format ([D13]). All byte offsets on the raw --disk device.
@@ -1241,12 +1242,29 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      **The layers.** Each scope removes its unwanted objects in one order,
      top-down. Every position is a dependency, not a preference:
 
-     *Before the first layer*, every unwanted per-CN dm-linear that is
-     suspended is resumed. L1 disables the nvmet namespace above it, and that
-     write closes the namespace's backing device — which does not complete on
-     a suspended dm target, whose bios queue with no timeout and no error
-     path ([D12]). The §11.2 cutover leaves exactly such devices behind, so a
-     side torn down inside the grace window is torn down over them.
+     *Before the first layer*, every suspended per-CN dm-linear the pass is
+     about to remove, or whose export it is about to remove — wanted or not —
+     is put on its dm-error and resumed: DN12's phase 2, brought forward
+     (*amended 2026-09-28*). L1 disables the nvmet namespace above it, and
+     that write first waits for every request in flight on the namespace;
+     one whose bio a suspended dm target holds never completes, since such a
+     target queues bios with no timeout and no error path ([D12]), and the
+     agent cannot know that none is held. The §11.2 cutover leaves exactly
+     such devices behind — holding the old primary's in-flight IO is what
+     its window is for — and not only under a side torn down inside the
+     grace window: `SP_LEVEL_NO_SIDE` keeps the linears and takes only the
+     exports off them. The linear under an export is the one its
+     attribution read off the namespace (above). A bare resume would free
+     the device too, but against the table it was suspended with — the
+     primary CN's maps the side's data — so what the window absorbed would
+     be replayed onto it; against the dm-error it fails instead. The one
+     exception is a request that also ends the source role: its pre-step
+     has already made that bare resume, which is that role ending's own
+     rule (DN12), so this step retires only a linear the resume left
+     suspended. A linear this step cannot prove out of suspension — a probe
+     or its reload failed — stops the descent before L1, as a layer that
+     left something behind does: no layer runs, every unwanted object of
+     the scope is named as a leftover, and the next pass tries again.
 
 | | removed | why here |
 |---|---|---|
@@ -1584,12 +1602,39 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       the swap would replay it onto the side's data. The RPC never waits out
       the window — a one-shot timer arms the converge that ends it, the same
       way DN8 arms the connect retry — and every converge is idempotent, so
-      an early one simply stays in phase 1.
+      an early one at an exporting level simply stays in phase 1.
 
       Four rules keep the suspension bounded, which is what makes it safe:
       * A side whose linears are suspended but whose window start is unknown
-        — an agent restart mid-window — is treated as **elapsed**, and phase 2
-        runs on the first converge. Restarting never opens a second window.
+        — an agent restart mid-window — is treated as **elapsed** once the
+        restarted agent finds them so, and phase 2 runs on the first
+        converge, so a restart that finds them suspended opens no second
+        window. One that does not find them so can (*known
+        limit, 2026-09-28*): the window's start, and the mark rule 3 leaves
+        when a level ends a window early, live only in memory. After the
+        window, with the linears resumed on the dm-errors phase 2 left them
+        on, the restarted agent's first converge that builds the side's
+        per-CN stacks at an exporting level, with the role still standing,
+        opens a second window over those dm-errors — unless a pass at a
+        level with no export layer has marked the window over again before
+        it. Nothing that window absorbs can reach the side's data — the
+        table that holds it is already the dm-error — but the linears sit
+        suspended for another `SuspendSeconds`, and the probe, which inside a
+        window expects the pre-fence table, reports the primary's linear
+        `RES_STATUS_ERROR` until phase 2 runs again. A restart inside the
+        window whose probes of the linears all go unanswered does not find
+        them suspended either, so it treats no window as elapsed: the
+        linears stay suspended on their pre-fence tables with no window
+        running and no timer armed, and no verdict names them, since they
+        are wanted. At an exporting level, with the role still standing, a
+        converge that stops at the DN9 gate leaves them so — rule 4 acts
+        only on a window the process knows of — and, unless a pass at a
+        level with no export layer has marked the window over and retired
+        them before it (rule 3), the first one that builds the side's
+        per-CN stacks opens a second window over them, which phase 2 ends
+        `SuspendSeconds` later, however long that converge was in coming.
+        While they sit so, a probe that gets past the side device expects
+        the dm-error and reports the primary's linear `RES_STATUS_ERROR`.
       * The role ending clears the window and returns the linears to their
         normal targets, resumed. The condition is a **state**, not an event:
         every converge of a side whose *effective* `migr_src_conf` is absent
@@ -1603,10 +1648,26 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
         resume alone is enough — the queued IO drains against whatever table
         is live, here the pre-fence one, and the build phase then reloads the
         linear onto the target the new desired state wants.
-      * The sweep resumes every suspended per-CN linear it is about to
-        remove **before** its first layer (DN6), because disabling an nvmet
-        namespace closes its backing device and that write does not complete
-        on a suspended dm target.
+      * Tearing the side down, or taking its exports away, inside the window
+        ends the window early, with the same reload (*amended 2026-09-28*).
+        **Before** its first layer (DN6) the sweep puts every suspended
+        per-CN linear it is about to remove, or whose export it is about to
+        remove, on its dm-error and resumes it — never a bare resume, which
+        would replay the absorbed IO onto the side's data — because
+        disabling an nvmet namespace first waits for every request in flight
+        on it, and one whose bio a suspended dm target holds never
+        completes. A request that also ends the role is rule 2's case
+        instead: its pre-step resumes the linears onto their pre-fence
+        tables before this step runs. A level with no export
+        layer — `SP_LEVEL_NO_SIDE`, which keeps the linears and takes only
+        their exports, or any level above it — ends the window outright:
+        for a source side at such a level the sweep's pre-step marks it over,
+        the way an adopted one is, until the role itself ends (a state again,
+        and in memory like the window's start), so a later converge of the
+        same process at an exporting level — the level coming back down —
+        rebuilds the exports over linears on their dm-errors instead of
+        opening a second window over them. A restart forgets the mark (rule
+        1's known limit).
       * A converge that stops at the side-device gate — *any* DN9 outcome
         short of ready: still provisioning (zeroing, or zeroed and not yet
         released by the CP), or a side-device fault (an unreadable disk,
@@ -1615,8 +1676,8 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
         never the fence: inside the window it re-arms the timer; past it, it
         finishes phase 2 itself. Nothing else would end the window there: the
         timer nils itself before converging, the only other unfences are the
-        two above and neither applies while the source role and the side are
-        still wanted, the agent's one periodic converge — DN8's connect
+        two above and neither applies while the role, the side and its exports
+        are still wanted, the agent's one periodic converge — DN8's connect
         retry, armed only while a destination role's connect is failing —
         would take this same gate, and a `CheckSide` round neither converges
         nor bumps a revision. One transient probe failure would otherwise
@@ -1631,7 +1692,8 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
       `RES_STATUS_OK` with `details = "suspended (migration cutover grace
       window)"`: it is an expected, time-bounded state, and the probe expects
       the **pre-fence** table there rather than the dm-error, so a healthy
-      cutover never reports a table mismatch.
+      cutover reports no table mismatch — except in rule 1's known-limit
+      second window, opened over tables phase 2 has already swapped.
 
       **Ending the role removes nothing directly.** `DnMigrSrcName` and its
       `MigrSrcNqn` export simply stop being wanted, and the sweep takes them
@@ -1976,9 +2038,10 @@ Recorded for traceability; the edits are already applied.
   the window rather than replayed onto the side's data — the replay was the
   half of the original hazard that risked src/dst divergence. The other half
   (a suspended device wedging any block-device scanner in D state) is
-  unchanged and is why the window is bounded, never restarted across an agent
-  restart, and always undone before teardown. Requested by the project owner
-  after the retired plan's [P3] had removed the suspension entirely.
+  unchanged and is why the window is bounded, adopted as elapsed by an
+  agent restart that finds its linears suspended, and always undone before
+  teardown. Requested by the project owner after the retired plan's [P3] had
+  removed the suspension entirely.
 * `dnagent.md` DN9/DN11/DN18 + `architecture.md` §8.4/§11.7/[D11]
   (the retired plan's [P1]/[P2]) — `SP_LEVEL_READONLY` now means exactly
   "every user-facing namespace is read-only: reads served, writes fail with
@@ -2192,9 +2255,37 @@ able to fail.
     detail; a probe inside the window mutates nothing. With the window
     elapsed they are reloaded onto their dm-errors and resumed. A timer ends
     the window unattended; cancelling the role, dropping the side from its
-    DN's list, and restarting the agent all end it without leaving anything
-    suspended, and a sweep inside the window resumes before it disables any
-    namespace. A
+    DN's list, raising the level to `SP_LEVEL_NO_SIDE` and restarting the
+    agent — one whose probes find the linears suspended — all end it without
+    leaving anything suspended, and a sweep inside the window, unless its
+    request also ends the source role, puts each fenced linear on its
+    dm-error and resumes it before it disables any namespace above it
+    (*amended 2026-09-28*; `TestTeardownInsideTheFenceWindow`,
+    `TestNoSideInsideTheFenceWindow`).
+    The fake names every namespace disable issued over a suspended device —
+    a write that does not return while the device holds any of that
+    namespace's IO — and records the table each resume of a suspended
+    device releases the deferred IO against, which must be the dm-error; at
+    `SP_LEVEL_NO_SIDE` the linears stay, nothing suspends them again, and
+    the reply and a later probe both read them OK outside the window. A
+    linear the sweep cannot bring out of suspension — its reload refused,
+    or killed before or after the ioctl — holds every export, named as a
+    leftover, until the next pass removes them, and is still retired onto
+    its dm-error, never resumed onto its pre-fence table, by the same
+    pass's build phase (`TestNoSideRetireFailureHoldsTheExports`) or, when
+    that pass stops at the DN9 gate, by the gate's fence bookkeeping
+    (`TestNoSideRetireFailureAtTheGate`). A linear whose probe does not
+    answer holds the exports too, named as leftovers, until a pass whose
+    probe of it answers takes them, the linear retired onto its dm-error
+    first (`TestNoSideProbeFailureHoldsTheExports`). A fenced linear whose
+    export the pass cannot attribute — its `device_path` read did not
+    answer — is still retired onto its dm-error before L2 tries to remove
+    it (`TestTeardownInsideTheFenceWindowOverAnUnreadExport`). The window the
+    level ended stays over when the level comes back down — nothing
+    suspended, the exports rebuilt over the dm-errors, a probe reading every
+    row OK (`TestNoSideThenLevelDownOpensNoSecondWindow`) — but not past the
+    role: the side's next migration gets its whole window
+    (`TestFenceEndedDoesNotOutliveTheRole`). A
     fence **adopted** across a restart settles even when the converge that
     adopts it stops at the DN9 gate: every per-CN linear is reloaded onto its
     dm-error and resumed, and no timer is armed for a window that is already

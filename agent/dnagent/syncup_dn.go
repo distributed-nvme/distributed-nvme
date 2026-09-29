@@ -74,7 +74,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		st := newSideState(req)
 		// Any per-CN linear this side left suspended belongs to the previous
 		// process; DN12 retires it at once rather than opening a second
-		// grace window.
+		// grace window — provided adoptFence finds one of them suspended. If
+		// none of its probes answers it finds nothing, which is DN12 rule 1's
+		// known limit.
 		s.adoptFence(ctx, st)
 		s.putSide(key, st)
 	}

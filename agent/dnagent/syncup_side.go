@@ -97,7 +97,9 @@ func (s *DnAgentServer) convergeSide(
 		// The §11.2 fence is the one thing the gate may not skip: a window
 		// opened by an earlier pass is a suspension already in place, and
 		// [D12] bounds it at the window plus one converge whatever the side
-		// device is doing.
+		// device is doing. That holds for every window this process opened,
+		// adopted or ended; DN12 rule 1's known limit is a suspension it
+		// knows nothing of, which settleFence cannot settle.
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info)
 		return info, sweep
@@ -455,10 +457,12 @@ func fenceDetails(err error) string {
 // the §11.2 grace window — an expected, time-bounded state, not a fault.
 const fenceSuspendedDetails = "suspended (migration cutover grace window)"
 
-// ensureDmLinearSuspended is phase 1 of the fence: the device must exist,
-// carry its pre-fence table, and be suspended. It never swaps the table —
-// the swap onto dm-error is phase 2, and doing it here would defeat the
-// window by erroring the very IO the window exists to absorb.
+// ensureDmLinearSuspended is phase 1 of the fence: the device must exist and
+// be suspended, on whatever table it carries — its pre-fence one, except in
+// DN12 rule 1's known-limit second window, which a restart opens over the
+// dm-error phase 2 had already installed. It never swaps the table — the
+// swap onto dm-error is phase 2, and doing it here would defeat the window
+// by erroring the very IO the window exists to absorb.
 func (s *DnAgentServer) ensureDmLinearSuspended(
 	ctx context.Context,
 	name string,
@@ -777,10 +781,13 @@ func (s *DnAgentServer) removeDm(ctx context.Context, name string) bool {
 	if dev == nil {
 		return true
 	}
-	// `dmsetup remove` does not succeed on a suspended device, and a side
-	// torn down inside the §11.2 grace window still has its per-CN linears
-	// suspended. Resume first; the queued IO drains against whatever table
-	// is live, which for a fenced linear is its pre-fence one.
+	// `dmsetup remove` does not succeed on a suspended device. A per-CN
+	// linear the §11.2 fence suspended never gets here that way — the
+	// sweep's pre-step has resumed it (a request that ends the source role)
+	// or its P0 has put it on its dm-error — so what the agent itself leaves
+	// suspended here is a device whose reload was cut off between its
+	// suspend and its resume. Resume first; the queued IO drains against
+	// whatever table is live.
 	if dev.Suspended {
 		if err := s.dm.Resume(ctx, name); err != nil {
 			slog.ErrorContext(ctx, "resuming a suspended dm device failed",
