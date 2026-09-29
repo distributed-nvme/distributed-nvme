@@ -192,15 +192,33 @@ func (s *Server) CreateThinDevice(
 	return &pb.CreateThinDeviceReply{TdId: tdId, DevId: devId}, nil
 }
 
-// DeleteThinDevice is architecture.md §8.7's DeleteThinDevice.
+// DeleteThinDevice is architecture.md §8.7's DeleteThinDevice: a plan, then a
+// deciding STM that verifies it, run in the candidate unit's loop (GW9).
 //
-// Its three FAILED_PRECONDITION guards are all evaluated from reads made
-// inside the deleting transaction, which is what makes them race-proof: a
-// CreateNamespace, a CreateClone or a CreateThinDevice snapshotting this td
-// that commits concurrently touches a key this transaction read, so one of the
-// two aborts and the client retries against the state that actually won
-// (§5.8/§5.9). Checking them from a pre-read would leave exactly the window
-// the guards exist to close.
+// Its three FAILED_PRECONDITION guards are decided inside the deleting
+// transaction, which is what makes them race-proof: a CreateNamespace, a
+// CreateClone or a CreateThinDevice snapshotting this td that commits
+// concurrently touches a key this transaction read, so the later of the two to
+// commit conflicts and etcdutil re-runs it against the state that actually
+// won; a request that carries a token then fails GW6, ABORTED, and its client
+// retries (§5.8/§5.9).
+//
+// The third guard's walk is the one read the transaction does not make. Finding
+// the snapshots of this td means reading every td of the SP, and a transaction
+// compares every key it read: toward the MaxTdCntPerSp ceiling that walk took
+// the delete past EtcdMaxTxnOps and etcd refused it, so that no td of a full
+// pool could be deleted at all. The walk is therefore the PLAN, a read-only
+// Snapshot, and the deciding STM re-reads only the snapshots the plan found —
+// after checking that the SP it resolved is the one the plan walked and that
+// SpRev still carries the revision the plan was read at. Every write to a td
+// bumps SpRev (§5.5), so a snapshot created between the plan and the delete's
+// commit either moves that revision before the STM reads it, and the round
+// re-plans, or commits after that read and conflicts the transaction on the
+// SpRev key, whose re-run re-plans the same way. That is the token-less path.
+// A request that carries a token does not get that far: its token is the
+// revision the plan read, so openSp's GW6 check refuses the moved revision
+// first, ABORTED "stale revision". The SP's identity and its revision are what
+// the plan is verified by; nothing is counted on the origin.
 //
 // Deleting the origin of snapshots is allowed once every snapshot of it is
 // created — dm-thin snapshots stay valid without their origin — which is why
@@ -221,12 +239,126 @@ func (s *Server) DeleteThinDevice(
 		return nil, err
 	}
 	var tdId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+	err := candidateUnit(ctx, func() error {
+		tdId = 0
+		plan, err := planDeleteThinDevice(ctx, s.cli, req)
+		if err != nil {
+			return err
+		}
+		tdDeletePlanned()
+		tdId, err = decideDeleteThinDevice(ctx, s.cli, req, plan)
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	return &pb.DeleteThinDeviceReply{TdId: tdId}, nil
+}
+
+// tdDeletePlanned runs in every DeleteThinDevice round between a plan that
+// succeeded and the deciding STM, and does nothing in production. It is the
+// seam a test drives the other side of a race through: a write committed here
+// lands in exactly the window the plan opens, one actor after the other rather
+// than concurrently, and counting its calls counts the plans that went on to
+// a deciding STM.
+var tdDeletePlanned = func() {}
+
+// tdDeletePlan is what DeleteThinDevice's plan hands its deciding STM.
+type tdDeletePlan struct {
+	// Cid and SpId identify the SP incarnation the plan walked: a recreated
+	// SP's SpRev starts again at 1, so its revision alone cannot tell two
+	// incarnations of one sp_name apart.
+	Cid  uint64
+	SpId uint64
+	// SpRevision is SpRev.revision as the plan read it: the pool revision the
+	// deciding STM verifies the plan against.
+	SpRevision uint64
+	// Snapshots names the uncreated snapshots of the target the plan found,
+	// in td_name_list order.
+	Snapshots []string
+}
+
+// planDeleteThinDevice is DeleteThinDevice's plan: one read-only Snapshot
+// (§5.8) that walks td_name_list for the target's uncreated snapshots.
+//
+// It opens with openSp, so a stale token is ABORTED before any other state
+// check exactly as in the deciding STM (GW6), and it refuses what the revision
+// it read already proves: NOT_FOUND for an absent td, and ABORTED for a listed
+// td whose key is gone, since a delete that cannot prove the td has no
+// uncreated snapshot must not proceed.
+func planDeleteThinDevice(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	req *pb.DeleteThinDeviceRequest,
+) (tdDeletePlan, error) {
+	var plan tdDeletePlan
+	err := cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		plan = tdDeletePlan{}
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
+		if err != nil {
+			return err
+		}
+		td := &pb.ThinDevice{}
+		if !stm.Get(
+			model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetTdName()), td,
+		) {
+			return errNotFound(
+				"thin device %q not found", req.GetTdName())
+		}
+		snapshots, err := tdUncreatedSnapshots(stm, sc,
+			sc.Conf.GetTdNameList(), req.GetTdName(), td.GetDevId())
+		if err != nil {
+			return err
+		}
+		plan = tdDeletePlan{
+			Cid:        sc.Cid,
+			SpId:       sc.SpId(),
+			SpRevision: sc.Rev.GetRevision(),
+			Snapshots:  snapshots,
+		}
+		return nil
+	})
+	if err != nil {
+		return tdDeletePlan{}, mapStmErr(err)
+	}
+	return plan, nil
+}
+
+// decideDeleteThinDevice is DeleteThinDevice's deciding STM: it verifies the
+// plan against the SP's identity and revision, evaluates the three guards and
+// deletes. A plan the pool has moved past is errCandidateChanged, which the
+// candidate unit answers with a new plan (GW9) — unless the request carries a
+// token the stored revision no longer matches: openSp's GW6 check runs first
+// and refuses that ABORTED "stale revision".
+//
+// What it commits is bounded without the td count: the target td and one key
+// per subsystem and per clone of the SP are its only reads beyond the fixed
+// resolution and token keys, and the snapshots the plan named are re-read only
+// on a path that refuses — with the SP and its revision unchanged each of them
+// still blocks. gateway/txnbudget_test.go's TestDeleteThinDeviceBudget holds
+// the arithmetic.
+func decideDeleteThinDevice(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	req *pb.DeleteThinDeviceRequest,
+	plan tdDeletePlan,
+) (uint64, error) {
+	var tdId uint64
+	err := cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		tdId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
 		if err != nil {
 			return err
+		}
+		if sc.Cid != plan.Cid || sc.SpId() != plan.SpId ||
+			sc.Rev.GetRevision() != plan.SpRevision {
+			// The pool moved after the plan read it, possibly by a snapshot
+			// of this very td that the plan's walk could not see, or the
+			// name now resolves to a recreated SP whose SpRev happens to
+			// stand at the plan's revision.
+			return errCandidateChanged
 		}
 		tdKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), req.GetTdName())
 		td := &pb.ThinDevice{}
@@ -252,12 +384,17 @@ func (s *Server) DeleteThinDevice(
 				"thin device %s is the destination of clone %s",
 				req.GetTdName(), cloneName)
 		}
-		blockers, err := tdUncreatedSnapshots(
-			stm, sc, req.GetTdName(), td.GetDevId())
+		snapshots, err := tdUncreatedSnapshots(stm, sc, plan.Snapshots,
+			req.GetTdName(), td.GetDevId())
 		if err != nil {
 			return err
 		}
-		if len(blockers) != 0 {
+		if len(snapshots) != 0 {
+			blockers := make([]string, 0, len(snapshots))
+			for _, name := range snapshots {
+				blockers = append(blockers, fmt.Sprintf(
+					msgSnapshotNotCreated, name, req.GetTdName()))
+			}
 			return errPrecondition("%s", strings.Join(blockers, "; "))
 		}
 		tdId = td.GetTdId()
@@ -268,9 +405,9 @@ func (s *Server) DeleteThinDevice(
 		return bumpSp(stm, opDeleteThinDevice, sc)
 	})
 	if err != nil {
-		return nil, mapStmErr(err)
+		return 0, err
 	}
-	return &pb.DeleteThinDeviceReply{TdId: tdId}, nil
+	return tdId, nil
 }
 
 // ListThinDevices is architecture.md §8.7's ListThinDevices: one Snapshot over
@@ -383,8 +520,9 @@ func tdCloneRef(
 	return "", false, nil
 }
 
-// tdUncreatedSnapshots is §8.7's third delete guard: one normative sentence
-// per snapshot of devId that has not materialized yet, in td_name_list order.
+// tdUncreatedSnapshots is §8.7's third delete guard: the names, among names,
+// of the snapshots of devId that have not materialized yet, in the order
+// given.
 //
 // The match is on dev_id and not on td_id or name, which is what makes a
 // same-name recreate safe: dev_ids are never reused, so a snapshot left over
@@ -396,17 +534,20 @@ func tdCloneRef(
 // Every blocker is reported rather than only the first: the operator's next
 // step is to wait for all of them, and a one-at-a-time refusal would make that
 // a guessing game. Reads are per key because an STM cannot range (§8.7 allows
-// either shape); they are the ListThinDevices read set, bounded by
-// MaxTdCntPerSp, and being inside the transaction is what makes a snapshot
-// created concurrently conflict this delete.
+// the plan one range instead, but only at the store revision it read SpRev
+// at). The plan passes the whole td_name_list — the ListThinDevices read set,
+// bounded by MaxTdCntPerSp, which is why it is read in a Snapshot and never in
+// the deciding transaction — and the deciding STM only the names the plan
+// returned.
 func tdUncreatedSnapshots(
 	stm etcdutil.STM,
 	sc *spScope,
+	names []string,
 	tdName string,
 	devId uint32,
 ) ([]string, error) {
 	var blockers []string
-	for _, name := range sc.Conf.GetTdNameList() {
+	for _, name := range names {
 		if name == tdName {
 			// The target cannot be its own origin, and its row is already in
 			// the caller's hands.
@@ -418,8 +559,7 @@ func tdUncreatedSnapshots(
 			return nil, errAborted("thin device key %q is missing", key)
 		}
 		if td.GetOriId() == devId && !td.GetCreated() {
-			blockers = append(blockers,
-				fmt.Sprintf(msgSnapshotNotCreated, name, tdName))
+			blockers = append(blockers, name)
 		}
 	}
 	return blockers, nil

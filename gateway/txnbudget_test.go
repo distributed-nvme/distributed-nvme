@@ -420,6 +420,121 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 	}
 }
 
+// The factors of ONE committing DeleteThinDevice, transcribed by hand from the
+// deciding STM of thindevice.go's decideDeleteThinDevice, with the caveat of
+// every set above: nothing in this file reads that STM, so a key added to or
+// taken out of it is invisible here. TestDeleteThinDeviceAtTheTdCeiling in
+// gateway/handler_vol_test.go is the half that meets the real transaction —
+// at the td ceiling, the dimension that used to break it, and with no
+// subsystem or clone in the pool.
+//
+// FIXED — openSp reads ClusterConf, SpConf and SpRev, and the target td is
+// read; the writes are the td's del, the SpConf put and the SpRev put
+// (BumpSpRev's read of SpRev is openSp's, already in the read set).
+// PER SUBSYSTEM — tdNamespaceRef reads each Subsystem of nqn_list once; the
+// namespaces are embedded in that value, so MaxNsCntPerSs never enters.
+// PER CLONE — tdCloneRef reads each Clone of clone_name_list once.
+// PER TD — nothing, and it is the factor this tripwire exists for. The walk
+// for the target's uncreated snapshots is the PLAN's, one read-only Snapshot
+// outside the transaction, and the deciding STM re-reads only the snapshots
+// the plan named, after checking that it resolved the SP the plan walked and
+// that SpRev has not moved since the plan read it. Every write to a td bumps
+// SpRev, so a snapshot the plan named still blocks there and the STM refuses:
+// no td but the target is ever in a committed read set. The identity check
+// reads nothing new — the cluster and sp ids come from keys already counted
+// under FIXED. While the walk sat inside the STM this factor was one
+// per td, and deleting from a pool at MaxTdCntPerSp cost 1030 compares before
+// a single subsystem or clone.
+const (
+	tdDeleteReadsFixed    = 4 // ClusterConf, SpConf, SpRev, the target td
+	tdDeleteWritesFixed   = 3 // td del, SpConf put, SpRev put
+	tdDeleteReadsPerSs    = 1 // the Subsystem
+	tdDeleteReadsPerClone = 1 // the Clone
+	tdDeleteReadsPerTd    = 0 // the walk is the plan's, outside the STM
+	// TODAY's two ceilings and the compare count the factors produce at them
+	// — the 75 common/constants.go's EtcdMaxTxnOps comment and gateway.md
+	// §2.1 quote. Separate assertions, for the clone tripwire's reason: a
+	// ceiling change and a retyped factor must not fail alike.
+	tdDeleteMaxSsCnt    = 4
+	tdDeleteMaxCloneCnt = 64
+	tdDeleteMaxCompares = 75
+)
+
+// TestDeleteThinDeviceBudget is DeleteThinDevice's arithmetic tripwire, and
+// the reason it sits beside the create's: EtcdMaxTxnOps is SIZED by the widest
+// CreateStoragePool, and the delete is the transaction that silently outgrew
+// it — at the td ceiling its deciding STM compared every td of the pool and
+// etcd refused it. The plan/verify split took the td count out of that STM;
+// this is what notices the count coming back, since one read per td takes the
+// budget past EtcdMaxTxnOps in a single step.
+func TestDeleteThinDeviceBudget(t *testing.T) {
+	budget := tdDeleteReadsFixed + tdDeleteWritesFixed +
+		tdDeleteReadsPerSs*common.MaxSsCntPerSp +
+		tdDeleteReadsPerClone*common.MaxCloneCntPerSp +
+		tdDeleteReadsPerTd*common.MaxTdCntPerSp
+	create := spCreateCompares(common.MaxSliceCntPerSp)
+	t.Logf("the widest committing DeleteThinDevice: %d subsystems, %d clones "+
+		"and %d thin devices in the SP, %d compares; the widest "+
+		"CreateStoragePool %d; EtcdMaxTxnOps %d",
+		common.MaxSsCntPerSp, common.MaxCloneCntPerSp, common.MaxTdCntPerSp,
+		budget, create, common.EtcdMaxTxnOps)
+
+	// The CEILINGS, exactly: the two that enter the count. MaxTdCntPerSp is
+	// deliberately not among them — raising it must stay free.
+	if common.MaxSsCntPerSp != tdDeleteMaxSsCnt ||
+		common.MaxCloneCntPerSp != tdDeleteMaxCloneCnt {
+		t.Errorf(
+			"the DeleteThinDevice ceilings moved: MaxSsCntPerSp %d and "+
+				"MaxCloneCntPerSp %d, want the pinned %d and %d. Re-pin "+
+				"tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt and tdDeleteMaxCompares "+
+				"together, and with them the count common/constants.go's "+
+				"EtcdMaxTxnOps comment and gateway.md §2.1 quote",
+			common.MaxSsCntPerSp, common.MaxCloneCntPerSp,
+			tdDeleteMaxSsCnt, tdDeleteMaxCloneCnt)
+	}
+	// The TRANSCRIPTION, evaluated at the PINNED ceilings so that a ceiling
+	// change cannot reach it: it fires when one of the five factors above is
+	// edited without re-deriving tdDeleteMaxCompares — the per-td one above
+	// all — and is blind to anything that happens inside the STM itself.
+	if compares := tdDeleteReadsFixed + tdDeleteWritesFixed +
+		tdDeleteReadsPerSs*tdDeleteMaxSsCnt +
+		tdDeleteReadsPerClone*tdDeleteMaxCloneCnt +
+		tdDeleteReadsPerTd*common.MaxTdCntPerSp; compares !=
+		tdDeleteMaxCompares {
+		t.Errorf(
+			"the DeleteThinDevice factors no longer add up: fixed %d (reads "+
+				"%d + writes %d) + %d per subsystem x %d + %d per clone x %d "+
+				"+ %d per td x MaxTdCntPerSp %d = %d compares, want the "+
+				"pinned %d. Re-read decideDeleteThinDevice's STM against the "+
+				"five factors above; a per-td factor above zero means the "+
+				"walk for uncreated snapshots is back inside the transaction",
+			tdDeleteReadsFixed+tdDeleteWritesFixed, tdDeleteReadsFixed,
+			tdDeleteWritesFixed, tdDeleteReadsPerSs, tdDeleteMaxSsCnt,
+			tdDeleteReadsPerClone, tdDeleteMaxCloneCnt, tdDeleteReadsPerTd,
+			common.MaxTdCntPerSp, compares, tdDeleteMaxCompares)
+	}
+	// The BUDGET, at the ceilings as they stand: the deployment requirement
+	// itself.
+	if budget > common.EtcdMaxTxnOps {
+		t.Errorf(
+			"the widest DeleteThinDevice is %d compares, over the %d dnv "+
+				"requires etcd to allow: keep the td walk out of the deciding "+
+				"STM, or lower MaxSsCntPerSp or MaxCloneCntPerSp",
+			budget, common.EtcdMaxTxnOps)
+	}
+	// And the create stays the widest transaction, which is what
+	// common/constants.go and gateway.md §2.1 say sizes EtcdMaxTxnOps. The
+	// delete is the one that once made that sentence false.
+	if budget > create {
+		t.Errorf(
+			"the widest DeleteThinDevice is %d compares, wider than the "+
+				"widest CreateStoragePool's %d: EtcdMaxTxnOps is no longer "+
+				"sized by the create, and every carrier that says it is — "+
+				"`grep -rn 'SIZED by'` — is wrong",
+			budget, create)
+	}
+}
+
 // mdNameMaxSliceIdx is the widest slice INDEX common/name_fmt.go's two md name
 // formats can carry. Both CnMdDevName and CnMdArrayName fold the meta flag
 // into bit 7 of the index — `if isMeta { sliceIdx |= 0x80 }` — and render the
@@ -427,7 +542,7 @@ func TestCreateStoragePoolBudget(t *testing.T) {
 const mdNameMaxSliceIdx = 0x7f
 
 // TestSliceCeilingFitsTheMdNames is the create's OTHER ceiling check, and the
-// reason it sits next to TestCreateStoragePoolBudget: raising
+// reason it sits in this file with TestCreateStoragePoolBudget: raising
 // MaxSliceCntPerSp runs into a second hard limit besides the etcd budget, and
 // only the budget had a tripwire. The second is a NAME WIDTH, it binds at 128
 // slices where the budget binds at 33, and a breach of it is silent — which is

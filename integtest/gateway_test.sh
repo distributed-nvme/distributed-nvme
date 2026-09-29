@@ -4226,9 +4226,10 @@ case_faults() {
 		gwx FAILED_PRECONDITION create-td --sp sp0 --rev "$SP_REV" \
 		--name tsnap --ori t0
 
-	# §8.7's three delete guards, one probe each. All three are evaluated
-	# from reads made INSIDE the deleting transaction, which is what makes
-	# them race-proof rather than merely correct.
+	# §8.7's three delete guards, one probe each. All three are decided
+	# INSIDE the deleting transaction — the third on the snapshots its plan
+	# found, verified by the pool's identity and revision — which is what
+	# makes them race-proof rather than merely correct.
 	assert_no_write "delete-td backing a namespace" \
 		gwx FAILED_PRECONDITION delete-td --sp sp0 --rev "$SP_REV" --name t0
 	assert_no_write "delete-td that is a clone destination" \

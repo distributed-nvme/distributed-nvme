@@ -1696,20 +1696,35 @@ Errors: `FAILED_PRECONDITION` if the `td_id` is referenced by any `Namespace.td_
 any subsystem of the SP (read `nqn_list` + every `Subsystem` in the same STM — bounded
 by `MaxSsCntPerSp × MaxNsCntPerSs`, cheap) or by any `Clone.dst_td_id`;
 `FAILED_PRECONDITION` if any td of the SP has `ori_id ==` this td's `dev_id` and
-`created == false` (read `td_name_list` + every `ThinDevice` in the same STM — the
-`ListThinDevices` read set, bounded by `MaxTdCntPerSp`), with details naming the
-blocking snapshot(s). A converge's sweep phase runs before its build phase
+`created == false` (read `td_name_list` + every `ThinDevice` — the `ListThinDevices`
+read set, bounded by `MaxTdCntPerSp` — in a read-only etcd `Snapshot` that plans the
+delete, and re-read in the deciding STM only the snapshots that plan found), with details
+naming the blocking snapshot(s). A converge's sweep phase runs before its build phase
 (`cnagent.md` CN9/CN21), so an origin leaving `td_list` in the converge that would
 first materialize its snapshot sends `delete {ori dev_id}` before `create_snap` and
 loses the snapshot for good; the guard is what makes that unreachable. Details name the blocking snapshot(s):
 `snapshot {td_name} of {target} is not created yet`. A snapshot with
 `created == true` does **not** block, and because the match is on `dev_id`,
-which is never reused, no stale snapshot can block a same-name recreate. The td
-reads MAY be served as one range under the `{p} thin_device {cluster_id}
-{sp_id} ` prefix where the `etcdutil` STM wrapper supports prefix reads (one
-`etcd range` record, `log.md` §5.3) and per key otherwise; either way they are
-inside the transaction, so a snapshot created concurrently conflicts it
-(§5.8/§5.9 `ABORTED`, the client retries).
+which is never reused, no stale snapshot can block a same-name recreate. The plan's
+td reads MAY be served as one range under the `{p} thin_device {cluster_id}
+{sp_id} ` prefix where `etcdutil` supports a prefix read pinned to an etcd store
+revision (one `etcd range` record, `log.md` §5.3) and per key otherwise, but always
+at the store revision the plan's `SpRev` was read at: a range served earlier can miss
+a snapshot whose `SpRev` bump the plan then reads, and the deciding STM would find
+nothing moved and delete the origin. Either way they stay OUT of the deciding
+transaction — this RPC's exception to §5.8's one STM: a transaction's compares are its
+reads plus its writes (§8.4), and one compare per td took a full pool's delete past
+`EtcdMaxTxnOps` (§13). The pool's identity and revision close the window between plan
+and STM: every write to a td — a snapshot create, a `created` flip, a delete — bumps
+`SpRev` (§5.5), and the deciding STM evaluates no guard and deletes nothing when the SP
+it resolves is not the one the plan walked (`cluster_id`, `sp_id`: a recreated SP's
+`SpRev` starts again at 1) or its `SpRev.revision` is no longer the one the plan read.
+A snapshot created between the plan and the delete's commit therefore either moves
+that revision before the STM reads it or commits after the read and conflicts the STM
+on the `SpRev` key, whose re-run reads the moved revision. A request carrying the
+token is then refused `ABORTED` ("stale revision") by the token check, which runs
+first and which the plan passed at the old revision; a token-less request re-plans,
+and the new plan finds the snapshot (`gateway.md` §5.6).
 Action: STM: remove from `td_name_list`, delete the key, bump `SpRev`. `dev_id` is never
 reused. Deleting the origin of snapshots is allowed — dm-thin snapshots stay valid —
 once every snapshot of it is created. The

@@ -53,7 +53,7 @@ decision, not an assumption.
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
 | R6 | One STM and one bump **per reply**, covering every td that reply completes (batching allowed). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
 | R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; an ns-dev needs no gate — CN16's backing rules never read `created`, so an uncreated td's ns-dev takes whatever backing CN16 picks: its raid0 in the converge that builds it, unless a clone targets the td or the namespace is parked (U2-S4) — and clone destinations are empty tds ([D3]). |
-| R8 | `DeleteThinDevice` of an origin is refused while any snapshot of it has `created == false`, found by reading the SP's tds inside the STM (no reverse index). | Retire runs before build (CN9): an origin leaving `td_list` in the converge that first materializes its snapshot sends `delete {ori dev_id}` before `create_snap` and loses the snapshot for good. `ListThinDevices` already reads the same set in one STM. |
+| R8 | `DeleteThinDevice` of an origin is refused while any snapshot of it has `created == false`, found by reading the SP's tds in a read-only plan that the deciding STM verifies by the pool's identity (`cluster_id`, `sp_id`) and revision (no reverse index, no counter on the origin). | Retire runs before build (CN9): an origin leaving `td_list` in the converge that first materializes its snapshot sends `delete {ori dev_id}` before `create_snap` and loses the snapshot for good. `ListThinDevices` already reads the same set in one STM. |
 | R9 | The cn agent **uses** the flag: `created == true` means "never send a `create_thin`/`create_snap` for this td again" (the `delete {dev_id}` a td leaving `td_list` triggers stays ungated — R2/N4). | A failover sends zero device-set-mutating pool messages instead of one failing `create_thin`/`create_snap` per td × slice (the rebuild's only `dmsetup message` traffic is the CN14 sweep's reserve/release pair — R14), and a pool that lost an id surfaces as `RES_STATUS_ERROR` instead of being silently recreated as an empty volume — which is what the unconditional `create_thin` before this change did. |
 | R10 | The snapshot pre-pass owns every message of an uncreated snapshot; the lazy `createSnapId` fallback and the `snapDone` handoff are removed; `td_list` order carries no meaning. | With the origin guaranteed materialized (R7/R8), same-pass origin-then-snapshot ordering can no longer occur, which was the only reason for both. |
 | R11 | A violated precondition at the agent (a `create_snap` whose origin id the pool lacks) is left to dm-thin: the row reports `RES_STATUS_ERROR` with the dmsetup output and is retried on every converge. | The origin guarantee is the gateway's contract to keep, not the agent's to re-check. |
@@ -158,8 +158,11 @@ pb/schema.proto` hits inside `message ThinDevice`; `clang-format` (the
 
 ## 3. U2 — Gateway: the snapshot precondition and the origin-deletion guard (§8.7)
 
-All three RPCs stay one STM each (§5.8). `cluster_id` is derived in-STM as
-today; every read below is inside the same transaction.
+All three RPCs stay one STM each (§5.8), except that `DeleteThinDevice`'s
+walk over the SP's tds is a read-only plan outside its deciding STM, which
+verifies it by the pool's identity and revision (U2-S2). `cluster_id` is
+derived in-STM as today; every other read below is inside the same
+transaction.
 
 **U2-S1 `CreateThinDevice`.**
 
@@ -183,13 +186,26 @@ today; every read below is inside the same transaction.
   `ori_id == target.dev_id && created == false`. Details name the blocking
   snapshot(s): `snapshot {td_name} of {target} is not created yet`.
 * Read set: `SpConf.td_name_list`, then every `ThinDevice` it names — the
-  `ListThinDevices` read set, bounded by `MaxTdCntPerSp` = 1024 — in the
-  same STM as the existing `Namespace`/`Clone` reference checks, so a
-  snapshot created concurrently conflicts the transaction (§5.8/§5.9
-  `ABORTED`, client retries). `etcdutil` MAY serve the td reads as one
-  range under the `{p} thin_device {cluster_id} {sp_id} ` prefix when its
-  STM wrapper supports prefix reads (logged as one `etcd range`, log.md
-  §5.3), and per key otherwise; either is inside the transaction.
+  `ListThinDevices` read set, bounded by `MaxTdCntPerSp` = 1024 — read in a
+  read-only etcd `Snapshot` that plans the delete, NOT in the deciding STM
+  that runs the existing `Namespace`/`Clone` reference checks: an STM compares
+  every key it read, and at the td ceiling this walk took the delete past
+  `EtcdMaxTxnOps` (gateway.md §2.1). The deciding STM re-reads only the
+  snapshots the plan found, after checking that the SP it resolves is the
+  one the plan walked (`cluster_id`, `sp_id`: a recreated SP's `SpRev`
+  starts again at 1) and that its `SpRev.revision` is still the one the
+  plan read. A snapshot created between the plan and the delete's commit
+  bumps `SpRev`, so the deciding STM reads the moved revision, on its first
+  run or on the re-run its `SpRev` conflict causes: a token-less delete
+  then re-plans and finds the snapshot (gateway.md §5.6, GW9), and a
+  token-carrying one is refused `ABORTED` ("stale revision") by GW6, whose
+  check runs first. `etcdutil` MAY serve the plan's td reads as one
+  range under the `{p} thin_device {cluster_id} {sp_id} ` prefix when it
+  supports a prefix read pinned to an etcd store revision (logged as one
+  `etcd range`, log.md §5.3), and per key otherwise — either way at the
+  store revision the plan's `SpRev` was read at: a range served earlier can
+  miss a snapshot whose `SpRev` bump the plan then reads, and the deciding
+  STM would find nothing moved and delete the origin.
 * A snapshot with `created == true` does **not** block: dm-thin snapshots
   stay valid after their origin is deleted (§8.7, unchanged). The match is
   on `dev_id`, which is never reused, so no stale snapshot can block a
@@ -256,10 +272,12 @@ is the inventory of record and re-scoped this list, §9 item 5).**
 * **U2-T5** Same-name recreate: create td `a` (`dev_id` 1), delete it,
   create `a` again ⇒ new `td_id`, `dev_id` 2, `created = false`; a snapshot
   record left over with `ori_id = 1` does not block deleting the new `a`.
-* **U2-T6** The scan is transactional: a test that injects a concurrent
-  `CreateThinDevice` (snapshot of the target) between the STM's read and
-  its commit sees the delete retried and then refused, never a deleted
-  origin with a live uncreated snapshot.
+* **U2-T6** The scan is verified: with a concurrent `CreateThinDevice`
+  (snapshot of the target) committed between the plan's walk and the
+  deciding STM, or between the STM's read and its commit, a token-less
+  delete is re-planned and then refused `FAILED_PRECONDITION`, and a
+  token-carrying one is refused `ABORTED` (stale revision) — never a
+  deleted origin with a live uncreated snapshot.
 
 ---
 
@@ -630,7 +648,10 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
   (read `td_name_list` + every `ThinDevice` in the same STM — the
   `ListThinDevices` read set, bounded by `MaxTdCntPerSp`)". Keep "Deleting
   the origin of snapshots is allowed — dm-thin snapshots stay valid" and
-  qualify it with "once every snapshot of it is created".
+  qualify it with "once every snapshot of it is created". (The read-set
+  clause has since been rewritten in place: the td walk is a read-only plan
+  outside the deciding STM, verified by the pool's identity and revision —
+  U2-S2.)
 * §8.7 **ListThinDevices** — append "`name_to_td` carries `created`; it is
   the client's wait primitive before snapshotting".
 * §9.5 — after the `td_id_to_thin_info[td].slice_id_to_dm_thin` sentence,
@@ -740,14 +761,27 @@ amendments section, citing `ThinDeviceCreated.md U*n*`.
    `TestSpCreatedFlipFromACheckRound` /
    `TestSpCreatedFlipIgnoresTheReplyRevision`). Only U2-T6's injected
    mid-STM race remains covered structurally (GW8/EU4's serializable STM):
-   `etcdutil.Client.run` has no seam to inject it through, and the outcome
-   is unreachable anyway for a token-carrying create — a real concurrent
-   create bumps `SpRev`, so GW6's token check refuses the retry first. Since
-   GW6 became presence-based (gateway.md §0 #7), a *token-less*
-   `CreateThinDevice` does reach that race; it is then serialized by the
-   serializable STM alone, which is what the structural coverage above
-   asserts, and the residual exposure is the token-less lost update of
-   gateway.md §0 #7.
+   `etcdutil.Client.run` has no seam to inject it through, and a
+   token-carrying delete never reaches the guard there anyway — a real
+   concurrent create bumps `SpRev`, so GW6's token check refuses the
+   delete's retry first. Since GW6 became presence-based (gateway.md §0 #7), a
+   *token-less* `DeleteThinDevice` does reach that race; it is then
+   serialized by the serializable STM alone, which is what the structural
+   coverage above asserts, and the residual exposure is the token-less lost
+   update of gateway.md §0 #7. Since U2-S2's plan, the delete's STM re-run
+   does not walk the tds itself: it finds `SpRev` moved and answers
+   candidate-changed, and GW9's loop re-plans. The same check guards the
+   window the plan opens ahead of the deciding STM — a snapshot committed
+   between the plan's walk and that STM — and that window does have a seam,
+   a hook the gateway calls between the two: `gateway/handler_vol_test.go`'s
+   `TestDeleteThinDeviceReplansAfterAConcurrentSnapshot` commits the create
+   through it after the first plan, and requires a token-less delete to
+   refuse naming the snapshot after exactly two plans and a token-carrying
+   one to be refused `ABORTED` ("stale revision") after one, with nothing
+   written either way. `TestDeleteThinDeviceReplansAfterAPoolRecreate` pins
+   the identity half of the check through the same hook: a delete whose SP
+   is recreated under its name at the plan's revision must plan again
+   rather than decide on the old SP's plan.
 
 ---
 

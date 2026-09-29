@@ -192,8 +192,8 @@ authoritative for comment text (as it is for `dnagent.md` §2.2's block).
 // dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
 // another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
 // arithmetic tripwired against it is that section's for CreateStoragePool
-// and dnv-worker.md §11.6's and §11.7's for the two drains — SPD13/SPD14
-// for the sp drain, CLD11 for the clone drain.
+// and DeleteThinDevice and dnv-worker.md §11.6's and §11.7's for the two
+// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 const (
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).

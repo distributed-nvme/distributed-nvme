@@ -136,7 +136,9 @@ func mapModelErr(err error) error {
 
 // errCandidateChanged is the sentinel an allocating STM closure returns when
 // one pick's exact capacity key — the key the scan outside the transaction saw
-// — is no longer there. It is never surfaced to a client (§0 #8).
+// — is no longer there. DeleteThinDevice's deciding STM returns it too, for a
+// stale plan: another SP than the one the plan walked, or, for a token-less
+// request, a moved SpRev. It is never surfaced to a client (§0 #8).
 var errCandidateChanged = errors.New("gateway: candidate changed")
 
 // isCandidateChanged reports whether err is that sentinel.

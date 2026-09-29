@@ -367,8 +367,9 @@ const (
 
 	// dnv-worker (dnv-worker.md §2.1), plus one constant this block holds for
 	// another document: EtcdMaxTxnOps is gateway.md §2.1's addition, and the
-	// arithmetic tripwired against it is dnv-worker.md §11.6's and §11.7's —
-	// SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
+	// arithmetic tripwired against it is that section's for CreateStoragePool
+	// and DeleteThinDevice and dnv-worker.md §11.6's and §11.7's for the two
+	// drains — SPD13/SPD14 for the sp drain, CLD11 for the clone drain.
 	//
 	// Seconds between two refreshes of a worker's registry key (VW2); a
 	// registration not refreshed for 2 × this is dead (VW3).
@@ -418,6 +419,18 @@ const (
 	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
 	// committed against a real etcd by model/drain_test.go's
 	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6).
+	//
+	// DeleteThinDevice stays below both, whatever the td count: its deciding
+	// STM commits having read the fixed resolution and token keys, the target
+	// td and one key per subsystem and per clone of the SP, so with its three
+	// writes it is 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the
+	// ceilings (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
+	// walk over every td for uncreated snapshots is a read-only plan outside
+	// the transaction, verified inside it by the pool's identity and revision
+	// (architecture.md §8.7), and TestDeleteThinDeviceAtTheTdCeiling commits a
+	// delete in a pool of MaxTdCntPerSp tds. While that walk sat inside the
+	// STM such a delete cost at least MaxTdCntPerSp + 6 = 1030 compares, and
+	// etcd refused it.
 	//
 	// DeleteClone's MaxSliceCntPerSp x MaxCloneBmCnt rectangle sweep — then
 	// 256 keys, at the 16-slice ceiling of the time — was this number's

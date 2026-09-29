@@ -924,9 +924,10 @@ func TestCreateThinDeviceRefusals(t *testing.T) {
 // TestDeleteThinDeviceReferenceGuards pins §8.7's three FAILED_PRECONDITION
 // guards, each with nothing written: a td that backs a namespace, a td that is
 // the destination of a clone, and a td with a snapshot the sp-worker has not
-// materialized yet. All three are evaluated from reads made INSIDE the
-// deleting transaction, which is what makes a concurrent create conflict
-// rather than slip through.
+// materialized yet. All three are decided INSIDE the deleting transaction —
+// the third on the snapshots its plan found, verified by the pool's identity
+// and revision — which is what makes a concurrent create conflict rather than
+// slip through.
 func TestDeleteThinDeviceReferenceGuards(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1051,6 +1052,314 @@ func TestDeleteThinDeviceHappyPath(t *testing.T) {
 	}
 	if got := env.spRev(); got != 2 {
 		t.Errorf("sp_rev: got %d, want 2", got)
+	}
+}
+
+// TestDeleteThinDeviceAtTheTdCeiling is the delete's half of the txn budget,
+// committed against the real etcd this package starts with
+// --max-txn-ops=common.EtcdMaxTxnOps: a pool holding MaxTdCntPerSp thin
+// devices, every one of them written by CreateThinDevice itself, must still
+// let one of them go.
+//
+// The td ceiling is what makes this the case to pin. The third guard walks
+// td_name_list for uncreated snapshots of the target, and a deciding STM that
+// made that walk itself compared every td it read: 3 writes and 4 fixed reads,
+// the target among them, plus one per other td came to MaxTdCntPerSp + 6 =
+// 1030 compares here, past the 1024 etcd accepts. From 1019 tds up — fewer
+// once the pool has subsystems or clones — no td of the pool could be deleted
+// at all, whichever one was named, and nothing else shrinks td_name_list.
+// TestDeleteThinDeviceBudget pins the arithmetic of the STM that replaced it.
+//
+// The tokens are counted rather than read back: each create must bump SpRev
+// exactly once for the next one's token to match, so the loop asserts that as
+// it goes without a read per iteration.
+func TestDeleteThinDeviceAtTheTdCeiling(t *testing.T) {
+	env := newVolEnv(t)
+	name := func(idx int) string { return fmt.Sprintf("ceiling-%04d", idx) }
+	rev := env.spRev()
+	for idx := 0; idx < common.MaxTdCntPerSp; idx++ {
+		_, err := env.srv.CreateThinDevice(env.ctx, &pb.CreateThinDeviceRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       &pb.SpRev{Revision: rev},
+			TdName:      name(idx),
+			Size:        volTdSize,
+		})
+		if err != nil {
+			t.Fatalf("CreateThinDevice %d of %d: %v",
+				idx+1, common.MaxTdCntPerSp, err)
+		}
+		rev++
+	}
+	first := env.td(name(0))
+	reply, err := env.srv.DeleteThinDevice(env.ctx, &pb.DeleteThinDeviceRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       &pb.SpRev{Revision: rev},
+		TdName:      name(0),
+	})
+	if err != nil {
+		t.Fatalf("DeleteThinDevice of %s in a pool of %d thin devices: %v "+
+			"(\"etcdserver: too many operations in txn request\" here means "+
+			"the deciding transaction reads the pool's thin devices again)",
+			name(0), common.MaxTdCntPerSp, err)
+	}
+	if reply.GetTdId() != first.GetTdId() {
+		t.Errorf("reply td_id: got %d, want %d",
+			reply.GetTdId(), first.GetTdId())
+	}
+	if env.exists(
+		model.ThinDeviceKey(env.cid, volSpId, name(0)), &pb.ThinDevice{},
+	) {
+		t.Errorf("the row of %s must be gone", name(0))
+	}
+	names := env.spConf().GetTdNameList()
+	if len(names) != common.MaxTdCntPerSp-1 || containsName(names, name(0)) {
+		t.Errorf("td_name_list: got %d names (%s among them: %v), want the "+
+			"other %d", len(names), name(0), containsName(names, name(0)),
+			common.MaxTdCntPerSp-1)
+	}
+	if got := env.spRev(); got != rev+1 {
+		t.Errorf("sp_rev: got %d, want %d (one bump for the delete)",
+			got, rev+1)
+	}
+}
+
+// setTdDeletePlanned installs hook as DeleteThinDevice's seam between its plan
+// and its deciding STM for the rest of the test, and puts the no-op back after
+// it. The seam is package state, which is safe because no test of this
+// package runs in parallel with another.
+func setTdDeletePlanned(t *testing.T, hook func()) {
+	t.Helper()
+	saved := tdDeletePlanned
+	tdDeletePlanned = hook
+	t.Cleanup(func() { tdDeletePlanned = saved })
+}
+
+// TestDeleteThinDeviceReplansAfterAConcurrentSnapshot is the verify half of the
+// delete's plan/verify split, with the two actors run in the order a race would
+// interleave them: the plan walks the pool and finds no uncreated snapshot of
+// vol, a snapshot of vol then commits through the seam between the plan and
+// the deciding STM, and only then does the deciding STM run on that plan. That
+// STM does not walk td_name_list, so none of its reads names the snapshot as a
+// blocker and the pool revision is the one thing that can notice. A deciding
+// STM that trusted its plan would delete an origin whose snapshot the primary
+// has not materialized yet — the loss the guard exists to prevent.
+//
+// The two cases are GW6's two modes, and they end differently. A token-less
+// delete reaches the revision compare, answers candidate-changed and plans
+// again: exactly two rounds, the second of which finds the snapshot, so the
+// refusal names it. A delete carrying the token never gets that far: its
+// token is the revision the plan read, so the deciding STM's token check
+// refuses the moved revision first — ABORTED "stale revision" after one
+// round, and no second plan. Counting the rounds is what pins the candidate
+// unit's loop itself: a delete run as a single round would hand the
+// token-less client the internal candidate-changed instead of the refusal.
+func TestDeleteThinDeviceReplansAfterAConcurrentSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		token      bool
+		wantCode   codes.Code
+		wantMsg    string
+		wantRounds int
+	}{
+		{
+			name:       "without a token",
+			wantCode:   codes.FailedPrecondition,
+			wantMsg:    "snapshot snap of vol is not created yet",
+			wantRounds: 2,
+		},
+		{
+			name:       "with the token",
+			token:      true,
+			wantCode:   codes.Aborted,
+			wantMsg:    msgStaleRevision,
+			wantRounds: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.putTd("vol", 900, 7, 0, true)
+			req := &pb.DeleteThinDeviceRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				TdName:      "vol",
+			}
+			if tc.token {
+				req.SpRev = env.token()
+			}
+			var before *pb.SpConf
+			var beforeRev uint64
+			rounds := 0
+			setTdDeletePlanned(t, func() {
+				rounds++
+				if rounds > 1 {
+					return
+				}
+				if _, err := env.srv.CreateThinDevice(
+					env.ctx, &pb.CreateThinDeviceRequest{
+						ClusterName: env.cluster,
+						SpName:      volSpName,
+						SpRev:       env.token(),
+						TdName:      "snap",
+						OriName:     "vol",
+					},
+				); err != nil {
+					t.Fatalf("CreateThinDevice snap: %v", err)
+				}
+				before = env.spConf()
+				beforeRev = env.spRev()
+			})
+
+			_, err := env.srv.DeleteThinDevice(env.ctx, req)
+			if rounds != tc.wantRounds {
+				t.Errorf("plan rounds: got %d, want %d", rounds, tc.wantRounds)
+			}
+			if rounds == 0 {
+				t.Fatalf("the seam never ran: %v", err)
+			}
+			msg := volWantCode(t, err, tc.wantCode)
+			if msg != tc.wantMsg {
+				t.Errorf("message: got %q, want %q", msg, tc.wantMsg)
+			}
+			env.wantUntouched(before, beforeRev)
+			if !env.exists(
+				model.ThinDeviceKey(env.cid, volSpId, "vol"),
+				&pb.ThinDevice{},
+			) {
+				t.Errorf("the origin of an uncreated snapshot must keep " +
+					"its row")
+			}
+		})
+	}
+}
+
+// TestDeleteThinDeviceReplansAfterAPoolRecreate pins the other half of what the
+// deciding STM verifies: that the SP it resolves is the SP its plan walked, and
+// not only that SpRev carries the plan's revision. Every transaction resolves
+// the cluster and sp_name afresh, and SpRev belongs to one incarnation of an
+// SP — CreateStoragePool starts a recreated one at revision 1 again — so a
+// pool torn down and recreated under the same name between the plan and the
+// STM can stand at the plan's revision with other thin devices behind it.
+// Here the plan walks the fixture SP and finds no snapshot of vol; through the
+// seam the name then passes to a new incarnation at that same revision, whose
+// own vol has a snapshot that is not created yet. A deciding STM that compared
+// the revision alone would re-read only the old plan's snapshots — none — and
+// delete the new vol ahead of its snapshot. It must answer candidate-changed
+// instead, and the second plan, walking the new incarnation, finds the
+// snapshot and refuses naming it.
+//
+// Each half of the identity gets its case. Recreating the SP alone mints a new
+// sp_id in the same cluster; recreating the whole cluster keeps the sp_id —
+// the first SP of a fresh cluster can draw the id the old one had — and moves
+// the cluster id instead, since that folds in a new creation_epoch. The token
+// does not help in either, so both modes run: the one a request carries is the
+// plan's revision, which the new incarnation also stands at. The new
+// incarnation is written directly — the state a full teardown and recreate
+// inside one plan-to-STM gap would leave — and only the keys a delete reads
+// are rewritten.
+func TestDeleteThinDeviceReplansAfterAPoolRecreate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cluster bool
+		token   bool
+	}{
+		{name: "sp recreated, without a token"},
+		{name: "sp recreated, with the token", token: true},
+		{name: "cluster recreated, without a token", cluster: true},
+		{name: "cluster recreated, with the token", cluster: true, token: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.putTd("vol", 900, 7, 0, true)
+			planRev := env.spRev()
+			req := &pb.DeleteThinDeviceRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				TdName:      "vol",
+			}
+			if tc.token {
+				req.SpRev = &pb.SpRev{Revision: planRev}
+			}
+			newCid, newSpId := env.cid, volSpId+1
+			newEpoch := env.cc.GetCreationEpoch() + 1
+			if tc.cluster {
+				newCid, newSpId = model.ClusterId(env.cluster, newEpoch),
+					volSpId
+			}
+			recreated := volSpConf()
+			recreated.SpId = newSpId
+			recreated.TdNameList = []string{"vol", "snap"}
+			rounds := 0
+			setTdDeletePlanned(t, func() {
+				rounds++
+				if rounds > 1 {
+					return
+				}
+				for _, key := range []string{
+					model.ThinDeviceKey(env.cid, volSpId, "vol"),
+					model.SpRevKey(volShard, env.cid, volSpId),
+					model.SpNameKey(env.cid, volSpId),
+					model.SpConfKey(env.cid, volSpName),
+				} {
+					if err := env.cli.Delete(env.ctx, key); err != nil {
+						t.Fatalf("Delete %s: %v", key, err)
+					}
+				}
+				if tc.cluster {
+					mustPut(t, env.cli, model.ClusterConfKey(env.cluster),
+						testStoredClusterConf(
+							newEpoch, volExtSize, volPoolBlock))
+				}
+				mustPut(t, env.cli, model.SpConfKey(newCid, volSpName),
+					recreated)
+				mustPut(t, env.cli, model.SpNameKey(newCid, newSpId),
+					&pb.SpName{SpName: volSpName})
+				mustPut(t, env.cli, model.SpRevKey(volShard, newCid, newSpId),
+					&pb.SpRev{SpName: volSpName, Revision: planRev})
+				mustPut(t, env.cli,
+					model.ThinDeviceKey(newCid, newSpId, "vol"),
+					&pb.ThinDevice{
+						TdId: volNextId, DevId: 1, Size: volTdSize,
+						Created: true,
+					})
+				mustPut(t, env.cli,
+					model.ThinDeviceKey(newCid, newSpId, "snap"),
+					&pb.ThinDevice{
+						TdId: volNextId + 1, DevId: 2, OriId: 1,
+						Size: volTdSize,
+					})
+			})
+
+			_, err := env.srv.DeleteThinDevice(env.ctx, req)
+			if rounds != 2 {
+				t.Errorf("plan rounds: got %d, want 2 (the first on the "+
+					"old SP, the second on the new one)", rounds)
+			}
+			msg := volWantCode(t, err, codes.FailedPrecondition)
+			if want := "snapshot snap of vol is not created yet"; msg != want {
+				t.Errorf("message: got %q, want %q", msg, want)
+			}
+			if !env.exists(
+				model.ThinDeviceKey(newCid, newSpId, "vol"),
+				&pb.ThinDevice{},
+			) {
+				t.Errorf("the new SP's vol must keep its row while its " +
+					"snapshot is not created")
+			}
+			conf := &pb.SpConf{}
+			env.get(model.SpConfKey(newCid, volSpName), conf)
+			if !proto.Equal(conf, recreated) {
+				t.Errorf("the new SP's sp_conf moved on a refusal:\n got "+
+					"%v\nwant %v", conf, recreated)
+			}
+			rev := &pb.SpRev{}
+			env.get(model.SpRevKey(volShard, newCid, newSpId), rev)
+			if rev.GetRevision() != planRev {
+				t.Errorf("the new SP's sp_rev: got %d, want %d (a refusal "+
+					"must not bump)", rev.GetRevision(), planRev)
+			}
+		})
 	}
 }
 

@@ -30,7 +30,7 @@ Terminology:
 | resolution | the in-STM reads that turn `cluster_name` (and `sp_name`) into `cid` (and `SpConf`), per architecture.md §5.8 — GW11's resolution of conf DEFAULTS is a different operation, and the text says which it means |
 | token check | asserting `stored.revision == request token revision`, when the request carries the token message at all (GW6) |
 | deciding STM | the STM that commits a mutation; for two-phase RPCs (AG4) it is the second one |
-| candidate unit | one "scan outside + STM commit" round of an allocating RPC (GW9) |
+| candidate unit | one "scan outside + STM commit" round of an allocating RPC, or of `DeleteThinDevice`'s plan and deciding STM (GW9) |
 | plays the worker | the integration suite writing a worker-owned flip (`created`/`provisioned`) or running a worker-owned drain (sp, clone) through `workerctl`, so a gateway precondition can be exercised — or a latch finished — without running dnv-worker (§2.4) |
 
 ---
@@ -265,7 +265,13 @@ CloneBmChunkBytes = 1 << 20
 // dimension — one more key read or written per DN costs 128 compares. The
 // sp drain's D2 batch, 486 compares at the maximum shape (dnv-worker.md
 // §11.6), is the SECOND bounded transaction this number has to cover and no
-// longer the one that sizes it. DeleteClone's MaxSliceCntPerSp x
+// longer the one that sizes it. DeleteThinDevice stays below both whatever
+// the td count, 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 compares at the
+// ceilings (TestDeleteThinDeviceBudget): its deciding STM commits having
+// read no td but its target, because the walk for uncreated snapshots is a
+// read-only plan outside it, verified by the pool's identity and revision
+// (§5.6). While the walk sat inside it a full pool's delete cost at least
+// 1030 compares and etcd refused it. DeleteClone's MaxSliceCntPerSp x
 // MaxCloneBmCnt rectangle sweep — then 256 keys, at the 16-slice ceiling of
 // the time — was this number's founding justification and is gone: the
 // clone drain replaced it with 68-op batches that fit the default (§5.8,
@@ -545,6 +551,12 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
   `ErrPrecondition{"candidate changed"}` when one is gone; on that error —
   and only that error — re-scan and retry until `ctx` ends (then `ABORTED`).
+  `DeleteThinDevice` runs the same loop without allocating: its scan is the
+  plan's walk for uncreated snapshots, and its STM fails candidate-changed
+  when the SP it resolves is not the one the plan walked or its
+  `SpRev.revision` is no longer the one the plan read — though a request
+  carrying the token that finds the revision moved fails GW6 first,
+  `ABORTED` (§5.6).
 * **GW10 — pagination** (`architecture.md` §5.7). `page_token` =
   `base64.StdEncoding.EncodeToString(lastReturnedKey)`; decode failure ⇒
   `INVALID_ARGUMENT`; empty ⇒ start of prefix; range starts at the key
@@ -886,12 +898,29 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   next_dev_id++`, `ori_id` = origin's `dev_id` or 0; put
   `ThinDevice{…, created: false}`; append `td_name_list`; `BumpSpRev`. Reply
   `td_id, dev_id`.
-* **DeleteThinDevice** — STM: resolve; token; td (`NOT_FOUND`);
+* **DeleteThinDevice** — a plan, then a deciding STM, looped as a GW9 unit.
+  Plan, one read-only `Snapshot`: resolve; token; td (`NOT_FOUND`); walk
+  `td_name_list` for the tds with `ori_id == this.dev_id && created ==
+  false` (a listed key missing ⇒ `ABORTED`) and keep their names, the
+  resolved `cluster_id` and `sp_id`, and the `SpRev.revision` it read. The
+  walk is the one read that grows with `MaxTdCntPerSp`, and it stays out of
+  the STM because the STM compares every key it read: inside, it took a
+  full pool's delete past `EtcdMaxTxnOps` (§2.1). STM: resolve; token;
+  `cluster_id`, `sp_id` or `SpRev.revision` ≠ the plan's ⇒ candidate
+  changed, re-plan. The ids are there because a recreated SP's `SpRev`
+  starts again at 1, so the revision alone cannot tell two SPs of one name
+  apart; the revision because every write to a td bumps `SpRev`: a snapshot
+  created between the plan and this STM's commit moves the revision this
+  STM reads, or, committing after that read, conflicts the STM on the
+  `SpRev` key and moves it for the re-run. A token-less request then trips
+  this check and re-plans; a token-carrying one fails the token check
+  before it — its token is the revision the plan read — ⇒ `ABORTED`
+  ("stale revision"), no re-plan. Then td (`NOT_FOUND`);
   `FAILED_PRECONDITION` when referenced by any `Namespace.td_id` (walk
   `nqn_list` → each Subsystem's `ns_list`), by any `Clone.dst_td_id` (walk
-  `clone_name_list`), or when some td has `ori_id == this.dev_id &&
-  created == false` (walk `td_name_list`); delete key, remove from list,
-  `BumpSpRev`. Reply `td_id`.
+  `clone_name_list`), or when a td the plan named still has `ori_id ==
+  this.dev_id && created == false` (re-read those keys only); delete key,
+  remove from list, `BumpSpRev`. Reply `td_id`.
 * **ListThinDevices** — one STM: SpConf + every listed td (missing ⇒
   `ABORTED`) into `name_to_td`. This is the documented client wait primitive
   for `created`.
@@ -1260,6 +1289,18 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    gate of its own (both confs, after its snapshot and before the meta
    ladder) as well as through the scan — and `GrowSlice` and
    `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
+   `DeleteThinDevice` at the thin-device ceiling — `MaxTdCntPerSp` tds
+   created through the RPC, then one of them deleted, committed against the
+   real etcd — beside its arithmetic tripwire, which pins the deciding STM
+   at 75 compares with no per-td term and keeps it below the widest create,
+   and the plan/verify race run in order through a hook between the plan
+   and the deciding STM: a snapshot of the target created there makes a
+   token-less delete plan exactly twice and refuse, naming the snapshot,
+   and one carrying the token fail `ABORTED` ("stale revision") after a
+   single plan, nothing written either way; the same hook recreates the SP
+   under its name at the plan's revision — a new `sp_id`, or a new cluster
+   id with the old `sp_id` — and the delete must plan twice and refuse
+   there too;
    `DeleteStoragePool`'s latch (SpConf + SpRev and nothing else, and a repeat
    delete pinned in BOTH directions: the first must bump, the second must
    not) plus the full-teardown accounting once the drain has run, driven here
