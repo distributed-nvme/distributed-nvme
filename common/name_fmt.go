@@ -242,6 +242,11 @@ func getShortId(clusterId, nodeId uint64) uint32 {
 	return uint32(h.Sum64())
 }
 
+// CnMdDevName is the array's /dev/md/{name} (architecture.md §4.3): 28 hex
+// chars, so even as a named array's kernel disk name ("md_" + 28) it stays
+// within DISK_NAME_LEN (32). grpIdx keeps its two digits only because
+// GrowSlice holds each group list to MaxGrpCntPerSlice
+// (TestMdNamesAtTheGroupCeiling is the tripwire).
 func (nf *NameFmt) CnMdDevName(
 	clusterId uint64,
 	cnId uint64,

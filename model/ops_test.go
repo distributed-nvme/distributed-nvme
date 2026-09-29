@@ -2055,6 +2055,97 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	}
 }
 
+// TestGrowSliceRefusesAFullGroupList pins the §8.5 group ceiling: a group's
+// md names carry its index in its list as two hex digits (§4.3), so GrowSlice
+// refuses to append to a list that already holds MaxGrpCntPerSlice groups,
+// for either kind, and writes nothing. The ceiling is per list: a grow of the
+// other kind still commits on the same slice. The data list is also walked up
+// to the ceiling by one real grow, which pins the boundary: the grow that
+// makes the list exactly full commits, only the next one is refused. The meta
+// list is padded straight to the ceiling, because at one extent per group the
+// ladder would refuse long before it (and the refusal must not depend on
+// that).
+func TestGrowSliceRefusesAFullGroupList(t *testing.T) {
+	pad := func(env *opsEnv, isMeta bool, cnt int) {
+		slice := env.slice()
+		grps := &slice.DataGrpList
+		if isMeta {
+			grps = &slice.MetaGrpList
+		}
+		for len(*grps) < cnt {
+			grp := proto.Clone((*grps)[0]).(*pb.Group)
+			grp.GrpId = 5000 + uint64(len(*grps))
+			*grps = append(*grps, grp)
+		}
+		mustPut(env.t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	}
+	grpCnt := func(env *opsEnv, isMeta bool) int {
+		if isMeta {
+			return len(env.slice().GetMetaGrpList())
+		}
+		return len(env.slice().GetDataGrpList())
+	}
+	for _, tc := range []struct {
+		name   string
+		isMeta bool
+	}{
+		{name: "data", isMeta: false},
+		{name: "meta", isMeta: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			if !tc.isMeta {
+				pad(env, false, common.MaxGrpCntPerSlice-1)
+				if _, err := GrowSlice(
+					env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+					noExpectRev, opsSliceId, false, opsNotPending, env.cc,
+					[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+				); err != nil {
+					t.Fatalf("the grow that fills the list: %v", err)
+				}
+			}
+			pad(env, tc.isMeta, common.MaxGrpCntPerSlice)
+			env.putDn("dn-f0:9000", 970, 5, opsDnFree)
+			env.putDn("dn-f1:9000", 971, 5, opsDnFree)
+			revBefore := env.spRev()
+			nextIdBefore := env.spConf().GetNextId()
+			_, err := GrowSlice(
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				noExpectRev, opsSliceId, tc.isMeta, opsNotPending, env.cc,
+				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")},
+			)
+			precondition := wantPrecondition(t, err, opGrowSlice)
+			if precondition.Reason != ReasonGrpListFull {
+				t.Errorf("Reason: got %q, want %q",
+					precondition.Reason, ReasonGrpListFull)
+			}
+			if got := grpCnt(env, tc.isMeta); got != common.MaxGrpCntPerSlice {
+				t.Errorf("%d groups in the list, want the ceiling %d",
+					got, common.MaxGrpCntPerSlice)
+			}
+			if got := env.dn("dn-f0:9000").GetFreeExtCnt(); got != opsDnFree {
+				t.Errorf("dn-f0 free_ext_cnt: got %d, want %d", got, opsDnFree)
+			}
+			if got := env.spConf().GetNextId(); got != nextIdBefore {
+				t.Errorf("next_id: got %d, want %d", got, nextIdBefore)
+			}
+			if got := env.spRev(); got != revBefore {
+				t.Errorf("an aborted grow must not bump SpRev: got %d", got)
+			}
+			// The ceiling is per list: a full list of one kind leaves the
+			// same slice free to grow the other kind.
+			if _, err := GrowSlice(
+				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+				noExpectRev, opsSliceId, !tc.isMeta, opsNotPending, env.cc,
+				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")},
+			); err != nil {
+				t.Fatalf("a grow of the other kind beside a full %s list: %v",
+					tc.name, err)
+			}
+		})
+	}
+}
+
 func TestGrowSlicePreconditions(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -578,7 +578,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one
      | `FlipProvisioned(cid, shard, spId, sides []SideRef) (written []SideRef)` | slice exists | every listed side still `provisioned == false` is set `true`; bump `SpRev` once iff any was written. The return lists the sides actually flipped, so the §12 `flip applied` record can name each (count = `len(written)`) (§10.3) |
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3, one STM per `MaxFlipCreatedPerTxn` candidates in list order (RW19): skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; each STM bumps once iff it wrote; the return lists the tds actually flipped, as above — on an error, those of the STMs that committed before the failing one, which the sp worker does not log (RW19) |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥` (`old.settling && cntlr_unhealthy > primary_unhealthy ? cntlr_unhealthy : primary_unhealthy`) — "primary_unhealthy not reached" resp. "cntlr_unhealthy not reached for a settling primary" (AR5, *amended 2026-09-26*); `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; set `new.settling`, clear `old.settling` (HL2); bump `SpRev` (§10.4) |
-     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
+     | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; the slice's list of that kind below `common.MaxGrpCntPerSlice` groups (`GrpListFull`, reason `grp_list_full` — `architecture.md` §4.3/§8.5; checked ahead of the sizing, so it holds for a meta grow whatever the ladder says); meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every existing `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in — a missing one is skipped, not rebuilt as the gateway's `CreateCntlr` and `DeleteCntlr` rebuild it (`architecture.md` §8.6); `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; no spare of the group has a side still `provisioned == false` — AR8 step 3's hold re-applied in-STM, which fails a second owner's create for one repair while the first owner's spare is still unprovisioned (AR2; `ErrPrecondition` "spare_unprovisioned"); `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; each has exactly one side ("spare leg has no single side" / "target leg has no single side": a second side is a migration's destination, and a migrating leg is neither promoted nor parked, `architecture.md` §8.12); the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
@@ -1832,8 +1832,8 @@ AR2. **One action per SP per pass** — "action" meaning a *reaction*
      none" and would otherwise be unreachable); AR5's `shared_state` and
      `same_error`, which can hold for as long as the error does — an
      operator's intervention, for a lost thin id; AR6's `grow_pending`,
-     `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
-     grow deferred on the CN, the `architecture.md` §8.5 ceiling — and must not disable
+     `grp_list_full`, `meta_ladder_cap` and `no_data_group` (each can hold
+     indefinitely — a grow deferred on the CN, an `architecture.md` §8.5 ceiling — and must not disable
      AR7/AR8 for the duration); and AR8's `leg_has_two_sides`,
      `spare_list_full`, step 3's `spare_unprovisioned` and step 2's wait for
      a pending spare (`spare_pending`), which move the scan to the next
@@ -2017,7 +2017,12 @@ AR6. Per slice, from the primary's `slice_id_to_dm_pool[slice_id]` row,
      `legs` = 1 (`RedundNone`) or 2 (`RedundMdRaid1`),
      picked randomly with the growing black list so the legs land on
      distinct DNs; fewer than `legs` candidates, or a cntlr's CN below the
-     budget (checked in the op), ⇒ `reaction skipped`.
+     budget (checked in the op), ⇒ `reaction skipped`. A slice whose list of
+     that kind already holds `MaxGrpCntPerSlice` groups (`architecture.md`
+     §8.5) can never grow that kind again: a breach of that kind that is not
+     pending logs `reaction skipped` (`grp_list_full`) without a scan and the
+     pass goes on (AR2); `GrowSlice`'s in-STM refusal carries the same
+     reason, both through `model.GrpListFull`.
 
 ### 11.4 Cntlr replacement
 
@@ -2174,8 +2179,10 @@ true` plus one `BumpSpRev`, five ops, nothing else (architecture.md §8.4,
 gateway.md §5.4) — and the sp coordinator takes it apart in steps whose size
 is a constant. The old one-shot was unbounded in the DN dimension (about 532
 writes at the then-maximum 16-slice shape, over the `EtcdMaxTxnOps` of the
-time, and the slice ceiling has doubled since) and `GrowSlice` makes a slice's
-group count unbounded, so no single transaction could ever be proven legal.
+time, and the slice ceiling has doubled since) and `GrowSlice` lets a slice's
+group count grow far past that shape (to `MaxGrpCntPerSlice`, 255, per group
+list, `architecture.md` §8.5), so no single transaction could ever be proven
+legal.
 
 SPD1. **The allocator's real group shape is a named constant.**
       `MaxAllocLegPerGrp = 2` is the widest group the allocator builds
@@ -2872,7 +2879,12 @@ does).
   it fails if every other pass skips the offer, if the count is read after
   the load, or if the child folds that offer in);
   the AR6 parser on a real status line and on garbage; the pending rule
-  before and after a grow becomes visible (data and meta units); AR7's
+  before and after a grow becomes visible (data and meta units); the
+  `grp_list_full` hold at `MaxGrpCntPerSlice` data groups (no scan, and AR8
+  still repairing in the same pass, or the same slice's meta grow applied;
+  in `model`, `TestGrowSliceRefusesAFullGroupList`: the data grow that
+  fills the list commits, a grow of either kind onto a full list is refused
+  with nothing written, and a grow of the other kind still commits); AR7's
   sole-primary variant, old-CN black list and tier-1 exclusion of the
   other cntlrs' `location`s — every survivor's, which a three-cntlr case
   pins (`TestReactionReplaceCntlrExcludesCntlrLocations`) — and, below the
@@ -4083,6 +4095,11 @@ durable, so nothing is lost — convergence is delayed, not skipped
   a shorter chunk at the agent (cost: extra copying, never correctness).
 * **A group's spare list can fill with parked legs** (AR8 step 4); the
   worker never frees a slot itself.
+* **A slice whose data list holds `MaxGrpCntPerSlice` groups never grows
+  its data again** (AR6): every pass that finds the pool's data usage above
+  `low_water_mark_pct`, with no data grow pending, logs `reaction skipped`
+  (`grp_list_full`) and goes on (AR2). Nothing frees the list, and the pool
+  can run out of data space (`architecture.md` §10.4, Appendix D).
 * **A spare that never connects holds its own group's repair for
   `leg_unhealthy`.** AR8 step 2 waits for a pending spare, and a spare whose
   leg keeps reading `ERROR` stays pending until it has been unhealthy that

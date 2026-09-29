@@ -1981,6 +1981,70 @@ func TestReactionPendingGrowDoesNotBlockThePass(t *testing.T) {
 		h.wantSkipped(reactionGrowMeta, reasonMetaLadderCap)
 		h.wantApplied(reactionSpareCreate)
 	})
+
+	t.Run("leg repair while the data group list is full", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.dnCands(reactDnC, reactDnD)
+		// The §8.5 group ceiling: the data list already holds
+		// MaxGrpCntPerSlice groups, so no data grow can ever run again for
+		// this slice. The pool reports every group's blocks, more than the
+		// pending rule's sum over all but the newest, so the grow is not
+		// pending either: the ceiling is the only thing holding it.
+		for idx := 1; idx < common.MaxGrpCntPerSlice; idx++ {
+			id := uint64(5000 + 10*idx)
+			h.slice().DataGrpList = append(h.slice().DataGrpList, reactGroup(
+				t, id, 2, []uint64{id + 1, id + 2}, []uint64{id + 3, id + 4},
+				[]string{reactDnA, reactDnB},
+			))
+		}
+		dataTotal := reactDataBlocks(t, 2) * common.MaxGrpCntPerSlice
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(1, 1000, dataTotal*90/100, dataTotal))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		// The capped grow ran no scan: the one scan is the spare's.
+		if queries := h.rops.allQueries(); len(queries) != 1 ||
+			queries[0].requiredCnt != 1 {
+			t.Fatalf("queries = %+v, want only the spare's scan", queries)
+		}
+		h.wantSkipped(reactionGrowData, reasonGrpListFull)
+		h.wantApplied(reactionSpareCreate)
+	})
+
+	t.Run("meta grows while the data group list is full", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.dnCands(reactDnC, reactDnD)
+		// The §8.5 group ceiling is per list: a data list at
+		// MaxGrpCntPerSlice holds back no metadata grow, and metadata
+		// filling up puts the pool into needs_check.
+		for idx := 1; idx < common.MaxGrpCntPerSlice; idx++ {
+			id := uint64(5000 + 10*idx)
+			h.slice().DataGrpList = append(h.slice().DataGrpList, reactGroup(
+				t, id, 2, []uint64{id + 1, id + 2}, []uint64{id + 3, id + 4},
+				[]string{reactDnA, reactDnB},
+			))
+		}
+		dataTotal := reactDataBlocks(t, 2) * common.MaxGrpCntPerSlice
+		metaTotal := reactMetaBlocks(t, 1)
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK, poolLine(
+			metaTotal*90/100, metaTotal, dataTotal*90/100, dataTotal,
+		))
+		h.pass()
+		calls := h.wantOps("grow")
+		if !calls[0].isMeta {
+			t.Fatalf("grow = %+v, want the meta grow", calls[0])
+		}
+		// The capped data grow ran no scan: the one scan is the meta's.
+		if queries := h.rops.allQueries(); len(queries) != 1 {
+			t.Fatalf("queries = %+v, want only the meta grow's scan", queries)
+		}
+		h.wantSkipped(reactionGrowData, reasonGrpListFull)
+		h.wantApplied(reactionGrowMeta)
+	})
 }
 
 // TestReactionPreconditionSkips checks AR2's other half: an op that raises

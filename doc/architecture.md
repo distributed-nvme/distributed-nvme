@@ -138,6 +138,7 @@ ClusterConf
 | `MaxCloneCntPerSp` | 64 | `MaxXferCntPerSp` | 4 |
 | `MaxMigrCntPerSp` | 4 | `MaxSideCntPerDn` | 1024 |
 | `MaxLegPerGrp` | 8 | `MaxSpareLegPerGrp` | 2 |
+| `MaxGrpCntPerSlice` (groups in EACH of a slice's two group lists, §4.3 / §8.5) | 255 | | |
 | `MaxCloneBmCnt` (chunks per source slice bitmap, §9.6) | 16 | `MaxMigrBmCnt` (chunks per migration bitmap) | 4 |
 | `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; SIZED by `CreateStoragePool`'s widest shape, 967 compares — §8.4/§13, tripwired by `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget`; the sp drain's 486-compare batch and the created flip's 514-compare transaction are bounded ones over etcd's default too, dnv-worker.md §11.6 / RW19) | 1024 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
@@ -796,7 +797,10 @@ group is a **meta** group, else `slice_idx`:
   `homehost:name` form `mdadm --examine --export` reports).
 
 `grpIdx` is the group's index inside its `meta_grp_list` / `data_grp_list` (stable:
-groups are only appended, never removed).
+groups are only appended, never removed). The two-hex-digit width holds indexes up to
+`0xff`, so GrowSlice refuses to append to a list that already holds
+`MaxGrpCntPerSlice` (255) groups (§8.5): `grpIdx` never exceeds `0xfe`, and a
+tripwire test fails if the ceiling is raised past what `%02x` can carry.
 
 ### 4.4 NQNs
 
@@ -1600,8 +1604,9 @@ deleted `SpRev` and stops dispatching.
 
 Why not one transaction: the old one-shot was unbounded in the DN dimension — about 532
 writes at the THEN-maximum 16-slice shape, over the `EtcdMaxTxnOps` of the time — and
-the slice ceiling has doubled since; `GrowSlice` on top of that makes a
-slice's group count unbounded, so no single transaction could ever be proven legal. What
+the slice ceiling has doubled since; `GrowSlice` on top of that lets a slice's group
+count grow far past that shape (to `MaxGrpCntPerSlice`, 255, per group list, §8.5), so
+no single transaction could ever be proven legal. What
 that transaction actually guaranteed was not atomicity but AGREEMENT — DN and CN budgets
 never disagreeing with the keys that describe them — and the drain keeps it by
 construction: every batch releases budget in the SAME transaction that shrinks the
@@ -1647,7 +1652,10 @@ Errors: `NOT_FOUND` `slice_id` not in `SpConf.slice_id_list`; `INVALID_ARGUMENT`
 `is_meta == false` and `ext_cnt == 0`, or `is_meta == true` and `ext_cnt != 0` (the
 request's `ext_cnt` is only this data/meta **exclusivity signal** — group sizes are
 computed, see below); `FAILED_PRECONDITION` `is_meta == true` and the slice's
-meta total is already at the 16 GiB cap, or `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the
+meta total is already at the 16 GiB cap, or the slice's group list of the requested
+kind already holds `MaxGrpCntPerSlice` (255) groups (§4.3's name width; a count, but
+one nothing frees, since a live slice's groups are only appended — the gateway answers it
+ahead of the candidate scan), or `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the
 model op refuses with "sp level suppresses reactions" — pools are suppressed at
 those levels, so there is nothing to grow; the same gate guards §8.12's
 CreateSpareLeg/SwitchSpareLeg); `RESOURCE_EXHAUSTED` when no DN candidates
@@ -3283,8 +3291,9 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   details, while only the deferred group's own rows report `RES_STATUS_PROVISIONING`;
   the grow completes by itself when the leg clears, and the per-kind "one grow per pool
   at a time" rule is unaffected because the serving pool's usage details keep flowing (§9.4,
-  §9.5, [D15]). Auto-grow is **best-effort** — a grow can find no DN candidates, and
-  nothing reserves space ahead — so a pool's data space can run out before a grow
+  §9.5, [D15]). Auto-grow is **best-effort** — a grow can find no DN candidates, a
+  slice whose data list already holds `MaxGrpCntPerSlice` groups takes no more (§8.5),
+  and nothing reserves space ahead — so a pool's data space can run out before a grow
   lands. The agent writes no feature arguments to the thin-pool table (`cnagent.md`
   CN13), so an exhausted pool behaves as dm-thin's default `queue_if_no_space`: IO
   needing a new block queues for the kernel's `no_space_timeout` (a dm-thin module
@@ -4777,3 +4786,12 @@ exists.
   group: it leaves a failed leg there in place — unless another spare of the group is
   or becomes ready to switch in — until that DN comes back and finishes zeroing the
   spare or an operator runs `DeleteSpareLeg` (`dnv-worker.md` AR8 step 3, Appendix B).
+* **A slice's data space is capped when its SP is created.** Every data grow — the
+  worker's or a user's — appends a group of the slice's first data group's size, which
+  is `init_ext_cnt` extents (§6.5, §8.5), and a slice's data list holds at most
+  `MaxGrpCntPerSlice` (255) groups (§4.3), so a slice's data space tops out at 255
+  groups of `init_ext_cnt` extents. At that cap `GrowSlice` answers
+  `FAILED_PRECONDITION` and the worker's auto-grow logs `reaction skipped`
+  (`grp_list_full`) instead of growing (`dnv-worker.md` AR6, Appendix B), so the pool
+  can run out of space as §10.4 describes. Nothing frees the ceiling: an SP expected to
+  grow large wants a larger `init_ext_cnt` or more slices.

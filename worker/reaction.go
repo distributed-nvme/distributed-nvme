@@ -27,9 +27,9 @@
 //     sole-primary variant is defined as "AR5 found none", so §0 item 16
 //     would otherwise be unreachable); AR5's shared_state and same_error,
 //     each a primary the pass declines to move, which can last until an
-//     operator acts; AR6's grow_pending, meta_ladder_cap
-//     and no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and
-//     all three can hold indefinitely — a grow deferred on the CN, the §8.5
+//     operator acts; AR6's grow_pending, grp_list_full, meta_ladder_cap and
+//     no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and all
+//     four can hold indefinitely — a grow deferred on the CN, a §8.5
 //     ceiling — so ending the pass would disable AR7 and AR8 for as long as
 //     they do); and AR8's leg_has_two_sides, spare_list_full,
 //     spare_unprovisioned and step 2's "wait for the pending spare", which
@@ -111,6 +111,11 @@ const (
 	// before model.GrowSlice is even called because the allocator has to
 	// search for the ladder's size first.
 	reasonMetaLadderCap = "meta_ladder_cap"
+	// reasonGrpListFull is §8.5's group ceiling: the slice's list of that
+	// kind already holds common.MaxGrpCntPerSlice groups, which
+	// model.GrowSlice refuses. It is model's string, for the reason
+	// reasonGrowPending is.
+	reasonGrpListFull = model.ReasonGrpListFull
 	// reasonNoDataGroup is a slice with no data group to size a data grow by.
 	reasonNoDataGroup = "no_data_group"
 	// reasonOpFailed is a transient failure — an etcd error, a scan that did
@@ -1008,7 +1013,7 @@ func (w *spWorker) parsePoolStatus(
 // end the pass. AR6 scopes its pending rule to "no grow OF THAT KIND starts",
 // so a pending data grow leaves the same slice's metadata — and every other
 // slice — free to grow; and a grow that is pending on the CN ([D15], §10.4)
-// or capped by the §8.5 meta ladder can stay that way indefinitely, so ending
+// or capped by a §8.5 ceiling can stay that way indefinitely, so ending
 // the pass on it would disable AR7 and AR8 for the whole SP for exactly as
 // long. Only an APPLIED grow, or one of the two skips AR2 makes pass-ending
 // (ErrPrecondition, no candidate), ends the pass.
@@ -1060,10 +1065,10 @@ func (w *spWorker) tryGrow(ctx context.Context, p *spPass) bool {
 // runGrow runs one AR6 grow of one kind on one slice. It reports whether the
 // pass ends here, which distinguishes the two shapes of "no grow ran":
 //
-//   - the grow is not APPLICABLE — pending (AR6), the §8.5 ladder cap, no data
-//     group to size a data grow by: the record is emitted and false is
-//     returned, so the walk goes on to the other kind, the next slice and
-//     finally to AR7 and AR8;
+//   - the grow is not APPLICABLE — pending (AR6), the §8.5 group ceiling or
+//     ladder cap, no data group to size a data grow by: the record is
+//     emitted and false is returned, so the walk goes on to the other kind,
+//     the next slice and finally to AR7 and AR8;
 //   - the grow WAS applicable and did not complete — no candidate, an
 //     ErrPrecondition, a failed scan or op: AR2 ends the pass, so that a pass
 //     that has already touched etcd (or may have) applies nothing else.
@@ -1093,9 +1098,10 @@ func (w *spWorker) runGrow(
 	extentSize := p.cc.GetDnBinConf().GetExtentSize()
 	extCnt, reason := growExtCnt(slice, isMeta, extentSize)
 	if reason != "" {
-		// meta_ladder_cap and no_data_group are both permanent for this
-		// slice and this kind: there is no grow to run, ever, and the pass
-		// must go on to the reactions that still can do something.
+		// grp_list_full, meta_ladder_cap and no_data_group are all
+		// permanent for this slice and this kind: there is no grow to run,
+		// ever, and the pass must go on to the reactions that still can do
+		// something.
 		w.reactionSkipped(ctx, kind, reason, sliceAttr)
 		return false
 	}
@@ -1162,7 +1168,9 @@ func growPending(
 // worker computes it because the allocator must search for exactly that size
 // BEFORE model.GrowSlice recomputes it inside its own STM: a data grow uses
 // the slice's first data group's ext_cnt — the original allocation unit — and
-// a meta grow the ladder value, which doubles the slice's meta total.
+// a meta grow the ladder value, which doubles the slice's meta total. A list
+// already at the §8.5 group ceiling has no group to size at all, and is
+// checked first, as model.GrowSlice checks it ahead of its own sizing.
 //
 // The second return value is a `reaction skipped` reason, empty on success.
 func growExtCnt(
@@ -1170,6 +1178,9 @@ func growExtCnt(
 	isMeta bool,
 	extentSize uint64,
 ) (uint64, string) {
+	if model.GrpListFull(slice, isMeta) {
+		return 0, reasonGrpListFull
+	}
 	if !isMeta {
 		grps := slice.GetDataGrpList()
 		if len(grps) == 0 || grps[0].GetExtCnt() == 0 {

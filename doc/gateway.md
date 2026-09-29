@@ -524,7 +524,7 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   | §7 violation, malformed `page_token`, bad enum/oneof | `INVALID_ARGUMENT` |
   | cluster / SP / named or id-addressed object absent | `NOT_FOUND` |
   | create finds the name key (or, `CreateCluster`, a global) present | `ALREADY_EXISTS` |
-  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included) | `FAILED_PRECONDITION` |
+  | a documented public precondition fails (incl. `model.ErrPrecondition` with any reason except the two below) (the meta ladder cap included, and `GrowSlice`'s `MaxGrpCntPerSlice` group ceiling — a count, but one nothing frees, since a live slice's groups are only appended) | `FAILED_PRECONDITION` |
   | `sum(shard_bucket) ≥ Max*CntPerCluster`; the per-SP and per-group count ceilings — `len(cntlr_id_list) ≥ MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at `MaxSsCntPerSp`, a subsystem's `ns_list` at `MaxNsCntPerSs`, `clone_name_list` at `MaxCloneCntPerSp`, `xfer_name_list` at `MaxXferCntPerSp`, `migr_name_list` at `MaxMigrCntPerSp`, a group's `spare_leg_list` at `MaxSpareLegPerGrp` (architecture.md §8.6–§8.12); too few candidates (§6.5); `AppendMigrationBitmap`'s `bm_cnt ≥ MaxMigrBmCnt` cap; `AppendCloneBitmap`'s `len(stored) + len(bitmap) > CloneBmChunkBytes` — one chunk's ceiling reached by previous appends, the same shape (AppendCloneBitmap's other four INVALID_ARGUMENT refusals are an invalid request ⇒ `INVALID_ARGUMENT`: the empty `bitmap` of the §7-violation row above, both index bounds — `src_slice_idx ≥ src_slice_cnt` and `bm_idx ≥ MaxCloneBmCnt`, checked in-STM — and the stateless `len(bitmap) > CloneBmChunkBytes` page cap, judged on the request alone because a page longer than a whole chunk fits nowhere whatever is stored; all four per §5.8); a cntlr's CN below a grow's ext count (§5.4's pre-check); the ledgers' own `charge` shortfall (`dnLedger.charge`/`cnLedger.charge`, `gateway/alloc.go`) — defensive, since `verifyPick` answers the same shortfall as candidate-changed first | `RESOURCE_EXHAUSTED` |
   | token mismatch; `model.ErrPrecondition{Reason: ReasonStaleRevision}` | `ABORTED` ("stale revision") |
   | everything `architecture.md` §5.9: STM-client/conflict-budget/etcd/proto errors; a stored conf that is not concrete (GW11; the message is `model`'s, beginning `invalid stored conf: `); agent gRPC failure where the RPC says so | `ABORTED` |
@@ -533,8 +533,10 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   `ErrPrecondition{Reason: "candidate changed"}` maps to nothing — see GW9.
 
   The dividing line: `RESOURCE_EXHAUSTED` is capacity or quota that could be
-  freed or extended (extents, candidates, count ceilings);
-  `FAILED_PRECONDITION` is the object's own state forbidding the operation.
+  freed or extended (extents, candidates, count ceilings — though not
+  `GrowSlice`'s `MaxGrpCntPerSlice`, which nothing frees);
+  `FAILED_PRECONDITION` is the object's own state forbidding the operation,
+  that group ceiling included, since a live slice's groups are only appended.
   A `GrowSlice` capacity shortfall sits on both sides, on either half of the
   allocation. A CN-budget shortfall is `RESOURCE_EXHAUSTED` when §5.4's
   pre-check sees it, but `FAILED_PRECONDITION` when it only appears in the
@@ -858,7 +860,13 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   `ABORTED`, GW11) — which is also what keeps `model.MetaLadderExtCnt`'s
   `false` meaning the 16 GiB cap and nothing else, since an unvalidated zero
   `extent_size` would report the same `false` and reach the operator as a
-  metadata ceiling. The plan itself is the slice's current meta total for
+  metadata ceiling. Before it plans, the handler answers §8.5's group
+  ceiling from the same snapshot: a slice whose list of the requested kind
+  already holds `MaxGrpCntPerSlice` groups (`model.GrpListFull`) ⇒
+  `FAILED_PRECONDITION`, GW7's object-state class, ahead of the scan, so a
+  cluster short of DNs cannot report it as `RESOURCE_EXHAUSTED`
+  (`TestGrowSliceGroupListFull`); `model.GrowSlice` re-checks it in-STM. The
+  plan itself is the slice's current meta total for
   `model.MetaLadderExtCnt` — cap reached ⇒ `FAILED_PRECONDITION`, GW7's
   object-state class — and the request's own black list, which is the entire
   seed of the §6.5 scan (D-F): one scan-and-pick round serves the group and

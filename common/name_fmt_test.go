@@ -142,6 +142,33 @@ func TestMdNames(t *testing.T) {
 		nf.CnMdArrayName(testSp, 2, 1, true), "dnv-0000000000000011-82-01")
 }
 
+// TestMdNamesAtTheGroupCeiling is the tripwire of MaxGrpCntPerSlice (§4.3):
+// the last group index a slice's list can hold must still format as the two
+// hex digits both md names reserve for it, so the device name stays 28 hex
+// chars ("md_" + 28 within DISK_NAME_LEN) and the array name 26 chars ending
+// in that index. Raising the ceiling past 256 groups fails here instead of
+// on a CN whose kernel cannot name the array.
+func TestMdNamesAtTheGroupCeiling(t *testing.T) {
+	nf := NewNameFmt("")
+	lastIdx := uint32(MaxGrpCntPerSlice - 1)
+	lastSlice := uint32(MaxSliceCntPerSp - 1)
+	hex28 := regexp.MustCompile(`^[0-9a-f]{28}$`)
+	for _, isMeta := range []bool{false, true} {
+		devName := nf.CnMdDevName(
+			testCluster, testCn, testSp, lastSlice, lastIdx, isMeta)
+		if !hex28.MatchString(devName) {
+			t.Errorf("md dev name %q at group index %d is not 28 hex chars",
+				devName, lastIdx)
+		}
+		arrayName := nf.CnMdArrayName(testSp, lastSlice, lastIdx, isMeta)
+		if len(arrayName) != 26 ||
+			!strings.HasSuffix(arrayName, fmt.Sprintf("-%02x", lastIdx)) {
+			t.Errorf("md array name %q at group index %d is not 26 chars "+
+				"ending in its two-digit index", arrayName, lastIdx)
+		}
+	}
+}
+
 // §4.4 NQNs.
 func TestNqns(t *testing.T) {
 	nf := NewNameFmt("")

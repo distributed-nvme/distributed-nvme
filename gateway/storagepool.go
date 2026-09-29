@@ -691,8 +691,9 @@ func (s *Server) CreateStoragePool(
 // transaction", dnv-worker.md §11.6): that transaction was unbounded in the DN
 // dimension — already about 532 writes at the then-maximum 16-slice shape,
 // over the common.EtcdMaxTxnOps of the time, with no tripwire — and the slice
-// ceiling has doubled since; GrowSlice on top of that makes a slice's group
-// count unbounded, so no single transaction can ever be proven legal. The
+// ceiling has doubled since; GrowSlice on top of that lets a slice's group
+// count grow far past that shape (to common.MaxGrpCntPerSlice groups per
+// group list), so no single transaction can ever be proven legal. The
 // worker's drain (model/drain.go) takes it apart in steps whose size is a
 // constant (SPD10/SPD11), and SPD14 is the tripwire pair that keeps it so.
 //
@@ -1132,6 +1133,22 @@ func (s *Server) GrowSlice(
 		}
 		if err := model.ValidateBdevConf(conf.GetBdevConf()); err != nil {
 			return errAborted("%v", err)
+		}
+		// The §8.5 group ceiling is, like the ladder cap below, the slice's
+		// own permanent state — a live slice's groups are only ever
+		// appended — so it is FAILED_PRECONDITION (GW7) though it is a
+		// count, and it is answered HERE, ahead of the scan, so that a
+		// cluster short of DNs cannot report it as a candidate shortfall.
+		// model.GrowSlice re-checks it in-STM, under the same code.
+		if model.GrpListFull(slice, req.GetIsMeta()) {
+			kind := "data"
+			if req.GetIsMeta() {
+				kind = "meta"
+			}
+			return errPrecondition(
+				"slice %d already holds %d %s groups, the most a slice "+
+					"can hold", req.GetSliceId(), common.MaxGrpCntPerSlice,
+				kind)
 		}
 		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt := uint64(0)

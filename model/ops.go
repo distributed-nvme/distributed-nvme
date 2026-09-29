@@ -85,6 +85,13 @@ const ReasonGrowPending = "grow_pending"
 // that rule before it would call the op.
 const ReasonSpareUnprovisioned = "spare_unprovisioned"
 
+// ReasonGrpListFull is the Reason a GrowSlice carries when the slice's group
+// list of that kind already holds common.MaxGrpCntPerSlice groups
+// (GrpListFull). It is exported for the reason ReasonGrowPending is:
+// worker/reaction.go logs the SAME `reaction skipped reason=` string when its
+// pass finds the list full before it would scan for a grow.
+const ReasonGrpListFull = "grp_list_full"
+
 // ReasonStaleRevision is the Reason the three ops the gateway shares with the
 // worker carry when their expectRev argument does not match the stored
 // SpRev.revision (gateway.md §2.2 #3). The gateway maps exactly this reason to
@@ -1145,7 +1152,8 @@ func Failover(
 // unit), for a meta grow the §8.5 ladder value, which doubles the slice's meta
 // total and is refused once that total reaches 16 GiB. meta_blocks and
 // data_blocks follow §3.6 from the SP's own bdev_conf and the cluster's
-// extent_size.
+// extent_size. A list of either kind that already holds
+// common.MaxGrpCntPerSlice groups takes no more (GrpListFull).
 //
 // poolTotal is the total the primary reported for the pool of THIS kind —
 // total_data for a data grow, total_meta for a meta one (AR6) — and is what
@@ -1220,6 +1228,11 @@ func GrowSlice(
 			slice, isMeta, poolTotal, PoolBlockSize(conf.GetBdevConf()),
 		) {
 			return fail(opGrowSlice, ReasonGrowPending)
+		}
+		// §8.5's group ceiling, ahead of the sizing so that it holds for a
+		// meta grow whatever the ladder would say.
+		if GrpListFull(slice, isMeta) {
+			return fail(opGrowSlice, ReasonGrpListFull)
 		}
 		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt, err := growExtCnt(slice, isMeta, extentSize)
@@ -1395,6 +1408,25 @@ func GrowPending(
 		total += blocks
 	}
 	return reportedTotal <= total
+}
+
+// GrpListFull reports whether the slice's group list of that kind already
+// holds common.MaxGrpCntPerSlice groups, so a grow of that kind has nothing it
+// may append (§8.5): a group's md names carry its index in its list as two hex
+// digits (§4.3). The other kind's list is not counted: a full data list
+// does not stop a meta grow, nor the other way round.
+//
+// It lives here for the reason GrowPending does: GrowSlice applies it inside
+// its STM, and both the worker's AR6 pass and the gateway's GrowSlice handler
+// apply it as a pre-check, so that a ceiling that holds for good neither ends
+// every worker pass nor reaches a client as a candidate shortfall. One rule,
+// one implementation.
+func GrpListFull(slice *pb.Slice, isMeta bool) bool {
+	grps := slice.GetDataGrpList()
+	if isMeta {
+		grps = slice.GetMetaGrpList()
+	}
+	return len(grps) >= common.MaxGrpCntPerSlice
 }
 
 // hasDuplicateAddr reports whether two picks name the same node. Two legs of

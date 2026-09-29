@@ -2808,6 +2808,67 @@ func TestGrowSliceMetaLadderCap(t *testing.T) {
 	}
 }
 
+// TestGrowSliceGroupListFull pins §8.5's group ceiling AND its error class:
+// a slice whose data list already holds MaxGrpCntPerSlice groups is refused
+// with nothing written. It is a count ceiling, but not one anything can free —
+// a slice's groups are only ever appended — so, like the ladder cap above, it
+// is the slice's own state and FAILED_PRECONDITION (GW7), never
+// RESOURCE_EXHAUSTED. The message is the handler's pre-check's, which runs
+// before the candidate scan, so a cluster short of DNs cannot answer
+// RESOURCE_EXHAUSTED for it first — the refused request matches no DN, which
+// pins that order; model.GrowSlice's in-STM re-check says only
+// "grp_list_full". The ceiling is per list: a meta grow of the same slice
+// still commits.
+func TestGrowSliceGroupListFull(t *testing.T) {
+	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+	spId := env.createSp(sptDefaultSpec(sptSpName))
+	sliceId := env.spConf(sptSpName).GetSliceIdList()[0]
+	slice := env.slice(spId, sliceId)
+	for len(slice.GetDataGrpList()) < common.MaxGrpCntPerSlice {
+		slice.DataGrpList = append(slice.DataGrpList,
+			proto.Clone(slice.GetDataGrpList()[0]).(*pb.Group))
+	}
+	mustPut(t, env.cli, model.SliceKey(env.cid, spId, sliceId), slice)
+	before := env.dump()
+	_, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		SpRev:       &pb.SpRev{Revision: 1},
+		SliceId:     sliceId,
+		ExtCnt:      1,
+		// No DN matches: were the ceiling answered after the scan, this
+		// request would come back RESOURCE_EXHAUSTED.
+		DnSelector: &pb.NodeSelector{WhiteList: []string{"192.0.2.1:1"}},
+	})
+	sptWantCode(t, err, codes.FailedPrecondition)
+	wantMsg := fmt.Sprintf(
+		"slice %d already holds %d data groups, the most a slice can hold",
+		sliceId, common.MaxGrpCntPerSlice)
+	if got := status.Convert(err).Message(); got != wantMsg {
+		t.Errorf("message %q, want the pre-check's %q", got, wantMsg)
+	}
+	if got := env.spRev(0, spId); got != 1 {
+		t.Errorf("a refusal bumped sp_rev to %d", got)
+	}
+	after := env.dump()
+	if len(before) != len(after) {
+		t.Fatalf("a refusal changed the key set: %d -> %d",
+			len(before), len(after))
+	}
+	for key, value := range before {
+		if !bytes.Equal(value, after[key]) {
+			t.Errorf("a refusal rewrote %q", key)
+		}
+	}
+	// The ceiling is per list: the same slice's metadata still grows.
+	if _, err := env.srv.GrowSlice(env.ctx, &pb.GrowSliceRequest{
+		ClusterName: env.name, SpName: sptSpName, SliceId: sliceId,
+		IsMeta: true,
+	}); err != nil {
+		t.Fatalf("a meta grow beside a full data list: %v", err)
+	}
+}
+
 // TestGrowSliceRefusals pins §8.5's refusals: the ext_cnt / is_meta
 // exclusivity of §7, a slice_id the SP does not list, and GW6's token check —
 // which openSp runs BEFORE the slice lookup, so a client whose token does not

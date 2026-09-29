@@ -80,6 +80,16 @@ const (
 	MaxCntlrCntPerCn     = 256
 	MaxLegPerGrp         = 8
 	MaxSpareLegPerGrp    = 2
+	// MaxGrpCntPerSlice is the most groups EACH of a slice's two group lists
+	// (meta_grp_list, data_grp_list) holds. A group's two md names carry its
+	// index in its list as two hex digits (%02x, architecture.md §4.3), and
+	// that fixed width is what keeps "md_" + CnMdDevName within the kernel's
+	// DISK_NAME_LEN; index 256 would widen to three digits. GrowSlice, the
+	// one op that appends a group to an existing slice, refuses at the
+	// ceiling (model.GrpListFull), and common/name_fmt_test.go
+	// TestMdNamesAtTheGroupCeiling is the tripwire that fails when the
+	// ceiling is raised past what the names can carry.
+	MaxGrpCntPerSlice = 255
 	// MaxAllocLegPerGrp is the allocator's ACTUAL maximum legs per group, as
 	// opposed to the aspirational and unenforced MaxLegPerGrp above: every
 	// allocating path picks between 1 leg (RedundNone) and 2 (RedundMdRaid1),
