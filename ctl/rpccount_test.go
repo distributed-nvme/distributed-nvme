@@ -8,9 +8,13 @@
 //
 //   - completeness_test.go (CT-T1) pins it as a Go literal, on
 //     `pb.Gateway_ServiceDesc.Methods`, on the `rpcToCmd` and `leafFlags`
-//     tables transcribed from dnvctl.md §5, and on the RPC leaves of the cobra
-//     tree NewRootCmd builds. It is what fails when an RPC is added to the
-//     service and not to the CLI. It says nothing about any document.
+//     tables transcribed from dnvctl.md §5, on the RPC leaves of the cobra
+//     tree NewRootCmd builds, and on the commands §5 itself states. It is
+//     what fails when an RPC is added to the service and not to the CLI,
+//     and — through TestDocSection5MatchesTables, which reads §5's rows and
+//     §5.3's mirror sentence — when one is added to the CLI and not to §5's
+//     tables. It reads no prose count: the sentences that write the number
+//     out are this file's.
 //
 //   - this file owns the PROSE carriers: the same number written out in
 //     README.md, in `doc/*.md` and in Go comments and help strings. It states
@@ -26,9 +30,10 @@
 //
 // Neither subsumes the other. Renaming one RPC, or deleting one and adding
 // another, leaves every count right and only CT-T1 notices. Adding an RPC does
-// fail CT-T1 — on its own literal — and updating that literal and its tables
-// makes it green again with every sentence in the tree still stale; the
-// sentences are what this file is for.
+// fail CT-T1 — on its own literals — and adding its command, its table
+// entries and its §5 row and updating those literals makes it green again
+// with every prose sentence in the tree still stale; the sentences are what
+// this file is for.
 //
 // It lives in ctl/ for the reason doclint_test.go's header gives at length: this
 // is where doc-versus-generated-code cross-checks already live, and the review

@@ -151,7 +151,7 @@ func failingDial(err error) dialFunc {
 	}
 }
 
-// TestUsageErrorsIssueNoRpc is §3.2's third row and §7.12's c5/c6. Each case
+// TestUsageErrorsIssueNoRpc is §3.2's third row and §7.12's c5-c7. Each case
 // asserts the call count, not just the exit code: the count is the only thing
 // that distinguishes "rejected before dialing" from "sent, then rejected".
 func TestUsageErrorsIssueNoRpc(t *testing.T) {
@@ -181,6 +181,10 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 		// --rev that does not parse — never a silently absent token.
 		{"empty --rev",
 			[]string{"td", "create", "--name", "t0", "--rev="}},
+		// §4: a --rev on a command whose request has no token field, here
+		// typed ahead of the group, as a global may be.
+		{"--rev with no token field",
+			[]string{"--rev", "7", "cluster", "delete", "--name", "c1"}},
 		{"malformed --bm-hex",
 			[]string{"clone", "append-bm", "--name", "cl0",
 				"--bm-hex", "zz", "--rev", "7"}},

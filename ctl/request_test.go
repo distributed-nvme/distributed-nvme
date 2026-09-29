@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -174,11 +175,11 @@ var sweepRows = []sweepRow{
 	{17, "CreateStoragePool",
 		[]string{"sp", "create", "--cntlr-cnt", "2", "--slice-cnt", "1",
 			"--init-ext-cnt", "2", "--slots", "0,1",
-			"--low-water-mark-pct", "30", "--rev", "7"},
-		// bdev_conf is ALWAYS sent with a redund_conf (§0 #11); --rev is
-		// ignored because the request carries no token; dm_pool_conf
-		// carries the mark alone, --block-size being untyped; dm_raid0_conf
-		// and event_threshold stay absent.
+			"--low-water-mark-pct", "30"},
+		// bdev_conf is ALWAYS sent with a redund_conf (§0 #11); no --rev,
+		// which the request has no token for (§4); dm_pool_conf carries
+		// the mark alone, --block-size being untyped; dm_raid0_conf and
+		// event_threshold stay absent.
 		&pb.CreateStoragePoolRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
@@ -746,25 +747,17 @@ func TestTokenPresenceTrio(t *testing.T) {
 }
 
 // TestTokenCarriersMatchSection4 pins the other half of §4: WHICH commands
-// carry a token. It drives every sweep row twice — once with --rev 7 and once
-// without — and asserts that the token field appears exactly on the 34 the
-// spec names and nowhere else. A token quietly added to a read, or dropped
-// from a mutator, is invisible to the sweep table (which fixes both argv and
-// expectation together) and shows up only here.
+// carry a token. It drives each of the 34 sweep rows whose request has a
+// token field twice — once with the row's --rev 7 and once without — and
+// asserts the token is sent exactly when --rev is typed; the count pins the
+// 34. A token quietly added to a read, or dropped from a mutator, is
+// invisible to the sweep table (which fixes both argv and expectation
+// together) and shows up here. The other 25 refuse --rev outright
+// (TestRevOnATokenlessCommandIsAUsageError).
 func TestTokenCarriersMatchSection4(t *testing.T) {
-	tokenFields := map[string]string{
-		"sp_rev": "SpRev", "dn_rev": "DnRev", "cn_rev": "CnRev",
-	}
 	carriers := 0
 	for _, row := range sweepRows {
-		fields := row.want.ProtoReflect().Descriptor().Fields()
-		var tokenField protoreflect.FieldDescriptor
-		for name := range tokenFields {
-			if field := fields.ByName(
-				protoreflect.Name(name)); field != nil {
-				tokenField = field
-			}
-		}
+		tokenField := revTokenField(row.want.ProtoReflect().Descriptor())
 		if tokenField == nil {
 			continue
 		}
@@ -787,6 +780,72 @@ func TestTokenCarriersMatchSection4(t *testing.T) {
 	if carriers != 34 {
 		t.Errorf("%d requests carry a revision token, want 34", carriers)
 	}
+}
+
+// TestRevOnATokenlessCommandIsAUsageError is the complement of the test
+// above: on the 25 commands whose request has no token field, a typed --rev
+// is a usage error — exit 2, §3.2's refusal line on stderr word for word, no
+// RPC issued. It used to be dropped unread, so `cluster delete --rev 7`
+// deleted with no gate while looking gated, and even `--rev zz`, which every
+// carrier refuses, exited 0; each row is driven with a parsable, an
+// unparsable and an empty value. The empty one is `--rev "$REV"` with REV
+// unset: a refusal keyed on the value rather than on the flag being typed
+// would let it through, and the request would go out ungated.
+func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
+	// A carrier's --rev first: the token read by one invocation must not
+	// stand in for the next one's in the same process.
+	runArgv(t, "CreateThinDevice", "td", "create", "--name", "t0",
+		"--rev", "7")
+	tokenless := 0
+	for _, row := range sweepRows {
+		if revTokenField(row.want.ProtoReflect().Descriptor()) != nil {
+			continue
+		}
+		tokenless++
+		t.Run(rpcToCmd[row.rpc], func(t *testing.T) {
+			for _, rev := range []string{"7", "zz", ""} {
+				client := &recordingClient{}
+				res := runCLI(t, client, globalArgv(
+					append(stripRev(row.argv), "--rev", rev)...)...)
+				if res.code != 2 {
+					t.Errorf("--rev %q: exit code = %d, want 2 (stderr %q)",
+						rev, res.code, res.stderr)
+				}
+				if client.calls != 0 {
+					t.Errorf("--rev %q: %d RPCs were issued, want 0 — a "+
+						"usage error must never reach the gateway",
+						rev, client.calls)
+				}
+				if res.stdout != "" {
+					t.Errorf("--rev %q: stdout = %q, want empty",
+						rev, res.stdout)
+				}
+				want := "dnvctl: invalid --rev: " +
+					strconv.Quote("dnvctl "+rpcToCmd[row.rpc]) +
+					" takes no revision token\n"
+				if res.stderr != want {
+					t.Errorf("--rev %q: stderr %q, want %q",
+						rev, res.stderr, want)
+				}
+			}
+		})
+	}
+	if tokenless != 25 {
+		t.Errorf("%d requests carry no revision token, want 25", tokenless)
+	}
+}
+
+// revTokenField is a request's §4 token field — sp_rev, dn_rev or cn_rev —
+// or nil when the request carries none.
+func revTokenField(
+	desc protoreflect.MessageDescriptor,
+) protoreflect.FieldDescriptor {
+	for _, name := range []protoreflect.Name{"sp_rev", "dn_rev", "cn_rev"} {
+		if field := desc.Fields().ByName(name); field != nil {
+			return field
+		}
+	}
+	return nil
 }
 
 // stripRev drops a `--rev <value>` pair from an argv.

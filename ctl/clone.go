@@ -139,8 +139,8 @@ func cloneDeleteCmd() *cobra.Command {
 	return cmd
 }
 
-// cloneGetCmd is GetClone. A pure read, so it carries no token (§4) and
-// declares no --rev of its own; the global flag is simply ignored here.
+// cloneGetCmd is GetClone. A pure read, so it carries no token (§4), and a
+// typed --rev is a usage error here.
 func cloneGetCmd() *cobra.Command {
 	cmd := leaf("get", "read one clone (GetClone)",
 		func() (job, error) {

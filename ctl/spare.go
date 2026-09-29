@@ -7,7 +7,7 @@
 // `--leg` on delete and the `--spare`/`--target` pair on switch. All four are
 // ids, so they are declared as strings and read through hexOf: Go base-0
 // parsing, `0x` accepted, and a malformed value is a usage error (exit 2) with
-// no RPC issued — the whole of dnvctl's input checking (CT8).
+// no RPC issued — all the checking dnvctl does on an id (CT8).
 package ctl
 
 import (

@@ -6,7 +6,8 @@
 // It is a test over documents, not over `ctl`. It sits here because ctl/ is
 // already where doc-versus-generated-code cross-checks live: completeness_test.go
 // walks `pb.Gateway_ServiceDesc` against the §5 tables transcribed from
-// dnvctl.md, and the 2026-09-16 review ledger puts the sibling "59 RPCs"
+// dnvctl.md and holds those tables to §5 itself, and the 2026-09-16 review
+// ledger puts the sibling "59 RPCs"
 // literal scan here too, "next to the existing table tests". A `doclint`
 // package of its own would
 // exist only to hold one file, and would have to be added to doc/layout.md's

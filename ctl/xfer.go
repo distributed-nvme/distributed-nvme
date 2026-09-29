@@ -118,7 +118,7 @@ func xferDeleteCmd() *cobra.Command {
 }
 
 // xferGetCmd is GetTransfer, a pure STM read. It bumps nothing, so §4 gives it
-// no token and the global --rev is simply ignored here.
+// no token, and a typed --rev is a usage error here.
 func xferGetCmd() *cobra.Command {
 	cmd := leaf(
 		"get",

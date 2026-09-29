@@ -152,8 +152,8 @@ func migrCancelCmd() *cobra.Command {
 	return cmd
 }
 
-// migrGetCmd is GetMigration, a pure STM read: no token, and the global --rev
-// is ignored here (§4).
+// migrGetCmd is GetMigration, a pure STM read: no token, so a typed --rev is
+// a usage error here (§4).
 func migrGetCmd() *cobra.Command {
 	cmd := leaf(
 		"get",

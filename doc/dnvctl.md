@@ -177,7 +177,7 @@ gatewayctl lesson). `make build` picks `cmd/dnvctl` up automatically the moment
 | `--gateway-address` | string | *(none — required)* | gateway `ip:port` to dial. No default: unlike the test driver there is no lab default worth baking in |
 | `--cluster` | string | `""` | `cluster_name` of every request that has one (58 of 59) |
 | `--sp` | string | `""` | `sp_name` of every request that has one (41 of 59) |
-| `--rev` | hexUint (base-0) | *(absent)* | revision token, §4 — only meaningful on the 34 token-carrying mutators; command line only: the one global with no env or config carrier (CT9) |
+| `--rev` | hexUint (base-0) | *(absent)* | revision token, §4 — taken only by the 34 token-carrying mutators, a usage error on the other 25 commands; command line only: the one global with no env or config carrier (CT9) |
 | `--timeout` | float64 | `10` | per-invocation deadline, seconds |
 | `--trace-id` | string | `""` | override the T4 mint (§2.3) |
 | `--config` | string | `""` | optional viper config file; it supplies the env-backed globals only (CT9) |
@@ -270,7 +270,7 @@ quiet/verbose mode.
 |---|---|---|---|
 | 0 | RPC returned OK | the §3.1 document | empty |
 | 1 | RPC or connection failure | empty | one line: `dnvctl: <CODE>: <message> (trace_id <id>)` |
-| 2 | usage error (unknown command/flag, unparsable flag value, an env or config `--timeout` that is not a number, a `NaN` or infinite `--timeout` from any carrier) | empty | `dnvctl: <message>`, the message being cobra's or pflag's (an unknown command or flag, a value pflag cannot parse), viper's (a `--config` file it cannot read) or dnvctl's own (a missing `--gateway-address`, `dnvctl` or a group typed without a verb, `invalid --<flag> …` for a value dnvctl parses itself: an id, `--ids`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--rev`, an env or config `--timeout`, a `NaN` or infinite `--timeout` from any carrier); **no RPC is issued** |
+| 2 | usage error (unknown command/flag, unparsable flag value, an env or config `--timeout` that is not a number, a `NaN` or infinite `--timeout` from any carrier, a `--rev` on a command whose request carries no token) | empty | `dnvctl: <message>`, the message being cobra's or pflag's (an unknown command or flag, a value pflag cannot parse), viper's (a `--config` file it cannot read) or dnvctl's own (a missing `--gateway-address`, `dnvctl` or a group typed without a verb, `invalid --<flag> …` for a value dnvctl parses itself: an id, `--ids`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--rev`, an env or config `--timeout`, a `NaN` or infinite `--timeout` from any carrier; `invalid --rev: "dnvctl <group> <verb>" takes no revision token` for a `--rev` on a command whose request carries none, whatever its value); **no RPC is issued** |
 
 `<CODE>` is the UPPER_SNAKE gRPC code (`NOT_FOUND`, `ABORTED`,
 `DEADLINE_EXCEEDED`, `UNAVAILABLE`, …) via a `codeNames` table, because
@@ -302,6 +302,12 @@ Presence semantics — dnvctl sends exactly what was typed:
   34 carriers a typed `--rev` must parse, an empty value included —
   `--rev "$REV"` with `REV` unset is a usage error (exit 2), not an ungated
   write.
+* On the other 25 commands — the 20 reads, and the five writes that carry
+  no token either: `cluster create`, `cluster delete`, `dn create`,
+  `cn create` and `sp create` — a typed `--rev` is a usage
+  error (exit 2, no RPC issued), whatever its value. No field could carry
+  it, so sending the request anyway would drop it unseen:
+  `cluster delete --rev 7` would delete ungated while looking gated.
 
 **The gateway side (§0 #9):** GW6 is presence-based — token message absent ⇒
 the check is skipped; present ⇒ strict equality. So a token-less mutator
@@ -350,11 +356,17 @@ under either gateway.
   `--page-token`.
 * **CT8 — no client-side validation.** dnvctl rejects only what fails to
   *parse* (exit 2 — malformed `--bm-hex`, non-numeric id, a `--timeout` that
-  is not a finite number of seconds, CT9); every parsed value is sent as
+  is not a finite number of seconds, CT9), plus a `--rev` on a command whose
+  request has no token field to carry it (§4); every parsed value is sent as
   typed, and the gateway's §7 validation answers. Empty required fields,
   contradictory flags, unknown enum numbers: all forwarded.
-* **CT1 — completeness.** The 59 rows below are exhaustive; CT-T1 pins them
-  against `pb.Gateway_ServiceDesc` in both directions.
+* **CT1 — completeness.** The 59 rows below are exhaustive; CT-T1 reads them
+  and pins them against `pb.Gateway_ServiceDesc` in both directions, their
+  flags columns against the flags each command declares, and whether each
+  carries a token mark — `(+ --rev)`, spelled `(+cn_rev)` in §5.3's prose —
+  against whether its request has a token field, so the marks sit on
+  exactly §4's 34 token carriers. `--rev` on a command without the mark is
+  a usage error (§4).
 
 Sweep argv values for every command are in §7.10; the tables here define the
 surface.
@@ -366,7 +378,7 @@ surface.
 | `cluster create` | CreateCluster | `--name`, `--extent-size` | *2026-09-17:* the v1 rule this row used to state — that the command sends no conf message at all, so every `ClusterConf` member the request can carry is left to the gateway — is amended by exactly one flag. `--extent-size` (bytes, default `0`) sets `dn_bin_conf.extent_size`, the DN/CN allocation unit (architecture.md §6.1), which `DefaultDnExtSize` otherwise fixes at 1 GiB. A 32-slice pool takes a meta group and a data group per slice, each with one side per leg, so on lab-sized backing devices the unit has to come down to `common.MinDnExtSize` (64 MiB) — that is why the flag exists. Non-zero ⇒ `dn_bin_conf` is sent carrying `extent_size` and nothing else; `0` ⇒ no `dn_bin_conf` message at all — the same "not given" convention as `sp create`'s `--stripe-size`/`--block-size`, which build `bdev_conf.dm_raid0_conf`/`dm_pool_conf` only when non-zero (`dm_pool_conf` also for a non-zero `--low-water-mark-pct`, §5.4), and exactly the pure-defaults request this command shipped with. The four `bin*_shift` members have no flag and are never sent, so the gateway reads the all-zero shift set — which is *not* a ladder: it is the proto3 "unset", accepted as the one exception, while any other non-ladder set is `INVALID_ARGUMENT` — and falls back to the 0/4/8/12 defaults as a whole set, never shift by shift (architecture.md §6.2, §8.1). The `[64 MiB, 1 TiB]` bound on a non-zero value is the gateway's (architecture.md §7); dnvctl range-checks nothing (CT8), and neither end applies an alignment or power-of-two rule. The command line is the flag's only carrier, like every leaf flag's (CT9, §0 #15), which matters most for this one because the value is write-once: `DNVCTL_EXTENT_SIZE` and an `extent-size` key in the `--config` file reach no request, so no stale variable sizes every cluster created under it, and text that is not a uint64 (`-1`, `abc`, 2^64) is a pflag parse error (exit 2, no RPC). No `cluster create` flag reaches the other four conf members the request can carry: `bdev_conf`, `alloc_conf` and `health_check_conf` are stored as the gateway's resolved defaults — the cluster's `bdev_conf` is only the per-SP default set, which `sp create`'s own `bdev_conf` flags then override member by member per pool (§5.4, architecture.md §8.1/§8.4) — while `qos_ratio` is stored exactly as sent, because alone among the request's conf members it is not defaultable and its proto3 zero keeps meaning "unset" (architecture.md §7, `model.ResolveClusterConf`). `creation_epoch`, the remaining `ClusterConf` member, is no request field at all — the gateway stamps it (architecture.md §7). And because `ClusterConf` is write-once (architecture.md §8.1, no `UpdateCluster*` RPC), this flag is the only chance a given cluster's extent size ever gets to be set |
 | `cluster delete` | DeleteCluster | `--name` | |
 | `cluster get` | GetCluster | `--name` | |
-| `cluster list` | ListClusters | `--count`, `--page-token` | the one request with no `cluster_name`; the globals are ignored |
+| `cluster list` | ListClusters | `--count`, `--page-token` | the one request with no `cluster_name`; `--cluster` and `--sp` are ignored |
 
 ### 5.2 `dn` — `ctl/dn.go`
 
@@ -483,6 +495,23 @@ All in `ctl/` (`*_test.go`) except CT-T6.
 * **CT-T1 — completeness.** An `rpcToCmd` map of all 59 RPC names →
   `"<group> <verb>"`, cross-checked against `pb.Gateway_ServiceDesc.Methods`
   in both directions, with `len == 59` pinned (the gatewayctl test, ported).
+  It and `leafFlags`, the flags columns transcribed, are diffed against §5
+  itself by `TestDocSection5MatchesTables`, which reads every §5 row,
+  §5.3's mirror sentence and §5.0's shared-helpers bullet: each command's
+  RPC against `rpcToCmd`, its flags column against `leafFlags` with
+  `trConfFlags`, `selectorFlags` and `dmCloneConfFlags` expanded by calling
+  the real helpers, whether it carries a token mark against whether its
+  request has a token field, and the flags the bullet spells for each
+  helper (`--<prefix>-black`, …, the page flags included) against the
+  flags that helper declares. So a leaf flag renamed in the code and in
+  the test tables fails while §5 still spells the old name in the
+  command's flags column (a `cn` command's is that of the `dn` row it
+  mirrors) or, for a flag a helper declares, in that bullet. A token
+  mark is read for its presence alone: the `--rev` it spells is not
+  compared with the flag the code declares, nor the field it names
+  (`⇒ dn_rev`, `(+cn_rev)`) with the request's token field. No other
+  prose is read: a flag named in a notes column or in another §5.0 bullet
+  can still go stale.
 * **CT-T2 — argv → request.** A `recordingClient` embedding `pb.GatewayClient`
   and overriding every one of the 59 methods (`ctl/client_test.go`), each a
   call into `rpcCall`, whose `want` check panics when the command drives any
@@ -492,7 +521,11 @@ All in `ctl/` (`*_test.go`) except CT-T6.
   issued with exit 0, and returns the captured request. Table tests per command assert every field, including:
   global `--cluster`/`--sp` fill; the `cluster` group's `--name` fallback; the
   §4 token trio (absent flag ⇒ nil message; `--rev 0` ⇒ present, revision 0;
-  `--rev 0x1f` ⇒ 31); trConf/selector/dmClone nil rules; list replace-on-set;
+  `--rev 0x1f` ⇒ 31); the token on exactly the 34 carriers
+  (`TestTokenCarriersMatchSection4`), and `--rev` on any of the other 25,
+  `7`, `zz` and an empty value alike ⇒ exit 2 with no RPC issued
+  (`TestRevOnATokenlessCommandIsAUsageError`); trConf/selector/dmClone nil
+  rules; list replace-on-set;
   `sp create`'s always-present `redund_conf` for both `--redund` values;
   `sp create`'s `--low-water-mark-pct` (`TestSpCreateLowWaterMark`: alone it
   builds a `dm_pool_conf` carrying only the mark, beside `--block-size` one
@@ -725,7 +758,7 @@ argv after the global prefix and only the *distinctive* assertions.
 | 09 | `dn set-disabled --addr 127.0.0.1:29901 --disabled --rev 7` | `disabled == true` |
 | 10 | `dn inspect --addr 127.0.0.1:29901` | |
 | 11-16 | the six `cn` mirrors at `127.0.0.1:29902`, `rack1` | `cn_rev.revision == "7"` on delete/set-disabled |
-| 17 | `sp create --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 2 --slots 0,1 --low-water-mark-pct 30 --rev 7` | `bdev_conf.redund_conf.redund_md_raid1` present (§0 #11 default); `bdev_conf.dm_pool_conf == {"low_water_mark_pct":30}` — no `data_block_size` key, `--block-size` untyped; no `dm_raid0_conf`/`event_threshold` keys |
+| 17 | `sp create --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 2 --slots 0,1 --low-water-mark-pct 30` | `bdev_conf.redund_conf.redund_md_raid1` present (§0 #11 default); `bdev_conf.dm_pool_conf == {"low_water_mark_pct":30}` — no `data_block_size` key, `--block-size` untyped; no `dm_raid0_conf`/`event_threshold` keys |
 | 18 | `sp delete --rev 7` | `sp_name == "sp0"` from the global |
 | 19 | `sp get` | |
 | 20 | `sp list --count 4` | no `sp_name` key |
@@ -782,7 +815,7 @@ goldens live in the targeted cases (§7.11), not the sweep.
 | b1 | `td create --name t0` (no `--rev`) | `state_req CreateThinDevice` has **no `sp_rev` key** — omission = absent message (§4) |
 | b2 | same with `--rev 0` | `sp_rev` key present, `== {}` (present message, zero revision — the protojson rendering of the always-stale probe) |
 | b3 | same with `--rev 0x1f` | `sp_rev.revision == "31"` — base-0 parse |
-| b4 | `sp create --redund none --rev 7` | `bdev_conf.redund_conf.redund_none` present, no `redund_md_raid1` key |
+| b4 | `sp create --redund none` | `bdev_conf.redund_conf.redund_none` present, no `redund_md_raid1` key |
 | b5 | inject `ListThinDevices` reply with one td `created:true`, run `td list` | stdout `jq -e '.name_to_td.t0.created == true'`; then with a `created:false` td, the key is still present (EmitUnpopulated). **Corrected 2026-09-11:** this row said `.td_list[0].created`, but `ListThinDevicesReply` carries `map<string, ThinDevice> name_to_td` and has no `td_list` at all — the old filter evaluated to `null` against a *correct* dnvctl, so it would have passed nothing and failed nothing |
 | b6 | `DNVCTL_CLUSTER=envclu` in the remote env, no `--cluster` flag | `cluster_name == "envclu"`; then with both, the flag wins (CT9 precedence) |
 | b7 | `cluster get --name other` vs bare | `--name` wins; fallback covered in sweep 03 |
@@ -798,9 +831,10 @@ trace id):
 | c1 | `GetStoragePool` → `NOT_FOUND` | `sp get` | `dnvctl: NOT_FOUND: … (trace_id it-errors-1)` |
 | c2 | `DeleteThinDevice` → `ABORTED`, message `stale revision` | `td delete --name t0 --rev 7` | `ABORTED: stale revision` — the §4 failure an operator will actually meet |
 | c3 | `CreateCluster` → `ALREADY_EXISTS` | `cluster create --name c1` | `ALREADY_EXISTS` |
-| c4 | `CreateStoragePool` → `INVALID_ARGUMENT` | `sp create --rev 7` | `INVALID_ARGUMENT` |
+| c4 | `CreateStoragePool` → `INVALID_ARGUMENT` | `sp create` | `INVALID_ARGUMENT` |
 | c5 | *(none)* | `ctl_usage td create --no-such-flag` | exit 2; the CreateThinDevice count unchanged (`assert_count_delta` 0) — no RPC on usage errors |
 | c6 | *(none)* | `ctl_usage clone append-bm --name cl0 --bm-hex zz --rev 7` | exit 2 (parse failure), count unchanged |
+| c7 | *(none)* | `ctl_usage cluster delete --name c1 --rev 7` | exit 2 (`DeleteCluster` carries no token, §4), count unchanged; stderr names `--rev` |
 
 ### 7.13 Case D — transport (`--only transport`)
 
@@ -831,7 +865,7 @@ Sweep = all 59 (§7.10 steps 01-59). Beyond it:
 
 | group | RPCs | extra coverage |
 |---|---|---|
-| cluster | 4 | S s1/s2 (ListClusters), B b6/b7, C c3, D d1/d2 (ListClusters); golden 03 |
+| cluster | 4 | S s1/s2 (ListClusters), B b6/b7, C c3/c7, D d1/d2 (ListClusters); golden 03 |
 | dn / cn | 6+6 | sweep only (token trio generalizes via b1-b3) |
 | sp | 9 | B b4, C c1/c4; golden 19 |
 | cntlr | 4 | sweep only |
@@ -897,7 +931,9 @@ which gained the `dnvctl_test.sh` and `fakegateway/` rows.
    nothing (the metadata shortcut is the drivers', not dnvctl's). Both greps
    exclude tests because CT-T5's `ctl/traceid_test.go` dials its own bufconn
    server and names the shortcut in a comment.
-5. CT-T1 pins 59 both ways; CT-T2's token trio (absent / `0` / `0x1f`), its
+5. CT-T1 pins 59 both ways and against §5's own rows; CT-T2's token trio
+   (absent / `0` / `0x1f`), its refusal of `--rev` on the 25 commands whose
+   request carries no token, its
    `--extent-size` rules (absent and `0` ⇒ no `dn_bin_conf`; non-zero ⇒
    `extent_size` alone), its `--low-water-mark-pct` rules and CT9's
    globals-only binding (no `DNVCTL_<leaf>` or config-file leaf key reaches a

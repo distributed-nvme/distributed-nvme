@@ -14,9 +14,20 @@
 // tree. A group file whose registerX forgot one leaf, or a leaf added to the
 // wrong group, passes a ServiceDesc-only check and fails the walk in
 // TestCommandTreeMatchesTable.
+//
+// A transcription can also go stale against what it transcribes: a flag
+// renamed in the code and in these tables, but not in §5, leaves every check
+// above green. TestDocSection5MatchesTables reads §5 itself — its rows,
+// §5.3's mirror sentence and §5.0's bullet spelling out the shared flag
+// helpers' flags — and holds rpcToCmd, leafFlags and those helpers to it. It
+// reads no other prose: a flag named in a notes column, or in another §5.0
+// bullet, can still go stale with everything green.
 package ctl
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -24,6 +35,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -348,6 +360,358 @@ func TestLeafFlagsMatchSection5(t *testing.T) {
 	}
 	if len(leafFlags) != 59 {
 		t.Errorf("leafFlags has %d rows, want 59", len(leafFlags))
+	}
+}
+
+// TestDocSection5MatchesTables holds the two transcriptions above to what
+// they transcribe. rpcToCmd and leafFlags are checked against the service
+// and the tree, but nothing read §5 itself, so a flag renamed in the code and
+// in both tables left a stale doc row with everything green. This reads every
+// §5 row, and §5.3's mirror sentence (the one group stated in prose), and
+// diffs each command against them: its RPC against rpcToCmd, its flags column
+// against leafFlags — the shared helpers expanded through the real
+// trConfFlags, selectorFlags and dmCloneConfFlags, so `trConfFlags("src-")`
+// in the doc means the flags that call declares — and whether it carries a
+// token marker, "(+ `--rev`)" or §5.3's "(+`cn_rev`)", against whether its
+// request has a token field (§4). That expansion is also why a row cannot
+// see a flag renamed inside a helper: the call changes with the helper.
+// §5.0's shared-helpers bullet spells those flags out, so it is read as well
+// (section5CheckHelpers). A marker counts only for being there: the --rev it
+// spells is matched against this file's own literal, not against the flag
+// root.go declares, and the field it names is not compared with the
+// request's token field, so renaming the global, or naming the wrong field,
+// leaves this test green.
+func TestDocSection5MatchesTables(t *testing.T) {
+	doc := readSection5(t)
+	rows := section5Rows(t, doc)
+	gateway := pb.File_pb_schema_proto.Services().ByName(
+		protoreflect.Name(pb.Gateway_ServiceDesc.ServiceName))
+	if gateway == nil {
+		t.Fatalf("schema.proto declares no service %s",
+			pb.Gateway_ServiceDesc.ServiceName)
+	}
+	for cmd, row := range rows {
+		want, ok := rpcToCmd[row.rpc]
+		if !ok {
+			t.Errorf("%s: §5 maps %q to %s, which rpcToCmd does not name",
+				row.site, cmd, row.rpc)
+			continue
+		}
+		if want != cmd {
+			t.Errorf("%s: §5 maps %q to %s, rpcToCmd maps %s to %q",
+				row.site, cmd, row.rpc, row.rpc, want)
+			continue
+		}
+		wantFlags := slices.Sorted(slices.Values(leafFlags[cmd]))
+		if !slices.Equal(row.flags, wantFlags) {
+			t.Errorf("%s: §5 gives %q the flags %v, leafFlags %v",
+				row.site, cmd, row.flags, wantFlags)
+		}
+		method := gateway.Methods().ByName(protoreflect.Name(row.rpc))
+		if method == nil {
+			t.Errorf("%s: service Gateway declares no %s", row.site, row.rpc)
+			continue
+		}
+		switch carries := revTokenField(method.Input()) != nil; {
+		case row.rev && !carries:
+			t.Errorf("%s: §5 marks %q (+ --rev), but the %s request "+
+				"carries no token", row.site, cmd, row.rpc)
+		case !row.rev && carries:
+			t.Errorf("%s: §5 does not mark %q (+ --rev), but the %s "+
+				"request carries a token", row.site, cmd, row.rpc)
+		}
+	}
+	for rpc, cmd := range rpcToCmd {
+		if _, ok := rows[cmd]; !ok {
+			t.Errorf("rpcToCmd maps %s to %q, which §5 has no row for",
+				rpc, cmd)
+		}
+	}
+	if len(rows) != 59 {
+		t.Errorf("§5 states %d commands, want 59", len(rows))
+	}
+	section5CheckHelpers(t, doc)
+}
+
+// section5Doc is dnvctl.md split into lines, §5 being lines[start:end].
+type section5Doc struct {
+	rel        string
+	lines      []string
+	start, end int
+}
+
+// readSection5 reads dnvctl.md and finds §5 in it.
+func readSection5(t *testing.T) section5Doc {
+	t.Helper()
+	const rel = "doc/dnvctl.md"
+	raw, err := os.ReadFile(filepath.Join(docRoot, rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	lines := strings.Split(string(raw), "\n")
+	start, end := -1, len(lines)
+	for i, line := range lines {
+		if start < 0 {
+			if strings.HasPrefix(line, "## 5. ") {
+				start = i
+			}
+		} else if strings.HasPrefix(line, "## ") {
+			end = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("%s has no \"## 5. \" section", rel)
+	}
+	return section5Doc{rel: rel, lines: lines, start: start, end: end}
+}
+
+// section5Row is one command as dnvctl.md §5 states it.
+type section5Row struct {
+	rpc   string
+	flags []string // sorted, the helpers expanded
+	rev   bool     // the token marker of §4's 34 carriers
+	site  docSite
+}
+
+var (
+	// section5Rev is a flags column's token marker: "(+ `--rev`)", or
+	// "(+ `--rev` ⇒ `dn_rev`)".
+	section5Rev = regexp.MustCompile("\\(\\+ ?`--rev`[^)]*\\)")
+	// section5Flag is one backticked flag in a flags column.
+	section5Flag = regexp.MustCompile("`--([a-z0-9-]+)`")
+	// section5Helper is a shared flag helper as §5.0 spells it.
+	section5Helper = regexp.MustCompile(
+		`(trConfFlags|selectorFlags)\("([a-z-]*)"\)|dmCloneConfFlags`)
+	// section5Mirror is §5.3's sentence: "Exact `dn` mirrors against the
+	// CN RPCs: `cn create`, … ↔ CreateControllerNode, …. Same flags."
+	section5Mirror = regexp.MustCompile(
+		"Exact `([a-z]+)` mirrors [^:]*: ([^↔]*) ↔ ([^.]*)\\. Same flags\\.")
+	// section5MirrorRev is the mirror sentence's token marker, "(+`cn_rev`)".
+	section5MirrorRev = regexp.MustCompile("\\(\\+ ?`[a-z]+_rev`\\)")
+	section5Quoted    = regexp.MustCompile("`([^`]+)`")
+)
+
+// section5Rows reads every command dnvctl.md §5 states: the table rows, and
+// the commands of §5.3's mirror sentence, which pair by position with its
+// RPCs and take the flags of the mirrored group's command with the same verb
+// ("Same flags.").
+func section5Rows(t *testing.T, doc section5Doc) map[string]section5Row {
+	t.Helper()
+	rel, lines, start, end := doc.rel, doc.lines, doc.start, doc.end
+	rows := map[string]section5Row{}
+	add := func(cmd string, row section5Row) {
+		if prev, ok := rows[cmd]; ok {
+			t.Errorf("%s: §5 states %q a second time (first at %s)",
+				row.site, cmd, prev.site)
+		}
+		rows[cmd] = row
+	}
+	var mirrorSites []docSite
+	for i := start; i < end; i++ {
+		site := docSite{rel, i + 1}
+		if strings.Contains(lines[i], "↔") {
+			mirrorSites = append(mirrorSites, site)
+		}
+		if !strings.HasPrefix(lines[i], "| `") {
+			continue
+		}
+		cells := section5Cells(lines[i])
+		if len(cells) < 3 {
+			t.Errorf("%s: a §5 row with %d cells", site, len(cells))
+			continue
+		}
+		flags, rev := section5Flags(cells[2])
+		add(strings.Trim(cells[0], "`"), section5Row{
+			rpc: cells[1], flags: flags, rev: rev, site: site,
+		})
+	}
+
+	// The mirror sentence spans lines, so it is matched on §5 joined into
+	// one; every ↔ must belong to a sentence read here, or a reworded one
+	// would silently drop its group from the check.
+	mirrors := section5Mirror.FindAllStringSubmatch(
+		strings.Join(lines[start:end], " "), -1)
+	if len(mirrors) != len(mirrorSites) {
+		t.Fatalf("§5 has %d ↔ lines (%v) and %d mirror sentences this "+
+			"lint can read", len(mirrorSites), mirrorSites, len(mirrors))
+	}
+	for k, m := range mirrors {
+		cmds := section5Quoted.FindAllStringSubmatch(m[2], -1)
+		rpcs := strings.Split(m[3], ",")
+		if len(cmds) != len(rpcs) {
+			t.Errorf("%s: %d commands ↔ %d RPCs", mirrorSites[k],
+				len(cmds), len(rpcs))
+			continue
+		}
+		for j, quoted := range cmds {
+			cmd := quoted[1]
+			_, verb, _ := strings.Cut(cmd, " ")
+			base, ok := rows[m[1]+" "+verb]
+			if !ok {
+				t.Errorf("%s: %q mirrors %q, which §5 has no row for",
+					mirrorSites[k], cmd, m[1]+" "+verb)
+				continue
+			}
+			item := strings.TrimSpace(rpcs[j])
+			rpc, _, _ := strings.Cut(item, " ")
+			add(cmd, section5Row{
+				rpc:   rpc,
+				flags: base.flags,
+				rev:   section5MirrorRev.MatchString(item),
+				site:  mirrorSites[k],
+			})
+		}
+	}
+	return rows
+}
+
+// section5Cells splits one table row into its trimmed cells. `\|` is a pipe
+// inside a cell (`sp create`'s `raid1`\|`none`), not a boundary.
+func section5Cells(line string) []string {
+	var cells []string
+	var cell strings.Builder
+	for i := 0; i < len(line); i++ {
+		switch {
+		case line[i] == '\\' && i+1 < len(line) && line[i+1] == '|':
+			cell.WriteByte('|')
+			i++
+		case line[i] == '|':
+			cells = append(cells, strings.TrimSpace(cell.String()))
+			cell.Reset()
+		default:
+			cell.WriteByte(line[i])
+		}
+	}
+	cells = append(cells, strings.TrimSpace(cell.String()))
+	// The row's outer pipes leave an empty cell at each end.
+	if len(cells) > 0 && cells[0] == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && cells[len(cells)-1] == "" {
+		cells = cells[:len(cells)-1]
+	}
+	return cells
+}
+
+// section5Flags reads one flags column: its backticked flags, its shared
+// helpers expanded by calling them on a scratch flag set, and its token
+// marker. Anything else in the column — `—`, a "(default `raid1`)" note, the
+// `/` between the four `--thr-*` — names no flag.
+func section5Flags(cell string) ([]string, bool) {
+	rev := section5Rev.MatchString(cell)
+	cell = section5Rev.ReplaceAllString(cell, "")
+	var flags []string
+	for _, m := range section5Flag.FindAllStringSubmatch(cell, -1) {
+		flags = append(flags, m[1])
+	}
+	for _, m := range section5Helper.FindAllStringSubmatch(cell, -1) {
+		scratch := pflag.NewFlagSet(m[0], pflag.ContinueOnError)
+		switch m[1] {
+		case "trConfFlags":
+			trConfFlags(scratch, m[2])
+		case "selectorFlags":
+			selectorFlags(scratch, m[2])
+		default:
+			dmCloneConfFlags(scratch)
+		}
+		scratch.VisitAll(func(f *pflag.Flag) {
+			flags = append(flags, f.Name)
+		})
+	}
+	sort.Strings(flags)
+	return flags, rev
+}
+
+// section5Helpers is §5.0's shared-helpers bullet as section5CheckHelpers
+// reads it: each helper, the words that introduce its flags there, and a call
+// declaring them. The bullet writes a prefixed flag with the placeholder
+// `<prefix>` (`--<prefix>tr-type`), so the two prefixed helpers are called
+// with that placeholder as their prefix and compared as spelled.
+var section5Helpers = []struct {
+	name    string
+	head    string
+	declare func(*pflag.FlagSet)
+}{
+	{"trConfFlags", "`trConfFlags(prefix)` →",
+		func(f *pflag.FlagSet) { trConfFlags(f, "<prefix>") }},
+	{"selectorFlags", "`selectorFlags(prefix)` →",
+		func(f *pflag.FlagSet) { selectorFlags(f, "<prefix>") }},
+	{"dmCloneConfFlags", "`dmCloneConfFlags` →", dmCloneConfFlags},
+	{"pageFlags", "page flags", pageFlags},
+}
+
+// section5Spelled is one backticked flag in the shared-helpers bullet, the
+// `<prefix>` placeholder included.
+var section5Spelled = regexp.MustCompile("`--([^`]+)`")
+
+// section5CheckHelpers holds §5.0's "Shared flag helpers" bullet to the
+// helpers it describes. A row that names a helper is expanded by calling it,
+// so a flag renamed inside the helper is renamed in that row's expansion too
+// and no row goes stale, while the bullet, which spells the helper's flags
+// out, does. For each helper the flags it spells are the backticked `--`
+// names after the helper's head, up to the first `,` or `⇒` (the defaults
+// and the nil rule follow), and they must be exactly the flags the helper
+// declares.
+func section5CheckHelpers(t *testing.T, doc section5Doc) {
+	t.Helper()
+	first := -1
+	for i := doc.start; i < doc.end; i++ {
+		if strings.HasPrefix(doc.lines[i], "* **Shared flag helpers**") {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		t.Errorf("%s: §5 has no \"* **Shared flag helpers**\" bullet",
+			doc.rel)
+		return
+	}
+	last := first + 1
+	for last < doc.end && doc.lines[last] != "" &&
+		!strings.HasPrefix(doc.lines[last], "* ") &&
+		!strings.HasPrefix(doc.lines[last], "#") {
+		last++
+	}
+	bullet := strings.Join(
+		strings.Fields(strings.Join(doc.lines[first:last], " ")), " ")
+	for _, helper := range section5Helpers {
+		// The failure names the line holding the head, or the bullet's
+		// first line when the head is broken across two.
+		site := docSite{doc.rel, first + 1}
+		for i := first; i < last; i++ {
+			if strings.Contains(doc.lines[i], helper.head) {
+				site.line = i + 1
+				break
+			}
+		}
+		_, spelling, ok := strings.Cut(bullet, helper.head)
+		if !ok {
+			t.Errorf("%s: the shared-helpers bullet has no %q, so the "+
+				"flags it spells for %s cannot be found", site, helper.head,
+				helper.name)
+			continue
+		}
+		if cut := strings.IndexAny(spelling, ",⇒"); cut >= 0 {
+			spelling = spelling[:cut]
+		}
+		var spelled []string
+		for _, m := range section5Spelled.FindAllStringSubmatch(
+			spelling, -1) {
+			spelled = append(spelled, m[1])
+		}
+		sort.Strings(spelled)
+		scratch := pflag.NewFlagSet(helper.name, pflag.ContinueOnError)
+		helper.declare(scratch)
+		var declared []string
+		scratch.VisitAll(func(f *pflag.Flag) {
+			declared = append(declared, f.Name)
+		})
+		sort.Strings(declared)
+		if !slices.Equal(spelled, declared) {
+			t.Errorf("%s: §5.0 spells the flags of %s as %v, but it "+
+				"declares %v", site, helper.name, spelled, declared)
+		}
 	}
 }
 

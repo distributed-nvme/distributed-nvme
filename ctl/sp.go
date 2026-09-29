@@ -134,7 +134,7 @@ func registerSp(root *cobra.Command) {
 // gateway's "must be empty" rule and is deliberately not ported).
 //
 // CreateStoragePool carries no token — there is no SP yet to have a revision —
-// so the global --rev is ignored here.
+// so a typed --rev is a usage error here.
 func spCreateCmd() *cobra.Command {
 	cmd := leaf("create", "create a storage pool (CreateStoragePool)",
 		func() (job, error) {

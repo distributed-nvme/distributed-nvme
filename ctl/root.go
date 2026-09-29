@@ -12,10 +12,11 @@
 //
 //   - CT8 — no client-side validation. dnvctl rejects only what fails to
 //     PARSE (exit 2), which for --timeout, a deadline rather than a request
-//     value, includes NaN and ±Inf (timeoutOf); every parsed value is sent as
-//     typed and the gateway's validation is the only validator. Empty
-//     required fields, contradictory flags and unknown enum numbers are all
-//     forwarded.
+//     value, includes NaN and ±Inf (timeoutOf), plus a --rev typed on a
+//     command whose request has no token field to put it in (run, §4);
+//     every parsed value is sent as typed and the gateway's validation is
+//     the only validator. Empty required fields, contradictory flags and
+//     unknown enum numbers are all forwarded.
 //   - CT9 — only the env-backed globals (every §2.1 flag but --rev) have a
 //     second carrier: they are bound into viper, so a DNVCTL_* environment
 //     variable or a --config file supplies one just as the flag does. --rev
@@ -200,7 +201,8 @@ func addGlobalFlags(root *cobra.Command) {
 		"sp_name of every request that has one")
 	flags.String("rev", "",
 		"revision token (base 0; command line only; omitted sends no "+
-			"token message at all)")
+			"token message at all; a usage error on a command whose "+
+			"request carries no token)")
 	flags.Float64("timeout", defaultTimeout,
 		"per-invocation deadline, seconds")
 	flags.String("trace-id", "",
@@ -287,10 +289,19 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 		return err
 	}
 	invoked = cmd.Flags()
+	revRead = false
 	defer func() { invoked = nil }()
 	j, err := build()
 	if err != nil {
 		return err
+	}
+	// A typed --rev that build never read has no field to travel in: this
+	// command's request carries no token (§4). Sending the request without
+	// it would drop, unseen, a gate the operator asked for, so it is a usage
+	// error, refused before the dial like every other.
+	if invoked.Changed("rev") && !revRead {
+		return fmt.Errorf("invalid --rev: %q takes no revision token",
+			cmd.CommandPath())
 	}
 
 	// The trace id: --trace-id when non-empty, else the T4 mint. The §4
@@ -477,6 +488,12 @@ func timeoutOf() (time.Duration, error) {
 // parameter.
 var invoked *pflag.FlagSet
 
+// revRead records that the command being run read its token: revToken sets
+// it and run clears it before each build. The 34 token carriers read --rev
+// in build, and the 25 commands whose request has no token field never do,
+// so a typed --rev left unread is how run knows it has nowhere to go (§4).
+var revRead bool
+
 // leafValue reads one flag of the invoked command through pflag's typed
 // getter. pflag already parsed the value with the command line, so the only
 // errors left are a name the command does not declare or a reader of the
@@ -520,7 +537,7 @@ func u32Of(name string) uint32 {
 
 // hexOf is an id value: Go base-0, so 17 and 0x11 are the same number. An
 // unset flag is the empty string and reads as 0; a malformed one is a usage
-// error (exit 2), which is the whole of dnvctl's input checking (CT8).
+// error (exit 2), which is all the checking dnvctl does on an id (CT8).
 func hexOf(name string) (uint64, error) {
 	raw := strings.TrimSpace(strOf(name))
 	if raw == "" {
@@ -650,8 +667,10 @@ func spOf() string { return viper.GetString("sp") }
 // never a value from some other carrier: --rev has none (CT9, §0 #15), so an
 // exported DNVCTL_REV cannot put a token on a write nobody typed it for. A
 // typed --rev must parse, an empty one included (`--rev "$REV"` with REV
-// unset is a usage error, not an ungated write).
+// unset is a usage error, not an ungated write). Calling it records the read
+// (revRead): a typed --rev that no build reads is refused by run.
 func revToken() (uint64, bool, error) {
+	revRead = true
 	raw := strings.TrimSpace(strOf("rev"))
 	if !invoked.Changed("rev") {
 		return 0, false, nil
@@ -703,7 +722,7 @@ func cnRev() (*pb.CnRev, error) {
 // Declaring it wider and narrowing on read would turn an out-of-range value
 // into a silent wrap to 0 — i.e. into "use the server default", the opposite
 // of what was asked — whereas pflag rejects it outright as the parse failure
-// it is (exit 2, no RPC issued), which is the one rejection CT8 allows.
+// it is (exit 2, no RPC issued), the kind of rejection CT8 allows.
 func pageFlags(flags *pflag.FlagSet) {
 	flags.Uint32("count", 0, "page size (0 = the server default)")
 	flags.String("page-token", "", "page token from a previous reply")

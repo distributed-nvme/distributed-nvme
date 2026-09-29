@@ -113,8 +113,8 @@ func clusterCreateCmd() *cobra.Command {
 }
 
 // clusterDeleteCmd drives DeleteCluster. A cluster delete carries no revision
-// token — the §4 trio covers DNs, CNs and SPs only — so the global --rev is
-// ignored here.
+// token — the §4 trio covers DNs, CNs and SPs only — so a typed --rev is a
+// usage error here.
 func clusterDeleteCmd() *cobra.Command {
 	cmd := leaf("delete", "delete a cluster (DeleteCluster)",
 		func() (job, error) {

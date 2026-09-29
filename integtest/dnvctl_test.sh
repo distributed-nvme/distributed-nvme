@@ -434,7 +434,7 @@ ctl_fail_msg() { # <UPPER_SNAKE code> <message> <args…>
 # ctl_usage is the §3.2 exit-2 wrapper. The "no RPC was issued" half is what
 # matters and it is proved, not asserted: the caller names the RPC the command
 # would have driven and the fake's own counter must not have moved across the
-# call (§7.12 c5/c6).
+# call (§7.12 c5-c7).
 ctl_usage() { # <Rpc the command would drive> <args…>
 	local rpc=$1
 	shift
@@ -960,8 +960,8 @@ EOF
 		cn inspect --addr "$CN_ADDR"
 
 	# --- sp (§5.4) -----------------------------------------------------
-	# CreateStoragePool carries no token, so the --rev 7 the §7.10 row types
-	# must leave no trace at all; and the always-present redund_md_raid1 is
+	# CreateStoragePool carries no token, so the §7.10 row types no --rev
+	# (case C stage 7 refuses one); and the always-present redund_md_raid1 is
 	# the one dnvctl-side default (§0 #11), with an EMPTY body because
 	# --bitmap-chunk-blocks was not given. --low-water-mark-pct alone builds
 	# dm_pool_conf with no data_block_size key (--block-size was not given);
@@ -973,7 +973,7 @@ EOF
 		  \"cntlid_slot_list\":[0,1],\"cntlr_cnt\":2,\"slice_cnt\":1,
 		  \"init_ext_cnt\":\"2\"}" \
 		sp create --cntlr-cnt 2 --slice-cnt 1 --init-ext-cnt 2 \
-		--slots 0,1 --low-water-mark-pct 30 --rev 7
+		--slots 0,1 --low-water-mark-pct 30
 	sweep_step 18 DeleteStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"}}" \
@@ -1268,7 +1268,7 @@ case_behavior() {
 	# -------------------------------------------------------------------
 	stage 4 "sp create --redund none: the other arm of the oneof"
 	# -------------------------------------------------------------------
-	ctl_ok sp create --redund none --rev 7
+	ctl_ok sp create --redund none
 	assert_req CreateStoragePool \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"bdev_conf\":{\"redund_conf\":{\"redund_none\":{}}}}"
@@ -1366,7 +1366,7 @@ EOF
 	stage 4 "sp create -> INVALID_ARGUMENT"
 	# -------------------------------------------------------------------
 	ctl_fail_msg INVALID_ARGUMENT "behavior.json INVALID_ARGUMENT" \
-		sp create --rev 7
+		sp create
 	assert_count_delta CreateStoragePool 1 "the refused create was recorded"
 
 	# -------------------------------------------------------------------
@@ -1379,13 +1379,23 @@ EOF
 	# -------------------------------------------------------------------
 	stage 6 "a malformed --bm-hex is exit 2 and issues NO RPC"
 	# -------------------------------------------------------------------
-	# CT8's dividing line: dnvctl rejects only what fails to PARSE, and it
-	# does so before the dial, so the gateway never sees it. An EMPTY
-	# --bm-hex is a different thing entirely and IS sent (§5.9).
+	# CT8's dividing line: dnvctl rejects only what fails to PARSE (and,
+	# stage 7, a --rev with no token field to fill), and it does so before
+	# the dial, so the gateway never sees it. An EMPTY --bm-hex is a
+	# different thing entirely and IS sent (§5.9).
 	ctl_usage AppendCloneBitmap \
 		clone append-bm --name cl0 --bm-hex zz --rev 7
 	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c 'bm-hex' || true)" \
 		"0" "the parse error must name --bm-hex: got '$CTL_ERR'"
+
+	# -------------------------------------------------------------------
+	stage 7 "--rev on a command with no token field is exit 2 and issues NO RPC"
+	# -------------------------------------------------------------------
+	# DeleteClusterRequest has no token field (§4): the --rev could only be
+	# dropped, and a delete that looks gated would go out ungated.
+	ctl_usage DeleteCluster cluster delete --name c1 --rev 7
+	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--rev' || true)" \
+		"0" "the refusal must name --rev: got '$CTL_ERR'"
 }
 
 # ---------------------------------------------------------------------------
