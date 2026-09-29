@@ -1410,6 +1410,29 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      neither set nor clear a `Leg.err_epoch`, and, unlike a standby's, they
      are not logged (RW14).
 
+     **Row classes.** The `ERROR` rows the table judges a cntlr by — every
+     map but `leg_id_to_leg` — are of two classes. A **shared-state** row
+     belongs to the stack of a td whose `created` is set and whose thin
+     row, in some slice, reads `ERROR` with `No data available` in its
+     details: the ENODATA with which dm-thin refuses the bare
+     `dmsetup create` of a created td's thin table once the slice's pool
+     no longer holds its id, as dmsetup prints it (`cnagent.md` CN14,
+     `ThinDeviceCreated.md` U4-S2). The stack is the td's own rows —
+     its thin rows, its raid0 and its dm-error — and every row of an object
+     that exists for it alone: the ns-dev and the nvmet namespace of each of
+     its namespaces, the three rows of a transfer out of one of them, the
+     three of a clone onto it. The pool lives on the SP's legs, so whichever
+     cntlr holds the primary role reads the same rows, and no failover
+     brings the td back: an operator does (`architecture.md` Appendix D).
+     Every other `ERROR` row is the cntlr's **own**. Both classes set
+     `Cntlr.err_epoch` as the table says — the row stays visible and the
+     epoch set — and the class steers AR5 alone: a report whose `ERROR` rows
+     are all shared-state is no failover trigger. Only a converge's report
+     names the id. A Check round's probe finds the volume absent and reads
+     it `MISSING` `""`, while the raid0 over it still reads `ERROR`, so its
+     report of the same loss holds own rows only, and it is AR5's second
+     refusal that keeps the role from moving back and forth over them.
+
      **The settle** (*added 2026-09-26*, §0 item 20). `Cntlr.settling` is
      set by the op that makes the cntlr primary (`Failover`, a primary
      `ReplaceCntlr`, MD6; the gateway's `CreateStoragePool` for the SP's
@@ -1684,10 +1707,14 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      `cntlr_interval` seconds (its own ticker). A pass starts with a fresh
      `SnapshotRev` (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the
      SP — the records the reactions read, and the ones this worker itself
-     writes the `err_epoch`s into — plus the in-memory latest `CntlrInfo` of
-     the **primary** cntlr (pool usage, spare readiness) and `now` (unix
-     seconds). The snapshot re-seeds the SP's health memos first, ahead of
-     every gate below (HL3).
+     writes the `err_epoch`s into — and the sub-objects `SpConf` lists
+     (AR5's row classes attribute rows through its tds, subsystems,
+     transfers and clones), plus the in-memory latest `CntlrInfo` of the
+     **primary** cntlr (pool usage, spare readiness, AR5's rows), `now`
+     (unix seconds) and the one record kept from an earlier pass that a
+     pass decides by: the coordinator's record of the last failover it
+     applied (AR5's second refusal). The snapshot re-seeds the SP's health
+     memos first, ahead of every gate below (HL3).
      *Amended 2026-09-28:* that is the primary the snapshot names,
      and its info is taken only once its child has been handed the primary
      plan. While RW14's sides-first hold keeps a promotion from the child,
@@ -1742,7 +1769,9 @@ AR2. **One action per SP per pass** — "action" meaning a *reaction*
      `reaction skipped` that means "not applicable here, keep looking" does
      not end the pass. The pass continues past: AR5's no-failover-candidate
      (AR7's sole-primary variant, §0 item 16, is defined as "AR5 found
-     none" and would otherwise be unreachable); AR6's `grow_pending`,
+     none" and would otherwise be unreachable); AR5's `shared_state` and
+     `same_error`, which can hold for as long as the error does — an
+     operator's intervention, for a lost thin id; AR6's `grow_pending`,
      `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
      grow deferred on the CN, the `architecture.md` §8.5 ceiling — and must not disable
      AR7/AR8 for the duration); and AR8's `leg_has_two_sides`,
@@ -1796,7 +1825,10 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      `cntlr_id` among those with `primary == false`, `disabled == false`,
      `err_epoch == 0`; none ⇒ `reaction skipped` (`no candidate`) and the pass
      continues (AR2); else
-     `model.Failover(old, candidate)`. This is the `architecture.md` §11.1 failover trigger;
+     `model.Failover(old, candidate)` — for an enabled primary, unless one of
+     the two refusals below holds it (the first is judged ahead of the
+     candidate, and where there is none it logs in place of
+     `no candidate`). This is the `architecture.md` §11.1 failover trigger;
      the data-plane choreography is the agents'. The `disabled` trigger waits
      out no threshold: disabling is explicit operator intent, and the
      disabled primary has normally stopped serving by then (§8.6) — its
@@ -1821,7 +1853,7 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      promotion's, or, while a new SP's sides are still being zeroed, the
      end of its first build (HL2's settle paragraph); a primary that never
      makes it is failed over at the same threshold AR7 would replace the
-     cntlr at.
+     cntlr at, unless one of the two refusals below holds it.
      The hold applies only where `cntlr_unhealthy` is the longer, as it is
      at the defaults: nothing orders the two thresholds (AR4), and an SP
      stored with a shorter `cntlr_unhealthy` would otherwise have its
@@ -1836,6 +1868,57 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      no-candidate skip only at the longer of the two thresholds, and AR7's
      sole-primary variant, which waits `cntlr_unhealthy` either way,
      replaces it; the replacement is created settling in turn.
+
+     A primary unhealthy past its threshold is not failed over where a
+     failover cannot help, or is presumed not to (the second refusal
+     compares rows, not causes) — its `err_epoch` stays set, and every pass
+     logs why and goes on (AR2), as AR8 does for what only an operator can
+     repair; a primary with no candidate is still replaced by AR7's
+     sole-primary variant at `cntlr_unhealthy`, in a pass that logs the
+     refusal (Appendix B):
+
+     * **Shared state.** Every `ERROR` row of its latest report that HL2
+       judges it by (every map but `leg_id_to_leg`) is of HL2's
+       shared-state class: `reaction skipped` (`shared_state`, with the
+       primary's `cntlr_id` and the smallest such `td_id`), judged ahead of
+       the candidate, so a primary with none logs this rather than
+       `no candidate`. AR7 still replaces such a primary at
+       `cntlr_unhealthy` (Appendix B). The next primary would read the same
+       rows from the same pool. Failing over moved the host paths and
+       nothing else, and the promoted cntlr, never settling, lost the role
+       again at `cntlr_unhealthy` — to the peer whose standby report had
+       cleared its `err_epoch` — once per window, for as long as the td
+       stayed lost.
+     * **The same error.** The failover this coordinator last applied took
+       the role from the candidate, the primary's `err_epoch` was set less
+       than `cntlr_unhealthy` after that failover, and every `ERROR` row of
+       the primary's latest report that HL2 judges it by — the same map and
+       key, and the same td for a thin row — is one the candidate's report
+       read `ERROR` on when it lost the role: `reaction skipped`
+       (`same_error`, with `old_cntlr_id` and `new_cntlr_id`). The rule
+       presumes the error followed the role rather than being the primary's
+       own — it compares rows, not causes (Appendix B) — and handing the
+       role back would move it again over the same error, once per
+       `cntlr_unhealthy` while the primary never settles and sooner once it
+       has. A report with any other `ERROR` row is taken for a fault of the
+       primary's own, and the role moves as for any; that failover records
+       the report's rows in turn. So an error the classes do not name — a
+       lost thin id a Check round reports, whose probe names no id, among
+       them (HL2) — does not send the role back to the cntlr it last left
+       while the new primary fails no row the old one did not: in an SP of
+       two cntlrs it moves the role once, and in a larger one it can first
+       move it on to a cntlr that has not held it. An `err_epoch` set later
+       is a new error, judged as any, and a report with no `ERROR` row — a
+       primary read unreachable, whose rows the worker marks `UNKNOWN` — is
+       refused nothing.
+
+     Neither refusal holds a `disabled` primary: that trigger is the
+     operator's. Both read a report, which no STM sees, so `model.Failover`
+     does not re-validate them. The second rests on the coordinator's record
+     of the last failover it applied, the one record of its own a pass
+     decides by: why the role moved is kept in no etcd record. A coordinator
+     without it — restarted, handed the shard, or the other owner of an
+     overlap (§0 item 4) — can fail over once more, which records it again.
 
 ### 11.3 Thin-pool auto-grow
 
@@ -2567,7 +2650,17 @@ does).
   still drives the standby plan and reports its path to a spare `OK`, so
   AR8 waits for the spare instead of switching it in (the case that fails
   if the pass takes a standby's info), and once the release has handed the
-  child the primary plan it switches the spare in.
+  child the primary plan it switches the spare in;
+  `TestASharedErrorDoesNotPingPongTheRole` (AR5, HL2) — on a live
+  coordinator whose SP has lost a created td's thin id from one slice's
+  pool, the two cntlrs that can hold the role report it as the cn agent
+  does while primary — the converge naming the id missing, every Check
+  round reading the volume `MISSING` with its raid0 and ns-dev `ERROR` —
+  and nothing while standby: across three windows of `cntlr_unhealthy`
+  the role moves at most once, the primary's `err_epoch` stays set and
+  at least one pass past its threshold logs `shared_state` or
+  `same_error`, where the role used to go back and forth once per window,
+  the promoted cntlr never settling.
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
   standby leg rows ignored; the DN `err_epoch` write failing on a missing
   and on an invalid cluster conf alike; `TestHealthSettle` (*added
@@ -2637,6 +2730,28 @@ does).
   and in `model` the same selection in `Failover`'s STM, the inverted
   thresholds included, the flag moving with the role there and in a primary
   `ReplaceCntlr`, and `SetCntlrErrEpoch`'s settle);
+  AR5's two refusals (`TestReactionSharedStateErrorIsNotATrigger`: a
+  primary whose report fails only in the stack of a created td whose
+  thin id the pool no longer holds — its thin, raid0 and dm-error rows,
+  its namespace's ns-dev and namespace, a transfer out of that namespace
+  and a clone onto the td — is not failed over, and the pass goes on to
+  AR6, and with no candidate it logs `shared_state` alone, not
+  `no candidate`, and short of its threshold it logs nothing, while an own
+  row beside the stack, another td's raid0, namespace, thin row, transfer
+  or clone, a thin row failing otherwise, an uncreated td, a probe's
+  report, a primary read unreachable after the converge's report (its rows
+  `UNKNOWN`, their details kept) and a disabled primary each fail it over;
+  `TestReactionRoleNotHandedBackOverTheSameError`: after a failover on a
+  probe's report the role is not handed back while the new primary fails
+  on the same rows alone, logged once per pass, a settled new primary
+  whose `err_epoch` was set `cntlr_unhealthy` less a second after the
+  failover included, and it moves on other rows, on the same rows with an
+  own one beside them — after which the next hand-back, over the same
+  rows alone, is refused — on a report with no `ERROR` row, on an
+  `err_epoch` set `cntlr_unhealthy` after the failover, to another
+  candidate, and at once from a disabled primary; each condition of both
+  refusals, and the order of the first after the threshold and ahead of
+  the candidate, mutation-tested);
   HL3's re-seed by every pass (`TestReactionPassReseedsHealthEveryLoad`:
   each of two passes in a row offers a cntlr child the stamp its load
   read, and the child's next clean verdict clears it; the offer of a pass
@@ -3455,7 +3570,9 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
     the worker writes one only for a record it read as settling.
     (2) cn1 `cntlr 3:2 rows slice_id_to_dm_pool.1 ERROR when_primary`
     (§14.9) ⇒ `assert_none_for 3` `C2`'s `err_epoch` set: inert on a
-    standby. (3) cn0 `cntlr 3:1 rows slice_id_to_dm_pool.1 ERROR` ⇒ within
+    standby. (3) cn0 `cntlr 3:1 rows slice_id_to_data.1 ERROR` — not
+    `C2`'s row: AR5 does not hand the role back while the new primary
+    fails only on rows the old one failed on (AR5's same error) — ⇒ within
     `2 + WAIT_SHORT` `reaction applied kind=failover`, `C2 primary true`
     and `settling true`, then `C2`'s `err_epoch` set by its first
     primary-shape reply; clear cn0 ⇒ `C1`'s `err_epoch` back to 0.
@@ -3641,7 +3758,7 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | HL1-HL6 | B; HL2's settle by D steps 2, 4 and 12 (*added 2026-09-26*) |
 | BM1-BM5 | C |
 | BM6 | unit tests only (§13, `TestPushFailureIsLoggedOnly`): case C step 6's forced code rejects the `SyncupSide` itself, so no push is attempted there, let alone failed |
-| AR1-AR9 | D |
+| AR1-AR9 | D; AR5's two refusals (HL2's row classes) are unit tests only (§13): case D step 12 only keeps clear of the second |
 | SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
 | CLD1-CLD12 | G steps 5-6; CLD1/CLD3's gateway halves and CLD2's guards are unit tests (§13), and the gateway suite owns the latch (gateway.md §10.11 step 13) |
 | MD2-MD6 (through the worker and `workerctl`) | every case; MD6 ops by D |
@@ -3885,7 +4002,8 @@ durable, so nothing is lost — convergence is delayed, not skipped
   target row `MISSING` (HL2) — keeps the SP on it that long once it is unhealthy, where a settled primary is
   judged by `primary_unhealthy` alone (600 s against 5 s at the
   defaults); an old primary that recovered meanwhile gets the role back
-  only then. A *settled* primary can still be failed
+  only then, and not while the new primary fails only on rows it failed
+  on (AR5's same error). A *settled* primary can still be failed
   over on one bad round at the defaults (`primary_unhealthy` =
   `cntlr_interval` = 5 s); such a failover now costs one settle rather
   than a loop.
@@ -3901,6 +4019,24 @@ durable, so nothing is lost — convergence is delayed, not skipped
   serving is fenced before its demotion is sent (`architecture.md` §11.1,
   [D16]); and the leg-removal disconnect/unlink race is narrowed, not
   closed, because the unlink rides the dn role's `SyncupDn`.
+* **A lost thin id costs a failover, and AR5's second refusal is a
+  memory.** A report names a created td's lost thin id only when it is a
+  converge's; a Check round's probe reads the absent volume `MISSING` and
+  names no id (HL2), so a primary whose latest report is a probe's is failed
+  over, and the second refusal then keeps the role from going back to it
+  for as long as the new primary fails only on rows it failed on (AR5) — in
+  an SP of two cntlrs, one failover in all, and one more each time a new
+  primary also fails a row of its own; in a larger one the role can first
+  move on to a cntlr that has not held it. That refusal rests on the
+  coordinator's record of the last failover it applied: a coordinator after
+  a restart or a shard handoff, or the other owner of an overlap (§0 item
+  4), has none, and can fail over once more before it has. It compares rows,
+  not causes: a new primary whose own fault fails only rows the old primary
+  failed on is held as well, for as long as that fault lasts or until an
+  operator moves the role, every pass logging why. AR7's sole-primary
+  variant takes neither refusal: the primary of an SP with no failover
+  candidate that reports a lost thin id is replaced at `cntlr_unhealthy`, by
+  a cntlr that reads the same rows and is replaced in turn.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and
   the migration that could have moved a readable-but-sick side is an
   operator's tool (`CreateMigration`), not a reaction (§0 item 12).
@@ -3943,4 +4079,5 @@ durable, so nothing is lost — convergence is delayed, not skipped
   health write keeps failing (RW12). The sp coordinator's pass adds its
   own, once per pass rather than per object — AR5's `reaction skipped` /
   `no candidate`, say, for as long as a primary due for failover has no
-  eligible candidate.
+  eligible candidate, or `shared_state` / `same_error` for as long as the
+  error that holds one lasts.

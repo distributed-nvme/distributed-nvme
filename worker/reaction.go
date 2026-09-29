@@ -1,10 +1,12 @@
 // The automatic reactions of dnv-worker.md §11 (AR1-AR9), run by the sp
 // coordinator of §8.4 as one PASS per SP per cntlr_interval (AR1).
 //
-// A pass is stateless by construction: it starts from a fresh model.LoadSp
-// snapshot plus the in-memory CntlrInfo the PRIMARY cntlr's child last
-// reported, decides ONE action (AR2), and forgets everything again. Two
-// owners overlapping on one SP therefore cannot apply an action twice — every
+// A pass is stateless by construction, but for one record: it starts from a
+// fresh model.LoadSp snapshot plus the in-memory CntlrInfo the PRIMARY cntlr's
+// child last reported, decides ONE action (AR2), and forgets everything again
+// — everything but AR5's record of the last failover it applied
+// (failoverMemo), which says why the role moved, a fact no etcd record keeps.
+// Two owners overlapping on one SP therefore cannot apply an action twice — every
 // action is a model op that re-validates its own preconditions inside its STM
 // (MD6/MD7), and the loser gets model.ErrPrecondition back. The one exception
 // is a spare create: model.CreateSpareLeg refuses it while a spare of the
@@ -23,7 +25,9 @@
 //     SP PER PASS, and "not applicable, keep looking" is not an action, so
 //     the pass CONTINUES past: AR5's no failover candidate (AR7's
 //     sole-primary variant is defined as "AR5 found none", so §0 item 16
-//     would otherwise be unreachable); AR6's grow_pending, meta_ladder_cap
+//     would otherwise be unreachable); AR5's shared_state and same_error,
+//     each a primary the pass declines to move, which can last until an
+//     operator acts; AR6's grow_pending, meta_ladder_cap
 //     and no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and
 //     all three can hold indefinitely — a grow deferred on the CN, the §8.5
 //     ceiling — so ending the pass would disable AR7 and AR8 for as long as
@@ -80,6 +84,12 @@ const (
 const (
 	// reasonNoCandidate is AR5's and the allocator's "nothing to pick".
 	reasonNoCandidate = "no candidate"
+	// reasonSharedState is AR5's first refusal: the primary's every ERROR
+	// row is HL2's shared-state class, which a failover cannot escape.
+	reasonSharedState = "shared_state"
+	// reasonSameError is AR5's second refusal: the primary fails only on rows
+	// the candidate failed on when the last failover took the role from it.
+	reasonSameError = "same_error"
 	// reasonGrowPending is AR6's stateless pending rule. It is model's
 	// string: the same reason reaches this record from the pass's pre-check
 	// and from a GrowSlice whose STM found the grow pending (AR2).
@@ -476,9 +486,10 @@ func (o *modelReactionOps) finishCloneDelete(
 // ---------------------------------------------------------------------------
 
 // reactor is the sp coordinator's §11 half: the model surface, plus the two
-// memos that exist only to keep the log honest. No decision is ever taken from
-// a memo — AR6's pending rule and AR8's spare rules are reconstructed from
-// etcd and the status line on every pass (§0 item 14).
+// memos that exist only to keep the log honest and the one record AR5 decides
+// by. No other decision is ever taken from a memo — AR6's pending rule and
+// AR8's spare rules are reconstructed from etcd and the status line on every
+// pass (§0 item 14).
 type reactor struct {
 	ops reactionOps
 	// badLine is the last unparsable pool status line per slice_id, so a
@@ -487,6 +498,9 @@ type reactor struct {
 	// suppressed is the last AR3 verdict, so msgReactionSuppressed is emitted
 	// on the transition only.
 	suppressed bool
+	// lastFailover is AR5's record of the last failover this coordinator
+	// applied (errorFollowedRole); nil before the first.
+	lastFailover *failoverMemo
 }
 
 // newReactor builds a reactor over one model surface.
@@ -740,8 +754,9 @@ func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 
 // tryFailover is AR5. It reports whether the pass ends here.
 //
-// The no-candidate case deliberately does NOT end the pass: see the file
-// comment, ambiguity (1). It is the one skip that lets the next reaction run.
+// The no-candidate case and the two refusals (shared_state, same_error)
+// deliberately do NOT end the pass: see the file comment, ambiguity (1). They
+// are AR5's skips that let the next reaction run.
 func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	if p.primary == nil {
 		return false
@@ -765,15 +780,35 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		// The hold lasts until that report — the promotion's or, while a new
 		// SP's sides are still being zeroed, the end of its first build — and
 		// a primary that never makes it is failed over at the same threshold
-		// AR7 would replace the cntlr at. Only when it is the longer wait:
-		// nothing orders the two thresholds (AR4), and the hold must never
-		// shorten the settled one. model.Failover re-validates the same
-		// selection inside its STM (MD6/MD7).
+		// AR7 would replace the cntlr at, unless AR5's refusals (below) hold
+		// it. Only when it is the longer wait: nothing orders the two
+		// thresholds (AR4), and the hold must never shorten the settled one.
+		// model.Failover re-validates the same selection inside its STM
+		// (MD6/MD7).
 		threshold = p.th.GetCntlrUnhealthy()
 	}
-	if !p.primary.GetDisabled() &&
-		!reached(p.now, p.primary.GetErrEpoch(), threshold) {
-		return false
+	if !p.primary.GetDisabled() {
+		if !reached(p.now, p.primary.GetErrEpoch(), threshold) {
+			return false
+		}
+		// AR5's first refusal: a report whose every ERROR row belongs to the
+		// stack of a created td whose thin id the pool no longer holds (HL2's
+		// shared-state rows) is no trigger. The pool lives on the legs, so the
+		// next primary reads the same rows: a failover moves the host paths
+		// and nothing else, and the promoted cntlr, never settling, lost the
+		// role again at cntlr_unhealthy — to the peer its promotion had made
+		// clean — once per window, for as long as the td stayed lost. The
+		// err_epoch stays set, and every pass says why AR5 moves nothing, as
+		// AR8 does for what only an operator can repair, and goes on (AR2) —
+		// to AR7, which still replaces a primary with no candidate at
+		// cntlr_unhealthy (dnv-worker.md Appendix B).
+		if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
+			w.reactionSkipped(ctx, reactionFailover, reasonSharedState,
+				slog.Uint64("cntlr_id", p.primaryId),
+				slog.Uint64("td_id", tdIds[0]),
+			)
+			return false
+		}
 	}
 	if p.failoverCand == 0 {
 		w.reactionSkipped(ctx, reactionFailover, reasonNoCandidate,
@@ -785,6 +820,11 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		slog.Uint64("old_cntlr_id", p.primaryId),
 		slog.Uint64("new_cntlr_id", p.failoverCand),
 	}
+	if !p.primary.GetDisabled() && w.reactor().errorFollowedRole(p) {
+		// AR5's second refusal, and the pass goes on (AR2).
+		w.reactionSkipped(ctx, reactionFailover, reasonSameError, ids...)
+		return false
+	}
 	err := w.reactor().ops.failover(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
 		p.primaryId, p.failoverCand, p.now,
@@ -793,8 +833,70 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		w.reactionFailed(ctx, reactionFailover, err, ids...)
 		return true
 	}
+	w.reactor().lastFailover = &failoverMemo{
+		lost: p.primaryId,
+		at:   p.now,
+		rows: rowSet(cntlrErrorRows(p.info)),
+	}
 	w.reactionApplied(ctx, reactionFailover, ids...)
 	return true
+}
+
+// failoverMemo is AR5's record of a failover the coordinator applied: the
+// cntlr that lost the role, the pass's now, and the ERROR rows of that
+// cntlr's latest report — why the role moved, which no etcd record keeps.
+type failoverMemo struct {
+	lost uint64
+	at   uint64
+	rows map[cntlrRowId]bool
+}
+
+// errorFollowedRole is AR5's second refusal. The last failover took the role
+// from the candidate, the primary's err_epoch was set less than
+// cntlr_unhealthy after that failover, and every ERROR row of its latest
+// report is one the candidate's failed on when it lost the role: the error is
+// presumed to have followed the role (rows are compared, not causes:
+// dnv-worker.md Appendix B), and handing the role back would move it again
+// over the same error — once per cntlr_unhealthy while the primary never
+// settles, sooner once it has. An enabled primary whose report HL2's classes
+// call shared state is not failed over at all (the first refusal); this keeps
+// an error they do not name — a Check round's report of a lost thin id among
+// them — from sending the role back to the cntlr it last left while the new
+// primary fails no row the old one did not: in an SP of two cntlrs it moves
+// the role once, and in a larger one it can first move it on to a cntlr that
+// has not held it. A report with any other ERROR row is taken for a fault of
+// the primary's own, and an err_epoch set later for a new error: the role
+// moves as for any, and that failover records the report's rows in turn. A
+// report with no ERROR row — a primary read unreachable has its rows UNKNOWN
+// — is refused nothing. The record goes with the coordinator: after a restart
+// or a handoff, one failover more records it again.
+func (r *reactor) errorFollowedRole(p *spPass) bool {
+	m := r.lastFailover
+	if m == nil || m.lost != p.failoverCand {
+		return false
+	}
+	if p.primary.GetErrEpoch() >= m.at+uint64(p.th.GetCntlrUnhealthy()) {
+		return false
+	}
+	rows := cntlrErrorRows(p.info)
+	if len(rows) == 0 {
+		return false
+	}
+	for _, row := range rows {
+		if !m.rows[row] {
+			return false
+		}
+	}
+	return true
+}
+
+// rowSet is a list of rows as a set.
+func rowSet(rows []cntlrRowId) map[cntlrRowId]bool {
+	set := make(map[cntlrRowId]bool, len(rows))
+	for _, row := range rows {
+		set[row] = true
+	}
+	return set
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,8 +1256,10 @@ func replaceTarget(p *spPass) (uint64, *pb.Cntlr) {
 			continue
 		}
 		if cntlr.GetPrimary() && p.failoverCand != 0 {
-			// AR5 will move the role away first; replacing it as primary
-			// would fail model.ReplaceCntlr's own precondition anyway.
+			// AR5 moves the role away first, or holds it where a failover
+			// cannot help or is presumed not to (its shared_state and
+			// same_error); replacing it as primary would fail
+			// model.ReplaceCntlr's own precondition anyway.
 			continue
 		}
 		return cntlrId, cntlr

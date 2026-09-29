@@ -3179,10 +3179,18 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   `cntlr_unhealthy` instead when that is the longer; the `disabled` trigger is
   unchanged — *amended 2026-09-26* (the failover ping-pong: a promotion that had
   not completed read unhealthy at its first reports and was failed back
-  `primary_unhealthy` later, on every pass).
+  `primary_unhealthy` later, on every pass). Nor is an unhealthy, enabled primary
+  failed over where a failover cannot help or is presumed not to (`dnv-worker.md` HL2,
+  AR5): not while its report — a converge's, which names the lost id — fails only in
+  the stack of a created td whose thin id the pool no longer holds, rows any primary
+  would read alike; and not back to the cntlr the last failover the SP's worker applied
+  took the role from while it fails, since less than `cntlr_unhealthy` after that
+  failover, only on rows that cntlr failed on then (a worker restart or shard handoff
+  forgets that failover and can cost one more).
 * `cntlr_unhealthy` (600 s): a cntlr stays unhealthy — a non-primary one, or the
   primary of an SP with no failover candidate (the sole-cntlr SP, or every other cntlr
-  unhealthy or disabled; otherwise AR5 moves the role away first) ⇒ replace it:
+  unhealthy or disabled; otherwise AR5 moves the role away first, or holds it where a
+  failover cannot help or is presumed not to) ⇒ replace it:
   internal `DeleteCntlr` (skipping the enabled check) + internal
   `CreateCntlr` on a fresh CN — never the old cntlr's CN nor one hosting another cntlr
   of the SP, and at §6.5's tier 1 outside the `location`s of the SP's other cntlrs (the
@@ -4680,6 +4688,17 @@ exists.
   supersedes the older behaviour, which would silently hand the live `dev_id`
   a fresh, empty volume, and it belongs next to the "no thin-metadata repair
   path" limit above: pool-metadata loss is an operator-intervention event.
+  Nor does the primary role move back and forth over it: every cntlr that takes
+  the role reads the same rows, so a converge's report failing only in the td's
+  stack triggers no failover, a Check round's — which reads the volume `MISSING`
+  and names no id — does, and the role is then not handed back while the new
+  primary fails only on rows the old one failed on (`dnv-worker.md` HL2, AR5,
+  Appendix B: one failover in an SP of two cntlrs, one more after a restart or shard
+  handoff of the worker that drives the SP or each time a new primary also fails a
+  row of its own, and in a larger SP the role can first move on to a cntlr that has
+  not held it). An SP with no failover candidate still has its primary replaced over
+  it once per `cntlr_unhealthy`, each replacement reading the same rows (AR7's
+  sole-primary variant, `dnv-worker.md` Appendix B).
 * **Worker membership tolerates, but does not repair, a partitioned observer.** A
   worker whose registry watch drops a peer's events while its own heartbeats still
   succeed sees that peer go stale and, after the grace window, claims its shards;

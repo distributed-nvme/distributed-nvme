@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -687,16 +688,21 @@ func cntlrHealthMaps(info *pb.CntlrInfo) []cntlrRowMap {
 	}
 	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
 		maps = append(maps, cntlrRowMap{
-			"slice_id_to_dm_thin",
+			thinMapLabel,
 			info.GetTdIdToThinInfo()[tdId].GetSliceIdToDmThin(),
 		})
 	}
 	return maps
 }
 
+// thinMapLabel labels the per-td thin maps of a CntlrInfo, keyed by slice.
+const thinMapLabel = "slice_id_to_dm_thin"
+
 // cntlrObservation applies the HL2 cntlr row to one CheckCntlr/SyncupCntlr
 // reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
-// leg_id_to_leg, whose rows belong to the legs (below).
+// leg_id_to_leg, whose rows belong to the legs (below). A row of either of
+// HL2's classes counts (sharedStateTds): the class steers AR5, not the
+// verdict, so the row stays visible and the epoch set.
 func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
@@ -707,6 +713,147 @@ func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 		}
 	}
 	return healthClean, ""
+}
+
+// thinIdMissing is how a created td's thin row names the thin id missing from
+// its slice's pool, the mark of HL2's shared-state rows (sharedStateTds). The
+// cn agent attaches a created td's volume with a bare `dmsetup create` of its
+// thin table and never messages the id back into existence (cnagent.md CN14,
+// ThinDeviceCreated.md U4-S2); dm-thin refuses the table of a dev_id the
+// pool's metadata does not hold with ENODATA, which dmsetup prints as this,
+// and the agent carries the output in the row's details (cnagent.md CN29
+// error capture).
+// Only a converge's report names it: a Check round's probe finds the volume
+// absent and reads it MISSING.
+const thinIdMissing = "No data available"
+
+// cntlrRowId names one row of a map HL2 judges a cntlr by: the map's label,
+// the td of a per-td thin map (0 for any other map) and the row's key.
+type cntlrRowId struct {
+	label string
+	tdId  uint64
+	key   uint64
+}
+
+// cntlrErrorRows lists every RES_STATUS_ERROR row HL2 judges a cntlr by, in
+// cntlrObservation's order; cntlrObservation stops at the first.
+func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
+	var rows []cntlrRowId
+	add := func(label string, tdId uint64, m map[uint64]*pb.ResInfo) {
+		for _, key := range sortedKeys(m) {
+			if m[key].GetStatus() == pb.ResStatus_RES_STATUS_ERROR {
+				rows = append(rows, cntlrRowId{label, tdId, key})
+			}
+		}
+	}
+	for _, m := range cntlrHealthMaps(info) {
+		if m.label != thinMapLabel {
+			add(m.label, 0, m.rows)
+		}
+	}
+	// The thin maps carry their td, which cntlrHealthMaps leaves out.
+	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
+		add(thinMapLabel, tdId,
+			info.GetTdIdToThinInfo()[tdId].GetSliceIdToDmThin())
+	}
+	return rows
+}
+
+// sharedStateTds applies HL2's two row classes to one CntlrInfo. A row is of
+// the shared-state class when it belongs to the stack of a created td (state)
+// whose thin row, in some slice, reads RES_STATUS_ERROR naming the thin id
+// missing (thinIdMissing): the td's own rows — its thin rows, its raid0 and
+// its dm-error — and every row of an object that exists for it alone — the
+// ns-dev and the nvmet namespace of each of its namespaces, the three rows of
+// a transfer out of one of them, the three of a clone onto it. The pool lives
+// on the SP's legs, so whichever cntlr holds the primary role reads the same
+// rows, and no failover brings the td, or anything over it, back: an operator
+// does (architecture.md Appendix D). Every other ERROR row is the cntlr's own.
+// It returns those tds, ascending, when the info carries ERROR rows and every
+// one of them is of the shared-state class, and nil when one is the cntlr's
+// own or there is none. Both classes set Cntlr.err_epoch alike
+// (cntlrObservation): the class steers AR5 alone.
+func sharedStateTds(info *pb.CntlrInfo, state *model.SpState) []uint64 {
+	lost := make(map[uint64]bool)
+	for _, td := range state.Tds {
+		if !td.GetCreated() {
+			continue
+		}
+		thin := info.GetTdIdToThinInfo()[td.GetTdId()]
+		for _, res := range thin.GetSliceIdToDmThin() {
+			if res.GetStatus() == pb.ResStatus_RES_STATUS_ERROR &&
+				strings.Contains(res.GetDetails(), thinIdMissing) {
+				lost[td.GetTdId()] = true
+			}
+		}
+	}
+	if len(lost) == 0 {
+		return nil
+	}
+	stacks := newTdStacks(state)
+	for _, row := range cntlrErrorRows(info) {
+		tdId, ok := stacks.owner(row)
+		if !ok || !lost[tdId] {
+			return nil
+		}
+	}
+	return sortedKeys(lost)
+}
+
+// tdStacks maps the rows of the objects that exist for one td alone to that
+// td (sharedStateTds), from the SP's desired state: a namespace to its td, a
+// transfer to the td of the namespace it exports, a clone to its destination.
+type tdStacks struct {
+	ns    map[uint64]uint64
+	xfer  map[uint64]uint64
+	clone map[uint64]uint64
+}
+
+func newTdStacks(state *model.SpState) *tdStacks {
+	s := &tdStacks{
+		ns:    make(map[uint64]uint64),
+		xfer:  make(map[uint64]uint64),
+		clone: make(map[uint64]uint64),
+	}
+	byIdx := make(map[string]map[uint32]uint64, len(state.Subsystems))
+	for nqn, ss := range state.Subsystems {
+		byIdx[nqn] = make(map[uint32]uint64, len(ss.GetNsList()))
+		for _, ns := range ss.GetNsList() {
+			s.ns[ns.GetNsId()] = ns.GetTdId()
+			byIdx[nqn][ns.GetNsIdx()] = ns.GetTdId()
+		}
+	}
+	for _, xfer := range state.Xfers {
+		if tdId, ok := byIdx[xfer.GetOriNqn()][xfer.GetOriNsIdx()]; ok {
+			s.xfer[xfer.GetXferId()] = tdId
+		}
+	}
+	for _, clone := range state.Clones {
+		s.clone[clone.GetCloneId()] = clone.GetDstTdId()
+	}
+	return s
+}
+
+// owner is the td whose stack holds row, if one does.
+func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
+	var ids map[uint64]uint64
+	switch row.label {
+	case thinMapLabel:
+		return row.tdId, true
+	case "td_id_to_raid0", "td_id_to_dm_error":
+		return row.key, true
+	case "ns_id_to_namespace", "ns_id_to_dm_linear":
+		ids = s.ns
+	case "xfer_id_to_dm_linear", "xfer_id_to_subsystem",
+		"xfer_id_to_namespace":
+		ids = s.xfer
+	case "clone_id_to_target", "clone_id_to_dm_clone", "clone_id_to_meta":
+		ids = s.clone
+	default:
+		return 0, false
+	}
+	tdId, ok := ids[row.key]
+	return tdId, ok
 }
 
 // primaryShapeBuilt reports whether a primary's reply shows its stack built,

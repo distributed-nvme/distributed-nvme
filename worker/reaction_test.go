@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -1079,6 +1080,410 @@ func TestReactionSettlingPrimary(t *testing.T) {
 			primary.ErrEpoch = h.ago(tc.age)
 			h.pass()
 			h.wantOps(tc.want...)
+		}
+	})
+}
+
+// The shared-state fixture's ids (sharedStateFixture).
+const (
+	reactLostTd     = uint64(500)
+	reactOtherTd    = uint64(501)
+	reactLostNs     = uint64(800)
+	reactOtherNs    = uint64(801)
+	reactLostXfer   = uint64(900)
+	reactOtherXfer  = uint64(901)
+	reactLostClone  = uint64(950)
+	reactOtherClone = uint64(951)
+	reactCntlrC     = uint64(3)
+	reactNqn        = "nqn.2024-01.io.dnv:react"
+)
+
+// sharedStateFixture is reactFixture with two created tds whose pool is the
+// fixture's slice: reactLostTd, whose thin id the pool no longer holds, and
+// reactOtherTd, which the pool still holds, each with a namespace, a transfer
+// out of that namespace and a clone onto the td.
+func sharedStateFixture(t *testing.T) *model.SpState {
+	t.Helper()
+	state := reactFixture(t)
+	state.Conf.TdNameList = []string{"td0", "td1"}
+	state.Tds = []*pb.ThinDevice{
+		{TdId: reactLostTd, DevId: 1, Created: true},
+		{TdId: reactOtherTd, DevId: 2, Created: true},
+	}
+	state.TdNames = []string{"td0", "td1"}
+	state.Conf.NqnList = []string{reactNqn}
+	state.Subsystems = map[string]*pb.Subsystem{reactNqn: {
+		SsId: 600,
+		NsList: []*pb.Namespace{
+			{NsId: reactLostNs, NsIdx: 1, TdId: reactLostTd},
+			{NsId: reactOtherNs, NsIdx: 2, TdId: reactOtherTd},
+		},
+	}}
+	state.Conf.XferNameList = []string{"xfer0", "xfer1"}
+	state.Xfers = map[string]*pb.Transfer{
+		"xfer0": {XferId: reactLostXfer, OriNqn: reactNqn, OriNsIdx: 1},
+		"xfer1": {XferId: reactOtherXfer, OriNqn: reactNqn, OriNsIdx: 2},
+	}
+	state.Conf.CloneNameList = []string{"clone0", "clone1"}
+	state.Clones = map[string]*pb.Clone{
+		"clone0": {CloneId: reactLostClone, DstTdId: reactLostTd},
+		"clone1": {CloneId: reactOtherClone, DstTdId: reactOtherTd},
+	}
+	return state
+}
+
+// lostStackInfo is the primary's report once the pool has lost reactLostTd's
+// thin id. With converge it is the converge's: the thin row names the id
+// missing — the ENODATA of the `dmsetup create` of its thin table — and every
+// other row of the td's stack fails with it: its raid0 and dm-error, its
+// namespace's ns-dev and nvmet namespace, the transfer out of that namespace
+// and the clone onto the td. Otherwise it is a Check round's probe, which
+// reads the absent volume MISSING and names no id. Everything else is OK.
+func lostStackInfo(converge bool) *pb.CntlrInfo {
+	thin := &pb.ResInfo{
+		ResName: "thin", Status: pb.ResStatus_RES_STATUS_MISSING,
+	}
+	if converge {
+		thin = resErr("thin", "dmsetup create thin --table 0 262144 thin "+
+			"253:7 1: device-mapper: reload ioctl on thin  failed: "+
+			"No data available")
+	}
+	lost := func(name string) map[uint64]*pb.ResInfo {
+		return map[uint64]*pb.ResInfo{reactLostXfer: resErr(name, "x")}
+	}
+	return &pb.CntlrInfo{
+		SsIdToSubsystem: map[uint64]*pb.ResInfo{600: resOk("ss")},
+		NsIdToNamespace: map[uint64]*pb.ResInfo{
+			reactLostNs:  resErr("ns", "namespace not enabled"),
+			reactOtherNs: resOk("ns2"),
+		},
+		NsIdToDmLinear: map[uint64]*pb.ResInfo{
+			reactLostNs:  resErr("nsdev", "lsblk raid0: not a block device"),
+			reactOtherNs: resOk("nsdev2"),
+		},
+		TdIdToRaid0: map[uint64]*pb.ResInfo{
+			reactLostTd:  resErr("raid0", "lsblk thin: not a block device"),
+			reactOtherTd: resOk("raid0-2"),
+		},
+		TdIdToDmError: map[uint64]*pb.ResInfo{
+			reactLostTd:  resErr("error", "x"),
+			reactOtherTd: resOk("error2"),
+		},
+		XferIdToDmLinear:  lost("xfer-dev"),
+		XferIdToSubsystem: lost("xfer-ss"),
+		XferIdToNamespace: lost("xfer-ns"),
+		CloneIdToTarget: map[uint64]*pb.ResInfo{
+			reactLostClone: resErr("clone-src", "x"),
+		},
+		CloneIdToDmClone: map[uint64]*pb.ResInfo{
+			reactLostClone: resErr("clone", "x"),
+		},
+		CloneIdToMeta: map[uint64]*pb.ResInfo{
+			reactLostClone: resErr("clone-meta", "x"),
+		},
+		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+			reactLostTd: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+				reactSliceId: thin,
+			}},
+			reactOtherTd: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+				reactSliceId: resOk("thin2"),
+			}},
+		},
+	}
+}
+
+// TestReactionSharedStateErrorIsNotATrigger pins AR5's first refusal (HL2's
+// row classes): an unhealthy primary whose report fails only in the stack of
+// a created td whose thin id the pool no longer holds is not failed over —
+// every cntlr that takes the role reads the same rows from the same pool —
+// and the pass records why and goes on. The refusal is judged ahead of the
+// candidate, so a primary with none logs it rather than `no candidate`, and
+// after the threshold, so a primary short of it logs nothing. Each other case
+// fails it over: an ERROR row of anything else beside the stack — another
+// td's raid0, namespace, thin row, transfer or clone among them — a thin row
+// failing for any other reason, an uncreated td, a probe's report, which
+// names no id, a primary read unreachable after the converge's report, its
+// rows UNKNOWN with their details kept, and a disabled primary, whose trigger
+// is the operator's.
+func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
+	// armGrow arms AR6 so that the pass going on is observable.
+	armGrow := func(t *testing.T, h *reactHarness) {
+		t.Helper()
+		total := reactDataBlocks(t, 2)
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(1, 1000, total, total))
+		h.dnCands(reactDnC, reactDnD)
+	}
+
+	t.Run("the lost td's stack alone", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		armGrow(t, h)
+		h.pass()
+		h.wantOps("grow")
+		h.wantApplied(reactionGrowData)
+		h.wantSkipped(reactionFailover, "shared_state")
+		rec := h.logs.withMsg(msgReactionSkipped)[0]
+		for attr, want := range map[string]uint64{
+			"cntlr_id": reactCntlrA,
+			"td_id":    reactLostTd,
+		} {
+			if got, _ := rec[attr].(float64); uint64(got) != want {
+				t.Fatalf("%s = %v, want %d", attr, rec[attr], want)
+			}
+		}
+	})
+
+	t.Run("no candidate", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		// The one other cntlr cannot take the role.
+		h.state.Cntlrs[reactCntlrB].Disabled = true
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		armGrow(t, h)
+		h.pass()
+		h.wantOps("grow")
+		h.wantApplied(reactionGrowData)
+		recs := h.logs.withMsg(msgReactionSkipped)
+		if len(recs) != 1 || recs[0]["kind"] != reactionFailover ||
+			recs[0]["reason"] != "shared_state" {
+			t.Fatalf("skips = %v, want failover/shared_state alone", recs)
+		}
+	})
+
+	t.Run("below the threshold", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy - 1)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		h.pass()
+		h.wantOps()
+		if recs := h.logs.withMsg(msgReactionSkipped); len(recs) != 0 {
+			t.Fatalf("skips below the threshold = %v, want none", recs)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(h *reactHarness, info *pb.CntlrInfo)
+	}{
+		{"an own row beside it", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+		}},
+		{"another td's raid0", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.TdIdToRaid0[reactOtherTd] = resErr("raid0-2", "x")
+		}},
+		{"another td's namespace", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.NsIdToDmLinear[reactOtherNs] = resErr("nsdev2", "x")
+		}},
+		{"another td's thin row", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId] =
+				resErr("thin2", "x")
+		}},
+		{"a transfer out of another td's namespace", func(
+			_ *reactHarness, info *pb.CntlrInfo,
+		) {
+			info.XferIdToDmLinear[reactOtherXfer] = resErr("xfer2-dev", "x")
+		}},
+		{"a clone onto another td", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.CloneIdToDmClone[reactOtherClone] = resErr("clone2", "x")
+		}},
+		{"a thin row failing otherwise", func(
+			_ *reactHarness, info *pb.CntlrInfo,
+		) {
+			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId] =
+				resErr("thin", "dmsetup info thin: signal: killed")
+		}},
+		{"an uncreated td", func(h *reactHarness, _ *pb.CntlrInfo) {
+			h.state.Tds[0].Created = false
+		}},
+		{"a probe's report", func(_ *reactHarness, info *pb.CntlrInfo) {
+			info.TdIdToThinInfo[reactLostTd].SliceIdToDmThin[reactSliceId] =
+				lostStackInfo(false).TdIdToThinInfo[reactLostTd].
+					SliceIdToDmThin[reactSliceId]
+		}},
+		{"an unreachable primary", func(_ *reactHarness, info *pb.CntlrInfo) {
+			// The stream died after the converge named the id: every row
+			// reads UNKNOWN and keeps its details (markCntlrUnknown).
+			markCntlrUnknown(info)
+		}},
+		{"a disabled primary", func(h *reactHarness, _ *pb.CntlrInfo) {
+			h.state.Cntlrs[reactCntlrA].Disabled = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, sharedStateFixture(t))
+			h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+				common.DefaultPrimaryUnhealthy)
+			info := lostStackInfo(true)
+			tc.mutate(h, info)
+			h.setPrimaryInfo(reactCntlrA, info)
+			h.pass()
+			calls := h.wantOps("failover")
+			if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrB {
+				t.Fatalf("failover %d -> %d", calls[0].oldId, calls[0].newId)
+			}
+			h.wantApplied(reactionFailover)
+		})
+	}
+}
+
+// TestReactionRoleNotHandedBackOverTheSameError pins AR5's second refusal: a
+// failover on a probe's report of the lost td — no refusal of the first kind,
+// the report naming no id — hands the role to a peer that fails on the same
+// rows, and the role is not handed back to the cntlr that lost it while the
+// primary fails only on rows that cntlr failed on, from an error set within
+// cntlr_unhealthy of that failover: the error is presumed to have followed
+// the role. The role moves on anything else — rows the old primary did not
+// fail on, beside its rows or instead of them, a report with no ERROR row, a
+// later error — and to another candidate, and at once when the primary is
+// disabled; a hand-back over rows of the primary's own records them in turn.
+func TestReactionRoleNotHandedBackOverTheSameError(t *testing.T) {
+	// failedOver runs the pass that fails A over to B and commits it the way
+	// model.Failover does: A a clean standby, B primary and settling, B's
+	// report rows, its err_epoch the failover's second.
+	failedOver := func(
+		t *testing.T,
+		state *model.SpState,
+		rows *pb.CntlrInfo,
+	) *reactHarness {
+		t.Helper()
+		h := newReactHarness(t, state)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultPrimaryUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(false))
+		h.pass()
+		h.wantOps("failover")
+		a, b := h.state.Cntlrs[reactCntlrA], h.state.Cntlrs[reactCntlrB]
+		a.Primary, a.ErrEpoch = false, 0
+		b.Primary, b.Settling, b.ErrEpoch = true, true, h.now()
+		h.setPrimaryInfo(reactCntlrB, rows)
+		return h
+	}
+	advance := func(h *reactHarness, seconds uint64) {
+		h.clk.advance(time.Duration(seconds) * time.Second)
+	}
+
+	t.Run("the same rows", func(t *testing.T) {
+		h := failedOver(t, sharedStateFixture(t), lostStackInfo(false))
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		h.pass()
+		h.wantOps("failover")
+		recs := h.logs.withMsg(msgReactionSkipped)
+		if len(recs) != 2 {
+			t.Fatalf("skips = %v, want one per pass", recs)
+		}
+		for _, rec := range recs {
+			if rec["kind"] != reactionFailover || rec["reason"] != "same_error" {
+				t.Fatalf("skip = %v, want failover/same_error", rec)
+			}
+			old, _ := rec["old_cntlr_id"].(float64)
+			cand, _ := rec["new_cntlr_id"].(float64)
+			if uint64(old) != reactCntlrB || uint64(cand) != reactCntlrA {
+				t.Fatalf("skip = %v, want %d -> %d refused", rec,
+					reactCntlrB, reactCntlrA)
+			}
+		}
+	})
+
+	t.Run("other rows", func(t *testing.T) {
+		rows := &pb.CntlrInfo{SsIdToSubsystem: map[uint64]*pb.ResInfo{
+			600: resErr("ss", "not linked to the port"),
+		}}
+		h := failedOver(t, sharedStateFixture(t), rows)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("failover", "failover")
+		if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrA {
+			t.Fatalf("failover %d -> %d", calls[1].oldId, calls[1].newId)
+		}
+	})
+
+	// The same rows and one of the new primary's own: the role goes back, and
+	// that failover's record refuses the next hand-back over the lost td's
+	// rows alone, so the role moves twice and then stays.
+	t.Run("the same rows and an own one", func(t *testing.T) {
+		rows := lostStackInfo(false)
+		rows.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+		h := failedOver(t, sharedStateFixture(t), rows)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("failover", "failover")
+		if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrA {
+			t.Fatalf("failover %d -> %d", calls[1].oldId, calls[1].newId)
+		}
+		a, b := h.state.Cntlrs[reactCntlrA], h.state.Cntlrs[reactCntlrB]
+		b.Primary, b.Settling, b.ErrEpoch = false, false, 0
+		a.Primary, a.Settling, a.ErrEpoch = true, true, h.now()
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(false))
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		h.wantOps("failover", "failover")
+		h.wantSkipped(reactionFailover, "same_error")
+	})
+
+	// A primary read unreachable has every row UNKNOWN: no row is one the
+	// old primary failed on, and the role goes back.
+	t.Run("no ERROR row", func(t *testing.T) {
+		rows := lostStackInfo(false)
+		markCntlrUnknown(rows)
+		h := failedOver(t, sharedStateFixture(t), rows)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("failover", "failover")
+		if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrA {
+			t.Fatalf("failover %d -> %d", calls[1].oldId, calls[1].newId)
+		}
+	})
+
+	// A new primary that settled and then fails on the same rows is held
+	// while its error was set within cntlr_unhealthy of the failover, and
+	// judged as any settled primary once it is set later.
+	for _, tc := range []struct {
+		after uint64
+		want  []string
+	}{
+		{common.DefaultCntlrUnhealthy - 1, []string{"failover"}},
+		{common.DefaultCntlrUnhealthy, []string{"failover", "failover"}},
+	} {
+		t.Run(fmt.Sprintf("settled, failing %d s after", tc.after),
+			func(t *testing.T) {
+				h := failedOver(t, sharedStateFixture(t), lostStackInfo(false))
+				b := h.state.Cntlrs[reactCntlrB]
+				advance(h, tc.after)
+				b.Settling, b.ErrEpoch = false, h.now()
+				advance(h, common.DefaultPrimaryUnhealthy)
+				h.pass()
+				h.wantOps(tc.want...)
+			})
+	}
+
+	t.Run("another candidate", func(t *testing.T) {
+		state := sharedStateFixture(t)
+		state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, reactCntlrC)
+		state.Cntlrs[reactCntlrC] = &pb.Cntlr{AddrPort: reactCnC}
+		h := failedOver(t, state, lostStackInfo(false))
+		// The operator has disabled the cntlr that lost the role.
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("failover", "failover")
+		if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrC {
+			t.Fatalf("failover %d -> %d", calls[1].oldId, calls[1].newId)
+		}
+	})
+
+	t.Run("a disabled primary", func(t *testing.T) {
+		h := failedOver(t, sharedStateFixture(t), lostStackInfo(false))
+		h.state.Cntlrs[reactCntlrB].Disabled = true
+		h.pass()
+		calls := h.wantOps("failover", "failover")
+		if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrA {
+			t.Fatalf("failover %d -> %d", calls[1].oldId, calls[1].newId)
 		}
 	})
 }

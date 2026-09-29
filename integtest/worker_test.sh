@@ -2948,11 +2948,14 @@ EOF
 		cntlr_epoch_set sp2 2
 
 	log "  12.3: fail the settled C1; C2 is promoted settling and reports ERROR"
+	# C1 fails on a row other than C2's: AR5 does not hand the role back to a
+	# cntlr while the new primary fails only on rows it failed on (AR5's same
+	# error), and 12.5 needs the fail-back.
 	local sp2_failovers c2_epoch c1_settles hold back_at
 	sp2_failovers=$(reaction_cnt failover)
 	set_behavior cn0 <<'EOF'
-{"objects": {"cntlr 3:1": {"rows": {"slice_id_to_dm_pool.1":
-  {"status": "ERROR", "details": "pool gone"}}}}}
+{"objects": {"cntlr 3:1": {"rows": {"slice_id_to_data.1":
+  {"status": "ERROR", "details": "data concat gone"}}}}}
 EOF
 	wait_until $((2 + WAIT_SHORT)) "sp2: reaction applied kind=failover" \
 		reaction_ge $((sp2_failovers + 1)) failover

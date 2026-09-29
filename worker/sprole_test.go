@@ -2975,6 +2975,28 @@ func sliceEpochField(slice *pb.Slice, legId uint64, sideId uint64) *uint64 {
 	return nil
 }
 
+// commitFailover applies what model.Failover commits to the stored state,
+// copy-on-write as putCntlrErrEpoch does: the role moves from oldId to newId,
+// the new primary is settling and the old one no longer (HL2), and SpRev
+// bumps. It returns the new revision.
+func (o *fakeSpOps) commitFailover(oldId uint64, newId uint64) uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	next := *o.state
+	next.Cntlrs = make(map[uint64]*pb.Cntlr, len(o.state.Cntlrs))
+	for id, cntlr := range o.state.Cntlrs {
+		next.Cntlrs[id] = cntlr
+	}
+	old := proto.Clone(o.state.Cntlrs[oldId]).(*pb.Cntlr)
+	old.Primary, old.Settling = false, false
+	fresh := proto.Clone(o.state.Cntlrs[newId]).(*pb.Cntlr)
+	fresh.Primary, fresh.Settling = true, true
+	next.Cntlrs[oldId], next.Cntlrs[newId] = old, fresh
+	next.SpRevision++
+	o.state = &next
+	return next.SpRevision
+}
+
 // reactWith gives a running coordinator a reactor over a recording model
 // surface: the production one holds the harness's nil etcd client, which any
 // reaction would dereference. It is safe until the clock first advances — a
@@ -2982,6 +3004,41 @@ func sliceEpochField(slice *pb.Slice, legId uint64, sideId uint64) *uint64 {
 // tick's channel send orders this write before the pass reads it.
 func (h *spHarness) reactWith(w *spWorker, rops *fakeReactionOps) {
 	w.react = newReactor(rops)
+}
+
+// failoverCommitter is the model surface of a live failover test: its
+// failover commits into the harness's stored SpState what model.Failover
+// commits (commitFailover) and hands the coordinator the new revision, as
+// the SpRev watch does. The hand-over lands in the coordinator's desired
+// channel and is taken up once the pass that ran the failover returns. Every
+// other op is fakeReactionOps'.
+type failoverCommitter struct {
+	*fakeReactionOps
+	ops *fakeSpOps
+	w   *spWorker
+}
+
+func (o *failoverCommitter) failover(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	oldId uint64,
+	newId uint64,
+	now uint64,
+) error {
+	err := o.fakeReactionOps.failover(
+		ctx, cid, shard, spId, spName, oldId, newId, now,
+	)
+	if err != nil {
+		return err
+	}
+	o.w.update(desiredState{
+		revision: o.ops.commitFailover(oldId, newId),
+		handle:   spName,
+	})
+	return nil
 }
 
 // epochWrites is the err_epoch of every health write of one record, in order.
@@ -3202,6 +3259,209 @@ func TestOrphanedEpochIsClearedByTheOwner(t *testing.T) {
 			t.Fatalf("epoch writes of %s = %v, want no write after the %d "+
 				"that corrected the record", rec.name, got, settled[idx])
 		}
+	}
+}
+
+// The shape of TestASharedErrorDoesNotPingPongTheRole. Three windows of
+// pingPongCntlrUnhealthy are what it runs: a primary that took the role never
+// settles (HL2), its report never being clean, so the old code handed the role
+// back once per window. pingPongInterval is its cntlr_interval and
+// side_interval, long against the clock's 5 s step, so that no round outlives
+// its own timeout while the test moves the clock (RW4 step 3): a missed round
+// marks the primary's rows UNKNOWN, and a primary read unreachable is failed
+// over whatever its rows said before. pingPongNs is the namespace on the td
+// the pool has lost.
+const (
+	pingPongCntlrUnhealthy = 180
+	pingPongInterval       = 60
+	pingPongNs             = uint64(800)
+)
+
+// lostThinInfo is what a cn agent reports as the primary of the fixture SP
+// once the pool of spSliceB no longer holds the created td's thin id
+// (cnagent.md CN14, ThinDeviceCreated.md U4-S2): with converge, its
+// converge's report, which the SyncupCntlr reply carries, and otherwise a
+// Check round's probe. The converge's `dmsetup create` of the thin table fails
+// with ENODATA, and the raid0 over the td's volumes cannot be built, nor the
+// ns-dev of its namespace over the raid0. The probe finds the volume absent —
+// MISSING, naming no id — and the raid0 and the ns-dev failing as before. A
+// standby builds none of it (CN9).
+func lostThinInfo(converge bool) *pb.CntlrInfo {
+	thin := &pb.ResInfo{
+		ResName: "thin-b",
+		Status:  pb.ResStatus_RES_STATUS_MISSING,
+	}
+	if converge {
+		thin = resErr("thin-b", "dmsetup create thin-b --table 0 262144 "+
+			"thin 253:7 2: device-mapper: reload ioctl on thin-b  failed: "+
+			"No data available\nCommand failed.")
+	}
+	pool := func(name string) *pb.ResInfo {
+		return &pb.ResInfo{
+			ResName: name,
+			Status:  pb.ResStatus_RES_STATUS_OK,
+			Details: poolLine(10, 1000, 10, 1000),
+		}
+	}
+	return &pb.CntlrInfo{
+		SsIdToSubsystem: map[uint64]*pb.ResInfo{600: resOk("ss")},
+		NsIdToNamespace: map[uint64]*pb.ResInfo{pingPongNs: resOk("ns")},
+		NsIdToDmLinear: map[uint64]*pb.ResInfo{pingPongNs: resErr(
+			"nsdev", "lsblk /dev/mapper/raid0: not a block device")},
+		TdIdToRaid0: map[uint64]*pb.ResInfo{spTdDone: resErr(
+			"raid0", "lsblk /dev/mapper/thin-b: not a block device")},
+		TdIdToDmError: map[uint64]*pb.ResInfo{spTdDone: resOk("error")},
+		SliceIdToDmPool: map[uint64]*pb.ResInfo{
+			spSliceA: pool("pool-a"),
+			spSliceB: pool("pool-b"),
+		},
+		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+			spTdDone: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+				spSliceA: resOk("thin-a"),
+				spSliceB: thin,
+			}},
+		},
+	}
+}
+
+// TestASharedErrorDoesNotPingPongTheRole pins AR5's two refusals end to end,
+// on a live coordinator with the fake clock. The pool of one slice has lost a
+// created td's thin id, so whichever cntlr is primary reports the td's
+// volume, its raid0 and the ns-dev of its namespace failing — its converge's
+// SyncupCntlr reply naming the id missing, every Check round after it reading
+// the volume MISSING — and a standby reports none of it. The old code failed
+// the settled primary over after primary_unhealthy and then, the promoted one
+// never settling, handed the role back once per cntlr_unhealthy, to the peer
+// whose standby report had cleared its err_epoch: host paths moved every
+// window for as long as the td stayed lost. Now a report whose ERROR rows are
+// all the lost td's is no trigger (HL2's shared-state rows), and a probe's,
+// which names no id, fails the primary over once, after which the role is not
+// handed back while the new primary fails only on rows the old one failed on.
+// Across three windows there is at most that one failover, the primary's
+// err_epoch stays set, and a pass past its threshold says why nothing moves.
+func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	setCachedConf(h.deps, testCid, testClusterConf(func(cc *pb.ClusterConf) {
+		cc.HealthCheckConf.CntlrInterval = pingPongInterval
+		cc.HealthCheckConf.SideInterval = pingPongInterval
+	}))
+	state := spFixture()
+	state.Conf.EventThreshold = &pb.EventThreshold{
+		CntlrUnhealthy: pingPongCntlrUnhealthy,
+	}
+	state.Subsystems["nqn.2024-01.io.dnv:sp0"].NsList = []*pb.Namespace{{
+		NsId: pingPongNs, NsIdx: 1, TdId: spTdDone,
+	}}
+	h.ops.setState(state)
+	h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
+	// Both cntlrs that can hold the role answer as the cn agent does: the
+	// converge's report on a SyncupCntlr, the probe's on a Check round at the
+	// revision last applied, the lost td's rows only while the request says
+	// primary and enabled. A Check before any SyncupCntlr answers revision 0,
+	// which re-syncs (RW4 step 5).
+	actsPrimary := func(req *pb.SyncupCntlrRequest) bool {
+		return req.GetCntlr().GetPrimary() && !req.GetCntlr().GetDisabled()
+	}
+	for _, addr := range []string{spCnA, spCnB} {
+		stub := h.cntlrs[addr]
+		stub.syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			info := &pb.CntlrInfo{}
+			if actsPrimary(req) {
+				info = lostThinInfo(true)
+			}
+			return &pb.SyncupCntlrReply{
+				Revision: req.GetRevision(), CntlrInfo: info,
+			}
+		}
+		stub.checkReply = func(*pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+			reqs := stub.syncups()
+			if len(reqs) == 0 {
+				return &pb.CheckCntlrReply{}
+			}
+			last := reqs[len(reqs)-1]
+			info := &pb.CntlrInfo{}
+			if actsPrimary(last) {
+				info = lostThinInfo(false)
+			}
+			return &pb.CheckCntlrReply{
+				Revision: last.GetRevision(), CntlrInfo: info,
+			}
+		}
+	}
+	for _, stub := range h.sides {
+		stub.checkReply = func(req *pb.CheckSideRequest) *pb.CheckSideReply {
+			return &pb.CheckSideReply{Revision: req.GetRevision()}
+		}
+	}
+	w := h.start()
+	// As reactWith: safe until the clock first advances.
+	rops := &failoverCommitter{
+		fakeReactionOps: &fakeReactionOps{}, ops: h.ops, w: w,
+	}
+	w.react = newReactor(rops)
+	failovers := func() []reactionCall {
+		var out []reactionCall
+		for _, call := range rops.allCalls() {
+			if call.op == "failover" {
+				out = append(out, call)
+			}
+		}
+		return out
+	}
+
+	// The primary's first converge reports the lost id and stamps it.
+	waitFor(t, "the primary's report", func() bool {
+		return h.ops.cntlrErrEpoch(spCntlrPrimary) != 0
+	})
+	end := h.clk.nowUnix() + 3*pingPongCntlrUnhealthy + pingPongInterval
+	moved := 0
+	for h.clk.nowUnix() < end {
+		h.clk.advance(5 * time.Second)
+		time.Sleep(5 * time.Millisecond)
+		calls := failovers()
+		if len(calls) == moved {
+			continue
+		}
+		moved = len(calls)
+		last := calls[moved-1]
+		// The role moved: the promoted cntlr's converge reports the lost id
+		// and the demoted one's standby report clears its epoch before the
+		// clock goes on, as they would within a round.
+		waitFor(t, "the reports after the failover", func() bool {
+			return h.ops.cntlrErrEpoch(last.newId) != 0 &&
+				h.ops.cntlrErrEpoch(last.oldId) == 0
+		})
+	}
+
+	calls := failovers()
+	if len(calls) > 1 {
+		t.Fatalf("%d failovers in three windows of cntlr_unhealthy, want "+
+			"at most one: %+v", len(calls), calls)
+	}
+	if other := rops.allCalls(); len(other) != len(calls) {
+		t.Fatalf("reaction ops = %+v, want the failovers alone", other)
+	}
+	primary := spCntlrPrimary
+	if len(calls) == 1 {
+		primary = calls[0].newId
+	}
+	if h.ops.cntlrErrEpoch(primary) == 0 {
+		t.Fatalf("the primary's err_epoch was cleared: the lost td is still " +
+			"reported")
+	}
+	refused := 0
+	for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+		if rec["kind"] == reactionFailover &&
+			(rec["reason"] == "shared_state" || rec["reason"] == "same_error") {
+			refused++
+		}
+	}
+	if refused == 0 {
+		t.Fatalf("no pass said why the primary past its threshold stayed: %v",
+			h.logs.withMsg(msgReactionSkipped))
 	}
 }
 

@@ -651,7 +651,21 @@ below is what shows the bare creates attached the existing ids).
   every converge and is never re-created by message (U4-S2). This
   supersedes the pre-change behaviour, which silently handed the `dev_id` a
   fresh empty volume; it belongs next to the "no thin-metadata repair path"
-  limit of Appendix D.
+  limit of Appendix D. Every cntlr that takes the primary role reads the
+  same rows from the same pool, so the worker does not fail the primary
+  over on a converge's report whose `ERROR` rows all belong to the td's
+  stack; a Check round's report, which reads the volume `MISSING` and names
+  no id, fails it over, and the role is not handed back while the new
+  primary fails only on rows the old one failed on (`dnv-worker.md` HL2,
+  AR5) — one failover in a pool of two cntlrs, one more after a restart or
+  shard handoff of the worker or each time a new primary also fails a row
+  of its own, and in a pool of more the role can first move on to a cntlr
+  that has not held it. The oscillation — the role handed back and forth
+  once per `cntlr_unhealthy` for as long as the id stayed lost — is closed.
+  AR7's sole-primary replacement is not: a primary with no failover
+  candidate that reports the lost id is replaced at `cntlr_unhealthy` by a
+  cntlr that reads the same rows, and is replaced in turn (`dnv-worker.md`
+  Appendix B). The intervention remains.
 * **One more fan-out per td creation.** Every flip bumps `SpRev` (R5), so
   creating a td costs two full fan-outs of the SP instead of one; per-reply
   batching (R6) keeps bulk creation at one extra fan-out per reply, or per
