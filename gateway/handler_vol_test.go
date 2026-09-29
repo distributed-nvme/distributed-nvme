@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -3253,6 +3255,251 @@ func TestCreateMigrationPrefersAnotherFailureDomain(t *testing.T) {
 			volDnCFree-volDataExtCnt {
 			t.Errorf("dn-c free_ext_cnt: got %d, want %d",
 				got, volDnCFree-volDataExtCnt)
+		}
+	})
+}
+
+// volReadHookKey marks the ctx of the one request a volReadHook watches.
+type volReadHookKey struct{}
+
+// volReadHook runs a second actor at one exact point of a request: right after
+// the request's first read of one key. etcdutil logs every read — plain,
+// snapshot and STM alike — once the value is fetched and before its caller
+// sees it, under the caller's own ctx (log.md §5.3), so a slog handler that
+// recognizes that record is a seam no production code had to grow. The two
+// actors still run one after the other, never concurrently: the request waits
+// inside its own log call until the actor returns. Only records whose ctx
+// carries volReadHookKey count, so the actor's own reads of the same key pass
+// through untouched.
+type volReadHook struct {
+	slog.Handler
+	key   string
+	actor func()
+	fired atomic.Bool
+}
+
+// Handle runs the actor on the watched request's first "etcd get" of the key,
+// then hands the record on to the handler it wraps.
+func (h *volReadHook) Handle(ctx context.Context, rec slog.Record) error {
+	if ctx.Value(volReadHookKey{}) != nil && rec.Message == "etcd get" &&
+		volRecordKey(rec) == h.key && h.fired.CompareAndSwap(false, true) {
+		h.actor()
+	}
+	return h.Handler.Handle(ctx, rec)
+}
+
+// volRecordKey is the "key" attribute of one etcdutil record.
+func volRecordKey(rec slog.Record) string {
+	key := ""
+	rec.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "key" {
+			return true
+		}
+		key = attr.Value.String()
+		return false
+	})
+	return key
+}
+
+// volDnE is a fifth disk node, in a failure domain of its own. Only the
+// failure-domain case of TestCreateMigrationRefusesADnTheGroupAlreadyUses adds
+// it to the fixture.
+const volDnE = "dn-e:9000"
+
+// volRaceMigrationA runs "migr-a", a token-less CreateMigration of the data
+// group's leg A with no NodeSelector, and runs actor — another request on the
+// same group — the moment migr-a's plan has read the slice. migr-a's plan
+// therefore predates whatever the actor hangs off the group, while its scan
+// and its deciding STM both see it. migr-a is token-less because that is the
+// race: a token would make its STM ABORTED on the actor's SpRev bump (GW6).
+//
+// The hook is the process's slog handler only while migr-a runs, so one test
+// can race again and again against fresh fixtures. No gateway test runs in
+// parallel, so the swap reaches only this test's own requests. The test fails
+// unless the hook fired and both requests succeeded; the result is the
+// addr_port migr-a's destination landed on.
+func volRaceMigrationA(t *testing.T, env *volEnv, actor func() error) string {
+	t.Helper()
+	var actorErr error
+	prev := slog.Default()
+	hook := &volReadHook{
+		Handler: prev.Handler(),
+		key:     model.SliceKey(env.cid, volSpId, volSliceId),
+		actor:   func() { actorErr = actor() },
+	}
+	slog.SetDefault(slog.New(hook))
+	defer slog.SetDefault(prev)
+	// Bounded, so that a unit which never settles — every round refused
+	// against a plan read only once for the whole unit — fails as ABORTED
+	// instead of hanging the package: GW9 retries until ctx ends.
+	ctx, cancel := context.WithTimeout(
+		context.WithValue(env.ctx, volReadHookKey{}, true), 30*time.Second)
+	defer cancel()
+	_, err := env.srv.CreateMigration(ctx, &pb.CreateMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		MigrName:    "migr-a",
+		SrcSideId:   volDataSideA,
+		DmCloneConf: &pb.DmCloneConf{HydrationThreshold: 2},
+	})
+	if !hook.fired.Load() {
+		t.Fatalf("the plan never read the slice: the other request " +
+			"never ran and nothing was raced")
+	}
+	if actorErr != nil {
+		t.Fatalf("the interleaved request: %v", actorErr)
+	}
+	if err != nil {
+		t.Fatalf("CreateMigration migr-a: %v", err)
+	}
+	leg := activeLegOf(volGrpOf(t, env.slice(), volDataGrpId), volDataLegA)
+	if leg == nil || len(leg.GetSideList()) != 2 {
+		t.Fatalf("leg %d must own two sides: %v", volDataLegA, leg)
+	}
+	return leg.GetSideList()[1].GetAddrPort()
+}
+
+// volMigrateLegB is an interleaved request for volRaceMigrationA: a
+// token-less migration of the data group's OTHER leg, leg B, onto dn-c.
+func volMigrateLegB(env *volEnv) error {
+	_, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		MigrName:    "migr-b",
+		SrcSideId:   volDataSideB,
+		DnSelector:  volDnSelector(volDnC),
+		DmCloneConf: &pb.DmCloneConf{HydrationThreshold: 2},
+	})
+	return err
+}
+
+// volSpareOnDnC is an interleaved request for volRaceMigrationA: a token-less
+// spare of the data group on dn-c. The spare leg takes the SP's next_id.
+func volSpareOnDnC(env *volEnv) error {
+	_, err := env.srv.CreateSpareLeg(env.ctx, &pb.CreateSpareLegRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		GrpId:       volDataGrpId,
+		DnSelector:  volDnSelector(volDnC),
+	})
+	return err
+}
+
+// TestCreateMigrationRefusesADnTheGroupAlreadyUses pins the deciding STM's own
+// check of the round's plan against the group (§8.11, GW9). A round plans its
+// black list and its tier-1 locations from the group as its snapshot read it,
+// so a side another request hangs off the group after that read — a migration
+// of the group's OTHER leg, or a spare — is missing from that plan: the scan
+// may hand back that side's very DN, behind a capacity key the pick's re-check
+// still finds, or a DN in that side's failure domain. Only the group as the
+// deciding STM reads it shows the change: the round is a changed candidate,
+// the next round plans again from the group as it now stands, and the
+// destination lands where a serial run would put it. Two legs of one group on
+// one disk node is what the black list exists to rule out (§6.5), and
+// finishing both migrations would leave it for good; two legs in one failure
+// domain is what tier 1 exists to avoid while the cluster has another.
+//
+// In the two disk-node cases every draw is forced: dn-d shares dn-c's failure
+// domain and holds less, so the first scan offers dn-c alone (one DN per
+// domain, fullest first, §6.3), and the second — dn-c black-listed and its
+// domain excluded — offers dn-d alone, through tier 2 (§6.5). The spare case
+// is there because a check that walks only the group's active legs still
+// passes the other one.
+//
+// The failure-domain case is a draw: dn-c and dn-d share a domain at the same
+// free count, and dn-e has a domain of its own. Once the other migration has
+// charged dn-c, dn-d fronts that domain, so the first scan offers dn-d and
+// dn-e. A check that looks only at the pick's own DN commits dn-d half the
+// time, both destinations in one domain; the check against the plan refuses
+// that round whatever it drew, and the next round's plan excludes the domain,
+// so its scan offers dn-e alone. Every draw is an independent race against a
+// fresh fixture, so volTier1DrawCnt of them leave the weaker check 2^-12 of a
+// chance to stay green.
+func TestCreateMigrationRefusesADnTheGroupAlreadyUses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor func(env *volEnv) error
+		// actorLegId is the leg of the side the interleaved request puts on
+		// dn-c: leg B, or the spare leg.
+		actorLegId uint64
+	}{
+		{"other leg's migration on the disk node", volMigrateLegB, volDataLegB},
+		{"spare on the disk node", volSpareOnDnC, volNextId},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.relocateDn(volDnD, volDnC)
+			env.setDnFree(volDnC, volDnCFree)
+			got := volRaceMigrationA(t, env, func() error {
+				return tc.actor(env)
+			})
+			if got != volDnD {
+				t.Errorf("leg %d destination on %s, want %s",
+					volDataLegA, got, volDnD)
+			}
+			grp := volGrpOf(t, env.slice(), volDataGrpId)
+			legOf := make(map[string]uint64)
+			for _, leg := range allLegs(grp) {
+				for _, side := range leg.GetSideList() {
+					addrPort := side.GetAddrPort()
+					other, ok := legOf[addrPort]
+					if ok && other != leg.GetLegId() {
+						t.Errorf("%s carries a side of leg %d and of leg "+
+							"%d: two legs of group %d on one disk node",
+							addrPort, other, leg.GetLegId(), volDataGrpId)
+					}
+					legOf[addrPort] = leg.GetLegId()
+				}
+			}
+			if legOf[volDnC] != tc.actorLegId {
+				t.Errorf("%s carries a side of leg %d, want leg %d",
+					volDnC, legOf[volDnC], tc.actorLegId)
+			}
+			// Each DN is charged once, by the request that meant it, and the
+			// refused round wrote nothing: one SpRev bump per request (§5.5).
+			for _, want := range []struct {
+				addrPort string
+				free     uint64
+				legId    uint64
+			}{
+				{volDnC, volDnCFree - volDataExtCnt, tc.actorLegId},
+				{volDnD, volDnFree - volDataExtCnt, volDataLegA},
+			} {
+				dn := env.dn(want.addrPort)
+				ptrs := dn.GetSidePtrList()
+				if dn.GetFreeExtCnt() != want.free || len(ptrs) != 1 ||
+					ptrs[0].GetLegId() != want.legId {
+					t.Errorf("%s: free_ext_cnt %d with side pointers %v, "+
+						"want %d with one pointer of leg %d",
+						want.addrPort, dn.GetFreeExtCnt(), ptrs,
+						want.free, want.legId)
+				}
+			}
+			if rev := env.spRev(); rev != 3 {
+				t.Errorf("sp_rev: got %d, want 3 (one bump per request)",
+					rev)
+			}
+		})
+	}
+
+	t.Run("other leg's migration in the failure domain", func(t *testing.T) {
+		for draw := 0; draw < volTier1DrawCnt; draw++ {
+			env := newVolEnv(t)
+			env.relocateDn(volDnD, volDnC)
+			env.putDn(volDnE, 704, 4, nil)
+			got := volRaceMigrationA(t, env, func() error {
+				return volMigrateLegB(env)
+			})
+			if got != volDnE {
+				t.Fatalf("draw %d: leg %d destination on %s, want %s "+
+					"(dn-d shares dn-c's domain, where leg %d's "+
+					"destination is)",
+					draw, volDataLegA, got, volDnE, volDataLegB)
+			}
+			if rev := env.spRev(); rev != 3 {
+				t.Fatalf("draw %d: sp_rev: got %d, want 3 (one bump per "+
+					"migration)", draw, rev)
+			}
 		}
 	})
 }

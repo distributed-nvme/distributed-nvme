@@ -188,11 +188,13 @@ func getMigration(
 // meanwhile (§11.2 phase 0). That is why this RPC allocates and writes but
 // starts no data movement — the sp-worker's later flip does.
 //
-// Shape (gateway.md §5.10): plain pre-reads to plan, then the GW9 candidate
-// unit. The plan — the group's ext_cnt and the black list — is read once
-// through a read-only snapshot so the SpConf and the slices it indexes are
-// coherent; nothing from it is trusted, since the deciding STM re-locates the
-// side and re-verifies the pick's capacity key.
+// Shape (gateway.md §5.10): the GW9 candidate unit, each round of which plans
+// from plain pre-reads, scans and decides. The plan — the group's ext_cnt and
+// the black list — is read through a read-only snapshot so the SpConf and the
+// slices it indexes are coherent; nothing from it is trusted, since the
+// deciding STM re-locates the side and re-verifies both the pick's capacity
+// key and the plan the pick was scanned against: the group, as that STM reads
+// it, must occupy no DN the plan's read of it did not.
 func (s *Server) CreateMigration(
 	ctx context.Context,
 	req *pb.CreateMigrationRequest,
@@ -218,58 +220,63 @@ func (s *Server) CreateMigration(
 	); err != nil {
 		return nil, err
 	}
-	// The plan: which cluster to scan, how big the destination must be, and
-	// which disk nodes — and failure domains — it must avoid. grpDnAddrs names
-	// every DN the group already occupies through an active or a spare leg and
-	// seeds the black list; grpDnLocations turns the same set into §6.5's
-	// tier-1 exclusion, so the destination leaves the failure domain the
-	// migration is meant to leave, and a cluster with no other domain still
-	// places through tier 2 rather than refusing.
-	var (
-		planCid uint64
-		planCc  *pb.ClusterConf
-		planExt uint64
-		planGrp *pb.Group
-	)
-	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
-		// openSp, not openSpRead: this is a MUTATOR's planning read, so
-		// GW6 wants the token — when one was sent — checked before any other
-		// state check: a stale client must see ABORTED "stale revision",
-		// never a NOT_FOUND or a FAILED_PRECONDITION computed against a slice
-		// list it has not read. The deciding STM checks it again (AG4); this
-		// one only fixes which refusal a stale caller is given.
-		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
-			req.GetSpRev())
-		if err != nil {
-			return err
-		}
-		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
-		if err != nil {
-			return err
-		}
-		loc, err := migrSrcLocation(
-			sc.Conf, slices, req.GetSpName(), req.GetSrcSideId())
-		if err != nil {
-			return err
-		}
-		planCid = sc.Cid
-		planCc = sc.Cc
-		planExt = loc.Grp.GetExtCnt()
-		planGrp = loc.Grp
-		return nil
-	})
-	if err != nil {
-		return nil, mapStmErr(err)
-	}
-	planBlack := grpDnAddrs(planGrp)
-	// Outside the snapshot, and once for the whole candidate unit: a location
-	// cannot change under either (§8.2).
-	planLocs, err := grpDnLocations(ctx, s.cli, planCid, planGrp)
-	if err != nil {
-		return nil, err
-	}
 	var migrId uint64
-	err = candidateUnit(ctx, func() error {
+	err := candidateUnit(ctx, func() error {
+		// The plan: which cluster to scan, how big the destination must be,
+		// and which disk nodes — and failure domains — it must avoid.
+		// grpDnAddrs names every DN the group already occupies through an
+		// active or a spare leg and seeds the black list; grpDnLocations
+		// turns the same set into §6.5's tier-1 exclusion, so the
+		// destination leaves the failure domain the migration is meant to
+		// leave, and a cluster with no other domain still places through
+		// tier 2 rather than refusing. It is read afresh every round, never
+		// once for the unit: the deciding STM refuses a round whose group
+		// has gained a DN since this read, and a plan read only once would
+		// be refused that way every round until ctx ends.
+		var (
+			planCid uint64
+			planCc  *pb.ClusterConf
+			planExt uint64
+			planGrp *pb.Group
+		)
+		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+			// openSp, not openSpRead: this is a MUTATOR's planning read, so
+			// GW6 wants the token — when one was sent — checked before any
+			// other state check: a stale client must see ABORTED "stale
+			// revision", never a NOT_FOUND or a FAILED_PRECONDITION computed
+			// against a slice list it has not read. The deciding STM checks
+			// it again (AG4); this one only fixes which refusal a stale
+			// caller is given.
+			sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+				req.GetSpRev())
+			if err != nil {
+				return err
+			}
+			slices, err := loadSlices(stm, sc.Cid, sc.Conf)
+			if err != nil {
+				return err
+			}
+			loc, err := migrSrcLocation(
+				sc.Conf, slices, req.GetSpName(), req.GetSrcSideId())
+			if err != nil {
+				return err
+			}
+			planCid = sc.Cid
+			planCc = sc.Cc
+			planExt = loc.Grp.GetExtCnt()
+			planGrp = loc.Grp
+			return nil
+		})
+		if err != nil {
+			return mapStmErr(err)
+		}
+		planBlack := grpDnAddrs(planGrp)
+		// Outside the snapshot, at no cost in coherence: a location cannot
+		// change (§8.2).
+		planLocs, err := grpDnLocations(ctx, s.cli, planCid, planGrp)
+		if err != nil {
+			return err
+		}
 		picks, err := pickDns(
 			ctx, s.cli, planCid, planCc,
 			dnPickPlan{ExtCnt: planExt, Legs: 1, ExcludeLocs: planLocs},
@@ -325,6 +332,29 @@ func (s *Server) CreateMigration(
 			ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 			if err != nil {
 				return err
+			}
+			// The pick was scanned against the group as the round's plan read
+			// it: planBlack for the distinct-DN rule, and those DNs'
+			// locations for tier 1 (§6.5). A side hung off the group since —
+			// a migration of its other leg, a spare — is missing from that
+			// plan, so the pick may sit on that side's very DN, behind a
+			// capacity key verifyPick still finds, or in its failure domain,
+			// and only the group as this transaction reads it can tell. A
+			// group that occupies a DN the plan's read of it did not is
+			// therefore a changed candidate, not a refusal (GW9): the next
+			// round plans from the group as it now stands. A pick on a DN the
+			// group occupies always fails this: the scan excluded planBlack,
+			// so that DN is a gain. Only a gain is checked: when the group
+			// has left a DN since the plan, the pick is still off every DN
+			// the group occupies, and the room the departure frees is like a
+			// DN that joins after the scan — a candidate the round did not
+			// count on, which GW9 never re-scans for. Only a token-less
+			// request gets here with a gained DN: the new side's SpRev bump
+			// fails a sent token at openSp above.
+			for _, addrPort := range grpDnAddrs(loc.Grp) {
+				if !containsName(planBlack, addrPort) {
+					return errCandidateChanged
+				}
 			}
 			dn, err := ledger.verifyPick(cand, extCnt)
 			if err != nil {

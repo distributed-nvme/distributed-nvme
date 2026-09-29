@@ -549,8 +549,11 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   scan candidates outside (`model.FindDnCandidatesAntiAffine` /
   `FindCnCandidatesAntiAffine` + `PickRandom`), run the STM which re-reads
   each pick's exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
-  `ErrPrecondition{"candidate changed"}` when one is gone; on that error —
-  and only that error — re-scan and retry until `ctx` ends (then `ABORTED`).
+  `ErrPrecondition{"candidate changed"}` when one is gone — CreateStoragePool's
+  STM also when its `cluster_id` or leg count no longer matches the scan's
+  (§5.4), CreateMigration's when the group, as it reads it, has gained a DN
+  since the read its scan was planned from (§5.10); on that error — and only
+  that error — re-scan and retry until `ctx` ends (then `ABORTED`).
   `DeleteThinDevice` runs the same loop without allocating: its scan is the
   plan's walk for uncreated snapshots, and its STM fails candidate-changed
   when the SP it resolves is not the one the plan walked or its
@@ -1087,12 +1090,23 @@ own — no CdcEntry involvement). Replies `xfer_id`.
   leg already has 2 sides ⇒ `FAILED_PRECONDITION`; candidate unit for one DN
   (`CandExtCnt` = the group's `ext_cnt`; black list seeded with the DNs of
   every leg/side of the group, and §6.5's two tiers applied — tier 1 also
-  excludes those DNs' `location`s, read once before the unit through
+  excludes those DNs' `location`s, read outside every transaction through
   `grpDnLocations` because a location never changes (§8.2); tier 2 rescans
   without the location exclusion when tier 1 yields fewer than the **one DN**
   this RPC places — never when it merely falls short of the oversampled
-  `DnCandCnt` — and its candidates are merged behind tier 1's). STM: resolve;
-  token; re-verify topology + capacity key; mint `migr_id` and `dst_side_id`;
+  `DnCandCnt` — and its candidates are merged behind tier 1's; each round
+  reads the group afresh — hence `CandExtCnt`, the black list and the
+  locations — before it scans). STM: resolve; token; re-verify topology; the
+  group as this STM reads it holds a DN the round's read of it did not ⇒
+  candidate changed (GW9: the round planned its black list and tier-1
+  locations from the group as it read it, and a side hung off the group
+  since — a migration of its other leg, a spare — was not in that group, so
+  the pick may sit on that side's DN or in its failure domain, and the next
+  round plans from the group with the side in it; a pick on a DN of the
+  group always trips this, the scan having black-listed every DN the round
+  read; only a token-less request meets a gained DN here, since the new
+  side's `SpRev` bump fails a sent token first); re-verify the capacity key;
+  mint `migr_id` and `dst_side_id`;
   append the new `Side` to the leg per §8.11 (`provisioned: false`,
   `cntlid_slot` ≠ the src side's); dst-DN bookkeeping + `BumpDnRev`; put
   `Migration`; `BumpSpRev`. Reply `migr_id`.
@@ -1377,6 +1391,19 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    `FAILED_PRECONDITION` with CreateMigration's message and nothing written,
    and the refusal lasts only as long as the migration — once it finishes,
    the spare deletes and the target switches.
+   CreateMigration's re-check of its round's plan against the group is
+   pinned by interleaving, one request after the other: a `slog` hook runs a
+   second token-less request on the group the moment a token-less
+   migration's plan has read the slice. When that request — a migration of
+   the group's other leg, or a spare — takes the one DN the first one's scan
+   then offers, the first one's deciding STM refuses the round as a changed
+   candidate and its next round places the destination on another DN; each
+   DN is charged once and the refused round writes nothing. The spare is
+   there because a check that walks only the active legs passes the
+   migration. When the other leg's migration takes a DN whose failure domain
+   the scan then offers through another DN, the next round leaves that
+   domain; the first round's pick is a draw between that other DN and one in
+   a domain of its own, so the case repeats against fresh fixtures.
    Clone bitmaps get three of their own, all on the
    PAIR addressing of §5.8: the appends `(slice 5, bm 0)`, `(slice 0, bm 3)`
    and `(slice 2, bm 1)` land in three chunk keys holding exactly the bytes

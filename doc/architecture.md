@@ -1140,8 +1140,12 @@ cntlr of the same SP.
   them, so a distinct-domain DN tier 1 did find is never dropped by a tier-2 scan that
   fills `DnCandCnt` out of the excluded domains. The resulting same-domain placement is
   visible in the stored topology; it is not logged separately. The locations are read
-  before the STM, which is sound because `location` is immutable (§8.2), and the in-STM
-  re-validation of the pick stays address-based.
+  before the STM, which is sound because `location` is immutable (§8.2) and because the
+  STM drops the pick when the group, as the STM reads it, has gained a DN since the read
+  the scan was planned from (the scan + STM then re-run from a fresh read of the group,
+  §8.11): a side hung off the group meanwhile is the only way the set of domains to
+  exclude can grow. That re-check, like the in-STM re-validation of the pick itself,
+  stays address-based.
 * **CreateSpareLeg**: one DN, same black-list seeding and the same two tiers as
   CreateMigration.
 * **CreateCntlr**: one CN, `CandExtCnt` = sum of all group `ext_cnt`s of the SP; the CNs
@@ -2097,7 +2101,12 @@ of the SP; `RESOURCE_EXHAUSTED` at `MaxMigrCntPerSp` or no DN candidate (§6.5);
 `FAILED_PRECONDITION` the owning leg already has 2 sides (a migration is already
 running on it), or `cntlid_slot_list` holds no slot different from the src side's
 (§11.8 — such an SP cannot migrate this leg at all; gateway.md D-I).
-Action: allocate one DN; STM: `migr_id` + `dst_side_id` from `next_id`; append a new
+Action: allocate one DN (§6.5); STM: a pick is dropped when the group, as this STM reads
+it, occupies a DN the scan's read of the group did not, and the scan + STM re-run as a
+unit from a fresh read of the group (the scan's black list and tier-1 locations come from
+that earlier read, so a side hung off the group since — a migration of its other leg, a
+spare — could have the pick land on its DN or in its failure domain); `migr_id` +
+`dst_side_id` from `next_id`; append a new
 `Side` to the leg's `side_list` (`cntlid_slot` = a slot from `cntlid_slot_list`
 different from the src side's — the only slot constraint sides have, §11.8;
 `addr_port`/`nvme_tr_conf` copied from the dst DN; `provisioned = false`, [D15]); write
