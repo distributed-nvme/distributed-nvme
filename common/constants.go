@@ -508,6 +508,7 @@ const (
 	DefaultCdcZeroKatoTmoMs = 120000
 	// DefaultCdcRescanInterval is the seconds between retries of a failed
 	// etcd scan (WV5). The server keeps answering from the held state
-	// meanwhile (DS10).
+	// meanwhile (DS10) — or, before the first scan has landed, answers no
+	// host at all (CM4).
 	DefaultCdcRescanInterval = 10
 )

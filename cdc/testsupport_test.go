@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,8 +40,9 @@ func TestMain(m *testing.M) {
 // ---------------------------------------------------------------------------
 
 // fakeClock is the test implementation of the package clock. Every keep-alive
-// deadline (NP10) and every rescan retry (WV5) goes through it, so advancing
-// this drives them without a single real sleep.
+// deadline (NP10), every rescan retry (WV5) and the one-minute timer of CM4's
+// first-scan wait go through it, so advancing this drives them without a
+// single real sleep.
 type fakeClock struct {
 	mu      sync.Mutex
 	current time.Time
@@ -169,6 +171,11 @@ type fakeStore struct {
 	rangeErr error
 	rangeCnt int
 	watches  chan *fakeWatch
+	// decodeHeld, once holdDecode has set it, keeps every Decode waiting
+	// until it is closed or that Decode's ctx ends; decodeIn is signalled,
+	// without blocking, as a Decode enters the wait.
+	decodeHeld chan struct{}
+	decodeIn   chan struct{}
 }
 
 func newFakeStore() *fakeStore {
@@ -220,6 +227,20 @@ func (s *fakeStore) rangeCount() int {
 	return s.rangeCnt
 }
 
+// holdDecode makes every later Decode wait until release is called (or its
+// ctx ends), which holds a scan in the window where its Range has answered
+// but its entries are not in the registry yet. entered receives once a
+// Decode is inside that wait.
+func (s *fakeStore) holdDecode() (entered <-chan struct{}, release func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := make(chan struct{})
+	s.decodeHeld = held
+	s.decodeIn = make(chan struct{}, 1)
+	var once sync.Once
+	return s.decodeIn, func() { once.Do(func() { close(held) }) }
+}
+
 func (s *fakeStore) Range(
 	ctx context.Context,
 	prefix string,
@@ -247,6 +268,20 @@ func (s *fakeStore) Decode(
 	kv etcdutil.KV,
 	msg proto.Message,
 ) error {
+	s.mu.Lock()
+	held, in := s.decodeHeld, s.decodeIn
+	s.mu.Unlock()
+	if held != nil {
+		select {
+		case in <- struct{}{}:
+		default:
+		}
+		select {
+		case <-held:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if err := proto.Unmarshal(kv.Value, msg); err != nil {
 		return fmt.Errorf("decode %s: %w", kv.Key, err)
 	}
@@ -439,6 +474,22 @@ type testServer struct {
 	// cancel ends the instance's context, which is the NP1 shutdown path.
 	cancel context.CancelFunc
 	done   chan struct{}
+	// accepts counts the listener's Accept calls. Only startInstance sets
+	// it: its accept loop must not call Accept before the first scan.
+	accepts *atomic.Int32
+}
+
+// countingListener counts Accept calls, including one made on a listener
+// that is already closed, so a test proves the accept loop never ran instead
+// of hoping to catch a connection it accepted.
+type countingListener struct {
+	net.Listener
+	accepts atomic.Int32
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	l.accepts.Add(1)
+	return l.Listener.Accept()
 }
 
 // stop cancels the instance and waits for its accept loop to return: what a
@@ -493,6 +544,67 @@ func startServer(t *testing.T) *testServer {
 	return ts
 }
 
+// instanceRescan is the WV5 retry cadence startInstance configures: far below
+// the minute of the CM4 waiting record, so one advance of it fires the
+// watcher's retry timer and nothing else.
+const instanceRescan = 5 * time.Second
+
+// startInstance starts a whole instance the way Run composes one (CM4): the
+// listener, then the watcher over store, then the accept loop. Unlike
+// startServer's, its registry is fed by the watcher alone, and its listener
+// counts the Accept calls into ts.accepts. The cleanup waits a bounded time,
+// so an instance that never stops fails the test instead of hanging the
+// package.
+func startInstance(t *testing.T, store *fakeStore) *testServer {
+	t.Helper()
+	clk := newFakeClock()
+	d := &deps{
+		cfg: Config{
+			Ranges:         []uint32{0},
+			TrType:         common.DefaultCdcTrType,
+			AdrFam:         common.DefaultCdcAdrFam,
+			TrAddr:         "127.0.0.1",
+			TrSvcId:        "0",
+			RescanInterval: instanceRescan,
+		},
+		store: store,
+		clk:   clk,
+	}
+	reg := newRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	srv, err := newServer(ctx, d, reg)
+	if err != nil {
+		cancel()
+		t.Fatalf("newServer: %v", err)
+	}
+	cl := &countingListener{Listener: srv.ln}
+	srv.ln = cl
+	ts := &testServer{
+		t:       t,
+		srv:     srv,
+		reg:     reg,
+		store:   store,
+		clk:     clk,
+		addr:    srv.addr().String(),
+		cancel:  cancel,
+		done:    make(chan struct{}),
+		accepts: &cl.accepts,
+	}
+	go func() {
+		defer close(ts.done)
+		runInstance(ctx, srv)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-ts.done:
+		case <-time.After(5 * time.Second):
+			t.Error("the instance did not stop")
+		}
+	})
+	return ts
+}
+
 // ---------------------------------------------------------------------------
 // The in-process fake NVMe/TCP host (§8)
 // ---------------------------------------------------------------------------
@@ -514,6 +626,17 @@ type fakeHost struct {
 	data map[uint16][]byte
 }
 
+// newFakeHost is a host on nc, a socket already connected to a controller.
+func newFakeHost(t *testing.T, nc net.Conn) *fakeHost {
+	return &fakeHost{
+		t:       t,
+		nc:      nc,
+		br:      bufio.NewReaderSize(nc, maxPduLen),
+		pending: make(map[uint16]completion),
+		data:    make(map[uint16][]byte),
+	}
+}
+
 // dial opens a connection to a running test server.
 func (ts *testServer) dial() *fakeHost {
 	ts.t.Helper()
@@ -521,15 +644,8 @@ func (ts *testServer) dial() *fakeHost {
 	if err != nil {
 		ts.t.Fatalf("dial: %v", err)
 	}
-	h := &fakeHost{
-		t:       ts.t,
-		nc:      nc,
-		br:      bufio.NewReaderSize(nc, maxPduLen),
-		pending: make(map[uint16]completion),
-		data:    make(map[uint16][]byte),
-	}
 	ts.t.Cleanup(func() { nc.Close() })
-	return h
+	return newFakeHost(ts.t, nc)
 }
 
 // close drops the socket, which is what a host that goes away looks like.

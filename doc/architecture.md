@@ -3493,6 +3493,11 @@ complementary ranges would leave a dead instance's shards with no discovery log 
 AENs, and a coverage gap is an operations error no instance can detect (`cdc.md`
 §0 #3, §6).
 
+An instance answers no host until its first scan of etcd has landed — before it
+there is no state to serve, and an empty discovery log would tell every host that
+connects that it has no subsystems — and from then on it keeps serving its last
+known state through etcd outages (`cdc.md` CM4, DS10).
+
 ---
 
 ## 13. Components: invocation reference

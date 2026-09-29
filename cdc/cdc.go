@@ -114,9 +114,11 @@ func (c Config) rangeStrings() []string {
 // Clock (testability)
 // ---------------------------------------------------------------------------
 
-// clock is the package's single source of time: the keep-alive deadlines of
-// NP10 and the rescan cadence of WV5 both go through it, so the §8 tests drive
-// them without sleeping.
+// clock is the package's source of time for every timer the §8 tests drive:
+// the keep-alive deadlines of NP10, the rescan cadence of WV5 and the
+// one-minute timer of CM4's first-scan wait all go through it, so those tests
+// drive them without sleeping. NP1's acceptRetryDelay pause and NP13's
+// socketWriteTimeout deadline call time directly (cdc.md §8).
 type clock interface {
 	now() time.Time
 	after(d time.Duration) <-chan time.Time
@@ -160,12 +162,15 @@ type deps struct {
 
 // Run starts the three parts of one dnv-cdc instance and blocks until ctx
 // ends (CM4): the listener first, so that a busy port fails the process
-// before anything else exists; then the watcher; then the accept loop.
+// before the watcher exists; then the watcher; then, once the watcher's first
+// scan has landed, the accept loop. Before that scan the registry holds
+// no state at all, and a host answered out of it would be told there are no
+// subsystems.
 //
 // On shutdown it stops accepting, closes every connection, joins the watcher
-// and closes the etcd client, then logs `cdc stopping` (CM5). It returns an
-// error only when the listener could not be opened — nothing about a shutdown
-// is an error.
+// and closes the etcd client, then logs `cdc stopping` (CM5) — also when the
+// first scan never landed. It returns an error only when the listener could
+// not be opened — nothing about a shutdown is an error.
 func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	d := &deps{cfg: cfg, store: cli, clk: realClock{}}
 	slog.InfoContext(ctx, msgCdcStarting,
@@ -184,16 +189,7 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 		}
 		return err
 	}
-	w := newWatcher(d, reg, cfg.Ranges)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		w.run(ctx)
-	}()
-
-	srv.run(ctx)
-	wg.Wait()
+	runInstance(ctx, srv)
 
 	if err := cli.Close(); err != nil {
 		slog.ErrorContext(ctx, "etcd client close failed",
@@ -202,6 +198,53 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	}
 	slog.InfoContext(ctx, msgCdcStopping)
 	return nil
+}
+
+// firstScanLogInterval is how often an instance whose first scan has not
+// landed repeats `cdc waiting for first scan` (CM4).
+const firstScanLogInterval = time.Minute
+
+// runInstance is Run between opening the listener and closing the etcd
+// client: the watcher, and once its first scan has landed the accept loop,
+// until ctx ends and both have stopped (CM4). A shutdown before that scan
+// closes the listener without ever accepting: the hosts waiting in its
+// backlog are dropped unanswered rather than served a log built from nothing.
+func runInstance(ctx context.Context, srv *server) {
+	w := newWatcher(srv.deps, srv.reg, srv.deps.cfg.Ranges)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.run(ctx)
+	}()
+
+	if awaitFirstScan(ctx, srv.deps.clk, w.scanned) {
+		srv.run(ctx)
+	} else {
+		_ = srv.ln.Close()
+	}
+	wg.Wait()
+}
+
+// awaitFirstScan blocks until scanned is closed and reports true, or until
+// ctx ends and reports false. Every minute it is still waiting it logs `cdc
+// waiting for first scan` at Error (CM4): an instance whose etcd does not
+// answer serves nobody, and that must not be silent.
+func awaitFirstScan(
+	ctx context.Context,
+	clk clock,
+	scanned <-chan struct{},
+) bool {
+	for {
+		select {
+		case <-scanned:
+			return true
+		case <-ctx.Done():
+			return false
+		case <-clk.after(firstScanLogInterval):
+			slog.ErrorContext(ctx, "cdc waiting for first scan")
+		}
+	}
 }
 
 // endpointSerial derives Identify's SN from the listen endpoint (NP7): a

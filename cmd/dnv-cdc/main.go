@@ -259,10 +259,11 @@ func checkTrSvcId(trSvcId string) error {
 // validate, mint the startup trace id, arm the CM5 signal handling, build the
 // etcd client and hand off to cdc.Run.
 //
-// Startup never fails because etcd is unreachable: etcdutil.New dials lazily
-// and dnv-cdc keeps serving its last known state through an outage anyway
-// (DS10). A configuration error, or a listen address already in use, is what
-// makes the process exit non-zero.
+// Startup never fails because etcd is unreachable: etcdutil.New dials lazily,
+// dnv-cdc answers no host until its first scan has landed (CM4) and keeps
+// serving its last known state through any later outage (DS10). A
+// configuration error, or a listen address already in use, is what makes the
+// process exit non-zero.
 func run(cmd *cobra.Command, args []string) error {
 	if err := bindViper(cmd); err != nil {
 		return err

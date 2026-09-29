@@ -27,12 +27,16 @@ type watcher struct {
 	// digit h owns the sixteen codes h0…hf. It is an array rather than a
 	// map because the lookup happens once per key of every scan.
 	owned [common.ShardBucketSize]bool
+	// scanned is closed by the first scan that lands, and only by the run
+	// goroutine. Until then the registry holds no state at all — empty, not
+	// "no subsystems" — so Run keeps the accept loop shut (CM4).
+	scanned chan struct{}
 }
 
 // newWatcher fixes the owned shard-code set from the configured ranges (DS2,
 // CM2). The ranges are already validated by cmd/dnv-cdc.
 func newWatcher(d *deps, reg *registry, ranges []uint32) *watcher {
-	w := &watcher{deps: d, reg: reg}
+	w := &watcher{deps: d, reg: reg, scanned: make(chan struct{})}
 	for _, digit := range ranges {
 		base := digit * 16
 		for i := uint32(0); i < 16; i++ {
@@ -61,12 +65,19 @@ func (w *watcher) run(ctx context.Context) {
 		genCtx := common.WithTraceId(ctx, common.NewTraceId())
 		rev, ok := w.scan(genCtx, prefix)
 		if !ok {
-			// WV5: the server keeps answering from the held state while a
-			// failed scan is retried. The etcdutil record carries the error.
+			// WV5: while a failed scan is retried the server keeps answering
+			// from the held state — or, before the first scan has landed,
+			// answers nobody (CM4). The etcdutil record carries the error.
 			if !w.wait(ctx) {
 				return
 			}
 			continue
+		}
+		// CM4: the first scan that lands lets the accept loop start.
+		select {
+		case <-w.scanned:
+		default:
+			close(w.scanned)
 		}
 		evCh, errCh := w.deps.store.WatchTyped(
 			genCtx, prefix, rev+1,

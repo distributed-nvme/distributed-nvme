@@ -246,7 +246,10 @@ and its key schema already exist.
 * **DS10 — staleness.** Through etcd outages dnv-cdc keeps serving its last
   known state (WV5): stale-but-consistent beats unavailable for an advisory
   service. Recovery rescans diff against the held state through the same
-  DS6 path, so changes missed during the outage still AEN.
+  DS6 path, so changes missed during the outage still AEN. A last known
+  state exists only once the first scan has landed: before it the registry
+  is empty, which is not the same as "no subsystems", so nothing is served
+  from it — the accept loop starts only after that scan (CM4).
 * **DS11 — restart.** Nothing persists. Every connection drops; hosts
   reconnect, host states are rebuilt, GENCTRs restart (§0 #6).
 
@@ -287,7 +290,9 @@ no served state is ever mutated concurrently.
   host costs far less than getting a per-key diff subtly wrong.
 * **WV5 — scan failure ⇒ retry.** A failed Range retries every
   `DefaultCdcRescanInterval` seconds; the server keeps answering from the
-  held state meanwhile (DS10). The `etcdutil` record carries the error.
+  held state meanwhile (DS10) — or, while the first scan has not landed,
+  answers no host at all, its accept loop not yet started (CM4). The
+  `etcdutil` record carries the error.
 * **WV6 — read-only.** No puts, no deletes, no leases, no locks, ever.
 
 ---
@@ -302,6 +307,11 @@ no served state is ever mutated concurrently.
   accepting again, so a transient failure (a file-descriptor shortage, say)
   costs a pause rather than a spin that fills the log and the CPU.
   `SIGTERM`: stop accepting, close every connection, stop.
+  The listener is open from startup, but nothing is accepted before the
+  watcher's first scan has landed (CM4): until then a connecting host's TCP
+  handshake completes into the kernel's listen backlog (while it has room)
+  and nothing answers its ICReq. A `SIGTERM` in that window closes the
+  listener, which resets those connections unanswered.
 * **NP2 — PDU subset.** Implemented: ICReq, ICResp, H2CTermReq, C2HTermReq,
   CapsuleCmd (Connect is the only command whose in-capsule data is *read*),
   CapsuleResp, C2HData. Never sent: R2T (no host data is ever solicited).
@@ -425,7 +435,18 @@ no served state is ever mutated concurrently.
 * **CM3 — wiring.** Build the `etcdutil` client, hand off to `cdc.Run`
   (watcher + listener + view registry). No interceptors (`grpc.md`
   unchanged). `common/log.go`'s `init` installs the JSON logger.
-* **CM4 — lifecycle logs, the start half.** `cdc starting` first.
+* **CM4 — lifecycle logs, the start half.** `cdc starting` first. Then the
+  start order: the listener opens (a busy port fails the process before the
+  watcher exists), the watcher starts, and the accept loop starts only once
+  the watcher's first scan has landed. Before that scan the registry holds
+  no state at all — empty, not "no subsystems" — yet a host answered out of
+  it would be told there are no subsystems. After a control-plane restart
+  in which etcd answers later than dnv-cdc listens, every discovery
+  controller would tell every host so at once, which is the shape §9.13
+  step 6 uses to make nvme-stas disconnect everything. So until then
+  nothing is accepted (NP1), and each full minute of waiting logs
+  `cdc waiting for first scan` at `Error`. A `SIGTERM` while waiting still
+  ends the process (CM5).
 * **CM5 — lifecycle logs, the stop half** (CM4's other half, the same §7 pair).
   `cdc stopping` on SIGTERM/SIGINT after the listener and watcher have stopped.
 
@@ -453,6 +474,7 @@ normative — the §9 suite parses them.
 | msg | attributes | when |
 |---|---|---|
 | `cdc starting` | `ranges`, `endpoints`, `tr_addr`, `tr_svc_id` | CM4 |
+| `cdc waiting for first scan` (`Error`) | — | CM4, once a minute while the first scan has not landed |
 | `cdc scan complete` | `entries` (owned count), `rev` | WV1, every (re)scan |
 | `cdc watch restarting` | `error`, `compacted` (bool) | WV4 |
 | `cdc entry applied` | `key`, `op` (`put`/`delete`) | WV3 |
@@ -470,7 +492,8 @@ normative — the §9 suite parses them.
 
 Plus the `etcd *` records of `etcdutil`. Only the rows above are normative:
 nothing in §9 may key off the `Error`/`Warn` rows, which exist so a failure
-is visible in the diagnostics, not so a test can count them.
+is visible in the diagnostics, not so the suite can count them. (The §8 unit
+tests do pin one: CM4's once-a-minute `cdc waiting for first scan`.)
 
 ---
 
@@ -482,12 +505,18 @@ watcher reaches etcd only through the narrow `etcdStore` interface (WV6), so
 `cdc/` drives it with an in-memory fake store — which is also what lets WV6
 be asserted structurally, by recording every call made through that
 interface — and the §2.2 goldens are pure parsing in `model/keys_test.go`.
-Fakes: a fake clock for the keep-alive deadlines (NP10) and the WV5 rescan
-retry; an **in-process fake NVMe/TCP host** — a small test-only client
-speaking NP2/NP3 over a loopback socket — for the server tests. Those
-deadlines and that retry are the only timers that go through the package
-clock: NP1's `acceptRetryDelay` pause and NP13's `socketWriteTimeout`
-deadline call `time` directly, and no unit test exercises either.
+In `cdc/`, only the test that goes through `Run` itself runs the watcher on
+anything but the fake store: `Run` takes a real `etcdutil` client, and the
+test hands it one whose only endpoint refuses connections (`etcdutil.New`
+dials lazily, so the client still builds). That test needs no etcd either,
+and its watcher never completes a scan.
+Fakes: a fake clock for the keep-alive deadlines (NP10), the WV5 rescan
+retry and the one-minute timer of CM4's first-scan wait; an **in-process
+fake NVMe/TCP host** — a small test-only client speaking NP2/NP3 over a
+loopback socket — for the server tests. Those are the only timers that go
+through the package clock: NP1's `acceptRetryDelay` pause and NP13's
+`socketWriteTimeout` deadline call `time` directly, and no unit test
+exercises either.
 
 * **view.go / logpage.go** — DS3 rendering goldens (a fixture entry to exact
   bytes, header and entry); skip-and-serve on a foreign `tr_type`; PORTID
@@ -510,6 +539,21 @@ deadline call `time` directly, and no unit test exercises either.
   expiry (KATO > 0 and the zero-KATO idle cutoff) on the fake clock; SQHD
   with and without disable-sqflow; C2HTermReq on garbage; NP13 unregister
   dropping the host state at last disconnect.
+* **cdc.go** — CM4's start order through the socket, on the fake store and
+  clock: a connecting host gets no answer at all (never a successful
+  NUMREC 0 page) and the listener's `Accept` is never called, both while the
+  first scan fails and while its Range has returned but its entries are not
+  in the registry yet (Decode held); once the scan lands, that same
+  connection is served the real records. A first scan that lands with no
+  owned entry (the store holds only an entry of a foreign shard) starts the
+  accept loop just the same: "no subsystems" is then the real answer, and
+  the host reads it as a successful NUMREC 0 page. While the scan does not
+  land, `cdc waiting for first scan` at `Error` once a minute and not
+  before, and a shutdown still ends the instance without an `Accept`, the
+  waiting host's socket ending with no PDU sent to it. Through `Run` itself,
+  with the refusing etcd client above, a host's ICReq goes unanswered, and
+  a shutdown still makes `Run` log `cdc stopping` once and return nil, the
+  host's socket ending unanswered.
 * **cmd** — CM2 rejects, `CdcRangeAll` default, env/flag precedence.
 
 ---
