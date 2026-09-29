@@ -397,9 +397,10 @@ NQN_PREFIX=nqn.2024-01.io.dnv
 
 # The prefix of every subsystem THIS SUITE creates with `ss create --nqn`. A
 # host-facing subsystem NQN is literally that flag's string (ctl/ss.go:53 sends
-# it unmunged; gateway/subsystem.go:385-387 only format-validates it), so this
-# is a suite choice, not a tree format. Distinct from cdc_test.sh's
-# nqn.2024-01.io.dnv-it:cdc.
+# it unmunged; gateway/subsystem.go:142 validates it and never rewrites it), so
+# this is a suite choice, not a tree format, as long as it stays outside the dnv
+# namespace nqn.2024-01.io.dnv:, which CreateSubsystem refuses (architecture.md
+# §7). Distinct from cdc_test.sh's nqn.2024-01.io.dnv-it:cdc.
 NQN_IT=nqn.2024-01.io.dnv-it:e2e
 
 # Fixed v4 uuids for the namespaces the suite creates. `ns create --uuid` is
@@ -1493,9 +1494,9 @@ derive_params() {
 # migr_src_nqn have no caller, and each carries a line saying so rather than
 # leaving it to be found. A host-facing subsystem NQN is a
 # different thing entirely — it is literally the `ss create --nqn` string
-# (ctl/ss.go:53 sends it unmunged; gateway/subsystem.go:385-387 only
-# format-validates it), which is why $NQN_IT is a suite choice and these are
-# not.
+# (ctl/ss.go:53 sends it unmunged; gateway/subsystem.go:142 validates it, the
+# dnv-namespace refusal included, and never rewrites it), which is why $NQN_IT
+# is a suite choice and these are not.
 # ---------------------------------------------------------------------------
 
 # Every NQN above starts with the cluster id, and the cluster id only exists
@@ -1529,13 +1530,16 @@ require_cluster_id() {
 # where `exit` ends only the subshell — so it logs the bug and returns a poison
 # string instead.
 #
-# Nothing downstream re-checks that string: common.ValidNqnPattern is
-# `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:.+$` (common/constants.go:9),
-# whose tail is `.+`, so an NQN carrying the poison still passes the gateway's
-# validateNqn (gateway/validate.go:72-84). What makes it findable is the log
-# line naming the caller plus a name that then matches nothing on any guest —
-# which is still far better than a silent cluster-0 name that matches the
-# WRONG thing.
+# Nothing downstream catches the usual poison, `notanid-empty` or
+# `notanid-null`: common.ValidNqnPattern is
+# `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
+# (common/constants.go:14), whose suffix set takes its letters, digits and
+# '-', so an NQN carrying it still passes the gateway's validateNqn
+# (gateway/validate.go:73-88) — src_nqn and allowed_hosts get no dnv-namespace
+# check — and only a bad id holding a character outside that set, or a "..",
+# would be refused there. What makes it findable is the log line naming the
+# caller plus a name that then matches nothing on any guest — which is still
+# far better than a silent cluster-0 name that matches the WRONG thing.
 hex16() { # <decimal id>
 	case "$1" in
 	'')

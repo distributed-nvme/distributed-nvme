@@ -75,7 +75,7 @@ func (s *Server) CreateTransfer(
 	if err := validateName("xfer_name", req.GetXferName()); err != nil {
 		return nil, err
 	}
-	if err := validateNqn("ori_nqn", req.GetOriNqn()); err != nil {
+	if err := validateHostFacingNqn("ori_nqn", req.GetOriNqn()); err != nil {
 		return nil, err
 	}
 	if err := validateHosts(

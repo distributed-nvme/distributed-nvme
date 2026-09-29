@@ -53,8 +53,10 @@ const (
 	volSlot    = uint32(3)
 	volSlotAlt = uint32(4)
 
-	volNqn    = "nqn.2024-01.io.dnv:vol-a"
-	volNqnB   = "nqn.2024-01.io.dnv:vol-b"
+	// A host-facing subsystem NQN lies outside the dnv namespace (§7); a
+	// host NQN and a clone's src_nqn need not, so the other four keep it.
+	volNqn    = "nqn.2024-01.io.example:vol-a"
+	volNqnB   = "nqn.2024-01.io.example:vol-b"
 	volSrcNqn = "nqn.2024-01.io.dnv:src"
 	volHostA  = "nqn.2024-01.io.dnv:host-a"
 	volHostB  = "nqn.2024-01.io.dnv:host-b"
@@ -2120,6 +2122,281 @@ func TestCreateTransferRefusals(t *testing.T) {
 			volWantCode(t, err, tc.want)
 			env.wantUntouched(before, beforeRev)
 		})
+	}
+}
+
+// TestUserNqnRules pins §7's NQN rules on subsystem NQNs, first on the two
+// fields its dnv-namespace rule covers: CreateSubsystem's nqn and
+// CreateTransfer's ori_nqn. The agents attribute a subsystem by parsing its
+// NQN, so a user NQN inside the dnv namespace would read as one dnv minted —
+// a kind-2 name as a disk node's export, never swept once the subsystem is
+// deleted, a kind-4 name as another SP's transfer, swept as that SP's while a
+// host uses it — and a subsystem's NQN names a configfs directory, so "/",
+// ".." and whitespace are refused too. Each case is INVALID_ARGUMENT with
+// nothing written. The transfer half stores a subsystem under the bad NQN
+// first, the shape a record written before the rule has: the request is what
+// is invalid, and the refusal must not depend on the origin being absent.
+//
+// The dnv-namespace rule is the subsystem's own: a transfer's allowed_hosts
+// carries the destination cntlrs' CnHostNqns (§8.10), so one case creates a
+// transfer whose allowed host is one.
+//
+// The last two groups pin what §7 leaves a subsystem stored before these
+// rules. One stored under a dnv name that passes the pattern is still served
+// by UpdateSubsystemHosts, CreateNamespace, UpdateNamespaceDev and
+// UpdateNamespaceSuspended. One stored under a name the pattern or the ".."
+// rule refuses is INVALID_ARGUMENT on those four. DeleteNamespace and
+// DeleteSubsystem, which check only the length, still empty and delete both.
+func TestUserNqnRules(t *testing.T) {
+	nf := common.NewNameFmt("")
+	for _, tc := range []struct {
+		name string
+		nqn  func(env *volEnv) string
+	}{
+		{"a dnv kind-2 name", func(env *volEnv) string {
+			return nf.SideToCnNqn(env.cid, volSpId, volDataLegA, 800)
+		}},
+		{"a dnv kind-4 name", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId+1, 1)
+		}},
+		{"a slash", func(*volEnv) string {
+			return "nqn.2024-01.io.example:vol/a"
+		}},
+		{"a dot-dot", func(*volEnv) string {
+			return "nqn.2024-01.io.example:vol..a"
+		}},
+		{"a space", func(*volEnv) string {
+			return "nqn.2024-01.io.example:vol a"
+		}},
+	} {
+		t.Run("CreateSubsystem/"+tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			before := env.spConf()
+			beforeRev := env.spRev()
+			_, err := env.srv.CreateSubsystem(env.ctx,
+				&pb.CreateSubsystemRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       &pb.SpRev{Revision: beforeRev},
+					Nqn:         tc.nqn(env),
+				})
+			msg := volWantCode(t, err, codes.InvalidArgument)
+			if !strings.HasPrefix(msg, "nqn ") {
+				t.Errorf("message %q does not name the nqn field", msg)
+			}
+			env.wantUntouched(before, beforeRev)
+		})
+		t.Run("CreateTransfer/"+tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			nqn := tc.nqn(env)
+			env.putSubsystem(nqn, 501, []*pb.Namespace{{
+				NsId: 601, NsIdx: 1, TdId: 900,
+			}})
+			before := env.spConf()
+			beforeRev := env.spRev()
+			_, err := env.srv.CreateTransfer(env.ctx,
+				&pb.CreateTransferRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       &pb.SpRev{Revision: beforeRev},
+					XferName:    "xfer-a",
+					OriNqn:      nqn,
+					OriNsIdx:    1,
+				})
+			msg := volWantCode(t, err, codes.InvalidArgument)
+			if !strings.HasPrefix(msg, "ori_nqn ") {
+				t.Errorf("message %q does not name the ori_nqn field", msg)
+			}
+			env.wantUntouched(before, beforeRev)
+		})
+	}
+	t.Run("a CnHostNqn is still a legal allowed host", func(t *testing.T) {
+		env := newVolEnv(t)
+		env.putSubsystem(volNqn, 501, []*pb.Namespace{{
+			NsId: 601, NsIdx: 1, TdId: 900,
+		}})
+		host := nf.CnHostNqn(env.cid, 800)
+		_, err := env.srv.CreateTransfer(env.ctx, &pb.CreateTransferRequest{
+			ClusterName:  env.cluster,
+			SpName:       volSpName,
+			SpRev:        env.token(),
+			XferName:     "xfer-a",
+			OriNqn:       volNqn,
+			OriNsIdx:     1,
+			AllowedHosts: []string{host},
+		})
+		if err != nil {
+			t.Fatalf("CreateTransfer: %v", err)
+		}
+		got := &pb.Transfer{}
+		env.get(model.TransferKey(env.cid, volSpId, "xfer-a"), got)
+		if fmt.Sprint(got.GetAllowedHosts()) != fmt.Sprint([]string{host}) {
+			t.Errorf("allowed_hosts: got %v, want [%s]",
+				got.GetAllowedHosts(), host)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		nqn  func(env *volEnv) string
+	}{
+		{"kind 2", func(env *volEnv) string {
+			return nf.SideToCnNqn(env.cid, volSpId, volDataLegA, 800)
+		}},
+		{"kind 4", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId+1, 1)
+		}},
+	} {
+		t.Run("a dnv-named subsystem stored before the rule is still served/"+
+			tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			nqn := tc.nqn(env)
+			env.putTd("vol", 900, 7, 0, true)
+			env.putTd("snap", 901, 8, 7, true)
+			env.putSubsystem(nqn, 501, nil)
+			volStoredNqnWalk(env, nqn)
+		})
+	}
+	for _, tc := range []struct{ name, nqn string }{
+		{"a slash", "nqn.2024-01.io.example:vol/a"},
+		{"a dot-dot", "nqn.2024-01.io.example:vol..a"},
+		{"a space", "nqn.2024-01.io.example:vol a"},
+		{"an upper-case domain", "nqn.2024-01.Com.Example:vol"},
+		{"a plus sign", "nqn.2024-01.io.example:vol+1"},
+	} {
+		t.Run("a subsystem stored under a refused name is still emptied "+
+			"and deleted/"+tc.name, func(t *testing.T) {
+			// The walk's own fixture, so that each of the four refusals
+			// below can only be the nqn's: with the nqn accepted, each
+			// call would succeed or find no namespace.
+			env := newVolEnv(t)
+			env.putTd("vol", 900, 7, 0, true)
+			env.putTd("snap", 901, 8, 7, true)
+			env.putSubsystem(tc.nqn, 501, nil)
+			before := env.spConf()
+			beforeRev := env.spRev()
+			for _, call := range volKeepingNqnCalls(env, tc.nqn) {
+				err := call.call()
+				if code := status.Code(err); code != codes.InvalidArgument {
+					t.Fatalf("%s: code %s (%v), want %s", call.name, code,
+						err, codes.InvalidArgument)
+				}
+				if msg := status.Convert(err).Message(); !strings.HasPrefix(
+					msg, "nqn ") {
+					t.Errorf("%s: message %q does not name the nqn field",
+						call.name, msg)
+				}
+				env.wantUntouched(before, beforeRev)
+			}
+			// A namespace the subsystem was given before the rules, for
+			// DeleteNamespace to take.
+			stored := env.subsystem(tc.nqn)
+			stored.NsList = []*pb.Namespace{{NsId: 601, NsIdx: 1, TdId: 900}}
+			mustPut(t, env.cli,
+				model.SubsystemKey(env.cid, volSpId, tc.nqn), stored)
+			volEmptyAndDelete(env, tc.nqn)
+		})
+	}
+}
+
+// volKeepingNqnCall is one of the four RPCs that address an existing
+// subsystem and keep or extend it, as TestUserNqnRules drives them.
+type volKeepingNqnCall struct {
+	name string
+	call func() error
+}
+
+// volKeepingNqnCalls are UpdateSubsystemHosts, CreateNamespace,
+// UpdateNamespaceDev and UpdateNamespaceSuspended against the subsystem nqn,
+// each with a fresh token, in an order that succeeds on a subsystem with an
+// empty ns_list and tds "vol" and "snap" beside it: the namespace
+// CreateNamespace adds at ns_idx 1 on "vol" is the one the next two repoint at
+// "snap" and suspend.
+func volKeepingNqnCalls(env *volEnv, nqn string) []volKeepingNqnCall {
+	return []volKeepingNqnCall{
+		{"UpdateSubsystemHosts", func() error {
+			_, err := env.srv.UpdateSubsystemHosts(env.ctx,
+				&pb.UpdateSubsystemHostsRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					SpRev: env.token(), Nqn: nqn,
+					AllowedHosts: []string{volHostA},
+				})
+			return err
+		}},
+		{"CreateNamespace", func() error {
+			_, err := env.srv.CreateNamespace(env.ctx,
+				&pb.CreateNamespaceRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					SpRev: env.token(), Nqn: nqn, NsIdx: 1, TdName: "vol",
+				})
+			return err
+		}},
+		{"UpdateNamespaceDev", func() error {
+			_, err := env.srv.UpdateNamespaceDev(env.ctx,
+				&pb.UpdateNamespaceDevRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					SpRev: env.token(), Nqn: nqn, NsIdx: 1, TdName: "snap",
+				})
+			return err
+		}},
+		{"UpdateNamespaceSuspended", func() error {
+			_, err := env.srv.UpdateNamespaceSuspended(env.ctx,
+				&pb.UpdateNamespaceSuspendedRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					SpRev: env.token(), Nqn: nqn, NsIdx: 1, Suspended: true,
+				})
+			return err
+		}},
+	}
+}
+
+// volStoredNqnWalk drives the four volKeepingNqnCalls and then DeleteNamespace
+// and DeleteSubsystem against nqn, which must be stored with an empty ns_list
+// and tds "vol" and "snap" beside it, and expects every one to succeed.
+func volStoredNqnWalk(env *volEnv, nqn string) {
+	env.t.Helper()
+	for _, call := range volKeepingNqnCalls(env, nqn) {
+		if err := call.call(); err != nil {
+			env.t.Fatalf("%s: %v", call.name, err)
+		}
+	}
+	got := findNs(env.subsystem(nqn), 1)
+	if got == nil || got.GetTdId() != 901 || !got.GetSuspended() {
+		env.t.Fatalf("ns_idx 1 after the walk: got %v, want td_id 901 "+
+			"and suspended", got)
+	}
+	volEmptyAndDelete(env, nqn)
+}
+
+// volEmptyAndDelete deletes namespace 1 of the subsystem nqn and then the
+// subsystem, and asserts both succeeded and nothing of it is left: its key,
+// its CdcEntry (ss_id 501) and its nqn_list entry.
+func volEmptyAndDelete(env *volEnv, nqn string) {
+	env.t.Helper()
+	if _, err := env.srv.DeleteNamespace(env.ctx, &pb.DeleteNamespaceRequest{
+		ClusterName: env.cluster, SpName: volSpName, SpRev: env.token(),
+		Nqn: nqn, NsIdx: 1,
+	}); err != nil {
+		env.t.Fatalf("DeleteNamespace: %v", err)
+	}
+	reply, err := env.srv.DeleteSubsystem(env.ctx, &pb.DeleteSubsystemRequest{
+		ClusterName: env.cluster, SpName: volSpName, SpRev: env.token(),
+		Nqn: nqn,
+	})
+	if err != nil {
+		env.t.Fatalf("DeleteSubsystem: %v", err)
+	}
+	if reply.GetSsId() != 501 {
+		env.t.Errorf("reply ss_id: got %d, want 501", reply.GetSsId())
+	}
+	if env.exists(model.SubsystemKey(env.cid, volSpId, nqn), &pb.Subsystem{}) {
+		env.t.Errorf("the subsystem key must be gone")
+	}
+	if env.exists(model.CdcEntryKey(env.cid, volShard, volSpId, 501),
+		&pb.CdcEntry{}) {
+		env.t.Errorf("the cdc entry must go with it")
+	}
+	if got := env.spConf().GetNqnList(); len(got) != 0 {
+		env.t.Errorf("nqn_list: got %v, want empty", got)
 	}
 }
 

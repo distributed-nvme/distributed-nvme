@@ -94,9 +94,12 @@ func IsDnvNqn(nqn string) bool {
 }
 
 // ParseNqn decodes a dnv-format NQN. A host-facing subsystem NQN is chosen by
-// the user and carries nothing, so it does not start with the dnv prefix and
-// parses false; that "false" is the signal the sweep attributes such a
-// subsystem by its namespaces' backing device instead.
+// the user and carries nothing, so it parses false; that "false" is the
+// signal the sweep attributes such a subsystem by its namespaces' backing
+// device instead. The gateway refuses a NEW host-facing NQN in the dnv
+// namespace (architecture.md §7), but a subsystem stored before that rule may
+// still carry one: if it decodes, it is attributed as the kind it mimics, and
+// if it does not, it is left alone (IsDnvNqn).
 func ParseNqn(nqn string) (NqnParts, bool) {
 	rest, found := strings.CutPrefix(nqn, NqnPrefix+":")
 	if !found {

@@ -929,13 +929,17 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 
 All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 
-* **CreateSubsystem** — nqn valid (§7; the discovery NQN can never validate)
-  and absent ⇒ else `ALREADY_EXISTS`; mint `ss_id`;
+* **CreateSubsystem** — nqn valid (§7, the dnv-namespace rule included; the
+  discovery NQN can never validate) and absent ⇒ else `ALREADY_EXISTS`;
+  mint `ss_id`;
   `serial = fmt.Sprintf("%016x", ss_id)`, `model = "dnv"`; put
   `Subsystem{empty ns_list, allowed_hosts}` + append `nqn_list` + put
   `CdcEntry{nqn, tr confs of every **enabled** cntlr's CN, allowed_hosts}`
   at `CdcEntryKey(cid, shard, spId, ssId)`. Reply `ss_id`.
-* **DeleteSubsystem** — `ns_list` empty ⇒ else `FAILED_PRECONDITION`; delete
+* **DeleteSubsystem** — nqn checked for length alone (§7, so a subsystem
+  stored under an NQN the rules now refuse can still be deleted; §7 also says
+  what a CN keeps of one in the dnv namespace); subsystem by nqn
+  (`NOT_FOUND`); `ns_list` empty ⇒ else `FAILED_PRECONDITION`; delete
   Subsystem + CdcEntry + list entry. Reply `ss_id`.
 * **ListSubsystems** — one STM: `nqn_list` → each Subsystem into
   `nqn_to_subsystem` (missing ⇒ `ABORTED`).
@@ -946,7 +950,8 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   (`NOT_FOUND`); mint `ns_id`; defaults: empty `dev_uuid` ⇒ RFC 4122 v4
   (canonical dashed string), empty `dev_nguid` ⇒ 16 random bytes as 32 hex
   chars; append to `ns_list`. Reply `ns_id`.
-* **DeleteNamespace** — locate by nqn + `ns_idx` (`NOT_FOUND`); remove from
+* **DeleteNamespace** — nqn checked for length alone, as for
+  DeleteSubsystem; locate by nqn + `ns_idx` (`NOT_FOUND`); remove from
   `ns_list`. Reply `ns_id`.
 * **UpdateNamespaceDev** — locate ns; resolve new `td_name` (`NOT_FOUND`);
   repoint the ns's td reference. Reply `ns_id`.
@@ -1058,8 +1063,10 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 
 ### 5.9 Transfers (§8.10)
 
-All pure etcd, standard mutator shape. **CreateTransfer** resolves the origin
-ns per §8.10, mints `xfer_id`, appends `xfer_name_list`. **DeleteTransfer**
+All pure etcd, standard mutator shape. **CreateTransfer** refuses an
+`ori_nqn` that breaks §7's NQN rules, the dnv-namespace one included
+(`INVALID_ARGUMENT`), resolves the origin ns per §8.10, mints `xfer_id`,
+appends `xfer_name_list`. **DeleteTransfer**
 with `force == false` *finalizes*: additionally sets `suspended = true` on
 the origin ns in the same STM; `force == true` *aborts* (origin untouched);
 both delete the Transfer + list entry and `BumpSpRev`. **GetTransfer** one
@@ -1257,9 +1264,16 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    `ETCD_BIN` (misconfigured ⇒ exit 1) else PATH else the etcd-backed tests
    skip; one server for the whole package on an ephemeral port.
 2. **validate.go**: table-driven, no I/O — every §7 row (sizes, patterns,
-   NQN incl. the discovery-NQN impossibility, numeric bounds (a zero passes,
-   asking for the default), the list `count` bound — zero accepted as the
-   default, above `MaxListCnt` refused — `bdev_feature_list`, level enum),
+   NQN incl. the discovery-NQN impossibility and the `/`, `..`, whitespace
+   and upper-case-domain refusals, the dnv-namespace row of
+   `validateHostFacingNqn` (a decodable kind, a prefix that decodes to
+   nothing, and the near-misses `nqn.2024-01.io.dnv-it:…` and
+   `nqn.2025-01.io.dnv:…` that stay legal), the length-only row of
+   `validateExistingNqn` that the two delete RPCs take (a `/`, `..`, a space,
+   an upper-case domain, a `+` and a dnv name all pass), numeric bounds (a
+   zero passes, asking for the default), the list `count` bound — zero
+   accepted as the default, above `MaxListCnt` refused —
+   `bdev_feature_list`, level enum),
    plus both arms of the `dn_bin_conf` shift rule: all four zero accepted (it
    asks for 0/4/8/12), any other non-ladder set `INVALID_ARGUMENT` (§5.1).
 3. **Handler tests** against the real etcd through a `Server` constructed
@@ -1268,6 +1282,17 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    and the reply; plus, at minimum: token mismatch ⇒ `ABORTED`, a *present*
    zero token ⇒ `ABORTED` (the presence discriminator), an *absent* token ⇒
    the check is skipped and the mutator runs (§0 #7);
+   §7's NQN rules on subsystem NQNs (`TestUserNqnRules`): a dnv kind-2 and
+   a kind-4 NQN, one with `/`, one with `..` and one with a space are each
+   `INVALID_ARGUMENT` with nothing written, on `CreateSubsystem.nqn` and on
+   `CreateTransfer.ori_nqn` — the latter with a subsystem of that NQN
+   already stored — while a `CnHostNqn` stays a legal entry of a transfer's
+   `allowed_hosts`; and, of the subsystems stored before these rules, one
+   under a dnv kind-2 or kind-4 NQN is served by `UpdateSubsystemHosts`,
+   `CreateNamespace`, `UpdateNamespaceDev` and `UpdateNamespaceSuspended`,
+   one under an NQN with `/`, `..`, a space, an upper-case domain or a `+`
+   is `INVALID_ARGUMENT` on those four with nothing written, and
+   `DeleteNamespace` and `DeleteSubsystem` still empty and delete both;
    name collision ⇒ `ALREADY_EXISTS` with nothing written; each
    `FAILED_PRECONDITION` of §5 with nothing written; `CreateCluster`
    collision-guard branch; `DeleteCluster` bucket-sum gate; pagination

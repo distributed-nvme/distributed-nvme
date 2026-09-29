@@ -1145,10 +1145,50 @@ capacity keys maintained per §5.6; reverse on delete.
   `clone_name`, `xfer_name`, `migr_name`, `location`, `NvmeTrConf` members,
   `Subsystem.serial/model`. Names additionally MUST match
   `ValidStrPattern = ^[a-zA-Z0-9\-_/.:]+$`.
-* NQNs: length ≤ `MaxNqnLength` = 223 and match `ValidNqnPattern`. The pattern
-  requires a `:` after the domain part, so the well-known discovery NQN
-  `nqn.2014-08.org.nvmexpress.discovery` can never validate — `CreateSubsystem` needs
-  no separate rejection for it.
+* NQNs (every NQN field but the `nqn` of `DeleteNamespace` and `DeleteSubsystem`,
+  below): length ≤ `MaxNqnLength` = 223, no `..`, and a match for
+  `ValidNqnPattern = ^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
+  — `nqn.`, a date, a lower-case domain, a `:` and a suffix of letters, digits, `.`,
+  `_`, `:` and `-`. The pattern leaves out `/` and whitespace, and `..` is refused
+  beside it, because a subsystem's NQN and an allowed host's each name a configfs
+  directory (Appendix A). The pattern requires a `:` after the domain part, so the
+  well-known discovery NQN `nqn.2014-08.org.nvmexpress.discovery` can never validate —
+  `CreateSubsystem` needs no separate rejection for it.
+* A subsystem's NQN must in addition lie outside the dnv namespace where a user picks
+  one, `CreateSubsystem.nqn`, and where a transfer is built on one,
+  `CreateTransfer.ori_nqn`: an NQN that starts with `NqnPrefix` + `:` (`IsDnvNqn`,
+  §4.4) is `INVALID_ARGUMENT` there. The agents attribute a subsystem by parsing its
+  NQN (§9.8), so such a name would be judged as one dnv minted: the cn agent would
+  never sweep a `:2:`-shaped one after `DeleteSubsystem`, and would sweep a
+  `:4:`-shaped one naming another SP of this cluster as that SP's transfer export while
+  a host still uses it. Host NQNs (`Transfer.allowed_hosts` carries `CnHostNqn`s),
+  `CreateClone.src_nqn` (another SP's `XferNqn`, §4.4) and the `nqn` of
+  `UpdateSubsystemHosts`, `CreateNamespace`, `UpdateNamespaceDev` and
+  `UpdateNamespaceSuspended`, which address an existing subsystem, take only the NQN
+  rule above. A subsystem stored in the dnv namespace before this rule can therefore
+  still be updated if its NQN passes the NQN rule, and emptied and deleted in any case
+  (next bullet); only a transfer can no longer be built on it. The rule does not change
+  how the cn agent judges such a subsystem, though (§9.8). Unless its NQN decodes as a
+  `:4:` of this cluster, no sweep of the cn agent ever removes it or a namespace in it,
+  and only the converge of a cntlr that still wants the subsystem drops a namespace
+  that left `ns_list`. So once a CN's cntlr stops wanting it — after `DeleteSubsystem`,
+  at `SP_LEVEL_DISABLE` (§11.7), or when that cntlr leaves the CN — the cn agent leaves
+  its nvmet subsystem there, still linked to that CN's port and holding every namespace
+  that CN had not dropped. Each such namespace the CN had enabled keeps its ns-dev
+  open, so that SP's sweep on that CN stops at the ns-dev layer on every pass and leaves
+  the SP's unwanted objects in every lower layer in place (§9.8); once that cntlr or the
+  SP is deleted, that is the rest of that SP's stack on that CN. And one that decodes
+  as a `:4:` of this cluster naming another SP is still swept as that SP's transfer
+  export while a host uses it.
+* `DeleteNamespace.nqn` and `DeleteSubsystem.nqn` take neither rule, only the length
+  check: non-empty and at most `MaxNqnLength` bytes. Each names an exact subsystem key,
+  and a string no subsystem is stored under is `NOT_FOUND` there. A subsystem stored
+  under an NQN these rules came to refuse later — for example an upper-case domain, a
+  `+` or `@` in the suffix, `/`, `..`, whitespace, or the dnv namespace — can therefore
+  still be emptied and deleted, and its SP after it (`DeleteStoragePool` refuses while
+  `nqn_list` is non-empty, §8.4); the bullet above says what the CNs keep of one in the
+  dnv namespace. For an NQN that fails the NQN rule this is the only compatibility path:
+  every other RPC that names such a subsystem refuses it with `INVALID_ARGUMENT`.
 * `addr_port` looks like `192.168.0.17:9000` — the gRPC endpoint of the node's agent.
 * Bounded numeric parameters. These bounds are checked on the **request**: a non-zero
   value outside `[Min, Max]` is rejected, while a proto3 zero is always accepted — it
@@ -1739,15 +1779,16 @@ the client's wait primitive before snapshotting.
 ### 8.8 Subsystems, namespaces
 
 **CreateSubsystem** —
-Errors: NQN rules of §7; `ALREADY_EXISTS` subsystem key; `RESOURCE_EXHAUSTED` at
-`MaxSsCntPerSp`; `INVALID_ARGUMENT` `len(allowed_hosts) > MaxHostCntPerSs` or any entry
-fails the NQN rules.
+Errors: NQN rules of §7, the dnv-namespace one included; `ALREADY_EXISTS` subsystem key;
+`RESOURCE_EXHAUSTED` at `MaxSsCntPerSp`; `INVALID_ARGUMENT`
+`len(allowed_hosts) > MaxHostCntPerSs` or any entry fails the host-NQN rules.
 Action: STM: `ss_id` from `next_id`; `serial = sprintf("%016x", ss_id)`,
 `model = "dnv"` [D2]; write `Subsystem` (empty `ns_list`), append `nqn_list`, write
 `CdcEntry{nqn, nvme_tr_conf_list = tr confs of every enabled cntlr's CN,
 allowed_hosts}`, bump `SpRev`. Reply `ss_id`.
 
-**DeleteSubsystem** — Errors: `FAILED_PRECONDITION` `ns_list` non-empty (allowed_hosts
+**DeleteSubsystem** — Errors: of §7's NQN rules the `nqn` gets the length check
+alone; `NOT_FOUND` nqn; `FAILED_PRECONDITION` `ns_list` non-empty (allowed_hosts
 never block, they go implicitly). Action: STM remove from `nqn_list`, delete `Subsystem`
 + `CdcEntry`, bump `SpRev`. dnv-cdc sends a discovery-log-change AEN; hosts running
 nvme-stas disconnect automatically. Reply `ss_id`.
@@ -1773,7 +1814,9 @@ cntlr creates the namespace's own dm-linear `CnNsDevName(…, ns_id)` (§3.3 ste
 and the nvmet namespace on top of it. ANA group ids are
 not stored — every namespace joins one of the three fixed node-local groups of [D4].
 
-**DeleteNamespace** — STM remove the `ns_idx` entry, bump `SpRev`. Reply `ns_id`.
+**DeleteNamespace** — Errors: of §7's NQN rules the `nqn` gets the length check
+alone; `NOT_FOUND` nqn / `ns_idx`. STM remove the `ns_idx` entry, bump `SpRev`. Reply
+`ns_id`.
 
 **UpdateNamespaceDev** — repoint the namespace at another td (`td_name`), e.g. to expose
 a snapshot in place of the origin. STM update `td_id`, bump `SpRev`; agents reload
@@ -2004,7 +2047,8 @@ served by the primary.*
 
 **CreateTransfer** —
 Errors: `ALREADY_EXISTS`; `RESOURCE_EXHAUSTED` at `MaxXferCntPerSp`; `NOT_FOUND`
-`ori_nqn` / `ori_ns_idx`; `INVALID_ARGUMENT` host-NQN rules on `allowed_hosts`
+`ori_nqn` / `ori_ns_idx`; `INVALID_ARGUMENT` NQN rules of §7 on `ori_nqn` (the
+dnv-namespace one included) and host-NQN rules on `allowed_hosts`
 (callers put the destination cntlrs' `CnHostNqn`s here).
 Action: STM: `xfer_id` from `next_id`, write `Transfer`, append `xfer_name_list`, bump
 `SpRev`. Reply `xfer_id`. Every enabled cntlr creates the xfer stack: primary builds

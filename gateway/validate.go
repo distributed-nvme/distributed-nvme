@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -67,8 +68,8 @@ func validateOptionalName(field string, value string) error {
 	return nil
 }
 
-// validateNqn checks one NQN against §7: at most MaxNqnLength bytes and
-// ValidNqnPattern.
+// validateNqn checks one NQN against §7: at most MaxNqnLength bytes,
+// ValidNqnPattern (which keeps out "/" and whitespace) and no "..".
 func validateNqn(field string, value string) error {
 	if value == "" {
 		return errInvalid("%s must not be empty", field)
@@ -79,6 +80,50 @@ func validateNqn(field string, value string) error {
 	}
 	if !validNqn.MatchString(value) {
 		return errInvalid("%s %q is not a valid NQN", field, value)
+	}
+	if strings.Contains(value, "..") {
+		return errInvalid("%s %q contains \"..\"", field, value)
+	}
+	return nil
+}
+
+// validateHostFacingNqn is validateNqn plus §7's dnv-namespace rule, for the
+// two fields that carry it: CreateSubsystem's nqn, where a user picks a
+// subsystem's NQN, and CreateTransfer's ori_nqn, where a transfer is built on
+// one. The agents attribute a subsystem by parsing its NQN (common.ParseNqn,
+// common.IsDnvNqn): a user NQN of a dnv kind would read as one dnv minted, and
+// one that only carries the prefix is never swept. Host NQNs (a transfer's
+// allowed_hosts holds CnHostNqns), a clone's src_nqn (another SP's XferNqn)
+// and the nqn of UpdateSubsystemHosts, CreateNamespace, UpdateNamespaceDev
+// and UpdateNamespaceSuspended keep plain validateNqn, so a subsystem stored
+// in the dnv namespace before this rule can still be updated if its NQN
+// passes validateNqn; DeleteNamespace and DeleteSubsystem take
+// validateExistingNqn.
+func validateHostFacingNqn(field string, value string) error {
+	if err := validateNqn(field, value); err != nil {
+		return err
+	}
+	if common.IsDnvNqn(value) {
+		return errInvalid("%s %q is in the dnv namespace %q, which only "+
+			"the NQNs dnv mints may use", field, value, common.NqnPrefix+":")
+	}
+	return nil
+}
+
+// validateExistingNqn is §7's length check alone, for the nqn of the two RPCs
+// that empty and delete a subsystem: DeleteNamespace and DeleteSubsystem. A
+// subsystem stored under an NQN that §7 came to refuse later — the pattern was
+// tightened, and the ".." and dnv-namespace refusals were added — can still
+// be emptied and deleted, and its SP after it. Nothing more is needed here:
+// the nqn only ever names an exact subsystem key, and a string no subsystem is
+// stored under is NOT_FOUND there.
+func validateExistingNqn(field string, value string) error {
+	if value == "" {
+		return errInvalid("%s must not be empty", field)
+	}
+	if len(value) > common.MaxNqnLength {
+		return errInvalid("%s is %d bytes, the maximum is %d",
+			field, len(value), common.MaxNqnLength)
 	}
 	return nil
 }

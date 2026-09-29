@@ -165,9 +165,10 @@ func TestValidateNameMessages(t *testing.T) {
 // NQNs (§7 row 2)
 // ---------------------------------------------------------------------------
 
-// TestValidateNqn pins the NQN row: non-empty, at most MaxNqnLength bytes and
-// ValidNqnPattern — which requires a ':' after the domain part and a non-empty
-// suffix behind it.
+// TestValidateNqn pins the NQN row: non-empty, at most MaxNqnLength bytes,
+// ValidNqnPattern — a date, a lower-case domain, a ':' and a non-empty suffix
+// of letters, digits, '.', '_', ':' and '-' — and no "..", since a
+// subsystem's NQN and an allowed host's each name a configfs directory.
 func TestValidateNqn(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -189,11 +190,86 @@ func TestValidateNqn(t *testing.T) {
 		{"empty after colon", "nqn.2024-01.io.dnv:", codes.InvalidArgument},
 		{"underscore in domain", "nqn.2024-01.io_dnv:x", codes.InvalidArgument},
 		{"leading space", " nqn.2024-01.io.dnv:x", codes.InvalidArgument},
+		{"inner space", "nqn.2024-01.io.example:a b", codes.InvalidArgument},
+		{"tab", "nqn.2024-01.io.example:a\tb", codes.InvalidArgument},
+		{"slash", "nqn.2024-01.io.example:a/b", codes.InvalidArgument},
+		{"dot-dot in the suffix", "nqn.2024-01.io.example:a..b",
+			codes.InvalidArgument},
+		{"dot-dot in the domain", "nqn.2024-01.io..example:x",
+			codes.InvalidArgument},
+		{"upper-case domain", "nqn.2024-01.IO.example:x",
+			codes.InvalidArgument},
+		{"domain opens with a hyphen", "nqn.2024-01.-io.example:x",
+			codes.InvalidArgument},
+		{"suffix with upper case and punctuation",
+			"nqn.2024-01.io.example:Vol_A-1.b:c", codes.OK},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			validateWantCode(t, "validateNqn",
 				validateNqn("nqn", item.value), item.want)
+		})
+	}
+}
+
+// TestValidateHostFacingNqn pins §7's dnv-namespace row: the refusal is
+// IsDnvNqn's prefix, NqnPrefix + ":", and neither "decodes as a dnv kind" —
+// which would pass a prefix-only name the cn agent then never sweeps — nor
+// the bare prefix, which would refuse the suites' own nqn.2024-01.io.dnv-it:
+// subsystems. A name the NQN row refuses stays refused.
+func TestValidateHostFacingNqn(t *testing.T) {
+	nf := common.NewNameFmt("")
+	cases := []struct {
+		name  string
+		value string
+		want  codes.Code
+	}{
+		{"kind 2", nf.SideToCnNqn(1, 2, 3, 4), codes.InvalidArgument},
+		{"kind 4", nf.XferNqn(1, 2, 3), codes.InvalidArgument},
+		{"prefix that decodes to nothing", common.NqnPrefix + ":x",
+			codes.InvalidArgument},
+		{"no colon after the prefix", "nqn.2024-01.io.dnv-it:x", codes.OK},
+		{"another date", "nqn.2025-01.io.dnv:x", codes.OK},
+		{"outside the namespace", "nqn.2024-01.io.example:x", codes.OK},
+		{"outside the namespace but a slash", "nqn.2024-01.io.example:a/b",
+			codes.InvalidArgument},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			validateWantCode(t, "validateHostFacingNqn",
+				validateHostFacingNqn("nqn", item.value), item.want)
+		})
+	}
+}
+
+// TestValidateExistingNqn pins §7's row for the nqn of DeleteNamespace and
+// DeleteSubsystem: only non-empty and at most MaxNqnLength bytes, so that a
+// subsystem stored under a name the NQN row or the dnv-namespace row came to
+// refuse can still be emptied and deleted.
+func TestValidateExistingNqn(t *testing.T) {
+	nf := common.NewNameFmt("")
+	cases := []struct {
+		name  string
+		value string
+		want  codes.Code
+	}{
+		{"empty", "", codes.InvalidArgument},
+		{"at MaxNqnLength", strings.Repeat("a", common.MaxNqnLength),
+			codes.OK},
+		{"one byte over MaxNqnLength",
+			strings.Repeat("a", common.MaxNqnLength+1), codes.InvalidArgument},
+		{"a legal NQN", "nqn.2024-01.io.example:x", codes.OK},
+		{"a dnv kind 2", nf.SideToCnNqn(1, 2, 3, 4), codes.OK},
+		{"a slash", "nqn.2024-01.io.example:a/b", codes.OK},
+		{"a dot-dot", "nqn.2024-01.io.example:a..b", codes.OK},
+		{"a space", "nqn.2024-01.io.example:a b", codes.OK},
+		{"an upper-case domain", "nqn.2024-01.Com.Example:x", codes.OK},
+		{"a plus sign", "nqn.2024-01.io.example:a+b", codes.OK},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			validateWantCode(t, "validateExistingNqn",
+				validateExistingNqn("nqn", item.value), item.want)
 		})
 	}
 }

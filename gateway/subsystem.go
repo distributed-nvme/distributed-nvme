@@ -118,7 +118,8 @@ func newDevNguid() (string, error) {
 //
 // The NQN needs no discovery-NQN rejection: ValidNqnPattern demands a ':'
 // after the domain part, which the well-known discovery NQN does not have, so
-// §7's pattern already refuses it (validate.go).
+// §7's pattern already refuses it (validate.go). Unlike a host NQN, it must
+// also lie outside the dnv namespace (validateHostFacingNqn).
 //
 // It writes three keys — the Subsystem, the SpConf whose nqn_list gained the
 // name and the counter advanced, and the CdcEntry dnv-cdc will serve the
@@ -138,7 +139,7 @@ func (s *Server) CreateSubsystem(
 	if err := validateName("sp_name", req.GetSpName()); err != nil {
 		return nil, err
 	}
-	if err := validateNqn("nqn", req.GetNqn()); err != nil {
+	if err := validateHostFacingNqn("nqn", req.GetNqn()); err != nil {
 		return nil, err
 	}
 	if err := validateHosts(
@@ -223,7 +224,7 @@ func (s *Server) DeleteSubsystem(
 	if err := validateName("sp_name", req.GetSpName()); err != nil {
 		return nil, err
 	}
-	if err := validateNqn("nqn", req.GetNqn()); err != nil {
+	if err := validateExistingNqn("nqn", req.GetNqn()); err != nil {
 		return nil, err
 	}
 	var ssId uint64
@@ -475,7 +476,7 @@ func (s *Server) DeleteNamespace(
 	if err := validateName("sp_name", req.GetSpName()); err != nil {
 		return nil, err
 	}
-	if err := validateNqn("nqn", req.GetNqn()); err != nil {
+	if err := validateExistingNqn("nqn", req.GetNqn()); err != nil {
 		return nil, err
 	}
 	var nsId uint64

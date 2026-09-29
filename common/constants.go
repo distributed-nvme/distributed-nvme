@@ -5,10 +5,13 @@ import "time"
 const (
 	ValidStrPattern = `^[a-zA-Z0-9\-_/.:]+$`
 	MaxStrSize      = 64
-	// ValidNqnPattern requires a ':' after the domain part, so the
-	// well-known discovery NQN "nqn.2014-08.org.nvmexpress.discovery" can
-	// never validate (architecture.md §7).
-	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[A-Za-z0-9\.-]+:.+$`
+	// ValidNqnPattern is "nqn.", a date, a lower-case domain, a ':' and a
+	// suffix of letters, digits, '.', '_', ':' and '-': no '/' and no
+	// whitespace, since an NQN names a configfs directory. The gateway
+	// refuses ".." on top of it. The ':' after the domain part is required,
+	// so the well-known discovery NQN "nqn.2014-08.org.nvmexpress.discovery"
+	// can never validate (architecture.md §7).
+	ValidNqnPattern = `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
 	MaxNqnLength    = 223
 
 	ShardBucketSize = 256
