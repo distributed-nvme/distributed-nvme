@@ -209,8 +209,11 @@ nothing is absent there, a present device lacks a capability):
     arena is a slot allocator of kind-`cb` dm-linears over one loop device.
   - `modprobe` (ignore errors, then verify): `nvmet`, `nvmet_tcp`,
     `nvme_tcp`, `nvme_fabrics`, `loop`, `dm_clone`, `dm_thin_pool`,
-    `dm_flakey`, `raid1`; `/sys/kernel/config/nvmet` exists (mount configfs
-    if absent); `/proc/mdstat` exists.
+    `dm_flakey`, `raid1`, each one verified loaded (`/sys/module/<name>`) or
+    built in (a `modules.builtin` line, since a built-in module can lack a
+    `/sys/module` entry) — `missing: kernel module(s) <names> on vm<n>`
+    otherwise; `/sys/kernel/config/nvmet` exists (mount configfs if
+    absent); `/proc/mdstat` exists.
   - `/sys/module/nvme_core/parameters/multipath` == `Y` (leg aggregation,
     failover and the §11.3 host flip all depend on it).
   - the stock md udev rule (`64-md-raid-assembly.rules` under
@@ -576,11 +579,18 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   (c) `DNREV<dn>++` (the `DNREV[dn]` counter of the Revisions bullet) and
       re-send the identical request with
       `--provisioned=true` (the flip), after which `side_dev_info` and every
-      per-CN entry are `RES_STATUS_OK` and the exports exist.
+      per-CN entry are `RES_STATUS_OK` and the exports exist — asserted row
+      by row, all three `cn_id_to_dm_error/linear/nvmeof` maps for the
+      primary and, where the side has one, the standby: phase (a)'s check
+      with the status turned round.
   The helper is `dn_side()`, which memoizes each side in a
-  `SIDE_PROVISIONED` map and runs phases (a)-(c) only on first use: every
-  *later* call for that side — re-sends, the case A failover flip — must
-  keep `--provisioned=true`. That memoization is load-bearing, not an
+  `SIDE_PROVISIONED` map and runs phases (a) and (b) only on first use:
+  every *later* call for that side — in this suite, case A's failover flip
+  and its `lateflip` stage's flip back — goes straight to (c)'s send, at a
+  fresh `DNREV<dn>` and still `--provisioned=true`, with the primary and
+  standby that call names, and its reply is checked as (c)'s is: the
+  `side_dev_info` row and all three per-CN maps of that primary and that
+  standby `RES_STATUS_OK`. That memoization is load-bearing, not an
   optimization: a blind two-phase re-run at the failover flip would send
   `--provisioned=false` and retract live exports mid-failover (row 3
   of the §9.4 converge matrix makes that a legal instruction to retire them, not
@@ -630,7 +640,12 @@ is `sprintf("%016x", slice_id)` per §9.3.)
   ANA-inaccessible paths queue IO and have no `/dev` node.
 - **Converge check**: after a case reaches steady state, one `check-cn`
   and one `check-cntlr` round with `--show-info` asserts code 0, matching
-  revision, and every expected `ResInfo.status == RES_STATUS_OK`. Check
+  revision, and every expected `ResInfo.status == RES_STATUS_OK` — where a
+  `cntlr_info` holding no status at all fails instead of passing as a set
+  with no not-OK member, and a not-OK row without a `res_name` (protojson
+  omits an empty one) is listed as `(unnamed)` instead of vanishing from
+  the list (`assert_all_ok`, which case C stage 6's post-wipe read
+  shares). Check
   rounds only ever run at steady state, i.e. after the two-phase flip above,
   so `RES_STATUS_PROVISIONING` must never appear in one. Steady state also
   means every leg has completed a probe round, so the `check-cntlr` round
@@ -726,7 +741,10 @@ is `sprintf("%016x", slice_id)` per §9.3.)
    gone) and no `dnv-it` subsystem in configfs — that configfs half is what
    proves the host-facing `dnv-it:*` subsystems are gone, the per-SP residue
    check of §11 step 7 matching subsystems by sp id and so unable to see
-   them. The kind-`cb` list is then asserted empty a second time on its own,
+   them. A failed `dmsetup ls`, or a failed listing of the nvmet subsystems
+   in configfs, fails this assertion instead of passing as an empty one
+   (§11 step 7). The kind-`cb` list is then asserted empty a second time on
+   its own,
    because it is the only allocation registry there is (CN18:
    no on-file table), so reading it by name reports a leaked clone unit as
    an arena leak rather than as one more anonymous dm device. The base state
@@ -792,8 +810,24 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    leg 1, `leg_idx` 0, so disk 0 of their arrays — and with them the host's
    path to CN1, which is inaccessible anyway and reconnects afterwards. The
    host writes a fresh 1 MiB at `seek=9` in the background, so the array
-   has a write stuck on the dead member; `check-cntlr` rounds on CN2
-   (≤ 90 s, one per second) must read **both** `grp_id_to_md_raid` rows
+   has a write stuck on the dead member until CN2's controller gives up on
+   that path at its keep-alive expiry. md's member writes are failfast, so
+   the controller's error recovery fails that one then — it is not parked
+   at the multipath head for the failfast interval, as `mdadm --detail`'s
+   plain read was — and md fails the member. The stage sees the write stuck
+   first: the host's `dd` in `D` state (`wait_write_blocked`, ≤ 20 s) and the
+   writer still running (`kill -0`). A write that is not stuck — a partition
+   that did not take, a member md had failed already — spends only
+   milliseconds in `D`. It passes that pair only when a 0.2 s poll happens
+   to land inside those milliseconds and the `kill -0` beats the write's
+   own ssh exit. A partition that did not take is still stopped further on,
+   where CN2's path must leave `live` and the rounds need `degraded`; a
+   member md had failed already is not, so for it the pair is a screen,
+   not a proof. The rounds start
+   once CN2's path of data leg 1 has left `live` (`leg_wait_not_live`,
+   ≤ 60 s; `State` rather than `ana_state`, as below) — the window in which
+   the old probe's plain member read would still be parked: `check-cntlr`
+   rounds on CN2 (≤ 90 s, one per second) must read **both** `grp_id_to_md_raid` rows
    `RES_STATUS_OK` on every round, until the data row's `details` holds
    `degraded` and both dead legs' `leg_id_to_leg` rows read
    `RES_STATUS_ERROR`; the background write must then complete, and
@@ -852,13 +886,24 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    `MD_NAME` read out of udev per `/proc/mdstat` entry, with `mdadm --detail
    --no-devices --export` as the fallback and never `mdadm --detail --scan`,
    which prints no `name=` field on these guests and left this assertion
-   vacuous until 2026-09-17; the check is sp-scoped, like the rest of the
-   residue sweep), and those nvmet
+   vacuous until 2026-09-17 — and an array with a member whose dm name
+   carries the sp id, read out of `/sys/block/mdN/md/dev-*/block/dm/name`,
+   is named beside that member: the member route of the `--wipe` pass
+   (§16), the only one that still names an `inactive` array over members
+   neither udev nor `mdadm` can read. That route adds no detection — while
+   `dmsetup ls` answers, such a member is one of the SP's dm devices,
+   already reported, and a `dmsetup ls` that fails fails the check on its
+   own (below) — it says which array holds it; the check is sp-scoped, like
+   the rest of the residue sweep), and those nvmet
    subsystems whose NQN carries the sp id, i.e. the `:2:`/`:3:`/`:4:` ones,
    which is what the check matches on. The host-facing `dnv-it:*`
    subsystems are named by the request (§5) and carry no id, so no per-SP
    check can see them; the per-CN sweep of §10 step 6 — run by case S and
-   by case C on both its CNs — is what does.
+   by case C on both its CNs — is what does. Neither check reads a failed
+   `dmsetup ls`, or a failed `ls` of `/sys/kernel/config/nvmet/subsystems`,
+   as nothing left: each prints one line saying so, which fails the check —
+   printing nothing, as both once did, passed it on a node nobody had
+   listed.
 
 ## 12. Case B — `thinbm` (snapshots and bitmap reads)
 
@@ -1095,11 +1140,24 @@ dst-bitmap `blkdiscard`s (on that dm-clone) and the re-applied src chunks
 `chunk_id_list [(0, 0), (0, 1)]` and both pair-named chunk files are still in
 the store (they survived the wipe, which never touches
 `$WORK/cn-store`). Of that order the recovery stage
-re-asserts a subset — the reserve/dump/release sequence, that the *first*
-`blkdiscard` on the dm-clone precedes `enable_hydration`, and that exactly
-one kind-`cb` wrapper exists for this CN — because the reconcile mints its
-own trace id and its per-`blkdiscard` arithmetic is already pinned on
-stage 4's converge, whose trace can be isolated. Host: the wipe killed the
+re-asserts a subset — the reserve/dump/release sequence, anchored on the
+fresh log's **last** `thin_dump`, which must follow the dm-clone's create
+and precede `enable_hydration` (the re-created pool's CN14 activation sweep
+dumps the same metadata through the same helper before any clone exists; a
+startup reconcile arms it and skips it, but a first-match anchor would take
+its triplet the day the log held one); that the *first* `blkdiscard` on
+the dm-clone precedes `enable_hydration`; when the wipe-time sample read
+more than 32 regions hydrated, i.e. region 0 had been copied onto the
+destination, a `blkdiscard --offset 0` on the dm-clone after that dump and
+before `enable_hydration` — the destination's own contribution, which the
+re-applied source chunk, never discarding below 32 MiB, cannot stand in
+for; and that exactly one kind-`cb` wrapper exists for this CN — only a
+subset, because the reconcile mints its own trace id and the source
+chunk's `blkdiscard` arithmetic is already pinned on stage 4's converge,
+whose trace can be isolated. The destination discard's length is not
+asserted at all: a dm-clone still hydrating at the wipe-time sample can go
+on copying until the wipe removes it, so the sample bounds that length
+only from below. Host: the wipe killed the
 sp2 controller with DNR (it will not reconnect) — disconnect it **by
 device** (`nvme disconnect -d`, never `-n`: the NQN is shared with the live
 sp1 path) and reconnect; wait `optimized` again.
@@ -1262,17 +1320,36 @@ the other side of the lock.
    past the controllers' own reconnect, which a removed subsystem refuses
    with DNR. S1 catches every probe in the sweep inside the failfast
    interval, where the first command to touch a dead leg is the one that
-   waits; S2 catches it after, where each fails at once. Those are different
-   code paths and only running both says the verdict is the same either way.
-   The four leg states are **logged and never asserted**: with `ctrl_loss_tmo
-   = -1` a leg's controller sits in `connecting` for ever rather than
-   disappearing, so what the paths looked like at that instant is the one
-   thing a failure report cannot reconstruct afterwards.
+   waits; S2 catches it after, where the leg controllers are gone and each
+   leg's namespace head with them: a command that reaches a leg through its
+   wrapper fails at once, and a probe for the leg's controller finds none.
+   Those are different code paths and only running both says the verdict
+   is the same either way. The four leg
+   states are read `live` before the sides go — `path_field` answers `none`
+   for any path it cannot find, a failed listing included, so the reads
+   prove themselves first — and 20 s after, **logged and then asserted
+   `none`**: `ctrl_loss_tmo = -1` does not keep a leg's controller here,
+   because each DN's port still listens (it also carries the host-facing
+   subsystem of the CN on the same VM), so the reconnect is refused with
+   DNR and the kernel deletes the controller at that first refusal
+   (Appendix A). A path still `connecting` would mean a reconnect that was
+   not refused with DNR — a port that stopped listening, say, whose refused
+   TCP connect retries for ever at `-1` — and a sweep meeting a leg
+   controller still there to disconnect, over a namespace head that still
+   exists, instead of neither: S4's path, not S2's. The states are
+   logged before they are judged because what the paths looked like at
+   that instant is the one thing a failure report cannot reconstruct
+   afterwards.
 3. **S3 — IO in flight.** The same again under a detached host writer
    running from before the sides go until after the CN is clean. Its writes
    are *expected* to fail from the moment the sides drop and those failures
    are ignored — a refused write is reported as a word, never as an exit
-   status, so nothing a failing write does can end the loop. What the stage
+   status, so nothing a failing write does can end the loop. The words are
+   counted, though (`wait_writer`, ≤ 20 s each): one `ok` before the sides
+   go, since a writer whose every write failed would leave the stage S1
+   with a loop beside it, and one more `eio` once the CN is clean — a write
+   in flight when the sides went, or issued since, that met the dying
+   stack. What the stage
    pins is that the flushing park of an ns-dev, the uncancellable nvmet
    `enable = 0` above it and the thin pool's postsuspend metadata commit all
    complete anyway, each with host IO through thin → md → leg to finish
@@ -1322,7 +1399,11 @@ parameters of `architecture.md` §3.3 step 1: `fast_io_fail_tmo = 5`,
 not a per-command budget, so a pass blocks for about one failfast interval
 plus a few soft timeouts however many commands it issues — which is why 60 s
 covers S1-S3, 30 s covers S5, and only S4, with the keep-alive in front of
-it, needs 90.
+it, needs 90. Those budgets are retry windows, not deadlines: the retrying
+drop reads the clock only between calls, so it can start one more call,
+after its 2 s pause, as a window closes, and each call carries the
+syncup's own deadline (180 s on a CN, 60 s on a DN) — a sweep that blocks
+holds S1-S3 for up to 60 + 2 + 180 s before the stage fails, not 60.
 
 Success proves: a teardown finishes when the objects under it are gone,
 long-gone, under load or unreachable, and when one genuinely cannot be done
@@ -1478,7 +1559,16 @@ left to dump); `cat /proc/mdstat` + `mdadm --detail --scan`; `losetup -a`;
 /sys/kernel/config/nvmet/{ports,subsystems}`; `nvme list-subsys -o json`
 (both VMs); the last `get-cntlr-info` of every involved cntlr. Debris stays
 in place (§2); the failing stage name and its `trace_id`s are printed so
-records can be pulled from the JSON logs on either VM.
+records can be pulled from the JSON logs on either VM. Every command of the
+VM dump after the two log tails runs under `timeout 20`, detached, its
+output through a file (`diag_cmd`): `timeout` ends a command in an ordinary
+sleep but not one in uninterruptible D state, which is where `dmsetup
+status` (a pool's metadata commit) and `mdadm --detail --scan` (a member's
+superblock read) go over a device left suspended — and nothing has resumed
+it yet when the failure handler runs. A command still running after 20 s
+is therefore abandoned with a note, left for cleanup's `resume_suspended`,
+and the dump goes on, so a wedged device can no longer hang the failure
+handler short of its closing report.
 
 ## 18. RPC coverage matrix
 
@@ -1703,9 +1793,15 @@ another document or the harness cites can shift.
 - **ANA `inaccessible` paths have no `/dev` node and queue IO** → the
   failover and transfer stages quiesce host IO across their no-serving-path
   windows.
-- **Subsystem/port removal kills host controllers with DNR** — they never
-  reconnect on their own → explicit host disconnect+reconnect after the
-  case C wipe.
+- **Removing a subsystem, or its port link, under a port that keeps
+  listening kills host controllers with DNR** — they never reconnect on
+  their own → explicit host disconnect+reconnect after the case C wipe
+  (VM2's port keeps DN2's sides). The same refusal deletes a CN's **leg**
+  controllers, whatever `ctrl_loss_tmo` says (`-1` on a leg), when a DN
+  side's subsystem goes under a port that keeps listening — case T's S2
+  asserts all four of CN1's leg paths gone. Only a port that has lost its
+  last subsystem stops listening; the reconnect then meets a refused TCP
+  connect, which retries, and the controller sits in `connecting`.
 - **uutils dd 0.8.0**: `iflag=/oflag=direct` silently broken → the §4 rule,
   identical to the dn suite.
 - **The tmpfs clone-metadata arena is volatile by design**

@@ -330,10 +330,19 @@ assert_cn_info_ok() { # json label
 
 # assert_all_ok fails on any ResInfo under a reply subtree whose status is not
 # OK — the §9 converge-check rule "every expected status == RES_STATUS_OK".
+# It also fails on a subtree that holds no status at all: an empty selection
+# has no not-OK member, so without the count a reply with code 0, the right
+# revision and no cntlr_info whatsoever passed every check round (`..` over
+# an absent path selects nothing rather than failing). A not-OK row with no
+# res_name is listed as "(unnamed)": protojson omits an empty string, join
+# turns the resulting null into "", and so a bare .res_name let such a row
+# pass as no failure at all.
 assert_all_ok() { # json path label
-	local bad
+	local cnt bad
+	cnt=$(jq_of "$1" "[$2 | .. | objects | select(has(\"status\"))] | length")
+	[ "${cnt:-0}" -gt 0 ] || die "$3: no resource status at all under $2"
 	bad=$(jq_of "$1" \
-		"[$2 | .. | objects | select(has(\"status\")) | select(.status != \"RES_STATUS_OK\") | .res_name] | join(\",\")")
+		"[$2 | .. | objects | select(has(\"status\")) | select(.status != \"RES_STATUS_OK\") | (.res_name // \"(unnamed)\")] | join(\",\")")
 	[ -z "$bad" ] || die "$3: not-OK resources: $bad"
 }
 
@@ -559,9 +568,11 @@ leg_wait_ana() { # cnvm sp leg cn dnidx want secs
 # leg_wait_not_live is leg_wait_ana's negative twin and the only barrier in the
 # suite that waits for a path to DIE. It exists for the partition stages (case
 # T's S4, case A's degrade): an ANA probe is the wrong instrument there,
-# because a leg is connected with ctrl_loss_tmo = -1 (agent/nvmehost.go), so
-# its controller never goes away and its per-path ana_state attribute keeps
-# reading whatever the last ANA log carried, while `State` moves to
+# because a leg is connected with ctrl_loss_tmo = -1 (agent/nvmehost.go) and a
+# partitioned DN answers its reconnects with nothing at all — no DNR refusal,
+# which is what deletes a controller whatever that timeout says (case T's
+# S2) — so its controller never goes away and its per-path ana_state attribute
+# keeps reading whatever the last ANA log carried, while `State` moves to
 # `connecting` within one keep-alive interval. The polling itself is the
 # VM's (one ssh round trip, not one per sample), exactly as wait_ana's is.
 leg_wait_not_live() { # cnvm sp leg cn dnidx secs
@@ -820,6 +831,7 @@ TR_SVC_ID=4200
 PIN_PREFIX=/var/tmp/dnv-it-pin
 WRITER_FLAG=/var/tmp/dnv-it-writer.run
 WRITER_PID=/var/tmp/dnv-it-writer.pid
+WRITER_RES=/var/tmp/dnv-it-writer.res
 
 subsys_json() {
 	local json
@@ -901,6 +913,30 @@ wait_path_live() {
 		sleep 0.5
 	done
 	echo "the path via $2 is '$got' after $3s" >&2
+	return 1
+}
+
+# wait_write_blocked <dev> <secs> — polls until the dd writing to <dev> sits
+# in uninterruptible sleep (a `D` in ps's stat column), i.e. its IO has not
+# come back yet, and prints that stat. Case A's degrade reads it on the host
+# VM for the background write the partition is there to catch. It matches the
+# dd's own `of=<dev>` argument in D state: the `bash -c` wrapper around it
+# carries the same argument but only ever sleeps interruptibly. It screens
+# rather than proves: a write to a live array sits in D for milliseconds,
+# which a 0.2 s poll rarely lands in, and one caught there passes the stage
+# only if its ssh session is still running at the kill -0 that follows.
+wait_write_blocked() {
+	local st i
+	for ((i = 0; i < $2 * 5; i++)); do
+		st=$(ps -eo stat=,args= 2>/dev/null |
+			awk -v w="of=$1" '$1 ~ /^D/ && index($0, w) { print $1; exit }')
+		if [ -n "$st" ]; then
+			echo "$st"
+			return 0
+		fi
+		sleep 0.2
+	done
+	echo "no write to $1 in D state on this VM after $2s" >&2
 	return 1
 }
 
@@ -1222,7 +1258,8 @@ partition_rules() {
 # the loop may read a failure as a reason to stop. Only the flag file and the
 # iteration cap end it — the cap because a stage that died between start and
 # stop takes the flag file's removal with it, and a writer left running would
-# hold a namespace open across the next case.
+# hold a namespace open across the next case. Each word lands in $WRITER_RES,
+# one per line, which is what S3 counts (wait_writer).
 writer_loop() {
 	local i
 	# Its own pid, for stop_writer, and for pin_dev's reason: `$!` in the
@@ -1232,10 +1269,10 @@ writer_loop() {
 	echo "$$" >"$WRITER_PID"
 	for ((i = 0; i < 900; i++)); do
 		[ -e "$WRITER_FLAG" ] || break
-		write_probe "$1" 0 >/dev/null
-		write_probe "$1" 1 >/dev/null
-		write_probe "$1" 2 >/dev/null
-		write_probe "$1" 3 >/dev/null
+		write_probe "$1" 0 >>"$WRITER_RES"
+		write_probe "$1" 1 >>"$WRITER_RES"
+		write_probe "$1" 2 >>"$WRITER_RES"
+		write_probe "$1" 3 >>"$WRITER_RES"
 		sleep 0.2
 	done
 	rm -f "$WRITER_FLAG"
@@ -1250,6 +1287,7 @@ writer_loop() {
 start_writer() {
 	local i
 	rm -f "$WRITER_PID"
+	: >"$WRITER_RES"
 	: >"$WRITER_FLAG"
 	setsid nohup bash "$0" writer_loop "$1" </dev/null >/dev/null 2>&1 &
 	for ((i = 0; i < 50; i++)); do
@@ -1283,8 +1321,37 @@ stop_writer() {
 	rm -f "$WRITER_FLAG"
 	pid=$(cat "$WRITER_PID" 2>/dev/null || true)
 	[ -z "$pid" ] || kill -9 "$pid" >/dev/null 2>&1
-	rm -f "$WRITER_PID"
+	rm -f "$WRITER_PID" "$WRITER_RES"
 	echo stopped
+}
+
+# writer_counts — the writer's results so far, as `ok=<n> eio=<m>`.
+writer_counts() {
+	local ok eio
+	ok=$(grep -cx ok "$WRITER_RES" 2>/dev/null) || true
+	eio=$(grep -cx eio "$WRITER_RES" 2>/dev/null) || true
+	echo "ok=${ok:-0} eio=${eio:-0}"
+}
+
+# wait_writer <ok|eio> <min> <secs> — polls until the writer has reported at
+# least <min> writes of that result, then prints writer_counts. S3 reads it
+# twice, because a writer is only an instrument once it is seen to work: an
+# `ok` before the sides go (a writer whose every write failed — a node that is
+# not the namespace, a dd refusing its arguments — would reduce the stage to
+# S1 with a loop beside it), and one more `eio` after, which is a write that
+# met the dying stack. Each read is local to this VM: one ssh round trip.
+wait_writer() {
+	local got i
+	for ((i = 0; i < $3 * 5; i++)); do
+		got=$(grep -cx "$1" "$WRITER_RES" 2>/dev/null) || true
+		if [ "${got:-0}" -ge "$2" ]; then
+			writer_counts
+			return 0
+		fi
+		sleep 0.2
+	done
+	echo "the writer reported $(writer_counts) after $3s, want $1 >= $2" >&2
+	return 1
 }
 
 # --- log readers -------------------------------------------------------------
@@ -1393,22 +1460,58 @@ mutations() {
 
 # residue <sp16> — everything either agent still holds for one storage pool: dm
 # devices, md arrays and nvmet subsystems. The teardown assertions require empty
-# output. The dm pattern's [cd][0-9a-f] kind field already covers the kind-cb
-# clone-metadata wrappers that replaced the clone VG's LVs ([D14]), so
-# a leaked arena allocation is caught here for free.
+# output, so neither `dmsetup ls` nor the `ls` of the nvmet subsystems may
+# print nothing when it fails: each prints one line saying so instead, its
+# error text folded into it, and that line fails the assertion — before, the
+# failure printed nothing and read as a clean node nobody had listed. The dm
+# pattern's [cd][0-9a-f] kind field already covers the kind-cb clone-metadata
+# wrappers that replaced the clone VG's LVs ([D14]), so a leaked arena
+# allocation is caught here for free. An md array is named as well as its
+# members: md_names by the array's own name, md_member_names by its members'
+# dm names, which carry the sp id too — the one md route that still names an
+# `inactive` array whose members neither udev nor mdadm can read. The member
+# route adds no detection over the dm line above: while `dmsetup ls` answers,
+# every member it reports is an sp dm device that the listing already shows,
+# and a `dmsetup ls` that fails already fails the assertion through its own
+# line. It says which array holds a member.
 residue() {
-	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-$1-" || true
-	ls "$NVMET/subsystems" 2>/dev/null | grep -E ":$1:" || true
+	local dms subs nl=$'\n'
+	if dms=$(dmsetup ls 2>&1); then
+		printf '%s\n' "$dms" | awk '{print $1}' |
+			grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-$1-" || true
+	else
+		echo "dmsetup ls failed, the dm residue is unknown: ${dms//$nl/; }"
+	fi
+	if subs=$(ls "$NVMET/subsystems" 2>&1); then
+		printf '%s\n' "$subs" | grep -E ":$1:" || true
+	else
+		echo "ls $NVMET/subsystems failed, the nvmet residue is unknown: ${subs//$nl/; }"
+	fi
 	md_names | grep -E "dnv-$1-[0-9a-f]+-[0-9a-f]+" || true
+	md_member_names |
+		grep -E " dnv-[0-9a-f]{16}-[0-9a-f]{16}-[cd][0-9a-f]-$1-" || true
 }
 
 # cn_residue <cn16> — every dm device of one CN plus the test's host-facing
-# subsystems (the §5 ss NQNs carry no id, so they are matched by prefix).
+# subsystems (the §5 ss NQNs carry no id, so they are matched by prefix). A
+# `dmsetup ls` or an `ls` of the nvmet subsystems that fails prints one line
+# saying so, for residue's reason.
+# agent_dm_names keeps printing nothing on a failed `dmsetup ls`: cleanup
+# hands every name it prints to dm_force_remove, which would take the words
+# of such a line for device names.
 cn_residue() {
-	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E "^dnv-[0-9a-f]{16}-$1-" || true
-	ls "$NVMET/subsystems" 2>/dev/null | grep -F "$NQN_IT_PREFIX" || true
+	local dms subs nl=$'\n'
+	if dms=$(dmsetup ls 2>&1); then
+		printf '%s\n' "$dms" | awk '{print $1}' |
+			grep -E "^dnv-[0-9a-f]{16}-$1-" || true
+	else
+		echo "dmsetup ls failed, the dm residue is unknown: ${dms//$nl/; }"
+	fi
+	if subs=$(ls "$NVMET/subsystems" 2>&1); then
+		printf '%s\n' "$subs" | grep -F "$NQN_IT_PREFIX" || true
+	else
+		echo "ls $NVMET/subsystems failed, the nvmet residue is unknown: ${subs//$nl/; }"
+	fi
 }
 
 # --- setup / teardown --------------------------------------------------------
@@ -1666,6 +1769,23 @@ md_names() {
 		case "$name" in
 		dnv-* | *:dnv-*) printf '%s\n' "$name" ;;
 		esac
+	done
+	return 0
+}
+
+# md_member_names prints one `mdN <dm name>` line per dm member of every md
+# array on the node, read straight out of sysfs
+# (/sys/block/mdN/md/dev-*/block/dm/name). It is lab_wipe's member route: no
+# superblock read, so it names what md_names cannot — an `inactive` array
+# whose members udev holds no MD_NAME for and mdadm can no longer read — and
+# a member's dm name carries its sp id, which is how residue attributes the
+# array. Empty output means no array has a dm member at all.
+md_member_names() {
+	local name d
+	for name in /sys/block/md*/md/dev-*/block/dm/name; do
+		[ -r "$name" ] || continue
+		d=${name#/sys/block/}
+		printf '%s %s\n' "${d%%/*}" "$(cat "$name" 2>/dev/null)"
 	done
 	return 0
 }
@@ -1954,32 +2074,71 @@ lab_wipe() {
 	return 0
 }
 
+# diag_cmd <cmd> [args…] — one diag command, bounded at 20 s. The bound has
+# two halves because one is not enough (open_rc's finding, measured on the lab
+# kernel): `timeout 20` ends a command that sleeps interruptibly, but not one
+# in uninterruptible D state — the SIGTERM does nothing there, and `timeout`
+# then waits for its child. `dmsetup status` (a pool's metadata commit) and
+# `mdadm --detail --scan` (a member's superblock read) enter exactly that over
+# a device left suspended, and diag runs from the failure handler, before
+# anything has resumed it. So the command runs detached with its output in a
+# file, and one still running after the bound is abandoned with a note — left
+# for resume_suspended to release at cleanup, as open_rc leaves its reader —
+# and the dump goes on instead of hanging the failure handler short of its
+# closing report. None of the group's descriptors is the ssh session's pipe
+# (open_rc's other finding), and both files are opened once, by the group
+# itself, so an abandoned command that finishes later writes into files
+# already unlinked rather than leaving new ones behind.
+diag_cmd() {
+	local out i
+	out=$(mktemp /tmp/dnv-diag.XXXXXX) || return 0
+	{
+		timeout 20 "$@" >&3 2>/dev/null
+		echo $?
+	} </dev/null >"$out.rc" 3>"$out" 2>/dev/null &
+	for ((i = 0; i < 220; i++)); do
+		[ -s "$out.rc" ] && break
+		sleep 0.1
+	done
+	cat "$out" 2>/dev/null
+	if [ ! -s "$out.rc" ]; then
+		echo "(still running after 20 s, abandoned: a read of a suspended device?)"
+	elif [ "$(cat "$out.rc")" = 124 ]; then
+		echo "(timed out after 20 s)"
+	fi
+	rm -f "$out" "$out.rc"
+	return 0
+}
+
 diag() {
 	echo "--- dn-agent.log (last 120 lines) ---"
 	tail -n 120 "$DN_LOG" 2>/dev/null
 	echo "--- cn-agent.log (last 120 lines) ---"
 	tail -n 120 "$CN_LOG" 2>/dev/null
+	# Everything from here reads kernel device state, which a suspended or
+	# dead device can block: each command goes through diag_cmd. A pipeline
+	# or helper runs as one `bash -c` or re-enters this file by name
+	# (start_writer's idiom), so the bound covers the whole of it.
 	echo "--- dmsetup ls ---"
-	dmsetup ls 2>/dev/null
+	diag_cmd dmsetup ls
 	echo "--- dmsetup table ---"
-	dmsetup table 2>/dev/null
+	diag_cmd dmsetup table
 	echo "--- dmsetup status ---"
-	dmsetup status 2>/dev/null
+	diag_cmd dmsetup status
 	echo "--- /proc/mdstat ---"
-	cat /proc/mdstat 2>/dev/null
+	diag_cmd cat /proc/mdstat
 	echo "--- mdadm --detail --scan ---"
-	mdadm --detail --scan 2>/dev/null
+	diag_cmd mdadm --detail --scan
 	echo "--- clone-meta wrappers (kind cb) ---"
-	dmsetup ls 2>/dev/null | awk '{print $1}' |
-		grep -E '^dnv-[0-9a-f]{16}-[0-9a-f]{16}-cb-' || true
+	diag_cmd bash "$0" clone_meta_wrappers
 	echo "--- losetup -a ---"
-	losetup -a 2>/dev/null
+	diag_cmd losetup -a
 	echo "--- tmpfs mounts ---"
-	findmnt 2>/dev/null | grep dnv-tmpfs
+	diag_cmd bash -c 'findmnt | grep dnv-tmpfs'
 	echo "--- nvmet configfs ---"
-	ls -R "$NVMET/ports" "$NVMET/subsystems" 2>/dev/null
+	diag_cmd ls -R "$NVMET/ports" "$NVMET/subsystems"
 	echo "--- nvme list-subsys ---"
-	subsys_json
+	diag_cmd bash "$0" subsys_json
 	return 0
 }
 
@@ -2144,6 +2303,14 @@ preflight_vms() {
 		# The agents hardcode the configfs path and neither mount nor
 		# modprobe; the harness does both here and nothing else.
 		sshv "$idx" "for m in nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-clone dm-thin-pool dm-flakey raid1; do modprobe \$m 2>/dev/null || true; done; grep -q ' /sys/kernel/config ' /proc/mounts || mount -t configfs none /sys/kernel/config; true"
+		# Then verified, module by module: the loop above ignores every modprobe
+		# error and the checks below see only nvmet and md, so a dm-clone or a
+		# dm-flakey that never loaded would surface stages later as a missing
+		# dm target. Loaded means a /sys/module entry; built in means a line in
+		# modules.builtin, since a built-in module can lack a /sys/module entry
+		# (one without parameters has none).
+		missing=$(sshv "$idx" "for m in nvmet nvmet_tcp nvme_tcp nvme_fabrics loop dm_clone dm_thin_pool dm_flakey raid1; do [ -d /sys/module/\$m ] || tr - _ </lib/modules/\$(uname -r)/modules.builtin 2>/dev/null | grep -qF /\$m.ko || echo \$m; done")
+		[ -z "$missing" ] || die "missing: kernel module(s) $missing on vm$idx"
 		local got
 		got=$(sshv "$idx" "ls -d $NVMET 2>/dev/null || echo MISSING")
 		assert_eq "$got" "$NVMET" "nvmet configfs on vm$idx"
@@ -2345,8 +2512,16 @@ dn_side() { # dnidx sp leg side ext_cnt primary_cn [standby_cn]
 		"${extra[@]}")
 	assert_ok "$out" ".side_info.side_dev_info.status" \
 		"dn$idx sp $2 leg $3 side_dev"
-	assert_ok "$out" ".side_info.cn_id_to_nvmeof[\"$(d16 "$6")\"].status" \
-		"dn$idx sp $2 leg $3 export to cn $6"
+	# The gate open: every per-CN row of all three maps is OK, for the
+	# primary and any standby alike — phase 1's loop with the status turned
+	# round. Reading the primary's export alone left the standby's stack, the
+	# one a failover promotes onto, unexamined.
+	for cn in "$6" ${7:+"$7"}; do
+		for field in cn_id_to_dm_error cn_id_to_dm_linear cn_id_to_nvmeof; do
+			assert_ok "$out" ".side_info.$field[\"$(d16 "$cn")\"].status" \
+				"dn$idx sp $2 leg $3 export to cn $cn: $field[$cn]"
+		done
+	done
 }
 
 # dn_drop empties a DN's side list, which tears its sides down declaratively.
@@ -2515,6 +2690,13 @@ assert_no_residue() { # sp
 # of one converge, which is how the CN9/CN18/§11.5 orderings are asserted.
 event_line() { # stream regex
 	printf '%s\n' "$1" | grep -nE -- "$2" | head -1 | cut -d: -f1 || true
+}
+
+# event_last is event_line's twin for the LAST match: the anchor when an
+# earlier event of the same shape can belong to something else (case C stage
+# 6's destination-bitmap read against the pool's activation sweep).
+event_last() { # stream regex
+	printf '%s\n' "$1" | grep -nE -- "$2" | tail -1 | cut -d: -f1 || true
 }
 
 event_cnt() { # stream regex
@@ -2825,16 +3007,36 @@ case_redund() {
 	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
 		"degrade: the partition rule was not installed"
 	# md learns that a member is dead only from an IO to it. This write goes
-	# to both data legs; the one into DN1 sits in the multipath head until
-	# the failfast expires, then fails, md fails that member (--failfast) and
-	# the write completes on DN2's. It runs in the background so that the
-	# check rounds below read the array while that write is stuck. The MiB
+	# to both data legs; the one into DN1 hangs on the black-holed connection
+	# until CN2's controller gives up on it at its keep-alive expiry. md sends
+	# member writes failfast, so the controller's error recovery fails that
+	# one then, rather than parking it at the multipath head for the failfast
+	# interval as it parks the plain read an `mdadm --detail` makes; md fails
+	# that member and the write completes on DN2's. The MiB
 	# is a fresh one, so the readback at the end of the stage can tell it
 	# from the one stage failover left at 9.
 	make_pattern "$hv" "$WORK/probe-redund.bin" 1
 	got=$(sha_range "$hv" "$WORK/probe-redund.bin" 1)
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9 &
 	writer=$!
+	# The write is seen stuck, not assumed: the host's dd in D state and the
+	# writer still running, while CN2's path into DN1 has not yet left
+	# `live`. A write that completed instead — a partition that did not
+	# take, a member md had failed before it — would leave the stage with
+	# no IO on the dead member, and md with no reason to fail it. The pair
+	# is a screen, not a proof (wait_write_blocked says how it can miss):
+	# past it, a partition that did not take is still stopped where the
+	# path must leave `live`, but a member md had failed before it is not.
+	helper "$hv" "wait_write_blocked '$dev' 20" >/dev/null ||
+		die "degrade: the background host write never blocked on the dead member"
+	kill -0 "$writer" 2>/dev/null ||
+		die "degrade: the background host write completed although DN1's" \
+			"member is partitioned away"
+	# The rounds begin once that path has left `live` (its State, for
+	# leg_wait_not_live's reason), which is when the controller's error
+	# recovery fails the write above: from there on a plain member read, the
+	# old `mdadm --detail` probe's, sits at the multipath head until the
+	# failfast interval expires, so these rounds are the ones it would fail.
 	leg_wait_not_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	mkey=$(d16 "$A_MGRP")
 	dkey=$(d16 "$A_DGRP")
@@ -3110,7 +3312,10 @@ case_redund() {
 # deadline from the path loss, not a per-command budget, so a pass blocks for
 # about one failfast interval plus a few soft timeouts however many commands it
 # issues. A partition is the same shape with the host-side keep-alive timeout
-# added in front, which is why S4 alone is given 90 s and not 60.
+# added in front, which is why S4 alone is given 90 s and not 60. Those
+# seconds are retry windows, not deadlines: cn_drop_until_clean and
+# dn_drop_until_clean read the clock only between calls, so one more call
+# can start as a window closes, and it carries the syncup's own deadline.
 
 # One sp per stage. The stages run in order and each one ends with its shape
 # fully torn down, so a shared sp would work — but a distinct one is what makes
@@ -3238,13 +3443,15 @@ s1_sides_gone() {
 
 # s2_paths_long_dead is S1 with the window moved. S1 catches the sweep inside
 # the failfast interval, where the first command that touches a dead leg is the
-# one that waits; this stage catches it after the interval has expired, where
-# every such command fails immediately and the paths have also been through the
-# host's own reconnect attempt. The two are different code paths through every
-# probe in the sweep — one returns late, the other returns at once with an
-# error — and only running both says the verdict is the same either way.
+# one that waits; this stage catches it after the interval has expired and
+# after the host's own reconnect attempt, which the DN refused with DNR — so
+# the leg controllers are deleted and each leg's namespace head with them: IO
+# through a leg wrapper fails at once, and a probe for the leg's controller
+# finds none. The two are different code paths through every probe in the
+# sweep — one returns late, the other at once, failing or finding nothing —
+# and only running both says the verdict is the same either way.
 s2_paths_long_dead() {
-	local sp=${T_SP[2]} uuid=${T_UUID[2]} hv=2 i
+	local sp=${T_SP[2]} uuid=${T_UUID[2]} hv=2 i st stuck
 	local nqn="$NQN_IT_PREFIX:t:s2"
 	local req1="$WORK/req-teardown-s2-cn1.json"
 	local req2="$WORK/req-teardown-s2-cn2.json"
@@ -3256,6 +3463,16 @@ s2_paths_long_dead() {
 	teardown_shape "$sp" "$nqn" "$uuid" "$req1" "$req2" "$hv"
 
 	stage s2 "S2: the legs have been dead for 20 s before the CN is told"
+	# The instrument first: path_field answers `none` for a path it cannot
+	# find, a listing that failed included, so the `none` asserted after the
+	# drop means something only once these same four reads have seen the
+	# paths `live`.
+	for i in 1 2; do
+		assert_eq "$(leg_state 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i")" live \
+			"s2: cn1 meta leg $i -> dn$i before the sides go"
+		assert_eq "$(leg_state 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i")" live \
+			"s2: cn1 data leg $i -> dn$i before the sides go"
+	done
 	host_disconnect "$hv" "$nqn"
 	dn_drop 1
 	dn_drop 2
@@ -3265,18 +3482,33 @@ s2_paths_long_dead() {
 	# attempt — which a removed subsystem refuses with DNR, so by now the
 	# paths are not merely failing, they are gone.
 	sleep 20
-	# Recorded, never asserted. With ctrl_loss_tmo = -1 a leg's controller sits
-	# in `connecting` for ever rather than disappearing, so what the four paths
-	# actually looked like at this instant is the one thing a failure report
-	# needs and cannot reconstruct afterwards — by the time the run fails, the
-	# CN has disconnected them all.
+	# Logged, then asserted `none`. ctrl_loss_tmo = -1 does not keep a leg's
+	# controller here: each DN's port still listens, because it also carries
+	# the host-facing subsystem of the CN on the same VM, so the reconnect to a
+	# removed subsystem is refused with DNR and the kernel deletes the
+	# controller at that first refusal, whatever ctrl_loss_tmo says
+	# (Appendix A). A path still `connecting` would mean a reconnect that was
+	# not refused with DNR — a port that stopped listening, say, whose refused
+	# TCP connect retries for ever at -1 — and a sweep that meets a leg
+	# controller still there to disconnect, over a namespace head that still
+	# exists, instead of neither: S4's path, not this stage's. The
+	# states are logged before they are judged, because what the four paths
+	# looked like at this instant is the one thing a failure report needs and
+	# cannot reconstruct afterwards — by the time the run fails, the CN has
+	# disconnected them all.
+	stuck=()
 	for i in 1 2; do
-		log "s2: cn1 meta leg $i -> dn$i: state" \
-			"$(leg_state 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i")"
-		log "s2: cn1 data leg $i -> dn$i: state" \
-			"$(leg_state 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i")"
+		st=$(leg_state 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i")
+		log "s2: cn1 meta leg $i -> dn$i: state $st"
+		[ "$st" = none ] || stuck+=("meta leg $i -> dn$i: $st")
+		st=$(leg_state 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i")
+		log "s2: cn1 data leg $i -> dn$i: state $st"
+		[ "$st" = none ] || stuck+=("data leg $i -> dn$i: $st")
 	done
 	log "s2: cn1 list-subsys: $(helper 1 subsys_json)"
+	[ "${#stuck[@]}" -eq 0 ] ||
+		die "s2: 20 s after the sides went, cn1 still holds leg paths no DNR" \
+			"refusal deleted: ${stuck[*]}"
 	cn_drop_until_clean 1 60
 	cn_drop 2
 	teardown_assert_clean "$sp" "s2_paths_long_dead"
@@ -3290,7 +3522,7 @@ s2_paths_long_dead() {
 # to complete against, and each of them is on the removal path. What the stage
 # pins is that they complete anyway.
 s3_io_in_flight() {
-	local sp=${T_SP[3]} uuid=${T_UUID[3]} hv=2 dev
+	local sp=${T_SP[3]} uuid=${T_UUID[3]} hv=2 dev got eio
 	local nqn="$NQN_IT_PREFIX:t:s3"
 	local req1="$WORK/req-teardown-s3-cn1.json"
 	local req2="$WORK/req-teardown-s3-cn2.json"
@@ -3305,17 +3537,32 @@ s3_io_in_flight() {
 	dev=$(host_dev "$uuid")
 	# The writer is detached on the host VM and runs from before the sides go
 	# until after the CN is clean. Its writes are EXPECTED to fail from the
-	# moment the sides are dropped, and those failures are ignored: write_probe
+	# moment the sides are dropped, and no failure stops it: write_probe
 	# reports a refused write as a word and never as an exit status, so nothing
 	# a failing write does can end the loop. It writes the first 4 MiB in a
 	# cycle, which is enough to keep the pool allocating and the arrays
 	# writing without turning the stage into a throughput test.
 	assert_eq "$(helper "$hv" "start_writer '$dev'")" started \
 		"s3: the background writer did not start"
+	# Counted, not assumed (wait_writer says why twice): a write lands before
+	# the sides go, and one fails after — IO in flight when they went, or
+	# issued since, and so what the park, the nvmet disable and the pool
+	# commit had to finish against.
+	got=$(helper "$hv" "wait_writer ok 1 20") ||
+		die "s3: no write of the background writer succeeded before the sides went"
+	log "s3: the writer before the sides go: $got"
+	eio=${got##*eio=}
+	case "$eio" in
+	'' | *[!0-9]*) die "s3: unreadable writer counts '$got'" ;;
+	esac
 	dn_drop 1
 	dn_drop 2
 	cn_drop_until_clean 1 60
 	cn_drop 2
+	got=$(helper "$hv" "wait_writer eio $((eio + 1)) 20") ||
+		die "s3: no write of the background writer failed after the sides went" \
+			"— nothing was in flight across the teardown"
+	log "s3: the writer after the teardown: $got"
 	assert_eq "$(helper "$hv" stop_writer)" stopped \
 		"s3: the background writer did not stop"
 	# Only now: the writer needs the host connected, and host_disconnect is
@@ -3701,7 +3948,7 @@ case_clone_xfer() {
 	local req1="$WORK/req-clone_xfer-cn1.json"
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
-	local idx bmargs bmfiles nsdev2 err1 err2
+	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -3951,11 +4198,14 @@ case_clone_xfer() {
 	# the rebuilt clone has left to copy. It is recorded, never asserted — the
 	# race is the loop device's speed — and the sample is taken as late as
 	# possible, immediately before the kill. A missing or unparseable status is
-	# logged too rather than failing the suite: nothing below depends on it.
+	# logged too rather than failing the suite; the one thing below that reads
+	# it, the destination's offset-0 discard, is then simply not required.
 	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
 		--clone "$C_CLONE" --sample-only) || sample=""
+	hyd=""
 	case "$sample" in
 	[0-9]*/[0-9]*)
+		hyd=${sample%%/*}
 		if [ "${sample%%/*}" -lt "${sample##*/}" ]; then
 			log "clone_xfer: hydration was still running at wipe time ($sample)"
 		else
@@ -3982,16 +4232,62 @@ case_clone_xfer() {
 	# The reconcile mints its own trace id, so the freshly rotated log is the
 	# filter: it holds the recovery and nothing else.
 	seq=$(helper 2 cn_events)
-	assert_before "$seq" '^dmsetup message .* 0 reserve_metadata_snap$' \
-		'^thin_dump ' "clone_xfer recovery: the metadata snapshot precedes the dump"
-	assert_before "$seq" '^thin_dump ' \
+	# The destination-bitmap read is anchored on the LAST thin_dump, which must
+	# follow the dm-clone's create: the recovery reads the destination only
+	# once the clone exists (created with hydration off, §11.5), while the
+	# re-created pool's CN14 activation sweep dumps the same metadata through
+	# the same reserve → thin_dump → release helper before any clone does. A
+	# startup reconcile arms that sweep and skips it, so today the fresh log
+	# holds one triplet; a first-match anchor would take the sweep's the day
+	# it held two, and pass with no destination read at all.
+	dump=$(event_last "$seq" '^thin_dump ')
+	[ -n "$dump" ] || die "clone_xfer recovery: no thin_dump in the fresh log"
+	at=$(event_line "$seq" "^dmsetup create $clonedm( |\$)")
+	[ -n "$at" ] && [ "$at" -lt "$dump" ] ||
+		die "clone_xfer recovery: the last thin_dump (event $dump) does not" \
+			"follow the dm-clone's create (event ${at:-none}), so no destination" \
+			"bitmap was read for it"
+	# sed and tail both read to the end: a `head` here could close the pipe
+	# on printf, and under pipefail that SIGPIPE would end the run.
+	upto=$(printf '%s\n' "$seq" | sed -n "1,${dump}p")
+	from=$(printf '%s\n' "$seq" | tail -n "+$dump")
+	rsv=$(event_last "$upto" '^dmsetup message .* 0 reserve_metadata_snap$')
+	rel=$(event_last "$upto" '^dmsetup message .* 0 release_metadata_snap$')
+	[ -n "$rsv" ] && [ "${rel:-0}" -lt "$rsv" ] ||
+		die "clone_xfer recovery: the last thin_dump (event $dump) ran with no" \
+			"metadata snapshot reserved (reserve ${rsv:-none}, release ${rel:-none})"
+	assert_before "$from" '^thin_dump ' \
 		'^dmsetup message .* 0 release_metadata_snap$' \
 		"clone_xfer recovery: the snapshot is always released"
+	assert_before "$from" '^thin_dump ' \
+		"^dmsetup message $clonedm 0 enable_hydration\$" \
+		"clone_xfer recovery: the destination is read before hydration"
 	# Scoped to the clone device, because the rebuild re-allocates an arena
 	# unit and so emits its own earlier blkdiscard on the loop device.
 	assert_before "$seq" "^blkdiscard .*/dev/mapper/$clonedm\$" \
 		"^dmsetup message $clonedm 0 enable_hydration\$" \
 		"clone_xfer recovery: every bitmap lands before hydration"
+	# The destination's own contribution. Hydration copies regions upward from
+	# 0 and the pushed chunk skips 32..63, so a wipe-time sample above 32 means
+	# region 0 was already copied onto the destination: the dump maps it, and
+	# the recovery must discard from offset 0 on the clone — the re-applied
+	# source chunk never discards below 32 MiB, so it cannot stand in for it.
+	# At 32 or below, or with no sample, nothing needs to have been copied.
+	# Its length is left open: a clone still hydrating at the sample can go on
+	# copying until the wipe removes it, so the sample bounds the length only
+	# from below.
+	if [ -n "$hyd" ] && [ "$hyd" -gt 32 ]; then
+		assert_before "$from" '^thin_dump ' \
+			"^blkdiscard --offset 0 --length [0-9]+ /dev/mapper/$clonedm\$" \
+			"clone_xfer recovery: $hyd hydrated, the destination discards from 0"
+		assert_before "$from" \
+			"^blkdiscard --offset 0 --length [0-9]+ /dev/mapper/$clonedm\$" \
+			"^dmsetup message $clonedm 0 enable_hydration\$" \
+			"clone_xfer recovery: the destination bitmap lands before hydration"
+	else
+		log "clone_xfer: no region copied at the wipe (${sample:-no sample});" \
+			"the destination's offset-0 discard is not required"
+	fi
 	# The registry is the dm table set, so a rebuilt CN reconstructs exactly
 	# one allocation from an arena that was wiped along with the kernel state.
 	assert_eq "$(helper 2 "clone_meta_wrappers $(hex16 "${CNID[2]}")")" \
