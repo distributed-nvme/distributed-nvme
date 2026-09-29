@@ -151,8 +151,13 @@ func (s *DnAgentServer) zeroLoop(
 
 		// The record is re-read every batch: a returned record pointer goes
 		// stale after the next write, and a cached one's bits would never
-		// advance — the same range would be zeroed forever.
-		rec, ok, err := s.meta.LookupSide(attemptCtx, job.spId, job.sideId)
+		// advance — the same range would be zeroed forever. It is read as
+		// this node's only (DN5): a record in a table whose header names
+		// another node — one that turned into another node's under the
+		// loop, say — is refused here, before a batch is computed from its
+		// bits, and the loop paces until a read of the disk confirms it.
+		rec, ok, err := s.meta.LookupConfirmedSide(
+			attemptCtx, job.spId, job.sideId)
 		if err != nil {
 			s.setZeroingErr(st, err)
 			if !s.zeroPace(ctx) {

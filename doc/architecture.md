@@ -2860,8 +2860,11 @@ cannot forget in that way: while the device is there, the next enumeration finds
   because the first `Check*` after a restart reports whatever the node still holds.
   `details` names the leftovers, at most eight of them, and reports an enumeration that
   did not answer the same way — an answer the agent cannot trust cannot prove the node
-  clean. The agent log carries the full list once per pass, so a lingering leftover is
-  visible every round rather than once.
+  clean. The dn agent reports two more conditions the same way, so that the worker
+  re-sends the `Syncup*` whose converge acts on them: a disk whose identity it has not
+  confirmed, and a side whose record still has extents to zero with no zeroing goroutine
+  running (`dnagent.md` DN6, DN16). The agent log carries the full list once per pass, so
+  a lingering leftover is visible every round rather than once.
 
 ---
 

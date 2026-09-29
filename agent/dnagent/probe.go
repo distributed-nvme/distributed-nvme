@@ -10,8 +10,9 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// The probe map of DN18. Every function here is read-only: Get*Info and the
-// Check* streams must never mutate (DN16, SH25).
+// The probe map of DN18. Every function here is read-only on the node:
+// Get*Info and the Check* streams must never mutate it (DN16, SH25). What a
+// probe can change is the agent's own view of the disk (probeDn).
 
 func (s *DnAgentServer) probeDn(
 	ctx context.Context,
@@ -28,7 +29,10 @@ func (s *DnAgentServer) probeDn(
 	}
 
 	// Only the 4 KiB header is re-read: cheap enough for the 5 s health
-	// rounds, and enough to catch a wiped, corrupt or foreign disk.
+	// rounds, and enough to catch a wiped, corrupt or foreign disk. What it
+	// reads also moves DiskMeta's own view, in memory and nowhere else: a
+	// header other than the one the loaded volume table came from drops that
+	// table, so the next call re-reads the disk (DN18).
 	details, err := s.meta.ProbeHeader(ctx, req.GetClusterId(),
 		req.GetDnId(), req.GetExtentSize())
 	switch {

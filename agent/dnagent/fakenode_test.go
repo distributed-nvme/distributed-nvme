@@ -140,7 +140,9 @@ type fakeNode struct {
 	// context.DeadlineExceeded (a sysfs read the soft timeout cut off).
 	// Neither may ever read as "absent": agent.readAttrStrict, which the
 	// nvme host walk reads through, tests for fs.ErrNotExist and nothing
-	// else.
+	// else. ReadBlock goes through the same hooks, matched on its recorded
+	// line (`readblock <dev> off=<o> len=<n>`), so a test can cut off the
+	// 4 KiB header read and leave the volume-table slots readable.
 	failRead       map[string]bool
 	failReadAlways map[string]bool
 	killRead       map[string]bool
@@ -407,11 +409,11 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 	return data, nil
 }
 
-// readHookErr applies the failRead/killRead hooks: the ReadFile half of the
-// same "answered no" / "did not answer" split the command hooks model. Both
-// errors are deliberately NOT fs.ErrNotExist — an unreadable attribute and a
-// timed-out one are the two ways a read can fail without the file being
-// absent, and neither may make a sweep believe an object is gone.
+// readHookErr applies the failRead/killRead hooks: the ReadFile and ReadBlock
+// half of the same "answered no" / "did not answer" split the command hooks
+// model. Both errors are deliberately NOT fs.ErrNotExist — an unreadable
+// attribute and a timed-out one are the two ways a read can fail without the
+// file being absent, and neither may make a sweep believe an object is gone.
 //
 // Deleting the matched key inside the range is the one-shot form (deleting
 // the current key during a range is defined behaviour in Go).
@@ -563,7 +565,11 @@ func (f *fakeNode) readBlock(
 ) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.record("readblock %s off=%d len=%d", path, offset, length)
+	line := fmt.Sprintf("readblock %s off=%d len=%d", path, offset, length)
+	f.record("%s", line)
+	if err := f.readHookErr(line); err != nil {
+		return nil, err
+	}
 	size, ok := f.devSize[path]
 	if !ok {
 		return nil, fmt.Errorf("no such device: %s", path)

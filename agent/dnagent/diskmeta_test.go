@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -34,8 +36,8 @@ func newTestMeta(t *testing.T) (*DiskMeta, *fakeNode) {
 func formatted(t *testing.T) (*DiskMeta, *fakeNode) {
 	t.Helper()
 	meta, node := newTestMeta(t)
-	if err := meta.EnsureFormatted(
-		context.Background(), testCluster, testDn, metaExtentSize); err != nil {
+	if err := meta.EnsureFormatted(context.Background(),
+		testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("EnsureFormatted: %v", err)
 	}
 	node.Reset()
@@ -50,6 +52,12 @@ func reopen(node *fakeNode) *DiskMeta {
 	return meta
 }
 
+// mayFormat is the format gate these tests hand EnsureFormatted: they build
+// no dm device, so a blank disk may always be formatted. The DN converge's
+// own gate, diskUnmapped, is tested through the server
+// (TestABlankHeaderUnderLiveSidesIsNeverFormatted).
+func mayFormat(context.Context) error { return nil }
+
 // ---------------------------------------------------------------------------
 // Rule 1/2 — lazy load, format, probe-first idempotency
 // ---------------------------------------------------------------------------
@@ -59,7 +67,7 @@ func TestDiskMetaFormatRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	if err := meta.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("EnsureFormatted: %v", err)
 	}
 	// Slot A with the first (empty) table, and only then the header: a valid
@@ -80,7 +88,7 @@ func TestDiskMetaFormatRoundTrip(t *testing.T) {
 		t.Errorf("Describe before any load = %q, want unformatted", got)
 	}
 	if err := again.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("re-open EnsureFormatted: %v", err)
 	}
 	if got := again.Describe(); !strings.HasPrefix(got, "seq=1 sides=0") {
@@ -100,13 +108,13 @@ func TestDiskMetaFormatIsIdempotent(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		if err := meta.EnsureFormatted(
-			ctx, testCluster, testDn, metaExtentSize); err != nil {
+			ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 			t.Fatalf("EnsureFormatted #%d: %v", i, err)
 		}
 	}
 	// A fresh DiskMeta must load from disk and still write nothing.
 	if err := reopen(node).EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("re-opened EnsureFormatted: %v", err)
 	}
 	for _, call := range node.Calls() {
@@ -131,7 +139,8 @@ func TestDiskMetaForeignDiskRefused(t *testing.T) {
 		{"other extent size", testCluster, testDn, metaExtentSize * 2},
 	} {
 		meta := reopen(node)
-		err := meta.EnsureFormatted(ctx, tc.cluster, tc.dn, tc.extent)
+		err := meta.EnsureFormatted(
+			ctx, tc.cluster, tc.dn, tc.extent, mayFormat)
 		if err == nil {
 			t.Fatalf("%s: EnsureFormatted succeeded", tc.name)
 		}
@@ -162,8 +171,8 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 		{"never verified", func() *DiskMeta { return reopen(node) }},
 		{"refused as foreign", func() *DiskMeta {
 			m := reopen(node)
-			if err := m.EnsureFormatted(
-				ctx, testCluster+1, testDn, metaExtentSize); err == nil {
+			if err := m.EnsureFormatted(ctx,
+				testCluster+1, testDn, metaExtentSize, mayFormat); err == nil {
 				t.Fatal("EnsureFormatted accepted a foreign disk")
 			}
 			return m
@@ -204,6 +213,133 @@ func TestDiskMetaUnverifiedRefusesMutation(t *testing.T) {
 	}
 }
 
+// DN5's identity gate compares the header the volume table was loaded under
+// with the identity the DN converge asked for, and it guards handing out a
+// record the table already holds exactly as it guards writing one: an
+// existing record's extents are this node's only if its table is. The
+// converge asks before it reads, and the comparison needs no read of its
+// own, so a converge whose header read did not answer leaves the disk
+// unconfirmed only until a later read of it has answered — and a disk whose
+// header names another node hands out nothing, whether or not a check has
+// answered.
+func TestDiskMetaIdentityGateComparesTheLoadedHeader(t *testing.T) {
+	meta, node := formatted(t)
+	ctx := context.Background()
+	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+	if _, err := meta.AllocCloneMeta(ctx, testSp, testMigrId, 1<<20); err != nil {
+		t.Fatalf("AllocCloneMeta: %v", err)
+	}
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	// restarted opens the disk the way a restarted agent does: its DN
+	// converge asks for dnId's identity, and the soft timeout cuts that
+	// converge's header read off.
+	restarted := func(dnId uint64) *DiskMeta {
+		t.Helper()
+		m := reopen(node)
+		setHook(node, node.killRead, header)
+		if err := m.EnsureFormatted(
+			ctx, testCluster, dnId, metaExtentSize, mayFormat); err == nil {
+			t.Fatal("EnsureFormatted succeeded with its header read killed")
+		}
+		if _, _, ok := m.Identity(); ok {
+			t.Fatal("the identity is confirmed before any header read " +
+				"answered")
+		}
+		return m
+	}
+	noWrites := func(what string) {
+		t.Helper()
+		for _, call := range node.Calls() {
+			if strings.HasPrefix(call, "writeblock") {
+				t.Errorf("%s: the disk was written: %s", what, call)
+			}
+		}
+	}
+	node.Reset()
+
+	// Nothing has said whose disk this is: nothing is handed out.
+	unasked := reopen(node)
+	if _, err := unasked.AllocSide(ctx, testSp, testSide, 1); err == nil {
+		t.Error("an existing side record was handed out before any DN " +
+			"converge said whose disk this is")
+	}
+	if _, err := unasked.AllocCloneMeta(
+		ctx, testSp, testMigrId, 1<<20); err == nil {
+		t.Error("an existing clone-metadata record was handed out before " +
+			"any DN converge said whose disk this is")
+	}
+	if _, _, err := unasked.LookupConfirmedSide(
+		ctx, testSp, testSide); err == nil {
+		t.Error("a confirmed lookup handed out a side record before any " +
+			"DN converge said whose disk this is")
+	}
+	noWrites("unasked")
+
+	// Another node's disk, found by a converge whose header read did not
+	// answer: the allocator's own read is the first to see the header, and
+	// the comparison refuses the records it holds.
+	foreign := restarted(testDn + 1)
+	if _, err := foreign.AllocSide(ctx, testSp, testSide, 1); err == nil ||
+		!strings.Contains(err.Error(), "foreign disk") {
+		t.Errorf("existing side record on a foreign disk: %v", err)
+	}
+	// The confirmed lookup refuses the record the same way; the reporting
+	// one still finds it, and a record the table does not hold is absent
+	// whoever's disk it is.
+	if _, _, err := foreign.LookupConfirmedSide(
+		ctx, testSp, testSide); err == nil ||
+		!strings.Contains(err.Error(), "foreign disk") {
+		t.Errorf("confirmed lookup on a foreign disk: %v", err)
+	}
+	if _, ok, err := foreign.LookupSide(ctx, testSp, testSide); !ok ||
+		err != nil {
+		t.Errorf("reporting lookup on a foreign disk = %v/%v, want the "+
+			"record", ok, err)
+	}
+	if _, ok, err := foreign.LookupConfirmedSide(
+		ctx, testSp, testSide2); ok || err != nil {
+		t.Errorf("confirmed lookup of an absent record on a foreign disk "+
+			"= %v/%v, want absent", ok, err)
+	}
+	if _, err := foreign.AllocCloneMeta(
+		ctx, testSp, testMigrId, 1<<20); err == nil ||
+		!strings.Contains(err.Error(), "foreign disk") {
+		t.Errorf("existing clone-metadata record on a foreign disk: %v", err)
+	}
+	if _, _, ok := foreign.Identity(); ok {
+		t.Error("a foreign disk reads as confirmed")
+	}
+	noWrites("foreign")
+
+	// This node's disk, after the same killed read: the first read that
+	// answers — the allocator's own — confirms it, and the existing records
+	// are handed out without a write.
+	ours := restarted(testDn)
+	if _, err := ours.AllocSide(ctx, testSp, testSide, 1); err != nil {
+		t.Errorf("an existing side record was refused: %v", err)
+	}
+	if _, err := ours.AllocCloneMeta(
+		ctx, testSp, testMigrId, 1<<20); err != nil {
+		t.Errorf("an existing clone-metadata record was refused: %v", err)
+	}
+	if _, _, ok := ours.Identity(); !ok {
+		t.Error("a read of this node's header did not confirm it")
+	}
+	if _, ok, err := ours.LookupConfirmedSide(
+		ctx, testSp, testSide); !ok || err != nil {
+		t.Errorf("confirmed lookup on this node's disk = %v/%v, want the "+
+			"record", ok, err)
+	}
+	noWrites("ours")
+	// A new record is the same comparison, and it goes through.
+	if _, err := ours.AllocSide(ctx, testSp, testSide2, 1); err != nil {
+		t.Errorf("a new side record on a confirmed disk: %v", err)
+	}
+}
+
 // Rule 1: a header whose magic matches but whose CRC does not fails every
 // operation and is never auto-formatted over.
 func TestDiskMetaCorruptHeaderRefused(t *testing.T) {
@@ -213,7 +349,8 @@ func TestDiskMetaCorruptHeaderRefused(t *testing.T) {
 	node.corruptBlock(metaDisk, common.DnHeaderOffset+20, []byte{0xff, 0xff})
 
 	meta := reopen(node)
-	err := meta.EnsureFormatted(ctx, testCluster, testDn, metaExtentSize)
+	err := meta.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat)
 	if err == nil || !strings.Contains(err.Error(), "corrupt header") {
 		t.Fatalf("EnsureFormatted on a corrupt header = %v", err)
 	}
@@ -260,6 +397,89 @@ func TestDiskMetaProbeHeader(t *testing.T) {
 		t.Error("ProbeHeader accepted an unformatted disk")
 	}
 	_ = blankNode
+}
+
+// A header probe is also this cache's view of the disk (DN18). One that finds
+// the header wiped, corrupt, another node's or from another format drops the
+// loaded table, so the very next call re-reads the disk instead of serving
+// the old extent map, and it leaves the identity unconfirmed. One that did
+// not answer proves nothing and keeps both.
+func TestDiskMetaProbeDropsATableTheDiskNoLongerHolds(t *testing.T) {
+	ctx := context.Background()
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	wipe := func(node *fakeNode) {
+		node.corruptBlock(metaDisk, common.DnHeaderOffset,
+			make([]byte, common.DnHeaderSize))
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, meta *DiskMeta, node *fakeNode)
+		// what the next LookupSide finds: the record, no record, or an
+		// error (a corrupt header fails every call, rule 1)
+		found, lookupErr bool
+		kept             bool // the loaded state survives the probe
+	}{
+		{name: "wiped", change: func(
+			t *testing.T, meta *DiskMeta, node *fakeNode) {
+			wipe(node)
+		}},
+		{name: "corrupt", lookupErr: true, change: func(
+			t *testing.T, meta *DiskMeta, node *fakeNode) {
+			node.corruptBlock(metaDisk, common.DnHeaderOffset+20,
+				[]byte{0xff, 0xff})
+		}},
+		{name: "another node's", found: true, change: func(
+			t *testing.T, meta *DiskMeta, node *fakeNode) {
+			hdr := proto.Clone(meta.hdr).(*pb.DnDiskHeader)
+			hdr.DnId = testDn + 1
+			block, err := buildDnHeader(hdr)
+			if err != nil {
+				t.Fatalf("buildDnHeader: %v", err)
+			}
+			node.corruptBlock(metaDisk, common.DnHeaderOffset, block)
+		}},
+		{name: "re-formatted", change: func(
+			t *testing.T, meta *DiskMeta, node *fakeNode) {
+			wipe(node)
+			if err := reopen(node).EnsureFormatted(ctx,
+				testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+				t.Fatalf("re-format: %v", err)
+			}
+		}},
+		{name: "did not answer", found: true, kept: true, change: func(
+			t *testing.T, meta *DiskMeta, node *fakeNode) {
+			setHook(node, node.killRead, header)
+		}},
+	} {
+		meta, node := formatted(t)
+		if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {
+			t.Fatalf("%s: AllocSide: %v", tc.name, err)
+		}
+		tc.change(t, meta, node)
+		if _, err := meta.ProbeHeader(
+			ctx, testCluster, testDn, metaExtentSize); err == nil {
+			t.Errorf("%s: ProbeHeader succeeded", tc.name)
+		}
+		if _, _, ok := meta.Identity(); ok != tc.kept {
+			t.Errorf("%s: identity confirmed = %v, want %v",
+				tc.name, ok, tc.kept)
+		}
+		node.Reset()
+		_, found, err := meta.LookupSide(ctx, testSp, testSide)
+		if found != tc.found || (err != nil) != tc.lookupErr {
+			t.Errorf("%s: LookupSide = %v/%v, want found %v, error %v",
+				tc.name, found, err, tc.found, tc.lookupErr)
+		}
+		wantReads := 1
+		if tc.kept {
+			wantReads = 0
+		}
+		if got := len(node.callsMatching(header)); got != wantReads {
+			t.Errorf("%s: %d header reads after the probe, want %d",
+				tc.name, got, wantReads)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +565,7 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 
 	fresh := reopen(node)
 	if err := fresh.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("re-format: %v", err)
 	}
 	if got := fresh.Describe(); !strings.HasPrefix(got, "seq=1 sides=0") {
@@ -354,7 +574,7 @@ func TestDiskMetaStaleSlotRejectedAfterReformat(t *testing.T) {
 	// And the freshly written slot A is the one that wins on the next load.
 	if got := reopen(node); func() string {
 		if err := got.EnsureFormatted(
-			ctx, testCluster, testDn, metaExtentSize); err != nil {
+			ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 			t.Fatalf("reload: %v", err)
 		}
 		return got.Describe()
@@ -378,7 +598,8 @@ func TestDiskMetaBothSlotsInvalidIsCorruption(t *testing.T) {
 	node.Reset()
 
 	back := reopen(node)
-	err := back.EnsureFormatted(ctx, testCluster, testDn, metaExtentSize)
+	err := back.EnsureFormatted(
+		ctx, testCluster, testDn, metaExtentSize, mayFormat)
 	if err == nil {
 		t.Fatal("a disk with no valid table slot was accepted")
 	}
@@ -417,7 +638,7 @@ func TestDiskMetaSlotEnvelopeIsChecksummed(t *testing.T) {
 
 	back := reopen(node)
 	if err := back.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("EnsureFormatted: %v", err)
 	}
 	if _, ok, _ := back.LookupSide(ctx, testSp, testSide2); !ok {
@@ -438,7 +659,7 @@ func TestDiskMetaFormatSlotWriteFailure(t *testing.T) {
 	node.failBlockSet = true
 
 	if err := meta.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err == nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err == nil {
 		t.Fatal("EnsureFormatted succeeded with a failing slot write")
 	}
 	for _, call := range node.Calls() {
@@ -454,7 +675,7 @@ func TestDiskMetaFormatSlotWriteFailure(t *testing.T) {
 	// The retry formats cleanly and the disk works.
 	node.failBlockSet = false
 	if err := meta.EnsureFormatted(
-		ctx, testCluster, testDn, metaExtentSize); err != nil {
+		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if _, err := meta.AllocSide(ctx, testSp, testSide, 1); err != nil {

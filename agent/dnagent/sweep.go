@@ -660,7 +660,9 @@ func (s *DnAgentServer) freeCloneMetaOf(
 // lock and this side's object lock.
 //
 // remove = false is the read-only verdict the Check rounds and GetSideInfo
-// take: same enumeration, same comparison, nothing touched.
+// take: same enumeration, same comparison, nothing touched — plus the one
+// comparison only the verdict makes (zeroingVerdict), taken before the result
+// is logged so the pass's one `sweep leftover` record carries it.
 func (s *DnAgentServer) sweepSide(
 	ctx context.Context,
 	st *sideState,
@@ -668,6 +670,7 @@ func (s *DnAgentServer) sweepSide(
 	remove bool,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
+	verdict := !remove
 	actual := s.enumerateDn(ctx, plan.clusterId, plan.dnId, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
 	// below is "actual minus desired", and with the listing unanswered
@@ -688,6 +691,9 @@ func (s *DnAgentServer) sweepSide(
 	chain := s.buildSideChain(ctx, plan, actual, claims, wanted, res)
 	if !remove {
 		reportChain(chain, res)
+		if verdict {
+			s.zeroingVerdict(ctx, st, plan, res)
+		}
 		res.Log(ctx, sideIdAttrs(plan)...)
 		return res
 	}
@@ -1443,4 +1449,37 @@ func (s *DnAgentServer) sideVerdict(
 	}
 	plan := newSidePlan(s.nf, st.req, dn.req.GetExtentSize())
 	return s.sweepSide(ctx, st, plan, false)
+}
+
+// zeroingVerdict is the one comparison a side's verdict makes beyond the
+// sweep's: zeroing that should be running and is not. A record this node's
+// confirmed table holds with extents still unzeroed wants its DN9 goroutine,
+// at every level and on both sides of the provisioned gate, and only a
+// converge starts one. A converge that could not — the startup reconcile's
+// while no read of the disk answered, say — left nothing zeroing the side,
+// and the probe then reports the same progress every round with nothing to
+// re-send the SyncupSide. Both halves are read fresh on every call, the
+// record from the table and the goroutine from the registry, so nothing about
+// the failed converge is remembered. A record that cannot be read, or that
+// sits on a disk this node has not confirmed, adds nothing: a converge could
+// not start the goroutine either, the next round reads it again, and the
+// DN's own verdict reports an unconfirmed disk.
+func (s *DnAgentServer) zeroingVerdict(
+	ctx context.Context,
+	st *sideState,
+	plan *sidePlan,
+	res *agent.SweepResult,
+) {
+	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.spId, plan.sideId)
+	if err != nil || !ok || sideFullyZeroed(rec) {
+		return
+	}
+	s.mu.Lock()
+	running := st.zeroing
+	s.mu.Unlock()
+	if running {
+		return
+	}
+	res.Fail(fmt.Sprintf(zeroingDetailsFmt, sideZeroedCnt(rec),
+		sideExtCnt(rec)), fmt.Errorf("nothing is zeroing the side"))
 }

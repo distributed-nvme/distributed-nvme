@@ -959,8 +959,10 @@ DN2. Enumerate the store (SH6). For each `dn-*` file: re-run the SyncupDn
      node-level sweep of that DN is skipped along with everything else of it,
      so its dm devices and its records are not removed until the conf is
      fixed: a leak, which is the side of the trade a conf fault is allowed to
-     fall on. The record step stays silent for a second reason too (it needs
-     a confirmed disk, and DN5's identity check never ran here). There
+     fall on. The record step would free nothing here even if it ran: it
+     needs a confirmed disk, and a disk is confirmed only against the
+     identity a DN5 converge has asked for, which this one stopped before
+     asking (the probe above hands `DiskMeta` no identity). There
      is no compat shim: a cluster whose stored conf carries zeros is refused
      loudly everywhere and has to be recreated. The order over the whole
      store is: every side whose pointer is absent from its DN's stored
@@ -1020,12 +1022,30 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        itself does not carry (the extent count is that size minus
        `DnDataOffset`, divided by the **header's** `extent_size`).
      * **the [D13] disk format.** Read the header block. Magic absent ⇒ the
-       disk is blank: write slot A with an empty table at `seq` 1 **first**,
-       then the header (a fresh `format_uuid` from `crypto/rand`, the
-       request's `cluster_id`/`dn_id`/`extent_size`, and the three layout
-       offsets) — slot-A-before-header makes "a valid header implies at
-       least one valid table slot" an invariant, so a crash between the two
-       writes leaves an inert slot rather than a header with no table.
+       disk is blank, and it is formatted only when no side device or
+       clone-metadata wrapper maps it — the only devices dnv builds on the
+       disk itself: `dmsetup ls`, then `dmsetup table` of every `DnSideName`
+       and `DnMigrMetaDmName` on the node, whatever cluster or dn the name
+       carries, compared against the disk's `major:minor`. A header can go
+       blank under live side devices (one mistaken `dd` over its first 4 KiB
+       is enough), and a fresh, empty table would hand their extents to the
+       next side, which zeroes them and serves them as its own. So while one
+       of them maps the disk, or while any of those reads does not answer, the
+       converge writes nothing to the disk and `meta_info` is
+       `RES_STATUS_ERROR`, details
+       `"blank disk header; refusing to format: …"`. This dn's DN6 sweep
+       removes its own such devices once nothing wants them. A device named
+       for another cluster or dn is not its to remove: while one maps the
+       disk, the disk stays blank, `meta_info` names the first device that
+       maps it and every round's verdict replies `ReplyCodeLeftover` (DN6's
+       record step), until an operator removes it. Once no side device or
+       clone-metadata wrapper maps the disk, the next converge whose reads all
+       answer formats. The format writes slot A with an empty table at `seq` 1
+       **first**, then the header (a fresh `format_uuid` from `crypto/rand`,
+       the request's `cluster_id`/`dn_id`/`extent_size`, and the three layout
+       offsets) — slot-A-before-header makes "a valid header implies at least
+       one valid table slot" an invariant, so a crash between the two writes
+       leaves an inert slot rather than a header with no table.
        Magic present but version or CRC wrong ⇒ **error**, and every
        later operation errors too — a corrupt header is never formatted over.
        Magic present and valid ⇒ verify `cluster_id`/`dn_id`/`extent_size`
@@ -1035,15 +1055,33 @@ DN5. Converge the once-per-DN base state of `architecture.md` §3.1,
        `extent_size` is therefore immutable for the life of a format. A
        re-call on an already-converged disk issues **zero** writes (SH16).
 
-       A successful identity check is what makes the disk **writable** at all:
-       every later mutation (allocate, free, the DN9 zeroed-bit updates, the
-       DN6 record step) refuses on a disk whose identity this node has not
-       confirmed.
+       The identity check is what makes the volume table this node's to build
+       on and to change: handing out a record it already holds (`AllocSide`,
+       `AllocCloneMeta` — an existing record's extents are this node's only if
+       its table is) and every mutation (allocate, free, the DN9 zeroed-bit
+       updates, the DN6 record step) refuse on a disk whose identity this node
+       has not confirmed, and so does DN9's re-read of the record before each
+       zeroing batch, so no batch is computed from another node's bits.
+       Confirming needs no read of its own: this converge hands `DiskMeta` the
+       identity it asks for **before** it reads anything, and each of those
+       operations compares the header the table in memory was loaded under
+       with it. So one header read that did not answer — this converge's at
+       startup, say — leaves the disk unconfirmed only until a later read of
+       it (a side converge's, a DN18 probe's) has answered, and a disk whose
+       header names another cluster, dn or extent size is refused whether or
+       not a check has answered. While no read has answered, the DN6 record
+       step says so and the verdict is not clean, which re-drives this
+       converge. Lookups that only report do not pass the check — the side
+       converge's first look at the record, which fills the counters, and the
+       DN18 side probe — so on another node's disk a record whose ids collide
+       still fills `zeroed_ext_cnt`/`total_ext_cnt`, in a side converge's
+       reply beside its foreign-disk refusal and in every probe of the side.
        The guard has to live at that layer rather than in the caller, because
        a failed DN converge does not stop the side converges that follow
        (DN19) — without it, a node pointed at another node's disk would
        report `meta_info = RES_STATUS_ERROR` and then allocate extents in
-       that disk's volume table anyway.
+       that disk's volume table, or build its devices over the records that
+       table holds, anyway.
      * `EnsurePort` (SH19: the agent's `--nvmet-port-id` port, default
        `NvmetPortId`, from the `--tr-*` flags + the three fixed ANA groups).
      * **the Write Zeroes fail-fast**. DN9 zeroes whole
@@ -1355,7 +1393,13 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      ahead of the layers, because a live `blkdiscard --zeroout` child holds
      `DnSideName` open and `dmsetup remove` on an open device fails EBUSY
      (§9.4). The whole step refuses on a disk whose identity this node has
-     not confirmed, as every mutation of the table does (DN5).
+     not confirmed, as every mutation of the table does (DN5), and it says
+     so: the table it cannot use counts as a listing that did not answer
+     (`volume table: disk identity is not confirmed for this node`), so the
+     verdict is not clean and the worker re-drives the `SyncupDn`, whose
+     DN5 converge checks the disk again — every round, for as long as the
+     disk stays unreadable, corrupt, another node's, or blank under a live
+     side device or clone-metadata wrapper (DN16).
 
      Ids are never reused, so a swept side never comes back.
 
@@ -1905,24 +1949,45 @@ DN16. Read-only: probe fresh under the DN1 locks and reply `agent_reply`,
       For a **known** object the `agent_reply` is the **verdict**: the sweep
       of DN6 run with its removals left out — the same enumeration, the same
       wanted set, the same comparison, nothing touched — so `GetDnInfo`
-      replies `ReplyCodeLeftover` while the node holds node-level leftovers
-      and `GetSideInfo` while that side does, and both reply 0 otherwise.
-      A DN's verdict covers node-level leftovers only and a side's covers its
-      own; each drives its own `Syncup*`. The verdict is recomputed on every
-      call and stored nowhere, so a leftover that has since gone stops being
-      reported without anyone clearing a flag. A DN whose stored
-      `extent_size` is unusable has **no** verdict — §7 says it converges
-      nothing and sweeps nothing, so naming leftovers there would report
-      objects this agent has deliberately refused to touch — and neither has
-      a side whose DN is unknown or in that state, since its own geometry
-      comes from the DN.
+      replies `ReplyCodeLeftover` while the node holds node-level leftovers,
+      while one of its listings does not answer, and while the disk's identity
+      is not confirmed (DN6's record step: every round for as long as the disk
+      stays unreadable, corrupt, another node's, or blank under a live side
+      device or clone-metadata wrapper, and the worker re-sends `SyncupDn`
+      each time), and `GetSideInfo` while that side holds leftovers, while one
+      of its listings does not answer, and — the one comparison a side's
+      verdict makes beyond its sweep's — while its record, read from a table
+      this node has confirmed (DN5), still has extents to zero and no DN9
+      zeroing goroutine is running for it
+      (`zeroing {k}/{n}: nothing is zeroing the side`). Only a converge starts
+      that goroutine, and one that could not — the startup reconcile's, while
+      no read of the disk answered — would otherwise leave the side reporting
+      the same progress every round with nothing to re-send its `SyncupSide`;
+      the registry and the record are both read fresh, so nothing about the
+      failed converge is remembered. Both reply 0 otherwise. `GetDnInfo` and a
+      `CheckDn` round probe before they take the verdict: the probe's read of
+      the disk can be the first to answer, which is what confirms the identity
+      (DN5). A DN's verdict covers the node-level scope only and a side's
+      covers its own side; each drives its own `Syncup*`. The verdict is
+      recomputed on every call and stored nowhere, so a leftover that has
+      since gone stops being reported without anyone clearing a flag. A DN
+      whose stored `extent_size` is unusable has **no** verdict — §7 says it
+      converges nothing and sweeps nothing, so naming leftovers there would
+      report objects this agent has deliberately refused to touch — and
+      neither has a side whose DN is unknown or in that state, since its own
+      geometry comes from the DN.
 
-      Never mutates — in
-      particular a `Get*Info` or `Check*` round never allocates a record and
-      never registers a DN9 zeroing goroutine (registration happens only on a
-      converge path), and it reports `RES_STATUS_MISSING` for a side whose
-      record the converge has not written yet. That holds for the verdict
-      too: it enumerates and compares, and removes nothing.
+      Never mutates the node — in particular a `Get*Info` or `Check*` round
+      never allocates a record and never registers a DN9 zeroing goroutine
+      (registration happens only on a converge path), and it reports
+      `RES_STATUS_MISSING` for a side whose record the converge has not
+      written yet. That holds for the verdict too: it enumerates and compares,
+      and removes nothing. What a round does change is the agent's own account
+      of what it observed: the SH14 tracker, the disk size the allocator
+      reads, and `DiskMeta`'s copy of the volume table, which a read that
+      answers loads (that read can be the one that confirms the identity, DN5)
+      and which a header other than the one it came from drops (DN18), so the
+      converges, probes and DN9 goroutines that follow re-read the disk.
 
 ### 4.9 `CheckDn` / `CheckSide`
 
@@ -1947,9 +2012,9 @@ DN18. Probe map (all via SH17 conventions; `res_name` and probe per
 | `ResInfo` | `res_name` | probe |
 |---|---|---|
 | `DnInfo.disk_info` | the `--disk` path | `lsblk --bytes --nodeps` succeeds |
-| `DnInfo.meta_info` | the `--disk` path | `ReadBlock` of the 4 KiB header: magic, version, CRC and `cluster_id`/`dn_id`/`extent_size` identity, **plus the DN5 Write-Zeroes check** (`/sys/class/block/{kname}/queue/write_zeroes_max_bytes` is absent, unreadable or ≠ 0). `details` = `"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d"` when OK — the last count is sides whose `zeroed_bits` are still incomplete (DN9); on failure the error text instead, `"disk lacks Write Zeroes"` for the WZ case |
+| `DnInfo.meta_info` | the `--disk` path | `ReadBlock` of the 4 KiB header: magic, version, CRC and `cluster_id`/`dn_id`/`extent_size` identity — a header other than the one the loaded volume table came from (blank, corrupt, or valid with another identity or another `format_uuid`) also drops that table, so the next call re-reads the disk and nothing is handed out or written from the old one, and a blank disk is then formatted only as DN5 allows — until then every side's lookup finds no record (the `side_dev_info` row below); a read that did not answer changes nothing — **plus the DN5 Write-Zeroes check** (`/sys/class/block/{kname}/queue/write_zeroes_max_bytes` is absent, unreadable or ≠ 0). `details` = `"seq=%d sides=%d clone_metas=%d free_ext=%d free_meta_units=%d provisioning=%d"` when OK — the last count is sides whose `zeroed_bits` are still incomplete (DN9); on failure the error text instead, `"disk lacks Write Zeroes"` for the WZ case |
 | `DnInfo.port_info` | the agent's port id as `%d` — `"1"` unless `--nvmet-port-id` says otherwise, so on a node running several agents the rows differ | configfs `addr_*` reads match the `--tr-*` flags; the three [D4] groups present with their fixed states |
-| `SideInfo.side_dev_info` | `DnSideName` | the volume-table record + its `zeroed_bits` + `dmsetup table`, judged by the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned = false` (the converge that allocates has not run) and `RES_STATUS_ERROR`, details `"record missing"`, at `provisioned = true`; bits incomplete ⇒ `RES_STATUS_PROVISIONING`, details `"zeroing {k}/{n}"`, at `false` and `RES_STATUS_ERROR`, details `"not zeroed"`, at `true`; an outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's output; a live table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`. The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every round |
+| `SideInfo.side_dev_info` | `DnSideName` | the volume-table record + its `zeroed_bits` + `dmsetup table`, judged by the DN9 matrix: no record ⇒ `RES_STATUS_MISSING` at `provisioned = false` (no converge has allocated one yet, or the header has gone blank under the side: a blank header reads as an unformatted disk with no records, and the meta row's probe drops a table loaded before the header went blank — the side's device is still there all the same, and its DN9 goroutine, if one is running, ends at its next re-read of the record) and `RES_STATUS_ERROR`, details `"record missing"`, at `provisioned = true` (a lost or foreign disk, or that same blank header, under which the side's devices keep serving its data: nothing removes a device the side still wants, and DN5 will not format while they map the disk); bits incomplete ⇒ `RES_STATUS_PROVISIONING`, details `"zeroing {k}/{n}"`, at `false` and `RES_STATUS_ERROR`, details `"not zeroed"`, at `true`; an outstanding batch failure ⇒ `RES_STATUS_ERROR` with the killed command's output; a live table that does not match the record's extent runs ⇒ `RES_STATUS_ERROR`. The same read fills `SideInfo.zeroed_ext_cnt`/`total_ext_cnt` every round |
 | `cn_id_to_dm_error[cn]` / `cn_id_to_dm_linear[cn]` | `DnErrorName` / `DnLinearName` | `dmsetup info` + `dmsetup table` (the linear's target — side device vs dm-error vs dm-clone — must match the desired role). Inside the §11.2 grace window the expected target is the **pre-fence** one and `details` is `"suspended (migration cutover grace window)"`; the probe never starts a window (DN16). While DN9's gate is closed no device is expected to exist and both report `RES_STATUS_PROVISIONING`, details `"side provisioning"` |
 | `cn_id_to_nvmeof[cn]` | the `SideToCnNqn` | configfs: subsystem present, ns enabled, `ana_grpid` as desired. `RES_STATUS_PROVISIONING`, details `"side provisioning"`, while DN9's gate is closed |
 | `migr_src_info.dm_linear_info` / `.nvmeof_info` | `DnMigrSrcName` / the `MigrSrcNqn` | `dmsetup status` / configfs. With `migr_src_conf.dst_provisioned = false` neither object exists by design (DN12) and both report `RES_STATUS_PROVISIONING`, details `"side provisioning"` |
@@ -1969,9 +2034,13 @@ DN19. Error capture (§9.1): a failed command marks that resource
       not answer, replies `ReplyCodeLeftover` with `details` = `leftover(n):
       kind:name, kind:name, …` — at most eight names, then `[+k more]` — and
       `enumeration failed: <what>: <err>` for each listing that did not
-      answer. The full list goes to the agent log once per pass as the
-      `sweep leftover` record (`log.md`), so a lingering leftover is visible
-      every round rather than once.
+      answer. Two dn checks that are not listings are folded into the same
+      outcome, in that same form, so that they drive the same re-send: DN6's
+      record step on a disk whose identity is not confirmed, and — in the
+      read-only verdict only — a side with extents still to zero and no
+      zeroing goroutine (DN16). The full list goes to the agent log once per
+      pass as the `sweep leftover` record (`log.md`), so a lingering leftover
+      is visible every round rather than once.
 
       It is **not** a rejection (SH9). The request was applied, the desired
       state is stored, and the `*Info` rows are the converge's full account
@@ -2245,6 +2314,61 @@ able to fail.
    stored one; unknown object ⇒ `ReplyCodeUnknownObject` with the stream kept
    open (SH25). A Check round never mutates — `writeblock` included — and
    never registers a zeroing goroutine (DN16).
+   **A header read that did not answer at startup** (DN5, DN6, DN16;
+   `TestATransientHeaderReadDoesNotFreezeTheSides`): after a restart whose
+   DN converge had its header read killed, the startup side converge's own
+   read confirms the identity, a failover flip of a side the table records
+   converges before any check round, moving the new primary's namespace to
+   the optimized group exactly once, and the first `CheckDn` round is
+   clean; after a restart during which no header read answers, a `CheckDn`
+   round replies `ReplyCodeLeftover` naming the disk identity, and once the
+   disk answers the first `GetDnInfo` replies 0 with `meta_info` `OK` — its
+   probe runs before the verdict — and the next flip converges.
+   `TestATransientHeaderReadKeepsALiveCloneServing`: the same restart under
+   a live migration destination, and a `SyncupSide` after it, issue no
+   reload of the primary's dm-linear, which stays on the dm-clone, and
+   `dm_clone_info` reads `OK`.
+   `TestATransientHeaderReadKeepsZeroing`: a side a stopped process left
+   at zeroing 0/n finishes after the same restart with no check round,
+   each batch's `blkdiscard --zeroout` issued exactly once.
+   `TestASideLeftWithNothingZeroingIsReDriven`: the same side after a
+   restart during which no header read answers until the startup
+   reconcile is over has nothing zeroing it; the first `CheckSide` round
+   replies `ReplyCodeLeftover` naming the zeroing, the `SyncupSide` it
+   re-drives starts the goroutine, the side finishes with each batch issued
+   exactly once, and the next verdict is clean.
+   `TestAForeignRecordIsNotZeroingToReDrive`: a second agent under another
+   dn id, finding the owner's record for the same ids still at zeroing
+   0/n, gets no zeroing in its side verdict — its `CheckDn` verdict names
+   the disk identity instead.
+   `TestAZeroingLoopIssuesNoBatchUnderAForeignHeader`: a header rewritten
+   with another dn id under a running zeroing loop, found by one `CheckDn`
+   round, stops the loop's batches — no `blkdiscard --zeroout` and no block
+   write after the round — and `side_dev_info` reads `RES_STATUS_ERROR`
+   naming the foreign disk.
+   `TestForeignDiskIsNeverWritten`: a second agent syncing the same disk
+   under another dn id, its DN converge's header read answered or killed,
+   has its side converge refused with a foreign-disk error: no block write,
+   no dm device created, reloaded or removed, and the owner's record
+   intact.
+   **A blank header under a live side** (DN5, DN18;
+   `TestABlankHeaderUnderLiveSidesIsNeverFormatted`): a header zeroed under
+   a converged side makes the `CheckDn` verdict a leftover; the `SyncupDn`
+   it re-drives refuses to format, naming the side device, and a new
+   side's converge is refused `"disk is not formatted"`; nothing is
+   written to the disk and the live stack is untouched until both sides
+   leave the DN, whose sweep removes the live side's devices, and the next
+   converge formats with exactly two writes, slot A then the header.
+   `TestABlankHeaderIsNotFormattedWhenTheGateCannotRead`: with the live
+   side's devices gone, a killed `lsblk` of the disk's device number, a
+   killed `dmsetup ls`, or a killed `dmsetup table` of another dn's side
+   device each make the converge refuse to format, with no block write;
+   the next converge formats with exactly two writes.
+   `TestABlankHeaderIsNotFormattedUnderAnotherNodesDevice`: a side device
+   of another dn, one of another cluster, and another dn's clone-metadata
+   wrapper, each mapping the disk, keep it blank round after round — the
+   refusal names the device, the verdict is a leftover, nothing is written
+   or removed — and once the device is gone the next converge formats.
 9. **sp_level**: `SP_LEVEL_NO_SIDE` removes exports but keeps dm + the side
    device; `SP_LEVEL_DISABLE` keeps only the side device and its record;
    lowering back rebuilds (DN11). `SP_LEVEL_READONLY` and the three CN-only
@@ -2355,6 +2479,24 @@ able to fail.
     one included); and the envelope layout
     itself (magics, version, seq, a non-zero `format_uuid`, and that the
     layout constants tile without overlap up to `DnDataOffset`).
+    **The identity gate** (DN5, DN18):
+    `TestDiskMetaIdentityGateComparesTheLoadedHeader` — before any DN
+    converge has asked for an identity, neither an existing side record nor
+    an existing clone-metadata record is handed out; after a converge whose
+    header read was killed, the first read that answers decides: another
+    node's header refuses both with a foreign-disk error, this node's hands
+    both out without a write and allocates a new record. The confirmed
+    lookup DN9's zeroing loop reads through answers the same way in all
+    three cases — refused before any converge has asked and on another
+    node's disk, handed out on this node's — while the reporting lookup
+    still finds the foreign record, and a record the foreign table does not
+    hold is absent rather than refused.
+    `TestDiskMetaProbeDropsATableTheDiskNoLongerHolds` — a probe that finds
+    the header wiped, corrupt, another node's or re-formatted leaves the
+    identity unconfirmed and drops the loaded table: the next lookup re-reads
+    the header exactly once and answers from what the disk now holds (no
+    record once it is wiped or re-formatted, an error once it is corrupt);
+    one that did not answer keeps both, with no re-read.
 14. **`GetDnSize`**: the reply is `disk size − DnDataOffset`; a device at or
     below `DnDataOffset`, and a failing `lsblk`, both report through the gRPC
     status (DN3).

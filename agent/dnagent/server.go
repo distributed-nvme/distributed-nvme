@@ -302,7 +302,7 @@ func (s *DnAgentServer) PushMigrBitmap(
 	return s.pushMigrBitmap(ctx, key, req), nil
 }
 
-// GetDnInfo probes fresh live state and never mutates (DN16).
+// GetDnInfo probes fresh live state and never mutates the node (DN16).
 func (s *DnAgentServer) GetDnInfo(
 	ctx context.Context,
 	req *pb.GetDnInfoRequest,
@@ -316,10 +316,15 @@ func (s *DnAgentServer) GetDnInfo(
 				"unknown dn %d", req.GetDnId()),
 		}, nil
 	}
+	// The probe runs first, as in checkDnRound: its read of the disk can be
+	// the first that answers, which is what confirms DN5's identity, and a
+	// verdict taken before it would report the volume table unconfirmed
+	// beside a meta row that reads OK.
+	info := s.probeDn(ctx, st)
 	return &pb.GetDnInfoReply{
 		AgentReply: s.dnVerdict(ctx, st).Reply(),
 		Revision:   st.req.GetRevision(),
-		DnInfo:     s.probeDn(ctx, st),
+		DnInfo:     info,
 	}, nil
 }
 

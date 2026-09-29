@@ -978,7 +978,9 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      rejection: the request was applied — the desired state is stored and
      every wanted object converged — and the node still holds objects the
      desired state does not want, or an enumeration of what it holds did
-     not answer, which proves nothing either way (`architecture.md` §9.8).
+     not answer, which proves nothing either way, or — on a dn — one of the
+     two conditions the agent reports the same way so that its `Syncup*` is
+     re-sent (`architecture.md` §9.8).
      It is logged as `syncup leftover` (`revision`, the agent's `details`)
      at `Info`, beside the ordinary `syncup result`: nothing agent-side
      re-drives the sweep, it runs again on the re-sync RW4 step 5 issues, so

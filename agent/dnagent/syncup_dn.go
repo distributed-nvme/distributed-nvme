@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -202,8 +204,16 @@ func (s *DnAgentServer) sweepOrphanRecords(
 ) {
 	clusterId, dnId, ok := s.meta.Identity()
 	if !ok {
-		// Unformatted, unreadable, or a disk this node has not confirmed as
-		// its own — nothing here may be freed.
+		// Unformatted, unreadable, corrupt, not read since the agent started
+		// or since a probe dropped the table, or a disk whose header names
+		// another node — nothing here may be freed. Nor is the pass clean:
+		// this step could not run, and a verdict that stayed OK would leave
+		// nothing to re-drive the SyncupDn whose converge reads the disk
+		// again and formats a blank one once no device maps it (DN5). A disk
+		// that stays another node's or corrupt keeps every round's verdict
+		// non-clean for as long as it does (DN16).
+		res.Fail("volume table",
+			fmt.Errorf("disk identity is not confirmed for this node"))
 		return
 	}
 	known, haveState, ok := s.knownSides()
@@ -525,22 +535,84 @@ func (s *DnAgentServer) convergeDn(
 }
 
 // ensureDiskMeta converges the [D13] disk format: a blank disk is formatted
-// (header + an empty volume table in slot A), a disk already formatted for
-// this cluster/dn/extent_size is left untouched, and a disk formatted for
-// anything else is refused rather than overwritten (DN5).
+// (header + an empty volume table in slot A) once no side device or
+// clone-metadata wrapper maps it, a disk already formatted for this
+// cluster/dn/extent_size is left untouched, and a disk formatted for anything
+// else is refused rather than overwritten (DN5).
 func (s *DnAgentServer) ensureDiskMeta(
 	ctx context.Context,
 	t *agent.ResTracker,
 	req *pb.SyncupDnRequest,
 ) *pb.ResInfo {
 	if err := s.meta.EnsureFormatted(ctx, req.GetClusterId(),
-		req.GetDnId(), req.GetExtentSize()); err != nil {
+		req.GetDnId(), req.GetExtentSize(), s.diskUnmapped); err != nil {
 		return t.Err(resKeyMeta, s.disk, err.Error())
 	}
 	if details, ok := s.checkWriteZeroes(ctx); !ok {
 		return t.Err(resKeyMeta, s.disk, details)
 	}
 	return t.Ok(resKeyMeta, s.disk, s.meta.Describe())
+}
+
+// diskUnmapped is DN5's format gate: EnsureFormatted formats a blank header
+// only when this answers nil, i.e. when no side device or clone-metadata
+// wrapper on the node — whatever cluster or dn its name carries — has a live
+// table that maps this disk. Those two kinds are the only devices dnv builds
+// on the disk itself. A header can go blank under live side devices (one
+// mistaken `dd` over its first 4 KiB is enough), and formatting it then would
+// write a fresh, empty table whose next allocation hands their extents to
+// another side, which zeroes them and serves them as its own. A listing or a
+// table read that did not answer refuses too: it proves nothing about what
+// maps the disk. The refusal is the meta row's error, and the disk stays
+// blank until every such device is gone — this dn's sweep removes its own
+// once nothing wants them; a device of another cluster or dn stays until an
+// operator removes it — after which a converge whose reads all answer formats
+// it.
+func (s *DnAgentServer) diskUnmapped(ctx context.Context) error {
+	const refusing = "blank disk header; refusing to format"
+	devNo, err := s.dm.DevNo(ctx, s.disk)
+	if err != nil {
+		return fmt.Errorf("%s: %w", refusing, err)
+	}
+	dms, err := s.dm.List(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: %w", refusing, err)
+	}
+	var live []string
+	for name := range dms {
+		dn, ok := common.ParseDmName(name)
+		if !ok || dn.Role() != common.DmRoleDn ||
+			(dn.Kind != common.DmKindDnSide &&
+				dn.Kind != common.DmKindDnMigrMeta) {
+			continue
+		}
+		targets, err := s.dm.Table(ctx, name)
+		if err != nil {
+			return fmt.Errorf("%s: %w", refusing, err)
+		}
+		if tableMaps(targets, devNo) {
+			live = append(live, name)
+		}
+	}
+	if len(live) > 0 {
+		sort.Strings(live)
+		return fmt.Errorf("%s: %d live dm device(s) still map the disk, "+
+			"first %s", refusing, len(live), live[0])
+	}
+	return nil
+}
+
+// tableMaps reports whether any target of a live dm table names devNo, the
+// "major:minor" form `dmsetup table` prints every device in.
+func tableMaps(targets []agent.DmTarget, devNo string) bool {
+	for _, target := range targets {
+		for _, arg := range target.Args {
+			if arg == devNo {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkWriteZeroes is §9.4's DN5 fail-fast. It returns
@@ -551,7 +623,8 @@ func (s *DnAgentServer) ensureDiskMeta(
 //
 // A failure reports meta_info but never gates converging (DN5): an
 // already-populated DN keeps serving the sides it hosts, and DN5's identity
-// check stays the only write gate.
+// check and its blank-disk format gate (diskUnmapped) stay the only write
+// gates.
 func (s *DnAgentServer) checkWriteZeroes(ctx context.Context) (string, bool) {
 	value, present, err := s.dm.WriteZeroesMaxBytes(ctx, s.disk)
 	if err != nil {

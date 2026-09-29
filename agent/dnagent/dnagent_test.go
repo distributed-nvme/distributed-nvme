@@ -1477,7 +1477,7 @@ func newVerifiedMeta(t *testing.T, node *fakeNode) *DiskMeta {
 	meta := NewDiskMeta(node.osClient(), testDisk)
 	meta.SetDiskSize(node.devSize[testDisk])
 	if err := meta.EnsureFormatted(context.Background(),
-		testCluster, testDn, testExtentSize); err != nil {
+		testCluster, testDn, testExtentSize, mayFormat); err != nil {
 		t.Fatalf("EnsureFormatted: %v", err)
 	}
 	return meta
@@ -1894,13 +1894,548 @@ func TestOrphanSweepFreesTornDownSide(t *testing.T) {
 
 // A disk formatted for another node is refused, and — because a failed DN
 // converge does not stop the side converges that follow (DN19) — nothing
-// downstream may write to it either.
+// downstream may write to it or build on its records either. That holds
+// when the DN converge's own header read did not answer, too: the side
+// converge is then the first to read whose disk this is, and the records it
+// finds are another node's even where their (sp, side) ids match its own —
+// ids restart in every cluster. Handing one out would put that node's extents
+// behind this node's devices and export them.
 func TestForeignDiskIsNeverWritten(t *testing.T) {
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		testDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	for _, tc := range []struct {
+		name string
+		// killHeader cuts off the header read of the second agent's
+		// SyncupDn, the check that would have found the disk foreign.
+		killHeader bool
+		// metaDetails is what that SyncupDn's meta row says.
+		metaDetails string
+	}{
+		{name: "answered", metaDetails: "foreign disk"},
+		{name: "header read killed", killHeader: true,
+			metaDetails: "reading the disk header"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+
+			// A second agent claims the same device under a different dn_id.
+			node.mu.Lock()
+			node.protos = map[string][]byte{}
+			node.mu.Unlock()
+			srv2 := NewDnAgentServer(node.osClient(),
+				common.NewNameFmt(common.DefaultLocalStorPrefix),
+				common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+				common.NvmetPortId)
+			if err := srv2.Reconcile(ctx); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+
+			node.Reset()
+			if tc.killHeader {
+				setHook(node, node.killRead, header)
+			}
+			req := dnReq(1, testSide)
+			req.DnId = testDn + 100
+			reply, err := srv2.SyncupDn(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			meta := reply.GetDnInfo().GetMetaInfo()
+			if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.Contains(meta.GetDetails(), tc.metaDetails) {
+				t.Errorf("meta_info = %v/%q, want ERROR/%s",
+					meta.GetStatus(), meta.GetDetails(), tc.metaDetails)
+			}
+
+			// The side converge that follows must neither allocate on the
+			// foreign disk nor hand out the record it holds for the same ids.
+			sideReply, err := srv2.SyncupSide(ctx, func() *pb.SyncupSideRequest {
+				r := sideReq(1, testSide, testCn0, nil,
+					pb.SpLevel_SP_LEVEL_READWRITE)
+				r.DnId = testDn + 100
+				return r
+			}())
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := sideReply.GetSideInfo().GetSideDevInfo(); got.
+				GetStatus() == pb.ResStatus_RES_STATUS_OK ||
+				!strings.Contains(got.GetDetails(), "foreign disk") {
+				t.Errorf("side_dev on a foreign disk = %v/%q, want a "+
+					"foreign-disk refusal", got.GetStatus(), got.GetDetails())
+			}
+			for _, call := range node.Calls() {
+				if strings.HasPrefix(call, "writeblock") {
+					t.Errorf("a foreign disk was written: %s", call)
+				}
+				if strings.Contains(call, "dmsetup remove") {
+					t.Errorf("a foreign disk's devices were removed: %s",
+						call)
+				}
+				if strings.Contains(call, "dmsetup create") ||
+					strings.Contains(call, "dmsetup reload") {
+					t.Errorf("a device was built on a foreign disk: %s",
+						call)
+				}
+			}
+			// The original owner's record is intact on disk.
+			fresh := NewDiskMeta(node.osClient(), testDisk)
+			if _, ok, err := fresh.LookupSide(ctx, testSp, testSide); !ok ||
+				err != nil {
+				t.Errorf("the owning node's record was destroyed: %v %v",
+					ok, err)
+			}
+		})
+	}
+}
+
+// One header read that did not answer at startup must not freeze the sides.
+// DN5's identity check compares the header the volume table was loaded under
+// with the identity the DN converge asked for, and the converge asks before
+// it reads: after a restart whose DN converge had its header read cut off,
+// the first read that answers — the side converge's own — confirms the disk,
+// and a failover of a side the table records converges before any check
+// round. The old agent confirmed the identity in the DN converge alone: one
+// killed read at startup refused every later SyncupSide at AllocSide while
+// CheckDn reported the node clean, and nothing ran the DN converge again
+// until the next DN revision.
+//
+// While no read of the header has answered at all, the DN's verdict is not
+// clean (DN6's record step), so the worker re-drives the SyncupDn; and the
+// first GetDnInfo whose probe reads the header back replies clean, because
+// the probe runs before the verdict is taken.
+func TestATransientHeaderReadDoesNotFreezeTheSides(t *testing.T) {
 	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ctx := context.Background()
 	syncupBoth(t, srv, 1, testSide)
+	stopTestServer(t, srv)
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		testDisk, common.DnHeaderOffset, common.DnHeaderSize)
 
-	// A second agent claims the same device under a different dn_id.
+	checkDn := func(srv *DnAgentServer) *pb.CheckDnReply {
+		t.Helper()
+		reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+			ClusterId: testCluster, DnId: testDn, Revision: 1,
+			ShowInfo: true,
+		}, nil)
+		return reply
+	}
+	// flip is a failover of the side's primary: it converges only past
+	// AllocSide, and it lands only if the new primary's namespace moves to
+	// the optimized group — exactly once.
+	flip := func(srv *DnAgentServer, revision uint64, primary uint64,
+		standby uint64) {
+		t.Helper()
+		node.Reset()
+		reply, err := srv.SyncupSide(ctx, sideReq(revision, testSide,
+			primary, []uint64{standby}, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		dev := reply.GetSideInfo().GetSideDevInfo()
+		if reply.GetAgentReply().GetCode() != 0 ||
+			dev.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("rev %d: agent_reply %v, side_dev %v/%q, want 0 and OK",
+				revision, reply.GetAgentReply(), dev.GetStatus(),
+				dev.GetDetails())
+		}
+		nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, primary)
+		moved := fmt.Sprintf(
+			"writedirect %s/subsystems/%s/namespaces/1/ana_grpid=%d",
+			agent.NvmetRoot, nqn, common.AnaGrpIdOptimized)
+		if got := len(node.callsMatching(moved)); got != 1 {
+			t.Errorf("rev %d: %d moves of cn %d's namespace to the "+
+				"optimized group, want 1", revision, got, primary)
+		}
+	}
+
+	// A fresh process over the same disk and store, whose first read of the
+	// disk header — the startup DN converge's — the soft timeout cuts off.
+	// Every later read answers.
+	setHook(node, node.killRead, header)
+	srv = startTestServer(t, node)
+	node.mu.Lock()
+	armed := node.killRead[header]
+	node.mu.Unlock()
+	if armed {
+		t.Fatal("the startup reconcile never read the disk header")
+	}
+	// A failover converges before any check round, and the first round is
+	// clean.
+	flip(srv, 2, testCn1, testCn0)
+	if _, _, ok := srv.meta.Identity(); !ok {
+		t.Error("the startup side converge read this node's header back, " +
+			"and the identity is still unconfirmed")
+	}
+	reply := checkDn(srv)
+	if got := reply.GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("first verdict after the restart = %v, want 0", got)
+	}
+	stopTestServer(t, srv)
+
+	// A restart during which no read of the header answers: nothing
+	// confirms the disk, and a round must say so — a clean verdict here is
+	// what left the old agent unconfirmed until the next DN revision.
+	setHook(node, node.killReadAlways, header)
+	srv = startTestServer(t, node)
+	reply = checkDn(srv)
+	if got := reply.GetDnInfo().GetMetaInfo().GetStatus(); got ==
+		pb.ResStatus_RES_STATUS_OK {
+		t.Error("meta_info = OK, but no header read answered")
+	}
+	if got := reply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover ||
+		!strings.Contains(got.GetDetails(), "disk identity") {
+		t.Errorf("verdict with the identity unconfirmed = %v, want a "+
+			"leftover naming the disk identity", got)
+	}
+
+	// Once the disk answers again, the first GetDnInfo is clean: its probe
+	// reads the header back before the verdict is taken.
+	clearHook(node, node.killReadAlways, header)
+	info, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+		ClusterId: testCluster, DnId: testDn,
+	})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if got := info.GetDnInfo().GetMetaInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("meta_info = %v/%q, want OK", got.GetStatus(),
+			got.GetDetails())
+	}
+	if got := info.GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("verdict of the GetDnInfo whose probe read the header = "+
+			"%v, want 0", got)
+	}
+
+	// And the next failover converges.
+	flip(srv, 3, testCn0, testCn1)
+}
+
+// The clone-metadata record is handed out on the same terms as the side's,
+// after the same restart. Were it refused where the side record is handed
+// out, the converge that gets past the side device would read the dm-clone
+// as not live and reload a live destination's primary dm-linear off the
+// clone onto its dm-error — an outage of the leg.
+func TestATransientHeaderReadKeepsALiveCloneServing(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	provisionSide(t, srv, 1, testSide)
+	if reply, err := srv.SyncupSide(ctx,
+		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil ||
+		reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupSide: %v %v", reply.GetAgentReply(), err)
+	}
+	stopTestServer(t, srv)
+	linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, testCn0)
+	cloneNo := node.devNo[nf.DmPath(
+		nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId))]
+	if !strings.Contains(node.dms[linName].table, cloneNo) {
+		t.Fatalf("the primary's dm-linear %q is not on the dm-clone (%s)",
+			node.dms[linName].table, cloneNo)
+	}
+
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		testDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	setHook(node, node.killRead, header)
+	node.Reset()
+	srv = startTestServer(t, node)
+	node.mu.Lock()
+	armed := node.killRead[header]
+	node.mu.Unlock()
+	if armed {
+		t.Fatal("the startup reconcile never read the disk header")
+	}
+	reply, err := srv.SyncupSide(ctx,
+		migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := reply.GetSideInfo().GetMigrDstInfo().GetDmCloneInfo(); got.
+		GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("dm_clone_info = %v/%q, want OK", got.GetStatus(),
+			got.GetDetails())
+	}
+	if got := node.callsMatching("cmd dmsetup reload " + linName); len(got) !=
+		0 {
+		t.Errorf("the primary's dm-linear was reloaded: %v", got)
+	}
+	if !strings.Contains(node.dms[linName].table, cloneNo) {
+		t.Errorf("the primary's dm-linear %q left the dm-clone (%s)",
+			node.dms[linName].table, cloneNo)
+	}
+}
+
+// A side still being zeroed when the agent stops goes on zeroing after a
+// restart whose first header read did not answer, and each batch's bits are
+// persisted the first time: the side converge that starts its goroutine again
+// is the read that confirms the disk, so no batch is zeroed twice for want
+// of a confirmation, and the side finishes without any check round. The old
+// agent refused the side at AllocSide until the next DN revision, and the
+// side reported its progress for ever with nothing zeroing it.
+func TestATransientHeaderReadKeepsZeroing(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	sideDevPath := nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// Every batch fails, so the side is still at zeroing 0/n when the
+	// process stops.
+	setFailAlways(node, "blkdiscard --zeroout", "stalled")
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	stopTestServer(t, srv)
+	if rec, ok, err := srv.meta.LookupSide(
+		ctx, testSp, testSide); err != nil || !ok || sideZeroedCnt(rec) != 0 {
+		t.Fatalf("the side was not left allocated and unzeroed: %v %v",
+			ok, err)
+	}
+	clearFailAlways(node, "blkdiscard --zeroout")
+
+	// A fresh process over the same disk and store, whose first read of the
+	// disk header — the startup DN converge's — the soft timeout cuts off.
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		testDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	node.Reset()
+	setHook(node, node.killRead, header)
+	srv = startTestServer(t, node)
+	waitZeroed(t, srv, testSide)
+	node.mu.Lock()
+	armed := node.killRead[header]
+	node.mu.Unlock()
+	if armed {
+		t.Fatal("the startup reconcile never read the disk header")
+	}
+	// Each batch exactly once, in order: a batch whose bits the volume
+	// table refused would have been zeroed again.
+	want := zerooutBatches(sideDevPath, testExtCnt)
+	if got := node.callsMatching("blkdiscard --zeroout"); strings.Join(
+		got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("zeroing batches after the restart:\n%s\nwant each "+
+			"exactly once:\n%s", strings.Join(got, "\n"),
+			strings.Join(want, "\n"))
+	}
+}
+
+// A side still being zeroed when the agent stops, after a restart during
+// which no read of the disk header answers: the startup converge of the side
+// cannot read its record, so nothing starts its zeroing, and once the disk
+// answers again every check round reads the record back fine. The side's
+// verdict is what notices — a record with extents still to zero and no
+// zeroing goroutine is not clean — and the worker re-sends the SyncupSide
+// whose converge starts the goroutine. The old verdict was clean on every
+// round, and the side reported "zeroing 0/n" for ever with nothing zeroing
+// it.
+func TestASideLeftWithNothingZeroingIsReDriven(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	sideDevPath := nf.DmPath(
+		nf.DnSideName(testCluster, testDn, testSp, testSide))
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// Every batch fails, so the side is still at zeroing 0/n when the
+	// process stops.
+	setFailAlways(node, "blkdiscard --zeroout", "stalled")
+	sideRequest := unprovisionedSideReq(1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	if _, err := srv.SyncupSide(ctx, sideRequest); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	stopTestServer(t, srv)
+	clearFailAlways(node, "blkdiscard --zeroout")
+
+	// A fresh process over the same disk and store, none of whose reads of
+	// the disk header answers until the startup reconcile is over.
+	header := fmt.Sprintf("readblock %s off=%d len=%d",
+		testDisk, common.DnHeaderOffset, common.DnHeaderSize)
+	node.Reset()
+	setHook(node, node.killReadAlways, header)
+	srv = startTestServer(t, node)
+	clearHook(node, node.killReadAlways, header)
+	if !node.hasCall(header) {
+		t.Fatal("the startup reconcile never read the disk header")
+	}
+	if got := len(node.callsMatching("blkdiscard --zeroout")); got != 0 {
+		t.Fatalf("zeroing ran although no read of the header answered: "+
+			"%d batches", got)
+	}
+	node.Reset()
+
+	// The worker's rounds: a Check reply that is not clean re-sends that
+	// object's Syncup* (RW4).
+	var firstSide *pb.AgentReply
+	for round := 0; round < 3; round++ {
+		dnReply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+			ClusterId: testCluster, DnId: testDn, Revision: 1,
+		}, nil)
+		if dnReply.GetAgentReply().GetCode() != 0 {
+			if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+		}
+		sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+			ClusterId: testCluster, DnId: testDn,
+			SidePointer: sidePtr(testSide), Revision: 1,
+		}, nil)
+		if firstSide == nil {
+			firstSide = sideReply.GetAgentReply()
+		}
+		if sideReply.GetAgentReply().GetCode() != 0 {
+			if _, err := srv.SyncupSide(ctx, sideRequest); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+		}
+	}
+	if firstSide.GetCode() != common.ReplyCodeLeftover ||
+		!strings.Contains(firstSide.GetDetails(), "zeroing 0/") {
+		t.Errorf("first side verdict with nothing zeroing = %v, want a "+
+			"leftover naming the zeroing", firstSide)
+	}
+	waitZeroed(t, srv, testSide)
+	// Each batch exactly once: the one SyncupSide the verdict re-drove
+	// started one goroutine.
+	want := zerooutBatches(sideDevPath, testExtCnt)
+	if got := node.callsMatching("blkdiscard --zeroout"); strings.Join(
+		got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("zeroing batches after the re-drive:\n%s\nwant each "+
+			"exactly once:\n%s", strings.Join(got, "\n"),
+			strings.Join(want, "\n"))
+	}
+	// Once zeroed, the verdict is clean again.
+	sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn,
+		SidePointer: sidePtr(testSide), Revision: 1,
+	}, nil)
+	if got := sideReply.GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("side verdict once zeroed = %v, want 0", got)
+	}
+}
+
+// A running zeroing loop reads its record as this node's only (DN5, DN9). A
+// header that turns into another node's under it — the same format, another
+// dn id — makes the next probe drop the table, and the loop's next re-read
+// loads the table under that header. No batch may be computed from it: the
+// loop used to read the record ungated, zero the batch its bits named, have
+// the bits refused and issue the same batch again every retry interval, for
+// ever, over a disk that was no longer confirmed as this node's.
+func TestAZeroingLoopIssuesNoBatchUnderAForeignHeader(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// The first batch parks in its command, so the header changes while the
+	// loop is at a known point: past its read of the record.
+	const zeroout = "blkdiscard --zeroout"
+	node.blockCmd(zeroout)
+	t.Cleanup(func() { node.releaseCmd(zeroout) })
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(zeroout)
+	}) {
+		t.Fatal("the first batch never started")
+	}
+
+	// The header turns into another dn's, and a probe round finds it.
+	srv.meta.mu.Lock()
+	hdr := proto.Clone(srv.meta.hdr).(*pb.DnDiskHeader)
+	srv.meta.mu.Unlock()
+	hdr.DnId = testDn + 1
+	block, err := buildDnHeader(hdr)
+	if err != nil {
+		t.Fatalf("buildDnHeader: %v", err)
+	}
+	node.corruptBlock(testDisk, common.DnHeaderOffset, block)
+	reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
+	}, nil)
+	if meta := reply.GetDnInfo().GetMetaInfo(); !strings.Contains(
+		meta.GetDetails(), "foreign disk") {
+		t.Fatalf("meta_info = %v/%q, want the foreign disk",
+			meta.GetStatus(), meta.GetDetails())
+	}
+
+	// The parked batch finishes and its bits are refused. Two sightings of
+	// the refusal, the test clearing the first, are two full turns of the
+	// loop after it: under the old lookup each turn issued a batch first.
+	node.Reset()
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	refused := func() bool {
+		err := srv.zeroingErr(st)
+		return err != nil && strings.Contains(err.Error(), "foreign disk")
+	}
+	node.releaseCmd(zeroout)
+	for turn := 0; turn < 2; turn++ {
+		if !waitFor(t, 5*time.Second, refused) {
+			t.Fatalf("turn %d: the loop never reported the foreign disk",
+				turn)
+		}
+		srv.setZeroingErr(st, nil)
+	}
+	if got := node.callsMatching(zeroout); len(got) != 0 {
+		t.Errorf("%d batches after the header became another node's: %v",
+			len(got), got)
+	}
+	if got := node.callsMatching("writeblock"); len(got) != 0 {
+		t.Errorf("the disk was written: %v", got)
+	}
+
+	// side_dev_info carries the refusal.
+	if !waitFor(t, 5*time.Second, refused) {
+		t.Fatal("the loop stopped reporting the foreign disk")
+	}
+	sideReply, _ := srv.checkSideRound(ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn,
+		SidePointer: sidePtr(testSide), Revision: 1, ShowInfo: true,
+	}, nil)
+	if dev := sideReply.GetSideInfo().GetSideDevInfo(); dev.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(dev.GetDetails(), "foreign disk") {
+		t.Errorf("side_dev_info = %v/%q, want ERROR naming the foreign "+
+			"disk", dev.GetStatus(), dev.GetDetails())
+	}
+}
+
+// The side verdict's zeroing comparison reads the record as this node's only
+// (DN5, DN16). A second agent syncing the same disk under another dn id finds
+// the owner's record under the same (sp, side) ids, still being zeroed; its
+// own side converge is refused, so nothing will ever zero that record on its
+// behalf, and a verdict that counted it would re-send the refused SyncupSide
+// every round. The DN's verdict is what reports the foreign disk.
+func TestAForeignRecordIsNotZeroingToReDrive(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	// The owner's side stays at zeroing 0/n.
+	setFailAlways(node, "blkdiscard --zeroout", "stalled")
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+
 	node.mu.Lock()
 	node.protos = map[string][]byte{}
 	node.mu.Unlock()
@@ -1911,48 +2446,340 @@ func TestForeignDiskIsNeverWritten(t *testing.T) {
 	if err := srv2.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-
-	node.Reset()
-	req := dnReq(1, testSide)
-	req.DnId = testDn + 100
-	reply, err := srv2.SyncupDn(ctx, req)
-	if err != nil {
+	dnRequest := dnReq(1, testSide)
+	dnRequest.DnId = testDn + 100
+	if _, err := srv2.SyncupDn(ctx, dnRequest); err != nil {
 		t.Fatalf("SyncupDn: %v", err)
 	}
-	meta := reply.GetDnInfo().GetMetaInfo()
-	if meta.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-		!strings.Contains(meta.GetDetails(), "foreign disk") {
-		t.Errorf("meta_info = %v/%q, want ERROR/foreign disk",
-			meta.GetStatus(), meta.GetDetails())
-	}
-
-	// The side converge that follows must not allocate on the foreign disk.
-	sideReply, err := srv2.SyncupSide(ctx, func() *pb.SyncupSideRequest {
-		r := sideReq(1, testSide, testCn0, nil,
-			pb.SpLevel_SP_LEVEL_READWRITE)
-		r.DnId = testDn + 100
-		return r
-	}())
+	sideRequest := unprovisionedSideReq(1, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	sideRequest.DnId = testDn + 100
+	sideReply, err := srv2.SyncupSide(ctx, sideRequest)
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if got := sideReply.GetSideInfo().GetSideDevInfo().GetStatus(); got ==
-		pb.ResStatus_RES_STATUS_OK {
-		t.Errorf("side_dev on a foreign disk reported OK")
+	if got := sideReply.GetSideInfo().GetSideDevInfo(); !strings.Contains(
+		got.GetDetails(), "foreign disk") {
+		t.Fatalf("side_dev on a foreign disk = %v/%q, want a foreign-disk "+
+			"refusal", got.GetStatus(), got.GetDetails())
+	}
+	reply, _ := srv2.checkSideRound(ctx, &pb.CheckSideRequest{
+		ClusterId: testCluster, DnId: testDn + 100,
+		SidePointer: sidePtr(testSide), Revision: 1,
+	}, nil)
+	if got := reply.GetAgentReply(); strings.Contains(
+		got.GetDetails(), "zeroing") {
+		t.Errorf("side verdict on a foreign disk = %v, want no zeroing "+
+			"to re-drive", got)
+	}
+	dnCheck, _ := srv2.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn + 100, Revision: 1,
+	}, nil)
+	if got := dnCheck.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover ||
+		!strings.Contains(got.GetDetails(), "disk identity") {
+		t.Errorf("dn verdict on a foreign disk = %v, want a leftover "+
+			"naming the disk identity", got)
+	}
+}
+
+// A header that goes blank under live side devices is never formatted over
+// (DN5). One mistaken dd over the disk's first 4 KiB is enough to blank it;
+// the probe that finds it so drops the loaded table (DN18), and the verdict
+// that says so re-drives the SyncupDn. Were that converge to format the disk,
+// the fresh, empty table would hand the live side's extents to the next
+// side, which would zero them and serve them as its own. The disk is
+// formatted only once the sweep has removed every device that maps it.
+func TestABlankHeaderUnderLiveSidesIsNeverFormatted(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	liveName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	newName := nf.DnSideName(testCluster, testDn, testSp, testSide2)
+	node.mu.Lock()
+	liveTable := node.dms[liveName].table
+	node.mu.Unlock()
+	node.corruptBlock(testDisk, common.DnHeaderOffset,
+		make([]byte, common.DnHeaderSize))
+
+	reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
+	}, nil)
+	if got := reply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover {
+		t.Fatalf("verdict over a blank header = %v, want a leftover", got)
+	}
+
+	// The SyncupDn that verdict re-drives, then a new side in a new
+	// revision: the disk is not formatted, and the new side gets no extents.
+	node.Reset()
+	dnReply, err := srv.SyncupDn(ctx, dnReq(1, testSide))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if meta := dnReply.GetDnInfo().GetMetaInfo(); meta.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(meta.GetDetails(), "refusing to format") ||
+		!strings.Contains(meta.GetDetails(), liveName) {
+		t.Errorf("meta_info = %v/%q, want ERROR refusing to format under "+
+			"%s", meta.GetStatus(), meta.GetDetails(), liveName)
+	}
+	if got := dnReply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover {
+		t.Errorf("verdict of the refused converge = %v, want a leftover",
+			got)
+	}
+	if _, err := srv.SyncupDn(ctx, dnReq(2, testSide, testSide2)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	sideReply, err := srv.SyncupSide(ctx, unprovisionedSideReq(
+		2, testSide2, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := sideReply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(got.GetDetails(), "not formatted") {
+		t.Errorf("the new side's side_dev = %v/%q, want ERROR, not "+
+			"formatted", got.GetStatus(), got.GetDetails())
 	}
 	for _, call := range node.Calls() {
 		if strings.HasPrefix(call, "writeblock") {
-			t.Errorf("a foreign disk was written: %s", call)
+			t.Errorf("the disk was written under a live side: %s", call)
 		}
-		if strings.Contains(call, "dmsetup remove") {
-			t.Errorf("a foreign disk's devices were removed: %s", call)
+		if strings.Contains(call, "dmsetup create "+newName) {
+			t.Errorf("the new side was built: %s", call)
+		}
+		if strings.Contains(call, "dmsetup remove") ||
+			strings.Contains(call, "dmsetup reload") {
+			t.Errorf("the live stack was touched: %s", call)
 		}
 	}
-	// The original owner's record is intact on disk.
-	fresh := NewDiskMeta(node.osClient(), testDisk)
-	if _, ok, err := fresh.LookupSide(ctx, testSp, testSide); !ok ||
-		err != nil {
-		t.Errorf("the owning node's record was destroyed: %v %v", ok, err)
+	node.mu.Lock()
+	live := node.dms[liveName]
+	node.mu.Unlock()
+	if live == nil || live.table != liveTable {
+		t.Errorf("the live side device changed: %+v, want table %q",
+			live, liveTable)
+	}
+
+	// Both sides leave the DN: the sweep removes the live side's devices,
+	// after the converge that still found them and refused, and the
+	// verdict re-drives a SyncupDn whose converge formats — once.
+	node.Reset()
+	dnReply, err = srv.SyncupDn(ctx, dnReq(3))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if !node.hasCall("cmd dmsetup remove " + liveName) {
+		t.Error("the sweep did not remove the live side's device")
+	}
+	if node.hasCall("writeblock") {
+		t.Error("formatted while a side device still mapped the disk")
+	}
+	if got := dnReply.GetAgentReply(); got.GetCode() !=
+		common.ReplyCodeLeftover {
+		t.Errorf("verdict with the disk still blank = %v, want a leftover",
+			got)
+	}
+	node.Reset()
+	dnReply, err = srv.SyncupDn(ctx, dnReq(3))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if meta := dnReply.GetDnInfo().GetMetaInfo(); meta.GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Errorf("meta_info after the devices went = %v/%q, want OK",
+			meta.GetStatus(), meta.GetDetails())
+	}
+	if got := dnReply.GetAgentReply(); got.GetCode() != 0 {
+		t.Errorf("verdict after the format = %v, want 0", got)
+	}
+	if got := len(node.callsMatching("writeblock")); got != 2 {
+		t.Errorf("%d block writes, want the format's 2", got)
+	}
+	assertOrder(t, node,
+		fmt.Sprintf("writeblock %s off=%d", testDisk,
+			common.DnTableSlotAOffset),
+		fmt.Sprintf("writeblock %s off=%d", testDisk, common.DnHeaderOffset))
+}
+
+// blankHeaderWithNoSide leaves a DN whose header was zeroed under a live side
+// and whose own side device the sweep has since removed, with seed's devices
+// (name to table) on the node from before the header was zeroed: the next
+// SyncupDn's converge is the one that decides whether to format the disk
+// (DN5).
+func blankHeaderWithNoSide(
+	t *testing.T,
+	seed map[string]string,
+) (*DnAgentServer, *fakeNode) {
+	t.Helper()
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	node.mu.Lock()
+	for name, table := range seed {
+		node.dms[name] = &fakeDm{table: table}
+	}
+	node.mu.Unlock()
+	node.corruptBlock(testDisk, common.DnHeaderOffset,
+		make([]byte, common.DnHeaderSize))
+	srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 1, ShowInfo: true,
+	}, nil)
+	// The side leaves the DN: this converge still finds its device and
+	// refuses, and the sweep after it removes the device.
+	node.Reset()
+	if _, err := srv.SyncupDn(ctx, dnReq(2)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	liveName := nf.DnSideName(testCluster, testDn, testSp, testSide)
+	if !node.hasCall("cmd dmsetup remove " + liveName) {
+		t.Fatal("the sweep did not remove the side's device")
+	}
+	if node.hasCall("writeblock") {
+		t.Fatal("formatted while the side's device still mapped the disk")
+	}
+	node.Reset()
+	return srv, node
+}
+
+// The format gate refuses on a read that did not answer as surely as on a
+// device it found (DN5). "Nothing maps the disk" is an absence, read from
+// three places that can each fail to answer: the disk's device number, the dm
+// listing, and the table of every device whose name could map the disk. Each
+// is killed in turn after the sweep has removed this dn's own side, and the
+// converge must refuse and write nothing: a killed read taken as "nothing
+// maps it" would format a disk that live devices may still map. The next
+// converge, every read answering, formats.
+func TestABlankHeaderIsNotFormattedWhenTheGateCannotRead(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	// other is another dn's side device over another disk: the gate reads
+	// its table, and that table does not map this disk.
+	other := nf.DnSideName(testCluster, testDn+7, testSp, testSide)
+	for _, tc := range []struct{ name, key string }{
+		{"lsblk", "--output MAJ:MIN " + testDisk},
+		{"dmsetup ls", "cmd dmsetup ls"},
+		{"dmsetup table", "cmd dmsetup table " + other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := blankHeaderWithNoSide(t,
+				map[string]string{other: "0 8 linear 7:99 0"})
+			ctx := context.Background()
+			setHook(node, node.killCmd, tc.key)
+			reply, err := srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			node.mu.Lock()
+			armed := node.killCmd[tc.key]
+			node.mu.Unlock()
+			if armed {
+				t.Fatalf("the gate never ran %q", tc.key)
+			}
+			if meta := reply.GetDnInfo().GetMetaInfo(); meta.GetStatus() !=
+				pb.ResStatus_RES_STATUS_ERROR ||
+				!strings.Contains(meta.GetDetails(), "refusing to format") {
+				t.Errorf("meta_info = %v/%q, want ERROR refusing to format",
+					meta.GetStatus(), meta.GetDetails())
+			}
+			if got := reply.GetAgentReply(); got.GetCode() !=
+				common.ReplyCodeLeftover {
+				t.Errorf("verdict of the refused converge = %v, want a "+
+					"leftover", got)
+			}
+			if node.hasCall("writeblock") {
+				t.Error("formatted although a read of the gate did not " +
+					"answer")
+			}
+
+			node.Reset()
+			reply, err = srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			if meta := reply.GetDnInfo().GetMetaInfo(); meta.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Errorf("meta_info once every read answers = %v/%q, "+
+					"want OK", meta.GetStatus(), meta.GetDetails())
+			}
+			if got := len(node.callsMatching("writeblock")); got != 2 {
+				t.Errorf("%d block writes, want the format's 2", got)
+			}
+		})
+	}
+}
+
+// The gate matches every device that can map the disk, not only this dn's
+// (DN5): a side device of another dn or of another cluster, or another dn's
+// clone-metadata wrapper, over this disk keeps a blank header blank. None of
+// them is this dn's sweep's to remove, so the refusal names it, the verdict
+// stays a leftover every round, and the disk is formatted only once it has
+// gone.
+func TestABlankHeaderIsNotFormattedUnderAnotherNodesDevice(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	for _, name := range []string{
+		nf.DnSideName(testCluster, testDn+7, testSp, testSide),
+		nf.DnSideName(testCluster+1, testDn, testSp, testSide),
+		nf.DnMigrMetaDmName(testCluster, testDn+7, testSp, testMigrId),
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, node := blankHeaderWithNoSide(t, nil)
+			ctx := context.Background()
+			node.mu.Lock()
+			node.dms[name] = &fakeDm{
+				table: "0 8 linear " + node.devNo[testDisk] + " 0",
+			}
+			node.mu.Unlock()
+			for round := 0; round < 2; round++ {
+				reply, err := srv.SyncupDn(ctx, dnReq(2))
+				if err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				if meta := reply.GetDnInfo().GetMetaInfo(); meta.
+					GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+					!strings.Contains(meta.GetDetails(),
+						"refusing to format") ||
+					!strings.Contains(meta.GetDetails(), name) {
+					t.Errorf("round %d: meta_info = %v/%q, want ERROR "+
+						"refusing to format under %s", round,
+						meta.GetStatus(), meta.GetDetails(), name)
+				}
+				if got := reply.GetAgentReply(); got.GetCode() !=
+					common.ReplyCodeLeftover {
+					t.Errorf("round %d: verdict = %v, want a leftover",
+						round, got)
+				}
+			}
+			for _, call := range node.Calls() {
+				if strings.HasPrefix(call, "writeblock") {
+					t.Errorf("formatted under %s: %s", name, call)
+				}
+				if strings.Contains(call, "dmsetup remove") {
+					t.Errorf("another node's device was removed: %s", call)
+				}
+			}
+
+			// Once it is gone, the next converge formats.
+			node.mu.Lock()
+			delete(node.dms, name)
+			node.mu.Unlock()
+			node.Reset()
+			reply, err := srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			if meta := reply.GetDnInfo().GetMetaInfo(); meta.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Errorf("meta_info once it has gone = %v/%q, want OK",
+					meta.GetStatus(), meta.GetDetails())
+			}
+			if got := len(node.callsMatching("writeblock")); got != 2 {
+				t.Errorf("%d block writes, want the format's 2", got)
+			}
+		})
 	}
 }
 
