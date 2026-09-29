@@ -1085,12 +1085,18 @@ its one deciding STM below.
   call the amended `model.CreateSpareLeg(…, expectRev = token)`. Reply
   `leg_id`. (The spare's side is written `provisioned: false`.)
 * **DeleteSpareLeg** — STM: resolve; token; group + spare leg by id
-  (`NOT_FOUND`); remove it from `spare_leg_list`, release its DN
-  (+`BumpDnRev`); `BumpSpRev`. Reply `leg_id`.
-* **SwitchSpareLeg** — call the amended
+  (`NOT_FOUND`); the spare has 2 sides ⇒ `FAILED_PRECONDITION`, with
+  CreateMigration's own 2-sides message (a migration is running on it, and
+  releasing both sides would strand the `Migration`, §8.12); remove it from
+  `spare_leg_list`, release its DN (+`BumpDnRev`); `BumpSpRev`. Reply
+  `leg_id`.
+* **SwitchSpareLeg** — the pre-read refuses either leg with 2 sides ⇒
+  `FAILED_PRECONDITION`, with the same message; then call the amended
   `model.SwitchSpareLeg(…, expectRev = token)`; its own preconditions apply
-  (spare's side must be `provisioned` — §9.4 — else `FAILED_PRECONDITION`
-  via `ErrPrecondition`). Reply `curr_active_leg_id, curr_spare_leg_id`.
+  (the spare's side must be `provisioned` — §9.4 — and each leg must have
+  exactly one side, the pre-read's check again inside the STM; either
+  failing ⇒ `FAILED_PRECONDITION` via `ErrPrecondition`). Reply
+  `curr_active_leg_id, curr_spare_leg_id`.
 
 ### 5.12 Bitmap reads (§8.13)
 
@@ -1278,7 +1284,13 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    CN half; `DeleteStoragePool` left that pair on 2026-09-15, releasing
    nothing itself any more, and the drain's deliberately OPPOSITE answer to
    the same lost key — skip, because a latched SP must still be deletable —
-   is pinned in `model`). Clone bitmaps get three of their own, all on the
+   is pinned in `model`). The migration guard of `DeleteSpareLeg` and
+   `SwitchSpareLeg` is pinned too: a delete of a spare whose side is a
+   migration's source, and a switch with either leg migrating, are each
+   `FAILED_PRECONDITION` with CreateMigration's message and nothing written,
+   and the refusal lasts only as long as the migration — once it finishes,
+   the spare deletes and the target switches.
+   Clone bitmaps get three of their own, all on the
    PAIR addressing of §5.8: the appends `(slice 5, bm 0)`, `(slice 0, bm 3)`
    and `(slice 2, bm 1)` land in three chunk keys holding exactly the bytes
    each sent, **and the three pairs no append wrote — `(5, 1)`, `(0, 0)`,

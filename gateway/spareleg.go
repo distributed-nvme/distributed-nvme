@@ -252,9 +252,10 @@ func (s *Server) CreateSpareLeg(
 //
 // This is the gateway's own STM — model exports no op for it — and the whole
 // RPC is that one transaction (GW8): resolve, token, group and spare leg by
-// id, then the two writes that must land together, the Slice without the leg
-// and the DN with its extents and its pointer back. A refusal returns before
-// the first Put, so an unknown id leaves the store untouched.
+// id, no migration running on that leg, then the two writes that must land
+// together, the Slice without the leg and the DN with its extents and its
+// pointer back. A refusal returns before the first Put, so an unknown id or a
+// spare under migration leaves the store untouched.
 //
 // No CN and no cntlr is touched, exactly as model.CreateSpareLeg touches
 // none: the footprint a cntlr's CN reserves for the SP is Σ ext_cnt over
@@ -287,9 +288,17 @@ func (s *Server) DeleteSpareLeg(
 				"spare leg %d not found in group %d",
 				req.GetLegId(), req.GetGrpId())
 		}
+		// A spare's side can be a migration source (§8.11 takes any leg of
+		// the SP), and the destination then hangs off this very leg.
+		// Releasing both would leave the Migration naming sides in no leg,
+		// which neither FinishMigration nor CancelMigration can end — and an
+		// SP whose migr_name_list never empties can never be deleted.
+		if len(spare.GetSideList()) > 1 {
+			return errMigrRunning(spare)
+		}
 		// The side was charged the group's ext_cnt when it was created, so
-		// that is what returns; the ledger reads each DN once and writes,
-		// re-indexes and bumps it once however many sides a leg carries.
+		// that is what returns; the ledger reads its DN once and writes,
+		// re-indexes and bumps it once.
 		ledger, err := newDnLedger(stm, sc.Cid, sc.Cc)
 		if err != nil {
 			return err
@@ -334,6 +343,17 @@ func (s *Server) DeleteSpareLeg(
 // FAILED_PRECONDITION model would raise for it. It deliberately does NOT look
 // at `provisioned`: that verdict belongs to the deciding STM, where it cannot
 // be raced.
+//
+// It does refuse either leg while a migration is running on it — two sides,
+// §8.11 — with CreateMigration's own message: a migration holds its leg until
+// Finish or Cancel ends it, so a migrating leg is neither promoted nor parked
+// (dnv-worker.md AR8 leaves one alone for the same reason). That refusal is a
+// pre-read too; model.SwitchSpareLeg re-checks both legs inside its STM, with
+// its own reasons. That re-check is what refuses a switch when a migration of
+// either leg started after the leg was read: the worker's own AR8 switch,
+// which passes no token, and this one when the request carried none. In that
+// race a request that carried a token is refused first, by the STM's token
+// check (ABORTED "stale revision"), because CreateMigration bumped SpRev.
 func (s *Server) SwitchSpareLeg(
 	ctx context.Context,
 	req *pb.SwitchSpareLegRequest,
@@ -353,15 +373,22 @@ func (s *Server) SwitchSpareLeg(
 	if err != nil {
 		return nil, err
 	}
-	if spareLegOf(loc.Grp, req.GetSpareLegId()) == nil {
+	spare := spareLegOf(loc.Grp, req.GetSpareLegId())
+	if spare == nil {
 		return nil, errNotFound(
 			"spare leg %d not found in group %d",
 			req.GetSpareLegId(), req.GetGrpId())
 	}
-	if activeLegOf(loc.Grp, req.GetTargetLegId()) == nil {
+	target := activeLegOf(loc.Grp, req.GetTargetLegId())
+	if target == nil {
 		return nil, errNotFound(
 			"active leg %d not found in group %d",
 			req.GetTargetLegId(), req.GetGrpId())
+	}
+	for _, leg := range []*pb.Leg{spare, target} {
+		if len(leg.GetSideList()) > 1 {
+			return nil, errMigrRunning(leg)
+		}
 	}
 	err = model.SwitchSpareLeg(
 		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),

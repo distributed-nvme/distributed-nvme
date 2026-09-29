@@ -138,11 +138,24 @@ func migrSrcLocation(
 			"side %d is not in any leg of storage pool %q", srcSideId, spName)
 	}
 	if len(loc.Leg.GetSideList()) >= migrMaxLegSideCnt {
-		return sliceLocation{}, errPrecondition(
-			"leg %d already has %d sides: a migration is running on it",
-			loc.Leg.GetLegId(), len(loc.Leg.GetSideList()))
+		return sliceLocation{}, errMigrRunning(loc.Leg)
 	}
 	return loc, nil
+}
+
+// errMigrRunning is the FAILED_PRECONDITION for a leg that owns more than its
+// own side: a migration is running on it (§8.11). CreateMigration raises it
+// for a source leg that cannot take a second destination, and DeleteSpareLeg
+// and SwitchSpareLeg for a leg they would release or move under that
+// migration (§8.12), so the three RPCs name the refusal the same way. The one
+// exception is the re-check inside model.SwitchSpareLeg's STM: it refuses
+// only a token-less switch that raced a CreateMigration, and it keeps model's
+// own reason ("spare leg has no single side" / "target leg has no single
+// side").
+func errMigrRunning(leg *pb.Leg) error {
+	return errPrecondition(
+		"leg %d already has %d sides: a migration is running on it",
+		leg.GetLegId(), len(leg.GetSideList()))
 }
 
 // getMigration reads one migration of the SP by name inside the caller's

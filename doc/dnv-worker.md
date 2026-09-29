@@ -555,7 +555,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
-     | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
+     | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; each has exactly one side ("spare leg has no single side" / "target leg has no single side": a second side is a migration's destination, and a migrating leg is neither promoted nor parked, `architecture.md` §8.12); the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
      | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (`architecture.md` §7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
      | `FinishSpDelete(cid, shard, spId, spName)` | the drain checks; `cntlr_id_list` and `slice_id_list` both empty; `SpRev` and `SpGlobal` exist | delete `SpConf`, `SpName`, `SpRev`; `SpGlobal.shard_bucket[shard] -= 1`. The ONE op that does not bump `SpRev` — it deletes the key, which is the shard worker's stop signal (§8.4) |
@@ -1708,14 +1708,19 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
 
      **Preconditions**: the group is `RedundMdRaid1` (`RedundNone` groups
      have no spare — both cases only log); the leg has exactly one side (a
-     leg with two sides has a user migration in flight and is left alone);
+     leg with two sides has a user migration in flight and is left alone;
+     `SwitchSpareLeg` re-checks this inside its STM, MD6, so step 1's switch
+     is refused too when the migration starts after the pass read the leg);
      the SP is not suppressed (AR3). Several unhealthy legs ⇒ the smallest
      `leg_id` first.
 
      **Procedure**, one step per pass, on the leg's group:
-     1. a **ready** spare exists — `Side.provisioned == true` and the
-        primary's latest `leg_id_to_leg[spare_leg_id] == RES_STATUS_OK`
-        (spares are connected and probed, §8.12) — ⇒ internal
+     1. a **ready** spare exists — it has exactly one side (a spare with two
+        sides has a user migration in flight and is neither ready nor
+        pending; MD6's switch would refuse it), that side has
+        `Side.provisioned == true`, and the primary's latest
+        `leg_id_to_leg[spare_leg_id] == RES_STATUS_OK` (spares are connected
+        and probed, §8.12) — ⇒ internal
         `SwitchSpareLeg(spare, leg)`: the spare takes the leg's place, the
         old leg is **parked** in `spare_leg_list` (§0 item 17) — still
         connected and probed, its `err_epoch` still set, never repaired again
@@ -1769,7 +1774,8 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         cntlrs connect to it, and a later pass finds it ready;
      4. else `reaction skipped` (`spare_list_full`): after two repairs of one
         group the list holds two parked legs, and only `DeleteSpareLeg` by an
-        operator frees a slot (Appendix B).
+        operator frees a slot (Appendix B) — and it refuses a parked leg
+        with a migration running on it (`architecture.md` §8.12).
 
 AR9. **The worker never**: deletes a td, subsystem, transfer, migration or
      spare, or a clone that is not `deleting`; touches a `RedundNone` leg;

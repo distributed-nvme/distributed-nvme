@@ -1857,6 +1857,15 @@ func nextLegIdx(grp *pb.Group) uint32 {
 //
 // The spare's single side must be provisioned (§9.4): switching to a side that
 // has not finished zeroing would put an unwritten member into the array.
+//
+// Both legs must own exactly one side. A second one is a migration's
+// destination (§8.11), and the migration holds its leg until Finish or Cancel
+// ends it, so a migrating leg is neither promoted nor parked. AR8's pass and
+// the gateway's pre-read turn such a leg away already. This re-check is what
+// catches a migration that started after either of them read the leg; for
+// the gateway, only when the request carried no token (expectRev == 0).
+// Otherwise checkSpRev, which runs before anything else in the STM, refuses
+// the switch with ReasonStaleRevision, because CreateMigration bumped SpRev.
 func SwitchSpareLeg(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1902,10 +1911,13 @@ func SwitchSpareLeg(
 		if len(spare.GetSideList()) != 1 {
 			return fail(opSwitchSpareLeg, "spare leg has no single side")
 		}
+		target := grp.GetLegList()[targetIdx]
+		if len(target.GetSideList()) != 1 {
+			return fail(opSwitchSpareLeg, "target leg has no single side")
+		}
 		if !spare.GetSideList()[0].GetProvisioned() {
 			return fail(opSwitchSpareLeg, "spare side is not provisioned")
 		}
-		target := grp.GetLegList()[targetIdx]
 		grp.LegList[targetIdx] = spare
 		grp.SpareLegList = append(
 			append(

@@ -2085,15 +2085,20 @@ added to the md array** — it is pre-connected standby capacity only. An unprov
 spare defers only itself — spares never assemble (§11.1.1) — and reports
 `RES_STATUS_PROVISIONING` until it clears. Reply `leg_id`.
 
-**DeleteSpareLeg** — Errors: `NOT_FOUND` `grp_id`/`leg_id`. Action: STM remove from
-`spare_leg_list`, DN bookkeeping back, bump `SpRev`. Reply `leg_id`.
+**DeleteSpareLeg** — Errors: `NOT_FOUND` `grp_id`/`leg_id`; `FAILED_PRECONDITION` the
+spare has 2 sides: a migration is running on it (§8.11 accepts a spare's side as a
+migration source), and releasing both would leave the `Migration` naming sides in no
+leg, which neither FinishMigration nor CancelMigration could then end. Action: STM
+remove from `spare_leg_list`, DN bookkeeping back, bump `SpRev`. Reply `leg_id`.
 
 **SwitchSpareLeg** — the only way a spare becomes active; invoked by users or by the
 sp-worker's leg repair of §10.4 (`dnv-worker.md` §11.5). Errors: `NOT_FOUND` ids not
 in the group's lists; `FAILED_PRECONDITION` when the spare's side is not yet
 `provisioned` ("spare side is not provisioned" — an unzeroed spare must never become
-an md member, [D15]) or at `sp_level ≥ SP_LEVEL_NO_THINPOOL` ("sp level suppresses
-reactions", §8.5).
+an md member, [D15]), when either leg has 2 sides (a migration is running on it and
+holds the leg until FinishMigration or CancelMigration ends it, so a migrating leg is
+neither promoted nor parked), or at `sp_level ≥ SP_LEVEL_NO_THINPOOL` ("sp level
+suppresses reactions", §8.5).
 Action: STM swap: `spare_leg_id` moves to `leg_list` (taking the active role),
 `target_leg_id` moves to `spare_leg_list`; bump `SpRev`. The primary then:
 `mdadm --fail`/`--remove` the target if the array still lists it, `mdadm --add
@@ -2927,8 +2932,9 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   cntlr's perspective **and** its side has been unhealthy for `side_unhealthy` — the side
   reports an error or the worker cannot talk to the DN, so the DN itself is probably
   dead, hence the shorter wait (§7 requires `leg_unhealthy > side_unhealthy`). Repair: if
-  the group already has a **ready** spare (`Side.provisioned == true` and the primary
-  reports its leg `RES_STATUS_OK`), perform an internal `SwitchSpareLeg` (§8.12 — the
+  the group already has a **ready** spare (one side only — a spare being migrated is
+  never switched in, §8.12 — with `Side.provisioned == true`, and the primary reports
+  its leg `RES_STATUS_OK`), perform an internal `SwitchSpareLeg` (§8.12 — the
   spare is only now `mdadm --add`-ed and rebuilt from the healthy leg); otherwise create
   a spare on a fresh DN first (internal `CreateSpareLeg`, black list = the DNs of every
   leg and spare of the group, whose `location`s §6.5's tier 1 excludes as well) and

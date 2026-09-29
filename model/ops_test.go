@@ -2608,6 +2608,15 @@ func TestSwitchSpareLeg(t *testing.T) {
 }
 
 func TestSwitchSpareLegPreconditions(t *testing.T) {
+	// addMigrDst gives one leg the second side a CreateMigration hangs off
+	// it (architecture.md §8.11): an unprovisioned destination on dn-d, the
+	// one DN no leg of the fixture uses.
+	addMigrDst := func(env *opsEnv, legId uint64) {
+		slice := env.slice()
+		leg := findLeg(slice, legId)
+		leg.SideList = append(leg.SideList, opsSide(461, opsDnD, false))
+		mustPut(env.t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	}
 	for _, tc := range []struct {
 		name     string
 		setup    func(env *opsEnv)
@@ -2623,6 +2632,30 @@ func TestSwitchSpareLegPreconditions(t *testing.T) {
 			spareId:  opsSpareLeg,
 			targetId: opsDataLegB,
 			reason:   "spare side is not provisioned",
+		},
+		{
+			name: "spare leg under migration",
+			setup: func(env *opsEnv) {
+				env.addSpare(true)
+				addMigrDst(env, opsSpareLeg)
+			},
+			grpId:    opsDataGrpId,
+			spareId:  opsSpareLeg,
+			targetId: opsDataLegB,
+			reason:   "spare leg has no single side",
+		},
+		{
+			// AR8 leaves a migrating leg alone, and the STM re-checks it:
+			// a migration may start after the worker's pass read the leg.
+			name: "target leg under migration",
+			setup: func(env *opsEnv) {
+				env.addSpare(true)
+				addMigrDst(env, opsDataLegB)
+			},
+			grpId:    opsDataGrpId,
+			spareId:  opsSpareLeg,
+			targetId: opsDataLegB,
+			reason:   "target leg has no single side",
 		},
 		{
 			name:     "spare leg not found",
