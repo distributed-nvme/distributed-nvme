@@ -3641,8 +3641,9 @@ partitions the cntlid space via
 `/sys/kernel/config/nvmet/subsystems/{nqn}/attr_cntlid_{min,max}` into
 `CnCntlidSlotCnt = DnCntlidSlotCnt = 8` slots, `Base = 10000`, `Step = 5000`, on both
 CNs and DNs: slot *s* ⇒ `attr_cntlid_min = 10000 + s×5000`,
-`attr_cntlid_max = attr_cntlid_min + 5000` (slot 0 = 10000-15000, … slot 7 =
-45000-50000). All slots come from `SpConf.cntlid_slot_list`. Rules:
+`attr_cntlid_max = attr_cntlid_min + 4999` (slot 0 = 10000-14999, … slot 7 =
+45000-49999): nvmet's range includes both ends, so a slot holds exactly `Step` CNTLIDs
+and no two slots share one. All slots come from `SpConf.cntlid_slot_list`. Rules:
 
 * Every **cntlr** of an SP uses a slot distinct from every other cntlr of the same SP
   (host-facing multipath aggregates them).
@@ -3654,6 +3655,15 @@ CNs and DNs: slot *s* ⇒ `attr_cntlid_min = 10000 + s×5000`,
   kernel would refuse the second path.
 * Two SPs joined by transfer+clone MUST use disjoint slot sets across their cntlrs
   (§11.3) — their host-facing subsystems share NQNs.
+
+An agent can find a subsystem it wants already live under another slot's range, built
+by the cntlr that a rotation replaced on the same CN (§11.3) or by another side of the
+same leg on the same kernel (§3.1); it converges that subsystem under its own cntlr's
+or side's slot. nvmet refuses an `attr_cntlid_min` above the current
+`attr_cntlid_max` and an `attr_cntlid_max` below the current `attr_cntlid_min`, so no
+single write order converges every move: the agent writes `attr_cntlid_max` first when
+the live one reads below the new `attr_cntlid_min`, and `attr_cntlid_min` first
+otherwise (Appendix A).
 
 ---
 
@@ -3890,6 +3900,8 @@ echo inaccessible  > .../ports/1/ana_groups/3/ana_state    # AnaGrpIdInaccessibl
 mkdir .../subsystems/{nqn}
 echo {cntlid_min} > .../subsystems/{nqn}/attr_cntlid_min      # §11.8
 echo {cntlid_max} > .../subsystems/{nqn}/attr_cntlid_max
+  # max goes FIRST when the live attr_cntlid_max reads below the new min (e.g. a
+  # subsystem built under a lower slot): nvmet refuses a min above the current max
 echo {serial} > .../attr_serial ; echo {model} > .../attr_model    # CN host-facing + DN side
   # allow_any_host = 0 — every dnv-internal subsystem (an xfer subsystem carries the
   # Transfer's list verbatim, empty included) and a CN host-facing one with hosts

@@ -2345,6 +2345,18 @@ able to fail.
    `ana_grpid` via `WriteFileDirect` and never writes any
    `ana_groups/*/ana_state`; no `WriteFile` call ever targets a
    `/sys/kernel/config` path (SH18).
+6b. **cntlid slots** (DN10, `architecture.md` §11.8;
+    `TestCntlidSlotsAreDisjoint`): a side converged on each of the
+    `DnCntlidSlotCnt` slots, one fresh node each, writes the same
+    `attr_cntlid_min`/`attr_cntlid_max` into both per-CN exports; slot *s*
+    reads back `10000 + s×5000` to `10000 + s×5000 + 4999`, and no two
+    slots' ranges share a CNTLID. `TestCntlidRangeMovesBetweenSlots` walks
+    one side across slots on one node (up by one, up by more, down by one,
+    down by more, then unchanged), against a fake that, like nvmet, refuses
+    a min above the current max and a max below the current min. Both
+    exports converge to the new slot every time; a move up writes
+    `attr_cntlid_max` first and a move down `attr_cntlid_min` first, each
+    bound exactly once, and an unchanged range writes neither.
 7. **PushMigrBitmap**: persist-before-apply call order; unknown `migr_id`
    rejected; applied set from files after a simulated restart (fresh server,
    same fake store) matches; chunk without a dm-clone still counts applied.

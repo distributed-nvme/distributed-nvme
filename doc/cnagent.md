@@ -2873,6 +2873,19 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    exactly one ns-dev reload; `sp_level = SP_LEVEL_READONLY` reloads
    user-facing ns-devs onto the flakey `error_writes` table and nothing
    else.
+8b. **cntlid slots** (CN16/CN17, `architecture.md` §11.8;
+    `TestCntlidSlotsAreDisjoint`): a primary converged on each of the
+    `CnCntlidSlotCnt` slots, one fresh node each, writes the same
+    `attr_cntlid_min`/`attr_cntlid_max` into its host-facing subsystem and
+    its transfer's; slot *s* reads back `10000 + s×5000` to
+    `10000 + s×5000 + 4999`, and no two slots' ranges share a CNTLID.
+    `TestCntlidRangeMovesBetweenSlots` walks one primary across slots on one
+    node (up by one, up by more, down by one, down by more, then unchanged),
+    against a fake that, like nvmet, refuses a min above the current max and
+    a max below the current min. Both subsystems converge to the new slot
+    every time; a move up writes `attr_cntlid_max` first and a move
+    down `attr_cntlid_min` first, each bound exactly once, and an unchanged
+    range writes neither.
 9. **Clone build and §11.5 recovery** (CN18): fresh build asserts
    connect(s) → the arena enumeration (`dmsetup ls` + `dmsetup table` of the
    kind-`cb` wrappers) → `blkdiscard --offset … --length …` of exactly the

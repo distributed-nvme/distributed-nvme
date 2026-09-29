@@ -4035,6 +4035,178 @@ func TestUpdateNamespaceDevIsOneReload(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// §6.8b — cntlid slots (CN16/CN17, §11.8)
+// ---------------------------------------------------------------------------
+
+// cntlidSpan is the `[attr_cntlid_min, attr_cntlid_max]` one subsystem holds
+// in configfs; nvmet hands out CNTLIDs from it with both ends included.
+type cntlidSpan struct{ first, last uint64 }
+
+// slotSpan is §11.8's range for one slot: `Base + s×Step` to
+// `Base + s×Step + Step − 1`.
+func slotSpan(slot int) cntlidSpan {
+	first := uint64(common.CnCntlidSlotBase + slot*common.CnCntlidSlotStep)
+	return cntlidSpan{first, first + common.CnCntlidSlotStep - 1}
+}
+
+// readCntlidSpan reads back the range a pass left in one subsystem.
+func readCntlidSpan(t *testing.T, node *fakeNode, nqn string) cntlidSpan {
+	t.Helper()
+	var span cntlidSpan
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	for _, attr := range []struct {
+		name string
+		into *uint64
+	}{
+		{"attr_cntlid_min", &span.first},
+		{"attr_cntlid_max", &span.last},
+	} {
+		path := agent.NvmetRoot + "/subsystems/" + nqn + "/" + attr.name
+		if _, err := fmt.Sscan(node.files[path], attr.into); err != nil {
+			t.Fatalf("%s is %q", path, node.files[path])
+		}
+	}
+	return span
+}
+
+// TestCntlidSlotsAreDisjoint converges a primary on every cntlid slot, each
+// on a fresh node, and reads back the range the pass wrote into configfs for
+// the host-facing subsystem and for the transfer's, which carry the cntlr's
+// one slot. nvmet hands out CNTLIDs from `[attr_cntlid_min,
+// attr_cntlid_max]`, both ends included, and a host merges the cntlrs of one
+// SP into one multipath device, so no two slots may share an id: slot s is
+// `Base + s×Step` to `Base + s×Step + Step − 1`. A range that ended at
+// `min + Step` handed its last id to the next slot as well.
+func TestCntlidSlotsAreDisjoint(t *testing.T) {
+	xfers := []*pb.Transfer{{
+		XferId:       testXfer,
+		OriNqn:       testNqn,
+		OriNsIdx:     1,
+		AllowedHosts: []string{testHostNqn},
+	}}
+	spans := make([]cntlidSpan, common.CnCntlidSlotCnt)
+	for slot := range spans {
+		srv, node := newTestServer(t)
+		cnSyncup(t, srv, 2, true)
+		req := cntlrReq(reqOpts{revision: 2, primary: true, xfers: xfers})
+		req.Cntlr.CntlidSlot = uint32(slot)
+		reply, err := srv.SyncupCntlr(context.Background(), req)
+		if err != nil {
+			t.Fatalf("slot %d: SyncupCntlr: %v", slot, err)
+		}
+		info := reply.GetCntlrInfo()
+		assertOk(t, info.GetSsIdToSubsystem()[testSs], "subsystem")
+		assertOk(t, info.GetXferIdToSubsystem()[testXfer], "xfer subsystem")
+		spans[slot] = readCntlidSpan(t, node, testNqn)
+		xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+		if got := readCntlidSpan(t, node, xferNqn); got != spans[slot] {
+			t.Errorf("slot %d: the transfer's cntlids are %d-%d, the "+
+				"subsystem's %d-%d", slot, got.first, got.last,
+				spans[slot].first, spans[slot].last)
+		}
+	}
+	for a := range spans {
+		for b := a + 1; b < len(spans); b++ {
+			if spans[a].last >= spans[b].first &&
+				spans[b].last >= spans[a].first {
+				t.Errorf("slot %d's cntlids %d-%d and slot %d's %d-%d "+
+					"overlap", a, spans[a].first, spans[a].last,
+					b, spans[b].first, spans[b].last)
+			}
+		}
+	}
+	// §11.8's table: slot 0 = 10000-14999 … slot 7 = 45000-49999.
+	for slot, span := range spans {
+		if want := slotSpan(slot); span != want {
+			t.Errorf("slot %d's cntlids are %d-%d, want %d-%d",
+				slot, span.first, span.last, want.first, want.last)
+		}
+	}
+}
+
+// TestCntlidRangeMovesBetweenSlots walks one live primary from slot to slot
+// on ONE node and reads the range back after every pass, from the
+// host-facing subsystem and from the transfer's. A live subsystem changes
+// slot when a cntlr adopts one that an earlier cntlr on the same CN left
+// behind: rotating a cntlr to a free slot (§11.3) deletes it and creates
+// another, both requests name the same NQNs (the host-facing one is the
+// user's own string), and the new cntlr's request keeps the leftover from
+// the sweep, so its pass converges that subsystem under the new slot. Like
+// nvmet, the fake refuses an attr_cntlid_min above the current
+// attr_cntlid_max and an attr_cntlid_max below the current attr_cntlid_min,
+// so once no two slots share an id a range that lies wholly above the live
+// one must be written max first: min first, even a move up by one slot fails
+// on every pass. The walk moves up by one, up by more, down by one and down
+// by more, then repeats its last slot, and counts each bound's writes, so the
+// max written first is not written a second time and an unchanged range
+// writes neither.
+func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
+	ctx := context.Background()
+	xfers := []*pb.Transfer{{
+		XferId:       testXfer,
+		OriNqn:       testNqn,
+		OriNsIdx:     1,
+		AllowedHosts: []string{testHostNqn},
+	}}
+	srv, node := newTestServer(t)
+	cnSyncup(t, srv, 2, true)
+	nqns := []string{testNqn, srv.nf.XferNqn(testCluster, testSp, testXfer)}
+	prev := -1
+	for step, slot := range []int{0, 1, 3, 7, 6, 4, 0, 0} {
+		label := fmt.Sprintf("slot %d -> %d", prev, slot)
+		if prev < 0 {
+			label = fmt.Sprintf("fresh node, slot %d", slot)
+		}
+		node.Reset()
+		req := cntlrReq(reqOpts{
+			revision: uint64(2 + step), primary: true, xfers: xfers})
+		req.Cntlr.CntlidSlot = uint32(slot)
+		reply, err := srv.SyncupCntlr(ctx, req)
+		if err != nil {
+			t.Fatalf("%s: SyncupCntlr: %v", label, err)
+		}
+		info := reply.GetCntlrInfo()
+		assertOk(t, info.GetSsIdToSubsystem()[testSs], label+": subsystem")
+		assertOk(t, info.GetXferIdToSubsystem()[testXfer],
+			label+": xfer subsystem")
+		for _, nqn := range nqns {
+			if got, want := readCntlidSpan(t, node, nqn),
+				slotSpan(slot); got != want {
+				t.Errorf("%s: %s holds cntlids %d-%d, want %d-%d", label,
+					nqn, got.first, got.last, want.first, want.last)
+			}
+			subsysPath := agent.NvmetRoot + "/subsystems/" + nqn
+			minWrite := "writedirect " + subsysPath + "/attr_cntlid_min="
+			maxWrite := "writedirect " + subsysPath + "/attr_cntlid_max="
+			wantWrites := 1
+			if slot == prev {
+				wantWrites = 0
+			}
+			minCnt := len(node.callsMatching(minWrite))
+			maxCnt := len(node.callsMatching(maxWrite))
+			if minCnt != wantWrites || maxCnt != wantWrites {
+				t.Errorf("%s: %s: %d attr_cntlid_min and %d attr_cntlid_max "+
+					"writes, want %d of each\ncalls:\n%s", label, nqn,
+					minCnt, maxCnt, wantWrites,
+					strings.Join(node.Calls(), "\n"))
+				continue
+			}
+			if wantWrites == 0 {
+				continue
+			}
+			maxFirst := node.indexOfCall(maxWrite) < node.indexOfCall(minWrite)
+			if wantMaxFirst := prev >= 0 && slot > prev; maxFirst !=
+				wantMaxFirst {
+				t.Errorf("%s: %s: attr_cntlid_max written first: %v, "+
+					"want %v", label, nqn, maxFirst, wantMaxFirst)
+			}
+		}
+		prev = slot
+	}
+}
+
+// ---------------------------------------------------------------------------
 // §6.26 — park before remove (CN9/CN21)
 // ---------------------------------------------------------------------------
 

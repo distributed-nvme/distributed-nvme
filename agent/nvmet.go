@@ -278,6 +278,17 @@ func (n *Nvmet) EnsureSubsystem(
 			return err
 		}
 	}
+	// nvmet refuses an `attr_cntlid_min` above the subsystem's current
+	// `attr_cntlid_max`, and an `attr_cntlid_max` below its current
+	// `attr_cntlid_min` (-EINVAL either way). attrs() lists min before max,
+	// which moves a range down, or up while the new min still falls inside
+	// the old range; a range that lies wholly above the live one, as when a
+	// subsystem is adopted from a lower cntlid slot (architecture.md §11.8),
+	// has its max written here first, or its min would be refused on every
+	// converge.
+	if err := n.raiseCntlidMax(ctx, subsysPath, conf); err != nil {
+		return err
+	}
 	// nvmet refuses `attr_allow_any_host = 1` while explicit host links
 	// remain (-EINVAL, "Can't set allow_any_host when explicit hosts are
 	// set!"), so that value is written *after* the unlink loop below; `0` is
@@ -332,6 +343,33 @@ func (n *Nvmet) EnsureSubsystem(
 		}
 	}
 	return nil
+}
+
+// raiseCntlidMax writes conf's attr_cntlid_max ahead of EnsureSubsystem's
+// attribute loop when conf's whole range lies above the one the live
+// subsystem holds, the one move nvmet refuses min first. The loop then writes
+// the min and finds the max already equal. A max that cannot be read, or does
+// not parse, leaves the order to the loop: its min write is then refused or
+// not on its own, and a refusal is the converge's error.
+func (n *Nvmet) raiseCntlidMax(
+	ctx context.Context,
+	subsysPath string,
+	conf SubsysConf,
+) error {
+	if conf.CntlidMin == 0 && conf.CntlidMax == 0 {
+		return nil
+	}
+	maxPath := subsysPath + "/attr_cntlid_max"
+	cur, ok, err := n.readAttr(ctx, maxPath)
+	if err != nil || !ok {
+		return err
+	}
+	curMax, err := strconv.ParseUint(cur, 10, 32)
+	if err != nil || uint64(conf.CntlidMin) <= curMax {
+		return nil
+	}
+	return n.writeAttr(ctx, maxPath,
+		strconv.FormatUint(uint64(conf.CntlidMax), 10))
 }
 
 // ProbeSubsystem reports whether the subsystem exists with the desired

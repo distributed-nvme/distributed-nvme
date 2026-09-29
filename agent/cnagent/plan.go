@@ -972,11 +972,12 @@ func (p *cntlrPlan) findNs(nqn string, nsIdx uint32) *nsPlan {
 // ---------------------------------------------------------------------------
 
 // cntlidRange is the cntlr's §11.8 slot, which every host-facing and every
-// transfer subsystem of this cntlr carries.
+// transfer subsystem of this cntlr carries. nvmet's range includes both
+// ends, so the slot stops one short of the next slot's first id.
 func (p *cntlrPlan) cntlidRange() (uint32, uint32) {
 	min := uint32(common.CnCntlidSlotBase) +
 		p.cntlr.GetCntlidSlot()*uint32(common.CnCntlidSlotStep)
-	return min, min + uint32(common.CnCntlidSlotStep)
+	return min, min + uint32(common.CnCntlidSlotStep) - 1
 }
 
 func (p *cntlrPlan) hostNqn() string {

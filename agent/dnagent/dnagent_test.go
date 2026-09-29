@@ -2210,6 +2210,186 @@ func TestNoWriteFileOnConfigfsAndNoAnaStateRewrite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. cntlid slots (DN10, architecture.md §11.8)
+// ---------------------------------------------------------------------------
+
+// cntlidSpan is the `[attr_cntlid_min, attr_cntlid_max]` one export holds in
+// configfs; nvmet hands out CNTLIDs from it with both ends included.
+type cntlidSpan struct{ first, last uint64 }
+
+// slotSpan is §11.8's range for one slot: `Base + s×Step` to
+// `Base + s×Step + Step − 1`.
+func slotSpan(slot int) cntlidSpan {
+	first := uint64(common.DnCntlidSlotBase + slot*common.DnCntlidSlotStep)
+	return cntlidSpan{first, first + common.DnCntlidSlotStep - 1}
+}
+
+// readCntlidSpan reads back the range a pass left in one export.
+func readCntlidSpan(t *testing.T, node *fakeNode, nqn string) cntlidSpan {
+	t.Helper()
+	var span cntlidSpan
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	for _, attr := range []struct {
+		name string
+		into *uint64
+	}{
+		{"attr_cntlid_min", &span.first},
+		{"attr_cntlid_max", &span.last},
+	} {
+		path := agent.NvmetRoot + "/subsystems/" + nqn + "/" + attr.name
+		if _, err := fmt.Sscan(node.files[path], attr.into); err != nil {
+			t.Fatalf("%s is %q", path, node.files[path])
+		}
+	}
+	return span
+}
+
+// TestCntlidSlotsAreDisjoint converges a side on every cntlid slot, each on a
+// fresh node, and reads back the range the pass wrote into configfs for both
+// per-CN exports. The two sides of a migrating leg export one NQN to the same
+// CN, whose kernel merges their controllers into one multipath device, and
+// nvmet hands out CNTLIDs from `[attr_cntlid_min, attr_cntlid_max]`, both
+// ends included, so the source's slot and the destination's may share no id:
+// slot s is `Base + s×Step` to `Base + s×Step + Step − 1`. A range that ended
+// at `min + Step` handed its last id to the next slot as well.
+func TestCntlidSlotsAreDisjoint(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	spans := make([]cntlidSpan, common.DnCntlidSlotCnt)
+	for slot := range spans {
+		srv, node := newTestServer(t)
+		dnReply, err := srv.SyncupDn(context.Background(),
+			dnReq(1, testSide))
+		if err != nil {
+			t.Fatalf("slot %d: SyncupDn: %v", slot, err)
+		}
+		if dnReply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("slot %d: SyncupDn rejected: %v",
+				slot, dnReply.GetAgentReply())
+		}
+		req := sideReq(1, testSide, testCn0, []uint64{testCn1},
+			pb.SpLevel_SP_LEVEL_READWRITE)
+		req.SideConf.CntlidSlot = uint32(slot)
+		rows := syncupSideTwoPhase(t, srv, req).GetSideInfo().
+			GetCnIdToNvmeof()
+		for i, cnId := range []uint64{testCn0, testCn1} {
+			if info := rows[cnId]; info.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("slot %d: cn %d nvmeof: %v %q",
+					slot, cnId, info.GetStatus(), info.GetDetails())
+			}
+			span := readCntlidSpan(t, node,
+				nf.SideToCnNqn(testCluster, testSp, testLeg, cnId))
+			if i == 0 {
+				spans[slot] = span
+			} else if span != spans[slot] {
+				t.Errorf("slot %d: cn %d's cntlids are %d-%d, cn %d's "+
+					"%d-%d", slot, cnId, span.first, span.last,
+					testCn0, spans[slot].first, spans[slot].last)
+			}
+		}
+	}
+	for a := range spans {
+		for b := a + 1; b < len(spans); b++ {
+			if spans[a].last >= spans[b].first &&
+				spans[b].last >= spans[a].first {
+				t.Errorf("slot %d's cntlids %d-%d and slot %d's %d-%d "+
+					"overlap", a, spans[a].first, spans[a].last,
+					b, spans[b].first, spans[b].last)
+			}
+		}
+	}
+	// §11.8's table: slot 0 = 10000-14999 … slot 7 = 45000-49999.
+	for slot, span := range spans {
+		if want := slotSpan(slot); span != want {
+			t.Errorf("slot %d's cntlids are %d-%d, want %d-%d",
+				slot, span.first, span.last, want.first, want.last)
+		}
+	}
+}
+
+// TestCntlidRangeMovesBetweenSlots walks one live side from slot to slot on
+// ONE node and reads the range back from both per-CN exports after every
+// pass. An export's NQN names the leg and the CN, not the side, so a live
+// export changes slot when a side of the leg is converged over an export
+// that another side of it built on this kernel: a new side landing on a DN
+// that still holds an earlier side's export, or the two sides of a
+// migrating leg held by two dn agents on one kernel, which both converge
+// that one subsystem (§3.1). Like nvmet, the fake refuses an
+// attr_cntlid_min above the current attr_cntlid_max and an attr_cntlid_max
+// below the current attr_cntlid_min, so once no two slots share an id a range
+// that lies wholly above the live one must be written max first: min first,
+// even a move up by one slot fails on every pass. The walk moves up by one,
+// up by more, down by one and down by more, then repeats its last slot, and
+// counts each bound's writes, so the max written first is not written a
+// second time and an unchanged range writes neither.
+func TestCntlidRangeMovesBetweenSlots(t *testing.T) {
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	srv, node := newTestServer(t)
+	dnReply, err := srv.SyncupDn(ctx, dnReq(1, testSide))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if dnReply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupDn rejected: %v", dnReply.GetAgentReply())
+	}
+	prev := -1
+	for step, slot := range []int{0, 1, 3, 7, 6, 4, 0, 0} {
+		node.Reset()
+		req := sideReq(uint64(1+step), testSide, testCn0,
+			[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE)
+		req.SideConf.CntlidSlot = uint32(slot)
+		rows := syncupSideTwoPhase(t, srv, req).GetSideInfo().
+			GetCnIdToNvmeof()
+		label := fmt.Sprintf("slot %d -> %d", prev, slot)
+		if prev < 0 {
+			label = fmt.Sprintf("fresh node, slot %d", slot)
+		}
+		for _, cnId := range []uint64{testCn0, testCn1} {
+			if info := rows[cnId]; info.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("%s: cn %d nvmeof: %v %q",
+					label, cnId, info.GetStatus(), info.GetDetails())
+			}
+			nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, cnId)
+			if got, want := readCntlidSpan(t, node, nqn),
+				slotSpan(slot); got != want {
+				t.Errorf("%s: cn %d's export holds cntlids %d-%d, want "+
+					"%d-%d", label, cnId, got.first, got.last,
+					want.first, want.last)
+			}
+			subsysPath := agent.NvmetRoot + "/subsystems/" + nqn
+			minWrite := "writedirect " + subsysPath + "/attr_cntlid_min="
+			maxWrite := "writedirect " + subsysPath + "/attr_cntlid_max="
+			wantWrites := 1
+			if slot == prev {
+				wantWrites = 0
+			}
+			minCnt := len(node.callsMatching(minWrite))
+			maxCnt := len(node.callsMatching(maxWrite))
+			if minCnt != wantWrites || maxCnt != wantWrites {
+				t.Errorf("%s: cn %d: %d attr_cntlid_min and %d "+
+					"attr_cntlid_max writes, want %d of each\ncalls:\n%s",
+					label, cnId, minCnt, maxCnt, wantWrites,
+					strings.Join(node.Calls(), "\n"))
+				continue
+			}
+			if wantWrites == 0 {
+				continue
+			}
+			maxFirst := node.indexOfCall(maxWrite) < node.indexOfCall(minWrite)
+			if wantMaxFirst := prev >= 0 && slot > prev; maxFirst !=
+				wantMaxFirst {
+				t.Errorf("%s: cn %d: attr_cntlid_max written first: %v, "+
+					"want %v", label, cnId, maxFirst, wantMaxFirst)
+			}
+		}
+		prev = slot
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 9. sp_level (DN11)
 // ---------------------------------------------------------------------------
 

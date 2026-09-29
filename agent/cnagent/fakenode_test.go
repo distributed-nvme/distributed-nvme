@@ -547,7 +547,48 @@ func (f *fakeNode) writeFileDirect(
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
 	}
+	if err := f.cntlidRefusal(path, data); err != nil {
+		return err
+	}
 	f.files[path] = configfsNormalize(path, data)
+	return nil
+}
+
+// cntlidRefusal models nvmet's store handlers for a subsystem's cntlid bounds
+// (nvmet_subsys_attr_cntlid_{min,max}_store): a bound of 0, an
+// attr_cntlid_min above the current attr_cntlid_max, and an attr_cntlid_max
+// below the current attr_cntlid_min are refused with EINVAL and change
+// nothing, as is a value this fake cannot read as a 16-bit number. A bound
+// nothing has written yet holds the kernel's default, NVME_CNTLID_MIN = 1 or
+// NVME_CNTLID_MAX = 0xffef. Without this a converge that writes the two
+// bounds in an order nvmet refuses passes here and fails on every real node.
+func (f *fakeNode) cntlidRefusal(path, data string) error {
+	attr := path[strings.LastIndex(path, "/")+1:]
+	var other string
+	var bound uint64
+	switch attr {
+	case "attr_cntlid_min":
+		other, bound = "attr_cntlid_max", 0xffef
+	case "attr_cntlid_max":
+		other, bound = "attr_cntlid_min", 1
+	default:
+		return nil
+	}
+	refused := &fs.PathError{Op: "write", Path: path, Err: syscall.EINVAL}
+	val, err := strconv.ParseUint(strings.TrimSpace(data), 10, 16)
+	if err != nil || val == 0 {
+		return refused
+	}
+	if cur, ok := f.files[parentDir(path)+"/"+other]; ok {
+		if bound, err = strconv.ParseUint(
+			strings.TrimSpace(cur), 10, 16); err != nil {
+			return fmt.Errorf("fake: %s holds %q", other, cur)
+		}
+	}
+	if (attr == "attr_cntlid_min" && val > bound) ||
+		(attr == "attr_cntlid_max" && val < bound) {
+		return refused
+	}
 	return nil
 }
 

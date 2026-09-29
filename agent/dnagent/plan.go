@@ -220,10 +220,13 @@ func (p *sidePlan) nsIdentity() (string, string) {
 	return common.DnNsIdentity(p.clusterId, p.spId, p.legId)
 }
 
+// cntlidRange is the side's §11.8 slot, which every per-CN export of this
+// side carries. nvmet's range includes both ends, so the slot stops one short
+// of the next slot's first id.
 func (p *sidePlan) cntlidRange() (uint32, uint32) {
 	min := uint32(common.DnCntlidSlotBase) +
 		p.conf.GetCntlidSlot()*uint32(common.DnCntlidSlotStep)
-	return min, min + uint32(common.DnCntlidSlotStep)
+	return min, min + uint32(common.DnCntlidSlotStep) - 1
 }
 
 // linearBacking is the table target of one CN's dm-linear: the LV for the

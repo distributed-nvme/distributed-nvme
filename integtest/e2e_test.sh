@@ -6608,7 +6608,7 @@ td_created() { # <td name>
 #
 #   ss_id_to_subsystem[ss] OK ⇒ the nvmet subsystem exists, its cntlid range,
 #     serial and model match, its allowed_hosts are EXACTLY the desired set
-#     (agent/nvmet.go:360-377 — it checks both inclusions), and it is LINKED TO
+#     (agent/nvmet.go:398-415 — it checks both inclusions), and it is LINKED TO
 #     THE NVMET PORT (probeExport, agent/cnagent/td.go:387-393). The link is the
 #     conjunct that matters most here: it is what makes the port listen.
 #   ns_id_to_namespace[ns] OK ⇒ the nvmet namespace exists, is enabled, carries
@@ -9847,7 +9847,7 @@ ops_snapshot() {
 	# The second thin device is deliberately $TD0's size and not §7.5's one
 	# TD_UNIT. Step 7 repoints a LIVE namespace at it, and nvmet fixes a
 	# namespace's capacity when it enables it: agent.NsConf carries nqn, nsid,
-	# device_path, uuid, nguid and ana_grpid and NO size (agent/nvmet.go:387-394),
+	# device_path, uuid, nguid and ana_grpid and NO size (agent/nvmet.go:425-432),
 	# and nothing here writes the kernel's revalidate_size. A td of another size
 	# would therefore leave the host's reported capacity stale — a separate
 	# mechanism, and not what step 7 is about. Equal sizes make
@@ -10245,7 +10245,7 @@ NS2_ID=""
 
 # Every CN's CnHostNqn, as the comma list `xfer set-hosts --hosts` takes, plus
 # the primary's own — which is the one the clone's connect will present
-# (agent/cnagent/plan.go:959-961 hostNqn() = CnHostNqn(cluster, cn_id)).
+# (agent/cnagent/plan.go:960-962 hostNqn() = CnHostNqn(cluster, cn_id)).
 CN_HOST_NQNS=""
 PRIMARY_CN_NQN=""
 PRIMARY_CN_ID=""
@@ -10379,7 +10379,7 @@ src_sp_gone() {
 # copy_xfer_host_linked is the observable that `xfer set-hosts` has REACHED the
 # CN, as opposed to having been written to etcd. nvmet's allowed_hosts is a
 # directory of symlinks, one per permitted host nqn
-# (agent/nvmet.go:296-322 links them under
+# (agent/nvmet.go:307-333 links them under
 # <subsys>/allowed_hosts/<hostnqn>), so its presence is the kernel's own
 # answer. Waiting for it is what keeps the clone's first connect attempt from
 # being refused and pushed into the CN's retry registry — which would still
@@ -10622,7 +10622,7 @@ src_raid0_ready() { # <sp name> <cntlr id> <count>
 #
 # `xfer set-hosts --hosts` on a transfer carries the DESTINATION cntlrs' host
 # NQNs, and a cntlr's CN presents CnHostNqn(cluster_id, cn_id) on every
-# connection it makes (agent/cnagent/plan.go:959-961). The cn_id is minted by
+# connection it makes (agent/cnagent/plan.go:960-962). The cn_id is minted by
 # the gateway, so it is read back from `cn get`, never computed.
 #
 # All $CN_CNT of them go in, not just the primary's: the list is what an
@@ -11364,7 +11364,7 @@ copy_xfer_delete() {
 #
 # WHAT IT DOES HAVE TO WAIT FOR, AND THE TRAP THAT MAKES IT MANDATORY. "ANA
 # picks the live one" is true only once there IS one. agent/dnagent/plan.go's
-# anaGrpId (:267-283) puts a migration SOURCE in AnaGrpIdInaccessible the
+# anaGrpId (:270-286) puts a migration SOURCE in AnaGrpIdInaccessible the
 # moment the migration exists, and a DESTINATION in AnaGrpIdInaccessible until
 # `cloneLive` — which is nothing more than "the dm-clone device is present"
 # (agent/dnagent/probe.go:215-218). So between `migr create` and the
@@ -11438,7 +11438,7 @@ copy_migration() {
 
 	# THE LEG BITMAP IS READ BEFORE THE MIGRATION EXISTS, and that is not a
 	# stylistic ordering. `migr create` takes the SOURCE side ANA-inaccessible
-	# at once — agent/dnagent/plan.go:267-283, `migrSrc != nil` =>
+	# at once — agent/dnagent/plan.go:270-286, `migrSrc != nil` =>
 	# AnaGrpIdInaccessible — and the DESTINATION stays inaccessible until its
 	# dm-clone exists (`migrDst != nil && !cloneLive`, where cloneLive is just
 	# "the dm-clone device is there", agent/dnagent/probe.go:215-218). So from
@@ -11558,7 +11558,7 @@ copy_migration() {
 	# THE LEG MUST BE SERVING AGAIN BEFORE ANY HOST IO TOUCHES IT. A migration
 	# SOURCE side is ANA-inaccessible from the moment the migration exists, and
 	# a destination side is inaccessible until its dm-clone exists
-	# (agent/dnagent/plan.go:267-283). Both conditions are cleared by now — the
+	# (agent/dnagent/plan.go:270-286). Both conditions are cleared by now — the
 	# record is gone — but the DN rewrites `ana_grpid` on its NEXT syncup, so
 	# this reads the primary CN's own view of its path to the surviving side
 	# instead of assuming the rewrite has landed. An inaccessible namespace
