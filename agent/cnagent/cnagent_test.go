@@ -3365,6 +3365,274 @@ func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
 	}
 }
 
+// TestUnansweredAddressReadKeepsTheController pins CN10's "unknown, never
+// unwanted". A controller's sysfs `address` is the only thing that ties it to
+// a side, so a read of it that did not answer — any error but ENOENT, such
+// as the soft timeout spent waiting for an OsClient slot, which stalled sysfs
+// reads can hold — leaves the pass not knowing which side, if any, that
+// controller serves. Read as an empty address it matched no desired side, so
+// the connect step asked for its side again: a duplicate the host refuses
+// (EALREADY, and so does the fake), which spent the pass's connect budget on
+// refused connects. And whenever a connect of the pass did succeed — the
+// leg's controller had been lost, or another side had none — and the
+// re-read after it met an address that did not answer, disconnectDeadPaths
+// retired that controller as a dead path: the live, only path of a healthy
+// leg, on a primary an md member, on a migrating leg the serving src path.
+// The pass must do neither: it disconnects nothing, connects nothing beside
+// it, and fails the leg's converge with the read in its row, which registers
+// the retry; the retry's next attempt, the read answering, finds the
+// controllers where they were. Once the address stops answering, every read
+// of it fails for the rest of the pass, and the cases fail it both ways the
+// fake can: refused (failRead) and cut off at the soft timeout (killRead).
+//
+// The reconnected cases, on a standby and on a primary, are that re-read
+// itself: the leg's controller was lost (a reconnect refused with DNR
+// deletes it), the pass connects the side again, and the new controller's
+// address is the one that does not answer. The migrating case is the other
+// shape of it: the pass connects the leg's newly provisioned dst side, and
+// the src controller's address stops answering while that connect runs.
+func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// opts is the desired state the pass converges. The cntlr is first
+		// built from it, and the pass is an equal-revision converge —
+		// except for migrate.
+		opts reqOpts
+		// reconnect loses the leg's controller before the pass, whose
+		// connect of the side then mints the one that does not answer.
+		reconnect bool
+		// migrate builds the cntlr one revision earlier with every dst side
+		// still zeroing; the pass provisions them, and its connect of the
+		// data leg's dst side is when the src address stops answering.
+		migrate bool
+		// killed cuts the read off at the soft timeout (killReadAlways)
+		// rather than refusing it (failReadAlways).
+		killed bool
+		// settled is the leg row once the address answers: the standby's
+		// transport verdict (CN11), or the primary's prober outcome, which
+		// reads PENDING because no test waits a CnLegProbeInterval.
+		settled func(t *testing.T, info *pb.ResInfo, label string)
+	}{
+		{name: "standby", opts: reqOpts{revision: 2}, settled: assertOk},
+		{name: "primary",
+			opts:   reqOpts{revision: 2, primary: true, raid1: true},
+			killed: true, settled: assertPending},
+		{name: "standby reconnected", opts: reqOpts{revision: 2},
+			reconnect: true, killed: true, settled: assertOk},
+		{name: "primary reconnected",
+			opts:      reqOpts{revision: 2, primary: true, raid1: true},
+			reconnect: true, settled: assertPending},
+		{name: "standby migrating",
+			opts:    reqOpts{revision: 3, extraSide: true},
+			migrate: true, killed: true, settled: assertOk},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			built := tc.opts
+			if tc.migrate {
+				built.revision--
+				built.unprovisionedExtraSide = true
+			}
+			syncupBoth(t, srv, built)
+			nqn := legNqn(srv, testDataLeg)
+			ctrlsOf := func() []fakeCtrl {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				var out []fakeCtrl
+				if subsys := node.subsystems[nqn]; subsys != nil {
+					for _, ctrl := range subsys.ctrls {
+						out = append(out, *ctrl)
+					}
+				}
+				return out
+			}
+			ctrls := ctrlsOf()
+			if len(ctrls) != 1 || ctrls[0].state != "live" {
+				t.Fatalf("the data leg holds %+v, want one live controller",
+					ctrls)
+			}
+			// ctrl is the controller whose address does not answer.
+			ctrl, connects := ctrls[0].name, 0
+			if tc.reconnect {
+				node.mu.Lock()
+				node.nvmeDisconnect([]string{"disconnect", "--device", ctrl})
+				ctrl = fmt.Sprintf("nvme%d", node.nextCtrl)
+				node.mu.Unlock()
+				connects = 1
+			}
+			address := sysfsNvmeCtrlDir + "/" + ctrl + "/address"
+			node.mu.Lock()
+			hooks := node.failReadAlways
+			if tc.killed {
+				hooks = node.killReadAlways
+			}
+			if tc.migrate {
+				// Every leg's dst side is connected, the meta leg's too.
+				// The hook runs under the fake's lock.
+				connects = 2
+				node.duringConnect[connectKey(nqn, testIp2, testSvcId2)] =
+					func() { hooks[address] = true }
+			} else {
+				hooks[address] = true
+			}
+			node.mu.Unlock()
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(tc.opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			}
+			if got := node.callsMatching("cmd nvme disconnect"); len(got) != 0 {
+				t.Fatalf("an unanswered address read disconnected a live "+
+					"leg: %q", got)
+			}
+			if got := node.callsMatching("cmd nvme connect"); len(got) !=
+				connects {
+				t.Fatalf("the pass made %d connects, want %d: %q",
+					len(got), connects, got)
+			}
+			assertNoCall(t, node, "cmd mdadm")
+			assertErrorDetails(t,
+				reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg], address,
+				"leg data, its address unanswered")
+			if !retrying(t, srv) {
+				t.Fatalf("a leg whose controller is unknown registered no " +
+					"retry: nothing else would re-run its converge")
+			}
+			// want is what the data leg holds after the pass: ctrl, and on
+			// a migrating leg the dst side's new controller beside it.
+			want := []string{ctrl}
+			if tc.migrate {
+				for _, held := range ctrlsOf() {
+					if held.trAddr == testIp2 && held.trSvcId == testSvcId2 {
+						want = append(want, held.name)
+					}
+				}
+				if len(want) != 2 {
+					t.Fatalf("the pass did not connect the dst side: %+v",
+						ctrlsOf())
+				}
+			}
+			slices.Sort(want)
+			assertHolds := func(label string) {
+				t.Helper()
+				var held []string
+				for _, ctrl := range ctrlsOf() {
+					held = append(held, ctrl.name)
+				}
+				slices.Sort(held)
+				if !slices.Equal(held, want) {
+					t.Fatalf("%s: the data leg holds %q, want %q",
+						label, held, want)
+				}
+			}
+			assertHolds("the unanswered pass")
+
+			node.mu.Lock()
+			delete(hooks, address)
+			delete(node.duringConnect, connectKey(nqn, testIp2, testSvcId2))
+			node.mu.Unlock()
+			node.Reset()
+			retryAttempt(t, srv)
+			for _, verb := range []string{
+				"cmd nvme connect", "cmd nvme disconnect", "cmd mdadm"} {
+				assertNoCall(t, node, verb)
+			}
+			if retrying(t, srv) {
+				t.Fatalf("the retry outlived the unanswered read")
+			}
+			assertHolds("the retry's attempt")
+			tc.settled(t, probedCntlrInfo(t, srv).GetLegIdToLeg()[testDataLeg],
+				"leg data, its address answering")
+		})
+	}
+}
+
+// TestAbsentAddressIsAGoneController pins the other half of CN10's sysfs
+// walk: an absent `address` is an answer. A fabrics controller has one for
+// as long as its device exists, and its subsystem keeps listing it after the
+// device was deleted, until the last reference to it drops, so a controller
+// whose `address` is absent is gone: no side's path, and not unknown. The
+// side it alone served reads unconnected and is connected again (no
+// duplicate: the kernel's check passes over a controller being deleted);
+// the gone controller is not disconnected, its device being deleted
+// already; and the leg converges with no retry, on this pass and on the
+// next, while the subsystem still lists it. Read as unknown, it would hold
+// the leg in ERROR and its side unconnected for as long as the listing
+// lasts; read as an empty address, it drew a disconnect of a device that is
+// no longer there.
+func TestAbsentAddressIsAGoneController(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts reqOpts
+		// settled is the leg row: the standby's transport verdict (CN11),
+		// or the primary's prober outcome, PENDING in a converge reply.
+		settled func(t *testing.T, info *pb.ResInfo, label string)
+	}{
+		{name: "standby", opts: reqOpts{revision: 2, extraSide: true},
+			settled: assertOk},
+		{name: "primary",
+			opts: reqOpts{revision: 2, primary: true, raid1: true,
+				extraSide: true},
+			settled: assertPending},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			syncupBoth(t, srv, tc.opts)
+			nqn := legNqn(srv, testDataLeg)
+			gone := node.deleteCtrlDevice(nqn, testIp2, testSvcId2)
+			if gone == "" {
+				t.Fatalf("the data leg has no controller for its dst side")
+			}
+			for pass, label := range []string{"the pass", "the next pass"} {
+				node.Reset()
+				reply, err := srv.SyncupCntlr(context.Background(),
+					cntlrReq(tc.opts))
+				if err != nil {
+					t.Fatalf("%s: SyncupCntlr: %v", label, err)
+				}
+				if reply.GetAgentReply().GetCode() != 0 {
+					t.Fatalf("%s: rejected: %v", label, reply.GetAgentReply())
+				}
+				if !node.hasCall("read " + sysfsNvmeCtrlDir + "/" + gone +
+					"/address") {
+					t.Fatalf("%s never read the gone controller's address: "+
+						"the subsystem no longer lists it", label)
+				}
+				assertNoCall(t, node, "cmd nvme disconnect")
+				connects := 0
+				if pass == 0 {
+					connects = 1
+				}
+				got := node.callsMatching("cmd nvme connect")
+				if len(got) != connects {
+					t.Fatalf("%s made %d connects, want %d: %q",
+						label, len(got), connects, got)
+				}
+				if connects == 1 &&
+					(!strings.Contains(got[0], "--traddr "+testIp2+" ") ||
+						!strings.Contains(got[0], "--nqn "+nqn+" ")) {
+					t.Fatalf("%s connected %q, want the data leg's dst side",
+						label, got[0])
+				}
+				assertNoCall(t, node, "cmd mdadm")
+				tc.settled(t,
+					reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg], label)
+				if retrying(t, srv) {
+					t.Fatalf("%s registered the retry for a gone controller",
+						label)
+				}
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §6.8 — namespace states (CN16)
 // ---------------------------------------------------------------------------

@@ -300,7 +300,8 @@ the controller device found by the §5 **sysfs walk**, never by
 for each `nvme{N}` controller entry inside that subsystem directory read
 `/sys/class/nvme/{ctrl}/address` and parse it as comma-separated `key=value`
 pairs (`traddr=…,trsvcid=…`) to find the dead side's controller — never by
-field position. Recorded in §5.
+field position; a controller whose `address` did not answer, or is absent,
+is never taken for it (CN10). Recorded in §5.
 
 ## 3. `cmd/dnv-agent cn` (dnagent.md §3 amendment)
 
@@ -906,8 +907,8 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       registers it no more, or teardown (the DN13 pattern); the RPC itself
       retries a connect, or waits for its head, only as far as the pass's
       budget allows. Four things register it: a leg that failed to converge
-      — its connect, its multipath namespace or its wrapper (above) — a
-      clone source whose
+      — its connect, its multipath namespace or its wrapper (above), or an
+      unknown controller (below) — a clone source whose
       connection failed, a clone recovery whose destination bitmaps were
       not applied or another clone failure CN18 lists (never a failed
       allocation or replacement of its metadata wrapper), and a
@@ -922,7 +923,21 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       the retry. **Dead paths**: a controller of the leg
       NQN whose `traddr`/`trsvcid` matches no desired side (the src side
       after `FinishMigration` — its controller died with DNR and will never
-      reconnect) is disconnected by **device** (§2.3), never by NQN.
+      reconnect) is disconnected by **device** (§2.3), never by NQN. A
+      controller whose `address` read did not answer — any error but
+      ENOENT, such as the soft timeout spent waiting for an `OsClient` slot,
+      which stalled sysfs reads can hold — is **unknown, never unwanted**:
+      it may be a desired side's live path as easily as a dead one. It is
+      never retired as a dead path; while the pass's first read of the
+      subsystem shows one, no side of the leg is connected, since it may be
+      that side's; and the leg's converge fails for the pass —
+      `RES_STATUS_ERROR` naming the read — which registers the retry. An
+      absent `address` is an answer: a fabrics controller has one for as
+      long as its device exists, and its subsystem keeps listing it after
+      the device was deleted, until the last reference to it drops. Such a
+      controller is **gone**, no side's path: it is not unknown and never
+      retired as a dead path, and a side it alone served reads unconnected
+      and is connected again.
       `Side.err_epoch` is CP bookkeeping and is ignored.
 
 CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
@@ -1032,17 +1047,22 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
            with a single available member mdadm itself decides whether a
            degraded start is safe, and a refusal leaves the group
            `RES_STATUS_ERROR`).
-        A leg is **available** iff its multipath namespace has a path that
-        is both `live` and `optimized` (§11.1.1, probed from **sysfs** — §5).
+        A leg is **available** iff its CN10 converge succeeded this pass —
+        its provisioned sides connected, every controller's `address`
+        answered, its multipath namespace found and its wrapper built — and
+        that namespace has a path that is both `live` and `optimized`
+        (§11.1.1, probed from **sysfs** — §5).
         A `leg_list` member that is **not** available this pass — whether
         its group was left unassembled (`no available leg`, `only k of n
         legs available …`), started degraded without it, holds the array
         while the member reconciliation below skips its `--add`, or runs the
         array with md still holding the member (its side died under the
         array — AR8's case — or its path is otherwise no longer both `live`
-        and `optimized`; the reconciliation below leaves such a member
-        held) — registers the cntlr for the CN10 background retry, as a
-        failed connect does
+        and `optimized`, or its CN10 converge failed this pass: a connect,
+        an `address` read that did not answer, its multipath namespace or
+        its wrapper; the reconciliation below leaves such a member held) —
+        registers the cntlr for the CN10 background retry, as a failed
+        connect does
         (*amended 2026-09-26*, the failover ping-pong: the worker fans a
         promotion's `SyncupCntlr` and the sides' `SyncupSide` out unordered,
         [D16], so the new primary's first converge regularly reads its paths
@@ -1176,9 +1196,10 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         lacks is `--add --failfast`ed (md then resyncs — a bitmap catch-up
         for a briefly absent leg, a full rebuild for a promoted spare).
         Every `leg_list` name is wanted, available or not: a leg this pass
-        cannot use (no path both `live` and `optimized`, or its connect or
-        wrapper failing) is never added, and a member md still holds for it is
-        neither failed nor removed.
+        cannot use (no path both `live` and `optimized`, or its CN10
+        converge failing: a connect, an `address` read that did not answer,
+        its multipath namespace or its wrapper) is never added, and a member
+        md still holds for it is neither failed nor removed.
         *Amended 2026-09-26:* the comparison was by device number, and an
         `lsblk` of a `leg_list` wrapper that did not answer read as "not
         wanted" and failed and removed that in-sync member. `--fail` and
@@ -1674,6 +1695,12 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          legs may have spent it — a source that did not connect, or whose
          namespace did not appear, fails step 1 exactly as before
          (`no namespace {src_ns_idx} on {src_nqn}` for the latter).
+         CN10's unknown-controller rule is not applied here: a source
+         controller whose `address` did not answer matches no entry, so an
+         entry it alone serves reads unconnected and is connected again — a
+         duplicate the host refuses while that controller lives, which
+         fails step 1 once the budget is spent — and nothing is
+         disconnected, since step 1 retires no path.
       2. Allocate the clone's metadata slot from the §2.1 arena:
          `ceil((4 MiB + region_cnt bytes) / CnCloneMetaUnit)` **contiguous**
          units with `region_cnt = td.size / block_size` (one byte per region
@@ -2649,6 +2676,17 @@ contradicts them.
   `CnErrorName` all the same (CN16's ANA rule), so a dead-CN failover
   whose promotion outruns the sides' flip is not clean from the host's
   side until the retry has built the stack (§7, known limits).
+* `dnagent.md` §2.8 SH20 + §2.3 above (2026-09-28) — a controller whose
+  `address` did not answer is never selected as a dead side's: it is
+  unknown, never unwanted (CN10); nor is one whose `address` is absent,
+  a controller already deleted that its subsystem still lists. The cn
+  agent's own walk (`agent/cnagent/leg.go` `readCtrl`) had left both with
+  an empty address, which matches no side: an unanswered one could, on
+  the re-read after a connect of the pass, have a live path retired by
+  device, and a gone one drew a disconnect of a device no longer there.
+  An unanswered address now fails the leg's converge for the pass
+  instead, naming the read, which registers the CN10 retry; a gone
+  controller is passed over.
 
 ## 6. Tests
 
@@ -3331,6 +3369,39 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     connect of a standby's leg, or of a primary's spare, registers the
     retry although neither leg is a late member — build ORs its
     late-member verdict into `ensureLegs`' and never overwrites it.
+31b. **An unanswered `address` read keeps the controller** (CN10,
+    *added 2026-09-28*; `agent/cnagent/cnagent_test.go`,
+    `TestUnansweredAddressReadKeepsTheController`). Once one leg
+    controller's `address` stops answering, every read of it fails for the
+    rest of the pass — refused (`failReadAlways`) or cut off by the soft
+    timeout (`killReadAlways`). An equal-revision converge of a standby,
+    and of an md-raid1 primary whose member that leg is, runs no
+    `nvme disconnect`, no `nvme connect` and no mdadm, reads the leg
+    `RES_STATUS_ERROR` naming the read and registers the retry; the retry's
+    next attempt, the read answering, connects and disconnects nothing,
+    runs no mdadm, stops the retry and finds the controllers the pass
+    left, the leg reading `OK` (standby) or `PENDING` (primary). Two more
+    cases, a standby and a primary, lose the leg's controller first, so the
+    pass connects the side once and the read that does not answer is the
+    new controller's, on the re-read after that connect; a last one
+    provisions a standby's migrating leg's dst side in the pass — its next
+    revision — and the src controller's `address` stops answering while
+    that connect runs (the fake's `duringConnect`). Each otherwise ends as
+    above. The cn fake refuses a connect to an endpoint it already holds a
+    controller for — in any state but deleting or dead — as nvme-cli and
+    the kernel do (`EALREADY`), so a pass that connected beside an unknown
+    controller would spend its budget on refused connects, as on a real
+    node.
+31c. **An absent `address` is a gone controller** (CN10, *added
+    2026-09-28*; `agent/cnagent/cnagent_test.go`,
+    `TestAbsentAddressIsAGoneController`). A two-sided leg's dst
+    controller is deleted while its subsystem still lists it (the fake's
+    `deleteCtrlDevice`: every read under `/sys/class/nvme/{ctrl}` answers
+    ENOENT). An equal-revision converge of a standby, and of an md-raid1
+    primary, connects that side once, runs no `nvme disconnect` and no
+    mdadm, reads the leg `OK` (standby) or `PENDING` (primary) and
+    registers no retry; the next pass, the link still listed, connects
+    and disconnects nothing.
 32. **The connect step's pass budget** (CN10/CN18, *added 2026-09-28*;
     `agent/cnagent/connstep_test.go`). Every test runs the pass on a fake
     clock through the server's `now`/`sleep` seams (`withPassClock`): a

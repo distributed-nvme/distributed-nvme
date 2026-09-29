@@ -120,6 +120,12 @@ type fakeNode struct {
 	// down spends CmdSoftTimeout. Without an advance it is inert.
 	connectTakes map[string]time.Duration
 	advance      func(time.Duration)
+	// duringConnect runs, under the fake's lock, when a connect to one
+	// endpoint (connectKey) succeeds: what else changes on the node while
+	// that connect runs — a migrating leg's src controller whose `address`
+	// stops answering, say, which the pass's re-read after the connect then
+	// meets. It must not take the lock.
+	duringConnect map[string]func()
 	// nsHeadAfter defers a subsystem's multipath namespace head, keyed by
 	// NQN: the connect that creates the subsystem adds its controller but
 	// not the head, which appears on the Nth listing of the subsystem
@@ -283,6 +289,7 @@ func newFakeNode() *fakeNode {
 		nsIdxOf:       make(map[string]uint32),
 		connectFail:   make(map[string]int),
 		connectTakes:  make(map[string]time.Duration),
+		duringConnect: make(map[string]func()),
 		nsHeadAfter:   make(map[string]int),
 		pendingHeads:  make(map[string]*pendingHead),
 		thinDumps:     make(map[string]string),
@@ -2090,6 +2097,23 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	if nqn == "" {
 		return "", 3
 	}
+	// A connect to an endpoint the host already holds a controller for is
+	// refused before it reaches the network: nvme-cli's own "already
+	// connected" check, and behind it the kernel's
+	// nvme_tcp_existing_controller, which answers EALREADY — the agent never
+	// passes --duplicate-connect. A controller being deleted, or dead, no
+	// longer counts (nvmf_ctlr_matches_baseopts).
+	if held := f.subsystems[nqn]; held != nil {
+		for _, ctrl := range held.ctrls {
+			if ctrl.trAddr == trAddr && ctrl.trSvcId == trSvcId &&
+				ctrl.state != "deleting" &&
+				ctrl.state != "deleting (no IO)" && ctrl.state != "dead" {
+				f.dispatchStderr =
+					"could not add new controller: already connected"
+				return "", 1
+			}
+		}
+	}
 	key := connectKey(nqn, trAddr, trSvcId)
 	if took := f.connectTakes[key]; took > 0 && f.advance != nil {
 		f.advance(took)
@@ -2143,6 +2167,9 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	f.files[ctrlDir+"/state"] = ctrl.state + "\n"
 	f.dirs[ctrlDir+"/"+pathDev] = true
 	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = ctrl.anaState + "\n"
+	if during := f.duringConnect[key]; during != nil {
+		during()
+	}
 	return "", 0
 }
 
@@ -2242,6 +2269,48 @@ func (f *fakeNode) dropCtrl(subsys *fakeSubsys, ctrl *fakeCtrl) {
 	delete(f.devNo, nsDev)
 	delete(f.devSize, nsDev)
 	delete(f.subsystems, subsys.nqn)
+}
+
+// deleteCtrlDevice deletes the device of one path's controller and leaves
+// its subsystem's link to it: the kernel's window between deleting a
+// controller's device (nvme_uninit_ctrl) and dropping its last reference
+// (nvme_free_ctrl, which removes the link). Every read under
+// /sys/class/nvme/{ctrl} answers ENOENT from then on, while the subsystem
+// directory still lists {ctrl}. The controller leaves subsys.ctrls, so a
+// connect of its endpoint is no duplicate — the kernel's check passes over a
+// controller being deleted. It returns the controller's name.
+func (f *fakeNode) deleteCtrlDevice(nqn, trAddr, trSvcId string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	subsys, ok := f.subsystems[nqn]
+	if !ok {
+		return ""
+	}
+	for _, ctrl := range subsys.ctrls {
+		if ctrl.trAddr != trAddr || ctrl.trSvcId != trSvcId {
+			continue
+		}
+		ctrlDir := sysfsNvmeCtrlDir + "/" + ctrl.name
+		for entry := range f.dirs {
+			if entry == ctrlDir || strings.HasPrefix(entry, ctrlDir+"/") {
+				delete(f.dirs, entry)
+			}
+		}
+		for entry := range f.files {
+			if strings.HasPrefix(entry, ctrlDir+"/") {
+				delete(f.files, entry)
+			}
+		}
+		var kept []*fakeCtrl
+		for _, held := range subsys.ctrls {
+			if held != ctrl {
+				kept = append(kept, held)
+			}
+		}
+		subsys.ctrls = kept
+		return ctrl.name
+	}
+	return ""
 }
 
 // setAnaState re-stamps a live path's ana_state, so a test can make a leg

@@ -245,7 +245,11 @@ func cloneBuiltThisPass(info *pb.CntlrInfo, np *nsPlan) bool {
 // the source namespace device. Its connect step is CN10's, on the same pass
 // budget the legs drew on (CN18): a failed connect is tried again while the
 // budget covers the pause, and after a connect this pass made the subsystem
-// is re-read until the source namespace is there.
+// is re-read until the source namespace is there. CN10's unknown-controller
+// guard is not applied: a source controller whose address did not answer
+// matches no entry, so an entry it alone serves is connected again — a
+// duplicate the host refuses while that controller lives — and nothing is
+// disconnected, since this step retires no path.
 func (s *CnAgentServer) ensureCloneSource(
 	ctx context.Context,
 	plan *cntlrPlan,

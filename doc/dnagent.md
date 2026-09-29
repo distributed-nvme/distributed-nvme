@@ -650,7 +650,10 @@ SH20. `nvmehost.go`: `Connect` always passes
       equals the NQN holds the `nvme{N}` controller entries, and one is
       selected by reading `/sys/class/nvme/{ctrl}/address` and parsing it as
       comma-separated `key=value` pairs (`traddr=…,trsvcid=…`) to match the
-      dead side — never by field position.
+      dead side — never by field position. A controller whose `address`
+      did not answer is never selected — it is unknown, never unwanted —
+      and neither is one whose `address` is absent, a controller already
+      deleted (`cnagent.md` CN10).
 
 ### 2.9 Bitmap-chunk store — `bitmap.go`
 

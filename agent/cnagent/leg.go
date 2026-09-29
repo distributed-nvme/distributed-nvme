@@ -2,7 +2,9 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"regexp"
 	"strconv"
@@ -62,6 +64,19 @@ type ctrlView struct {
 	trSvcId  string
 	state    string // live | connecting | resetting | deleting | dead
 	anaState string // optimized | non-optimized | inaccessible
+	// addrUnknown is the error of an `address` read that did not answer —
+	// any failure but ENOENT — and nil otherwise. trAddr/trSvcId are then
+	// empty and match no side, yet the controller may be a desired side's
+	// live path as easily as a dead one: it is unknown, never unwanted
+	// (CN10).
+	addrUnknown error
+	// gone is an absent `address`: a fabrics controller has one for as long
+	// as its device exists, and its subsystem keeps listing it after the
+	// device was deleted, until the last reference to it drops. A gone
+	// controller is no side's path: it matches no side — a side it alone
+	// served reads unconnected and is connected again — and it is neither
+	// unknown nor disconnected (CN10).
+	gone bool
 }
 
 func (v *subsysView) ctrlOf(trAddr, trSvcId string) *ctrlView {
@@ -76,10 +91,28 @@ func (v *subsysView) ctrlOf(trAddr, trSvcId string) *ctrlView {
 	return nil
 }
 
-// available is the §11.1.1 test: a leg is available iff it has an optimized
-// path. A `non-optimized` path means the side currently exports dm-error and
-// cannot be used; a path that is merely `connecting` keeps its last-known ANA
-// state, which is why the controller state gates it.
+// unknownCtrl names the first controller whose address read did not answer,
+// and the read; nil when every one answered (CN10). A gone controller
+// answered: it is not unknown.
+func (v *subsysView) unknownCtrl() error {
+	if v == nil {
+		return nil
+	}
+	for _, ctrl := range v.ctrls {
+		if ctrl.addrUnknown != nil {
+			return fmt.Errorf("controller %s is unknown: %w",
+				ctrl.name, ctrl.addrUnknown)
+		}
+	}
+	return nil
+}
+
+// available is the path half of CN12's availability (§11.1.1): a path that is
+// both live and optimized. ensureLegs counts a leg available only when its
+// CN10 converge succeeded too. A `non-optimized` path means the side
+// currently exports dm-error and cannot be used; a path that is merely
+// `connecting` keeps its last-known ANA state, which is why the controller
+// state gates it.
 //
 // This is deliberately *not* transportHealth's CN11 rule: this is the
 // primary's assembly-time gate, "is this path usable now", which
@@ -162,7 +195,18 @@ func (s *CnAgentServer) readCtrl(
 ) ctrlView {
 	ctrlDir := sysfsNvmeCtrlDir + "/" + name
 	ctrl := ctrlView{name: name}
-	if address, err := s.readSysfs(ctx, ctrlDir+"/address"); err == nil {
+	address, err := s.readSysfs(ctx, ctrlDir+"/address")
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// CN10: the device is deleted and nothing else of it is left to
+		// read; only the subsystem's link to it is.
+		ctrl.gone = true
+		return ctrl
+	case err != nil:
+		// CN10: the failure is recorded, not left as an empty address,
+		// which matches no side and so reads as a dead path to retire.
+		ctrl.addrUnknown = fmt.Errorf("read %s/address: %w", ctrlDir, err)
+	default:
 		ctrl.trAddr, ctrl.trSvcId = agent.ParseNvmeAddress(
 			strings.TrimSpace(address))
 	}
@@ -226,11 +270,12 @@ func (s *CnAgentServer) readSysfs(
 // ensureLegs converges every leg of every group of every slice — spare legs
 // included, both roles. It reports which legs are **available** (§11.1.1),
 // which is what CN12 assembly needs, records each leg's ResInfo, and says
-// whether any leg failed to converge — its connect, its multipath namespace
-// or its wrapper — which registers the cntlr for the background retry (build
-// registers it too for a group's leg_list member that is not available,
-// CN12). budget is the pass's one CN10 wait budget, shared by every leg and
-// by the clone sources after them.
+// whether any leg failed to converge — its connect, a controller's address
+// read that did not answer, its multipath namespace or its wrapper — which
+// registers the cntlr for the background retry (build registers it too for a
+// group's leg_list member that is not available, CN12). budget is the pass's
+// one CN10 wait budget, shared by every leg and by the clone sources after
+// them.
 func (s *CnAgentServer) ensureLegs(
 	ctx context.Context,
 	st *cntlrState,
@@ -292,6 +337,9 @@ func (s *CnAgentServer) ensureLeg(
 	if err != nil {
 		return nil, err
 	}
+	// CN10: a controller whose address read did not answer may be any
+	// side's path, so no side is connected beside it; the leg fails below.
+	unknown := view.unknownCtrl()
 	connected := false
 	for _, side := range lp.sides {
 		if !side.GetProvisioned() {
@@ -303,7 +351,8 @@ func (s *CnAgentServer) ensureLeg(
 			continue
 		}
 		tr := side.GetNvmeTrConf()
-		if view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
+		if unknown != nil ||
+			view.ctrlOf(tr.GetTrAddr(), tr.GetTrSvcId()) != nil {
 			continue
 		}
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
@@ -323,6 +372,12 @@ func (s *CnAgentServer) ensureLeg(
 		}
 	}
 	s.disconnectDeadPaths(ctx, lp, view)
+	// CN10: unknown, never unwanted — disconnectDeadPaths passed over it, and
+	// the leg fails for the pass, which registers the retry that reads it
+	// again. After a connect this pass made, this is the re-read view.
+	if err := view.unknownCtrl(); err != nil {
+		return nil, err
+	}
 	if view.nsDev == "" {
 		return nil, fmt.Errorf("no multipath namespace for %s", lp.nqn)
 	}
@@ -410,6 +465,9 @@ func (s *CnAgentServer) newPassBudget() *agent.WaitBudget {
 // matches no desired side — the src side after FinishMigration, whose
 // controller died with DNR and will never reconnect. It is dropped by
 // **device**, never by NQN: the surviving side shares that NQN ([D1], §2.3).
+// A controller whose address read did not answer is passed over: its empty
+// transport matches no side, but it is unknown, never unwanted (CN10). A gone
+// one is passed over too: its device is already deleted.
 // `nvme disconnect --device` is not idempotent — a second call reports "Did
 // not find device" — so a failure here is logged, never fatal.
 func (s *CnAgentServer) disconnectDeadPaths(
@@ -433,7 +491,7 @@ func (s *CnAgentServer) disconnectDeadPaths(
 				break
 			}
 		}
-		if wanted || ctrl.name == "" {
+		if wanted || ctrl.name == "" || ctrl.gone || ctrl.addrUnknown != nil {
 			continue
 		}
 		if err := s.host.DisconnectDevice(ctx, ctrl.name); err != nil {
