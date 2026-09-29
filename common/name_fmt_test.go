@@ -233,21 +233,21 @@ func TestLocalStorePaths(t *testing.T) {
 	const c = "ebada5168620c5fe"
 
 	checkName(t, "LocalDnPath", nf.LocalDnPath(testCluster, testDn),
-		"/var/tmp/dn-"+c+"-0000000000000003")
+		"/var/lib/dnv/dn-"+c+"-0000000000000003")
 	checkName(t, "LocalSidePath", nf.LocalSidePath(testCluster, testDn, testSp, testSide),
-		"/var/tmp/side-"+c+"-0000000000000003-0000000000000011-0000000000000016")
+		"/var/lib/dnv/side-"+c+"-0000000000000003-0000000000000011-0000000000000016")
 	checkName(t, "LocalCnPath", nf.LocalCnPath(testCluster, testCn),
-		"/var/tmp/cn-"+c+"-0000000000000005")
+		"/var/lib/dnv/cn-"+c+"-0000000000000005")
 	checkName(t, "LocalCntlrPath", nf.LocalCntlrPath(testCluster, testCn, testSp, 0x61),
-		"/var/tmp/cntlr-"+c+"-0000000000000005-0000000000000011-0000000000000061")
+		"/var/lib/dnv/cntlr-"+c+"-0000000000000005-0000000000000011-0000000000000061")
 	checkName(t, "LocalMigrBmPath",
 		nf.LocalMigrBmPath(testCluster, testDn, testSp, testMigr, 3),
-		"/var/tmp/migr-bm-"+c+"-0000000000000003-0000000000000011-000000000000001e-03")
+		"/var/lib/dnv/migr-bm-"+c+"-0000000000000003-0000000000000011-000000000000001e-03")
 	// A clone chunk is addressed by the PAIR (src_slice_idx, bm_idx), so the
 	// name ends in two %02x segments and never one (§9.6).
 	checkName(t, "LocalCloneBmPath",
 		nf.LocalCloneBmPath(testCluster, testCn, testSp, testClone, 0x07, 0x0a),
-		"/var/tmp/clone-bm-"+c+"-0000000000000005-0000000000000011-0000000000000041-07-0a")
+		"/var/lib/dnv/clone-bm-"+c+"-0000000000000005-0000000000000011-0000000000000041-07-0a")
 
 	// --local-store overrides the prefix (architecture.md §13).
 	custom := NewNameFmt("/srv/dnv")

@@ -76,6 +76,23 @@ func sweepDstReq(
 	return req
 }
 
+// sweepSrcReq is sweepSideReq playing the source of one migration whose
+// destination has provisioned, so the role is live (§11.2).
+func sweepSrcReq(
+	revision uint64,
+	ptr *pb.SidePointer,
+	migrId uint64,
+) *pb.SyncupSideRequest {
+	req := sweepSideReq(revision, ptr)
+	req.MigrSrcConf = &pb.SyncupSideRequest_MigrSrcConf{
+		MigrId:         migrId,
+		DstSideId:      ptr.GetSideId() + 0x100,
+		DstDnId:        testSrcDn,
+		DstProvisioned: true,
+	}
+	return req
+}
+
 // dmPresent / subsysPresent read the fake's objects rather than its call log:
 // a sweep is judged by what is left on the node, never by what it said.
 func dmPresent(node *fakeNode, name string) bool {
@@ -1026,24 +1043,32 @@ func TestCloneMetaRecordFreedUnderTheProof(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
-		if dmPresent(node, metaName) {
-			t.Error("the clone-metadata wrapper survived the finish")
+		// The wrapper waits with its record. The side known by its pointer
+		// alone may be the one whose claim a lost store took, so this pass
+		// judges no migration device of the sp either (DN6).
+		if !dmPresent(node, metaName) {
+			t.Error("the clone-metadata wrapper went while a side of the sp " +
+				"was known only by pointer")
 		}
 		if _, ok, _ := srv.meta.LookupCloneMeta(
 			ctx, testSp, testMigrId); !ok {
 			t.Fatal("the slot was released while a side of the sp could " +
 				"still own it: an in-flight migration's hydration metadata")
 		}
-		// A record waiting for a proof is not a leftover: the device is
-		// gone, nothing is stuck, and the next node-level pass releases it.
+		// An object waiting for a proof is not a leftover: nothing is stuck,
+		// and a pass that has the proof takes it.
 		if got := reply.GetAgentReply().GetCode(); got != 0 {
 			t.Errorf("code = %d (%s), want 0",
 				got, reply.GetAgentReply().GetDetails())
 		}
 
-		// The missing side arrives; now the proof exists and the ordinary
-		// record sweep releases the slot.
+		// The missing side arrives; now the proof exists. That side's own
+		// pass takes the wrapper, and the slot is released.
 		syncupSideTwoPhase(t, srv, sweepSideReq(1, other))
+		if dmPresent(node, metaName) {
+			t.Error("the clone-metadata wrapper survived once the sp was " +
+				"fully known")
+		}
 		if _, err := srv.SyncupDn(ctx, sweepDnReq(2, dst, other)); err != nil {
 			t.Fatalf("SyncupDn: %v", err)
 		}

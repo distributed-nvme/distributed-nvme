@@ -1224,7 +1224,7 @@ another document or the harness cites can shift.
   `SP_LEVEL_READONLY` is enforced only at the CN's user-facing namespaces
   ([D11]), and the DN agent never flips any device or LV read-only.
 - **`--local-store` must pre-exist** (agent startup reconcile fails
-  otherwise) and defaults to shared `/var/tmp` — always pass the dedicated
+  otherwise) and defaults to shared `/var/lib/dnv` — always pass the dedicated
   `$WORK/store`.
 - **`attr_serial` reads back space-padded** from configfs — irrelevant to
   current assertions; relevant if serial-based checks are added.

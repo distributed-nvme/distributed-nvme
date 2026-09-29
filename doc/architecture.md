@@ -704,7 +704,7 @@ gets `bitmap_bits = 8192`, `bitmap_bytes = 1280`, `bitmap_blocks = 1`, so
 All formats below are normative. `NameFmt` is constructed from the prefixes in
 `constants.go`: `dmPrefix = DmPrefix = "dnv"`, `nqnPrefix = NqnPrefix =
 "nqn.2024-01.io.dnv"`, `tmpfsPrefix = DefaultTmpfsPrefix`, `localStorPrefix =
-DefaultLocalStorPrefix = "/var/tmp"`. Unless noted, every id field is `%016x`, joined
+DefaultLocalStorPrefix = "/var/lib/dnv"`. Unless noted, every id field is `%016x`, joined
 by `-`; a dm name's kind field is the two-character string of §4.1, an NQN's is a bare
 `%01x` digit (§4.4). The signatures and formats in this section are normative and match
 `name_fmt.go`. Two of them deserve their rationale up front: a
@@ -824,8 +824,13 @@ step 2, and every dnv device name is a dm name from §4.2 (kinds `c9`/`ca`/`cb` 
 ### 4.6 Agent local-store paths
 
 The agent's persistent state (§9.1) lives as flat protobuf files under
-`localStorPrefix` (`--local-store`). `{src_slice_idx}` and `{bm_idx}` are both
-formatted with `BmIdxFmt = "%02x"`:
+`localStorPrefix` (`--local-store`; default `DefaultLocalStorPrefix` = `/var/lib/dnv`, a
+directory that must exist before the agent starts, `dnagent.md` SH3). The default is
+not `/var/tmp`, where the stock tmpfiles rule of some distributions deletes files that
+nothing has touched for 30 days: a store file is written only when a request for its
+object is applied and read only at startup, so the file of an object that stays quiet
+that long would go while its agent runs, and the next restart would find it lost.
+`{src_slice_idx}` and `{bm_idx}` are both formatted with `BmIdxFmt = "%02x"`:
 
 | function | path | content |
 |---|---|---|
@@ -2750,7 +2755,16 @@ cannot forget in that way: while the device is there, the next enumeration finds
   wanted (`dnagent.md` DN6). The node-level pass never touches a side/sp that *is* in
   the pointer list, even when its own file is missing: the pointer arrives before the
   object's `Syncup*` (§9.1), and after a lost `--local-store` the resources must be
-  re-adopted probe-first by that `Syncup*`.
+  re-adopted probe-first by that `Syncup*`. On the dn the migration objects of such a
+  side's sp wait too, at both scopes (*amended 2026-09-29*). They name `(sp, migr)` and
+  no side, so the object-level pass of every side of that sp on the node judges them as
+  well, and while any side of their sp that the node may host is known by its pointer alone
+  the stored requests cannot show them unwanted: the missing one may be the one playing
+  the migration. Neither pass removes or names them until every such side has its
+  state, the proof a clone-metadata record's release already waits for (`dnagent.md`
+  DN6). Taking them sooner pulled a migration source's export out from under the
+  destination's dm-clone, in the `SyncupDn` that brought a lost store's list back, or in
+  the first `SyncupSide` of another side of that sp on the node.
 * **Attribution is by name, and by what a nameless object is built out of.** §4.1's
   role letter and §4.2's ids say which agent, which cluster, which node and which sp a
   dm device belongs to, and §4.4 does the same for a dnv-format NQN. The objects whose
@@ -3710,12 +3724,12 @@ dnv-worker --etcd-endpoints 192.168.0.10:2379,192.168.0.11:2379,192.168.0.12:237
 
 dnv-agent dn --grpc-network tcp --grpc-address 192.168.0.20:29528 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
-  --local-store /var/tmp \
+  --local-store /var/lib/dnv \
   --disk /dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360
 
 dnv-agent cn --grpc-network tcp --grpc-address 192.168.0.20:29529 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.20 --tr-svc-id 4200 \
-  --local-store /var/tmp --capacity 8796093022208
+  --local-store /var/lib/dnv --capacity 8796093022208
 
 dnv-cdc --etcd-endpoints ... --range 0,1,2,3,4,5,6,7,8,9,a,b,c,d,e,f \
   --tr-type tcp --adr-fam ipv4 --tr-addr 192.168.0.10 --tr-svc-id 8009
@@ -3762,7 +3776,8 @@ timers default to `DefaultVoteWorkerInterval`/`DefaultVoteWorkerGraceTime`). The
 lives at — default `NvmetPortId` = 1, anything below 1 refused — so several agents can
 share one node's kernel (§3.1); the two `dnv-agent` lines above name no port id, so
 both roles there take the default. `--local-store` sets the `localStorPrefix` under which
-the §4.6 state files live. `--capacity` is cn-only (a DN's size is read off its
+the §4.6 state files live; its default is `DefaultLocalStorPrefix` = `/var/lib/dnv`, which
+must exist before the agent starts (§4.6). `--capacity` is cn-only (a DN's size is read off its
 `--disk`): it is the byte budget `GetCnSize` replies verbatim, i.e. the per-node input
 to the §6.1 CN extent count, whose divisor `extent_size` is the cluster-wide
 `dn_bin_conf.extent_size` instead. Its default **0** means "no opinion", which

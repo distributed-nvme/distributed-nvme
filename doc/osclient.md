@@ -972,7 +972,7 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 
 ```json
 {"time":"2026-08-28T10:00:01.000Z","level":"INFO","msg":"os command","cmd":"dmsetup","args":["create","dnv-ebada5168620c5fe-0000000000000003-d4-0000000000000011-0000000000000016"],"stdin":"0 20480 linear 253:0 524288\n","stdout":"","stderr":"","exit_code":0,"trace_id":"a1b2c3d4e5f60718"}
-{"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/tmp/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":34,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"side_conf":{"ext_cnt":10,"cntlid_slot":1,"primary_cn_id":5,"standby_id_list":[6]}},"trace_id":"a1b2c3d4e5f60718"}
+{"time":"2026-08-28T10:00:01.050Z","level":"INFO","msg":"os write proto","path":"/var/lib/dnv/side-ebada5168620c5fe-0000000000000003-0000000000000011-0000000000000016","size":34,"data":{"cluster_id":16981786240730056190,"dn_id":3,"side_pointer":{"sp_id":17,"leg_id":21,"side_id":22},"revision":9,"side_conf":{"ext_cnt":10,"cntlid_slot":1,"primary_cn_id":5,"standby_id_list":[6]}},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
 ```json

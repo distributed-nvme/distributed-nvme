@@ -218,7 +218,9 @@ func DnNsIdentity(clusterId, spId, legId uint64) (uuid string, nguid string) {
 
 SH1. The lifecycle is **reconcile, then serve** (`architecture.md` §9.1): the
      gRPC listener MUST NOT open before the startup reconcile finished. A
-     fresh node has an empty local store, so its reconcile is instant.
+     fresh node has an empty local store — an empty directory, which must
+     already exist: the agent creates none, and a missing one is SH3's fatal
+     case — so its reconcile is instant.
 
 SH2. The startup reconcile runs under a ctx carrying a freshly minted trace id
      (`common.NewTraceId`), so every startup `os command` record is
@@ -734,7 +736,7 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
 | `--grpc-address` | required | required | — | gRPC endpoint; the CP stores it as `DnConf`/`CnConf` `addr_port` |
 | `--tr-type` / `--adr-fam` / `--tr-addr` / `--tr-svc-id` | required | required | — | this agent's single nvmet port (`NvmeTrConf`), mirrored into `DnConf`/`CnConf` at creation |
 | `--nvmet-port-id` | ✓ | ✓ | `NvmetPortId` (1) | configfs id of the nvmet port this agent converges (`/sys/kernel/config/nvmet/ports/{id}`); several agents on one node's kernel take distinct ids (`architecture.md` §3.1). Env `DNV_AGENT_NVMET_PORT_ID`; a value below 1 is refused (CM3) |
-| `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` | `localStorPrefix` of `common.NewNameFmt` (`architecture.md` §4.6 state files) |
+| `--local-store` | ✓ | ✓ | `DefaultLocalStorPrefix` (`/var/lib/dnv`) | `localStorPrefix` of `common.NewNameFmt` (`architecture.md` §4.6 state files); the directory must exist before the agent starts (SH3) |
 | `--disk` | required | — | — | the raw block device that carries the dnv disk format ([D13]; §4.1 `diskmeta.go`) |
 | `--capacity` | — | ✓ | 0 | capacity budget in bytes this CN is willing to host; `GetCnSize` replies it verbatim, 0 = "use the CP default" (added by `cnagent.md` §3) |
 | `--config` | ✓ | ✓ | — | optional viper config file |
@@ -763,7 +765,7 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
      `SideToCnNqn` subsystem into its **own** port. The prefix, not the file
      name, is the unit of ownership. A dn and a cn agent may share one,
      because the two roles' kind prefixes are disjoint — which is what lets
-     the `architecture.md` §13 pair both run on `/var/tmp`.
+     the `architecture.md` §13 pair both run on `/var/lib/dnv`.
 
      One name a dn agent builds is **not** keyed by `dn_id` and names an
      object two agents would fight over: the side subsystem NQN.
@@ -1152,7 +1154,8 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      authoritative list: a `DnErrorName`/`DnLinearName`/`DnSideName` device
      whose `(sp_id, side_id)` appears in no synced DN's `side_pointer_list`
      **and** in no locally stored side goes, together with the migration
-     objects no stored side claims and the exports this agent can attribute
+     objects no stored side claims (once every side of their sp this node
+     may host is stored, below) and the exports this agent can attribute
      to itself that name no side it must keep — a `SideToCnNqn` export
      carries no dn id, so it is attributed before it is judged (below), or
      the sweep would take a sibling agent's. It never touches a side that
@@ -1160,7 +1163,29 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      node that lost `--local-store` but kept its disk must rebuild those
      sides from their records, and sweeping them would free the extents and
      send the next `SyncupSide` through the §9.4 provisioning protocol again,
-     zeroing live data. It also takes the namespace-less exports nobody can
+     zeroing live data. Nor, while such a side has no stored request — its
+     file absent or unreadable — does it judge a migration object of that
+     side's sp (*amended 2026-09-29*): the
+     migration objects follow the known-with-state rule of the
+     `CloneMetaRecord` (the record rule, below). Each names `(sp_id,
+     migr_id)` and no side, and the claim rule reads stored requests only,
+     so while any side of its sp is known by its pointer alone, "no stored
+     side claims it" proves nothing — that side may be the one playing the
+     migration. Judging them anyway, in the `SyncupDn` that brings a lost
+     store's pointer list back, took a source's `DnMigrSrcName` and its
+     `MigrSrcNqn` export out from under the destination's dm-clone, whose
+     reads of every region not yet hydrated then failed on the leg the host
+     was using. Such an object is neither removed nor named as a leftover —
+     naming it would only have the worker re-send a `SyncupDn` that must not
+     remove it — and the wait ends by itself: the side's Check round replies
+     `ReplyCodeUnknownObject` until its `SyncupSide` stores the request, and
+     that rejection is what brings the `SyncupSide` (`dnv-worker.md` RW4);
+     once every side of the sp this node may host is stored, the next pass
+     judges the object by the claim rule again. A
+     destination's `:3:` connection waits with its dm-clone, not only
+     behind L3's stop rule: with the clone out of the chain, L3 would find
+     no clone of its own to fail on and disconnect the source under the
+     live one. It also takes the namespace-less exports nobody can
      attribute, once they are older than `DnExportOrphanGrace` (below). When
      no DN has been synced or reloaded at all nothing is authoritative and
      the sweep does nothing.
@@ -1197,6 +1222,23 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      the same answer it gives for any object that vanished between the
      enumeration and the removal.
 
+     A side-level sweep judges the migration objects of its sp only under
+     Scope 1's condition (*amended 2026-09-29*): once every side of the sp
+     this node may host is stored. Short of it, the sp's migration devices,
+     `MigrSrcNqn` exports and `:3:` connections are left out of its chain,
+     neither removed nor named. A DN may host sides of two groups of one sp
+     (`architecture.md` §6.5), and after a lost store the first
+     `SyncupSide` may be that of the side not playing the migration. Judging
+     them by the claim rule alone, as it used to, its pass removed a live
+     source's `DnMigrSrcName` and `MigrSrcNqn` export with a clean reply,
+     and on a destination tried to remove the dm-clone — EBUSY under the
+     per-CN linears — and named it, its wrapper and its `:3:` connection as
+     leftovers, re-driving that side every round until the migrating side's
+     own `SyncupSide` stored its request. The condition is read before the
+     claims: this scope holds only the node read lock, so another side's
+     `SyncupSide` can store its request meanwhile, and read after the claims
+     the condition could hold on claims that miss it.
+
      **Objects whose name carries no side.** A migration device
      (`DnMigrSrcName`, `DnMigrFinalName`, `DnMigrMetaDmName`) is keyed by
      `(sp_id, migr_id)`, a `SideToCnNqn` export by `(cluster, sp, leg, cn)`,
@@ -1210,8 +1252,10 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      For the three migration dm devices the first question is already
      answered by the enumeration — their names carry this cluster and this
      dn, as the `MigrSrcNqn` export's own name does — so for those the claim
-     rule below is the whole test. The `:2:` export carries no dn id at all
-     and the `:3:` connection carries only the **source** DN's, so neither
+     rule below is the whole test, taken once every side of their sp this
+     node may host is stored (both scopes, above). The `:2:` export carries
+     no dn id at all and the `:3:` connection carries only the **source**
+     DN's, so neither
      names the agent holding it; both are visible to every agent sharing the
      kernel, so each needs attributing first. A `:2:` export is attributed
      by the per-CN dm-linear its namespace backs: one naming another dn
@@ -1294,11 +1338,14 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      source until `migr_src_conf` itself was dropped. Being skipped rather
      than named is what makes this class silent: a leftover at least
      re-drives. A side's request is stored before its converge
-     builds anything, so no live claim can be invisible to the rule; and the
-     claim is recomputed from the requests every pass, never read from what a
-     converge left behind. That
+     builds anything, so no claim of a role this process started can be
+     invisible to the rule; one a lost store took stays invisible until the
+     side's `SyncupSide` stores its request again, which both scopes wait
+     out (above). And the claim is recomputed from the requests every pass,
+     never read from what a converge left behind. That
      is what lets a **finished** migration's objects go in the same pass that
-     drops its conf, with no "applied destination" to remember — the field
+     drops its conf (unless that wait holds them), with no "applied
+     destination" to remember — the field
      that used to hold it was overwritten by the very converge that was
      supposed to retry the removal.
 
@@ -1452,6 +1499,19 @@ DN8. **Gating.** The pointer MUST be present in the stored
      `SyncupDnRequest.side_pointer_list` — else `ReplyCodeUnknownObject`
      (`SyncupDn` introduces pointers first, §9.2). Then the SH8 revision gate
      against the stored `SyncupSideRequest`.
+
+     After a lost `--local-store`, the first `SyncupSide` of each listed
+     side meets no stored request: there is no revision to gate it against,
+     and its converge adopts, probe-first, what the node still holds for it
+     (*amended 2026-09-29*). The `SyncupDn` that brought the list back left
+     the side's devices and the exports attributed to it in place (DN6's
+     Scope 1), and the migration objects of its sp as well: both of DN6's
+     scopes judge a migration object only once every side of its sp this
+     node may host is stored, so neither that pass nor the first
+     `SyncupSide` of another listed side of the same sp takes a migration
+     source's `DnMigrSrcName` and `MigrSrcNqn` export, or a destination's
+     dm-clone, wrapper and `:3:` connection, from under a live migration
+     before the migrating side's own request is back.
 
 DN9. **Side device and the §9.4 side provisioning protocol.** Look up
      `(sp_id, side_id)` in the volume table. An existing record whose extent
@@ -1789,7 +1849,8 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
 
       **Ending the role removes nothing directly.** `DnMigrSrcName` and its
       `MigrSrcNqn` export simply stop being wanted, and the sweep takes them
-      (DN6 L4 and L1). The linear is keyed by `(sp_id, migr_id)` and the
+      (DN6 L4 and L1) once every side of the sp this node may host is
+      stored. The linear is keyed by `(sp_id, migr_id)` and the
       export by `(cluster, dn, sp_id, migr_id)`; neither names a side, so
       both are judged by the claim rule — no stored side of this DN still
       names that `migr_src_conf` — rather than by an "applied source" the
@@ -1901,7 +1962,8 @@ DN13. **Migration destination** (`migr_dst_conf` set).
       `SP_LEVEL_NO_MIGRATION`, or the side leaving its DN's list —
       `DnMigrFinalName`, `DnMigrMetaDmName` and the `:3:` connection stop
       being wanted and DN6's layers take them, clone before connection and
-      wrapper after both. All three are identified by `(sp_id, migr_id)` —
+      wrapper after both, once every side of the sp this node may host is
+      stored. All three are identified by `(sp_id, migr_id)` —
       the `:3:` NQN carries the **source** DN's id, not this node's, so that
       pair is the only part of it which names the migration. Nothing in that
       NQN names *this* agent either, and the nvme host namespace is per
@@ -2513,6 +2575,34 @@ able to fail.
     `"controller has no namespace"` with the retry registered; and a read
     that fails after the connect ends the wait with no pause, the target
     carrying the read's error.
+    **A lost store** (DN6, DN8, *added 2026-09-29*;
+    `TestLostStoreKeepsAMigrationSourceUntilItsSideIsKnown`,
+    `TestLostStoreKeepsAMigrationDestinationUntilItsSideIsKnown`) restarts
+    the agent over the same node with an empty store and sends the
+    `SyncupDn` that lists the side ahead of the side's own request: no
+    mutating call names the source's `DnMigrSrcName` or `MigrSrcNqn`, or
+    the destination's dm-clone or wrapper, no `nvme disconnect` runs, all
+    of them survive, and both the reply and the read-only verdict are
+    clean. The side's `SyncupSide` then finds everything in place and
+    issues no mutating call but its own store write, with the migration
+    rows `OK` — the §11.2 window off, as `startTestServer` leaves it; with
+    it on, the source's pass would also open a second window over the
+    dm-errors, DN12 rule 1's known limit. The destination case is what pins
+    the connection's gate: with only the dm-clone kept out of the chain, L3
+    disconnects the source under it. The startup twin
+    (`TestReconcileKeepsAMigrationSourceWhoseSideFileIsLost`) keeps the dn
+    file and loses only the source side's, so the startup reconcile's own
+    removing sweep meets that side by its pointer alone: no mutating call
+    names the source's `DnMigrSrcName` or `MigrSrcNqn`, and both survive.
+    With a second side of the sp on the node
+    (`TestLostStoreSiblingSideKeepsAMigrationSource`,
+    `TestLostStoreSiblingSideKeepsAMigrationDestination`), the `SyncupSide`
+    of the side not playing the migration comes first after the restart's
+    `SyncupDn`: neither its pass nor its read-only verdict removes or names
+    the migration objects — no mutating call names them, no `nvme
+    disconnect` runs, both codes are 0 — and the migrating side's own
+    `SyncupSide` then issues no mutating call but its store write. The
+    destination case pins the side-level connection's gate the same way.
 13. **`diskmeta`** (`diskmeta_test.go`, on the fake's segment store): format
     and load round-trip; probe-first idempotency (zero `WriteBlock` on a
     formatted disk); identity mismatch refused; corrupt-header refusal; A/B

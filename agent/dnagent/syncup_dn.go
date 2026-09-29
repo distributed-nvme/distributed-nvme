@@ -196,8 +196,12 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 // them would free the extents and send the next SyncupSide through the §9.4
 // provisioning protocol again, zeroing live data.
 //
-// The caller holds the node write lock, so neither the DN set nor the side
-// set can move under it.
+// SyncupDn and the startup Reconcile hold the node write lock, so neither
+// the DN set nor the side set can move under them. The read-only verdict
+// (dnVerdict, behind CheckDn and GetDnInfo) runs under the read lock only,
+// where a side's SyncupSide may store its request meanwhile; knownSides is
+// read before claimedMigrs for the same reason sweepSide reads it before the
+// claims.
 func (s *DnAgentServer) sweepOrphanRecords(
 	ctx context.Context,
 	res *agent.SweepResult,
@@ -351,10 +355,11 @@ func (s *DnAgentServer) knownSides() (
 
 // claimedMigrs lists the (sp_id, migr_id) pairs a live destination role owns.
 // The REQUEST alone decides: it is stored (putSide) before any converge
-// builds a thing, so a metadata slot cannot be in use by a role whose claim
-// is not visible here. The "last applied conf" this used to also consult was
-// memory of a past converge — the very thing that let a role whose teardown
-// failed keep its slot claimed for ever.
+// builds a thing, so no role this process started can use a metadata slot
+// whose claim is not visible here; one whose request a lost store took is
+// what spFullyKnown, both callers' other half, waits out. The "last applied
+// conf" this used to also consult was memory of a past converge — the very
+// thing that let a role whose teardown failed keep its slot claimed for ever.
 func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()

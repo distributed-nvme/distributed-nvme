@@ -168,7 +168,13 @@ const (
 	DnCloneMetaUnit    = 4 * 1024 * 1024   // slot allocation granularity
 	DnDataOffset       = 256 * 1024 * 1024 // extent area start (fixed!)
 
-	DefaultLocalStorPrefix = "/var/tmp"
+	// DefaultLocalStorPrefix is the directory an agent keeps its local store
+	// in when --local-store is not given (architecture.md §4.6). It must
+	// exist before the agent starts (dnagent.md SH3). Not /var/tmp, where the
+	// stock tmpfiles rule of some distributions deletes files that nothing
+	// has touched for 30 days: a store file is written only when a request for
+	// its object is applied and read only at startup.
+	DefaultLocalStorPrefix = "/var/lib/dnv"
 
 	IdKeyFmt     = "%016x"
 	FreeSpaceFmt = "%016x"

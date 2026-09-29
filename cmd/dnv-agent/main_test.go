@@ -19,7 +19,7 @@ var exampleDnArgs = []string{
 	"--adr-fam", "ipv4",
 	"--tr-addr", "192.168.0.20",
 	"--tr-svc-id", "4200",
-	"--local-store", "/var/tmp",
+	"--local-store", "/var/lib/dnv",
 	"--disk", "/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360",
 }
 
@@ -92,7 +92,7 @@ func TestExampleInvocationParses(t *testing.T) {
 		"adr-fam":      "ipv4",
 		"tr-addr":      "192.168.0.20",
 		"tr-svc-id":    "4200",
-		"local-store":  "/var/tmp",
+		"local-store":  "/var/lib/dnv",
 		"disk": "/dev/disk/by-uuid/" +
 			"4425c6a8-dc27-40a3-9fd5-0cc41f534360",
 	} {
@@ -292,7 +292,7 @@ var exampleCnArgs = []string{
 	"--adr-fam", "ipv4",
 	"--tr-addr", "192.168.0.20",
 	"--tr-svc-id", "4200",
-	"--local-store", "/var/tmp",
+	"--local-store", "/var/lib/dnv",
 	"--capacity", "1099511627776",
 }
 

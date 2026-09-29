@@ -638,6 +638,415 @@ func TestMigrationSourceSequence(t *testing.T) {
 	}
 }
 
+// A node that lost its --local-store but kept its disk and its kernel state
+// rebuilds every side its DN's pointer list names from what is there (DN8),
+// and the SyncupDn that brings the list back comes before any side's own
+// request. Its node-level sweep judged the migration objects by the claim
+// rule alone, which reads stored requests — and none is stored yet. A
+// source's `d2` linear and its `:3:` export are claimed by nothing but that
+// side's request, so the sweep took both out from under the destination's
+// dm-clone: every read of a region not yet hydrated failed on the leg the host
+// was using. A migration object names its sp, not a side, so while a side of
+// that sp is known only by its pointer "no stored side claims it" proves
+// nothing, and the object waits for a pass that can prove it — the rule the
+// clone-metadata record already follows (DN6).
+func TestLostStoreKeepsAMigrationSourceUntilItsSideIsKnown(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	if !dmPresent(node, srcName) || !subsysPresent(node, srcNqn) {
+		t.Fatal("the migration source was never built")
+	}
+
+	// The agent restarts over an empty --local-store; the disk and every
+	// kernel object survive.
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	node.protos = map[string][]byte{}
+	node.mu.Unlock()
+	restarted := startTestServer(t, node)
+
+	// The worker re-syncs the DN first. Its list names the side, whose own
+	// request has not arrived.
+	node.Reset()
+	reply, err := restarted.SyncupDn(ctx, dnReq(1, testSide))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	for _, call := range node.Mutations() {
+		if strings.Contains(call, srcName) || strings.Contains(call, srcNqn) {
+			t.Errorf("the SyncupDn took the live migration source apart: %s",
+				call)
+		}
+	}
+	if !dmPresent(node, srcName) {
+		t.Errorf("%s did not survive the SyncupDn", srcName)
+	}
+	if !subsysPresent(node, srcNqn) {
+		t.Errorf("%s did not survive the SyncupDn", srcNqn)
+	}
+	// Kept is not left over. Naming it would have the worker re-send, every
+	// round, a SyncupDn that must not remove it.
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("SyncupDn code = %d (%s), want 0",
+			got, reply.GetAgentReply().GetDetails())
+	}
+	infoReply, err := restarted.GetDnInfo(ctx,
+		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if got := infoReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("dn verdict = %d (%s), want 0",
+			got, infoReply.GetAgentReply().GetDetails())
+	}
+
+	// The side's request arrives. Everything it wants is already there, so
+	// its converge adopts what it finds and rebuilds nothing.
+	node.Reset()
+	sideReply, err := restarted.SyncupSide(ctx, migrSrcReq(2))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := sideReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("SyncupSide code = %d (%s), want 0",
+			got, sideReply.GetAgentReply().GetDetails())
+	}
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto") {
+			continue // SH5: the request itself is persisted
+		}
+		t.Errorf("the side's SyncupSide rebuilt what the sweep kept: %s", call)
+	}
+	src := sideReply.GetSideInfo().GetMigrSrcInfo()
+	for _, row := range []struct {
+		name string
+		info *pb.ResInfo
+	}{
+		{"dm_linear", src.GetDmLinearInfo()},
+		{"nvmeof", src.GetNvmeofInfo()},
+	} {
+		if row.info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("migr_src %s = %v/%q, want OK", row.name,
+				row.info.GetStatus(), row.info.GetDetails())
+		}
+	}
+}
+
+// The destination's twin. Its dm-clone, the clone's metadata wrapper and its
+// `:3:` connection to the source are claimed by nothing but the destination
+// side's request either. The clone survived all the same — the side's per-CN
+// linears map it, so its removal failed EBUSY and the layer stop rule held the
+// connection — but the attempt named all three as leftovers, and a SyncupDn
+// reporting them is re-sent every round for objects it must not remove. The
+// connection needs the gate as much as the clone does: with the clone kept out
+// of the chain and the connection left in, the dm-clone layer finds nothing of
+// its own to remove and disconnects the source under the live clone.
+func TestLostStoreKeepsAMigrationDestinationUntilItsSideIsKnown(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	provisionSide(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx,
+		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+	metaName := nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+	if !dmPresent(node, cloneName) || !dmPresent(node, metaName) ||
+		!connPresent(node, srcNqn) {
+		t.Fatal("the migration destination was never built")
+	}
+
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	node.protos = map[string][]byte{}
+	node.mu.Unlock()
+	restarted := startTestServer(t, node)
+
+	node.Reset()
+	reply, err := restarted.SyncupDn(ctx, dnReq(1, testSide))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	for _, call := range node.Mutations() {
+		if strings.Contains(call, cloneName) ||
+			strings.Contains(call, metaName) ||
+			strings.HasPrefix(call, "cmd nvme disconnect") {
+			t.Errorf("the SyncupDn took the live migration destination "+
+				"apart: %s", call)
+		}
+	}
+	for _, name := range []string{cloneName, metaName} {
+		if !dmPresent(node, name) {
+			t.Errorf("%s did not survive the SyncupDn", name)
+		}
+	}
+	if !connPresent(node, srcNqn) {
+		t.Errorf("the connection to %s did not survive the SyncupDn", srcNqn)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("SyncupDn code = %d (%s), want 0",
+			got, reply.GetAgentReply().GetDetails())
+	}
+	infoReply, err := restarted.GetDnInfo(ctx,
+		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if got := infoReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("dn verdict = %d (%s), want 0",
+			got, infoReply.GetAgentReply().GetDetails())
+	}
+
+	node.Reset()
+	sideReply, err := restarted.SyncupSide(ctx,
+		migrDstReq(1, pb.SpLevel_SP_LEVEL_READWRITE))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := sideReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("SyncupSide code = %d (%s), want 0",
+			got, sideReply.GetAgentReply().GetDetails())
+	}
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto") {
+			continue // SH5: the request itself is persisted
+		}
+		t.Errorf("the side's SyncupSide rebuilt what the sweep kept: %s", call)
+	}
+	dst := sideReply.GetSideInfo().GetMigrDstInfo()
+	for _, row := range []struct {
+		name string
+		info *pb.ResInfo
+	}{
+		{"target", dst.GetTargetInfo()},
+		{"dm_clone", dst.GetDmCloneInfo()},
+	} {
+		if row.info.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("migr_dst %s = %v/%q, want OK", row.name,
+				row.info.GetStatus(), row.info.GetDetails())
+		}
+	}
+}
+
+// The startup twin: the dn file survives, the source side's does not, so
+// Reconcile's own removing sweepDn meets the side by its pointer alone.
+func TestReconcileKeepsAMigrationSourceWhoseSideFileIsLost(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	if !dmPresent(node, srcName) || !subsysPresent(node, srcNqn) {
+		t.Fatal("the migration source was never built")
+	}
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	delete(node.protos, nf.LocalSidePath(testCluster, testDn, testSp, testSide))
+	node.mu.Unlock()
+	node.Reset()
+	startTestServer(t, node)
+	for _, call := range node.Mutations() {
+		if strings.Contains(call, srcName) || strings.Contains(call, srcNqn) {
+			t.Errorf("Reconcile took the live migration source apart: %s", call)
+		}
+	}
+	if !dmPresent(node, srcName) || !subsysPresent(node, srcNqn) {
+		t.Error("the migration source did not survive Reconcile")
+	}
+}
+
+// Two sides of one sp may share a DN: growing a slice keeps a DN that already
+// carries another group of the slice or of the sp allowed. A migration object
+// names (sp, migr) and no side, so the object-level pass of EITHER side
+// judges it, not only the pass of the side that plays the migration. After a
+// lost store the other side's request can come back first, and its pass met
+// the source's `d2` linear and `:3:` export with no stored request claiming
+// them: it took both from under the destination's dm-clone and replied code
+// 0, so nothing reported it. That pass has to wait for the same proof as the
+// node-level one.
+func TestLostStoreSiblingSideKeepsAMigrationSource(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	src := sweepSidePtr(testLeg, testSide)
+	sibling := sweepSidePtr(testLeg+1, testSide2)
+	if _, err := srv.SyncupDn(ctx, sweepDnReq(1, src, sibling)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	syncupSideTwoPhase(t, srv, sweepSideReq(1, src))
+	syncupSideTwoPhase(t, srv, sweepSideReq(1, sibling))
+	if _, err := srv.SyncupSide(ctx,
+		sweepSrcReq(2, src, testMigrId)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	srcName := nf.DnMigrSrcName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testDn, testSp, testMigrId)
+	if !dmPresent(node, srcName) || !subsysPresent(node, srcNqn) {
+		t.Fatal("the migration source was never built")
+	}
+
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	node.protos = map[string][]byte{}
+	node.mu.Unlock()
+	restarted := startTestServer(t, node)
+	if _, err := restarted.SyncupDn(ctx,
+		sweepDnReq(1, src, sibling)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+
+	// The sibling's request comes back first.
+	node.Reset()
+	reply, err := restarted.SyncupSide(ctx, sweepSideReq(1, sibling))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	for _, call := range node.Mutations() {
+		if strings.Contains(call, srcName) || strings.Contains(call, srcNqn) {
+			t.Errorf("the sibling's SyncupSide took the live migration "+
+				"source apart: %s", call)
+		}
+	}
+	if !dmPresent(node, srcName) || !subsysPresent(node, srcNqn) {
+		t.Error("the migration source did not survive the sibling's pass")
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("sibling SyncupSide code = %d (%s), want 0",
+			got, reply.GetAgentReply().GetDetails())
+	}
+	infoReply, err := restarted.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sibling})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := infoReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("sibling verdict = %d (%s), want 0",
+			got, infoReply.GetAgentReply().GetDetails())
+	}
+
+	// The source's own request then finds everything in place.
+	node.Reset()
+	srcReply, err := restarted.SyncupSide(ctx, sweepSrcReq(2, src, testMigrId))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := srcReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("source SyncupSide code = %d (%s), want 0",
+			got, srcReply.GetAgentReply().GetDetails())
+	}
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto") {
+			continue // SH5: the request itself is persisted
+		}
+		t.Errorf("the source's SyncupSide rebuilt what was kept: %s", call)
+	}
+}
+
+// The destination's twin of the sibling case. The sibling's pass tried
+// `dmsetup remove` on the live dm-clone (EBUSY under the destination's per-CN
+// linears) and replied with the clone, its metadata wrapper and its `:3:`
+// connection as leftovers, a reply re-sent every round until the
+// destination's own request came back.
+func TestLostStoreSiblingSideKeepsAMigrationDestination(t *testing.T) {
+	srv, node := newTestServer(t)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	ctx := context.Background()
+	dst := sweepSidePtr(testLeg, testSide)
+	sibling := sweepSidePtr(testLeg+1, testSide2)
+	if _, err := srv.SyncupDn(ctx, sweepDnReq(1, dst, sibling)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	syncupSideTwoPhase(t, srv, sweepDstReq(1, dst, testMigrId))
+	syncupSideTwoPhase(t, srv, sweepSideReq(1, sibling))
+	cloneName := nf.DnMigrFinalName(testCluster, testDn, testSp, testMigrId)
+	metaName := nf.DnMigrMetaDmName(testCluster, testDn, testSp, testMigrId)
+	srcNqn := nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId)
+	if !dmPresent(node, cloneName) || !dmPresent(node, metaName) ||
+		!connPresent(node, srcNqn) {
+		t.Fatal("the migration destination was never built")
+	}
+
+	stopTestServer(t, srv)
+	node.mu.Lock()
+	node.protos = map[string][]byte{}
+	node.mu.Unlock()
+	restarted := startTestServer(t, node)
+	if _, err := restarted.SyncupDn(ctx,
+		sweepDnReq(1, dst, sibling)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+
+	node.Reset()
+	reply, err := restarted.SyncupSide(ctx, sweepSideReq(1, sibling))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	for _, call := range node.Mutations() {
+		if strings.Contains(call, cloneName) ||
+			strings.Contains(call, metaName) ||
+			strings.HasPrefix(call, "cmd nvme disconnect") {
+			t.Errorf("the sibling's SyncupSide took the live migration "+
+				"destination apart: %s", call)
+		}
+	}
+	for _, name := range []string{cloneName, metaName} {
+		if !dmPresent(node, name) {
+			t.Errorf("%s did not survive the sibling's pass", name)
+		}
+	}
+	if !connPresent(node, srcNqn) {
+		t.Errorf("the connection to %s did not survive the sibling's pass",
+			srcNqn)
+	}
+	if got := reply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("sibling SyncupSide code = %d (%s), want 0",
+			got, reply.GetAgentReply().GetDetails())
+	}
+	infoReply, err := restarted.GetSideInfo(ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sibling})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if got := infoReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("sibling verdict = %d (%s), want 0",
+			got, infoReply.GetAgentReply().GetDetails())
+	}
+
+	node.Reset()
+	dstReply, err := restarted.SyncupSide(ctx,
+		sweepDstReq(1, dst, testMigrId))
+	if err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if got := dstReply.GetAgentReply().GetCode(); got != 0 {
+		t.Errorf("destination SyncupSide code = %d (%s), want 0",
+			got, dstReply.GetAgentReply().GetDetails())
+	}
+	for _, call := range node.Mutations() {
+		if strings.HasPrefix(call, "writeproto") {
+			continue // SH5: the request itself is persisted
+		}
+		t.Errorf("the destination's SyncupSide rebuilt what was kept: %s",
+			call)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 7. PushMigrBitmap (DN15, SH21-SH23)
 // ---------------------------------------------------------------------------

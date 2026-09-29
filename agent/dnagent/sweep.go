@@ -34,7 +34,9 @@ import (
 //     they are judged by a claim rule over every locally stored side rather
 //     than by an sp id in the name. That is what lets a FINISHED migration's
 //     dm-clone go in the pass that repoints the linear off it, without any
-//     "applied destination" memory.
+//     "applied destination" memory. Both passes judge them only once every
+//     side of their sp this node may host is locally stored: a side known
+//     by its pointer alone may be the one whose claim a lost store took.
 // ---------------------------------------------------------------------------
 
 // dnActual is one snapshot of everything on the node this agent could own,
@@ -146,7 +148,13 @@ type sideClaims struct {
 // collectClaims walks every side this agent holds state for. A side's request
 // is stored (putSide) before its converge builds anything, so nothing can be
 // exported or connected by a side whose claim is not already visible here —
-// which is what makes it safe to run this outside the node write lock.
+// which is what makes it safe to run this outside the node write lock. That
+// holds for what THIS process builds. What a side built before a restart
+// that lost the local store has no claim here until that side's request
+// comes back, which is why both scopes judge a migration object only once
+// every side of its sp this node may host is stored. Both read that set
+// (knownSides) before the claims: a side stored in between is then either
+// still missing from it, which keeps the gate shut, or visible here.
 func (s *DnAgentServer) collectClaims(
 	clusterId uint64,
 	dnId uint64,
@@ -686,9 +694,17 @@ func (s *DnAgentServer) sweepSide(
 	if !actual.dmListed {
 		remove = false
 	}
+	// spKnown is sweepDn's fullyKnown for this side's sp, and it is read
+	// BEFORE the claims: this pass holds only the node read lock, so another
+	// side's SyncupSide may store its request meanwhile. Read first, such a
+	// side is either still missing from haveState, which keeps the gate
+	// shut, or visible to the claims; read the other way round, it could
+	// open the gate on claims that miss it.
+	known, haveState, ok := s.knownSides()
+	spKnown := ok && s.spFullyKnown(plan.spId, known, haveState)
 	claims := s.collectClaims(plan.clusterId, plan.dnId)
 	wanted := sideWanted(plan)
-	chain := s.buildSideChain(ctx, plan, actual, claims, wanted, res)
+	chain := s.buildSideChain(ctx, plan, actual, claims, wanted, spKnown, res)
 	if !remove {
 		reportChain(chain, res)
 		if verdict {
@@ -773,12 +789,25 @@ func sideIdAttrs(plan *sidePlan) []any {
 // migration devices carry (sp, migr) instead and belong to no side at all, so
 // they are judged by the claim rule — which is what lets a FINISHED
 // migration's clone go in this pass rather than waiting for a SyncupDn.
+//
+// That makes them any side's to judge, not only the migrating side's: a node
+// may host two sides of one sp. So they are judged only when spKnown, the
+// proof sweepDn waits for too — every side of the sp this node may host is
+// stored. Short of it, the sp's migration devices, its :3: exports and its
+// :3: connections are left out of the chain, neither removed nor named: a
+// side known by its pointer alone may be the one playing the migration, its
+// claim taken by a lost store, and taking a source's d2 and :3: export
+// strands the destination's dm-clone. The wait ends by itself: that side's
+// Check round answers "unknown side" until its SyncupSide stores the
+// request, and from then on the Check rounds' verdicts name every unwanted
+// one, which re-drives its removal.
 func (s *DnAgentServer) buildSideChain(
 	ctx context.Context,
 	plan *sidePlan,
 	actual *dnActual,
 	claims *sideClaims,
 	wanted *dnWanted,
+	spKnown bool,
 	res *agent.SweepResult,
 ) *dnChain {
 	chain := &dnChain{}
@@ -817,14 +846,22 @@ func (s *DnAgentServer) buildSideChain(
 		}
 		return out
 	}
-	chain.clones = unclaimedMigr(common.DmKindDnMigrFinal, claims.migrDst)
-	chain.metas = unclaimedMigr(common.DmKindDnMigrMeta, claims.migrDst)
-	chain.migrSrcs = unclaimedMigr(common.DmKindDnMigrSrc, claims.migrSrcDm)
+	if spKnown {
+		chain.clones = unclaimedMigr(common.DmKindDnMigrFinal, claims.migrDst)
+		chain.metas = unclaimedMigr(common.DmKindDnMigrMeta, claims.migrDst)
+		chain.migrSrcs = unclaimedMigr(
+			common.DmKindDnMigrSrc, claims.migrSrcDm)
+	}
 
 	s.collectExports(ctx, plan.clusterId, plan.dnId, plan.spId, plan.legId,
-		plan.sideId, actual, claims, wanted, chain, &portLinks{}, res)
-	s.collectSrcConns(ctx, plan.clusterId, plan.dnId, plan.spId,
-		actual, claims, wanted, chain, res)
+		plan.sideId, actual, claims, wanted, spKnown, chain, &portLinks{}, res)
+	// The connection goes with its clone, as in sweepDn: with the clone out
+	// of the chain and the connection in, L3 would find no clone of its own
+	// to fail on and disconnect the source under the live one.
+	if spKnown {
+		s.collectSrcConns(ctx, plan.clusterId, plan.dnId, plan.spId,
+			actual, claims, wanted, chain, res)
+	}
 	return chain
 }
 
@@ -988,7 +1025,8 @@ func (s *DnAgentServer) classifyExport(
 }
 
 // collectExports adds the unwanted nvmet subsystems of one side's scope to a
-// chain: the :2: exports of its own leg and the :3: exports of its sp.
+// chain: the :2: exports of its own leg and, when spKnown (buildSideChain),
+// the :3: exports of its sp.
 func (s *DnAgentServer) collectExports(
 	ctx context.Context,
 	clusterId uint64,
@@ -999,6 +1037,7 @@ func (s *DnAgentServer) collectExports(
 	actual *dnActual,
 	claims *sideClaims,
 	wanted *dnWanted,
+	spKnown bool,
 	chain *dnChain,
 	links *portLinks,
 	res *agent.SweepResult,
@@ -1052,7 +1091,7 @@ func (s *DnAgentServer) collectExports(
 			// (cluster, dn, sp, migr) — the dn id is the exporting one, so
 			// this really is ours, and the NQN names the migration directly.
 			if parts.Ids[0] != clusterId || parts.Ids[1] != dnId ||
-				parts.Ids[2] != spId {
+				parts.Ids[2] != spId || !spKnown {
 				continue
 			}
 			if _, keep := wanted.nvmetSs[nqn]; keep {
@@ -1198,16 +1237,18 @@ func (s *DnAgentServer) dmMapsUnwanted(
 }
 
 // sweepDn is the node-level pass: everything of a side whose pointer has left
-// this DN's list, the migration objects no stored side claims, the exports no
-// stored side claims, and the allocation records the authoritative lists
-// prove orphaned.
+// this DN's list, the migration objects no stored side claims (of an sp whose
+// every known side is stored), the exports no stored side claims, and the
+// allocation records the authoritative lists prove orphaned.
 //
-// It runs under the node write lock, so neither the DN set nor the side set
-// can move under it. A side that IS in the pointer list is never touched here
+// The removing pass runs under the node write lock, so neither the DN set nor
+// the side set can move under it; the read-only one (dnVerdict) holds only
+// the read lock. A side that IS in the pointer list is never touched here
 // even when its side file is absent: after a lost --local-store the side must
 // be REBUILT from its record, and sweeping it would free the extents and send
 // the next SyncupSide through the §9.4 provisioning protocol again, zeroing
-// live data.
+// live data. Nor, while that side has no stored request, is a migration
+// object of its sp (fullyKnown below).
 func (s *DnAgentServer) sweepDn(
 	ctx context.Context,
 	st *dnState,
@@ -1231,20 +1272,40 @@ func (s *DnAgentServer) sweepDn(
 	if !actual.dmListed {
 		remove = false
 	}
-	claims := s.collectClaims(clusterId, dnId)
 
 	// knownSides is the authoritative proof: the union of every synced DN's
 	// side_pointer_list and every side this agent holds state for. It is the
 	// same set sweepOrphanRecords frees against, so the device sweep and the
 	// record sweep can never disagree about which sides may still be hosted
 	// here. With no DN synced at all nothing is authoritative and nothing is
-	// swept.
-	known, _, ok := s.knownSides()
+	// swept. It is read before the claims, as sweepSide reads it: the
+	// read-only verdict runs under the node read lock, where a side's
+	// SyncupSide may store its request meanwhile.
+	known, haveState, ok := s.knownSides()
 	if !ok {
 		res.Log(ctx,
 			slog.Uint64("cluster_id", clusterId),
 			slog.Uint64("dn_id", dnId))
 		return res
+	}
+	claims := s.collectClaims(clusterId, dnId)
+	// fullyKnown gates every migration object: the d2 linear and its :3:
+	// export, the d3 dm-clone, its d5 wrapper and its :3: connection. They
+	// name (sp, migr) and no side, and the claim rule reads stored requests
+	// only, so while a side of their sp is known by its pointer alone — the
+	// first SyncupDn after a lost --local-store, ahead of that side's own
+	// SyncupSide — "no stored side claims it" proves nothing: that side may
+	// be the one playing the migration, and taking a source's d2 and :3:
+	// export strands the destination's dm-clone. Such an object is neither
+	// removed nor named until every side of its sp in `known` is stored —
+	// the proof the clone-metadata record waits for too (cloneMetaGate), and
+	// the one the side-level pass waits for (buildSideChain) — and the wait
+	// ends by itself: that side's Check round answers "unknown side" until
+	// its SyncupSide arrives. The connection is gated with its clone, not
+	// only through L3's stop rule: with the clone out of the chain, L3 would
+	// find no clone of its own to fail on and disconnect the source under it.
+	fullyKnown := func(spId uint64) bool {
+		return s.spFullyKnown(spId, known, haveState)
 	}
 
 	chain := &dnChain{}
@@ -1264,17 +1325,17 @@ func (s *DnAgentServer) sweepDn(
 			}
 		case common.DmKindDnMigrFinal:
 			if _, held := claims.migrDst[[2]uint64{
-				dn.Ids[0], dn.Ids[1]}]; !held {
+				dn.Ids[0], dn.Ids[1]}]; !held && fullyKnown(dn.Ids[0]) {
 				chain.clones = append(chain.clones, name)
 			}
 		case common.DmKindDnMigrMeta:
 			if _, held := claims.migrDst[[2]uint64{
-				dn.Ids[0], dn.Ids[1]}]; !held {
+				dn.Ids[0], dn.Ids[1]}]; !held && fullyKnown(dn.Ids[0]) {
 				chain.metas = append(chain.metas, name)
 			}
 		case common.DmKindDnMigrSrc:
 			if _, held := claims.migrSrcDm[[2]uint64{
-				dn.Ids[0], dn.Ids[1]}]; !held {
+				dn.Ids[0], dn.Ids[1]}]; !held && fullyKnown(dn.Ids[0]) {
 				chain.migrSrcs = append(chain.migrSrcs, name)
 			}
 		}
@@ -1344,7 +1405,8 @@ func (s *DnAgentServer) sweepDn(
 				continue
 			}
 			if _, held := claims.migrSrcNqn[[2]uint64{
-				parts.Ids[2], parts.Ids[3]}]; held {
+				parts.Ids[2], parts.Ids[3]}]; held ||
+				!fullyKnown(parts.Ids[2]) {
 				continue
 			}
 		default:
@@ -1363,7 +1425,7 @@ func (s *DnAgentServer) sweepDn(
 			continue
 		}
 		if _, held := claims.migrDst[[2]uint64{
-			parts.Ids[2], parts.Ids[3]}]; held {
+			parts.Ids[2], parts.Ids[3]}]; held || !fullyKnown(parts.Ids[2]) {
 			continue
 		}
 		// The dn id inside a MigrSrcNqn is the SOURCE dn's, and the nvme host
