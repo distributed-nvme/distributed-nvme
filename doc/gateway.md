@@ -547,8 +547,8 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
 * **GW9 — candidate unit retry.** Allocating RPCs (`CreateStoragePool`,
   `GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateSpareLeg`) loop:
   scan candidates outside (`model.FindDnCandidatesAntiAffine` /
-  `FindCnCandidates` + `PickRandom`), run the STM which re-reads each pick's
-  exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
+  `FindCnCandidatesAntiAffine` + `PickRandom`), run the STM which re-reads
+  each pick's exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
   `ErrPrecondition{"candidate changed"}` when one is gone; on that error —
   and only that error — re-scan and retry until `ctx` ends (then `ABORTED`).
   `DeleteThinDevice` runs the same loop without allocating: its scan is the
@@ -750,7 +750,10 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   `dn_batch_size × RequiredCnt` candidates, random pick, picked DNs
   black-listed so every leg of the SP lands on a distinct
   DN) and CNs (`CandExtCnt = Σ ext_cnt` over all groups, `cntlr_cnt` rounds,
-  random pick, black-listed); too few at any point ⇒ `RESOURCE_EXHAUSTED`.
+  random pick, black-listed, and §6.5's two tiers applied — tier 1 of every
+  later round excludes the `location`s of the CNs already picked, tier 2
+  drops that exclusion when tier 1 finds no CN); too few at any point ⇒
+  `RESOURCE_EXHAUSTED`.
   STM, in this order: resolve; build the `bdev_conf` to store as
   `model.ResolveBdevConf(mergeSpBdevConf(request, cluster))` — merge first so
   an omitted member still inherits from the cluster, resolve second so what
@@ -853,7 +856,12 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 ### 5.5 Cntlrs and inspects (§8.6)
 
 * **CreateCntlr** — validate slot; candidate unit for one CN
-  (`CandExtCnt = Σ` all groups' ext). STM: resolve; token; slot in
+  (`CandExtCnt = Σ` all groups' ext; the scan excludes the CNs of the SP's
+  cntlrs (§6.4) and, at §6.5's tier 1, their `location`s, which the plain
+  pre-reads that plan each round take from those CNs' `CnConf`s —
+  `cnLocations`, sound outside the STM because a location never changes
+  (§8.3); tier 2 drops the location exclusion when tier 1 finds no CN).
+  STM: resolve; token; slot in
   `cntlid_slot_list` and unused ⇒ else `INVALID_ARGUMENT`; mint `cntlr_id`;
   put `Cntlr{addr_port, nvme_tr_conf (the CN's), cntlid_slot,
   primary: false, disabled: false}`; append `cntlr_id_list`; CN bookkeeping +
@@ -1344,7 +1352,17 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    from; §6.5's two-tier placement — a spare leg and a migration destination
    each land on the DN in the other failure domain, and still land (never
    `RESOURCE_EXHAUSTED`) once that DN is gone and the group's own domain is all
-   that is left; a release path whose `dn_conf`/`cn_conf` invariant key is
+   that is left; its cntlr half — over two locations of two CNs each, fifty
+   two-cntlr `CreateStoragePool`s and fifty one-cntlr pools grown by
+   `CreateCntlr` never put two cntlrs of a pool in one location, and over
+   three locations fifty three-cntlr pools and fifty two-cntlr pools grown
+   to three put each of a pool's cntlrs in a location of its own, which pins
+   that EVERY location the pool's cntlrs hold is excluded, not merely one
+   (random picks, so mutation-tested); a third and a fourth cntlr still
+   land, on CNs of their own, once both of two locations hold one; and a
+   single CN with room for two footprints refuses a two-cntlr pool
+   `RESOURCE_EXHAUSTED` rather than place both cntlrs on it; a release path
+   whose `dn_conf`/`cn_conf` invariant key is
    missing ⇒ `ABORTED`, not `NOT_FOUND` (GW7), with the whole message pinned and
    nothing torn down (`DeleteSpareLeg` for the DN half, `DeleteCntlr` for the
    CN half; `DeleteStoragePool` left that pair on 2026-09-15, releasing

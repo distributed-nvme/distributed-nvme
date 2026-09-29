@@ -54,7 +54,7 @@ Numbered for citation as "§0 #n". All decided in the 2026-09-11 interview.
    `BumpSpRev`), a deliberate always-stale probe.
 10. **No hidden RPCs, no client-side validation.** dnvctl never issues an RPC
     the operator did not type: no token auto-fetch, and no pre-read for the
-    "disabling the last enabled cntlr" warning that `gateway/cntlr.go:393-396`
+    "disabling the last enabled cntlr" warning that `gateway/cntlr.go:402-405`
     and architecture.md §8.6 anticipated — that warning is deferred until the
     gateway itself carries the hint in a reply. dnvctl also does not
     second-guess values; the gateway's §7 validation is the only validator

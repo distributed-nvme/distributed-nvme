@@ -138,6 +138,71 @@ func TestCntlrSettleWritesThroughModel(t *testing.T) {
 	}
 }
 
+// TestReactionCnScanThroughModel checks AR7's scan below the reactionOps seam,
+// against real etcd: the production adapter hands the exclusion to model's
+// two-tier FindCnCandidatesAntiAffine, not to the one-tier FindCnCandidates.
+// The fake of the reaction tests only records the argument, so an adapter that
+// dropped excludeLocs, or that called the one-tier scan, would pass every one
+// of them — and in a two-rack cluster where only the survivor's rack has room,
+// the one-tier scan would leave AR7 skipping with "no candidate" on every pass
+// instead of replacing.
+func TestReactionCnScanThroughModel(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testClusterId()
+	const (
+		cnSurvivor = "cn0:9620" // hosts the SP's surviving cntlr
+		cnOld      = "cn1:9620" // hosts the cntlr being replaced
+		cnRackMate = "cn2:9620" // shares the survivor's rack
+		cnOther    = "cn3:9620" // shares the old cntlr's rack
+	)
+	for _, cn := range []struct {
+		addr     string
+		free     uint64
+		location string
+	}{
+		{cnSurvivor, 50, "rack0"},
+		{cnOld, 45, "rack1"},
+		{cnRackMate, 40, "rack0"},
+		{cnOther, 30, "rack1"},
+	} {
+		err := cli.Put(ctx, model.CnCapacityKey(cid, cn.free, cn.addr),
+			&pb.CnCapacity{Location: cn.location})
+		if err != nil {
+			t.Fatalf("seed %s: %v", cn.addr, err)
+		}
+	}
+	ops := &modelReactionOps{cli: cli}
+	scan := func(spCnAddrs []string, excludeLocs []string) []string {
+		t.Helper()
+		cands, err := ops.findCnCandidates(
+			ctx, cid, 20, 10, []string{cnOld}, spCnAddrs, excludeLocs,
+		)
+		if err != nil {
+			t.Fatalf("findCnCandidates: %v", err)
+		}
+		addrs := make([]string, 0, len(cands))
+		for _, cand := range cands {
+			addrs = append(addrs, cand.AddrPort)
+		}
+		return addrs
+	}
+
+	// Tier 1: the survivor's rack is excluded, so its rack-mate is skipped
+	// although it has more room, and only the old cntlr's rack is left.
+	if got := scan([]string{cnSurvivor}, []string{"rack0"}); len(got) != 1 ||
+		got[0] != cnOther {
+		t.Errorf("tier 1 = %v, want [%s] alone", got, cnOther)
+	}
+	// Tier 2: both racks hold a survivor, so tier 1 finds nothing and the
+	// rescan without the location exclusion still places — on the one CN
+	// that is neither black-listed nor one of the SP's.
+	got := scan([]string{cnSurvivor, cnOther}, []string{"rack0", "rack1"})
+	if len(got) != 1 || got[0] != cnRackMate {
+		t.Errorf("tier 2 = %v, want [%s]", got, cnRackMate)
+	}
+}
+
 // TestConfCacheAgainstEtcd runs the RW21 cache over the real client: scan,
 // watch, key -> id derivation, delete, and the §7 rule that the value a reader
 // gets is the value that was written — no default is applied on the way out.

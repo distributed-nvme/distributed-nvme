@@ -386,9 +386,10 @@ func (s *Server) CreateStoragePool(
 		// as the request's own (pickDns folds dn_selector.black_list in) and
 		// grows with every pick, so every leg of the WHOLE SP lands on a
 		// distinct DN — not merely every leg of one group. ExcludeLocs stays
-		// empty: §6.5 leaves CreateStoragePool out of the two-tier rule, an SP
-		// being created has no failure domains to keep out of yet, and the
-		// scan's own one-DN-per-location rule already spreads each group.
+		// empty: §6.5 leaves CreateStoragePool's DN scans out of the two-tier
+		// rule (only its CN picks below are two-tier) — a group being created
+		// has no failure domains of its own to keep out of yet, and the scan's
+		// own one-DN-per-location rule already spreads each group.
 		dnPicks := make([][]model.Cand, 0, len(plans))
 		var dnBlack []string
 		for _, plan := range plans {
@@ -403,18 +404,23 @@ func (s *Server) CreateStoragePool(
 			dnBlack = append(dnBlack, candAddrs(picks)...)
 		}
 		// §6.5 CN scan: one pick per cntlr, each for the SP's whole
-		// footprint, each black-listed so two cntlrs never share a CN.
+		// footprint, each black-listed so two cntlrs never share a CN, and
+		// each pick's location excluded from every later pick's tier 1 so
+		// the cntlrs spread over failure domains while a domain none of them
+		// occupies yet still has a CN with room.
 		cnPicks := make([]model.Cand, 0, cntlrCnt)
-		var cnBlack []string
+		var cnBlack, cnLocs []string
 		for idx := 0; idx < cntlrCnt; idx++ {
 			pick, err := pickCn(
 				ctx, s.cli, scanCid, scanCc, footprint,
-				req.GetCnSelector(), cnBlack, nil, "create storage pool")
+				req.GetCnSelector(), cnBlack, nil, cnLocs,
+				"create storage pool")
 			if err != nil {
 				return err
 			}
 			cnPicks = append(cnPicks, pick)
 			cnBlack = append(cnBlack, pick.AddrPort)
+			cnLocs = append(cnLocs, pick.Location)
 		}
 		return s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 			spId = 0

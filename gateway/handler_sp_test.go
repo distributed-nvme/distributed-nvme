@@ -1093,8 +1093,9 @@ func TestCreateStoragePoolIdSequence(t *testing.T) {
 // TestCreateStoragePoolRefusals pins the refusals of §8.4 that write nothing:
 // a name already taken is ALREADY_EXISTS, and each RESOURCE_EXHAUSTED path —
 // too few disk nodes for the leg count, no controller node with room for the
-// SP's footprint, and a cluster that has reached MaxSpCntPerCluster — leaves
-// the SpGlobal and every node exactly as it found them (GW7, §6.5).
+// SP's footprint, fewer such controller nodes than the SP has cntlrs, and a
+// cluster that has reached MaxSpCntPerCluster — leaves the SpGlobal and every
+// node exactly as it found them (GW7, §6.5).
 func TestCreateStoragePoolRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1123,6 +1124,20 @@ func TestCreateStoragePoolRefusals(t *testing.T) {
 			dnCnt:  sptDnCnt,
 			cnCnt:  sptCnCnt,
 			cnFree: sptFootprint - 1,
+			want:   codes.ResourceExhausted,
+			msg:    "no controller node",
+		},
+		{
+			// One CN with room for two footprints, and two cntlrs to place.
+			// The CN is its own location, so the second pick's tier 1 finds
+			// nothing and tier 2 rescans without the location exclusion:
+			// only the CN black list keeps that pick off the first one's CN
+			// (§6.4, §6.5), and a create that lost it would commit both
+			// cntlrs there instead of refusing.
+			name:   "one controller node for two cntlrs",
+			dnCnt:  sptDnCnt,
+			cnCnt:  1,
+			cnFree: 2 * sptFootprint,
 			want:   codes.ResourceExhausted,
 			msg:    "no controller node",
 		},
@@ -3145,6 +3160,238 @@ func TestCreateCntlrWithoutAToken(t *testing.T) {
 		CntlidSlot:  1,
 	})
 	sptWantStale(t, err)
+}
+
+// sptRackCnFree is what sptRackEnv gives every controller node: fifty pools
+// each reserve a two-extent footprint on every CN that hosts one of their
+// cntlrs, and a CN the draws kept landing on must still have room, or a test
+// about locations would fail on a capacity refusal instead.
+const sptRackCnFree = uint64(512)
+
+// relocateCn moves one CN into another failure domain. Both copies move: the
+// CnConf that CreateCntlr's pre-read takes an existing cntlr's location from,
+// and the copy the capacity-key value carries, which is what the scan
+// dedupes and excludes by ([D5]).
+func (e *sptEnv) relocateCn(addrPort string, location string) {
+	e.t.Helper()
+	cn := e.cnConf(addrPort)
+	cn.Location = location
+	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
+	mustPut(
+		e.t, e.cli,
+		model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort),
+		&pb.CnCapacity{Location: location},
+	)
+}
+
+// sptRackEnv is rackCnt failure domains of two controller nodes each — cn-00
+// and cn-01 in rack-0, cn-02 and cn-03 in rack-1, and so on — so every cntlr
+// pick has a CN in each domain it is meant to avoid.
+func sptRackEnv(t *testing.T, rackCnt int) *sptEnv {
+	t.Helper()
+	env := sptNewEnv(t, sptDnCnt, 2*rackCnt, sptRackCnFree)
+	for idx, addrPort := range env.cnAddrs {
+		env.relocateCn(addrPort, fmt.Sprintf("rack-%d", idx/2))
+	}
+	return env
+}
+
+// cntlrPlaces is where every cntlr of the SP sits, in cntlr_id_list order —
+// pick order for the create (D-D), then CreateCntlr's appends — as its CN and
+// that CN's stored location.
+func (e *sptEnv) cntlrPlaces(spName string) ([]string, []string) {
+	e.t.Helper()
+	conf := e.spConf(spName)
+	var addrs, locs []string
+	for _, cntlrId := range conf.GetCntlrIdList() {
+		addrPort := e.cntlr(conf.GetSpId(), cntlrId).GetAddrPort()
+		addrs = append(addrs, addrPort)
+		locs = append(locs, e.cnConf(addrPort).GetLocation())
+	}
+	return addrs, locs
+}
+
+// sptDistinctCnt is how many distinct strings strs holds.
+func sptDistinctCnt(strs []string) int {
+	seen := make(map[string]struct{}, len(strs))
+	for _, str := range strs {
+		seen[str] = struct{}{}
+	}
+	return len(seen)
+}
+
+// TestCntlrsSpreadAcrossLocations pins §6.5's location anti-affinity between
+// the cntlrs of one SP: every cntlr pick after the first excludes, at tier 1,
+// the locations the SP's cntlrs already occupy, so two of them share a
+// failure domain only once no controller node outside those locations has
+// room — and then tier 2 still places, on a CN of its own (§6.4), rather than
+// refusing.
+//
+// The first fixture is two locations of two CNs each. A pick that did not
+// exclude the locations would be a fair draw between the other CN of the
+// first cntlr's location and one CN of the other location — a scan keeps one
+// candidate per location (§6.3) and PickRandom takes either — so every pool
+// would share a location with probability one half, and fifty pools that all
+// spread would be a 2^-50 accident. The three-location cases pin that the
+// exclusion is EVERY location the SP's cntlrs hold and not just one of them,
+// which two locations cannot tell apart. Every one of these pins sits behind
+// a random pick, so each was mutation-tested, five runs and five reds: the
+// exclusion removed; CreateStoragePool excluding only the previous pick's
+// location; CreateCntlr excluding only its first cntlr's.
+func TestCntlrsSpreadAcrossLocations(t *testing.T) {
+	const poolCnt = 50
+
+	t.Run("CreateStoragePool", func(t *testing.T) {
+		env := sptRackEnv(t, 2)
+		for idx := 0; idx < poolCnt; idx++ {
+			name := fmt.Sprintf("pool%02d", idx)
+			env.createSp(sptSpec{
+				name:     name,
+				cntlrCnt: 2,
+				sliceCnt: 1,
+				initExt:  1,
+			})
+			addrs, locs := env.cntlrPlaces(name)
+			if len(locs) != 2 || locs[0] == locs[1] {
+				t.Fatalf("%s: cntlrs on %v in %v, want two locations",
+					name, addrs, locs)
+			}
+		}
+	})
+
+	t.Run("CreateCntlr", func(t *testing.T) {
+		env := sptRackEnv(t, 2)
+		for idx := 0; idx < poolCnt; idx++ {
+			name := fmt.Sprintf("pool%02d", idx)
+			env.createSp(sptSpec{
+				name:     name,
+				cntlrCnt: 1,
+				sliceCnt: 1,
+				initExt:  1,
+			})
+			_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+				ClusterName: env.name,
+				SpName:      name,
+				SpRev:       &pb.SpRev{Revision: 1},
+				CntlidSlot:  1,
+			})
+			if err != nil {
+				t.Fatalf("CreateCntlr %s: %v", name, err)
+			}
+			addrs, locs := env.cntlrPlaces(name)
+			if len(locs) != 2 || locs[0] == locs[1] {
+				t.Fatalf("%s: cntlrs on %v in %v, want two locations",
+					name, addrs, locs)
+			}
+		}
+	})
+
+	// Three locations of two CNs each: the last pick must stay out of both
+	// locations the SP's cntlrs already hold. An exclusion that kept only one
+	// of them — the previous pick's, or the first cntlr's — would leave that
+	// pick a fair draw between the other CN of the location it forgot and a
+	// CN of the free one, so fifty pools would all spread by a 2^-50 accident.
+	t.Run("CreateStoragePool over three locations", func(t *testing.T) {
+		env := sptRackEnv(t, 3)
+		for idx := 0; idx < poolCnt; idx++ {
+			name := fmt.Sprintf("pool%02d", idx)
+			env.createSp(sptSpec{
+				name:     name,
+				cntlrCnt: 3,
+				sliceCnt: 1,
+				initExt:  1,
+			})
+			addrs, locs := env.cntlrPlaces(name)
+			if len(locs) != 3 || sptDistinctCnt(locs) != 3 {
+				t.Fatalf("%s: cntlrs on %v in %v, want three locations",
+					name, addrs, locs)
+			}
+		}
+	})
+
+	t.Run("CreateCntlr over three locations", func(t *testing.T) {
+		env := sptRackEnv(t, 3)
+		for idx := 0; idx < poolCnt; idx++ {
+			name := fmt.Sprintf("pool%02d", idx)
+			env.createSp(sptSpec{
+				name:     name,
+				cntlrCnt: 2,
+				sliceCnt: 1,
+				initExt:  1,
+			})
+			_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+				ClusterName: env.name,
+				SpName:      name,
+				SpRev:       &pb.SpRev{Revision: 1},
+				CntlidSlot:  2,
+			})
+			if err != nil {
+				t.Fatalf("CreateCntlr %s: %v", name, err)
+			}
+			addrs, locs := env.cntlrPlaces(name)
+			if len(locs) != 3 || sptDistinctCnt(locs) != 3 {
+				t.Fatalf("%s: cntlrs on %v in %v, want three locations",
+					name, addrs, locs)
+			}
+		}
+	})
+
+	// Tier 2: with both locations taken, a third and a fourth cntlr still
+	// land — on the CNs the SP does not use yet, never on one it does. Both
+	// allocating paths are driven, and neither result depends on the draw:
+	// tier 1 leaves the second pick a single candidate, in the other
+	// location, and a tier-2 pick draws only among CNs the SP does not use,
+	// its own being excluded by address. That makes this case a pin of
+	// CreateStoragePool's CN black list, too: the picks are all scanned
+	// before any is charged, so without the list the tier-2 rescan hands back
+	// the very CNs the first two picks took, one per location, every run.
+	// (TestCreateStoragePoolRefusals pins the same list where every CN is its
+	// own location but only one has room.)
+	t.Run("tier 2 once every location is taken", func(t *testing.T) {
+		env := sptRackEnv(t, 2)
+		env.createSp(sptSpec{
+			name:     "wide",
+			cntlrCnt: common.MaxCntlrCntPerSp,
+			sliceCnt: 1,
+			initExt:  1,
+		})
+		env.createSp(sptSpec{
+			name:     "grown",
+			cntlrCnt: 2,
+			sliceCnt: 1,
+			initExt:  1,
+		})
+		for slot := uint32(2); slot < common.MaxCntlrCntPerSp; slot++ {
+			_, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+				ClusterName: env.name,
+				SpName:      "grown",
+				SpRev:       &pb.SpRev{Revision: uint64(slot) - 1},
+				CntlidSlot:  slot,
+			})
+			if err != nil {
+				t.Fatalf("CreateCntlr slot %d: %v", slot, err)
+			}
+		}
+		for _, name := range []string{"wide", "grown"} {
+			addrs, locs := env.cntlrPlaces(name)
+			if len(addrs) != common.MaxCntlrCntPerSp {
+				t.Fatalf("%s: %d cntlrs, want %d",
+					name, len(addrs), common.MaxCntlrCntPerSp)
+			}
+			seen := make(map[string]bool, len(addrs))
+			for _, addrPort := range addrs {
+				if seen[addrPort] {
+					t.Errorf("%s: two cntlrs on %s (%v)",
+						name, addrPort, addrs)
+				}
+				seen[addrPort] = true
+			}
+			if locs[0] == locs[1] {
+				t.Errorf("%s: the first two cntlrs share %s (%v)",
+					name, locs[0], addrs)
+			}
+		}
+	})
 }
 
 // TestDeleteCntlr pins §8.6's DeleteCntlr: it refuses the primary and refuses

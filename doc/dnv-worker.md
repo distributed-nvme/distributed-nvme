@@ -525,8 +525,13 @@ MD5. **Allocator** (`architecture.md` §6.3/§6.4 verbatim). `FindDnCandidates(c
      fewer than `requiredCnt` — the DNs the caller must actually place, never
      the oversampled `candCnt` — and its candidates are merged **behind**
      tier 1's, so a distinct-domain DN tier 1 found is never dropped; the bool
-     reports whether tier 2 ran), and `FindCnCandidates(ctx, cli, cid,
-     candExt, candCnt, black, white, spCnAddrs []string)`;
+     reports whether tier 2 ran), `FindCnCandidates(ctx, cli, cid,
+     candExt, candCnt, black, white, spCnAddrs, excludeLocs []string)` —
+     `excludeLocs` seeds the `LocList` as for DNs — and its two-tier twin
+     `FindCnCandidatesAntiAffine(…, spCnAddrs, excludeLocs []string)
+     ([]Cand, bool, error)`, whose tier 2 runs when tier 1 finds no CN at all
+     (every cntlr pick places one) and relaxes the location exclusion only,
+     never `spCnAddrs`, the black list or the white list;
      `Cand{AddrPort, Location string; FreeExt uint64;
      BinIdx uint32}`; `PickRandom(cands, n)`. The scans are plain descending
      `Range`s **outside** any STM. Because the picked node's free count is
@@ -586,9 +591,11 @@ MD9. **Tests.** Key golden strings (the §5.1 example, every prefix ending in
      black/white lists, the `excludeLocs` seeding of `architecture.md` §6.5 tier 1 and the
      two-tier helper (tier 1 alone; the tier-2 rescan merged **behind** it;
      and the trigger itself — a tier 1 short of `candCnt` but not of
-     `requiredCnt` must NOT fall through); each MD6 op's happy path, every
-     listed precondition as an `ErrPrecondition`, revision bumps counted
-     exactly, and the candidate-changed retry.
+     `requiredCnt` must NOT fall through) and its CN twin (tier 1 alone; tier
+     2 on an empty tier 1, the SP's CNs and the black list still excluded and
+     the white list still binding; no rescan without an exclusion); each MD6
+     op's happy path, every listed precondition as an `ErrPrecondition`,
+     revision bumps counted exactly, and the candidate-changed retry.
 
 ---
 
@@ -1829,9 +1836,19 @@ AR7. When a cntlr has `err_epoch != 0`, `now − err_epoch ≥ cntlr_unhealthy`,
      `disabled == false`, and either `primary == false` or it is the primary
      and **no failover candidate exists** (AR5 found none — the sole-cntlr
      SP, or every other cntlr unhealthy/disabled): candidates =
-     `FindCnCandidates(candExt = the SP footprint Σ ext_cnt over all groups,
-     candCnt = cn_batch_size, black = {the old cntlr's addr_port}, spCnAddrs
-     = the SP's other cntlrs' endpoints)`; pick one; internal
+     `FindCnCandidatesAntiAffine(candExt = the SP footprint Σ ext_cnt over
+     all groups, candCnt = cn_batch_size, black = {the old cntlr's
+     addr_port}, spCnAddrs = the SP's other cntlrs' endpoints, excludeLocs =
+     those CNs' locations)` — the locations out of the pass's own snapshot
+     (MD3; a CN missing from it contributes none), the old cntlr adding none
+     of its own because it is the one leaving, so its domain is excluded only
+     when a survivor shares it (unlike AR8 step 3, whose spare also avoids
+     the failing leg's domain: excluding the old cntlr's domain here would
+     empty tier 1 in a two-domain cluster the SP's cntlrs already span, and
+     the tier-2 rescan could then put the replacement in a survivor's
+     domain), and
+     `architecture.md` §6.5's tier 2 rescanning without them when tier 1
+     finds no CN; pick one; internal
      `ReplaceCntlr(old, pick, asPrimary = old.primary)` — same `cntlid_slot`,
      `primary = true` and `settling = true` only in the sole-primary
      variant, `disabled = false`, `err_epoch = 0` (`settling` *amended
@@ -2560,7 +2577,13 @@ does).
   the load, or if the child folds that offer in);
   the AR6 parser on a real status line and on garbage; the pending rule
   before and after a grow becomes visible (data and meta units); AR7's
-  sole-primary variant and old-CN black list; AR8 cases 1 and 2, the
+  sole-primary variant, old-CN black list and tier-1 exclusion of the
+  other cntlrs' `location`s — every survivor's, which a three-cntlr case
+  pins (`TestReactionReplaceCntlrExcludesCntlrLocations`) — and, below the
+  seam, the production adapter handing that exclusion to `model`'s two-tier
+  scan over the real etcd (`TestReactionCnScanThroughModel`, `etcd_test.go`:
+  tier 1 skips the survivor's rack-mate, and tier 2 still places when both
+  racks hold a survivor); AR8 cases 1 and 2, the
   readiness and pending-spare rules, two-sides skip, `RedundNone` skip,
   `spare_list_full`, and the spare-create scan's tier-1 exclusion of the
   group's `location`s at `requiredCnt = 1`

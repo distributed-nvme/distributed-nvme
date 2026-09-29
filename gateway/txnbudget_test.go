@@ -275,9 +275,15 @@ func TestSpDrainBatchBudget(t *testing.T) {
 // What this does NOT guard is placement. The count assumes all D DNs and all C
 // CNs are distinct; two sides landing on one DN, or two cntlrs on one CN,
 // would make the transaction SMALLER, not larger, so a regression in either
-// growing black list is caught by TestCreateStoragePoolWriteSet and by
-// TestCreateStoragePoolAtTheCeiling's two distinct-node assertions, never
-// here.
+// growing black list is caught elsewhere, never here: the DN list's by
+// TestCreateStoragePoolWriteSet's and TestCreateStoragePoolAtTheCeiling's
+// distinct-node assertions, the CN list's by TestCntlrsSpreadAcrossLocations'
+// tier-2 case and TestCreateStoragePoolRefusals' one-CN case. §6.5's tier-1
+// location exclusion stands in for a lost CN list only while tier 1 still
+// finds a CN outside the picks' locations: the tier-2 case's CNs share
+// locations, and where every CN is its own location but fewer CNs have room
+// than cntlr_cnt — the one-CN case — a lost list turns the RESOURCE_EXHAUSTED
+// refusal into two cntlrs on one CN.
 const (
 	spCreateReadsFixed  = 3 // ClusterConf, SpConf (absent), SpGlobal
 	spCreateWritesFixed = 4 // SpConf, sp_id_to_name, SpRev, SpGlobal

@@ -13,10 +13,10 @@ import (
 
 // This file is the §6.5 half of the gateway: the per-operation candidate
 // compositions that run OUTSIDE every STM (model.FindDnCandidatesAntiAffine /
-// FindCnCandidates + PickRandom), the in-STM re-validation of a pick that
-// makes a scan outside a transaction safe (GW9), and the DN/CN bookkeeping
-// ledgers that keep "one write and one revision bump per node per STM" (§5.5)
-// true however many sides or cntlrs one transaction touches.
+// FindCnCandidatesAntiAffine + PickRandom), the in-STM re-validation of a pick
+// that makes a scan outside a transaction safe (GW9), and the DN/CN
+// bookkeeping ledgers that keep "one write and one revision bump per node per
+// STM" (§5.5) true however many sides or cntlrs one transaction touches.
 
 // ---------------------------------------------------------------------------
 // Candidate scans (§6.5)
@@ -43,8 +43,8 @@ func isMdRaid1(bdev *pb.BdevConf) bool {
 
 // dnPickPlan is one group's DN allocation request: how many extents each leg
 // needs, how many legs the group has, and the failure domains tier 1 of the
-// §6.5 scan keeps out. ExcludeLocs is empty for the operations §6.5 leaves on
-// the plain scan (CreateStoragePool, GrowSlice).
+// §6.5 scan keeps out. ExcludeLocs is empty for the DN scans §6.5 leaves on
+// the plain scan (CreateStoragePool's and GrowSlice's).
 type dnPickPlan struct {
 	ExtCnt      uint64
 	Legs        int
@@ -106,7 +106,10 @@ func pickDns(
 
 // pickCn draws exactly one CN with extCnt free extents (§6.5). spCnAddrs
 // names the CNs already hosting a cntlr of this SP, which model excludes so
-// that two cntlrs of one SP never share a CN (§6.4).
+// that two cntlrs of one SP never share a CN (§6.4). excludeLocs is the
+// two-tier half of the rule: tier 1 keeps the pick out of the locations the
+// SP's other cntlrs occupy, and tier 2 drops that exclusion when tier 1 finds
+// no CN, so too few failure domains alone never make it refuse.
 func pickCn(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -116,6 +119,7 @@ func pickCn(
 	selector *pb.NodeSelector,
 	black []string,
 	spCnAddrs []string,
+	excludeLocs []string,
 	what string,
 ) (model.Cand, error) {
 	// As in pickDns: the stored batch size, validated rather than defaulted.
@@ -123,13 +127,15 @@ func pickCn(
 		return model.Cand{}, errAborted("%v", err)
 	}
 	batch := int(cc.GetAllocConf().GetCnBatchSize())
-	cands, err := model.FindCnCandidates(
+	// The tier bool is dropped, as in pickDns.
+	cands, _, err := model.FindCnCandidatesAntiAffine(
 		ctx, cli, cid,
 		extCnt,
 		batch,
 		append(append([]string(nil), selector.GetBlackList()...), black...),
 		selector.GetWhiteList(),
 		spCnAddrs,
+		excludeLocs,
 	)
 	if err != nil {
 		return model.Cand{}, errAborted("%v", err)
@@ -589,6 +595,41 @@ func grpDnLocations(
 			continue
 		}
 		locs = append(locs, dn.GetLocation())
+	}
+	return locs, nil
+}
+
+// cnLocations is the failure domain of every CN addrs names: the tier-1
+// exclusion of CreateCntlr (§6.5), which keeps a new cntlr out of the
+// LOCATIONS the SP's cntlrs occupy and not merely off their CNs.
+//
+// grpDnLocations' CN twin, and sound before the transaction for the same
+// reason: `location` is immutable in v1 — CreateControllerNode defaults it to
+// addr_port and UpdateControllerNodeDisabled is the only later CN mutator
+// (§8.3) — so the pick's in-STM re-validation stays address-based. A CN whose
+// conf is gone contributes no location: it is excluded by address anyway.
+func cnLocations(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	addrs []string,
+) ([]string, error) {
+	locs := make([]string, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
+	for _, addrPort := range addrs {
+		if _, ok := seen[addrPort]; ok {
+			continue
+		}
+		seen[addrPort] = struct{}{}
+		cn := &pb.CnConf{}
+		found, err := cli.Get(ctx, model.CnConfKey(cid, addrPort), cn)
+		if err != nil {
+			return nil, errAborted("%v", err)
+		}
+		if !found {
+			continue
+		}
+		locs = append(locs, cn.GetLocation())
 	}
 	return locs, nil
 }

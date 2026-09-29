@@ -310,11 +310,12 @@ func (o *fakeReactionOps) findCnCandidates(
 	candCnt int,
 	black []string,
 	spCnAddrs []string,
+	excludeLocs []string,
 ) ([]model.Cand, error) {
 	o.mu.Lock()
 	o.queries = append(o.queries, candQuery{
 		kind: "cn", candExt: candExt, candCnt: candCnt,
-		black: black, spCn: spCnAddrs,
+		black: black, spCn: spCnAddrs, excludeLocs: excludeLocs,
 	})
 	cands, err := o.cnCands, o.scanErr
 	o.mu.Unlock()
@@ -1632,6 +1633,87 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 		t.Fatalf("spCnAddrs = %v, want the other cntlr's cn", query.spCn)
 	}
 	h.wantApplied(reactionReplaceCntlr)
+}
+
+// TestReactionReplaceCntlrExcludesCntlrLocations pins AR7's tier-1 exclusion
+// (§6.5): the cn scan carries the locations of the SP's OTHER cntlrs' CNs,
+// read from the pass's own snapshot of the node records (MD3) rather than from
+// a second etcd round-trip, so the replacement lands outside the failure
+// domains the surviving cntlrs occupy whenever tier 1 finds a CN. The old
+// cntlr adds no location of its own — it is the one leaving — so its domain is
+// excluded only through a survivor that shares it.
+func TestReactionReplaceCntlrExcludesCntlrLocations(t *testing.T) {
+	build := func(t *testing.T, locA string, locB string) *reactHarness {
+		t.Helper()
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(700)
+		h.state.CnByAddr[reactCnA] = &pb.CnConf{Location: locA}
+		h.state.CnByAddr[reactCnB] = &pb.CnConf{Location: locB}
+		h.cnCands(reactCnC)
+		return h
+	}
+	wantScan := func(t *testing.T, h *reactHarness, wantLocs []string) {
+		t.Helper()
+		calls := h.wantOps("replace")
+		if calls[0].legs[0].AddrPort != reactCnC {
+			t.Fatalf("new cn = %s", calls[0].legs[0].AddrPort)
+		}
+		queries := h.rops.allQueries()
+		if len(queries) != 1 || queries[0].kind != "cn" {
+			t.Fatalf("queries = %+v", queries)
+		}
+		// Quoted, so that an empty-string location — what a missing
+		// cn_conf would contribute through its nil-safe getter — shows up as
+		// [""] rather than printing like no location at all.
+		if fmt.Sprintf("%q", queries[0].excludeLocs) !=
+			fmt.Sprintf("%q", wantLocs) {
+			t.Errorf("exclude_locs = %q, want %q",
+				queries[0].excludeLocs, wantLocs)
+		}
+	}
+
+	t.Run("two named locations", func(t *testing.T) {
+		h := build(t, "rack-left", "rack-right")
+		h.pass()
+		wantScan(t, h, []string{"rack-left"})
+	})
+
+	t.Run("a survivor sharing the old cntlr's location", func(t *testing.T) {
+		// The old cntlr's domain is not taken out of the exclusion when a
+		// survivor holds it too: tier 1 keeps the replacement out of it.
+		h := build(t, "rack-right", "rack-right")
+		h.pass()
+		wantScan(t, h, []string{"rack-right"})
+	})
+
+	t.Run("a missing cn_conf contributes no location", func(t *testing.T) {
+		h := build(t, "rack-left", "rack-right")
+		delete(h.state.CnByAddr, reactCnA)
+		h.pass()
+		wantScan(t, h, nil)
+	})
+
+	t.Run("the default location is the addr_port", func(t *testing.T) {
+		// The §8.3 default makes the exclusion the same CN spCnAddrs already
+		// excludes, which is AR7's behavior before the two tiers covered it.
+		h := build(t, reactCnA, reactCnB)
+		h.pass()
+		wantScan(t, h, []string{reactCnA})
+	})
+
+	t.Run("the locations of every survivor", func(t *testing.T) {
+		// A third cntlr, healthy, on a fourth CN puts the failing cntlr B
+		// between two survivors: the exclusion is both of their locations,
+		// in cntlr_id order, and not the first survivor's alone.
+		const cntlrC = uint64(3)
+		const cnD = "rcn3:9620"
+		h := build(t, "rack-left", "rack-right")
+		h.state.Conf.CntlrIdList = append(h.state.Conf.CntlrIdList, cntlrC)
+		h.state.Cntlrs[cntlrC] = &pb.Cntlr{AddrPort: cnD}
+		h.state.CnByAddr[cnD] = &pb.CnConf{Location: "rack-mid"}
+		h.pass()
+		wantScan(t, h, []string{"rack-left", "rack-mid"})
+	})
 }
 
 // TestReactionReplaceSolePrimary pins §0 item 16: the primary of an SP with no

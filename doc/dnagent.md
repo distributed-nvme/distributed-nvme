@@ -777,11 +777,19 @@ CM2. Flags (`architecture.md` §13; every flag is also settable via config
      `XferNqn(cluster, sp, xfer)` carries no node id
      (`architecture.md` §4.4); and `CnMdArrayName(sp, slice, grp)`, the
      `mdadm --name` superblock name, carries neither cluster nor cn id
-     (`architecture.md` §4.3). Nor is there a placement rule to fall back on,
-     as there is for the dn: CN scans take no `ExcludeLocs` at all
-     (`architecture.md` §6.4) and §6.5 black-lists the CNs of the SP by
-     `addr_port`, so two cn agents on one kernel are simply two CNs to the
-     allocator and both cntlrs of one SP may land there.
+     (`architecture.md` §4.3). Nor is the placement rule the dn falls back on
+     enough here: `architecture.md` §6.5 keeps the cntlrs of one SP in
+     distinct `location`s only at tier 1, so two cn agents of one kernel
+     registered under one `location` can still take two cntlrs of an SP once
+     a pick finds no CN with room outside the domains that SP's cntlrs
+     already hold (which any SP with more cntlrs than the cluster has
+     domains with room reaches), an automatic cntlr replacement may land on
+     the other cn agent of the failed cntlr's kernel even at tier 1
+     (`dnv-worker.md` AR7 excludes only the surviving cntlrs' domains),
+     two left at the default `location` are simply two CNs to the allocator,
+     and where the dn's collision needs a migration in flight, the cn's needs
+     no more than an SP with more than one cntlr, or an automatic replacement
+     of any SP's cntlr.
 
 CM3. Viper binding per subcommand: `viper.BindPFlags(cmd.Flags())`,
      `viper.SetEnvPrefix("DNV_AGENT")`,

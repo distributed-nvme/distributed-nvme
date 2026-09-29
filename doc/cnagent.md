@@ -321,8 +321,11 @@ CN-CM1. The CM2 flag table gains one cn-only row (edit applied to
      The flag is not a licence to run two **cn** agents on one kernel: a
      distinct port id separates their ports and nothing else, while the
      host-facing subsystem NQN, `XferNqn` and `CnMdArrayName` carry no cn id
-     and CN placement has no location exclusion to keep two cntlrs of one SP
-     apart (CM2's cn paragraph; `architecture.md` §3.2, §6.4).
+     and CN placement keeps two cntlrs of one SP off one kernel only while
+     that kernel's cn agents share one `location`, and even then only at its
+     tier 1 and not reliably between a failed cntlr and its automatic
+     replacement — never under the default `location` (CM2's cn paragraph;
+     `architecture.md` §3.2, §6.5).
 
 CN-CM2. `runCn` mirrors `runDn` (CM4): bind viper, require the common
      values (`--capacity` is optional), resolve and floor-check

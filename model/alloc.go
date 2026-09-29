@@ -234,9 +234,12 @@ func FindDnCandidatesAntiAffine(
 // It is §6.3 without bins — one descending range over the single cn_capacity
 // prefix — plus one extra filter: spCnAddrs names the CNs that already host a
 // cntlr of the SP being served, and a second cntlr of one SP never lands on
-// the same CN. The returned Cand.BinIdx is always 0: CN capacity keys carry no
-// bin field, and a caller re-validating a pick rebuilds CnCapacityKey(cid,
-// FreeExt, AddrPort) from the other two fields.
+// the same CN. excludeLocs seeds the location set before the walk exactly as
+// in FindDnCandidates; for a cntlr pick it is the failure domains of the SP's
+// other cntlrs — for a replacement, the surviving ones (§6.5 tier 1). The
+// returned Cand.BinIdx is always 0: CN capacity keys carry no bin field, and a
+// caller re-validating a pick rebuilds CnCapacityKey(cid, FreeExt, AddrPort)
+// from the other two fields.
 func FindCnCandidates(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -246,6 +249,7 @@ func FindCnCandidates(
 	black []string,
 	white []string,
 	spCnAddrs []string,
+	excludeLocs []string,
 ) ([]Cand, error) {
 	if candCnt <= 0 {
 		return nil, nil
@@ -254,6 +258,12 @@ func FindCnCandidates(
 	whiteSet := strSet(white)
 	spSet := strSet(spCnAddrs)
 	locSet := make(map[string]struct{})
+	// Seeded, not tested inside the loop, for FindDnCandidates' reason: an
+	// excluded addr_port is skipped before its location is recorded, so
+	// excluding the SP's CNs never excluded their domains.
+	for _, location := range excludeLocs {
+		locSet[location] = struct{}{}
+	}
 	cands := make([]Cand, 0, candCnt)
 	kvs, _, err := cli.RangeDesc(ctx, CnCapacityPrefix(cid), 0)
 	if err != nil {
@@ -292,6 +302,54 @@ func FindCnCandidates(
 		}
 	}
 	return cands, nil
+}
+
+// FindCnCandidatesAntiAffine is FindCnCandidates with the two-tier location
+// rule of §6.5, for a cntlr pick: tier 1 excludes excludeLocs; when it finds
+// no CN at all, tier 2 rescans without the location exclusion. The bool
+// reports whether tier 2 was used.
+//
+// It is FindDnCandidatesAntiAffine with requiredCnt fixed at one — every
+// cntlr pick places exactly one CN — so "short" means "empty", and tier 2 has
+// no tier-1 entry to merge behind. The black and white lists and spCnAddrs
+// apply to both tiers: tier 2 relaxes the failure domain and nothing else, so
+// two cntlrs of one SP still never share a CN. An empty excludeLocs makes tier
+// 1 the plain scan, and tier 2 — which would repeat it exactly — is skipped.
+//
+// In a default deployment location defaults to addr_port (§8.3), so the SP's
+// locations ARE the addr_ports of the CNs its caller already excludes by
+// address: tier 1 is the plain scan, and tier 2 — reached only where that
+// scan was empty — re-walks the index for the same empty answer.
+func FindCnCandidatesAntiAffine(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	candExt uint64,
+	candCnt int,
+	black []string,
+	white []string,
+	spCnAddrs []string,
+	excludeLocs []string,
+) ([]Cand, bool, error) {
+	cands, err := FindCnCandidates(
+		ctx, cli, cid, candExt, candCnt, black, white, spCnAddrs, excludeLocs,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(excludeLocs) == 0 || len(cands) > 0 {
+		return cands, false, nil
+	}
+	// Tier 2 is what keeps a cluster with fewer failure domains than the SP
+	// has cntlrs able to place them at all (§6.5). The same-domain placement
+	// is visible in the stored topology and is not logged separately.
+	cands, err = FindCnCandidates(
+		ctx, cli, cid, candExt, candCnt, black, white, spCnAddrs, nil,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	return cands, true, nil
 }
 
 // PickRandom draws n distinct candidates uniformly at random (MD5,

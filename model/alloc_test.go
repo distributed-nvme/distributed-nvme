@@ -419,7 +419,7 @@ func TestFindCnCandidates(t *testing.T) {
 	// cn-b already hosts a cntlr of this SP; cn-c repeats cn-a's location;
 	// cn-e is below candExt and ends the scan.
 	cands, err := FindCnCandidates(
-		ctx, cli, cid, 20, 10, nil, nil, []string{"cn-b:9000"},
+		ctx, cli, cid, 20, 10, nil, nil, []string{"cn-b:9000"}, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidates: %v", err)
@@ -436,7 +436,7 @@ func TestFindCnCandidates(t *testing.T) {
 		ctx, cli, cid, 10, 10,
 		[]string{"cn-a:9000"},
 		[]string{"cn-a:9000", "cn-b:9000", "cn-e:9000"},
-		nil,
+		nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("FindCnCandidates: %v", err)
@@ -445,6 +445,102 @@ func TestFindCnCandidates(t *testing.T) {
 		addrsOf(cands), []string{"cn-b:9000", "cn-e:9000"},
 	) {
 		t.Errorf("lists gave %v", addrsOf(cands))
+	}
+}
+
+// TestFindCnCandidatesAntiAffine pins the cntlr half of §6.5's two tiers:
+// tier 1 seeds the SP's cntlr locations, so a CN that merely shares a domain
+// with one of the SP's CNs is skipped; tier 2 rescans without them only when
+// tier 1 found no CN at all — the one CN every cntlr pick places — and it
+// relaxes the domain and nothing else: the black list, the white list and
+// the SP's own CNs bind both tiers. A nil exclusion is the plain scan, and an
+// empty plain scan is not rescanned.
+func TestFindCnCandidatesAntiAffine(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	// cn-a hosts a cntlr of the SP; cn-b shares its domain; cn-c and cn-d are
+	// the other domain.
+	putCnCap(t, cli, cid, 50, "cn-a:9000", "rack0")
+	putCnCap(t, cli, cid, 40, "cn-b:9000", "rack0")
+	putCnCap(t, cli, cid, 30, "cn-c:9000", "rack1")
+	putCnCap(t, cli, cid, 20, "cn-d:9000", "rack1")
+	spCn := []string{"cn-a:9000"}
+
+	plain, err := FindCnCandidates(ctx, cli, cid, 20, 10, nil, nil, spCn, nil)
+	if err != nil {
+		t.Fatalf("FindCnCandidates: %v", err)
+	}
+	if !equalStrings(addrsOf(plain), []string{"cn-b:9000", "cn-c:9000"}) {
+		t.Errorf("no exclusion gave %v", addrsOf(plain))
+	}
+
+	// Tier 1 has the one CN a pick needs: the other domain's, alone.
+	cands, tier2, err := FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 20, 10, nil, nil, spCn, []string{"rack0"},
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if tier2 || !equalStrings(addrsOf(cands), []string{"cn-c:9000"}) {
+		t.Errorf("tier 1 = %v, tier2 = %v", addrsOf(cands), tier2)
+	}
+
+	// The SP already has a cntlr in each domain, so tier 1 is empty and tier
+	// 2 places anyway — in a domain the SP uses, but never on one of its CNs
+	// and never on a black-listed one.
+	cands, tier2, err = FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 20, 10,
+		[]string{"cn-d:9000"}, nil,
+		[]string{"cn-a:9000", "cn-c:9000"}, []string{"rack0", "rack1"},
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if !tier2 || !equalStrings(addrsOf(cands), []string{"cn-b:9000"}) {
+		t.Errorf("tier 2 = %v, tier2 = %v", addrsOf(cands), tier2)
+	}
+
+	// The white list binds tier 2 too: cn-c is the fuller CN of rack1 but is
+	// not white-listed, so the rescan reaches past it to cn-d. A tier 2 that
+	// dropped the white list would hand back cn-c — a cntlr placed outside
+	// the operator's cn_selector because every CN inside it sat in an
+	// excluded domain.
+	cands, tier2, err = FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 20, 10,
+		nil, []string{"cn-a:9000", "cn-b:9000", "cn-d:9000"},
+		spCn, []string{"rack0", "rack1"},
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if !tier2 ||
+		!equalStrings(addrsOf(cands), []string{"cn-b:9000", "cn-d:9000"}) {
+		t.Errorf("white-listed tier 2 = %v, tier2 = %v, want "+
+			"[cn-b:9000 cn-d:9000] from tier 2", addrsOf(cands), tier2)
+	}
+
+	// No exclusion: tier 1 is the plain scan, byte for byte, and an empty one
+	// stays empty — a second identical scan would find nothing new.
+	cands, tier2, err = FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 20, 10, nil, nil, spCn, nil,
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if tier2 || !reflect.DeepEqual(cands, plain) {
+		t.Errorf("nil excludeLocs = %v (tier2 %v), want %v",
+			cands, tier2, plain)
+	}
+	cands, tier2, err = FindCnCandidatesAntiAffine(
+		ctx, cli, cid, 100, 10, nil, nil, spCn, nil,
+	)
+	if err != nil {
+		t.Fatalf("FindCnCandidatesAntiAffine: %v", err)
+	}
+	if tier2 || len(cands) != 0 {
+		t.Errorf("an empty plain scan = %v (tier2 %v), want nothing and "+
+			"no rescan", addrsOf(cands), tier2)
 	}
 }
 

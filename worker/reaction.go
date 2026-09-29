@@ -140,7 +140,9 @@ type reactionOps interface {
 		black []string,
 		excludeLocs []string,
 	) ([]model.Cand, error)
-	// findCnCandidates is MD5 for a cntlr allocation (AR7).
+	// findCnCandidates is MD5 for a cntlr allocation (AR7). excludeLocs is
+	// §6.5's tier-1 exclusion: the failure domains of the SP's other cntlrs,
+	// which model drops again when tier 1 finds no CN.
 	findCnCandidates(
 		ctx context.Context,
 		cid uint64,
@@ -148,6 +150,7 @@ type reactionOps interface {
 		candCnt int,
 		black []string,
 		spCnAddrs []string,
+		excludeLocs []string,
 	) ([]model.Cand, error)
 	// failover is AR5.
 	failover(
@@ -299,10 +302,13 @@ func (o *modelReactionOps) findCnCandidates(
 	candCnt int,
 	black []string,
 	spCnAddrs []string,
+	excludeLocs []string,
 ) ([]model.Cand, error) {
-	return model.FindCnCandidates(
-		ctx, o.cli, cid, candExt, candCnt, black, nil, spCnAddrs,
+	// The tier bool is dropped, as in findDnCandidates.
+	cands, _, err := model.FindCnCandidatesAntiAffine(
+		ctx, o.cli, cid, candExt, candCnt, black, nil, spCnAddrs, excludeLocs,
 	)
+	return cands, err
 }
 
 func (o *modelReactionOps) failover(
@@ -1086,10 +1092,12 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	batch := int(p.cc.GetAllocConf().GetCnBatchSize())
 	// AR7: the old CN is black-listed even when the node itself is healthy —
 	// its cntlr is what failed. The SP's other cntlrs' CNs are excluded by
-	// the §6.4 rule instead, which is spCnAddrs.
+	// the §6.4 rule instead, which is spCnAddrs, and their locations by
+	// §6.5's tier 1.
 	cands, err := w.reactor().ops.findCnCandidates(
 		ctx, w.cid, footprint, batch,
 		[]string{old.GetAddrPort()}, otherCntlrAddrs(p, oldId),
+		otherCntlrLocations(p, oldId),
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionReplaceCntlr, err, ids...)
@@ -1159,6 +1167,27 @@ func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 		addrs = append(addrs, cntlr.GetAddrPort())
 	}
 	return addrs
+}
+
+// otherCntlrLocations is AR7's tier-1 exclusion (§6.5): the failure domain of
+// every CN otherCntlrAddrs names, resolved through the pass's OWN snapshot of
+// the node records — MD3 reads one CnConf per distinct Cntlr.addr_port in the
+// same transaction as the cntlrs — so it costs no further read. A CN missing
+// from that snapshot contributes no location; it is excluded by address
+// anyway. The old cntlr adds no location of its own, on purpose: it is the
+// one leaving, and the replacement is kept off the domains the SP keeps — so
+// the old cntlr's domain is excluded only when a survivor shares it.
+//
+// With the default `location = addr_port` this excludes exactly the CNs
+// spCnAddrs already does, so AR7 behaves as it always has.
+func otherCntlrLocations(p *spPass, oldId uint64) []string {
+	var locs []string
+	for _, addrPort := range otherCntlrAddrs(p, oldId) {
+		if cn, ok := p.state.CnByAddr[addrPort]; ok {
+			locs = append(locs, cn.GetLocation())
+		}
+	}
+	return locs
 }
 
 // spFootprint is the Σ ext_cnt over ALL groups of ALL slices of the SP, meta

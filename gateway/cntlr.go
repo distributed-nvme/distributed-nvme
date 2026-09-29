@@ -62,12 +62,14 @@ func resolveCntlr(
 
 // cntlrPlan is what CreateCntlr prepares outside its STM (GW8): the cluster
 // the scan runs in, the number of extents one cntlr of this SP reserves on
-// its CN, and the CNs that are already excluded from the draw.
+// its CN, the CNs that are already excluded from the draw, and their
+// locations, which tier 1 of the draw excludes as well (§6.5).
 type cntlrPlan struct {
 	Cid       uint64
 	Cc        *pb.ClusterConf
 	ExtCnt    uint64
 	SpCnAddrs []string
+	SpCnLocs  []string
 }
 
 // planCreateCntlr is CreateCntlr's "plain pre-reads for planning"
@@ -77,7 +79,8 @@ type cntlrPlan struct {
 // The size is the SP's footprint — Σ ext_cnt over every group of every slice
 // (§8.4) — which is what one cntlr's CN reserves, so the slices must be read
 // to size the scan at all. The exclusion list is the addr_port of every CN
-// that already hosts a cntlr of this SP (§6.4).
+// that already hosts a cntlr of this SP (§6.4), and the location of each of
+// those CNs is the §6.5 tier-1 exclusion (cnLocations).
 //
 // These are plain reads, not a transaction: they only shape the scan, and the
 // STM re-reads all of it authoritatively (§5.8). They can therefore observe a
@@ -135,11 +138,16 @@ func planCreateCntlr(
 		}
 		addrs = append(addrs, cntlr.GetAddrPort())
 	}
+	locs, err := cnLocations(ctx, cli, cid, addrs)
+	if err != nil {
+		return cntlrPlan{}, err
+	}
 	return cntlrPlan{
 		Cid:       cid,
 		Cc:        cc,
 		ExtCnt:    spFootprint(slices),
 		SpCnAddrs: addrs,
+		SpCnLocs:  locs,
 	}, nil
 }
 
@@ -199,7 +207,8 @@ func (s *Server) CreateCntlr(
 		}
 		cand, err := pickCn(
 			ctx, s.cli, plan.Cid, plan.Cc, plan.ExtCnt,
-			req.GetCnSelector(), nil, plan.SpCnAddrs, opCreateCntlr)
+			req.GetCnSelector(), nil, plan.SpCnAddrs, plan.SpCnLocs,
+			opCreateCntlr)
 		if err != nil {
 			return err
 		}

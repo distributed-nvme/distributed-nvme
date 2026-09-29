@@ -45,12 +45,16 @@ import (
 // at the two slices TestCreateStoragePoolWriteSet uses, on both sides: the DN
 // black list grows across groups, so the spCreateGrpsPerSlice x
 // MaxSliceCntPerSp x MaxAllocLegPerGrp sides sit on that many DISTINCT disk
-// nodes, and the CN black list grows across cntlrs, so the MaxCntlrCntPerSp
-// cntlrs sit on that many distinct controller nodes. The budget arithmetic
-// cannot check either — sharing a node would make the transaction smaller, not
-// larger — which is exactly why both are asserted here. (The placement rule
-// itself is TestCreateStoragePoolWriteSet's; what is this test's own is that
-// the two counts are still the ones the 967 was computed from.)
+// nodes, and the CN picks — the growing CN black list and, every CN here being
+// its own location, §6.5's tier-1 location exclusion as well — put the
+// MaxCntlrCntPerSp cntlrs on that many distinct controller nodes. The budget
+// arithmetic cannot check either — sharing a node would make the transaction
+// smaller, not larger — which is exactly why both are asserted here. (The DN
+// black list is pinned here and by TestCreateStoragePoolWriteSet; the CN one
+// only by TestCntlrsSpreadAcrossLocations' tier-2 case and
+// TestCreateStoragePoolRefusals' one-CN case — see the CN arm below. What is
+// this test's own is that the two counts are still the ones the 967 was
+// computed from.)
 //
 // Two fixture facts this test depends on, and they fail DIFFERENTLY. Getting
 // the DN one wrong can only refuse the create. Getting the CN one wrong can
@@ -161,22 +165,26 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 	// capacity key, CnRev — happen once for that CN instead of twice, while
 	// the Cntlr put is per cntlr_id and happens either way.
 	//
-	// Unlike the DN arm above this one sits behind a random pick with very
-	// little room in it: MaxCntlrCntPerSp cntlrs drawn from the
-	// MaxCntlrCntPerSp CNs the fixture plants still come out all-distinct in
-	// 24 of the 256 equally likely draws, so a create that lost its cnBlack
-	// list passes here about one run in ten. Mutation-checked when it was
-	// written: dropping the cnBlack append let the FIRST run pass and then
-	// failed 8 of 8 under -count=8, which is what that one in ten looks like.
-	// The DN arm has no such gap — 128 picks out of 128 DNs are never all
-	// distinct by accident.
+	// Unlike the DN arm above this one is not what pins its black list. Every
+	// CN the fixture plants is its own location with room for the SP, so
+	// §6.5's tier-1 location exclusion keeps the picks on distinct CNs by
+	// itself — tier 1 never comes up empty here — and a create that
+	// lost its cnBlack list passes here every run (mutation-checked: five runs,
+	// five passes). The list is what keeps a TIER-2 pick — one made once no
+	// CN outside the picks' locations has room — off the SP's own CNs, and
+	// two tests pin it there: dropping the cnBlack append fails
+	// TestCntlrsSpreadAcrossLocations' tier-2 case, whose CNs share
+	// locations, and TestCreateStoragePoolRefusals' one-CN case, whose single
+	// CN is its own location, every run. The DN arm has no such gap —
+	// the create's DN scans exclude no locations, and 128 picks out of 128
+	// DNs are never all distinct by accident.
 	seenCn := make(map[string]struct{}, cnCnt)
 	for _, cntlr := range get.GetCntlrList() {
 		seenCn[cntlr.GetAddrPort()] = struct{}{}
 	}
 	if len(seenCn) != cnCnt {
 		t.Fatalf("the %d cntlrs sit on %d distinct controller nodes, want "+
-			"%d: the cnBlack list of §6.5 no longer puts every cntlr of the "+
+			"%d: the §6.5 CN picks no longer put every cntlr of the "+
 			"sp on a CN of its own, and the transaction this test commits is "+
 			"smaller than the one the budget is computed for",
 			len(get.GetCntlrList()), len(seenCn), cnCnt)

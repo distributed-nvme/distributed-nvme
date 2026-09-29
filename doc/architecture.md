@@ -422,9 +422,15 @@ Per CN, once (created by the cn agent at first `SyncupCn`):
    one: the host-facing subsystem NQN is the one the user passed `CreateSubsystem` and
    every cntlr of that SP exports it (§3.3 step 6, §3.5, §11.8), `XferNqn` carries no
    node id (§4.4), and `CnMdArrayName` — the `mdadm --name` superblock name — carries
-   neither cluster nor cn id (§4.3). No placement rule separates them either: CN scans
-   take no `ExcludeLocs` (§6.4) and §6.5 black-lists the SP's CNs by `addr_port`, so
-   two cn agents on one kernel are simply two CNs to the allocator.
+   neither cluster nor cn id (§4.3). Placement does not reliably separate them either:
+   §6.5 keeps the cntlrs of one SP in distinct `location`s only at tier 1, so two cn
+   agents of one kernel registered under one `location` can still take two cntlrs of an
+   SP once a pick finds no CN with room outside the domains that SP's cntlrs already
+   hold — which any SP with more cntlrs than the cluster has domains with room reaches —
+   and an AR7 replacement, which excludes only the surviving cntlrs' domains
+   (`dnv-worker.md` AR7), can land on the other cn agent of the failed cntlr's kernel
+   even at tier 1; under the default `location = addr_port` (§8.3) they are simply two
+   CNs to the allocator.
 4. **QoS** from `SyncupCnRequest.qos_ratio` (a copy of `ClusterConf.qos_ratio`,
    §10.2). Limits are size-proportional: for a device of `size` bytes,
    `iops = size / bytes_per_iops` and `bps = size / bytes_per_bps` (a zero divisor
@@ -1088,8 +1094,9 @@ excludes DNs and not their domains — and **tier 2** is this scan with `Exclude
 
 ### 6.4 Finding CN candidates
 
-Same as §6.3 but there are no bins and no `ExcludeLocs` (no operation of §6.5 asks a CN
-scan for the two tiers): one descending scan over `{p} cn_capacity {cluster_id} `; skip
+Same as §6.3 but there are no bins: one descending scan over
+`{p} cn_capacity {cluster_id} ` with `LocList` seeded from `ExcludeLocs`, which every CN
+pick of §6.5 fills, at tier 1, with the `location`s of the SP's other cntlrs; skip
 black-listed / non-white-listed / duplicate-location CNs, plus CNs already hosting a
 cntlr of the same SP.
 
@@ -1106,7 +1113,13 @@ cntlr of the same SP.
   every leg of the SP lands on a distinct DN.
 * **CreateStoragePool — CNs.** `CandExtCnt` = sum of `ext_cnt` over **all** groups of the
   SP; `RequiredCnt = 1`, `CnCandCnt = cn_batch_size`; repeat `cntlr_cnt` times, random
-  pick, black-list the pick.
+  pick, black-list the pick. Placement is **two-tier**, as for CreateMigration below:
+  **tier 1** also excludes the `location`s of the CNs picked so far, and **tier 2**
+  rescans without that exclusion (the black list still applies) when tier 1 yields no
+  candidate — so the cntlrs of one SP land in distinct failure domains as long as a
+  domain none of them holds yet has a CN with room, and a cluster with fewer such
+  domains than `cntlr_cnt` still places them when it has `cntlr_cnt` CNs with room. The
+  picks' locations come out of the scan itself ([D5]).
 * **GrowSlice**: like the DN flow for exactly one group — the new one. Its black list is
   seeded with the request's own `NodeSelector.black_list` and nothing else, and the
   gateway never appends to it: one scan-and-pick round serves the whole group, so a
@@ -1131,7 +1144,11 @@ cntlr of the same SP.
   re-validation of the pick stays address-based.
 * **CreateSpareLeg**: one DN, same black-list seeding and the same two tiers as
   CreateMigration.
-* **CreateCntlr**: one CN, `CandExtCnt` = sum of all group `ext_cnt`s of the SP.
+* **CreateCntlr**: one CN, `CandExtCnt` = sum of all group `ext_cnt`s of the SP; the CNs
+  of the SP's cntlrs are excluded (§6.4) and their `location`s form tier 1's exclusion,
+  with the same two tiers as CreateStoragePool's CNs. The locations are read before the
+  STM, which is sound because `location` is immutable (§8.3), and the in-STM
+  re-validation of the pick stays address-based.
 
 Free-extent bookkeeping in the same STM as the pick: each leg's DN
 `free_ext_cnt -= group.ext_cnt`; each cntlr's CN `free_ext_cnt -= Σ group.ext_cnt`;
@@ -2999,8 +3016,11 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   primary of an SP with no failover candidate (the sole-cntlr SP, or every other cntlr
   unhealthy or disabled; otherwise AR5 moves the role away first) ⇒ replace it:
   internal `DeleteCntlr` (skipping the enabled check) + internal
-  `CreateCntlr` on a fresh CN with the same `cntlid_slot`, primary iff the old one was,
-  and then created settling (§2, *amended 2026-09-26*; `dnv-worker.md` AR7).
+  `CreateCntlr` on a fresh CN — never the old cntlr's CN nor one hosting another cntlr
+  of the SP, and at §6.5's tier 1 outside the `location`s of the SP's other cntlrs (the
+  old cntlr counts as none of them: it is the one leaving) — with the same
+  `cntlid_slot`, primary iff the old one was, and then created settling (§2, *amended
+  2026-09-26*; `dnv-worker.md` AR7).
 * `side_unhealthy` (600 s) and `leg_unhealthy` (1200 s) — **leg repair**, one procedure
   with two triggers (`dnv-worker.md` §11.5). The sp-worker believes a leg needs replacing
   when either (1) the leg has been unhealthy from the cntlr's perspective for
