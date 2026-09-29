@@ -909,9 +909,18 @@ wait_stas_converged() { # <h1|h2>
 }
 
 # no_test_subsystems is the §9.13 step 6 assertion: stacd disconnected
-# everything whose DLPE vanished.
+# everything whose DLPE vanished. It is deliberately not a bare
+# `[ -z "$(test_subsystems …)" ]`: subsys_json's die runs inside that
+# substitution and ends only the subshell, so a listing that failed would come
+# back empty, read as "no subsystems" and pass the wipe stage's waits at their
+# first poll on a broken ssh. The assignment carries the pipeline's status
+# (pipefail), so a failed read dies here instead, and so does a listing jq
+# cannot parse.
 no_test_subsystems() { # <h1|h2>
-	[ -z "$(test_subsystems "$1")" ]
+	local out
+	out=$(test_subsystems "$1") ||
+		die "$1: listing the dnv-it subsystems failed"
+	[ -z "$out" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1178,10 +1187,27 @@ uev_stop() {
 # starts nvmf-connect@.service on the very AEN this suite measures. Masking the
 # unit leaves exactly one connector active: the operator (cases S, M, L) or
 # stacd (cases T, H). nvme-stas 2.4.1 offers no knob of its own for this.
+#
+# do_mask reads the result back instead of announcing it. Both mask calls
+# carry `|| true` (a mask can fail, on a read-only /etc for one), so an
+# unconditional `echo masked` would pass setup with the kernel's autoconnect
+# still live for the whole run. `systemctl is-enabled` prints `masked` for a
+# masked unit and exits 1, hence its own `|| true`: the word is the evidence,
+# not the status. Anything else comes back as the two states it read
+# (`unreadable` for a read that printed nothing), and setup's comparison
+# prints them.
 do_mask() {
+	local svc tgt
 	systemctl mask nvmf-connect@.service >/dev/null 2>&1 || true
 	systemctl mask nvmf-connect.target >/dev/null 2>&1 || true
-	echo masked
+	svc=$(systemctl is-enabled nvmf-connect@.service 2>/dev/null) || true
+	tgt=$(systemctl is-enabled nvmf-connect.target 2>/dev/null) || true
+	if [ "$svc" = masked ] && [ "$tgt" = masked ]; then
+		echo masked
+	else
+		printf 'service=%s target=%s\n' "${svc:-unreadable}" \
+			"${tgt:-unreadable}"
+	fi
 }
 
 do_unmask() {
@@ -1633,7 +1659,7 @@ preflight_servers() {
 	ports_free "$S2" "${S2_PORTS[@]}"
 
 	# 4. h1/h2: nvme-tcp, nvme-cli, the host identity files, udevadm.
-	local hostsel version
+	local hostsel version unit state
 	for hostsel in h1 h2; do
 		h "$hostsel" "modprobe nvme-tcp" ||
 			die "modprobe nvme-tcp failed on $hostsel"
@@ -1675,9 +1701,20 @@ preflight_servers() {
 		*" 2."*) ;;
 		*) die "$hostsel: nvme-stas $version is not the pinned 2.x line" ;;
 		esac
-		h "$hostsel" "systemctl status stafd >/dev/null 2>&1;" \
-			"systemctl status stacd >/dev/null 2>&1; true" ||
-			die "stafd/stacd units are not resolvable on $hostsel"
+		# "Resolvable" is systemd holding a unit stas_start can restart,
+		# read positively as LoadState `loaded` (`not-found` is no unit,
+		# `masked` one systemd refuses to start). `systemctl status` cannot
+		# be the test: the start-of-run cleanup stops both daemons before
+		# this runs, and a stopped unit's status exits non-zero (3) just as
+		# a missing one's (4) does.
+		for unit in stafd stacd; do
+			state=$(hu "$hostsel" "systemctl show -p LoadState" \
+				"--value $unit.service") ||
+				die "reading the $unit unit's LoadState on $hostsel failed"
+			[ "$state" = loaded ] ||
+				die "$hostsel: the $unit unit is not resolvable" \
+					"(LoadState '$state', want loaded)"
+		done
 	done
 	log "preflight (servers) ok"
 }
@@ -1726,10 +1763,14 @@ setup() {
 	s2 "$WORK/cdc_target.sh setup $IP2" || die "cdc_target.sh setup failed"
 
 	stage hosts "mask the kernel autoconnect and mint the ghost identity"
-	local hostsel
+	local hostsel out
 	for hostsel in h1 h2; do
-		h "$hostsel" "$WORK/cdc_host.sh mask" >/dev/null ||
+		# The verb answers `masked` only when both units read back masked;
+		# otherwise it prints the two states it found, which fail here.
+		out=$(h "$hostsel" "$WORK/cdc_host.sh mask") ||
 			die "masking nvmf-connect on $hostsel failed"
+		assert_eq "$out" masked \
+			"$hostsel: masking nvmf-connect@.service and nvmf-connect.target"
 	done
 	GHOST_ID=$(hu h1 "uuidgen")
 	[ -n "$GHOST_ID" ] || die "minting the ghost hostid failed"
@@ -2198,6 +2239,28 @@ disc_ctrls_are() { # <h1|h2> <n>
 	[ "$(disc_ctrl_count "$1")" = "$2" ]
 }
 
+# data_undisturbed is §9.14 step 4's "undisturbed throughout", the
+# ss_repointed pattern applied to the full-fleet restart: it probes case H's
+# four data device nodes (h1 ssA ssB, h2 ssA ssC), dies on the first one
+# missing, then answers as the wrapped predicate. Every wait of the fleet stage
+# polls through it, so a data connection that is gone at any poll fails the
+# case — two point samples would pass one that dropped and came back between
+# them.
+data_undisturbed() { # <cmd…>
+	local pair
+	for pair in h1:ssa h1:ssb h2:ssa h2:ssc; do
+		have_dev "${pair%%:*}" "${pair#*:}" ||
+			die "${pair%%:*} lost its ${pair#*:} data connection during" \
+				"the full-fleet restart"
+	done
+	"$@"
+}
+
+# seconds_past turns a fixed hold into a wait_until predicate.
+seconds_past() { # <deadline in SECONDS>
+	[ "$SECONDS" -ge "$1" ]
+}
+
 case_ha() {
 	if [ "$STAS_RUNNING" != 1 ]; then
 		stage start "start stafd and stacd on both hosts"
@@ -2243,7 +2306,7 @@ case_ha() {
 
 	stage fleet "SIGKILL the whole fleet under live hosts and relaunch it"
 	declare -A conn_base=() scan_base=()
-	local dir i
+	local dir i held
 	for dir in "${CDC_DIRS[@]}"; do
 		conn_base[$dir]=$(connects_at "$dir")
 		scan_base[$dir]=$(scans_at "$dir")
@@ -2252,23 +2315,38 @@ case_ha() {
 		ok_or_true sig_cdc "$dir" KILL
 		unset "RUNNING[$dir]"
 	done
-	for dir in "${CDC_DIRS[@]}"; do
-		wait_until "$WAIT_SHORT" "$dir to exit" cdc_gone "$dir"
-	done
 	# The data connections are to s2's nvmet, not to the cdc fleet, so they
-	# must be untouched by the fleet dying (§9.14 step 4: data connections
-	# are undisturbed throughout the full-fleet restart).
+	# must be untouched by the fleet dying, by its relaunch and by the hosts
+	# reading its logs again (§9.14 step 4: data connections are undisturbed
+	# throughout the full-fleet restart). Every wait of this stage from here
+	# on polls through data_undisturbed, which probes all four device nodes
+	# each time.
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$WAIT_SHORT" "$dir to exit" \
+			data_undisturbed cdc_gone "$dir"
+	done
 	assert_dev h1 "h1 kept its data connections across the fleet outage" ssa ssb
 	assert_dev h2 "h2 kept its data connections across the fleet outage" ssa ssc
 	for i in 0 1 2 3; do start_cdc "$i"; done
 	for dir in "${CDC_DIRS[@]}"; do
-		wait_scan "$dir" "${scan_base[$dir]}"
+		wait_until "$WAIT_SHORT" "$dir: cdc scan complete" \
+			data_undisturbed scanned_since "$dir" "${scan_base[$dir]}"
 	done
 	for dir in "${CDC_DIRS[@]}"; do
 		wait_until "$WAIT_STAS" "$dir: both hosts reconnected after the restart" \
-			both_hosts_connected_since "$dir" "${conn_base[$dir]}"
+			data_undisturbed both_hosts_connected_since \
+			"$dir" "${conn_base[$dir]}"
 	done
 	log "  ok: stas re-established 4 x 2 discovery connections"
+	# A reconnected host reads the log afresh, and stacd acts on what it read
+	# only after the `host connected` records counted above: hold the probe
+	# for at least SETTLE more seconds so that reaction is inside the window
+	# too. SECONDS ticks on the wall clock's whole seconds, so SECONDS + SETTLE
+	# can come due just over SETTLE - 1 seconds from now; the + 1 is what makes
+	# the hold at least SETTLE.
+	held=$((SECONDS + SETTLE + 1))
+	wait_until "$((SETTLE + WAIT_SHORT))" "the ${SETTLE}s post-restart hold" \
+		data_undisturbed seconds_past "$held"
 	assert_dev h1 "h1's data connections are still up" ssa ssb
 	assert_dev h2 "h2's data connections are still up" ssa ssc
 

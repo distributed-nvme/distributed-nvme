@@ -732,8 +732,12 @@ Aborts with a message on the first failure:
    hostnqns differ; `udevadm` present.
 5. h1/h2: nvme-stas present or installable: `command -v stafd || sudo
    apt-get install -y nvme-stas` (the one step needing outbound network;
-   version logged; the package is **left installed** by cleanup). `systemctl
-   status stafd stacd` resolvable. The exact stas conf keys for "connect
+   version logged; the package is **left installed** by cleanup). Both
+   units resolvable: `systemctl show -p LoadState --value` reads `loaded`
+   for `stafd.service` and `stacd.service` (`not-found`: no unit; `masked`:
+   one systemd will not start). Not `systemctl status`: the start-of-run
+   cleanup that precedes this check stops both, and a stopped unit exits 3,
+   non-zero like a missing one's 4. The exact stas conf keys for "connect
    what the DLPEs say, disconnect what they stop saying" differ across stas
    1.x/2.x; the implementation pins them for the lab's version and the
    preflight asserts that version.
@@ -847,7 +851,11 @@ remove dnv-cdc-it-*`. Modules stay loaded.
   unmasking both at end-cleanup. nvme-stas 2.x has no knob of its own for
   this, and the rule is masked for EVERY case, not only the stas ones: it
   would otherwise connect behind case L's back the instant an AEN landed,
-  which is precisely what case L is measuring.
+  which is precisely what case L is measuring. Setup checks the mask rather
+  than trusting it: the `mask` verb reads both units back with `systemctl
+  is-enabled` and answers `masked` only when both say so (otherwise the two
+  states it read, `unreadable` for a read that printed nothing), and setup
+  stops the run on any other answer.
 * `stas_stop`: stop both daemons, restore the backups (or remove our
   confs). Cases S, M, L run with the daemons **stopped**; T starts them; H
   inherits them; teardown stops them.
@@ -1046,7 +1054,15 @@ convergence (h1 {1}, h2 {1,3}).
 4. Full-fleet restart under load: `SIGKILL` all four, relaunch, wait four
    scans; assert stas re-established 4 × 2 discovery connections (`host
    connected` lines post-restart) and data connections are undisturbed
-   throughout (uuid waits never dropped).
+   throughout: every poll of this step's exit, scan and reconnect waits,
+   and of a hold of at least 3 s after the last reconnect (a reconnected
+   host reads the log afresh, and stacd acts on what it read only after the
+   `host connected` record), first finds all four data device nodes (h1
+   {1,2}, h2 {1,3}) and fails the case on the first one missing. Two point
+   samples, after the kills and after the reconnects, would pass a
+   connection that dropped and came back between them; a flap shorter than
+   the poll interval (a second plus the probes) is below the suite's
+   resolution.
 5. Post-restart AEN path: `put` ssE (H1, `3c`, port3 — the setup-shape
    link, §9.13 step 7) → h1 auto-connects uuid 5.
 
