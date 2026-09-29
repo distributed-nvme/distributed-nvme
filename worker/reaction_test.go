@@ -1877,8 +1877,11 @@ func TestReactionLegRepairSmallestLegId(t *testing.T) {
 	}
 }
 
-// TestReactionLegRepairSkips pins the three preconditions of AR8 that only
-// log: a RedundNone group, a leg with two sides, and a full spare list.
+// TestReactionLegRepairSkips pins four preconditions of AR8 that only log — a
+// RedundNone group, a leg with two sides, a full spare list and a spare still
+// unprovisioned (step 2's wait for a pending spare is
+// TestReactionSpareReadiness's) — and the in-STM refusal of that last one,
+// which is what a second owner meets and which logs the same way.
 func TestReactionLegRepairSkips(t *testing.T) {
 	t.Run("redund none", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -1931,6 +1934,52 @@ func TestReactionLegRepairSkips(t *testing.T) {
 		h.wantOps()
 		h.wantSkipped(reactionSpareCreate, reasonSpareListFull)
 	})
+
+	// model.CreateSpareLeg refuses while a spare of the group is
+	// unprovisioned (MD6). This one is not pending — its DN went away while
+	// it zeroed, so its side carries an err_epoch — and it stays unprovisioned
+	// until that DN comes back or an operator deletes it: the pass holds the
+	// group without a scan instead of ending on the op's refusal.
+	t.Run("unprovisioned spare", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
+			LegId:  700,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: 800, AddrPort: reactDnC, ErrEpoch: h.ago(1),
+			}},
+		})
+		h.dnCands(reactDnD)
+		h.pass()
+		h.wantOps()
+		if got := len(h.rops.allQueries()); got != 0 {
+			t.Fatalf("scans = %d, want 0", got)
+		}
+		h.wantSkipped(reactionSpareCreate, reasonSpareUnprovisioned)
+	})
+
+	// Two owners planning from one snapshot: the one whose STM lands second
+	// finds the first one's spare unprovisioned. Its refusal is a `reaction
+	// skipped` carrying the model's reason — the string the hold above logs
+	// — and, like every ErrPrecondition, it ends the pass (AR2): the data
+	// group's leg is not tried after the meta group's.
+	t.Run("second owner refused in the STM", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnC)
+		h.rops.opErr = &model.ErrPrecondition{
+			Op: "CreateSpareLeg", Reason: model.ReasonSpareUnprovisioned,
+		}
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactMetaGrp {
+			t.Fatalf("create_spare = %+v, want the meta group", calls[0])
+		}
+		h.wantApplied()
+		h.wantSkipped(reactionSpareCreate, reasonSpareUnprovisioned)
+	})
 }
 
 // TestReactionLegRepairWalksPastUnrepairableLegs pins AR8's per-leg
@@ -1938,10 +1987,14 @@ func TestReactionLegRepairSkips(t *testing.T) {
 // the pass: the smallest-leg_id ordering has to run over the legs that are
 // actually repairable.
 //
-// Both conditions last: a two-sided leg has a user migration in flight (hours)
-// and a full spare list is an operator event (§0 item 17). Ending the pass on
-// either would leave every other group of the SP running degraded on a single
-// md-raid1 member for that whole time — one more failure there is data loss.
+// Every one of them lasts: a two-sided leg has a user migration in flight
+// (hours), a full spare list is an operator event (§0 item 17), a pending
+// spare stays pending for up to leg_unhealthy while it reads ERROR and for
+// good if the primary never reports it, and a spare whose DN failed while it
+// zeroed stays unprovisioned until that DN finishes zeroing it or an operator
+// deletes it. Ending the pass on any of them would leave every other group of
+// the SP running degraded on a single md-raid1 member for that whole time —
+// one more failure there is data loss.
 func TestReactionLegRepairWalksPastUnrepairableLegs(t *testing.T) {
 	t.Run("two sides does not hide a larger leg", func(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
@@ -1993,6 +2046,35 @@ func TestReactionLegRepairWalksPastUnrepairableLegs(t *testing.T) {
 			t.Fatalf("create_spare = %+v, want the data group", calls[0])
 		}
 		h.wantSkipped(reactionSpareCreate, reasonSpareListFull)
+		h.wantApplied(reactionSpareCreate)
+	})
+
+	t.Run("unprovisioned spare does not hide another group", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		// The meta group's spare never finished zeroing and its DN is gone
+		// (the side's err_epoch), so it is dead rather than pending — yet
+		// CreateSpareLeg refuses another spare for as long as it stays
+		// unprovisioned, which only its DN's return or an operator ends.
+		h.metaGrp().SpareLegList = append(h.metaGrp().SpareLegList, &pb.Leg{
+			LegId:  700,
+			LegIdx: 2,
+			SideList: []*pb.Side{{
+				SideId: 800, AddrPort: reactDnC, ErrEpoch: h.ago(9000),
+			}},
+		})
+		h.legOf(reactMetaLegA).ErrEpoch = h.ago(9000)
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+		h.dnCands(reactDnD)
+		h.pass()
+		calls := h.wantOps("create_spare")
+		if calls[0].grpId != reactDataGrp {
+			t.Fatalf("create_spare = %+v, want the data group", calls[0])
+		}
+		// The held group costs no scan: the one scan is the data group's.
+		if got := len(h.rops.allQueries()); got != 1 {
+			t.Fatalf("scans = %d, want 1", got)
+		}
+		h.wantSkipped(reactionSpareCreate, reasonSpareUnprovisioned)
 		h.wantApplied(reactionSpareCreate)
 	})
 

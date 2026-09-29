@@ -78,6 +78,13 @@ const ReasonCandidateChanged = "candidate changed"
 // §14 suite greps for one string, not two.
 const ReasonGrowPending = "grow_pending"
 
+// ReasonSpareUnprovisioned is the Reason a CreateSpareLeg carries when a spare
+// of the group still has an unprovisioned side (UnprovisionedSpare). It is
+// exported for the reason ReasonGrowPending is: worker/reaction.go logs the
+// SAME `reaction skipped reason=` string when its pass holds the group on
+// that rule before it would call the op.
+const ReasonSpareUnprovisioned = "spare_unprovisioned"
+
 // ReasonStaleRevision is the Reason the three ops the gateway shares with the
 // worker carry when their expectRev argument does not match the stored
 // SpRev.revision (gateway.md §2.2 #3). The gateway maps exactly this reason to
@@ -1111,8 +1118,9 @@ func Failover(
 // total_data for a data grow, total_meta for a meta one (AR6) — and is what
 // makes the AR6 pending rule a precondition of the transaction: the caller has
 // already found the grow not pending against its own snapshot, and this
-// re-runs the same rule against the slice as it is NOW. Without it AR6 would
-// be the one reaction whose second attempt cannot fail (AR2): during an
+// re-runs the same rule against the slice as it is NOW. Without it AR6's
+// second attempt could not fail, contrary to AR2 (whose one exception is a
+// spare create that lands after RW18's flip, CreateSpareLeg): during an
 // accepted shard-handoff overlap (§0 item 4) two owners evaluating the same
 // pre-grow snapshot both find the grow not pending, and the second would
 // append a second group for one breach — twice the DN extents and twice the CN
@@ -1721,6 +1729,16 @@ func appendTrConf(
 // is immutable in v1 (architecture.md §8.2), so what the scan read cannot have
 // gone stale. No §3.6 geometry is computed: the spare joins an existing Group
 // and inherits its ext_cnt, meta_blocks and data_blocks unchanged.
+//
+// No spare of the group may still have an unprovisioned side
+// (UnprovisionedSpare). That re-validation is what gives two owners
+// overlapping on one SP (AR2) one spare for one repair rather than two: both
+// plan the create from one snapshot, and the second STM finds the first one's
+// new spare still unprovisioned. It holds only while that spare's side is:
+// a group may keep MaxSpareLegPerGrp spares of standby capacity, and nothing
+// records which repair a spare was made for, so a second create that lands
+// after RW18's flip still commits — unless the first one filled the list or
+// the second picked the same DN.
 func CreateSpareLeg(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1760,6 +1778,9 @@ func CreateSpareLeg(
 		}
 		if len(grp.GetSpareLegList()) >= common.MaxSpareLegPerGrp {
 			return fail(opCreateSpareLeg, "spare list full")
+		}
+		if UnprovisionedSpare(grp) != nil {
+			return fail(opCreateSpareLeg, ReasonSpareUnprovisioned)
 		}
 		if grpHostsAddr(grp, dn.AddrPort) {
 			return fail(opCreateSpareLeg, "dn already in the group")
@@ -1809,6 +1830,26 @@ func CreateSpareLeg(
 		return 0, err
 	}
 	return legId, nil
+}
+
+// UnprovisionedSpare is the first spare of the group, in spare_leg_list
+// order, that has a side still unprovisioned — any side, so a spare with a
+// migration's second side counts while that side is unprovisioned — or nil.
+//
+// It lives here, not in worker/reaction.go, because AR8 step 3 applies it in
+// two places: CreateSpareLeg as the precondition AR2 requires it to re-validate
+// inside its STM, and the pass as the hold that keeps a spare stuck
+// unprovisioned — its DN gone while it zeroed — from ending every pass on the
+// op's refusal. One rule, one implementation, so the two cannot disagree.
+func UnprovisionedSpare(grp *pb.Group) *pb.Leg {
+	for _, spare := range grp.GetSpareLegList() {
+		for _, side := range spare.GetSideList() {
+			if !side.GetProvisioned() {
+				return spare
+			}
+		}
+	}
+	return nil
 }
 
 // grpHostsAddr reports whether the group already has a leg or a spare on that

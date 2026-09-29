@@ -1126,7 +1126,10 @@ its one deciding STM below.
   §6.5 two-tier rule as CreateMigration: tier 1 excludes their `location`s
   too, and tier 2 drops that exclusion — when tier 1 offers nothing for the
   one DN this RPC places — rather than leave the group unrepaired);
-  call the amended `model.CreateSpareLeg(…, expectRev = token)`. Reply
+  call the amended `model.CreateSpareLeg(…, expectRev = token)`, whose STM
+  also refuses while a spare of the group still has an unprovisioned side
+  (`FAILED_PRECONDITION` via `ErrPrecondition`, reason
+  `spare_unprovisioned` — `dnv-worker.md` AR8 step 3). Reply
   `leg_id`. (The spare's side is written `provisioned: false`.)
 * **DeleteSpareLeg** — STM: resolve; token; group + spare leg by id
   (`NOT_FOUND`); the spare has 2 sides ⇒ `FAILED_PRECONDITION`, with

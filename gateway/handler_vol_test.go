@@ -3733,13 +3733,16 @@ func TestCreateSpareLegPrefersAnotherFailureDomain(t *testing.T) {
 // RPC its own codes: model raises every one of its preconditions as
 // FAILED_PRECONDITION, so a RedundNone group and a full spare list have to be
 // judged before the op is called if they are to be INVALID_ARGUMENT and
-// RESOURCE_EXHAUSTED.
+// RESOURCE_EXHAUSTED. A spare of the group still unprovisioned is left to the
+// op, and reaches the client as exactly that FAILED_PRECONDITION.
 func TestCreateSpareLegRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		setup func(env *volEnv)
 		grpId uint64
 		want  codes.Code
+		// msg, when set, is a reason the refusal's message must carry.
+		msg string
 	}{
 		{
 			name: "the SP has no redundancy to repair",
@@ -3776,6 +3779,25 @@ func TestCreateSpareLegRefusals(t *testing.T) {
 			want:  codes.ResourceExhausted,
 		},
 		{
+			name: "a spare of the group is still unprovisioned",
+			setup: func(env *volEnv) {
+				slice := env.slice()
+				grp := volGrpOf(env.t, slice, volDataGrpId)
+				grp.SpareLegList = append(grp.SpareLegList, &pb.Leg{
+					LegId:  500,
+					LegIdx: 2,
+					SideList: []*pb.Side{{
+						SideId:   510,
+						AddrPort: volDnD,
+					}},
+				})
+				env.putSlice(slice)
+			},
+			grpId: volDataGrpId,
+			want:  codes.FailedPrecondition,
+			msg:   model.ReasonSpareUnprovisioned,
+		},
+		{
 			name:  "unknown group",
 			grpId: 999999,
 			want:  codes.NotFound,
@@ -3797,7 +3819,10 @@ func TestCreateSpareLegRefusals(t *testing.T) {
 					GrpId:       tc.grpId,
 					DnSelector:  volDnSelector(volDnC),
 				})
-			volWantCode(t, err, tc.want)
+			msg := volWantCode(t, err, tc.want)
+			if !strings.Contains(msg, tc.msg) {
+				t.Errorf("message %q does not carry %q", msg, tc.msg)
+			}
 			env.wantUntouched(before, beforeRev)
 			if got := env.slice(); !proto.Equal(got, sliceBefore) {
 				t.Errorf("the slice moved on a refusal: %v", got)

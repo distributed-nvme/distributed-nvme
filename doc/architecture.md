@@ -2154,7 +2154,10 @@ fully-skippable dm-clone regions.
 **CreateSpareLeg** — Errors: `NOT_FOUND` `grp_id` not in the SP; `INVALID_ARGUMENT` the
 group is RedundNone; `RESOURCE_EXHAUSTED` at `MaxSpareLegPerGrp` or no DN (§6.5);
 `FAILED_PRECONDITION` at `sp_level ≥ SP_LEVEL_NO_THINPOOL` ("sp level suppresses
-reactions", §8.5).
+reactions", §8.5), and while a spare of the group still has a side that is not
+`provisioned` ("spare_unprovisioned"; for as long as that holds, the refusal keeps two
+overlapping sp-worker owners from creating two spares for one repair — `dnv-worker.md`
+AR2 and AR8 step 3).
 Action: STM: new `Leg{leg_id, leg_idx = next unused idx in the group, one Side}`
 (that `Side` written `provisioned = false`, [D15]) appended to `spare_leg_list`; DN
 bookkeeping + `DnRev`; bump `SpRev`. Every cntlr
@@ -4497,3 +4500,9 @@ exists.
   replaced leg in `spare_leg_list` and `MaxSpareLegPerGrp` = 2, so after two repairs
   of one group the worker can only log `reaction skipped` until an operator runs
   `DeleteSpareLeg` (`dnv-worker.md` §11.5).
+* **A spare whose DN fails while it zeroes blocks its group's next spare.**
+  `CreateSpareLeg` refuses while any spare of the group has a side that is not
+  `provisioned` (§8.12), so the worker's leg repair cannot create a spare for that
+  group: it leaves a failed leg there in place — unless another spare of the group is
+  or becomes ready to switch in — until that DN comes back and finishes zeroing the
+  spare or an operator runs `DeleteSpareLeg` (`dnv-worker.md` AR8 step 3, Appendix B).

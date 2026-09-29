@@ -6,7 +6,12 @@
 // reported, decides ONE action (AR2), and forgets everything again. Two
 // owners overlapping on one SP therefore cannot apply an action twice — every
 // action is a model op that re-validates its own preconditions inside its STM
-// (MD6/MD7), and the loser gets model.ErrPrecondition back.
+// (MD6/MD7), and the loser gets model.ErrPrecondition back. The one exception
+// is a spare create: model.CreateSpareLeg refuses it while a spare of the
+// group is still unprovisioned, but a loser whose STM lands after RW18 has
+// flipped the winner's spare can create a second one — when the group held
+// no spare before (else the winner's create filled the list) and the two
+// picked different DNs (AR2).
 //
 // Two spec ambiguities are resolved here, both in one place so a reader does
 // not have to reconstruct them:
@@ -22,11 +27,14 @@
 //     and no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and
 //     all three can hold indefinitely — a grow deferred on the CN, the §8.5
 //     ceiling — so ending the pass would disable AR7 and AR8 for as long as
-//     they do); and AR8's leg_has_two_sides, spare_list_full and step 2's
-//     "wait for the pending spare", which move the scan to the next
-//     candidate leg (a migration lasts hours, only an operator frees a spare
-//     slot, §0 item 17, and a spare that cannot be connected stays pending
-//     for up to leg_unhealthy — one that is never reported at all, for good).
+//     they do); and AR8's leg_has_two_sides, spare_list_full,
+//     spare_unprovisioned and step 2's "wait for the pending spare", which
+//     move the scan to the next candidate leg (a migration lasts hours, only
+//     an operator frees a spare slot, §0 item 17, a spare whose DN failed
+//     while it zeroed stays unprovisioned until that DN finishes zeroing it
+//     or an operator deletes it, and a spare that cannot be connected stays
+//     pending for up to leg_unhealthy — one that is never reported at all,
+//     for good).
 //     Everything else ends the pass as AR2 says: every
 //     model.ErrPrecondition, every empty allocator scan and every transient
 //     op failure.
@@ -80,6 +88,10 @@ const (
 	reasonSparePending = "spare_pending"
 	// reasonSpareListFull is AR8 step 4: only an operator frees a slot.
 	reasonSpareListFull = "spare_list_full"
+	// reasonSpareUnprovisioned is AR8 step 3's hold: a spare of the group
+	// still has an unprovisioned side, which model.CreateSpareLeg refuses.
+	// It is model's string, for the reason reasonGrowPending is.
+	reasonSpareUnprovisioned = model.ReasonSpareUnprovisioned
 	// reasonRedundNone is AR8's "RedundNone groups only log" (AR9).
 	reasonRedundNone = "redund_none"
 	// reasonTwoSides is AR8's "a leg with two sides has a user migration in
@@ -1222,14 +1234,17 @@ type repairTarget struct {
 // tryLegRepair is AR8: one step per pass on the group of the unhealthy leg
 // with the smallest leg_id. It reports whether the pass ends here.
 //
-// AR8's three holds — "the leg has exactly one side" (this leg), step 2's
-// wait for a pending spare and step 4's full spare list (this group) — are
+// AR8's four holds — "the leg has exactly one side" (this leg), step 2's
+// wait for a pending spare, step 4's full spare list and step 3's spare still
+// unprovisioned (this group) — are
 // part of the candidate test, not reasons to end the pass. Each is a property of ONE leg
 // or ONE group, and each can hold for a very long time: a two-sided leg has a
 // user migration in flight (hours), a spare that cannot be connected stays
 // pending until its leg has been unhealthy for leg_unhealthy (and one the
-// primary never reports stays pending for good), and only DeleteSpareLeg by
-// an operator frees a spare slot (§0 item 17). Ending the pass on any of them
+// primary never reports stays pending for good), only DeleteSpareLeg by
+// an operator frees a spare slot (§0 item 17), and a spare whose DN failed
+// while it zeroed stays unprovisioned until that DN finishes zeroing it or an
+// operator deletes it. Ending the pass on any of them
 // would leave every OTHER group of the SP degraded on a single md-raid1 member
 // for exactly as long, so a further failure there is data loss. Each is still
 // recorded per leg for visibility (§14.11 case D step 9 greps
@@ -1286,6 +1301,23 @@ func (w *spWorker) tryLegRepair(ctx context.Context, p *spPass) bool {
 			// candidate rather than stranding the rest of the SP behind it.
 			w.reactionSkipped(
 				ctx, reactionSpareCreate, reasonSpareListFull, ids...,
+			)
+			continue
+		}
+		if spare := model.UnprovisionedSpare(target.grp); spare != nil {
+			// model.CreateSpareLeg refuses while a spare of the group has a
+			// side still unprovisioned (MD6). The unprovisioned spares that
+			// get here are the ones step 2 does not wait for — a side with
+			// an err_epoch, its DN unreachable or reporting ERROR while it
+			// zeroed, say, or a second side a migration gave the spare — and
+			// the first kind stays unprovisioned until its DN finishes zeroing
+			// it or an operator deletes it. That is an event on THIS group, so
+			// the scan goes on to the next candidate rather than ending the
+			// pass on the op's refusal, and runs no candidate scan the op
+			// could only throw away.
+			w.reactionSkipped(
+				ctx, reactionSpareCreate, reasonSpareUnprovisioned,
+				withAttr(ids, slog.Uint64("spare_leg_id", spare.GetLegId()))...,
 			)
 			continue
 		}
@@ -1396,6 +1428,9 @@ func readySpare(grp *pb.Group, info *pb.CntlrInfo) *pb.Leg {
 // case 1 was. Dead is a current state, not an identity: a parked leg whose DN
 // comes back, or that recovers and fails again, is pending again by the same
 // tests, and holds its group's next repair until it reads OK or times out.
+// A dead spare that is still unprovisioned — its DN failed while it zeroed —
+// makes no room for another: step 3 holds the group instead (tryLegRepair,
+// model.UnprovisionedSpare).
 //
 // The leg's err_epoch is held to AR8 case 1's threshold (legNeedsRepair)
 // rather than read as a verdict, because HL2 probes spares too: the moment a

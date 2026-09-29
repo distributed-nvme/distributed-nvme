@@ -64,7 +64,10 @@ Appendix B carries the cross-component one as **[D17]**.
    registration, so it drives nothing during its first grace window, and
    old and new owners switch within seconds of each other. The residual
    overlap/gap is accepted: every `Syncup*` is idempotent under the agents'
-   revision gate, every etcd reaction is STM-guarded, and an `err_epoch`
+   revision gate, every etcd reaction is STM-guarded (save a second
+   owner's spare create that lands after RW18 has flipped the first
+   owner's spare, which can leave its group a spare no failure asked for:
+   AR2, Appendix B), and an `err_epoch`
    the overlap leaves stale is corrected by the owner's first verdict after
    it next loads the record — within a pass and a round for a side, a leg
    or a cntlr, within a minute and a round for a DN or a CN — though at
@@ -564,7 +567,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM`, re-validates every
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥` (`old.settling && cntlr_unhealthy > primary_unhealthy ? cntlr_unhealthy : primary_unhealthy`) — "primary_unhealthy not reached" resp. "cntlr_unhealthy not reached for a settling primary" (AR5, *amended 2026-09-26*); `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; set `new.settling`, clear `old.settling` (HL2); bump `SpRev` (§10.4) |
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
      | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in; `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
-     | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
+     | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; no spare of the group has a side still `provisioned == false` — AR8 step 3's hold re-applied in-STM, which fails a second owner's create for one repair while the first owner's spare is still unprovisioned (AR2; `ErrPrecondition` "spare_unprovisioned"); `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; each has exactly one side ("spare leg has no single side" / "target leg has no single side": a second side is a migration's destination, and a migrating leg is neither promoted nor parked, `architecture.md` §8.12); the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
      | `DrainSpSlice(cid, shard, spId, spName, sliceId, cc) (removed int, sliceDone bool)` | the drain checks; `cc` valid (`architecture.md` §7, for `MaintainDnCapacity`'s ladder); `cntlr_id_list` empty; the slice key exists | pop up to `MaxDelGrpPerTxn` groups from the TAIL of `data_grp_list`, then of `meta_grp_list`; per DISTINCT DN every popped side's `group.ext_cnt` back, pointer out, capacity, one `DnRev` bump (a DN whose record is gone is skipped); if both lists are now empty delete the `Slice` key AND remove the id from `slice_id_list` in the same STM, else put the shrunken `Slice`; bump `SpRev`. A slice id no longer listed is a no-op |
@@ -1708,16 +1711,24 @@ AR2. **One action per SP per pass** — "action" meaning a *reaction*
      `meta_ladder_cap` and `no_data_group` (each can hold indefinitely — a
      grow deferred on the CN, the `architecture.md` §8.5 ceiling — and must not disable
      AR7/AR8 for the duration); and AR8's `leg_has_two_sides`,
-     `spare_list_full` and step 2's wait for a pending spare
-     (`spare_pending`), which move the scan to the next candidate leg — a
-     spare that cannot be connected stays pending until its leg has been
-     unhealthy for `leg_unhealthy`, and one the primary never reports has no
-     bound at all. *Amended 2026-09-23:* the pending wait used to end the
-     pass, on the premise that it clears within one provisioning.
+     `spare_list_full`, step 3's `spare_unprovisioned` and step 2's wait for
+     a pending spare (`spare_pending`), which move the scan to the next
+     candidate leg — a spare that cannot be connected stays pending until its
+     leg has been unhealthy for `leg_unhealthy`, one the primary never
+     reports has no bound at all, and step 3's hold on a spare whose DN
+     failed while it zeroed has none either. *Amended 2026-09-23:* the pending
+     wait used to end the pass, on the premise that it clears within one
+     provisioning.
      Everything else ends the pass as before: every `ErrPrecondition`, every
      empty allocator scan and every transient op failure. Two
-     owners overlapping on one SP (§0 item 4) cannot apply an action twice:
-     the second STM fails its precondition.
+     owners overlapping on one SP (§0 item 4) cannot apply an action twice —
+     the second STM fails its precondition — with one exception: a spare
+     create. `CreateSpareLeg` refuses one while a spare of the group still
+     has an unprovisioned side (MD6), but nothing records which repair a
+     spare was made for, so a second owner's create that lands only after
+     RW18 has flipped the side of the first owner's spare can commit — when
+     the group held no spare before the first create (otherwise that create
+     filled the list) and the two owners picked different DNs (Appendix B).
 
 AR3. **Suppression.** No reaction runs for an SP with
      `sp_level ≥ SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
@@ -1939,7 +1950,16 @@ AR8. **Triggers.** A leg in a group's `leg_list` needs repair when either
         this step places, never when it merely falls short of `candCnt`
         (`architecture.md` §6.5), so a cluster with one failure domain still
         repairs; pick one; the new side provisions (§9.4), RW18 flips it, the
-        cntlrs connect to it, and a later pass finds it ready;
+        cntlrs connect to it, and a later pass finds it ready. The step is
+        held — no scan, no op — while a spare of the group still has an
+        unprovisioned side, which `CreateSpareLeg` refuses (MD6): the pass
+        logs `reaction skipped` (`spare_unprovisioned`) and goes on to the
+        next candidate leg (AR2). Step 2 waits for such a spare while it
+        provisions; the ones this hold catches are those step 2 does not wait
+        for, such as one whose DN failed while it zeroed (its side's
+        `err_epoch`), which holds the step until that DN finishes zeroing it
+        or an operator deletes it (Appendix B), or one a migration gave a
+        second side that is not provisioned yet;
      4. else `reaction skipped` (`spare_list_full`): after two repairs of one
         group the list holds two parked legs, and only `DeleteSpareLeg` by an
         operator frees a slot (Appendix B) — and it refuses a parked leg
@@ -2585,7 +2605,13 @@ does).
   tier 1 skips the survivor's rack-mate, and tier 2 still places when both
   racks hold a survivor); AR8 cases 1 and 2, the
   readiness and pending-spare rules, two-sides skip, `RedundNone` skip,
-  `spare_list_full`, and the spare-create scan's tier-1 exclusion of the
+  `spare_list_full`, the `spare_unprovisioned` hold (no scan, its own group
+  only) and a second owner's in-STM refusal logged under the same reason
+  (in `model`, `TestCreateSpareLegRefusesWhileASpareIsPending`: two owners
+  planning from one snapshot, the second create refused, with nothing
+  written, while the first spare's side is unprovisioned, and the same pick
+  committing once it is provisioned),
+  and the spare-create scan's tier-1 exclusion of the
   group's `location`s at `requiredCnt = 1`
   (`TestReactionSpareCreateExcludesGroupLocations`); the AR1 gate refusing
   a pass on a missing and on an invalid stored conf.
@@ -3707,7 +3733,10 @@ durable, so nothing is lost — convergence is delayed, not skipped
   deletes the peer's key; the peer sees it (VW8 c), fences and rejoins as a
   fresh identity; in between, both drive the same shards — bounded by the
   grace window plus one round, harmless to agents (idempotent syncups),
-  but not prevented. In etcd every reaction is STM-guarded, but a health
+  but not prevented. In etcd every reaction is STM-guarded — save a second
+  owner's spare create that lands after RW18 has flipped the first owner's
+  spare, which can leave the group a spare no failure asked for (AR2, and
+  the bullet below on a spare whose DN fails while it zeroes) — but a health
   epoch is a reaction input, and one the other driver left stale is
   corrected by the owner's first verdict after it next loads the record
   (HL3): within a pass and a round for a side, a leg or a cntlr — though
@@ -3732,6 +3761,16 @@ durable, so nothing is lost — convergence is delayed, not skipped
   holds that group only; the scan repairs the others (AR2). A spare the
   primary never reports at all stays pending with no bound, which is older
   than the amendment.
+* **A spare whose DN fails while it zeroes blocks its group's next spare
+  until that DN finishes zeroing it or an operator deletes it.**
+  `CreateSpareLeg` refuses while any spare of the group has an
+  unprovisioned side (MD6), so AR8 step 3 cannot replace it; the pass holds
+  that group only (`spare_unprovisioned`, AR2). The same refusal fails a
+  second owner's create for one repair only until RW18 flips the first
+  owner's spare: nothing records which repair a spare was made for, so a
+  second owner whose create lands after that flip — on a group that held no
+  spare before the first create, and on a DN other than the first owner's —
+  leaves the group a spare no failure asked for.
 * **A primary that never settles is failed over or replaced no earlier
   than `cntlr_unhealthy`**, unless it is disabled (AR5, HL2; *added
   2026-09-26*) — nor failed over before `primary_unhealthy`, AR5 taking the

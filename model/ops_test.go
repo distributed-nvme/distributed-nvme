@@ -1687,9 +1687,10 @@ func TestGrowSliceData(t *testing.T) {
 }
 
 // TestGrowSliceRefusesASecondGrowForOneBreach is AR2's "two owners overlapping
-// on one SP cannot apply an action twice: the second STM fails its
-// precondition", applied to the one reaction whose STM used to have no
-// re-validating precondition of its own.
+// on one SP cannot apply an action twice — the second STM fails its
+// precondition", applied to GrowSlice, whose STM used to have no re-validating
+// precondition of its own (nor did CreateSpareLeg's, whose partial one
+// TestCreateSpareLegRefusesWhileASpareIsPending pins).
 //
 // Both owners evaluate the SAME pre-grow snapshot during an accepted
 // shard-handoff overlap (§0 item 4): both find AR6's pending rule false, both
@@ -2426,7 +2427,17 @@ func TestCreateSpareLeg(t *testing.T) {
 	if got := env.spRev(); got != before.spRev+1 {
 		t.Errorf("SpRev: got %d, want %d", got, before.spRev+1)
 	}
-	// A second spare on a different DN fills the list; a third is refused.
+	// A second spare on a different DN fills the list once the first one's
+	// side is provisioned (an unprovisioned spare holds the next create
+	// back); a third is refused.
+	if _, err := FlipProvisioned(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		[]SideRef{{
+			SliceId: opsSliceId, LegId: legId, SideId: side.GetSideId(),
+		}},
+	); err != nil {
+		t.Fatalf("FlipProvisioned: %v", err)
+	}
 	if _, err := CreateSpareLeg(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, opsDataGrpId, env.dnCand(opsDnD), env.cc,
@@ -2441,6 +2452,77 @@ func TestCreateSpareLeg(t *testing.T) {
 	precondition := wantPrecondition(t, err, opCreateSpareLeg)
 	if precondition.Reason != "spare list full" {
 		t.Errorf("Reason: got %q", precondition.Reason)
+	}
+}
+
+// TestCreateSpareLegRefusesWhileASpareIsPending pins AR8 step 3's guard inside
+// the STM (AR2): two owners overlapping on one SP plan a spare for the same
+// repair from ONE snapshot, in which the group has none, and each picks a DN of
+// its own. The first create commits; the second must fail its precondition
+// while the first spare's side is still unprovisioned, and write nothing,
+// rather than add a second spare no failure asked for. The refusal lifts once
+// that side is provisioned — a group may hold MaxSpareLegPerGrp spares of
+// standby capacity — so the same pick then commits.
+func TestCreateSpareLegRefusesWhileASpareIsPending(t *testing.T) {
+	env := newOpsEnv(t)
+	ownerA := env.dnCand(opsDnC)
+	ownerB := env.dnCand(opsDnD)
+	legId, err := CreateSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, opsDataGrpId, ownerA, env.cc,
+	)
+	if err != nil {
+		t.Fatalf("CreateSpareLeg (owner A): %v", err)
+	}
+	spRev := env.spRev()
+	conf := env.spConf()
+	dnD := env.dn(opsDnD)
+	dnDRev := env.dnRev(opsDnD)
+	_, err = CreateSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, opsDataGrpId, ownerB, env.cc,
+	)
+	precondition := wantPrecondition(t, err, opCreateSpareLeg)
+	if precondition.Reason != ReasonSpareUnprovisioned {
+		t.Errorf("Reason: got %q, want %q",
+			precondition.Reason, ReasonSpareUnprovisioned)
+	}
+	spares := findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
+	if len(spares) != 1 || spares[0].GetLegId() != legId {
+		t.Fatalf("spares: got %v, want owner A's leg %d alone", spares, legId)
+	}
+	if got := env.spRev(); got != spRev {
+		t.Errorf("SpRev: got %d, want %d", got, spRev)
+	}
+	if got := env.spConf(); !proto.Equal(got, conf) {
+		t.Errorf("SpConf moved on a refusal: %v", got)
+	}
+	if got := env.dn(opsDnD); !proto.Equal(got, dnD) {
+		t.Errorf("dn-d moved on a refusal: %v", got)
+	}
+	if got := env.dnRev(opsDnD); got != dnDRev {
+		t.Errorf("dn-d rev: got %d, want %d", got, dnDRev)
+	}
+	// RW18's flip of the spare's side is what lifts the refusal.
+	if _, err := FlipProvisioned(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		[]SideRef{{
+			SliceId: opsSliceId,
+			LegId:   legId,
+			SideId:  spares[0].GetSideList()[0].GetSideId(),
+		}},
+	); err != nil {
+		t.Fatalf("FlipProvisioned: %v", err)
+	}
+	if _, err := CreateSpareLeg(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, opsDataGrpId, ownerB, env.cc,
+	); err != nil {
+		t.Fatalf("CreateSpareLeg (owner B) after the flip: %v", err)
+	}
+	spares = findGroup(env.slice(), opsDataGrpId).GetSpareLegList()
+	if len(spares) != 2 {
+		t.Errorf("spares after the flip: got %d, want 2", len(spares))
 	}
 }
 
@@ -2464,13 +2546,33 @@ func TestCreateSpareLegPreconditions(t *testing.T) {
 			reason: "dn already in the group",
 		},
 		{
+			// Provisioned, or the unprovisioned-spare refusal would answer
+			// first.
 			name:  "dn already a spare of the group",
 			grpId: opsDataGrpId,
 			setup: func(env *opsEnv) Cand {
-				env.addSpare(false)
+				env.addSpare(true)
 				return env.dnCand(opsDnC)
 			},
 			reason: "dn already in the group",
+		},
+		{
+			// A migration off a spare gives it a second side, unprovisioned
+			// until the destination is zeroed: ANY side of a spare counts.
+			name:  "a spare's second side is unprovisioned",
+			grpId: opsDataGrpId,
+			setup: func(env *opsEnv) Cand {
+				env.addSpare(true)
+				slice := env.slice()
+				spare := findLeg(slice, opsSpareLeg)
+				spare.SideList = append(spare.SideList,
+					opsSide(opsSpareSide+1, opsDnD, false))
+				mustPut(env.t, env.cli,
+					SliceKey(env.cid, opsSpId, opsSliceId), slice)
+				env.putDn("dn-e:9000", 704, 4, opsDnFree)
+				return env.dnCand("dn-e:9000")
+			},
+			reason: ReasonSpareUnprovisioned,
 		},
 		{
 			name:  "group is not md-raid1",

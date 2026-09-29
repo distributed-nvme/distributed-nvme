@@ -3583,7 +3583,9 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
   migration in flight, which AR8 leaves alone, `leg_has_two_sides`; it has
   no available path once the dst's DN is dead, or the src's before the
   dst's path is `optimized`, `architecture.md` §11.2 dst step 5), a full
-  spare list (`spare_list_full`, AR8 step 4), an SP whose reactions are
+  spare list (`spare_list_full`, AR8 step 4), a spare of the group left
+  unprovisioned on a DN that failed while it zeroed (`spare_unprovisioned`,
+  step 3), an SP whose reactions are
   suppressed (AR3), no DN to place a spare on (step 3), or a pending spare
   that step 2 keeps waiting for (one the primary never reports). The retry
   then runs until the DN returns or an operator acts.
