@@ -303,6 +303,9 @@ type spWorker struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{}
+	// after is revWorkerParams.after: the coordinator starts once it is
+	// closed (RW1).
+	after <-chan struct{}
 
 	// Everything below is owned by the run goroutine.
 	desired   desiredState
@@ -313,6 +316,10 @@ type spWorker struct {
 	tdRefs    map[uint64]model.TdRef
 	fanWanted bool
 	idleCnt   int
+	// sideStops and cntlrStops are the graceful stops RW14's diff issued,
+	// kept until they have returned (childStops).
+	sideStops  childStops[sideKey]
+	cntlrStops childStops[uint64]
 	// held is the cntlr half of a fan-out RW14's sides-first barrier is
 	// holding back; nil when nothing is held.
 	held *cntlrHold
@@ -349,6 +356,7 @@ func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 		ctx:       ctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		after:     p.after,
 		desired:   p.desired,
 		sides:     make(map[sideKey]*sideChild),
 		cntlrs:    make(map[uint64]*cntlrChild),
@@ -374,8 +382,8 @@ func (w *spWorker) update(d desiredState) {
 }
 
 // stop cancels the coordinator and joins it (RW11, SW5). Its children are
-// stopped in parallel on the way out, so a stop costs one in-flight call, not
-// one per child.
+// stopped in parallel on the way out, and joined with the stops its diff left
+// running, so a stop costs one in-flight call, not one per child.
 func (w *spWorker) stop() {
 	w.cancel()
 	<-w.done
@@ -388,6 +396,9 @@ func (w *spWorker) stop() {
 // cntlr_interval for the idle-child re-resolution and the reaction pass (AR1).
 func (w *spWorker) run() {
 	defer close(w.done)
+	if !awaitPredecessor(w.ctx, w.after) {
+		return
+	}
 	slog.InfoContext(w.ctx, msgRevisionWorkerStarted, w.attrs()...)
 	defer func() {
 		if w.held != nil {
@@ -1112,10 +1123,12 @@ func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
 	return ok && child.plan.primary
 }
 
-// applyPlan is RW14's child diff: new => start; gone => stop (RW11); a child
-// whose ENDPOINT changed is restarted at the new one; every remaining child
-// receives its new request as a desired change (RW6, immediate syncup) — a
-// side at once, a cntlr once the sides hold the revision (holdCntlrs).
+// applyPlan is RW14's child diff: new => start; gone => stop (RW11), off the
+// coordinator's goroutine (childStops); a child whose ENDPOINT changed is
+// restarted at the new one, the new child waiting for the old one's stop
+// (RW1); every remaining child receives its new request as a desired change
+// (RW6, immediate syncup) — a side at once, a cntlr once the sides hold the
+// revision (holdCntlrs).
 //
 // A re-resolution tick can also change a request without changing the SpRev
 // revision — a cntlr whose CnConf finally appeared changes every side's
@@ -1123,7 +1136,6 @@ func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
 // (RW3), so such a child is restarted instead: rare, and the alternative
 // would be a child driving a stale request until the next bump.
 func (w *spWorker) applyPlan(plan *spPlan) {
-	var stops []func()
 	for key, child := range w.sides {
 		next, ok := plan.sides[key]
 		if ok && keepChild(
@@ -1131,8 +1143,8 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 		) {
 			continue
 		}
-		stops = append(stops, w.sideStopper(child))
 		delete(w.sides, key)
+		w.sideStops.stop(key, w.sideStopper(child))
 	}
 	for cntlrId, child := range w.cntlrs {
 		next, ok := plan.cntlrs[cntlrId]
@@ -1141,10 +1153,9 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 		) {
 			continue
 		}
-		stops = append(stops, w.cntlrStopper(child))
 		delete(w.cntlrs, cntlrId)
+		w.cntlrStops.stop(cntlrId, w.cntlrStopper(child))
 	}
-	stopSpChildren(stops)
 
 	// Held before any side is handed its request, so the bound runs from the
 	// fan-out and no side's Syncup* is ahead of the hold.
@@ -1159,7 +1170,7 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 			})
 			continue
 		}
-		w.sides[key] = w.startSideChild(next)
+		w.sides[key] = w.startSideChild(key, next)
 	}
 	// A re-fan whose sides all hold the revision already — a re-resolution
 	// tick's, say — releases the cntlrs here and now.
@@ -1176,8 +1187,9 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 }
 
 // startSideChild starts one side child (RW14): an ordinary revision worker of
-// §8.1 with the side driver.
-func (w *spWorker) startSideChild(p *sidePlan) *sideChild {
+// §8.1 with the side driver, which waits for the stop of the side's previous
+// child if that is still running (RW1).
+func (w *spWorker) startSideChild(key sideKey, p *sidePlan) *sideChild {
 	params := revWorkerParams{
 		deps:  w.deps,
 		role:  common.WorkerRoleSp,
@@ -1189,6 +1201,7 @@ func (w *spWorker) startSideChild(p *sidePlan) *sideChild {
 			revision: p.req.GetRevision(),
 			handle:   p.addr,
 		},
+		after: w.sideStops.after(key),
 	}
 	var driver *sideDriver
 	handle := startRevWorker(params, func(host *revWorker) objDriver {
@@ -1198,7 +1211,8 @@ func (w *spWorker) startSideChild(p *sidePlan) *sideChild {
 	return &sideChild{handle: handle, driver: driver, plan: p}
 }
 
-// startCntlrChild starts one cntlr child (RW14).
+// startCntlrChild starts one cntlr child (RW14), which waits for the stop of
+// the cntlr's previous child if that is still running (RW1).
 func (w *spWorker) startCntlrChild(p *cntlrPlan) *cntlrChild {
 	params := revWorkerParams{
 		deps:  w.deps,
@@ -1211,6 +1225,7 @@ func (w *spWorker) startCntlrChild(p *cntlrPlan) *cntlrChild {
 			revision: p.req.GetRevision(),
 			handle:   p.addr,
 		},
+		after: w.cntlrStops.after(p.cntlrId),
 	}
 	var driver *cntlrDriver
 	handle := startRevWorker(params, func(host *revWorker) objDriver {
@@ -1237,7 +1252,8 @@ func (w *spWorker) cntlrStopper(child *cntlrChild) func() {
 	}
 }
 
-// stopChildren stops every child in parallel and joins them (SW5, RW11).
+// stopChildren stops every child in parallel and joins them, together with
+// the stops the diff left running (SW5, RW11).
 func (w *spWorker) stopChildren() {
 	var stops []func()
 	for key, child := range w.sides {
@@ -1249,6 +1265,8 @@ func (w *spWorker) stopChildren() {
 		delete(w.cntlrs, cntlrId)
 	}
 	stopSpChildren(stops)
+	w.sideStops.join()
+	w.cntlrStops.join()
 }
 
 // keepChild reports whether a running child may stay where it is (RW14). It

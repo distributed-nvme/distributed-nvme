@@ -572,6 +572,78 @@ func TestRevisionStopLetsInFlightUnaryFinish(t *testing.T) {
 	}
 }
 
+// TestRevisionWorkerWaitsForItsPredecessor checks RW1 across a parent's stop
+// off its own goroutine (childStops): a worker started while its object's
+// previous worker is still stopping opens no stream and logs nothing until
+// that stop has returned, and one stopped while it waits returns only after
+// that stop too, so a chain of restarts of one object stays in order.
+func TestRevisionWorkerWaitsForItsPredecessor(t *testing.T) {
+	h := newRevHarness(t)
+	stub := &stubDnAgent{
+		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			return &pb.CheckDnReply{Revision: req.GetRevision()}
+		},
+	}
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	start := func(after <-chan struct{}) *revWorker {
+		params := revWorkerParams{
+			deps:    h.deps,
+			role:    common.WorkerRoleDn,
+			shard:   testShard,
+			cid:     testCid,
+			id:      testDnId,
+			seed:    seedOf(1),
+			desired: desiredState{revision: 1, handle: testAddr},
+			after:   after,
+		}
+		return startRevWorker(params, func(host *revWorker) objDriver {
+			return newDnDriver(params, host)
+		})
+	}
+
+	// Stopped while it waits: its stop outlasts the wait.
+	first := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		start(first).stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatalf("a waiting worker's stop returned before its " +
+			"predecessor's")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(first)
+	waitClosed(t, "the waiting worker's stop", stopped)
+
+	// Left to run: nothing until the predecessor has stopped.
+	second := make(chan struct{})
+	w := start(second)
+	t.Cleanup(w.stop)
+	t.Cleanup(func() {
+		select {
+		case <-second:
+		default:
+			close(second)
+		}
+	})
+	time.Sleep(50 * time.Millisecond)
+	if got := stub.streamCount(); got != 0 {
+		t.Fatalf("%d streams opened before the predecessor stopped", got)
+	}
+	if got := len(h.logs.withMsg(msgRevisionWorkerStarted)); got != 0 {
+		t.Fatalf("%d started records before the predecessor stopped", got)
+	}
+	close(second)
+	waitFor(t, "the first check", func() bool { return stub.checkCount() >= 1 })
+	if got := len(h.logs.withMsg(msgRevisionWorkerStarted)); got != 1 {
+		t.Fatalf("%d started records, want the one worker that ran", got)
+	}
+}
+
 // TestRevisionIdleWithoutClusterConf checks RW9/SW6: a cluster absent from the
 // cache makes the loop idle — no stream, no syncup — with exactly one
 // "cluster conf missing" record per idle period.

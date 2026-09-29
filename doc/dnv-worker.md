@@ -317,7 +317,7 @@ EU2. **Typed plain operations.** All take a ctx, log per the `log.md` §5.3
      | `Get(ctx, key, msg proto.Message) (found bool, err error)` | point read; `msg` untouched when not found | `etcd get` — `key`, `found`, `value` (decoded, only when found), `error?` |
      | `Put(ctx, key, msg)` | write | `etcd put` — `key`, `value`, `error?` |
      | `Delete(ctx, key)` | delete; deleting an absent key is not an error | `etcd delete` — `key`, `error?` |
-     | `Range(ctx, prefix) ([]KV, rev int64, err)` | prefix scan, `KV{Key string; Value []byte}` in key order, `rev` = the store revision the scan was served at | `etcd range` — `prefix`, `count`, `error?` (values are **not** dumped) |
+     | `Range(ctx, prefix) ([]KV, rev int64, err)` | prefix scan, `KV{Key string; Value []byte; ModRev int64}` in key order (`ModRev` = the key's `mod_revision`, which VW3's rescan compares), `rev` = the store revision the scan was served at | `etcd range` — `prefix`, `count`, `error?` (values are **not** dumped) |
      | `RangeDesc(ctx, prefix, limit int64) ([]KV, rev, err)` | prefix scan in **descending** key order, at most `limit` keys (`≤ 0` ⇒ no limit): the capacity keys embed `free_ext_cnt` in `FreeSpaceFmt`, so descending key order is largest-free-first, which is the MD5 allocator's walk | `etcd range` — `prefix`, `count` |
      | `RangeKeys(ctx, prefix) ([]KeyRev, rev, err)` | keys-only prefix scan (`clientv3.WithKeysOnly`); `KeyRev{Key string; ModRev int64}` — the key and its `mod_revision`, which BM5 memoizes | `etcd range` — `prefix`, `count` |
      | `RangeKeysAtRev(ctx, prefix, rev) ([]KeyRev, err)` | `RangeKeys` pinned to one store revision (`clientv3.WithRev`), for MD3's bitmap-index scans, which must be served at the revision the SP snapshot was read at; a `rev` the store has compacted away is an error, never silently served from a newer one | `etcd range` — `prefix`, `count` |
@@ -327,14 +327,16 @@ EU3. **Typed watch.** `WatchTyped(ctx, prefix string, fromRev int64, newMsg
      func() proto.Message) (<-chan Event, <-chan error)` opens one prefix
      watch starting at `fromRev` (`clientv3.WithPrefix`, `WithRev`). Every
      event is delivered as `Event{Type Put|Delete, Key string, Msg
-     proto.Message (puts only), Rev int64}` in order, and logged as `etcd
-     watch event` with `key`, `type` and, for puts, the decoded `value`. The
-     etcd client reconnects transparently; a watch cancelled by the server
-     with `ErrCompacted` is reported once on the error channel and both
-     channels close — the caller rescans (SW4, VW3), which `IsCompacted(err)
-     bool` lets it recognize without importing `rpctypes` itself. When `ctx`
-     ends both channels close without an error. There is no untyped watch:
-     every dnv prefix holds one message type.
+     proto.Message (puts only), Rev int64}` (`Rev` is the event's
+     `Kv.ModRevision`: for a put the key's `mod_revision`, which VW3 compares
+     with a scan's `ModRev`; for a delete the revision of the deletion) in
+     order, and logged as `etcd watch event` with `key`, `type` and, for puts,
+     the decoded `value`. The etcd client reconnects transparently; a watch
+     cancelled by the server with `ErrCompacted` is reported once on the error
+     channel and both channels close — the caller rescans (SW4, VW3), which
+     `IsCompacted(err) bool` lets it recognize without importing `rpctypes`
+     itself. When `ctx` ends both channels close without an error. There is no
+     untyped watch: every dnv prefix holds one message type.
 
 EU4. **STM.** Two runners over `concurrency.NewSTM` with
      `WithIsolation(concurrency.SerializableSnapshot)`:
@@ -401,9 +403,11 @@ EU7. **Tests.** `etcdutil_test.go` runs against a real `etcd` binary found on
      temporary data dir, and is skipped (`t.Skip`) otherwise — no dependency
      on the etcd *server* module. Covered: each EU2 record's attributes
      (captured `slog` handler, `log.md` §7 style), `Range`/`RangeKeys` order
-     and `rev`, `WatchTyped` ordering and its `ErrCompacted` report after an
-     explicit compaction, `RunSTM` conflict retry, `Snapshot` reading one
-     revision, `ErrPrecondition` aborting without commit.
+     and `rev`, the per-key `mod_revision` of `RangeKeys`, `Range` and
+     `RangeDesc`, `WatchTyped` ordering, its events' `Rev` (a put's equal
+     to the `ModRev` a scan then reports), and its `ErrCompacted` report
+     after an explicit compaction, `RunSTM` conflict retry, `Snapshot`
+     reading one revision, `ErrPrecondition` aborting without commit.
 
 ---
 
@@ -710,10 +714,15 @@ VW2. For every configured role `r` the worker keeps `WorkerRegKey(r, seed)`
 VW3. Per role: one `Range(WorkerRegPrefix(r))` scan, then `WatchTyped(prefix,
      rev+1, WorkerReg)`. For every registration key the observer keeps
      `lastSeen` — the monotonic time of the last put it observed (the scan
-     time for keys found by a scan) — and `observed ∈ {live, dead}`:
+     time for a put it learned of from a scan) — the key's `mod_revision`
+     as last observed (a put event's `Rev`, a scan's `ModRev`, EU2/EU3),
+     and `observed ∈ {live, dead}`:
 
      * a key found by a scan: `lastSeen = now`; `observed = live` — an
-       **appear** transition if it was not already observed live;
+       **appear** transition if it was not already observed live — unless
+       the observer already saw the key at the `mod_revision` the scan
+       reports: then nothing was put since, and the scan changes nothing
+       (below);
      * a put event: `lastSeen = now`; if `observed == dead` → `live`
        (appear / reappear);
      * a delete event: `observed = dead` (disappear) at once;
@@ -721,10 +730,17 @@ VW3. Per role: one `Range(WorkerRegPrefix(r))` scan, then `WatchTyped(prefix,
        it fires with no put in between → `observed = dead` (disappear).
 
      The worker's own keys are tracked exactly like everyone else's. After
-     `ErrCompacted` or any watch error the role rescans: keys present get
-     `lastSeen = now` (a key already observed live has no transition); keys
-     that were live but are absent from the rescan transition to dead; the
-     watch restarts from the rescan's `rev + 1`.
+     `ErrCompacted` or any watch error the role rescans: keys present that
+     the observer does not track, or whose `mod_revision` moved since it
+     last saw them, get `lastSeen = now` (a key already observed live has no
+     transition); keys present at the `mod_revision` already seen are left
+     as they are — live with their deadline still running, or dead —
+     because nothing expires a registration (VW6): a scan finds a dead
+     worker's key as surely as a live one's, and a rescan that counted it
+     as a put would re-arm the deadline of every dead peer, so a watch that
+     keeps failing faster than `2 × interval` would keep them alive for
+     good; keys that were live but are absent from the rescan transition to
+     dead; the watch restarts from the rescan's `rev + 1`.
 
 VW4. The stored `epoch` is **never** compared with local time. Liveness
      depends only on the observer's own monotonic clock and the events it
@@ -793,10 +809,23 @@ VW8. A worker MUST **fence** itself when any of these holds, checked on
          a peer committed it dead (VW6).
 
      Fencing means: log `worker fenced` (`reason`, `old_seed`, `new_seed`);
-     stop every shard worker of every role gracefully and in parallel (SW5);
-     best-effort `Delete` the old registrations (they may already be gone);
-     discard every tracking entry, timer and effective set; mint a new seed
-     (VW1) and restart §6.2–§6.4 from scratch. VW7 applies to the new
+     stop the heartbeat loop and join it, so no put of the old seed lands
+     after its delete; start the graceful stop of every shard worker of
+     every role, in parallel (SW5), and go on without waiting for it —
+     every shard worker is told at once, also in a role that is still
+     waiting for the stop of a shard it no longer owns (VW9);
+     best-effort `Delete` the old registrations (they may already be
+     gone). Like CM5's delete ahead of its drain, and with CM5's accepted
+     overlap, this lets the peers observe a delete that lands as a
+     disappear and start their grace windows at once, rather than when the
+     drain ends — which can take `DefaultWorkerSyncupTimeout` (RW11) — or
+     the dead threshold passes, whichever comes first. The drain is started
+     before the deletes because a delete that cannot land — a VW8 (a) fence
+     is usually cut off from etcd — takes up to `DefaultEtcdOpTimeout` per
+     role, and shard workers not yet told to stop would go on driving
+     rounds and `Syncup*` calls behind it. Then join the drain; discard
+     every tracking entry, timer and effective set; mint a new seed (VW1)
+     and restart §6.2–§6.4 from scratch. VW7 applies to the new
      incarnation: nothing is driven until one full grace window after the
      new seed's first successful put. There is no "resume with the old
      seed" path — a worker that lost etcd for the dead threshold is a new
@@ -855,19 +884,25 @@ SW2. **Start.** `Range(prefix)` → `rev`; every key is decoded (`Decode`) and
 SW3. **Events.** A put for an existing key → `Update(desired)` on its
      revision worker (RW3 coalescing; a put that changes neither `revision`
      nor the handle is a no-op); a put for a new key → start a revision
-     worker; a delete → stop it gracefully (RW11) and forget it. Each start
-     and stop logs `revision worker started` / `revision worker stopped`.
+     worker; a delete → forget it and stop it gracefully (RW11) on a
+     goroutine of its own, without waiting: the stop waits out the worker's
+     in-flight unary call, which can take `DefaultWorkerSyncupTimeout`, and
+     the shard's other keys are not held behind it. A worker started for the
+     same key before that stop has returned drives nothing until it has
+     (RW1). Each start and stop logs `revision worker started` / `revision
+     worker stopped`; a worker waiting for its predecessor logs its start
+     when the wait ends, and one stopped during the wait logs neither.
 
 SW4. **Compaction and watch errors.** Rescan the prefix: start workers for
      keys not known; update known ones whose `(revision, handle)` differ;
-     stop workers whose key is absent from the scan; restart the watch from
-     the new `rev + 1`. A failing rescan is retried every `--vote-interval`
-     seconds — never a hot loop.
+     stop workers whose key is absent from the scan, without waiting, as a
+     delete does (SW3); restart the watch from the new `rev + 1`. A failing
+     rescan is retried every `--vote-interval` seconds — never a hot loop.
 
 SW5. **Graceful stop.** Cancel the watch, stop every revision worker in
-     parallel (RW11), join them. The vote worker logs `shard released` after
-     the join, so a shard shows as released only when nothing is driving it
-     any more.
+     parallel (RW11), join them and every stop SW3 or SW4 left running. The
+     vote worker logs `shard released` after the join, so a shard shows as
+     released only when nothing is driving it any more.
 
 SW6. **Multi-cluster.** Keys of every cluster share the shard prefix; the
      `cluster_id` comes from the key, and the §8.5 cache supplies that
@@ -884,7 +919,11 @@ RW1. **One goroutine per object** — one per DN (dn role), per CN (cn role),
      per side and per cntlr (sp role). The goroutine alone owns the object's
      `Check*` stream, its `Syncup*` calls and the loop's own state, which is
      what makes `architecture.md` §9.1's "one `Syncup*` at a time per
-     object" and §9.7's "one stream per object" hold by construction. Three
+     object" and §9.7's "one stream per object" hold by construction. A
+     parent does not wait for the stop of a child it replaces (RW11), so a
+     worker started for an object whose previous worker is still stopping
+     drives nothing until that stop has returned: a restart never puts two
+     loops on one object. Three
      deliberate carve-outs share the object: the `Push*Bitmap` calls run on
      the §10 pusher's own goroutines (BM3 — one in flight per
      migration/clone, concurrently with this loop); `lastInfo` is
@@ -1061,8 +1100,19 @@ RW10. **Trace ids.** Every round, syncup, fan-out, push, flip and reaction runs 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
       unary call (its own deadline bounds the wait; the stop ctx is not the
       RPC ctx), then `CloseSend`s and cancels the stream, releases the
-      connection and logs `revision worker stopped`. Parents join their
-      children with a `sync.WaitGroup`.
+      connection and logs `revision worker stopped`. A loop cancelled while
+      it still waits for its predecessor (RW1) has done nothing yet: it
+      returns once its predecessor has stopped, and logs neither `revision
+      worker started` nor `revision worker stopped` (SW3). A parent that
+      goes on running — the shard worker on a delete or a rescan (SW3,
+      SW4), the sp coordinator on its child diff (RW14) — runs such a stop
+      on a goroutine of its own and does not wait for it, so no other
+      object it drives waits out that call, save the cntlr half of an sp
+      fan-out that restarted a side: RW14's sides-first hold waits for that
+      side's report, which its new child can send only once the old child's
+      stop has returned (RW1), so those cntlrs can wait out the call up to
+      the hold's one-`cntlr_interval` bound. A parent that stops joins its
+      children, those stops included, with a `sync.WaitGroup` (SW5).
 
 RW12. **No backoff anywhere.** The round is the retry cadence for everything
       the loop could not finish — an unreachable agent, a rejected syncup, a
@@ -1105,8 +1155,10 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       `SyncupSideRequest` and `SyncupCntlrRequest` once (RW15/RW16), and
       diffs its **children**: one per side `(sp_id, leg_id, side_id)` —
       spare legs' sides included — and one per cntlr `(sp_id, cntlr_id)`.
-      New → start; gone → stop (RW11); a child whose endpoint changed is
-      restarted at the new one; every remaining child receives its new
+      New → start; gone → stop (RW11), without waiting for the stop; a
+      child whose endpoint changed is restarted at the new one, the new
+      child driving nothing until the old one has stopped (RW1); every
+      remaining child receives its new
       request as a desired change (RW6). A child whose **request** changed
       while the `SpRev` revision did not — a re-resolution tick that altered
       a standby list — is restarted too, because RW3's coalescing sees the
@@ -1136,7 +1188,10 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       fan-out's revision (or a newer one) applied, or until one
       `cntlr_interval` has passed since the hold began, whichever comes
       first. A side left idle (above) is not waited for, and with every side
-      idle the cntlrs go at once. A cntlr child the diff stops is stopped at
+      idle the cntlrs go at once. A side child the diff restarts — at a new
+      endpoint, or on a changed request — is waited for like any other, though
+      its new child reports nothing until the old child's stop has returned
+      (RW1; the cost is below). A cntlr child the diff stops is stopped at
       once, beside the sides', and one it restarts is started with the
       release. A side child reports each accepted reply (RW5) whose revision
       is newer than the last one it reported, and a `CheckSide` reply counts
@@ -1197,7 +1252,12 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       (`ReplyCodeUnknownObject`, `dnagent.md` DN8; normal per RW5) and tries
       again at its next round, one `side_interval` after its first round
       ended, which falls after the hold's deadline when the two intervals
-      are equal, as they are by default.
+      are equal, as they are by default. It is paid as well, in part or in
+      whole, when the diff restarts a side whose old child is still inside
+      a `Syncup*`: the new child sends and reports nothing until that call
+      has ended and the old child has stopped (RW1, RW11), which can be up
+      to `DefaultWorkerSyncupTimeout` (60 s) later — past the hold's
+      deadline at the default `cntlr_interval`.
 
       Between the load and the plan the fan-out validates the SP's stored
       `bdev_conf` with `model.ValidateBdevConf` (`architecture.md` §7). That geometry is what
@@ -2506,7 +2566,7 @@ parses them.
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions, judged against the memo HL3 re-seeds from the record — the correction of an epoch another observer wrote or cleared included |
 | `cntlr settled` | `role` (`sp`), `cluster_id`, `sp_id`, `cn_id`, `cntlr_pointer`, `revision` (the reply's, which the settle requires to be the one the child drives) | *added 2026-09-26:* HL2's settle written — at most once per acquisition of the primary role, the re-enable of a primary counting as one (none when the cntlr is demoted before it settles), plus a repeat for a plan loaded before the write landed (HL2) or for a second owner in an overlap (§0 item 4) |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
-| `sp sides unsynced` | `cluster_id`, `sp_id`, `revision` (the held fan-out's), `side_cnt` (the side children that had not reported it applied when the timer fired) | RW14's sides-first barrier released by its timer: one `cntlr_interval` after the cntlrs were first held, they are sent the fan-out all the same. One record per hold, never per round. Also expected in normal operation: a new side whose first `SyncupSide` its disk node refused (`dnagent.md` DN8) usually reports only after the deadline; and at every hold of an SP with a side on a dead disk node — that of a leg AR8 parked there included, until the leg is deleted (RW14) |
+| `sp sides unsynced` | `cluster_id`, `sp_id`, `revision` (the held fan-out's), `side_cnt` (the side children that had not reported it applied when the timer fired) | RW14's sides-first barrier released by its timer: one `cntlr_interval` after the cntlrs were first held, they are sent the fan-out all the same. One record per hold, never per round. Also expected in normal operation: a new side whose first `SyncupSide` its disk node refused (`dnagent.md` DN8) usually reports only after the deadline; at every hold of an SP with a side on a dead disk node — that of a leg AR8 parked there included, until the leg is deleted (RW14); and at a hold whose fan-out restarted a side while its old child was inside a `Syncup*` that outlasts the hold (RW1) |
 | `bitmap pushed` | in this order: `kind` (`migr`/`clone`), the object's ids, `<res>_id` (`migr_id`/`clone_id`), `src_slice_idx` (always 0 for `kind=migr`), `bm_idx`, `code` | BM3 |
 | `bitmap push failed` | the `bitmap pushed` attributes up to `bm_idx` (`src_slice_idx` and `bm_idx` 0 for a push that never reached a chunk), then either `error` (transport, fetch, `chunk not found`) **or** `code` + `details` — the agent's own explanation, which the `bitmap pushed` record beside it cannot carry because it holds the code alone | BM6. Non-normative in the §12 sense: it names no decision, it exists because a push that produced no `AgentReply` has no code to report and must not be logged as a `bitmap pushed` with an invented 0 |
 | `reaction applied` | `cluster_id`, `sp_id`, `kind` (`failover`/`grow_data`/`grow_meta`/`replace_cntlr`/`spare_create`/`spare_switch`), ids, `revision` | AR2 |
@@ -2539,20 +2599,72 @@ does).
   delete issued exactly on `nonmember` commits; ticket determinism (a
   golden sha256), largest-wins, and the ~1/n movement property over 256
   shards with 3→4 members (only shards whose new max is the joiner move);
-  role independence.
+  role independence; `TestVoteRescanRefreshesOnlyReputKeys` (VW3) — under
+  a watch that fails every interval, the rescans re-arm only a key whose
+  `mod_revision` moved: a peer that stopped putting is observed dead at the
+  dead threshold and not revived by the rescans after it, while one whose
+  puts only the rescans see stays live (the cases that fail if a rescan
+  counts a key already seen, if a put event leaves its `mod_revision`
+  unrecorded, or if a rescan re-arms nothing);
+  `TestVoteRescanKeepsTheDeadlineOfAScannedKey` (VW3) — likewise for a
+  dead peer only ever seen through a scan, the first one: observed dead at
+  the dead threshold after that scan and never revived (the case that
+  fails if a scan leaves the `mod_revision` unrecorded);
+  `TestVoteFenceDeletesRegsBeforeDrainingShards` (VW8) — a watch-stalled
+  fence starts its drain before its deletes: the test keeps the old
+  registration's `Delete` from returning until the drain reaches a
+  revision worker, which it does only if the drain was started first; the
+  delete lands while that worker's stop is still held, and the new seed
+  registers only after that stop returns (the cases that fail if the shard
+  workers drive on behind the deletes, or if the deletes wait for the
+  drain); `TestVoteFenceStopsShardsDuringAHandoff` (VW8) — the same order
+  for a role still waiting for the stop of a shard a peer has taken over,
+  whose revision worker's stop the test holds: the test keeps the old
+  registration's `Delete` from returning until the revision worker of a
+  shard the role kept has been told to stop, and the shard taken over is
+  logged `shard released` only after the held stop returns (the case that
+  fails if a role's shard workers learn of the fence only once its handoff
+  has returned).
 * **shard.go** — scan-then-watch, coalescing, delete stops, compaction
-  rescan diff, parse rejects malformed keys.
+  rescan diff, parse rejects malformed keys;
+  `TestShardDeleteDoesNotWaitForTheStop` (SW3, SW5) — while a deleted
+  key's worker's stop is held, another key's put is applied, and the
+  shard's own stop returns only after the held one;
+  `TestShardRescanDoesNotWaitForTheStop` (SW4) — likewise a rescan
+  re-opens its watch and applies the next put;
+  `TestShardSuccessorWaitsForItsPredecessor` (RW1) — a key deleted and put
+  again during that stop gets a worker handed exactly that stop to wait
+  for.
 * **revision.go** — round timeout ⇒ unreachable; revision mismatch and
   `code != 0` ⇒ syncup; desired change ⇒ immediate syncup and coalescing
   under an in-flight call; `TestSyncupLeftoverLogged` — a `ReplyCodeLeftover`
   reply is logged as `syncup leftover` at `Info`, with the agent's `details`
   and the object's ids, and never as `syncup rejected` (RW5); stop
-  lets an in-flight unary finish before closing the stream; connection
+  lets an in-flight unary finish before closing the stream;
+  `TestRevisionWorkerWaitsForItsPredecessor` (RW1) — a worker whose
+  predecessor is still stopping opens no stream and logs no start until
+  that stop returns, and one stopped while it waits returns only after it;
+  connection
   reference counting; idle without cluster conf, and the same quiesced
   refusal on an invalid one.
 * **dnrole/cnrole/sprole** — golden requests from a fixture `SpState`
   (side/cntlr requests incl. migration src/dst confs, `id_to_slice` keys,
   standby list with a disabled cntlr); child diff on a changed endpoint;
+  `TestSpChildStopDoesNotHoldTheCoordinator` (RW14, RW1) — a moved side
+  whose old child is held inside a `SyncupSide` leaves the coordinator
+  free: a sibling side is sent the new revision at once, while the moved
+  side's new child sends no `SyncupSide` and logs no start until the old
+  one has stopped (the case that fails if the successor does not wait);
+  `TestSpCntlrStopDoesNotHoldTheCoordinator` (RW14, RW1) — the same for
+  a moved cntlr: a side and the primary cntlr are sent the new revision
+  while the old child is held inside a `SyncupCntlr`, and the new child
+  sends nothing until the old one has stopped (the cases that fail if the
+  stop is joined in line or the successor does not wait);
+  `TestSpCoordinatorStopJoinsItsChildStops` (RW11, SW5) — the
+  coordinator's own stop returns only after the stop of a cntlr the diff
+  removed while its `SyncupCntlr` was held;
+  `TestSpCoordinatorWaitsForItsPredecessor` (RW1) — a coordinator whose
+  predecessor is still stopping loads nothing until that stop returns;
   the fan-out refusing an invalid SP `bdev_conf` — one `Error` record
   naming the field, no child started and no `Syncup*` sent, and the next
   fan-out after a repair starting the children it owed;
@@ -3964,7 +4076,9 @@ durable, so nothing is lost — convergence is delayed, not skipped
 * **Overlap and gap at every ownership change** (§0 item 4): a few seconds
   of double driving or of no driving per shard per change. Accepted.
 * **Undriven windows**: a fresh worker's first grace window; 2I + G after a
-  crash; G after a graceful stop; G after a fence (Appendix A).
+  crash; G after a graceful stop; G after a fence (Appendix A) — both of
+  which delete their registrations without waiting for their drain (CM5,
+  VW8), so the window does not wait out the drain's in-flight calls.
 * **The [D8] memo** of grown clone chunks is per worker; a handoff can leave
   a shorter chunk at the agent (cost: extra copying, never correctness).
 * **A group's spare list can fill with parked legs** (AR8 step 4); the
@@ -4008,10 +4122,11 @@ durable, so nothing is lost — convergence is delayed, not skipped
   `cntlr_interval` = 5 s); such a failover now costs one settle rather
   than a loop.
 * **Sides first holds every cntlr request** (RW14, *added 2026-09-28*): a
-  side that does not report — a dead disk node, or a new side its disk node
+  side that does not report — a dead disk node, a new side its disk node
   refuses until the dn role's `SyncupDn` has introduced it (`dnagent.md`
-  DN8) — delays every cntlr request of its SP's fan-out by up to one
-  `cntlr_interval` (an hour at RW9's ceiling), a failover's promotion and
+  DN8), or a side the fan-out restarted whose old child is still inside a
+  `Syncup*` (RW1) — delays every cntlr request of its SP's fan-out by up to
+  one `cntlr_interval` (an hour at RW9's ceiling), a failover's promotion and
   demotion included; a dead disk node's share of it outlives AR8's repair,
   because the leg AR8 parks there keeps its side in `spare_leg_list` and
   that side is waited for like any other, until the disk node returns or

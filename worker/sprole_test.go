@@ -1878,6 +1878,264 @@ func TestSpChildRestartedOnEndpointChange(t *testing.T) {
 	}
 }
 
+// sideRecords counts the records with msg that name the side sideId in their
+// side_pointer (§12's sp child lifecycle records).
+func sideRecords(logs *logCapture, msg string, sideId uint64) int {
+	n := 0
+	for _, rec := range logs.withMsg(msg) {
+		ptr, _ := rec["side_pointer"].(map[string]any)
+		if id, _ := ptr["side_id"].(float64); id == float64(sideId) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSpChildStopDoesNotHoldTheCoordinator checks RW14's diff against a side
+// child whose graceful stop is waiting out an in-flight Syncup* (RW11): the
+// stop runs off the coordinator's goroutine, so the same fan-out hands every
+// other side child its new revision at once instead of up to
+// DefaultWorkerSyncupTimeout later (the cntlr half stays behind RW14's
+// sides-first hold, which waits for the moved side's new child), and the
+// child restarted in the stopped one's place — at its new endpoint — drives
+// nothing until that stop has returned (RW1).
+func TestSpChildStopDoesNotHoldTheCoordinator(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	const moved = "spdn9:9520"
+	movedStub := h.addSide(moved)
+	// The spare leg's side answers no SyncupSide until it is released.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.sides[spDnD].syncupReply = func(
+		req *pb.SyncupSideRequest,
+	) *pb.SyncupSideReply {
+		once.Do(func() { close(entered) })
+		<-release
+		return &pb.SyncupSideReply{Revision: req.GetRevision()}
+	}
+	w := h.start()
+	// Registered after start's own cleanup, so it runs first: a failing test
+	// still lets the held call return before the coordinator is stopped.
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+	waitClosed(t, "the spare side's first SyncupSide", entered)
+
+	// The spare leg's side moved to another DN, at a new revision.
+	state := spFixture()
+	grp := state.Slices[spSliceA].GetDataGrpList()[0]
+	grp.GetSpareLegList()[0].GetSideList()[0].AddrPort = moved
+	state.DnByAddr[moved] = &pb.DnConf{DnId: 0xd9}
+	h.ops.setState(state)
+	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+
+	waitFor(t, "a sibling side synced at the new revision while the "+
+		"moved side's old child is still stopping", func() bool {
+		for _, req := range h.sides[spDnA].syncups() {
+			if req.GetRevision() == testSpRev+1 {
+				return true
+			}
+		}
+		return false
+	})
+	// RW1: the moved side's new child waits for the old one's stop, which
+	// waits for the call still held at the old endpoint.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(movedStub.syncups()); got != 0 {
+		t.Fatalf("%d syncups at the new endpoint while the old child was "+
+			"still inside its call", got)
+	}
+	if got := sideRecords(
+		h.logs, msgRevisionWorkerStarted, spSideSpare,
+	); got != 1 {
+		t.Fatalf("%d spare side children started while the first was "+
+			"still stopping, want only that first one", got)
+	}
+
+	released = true
+	close(release)
+	waitFor(t, "syncup at the new endpoint", func() bool {
+		return len(movedStub.syncups()) > 0
+	})
+	if got := sideRecords(
+		h.logs, msgRevisionWorkerStopped, spSideSpare,
+	); got != 1 {
+		t.Fatalf("%d spare side children stopped before the new one "+
+			"drove its endpoint, want the old one", got)
+	}
+}
+
+// TestSpCntlrStopDoesNotHoldTheCoordinator is the cntlr twin of the case
+// above: a cntlr moved to a new endpoint while its old child is held inside a
+// SyncupCntlr is stopped off the coordinator's goroutine, so the fan-out's
+// sides are sent the new revision at once and the other cntlrs as soon as the
+// sides have reported it (RW14's hold), while the moved cntlr's new child
+// sends nothing until the old one has stopped (RW1).
+func TestSpCntlrStopDoesNotHoldTheCoordinator(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	const moved = "spcn9:9620"
+	movedStub := h.addCntlr(moved)
+	// The disabled cntlr answers no SyncupCntlr until it is released.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.cntlrs[spCnC].syncupReply = func(
+		req *pb.SyncupCntlrRequest,
+	) *pb.SyncupCntlrReply {
+		once.Do(func() { close(entered) })
+		<-release
+		return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+	}
+	w := h.start()
+	// Registered after start's own cleanup, so it runs first.
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+	waitClosed(t, "the disabled cntlr's first SyncupCntlr", entered)
+
+	// The disabled cntlr moved to another CN, at a new revision.
+	state := spFixture()
+	state.Cntlrs[spCntlrDisabled].AddrPort = moved
+	state.CnByAddr[moved] = &pb.CnConf{CnId: 0xc9}
+	h.ops.setState(state)
+	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+
+	waitFor(t, "a side synced at the new revision while the moved "+
+		"cntlr's old child is still stopping", func() bool {
+		for _, req := range h.sides[spDnA].syncups() {
+			if req.GetRevision() == testSpRev+1 {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "the primary cntlr synced at the new revision", func() bool {
+		for _, req := range h.cntlrs[spCnA].syncups() {
+			if req.GetRevision() == testSpRev+1 {
+				return true
+			}
+		}
+		return false
+	})
+	// RW1: the moved cntlr's new child waits for the old one's stop, which
+	// waits for the call still held at the old endpoint.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(movedStub.syncups()); got != 0 {
+		t.Fatalf("%d syncups at the moved cntlr's new endpoint while the "+
+			"old child was still inside its call", got)
+	}
+
+	released = true
+	close(release)
+	waitFor(t, "syncup at the moved cntlr's new endpoint", func() bool {
+		return len(movedStub.syncups()) > 0
+	})
+}
+
+// TestSpCoordinatorStopJoinsItsChildStops checks that the coordinator's own
+// graceful stop joins the child stops its diff left running (RW11, SW5): a
+// cntlr removed from the SP while its child is held inside a SyncupCntlr has
+// no successor to wait for it, and the coordinator's stop — which the shard
+// worker's release, or an SpRev delete, waits for — returns only after it.
+func TestSpCoordinatorStopJoinsItsChildStops(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	h.cntlrs[spCnC].syncupReply = func(
+		req *pb.SyncupCntlrRequest,
+	) *pb.SyncupCntlrReply {
+		once.Do(func() { close(entered) })
+		<-release
+		return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+	}
+	w := h.start()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(release)
+		}
+	})
+	waitClosed(t, "the disabled cntlr's first SyncupCntlr", entered)
+
+	// The disabled cntlr left the SP, at a new revision.
+	state := spFixture()
+	delete(state.Cntlrs, spCntlrDisabled)
+	state.Conf.CntlrIdList = []uint64{spCntlrPrimary, spCntlrStandby}
+	h.ops.setState(state)
+	w.update(desiredState{revision: testSpRev + 1, handle: testSpName})
+	waitFor(t, "a side synced at the new revision", func() bool {
+		for _, req := range h.sides[spDnA].syncups() {
+			if req.GetRevision() == testSpRev+1 {
+				return true
+			}
+		}
+		return false
+	})
+
+	stopped := make(chan struct{})
+	go func() {
+		w.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatalf("the coordinator stopped while a removed cntlr's child " +
+			"was still stopping")
+	case <-time.After(50 * time.Millisecond):
+	}
+	released = true
+	close(release)
+	waitClosed(t, "the coordinator's stop", stopped)
+}
+
+// TestSpCoordinatorWaitsForItsPredecessor is RW1 for the coordinator itself: an
+// SP whose SpRev was deleted and put again while its previous coordinator is
+// still stopping (SW3) loads nothing and starts no child until that stop has
+// returned.
+func TestSpCoordinatorWaitsForItsPredecessor(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	pred := make(chan struct{})
+	w := startSpWorker(revWorkerParams{
+		deps:    h.deps,
+		role:    common.WorkerRoleSp,
+		shard:   testShard,
+		cid:     testCid,
+		id:      testSpId,
+		seed:    seedOf(3),
+		desired: desiredState{revision: testSpRev, handle: testSpName},
+		after:   pred,
+	}, h.ops)
+	t.Cleanup(w.stop)
+	t.Cleanup(func() {
+		select {
+		case <-pred:
+		default:
+			close(pred)
+		}
+	})
+
+	time.Sleep(50 * time.Millisecond)
+	if got := h.ops.loadCnt(); got != 0 {
+		t.Fatalf("%d loads before the predecessor stopped", got)
+	}
+	close(pred)
+	waitFor(t, "the fan-out", func() bool {
+		return len(h.sides[spDnA].syncups()) > 0
+	})
+}
+
 // TestSpFanOutWaitsForItsRevision checks RW14's revision guard: a fan-out
 // whose load is ahead of the revision the coordinator was delivered builds
 // nothing. The case is the one the guard exists for (HL2): a Failover

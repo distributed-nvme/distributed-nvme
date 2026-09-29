@@ -76,16 +76,24 @@ type shardWorker struct {
 
 	// workers is owned by the run goroutine.
 	workers map[revObjKey]*revObjEntry
+	// stops are the graceful stops a delete or a rescan issued (SW3, SW4),
+	// kept until they have returned; owned by the run goroutine too.
+	stops childStops[revObjKey]
 }
 
-// startShardWorker starts one shard worker (SW1/SW2).
+// startShardWorker starts one shard worker (SW1/SW2). Its loop runs under a
+// child of parent — the shard manager's ctx — so the manager's cancel tells
+// every shard worker it runs to stop at once, including while the manager
+// itself is still joining a handoff (VW8, VW9). Its revision workers do not
+// inherit it: they are stopped only through their handles (RW11).
 func startShardWorker(
+	parent context.Context,
 	d *deps,
 	kind revKind,
 	shard uint32,
 	seed string,
 ) *shardWorker {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	w := &shardWorker{
 		deps:    d,
 		kind:    kind,
@@ -101,9 +109,9 @@ func startShardWorker(
 }
 
 // stop is the graceful stop of SW5: cancel the watch, stop every revision
-// worker in parallel (RW11), join them. The vote worker logs "shard released"
-// only after this returns, so a shard shows as released when nothing is
-// driving it any more.
+// worker in parallel (RW11), join them — and the stops a delete or a rescan
+// left running. The vote worker logs "shard released" only after this
+// returns, so a shard shows as released when nothing is driving it any more.
 func (w *shardWorker) stop() {
 	w.cancel()
 	<-w.done
@@ -180,7 +188,8 @@ func (w *shardWorker) watch(
 
 // applyScan diffs the shard against a full scan (SW2 for the first one, SW4
 // for every rescan): start workers for keys not known, update known ones
-// whose desired state differs, stop workers whose key is absent.
+// whose desired state differs, stop workers whose key is absent — without
+// waiting for those stops, like a delete (applyEvent).
 func (w *shardWorker) applyScan(kvs []etcdutil.KV) {
 	seen := make(map[revObjKey]desiredState, len(kvs))
 	for _, kv := range kvs {
@@ -203,21 +212,21 @@ func (w *shardWorker) applyScan(kvs []etcdutil.KV) {
 	for key, desired := range seen {
 		w.start(key, desired)
 	}
-	var stopping []*revObjEntry
 	for key, entry := range w.workers {
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		stopping = append(stopping, entry)
 		delete(w.workers, key)
+		w.stops.stop(key, entry.handle.stop)
 	}
-	stopParallel(stopping)
 }
 
 // applyEvent folds one watch event into the shard (SW3): a put for a known
 // key updates its revision worker (RW3 coalescing; a put that changes neither
 // revision nor handle is a no-op), a put for a new key starts one, a delete
-// stops one gracefully and forgets it.
+// forgets one and stops it gracefully — on a goroutine of its own, so the
+// events of the shard's other keys are not held behind a stop that waits out
+// an in-flight unary call (RW11).
 func (w *shardWorker) applyEvent(event etcdutil.Event) {
 	key, ok := w.parseKey(event.Key)
 	if !ok {
@@ -229,7 +238,7 @@ func (w *shardWorker) applyEvent(event etcdutil.Event) {
 			return
 		}
 		delete(w.workers, key)
-		entry.handle.stop()
+		w.stops.stop(key, entry.handle.stop)
 		return
 	}
 	desired, ok := w.parseValue(event.Key, event.Msg)
@@ -281,7 +290,8 @@ func (w *shardWorker) parseValue(
 }
 
 // start starts a revision worker for a key not known yet, or updates the one
-// already running (SW2, SW3).
+// already running (SW2, SW3). A new worker whose key's previous one is still
+// stopping waits for that stop before it drives anything (RW1).
 func (w *shardWorker) start(key revObjKey, desired desiredState) {
 	if entry, ok := w.workers[key]; ok {
 		if entry.desired == desired {
@@ -300,12 +310,13 @@ func (w *shardWorker) start(key revObjKey, desired desiredState) {
 		id:      key.id,
 		seed:    w.seed,
 		desired: desired,
+		after:   w.stops.after(key),
 	})
 	w.workers[key] = &revObjEntry{handle: handle, desired: desired}
 }
 
-// stopAll stops every revision worker of the shard in parallel and joins them
-// (SW5).
+// stopAll stops every revision worker of the shard in parallel and joins them,
+// together with the stops a delete or a rescan left running (SW5).
 func (w *shardWorker) stopAll() {
 	entries := make([]*revObjEntry, 0, len(w.workers))
 	for key, entry := range w.workers {
@@ -313,6 +324,7 @@ func (w *shardWorker) stopAll() {
 		delete(w.workers, key)
 	}
 	stopParallel(entries)
+	w.stops.join()
 }
 
 // stopParallel stops a set of revision workers concurrently and joins them
@@ -331,6 +343,69 @@ func stopParallel(entries []*revObjEntry) {
 		}(entry)
 	}
 	wg.Wait()
+}
+
+// childStops runs the graceful stops a parent issues while it goes on running
+// — a delete or a rescan in a shard worker (SW3, SW4), the child diff of the
+// sp coordinator (RW14) — each on a goroutine of its own. A stop waits out
+// the child's in-flight unary call (RW11), which can take
+// common.DefaultWorkerSyncupTimeout, and a parent that joined it in line
+// would hold every other object it drives that long. What such a join would
+// guarantee is kept otherwise: the parent's own graceful stop joins every
+// stop still running (join, SW5), and a child it starts for the same object
+// meanwhile waits for the stop of the one before it (after, RW1).
+//
+// It is owned by the parent's goroutine; the zero value is ready to use.
+type childStops[K comparable] struct {
+	wg sync.WaitGroup
+	// pending maps an object to the stop of its last stopped child until a
+	// successor takes it (after) or it is seen to have returned (prune).
+	pending map[K]chan struct{}
+}
+
+// stop runs one child's graceful stop on a goroutine of its own.
+func (s *childStops[K]) stop(key K, stop func()) {
+	s.prune()
+	if s.pending == nil {
+		s.pending = make(map[K]chan struct{})
+	}
+	done := make(chan struct{})
+	s.pending[key] = done
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer close(done)
+		stop()
+	}()
+}
+
+// after hands a successor of key what it must wait for (revWorkerParams.after):
+// the stop of the child before it, or nil when no such stop can still be
+// running.
+func (s *childStops[K]) after(key K) <-chan struct{} {
+	done, ok := s.pending[key]
+	if !ok {
+		return nil
+	}
+	delete(s.pending, key)
+	return done
+}
+
+// prune forgets the stops that have returned and that no successor took.
+func (s *childStops[K]) prune() {
+	for key, done := range s.pending {
+		select {
+		case <-done:
+			delete(s.pending, key)
+		default:
+		}
+	}
+}
+
+// join waits for every stop still running (SW5).
+func (s *childStops[K]) join() {
+	s.wg.Wait()
+	s.pending = nil
 }
 
 // ---------------------------------------------------------------------------

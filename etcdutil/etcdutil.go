@@ -138,11 +138,14 @@ func logDelete(ctx context.Context, key string, err error) {
 // Typed plain operations (EU2)
 // ---------------------------------------------------------------------------
 
-// KV is one scanned key and its still-encoded value (EU2). Decode turns the
-// value into a message and logs it.
+// KV is one scanned key, its still-encoded value and its mod_revision (EU2).
+// Decode turns the value into a message and logs it. The mod_revision is how a
+// rescan tells a key put again since the previous scan from one that is merely
+// still there (VW3).
 type KV struct {
-	Key   string
-	Value []byte
+	Key    string
+	Value  []byte
+	ModRev int64
 }
 
 // KeyRev is one scanned key and its mod_revision, which BM5 memoizes (EU2).
@@ -254,7 +257,11 @@ func (c *Client) Range(
 	}
 	kvs := make([]KV, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
-		kvs = append(kvs, KV{Key: string(kv.Key), Value: kv.Value})
+		kvs = append(kvs, KV{
+			Key:    string(kv.Key),
+			Value:  kv.Value,
+			ModRev: kv.ModRevision,
+		})
 	}
 	return kvs, resp.Header.Revision, nil
 }
@@ -283,7 +290,11 @@ func (c *Client) RangeDesc(
 	}
 	kvs := make([]KV, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
-		kvs = append(kvs, KV{Key: string(kv.Key), Value: kv.Value})
+		kvs = append(kvs, KV{
+			Key:    string(kv.Key),
+			Value:  kv.Value,
+			ModRev: kv.ModRevision,
+		})
 	}
 	return kvs, resp.Header.Revision, nil
 }

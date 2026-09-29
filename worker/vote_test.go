@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -97,6 +99,7 @@ func (s *voteHookStore) seedRaw(key string, value []byte) {
 	defer s.fakeStore.mu.Unlock()
 	s.fakeStore.rev++
 	s.fakeStore.kvs[key] = value
+	s.fakeStore.modRevs[key] = s.fakeStore.rev
 }
 
 // opLog returns the successful writes in the order they happened.
@@ -193,10 +196,27 @@ func newVoteHarnessCfg(
 	store *voteHookStore,
 ) *voteHarness {
 	t.Helper()
+	return newVoteHarnessDeps(t, cfg, store, nil)
+}
+
+// newVoteHarnessDeps is newVoteHarnessCfg with a hook that edits the deps
+// before the vote worker starts: a case that needs shard plumbing of its own
+// installs its deps.kinds there, because every incarnation resolves its kinds
+// when it starts (VW1).
+func newVoteHarnessDeps(
+	t *testing.T,
+	cfg Config,
+	store *voteHookStore,
+	edit func(d *deps),
+) *voteHarness {
+	t.Helper()
 	logs := captureLogs(t)
 	clk := newFakeClock()
 	d := newTestDeps(cfg, store.fakeStore, clk)
 	d.store = store
+	if edit != nil {
+		edit(d)
+	}
 	h := &voteHarness{
 		t:     t,
 		clk:   clk,
@@ -813,6 +833,97 @@ func TestVoteScanKeepsUndecodableValueLive(t *testing.T) {
 	}
 }
 
+// TestVoteRescanRefreshesOnlyReputKeys is VW3's rescan under a watch that keeps
+// failing faster than the dead threshold. A scan finds a dead worker's key as
+// surely as a live one's — nothing expires it (VW6) — so a rescan counts a
+// key as put again only when its mod_revision moved since this observer last
+// saw it, by a scan or by a put event. Otherwise every rescan re-arms the
+// deadline of a peer that stopped putting, it is never observed dead, and its
+// shards stay with it for every observer. The live peer's puts are the ones
+// only the rescans see.
+func TestVoteRescanRefreshesOnlyReputKeys(t *testing.T) {
+	h := newVoteHarness(t, common.WorkerRoleDn)
+	dead := seedOf(7)
+	live := seedOf(8)
+	// Both put once, and the watch delivers both puts.
+	h.beat(common.WorkerRoleDn, dead)
+	h.beat(common.WorkerRoleDn, live)
+	interval := func() {
+		h.advance(h.deps.cfg.VoteInterval)
+		h.store.seed(t, workerRegKey(common.WorkerRoleDn, live),
+			&pb.WorkerReg{Epoch: h.clk.nowUnix()})
+		h.store.breakWatches(errors.New(
+			"mvcc: required revision has been compacted",
+		))
+		waitFor(t, "the rescan's watch", func() bool {
+			return h.store.watchCount() == 1
+		})
+		h.settle()
+	}
+
+	// The dead threshold after its put, the dead peer's deadline fires on
+	// time: the rescan one interval in found nothing new.
+	interval()
+	interval()
+	if states := h.observedStates(common.WorkerRoleDn, dead); len(states) != 2 ||
+		states[0] != stateLive || states[1] != stateDead {
+		t.Fatalf("dead peer observed %v at the dead threshold, want live "+
+			"then dead: a rescan re-armed a key nobody re-put", states)
+	}
+	// Twice the threshold: the rescans revived nothing, and missed no put.
+	interval()
+	interval()
+	if states := h.observedStates(common.WorkerRoleDn, dead); len(states) != 2 {
+		t.Fatalf("dead peer observed %v, want no transition after its "+
+			"disappear: a rescan revived it", states)
+	}
+	if states := h.observedStates(common.WorkerRoleDn, live); len(states) != 1 ||
+		states[0] != stateLive {
+		t.Fatalf("live peer observed %v, want one live appear: a rescan "+
+			"missed a put", states)
+	}
+}
+
+// TestVoteRescanKeepsTheDeadlineOfAScannedKey is the same rule for a key this
+// observer has only ever seen through a scan: a peer already dead when the
+// observer starts — or rejoins after a fence — whose key the first scan finds
+// and records with its mod_revision. The rescans after it find that same
+// mod_revision and re-arm nothing, so the peer is observed dead at the dead
+// threshold after the first scan and never revived.
+func TestVoteRescanKeepsTheDeadlineOfAScannedKey(t *testing.T) {
+	store := newVoteHookStore()
+	dead := seedOf(9)
+	store.seed(t, workerRegKey(common.WorkerRoleDn, dead), &pb.WorkerReg{})
+	h := newVoteHarnessOn(t, store, common.WorkerRoleDn)
+	h.waitRecords(msgMembershipObserved, 2)
+	h.settle()
+	interval := func() {
+		h.advance(h.deps.cfg.VoteInterval)
+		h.store.breakWatches(errors.New(
+			"mvcc: required revision has been compacted",
+		))
+		waitFor(t, "the rescan's watch", func() bool {
+			return h.store.watchCount() == 1
+		})
+		h.settle()
+	}
+
+	interval()
+	interval()
+	if states := h.observedStates(common.WorkerRoleDn, dead); len(states) != 2 ||
+		states[0] != stateLive || states[1] != stateDead {
+		t.Fatalf("scanned dead peer observed %v at the dead threshold, "+
+			"want live then dead: a rescan re-armed a key the first scan "+
+			"had already seen", states)
+	}
+	interval()
+	interval()
+	if states := h.observedStates(common.WorkerRoleDn, dead); len(states) != 2 {
+		t.Fatalf("scanned dead peer observed %v, want no transition after "+
+			"its disappear: a rescan revived it", states)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Self-fence (VW8)
 // ---------------------------------------------------------------------------
@@ -1340,6 +1451,237 @@ func TestVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 	if !deleted {
 		t.Fatalf("the fence never deleted %s: %v", dnKey, store.opLog())
 	}
+}
+
+// TestVoteFenceDeletesRegsBeforeDrainingShards checks the rest of VW8's order:
+// once the heartbeat is joined, the old registrations are deleted BEFORE the
+// shard workers' stop has returned, as on CM5's graceful stop, and that stop
+// has begun before the deletes. Stopping a shard worker waits out its
+// revision workers' in-flight calls (RW11), which can take
+// DefaultWorkerSyncupTimeout; a fence that deleted only afterwards would let
+// its peers see the old seed go only when that drain ends or its deadline
+// passes, whichever comes first, and leave its shards undriven that much
+// longer than the grace window (Appendix B). And a delete can take
+// DefaultEtcdOpTimeout per role when etcd is out of reach, the usual cause of
+// a VW8(a) fence; shard workers not yet told to stop would go on driving
+// behind it.
+func TestVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
+	rec := newRevRecorder()
+	store := newVoteHookStore()
+	// One DnRev key, on a shard this worker will own, driven by a recording
+	// revision worker whose stop the test holds.
+	store.seed(t, model.DnRevKey(testShard, testCid, 10),
+		&pb.DnRev{AddrPort: "dn0:9520", Revision: 1})
+	h := newVoteHarnessDeps(t, testConfig(common.WorkerRoleDn), store,
+		func(d *deps) {
+			d.kinds = func(role string) (revKind, bool) {
+				if role != common.WorkerRoleDn {
+					return kindFor(role)
+				}
+				return recordingDnKind(rec), true
+			}
+		})
+	old := h.vote.currentSeed()
+	key := workerRegKey(common.WorkerRoleDn, old)
+	h.advance(h.deps.cfg.GraceTime)
+	waitFor(t, "the revision worker", func() bool {
+		return rec.startCount() == 1
+	})
+	worker := rec.get(testCid, 10)
+	held := worker.holdStop()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+
+	// The old registration's delete holds the fence until the drain has
+	// reached the revision worker, as a delete to an etcd out of reach
+	// would: that happens only if the drain was started ahead of it.
+	drainAhead := make(chan bool, 1)
+	h.store.setOnDelete(func(deleted string) {
+		if deleted != key {
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, stopped := worker.snapshot(); stopped == 1 {
+				drainAhead <- true
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		drainAhead <- false
+	})
+
+	// VW8(b): the puts keep landing while the watch stops echoing them.
+	h.store.setMuteEvents(true)
+	h.advance(2 * h.deps.cfg.VoteInterval)
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	if rec := fenceRecord(t, h); rec["reason"] != fenceWatchStalled {
+		t.Fatalf("reason = %v, want %s", rec["reason"], fenceWatchStalled)
+	}
+	select {
+	case ahead := <-drainAhead:
+		if !ahead {
+			t.Fatalf("the drain had not reached the revision worker while " +
+				"the old registration's delete was still running: the " +
+				"shard workers drove on behind the deletes")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for the old registration's delete")
+	}
+	waitFor(t, "the old registration's delete while a revision worker "+
+		"is still stopping", func() bool { return !h.store.has(key) })
+
+	// The drain finishes, and only then does the new seed register.
+	h.store.setMuteEvents(false)
+	newSeedStr, _ := fenceRecord(t, h)["new_seed"].(string)
+	if h.store.has(workerRegKey(common.WorkerRoleDn, newSeedStr)) {
+		t.Fatalf("the new seed registered before the drain finished")
+	}
+	released = true
+	close(held)
+	waitFor(t, "the new incarnation to register", func() bool {
+		return h.store.has(workerRegKey(common.WorkerRoleDn, newSeedStr))
+	})
+}
+
+// TestVoteFenceStopsShardsDuringAHandoff is VW8's order for a role whose shard
+// manager is still joining a handoff (VW9) when the fence comes: the stop of
+// a shard a peer has taken over, whose revision worker is stuck in a call.
+// The manager sees its own cancel only once that join returns, which can take
+// DefaultWorkerSyncupTimeout, so the fence reaches the shard workers it still
+// runs only because each one's ctx is a child of the manager's. Were it not,
+// every other shard of the role would go on driving rounds and syncups behind
+// the deletes, for a worker that has given up its membership.
+func TestVoteFenceStopsShardsDuringAHandoff(t *testing.T) {
+	role := common.WorkerRoleDn
+	// The harness starts under seedOf(1). Find a peer whose ticket beats it on
+	// one shard (X, handed off) and loses on another (Y, kept).
+	own := seedOf(1)
+	var peer string
+	var shardX, shardY uint32
+	for n := 2; peer == "" && n < 64; n++ {
+		p := seedOf(n)
+		var won, lost []uint32
+		for s := uint32(0); s < common.ShardBucketSize; s++ {
+			pt := voteTicket(p, role, s)
+			ot := voteTicket(own, role, s)
+			if bytes.Compare(pt[:], ot[:]) > 0 {
+				won = append(won, s)
+			} else {
+				lost = append(lost, s)
+			}
+		}
+		if len(won) > 0 && len(lost) > 0 {
+			peer, shardX, shardY = p, won[0], lost[0]
+		}
+	}
+	if peer == "" {
+		t.Fatalf("no peer splits the shards with %s", own)
+	}
+	rec := newRevRecorder()
+	store := newVoteHookStore()
+	store.seed(t, model.DnRevKey(shardX, testCid, 10),
+		&pb.DnRev{AddrPort: "dn0:9520", Revision: 1})
+	store.seed(t, model.DnRevKey(shardY, testCid, 11),
+		&pb.DnRev{AddrPort: "dn1:9520", Revision: 1})
+	h := newVoteHarnessDeps(t, testConfig(role), store, func(d *deps) {
+		d.kinds = func(r string) (revKind, bool) {
+			if r != common.WorkerRoleDn {
+				return kindFor(r)
+			}
+			return recordingDnKind(rec), true
+		}
+	})
+	if got := h.vote.currentSeed(); got != own {
+		t.Fatalf("harness seed = %s, want %s", got, own)
+	}
+	key := workerRegKey(role, own)
+	h.advance(h.deps.cfg.GraceTime)
+	waitFor(t, "both revision workers", func() bool {
+		return rec.startCount() == 2
+	})
+	onX := rec.get(testCid, 10)
+	onY := rec.get(testCid, 11)
+	held := onX.holdStop()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+
+	// The peer joins and takes shard X: the manager starts the handoff and
+	// stays inside it, joining X's stuck revision worker.
+	h.beat(role, peer)
+	h.keepAlive(role, peer, h.deps.cfg.GraceTime)
+	waitFor(t, "the handoff of shard X", func() bool {
+		_, stopped := onX.snapshot()
+		return stopped == 1
+	})
+	if _, stopped := onY.snapshot(); stopped != 0 {
+		t.Fatalf("shard Y's revision worker was stopped by the handoff")
+	}
+
+	// The old registration's delete holds the fence until shard Y's revision
+	// worker has been told to stop, as a delete to an etcd out of reach would.
+	stoppedAhead := make(chan bool, 1)
+	h.store.setOnDelete(func(deleted string) {
+		if deleted != key {
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, stopped := onY.snapshot(); stopped == 1 {
+				stoppedAhead <- true
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		stoppedAhead <- false
+	})
+
+	// VW8(b): the puts keep landing while the watch stops echoing them.
+	h.store.setMuteEvents(true)
+	h.advance(2 * h.deps.cfg.VoteInterval)
+	waitFor(t, "fence", func() bool {
+		return len(h.logs.withMsg(msgWorkerFenced)) >= 1
+	})
+	select {
+	case ahead := <-stoppedAhead:
+		if !ahead {
+			t.Fatalf("shard Y's revision worker had not been told to stop " +
+				"while the old registration's delete was running: a " +
+				"manager still joining a handoff left its other shard " +
+				"workers driving behind the deletes")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for the old registration's delete")
+	}
+	// It was the handoff that still held the manager: shard X is not
+	// released yet.
+	for _, r := range h.logs.withMsg(msgShardReleased) {
+		if r["shard"] == shardCode(shardX) && r["seed"] == own {
+			t.Fatalf("shard X was released before its revision worker " +
+				"stopped")
+		}
+	}
+	h.store.setMuteEvents(false)
+	released = true
+	close(held)
+	waitFor(t, "shard X released", func() bool {
+		for _, r := range h.logs.withMsg(msgShardReleased) {
+			if r["shard"] == shardCode(shardX) && r["seed"] == own {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // TestVoteShutdownDeletesOwnRegistrations is CM5: a graceful stop deletes the

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -23,6 +24,10 @@ type fakeRevWorker struct {
 	params  revWorkerParams
 	updates []desiredState
 	stopped int
+	// held, when set, keeps stop from returning until it is closed: the
+	// graceful stop of a worker whose in-flight unary call is still running
+	// (RW11).
+	held chan struct{}
 }
 
 func (w *fakeRevWorker) update(d desiredState) {
@@ -33,8 +38,22 @@ func (w *fakeRevWorker) update(d desiredState) {
 
 func (w *fakeRevWorker) stop() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	w.stopped++
+	held := w.held
+	w.mu.Unlock()
+	if held != nil {
+		<-held
+	}
+}
+
+// holdStop makes every later stop wait until the returned channel is closed.
+// The caller closes it in a t.Cleanup registered after the harness's own, so
+// a failing test still lets the shard worker stop.
+func (w *fakeRevWorker) holdStop() chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.held = make(chan struct{})
+	return w.held
 }
 
 func (w *fakeRevWorker) snapshot() ([]desiredState, int) {
@@ -109,6 +128,7 @@ func newShardHarness(t *testing.T) *shardHarness {
 func (h *shardHarness) start() {
 	h.t.Helper()
 	h.sw = startShardWorker(
+		context.Background(),
 		h.deps, recordingDnKind(h.rec), testShard, seedOf(1),
 	)
 	h.t.Cleanup(h.sw.stop)
@@ -220,6 +240,105 @@ func TestShardDeleteStops(t *testing.T) {
 	waitFor(t, "restarted", func() bool { return h.rec.startCount() == 2 })
 }
 
+// TestShardDeleteDoesNotWaitForTheStop checks SW3 against a revision worker
+// whose graceful stop is still waiting out an in-flight unary call (RW11): the
+// shard hands that stop to a goroutine of its own and goes on applying the
+// events of its other keys — a bump of another SP on the same shard is not
+// held for up to DefaultWorkerSyncupTimeout — while SW5's stop of the shard
+// still returns only once that stop has.
+func TestShardDeleteDoesNotWaitForTheStop(t *testing.T) {
+	h := newShardHarness(t)
+	goneKey := model.DnRevKey(testShard, 1, 10)
+	h.store.seed(t, goneKey, &pb.DnRev{AddrPort: "dn0:9520", Revision: 7})
+	h.store.seed(t, model.DnRevKey(testShard, 1, 11),
+		&pb.DnRev{AddrPort: "dn1:9520", Revision: 3})
+	h.start()
+	waitFor(t, "two workers", func() bool { return h.rec.startCount() == 2 })
+	gone := h.rec.get(1, 10)
+	other := h.rec.get(1, 11)
+	held := gone.holdStop()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+
+	if err := h.store.Delete(context.Background(), goneKey); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	waitFor(t, "the deleted key's stop", func() bool {
+		_, stopped := gone.snapshot()
+		return stopped == 1
+	})
+	h.putRev(1, 11, &pb.DnRev{AddrPort: "dn1:9520", Revision: 4})
+	waitFor(t, "the other key's update while the deleted key's worker "+
+		"is still stopping", func() bool {
+		updates, _ := other.snapshot()
+		return len(updates) == 1
+	})
+
+	// SW5: the shard's own stop joins the stop still running.
+	stopped := make(chan struct{})
+	go func() {
+		h.sw.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatalf("the shard stopped while a revision worker was still " +
+			"stopping")
+	case <-time.After(50 * time.Millisecond):
+	}
+	released = true
+	close(held)
+	waitClosed(t, "the shard's stop", stopped)
+}
+
+// TestShardSuccessorWaitsForItsPredecessor checks RW1 across SW3's stop off the
+// watch goroutine: a key deleted and put again while its old worker is still
+// stopping gets a new worker that is handed exactly that stop to wait for.
+func TestShardSuccessorWaitsForItsPredecessor(t *testing.T) {
+	h := newShardHarness(t)
+	key := model.DnRevKey(testShard, 1, 10)
+	h.store.seed(t, key, &pb.DnRev{AddrPort: "dn0:9520", Revision: 7})
+	h.start()
+	waitFor(t, "worker", func() bool { return h.rec.startCount() == 1 })
+	old := h.rec.get(1, 10)
+	if old.params.after != nil {
+		t.Fatalf("a first worker was handed a predecessor to wait for")
+	}
+	held := old.holdStop()
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(held)
+		}
+	})
+
+	if err := h.store.Delete(context.Background(), key); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	waitFor(t, "the old worker's stop", func() bool {
+		_, stopped := old.snapshot()
+		return stopped == 1
+	})
+	h.putRev(1, 10, &pb.DnRev{AddrPort: "dn0:9520", Revision: 9})
+	waitFor(t, "the successor", func() bool { return h.rec.startCount() == 2 })
+	after := h.rec.get(1, 10).params.after
+	if after == nil {
+		t.Fatalf("the successor was not handed its predecessor's stop")
+	}
+	select {
+	case <-after:
+		t.Fatalf("the predecessor's stop reads as returned while it runs")
+	default:
+	}
+	released = true
+	close(held)
+	waitClosed(t, "the predecessor's stop, as the successor sees it", after)
+}
+
 // TestShardRescanDiffAfterCompaction checks SW4: after a compaction the shard
 // rescans and diffs — starting unknown keys, updating changed ones and
 // stopping the ones that are gone — then restarts the watch.
@@ -257,12 +376,49 @@ func TestShardRescanDiffAfterCompaction(t *testing.T) {
 	waitFor(t, "watch restarted", func() bool { return h.store.watchCount() > 0 })
 }
 
+// TestShardRescanDoesNotWaitForTheStop checks SW4 the same way: a worker
+// whose key a rescan finds gone is stopped off the shard's goroutine, which
+// re-opens its watch at once instead of after that worker's in-flight call.
+func TestShardRescanDoesNotWaitForTheStop(t *testing.T) {
+	h := newShardHarness(t)
+	goneKey := model.DnRevKey(testShard, 1, 10)
+	h.store.seed(t, goneKey, &pb.DnRev{AddrPort: "dn0:9520", Revision: 7})
+	h.store.seed(t, model.DnRevKey(testShard, 1, 11),
+		&pb.DnRev{AddrPort: "dn1:9520", Revision: 3})
+	h.start()
+	waitFor(t, "two workers", func() bool { return h.rec.startCount() == 2 })
+	gone := h.rec.get(1, 10)
+	other := h.rec.get(1, 11)
+	held := gone.holdStop()
+	t.Cleanup(func() { close(held) })
+
+	// The key goes behind the watch's back, then the watch breaks.
+	h.store.mu.Lock()
+	delete(h.store.kvs, goneKey)
+	h.store.mu.Unlock()
+	h.store.breakWatches(errors.New(
+		"etcdserver: mvcc: required revision has been compacted",
+	))
+	waitFor(t, "the gone key's stop", func() bool {
+		_, stopped := gone.snapshot()
+		return stopped == 1
+	})
+	waitFor(t, "the rescan's watch while the gone key's worker is still "+
+		"stopping", func() bool { return h.store.watchCount() == 1 })
+	h.putRev(1, 11, &pb.DnRev{AddrPort: "dn1:9520", Revision: 4})
+	waitFor(t, "the other key's update", func() bool {
+		updates, _ := other.snapshot()
+		return len(updates) == 1
+	})
+}
+
 // TestShardFailingRescanRetries checks SW4's "never a hot loop": a failing
 // rescan is retried one vote interval later.
 func TestShardFailingRescanRetries(t *testing.T) {
 	h := newShardHarness(t)
 	h.store.setRangeErr(errors.New("etcd down"))
 	h.sw = startShardWorker(
+		context.Background(),
 		h.deps, recordingDnKind(h.rec), testShard, seedOf(1),
 	)
 	t.Cleanup(h.sw.stop)

@@ -131,9 +131,13 @@ func (p *pendingTimer) stop() {
 type regEntry struct {
 	seed string
 	// lastSeen is the MONOTONIC time of the last put this observer saw (the
-	// scan time for a key found by a scan). The stored WorkerReg.epoch is
-	// never compared with local time (VW4).
+	// scan time for a put it learned of from a scan). The stored
+	// WorkerReg.epoch is never compared with local time (VW4).
 	lastSeen time.Time
+	// modRev is the key's mod_revision at that put — the put event's, or the
+	// one the scan reported. A rescan that reports it unchanged has found no
+	// new put, only the key still sitting in the registry (VW3).
+	modRev int64
 	// live is the observed state of VW3.
 	live bool
 	// effective is the committed state of VW5/VW6: true = member.
@@ -583,7 +587,8 @@ func (v *voteWorker) onScan(msg scanMsg) {
 
 // applyScan applies one scan to a role's tracking entries (VW3, VW7): a key
 // present gets lastSeen = now and becomes live (an APPEAR transition only if
-// it was not already observed live); a key that WAS live but is absent from
+// it was not already observed live), unless this observer already saw it at
+// the mod_revision the scan reports; a key that WAS live but is absent from
 // the scan transitions to dead.
 //
 // The worker's own key is tracked exactly like everyone else's, which is what
@@ -613,8 +618,20 @@ func (v *voteWorker) applyScan(
 		// into a disappear, commit it nonmember, delete its registration and
 		// so fence it (VW8c) over a field nobody reads.
 		present[seed] = true
+		if entry, ok := rs.entries[seed]; ok && entry.modRev == kv.ModRev {
+			// Nothing was put since this observer last saw the key: nothing
+			// expires a registration (VW6), so a scan finds a dead worker's
+			// key exactly as it finds a live one's. Counting the find as a
+			// put would re-arm the deadline of a peer that stopped putting
+			// on every rescan, and a watch that keeps failing faster than
+			// the dead threshold would keep that peer — and its shards —
+			// alive for good. The entry is left as it was: live with its
+			// deadline running, or dead.
+			continue
+		}
 		entry := rs.entryFor(seed)
 		entry.lastSeen = now
+		entry.modRev = kv.ModRev
 		if !entry.live {
 			entry.live = true
 			v.observed(inc, rs, entry, true)
@@ -720,6 +737,7 @@ func (v *voteWorker) onWatch(msg watchMsg) {
 	case etcdutil.EventPut:
 		entry := rs.entryFor(seed)
 		entry.lastSeen = now
+		entry.modRev = msg.event.Rev
 		if own {
 			inc.lastOwnEcho = now
 		}
@@ -1084,8 +1102,22 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 	// already given up on — peers would then observe an appear for a seed
 	// that no longer exists.
 	v.stopHeartbeat(inc)
-	v.stopManagers(inc)
+	// The shard workers' graceful stop starts next, and the fence does not
+	// wait for it before the deletes: the drain waits out their in-flight
+	// calls (RW11), which can take common.DefaultWorkerSyncupTimeout, and a
+	// delete issued only after that would let the peers see this seed go
+	// only when the drain ends or its deadline passes, whichever comes first
+	// — the old shards undriven that much longer than the grace window. Nor
+	// do the deletes wait before the drain starts: one that cannot land — a
+	// fence of VW8(a) is usually cut off from etcd — takes
+	// common.DefaultEtcdOpTimeout per role, and shard workers left running
+	// behind it would go on starting rounds, syncups and reaction passes for
+	// a worker that has already given up its membership. The overlap this
+	// allows, a last syncup finishing after a peer took the shard, is the one
+	// CM5 accepts.
+	v.cancelManagers(inc)
 	v.deleteOwnRegs(inc.ctx, inc)
+	v.stopManagers(inc)
 	v.discard(inc)
 	v.inc = nil
 	// VW7 applies to the new incarnation: nothing is driven until one full
@@ -1127,8 +1159,9 @@ func (v *voteWorker) stopHeartbeat(inc *incarnation) {
 //
 // This is the ONLY place that deletes an own registration, and both callers —
 // the fence and the shutdown — run it on the loop goroutine and discard the
-// incarnation immediately afterwards, so the delete events it produces are
-// never processed. That is what lets VW8(c) fence on every own-key delete event
+// incarnation before that goroutine selects again (the shard workers' drain
+// sits in between on both paths), so the delete events it produces are never
+// processed. That is what lets VW8(c) fence on every own-key delete event
 // it sees without tracking which deletes this process issued (onWatch).
 func (v *voteWorker) deleteOwnRegs(parent context.Context, inc *incarnation) {
 	for _, role := range v.roles {
@@ -1136,6 +1169,20 @@ func (v *voteWorker) deleteOwnRegs(parent context.Context, inc *incarnation) {
 		ctx, cancel := shutdownCtx(parent)
 		_ = v.deps.store.Delete(ctx, key)
 		cancel()
+	}
+}
+
+// cancelManagers starts the graceful stop of every role's shard workers
+// without waiting for it (VW8), and stopManagers joins them. Every shard
+// worker runs under a child of its manager's ctx (startShardWorker), so the
+// cancel reaches all of them at once — also those of a manager that is still
+// joining the stop of a shard it no longer owns (VW9), and would see its own
+// cancel only once that join returned.
+func (v *voteWorker) cancelManagers(inc *incarnation) {
+	for _, rs := range inc.roles {
+		if rs.mgr != nil {
+			rs.mgr.cancel()
+		}
 	}
 }
 
@@ -1290,7 +1337,7 @@ func (m *shardManager) apply(owned map[uint32]bool) {
 	})
 	for _, shard := range starting {
 		m.running[shard] = startShardWorker(
-			m.deps, m.kind, shard, m.seed,
+			m.ctx, m.deps, m.kind, shard, m.seed,
 		)
 		slog.InfoContext(m.ctx, msgShardOwned,
 			slog.String("role", m.kind.role),

@@ -520,6 +520,54 @@ func TestRangeOrderRevAndDecode(t *testing.T) {
 	}
 }
 
+// TestRangeModRev checks that Range and RangeDesc hand back each key's
+// mod_revision beside its value: a rescan tells a key re-put since the last
+// scan from one merely still there by that number alone (VW3).
+func TestRangeModRev(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	prefix := testPrefix(t)
+	keys := []string{prefix + "a", prefix + "b", prefix + "c"}
+	for _, key := range keys {
+		if err := cli.Put(ctx, key, &pb.WorkerReg{Epoch: 1}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+	}
+	// Rewrite the middle key: its mod revision must become the largest.
+	if err := cli.Put(ctx, keys[1], &pb.WorkerReg{Epoch: 2}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	asc, rev, err := cli.Range(ctx, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	desc, _, err := cli.RangeDesc(ctx, prefix, 0)
+	if err != nil {
+		t.Fatalf("RangeDesc: %v", err)
+	}
+	if len(asc) != 3 || len(desc) != 3 {
+		t.Fatalf("want 3 keys each way, got %d and %d", len(asc), len(desc))
+	}
+	for i, kv := range asc {
+		if kv.ModRev <= 0 {
+			t.Fatalf("Range: key %q has no mod revision", kv.Key)
+		}
+		if kv.ModRev > rev {
+			t.Fatalf("Range: mod revision %d beyond store revision %d",
+				kv.ModRev, rev)
+		}
+		if mirror := desc[len(desc)-1-i]; mirror.Key != kv.Key ||
+			mirror.ModRev != kv.ModRev {
+			t.Fatalf("RangeDesc: %q at mod revision %d, Range: %q at %d",
+				mirror.Key, mirror.ModRev, kv.Key, kv.ModRev)
+		}
+	}
+	if asc[1].ModRev <= asc[0].ModRev || asc[1].ModRev <= asc[2].ModRev {
+		t.Fatalf("rewritten key must carry the largest mod revision: %v", asc)
+	}
+}
+
 func TestRangeKeysModRev(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := context.Background()
@@ -684,6 +732,20 @@ func TestWatchTypedOrderingAndCtxEnd(t *testing.T) {
 	}
 	if third.Msg != nil {
 		t.Fatalf("a delete event carries no message: %+v", third.Msg)
+	}
+	// A put event's Rev is the number a scan reports as the key's ModRev,
+	// which VW3's rescan compares; a delete event's is the deletion's own.
+	kvs, scanRev, err := cli.Range(base, prefix)
+	if err != nil {
+		t.Fatalf("Range: %v", err)
+	}
+	if len(kvs) != 1 || kvs[0].Key != keyB || kvs[0].ModRev != second.Rev {
+		t.Fatalf("scan after the events: %+v, want only %q at mod "+
+			"revision %d", kvs, keyB, second.Rev)
+	}
+	if third.Rev <= second.Rev || third.Rev > scanRev {
+		t.Fatalf("delete event at revision %d, want after the put's %d "+
+			"and at most the store's %d", third.Rev, second.Rev, scanRev)
 	}
 
 	putRec := capture.onlyMsgKey(t, "etcd watch event", keyB)

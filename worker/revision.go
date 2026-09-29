@@ -131,6 +131,30 @@ type revWorkerParams struct {
 	id      uint64
 	seed    string
 	desired desiredState
+	// after is the graceful stop of the object's previous worker when its
+	// parent has not seen it return yet (childStops): closed once it has,
+	// nil when there is none to wait for (RW1).
+	after <-chan struct{}
+}
+
+// awaitPredecessor holds a worker until the previous worker of its object has
+// stopped (RW1). A parent that goes on running does not wait for the stop of
+// a child it stopped (childStops), so a successor can be started while its
+// predecessor still finishes an in-flight call; it drives nothing — it does
+// not even log "revision worker started" — until that stop has returned. A
+// worker stopped while it waits still returns only after its predecessor has,
+// so a chain of restarts of one object stays in order too. It reports whether
+// the worker may run.
+func awaitPredecessor(ctx context.Context, after <-chan struct{}) bool {
+	if after == nil {
+		return true
+	}
+	select {
+	case <-after:
+	case <-ctx.Done():
+		<-after
+	}
+	return ctx.Err() == nil
 }
 
 // revWorker is the generic per-object loop of §8.1 (RW1-RW12), shared by the
@@ -153,6 +177,8 @@ type revWorker struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	done      chan struct{}
+	// after is revWorkerParams.after: the loop starts once it is closed.
+	after <-chan struct{}
 
 	// State owned by the loop goroutine (RW2).
 	desired    desiredState
@@ -199,6 +225,7 @@ func startRevWorker(
 		ctx:       ctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		after:     p.after,
 		desired:   p.desired,
 	}
 	w.driver = newDriver(w)
@@ -222,7 +249,8 @@ func (w *revWorker) update(d desiredState) {
 
 // stop cancels the worker and joins it (RW11). An in-flight unary call is
 // allowed to finish first — its own deadline bounds the wait — so this can
-// take up to common.DefaultWorkerSyncupTimeout.
+// take up to common.DefaultWorkerSyncupTimeout, which is why a parent that
+// keeps running issues it off its own goroutine (childStops).
 func (w *revWorker) stop() {
 	w.cancel()
 	<-w.done
@@ -238,6 +266,9 @@ func (w *revWorker) desiredRevision() uint64 {
 // of catch-up rounds (RW8) — is wait().
 func (w *revWorker) run() {
 	defer close(w.done)
+	if !awaitPredecessor(w.ctx, w.after) {
+		return
+	}
 	slog.InfoContext(w.ctx, msgRevisionWorkerStarted, w.lifecycleAttrs()...)
 	defer func() {
 		w.cleanup()

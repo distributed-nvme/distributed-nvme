@@ -153,6 +153,9 @@ type fakeStore struct {
 	kvs      map[string][]byte
 	rev      int64
 	watchers []*fakeWatch
+	// modRevs is each key's mod_revision: the store revision of its last
+	// write, which Range reports (EU2) and VW3's rescan compares.
+	modRevs map[string]int64
 
 	putErr   error
 	rangeErr error
@@ -185,7 +188,11 @@ type fakeWatch struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{kvs: make(map[string][]byte), rev: 1}
+	return &fakeStore{
+		kvs:     make(map[string][]byte),
+		rev:     1,
+		modRevs: make(map[string]int64),
+	}
 }
 
 // seed writes a key without emitting a watch event, as if it had been there
@@ -200,6 +207,7 @@ func (s *fakeStore) seed(t *testing.T, key string, msg proto.Message) {
 	defer s.mu.Unlock()
 	s.rev++
 	s.kvs[key] = data
+	s.modRevs[key] = s.rev
 }
 
 func (s *fakeStore) Get(
@@ -237,6 +245,7 @@ func (s *fakeStore) Put(
 	s.rev++
 	rev := s.rev
 	s.kvs[key] = data
+	s.modRevs[key] = rev
 	s.puts = append(s.puts, key)
 	watchers := s.matching(key)
 	s.mu.Unlock()
@@ -258,6 +267,7 @@ func (s *fakeStore) Delete(ctx context.Context, key string) error {
 	rev := s.rev
 	_, existed := s.kvs[key]
 	delete(s.kvs, key)
+	delete(s.modRevs, key)
 	s.deletes = append(s.deletes, key)
 	watchers := s.matching(key)
 	s.mu.Unlock()
@@ -289,7 +299,11 @@ func (s *fakeStore) Range(
 	sort.Strings(keys)
 	kvs := make([]etcdutil.KV, 0, len(keys))
 	for _, key := range keys {
-		kvs = append(kvs, etcdutil.KV{Key: key, Value: s.kvs[key]})
+		kvs = append(kvs, etcdutil.KV{
+			Key:    key,
+			Value:  s.kvs[key],
+			ModRev: s.modRevs[key],
+		})
 	}
 	return kvs, s.rev, nil
 }

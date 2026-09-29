@@ -3098,10 +3098,12 @@ each request always carries the full desired state (§9.1). **Sides first**
 (`dnv-worker.md` RW14): the cntlrs' requests — a failover's demotion as much as its
 promotion (§11.1) — are held until every side the worker drives has reported the new
 revision applied (an idle side is not waited for), or for one `cntlr_interval` at most
-when a side does not accept it: a side on a dead disk node — a leg AR8 parked there
+when a side does not report it: a side on a dead disk node — a leg AR8 parked there
 keeps one, so every hold of that SP lasts the whole interval until the disk node returns
-or the leg is deleted — or a new side its disk node refuses until the dn role's
-`SyncupDn` has introduced it. The order mitigates three races and is no correctness
+or the leg is deleted — a new side its disk node refuses until the dn role's
+`SyncupDn` has introduced it, or a side the worker restarted while its old child was
+inside a `Syncup*`, whose new child sends nothing until that call has ended
+(`dnv-worker.md` RW1). The order mitigates three races and is no correctness
 dependency ([D16]). Resolve each side's DN and
 each cntlr's CN by reading `DnConf`/`CnConf` at the record's endpoint
 (`Side.addr_port` / `Cntlr.addr_port` — those keys are endpoint-addressed, §5.3):
@@ -4402,8 +4404,11 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   semantics. Why observer-local time rather than the stored epoch: comparing a writer's
   wall clock with a reader's makes correctness depend on NTP — a clock running ahead
   would let one worker claim every shard while the others keep theirs, undetected; the
-  epoch in the value is therefore informational. The costs, all accepted: a rescan needs
-  2 × interval before it can declare anyone dead; a fresh worker drives nothing for its
+  epoch in the value is therefore informational. The costs, all accepted: a key a scan
+  finds untracked — every key of the first scan after a start or a fence — needs
+  2 × interval before it can be declared dead (a rescan keeps the running deadline of
+  every key whose `mod_revision` the observer has already seen, `dnv-worker.md` VW3);
+  a fresh worker drives nothing for its
   first grace window; ownership changes overlap or gap by a few seconds across workers
   (safe because every `Syncup*` is idempotent under the agents' revision gate and every
   etcd reaction is STM-guarded; an `err_epoch` the overlap leaves stale is corrected by
