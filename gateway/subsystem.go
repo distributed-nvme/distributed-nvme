@@ -304,8 +304,14 @@ func (s *Server) ListSubsystems(
 // The host list is stored twice on purpose and both copies move together: the
 // Subsystem's copy is what every cntlr's nvmet allowed_hosts is built from,
 // the CdcEntry's is what dnv-cdc filters its discovery log with. A CdcEntry
-// that is not there yet is skipped rather than invented, exactly as in
-// eachCdcEntry — only CreateSubsystem knows the rest of an entry's fields.
+// whose key is missing is rebuilt (rebuildCdcEntry) and written with the new
+// hosts, exactly as eachCdcEntry does for the cntlr mutators: skipping it
+// would answer OK while the subsystem stayed out of dnv-cdc's discovery log
+// for every host, the newly allowed ones included (dnv-cdc drops an entry
+// whose key is deleted, cdc.md WV3).
+// The entry is read, and rebuilt if missing, before the first write, as
+// CreateSubsystem reads its cntlrs: a lost cntlr key then refuses the RPC
+// before anything is staged.
 func (s *Server) UpdateSubsystemHosts(
 	ctx context.Context,
 	req *pb.UpdateSubsystemHostsRequest,
@@ -339,15 +345,19 @@ func (s *Server) UpdateSubsystemHosts(
 			return err
 		}
 		ssId = subsystem.GetSsId()
+		entryKey := model.CdcEntryKey(sc.Cid, sc.Shard(), sc.SpId(), ssId)
+		entry := &pb.CdcEntry{}
+		if !stm.Get(entryKey, entry) {
+			entry, err = rebuildCdcEntry(stm, sc, req.GetNqn(), subsystem)
+			if err != nil {
+				return err
+			}
+		}
 		subsystem.AllowedHosts = req.GetAllowedHosts()
 		stm.Put(
 			model.SubsystemKey(sc.Cid, sc.SpId(), req.GetNqn()), subsystem)
-		entryKey := model.CdcEntryKey(sc.Cid, sc.Shard(), sc.SpId(), ssId)
-		entry := &pb.CdcEntry{}
-		if stm.Get(entryKey, entry) {
-			entry.AllowedHosts = req.GetAllowedHosts()
-			stm.Put(entryKey, entry)
-		}
+		entry.AllowedHosts = req.GetAllowedHosts()
+		stm.Put(entryKey, entry)
 		return bumpSp(stm, opUpdateSubsystemHosts, sc)
 	})
 	if err != nil {

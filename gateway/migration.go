@@ -416,13 +416,14 @@ func (s *Server) CreateMigration(
 // It is two-phase (AG4) for the same reason DeleteClone is: `force == false`
 // must PROVE the dm-clone has finished hydrating before the source disappears,
 // and only the destination DN's agent knows that — so one read-only STM
-// resolves what the call needs, the GetSideInfo happens strictly between the
-// transactions (AG1), and the deciding STM re-runs the whole resolution plus
-// the token check. Nothing from phase 1 is trusted in phase 2: any interleaved
-// mutation bumped SpRev, so a token that was sent subsumes the staleness of
-// everything phase 1 saw. A caller that sent none gets the re-resolution but
-// not that subsumption — GW6 is presence-based (§0 #7), so an interleaved
-// mutation stays invisible to it.
+// resolves what the call needs, the deleting gate included, and checks the
+// token, the GetSideInfo happens strictly between the transactions (AG1), and
+// the deciding STM re-runs the whole resolution plus the token check. Nothing
+// from phase 1 is trusted in phase 2: any interleaved mutation bumped SpRev,
+// so a token that was sent subsumes the staleness of everything phase 1 saw.
+// A caller that sent none gets the re-resolution but not that subsumption —
+// GW6 is presence-based (§0 #7), so an interleaved mutation stays invisible
+// to it.
 //
 // An unreachable agent is FAILED_PRECONDITION, not ABORTED (AG3): the caller
 // cannot prove hydration is done, which is exactly the precondition §8.11
@@ -449,7 +450,14 @@ func (s *Server) FinishMigration(
 		phasePtr  *pb.SidePointer
 	)
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
-		sc, err := openSpRead(stm, req.GetClusterName(), req.GetSpName())
+		// openSp, not openSpRead, as in CreateMigration's planning read:
+		// GW5's deleting gate, then GW6's token, before the migration lookup
+		// and before any agent call. Without them a deleting pool or a stale
+		// token could first meet the lookup's NOT_FOUND or, unforced, the
+		// hydration verdict and its agent call. Phase 2 checks both again
+		// (AG4).
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
 		if err != nil {
 			return err
 		}

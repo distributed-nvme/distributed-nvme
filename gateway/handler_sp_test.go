@@ -3775,6 +3775,112 @@ func TestUpdateCntlrEnabled(t *testing.T) {
 	}
 }
 
+// TestCntlrMutatorsRecreateAMissingCdcEntry pins what the three cntlr mutators
+// do with a listed subsystem whose CdcEntry key is gone: they write it back in
+// the same transaction, rebuilt from the Subsystem record — the NQN it is
+// listed under and its allowed_hosts — and advertising every cntlr that is
+// ENABLED once the mutator's own change is applied (§8.8). Skipping the entry
+// instead answered OK while the subsystem stayed out of dnv-cdc's discovery
+// log, and no later RPC would ever have put the key back.
+//
+// Each case runs on a fresh SP and the entry is deleted immediately before the
+// mutator under test, so that mutator is the one that meets the gap: the
+// enable and the delete first need the standby disabled, and get there through
+// UpdateCntlrEnabled while the entry still exists.
+func TestCntlrMutatorsRecreateAMissingCdcEntry(t *testing.T) {
+	hosts := []string{"nqn.2024-01.io.dnv:spt-host-a"}
+	for _, op := range []string{"create", "disable", "enable", "delete"} {
+		t.Run(op, func(t *testing.T) {
+			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+			spId := env.createSp(sptDefaultSpec(sptSpName))
+			env.addSubsystem(spId)
+			ssKey := model.SubsystemKey(env.cid, spId, sptNqn)
+			subsystem := &pb.Subsystem{}
+			env.get(ssKey, subsystem)
+			subsystem.AllowedHosts = hosts
+			mustPut(t, env.cli, ssKey, subsystem)
+			conf := env.spConf(sptSpName)
+			primaryId := conf.GetCntlrIdList()[0]
+			standbyId := conf.GetCntlrIdList()[1]
+			primaryAddr := env.cntlr(spId, primaryId).GetAddrPort()
+			standbyAddr := env.cntlr(spId, standbyId).GetAddrPort()
+			rev := uint64(1)
+			setEnabled := func(enabled bool) {
+				t.Helper()
+				if _, err := env.srv.UpdateCntlrEnabled(
+					env.ctx, &pb.UpdateCntlrEnabledRequest{
+						ClusterName: env.name,
+						SpName:      sptSpName,
+						SpRev:       &pb.SpRev{Revision: rev},
+						CntlrId:     standbyId,
+						Enabled:     enabled,
+					}); err != nil {
+					t.Fatalf("UpdateCntlrEnabled enabled=%v: %v", enabled, err)
+				}
+				rev++
+			}
+			if op == "enable" || op == "delete" {
+				setEnabled(false)
+			}
+			entryKey := model.CdcEntryKey(env.cid, 0, spId, sptSsId)
+			if err := env.cli.Delete(env.ctx, entryKey); err != nil {
+				t.Fatalf("Delete %s: %v", entryKey, err)
+			}
+
+			var wantAddrs []string
+			switch op {
+			case "create":
+				reply, err := env.srv.CreateCntlr(
+					env.ctx, &pb.CreateCntlrRequest{
+						ClusterName: env.name,
+						SpName:      sptSpName,
+						SpRev:       &pb.SpRev{Revision: rev},
+						CntlidSlot:  2,
+					})
+				if err != nil {
+					t.Fatalf("CreateCntlr: %v", err)
+				}
+				newAddr := env.cntlr(spId, reply.GetCntlrId()).GetAddrPort()
+				wantAddrs = []string{primaryAddr, standbyAddr, newAddr}
+			case "disable":
+				setEnabled(false)
+				wantAddrs = []string{primaryAddr}
+			case "enable":
+				setEnabled(true)
+				wantAddrs = []string{primaryAddr, standbyAddr}
+			case "delete":
+				if _, err := env.srv.DeleteCntlr(
+					env.ctx, &pb.DeleteCntlrRequest{
+						ClusterName: env.name,
+						SpName:      sptSpName,
+						SpRev:       &pb.SpRev{Revision: rev},
+						CntlrId:     standbyId,
+					}); err != nil {
+					t.Fatalf("DeleteCntlr: %v", err)
+				}
+				wantAddrs = []string{primaryAddr}
+			}
+
+			entry := &pb.CdcEntry{}
+			found, err := env.cli.Get(env.ctx, entryKey, entry)
+			if err != nil {
+				t.Fatalf("Get %s: %v", entryKey, err)
+			}
+			if !found {
+				t.Fatalf("the missing CdcEntry was not recreated by %s", op)
+			}
+			want := &pb.CdcEntry{Nqn: sptNqn, AllowedHosts: hosts}
+			for _, addr := range wantAddrs {
+				want.NvmeTrConfList = append(
+					want.NvmeTrConfList, sptTrConf(addr))
+			}
+			if !proto.Equal(entry, want) {
+				t.Errorf("recreated cdc entry:\n got %v\nwant %v", entry, want)
+			}
+		})
+	}
+}
+
 // TestUpdateCntlrEnabledNoWrite pins §0 #17: a request that asks for the state
 // already stored writes NOTHING and bumps NOTHING — a no-op that bumped SpRev
 // would invalidate every client's token and make every agent re-sync for a

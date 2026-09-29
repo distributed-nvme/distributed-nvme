@@ -1688,12 +1688,22 @@ func TestUpdateSubsystemHostsRewritesBothCopies(t *testing.T) {
 	}
 }
 
-// TestUpdateSubsystemHostsSkipsMissingCdcEntry pins the "skipped, never
-// invented" half of the CdcEntry rule: only CreateSubsystem knows an entry's
-// other fields, so an entry that is not there is left absent rather than
-// guessed at — and the RPC still succeeds and still bumps.
-func TestUpdateSubsystemHostsSkipsMissingCdcEntry(t *testing.T) {
+// TestUpdateSubsystemHostsRecreatesMissingCdcEntry pins the other half of the
+// two-copy rule: a subsystem whose CdcEntry key is gone gets it back in the
+// same transaction, rebuilt from what the entry is made of — the NQN, the
+// transports of every ENABLED cntlr's CN and the new allowed_hosts — exactly
+// as CreateSubsystem wrote it. Skipping it instead answered OK while the
+// subsystem stayed out of dnv-cdc's discovery log. cntlr B is disabled so that
+// the rebuild is seen to apply CreateSubsystem's filter, not copy the cntlr
+// list.
+func TestUpdateSubsystemHostsRecreatesMissingCdcEntry(t *testing.T) {
 	env := newVolEnv(t)
+	mustPut(t, env.cli, model.CntlrKey(env.cid, volSpId, volCntlrB), &pb.Cntlr{
+		AddrPort:   volCnB,
+		NvmeTrConf: volTrConf(volCnB),
+		CntlidSlot: 1,
+		Disabled:   true,
+	})
 	env.putSubsystem(volNqn, 501, nil)
 	entryKey := model.CdcEntryKey(env.cid, volShard, volSpId, 501)
 	if err := env.cli.Delete(env.ctx, entryKey); err != nil {
@@ -1710,8 +1720,16 @@ func TestUpdateSubsystemHostsSkipsMissingCdcEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateSubsystemHosts: %v", err)
 	}
-	if env.exists(entryKey, &pb.CdcEntry{}) {
-		t.Errorf("a missing CdcEntry must not be invented")
+	if !env.exists(entryKey, &pb.CdcEntry{}) {
+		t.Fatalf("the missing CdcEntry was not recreated")
+	}
+	wantEntry := &pb.CdcEntry{
+		Nqn:            volNqn,
+		NvmeTrConfList: []*pb.NvmeTrConf{volTrConf(volCnA)},
+		AllowedHosts:   []string{volHostA},
+	}
+	if got := env.cdcEntry(501); !proto.Equal(got, wantEntry) {
+		t.Errorf("recreated cdc entry:\n got %v\nwant %v", got, wantEntry)
 	}
 	if got := env.subsystem(volNqn).GetAllowedHosts(); len(got) != 1 {
 		t.Errorf("subsystem allowed_hosts: got %v", got)
@@ -3734,6 +3752,140 @@ func TestFinishMigrationReleasesSource(t *testing.T) {
 	if got := env.spConf().GetMigrNameList(); len(got) != 0 {
 		t.Errorf("migr_name_list: got %v, want empty", got)
 	}
+}
+
+// TestFinishMigrationChecksTheTokenInPhaseOne pins GW6's order on §8.11's
+// two-phase finish: a stale token is ABORTED "stale revision" in PHASE 1,
+// ahead of the migration lookup and ahead of the hydration proof, exactly as
+// DeleteClone's phase 1 answers it. The deciding STM checks the token too
+// (AG4), but a check left there alone comes after two answers computed
+// against state the client has not read: an unknown migration's NOT_FOUND,
+// and the destination agent's hydration verdict.
+//
+// The destination lands on a fake agent that reports no finished dm-clone, so
+// a phase-2-only check would answer FAILED_PRECONDITION "has not finished
+// hydrating" and count one GetSideInfo. The count is asserted, not only the
+// code: a stale client must not reach the agent at all.
+func TestFinishMigrationChecksTheTokenInPhaseOne(t *testing.T) {
+	env := newVolEnv(t)
+	addr := fakeAddrPort(t, "dn")
+	agent := startFakeAgent(t, addr, 1<<40)
+	env.putDn(addr, 704, 0, nil)
+	if _, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		MigrName:    "migr-a",
+		SrcSideId:   volDataSideA,
+		DnSelector:  volDnSelector(addr),
+	}); err != nil {
+		t.Fatalf("CreateMigration: %v", err)
+	}
+	before := env.spConf()
+	beforeRev := env.spRev()
+	for _, tc := range []struct {
+		name     string
+		migrName string
+		force    bool
+	}{
+		{name: "unforced", migrName: "migr-a", force: false},
+		{name: "forced unknown migration", migrName: "migr-x", force: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := env.srv.FinishMigration(
+				env.ctx, &pb.FinishMigrationRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       &pb.SpRev{Revision: beforeRev + 99},
+					MigrName:    tc.migrName,
+					Force:       tc.force,
+				})
+			msg := volWantCode(t, err, codes.Aborted)
+			if msg != msgStaleRevision {
+				t.Errorf("message: got %q, want %q", msg, msgStaleRevision)
+			}
+		})
+	}
+	if got := agent.callCount("GetSideInfo"); got != 0 {
+		t.Errorf("a stale-token finish called GetSideInfo: %d calls, want 0",
+			got)
+	}
+	env.wantUntouched(before, beforeRev)
+}
+
+// TestFinishMigrationRefusesADeletingPoolInPhaseOne pins the other half of
+// phase 1's opening: a mutator's resolution includes the `deleting` gate, and
+// the token comes after it, so on a pool whose deletion has begun the finish
+// answers FAILED_PRECONDITION "is being deleted" — as CreateMigration and
+// CancelMigration do — before the token, the migration lookup and any agent
+// call. Without the gate in phase 1, a token-less unforced finish answered
+// "has not finished hydrating" after one GetSideInfo, and an unknown migration
+// NOT_FOUND: only the deciding STM, which neither reached, applied the gate.
+// The stale-token case pins the order of the two checks: a phase 1 that
+// checked the token without the gate answered it ABORTED.
+//
+// DeleteStoragePool refuses a pool that still lists a migration, so a
+// deleting pool normally holds none: the unknown-name case is that pool. The
+// migration is planted before the flag only so that, without the gate, the
+// other two cases would get past the lookup and the unforced one would reach
+// the agent. The GetSideInfo count is asserted, not only the code: a refused
+// finish must not reach the agent at all.
+func TestFinishMigrationRefusesADeletingPoolInPhaseOne(t *testing.T) {
+	env := newVolEnv(t)
+	addr := fakeAddrPort(t, "dn")
+	agent := startFakeAgent(t, addr, 1<<40)
+	env.putDn(addr, 704, 0, nil)
+	if _, err := env.srv.CreateMigration(env.ctx, &pb.CreateMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		MigrName:    "migr-a",
+		SrcSideId:   volDataSideA,
+		DnSelector:  volDnSelector(addr),
+	}); err != nil {
+		t.Fatalf("CreateMigration: %v", err)
+	}
+	conf := env.spConf()
+	conf.Deleting = true
+	env.putSpConf(conf)
+	before := env.spConf()
+	beforeRev := env.spRev()
+	want := fmt.Sprintf("storage pool %q is being deleted", volSpName)
+	for _, tc := range []struct {
+		name     string
+		tok      *pb.SpRev
+		migrName string
+		force    bool
+	}{
+		{
+			name:     "stale token, forced",
+			tok:      &pb.SpRev{Revision: beforeRev + 99},
+			migrName: "migr-a",
+			force:    true,
+		},
+		{name: "no token, unforced", migrName: "migr-a", force: false},
+		{name: "no token, unknown migration", migrName: "migr-x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := env.srv.FinishMigration(
+				env.ctx, &pb.FinishMigrationRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       tc.tok,
+					MigrName:    tc.migrName,
+					Force:       tc.force,
+				})
+			msg := volWantCode(t, err, codes.FailedPrecondition)
+			if msg != want {
+				t.Errorf("message: got %q, want %q", msg, want)
+			}
+		})
+	}
+	if got := agent.callCount("GetSideInfo"); got != 0 {
+		t.Errorf("a finish on a deleting pool called GetSideInfo: "+
+			"%d calls, want 0", got)
+	}
+	env.wantUntouched(before, beforeRev)
 }
 
 // TestCreateMigrationRefusals pins §8.11's error table, each with nothing

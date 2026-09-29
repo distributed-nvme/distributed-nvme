@@ -480,7 +480,12 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   the STM's first read is `model.ClusterConfKey(cluster_name)`
   (`cluster_name` defaulted to `common.DefaultClusterName`) — absent ⇒
   `NOT_FOUND` — and `cid = model.ClusterId(name, conf.CreationEpoch)`
-  prefixes every further key. SP-scoped RPCs then read
+  prefixes every further key. `GrowSlice`, `CreateSpareLeg` and
+  `SwitchSpareLeg` make that read in their planning `Snapshot` only
+  (§5.4, §5.11): their later transactions — the deciding STM, which is the
+  `model` op the sp-worker shares, and `GrowSlice`'s CN-budget pre-check —
+  take `cid`, and the ClusterConf where they use it, from that snapshot and
+  never read ClusterConf themselves. SP-scoped RPCs then read
   `model.SpConfKey(cid, sp_name)` — absent ⇒ `NOT_FOUND`; mutators (except
   `DeleteStoragePool`) fail `FAILED_PRECONDITION` when `SpConf.deleting`.
   `DeleteStoragePool` is what SETS that flag (§5.4), so the gate is live from
@@ -894,7 +899,11 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   primary: false, disabled: false}`; append `cntlr_id_list`; CN bookkeeping +
   `BumpCnRev`; append the CN's `nvme_tr_conf` to **every** `CdcEntry` of the
   SP (iterate `nqn_list` → Subsystem → `CdcEntryKey(cid, shard, spId,
-  ssId)`); `BumpSpRev`. Reply `cntlr_id`.
+  ssId)`; an entry whose key is missing is first rebuilt as §5.7's
+  CreateSubsystem writes it, from the Subsystem and the cntlrs as this STM
+  reads them, then changed like the rest — DeleteCntlr and a flag-changing
+  UpdateCntlrEnabled walk the entries the same way); `BumpSpRev`. Reply
+  `cntlr_id`.
 * **DeleteCntlr** — STM: resolve; token; `primary == false` and
   `disabled == true` ⇒ else `FAILED_PRECONDITION`; reverse everything
   CreateCntlr did (id list, key, CN bookkeeping + `BumpCnRev`, tr conf out of
@@ -987,7 +996,8 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
 * **ListSubsystems** — one STM: `nqn_list` → each Subsystem into
   `nqn_to_subsystem` (missing ⇒ `ABORTED`).
 * **UpdateSubsystemHosts** — rewrite `allowed_hosts` in **both** the
-  Subsystem and its CdcEntry. Reply `ss_id`.
+  Subsystem and its CdcEntry; a CdcEntry whose key is missing is rebuilt as
+  CreateSubsystem writes it and written with the new hosts. Reply `ss_id`.
 * **CreateNamespace** — subsystem by nqn (`NOT_FOUND`); `ns_idx != 0` and
   unused in this subsystem ⇒ else `INVALID_ARGUMENT`; td by `td_name`
   (`NOT_FOUND`); mint `ns_id`; defaults: empty `dev_uuid` ⇒ RFC 4122 v4
@@ -1142,9 +1152,14 @@ own — no CdcEntry involvement). Replies `xfer_id`.
   append the new `Side` to the leg per §8.11 (`provisioned: false`,
   `cntlid_slot` ≠ the src side's); dst-DN bookkeeping + `BumpDnRev`; put
   `Migration`; `BumpSpRev`. Reply `migr_id`.
-* **FinishMigration** — two-phase like DeleteClone: `force == false` resolves
-  the **destination** side's DN in phase 1, calls `GetSideInfo` between
-  phases, judges hydration from `migr_dst_info.dm_clone_info`; incomplete or
+* **FinishMigration** — two-phase like DeleteClone. Phase 1 (read-only)
+  opens with `openSp`, as CreateMigration's planning read does: resolve,
+  the `deleting` gate included, then token, so a deleting SP is
+  `FAILED_PRECONDITION` and a stale token `ABORTED` ahead of the migration
+  lookup and of any agent call; then migration (`NOT_FOUND`); with
+  `force == false`, the **destination** side's DN. Between phases
+  `force == false` calls `GetSideInfo` and
+  judges hydration from `migr_dst_info.dm_clone_info`; incomplete or
   unreachable ⇒ `FAILED_PRECONDITION`. Deciding STM: re-resolve + token;
   apply the §8.11 finish (dst side becomes the leg's side, src side removed,
   src-DN bookkeeping released + `BumpDnRev`); delete the Migration + its
@@ -1455,6 +1470,13 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    `FAILED_PRECONDITION` with CreateMigration's message and nothing written,
    and the refusal lasts only as long as the migration — once it finishes,
    the spare deletes and the target switches.
+   A subsystem whose CdcEntry key is missing gets it back from
+   `UpdateSubsystemHosts` and from each of `CreateCntlr`, `DeleteCntlr` and
+   `UpdateCntlrEnabled` (disable and enable), the rebuilt entry compared
+   whole: the NQN, the Subsystem's allowed hosts and the transport of every
+   cntlr enabled once the mutator's own change is in — a disabled cntlr
+   planted under `UpdateSubsystemHosts` shows the filter is applied, not
+   the cntlr list copied.
    CreateMigration's re-check of its round's plan against the group is
    pinned by interleaving, one request after the other: a `slog` hook runs a
    second token-less request on the group the moment a token-less
@@ -1517,7 +1539,14 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    (never the stored rev keys); timeout path (a hanging fake ⇒ `ABORTED` within the
    budget); `DeleteClone`/`FinishMigration` force=false refusal on
    unreachable agent (`FAILED_PRECONDITION`); trace id visible at the fake
-   (T3).
+   (T3). A stale token on `FinishMigration` is `ABORTED` "stale revision"
+   in phase 1 — unforced against a fake that reports no finished dm-clone,
+   and forced on an unknown migration name — with zero `GetSideInfo` calls,
+   no bump and the SpConf untouched. On a deleting SP the same phase 1
+   answers `FAILED_PRECONDITION` "is being deleted" ahead of the token and
+   the migration lookup — a stale token forced, no token unforced against
+   that fake, and no token on an unknown migration name — again with zero
+   `GetSideInfo` calls, no bump and the SpConf untouched.
 5. **Serving test** over `bufconn`: interceptors wired on the server, status
    codes cross the wire intact, `GracefulStop` on ctx cancel.
 6. **Race test**: `-race`, two goroutines through one `Server` doing

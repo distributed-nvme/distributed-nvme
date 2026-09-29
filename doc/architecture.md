@@ -1026,7 +1026,11 @@ candidate lists) to keep transactions short. `cluster_id` is **not** among them:
 §5.2 it depends on `ClusterConf.creation_epoch`, so the `{p} cluster_conf {cluster_name}`
 read is the first step **inside** the STM and every other key of the RPC is formatted
 from the `cluster_id` derived there. Doing it in-STM also makes the transaction fail
-correctly when the cluster is concurrently deleted or recreated. Network calls to agents
+correctly when the cluster is concurrently deleted or recreated. `GrowSlice`,
+`CreateSpareLeg` and `SwitchSpareLeg` are the exceptions: they make that read in a
+planning snapshot, and their deciding STM — a `model` op the sp-worker shares — formats
+its keys from the `cluster_id` derived there without reading `ClusterConf` again
+(`gateway.md` GW5). Network calls to agents
 (GetDnSize/GetCnSize, the `Get*Info` behind `Inspect*` and behind the §8.9/§8.11
 `force = false` hydration checks, bitmap reads) MUST happen **outside** (before/after) the
 STM; when such a call needs `cluster_id`, do a plain pre-read of `ClusterConf` for it and
@@ -1336,7 +1340,8 @@ except `CreateCluster` and `ListClusters` starts by reading
 check but because `cluster_id = fnv64a(cluster_name ∥ ClusterConf.creation_epoch)`
 (§5.2) is the prefix of every other key it will touch. An RPC that names an SP then also
 resolves `{p} sp_conf {cluster_id} {sp_name}` (`NOT_FOUND` if absent); both checks are
-implied below and both live inside the RPC's STM (§5.8). All mutating SP RPCs except
+implied below and both live inside the RPC's STM (§5.8, which names the three RPCs that
+make the `ClusterConf` read in a planning snapshot instead). All mutating SP RPCs except
 `DeleteStoragePool` fail with `FAILED_PRECONDITION` when `SpConf.deleting == true`.
 `DeleteStoragePool` is the one RPC that SETS the flag (§8.4, amended 2026-09-15), and
 the sp-worker's drain (dnv-worker.md §11.6) is what acts on it; no code path anywhere
@@ -1687,9 +1692,13 @@ Errors: `RESOURCE_EXHAUSTED` `len(cntlr_id_list) ≥ MaxCntlrCntPerSp` or no eli
 another **cntlr** of the SP (§11.8).
 Action: pick a CN (§6.5); STM: new `Cntlr` (`primary = false`, `disabled = false`),
 append id, CN bookkeeping + `CnRev`, append the CN's `nvme_tr_conf` to every `CdcEntry`
-of the SP, bump `SpRev`. The sp-worker's next `SyncupSide` round tells every side about
-the new standby (`side_conf.standby_id_list`), and the sides grow a dm-error/dm-linear/nvmet
-export for it (§3.1). Reply `cntlr_id`.
+of the SP, bump `SpRev`. A subsystem whose `CdcEntry` is missing gets it back here,
+rebuilt as §8.8's CreateSubsystem writes it and then changed like the rest; DeleteCntlr
+and an UpdateCntlrEnabled that changes the flag put a missing entry back the same way
+(the sp-worker's cntlr replacement, §10.4, does not: it rewrites only the entries that
+exist and leaves a missing one missing). The sp-worker's next `SyncupSide` round tells
+every side about the new standby (`side_conf.standby_id_list`), and the sides grow a
+dm-error/dm-linear/nvmet export for it (§3.1). Reply `cntlr_id`.
 
 **DeleteCntlr** —
 Errors: `NOT_FOUND` id not in list; `FAILED_PRECONDITION` `primary == true` or
@@ -1889,7 +1898,8 @@ nvme-stas disconnect automatically. Reply `ss_id`.
 **ListSubsystems** — STM read of `nqn_list` + each `Subsystem` into `nqn_to_subsystem`.
 
 **UpdateSubsystemHosts** — STM update `Subsystem.allowed_hosts` and
-`CdcEntry.allowed_hosts`, bump `SpRev`. Reply `ss_id`.
+`CdcEntry.allowed_hosts`, bump `SpRev`; a missing `CdcEntry` is written back, rebuilt as
+CreateSubsystem writes it with the new hosts. Reply `ss_id`.
 
 **CreateNamespace** —
 Errors: `NOT_FOUND` nqn/td; `RESOURCE_EXHAUSTED` `len(ns_list) ≥ MaxNsCntPerSs`;
@@ -3196,7 +3206,9 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   of the SP, and at §6.5's tier 1 outside the `location`s of the SP's other cntlrs (the
   old cntlr counts as none of them: it is the one leaving) — with the same
   `cntlid_slot`, primary iff the old one was, and then created settling (§2, *amended
-  2026-09-26*; `dnv-worker.md` AR7).
+  2026-09-26*; `dnv-worker.md` AR7). Unlike the
+  gateway's two RPCs, the replacement skips a missing `CdcEntry` instead of rebuilding
+  it (§8.6).
 * `side_unhealthy` (600 s) and `leg_unhealthy` (1200 s) — **leg repair**, one procedure
   with two triggers (`dnv-worker.md` §11.5). The sp-worker believes a leg needs replacing
   when either (1) the leg has been unhealthy from the cntlr's perspective for

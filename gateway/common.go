@@ -183,7 +183,9 @@ func clusterNameOf(name string) string {
 }
 
 // resolveCluster is the first read of every STM but CreateCluster's and
-// ListClusters' (GW5, §5.8): ClusterConf is the only name-keyed message, and
+// ListClusters' (GW5, §5.8), save the later transactions of GrowSlice,
+// CreateSpareLeg and SwitchSpareLeg, which reuse the cid their planning
+// snapshot resolved here. ClusterConf is the only name-keyed message, and
 // cluster_id = fnv64a(name ‖ creation_epoch) is the prefix of every other key
 // the RPC will touch. Reading it INSIDE the transaction is what makes an RPC
 // fail correctly when the cluster is concurrently deleted or recreated.
@@ -824,8 +826,15 @@ func findNs(subsystem *pb.Subsystem, nsIdx uint32) *pb.Namespace {
 // A listed Subsystem that is missing aborts the RPC: its CdcEntry key cannot
 // be formed, so the entry would keep advertising a controller that no longer
 // exists, and an RPC never writes half of what it owes. A Subsystem whose
-// CdcEntry has not been written is skipped: there is nothing to rewrite, and
-// inventing one here would guess at fields only CreateSubsystem knows.
+// CdcEntry key is missing gets it back: rebuildCdcEntry recomputes the entry
+// from this transaction's view and f is applied to it like to any other.
+// Skipping it would answer OK while the subsystem stayed out of dnv-cdc's
+// discovery log: dnv-cdc drops an entry whose key is deleted (cdc.md WV3), so
+// no host could discover the subsystem until something put the key back. The
+// view may or may not hold the caller's own cntlr write yet —
+// CreateCntlr and DeleteCntlr make theirs first, UpdateCntlrEnabled after —
+// and the result is the same either way, because f's add is idempotent and
+// its drop removes whatever is there.
 func eachCdcEntry(
 	stm etcdutil.STM,
 	sc *spScope,
@@ -841,12 +850,40 @@ func eachCdcEntry(
 			sc.Cid, sc.Shard(), sc.SpId(), subsystem.GetSsId())
 		entry := &pb.CdcEntry{}
 		if !stm.Get(key, entry) {
-			continue
+			rebuilt, err := rebuildCdcEntry(stm, sc, nqn, subsystem)
+			if err != nil {
+				return err
+			}
+			entry = rebuilt
 		}
 		f(entry)
 		stm.Put(key, entry)
 	}
 	return nil
+}
+
+// rebuildCdcEntry is one subsystem's CdcEntry as CreateSubsystem writes it
+// (§8.8), recomputed from what this transaction reads: the NQN the subsystem
+// is listed under, the Subsystem's allowed_hosts and the transport of every
+// ENABLED cntlr's CN in cntlr_id_list order. Every field is derived, none is
+// guessed, which is why UpdateSubsystemHosts and the cntlr mutators put this
+// back when they find the entry's key missing, rather than skip the entry.
+// The worker's ReplaceCntlr (model rewriteCdcEntries) still skips it.
+func rebuildCdcEntry(
+	stm etcdutil.STM,
+	sc *spScope,
+	nqn string,
+	subsystem *pb.Subsystem,
+) (*pb.CdcEntry, error) {
+	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.CdcEntry{
+		Nqn:            nqn,
+		NvmeTrConfList: enabledCntlrTrConfs(cntlrs),
+		AllowedHosts:   subsystem.GetAllowedHosts(),
+	}, nil
 }
 
 // addCdcTrConf appends one transport address to every CdcEntry of the SP,

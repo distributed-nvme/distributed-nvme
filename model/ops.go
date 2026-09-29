@@ -1479,8 +1479,10 @@ func chargeSpCns(
 // that CN gets its pointer removed, the SP footprint back, its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with
 // cntlr_id = SpConf.next_id++ and settling iff asPrimary, and its CN charged
-// the same way; every CdcEntry of the SP loses the old nvme_tr_conf and
-// gains the new one; SpConf is rewritten and SpRev bumped once.
+// the same way; every CdcEntry of the SP that exists loses the old
+// nvme_tr_conf and gains the new one, and a missing one stays missing —
+// unlike the gateway's DeleteCntlr and CreateCntlr, which rebuild it (see
+// rewriteCdcEntries); SpConf is rewritten and SpRev bumped once.
 func ReplaceCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1679,8 +1681,12 @@ func removeId(ids []uint64, id uint64) []uint64 {
 // A listed Subsystem that is missing aborts the op: its CdcEntry key cannot be
 // formed, so the entry would keep advertising a controller that no longer
 // exists, and an op never writes half of what it owes. A Subsystem whose
-// CdcEntry has not been written yet is skipped: there is nothing to rewrite,
-// and inventing one here would guess at fields only CreateSubsystem knows.
+// CdcEntry key is missing is skipped, so ReplaceCntlr leaves that entry
+// missing. That is a choice of scope, not a limit: every field of an entry can
+// be derived from the NQN it is listed under, the Subsystem and the SP's
+// enabled cntlrs, and the gateway's CreateCntlr, DeleteCntlr, flag-changing
+// UpdateCntlrEnabled and UpdateSubsystemHosts rebuild a missing entry that
+// way (gateway rebuildCdcEntry).
 func rewriteCdcEntries(
 	s etcdutil.STM,
 	op string,
