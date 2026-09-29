@@ -802,8 +802,12 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
      **Pre-steps** (the transitions the retire phase used to compute from the
      previously applied plan, and this one derives from the plan and the live
      tables — `architecture.md` §9.8, whose attribution and derivation
-     bullets are what this implements). They exist so the layers below them
-     can remove anything at all:
+     bullets are what this implements). Pre-steps 2 and 3 exist so the layers
+     below them can remove anything at all, and run only on a pass whose
+     listings all answered (CN21). Pre-step 1 exists so that a namespace the
+     plan wants `inaccessible`, a transfer's included, is moved there before
+     the device under it is parked or demoted — by pre-step 2 or 3, or by
+     the build phase — and runs on every converge:
      1. **ANA.** Every namespace **of the plan** whose desired `ana_grpid` is
         `AnaGrpIdInaccessible` — a suspended one, a standby's, a deferred one
         (CN16), and every transfer namespace the same — is moved there first,
@@ -814,7 +818,11 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
         per-namespace `ana_grpid` before the `rmdir` — this pre-step is that
         level's only ANA move. It **is** §11.1 old_primary step 1, and it
         precedes the park below for the reason §11.1 gives: the host is
-        told to stop using the path before the path stops working.
+        told to stop using the path before the path stops working. It is
+        also the one pre-step a converge still runs when an unanswered
+        listing has stopped its sweep (CN21): it removes nothing, and the
+        build phase that follows parks ns-devs whether or not the sweep ran
+        (CN16), so the move has to come first there too.
      2. **Park of a planned ns-dev.** A `CnNsDevName` **of the plan** whose
         CN16 backing is its td's `CnErrorName` (rules 0-4), or whose **live
         table** still maps a device this pass is about to remove, is reloaded
@@ -1126,7 +1134,8 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         stop, and the kernel says otherwise): from the moment md marks the
         array deleted until its `md/` goes, `array_state` reads
         `EBUSY`, and `ListArrays`' strict rule fails that pass's md
-        enumeration — a Leftover the worker re-drives. By default md marks
+        enumeration — a Leftover the worker re-drives, from a sweep that
+        removed nothing (CN21). By default md marks
         it when the stopped array's last reference goes — a close, or the
         end of a read of one of its `md/` attributes, whichever is last —
         after its `dev-*` directories are gone; with the md module's
@@ -1605,14 +1614,25 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       `AnaGrpIdInaccessible` first (CN9 pre-step 1), then the ns-dev reload —
       which CN9 pre-step 2 performs, because rule 1 has
       already made the backing the dm-error, and the build phase then finds
-      the table it wants. Unparking: the reload onto the backing the remaining
-      rules select first, then ANA per the rule below.
-      No CN device is ever left suspended across a pass; a device found
+      the table it wants; on a pass whose sweep an unanswered listing
+      stopped (CN21) pre-step 2 does not run and `ensureNsDev` makes the
+      same reload itself, still after pre-step 1. Unparking: the reload
+      onto the backing the remaining
+      rules select first, then ANA per the rule below — except onto the
+      td's raid0 on a pass whose sweep an unanswered listing stopped while a
+      dm-clone the plan does not want may still be live: the namespace then
+      stays parked, in the ANA group it has, until a pass whose listings
+      answer (CN18).
+      No path of a pass leaves a CN device suspended. A device found
       suspended is one an older build, an interrupted `Reload`, or an agent
       killed inside CN14's quiesce bracket left, and every path that meets it
-      resumes it — by a reload or by a bare resume, never by leaving it.
+      resumes it — by a reload or by a bare resume, never by leaving it. An
+      unwanted one that no path of a pass meets — below a layer the chain
+      stopped at, or anywhere on a pass whose sweep an unanswered listing
+      stopped (CN21) — is met by the first pass whose chain reaches it.
       `ensureNsDev` and `removeDm` bare-resume a device whose table already
-      matches. `parkNsDev` — CN9's pre-step 2, the park of an ns-dev **of the
+      matches, and `ensureNsDev` one it holds off the raid0 (CN18) as well.
+      `parkNsDev` — CN9's pre-step 2, the park of an ns-dev **of the
       plan**, which has a plan to reload from — reloads one whose table does
       not match, *and* one whose table does match while it is suspended, and
       that reload resumes it as a side effect. CN21's P0 is neither of those
@@ -1629,7 +1649,17 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       gateway stamped [D2]), `attr_allow_any_host = 1` iff `allowed_hosts`
       is empty, else host links exactly per the list; per `Namespace` an
       nvmet namespace `nsid = ns_idx`, `device_path` = its own ns-dev,
-      `uuid`/`nguid` from the record. **ANA**: `AnaGrpIdOptimized` iff
+      `uuid`/`nguid` from the record. A namespace that has left `ns_list`
+      under a subsystem that stays is normally gone before the build gets
+      there, taken by CN21's L1 after P0 has parked or resumed the ns-dev
+      under it. When the build still finds one after a sweep whose listings
+      answered — L1's removal did not go, or the sweep's own listing of that
+      subsystem's namespaces did not answer — it removes it, moving it to
+      `AnaGrpIdInaccessible` first as L1 does. After a sweep an unanswered
+      listing stopped it leaves it alone (CN21): P0 has not run, and
+      disabling the namespace closes its ns-dev, which does not complete on
+      one still dm-suspended.
+      **ANA**: `AnaGrpIdOptimized` iff
       primary ∧ not disabled ∧ not effectively suspended **∧ its backing
       chain is not provisioning-deferred** (CN9); else
       `AnaGrpIdInaccessible` (single `ana_grpid` writes, SH19). The last
@@ -1665,7 +1695,11 @@ CN17. **Transfers** (`xfer.go`; both roles, fig. `100Transfer`). Per
       error table of its own size, as CN9's pre-step 3, before any layer
       touches what is under it: a linear still mapping the origin td's raid0
       holds it open and the raid0's removal would fail EBUSY (CN19's
-      `NO_THINPOOL` row). At `SP_LEVEL_DISABLE` the pre-step still runs —
+      `NO_THINPOOL` row). On a pass whose sweep an unanswered listing
+      stopped (CN21) pre-step 3 does not run, and the build phase makes the
+      same reload when it converges the device — still after pre-step 1
+      has made whatever ANA move the plan wants for the transfer's
+      namespace. At `SP_LEVEL_DISABLE` the pre-step still runs —
       nothing serves the device at that level either — but it no longer
       decides anything: the wanted set is empty, so the transfer device is
       removed outright a layer later with every other cntlr-scoped object
@@ -1826,7 +1860,8 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          above),
          first the **dst** bitmaps: with every affected ns-dev parked
          on `CnErrorName` (by CN9's pre-step 2 when the namespace is
-         effectively suspended or the cntlr is standby, and otherwise by
+         effectively suspended or the cntlr is standby and no unanswered
+         listing stopped the sweep (CN21), and otherwise by
          step 2 of a recovery build, before the old dm-clone is removed —
          `parkTdNsDevs` takes a *serving* namespace off
          the td with no ANA move, and that IO-error window is this
@@ -1889,6 +1924,19 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
         level-suppressed clone at `sp_level ≥ NO_CLONE`, rule 4; or
         `sp_level ≥ NO_THINPOOL`, rule 3). An ns-dev that is itself unwanted
         is parked by P0 and removed at L2.
+        On a pass whose sweep an unanswered listing stopped (CN21) neither
+        pre-step 2 nor L3 runs, so the dm-clone stays loaded, and one whose
+        hydration is on and not finished goes on copying into the raid0
+        whether or not anything has it open: its copy of a region not yet
+        hydrated would overwrite a write a host made to that region of the
+        raid0 directly. So on such a pass, while a dm-clone
+        the plan does not want may still be live — the dm listing did not
+        answer, or it names one — the build puts no ns-dev onto a td's raid0
+        it is not on already: one over the dm-clone stays there and serves
+        on through it, a parked one stays parked, a new one is created
+        parked, and none of them is moved to `optimized` on that pass. The
+        next pass whose listings answer takes the order above — the park of
+        one still over the dm-clone, L3, then the reload.
       * **L3** removes the dm-clone, **before** its source connection dies —
         dm-clone flushes through the source on removal and blocks without it.
       * **L4** removes the metadata wrapper `CnCloneMetaDmName` under
@@ -1902,8 +1950,8 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
         has actually removed it the dm-clone still maps its own source and
         would keep it claimed.
       The clone's `clone-bm-*` files are **not** part of that chain. They are
-      swept separately, at the end of the cntlr-level pass, against the
-      stored `clone_list` (SH7) — a clone that left the list loses them, one
+      swept separately, at the end of the cntlr-level sweep (CN21), against
+      the stored `clone_list` (SH7) — a clone that left the list loses them, one
       the role or the level merely suppresses keeps them applied-by-file
       (CN19, CN22 — deleting them on every standby converge would make the
       worker re-push them forever, and a promoted standby's §11.5 rebuild
@@ -2019,7 +2067,31 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       subsystem is unlinked but present. An enumerator that
       **did not answer** leaves its part of the snapshot empty and is
       reported as `enumeration failed`; it never reads as "there is nothing
-      there". The snapshot is thrown away at the end of the pass: it decides
+      there". An empty part is exactly what "nothing there" looks like to
+      every removal gated on absence (`architecture.md` §9.8), so with any
+      one of the four unanswered the sweep removes nothing from the node at
+      either scope: no chain runs, neither do CN9's pre-steps 2 and 3, and
+      what the chain would have removed is only reported. The md
+      enumeration is the sharpest case: unanswered, it would leave L9 no
+      array to stop and let L10 disconnect unwanted legs from under a live
+      one. A cntlr-level converge whose sweep is stopped this way still
+      runs two things that read no snapshot. One is CN9's pre-step 1, the
+      ANA move: it decides from the plan alone and removes nothing, and the build
+      phase that follows parks whether or not the sweep ran — it reloads
+      an ns-dev whose CN16 backing is the td's `CnErrorName` onto it, and
+      CN17's converge demotes a transfer device this cntlr does not serve
+      — so without the move a demoted or suspended namespace would be
+      served from an error table while its path still reads `optimized`.
+      The other is the pair of local-state sweeps ("Not on the node"
+      below): they decide from the request alone, so an unanswered listing
+      is no reason for them to wait. The build phase of such a converge in
+      turn holds back the two things that are safe only after a step the
+      stopped sweep skipped: while a dm-clone the plan does not want may
+      still be live it puts no ns-dev onto a td's raid0 it is not on
+      already — that waits for L3 to remove the dm-clone (CN18) — and it
+      leaves a namespace that has left `ns_list` to the next pass's P0 and
+      L1 (CN16).
+      The snapshot is thrown away at the end of the pass: it decides
       only what to *attempt*, and every removal re-probes its own object.
 
       **Attribution.** A dm device is ours by its parsed name (§2.1): role
@@ -2150,7 +2222,9 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       source of a clone that did go is.
 
       **Not on the node.** Two pieces of the cntlr's *local* state follow the
-      same rule and are swept at the end of the cntlr-level pass: the
+      same rule and are swept at the end of the cntlr-level sweep of every
+      converge — one that an unanswered listing stopped included — ahead of
+      the build phase: the
       `clone-bm-*` files of every clone no longer in `clone_list` (SH7 — a
       sweep of the store against the **request**, not a side effect of
       removing the clone's wrapper, because a standby builds no wrapper at
@@ -2158,7 +2232,14 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       disk for ever), and the `ResInfo` histories, pruned to the keys this
       plan's objects can use (SH14) so a later rebuild of the same id reports
       a fresh epoch rather than the dead object's. A clone the role or the
-      level merely *suppresses* keeps its chunks (CN19, CN22).
+      level merely *suppresses* keeps its chunks (CN19, CN22). The cntlr's
+      in-memory index of its chunk files lets a clone's entry go only once
+      the `rm` of its files succeeded: one that failed or did not answer
+      keeps them indexed, and the converge that tried names each as a `record`
+      leftover, as does the read-only verdict (CN30) until a pass removes
+      them. Dropping the entry first would leave the files on disk with
+      nothing short of a restart ever listing them again, and no reply
+      naming them.
 
       The connect-retry registration and the leg probers are not swept —
       they are goroutines, not objects on the node. A cntlr that is dropped
@@ -2873,6 +2954,74 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     dm device of the node survives, and the §3.2 base state does — the tmpfs
     is still mounted and its single loop device still attached, which is the
     assertion that keeps "the base state is never swept" honest.
+9c. **An unanswered enumeration stops every removal of the sweep** (CN21,
+    `agent/cnagent/cnsweep_test.go`): `TestUnansweredMdListingStopsTheDescent`
+    — a raid1 cntlr (two legs in its data group) whose arrays and legs the
+    pass no longer wants, the cntlr gone from `cntlr_pointer_list`
+    (node-level) or its level raised to `SP_LEVEL_NO_SIDE` (cntlr-level),
+    and the `/sys/block` listing killed once: at either scope the reply is
+    a Leftover naming `enumeration failed: md arrays`, no `nvme
+    disconnect`, `mdadm --stop` or `dmsetup remove` is issued, both arrays
+    stay assembled and every leg keeps its wrapper and its connection; the
+    re-drive at the same revision, the listing answering, no longer names
+    the md enumeration and stops both arrays.
+    `TestUnansweredSubsystemListingRemovesNothing` — `dmsetup ls`, the
+    nvme host walk or the nvmet `ls` killed, with the cntlr forgotten: a
+    Leftover naming that enumeration and not one teardown command
+    (`dmsetup remove`/`reload`/`message`, `mdadm --stop`, `nvme
+    disconnect`, `rmdir`, `rm -f`). `TestUnansweredEnumerationRemovesNothing`
+    is the first, narrower pin of the `dmsetup ls` case: the Leftover code,
+    no `dmsetup remove`, `mdadm --stop` or `nvme disconnect`, and every dm
+    device, the subsystem and the connections still there. What a
+    cntlr-level converge whose sweep was stopped still does, and what it
+    holds back, is pinned for each of the four listings, killed once:
+    `TestUnansweredListingStillMovesAnaBeforeThePark` — a raid1 primary
+    with a transfer demoted to standby, and a steady primary whose
+    namespace becomes suspended: a Leftover naming the enumeration, no
+    `dmsetup remove`, `mdadm --stop` or `nvme disconnect`, and exactly one
+    `ana_grpid` write for the namespace, to `3`, ahead of the build's
+    reload of its ns-dev onto the td's dm-error — for the demotion the
+    same for the transfer's namespace, ahead of the transfer device's
+    reload onto its error table; the next check round reads the namespace
+    `OK`, and for the suspend, which leaves nothing to remove, the verdict
+    `OK` as well.
+    `TestUnansweredListingStillSweepsCloneChunks` — a standby drops a
+    clone whose chunk was pushed: the chunk file is gone after that pass
+    and the reply lists no applied chunks, and the next check round's
+    verdict is `OK`.
+    `TestUnansweredListingDoesNotParkAServingNamespace` — a namespace
+    moves to a second td while its first leaves `td_list`: no reload onto
+    the new td's dm-error, and exactly one reload, onto its raid0 — none
+    at all with `dmsetup ls` killed, which leaves no snapshot to rule out
+    a lingering dm-clone.
+    `TestUnansweredListingKeepsTheNsDevOffALeavingClone` — a clone whose
+    hydration is on leaves `clone_list` while its namespace serves through
+    it (also with that ns-dev held dm-suspended by an older build), or
+    while it is parked and the delete's latch resumes it, or while a new
+    namespace joins the same td: after the stopped pass the dm-clone is
+    still there, each ns-dev is live over the dm-clone or parked on the
+    td's dm-error, and no `ana_grpid` is written `1`; the next pass
+    removes the dm-clone before any reload onto the raid0 — parking one
+    still over it first — and writes a parked namespace's `ana_grpid` `1`
+    only after that reload.
+    `TestUnansweredListingLeavesADroppedNamespaceToTheSweep` — the only
+    namespace leaves `ns_list`, its ns-dev left dm-suspended over the
+    raid0 by an older build: no `enable = 0` and no `rmdir` of it on the
+    stopped pass, whose reply names it beside the failed enumeration (the
+    enumeration alone when the nvmet listing is the one killed); the next
+    pass reloads and resumes the ns-dev before the `enable = 0`, the
+    `rmdir` and the `dmsetup remove`.
+    With the four listings answering,
+    `TestBuildDropsANamespaceInaccessibleFirst` — nsid 2 leaves `ns_list`
+    under a subsystem that stays while the sweep's own listing of that
+    subsystem's namespaces is killed once: exactly one `ana_grpid` write
+    for it, to `3`, before the build's `enable = 0` and `rmdir`, and no
+    write for nsid 1. And `TestUnremovedChunkFileIsRedriven` — the `rm -f`
+    of a dropped clone's chunk file killed before it acted, once with the
+    listings answering and once with `dmsetup ls` killed as well: the pass
+    and the next check round name `record:{path}`, and the re-drive issues
+    exactly one `rm -f` of it, removes the file and reads `OK`, as does the
+    check round after it.
 10. **PushCloneBitmap** (CN22, `agent/cnagent/clone_test.go`):
     `TestPushCloneBitmapGates` — unknown `clone_id`, and the two index
     bounds asserted **separately** so neither can stand in for the other: an

@@ -420,8 +420,14 @@ func (s *CnAgentServer) build(
 
 	// ns-devs and the host-facing nvmet objects (CN16).
 	if plan.wantAny {
+		// held: the namespaces whose ns-dev ensureNsDev kept off a raid0 a
+		// dm-clone the plan does not want may still be hydrating into.
+		held := make(map[uint64]bool)
 		for _, np := range plan.namespaces {
-			err := s.ensureNsDev(ctx, np)
+			nsHeld, err := s.ensureNsDev(ctx, np, plan.cloneMayLinger)
+			if nsHeld {
+				held[np.nsId] = true
+			}
 			if err != nil && cloneBuiltThisPass(info, np) {
 				// Rule 5 after a build this pass finished: hydration is on,
 				// so whatever still keeps the td's hosts off the dm-clone is
@@ -446,9 +452,12 @@ func (s *CnAgentServer) build(
 			s.ensureSubsystem(ctx, st, plan, ssp, info)
 		}
 
-		// ANA rewrites to optimized last — §11.1 new_primary step 4.
+		// ANA rewrites to optimized last — §11.1 new_primary step 4. A held
+		// namespace keeps the group it has: a parked one stays inaccessible
+		// rather than go optimized over the dm-error, and one that serves
+		// goes on serving from the table it keeps.
 		for _, np := range plan.namespaces {
-			if np.anaGrpId == common.AnaGrpIdInaccessible {
+			if np.anaGrpId == common.AnaGrpIdInaccessible || held[np.nsId] {
 				continue
 			}
 			if err := s.setAna(

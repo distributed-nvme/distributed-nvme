@@ -1204,6 +1204,778 @@ func TestUnansweredEnumerationRemovesNothing(t *testing.T) {
 	}
 }
 
+// TestUnansweredMdListingStopsTheDescent pins the same rule on the listing
+// whose silence costs the most: the md arrays.
+//
+// The data group is a live two-leg raid1, and this pass wants neither the
+// array nor its legs — the sp has left the node, or its level has risen to
+// SP_LEVEL_NO_SIDE. The `/sys/block` listing ListArrays opens with does not
+// answer, while every other listing does, so `actual.arrays` is empty for want
+// of an answer rather than because the node runs no array. A descent that went
+// on regardless would find no array for L9 to stop, read that layer as clean,
+// and let L10 disconnect both legs from under the running mirror: md fails
+// them, and on the migration path that strands the superblocks the next CN
+// assembles from. So neither scope removes anything on that snapshot — the
+// reply is a Leftover naming the md enumeration — and the re-drive at the same
+// revision, with the listing answering, stops the arrays with nothing
+// remembered from the pass that stopped.
+func TestUnansweredMdListingStopsTheDescent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pass func(t *testing.T, srv *CnAgentServer) *pb.AgentReply
+	}{
+		{"node-level", func(t *testing.T, srv *CnAgentServer) *pb.AgentReply {
+			return cnSweepSyncup(t, srv, 3, false).GetAgentReply()
+		}},
+		{"cntlr-level", func(t *testing.T, srv *CnAgentServer) *pb.AgentReply {
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true, raid1: true,
+					twoLegs: true, level: pb.SpLevel_SP_LEVEL_NO_SIDE}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			return reply.GetAgentReply()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, raid1: true, twoLegs: true})
+			arrays := []string{
+				cnSweepMdNode(t, srv, node, 0, false),
+				cnSweepMdNode(t, srv, node, 0, true),
+			}
+
+			node.Reset()
+			// Killed, not answered "no", and one-shot: the pass's first
+			// `ls` of /sys/block is the sweep's own enumeration.
+			node.killCmd["ls -1 "+sysfsBlockDir] = true
+			reply := tc.pass(t, srv)
+			cnSweepAssertCode(t, reply, common.ReplyCodeLeftover,
+				"the pass over an unanswered md listing")
+			cnSweepAssertDetails(t, reply, "enumeration failed: md arrays",
+				"the failure details")
+			for _, call := range []string{
+				"cmd nvme disconnect", "cmd mdadm --stop", "cmd dmsetup remove",
+			} {
+				assertNoCall(t, node, call)
+			}
+			for _, dev := range arrays {
+				if node.arrayGone(dev) {
+					t.Fatalf("%s was stopped on an unanswered listing", dev)
+				}
+			}
+			node.mu.Lock()
+			for _, legId := range []uint64{
+				testDataLeg, testDataLeg2, testMetaLeg,
+			} {
+				if _, ok := node.dms[legName(srv, legId)]; !ok {
+					t.Errorf("leg %#x lost its wrapper", legId)
+				}
+				if _, ok := node.subsystems[legNqn(srv, legId)]; !ok {
+					t.Errorf("leg %#x lost its connection", legId)
+				}
+			}
+			node.mu.Unlock()
+			if t.Failed() {
+				t.FailNow()
+			}
+
+			// The re-drive, the listing answering: the same enumeration now
+			// finds both arrays and the descent stops them — they were
+			// unwanted all along, which is what makes their survival above
+			// mean something. Nothing of the pass that stopped is consulted;
+			// nothing of it was remembered.
+			node.Reset()
+			reply = tc.pass(t, srv)
+			if strings.Contains(reply.GetDetails(), "md arrays") {
+				t.Fatalf("the re-drive still names the md enumeration: %q",
+					reply.GetDetails())
+			}
+			for _, dev := range arrays {
+				if !node.arrayGone(dev) {
+					t.Fatalf("the re-drive left %s assembled", dev)
+				}
+			}
+		})
+	}
+}
+
+// TestUnansweredSubsystemListingRemovesNothing pins the same rule on the two
+// listings of subsystems: the sysfs walk of this host's nvme connections and
+// the `ls` of the nvmet configfs tree. Either one that does not answer leaves
+// its part of the snapshot empty, and an empty part is the shape of "nothing
+// here" to the layers that read it — L1 finds no nvmet object above the
+// ns-devs, L5 and L10 no connection — so a pass that went on would run every
+// layer below as though those had gone clean. The fixture is the harshest one
+// again: the cntlr is forgotten, so a pass that did run would tear down
+// everything of the sp it could see. The `dmsetup ls` row holds that listing
+// to the same full list of teardown commands, which
+// TestUnansweredEnumerationRemovesNothing checks only in part.
+func TestUnansweredSubsystemListingRemovesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string // the enumeration, as the verdict names it
+		kill string // the listing behind it
+	}{
+		{"dmsetup ls", "dmsetup ls"},
+		{"nvme subsystems", "ls -1 " + sysfsNvmeSubsysDir},
+		{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			cnSweepForget(t, srv, node)
+			node.mu.Lock()
+			before := len(node.dms)
+			node.mu.Unlock()
+
+			node.Reset()
+			node.killCmdAlways[tc.kill] = true
+			reply := cnSweepSyncup(t, srv, 3, false)
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "SyncupCn with a killed listing")
+			cnSweepAssertDetails(t, reply.GetAgentReply(),
+				"enumeration failed: "+tc.name, "the failure details")
+			cnSweepAssertNoRemoval(t, node)
+			node.mu.Lock()
+			after := len(node.dms)
+			node.mu.Unlock()
+			if after != before {
+				t.Fatalf("dm devices went from %d to %d on an unanswered "+
+					"listing", before, after)
+			}
+			if !subsysDirPresent(node, testNqn) {
+				t.Fatal("the host-facing subsystem was removed on an " +
+					"unanswered listing")
+			}
+		})
+	}
+}
+
+// cnSweepListings are the four listings a pass is derived from, each killed by
+// the one command behind it and named in the verdict the way enumerateCn
+// names it.
+var cnSweepListings = []struct {
+	name string // the enumeration, as the verdict names it
+	kill string // the listing behind it
+}{
+	{"dmsetup ls", "dmsetup ls"},
+	{"md arrays", "ls -1 " + sysfsBlockDir},
+	{"nvme subsystems", "ls -1 " + sysfsNvmeSubsysDir},
+	{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
+}
+
+// TestUnansweredListingStillMovesAnaBeforeThePark pins what a converge still
+// owes the hosts on a pass whose sweep an unanswered listing stopped. That
+// sweep removes nothing, and it skips the two pre-steps that exist only for a
+// removal, but not the ANA move: the build phase after the sweep parks
+// whether or not the sweep ran. ensureNsDev reloads a demoted or suspended
+// namespace's ns-dev onto the td's dm-error, ensureXfer reloads an unserved
+// transfer device onto an error table, and neither moves an ANA group. With
+// no move first, a host keeps an optimized path over an error table and takes
+// IO errors where it should have queued.
+//
+// The two shapes differ in what comes after. The demotion leaves the pool
+// and the arrays to remove, so its verdict stays a Leftover and the worker
+// drives another pass. The suspend on a steady primary leaves nothing to
+// remove: from the next round on the verdict reads OK, and nothing would
+// correct a wrong group before the next revision. So the move is asserted
+// on the pass itself, once and ahead of the park, for every listing.
+func TestUnansweredListingStillMovesAnaBeforeThePark(t *testing.T) {
+	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
+	for _, shape := range []struct {
+		name string
+		from reqOpts
+		to   reqOpts
+		// xfer: the fixture carries a transfer, whose namespace P1 moves
+		// ahead of the transfer device's demotion as well.
+		xfer bool
+		// settled: the pass leaves nothing to remove, so the Check verdict
+		// that follows reads OK.
+		settled bool
+	}{
+		{"demotion",
+			reqOpts{revision: 2, primary: true, raid1: true, xfers: xfers},
+			reqOpts{revision: 3, primary: false, raid1: true, xfers: xfers},
+			true, false},
+		{"suspend",
+			reqOpts{revision: 2, primary: true, raid1: true},
+			reqOpts{revision: 3, primary: true, raid1: true, suspended: true},
+			false, true},
+	} {
+		for _, listing := range cnSweepListings {
+			t.Run(shape.name+"/"+listing.name, func(t *testing.T) {
+				ctx := context.Background()
+				srv, node := newTestServer(t)
+				syncupBoth(t, srv, shape.from)
+				xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+				if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+					t.Fatalf("fixture: ana_grpid is %q before the pass, "+
+						"want 1", got)
+				}
+				if shape.xfer {
+					if got := node.files[anaPath(xferNqn, 1)]; got != "1" {
+						t.Fatalf("fixture: the transfer's ana_grpid is %q "+
+							"before the pass, want 1", got)
+					}
+				}
+
+				node.Reset()
+				// One-shot: the pass's first such command is the sweep's own
+				// enumeration.
+				node.killCmd[listing.kill] = true
+				reply, err := srv.SyncupCntlr(ctx, cntlrReq(shape.to))
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				cnSweepAssertCode(t, reply.GetAgentReply(),
+					common.ReplyCodeLeftover, "the pass over an unanswered "+
+						"listing")
+				cnSweepAssertDetails(t, reply.GetAgentReply(),
+					"enumeration failed: "+listing.name, "the failure details")
+				for _, call := range []string{
+					"cmd dmsetup remove", "cmd mdadm --stop",
+					"cmd nvme disconnect",
+				} {
+					assertNoCall(t, node, call)
+				}
+
+				// Exactly one write, to 3, ahead of the build's park: an
+				// ordering assertion stops at its first match, so only the
+				// count shows that nothing moved the group back later on.
+				nsAna := "writedirect " + anaPath(testNqn, 1) + "="
+				if moves := node.callsMatching(nsAna); len(moves) != 1 ||
+					moves[0] != nsAna+"3" {
+					t.Fatalf("ana_grpid writes %q, want exactly one, to 3",
+						moves)
+				}
+				assertOrder(t, node, nsAna+"3",
+					"cmd dmsetup reload "+nsDevName(srv, testNs))
+				if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+					t.Fatalf("ana_grpid is %q after the pass, want 3", got)
+				}
+				assertParked(t, srv, node, testNs, testTd, shape.name)
+				if shape.xfer {
+					xferAna := "writedirect " + anaPath(xferNqn, 1) + "="
+					if moves := node.callsMatching(xferAna); len(moves) != 1 ||
+						moves[0] != xferAna+"3" {
+						t.Fatalf("transfer ana_grpid writes %q, want exactly "+
+							"one, to 3", moves)
+					}
+					assertOrder(t, node, xferAna+"3",
+						"cmd dmsetup reload "+xferName(srv, testXfer))
+					table := node.dms[xferName(srv, testXfer)].table
+					if !strings.HasSuffix(table, " error") {
+						t.Fatalf("the transfer device is %q, want its error "+
+							"table", table)
+					}
+				}
+
+				// What the worker sees next: the namespace is where the
+				// desired state wants it, whether or not a leftover still
+				// drives another pass.
+				node.Reset()
+				check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(), Revision: 3, ShowInfo: true,
+				}, nil)
+				assertOk(t, check.GetCntlrInfo().GetNsIdToNamespace()[testNs],
+					"the namespace on the next check round")
+				if shape.xfer {
+					assertOk(t,
+						check.GetCntlrInfo().GetXferIdToNamespace()[testXfer],
+						"the transfer namespace on the next check round")
+				}
+				if shape.settled {
+					cnSweepAssertCode(t, check.GetAgentReply(), 0,
+						"the next check round")
+				}
+			})
+		}
+	}
+}
+
+// TestUnansweredListingStillSweepsCloneChunks pins the other work a stopped
+// sweep still does. The chunk files of a clone that left clone_list are local
+// state, swept against the request alone, so an unanswered listing is no
+// reason to leave them: they go in this pass, and a standby, which builds no
+// clone device, has nothing left to remove, so the Check round after it reads
+// OK. (A chunk file a pass did not remove would keep the verdict naming it:
+// TestUnremovedChunkFileIsRedriven.)
+func TestUnansweredListingStillSweepsCloneChunks(t *testing.T) {
+	for _, listing := range cnSweepListings {
+		t.Run(listing.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			// A standby that carries the clone in its desired state.
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
+			pushBitmap(t, srv, hexBytes(t, testSkipHex))
+			bmPath := srv.nf.LocalCloneBmPath(
+				testCluster, testCn, testSp, testClone, 0, 0)
+			if _, ok := node.protos[bmPath]; !ok {
+				t.Fatalf("fixture: the chunk was not persisted")
+			}
+
+			node.Reset()
+			node.killCmd[listing.kill] = true
+			reply, err := srv.SyncupCntlr(ctx,
+				cntlrReq(reqOpts{revision: 3, primary: false}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass that drops the clone "+
+					"over an unanswered listing")
+			cnSweepAssertDetails(t, reply.GetAgentReply(),
+				"enumeration failed: "+listing.name, "the failure details")
+			if _, ok := node.protos[bmPath]; ok {
+				t.Fatalf("the dropped clone's chunk file survived the pass")
+			}
+			if got := reply.GetBmInfoList(); len(got) != 0 {
+				t.Fatalf("the reply still reports applied chunks: %v", got)
+			}
+			check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr(), Revision: 3,
+			}, nil)
+			cnSweepAssertCode(t, check.GetAgentReply(), 0,
+				"the next check round")
+		})
+	}
+}
+
+// TestBuildDropsANamespaceInaccessibleFirst pins a removal the build phase
+// makes on its own. A namespace that left ns_list under a subsystem that
+// stays is normally L1's, which moves it to the inaccessible group and then
+// removes it. When the sweep's own listing of that subsystem's namespaces
+// does not answer — a failure that stops no pass, the four listings having
+// answered — L1 never learns of the namespace, and the build's pass over the
+// subsystem, which lists the namespaces itself, removes it instead: the same
+// move has to come first there, or a host loses the path under IO instead of
+// being told to stop using it. (After a sweep one of the four listings
+// stopped, the build leaves such a namespace alone:
+// TestUnansweredListingLeavesADroppedNamespaceToTheSweep.)
+func TestBuildDropsANamespaceInaccessibleFirst(t *testing.T) {
+	const secondNs = uint64(0x1b)
+	twoNs := defaultSubsys(false)
+	twoNs[testNqn].NsList = append(twoNs[testNqn].NsList, &pb.Namespace{
+		NsId:     secondNs,
+		NsIdx:    2,
+		TdId:     testTd,
+		DevUuid:  "22222222-2222-4222-8222-222222222222",
+		DevNguid: "22222222222242228222222222222222",
+	})
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{
+		revision: 2, primary: true, raid1: true, subsys: twoNs})
+	if got := node.files[anaPath(testNqn, 2)]; got != "1" {
+		t.Fatalf("fixture: nsid 2's ana_grpid is %q, want 1", got)
+	}
+
+	node.Reset()
+	// One-shot: the sweep's listing of the subsystem's namespaces is the
+	// pass's first, and the build's own, later, answers.
+	node.killCmd["ls -1 "+agent.NvmetRoot+"/subsystems/"+testNqn+
+		"/namespaces"] = true
+	reply, err := srv.SyncupCntlr(context.Background(),
+		cntlrReq(reqOpts{revision: 3, primary: true, raid1: true}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	cnSweepAssertCode(t, reply.GetAgentReply(), common.ReplyCodeLeftover,
+		"the pass over an unanswered namespace listing")
+	cnSweepAssertDetails(t, reply.GetAgentReply(),
+		"nvmet namespaces of "+testNqn, "the failure details")
+	for _, listing := range cnSweepListings {
+		if strings.Contains(reply.GetAgentReply().GetDetails(),
+			"enumeration failed: "+listing.name+":") {
+			t.Fatalf("fixture: the %s listing failed too, so the sweep "+
+				"was stopped", listing.name)
+		}
+	}
+	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/2"
+	ana := "writedirect " + anaPath(testNqn, 2) + "="
+	if moves := node.callsMatching(ana); len(moves) != 1 ||
+		moves[0] != ana+"3" {
+		t.Fatalf("nsid 2 ana_grpid writes %q, want exactly one, to 3", moves)
+	}
+	assertOrder(t, node, ana+"3",
+		"writedirect "+nsPath+"/enable=0",
+		"cmd rmdir "+nsPath)
+	// The namespace that stays is left alone.
+	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
+}
+
+// TestUnansweredListingLeavesADroppedNamespaceToTheSweep pins what the build
+// leaves alone after a stopped sweep: a namespace that has left ns_list under
+// a subsystem that stays. Its removal is L1's, and P0 comes first because
+// disabling the namespace closes the ns-dev under it, which does not complete
+// on a dm-suspended device — the state an older build's leftover is in here.
+// A stopped pass runs no P0, so a drop by the build would disable the
+// namespace over that device. The build leaves it instead, the reply names it
+// — or, when that is the listing that did not answer, the nvmet listing — and
+// the next pass whose listings answer parks the ns-dev before it removes the
+// namespace.
+func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
+	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
+	for _, listing := range cnSweepListings {
+		t.Run(listing.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: true, suspended: true})
+			// An older build's leftover: the ns-dev held dm-suspended, its
+			// table still over the raid0.
+			nsDev := node.dms[nsDevName(srv, testNs)]
+			nsDev.table = agent.LinearTable(testTdSize/512,
+				node.devNo["/dev/mapper/"+raid0Name(srv, testTd)], 0)
+			nsDev.suspended = true
+			noNs := defaultSubsys(false)
+			noNs[testNqn].NsList = nil
+			req := cntlrReq(reqOpts{revision: 3, primary: true, subsys: noNs})
+
+			node.Reset()
+			node.killCmd[listing.kill] = true
+			reply, err := srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass over an unanswered "+
+					"listing")
+			cnSweepAssertDetails(t, reply.GetAgentReply(),
+				"enumeration failed: "+listing.name, "the failure details")
+			if listing.name != "nvmet subsystems" {
+				cnSweepAssertDetails(t, reply.GetAgentReply(),
+					agent.LeftoverKindNvmetNs+":"+testNqn+"/1",
+					"the leftover")
+			}
+			assertNoCall(t, node, "writedirect "+nsPath+"/enable=0")
+			assertNoCall(t, node, "cmd rmdir "+nsPath)
+			if !node.dirs[nsPath] {
+				t.Fatalf("the namespace was removed on a stopped pass")
+			}
+
+			// The next pass, its listings answering: P0 before L1.
+			node.Reset()
+			if _, err := srv.SyncupCntlr(ctx, req); err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			assertOrder(t, node,
+				"cmd dmsetup reload "+nsDevName(srv, testNs),
+				"cmd dmsetup resume "+nsDevName(srv, testNs),
+				"writedirect "+nsPath+"/enable=0",
+				"cmd rmdir "+nsPath,
+				"cmd dmsetup remove "+nsDevName(srv, testNs),
+			)
+		})
+	}
+}
+
+// TestUnansweredListingKeepsTheNsDevOffALeavingClone pins a move the build
+// must not make after a stopped sweep: an ns-dev onto the raid0 that a
+// dm-clone which has left clone_list may still be hydrating into.
+//
+// The chain's order is what makes that move safe: the ns-dev parked (P2),
+// the dm-clone removed (L3), and only then the build's reload onto the raid0.
+// A stopped pass runs neither step, so the dm-clone stays loaded with its
+// hydration enabled, and a region it has not copied yet would overwrite a
+// host's write made to the raid0 directly. That is live whenever a clone
+// still hydrating is deleted with force, in three shapes: a namespace serving
+// through the dm-clone (auto_resume; once more with its ns-dev left
+// dm-suspended by an older build, which is resumed where it is), one parked
+// while the clone ran (auto_resume false — the delete's latch resumes it in
+// the same revision), and a namespace new in that revision. On the stopped
+// pass each stays off the raid0 and none is moved to the optimized group —
+// the first serves on through the dm-clone, the other two are parked on the
+// td's dm-error — and the pass after it, its listings answering, removes
+// the dm-clone before any reload onto the raid0.
+func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
+	const newNs = uint64(0x1b)
+	parkedClone := cloneOf()
+	parkedClone.AutoResume = false
+	withNewNs := defaultSubsys(false)
+	withNewNs[testNqn].NsList = append(withNewNs[testNqn].NsList,
+		&pb.Namespace{
+			NsId:     newNs,
+			NsIdx:    2,
+			TdId:     testTd,
+			DevUuid:  "22222222-2222-4222-8222-222222222222",
+			DevNguid: "22222222222242228222222222222222",
+		})
+	// nsWant is one namespace after the stopped pass: the device its ns-dev
+	// maps ("clone" or "error") and its ana_grpid.
+	type nsWant struct {
+		nsId  uint64
+		nsIdx int
+		on    string
+		ana   string
+	}
+	for _, shape := range []struct {
+		name string
+		from reqOpts
+		to   reqOpts
+		// suspended leaves the ns-dev dm-suspended after the fixture, as
+		// an older build held one for §11.6: kept where it is, it is still
+		// resumed.
+		suspended bool
+		want      []nsWant
+	}{
+		{"serving through the clone",
+			reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			reqOpts{revision: 3, primary: true}, false,
+			[]nsWant{{testNs, 1, "clone", "1"}}},
+		{"held suspended by an older build",
+			reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			reqOpts{revision: 3, primary: true}, true,
+			[]nsWant{{testNs, 1, "clone", "1"}}},
+		{"parked while the clone ran",
+			reqOpts{revision: 2, primary: true, suspended: true,
+				clones: []*pb.Clone{parkedClone}},
+			reqOpts{revision: 3, primary: true}, false,
+			[]nsWant{{testNs, 1, "error", "3"}}},
+		{"new in the same revision",
+			reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			reqOpts{revision: 3, primary: true, subsys: withNewNs}, false,
+			[]nsWant{{testNs, 1, "clone", "1"}, {newNs, 2, "error", "3"}}},
+	} {
+		for _, listing := range cnSweepListings {
+			t.Run(shape.name+"/"+listing.name, func(t *testing.T) {
+				ctx := context.Background()
+				srv, node := newTestServer(t)
+				syncupBoth(t, srv, shape.from)
+				if shape.suspended {
+					node.dms[nsDevName(srv, testNs)].suspended = true
+				}
+				clone := cloneName(srv, testClone)
+				if dm := node.dms[clone]; dm == nil || dm.noHydration {
+					t.Fatalf("fixture: no dm-clone with its hydration on")
+				}
+				devNoOf := func(name string) string {
+					return node.devNo["/dev/mapper/"+name]
+				}
+				linear := func(devNo string) string {
+					return agent.LinearTable(testTdSize/512, devNo, 0)
+				}
+				raid0No := devNoOf(raid0Name(srv, testTd))
+				on := map[string]string{
+					"clone": devNoOf(clone),
+					"error": devNoOf(errorName(srv, testTd)),
+				}
+
+				node.Reset()
+				node.killCmd[listing.kill] = true
+				reply, err := srv.SyncupCntlr(ctx, cntlrReq(shape.to))
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				cnSweepAssertCode(t, reply.GetAgentReply(),
+					common.ReplyCodeLeftover, "the pass over an unanswered "+
+						"listing")
+				cnSweepAssertDetails(t, reply.GetAgentReply(),
+					"enumeration failed: "+listing.name, "the failure details")
+				assertNoCall(t, node, "cmd dmsetup remove")
+				if node.dms[clone] == nil {
+					t.Fatalf("the dm-clone is gone after a stopped pass")
+				}
+				for _, ns := range shape.want {
+					dev := node.dms[nsDevName(srv, ns.nsId)]
+					if dev == nil {
+						t.Fatalf("ns %#x has no ns-dev", ns.nsId)
+					}
+					if dev.table != linear(on[ns.on]) || dev.suspended {
+						t.Fatalf("ns %#x's ns-dev is %q (suspended %v), "+
+							"want it live on the %s: %q", ns.nsId, dev.table,
+							dev.suspended, ns.on, linear(on[ns.on]))
+					}
+					got := node.files[anaPath(testNqn, ns.nsIdx)]
+					if got != ns.ana {
+						t.Fatalf("nsid %d's ana_grpid is %q, want %q",
+							ns.nsIdx, got, ns.ana)
+					}
+					assertNoCall(t, node,
+						"writedirect "+anaPath(testNqn, ns.nsIdx)+"=1")
+				}
+
+				// The next pass, its listings answering: the dm-clone goes
+				// first, and every ns-dev lands on the raid0 after it —
+				// a namespace that was optimized over the dm-clone being
+				// parked on the way (P2), one that was parked going
+				// optimized only once its ns-dev is on the raid0.
+				node.Reset()
+				reply, err = srv.SyncupCntlr(ctx, cntlrReq(shape.to))
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				cnSweepAssertCode(t, reply.GetAgentReply(), 0,
+					"the pass whose listings answer")
+				for _, ns := range shape.want {
+					reload := "cmd dmsetup reload " +
+						nsDevName(srv, ns.nsId) + " --table "
+					if ns.on == "clone" {
+						assertOrder(t, node, reload+linear(on["error"]),
+							"cmd dmsetup remove "+clone,
+							reload+linear(raid0No))
+					} else {
+						assertOrder(t, node, "cmd dmsetup remove "+clone,
+							reload+linear(raid0No),
+							"writedirect "+anaPath(testNqn, ns.nsIdx)+"=1")
+					}
+					table := node.dms[nsDevName(srv, ns.nsId)].table
+					if table != linear(raid0No) {
+						t.Fatalf("ns %#x's ns-dev is %q after the pass, "+
+							"want it on the raid0", ns.nsId, table)
+					}
+					got := node.files[anaPath(testNqn, ns.nsIdx)]
+					if got != "1" {
+						t.Fatalf("nsid %d's ana_grpid is %q after the "+
+							"pass, want 1", ns.nsIdx, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestUnansweredListingDoesNotParkAServingNamespace pins the rest of what a
+// stopped sweep leaves out: CN9's pre-steps 2 and 3, which exist only so the
+// layers below them can remove. The namespace here moves to another td while
+// its old td leaves td_list. Run on this pass, P2 would park it on the new
+// td's dm-error first — while it is still optimized, so its host takes IO
+// errors — for the sake of a raid0 removal the stopped pass does not make.
+// Without P2 the build moves it in one reload, straight onto the new td's
+// raid0. The dm listing's own silence is the exception: with no snapshot to
+// rule out a dm-clone still hydrating into a raid0, the build keeps the
+// ns-dev where it is (TestUnansweredListingKeepsTheNsDevOffALeavingClone),
+// and there is no reload at all.
+func TestUnansweredListingDoesNotParkAServingNamespace(t *testing.T) {
+	tds := []*pb.ThinDevice{
+		{TdId: testTd, DevId: 1, Size: testTdSize},
+		{TdId: testSnapTd, DevId: 2, Size: testTdSize},
+	}
+	subsys := defaultSubsys(false)
+	subsys[testNqn].NsList[0].TdId = testSnapTd
+	for _, listing := range cnSweepListings {
+		t.Run(listing.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+			errNo := node.devNo["/dev/mapper/"+errorName(srv, testSnapTd)]
+			raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testSnapTd)]
+			if errNo == "" || raid0No == "" {
+				t.Fatalf("fixture: the new td is not built")
+			}
+
+			node.Reset()
+			node.killCmd[listing.kill] = true
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true, tds: tds[1:],
+					subsys: subsys}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass over an unanswered "+
+					"listing")
+			cnSweepAssertDetails(t, reply.GetAgentReply(),
+				"enumeration failed: "+listing.name, "the failure details")
+			want := []string{"cmd dmsetup reload " + nsDevName(srv, testNs) +
+				" --table " + agent.LinearTable(testTdSize/512, raid0No, 0)}
+			if listing.name == "dmsetup ls" {
+				want = nil
+			}
+			got := node.callsMatching(
+				"cmd dmsetup reload " + nsDevName(srv, testNs))
+			if strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("ns-dev reloads %q, want %q (the td's dm-error "+
+					"is %s)", got, want, errNo)
+			}
+			assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
+		})
+	}
+}
+
+// TestUnremovedChunkFileIsRedriven pins the chunk index against a removal
+// that did not happen. The files of a clone that left clone_list go with one
+// `rm -f`; killed before it did anything, it leaves them on disk. The clone's
+// entry in the index stays, so the pass names each file as a leftover record,
+// and so does the Check verdict after it — which is what makes the worker
+// re-drive — and the re-driven pass removes the file. Forgetting the entry
+// first would leave nothing but a restart that ever lists the file again,
+// and every reply would read OK. The same holds on a pass an unanswered
+// listing stopped.
+func TestUnremovedChunkFileIsRedriven(t *testing.T) {
+	for _, kill := range []string{"", "dmsetup ls"} {
+		name := "listings answer"
+		if kill != "" {
+			name = kill + " killed"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			// A standby that carries the clone in its desired state.
+			syncupBoth(t, srv, reqOpts{
+				revision: 2, primary: false, clones: []*pb.Clone{cloneOf()}})
+			pushBitmap(t, srv, hexBytes(t, testSkipHex))
+			bmPath := srv.nf.LocalCloneBmPath(
+				testCluster, testCn, testSp, testClone, 0, 0)
+			if _, ok := node.protos[bmPath]; !ok {
+				t.Fatalf("fixture: the chunk was not persisted")
+			}
+			record := agent.LeftoverKindRecord + ":" + bmPath
+			req := cntlrReq(reqOpts{revision: 3, primary: false})
+			checkRound := func() *pb.AgentReply {
+				check, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+					ClusterId: testCluster, CnId: testCn,
+					CntlrPointer: cntlrPtr(), Revision: 3,
+				}, nil)
+				return check.GetAgentReply()
+			}
+
+			node.Reset()
+			if kill != "" {
+				node.killCmd[kill] = true
+			}
+			node.killCmdNoEffect["rm -f "+bmPath] = true
+			reply, err := srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if _, ok := node.protos[bmPath]; !ok {
+				t.Fatalf("fixture: the killed rm removed the chunk file")
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass whose rm was killed")
+			cnSweepAssertDetails(t, reply.GetAgentReply(), record,
+				"the leftover")
+			check := checkRound()
+			cnSweepAssertCode(t, check, common.ReplyCodeLeftover,
+				"the check round after it")
+			cnSweepAssertDetails(t, check, record, "the verdict")
+
+			// The worker's re-drive.
+			node.Reset()
+			reply, err = srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(), 0, "the re-drive")
+			if _, ok := node.protos[bmPath]; ok {
+				t.Fatalf("the chunk file survived the re-drive")
+			}
+			if rms := node.callsMatching("cmd rm -f " + bmPath); len(rms) != 1 {
+				t.Fatalf("the re-drive issued %d rm of the chunk file, "+
+					"want 1: %q", len(rms), rms)
+			}
+			cnSweepAssertCode(t, checkRound(), 0,
+				"the check round after the re-drive")
+		})
+	}
+}
+
 // TestUnreadableCloneTableKeepsEverySource is the "did not answer" rule
 // applied to the live-device half of that attribution.
 //

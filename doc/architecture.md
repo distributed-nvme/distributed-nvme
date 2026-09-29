@@ -2778,7 +2778,7 @@ cannot forget in that way: while the device is there, the next enumeration finds
   the old list against sides that no longer exist. With the new list on disk first, a
   crash mid-sweep is nothing worse than a startup sweep.
 * **An enumeration that did not answer licenses no removal.** The rule above is
-  about one object; this one is about the listing the whole pass is derived from.
+  about one object; this one is about the listings the whole pass is derived from.
   "Actual minus desired" with an unanswered `dmsetup ls` subtracts to *remove
   nothing*, which looks like the safe direction and is not: an empty `actual` is
   also the shape of "there is nothing left", so every removal gated on ABSENCE
@@ -2787,11 +2787,30 @@ cannot forget in that way: while the device is there, the next enumeration finds
   the evidence that protects a shared object (a dm-clone still mapping its source)
   vanishes node-wide; and objects attributed WITHOUT the dm listing — a host-facing
   subsystem, read from configfs — are removed on a snapshot that proves nothing.
-  So the pass reports and touches nothing, and the recorded failure makes the
-  verdict non-OK, which is what re-drives it. The same applies per object: a live
+  On the cn each of its three other listings — the sysfs md enumeration, the sysfs
+  walk of the nvme host's subsystems and the `ls` of the nvmet configfs tree —
+  empties its own part the same way, the md enumeration most sharply: with it
+  unanswered the md layer finds no array to stop and reads clean, and the leg layer
+  below it disconnects unwanted legs from under a live array. So on the cn, when
+  any of its four listings did not answer, the sweep removes nothing from the node
+  and reports what it found (`cnagent.md` CN21), and the recorded failure makes the
+  verdict non-OK, which is what re-drives it. Two things that need no listing
+  still run there: the move of every namespace the desired state wants
+  `inaccessible` into that ANA group, because the build phase that follows
+  reloads ns-devs onto the dm-error whether or not the sweep ran and a demoted or
+  suspended namespace must be `inaccessible` first; and the sweep of the cntlr's
+  local state, which is compared against the request rather than a listing. The
+  build phase, for its part, holds back what is safe only after a step the stopped
+  sweep skipped: it puts no ns-dev onto a raid0 that a dm-clone the desired state
+  no longer wants may still be hydrating into, and it leaves a namespace that has
+  left its subsystem to the next pass. The rule applies per object too: a live
   dm-clone that will not say what it maps makes EVERY clone-source connection
   in-use for that pass, because recording a failure is not the same as acting on
-  one — nothing downstream reads the failure list before removing.
+  one — nothing downstream reads the failure list before removing. The dn applies
+  the pass-wide rule to its `dmsetup ls` alone, a known gap: an unanswered nvmet
+  `ls` or host walk is named in the verdict but stops nothing, so the step that
+  removes its exports or the one that disconnects its migration-source connections
+  finds nothing to remove, and the layers below run on.
 * **"Gone" is probe-verified, never inferred from an exit status.** dm through
   `dmsetup info`, nvme host connections through sysfs, md arrays through sysfs
   `array_state`, nvmet through configfs — and `mdadm --detail` never runs in a sweep,
@@ -4038,7 +4057,9 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   effectively suspended namespace is **parked** instead — its ns-dev reloaded onto the
   td's dm-error and resumed, the namespace `inaccessible` — with **no grace window**,
   because the namespace is moved to `inaccessible` before its own ns-dev is touched
-  (CN9's pre-steps do the ANA move first and the park second) and nvmet refuses IO to an
+  (CN9's pre-step 1 does the ANA move, on every converge; the park comes second, from
+  pre-step 2 or, when an unanswered listing stopped the sweep, from the build phase)
+  and nvmet refuses IO to an
   inaccessible namespace at the target, so a window would absorb nothing but a local
   scanner's bios; the reload's own flushing suspend is what keeps in-flight IO from
   being replayed. Two bounds on that argument are stated rather than hidden: the ANA

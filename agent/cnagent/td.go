@@ -133,69 +133,111 @@ func (s *CnAgentServer) nsDevNow(
 // made its backing the td's dm-error, so the ordinary reload below installs
 // the park — live, never dm-suspended (§11.6, [D12]). The ANA move to
 // `inaccessible` that must precede it has already happened in the sweep's P1
-// pre-step (CN9), which runs before anything else in the pass.
+// pre-step (CN9), which runs before anything else in the pass and on every
+// converge, one whose sweep an unanswered listing stopped included (CN21).
+//
+// held reports the one case in which it does not converge: on a pass whose
+// sweep an unanswered listing stopped, while a dm-clone the plan does not
+// want may still be live (cloneMayLinger, CN18), an ns-dev goes onto its
+// td's raid0 only if it is on it already. That dm-clone goes on hydrating
+// into the raid0 until L3 removes it, and a region it has not copied yet
+// would overwrite a write a host made to the raid0 directly. An existing
+// ns-dev keeps its live table — one over the dm-clone serves on through it,
+// a parked one stays parked — and a new one starts parked on the td's
+// dm-error. The caller leaves a held namespace in the ANA group it has; the
+// next pass whose listings answer removes the dm-clone — parking first an
+// ns-dev still over it — and only then reloads.
 func (s *CnAgentServer) ensureNsDev(
 	ctx context.Context,
 	np *nsPlan,
-) error {
+	cloneMayLinger bool,
+) (held bool, err error) {
 	if np.backingName == "" {
-		return fmt.Errorf("namespace has no thin device")
+		return false, fmt.Errorf("namespace has no thin device")
 	}
 	if np.sectors == 0 {
-		return fmt.Errorf("namespace size is 0")
+		return false, fmt.Errorf("namespace size is 0")
 	}
 	// A rule-5 ns-dev gets the park's table while its dm-clone does not show
 	// hydration on, with no ANA move: its namespace stays optimized, as it
 	// does through a recovery's own park (CN18 step 2).
-	np, err := s.nsDevNow(ctx, np)
+	np, err = s.nsDevNow(ctx, np)
 	if err != nil {
-		return err
+		return false, err
 	}
+	hold := cloneMayLinger && np.td != nil &&
+		np.backingName == np.td.raid0Name
 	// The td's dm-error is the one backing that may not exist yet when a
 	// namespace is pointed at it — the sweep's park pre-step reaches here
 	// before the build phase creates it.
 	if np.td != nil && np.backingName == np.td.errorName {
 		if err := s.ensureDmError(
 			ctx, np.td.errorName, np.td.sectors); err != nil {
-			return err
+			return false, err
 		}
 	}
 	devNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.backingName))
 	if err != nil {
-		return err
+		return false, err
 	}
 	table := nsDevTable(np, devNo)
 	dev, err := s.dm.Info(ctx, np.devName)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if dev == nil {
+		if hold {
+			// Created parked, on the td's dm-error.
+			if err := s.ensureDmError(
+				ctx, np.td.errorName, np.td.sectors); err != nil {
+				return false, err
+			}
+			errNo, err := s.dm.DevNo(ctx, s.nf.DmPath(np.td.errorName))
+			if err != nil {
+				return false, err
+			}
+			held = true
+			table = agent.LinearTable(np.sectors, errNo, 0)
+		}
 		if err := s.dm.Create(ctx, np.devName, table); err != nil {
-			return err
+			return held, err
 		}
 		dev = &agent.DmDevInfo{}
 	} else {
 		targets, tableErr := s.dm.Table(ctx, np.devName)
 		if tableErr != nil {
-			return tableErr
+			return false, tableErr
 		}
 		if !nsDevTableMatches(targets, np, devNo) || dev.ReadOnly {
-			// Reload is suspend, load, resume: it leaves the device live, so
-			// the guard below needs no case for this branch.
-			if err := s.dm.Reload(ctx, np.devName, table); err != nil {
-				return err
+			if hold && !onDevice(targets, devNo) {
+				held = true
+			} else {
+				// Reload is suspend, load, resume: it leaves the device
+				// live, so the guard below needs no case for this branch.
+				if err := s.dm.Reload(ctx, np.devName, table); err != nil {
+					return false, err
+				}
+				dev = &agent.DmDevInfo{}
 			}
-			dev = &agent.DmDevInfo{}
 		}
 	}
-	// Nothing here ever suspends. A device found suspended while its table is
-	// already the one this pass wants is one an **older build** deliberately
-	// held suspended for §11.6, or one an interrupted reload left behind;
-	// either way it is resumed, which is the whole of the upgrade path.
+	// Nothing here ever suspends. A device found suspended and not reloaded
+	// — its table already the one this pass wants, or held — is one an
+	// **older build** deliberately held suspended for §11.6, or one an
+	// interrupted reload left behind; either way it is resumed, which is the
+	// whole of the upgrade path.
 	if dev.Suspended {
-		return s.dm.Resume(ctx, np.devName)
+		return held, s.dm.Resume(ctx, np.devName)
 	}
-	return nil
+	return held, nil
+}
+
+// onDevice reports whether a live ns-dev table is a single target over one
+// device: a dm-linear, or the [D11] dm-flakey wrapper, whose first argument
+// is that device either way.
+func onDevice(targets []agent.DmTarget, devNo string) bool {
+	return len(targets) == 1 && len(targets[0].Args) > 0 &&
+		targets[0].Args[0] == devNo
 }
 
 // parkNsDev reloads one ns-dev onto its td's dm-error. It is both the §11.1
@@ -290,7 +332,17 @@ func (s *CnAgentServer) ensureNamespaceObject(
 
 // ensureSubsystem converges one host-facing subsystem, its namespaces and its
 // port link, and drops namespaces that left `ns_list` while the subsystem
-// itself stays.
+// itself stays. Such a namespace is normally gone already, taken by the
+// sweep's L1 after P0 has parked or resumed the ns-dev under it. One still
+// here after a sweep whose listings answered — L1's removal did not go, or
+// the sweep's own listing of this subsystem's namespaces did not answer — is
+// dropped the way L1 drops one: moved to the inaccessible group first.
+// After a sweep an unanswered listing stopped (CN21) the build leaves it
+// alone: with no P0 the ns-dev under it may still be dm-suspended, and
+// disabling the namespace closes that backing device, which does not
+// complete on a suspended device. The verdict stays non-OK — it names the
+// namespace, or the listing that did not answer — and the next pass whose
+// listings answer takes it through P0 and L1.
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,
@@ -309,18 +361,24 @@ func (s *CnAgentServer) ensureSubsystem(
 	for _, np := range sp.namespaces {
 		wanted[np.nsIdx] = struct{}{}
 	}
-	if nsids, ok, err := s.nvmet.ListNamespaces(ctx, sp.nqn); err == nil &&
-		ok {
-		for _, nsid := range nsids {
-			if _, keep := wanted[nsid]; keep {
-				continue
+	// None is dropped after a sweep an unanswered listing stopped (above).
+	var drop []int
+	if !plan.sweepStopped {
+		if nsids, ok, err := s.nvmet.ListNamespaces(
+			ctx, sp.nqn); err == nil && ok {
+			for _, nsid := range nsids {
+				if _, keep := wanted[nsid]; !keep {
+					drop = append(drop, nsid)
+				}
 			}
-			if err := s.nvmet.RemoveNamespace(
-				ctx, sp.nqn, nsid); err != nil {
-				info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
-					ssKey, sp.nqn, err.Error())
-				return
-			}
+		}
+	}
+	for _, nsid := range drop {
+		s.setAnaLogged(ctx, sp.nqn, nsid)
+		if err := s.nvmet.RemoveNamespace(ctx, sp.nqn, nsid); err != nil {
+			info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
+				ssKey, sp.nqn, err.Error())
+			return
 		}
 	}
 	for _, np := range sp.namespaces {

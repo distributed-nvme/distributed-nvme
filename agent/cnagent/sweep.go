@@ -69,11 +69,23 @@ type cnActual struct {
 	dmListed bool
 	// arrays is every md array on the node, read from sysfs alone.
 	arrays []MdArray
+	// mdListed is dmListed for arrays: the /sys/block enumeration answered,
+	// for every array of it under ListArrays' strict rule. Its silence costs
+	// the most: with arrays empty for want of an answer, L9 would find no
+	// array to stop and read clean, and L10 would disconnect unwanted legs
+	// from under a live one.
+	mdListed bool
 	// hostSubsys is every nvme subsystem this host holds a controller for.
 	hostSubsys []agent.SubsysBrief
+	// hostListed is dmListed for hostSubsys: the sysfs subsystem walk
+	// answered.
+	hostListed bool
 	// nvmetSubsys is every subsystem in the target's configfs tree, linked to
 	// the port or not.
 	nvmetSubsys []string
+	// nvmetListed is dmListed for nvmetSubsys: the `ls` of the configfs
+	// subsystems tree answered.
+	nvmetListed bool
 	// nvmetOwner is that tree attributed once per pass. Attribution costs
 	// configfs reads per host-facing subsystem, and doing it again for every
 	// sp chain would not only be wasteful but could give two chains
@@ -90,10 +102,12 @@ type nvmetAttr struct {
 	unowned bool
 }
 
-// enumerateCn takes the snapshot. Every enumerator that did not answer is
-// recorded as a failure and leaves its part of the snapshot empty — the sweep
-// then removes nothing from that part and reports the failure, because an
-// empty answer it cannot trust must never read as "there is nothing there".
+// enumerateCn takes the snapshot. Each of its four listings that did not
+// answer is recorded as a failure and leaves its part of the snapshot empty —
+// the sweep then removes nothing from the node and reports the failure,
+// because an empty answer it cannot trust must never read as "there is
+// nothing there", and every removal gated on absence would read it exactly
+// so (listed).
 func (s *CnAgentServer) enumerateCn(
 	ctx context.Context,
 	clusterId uint64,
@@ -127,18 +141,21 @@ func (s *CnAgentServer) enumerateCn(
 	if err != nil {
 		res.Fail("md arrays", err)
 	} else {
+		actual.mdListed = true
 		actual.arrays = arrays
 	}
 	hostSubsys, err := s.host.ListAllSubsys(ctx)
 	if err != nil {
 		res.Fail("nvme subsystems", err)
 	} else {
+		actual.hostListed = true
 		actual.hostSubsys = hostSubsys
 	}
 	nvmetSubsys, err := s.nvmet.ListSubsystems(ctx)
 	if err != nil {
 		res.Fail("nvmet subsystems", err)
 	} else {
+		actual.nvmetListed = true
 		actual.nvmetSubsys = nvmetSubsys
 	}
 	actual.nvmetOwner = make(map[string]nvmetAttr, len(actual.nvmetSubsys))
@@ -148,6 +165,15 @@ func (s *CnAgentServer) enumerateCn(
 			spId: spId, ours: ours, unowned: unowned}
 	}
 	return actual
+}
+
+// listed says every one of the four listings behind the snapshot answered.
+// A part that did not is empty for want of an answer, which is the shape of
+// "there is nothing here" to every removal gated on absence — the layer stop
+// rule first of all — so a snapshot with any part missing licenses no removal
+// at all (architecture.md §9.8).
+func (a *cnActual) listed() bool {
+	return a.dmListed && a.mdListed && a.hostListed && a.nvmetListed
 }
 
 // dmsOfKind is the node's devices of one kind, whose sp id passes the filter,
@@ -1118,28 +1144,46 @@ func (s *CnAgentServer) disconnectVerified(
 // make the worker re-push them every round, and would leave a promoted
 // standby's §11.5 rebuild nothing to skip with. The test is membership of
 // clone_list, which is exactly "the clone still exists".
+//
+// st.chunks mirrors the files, so a clone's entry goes only once its files
+// have. A removal that did not happen keeps them indexed, the converge that
+// tried names each as a leftover record, and so does every verdict
+// (converge false) until one goes: that is what re-drives the pass that
+// removes them. Dropping the entry first would forget files still on disk —
+// nothing but a restart's orphan sweep lists the store again — and no reply
+// would ever name them.
 func (s *CnAgentServer) sweepCloneChunks(
 	ctx context.Context,
 	st *cntlrState,
+	res *agent.SweepResult,
+	converge bool,
 ) {
 	ptr := st.req.GetCntlrPointer()
+	var gone []uint64
 	var paths []string
 	for cloneId := range st.chunks {
 		if findClone(st.req, cloneId) != nil {
 			continue
 		}
+		gone = append(gone, cloneId)
 		paths = append(paths, s.cloneChunkPathsOf(st,
 			st.req.GetClusterId(), st.req.GetCnId(),
 			ptr.GetSpId(), cloneId)...)
-		delete(st.chunks, cloneId)
-	}
-	if len(paths) == 0 {
-		return
 	}
 	sort.Strings(paths)
-	if err := s.store.Remove(ctx, paths...); err != nil {
+	if converge {
+		err := s.store.Remove(ctx, paths...)
+		if err == nil {
+			for _, cloneId := range gone {
+				delete(st.chunks, cloneId)
+			}
+			return
+		}
 		slog.ErrorContext(ctx, "removing clone bitmap chunks failed",
 			slog.String("error", err.Error()))
+	}
+	for _, path := range paths {
+		res.Add(agent.LeftoverKindRecord, path)
 	}
 }
 
@@ -1327,18 +1371,22 @@ func (s *CnAgentServer) sweepCntlr(
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	actual := s.enumerateCn(ctx, plan.clusterId, plan.cnId, res)
+	// converge is what the caller asked for; from here on, remove is what
+	// the snapshot licenses.
+	converge := remove
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
-	// below is "actual minus desired", and with the listing unanswered
-	// `actual` is empty for want of an answer — which subtracts to "remove
-	// nothing" in the safe direction but reads as "there is nothing left"
-	// everywhere a REMOVAL is gated on absence: the layer stop rule never
-	// fires, so lower layers run as though the ones above them had
-	// succeeded, and the live-device tests that protect a shared object
-	// (a dm-clone still mapping its source) lose the half of their evidence
-	// that comes from the node. res.Fail has already made the verdict
-	// non-OK, so the worker re-drives; this pass reports and touches
-	// nothing.
-	if !actual.dmListed {
+	// below is "actual minus desired", and with a listing unanswered its
+	// part of `actual` is empty for want of an answer — which subtracts to
+	// "remove nothing" in the safe direction but reads as "there is nothing
+	// left" everywhere a REMOVAL is gated on absence: the layer stop rule
+	// never fires, so lower layers run as though the ones above them had
+	// succeeded (an unanswered md enumeration leaves L9 nothing to stop and
+	// lets L10 disconnect unwanted legs under a live array), and the
+	// live-device tests that protect a shared object (a dm-clone still
+	// mapping its source) lose the half of their evidence that comes from
+	// the node. res.Fail has already made the verdict non-OK, so the worker
+	// re-drives; this pass reports and removes nothing from the node.
+	if !actual.listed() {
 		remove = false
 	}
 	wanted := cntlrWanted(plan)
@@ -1347,21 +1395,56 @@ func (s *CnAgentServer) sweepCntlr(
 	chain.srcNqns = func() []string {
 		return s.unownedSrcNqns(ctx, plan.clusterId, plan.cnId, actual, res)
 	}
-	if !remove {
-		s.reportChain(chain, res)
-		res.Log(ctx, s.cntlrIdAttrs(plan)...)
-		return res
+	if converge {
+		// P1 runs on every converge, a gated one too: it decides from the
+		// plan alone and removes nothing, and the build phase after this sweep
+		// parks on its strength whether or not the sweep ran — ensureNsDev
+		// reloads a demoted or suspended namespace's ns-dev onto the td's
+		// dm-error and ensureXfer demotes an unserved transfer device, and
+		// neither moves an ANA group. Skipped here, such a namespace would
+		// be served from an error table while its path still reads
+		// optimized, until some later pass moved it; and a pass with nothing
+		// left to remove has no leftover to make the worker drive one.
+		s.cntlrAnaPreStep(ctx, plan)
 	}
-	s.cntlrPreSteps(ctx, plan, actual, wanted)
-	s.runChain(ctx, st, plan, chain, actual, wanted, res)
+	if remove {
+		s.cntlrPreSteps(ctx, plan, actual, wanted)
+		s.runChain(ctx, st, plan, chain, actual, wanted, res)
+	} else {
+		s.reportChain(chain, res)
+	}
+	if converge && !remove {
+		// The build phase after a stopped sweep must not act on the
+		// strength of steps that did not run. With no P0, a namespace that
+		// left ns_list is still enabled over an ns-dev that may be
+		// dm-suspended, so the build leaves it to the next pass's P0 and L1
+		// (ensureSubsystem). With no L3, a dm-clone the plan does not want
+		// may still be live and hydrating into its destination raid0 —
+		// certainly when the dm listing names one, possibly when that
+		// listing did not answer — and a host writing that raid0 directly
+		// could have its write overwritten by a region the clone had not
+		// copied yet, so the build puts no ns-dev onto a raid0 it is not
+		// already on (ensureNsDev). Both facts are this pass's, read off
+		// this snapshot; the next pass learns its own.
+		plan.sweepStopped = true
+		plan.cloneMayLinger = !actual.dmListed || len(chain.clones) > 0
+	}
 	// The local store follows the same rule as the devices: a clone's chunk
 	// files go when the clone leaves the request, and stay while it is only
-	// suppressed. Last, so they go with the rest of the clone's state (SH7).
-	s.sweepCloneChunks(ctx, st)
-	// The ResInfo histories follow the same rule as the devices: whatever the
-	// desired state no longer names is forgotten, so a later rebuild of the
-	// same id reports a fresh epoch rather than the dead object's (SH14).
-	st.tracker.Keep(cntlrResKeys(plan))
+	// suppressed. That is decided from the request alone, so an unanswered
+	// listing gives it no reason to wait, and it runs on every converge. It
+	// comes after the chain, so that on a pass that removes, the files go
+	// with the rest of the clone's state (SH7). The verdict runs it too, to
+	// name what a converge could not remove.
+	s.sweepCloneChunks(ctx, st, res, converge)
+	if converge {
+		// The ResInfo histories follow the same rule as the devices:
+		// whatever the desired state no longer names is forgotten, so a
+		// later rebuild of the same id reports a fresh epoch rather than the
+		// dead object's (SH14). From the request alone as well, so this too
+		// runs on every converge.
+		st.tracker.Keep(cntlrResKeys(plan))
+	}
 	res.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return res
 }
@@ -1437,15 +1520,12 @@ func (s *CnAgentServer) cntlrIdAttrs(plan *cntlrPlan) []any {
 	}
 }
 
-// cntlrPreSteps are the transitions the old retire phase computed from the
-// previously applied plan and this one derives from the live tables instead.
-// All three exist so the layers below them can remove anything at all.
-func (s *CnAgentServer) cntlrPreSteps(
-	ctx context.Context,
-	plan *cntlrPlan,
-	actual *cnActual,
-	wanted *cnWanted,
-) {
+// cntlrAnaPreStep is P1, the first of the transitions the old retire phase
+// computed from the previously applied plan. It is the one of them that runs
+// on every converge, whether or not the snapshot licensed any removal: it
+// decides from the plan alone and removes nothing, and the build phase parks
+// on its strength (sweepCntlr).
+func (s *CnAgentServer) cntlrAnaPreStep(ctx context.Context, plan *cntlrPlan) {
 	// P1, ANA: every namespace the desired state wants inaccessible is moved
 	// there before anything under it is touched (§11.1 old_primary step 1).
 	// A provisioning-deferred namespace is already inaccessible by CN16's
@@ -1460,6 +1540,18 @@ func (s *CnAgentServer) cntlrPreSteps(
 			s.setAnaLogged(ctx, xp.nqn, int(xp.xfer.GetOriNsIdx()))
 		}
 	}
+}
+
+// cntlrPreSteps are the other two of those transitions, which this pass
+// derives from the plan and the live tables instead of from a remembered
+// plan. Both exist only so the layers below them can remove anything at all,
+// so they run only on a pass whose snapshot licenses removal, after P1.
+func (s *CnAgentServer) cntlrPreSteps(
+	ctx context.Context,
+	plan *cntlrPlan,
+	actual *cnActual,
+	wanted *cnWanted,
+) {
 	// P2, park: an ns-dev OF THE PLAN whose LIVE table still maps something
 	// this pass is about to remove is reloaded onto its td's dm-error first.
 	// Of the plan, not of the wanted set: the loop below is over
@@ -1604,17 +1696,18 @@ func (s *CnAgentServer) sweepCn(
 	cnId := st.req.GetCnId()
 	actual := s.enumerateCn(ctx, clusterId, cnId, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
-	// below is "actual minus desired", and with the listing unanswered
-	// `actual` is empty for want of an answer — which subtracts to "remove
-	// nothing" in the safe direction but reads as "there is nothing left"
-	// everywhere a REMOVAL is gated on absence: the layer stop rule never
-	// fires, so lower layers run as though the ones above them had
-	// succeeded, and the live-device tests that protect a shared object
-	// (a dm-clone still mapping its source) lose the half of their evidence
-	// that comes from the node. res.Fail has already made the verdict
-	// non-OK, so the worker re-drives; this pass reports and touches
-	// nothing.
-	if !actual.dmListed {
+	// below is "actual minus desired", and with a listing unanswered its
+	// part of `actual` is empty for want of an answer — which subtracts to
+	// "remove nothing" in the safe direction but reads as "there is nothing
+	// left" everywhere a REMOVAL is gated on absence: the layer stop rule
+	// never fires, so lower layers run as though the ones above them had
+	// succeeded (an unanswered md enumeration leaves L9 nothing to stop and
+	// lets L10 disconnect unwanted legs under a live array), and the
+	// live-device tests that protect a shared object (a dm-clone still
+	// mapping its source) lose the half of their evidence that comes from
+	// the node. res.Fail has already made the verdict non-OK, so the worker
+	// re-drives; this pass reports and touches nothing.
+	if !actual.listed() {
 		remove = false
 	}
 
