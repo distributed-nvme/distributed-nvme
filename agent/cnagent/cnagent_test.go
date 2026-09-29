@@ -3,6 +3,7 @@ package cnagent
 import (
 	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -4892,7 +4893,7 @@ func (s *fakeCheckCnStream) Context() context.Context { return s.ctx }
 
 func (s *fakeCheckCnStream) Recv() (*pb.CheckCnRequest, error) {
 	if len(s.requests) == 0 {
-		return nil, fmt.Errorf("EOF")
+		return nil, io.EOF
 	}
 	req := s.requests[0]
 	s.requests = s.requests[1:]
@@ -4900,6 +4901,29 @@ func (s *fakeCheckCnStream) Recv() (*pb.CheckCnRequest, error) {
 }
 
 func (s *fakeCheckCnStream) Send(reply *pb.CheckCnReply) error {
+	s.replies = append(s.replies, reply)
+	return nil
+}
+
+type fakeCheckCntlrStream struct {
+	pb.ControllerNodeAgent_CheckCntlrServer
+	ctx      context.Context
+	requests []*pb.CheckCntlrRequest
+	replies  []*pb.CheckCntlrReply
+}
+
+func (s *fakeCheckCntlrStream) Context() context.Context { return s.ctx }
+
+func (s *fakeCheckCntlrStream) Recv() (*pb.CheckCntlrRequest, error) {
+	if len(s.requests) == 0 {
+		return nil, io.EOF
+	}
+	req := s.requests[0]
+	s.requests = s.requests[1:]
+	return req, nil
+}
+
+func (s *fakeCheckCntlrStream) Send(reply *pb.CheckCntlrReply) error {
 	s.replies = append(s.replies, reply)
 	return nil
 }
@@ -4976,6 +5000,70 @@ func TestCheckCntlrRounds(t *testing.T) {
 	// comparing a configfs identity attribute byte-wise (agent.SameNsId) —
 	// writes nothing and still fails the CP's converge check.
 	assertAllOk(t, reply.GetCntlrInfo())
+}
+
+// TestCheckRoundsCarryTheRequestTraceId pins CN24's per-round trace id: the
+// stream's context names only the worker round that opened it, so every
+// command and read of a round runs under the request's trace_id, and a round
+// that names none keeps the stream's.
+func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	probeAllLegs(t, srv)
+
+	// The stream contexts are what the server interceptor hands the handler:
+	// the trace id of the stream's metadata (grpc.md T2).
+	check := func(streamId string, roundIds ...string) {
+		t.Helper()
+		cn := &fakeCheckCnStream{
+			ctx: common.WithTraceId(context.Background(), "cn-"+streamId),
+		}
+		cntlr := &fakeCheckCntlrStream{
+			ctx: common.WithTraceId(context.Background(), "cntlr-"+streamId),
+		}
+		for _, id := range roundIds {
+			cn.requests = append(cn.requests, &pb.CheckCnRequest{
+				ClusterId: testCluster, CnId: testCn, Revision: 2,
+				TraceId: id,
+			})
+			cntlr.requests = append(cntlr.requests, &pb.CheckCntlrRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr(), Revision: 2, TraceId: id,
+			})
+		}
+		if err := srv.CheckCn(cn); err != nil {
+			t.Fatalf("CheckCn: %v", err)
+		}
+		if err := srv.CheckCntlr(cntlr); err != nil {
+			t.Fatalf("CheckCntlr: %v", err)
+		}
+		if len(cn.replies) != len(roundIds) ||
+			len(cntlr.replies) != len(roundIds) {
+			t.Fatalf("%d cn and %d cntlr replies to %d rounds",
+				len(cn.replies), len(cntlr.replies), len(roundIds))
+		}
+	}
+
+	check("stream", "round-1", "round-2")
+	for _, id := range []string{"round-1", "round-2"} {
+		if len(node.Traced(id)) == 0 {
+			t.Errorf("no command or read ran under %s", id)
+		}
+	}
+	for _, id := range []string{"cn-stream", "cntlr-stream"} {
+		if got := node.Traced(id); len(got) != 0 {
+			t.Errorf("a round naming its own id ran %d calls under the "+
+				"stream's %s, the first %q", len(got), id, got[0])
+		}
+	}
+	// An empty trace_id keeps the stream's id.
+	check("stream", "")
+	for _, id := range []string{"cn-stream", "cntlr-stream"} {
+		if len(node.Traced(id)) == 0 {
+			t.Errorf("a round naming no id ran nothing under the stream's %s",
+				id)
+		}
+	}
 }
 
 // assertAllOk walks every ResInfo a CntlrInfo carries, the way the

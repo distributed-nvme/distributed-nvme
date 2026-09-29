@@ -2423,7 +2423,7 @@ concatenation (§9.6, §11.4).
 | `SyncupSide` | Carries one `side_pointer`, `revision`, `side_conf` (`ext_cnt`, `cntlid_slot`, `primary_cn_id`, `standby_id_list`, `sp_level`, `provisioned`) and — only when this side is a migration endpoint — `migr_src_conf` (`migr_id`, `dst_side_id`, `dst_dn_id`, `dst_provisioned`: the source role, §11.2) and/or `migr_dst_conf` (`migr_id`, `src_side_id`, `src_dn_id`, `src_nvme_tr_conf`, `block_size`, `meta_blocks`, `dm_clone_conf`, `bm_cnt`: the destination role). Reject if the pointer is unknown (SyncupDn must introduce it first). Converge the §3.1 per-side stack: the side device of `ext_cnt` extents and its zeroing state (§9.4), per-CN dm-error/dm-linear/nvmet subsystem, primary vs standby table targets + ANA states, migration source/destination roles (§11.2). Reply `agent_reply`, `revision`, `side_info` (which always reports `zeroed_ext_cnt` / `total_ext_cnt`, §9.4), `bm_info` (the applied migration-bitmap indexes, §9.6). |
 | `PushMigrBitmap` | Deliver one `MigrBitmap` chunk (`side_pointer`, `migr_id`, `bm_idx`, `bitmap`) to the **destination**-side agent, per the §9.6 protocol: persist the chunk at `LocalMigrBmPath`, then recompute + `blkdiscard` the fully-skippable dm-clone regions (§8.11, §11.4). Reply `agent_reply` only. |
 | `GetDnInfo` / `GetSideInfo` | Return the current `DnInfo` / `SideInfo` without changing anything (`agent_reply`, `revision`, info). |
-| `CheckDn` / `CheckSide` (stream) | Health streams, one per DN resp. per side, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `dn_info` / `side_info`. |
+| `CheckDn` / `CheckSide` (stream) | Health streams, one per DN resp. per side, protocol in §9.7. Request: ids, `revision`, `show_info`, `trace_id` (the sending round's id, §9.7); reply: `agent_reply`, `revision`, `dn_info` / `side_info`. |
 
 ### 9.3 `service ControllerNodeAgent`
 
@@ -2435,7 +2435,7 @@ concatenation (§9.6, §11.4).
 | `PushCloneBitmap` | Deliver one `CloneBitmap` chunk (`cntlr_pointer`, `clone_id`, `src_slice_idx`, `bm_idx`, `bitmap`) to the **primary** cntlr's agent, per the §9.6 protocol: persist the chunk at `LocalCloneBmPath(…, src_slice_idx, bm_idx)`, translate through §11.4, `blkdiscard` the dm-clone. Safe at any time (§11.5). Reply `agent_reply` only. |
 | `GetCnInfo` / `GetCntlrInfo` | Read-only live state (`agent_reply`, `revision`, info). |
 | `GetThinDeviceBm` / `GetLegBm` | Serve the §8.13 gateway reads from a dm-thin metadata snapshot (`dmsetup message ... reserve_metadata_snap`, read via `thin_dump`/direct parse, then `release_metadata_snap`): per-slice td mapping bitmap, or the leg-projected pool mapping bitmap. Reply bitmaps use the wire convention **1 = unmapped**. |
-| `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`; reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
+| `CheckCn` / `CheckCntlr` (stream) | Health streams, one per CN resp. per cntlr, protocol in §9.7. Request: ids, `revision`, `show_info`, `trace_id` (the sending round's id, §9.7); reply: `agent_reply`, `revision`, `cn_info` / `cntlr_info`. |
 
 ### 9.4 Side provisioning protocol (whole-side zeroing behind the `provisioned` gate)
 
@@ -2791,8 +2791,10 @@ object's live state cheaply instead of polling `Get*Info`:
 * **Request:** the object ids (`cluster_id` + `dn_id`/`cn_id`, plus `side_pointer` /
   `cntlr_pointer`), `revision` = the worker's current **desired** revision for the
   object (`dnv-worker.md` RW4 — the agents ignore this request field; the mismatch
-  check below is the worker comparing the *reply's* revision against desired), and
-  `show_info`.
+  check below is the worker comparing the *reply's* revision against desired),
+  `show_info`, and `trace_id` — the id of the worker round that sent it, under which
+  the agent runs the round, because the stream's metadata names only the round that
+  opened it (`grpc.md` T3).
 * **Reply:** `agent_reply`, `revision` = the agent's last fully applied revision for the
   object, and the `*Info`:
   * `show_info = true` ⇒ the agent always fills the complete current `*Info` (§9.5);

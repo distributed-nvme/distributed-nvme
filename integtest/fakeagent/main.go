@@ -65,6 +65,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -1449,7 +1450,8 @@ func (a *fakeAgent) CheckDn(
 		if err != nil {
 			return err
 		}
-		drop, err := a.waitForRound(ctx, dnObjKey)
+		drop, err := a.waitForRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), dnObjKey)
 		if err != nil {
 			return err
 		}
@@ -1491,7 +1493,8 @@ func (a *fakeAgent) CheckSide(
 			return err
 		}
 		key := sideObjKey(req.GetSidePointer())
-		drop, err := a.waitForRound(ctx, key)
+		drop, err := a.waitForRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), key)
 		if err != nil {
 			return err
 		}
@@ -1696,7 +1699,8 @@ func (a *fakeAgent) CheckCn(
 		if err != nil {
 			return err
 		}
-		drop, err := a.waitForRound(ctx, cnObjKey)
+		drop, err := a.waitForRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), cnObjKey)
 		if err != nil {
 			return err
 		}
@@ -1737,7 +1741,8 @@ func (a *fakeAgent) CheckCntlr(
 			return err
 		}
 		key := cntlrObjKey(req.GetCntlrPointer())
-		drop, err := a.waitForRound(ctx, key)
+		drop, err := a.waitForRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), key)
 		if err != nil {
 			return err
 		}

@@ -1921,10 +1921,13 @@ type sideCheckStream struct {
 	stream grpc.BidiStreamingClient[pb.CheckSideRequest, pb.CheckSideReply]
 }
 
-func (s *sideCheckStream) send(revision uint64, showInfo bool) error {
+func (s *sideCheckStream) send(
+	traceId string, revision uint64, showInfo bool,
+) error {
 	req := sideCheckRequest(
 		s.driver.cid, s.driver.dnId, s.driver.ptr, revision, showInfo,
 	)
+	req.TraceId = traceId
 	if err := s.stream.Send(req); err != nil {
 		return fmt.Errorf("check side send: %w", err)
 	}
@@ -2398,10 +2401,13 @@ type cntlrCheckStream struct {
 	stream grpc.BidiStreamingClient[pb.CheckCntlrRequest, pb.CheckCntlrReply]
 }
 
-func (s *cntlrCheckStream) send(revision uint64, showInfo bool) error {
+func (s *cntlrCheckStream) send(
+	traceId string, revision uint64, showInfo bool,
+) error {
 	req := cntlrCheckRequest(
 		s.driver.cid, s.driver.cnId, s.driver.ptr, revision, showInfo,
 	)
+	req.TraceId = traceId
 	if err := s.stream.Send(req); err != nil {
 		return fmt.Errorf("check cntlr send: %w", err)
 	}

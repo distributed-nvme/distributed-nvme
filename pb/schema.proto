@@ -1394,6 +1394,12 @@ message CheckDnRequest {
     uint64 dn_id = 2;
     uint64 revision = 3;
     bool show_info = 4;
+    // The trace id of the worker round that sent this request
+    // (grpc.md T3): the stream's metadata carries only the id of
+    // the round that opened it, so each round names its own here
+    // and the agent runs the round under it. Empty keeps the
+    // stream's id.
+    string trace_id = 5;
 }
 
 message CheckDnReply {
@@ -1408,6 +1414,8 @@ message CheckSideRequest {
     SidePointer side_pointer = 3;
     uint64 revision = 4;
     bool show_info = 5;
+    // As CheckDnRequest.trace_id.
+    string trace_id = 6;
 }
 
 message CheckSideReply {
@@ -1544,6 +1552,8 @@ message CheckCnRequest {
     uint64 cn_id = 2;
     uint64 revision = 3;
     bool show_info = 4;
+    // As CheckDnRequest.trace_id.
+    string trace_id = 5;
 }
 
 message CheckCnReply {
@@ -1558,6 +1568,8 @@ message CheckCntlrRequest {
     CntlrPointer cntlr_pointer = 3;
     uint64 revision = 4;
     bool show_info = 5;
+    // As CheckDnRequest.trace_id.
+    string trace_id = 6;
 }
 
 message CheckCntlrReply {

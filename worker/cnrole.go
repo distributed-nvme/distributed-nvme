@@ -188,8 +188,11 @@ type cnCheckStream struct {
 	stream grpc.BidiStreamingClient[pb.CheckCnRequest, pb.CheckCnReply]
 }
 
-func (s *cnCheckStream) send(revision uint64, showInfo bool) error {
+func (s *cnCheckStream) send(
+	traceId string, revision uint64, showInfo bool,
+) error {
 	req := cnCheckRequest(s.driver.cid, s.driver.cnId, revision, showInfo)
+	req.TraceId = traceId
 	if err := s.stream.Send(req); err != nil {
 		return fmt.Errorf("check cn send: %w", err)
 	}

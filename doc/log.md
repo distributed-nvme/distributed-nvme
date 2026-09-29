@@ -62,7 +62,15 @@ R5. The trace id is carried in the context under an unexported key and injected
     into every record as attribute `trace_id` by `TraceIdHandler`. Access only
     through the exported helpers `WithTraceId` / `TraceIdFromCtx` (§3). The gRPC
     interceptors (`grpc.md`) move the trace id between context and gRPC
-    metadata; nothing else touches it. On a logger derived with `WithGroup` the
+    metadata. Nothing else touches it but the entry points that set one
+    (`grpc.md` T4, and the `integtest/` drivers' `--trace-id`) — among them
+    the gateway's mint, which writes it straight into the incoming metadata
+    (`gateway/traceid.go`), and `gatewayctl`, `dnagentctl` and `cnagentctl`,
+    which put it into their outgoing metadata themselves because they dial
+    without the client interceptors (`grpc.md` §6) — and the `Check*`
+    streams, whose requests carry each round's id in a `trace_id` field that
+    the worker fills and the agent adopts (`grpc.md` T3). On a logger
+    derived with `WithGroup` the
     attribute is nested inside that group rather than at the top level — see
     R12 — so a consumer that greps `trace_id` positionally must account for it.
 
@@ -199,8 +207,10 @@ func TraceIdFromCtx(ctx context.Context) (string, bool) {
 
 // NewTraceId mints a new trace id. Entry points create one (dnvctl per CLI
 // invocation, dnv-worker per sync/health round, dnv-gateway for a request that
-// arrived without one, in its own ensureTraceId interceptors); the shared
-// interceptors of grpc.md §3 never invent one (T4).
+// arrived without one, in its own ensureTraceId interceptors; every daemon at
+// startup; dnv-agent per background attempt, dnv-cdc per host connection, scan
+// and watch event); the shared interceptors of grpc.md §3 never invent one
+// (T4).
 func NewTraceId() string {
 	var b [8]byte
 	// crypto/rand.Read never returns an error (it panics on failure since

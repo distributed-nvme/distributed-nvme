@@ -202,8 +202,11 @@ type dnCheckStream struct {
 	stream grpc.BidiStreamingClient[pb.CheckDnRequest, pb.CheckDnReply]
 }
 
-func (s *dnCheckStream) send(revision uint64, showInfo bool) error {
+func (s *dnCheckStream) send(
+	traceId string, revision uint64, showInfo bool,
+) error {
 	req := dnCheckRequest(s.driver.cid, s.driver.dnId, revision, showInfo)
+	req.TraceId = traceId
 	if err := s.stream.Send(req); err != nil {
 		return fmt.Errorf("check dn send: %w", err)
 	}

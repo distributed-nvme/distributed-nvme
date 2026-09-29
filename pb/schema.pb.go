@@ -11684,11 +11684,17 @@ func (x *GetSideInfoReply) GetSideInfo() *SideInfo {
 }
 
 type CheckDnRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	DnId          uint64                 `protobuf:"varint,2,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
-	Revision      uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
-	ShowInfo      bool                   `protobuf:"varint,4,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	DnId      uint64                 `protobuf:"varint,2,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
+	Revision  uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	ShowInfo  bool                   `protobuf:"varint,4,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	// The trace id of the worker round that sent this request
+	// (grpc.md T3): the stream's metadata carries only the id of
+	// the round that opened it, so each round names its own here
+	// and the agent runs the round under it. Empty keeps the
+	// stream's id.
+	TraceId       string `protobuf:"bytes,5,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11749,6 +11755,13 @@ func (x *CheckDnRequest) GetShowInfo() bool {
 		return x.ShowInfo
 	}
 	return false
+}
+
+func (x *CheckDnRequest) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
 }
 
 type CheckDnReply struct {
@@ -11812,12 +11825,14 @@ func (x *CheckDnReply) GetDnInfo() *DnInfo {
 }
 
 type CheckSideRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	DnId          uint64                 `protobuf:"varint,2,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
-	SidePointer   *SidePointer           `protobuf:"bytes,3,opt,name=side_pointer,json=sidePointer,proto3" json:"side_pointer,omitempty"`
-	Revision      uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
-	ShowInfo      bool                   `protobuf:"varint,5,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId   uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	DnId        uint64                 `protobuf:"varint,2,opt,name=dn_id,json=dnId,proto3" json:"dn_id,omitempty"`
+	SidePointer *SidePointer           `protobuf:"bytes,3,opt,name=side_pointer,json=sidePointer,proto3" json:"side_pointer,omitempty"`
+	Revision    uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
+	ShowInfo    bool                   `protobuf:"varint,5,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	// As CheckDnRequest.trace_id.
+	TraceId       string `protobuf:"bytes,6,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11885,6 +11900,13 @@ func (x *CheckSideRequest) GetShowInfo() bool {
 		return x.ShowInfo
 	}
 	return false
+}
+
+func (x *CheckSideRequest) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
 }
 
 type CheckSideReply struct {
@@ -13036,11 +13058,13 @@ func (x *GetLegBmReply) GetBitmap() []byte {
 }
 
 type CheckCnRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	CnId          uint64                 `protobuf:"varint,2,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
-	Revision      uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
-	ShowInfo      bool                   `protobuf:"varint,4,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	CnId      uint64                 `protobuf:"varint,2,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
+	Revision  uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	ShowInfo  bool                   `protobuf:"varint,4,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	// As CheckDnRequest.trace_id.
+	TraceId       string `protobuf:"bytes,5,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13101,6 +13125,13 @@ func (x *CheckCnRequest) GetShowInfo() bool {
 		return x.ShowInfo
 	}
 	return false
+}
+
+func (x *CheckCnRequest) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
 }
 
 type CheckCnReply struct {
@@ -13164,12 +13195,14 @@ func (x *CheckCnReply) GetCnInfo() *CnInfo {
 }
 
 type CheckCntlrRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterId     uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
-	CnId          uint64                 `protobuf:"varint,2,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
-	CntlrPointer  *CntlrPointer          `protobuf:"bytes,3,opt,name=cntlr_pointer,json=cntlrPointer,proto3" json:"cntlr_pointer,omitempty"`
-	Revision      uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
-	ShowInfo      bool                   `protobuf:"varint,5,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ClusterId    uint64                 `protobuf:"varint,1,opt,name=cluster_id,json=clusterId,proto3" json:"cluster_id,omitempty"`
+	CnId         uint64                 `protobuf:"varint,2,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
+	CntlrPointer *CntlrPointer          `protobuf:"bytes,3,opt,name=cntlr_pointer,json=cntlrPointer,proto3" json:"cntlr_pointer,omitempty"`
+	Revision     uint64                 `protobuf:"varint,4,opt,name=revision,proto3" json:"revision,omitempty"`
+	ShowInfo     bool                   `protobuf:"varint,5,opt,name=show_info,json=showInfo,proto3" json:"show_info,omitempty"`
+	// As CheckDnRequest.trace_id.
+	TraceId       string `protobuf:"bytes,6,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13237,6 +13270,13 @@ func (x *CheckCntlrRequest) GetShowInfo() bool {
 		return x.ShowInfo
 	}
 	return false
+}
+
+func (x *CheckCntlrRequest) GetTraceId() string {
+	if x != nil {
+		return x.TraceId
+	}
+	return ""
 }
 
 type CheckCntlrReply struct {
@@ -15031,25 +15071,27 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12&\n" +
-	"\tside_info\x18\x03 \x01(\v2\t.SideInfoR\bsideInfo\"}\n" +
+	"\tside_info\x18\x03 \x01(\v2\t.SideInfoR\bsideInfo\"\x98\x01\n" +
 	"\x0eCheckDnRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05dn_id\x18\x02 \x01(\x04R\x04dnId\x12\x1a\n" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tshow_info\x18\x04 \x01(\bR\bshowInfo\"z\n" +
+	"\tshow_info\x18\x04 \x01(\bR\bshowInfo\x12\x19\n" +
+	"\btrace_id\x18\x05 \x01(\tR\atraceId\"z\n" +
 	"\fCheckDnReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
-	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\xb0\x01\n" +
+	"\adn_info\x18\x03 \x01(\v2\a.DnInfoR\x06dnInfo\"\xcb\x01\n" +
 	"\x10CheckSideRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05dn_id\x18\x02 \x01(\x04R\x04dnId\x12/\n" +
 	"\fside_pointer\x18\x03 \x01(\v2\f.SidePointerR\vsidePointer\x12\x1a\n" +
 	"\brevision\x18\x04 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tshow_info\x18\x05 \x01(\bR\bshowInfo\"\x82\x01\n" +
+	"\tshow_info\x18\x05 \x01(\bR\bshowInfo\x12\x19\n" +
+	"\btrace_id\x18\x06 \x01(\tR\atraceId\"\x82\x01\n" +
 	"\x0eCheckSideReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
@@ -15164,25 +15206,27 @@ const file_pb_schema_proto_rawDesc = "" +
 	"startBlock\x12\x1b\n" +
 	"\tblock_cnt\x18\a \x01(\x04R\bblockCnt\"'\n" +
 	"\rGetLegBmReply\x12\x16\n" +
-	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"}\n" +
+	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\x98\x01\n" +
 	"\x0eCheckCnRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\x12\x1a\n" +
 	"\brevision\x18\x03 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tshow_info\x18\x04 \x01(\bR\bshowInfo\"z\n" +
+	"\tshow_info\x18\x04 \x01(\bR\bshowInfo\x12\x19\n" +
+	"\btrace_id\x18\x05 \x01(\tR\atraceId\"z\n" +
 	"\fCheckCnReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
-	"\acn_info\x18\x03 \x01(\v2\a.CnInfoR\x06cnInfo\"\xb4\x01\n" +
+	"\acn_info\x18\x03 \x01(\v2\a.CnInfoR\x06cnInfo\"\xcf\x01\n" +
 	"\x11CheckCntlrRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
 	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\x122\n" +
 	"\rcntlr_pointer\x18\x03 \x01(\v2\r.CntlrPointerR\fcntlrPointer\x12\x1a\n" +
 	"\brevision\x18\x04 \x01(\x04R\brevision\x12\x1b\n" +
-	"\tshow_info\x18\x05 \x01(\bR\bshowInfo\"\x86\x01\n" +
+	"\tshow_info\x18\x05 \x01(\bR\bshowInfo\x12\x19\n" +
+	"\btrace_id\x18\x06 \x01(\tR\atraceId\"\x86\x01\n" +
 	"\x0fCheckCntlrReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x12\x1a\n" +

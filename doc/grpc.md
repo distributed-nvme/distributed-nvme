@@ -48,6 +48,17 @@ T3. Propagation is transitive end to end by construction: dnvctl mints an id →
     it in ctx → gateway's outbound agent calls go through the client
     interceptor with that ctx → agent server interceptor restores it → the
     agent's `OsClient`/state-file logs carry the same `trace_id`.
+    A stream's metadata travels once, when the stream opens, so a long-lived
+    `Check*` stream (`architecture.md` §9.7) carries in its metadata only the
+    id of the worker round that opened it, while every round runs under an
+    id of its own (`dnv-worker.md` RW10). On these streams the id therefore
+    also travels in the request: every `Check*Request` the worker sends
+    carries its round's id in `trace_id`, and the agent runs the round under
+    it (`agent.CheckRoundCtx`, `dnagent.md` SH24), so that round's `os …`
+    records carry the round's id; an empty `trace_id` keeps the stream's.
+    The stream's own per-message records (L4) are logged under the stream
+    ctx and keep the id it was opened with; a round's id shows in the `data`
+    of its request's `grpc client send` / `grpc server recv` records.
 
 T4. Minting trace ids is the entry points' job, not the §3 interceptors'
     (non-normative recommendation): `dnvctl` creates one per CLI invocation,
@@ -58,7 +69,13 @@ T4. Minting trace ids is the entry points' job, not the §3 interceptors'
     `ensureTraceIdUnary`/`ensureTraceIdStream` interceptors
     (`gateway/traceid.go`), which `serverOptions` (`gateway/server.go`) chains
     AHEAD of the §4 pair, so the id is already in the incoming metadata when
-    the shared chain logs the request (`gateway.md` §0 #6, §3). The §3
+    the shared chain logs the request (`gateway.md` §0 #6, §3). Each daemon
+    also mints one at startup, for its startup and other process-lifetime
+    records; `dnv-agent` mints one per attempt of a background task
+    (`dnagent.md` SH27: each background re-converge of a side or a cntlr,
+    each zeroing batch, each leg probe round), and `dnv-cdc` one per accepted
+    host connection, one per scan attempt (the watch it opens included) and
+    one per applied watch event. The §3
     interceptors themselves never mint. The generator, `common.NewTraceId` in
     `common/log.go`, in outline:
 
@@ -434,11 +451,12 @@ One (unary) `PushMigrBitmap` chunk, worker side then agent side:
 {"time":"...","level":"INFO","msg":"grpc client reply","method":"/DiskNodeAgent/PushMigrBitmap","data":{"agent_reply":{}},"trace_id":"a1b2c3d4e5f60718"}
 ```
 
-and one round on a long-lived `CheckDn` stream:
+and one round on a long-lived `CheckDn` stream — the round that opened it, so
+the request's `trace_id` and the records' are the same id (T3):
 
 ```json
-{"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
-{"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc client send","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true,"trace_id":"0a1b2c3d4e5f6071"},"trace_id":"0a1b2c3d4e5f6071"}
+{"time":"...","level":"INFO","msg":"grpc server recv","method":"/DiskNodeAgent/CheckDn","data":{"cluster_id":16981786240730056190,"dn_id":3,"revision":9,"show_info":true,"trace_id":"0a1b2c3d4e5f6071"},"trace_id":"0a1b2c3d4e5f6071"}
 {"time":"...","level":"INFO","msg":"grpc server send","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
 {"time":"...","level":"INFO","msg":"grpc client recv","method":"/DiskNodeAgent/CheckDn","data":{"agent_reply":{},"revision":9,"dn_info":{"disk_info":{"res_name":"/dev/disk/by-uuid/4425c6a8-dc27-40a3-9fd5-0cc41f534360","status":"RES_STATUS_OK","epoch":1788051600},"meta_info":{"res_name":"/dev/nvme0n1","status":"RES_STATUS_OK","details":"seq=7 sides=2 clone_metas=0 free_ext=26 free_meta_units=48 provisioning=0","epoch":1788051600},"port_info":{"res_name":"1","status":"RES_STATUS_OK","epoch":1788051600}}},"trace_id":"0a1b2c3d4e5f6071"}
 ```
@@ -500,7 +518,9 @@ instead is recorded here, so that the one carve-out left does not live only in
   passes its `--trace-id` as plain outgoing metadata
   (`metadata.AppendToOutgoingContext` with `common.TraceIdMetadataKey`), which
   is all T2 needs on the far side, so the T3 chain the suites assert holds
-  unchanged. `integtest/fakeagent` does install both server interceptors of
+  unchanged; `dnagentctl` and `cnagentctl` also put it in the `trace_id` of
+  their `Check*` requests, as the worker does (T3).
+  `integtest/fakeagent` does install both server interceptors of
   §4: it stands in for an agent, and its `agent.log` is the record the suites
   read for what the worker sent — `worker_test.sh` matches `grpc server *`
   records only, never the worker's own client-side ones, which carry the same

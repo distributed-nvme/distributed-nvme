@@ -2464,7 +2464,9 @@ CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
 CN24. Instantiate the SH24-SH26 loop with the §4.12 probes; one round takes
       the CN1 locks of the corresponding `Get*Info`, and its `agent_reply`
       is the same read-only verdict (CN30) — which is what drives the
-      worker's re-sync while a leftover is still there.
+      worker's re-sync while a leftover is still there. Like every SH24
+      round it runs under its request's `trace_id` (the stream's id when
+      that is empty).
 
 ### 4.11 `GetThinDeviceBm` / `GetLegBm`
 
@@ -2940,9 +2942,12 @@ transport that `common`'s own interceptor tests already cover. The
 `CheckCn`/`CheckCntlr` tests go one level further down still: rather than
 supply a server-stream argument they call the unexported per-round helpers
 (`checkCnRound`/`checkCntlrRound`) and thread `lastSent` by hand, because
-every CN24 assertion — the reply codes, the rule for when the info rides
+every CN24 assertion but the per-round trace id — the reply codes, the rule for when the info rides
 along, the CN1 locks — lives in the round, while the `Recv`/`Send` loop
-around it is the SH24-SH26 shape with nothing cn-specific in it.
+around it is the SH24-SH26 shape with nothing cn-specific in it. The one
+test of that loop, `TestCheckRoundsCarryTheRequestTraceId`, does supply
+in-process fake server streams: the per-round trace id is derived there,
+between `Recv` and the round (SH24).
 
 1. **Fresh SyncupCn**: scripted empty probes; assert the `WriteProto` to
    `LocalCnPath` **first** (CN7's persist-first order, `architecture.md`
@@ -3295,7 +3300,11 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
 12. **Check streams** (CN24): first reply full info; unchanged
     `show_info = false` round omits it; `show_info = true` re-includes it;
     unknown object ⇒ code 2 with the stream kept open; a round never
-    mutates.
+    mutates. `TestCheckRoundsCarryTheRequestTraceId` (SH24): on a
+    `CheckCn` and a `CheckCntlr` stream whose ctx carries the stream's
+    id, two rounds run their commands and reads under their own requests'
+    `trace_id`s and none under the stream's; a round with an empty
+    `trace_id` runs them under the stream's.
 13. **Lock smoke** (CN1): a `SyncupCntlr` blocked in a slow scripted
     command blocks a same-cntlr `SyncupCntlr` but not a `CheckCn` round or
     another cntlr's converge. `TestAStuckDisconnectDoesNotHoldTheCheckRound`
@@ -3887,12 +3896,15 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
    nothing: the clone-metadata arena uses a plain `blkdiscard` hole punch,
    while `--zeroout` belongs only to the dn side-provisioning path (CN18/§9.4).
 7. A manual run of the `architecture.md` §13 example starts `dnv-agent cn`, serves
-   `GetCnSize`, and a `SyncupCn`/`SyncupCntlr`/`CheckCntlr` round-trip
-   shows one trace id across its `grpc server request`, `os command` and
-   `os write file direct` records; the `probe write block` / `probe read
-   block direct` records of the CN11 leg probers appear on their own
-   per-attempt trace ids (CN2), never on an RPC's — and they carry no
-   `os command` framing, because the prober issues its IO directly (§2.2).
+   `GetCnSize`, and a `SyncupCn`/`SyncupCntlr` round-trip shows one trace id
+   across its `grpc server request`, `os command` and `os write file direct`
+   records, and each `CheckCntlr` round's `os …` records carry the
+   `trace_id` in its request (the `data` of its `grpc server recv` record;
+   the record's own `trace_id` is the stream's — SH24, `grpc.md` T3); the
+   `probe write block` / `probe read block direct` records of the CN11 leg
+   probers appear on their own per-attempt trace ids (CN2), never on an
+   RPC's — and they carry no `os command` framing, because the prober
+   issues its IO directly (§2.2).
 8. A **primary**'s `SyncupCntlr` whose legs are all `provisioned = false`
    issues zero `nvme connect` and `mdadm` calls (a standby's sweep issues
    `mdadm --stop` for an array its empty group set no longer wants, and

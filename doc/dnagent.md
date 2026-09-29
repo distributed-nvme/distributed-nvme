@@ -285,7 +285,7 @@ SH27. **Background tasks and process exit** (added by amendment;
       a dead ctx and spawns nothing.
 
 Reference implementation — `agent/agent.go` (complete; the `waitBackground`
-parameter and the derived task ctx are SH27's):
+parameter and the derived task ctx are SH27's, `CheckRoundCtx` is SH24's):
 
 ```go
 // Package agent holds the mechanism shared by the dn and cn agent roles
@@ -380,6 +380,19 @@ func Serve(
 	// waits for the ones waitBackground covers, so no orphan child process of
 	// theirs outlives the agent (§9.4).
 	return grpcServer.Serve(lis)
+}
+
+// CheckRoundCtx is the ctx one Check* round runs under (SH24): the stream's,
+// re-keyed to the trace id the round's request carries. The stream's own id is
+// the one its metadata brought at open (grpc.md T2) — on a worker's stream,
+// the id of the round that opened it — so without this every later round's
+// records would be filed under that first round. An empty id keeps the
+// stream's.
+func CheckRoundCtx(streamCtx context.Context, traceId string) context.Context {
+	if traceId == "" {
+		return streamCtx
+	}
+	return common.WithTraceId(streamCtx, traceId)
 }
 ```
 
@@ -785,6 +798,12 @@ follow these rules (`architecture.md` §9.7):
 SH24. Rounds are worker-initiated: loop on `Recv` (a `Recv` returning
       `io.EOF`, or the stream ctx ending, ends the handler with `nil`);
       exactly one `Send` per received request; never an unsolicited send.
+      Each round runs under the trace id its request carries in `trace_id`
+      (`agent.CheckRoundCtx`): the stream ctx holds only the id its
+      metadata brought at open (`grpc.md` T2) — on a worker's stream, that
+      of the round that opened it (T3) — so without it every later round's
+      records would carry that first round's id. An empty `trace_id` keeps
+      the stream ctx's id.
 
 SH25. Per round, under the SH11/SH12 locks: validate the object (unknown ⇒
       reply `agent_reply.code = ReplyCodeUnknownObject`, `revision = 0`, no
@@ -2591,6 +2610,11 @@ able to fail.
    stored one; unknown object ⇒ `ReplyCodeUnknownObject` with the stream kept
    open (SH25). A Check round never mutates — `writeblock` included — and
    never registers a zeroing goroutine (DN16).
+   **Each round's trace id** (SH24; `TestCheckRoundsCarryTheRequestTraceId`):
+   on a `CheckDn` and a `CheckSide` stream, each opened under a metadata
+   id of its own, two rounds run their commands and reads under their own
+   requests' `trace_id`s and none under the stream's; a round with an empty
+   `trace_id` runs them under the stream's.
    **A header read that did not answer at startup** (DN5, DN6, DN16;
    `TestATransientHeaderReadDoesNotFreezeTheSides`): after a restart whose
    DN converge had its header read killed, the startup side converge's own
@@ -2965,9 +2989,12 @@ able to fail.
 6. `grep -rnE "pvcreate|vgcreate|lvcreate|lvchange|lvremove|\\blvs\\b|\\bvgs\\b|\\bpvs\\b" agent/ cmd/ common/` finds nothing outside comments and test-guard string literals — **repo-wide**: no dnv agent runs any LVM command ([D13], [D14]).
 7. A manual run of the `architecture.md` §13 example starts `dnv-agent dn`,
    serves
-   `GetDnSize`, and a `SyncupDn`/`SyncupSide`/`CheckSide` round-trip shows
-   one trace id across `grpc server request`, `os command` and
-   `os write file direct` records.
+   `GetDnSize`, and a `SyncupDn`/`SyncupSide` round-trip shows one trace id
+   across `grpc server request`, `os command` and `os write file direct`
+   records, and each `CheckSide` round's `os …` records carry the
+   `trace_id` in its request (the `data` of its `grpc server recv` record,
+   whose own `trace_id` is the one the stream was opened under — SH24,
+   `grpc.md` T3).
 8. `grep -rn "trimmed" pb/schema.proto agent/` finds only the `reserved 3;`
    comment in `DnDiskTable.SideRecord`: the trim flag is gone and DN9's
    zeroing protocol replaced it ([D15]).

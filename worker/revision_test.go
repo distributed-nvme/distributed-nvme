@@ -12,6 +12,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -952,6 +953,162 @@ func TestRevisionCheckRequestShape(t *testing.T) {
 	if req.GetClusterId() != testCid || req.GetDnId() != testDnId ||
 		req.GetRevision() != 13 || req.GetShowInfo() {
 		t.Fatalf("check request = %v", req)
+	}
+}
+
+// traceDnAgent is a DiskNodeAgent whose CheckDn derives each round's trace id
+// the way the agents do — the request's trace_id when set, else the stream's
+// — and records it beside the trace_id metadata the stream was opened with.
+// Its replies name revision 0, so every round ends in a SyncupDn.
+type traceDnAgent struct {
+	pb.UnimplementedDiskNodeAgentServer
+
+	mu       sync.Mutex
+	streams  int
+	syncups  int
+	metaIds  []string
+	roundIds []string
+}
+
+func (s *traceDnAgent) CheckDn(
+	stream grpc.BidiStreamingServer[pb.CheckDnRequest, pb.CheckDnReply],
+) error {
+	s.mu.Lock()
+	s.streams++
+	s.mu.Unlock()
+	for {
+		req, err := stream.Recv()
+		if err != nil {
+			return nil
+		}
+		var metaId string
+		md, _ := metadata.FromIncomingContext(stream.Context())
+		if vals := md.Get(common.TraceIdMetadataKey); len(vals) > 0 {
+			metaId = vals[0]
+		}
+		ctx := stream.Context()
+		if req.GetTraceId() != "" {
+			ctx = common.WithTraceId(ctx, req.GetTraceId())
+		}
+		roundId, _ := common.TraceIdFromCtx(ctx)
+		s.mu.Lock()
+		s.metaIds = append(s.metaIds, metaId)
+		s.roundIds = append(s.roundIds, roundId)
+		s.mu.Unlock()
+		if err := stream.Send(&pb.CheckDnReply{Revision: 0}); err != nil {
+			return err
+		}
+	}
+}
+
+// SyncupDn is the signal that a round has FINISHED: every CheckDn reply names
+// a revision the worker did not ask for, so RW4 step 5 syncs after recv()
+// returned and stopped the round timer.
+func (s *traceDnAgent) SyncupDn(
+	_ context.Context, req *pb.SyncupDnRequest,
+) (*pb.SyncupDnReply, error) {
+	s.mu.Lock()
+	s.syncups++
+	s.mu.Unlock()
+	return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
+}
+
+func (s *traceDnAgent) syncupCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncups
+}
+
+func (s *traceDnAgent) snapshot() (streams int, metaIds, roundIds []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streams, append([]string(nil), s.metaIds...),
+		append([]string(nil), s.roundIds...)
+}
+
+// TestEachCheckRoundCarriesItsOwnTraceId pins RW10 on the long-lived Check
+// stream: the stream's metadata is written once, at open, under the id of
+// the round that opened it, so each later round must carry its own id in the
+// request — else every agent record of round two, three, … is filed under
+// round one's id.
+func TestEachCheckRoundCarriesItsOwnTraceId(t *testing.T) {
+	h := newRevHarness(t)
+	stub := &traceDnAgent{}
+	h.fleet.serve(t, testAddr, func(server *grpc.Server) {
+		pb.RegisterDiskNodeAgentServer(server, stub)
+	})
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	h.startDn(testAddr, 3)
+
+	rounds := func() int {
+		_, _, roundIds := stub.snapshot()
+		return len(roundIds)
+	}
+	// Advance the clock only while the loop is parked in wait(): an advance
+	// during a round in flight fires its round timer and drops the stream.
+	waitFor(t, "the first round to finish", func() bool {
+		return stub.syncupCount() >= 1 && h.clk.waiterCount() == 1
+	})
+	h.clk.advance(roundInterval)
+	waitFor(t, "second check", func() bool { return rounds() >= 2 })
+	streams, metaIds, roundIds := stub.snapshot()
+	if streams != 1 {
+		t.Fatalf("%d streams, want both rounds on one", streams)
+	}
+	if metaIds[1] != metaIds[0] || roundIds[0] != metaIds[0] {
+		t.Fatalf("metadata ids %q, round ids %q: the stream must be opened "+
+			"under the first round's id", metaIds, roundIds)
+	}
+	if roundIds[1] == roundIds[0] {
+		t.Fatalf("both rounds on one stream derived trace id %q, "+
+			"want one id per round", roundIds[1])
+	}
+	for _, id := range roundIds[:2] {
+		if !strings.HasPrefix(id, seedPrefix(seedOf(1))+"-") {
+			t.Fatalf("round trace id %q lacks the worker's seed prefix", id)
+		}
+	}
+}
+
+// captureSend records what a checkStream adapter hands the generated stream.
+type captureSend[Req, Rep any] struct {
+	grpc.BidiStreamingClient[Req, Rep]
+	sent []*Req
+}
+
+func (c *captureSend[Req, Rep]) Send(r *Req) error {
+	c.sent = append(c.sent, r)
+	return nil
+}
+
+// TestEveryCheckStreamSendsTheRoundTraceId pins RW10 on all four adapters:
+// the loop test above drives only the dn one, so the cn, side and cntlr
+// adapters are checked here, each handed a round's trace id directly.
+func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
+	dn := &captureSend[pb.CheckDnRequest, pb.CheckDnReply]{}
+	cn := &captureSend[pb.CheckCnRequest, pb.CheckCnReply]{}
+	side := &captureSend[pb.CheckSideRequest, pb.CheckSideReply]{}
+	cntlr := &captureSend[pb.CheckCntlrRequest, pb.CheckCntlrReply]{}
+	for _, s := range []checkStream{
+		&dnCheckStream{driver: &dnDriver{}, stream: dn},
+		&cnCheckStream{driver: &cnDriver{}, stream: cn},
+		&sideCheckStream{driver: &sideDriver{}, stream: side},
+		&cntlrCheckStream{driver: &cntlrDriver{}, stream: cntlr},
+	} {
+		if err := s.send("round-7", 1, false); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+	}
+	for name, got := range map[string]string{
+		"CheckDn":    dn.sent[0].GetTraceId(),
+		"CheckCn":    cn.sent[0].GetTraceId(),
+		"CheckSide":  side.sent[0].GetTraceId(),
+		"CheckCntlr": cntlr.sent[0].GetTraceId(),
+	} {
+		if got != "round-7" {
+			t.Errorf("%s request trace_id %q, want round-7", name, got)
+		}
 	}
 }
 

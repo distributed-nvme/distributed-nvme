@@ -14,7 +14,8 @@ import (
 // The Check* streams follow SH24-SH26: rounds are worker-initiated, exactly
 // one reply per received request, never an unsolicited send. The info rides
 // along when show_info is set, on the first reply of the stream, and whenever
-// the freshly probed info differs from the last one actually sent.
+// the freshly probed info differs from the last one actually sent. Each round
+// runs under the trace id its own request carries (agent.CheckRoundCtx).
 
 // streamEnded reports whether a Recv error is the normal end of a stream.
 func streamEnded(ctx context.Context, err error) bool {
@@ -34,7 +35,8 @@ func (s *DnAgentServer) CheckDn(
 			}
 			return err
 		}
-		reply, info := s.checkDnRound(ctx, req, lastSent)
+		reply, info := s.checkDnRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), req, lastSent)
 		if info != nil {
 			lastSent = info
 		}
@@ -92,7 +94,8 @@ func (s *DnAgentServer) CheckSide(
 			}
 			return err
 		}
-		reply, info := s.checkSideRound(ctx, req, lastSent)
+		reply, info := s.checkSideRound(
+			agent.CheckRoundCtx(ctx, req.GetTraceId()), req, lastSent)
 		if info != nil {
 			lastSent = info
 		}

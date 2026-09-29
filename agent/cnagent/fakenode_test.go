@@ -33,6 +33,10 @@ type fakeNode struct {
 	// no deadline. The leg walk's sysfs reads are
 	// SH15-bounded like every other OS touch, so this must stay empty.
 	sysfsNoDeadline []string
+	// traced is every command and file read keyed by the trace id of the
+	// ctx it ran on: the trace_id its `os command` / `os read file` record
+	// carries in production (log.md R5); "" for a ctx without one.
+	traced map[string][]string
 
 	// block devices
 	devSize   map[string]uint64
@@ -424,6 +428,23 @@ func (f *fakeNode) Calls() []string {
 	return append([]string(nil), f.calls...)
 }
 
+// recordTrace files one call under its ctx's trace id (traced). Called with
+// f.mu held.
+func (f *fakeNode) recordTrace(ctx context.Context, line string) {
+	traceId, _ := common.TraceIdFromCtx(ctx)
+	if f.traced == nil {
+		f.traced = make(map[string][]string)
+	}
+	f.traced[traceId] = append(f.traced[traceId], line)
+}
+
+// Traced returns the calls that ran under traceId, in order.
+func (f *fakeNode) Traced(traceId string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.traced[traceId]...)
+}
+
 func (f *fakeNode) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -505,6 +526,7 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("read %s", path)
+	f.recordTrace(ctx, "read "+path)
 	if _, ok := ctx.Deadline(); !ok && strings.HasPrefix(path, "/sys/") {
 		// SH15. The local store under --local-store is a
 		// plain-file path and is deliberately not covered by the prefix.
@@ -755,6 +777,7 @@ func (f *fakeNode) runCommand(
 		tid, _ := common.TraceIdFromCtx(ctx)
 		f.traceOf[line] = tid
 	}
+	f.recordTrace(ctx, line)
 	var gate chan struct{}
 	for key, ch := range f.gate {
 		if strings.Contains(line, key) {

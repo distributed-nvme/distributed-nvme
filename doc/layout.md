@@ -211,7 +211,7 @@ client is linked only into the binaries that use it (§3).
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | grpc client to the Gateway; cobra + pflag + viper (the dnvctl command tree and its CT9 viper binding live here, not in `cmd/dnvctl` — `dnvctl.md` §1.2); **no etcd** |
 | `cmd/*` | the matching top-level package + `common` (`cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes; `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: main builds the two servers and their `NvmeTrConf` and registers each through `agent.Serve`; `cmd/dnvctl` imports only `common` + `ctl`) | viper + cobra live here (flag/config/env parsing and subcommand trees per §13, `dnagent.md` §3) — except for `dnvctl`, whose tree is `ctl`'s (row above) and whose main imports neither |
-| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
+| `integtest/*` | `common`, `pb`, `agent` (the agent drivers, for `ParseCloneStatus`; `fakeagent`, for `CheckRoundCtx`, `dnagent.md` SH24), `model` + `etcdutil` (`workerctl`, which plays the gateway, and `cdcctl`, which plays gateway + worker for the `CdcEntry` keys) | test drivers only, never linked into a `cmd/` binary |
 
 Consequences worth stating: the agent and `dnvctl` binaries do not link the
 etcd client, and there are no import cycles because `common` and `pb` import

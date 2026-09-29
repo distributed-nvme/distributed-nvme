@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -226,6 +227,80 @@ func TestCheckSideStream(t *testing.T) {
 	if got := changed.GetSideInfo().GetCnIdToDmLinear()[testCn0].
 		GetStatus(); got != pb.ResStatus_RES_STATUS_MISSING {
 		t.Errorf("dm-linear status = %v, want MISSING", got)
+	}
+}
+
+// TestCheckRoundsCarryTheRequestTraceId pins SH24's per-round trace id: the
+// stream's metadata names only the worker round that opened it, so every
+// command and read of a round runs under the request's trace_id, and a round
+// that names none keeps the stream's.
+func TestCheckRoundsCarryTheRequestTraceId(t *testing.T) {
+	srv, node := newTestServer(t)
+	client := dialAgent(t, srv)
+	syncupBoth(t, srv, 1, testSide)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dnStream, err := client.CheckDn(metadata.AppendToOutgoingContext(
+		ctx, common.TraceIdMetadataKey, "dn-stream"))
+	if err != nil {
+		t.Fatalf("CheckDn: %v", err)
+	}
+	sideStream, err := client.CheckSide(metadata.AppendToOutgoingContext(
+		ctx, common.TraceIdMetadataKey, "side-stream"))
+	if err != nil {
+		t.Fatalf("CheckSide: %v", err)
+	}
+	dnRound := func(traceId string) {
+		t.Helper()
+		if err := dnStream.Send(&pb.CheckDnRequest{
+			ClusterId: testCluster, DnId: testDn, Revision: 1,
+			TraceId: traceId,
+		}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		if _, err := dnStream.Recv(); err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+	}
+	sideRound := func(traceId string) {
+		t.Helper()
+		if err := sideStream.Send(&pb.CheckSideRequest{
+			ClusterId: testCluster, DnId: testDn,
+			SidePointer: sidePtr(testSide), Revision: 1, TraceId: traceId,
+		}); err != nil {
+			t.Fatalf("send: %v", err)
+		}
+		if _, err := sideStream.Recv(); err != nil {
+			t.Fatalf("recv: %v", err)
+		}
+	}
+
+	dnRound("dn-round-1")
+	dnRound("dn-round-2")
+	sideRound("side-round-1")
+	sideRound("side-round-2")
+	for _, id := range []string{
+		"dn-round-1", "dn-round-2", "side-round-1", "side-round-2",
+	} {
+		if len(node.Traced(id)) == 0 {
+			t.Errorf("no command or read ran under %s", id)
+		}
+	}
+	for _, id := range []string{"dn-stream", "side-stream"} {
+		if got := node.Traced(id); len(got) != 0 {
+			t.Errorf("a round naming its own id ran %d calls under the "+
+				"stream's %s, the first %q", len(got), id, got[0])
+		}
+	}
+	// An empty trace_id keeps the stream's id.
+	dnRound("")
+	sideRound("")
+	for _, id := range []string{"dn-stream", "side-stream"} {
+		if len(node.Traced(id)) == 0 {
+			t.Errorf("a round naming no id ran nothing under the stream's %s",
+				id)
+		}
 	}
 }
 

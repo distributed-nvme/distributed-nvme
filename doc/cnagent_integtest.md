@@ -422,7 +422,8 @@ are built natively on the driver.
 Plaintext gRPC (`insecure.NewCredentials()`), no server reflection — same
 rationale and conventions as `dnagentctl`: global flags `--addr` (the cn
 endpoint `<ip>:29529`), `--cluster`, `--cn`, `--trace-id` (metadata key
-`trace_id`, script passes `it-<case>-<step>`), `--timeout` (default 10),
+`trace_id`, and the request's `trace_id` on `check-cn` and `check-cntlr`;
+script passes `it-<case>-<step>`), `--timeout` (default 10),
 `0x` hex accepted on id flags, protojson replies on stdout, non-zero exit on
 gRPC error **or** `agent_reply.code != 0` unless `--expect-code N`. The
 script raises that deadline for the converge RPCs, which do real kernel work

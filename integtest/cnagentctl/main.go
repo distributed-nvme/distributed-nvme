@@ -101,7 +101,7 @@ func (g *globals) bind(fs *flag.FlagSet, withTimeout bool) {
 	fs.Var(&g.cluster, "cluster", "cluster id")
 	fs.Var(&g.cn, "cn", "controller node id")
 	fs.StringVar(&g.traceId, "trace-id", "",
-		"value of the trace_id gRPC metadata key")
+		"value of the trace_id gRPC metadata key and of a check-* request")
 	g.timeout = 10
 	if withTimeout {
 		fs.Float64Var(&g.timeout, "timeout", 10,
@@ -481,6 +481,7 @@ func cmdCheckCn(args []string) {
 		CnId:      uint64(g.cn),
 		Revision:  uint64(revision),
 		ShowInfo:  *showInfo,
+		TraceId:   g.traceId,
 	}); err != nil {
 		die("CheckCn send failed: %v", err)
 	}
@@ -522,6 +523,7 @@ func cmdCheckCntlr(args []string) {
 		CntlrPointer: cntlrPointerOf(sp, cntlr),
 		Revision:     uint64(revision),
 		ShowInfo:     *showInfo,
+		TraceId:      g.traceId,
 	}); err != nil {
 		die("CheckCntlr send failed: %v", err)
 	}

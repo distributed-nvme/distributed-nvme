@@ -970,7 +970,7 @@ RW4. **Round**, every `interval` seconds (RW9):
      1. no stream ⇒ open one over the cached connection (RW7); a failure to
         open counts as a broken stream;
      2. send `Check*Request{ids, revision = desired.revision, show_info =
-        false}`;
+        false, trace_id = the round's (RW10)}`;
      3. wait for the reply at most `interval` seconds (RW8);
      4. no reply, or a stream error ⇒ close the stream; health "unreachable"
         (§9) — except for a round abandoned under RW6, and for a round the
@@ -1095,7 +1095,10 @@ RW10. **Trace ids.** Every round, syncup, fan-out, push, flip and reaction runs 
       `common.WithTraceId(ctx, seed[:8] + "-" + common.NewTraceId())`. The
       interceptors carry it to the agent (`grpc.md` T1), whose log then names
       the worker that sent each request — the §14 suite's
-      "one owner per shard" evidence.
+      "one owner per shard" evidence. A `Check*` stream's metadata is sent
+      once, at open, under the round that opened it, so every round also
+      puts its own id in the request's `trace_id` (RW4 step 2), under
+      which the agent runs the round (`grpc.md` T3).
 
 RW11. **Graceful stop.** On ctx cancellation the loop finishes an in-flight
       unary call (its own deadline bounds the wait; the stop ctx is not the
@@ -1131,7 +1134,7 @@ RW13. Inputs: `cluster_id` and `dn_id` from the key, `addr_port` and
       `SyncupDnRequest{cluster_id, dn_id, revision, side_pointer_list =
       DnConf.side_ptr_list, extent_size = dn_bin_conf.extent_size}` to
       `addr_port`. Rounds send `CheckDnRequest{cluster_id, dn_id, revision,
-      show_info}`. Health per HL1, judged against a cache of the record's
+      show_info, trace_id}`. Health per HL1, judged against a cache of the record's
       `err_epoch` that the syncup's read re-seeds and that the health
       monitor re-reads itself, with the same `Get`, before a verdict once a
       minute has passed without its reading or writing the record (HL3). A
@@ -1328,8 +1331,8 @@ RW16. **Cntlr request.** `SyncupCntlrRequest{cluster_id, cn_id,
       every cntlr's `clone_list` (CLD5).
 
 RW17. **Rounds** send `CheckSideRequest{cluster_id, dn_id, side_pointer,
-      revision, show_info}` / `CheckCntlrRequest{cluster_id, cn_id,
-      cntlr_pointer, revision, show_info}`.
+      revision, show_info, trace_id}` / `CheckCntlrRequest{cluster_id, cn_id,
+      cntlr_pointer, revision, show_info, trace_id}`.
 
 RW18. **Provisioned flip** (§10.3). On an ACCEPTED `SyncupSide`/`CheckSide`
       reply (`code == 0` or `ReplyCodeLeftover` — the gate RW19 defers to,
@@ -2587,7 +2590,10 @@ parses them.
 
 Plus the `etcd *` records of `etcdutil` (§3) and the `grpc client *`
 records of the interceptors (`grpc.md`) — the latter are what an agent's
-log mirrors as `grpc server *` with the same `trace_id`.
+log mirrors as `grpc server *` with the same `trace_id`. On a `Check*`
+stream that `trace_id` is the one the stream was opened under, for every
+round; a round's own id is the `trace_id` inside its request's `data`
+(`grpc.md` T3).
 
 ---
 
@@ -2653,7 +2659,13 @@ does).
   that stop returns, and one stopped while it waits returns only after it;
   connection
   reference counting; idle without cluster conf, and the same quiesced
-  refusal on an invalid one.
+  refusal on an invalid one; `TestEachCheckRoundCarriesItsOwnTraceId` —
+  two rounds on one `Check*` stream reach the agent under two different
+  trace ids, each with the worker's seed prefix, while the stream's
+  metadata keeps the first round's (RW10);
+  `TestEveryCheckStreamSendsTheRoundTraceId` — each of the four `Check*`
+  stream adapters (dn, cn, side, cntlr) puts the trace id its round hands
+  it into the request's `trace_id` (RW4 step 2, RW10).
 * **dnrole/cnrole/sprole** — golden requests from a fixture `SpState`
   (side/cntlr requests incl. migration src/dst confs, `id_to_slice` keys,
   standby list with a disabled cntlr); child diff on a changed endpoint;
@@ -3003,7 +3015,9 @@ Three artifacts under `integtest/`, next to the two agent suites:
 * `integtest/fakeagent/main.go` — the fake agents (§14.9): one binary,
   `dn`/`cn` subcommands, the generated `DiskNodeAgent` /
   `ControllerNodeAgent` servers with the real server interceptors, driven
-  by a behavior file. Imports `pb`, `common`.
+  by a behavior file. Imports `pb`, `common`, `agent` (`CheckRoundCtx`: a
+  `Check*` round runs under its request's `trace_id`, as in the real
+  agents, `dnagent.md` SH24).
 
 The script builds `bin/dnv-worker` (`make build`) and the two drivers into
 `integtest/bin/` (gitignored: `bin/`), downloads the pinned etcd release

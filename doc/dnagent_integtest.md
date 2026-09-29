@@ -365,7 +365,8 @@ Plaintext gRPC (`insecure.NewCredentials()`), **no server reflection exists**
 `-proto pb/schema.proto` plus bash-assembled JSON and base64 bitmaps).
 
 Global flags: `--addr <ip:29528>` (required), `--cluster`, `--dn`,
-`--trace-id <s>` (sent as gRPC metadata key `trace_id`; the script passes
+`--trace-id <s>` (sent as gRPC metadata key `trace_id`, and by `check-dn`
+and `check-side` as the request's `trace_id` too; the script passes
 `it-<case>-<step>` so records correlate across driver and both agent logs),
 `--timeout <sec>` (default 10). The script's `ctl` wrapper raises it to 60 s
 for `syncup-dn` and `syncup-side`: one converge pass runs dozens of OS

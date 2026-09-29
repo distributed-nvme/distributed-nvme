@@ -91,3 +91,16 @@ func Serve(
 	// theirs outlives the agent (§9.4).
 	return grpcServer.Serve(lis)
 }
+
+// CheckRoundCtx is the ctx one Check* round runs under (SH24): the stream's,
+// re-keyed to the trace id the round's request carries. The stream's own id is
+// the one its metadata brought at open (grpc.md T2) — on a worker's stream,
+// the id of the round that opened it — so without this every later round's
+// records would be filed under that first round. An empty id keeps the
+// stream's.
+func CheckRoundCtx(streamCtx context.Context, traceId string) context.Context {
+	if traceId == "" {
+		return streamCtx
+	}
+	return common.WithTraceId(streamCtx, traceId)
+}

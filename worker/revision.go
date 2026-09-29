@@ -50,9 +50,11 @@ type replyState struct {
 
 // checkStream is one object's Check* bidirectional stream (RW4,
 // architecture.md §9.7). recv blocks; the caller bounds it with the round
-// timer and closes the stream when the timer wins (RW4 step 4).
+// timer and closes the stream when the timer wins (RW4 step 4). send puts the
+// round's trace id into the request (RW10): the stream's metadata carries
+// only the id of the round that opened it.
 type checkStream interface {
-	send(revision uint64, showInfo bool) error
+	send(traceId string, revision uint64, showInfo bool) error
 	recv() (*replyState, error)
 	closeSend() error
 }
@@ -340,8 +342,11 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 			return
 		}
 	}
-	// Step 2.
-	if err := w.stream.stream.send(w.desired.revision, false); err != nil {
+	// Step 2, under this round's trace id (RW10).
+	traceId, _ := common.TraceIdFromCtx(ctx)
+	if err := w.stream.stream.send(
+		traceId, w.desired.revision, false,
+	); err != nil {
 		slog.InfoContext(ctx, "check stream send failed",
 			append(w.idAttrs(), slog.String("error", err.Error()))...,
 		)
