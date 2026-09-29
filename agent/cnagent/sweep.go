@@ -690,7 +690,6 @@ func (s *CnAgentServer) removeExportVerified(
 func (s *CnAgentServer) runChain(
 	ctx context.Context,
 	st *cntlrState,
-	plan *cntlrPlan,
 	chain *cnChain,
 	actual *cnActual,
 	wanted *cnWanted,
@@ -865,16 +864,14 @@ func (s *CnAgentServer) runChain(
 				s.reportDms(res, chain.grpDms)
 			},
 		},
-		{ // L10 — legs: the probers, then the connections, then the wrappers.
+		{ // L10 — legs: the connections, then the wrappers.
 			run: func() bool {
 				left := false
-				// A prober wedged on a pathless leg holds an open fd on the
-				// wrapper, so it has to go before the removal; the disconnect
-				// set going below is what releases one stuck in D state
-				// (CN11).
-				if st != nil && plan != nil {
-					s.stopLegProbers(st, wantedProbers(plan))
-				}
+				// Their probers are cancelled already — by the converge's
+				// trim before its sweep (convergeCntlr), or at node level by
+				// the drop step (CN7) — but one wedged on a pathless leg
+				// still holds an open fd on the wrapper; the disconnect set
+				// going below is what releases one stuck in D state (CN11).
 				for _, nqn := range chain.legNqns {
 					if !s.disconnectVerified(ctx, nqn) {
 						res.Add(agent.LeftoverKindNvme, nqn)
@@ -1429,7 +1426,7 @@ func (s *CnAgentServer) sweepCntlr(
 	}
 	if remove {
 		s.cntlrPreSteps(ctx, plan, actual, wanted)
-		s.runChain(ctx, st, plan, chain, actual, wanted, res)
+		s.runChain(ctx, st, chain, actual, wanted, res)
 	} else {
 		s.reportChain(chain, res)
 	}
@@ -1784,7 +1781,7 @@ func (s *CnAgentServer) sweepCn(
 			s.reportChain(chain, res)
 			continue
 		}
-		s.runChain(ctx, nil, nil, chain, actual, newCnWanted(), res)
+		s.runChain(ctx, nil, chain, actual, newCnWanted(), res)
 	}
 
 	// Cross-sp items, each its own one-layer chain: they have no stack of

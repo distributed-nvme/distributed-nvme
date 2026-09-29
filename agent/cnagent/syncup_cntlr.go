@@ -135,6 +135,17 @@ func (s *CnAgentServer) convergeCntlr(
 	// entrance — the RPC, the startup reconcile, a background retry attempt
 	// — gets its own and no pass can spend another's.
 	budget := s.newPassBudget()
+	// CN11: the probers are this process's goroutines, not objects of the
+	// node, so the sweep does not own them. Every converge trims them,
+	// before its sweep, to the legs its plan still probes: the trim decides
+	// from the plan alone and removes nothing from the node, so a sweep
+	// that an unanswered listing stops, or whose descent stops above L10,
+	// is no reason for it to wait. Inside L10 it did wait on every layer
+	// above, and a demoted primary's probers went on probing through the
+	// standby's legs, and a departed leg's through its wrapper, until some
+	// later pass got that far. Coming first, it also comes before L10's
+	// disconnect, which is what releases a prober wedged on a pathless leg.
+	s.stopLegProbers(st, wantedProbers(plan))
 	sweep := s.sweepCntlr(ctx, st, plan, true)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every

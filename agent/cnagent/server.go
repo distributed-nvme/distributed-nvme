@@ -118,7 +118,8 @@ type cntlrState struct {
 	reqFromRpc bool
 
 	// probers are the CN11 leg health probers, keyed by leg_id. They hold no
-	// lock and are cancelled at teardown.
+	// lock; every converge cancels those its plan no longer probes
+	// (convergeCntlr), and the cntlr's drop cancels the rest (CN7).
 	probers map[uint64]*legProber
 
 	// retrying/cancel drive the CN10/CN18 background connect retry.

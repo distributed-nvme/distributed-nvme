@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -719,6 +720,182 @@ func TestProbersStopOnDemotion(t *testing.T) {
 	}
 	if len(st.probers) != 2 {
 		t.Fatalf("re-promotion left %d probers", len(st.probers))
+	}
+}
+
+// TestProbersTrimmedWhenTheDescentStops pins CN11's trim on a converge whose
+// sweep never reaches L10: one whose descent stops at an array that would not
+// stop (L9), and one whose sweep an unanswered listing stopped before any
+// layer ran. The trim decides from the plan alone and removes nothing from
+// the node, so neither is a reason to skip it. Run inside L10, it left a
+// demoted primary's probers writing the health block through the standby's
+// legs, and a departed leg's prober writing through a wrapper the plan no
+// longer wants, until some later pass got that far (CN21).
+//
+// The count is the assertion: a prober the plan no longer probes is
+// cancelled exactly once in that pass, and a wanted one is never cancelled
+// at all. It is the same prober after the pass, so its leg does not start
+// over at "health probe pending" (CN28) on every converge. The one cancel
+// comes before the sweep's first command, which keeps it ahead of L10's
+// disconnect wherever a pass gets that far.
+func TestProbersTrimmedWhenTheDescentStops(t *testing.T) {
+	// NO_THINPOOL for the leg that leaves: a serving pool's concat may never
+	// shrink (CN13), so below NO_THINPOOL it keeps mapping the departed
+	// group's array, whose `mdadm --stop` is then refused as held. The
+	// descent would stop at L9 with nothing killed, and the array-stop kill
+	// would not be what stopped it.
+	noPool := pb.SpLevel_SP_LEVEL_NO_THINPOOL
+	shapes := []struct {
+		name     string
+		from, to reqOpts
+		// grown: the build carries a second data group, whose one leg the
+		// pass drops.
+		grown   bool
+		kept    []uint64 // legs whose probers the pass leaves running
+		trimmed []uint64 // legs whose probers the pass cancels
+	}{
+		{"demotion",
+			reqOpts{revision: 2, primary: true, raid1: true},
+			reqOpts{revision: 3, primary: false, raid1: true},
+			false, nil, []uint64{testMetaLeg, testDataLeg}},
+		{"no-side",
+			reqOpts{revision: 2, primary: true, raid1: true},
+			reqOpts{revision: 3, primary: true, raid1: true,
+				level: pb.SpLevel_SP_LEVEL_NO_SIDE},
+			false, nil, []uint64{testMetaLeg, testDataLeg}},
+		{"leg leaves",
+			reqOpts{revision: 2, primary: true, raid1: true, level: noPool},
+			reqOpts{revision: 3, primary: true, raid1: true, level: noPool},
+			true, []uint64{testMetaLeg, testDataLeg}, []uint64{testDataLeg2}},
+	}
+	// How the pass stops short of L10: every unwanted array's stop killed
+	// before it acted, so L9 leaves them and the descent ends there; or one
+	// of the four listings killed once, so no layer runs at all.
+	type stopKind struct {
+		name    string
+		arm     func(node *fakeNode)
+		details string // what the Leftover reply names
+	}
+	stops := []stopKind{{"array stop", func(node *fakeNode) {
+		node.killCmdNoEffectAlways["mdadm --stop"] = true
+	}, "md:"}}
+	for _, listing := range cnSweepListings {
+		kill := listing.kill
+		stops = append(stops, stopKind{listing.name, func(node *fakeNode) {
+			node.killCmd[kill] = true
+		}, "enumeration failed: " + listing.name})
+	}
+	for _, shape := range shapes {
+		for _, stop := range stops {
+			t.Run(shape.name+"/"+stop.name, func(t *testing.T) {
+				ctx := context.Background()
+				srv, node := newTestServer(t)
+				withClock(srv)
+				if _, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil {
+					t.Fatalf("SyncupCn: %v", err)
+				}
+				from := cntlrReq(shape.from)
+				if shape.grown {
+					grownDataGrp(from, true)
+				}
+				reply, err := srv.SyncupCntlr(ctx, from)
+				if err != nil || reply.GetAgentReply().GetCode() != 0 {
+					t.Fatalf("fixture: build: %v %v", err,
+						reply.GetAgentReply())
+				}
+
+				// Each prober's cancel counts its calls and notes how many
+				// node calls the pass had made by then, and each prober is
+				// kept, so a restart would show as a different one.
+				st := legState(t, srv)
+				probers := make(map[uint64]*legProber)
+				cancels := make(map[uint64]*atomic.Int32)
+				cancelAt := make(map[uint64]*atomic.Int32)
+				srv.mu.Lock()
+				for legId, prober := range st.probers {
+					n, at := &atomic.Int32{}, &atomic.Int32{}
+					cancel := prober.cancel
+					prober.cancel = func() {
+						n.Add(1)
+						at.Store(int32(len(node.Calls())))
+						cancel()
+					}
+					probers[legId] = prober
+					cancels[legId] = n
+					cancelAt[legId] = at
+				}
+				srv.mu.Unlock()
+				for _, legId := range append(append([]uint64{},
+					shape.kept...), shape.trimmed...) {
+					if probers[legId] == nil {
+						t.Fatalf("fixture: leg %#x has no prober", legId)
+					}
+				}
+				want := len(shape.kept) + len(shape.trimmed)
+				if len(probers) != want {
+					t.Fatalf("fixture: %d probers, want %d", len(probers), want)
+				}
+
+				node.Reset()
+				stop.arm(node)
+				reply, err = srv.SyncupCntlr(ctx, cntlrReq(shape.to))
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				// The pass did stop short of L10: its reply names why, and
+				// no leg lost its connection or its wrapper.
+				cnSweepAssertCode(t, reply.GetAgentReply(),
+					common.ReplyCodeLeftover, "the stopped pass")
+				cnSweepAssertDetails(t, reply.GetAgentReply(), stop.details,
+					"the stopped pass")
+				assertNoCall(t, node, "cmd nvme disconnect")
+				for legId := range probers {
+					assertNoCall(t, node,
+						"cmd dmsetup remove "+legName(srv, legId))
+				}
+
+				srv.mu.Lock()
+				after := make(map[uint64]*legProber, len(st.probers))
+				for legId, prober := range st.probers {
+					after[legId] = prober
+				}
+				srv.mu.Unlock()
+				// The trim comes before the sweep's first command, its
+				// `dmsetup ls`, and so before L10's disconnect wherever a
+				// pass gets that far.
+				sweepStart := node.indexOfCall("cmd dmsetup ls")
+				if sweepStart < 0 {
+					t.Fatalf("fixture: the pass ran no sweep")
+				}
+				for _, legId := range shape.trimmed {
+					if n := cancels[legId].Load(); n != 1 {
+						t.Errorf("leg %#x: its prober was cancelled %d times, "+
+							"want exactly 1", legId, n)
+					}
+					if at := int(cancelAt[legId].Load()); at > sweepStart {
+						t.Errorf("leg %#x: its prober was cancelled after "+
+							"call %d, the sweep began at call %d", legId, at,
+							sweepStart)
+					}
+					if after[legId] != nil {
+						t.Errorf("leg %#x: a prober is still registered", legId)
+					}
+				}
+				for _, legId := range shape.kept {
+					if n := cancels[legId].Load(); n != 0 {
+						t.Errorf("leg %#x: its wanted prober was cancelled %d "+
+							"times", legId, n)
+					}
+					if after[legId] != probers[legId] {
+						t.Errorf("leg %#x: its prober was replaced", legId)
+					}
+				}
+				if len(after) != len(shape.kept) {
+					t.Errorf("%d probers registered after the pass, want %d",
+						len(after), len(shape.kept))
+				}
+			})
+		}
 	}
 }
 

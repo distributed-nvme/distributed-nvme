@@ -1089,15 +1089,21 @@ CN11. **Leg health probes** (`healthcheck.go`; [D6], §3.6). Only the
       whose `side_list` holds two sides (a migration, CN10) is checked for
       liveness only: its ANA is wrong-by-design for the hydration and the
       phase is the DN's knowledge, not this CN's. Probers
-      start when the wrapper converges and are cancelled at teardown; a
+      start when the wrapper converges and are cancelled by the first
+      converge whose plan no longer probes their leg — every converge trims
+      them before its sweep, whether or not the sweep's descent reaches the
+      legs (CN21) — or when the cntlr is dropped (CN7); a
       goroutine wedged in D state on a pathless leg is released by the
       teardown's own disconnect (deleting the controller errors its queued
       IO) and is accepted as unreclaimable until then. Because that wedged
-      probe holds an **open fd on the leg wrapper**, the teardown order is
-      cancel the prober → **set the leg's disconnect going** → remove the
-      wrapper (CN21): a `dmsetup remove` fails EBUSY until the disconnect,
-      which runs off the pass (CN10), has errored the queued IO, so such a
-      wrapper normally goes on a later pass.
+      probe still holds an **open fd on the leg wrapper** after its cancel,
+      CN21's L10 order is **set the leg's disconnect going** → remove the
+      wrapper: a `dmsetup remove` fails EBUSY until the disconnect, which
+      runs off the pass (CN10), has errored the queued IO, so such a
+      wrapper normally goes on a later pass. The cancel itself comes before
+      L10: in the converge's trim ahead of its sweep, or, for a cntlr that
+      is forgotten, in the drop step that precedes the node-level sweep
+      (CN7, CN2).
       Cancellation is never a join — the direct read is uninterruptible,
       so waiting for it would hang shutdown forever (§2.2, `dnagent.md`
       SH27). A wedged prober costs nothing else: it holds no lock (CN1) and
@@ -2188,16 +2194,19 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       enumeration is the sharpest case: unanswered, it would leave L9 no
       array to stop and let L10 disconnect unwanted legs from under a live
       one. A cntlr-level converge whose sweep is stopped this way still
-      runs two things that read no snapshot. One is CN9's pre-step 1, the
+      runs three things that read no snapshot, besides CN19's two explicit
+      steps at `SP_LEVEL_DISABLE`. One is CN9's pre-step 1, the
       ANA move: it decides from the plan alone and removes nothing, and the build
       phase that follows parks whether or not the sweep ran — it reloads
       an ns-dev whose CN16 backing is the td's `CnErrorName` onto it, and
       CN17's converge demotes a transfer device this cntlr does not serve
       — so without the move a demoted or suspended namespace would be
       served from an error table while its path still reads `optimized`.
-      The other is the pair of local-state sweeps ("Not on the node"
+      The second is the pair of local-state sweeps ("Not on the node"
       below): they decide from the request alone, so an unanswered listing
-      is no reason for them to wait. The build phase of such a converge in
+      is no reason for them to wait. The third, ahead of the sweep, is the
+      trim of the CN11 probers (below), which decides from the plan alone
+      and removes nothing from the node. The build phase of such a converge in
       turn holds back the two things that are safe only after a step the
       stopped sweep skipped: while a dm-clone the plan does not want may
       still be live it puts no ns-dev onto a td's raid0 it is not on
@@ -2292,18 +2301,19 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       * **L9** — md arrays (`mdadm --stop` on the node **sysfs** named, CN12)
         and `CnGrpName` linears.
       * **L10** — legs, in the one order that is deliberately **not**
-        top-down: **cancel the probers, then set the legs' disconnects
-        going** (whole-NQN is fine here: every path of an unwanted leg is
-        going; off the pass, through the CN10 disconnect registry), **then
-        remove the leg wrappers** without waiting for them. A wedged prober
-        holds an open fd on the wrapper, so its removal fails EBUSY until the
-        disconnect has errored the queued IO and the prober's fd has closed
-        (§2.2, CN11); setting the disconnects going first only gives a quick
-        one the chance to release such a wrapper within the pass — otherwise
-        it goes on a later pass. A wrapper is removed even when its own
-        connection is still there: they are two different objects, and the
-        connection is a leftover of this pass that a later pass's probe
-        finds gone.
+        top-down: **set the legs' disconnects going** (whole-NQN is fine
+        here: every path of an unwanted leg is going; off the pass, through
+        the CN10 disconnect registry), **then remove the leg wrappers**
+        without waiting for them. Their probers are cancelled already, by
+        the converge's trim (below) or by CN7's drop step, but a wedged
+        prober still holds an open fd on the wrapper, so its removal fails
+        EBUSY until the disconnect has errored the queued IO and the
+        prober's fd has closed (§2.2, CN11); setting the disconnects going
+        first only gives a quick one the chance to release such a wrapper
+        within the pass — otherwise it goes on a later pass. A wrapper is
+        removed even when its own connection is still there: they are two
+        different objects, and the connection is a leftover of this pass
+        that a later pass's probe finds gone.
       No `delete` message is ever sent for a thin volume whose pool is itself
       going (CN14: this is deactivation, the metadata on the legs is the next
       CN's to find), and nothing in any layer runs `mdadm --detail` (CN12).
@@ -2364,7 +2374,16 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       The connect-retry registration and the leg probers are not swept —
       they are goroutines, not objects on the node. A cntlr that is dropped
       loses both in CN7's drop step; a cntlr at `SP_LEVEL_DISABLE` loses the
-      retry in CN19; L10 trims the probers to the legs the plan still wants.
+      retry in CN19; and every converge trims the probers to the legs the
+      plan still probes (CN11) before its sweep, whether or not the sweep's
+      chain runs or reaches L10: the trim decides from the plan alone and
+      removes nothing from the node. Left to L10, it would wait on every
+      layer above, and a descent stopped at an array that would not stop,
+      or a sweep stopped by an unanswered listing, would leave a demoted
+      primary's probers probing through the standby's legs, and a departed
+      leg's through its wrapper, until some pass got that far. Coming
+      before the sweep, it still precedes L10's disconnect, which is what
+      releases a prober wedged on a pathless leg.
 
 ### 4.8 `PushCloneBitmap`
 
@@ -3174,7 +3193,9 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     `TestUnansweredListingStillSweepsCloneChunks` — a standby drops a
     clone whose chunk was pushed: the chunk file is gone after that pass
     and the reply lists no applied chunks, and the next check round's
-    verdict is `OK`.
+    verdict is `OK`. The third thing CN21 says such a converge still does,
+    the CN11 prober trim, is pinned for the four listings as well, by test
+    15's `TestProbersTrimmedWhenTheDescentStops`.
     `TestUnansweredListingDoesNotParkAServingNamespace` — a namespace
     moves to a second td while its first leaves `td_list`: no reload onto
     the new td's dm-error, and exactly one reload, onto its raid0 — none
@@ -3351,6 +3372,17 @@ around it is the SH24-SH26 shape with nothing cn-specific in it.
     set going before the `dmsetup remove` of its wrapper and runs off the
     pass (test 13), so a wedged prober's wrapper normally goes on a later
     pass.
+    `TestProbersTrimmedWhenTheDescentStops`: a raid1 primary demoted to
+    standby, raised to `SP_LEVEL_NO_SIDE`, or at `SP_LEVEL_NO_THINPOOL`
+    losing a grown data group with its one leg, on a pass that stops short
+    of L10 — every unwanted array's `mdadm --stop` killed before it acted,
+    or one of the four listings killed once: the reply is a Leftover naming
+    the array or the enumeration, and no `nvme disconnect` and no
+    leg-wrapper `dmsetup remove` is issued, yet each prober of a leg the
+    plan no longer probes is cancelled exactly once in that pass, before
+    the sweep's first command (its `dmsetup ls`), and deregistered, while
+    each wanted one is never cancelled and is the same prober afterwards
+    (CN21).
 16. **cmd**: the `architecture.md` §13 example `dnv-agent cn …` invocation parses; `--disk`
     is rejected for `cn`; `--capacity` reaches `GetCnSize` verbatim; env
     `DNV_AGENT_CAPACITY` overrides the flag default (CM3).

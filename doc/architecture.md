@@ -2921,12 +2921,16 @@ cannot forget in that way: while the device is there, the next enumeration finds
   below it disconnects unwanted legs from under a live array. So on the cn, when
   any of its four listings did not answer, the sweep removes nothing from the node
   and reports what it found (`cnagent.md` CN21), and the recorded failure makes the
-  verdict non-OK, which is what re-drives it. Two things that need no listing
-  still run there: the move of every namespace the desired state wants
-  `inaccessible` into that ANA group, because the build phase that follows
-  reloads ns-devs onto the dm-error whether or not the sweep ran and a demoted or
-  suspended namespace must be `inaccessible` first; and the sweep of the cntlr's
-  local state, which is compared against the request rather than a listing. The
+  verdict non-OK, which is what re-drives it. A cntlr's own converge whose sweep
+  stopped this way still runs three things that need no listing, besides the two
+  explicit steps of `SP_LEVEL_DISABLE` (`cnagent.md` CN19): the move of every
+  namespace the desired state wants `inaccessible` into that ANA group, because the
+  build phase that follows reloads ns-devs onto the dm-error whether or not the sweep
+  ran and a demoted or suspended namespace must be `inaccessible` first; the sweep of
+  the cntlr's local state, which is compared against the request rather than a
+  listing; and, ahead of the sweep, the trim of the leg health probers of §3.6, which
+  only a primary runs, to the legs the desired state still probes. The probers are the
+  agent's own goroutines, not objects on the node (`cnagent.md` CN11, CN21). The
   build phase, for its part, holds back what is safe only after a step the stopped
   sweep skipped: it puts no ns-dev onto a raid0 that a dm-clone the desired state
   no longer wants may still be hydrating into, and it leaves a namespace that has
