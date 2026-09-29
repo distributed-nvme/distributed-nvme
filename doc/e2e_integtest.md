@@ -169,7 +169,7 @@ than copied (§3, rule E2E12).
 |---|---|---|
 | `SLICE_CNT_DEFAULT` | 32 | `common.MaxSliceCntPerSp` |
 | `EXTENT_SIZE` | 67108864 | `common.MinDnExtSize`; sent once, as `cluster create --extent-size` |
-| `STRIPE_SIZE` | 1048576 | a suite choice, bounded above by `validateCloneGeometry`'s `256 × 4 KiB` ceiling on `src_stripe_size` — not by the sp's own 64 MiB limit |
+| `STRIPE_SIZE` | 1048576 | a suite choice, at the ceiling: `common.MaxDmRaid0StripeSize`, the sp's own `stripe_size` limit, which is also `validateCloneGeometry`'s `256 × 4 KiB` ceiling on `src_stripe_size` |
 | `INIT_EXT_CNT` | 1 | extents per data group; also fixes AR6's grow size |
 | `CNTLR_CNT` | 2 | one primary and one standby, on two distinct CN VMs; the remaining `--cn` guests carry no cntlr, which is where AR7's replacement lands |
 | `SLOTS` | `0,1` | the cntlid slot list §4.3 step 3 grows to `0,1,2` |

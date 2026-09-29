@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -47,10 +48,13 @@ const (
 
 // spPreReadCluster is the plain pre-read §5.8 allows for the work that cannot
 // wait for the transaction: a candidate scan needs the cluster_id, the extent
-// size and the batch sizes, and an STM cannot range at all. The in-STM
-// resolveCluster stays authoritative — everything read here is re-derived and
-// re-checked inside the transaction — so this read can only ever be an
-// optimization, never a decision.
+// size and the batch sizes, and an STM cannot range at all. Where a
+// transaction follows, its resolveCluster stays authoritative — everything
+// read here is re-derived and re-checked inside it — so nothing read here is
+// trusted for a write. The only verdicts reached on this read are refusals:
+// NOT_FOUND for a missing cluster and, in CreateStoragePool, the stored-conf
+// gate and the merged geometry, judged here so that they come before the
+// scans and judged again in its transaction.
 func spPreReadCluster(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -189,6 +193,20 @@ func mergeRedundConf(
 	return proto.Clone(clusterConf).(*pb.RedundConf)
 }
 
+// validateMergedBdevConf judges §7's geometry rules on the bdev_conf a
+// CreateStoragePool would store: the request merged over the cluster's conf
+// and resolved. The request itself was judged only between the members it
+// states; a member it omits is inherited, and whether that one meets the rest
+// shows only here. The refusal says so, because the value it names may be one
+// the request never sent.
+func validateMergedBdevConf(bdev *pb.BdevConf) error {
+	if err := validateBdevConf(bdev); err != nil {
+		return errInvalid("bdev_conf merged over the cluster's: %s",
+			status.Convert(err).Message())
+	}
+	return nil
+}
+
 // growSliceCnBudget is §8.5's CN half of RESOURCE_EXHAUSTED: a grow every
 // cntlr of the SP will stack needs extCnt free extents on every one of their
 // CNs (§6.5). It reads the cntlrs and their CnConfs at one store revision, so
@@ -277,10 +295,15 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 //
 // The scans need the extent size, the batch sizes and the leg count, all of
 // which live in ClusterConf, so each iteration starts with one plain pre-read
-// of it (§5.8). That read decides nothing: the in-STM read is authoritative,
-// and when it yields a different cluster_id — the cluster was deleted and
-// re-created under the scan — or a different leg count, every pick was drawn
-// for a different SP shape and the unit re-plans.
+// of it (§5.8). That read decides nothing but three refusals: NOT_FOUND for a
+// cluster that is not there, ABORTED for a stored conf that fails §7 (the
+// allocator's gate, run before anything is computed from it), and the §7
+// geometry of the request merged over it, judged before the scans so that a
+// request whose merge breaks a rule is INVALID_ARGUMENT even on a cluster too
+// short of nodes for them. The in-STM read is authoritative and judges all
+// three again; when it yields a different cluster_id — the cluster was
+// deleted and re-created under the scan — or a different leg count, every
+// pick was drawn for a different SP shape and the unit re-plans.
 //
 // Nothing is bumped here. SpRev is CREATED at revision 1, and the DN/CN
 // revisions are bumped once per node by the two ledgers' flush (§5.5), however
@@ -380,8 +403,24 @@ func (s *Server) CreateStoragePool(
 		if err != nil {
 			return err
 		}
-		legs := legCntOf(mergeSpBdevConf(
+		// The allocator's conf gate, run before anything is computed from the
+		// stored conf: the merge below would resolve a zero read back out of
+		// the store into a constant and judge the request against that, where
+		// §5.9 makes a stored conf that fails §7 ABORTED, never
+		// INVALID_ARGUMENT.
+		if err := model.ValidateClusterConf(scanCc); err != nil {
+			return errAborted("%v", err)
+		}
+		scanBdev := model.ResolveBdevConf(mergeSpBdevConf(
 			req.GetBdevConf(), scanCc.GetBdevConf()))
+		// §7's geometry rules on the conf this SP would store, judged BEFORE
+		// the scans: a scan run first would answer a request whose merge
+		// breaks one RESOURCE_EXHAUSTED on a cluster short of nodes, sending
+		// the operator to add capacity for a pool that is refused anyway.
+		if err := validateMergedBdevConf(scanBdev); err != nil {
+			return err
+		}
+		legs := legCntOf(scanBdev)
 		// §6.5 DN scan, in decision D-D's group order. The black list starts
 		// as the request's own (pickDns folds dn_selector.black_list in) and
 		// grows with every pick, so every leg of the WHOLE SP lands on a
@@ -437,6 +476,15 @@ func (s *Server) CreateStoragePool(
 				// The scan planned for another cluster or another leg count;
 				// its picks describe an SP this transaction is not building.
 				return errCandidateChanged
+			}
+			// §7's geometry rules once more, on the conf this SP will STORE
+			// and before any id is minted. The ClusterConf of an unchanged
+			// cluster_id is the one the pre-read returned (it is write-once),
+			// so this verdict is the one reached before the scans; it is
+			// judged here too because this read, not that one, is
+			// authoritative.
+			if err := validateMergedBdevConf(bdev); err != nil {
+				return err
 			}
 			confKey := model.SpConfKey(cid, req.GetSpName())
 			if stm.Get(confKey, &pb.SpConf{}) {

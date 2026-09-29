@@ -1228,9 +1228,9 @@ capacity keys maintained per §5.6; reverse on delete.
 |---|---|---|---|
 | `dn_bin_conf.extent_size` | 64 MiB | 1 TiB | 1 GiB |
 | `alloc_conf.dn_batch_size` / `cn_batch_size` | 1 | 1024 | 16 |
-| `dm_pool_conf.data_block_size` | 64 KiB | 1 GiB | 1 MiB |
+| `dm_pool_conf.data_block_size` (a power of two) | 64 KiB | 1 GiB | 1 MiB |
 | `dm_pool_conf.low_water_mark_pct` | — | — | 50 (`DefaultPoolLowWatermarkPct`; `0` selects it). Never rejected: values > 100 are accepted and switch the §10.4 auto-grow **off** (`schema.proto`); the agent then passes `low_water_mark = 0` to the thin-pool table — no dm events |
-| `dm_raid0_conf.stripe_size` | 4 KiB | 64 MiB | 64 KiB |
+| `dm_raid0_conf.stripe_size` (a multiple of 4 KiB) | 4 KiB | 1 MiB | 64 KiB |
 | `redund_md_raid1.bitmap_chunk_block_cnt` | 1 | 1024 | 128 |
 | (dm region block cnt, same meaning) | 1 | 1024 | 128 |
 | `DmCloneConf.hydration_threshold` (clone) | 1 | 8 | 1 |
@@ -1244,6 +1244,35 @@ capacity keys maintained per §5.6; reverse on delete.
 | `health_check_conf.dn_interval` / `cn_interval` / `side_interval` / `cntlr_interval` (s) | 1 | 3600 | 5 (`{Min,Max,Default}HealthCheckInterval`) |
 | list `count` | 1 | 1024 | 64 |
 
+* **Geometry rules.** Beyond the bounds above, `CreateCluster` and `CreateStoragePool`
+  hold the geometry of the `bdev_conf` they store to four rules (`INVALID_ARGUMENT`
+  otherwise), each refusing up front what dm-thin, dm-clone, mdadm or `CreateClone` would
+  otherwise refuse, or mdadm mishandle, only once an SP with that geometry exists, and
+  then for ever, because an SP's stored geometry never changes (§8.4). `data_block_size`
+  is a power of two: with its 64 KiB minimum that makes it a multiple of 64 KiB, the unit
+  dm-thin demands of its block, and it is the dm-clone region of every clone into the SP
+  and of every migration of one of its sides (§8.9, §11.2), which dm-clone refuses unless
+  it is a power of two. `stripe_size` is a multiple of 4 KiB and at most 1 MiB, and
+  `data_block_size` is a multiple of `stripe_size` — the §11.4 source rules `CreateClone`
+  enforces (§8.9); under a power-of-two block that makes the stripe a power of two too.
+  Under `redund_md_raid1` the md bitmap chunk, `bitmap_chunk_block_cnt × data_block_size`
+  bytes (§3.6), is a power of two, which mdadm demands of `--bitmap-chunk` (it refuses
+  1000K), and at most 1 GiB, the largest chunk mdadm turns into bytes without overflowing
+  the signed int it keeps the chunk in. That ceiling is read from mdadm's source, not
+  tried in the lab: a 2 GiB chunk overflows that int, a 4 GiB one wraps it to zero, which
+  mdadm then refuses, and md stores the chunk as a 32-bit byte count. So every SP created
+  under these rules is a legal clone source, and its block is a region dm-clone takes
+  wherever the SP is the destination of a clone or a migration. A zero member is unset
+  here as well, so a request is judged by a rule between two members only when it sets
+  both; every rule is then judged again on the `bdev_conf` the create RPC stores —
+  `CreateCluster`'s resolved against the constants, `CreateStoragePool`'s merged over
+  `ClusterConf.bdev_conf` and resolved (§8.4) — because only that message shows what an
+  omitted member becomes. An SP therefore cannot inherit a member these rules refuse,
+  even from a cluster created before them. An SP stored before them keeps its geometry,
+  and no RPC judges a stored SP's `bdev_conf` against them: `CreateClone` still refuses
+  one whose stripe or block breaks the §11.4 source rules as a source, and one whose
+  `data_block_size` is not a power of two still fails, at its dm-clone, every clone into
+  it and every migration of one of its sides.
 * `EventThreshold.leg_unhealthy` MUST be greater than
   `EventThreshold.side_unhealthy` after the defaults above are resolved
   (`INVALID_ARGUMENT` otherwise): the §10.4 leg repair fires on the side
@@ -1321,7 +1350,9 @@ component.
 Errors: `ALREADY_EXISTS` if `{p} cluster_conf {cluster_name}` exists or any of
 `{p} dn_global|cn_global|sp_global {cluster_id}` exists (hash-collision guard); checks
 inside the STM; `INVALID_ARGUMENT` when `dn_bin_conf`'s shifts are set to anything that
-is not a ladder (§6.2 — all four zero asks for the default and is accepted).
+is not a ladder (§6.2 — all four zero asks for the default and is accepted), or when the
+resolved `bdev_conf` breaks a §7 geometry rule (a member the request omitted is judged as
+its constant, and the message says the defaults were filled in).
 Defaults: §7 tables for every `ClusterConf` member, applied **here** and stored
 concrete — `ClusterConf` is write-once, so this is the only chance its members ever get
 to be resolved (§7). `creation_epoch` is **not** a request field: the gateway
@@ -1332,7 +1363,9 @@ failed `CreateCluster` stamps a new epoch and thus targets a different `cluster_
 which is why the collision guard is re-evaluated inside every attempt's STM.
 Action: bound-check the raw request (§7), then resolve it — in that order, or the bounds
 check nothing — and build the message to store once, outside the STM, like the epoch
-above. One STM creates `ClusterConf` (the **resolved** members plus the stamped
+above. The resolved `bdev_conf` is judged by §7's geometry rules once more before it is
+stored, since a member the request omitted meets them only as its constant. One STM
+creates `ClusterConf` (the **resolved** members plus the stamped
 `creation_epoch`), and `DnGlobal`, `CnGlobal`, `SpGlobal` each with `next_id = 1` and
 `shard_bucket` = 256 zeros. Reply `cluster_id`. Nothing downstream resolves again: a
 zero read back out of this key is corruption and is refused, not substituted (§7).
@@ -1443,7 +1476,8 @@ when DN allocation fails (§6.5); `INVALID_ARGUMENT` when: `cntlr_cnt` outside
 `init_ext_cnt × extent_size`, or the fixed one-extent meta group when
 `extent_size / data_block_size` is that small — or `init_ext_cnt × extent_size`
 overflowing `uint64`; `cntlid_slot_list` has duplicates, values ≥ `CnCntlidSlotCnt`(8) or fewer
-entries than `cntlr_cnt`; any §7 violation in `bdev_conf` / `event_threshold`.
+entries than `cntlr_cnt`; any §7 violation in `bdev_conf` / `event_threshold`, the
+`bdev_conf` geometry rules judged on the merged conf the SP stores as well (step 2).
 Defaults: `cntlr_cnt = DefaultCntlrCntPerSp`(2); `slice_cnt = DefaultSliceCntPerSp`(2);
 `cntlid_slot_list = [0..7]`;
 `bdev_conf` member-wise from `ClusterConf.bdev_conf` then constants (`redund_conf`
@@ -1465,11 +1499,21 @@ Action:
    counts only**. The groups' `meta_blocks`/`data_blocks` are not computable yet: §3.6
    needs the resolved `bdev_conf` and the cluster's stored `extent_size`, which step 2 is
    the first to hold (§7).
-2. Pre-STM candidate scan + STM commit may be retried as a unit on STM conflict. In the
-   STM, in this order: merge and resolve `bdev_conf` against the `ClusterConf` this
-   transaction read, **before any id is minted** — the pre-STM scan merged only to learn
-   the leg count, and the picks are refused right here if that count or the `cluster_id`
-   moved; the `sp_conf` existence check; allocate `sp_id`/`shard_code` from `SpGlobal`;
+2. Pre-STM candidate scan + STM commit may be retried as a unit on STM conflict. Before
+   the scan, check a plain pre-read of `ClusterConf` against §7 as the scan does
+   (`ABORTED` otherwise, §5.9), then merge and resolve `bdev_conf` against it: the result
+   gives the scan its leg count, and the §7 geometry rules judge it right there
+   (`INVALID_ARGUMENT`, and the message says it concerns the merged conf: a member the
+   request omitted is inherited, and only the merge shows whether it meets the ones the
+   request set), so a request whose merge breaks a rule is `INVALID_ARGUMENT`, not
+   `RESOURCE_EXHAUSTED`, even while the cluster lacks the DNs or CNs the scan would
+   need. In the STM, in this order: merge and resolve `bdev_conf` against the
+   `ClusterConf` this transaction read, **before any id is minted**, and refuse the picks
+   right here if the leg count or the `cluster_id` moved since the scan; the §7 geometry
+   rules on that resolved `bdev_conf` once more (`ClusterConf` is write-once, so for an
+   unchanged `cluster_id` this repeats the pre-read's verdict, but this read is the
+   authoritative one); the `sp_conf` existence check; allocate `sp_id`/`shard_code` from
+   `SpGlobal`;
    validate that `ClusterConf` (§7) and compute every group's `meta_blocks`/`data_blocks`
    per §3.6 from the resolved `bdev_conf` and the cluster's stored `extent_size`; verify
    every §6.5 DN and CN pick against the capacity key the scan drew it from and charge
@@ -3534,7 +3578,9 @@ moving ss/ns from `sp1` to `sp2`:
 
 Definitions for one raid0 device: `slice_cnt` underlying devices, `stripe_size` chunk
 size, and per-underlying-device write bitmaps whose bit granularity is `block_size`.
-Constraints (validated in §8.9): `1 ≤ slice_cnt ≤ 32` (`MaxSliceCntPerSp`);
+Constraints (validated in §8.9; the geometry of every SP created under §7's geometry
+rules meets them too, §7 and §8.4, so any such SP can be a clone source):
+`1 ≤ slice_cnt ≤ 32` (`MaxSliceCntPerSp`);
 `stripe_size = i × 4 KiB, 1 ≤ i ≤ 256`; `block_size = j × 64 KiB, 1 ≤ j ≤ 16384`;
 `block_size = k × stripe_size, k ≥ 1`. Address mapping for logical byte offset `off`:
 chunk `c = off / stripe_size`, slice `= c mod slice_cnt`, slice-local offset

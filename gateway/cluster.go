@@ -39,8 +39,10 @@ import (
 // so this is the only chance its members ever get to be made concrete, and
 // both halves happen here in this order: validateClusterConfInput bounds the
 // RAW request — where a proto3 zero still means "give me the default" and a
-// non-zero value outside its range is refused — and model.ResolveClusterConf
-// then turns the accepted request into the concrete message that is stored.
+// non-zero value outside its range is refused, and then judges §7's geometry
+// rules once more on a resolved copy of its bdev_conf — and
+// model.ResolveClusterConf then turns the accepted request into the concrete
+// message that is stored.
 // The order is load-bearing: resolving first would replace every omitted
 // member with a constant and make the bound checks tautologies.
 //

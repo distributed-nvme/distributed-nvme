@@ -166,12 +166,14 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //     16 GiB cap and nothing else;
 //   - the five allocating RPCs — CreateStoragePool, GrowSlice, CreateCntlr,
 //     CreateSpareLeg and CreateMigration, i.e. every caller of pickDns or
-//     pickCn — reach the check through the §6.5 scan itself, which refuses
-//     rather than scan with a batch size of zero: a zero width finds no
-//     candidate and would report a cluster full of free extents as
-//     RESOURCE_EXHAUSTED. CreateCntlr, CreateSpareLeg and CreateMigration
-//     carry no conf gate of their own (nor does model.CreateSpareLeg), so
-//     those three are the cases that pin the allocator's;
+//     pickCn — reach the check through the §6.5 scan, which refuses rather
+//     than scan with a batch size of zero: a zero width finds no candidate
+//     and would report a cluster full of free extents as RESOURCE_EXHAUSTED.
+//     CreateStoragePool runs that gate itself as well, just before its scans
+//     and ahead of the merged geometry it judges there, so its refusal comes
+//     from that copy. CreateCntlr, CreateSpareLeg and CreateMigration carry
+//     no conf gate of their own (nor does model.CreateSpareLeg), so those
+//     three are the cases that pin the allocator's;
 //   - DeleteSpareLeg, FinishMigration and CancelMigration reach newDnLedger's
 //     gate: those three are every handler that RELEASES DN capacity through a
 //     ledger and has no conf gate of its own, and all three are driven here
@@ -198,11 +200,13 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
 // keeps failing as an assertion rather than a panic when a gate is removed.
 //
-// CreateStoragePool cannot distinguish its own in-STM gate from the
-// allocator's — the two run the same predicate over the same stored key and
-// pickDns runs first — so what that case pins is the RPC's refusal, not which
-// of its two gates produced it. CreateMigration is in the same position once
-// newDnLedger has a gate, and for the same reason: pickDns runs first.
+// CreateStoragePool cannot distinguish its three gates — the one ahead of its
+// scans, the allocator's and its in-STM one run the same predicate over the
+// same stored key, in that order — so what that case pins is the RPC's
+// refusal, not which gate produced it; that the first one runs before the
+// merged geometry is judged is TestCreateStoragePoolJudgesTheMergedGeometry's
+// to pin. CreateMigration is in the same position once newDnLedger has a
+// gate: pickDns runs before it.
 //
 // The five release cases come FIRST in the list, because scReplay runs the
 // cases in order against the repaired conf: an allocating case replayed
@@ -445,7 +449,7 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 //
 // One RPC is enough here: the sentence is the validator's, and every conf gate
 // in the gateway hands it on the same way, as `errAborted("%v", err)` — grep
-// Validate{Cluster,Bdev}Conf across the package and each of the eleven hits is
+// Validate{Cluster,Bdev}Conf across the package and each of the twelve hits is
 // followed by exactly that line. CreateStoragePool is the one chosen because
 // it reads the whole conf on its way through — the ladder and the batch sizes
 // in the allocator, the extent size in the STM for §3.6.

@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"math/bits"
 	"regexp"
 	"strings"
+
+	"google.golang.org/grpc/status"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -14,7 +17,11 @@ import (
 // malformed request is refused without touching the store. Validation that
 // depends on stored state — a cntlid slot already in use, an ns_idx already
 // taken, a size that must divide the SP's stripe — is not here; it happens
-// inside the RPC's STM.
+// inside the RPC's STM. CreateStoragePool also runs validateBdevConf on a conf
+// that depends on stored state, the bdev_conf it merges over the cluster's:
+// once over the conf its plain pre-read returned, before its scans, and once
+// more inside its STM. §7's geometry rules must hold for what the SP stores,
+// and only the merge shows what an omitted member becomes.
 //
 // The rule for bounded numerics is §7's: a proto3 zero means "unset" and asks
 // for the default, so zero is always accepted here and only a non-zero value
@@ -291,10 +298,36 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 		1, common.MaxCloneBatchSize)
 }
 
-// validateBdevConf checks the §7 bounds of a BdevConf plus the two structural
-// rules: bdev_feature_list MUST be empty in this version, and RedundConf
-// accepts only redund_none and redund_md_raid1 (the proto oneof has no third
-// case, so an unset oneof is the only other shape and means redund_none).
+// validateBdevConf checks the §7 bounds of a BdevConf, its four geometry
+// rules, and the two structural rules: bdev_feature_list MUST be empty in this
+// version, and RedundConf accepts only redund_none and redund_md_raid1 (the
+// proto oneof has no third case, so an unset oneof is the only other shape and
+// means redund_none).
+//
+// The geometry rules refuse here what would otherwise be refused only once the
+// pool exists — by dm-thin, dm-clone or mdadm as it is built, by CreateClone
+// as it is named a source — and then for ever, because a stored geometry never
+// changes (§8.4):
+//
+//   - data_block_size is a power of two. Its 64 KiB minimum then makes it a
+//     multiple of dm-thin's unit ("Invalid block size" otherwise), and it is
+//     the dm-clone region of every clone into the pool and of every migration
+//     of one of its sides, which dm-clone refuses unless it is a power of two
+//     ("Region size is not a power of 2").
+//   - stripe_size is a multiple of 4 KiB and at most 1 MiB by its bound, and
+//     data_block_size is a multiple of it: CreateClone's §11.4 source rules,
+//     which every pool created under them meets, so that any such pool can be
+//     a clone source.
+//   - Under md-raid1, the bitmap chunk of bitmap_chunk_block_cnt ×
+//     data_block_size bytes is a power of two (mdadm's "invalid bitmap
+//     chunksize") and at most maxMdBitmapChunk.
+//
+// A zero member is "unset" and takes part in no rule, so a rule between two
+// members is judged only when both are non-zero. The bdev_conf a create RPC
+// stores therefore comes through here a second time, resolved:
+// validateClusterConfInput resolves CreateCluster's against the constants, and
+// CreateStoragePool judges its merge over the cluster's conf, where an omitted
+// member takes its real value.
 func validateBdevConf(conf *pb.BdevConf) error {
 	if conf == nil {
 		return nil
@@ -302,12 +335,19 @@ func validateBdevConf(conf *pb.BdevConf) error {
 	if len(conf.GetBdevFeatureList()) != 0 {
 		return errInvalid("bdev_conf.bdev_feature_list must be empty")
 	}
+	blockSize := conf.GetDmPoolConf().GetDataBlockSize()
 	if err := validateBound(
-		"bdev_conf.dm_pool_conf.data_block_size",
-		conf.GetDmPoolConf().GetDataBlockSize(),
+		"bdev_conf.dm_pool_conf.data_block_size", blockSize,
 		common.MinDmPoolDataBlockSize, common.MaxDmPoolDataBlockSize,
 	); err != nil {
 		return err
+	}
+	// Above the minimum, a power of two is also a whole number of dm-thin's
+	// 64 KiB (128-sector) units.
+	if blockSize != 0 && bits.OnesCount64(blockSize) != 1 {
+		return errInvalid(
+			"bdev_conf.dm_pool_conf.data_block_size %d is not a power of two",
+			blockSize)
 	}
 	if lwm := conf.GetDmPoolConf().GetLowWaterMarkPct(); lwm != 0 && lwm < 1 {
 		// Unreachable for a uint32, kept as the explicit statement of the
@@ -316,27 +356,66 @@ func validateBdevConf(conf *pb.BdevConf) error {
 		return errInvalid(
 			"bdev_conf.dm_pool_conf.low_water_mark_pct %d is invalid", lwm)
 	}
+	stripeSize := conf.GetDmRaid0Conf().GetStripeSize()
 	if err := validateBound(
-		"bdev_conf.dm_raid0_conf.stripe_size",
-		conf.GetDmRaid0Conf().GetStripeSize(),
+		"bdev_conf.dm_raid0_conf.stripe_size", stripeSize,
 		common.MinDmRaid0StripeSize, common.MaxDmRaid0StripeSize,
 	); err != nil {
 		return err
 	}
+	// The minimum is also the stripe's unit: §11.4's i × 4 KiB.
+	if stripeSize%common.MinDmRaid0StripeSize != 0 {
+		return errInvalid(
+			"bdev_conf.dm_raid0_conf.stripe_size %d is not a multiple of %d",
+			stripeSize, common.MinDmRaid0StripeSize)
+	}
+	if blockSize != 0 && stripeSize != 0 && blockSize%stripeSize != 0 {
+		return errInvalid(
+			"bdev_conf.dm_pool_conf.data_block_size %d is not a multiple "+
+				"of bdev_conf.dm_raid0_conf.stripe_size %d",
+			blockSize, stripeSize)
+	}
 	if raid1 := conf.GetRedundConf().GetRedundMdRaid1(); raid1 != nil {
+		chunkBlockCnt := raid1.GetBitmapChunkBlockCnt()
 		if err := validateBound(
 			"bdev_conf.redund_conf.redund_md_raid1.bitmap_chunk_block_cnt",
-			raid1.GetBitmapChunkBlockCnt(),
+			chunkBlockCnt,
 			common.MinChunkBlockCnt, common.MaxChunkBlockCnt,
 		); err != nil {
 			return err
+		}
+		// Both factors are bounded by now, so the product is at most
+		// 1024 × 1 GiB and cannot overflow; it is zero while either is unset.
+		chunk := chunkBlockCnt * blockSize
+		if chunk != 0 && bits.OnesCount64(chunk) != 1 {
+			return errInvalid(
+				"bdev_conf.redund_conf.redund_md_raid1."+
+					"bitmap_chunk_block_cnt %d x "+
+					"bdev_conf.dm_pool_conf.data_block_size %d = %d bytes "+
+					"is not a power of two",
+				chunkBlockCnt, blockSize, chunk)
+		}
+		if chunk > maxMdBitmapChunk {
+			return errInvalid(
+				"bdev_conf.redund_conf.redund_md_raid1."+
+					"bitmap_chunk_block_cnt %d x "+
+					"bdev_conf.dm_pool_conf.data_block_size %d = %d bytes "+
+					"is above %d, the largest md bitmap chunk",
+				chunkBlockCnt, blockSize, chunk, maxMdBitmapChunk)
 		}
 	}
 	return nil
 }
 
-// validateEventThreshold checks the four thresholds and the one cross-field
-// rule of §7: leg_unhealthy MUST exceed side_unhealthy AFTER the defaults are
+// maxMdBitmapChunk is the largest md bitmap chunk, in bytes, a pool may ask
+// mdadm for (§7). mdadm keeps --bitmap-chunk in a signed int and turns it into
+// bytes in that int, so 1 GiB is the largest chunk it computes without
+// overflowing: a 4 GiB one wraps to zero and is refused, and md stores the
+// chunk as a 32-bit byte count anyway.
+const maxMdBitmapChunk = uint64(1) << 30
+
+// validateEventThreshold checks the four thresholds and their one cross-field
+// rule (§7): leg_unhealthy MUST exceed side_unhealthy AFTER the defaults are
 // resolved, because the §10.4 leg repair fires on the side threshold when the
 // DN looks dead and on the leg threshold when only the cntlr's path is bad.
 func validateEventThreshold(threshold *pb.EventThreshold) error {
@@ -360,6 +439,18 @@ func validateClusterConfInput(req *pb.CreateClusterRequest) error {
 	}
 	if err := validateBdevConf(req.GetBdevConf()); err != nil {
 		return err
+	}
+	// Once more on the bdev_conf CreateCluster STORES: a member the request
+	// left unset becomes its constant, and only the resolved message shows
+	// whether that constant meets the members the request did set — 1000
+	// chunk blocks of the default 1 MiB block is a bitmap chunk mdadm
+	// refuses, and a 192 KiB stripe does not divide that block. The message
+	// says so, because the value it names may be one this request never sent.
+	if err := validateBdevConf(
+		model.ResolveBdevConf(req.GetBdevConf()),
+	); err != nil {
+		return errInvalid("bdev_conf with its defaults filled in: %s",
+			status.Convert(err).Message())
 	}
 	if err := validateDnBinConf(req.GetDnBinConf()); err != nil {
 		return err

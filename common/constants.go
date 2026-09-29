@@ -36,10 +36,12 @@ const (
 	MaxAllocCnBatchSize     = 1024
 	DefaultAllocCnBatchSize = 16
 
+	// MaxDmRaid0StripeSize equals CreateClone's src_stripe_size cap, 256 x 4 KiB
+	// (architecture.md §11.4), so that every legal pool is a legal clone source.
 	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
 	MinDmPoolDataBlockSize     = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
-	MaxDmRaid0StripeSize       = 64 * 1024 * 1024
+	MaxDmRaid0StripeSize       = 1 * 1024 * 1024
 	MinDmRaid0StripeSize       = 4 * 1024
 	DefaultDmRaid0StripeSize   = 64 * 1024
 

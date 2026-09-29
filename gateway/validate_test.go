@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"math/bits"
 	"strings"
 	"testing"
 
@@ -781,7 +782,7 @@ func TestValidateTrConfList(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BdevConf: bounds plus the two structural rules
+// BdevConf: bounds, the four geometry rules and the two structural rules
 // ---------------------------------------------------------------------------
 
 // TestValidateBdevConf pins every bounded member of a BdevConf and the §7
@@ -935,8 +936,279 @@ func TestValidateBdevConf(t *testing.T) {
 	}
 }
 
+// TestBdevConfGeometryRules pins the four §7 geometry rules a BdevConf obeys
+// beyond its bounds. Each is a refusal dm-thin, dm-clone, mdadm or CreateClone
+// would otherwise deliver only once the pool exists, and then for ever,
+// because a stored geometry never changes (§8.4):
+//
+//   - data_block_size is a power of two. Its 64 KiB minimum then makes it a
+//     whole number of dm-thin's units, which dm-thin demands ("Invalid block
+//     size"; lab, kernel 7.0: 192 sectors refused, 128 accepted), and it is
+//     the dm-clone region of every clone into the pool and of every migration
+//     of one of its sides, which dm-clone's parse_region_size refuses unless
+//     it is a power of two ("Region size is not a power of 2");
+//   - stripe_size is a multiple of 4 KiB and at most 1 MiB, and
+//     data_block_size a multiple of stripe_size: CreateClone's §11.4 source
+//     rules, so that every legal pool is a legal clone source;
+//   - under md-raid1, the bitmap chunk of bitmap_chunk_block_cnt x
+//     data_block_size bytes is a power of two, which mdadm demands of any
+//     --bitmap-chunk ("invalid bitmap chunksize"; lab, mdadm 4.5: 1000K
+//     refused, 1024K accepted), and at most 1 GiB, the largest chunk mdadm
+//     computes without overflowing the signed int it keeps the chunk in.
+//
+// A zero member is the proto3 "unset", so validateBdevConf judges a rule
+// between two members only when the request states both. What an unset
+// member turns into is judged where the stored conf is built: CreateCluster
+// resolves it against the constants (the "as stored" rows below), and
+// CreateStoragePool judges its merge of the request over the cluster's conf
+// (TestCreateStoragePoolJudgesTheMergedGeometry).
+func TestBdevConfGeometryRules(t *testing.T) {
+	const kib = uint64(1024)
+	const mib = 1024 * kib
+	const gib = 1024 * mib
+	raid1 := func(cnt uint64) *pb.RedundConf {
+		return &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: cnt},
+			},
+		}
+	}
+	none := &pb.RedundConf{
+		RedunKind: &pb.RedundConf_RedundNone{RedundNone: &pb.RedundNone{}},
+	}
+	// bdev builds a request that states only the sizes it is given non-zero.
+	bdev := func(block, stripe uint64, redund *pb.RedundConf) *pb.BdevConf {
+		conf := &pb.BdevConf{RedundConf: redund}
+		if block != 0 {
+			conf.DmPoolConf = &pb.DmPoolConf{DataBlockSize: block}
+		}
+		if stripe != 0 {
+			conf.DmRaid0Conf = &pb.DmRaid0Conf{StripeSize: stripe}
+		}
+		return conf
+	}
+	cases := []struct {
+		name string
+		conf *pb.BdevConf
+		want codes.Code
+	}{
+		// The block is a power of two: a whole number of dm-thin's 64 KiB
+		// units, and a region dm-clone takes.
+		{
+			"data_block_size 96 KiB, the 192 sectors dm-thin refused",
+			bdev(96*kib, 0, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 1 MiB + 4 KiB",
+			bdev(mib+4*kib, 0, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 192 KiB: three dm-thin units, no dm-clone region",
+			bdev(192*kib, 0, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 128 KiB, a power of two",
+			bdev(128*kib, 0, nil), codes.OK,
+		},
+		// The raid0 stripe is a whole number of 4 KiB units, at most 256.
+		{"stripe_size 6 KiB", bdev(0, 6*kib, nil), codes.InvalidArgument},
+		{
+			"stripe_size 2 MiB, above the clone-source ceiling",
+			bdev(0, 2*mib, nil), codes.InvalidArgument,
+		},
+		{"stripe_size 1 MiB, 256 x 4 KiB", bdev(0, mib, nil), codes.OK},
+		{
+			"stripe_size 12 KiB, three 4 KiB units",
+			bdev(0, 12*kib, nil), codes.OK,
+		},
+		// The block is a whole number of stripes.
+		{
+			"data_block_size 1 MiB over a 192 KiB stripe",
+			bdev(mib, 192*kib, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 64 KiB under a 128 KiB stripe",
+			bdev(64*kib, 128*kib, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 256 KiB over a 12 KiB stripe, which divides " +
+				"no power of two",
+			bdev(256*kib, 12*kib, nil), codes.InvalidArgument,
+		},
+		{
+			"data_block_size 512 KiB over a 128 KiB stripe",
+			bdev(512*kib, 128*kib, nil), codes.OK,
+		},
+		{
+			"data_block_size equal to stripe_size",
+			bdev(mib, mib, nil), codes.OK,
+		},
+		// The md-raid1 bitmap chunk is a power of two in bytes, at most 1 GiB.
+		{
+			"bitmap chunk 1000 x 1 MiB",
+			bdev(mib, 0, raid1(1000)), codes.InvalidArgument,
+		},
+		{
+			"bitmap chunk 3 x 64 KiB",
+			bdev(64*kib, 0, raid1(3)), codes.InvalidArgument,
+		},
+		{
+			"bitmap chunk 1 x 64 KiB, the smallest",
+			bdev(64*kib, 0, raid1(1)), codes.OK,
+		},
+		{
+			"bitmap chunk 1024 x 1 MiB = 1 GiB, the ceiling",
+			bdev(mib, 0, raid1(1024)), codes.OK,
+		},
+		{
+			"bitmap chunk 1 x 1 GiB = 1 GiB, the ceiling",
+			bdev(gib, 0, raid1(1)), codes.OK,
+		},
+		{
+			"bitmap chunk 2 x 1 GiB = 2 GiB, above the ceiling",
+			bdev(gib, 0, raid1(2)), codes.InvalidArgument,
+		},
+		{
+			"bitmap chunk 1024 x 4 MiB = 4 GiB, which mdadm wraps to zero",
+			bdev(4*mib, 0, raid1(1024)), codes.InvalidArgument,
+		},
+		{
+			"bitmap chunk 4 x 1 GiB = 4 GiB",
+			bdev(gib, 0, raid1(4)), codes.InvalidArgument,
+		},
+		{
+			"a 1 GiB block under redund_none has no bitmap chunk",
+			bdev(gib, 64*kib, none), codes.OK,
+		},
+		// A rule between two members waits for the request to state both.
+		{
+			"a 192 KiB stripe with data_block_size unset",
+			bdev(0, 192*kib, nil), codes.OK,
+		},
+		{
+			"a 16 MiB block under md-raid1 with the chunk count unset",
+			bdev(16*mib, 0, raid1(0)), codes.OK,
+		},
+		{
+			"1000 chunk blocks with data_block_size unset",
+			bdev(0, 0, raid1(1000)), codes.OK,
+		},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			validateWantCode(t, "validateBdevConf",
+				validateBdevConf(item.conf), item.want)
+		})
+	}
+	// CreateCluster stores its request resolved against the constants, so it
+	// judges the rules on that message as well: each request below is legal
+	// as sent and illegal as stored, and the refusal says it concerns the
+	// defaults, because the value it names is one the request never sent.
+	const resolvedPrefix = "bdev_conf with its defaults filled in: "
+	for _, item := range []struct {
+		name  string
+		conf  *pb.BdevConf
+		field string
+	}{
+		{
+			"a 192 KiB stripe over the 1 MiB default block",
+			bdev(0, 192*kib, nil), "stripe_size",
+		},
+		{
+			"a 16 MiB block under md-raid1 with the default 128-block chunk",
+			bdev(16*mib, 0, raid1(0)), "bitmap_chunk_block_cnt",
+		},
+		{
+			"1000 chunk blocks of the 1 MiB default block",
+			bdev(0, 0, raid1(1000)), "bitmap_chunk_block_cnt",
+		},
+	} {
+		t.Run("as stored: "+item.name, func(t *testing.T) {
+			validateWantCode(t, "validateBdevConf",
+				validateBdevConf(item.conf), codes.OK)
+			err := validateClusterConfInput(
+				&pb.CreateClusterRequest{BdevConf: item.conf})
+			validateWantCode(t, "validateClusterConfInput", err,
+				codes.InvalidArgument)
+			msg := status.Convert(err).Message()
+			if !strings.HasPrefix(msg, resolvedPrefix) {
+				t.Errorf("message %q does not say it concerns the defaults",
+					msg)
+			}
+			validateWantMsg(t, "validateClusterConfInput", err, item.field)
+		})
+	}
+	// The converse of both halves: a request the resolved check must let
+	// through, and a request refused as SENT, whose message must not claim a
+	// default it never involved.
+	t.Run("as stored: 1024 chunk blocks of the 1 MiB default block", func(
+		t *testing.T,
+	) {
+		validateWantCode(t, "validateClusterConfInput",
+			validateClusterConfInput(&pb.CreateClusterRequest{
+				BdevConf: bdev(0, 0, raid1(1024)),
+			}), codes.OK)
+	})
+	t.Run("as sent: a 96 KiB block", func(t *testing.T) {
+		err := validateClusterConfInput(
+			&pb.CreateClusterRequest{BdevConf: bdev(96*kib, 0, nil)})
+		validateWantCode(t, "validateClusterConfInput", err,
+			codes.InvalidArgument)
+		if msg := status.Convert(err).Message(); strings.HasPrefix(
+			msg, resolvedPrefix) {
+			t.Errorf("message %q blames the defaults for a value the "+
+				"request sent", msg)
+		}
+	})
+	// Every refusal names the member to fix: the message is all an operator
+	// sees (§7).
+	for _, item := range []struct {
+		conf  *pb.BdevConf
+		field string
+	}{
+		{bdev(96*kib, 0, nil), "data_block_size"},
+		{bdev(192*kib, 0, nil), "data_block_size"},
+		{bdev(0, 6*kib, nil), "stripe_size"},
+		{bdev(mib, 192*kib, nil), "stripe_size"},
+		{bdev(mib, 0, raid1(1000)), "bitmap_chunk_block_cnt"},
+		{bdev(4*mib, 0, raid1(1024)), "bitmap_chunk_block_cnt"},
+	} {
+		validateWantMsg(t, "validateBdevConf",
+			validateBdevConf(item.conf), item.field)
+	}
+	// The raid0 half of the rules IS CreateClone's source rule set, and the
+	// block rule adds only the power of two dm-clone demands of a region:
+	// over a grid that straddles every unit and both ceilings, a geometry is
+	// a legal pool exactly when it is a legal clone source whose block is a
+	// power of two. So no pool the gateway admits is refused as the source
+	// of a clone.
+	t.Run("a legal pool is a legal clone source", func(t *testing.T) {
+		var blocks []uint64
+		for block := 32 * kib; block <= 4*mib; block += 32 * kib {
+			blocks = append(blocks, block)
+		}
+		blocks = append(blocks, gib-64*kib, gib, gib+64*kib)
+		for _, block := range blocks {
+			for stripe := 2 * kib; stripe <= 2*mib; stripe += 2 * kib {
+				pool := validateBdevConf(bdev(block, stripe, none)) == nil
+				clone := validateCloneGeometry(1, stripe, block) == nil
+				if pool && !clone {
+					t.Fatalf("block %d stripe %d: a legal pool is refused "+
+						"as a clone source", block, stripe)
+				}
+				pow2 := bits.OnesCount64(block) == 1
+				if pool != (clone && pow2) {
+					t.Fatalf("block %d stripe %d: legal pool %v, legal "+
+						"clone source %v, power-of-two block %v",
+						block, stripe, pool, clone, pow2)
+				}
+			}
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
-// EventThreshold: the one cross-field rule of §7
+// EventThreshold: its one cross-field rule (§7)
 // ---------------------------------------------------------------------------
 
 // TestValidateEventThreshold pins the leg_unhealthy > side_unhealthy rule, and

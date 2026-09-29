@@ -458,7 +458,9 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   as pure functions (no I/O): string sizes/patterns, NQN rules, bounded
   numerics — a zero passes as "give me the default", and for every member
   that ends up in a stored conf substituting that default is GW11's job on
-  the write path, never this one's — and `bdev_feature_list` empty. The list
+  the write path, never this one's — `bdev_feature_list` empty, and the
+  `bdev_conf` geometry rules, which `CreateCluster` judges once more on its
+  resolved conf, still before any read (§5.1). The list
   `count` is the one bounded numeric GW11 does not cover, because it reaches
   no stored message at all: `pageLimit` refuses a value above `MaxListCnt`
   1024 (`INVALID_ARGUMENT`, never a silent cap) and turns a zero into
@@ -467,8 +469,13 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   ClusterConf read; `ListClusters` reaches the same two checks through
   `pageNames` before its range (GW10).
   Violations ⇒ `INVALID_ARGUMENT` before any etcd read.
-  State-dependent validation (slot in use, `ns_idx` taken, …) happens
-  inside the STM.
+  State-dependent validation (slot in use, `ns_idx` taken, the geometry
+  rules on the `bdev_conf` `CreateStoragePool` merges over the cluster's, …)
+  happens inside the STM. `CreateStoragePool` judges that merged
+  `bdev_conf` before its STM as well, right after its plain pre-read of
+  ClusterConf and before its candidate scans (§5.4), so a request whose
+  merge breaks a rule is `INVALID_ARGUMENT` even on a cluster whose scans
+  would come up short (`RESOURCE_EXHAUSTED`).
 * **GW5 — resolution in-STM.** Except `CreateCluster` and `ListClusters`,
   the STM's first read is `model.ClusterConfKey(cluster_name)`
   (`cluster_name` defaulted to `common.DefaultClusterName`) — absent ⇒
@@ -585,9 +592,11 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   (before dividing a reported size by `extent_size`), in `DeleteDiskNode` and
   `UpdateDiskNodeDisabled` (the last check before their first write, because
   the one capacity key each moves is named by shifting the STORED ladder), in
-  `CreateStoragePool` and the `GrowSlice` handler (before any group
-  geometry), in `newDnLedger` — the DN ledger `CreateStoragePool`,
-  `DeleteSpareLeg`, `CreateMigration`, `FinishMigration` and
+  `CreateStoragePool` (on its plain pre-read, before the merge that gives
+  its scans their leg count and that §7's geometry rules judge, §5.4, and
+  again in its STM before any group geometry) and the `GrowSlice` handler
+  (before any group geometry), in `newDnLedger` — the DN ledger
+  `CreateStoragePool`, `DeleteSpareLeg`, `CreateMigration`, `FinishMigration` and
   `CancelMigration` build before staging their first write, for the same
   capacity-key reason — and in the §6.5 scans `pickDns`/`pickCn` (where a zero batch
   size would silently make the scan width zero and turn every allocation
@@ -654,8 +663,11 @@ stay in the cited architecture.md section; nothing below overrides them.
 ### 5.1 Clusters (§8.1)
 
 * **CreateCluster** — validate confs (§7) on the RAW request, where a zero
-  still asks for the default. One §7 row is a refusal rather than a bound:
-  the `dn_bin_conf` shifts are all-or-nothing — all four zero asks for the
+  still asks for the default, and its `bdev_conf` once more resolved, where
+  an omitted member meets §7's geometry rules as its constant (a refusal is
+  `INVALID_ARGUMENT`, prefixed `bdev_conf with its defaults filled in:`).
+  The `dn_bin_conf` shifts are not bounded one by one but judged as a set
+  (§6.2), all-or-nothing: all four zero asks for the
   0/4/8/12 default and is accepted, any other set that is not
   `0 ≤ bin0 < bin1 < bin2 < bin3 ≤ 63` is `INVALID_ARGUMENT`, because the
   stored ladder is what every capacity key of this cluster is written under
@@ -748,8 +760,17 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   (`ext_cnt = init_ext_cnt`) — ext counts only;
   `model.GroupBlocks` turns each into `meta_blocks`/`data_blocks` in
   the STM, where the conf it needs has been read and checked. Candidate unit
-  (GW9): scan DNs per group with the §6.5 growing black list (`RequiredCnt`
-  legs per group — RedundNone 1, RedundMdRaid1 2 — from
+  (GW9): a plain pre-read of ClusterConf, gated by `model.ValidateClusterConf`
+  as the scans gate it (a stored conf that fails it is `ABORTED`, GW11,
+  before anything is computed from it), and over it the same merge and
+  resolution the STM makes below, which gives the scans their leg count;
+  `validateBdevConf` on that conf (`validateMergedBdevConf`), because the
+  raw request was judged by §7's geometry rules only between the members it
+  set (a refusal is `INVALID_ARGUMENT`, prefixed
+  `bdev_conf merged over the cluster's:`), and before the scans, so that a
+  cluster short of nodes does not answer a request that breaks a rule
+  `RESOURCE_EXHAUSTED` first; then scan DNs per group with the §6.5 growing
+  black list (`RequiredCnt` legs per group — RedundNone 1, RedundMdRaid1 2 — from
   `dn_batch_size × RequiredCnt` candidates, random pick, picked DNs
   black-listed so every leg of the SP lands on a distinct
   DN) and CNs (`CandExtCnt = Σ ext_cnt` over all groups, `cntlr_cnt` rounds,
@@ -763,6 +784,9 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   is stored is concrete (D-C, GW11) — and fail the unit right there, before
   a single other key is read, when this transaction's `cluster_id` or that
   conf's leg count no longer matches the one the scan drew its picks for;
+  `validateMergedBdevConf` on that conf once more (ClusterConf is
+  write-once, so for an unchanged `cluster_id` this repeats the verdict of
+  the pre-read, but the in-STM read is the authoritative one);
   `SpConfKey` present ⇒ `ALREADY_EXISTS`; mint `sp_id`/shard from `SpGlobal`
   (GW12), then every `cntlr_id` in pick order (D-D);
   `model.ValidateClusterConf` before the cluster's `extent_size` is used (a
@@ -1309,6 +1333,17 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    `bdev_feature_list`, level enum),
    plus both arms of the `dn_bin_conf` shift rule: all four zero accepted (it
    asks for 0/4/8/12), any other non-ladder set `INVALID_ARGUMENT` (§5.1).
+   The four §7 geometry rules of `bdev_conf` (`TestBdevConfGeometryRules`): a
+   block that is not a power of two (a 192 KiB one among them, which dm-thin
+   would take), a stripe that is not a multiple of 4 KiB or is above 1 MiB, a
+   block that is not a multiple of the stripe and an md-raid1 bitmap chunk
+   whose byte size is not a power of two or is above 1 GiB are each
+   `INVALID_ARGUMENT`; a rule between two members waits for the request to
+   set both; `validateClusterConfInput` judges the resolved conf as well,
+   with a refusal prefixed `bdev_conf with its defaults filled in:` that its
+   refusal of the raw request never carries; and over a grid of sizes a pool
+   geometry is legal exactly when it is a legal clone source whose block is
+   a power of two.
 3. **Handler tests** against the real etcd through a `Server` constructed
    directly: per resource group, the happy path asserting **exact** etcd
    state via `etcdutil` reads (keys, ids, buckets, capacity keys, rev values)
@@ -1341,12 +1376,26 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    (`invalid stored conf: ` + the field) and nothing written:
    `CreateDiskNode`, `CreateControllerNode`, `DeleteDiskNode` and
    `UpdateDiskNodeDisabled` on the cluster's, every GW9
-   allocating RPC through the §6.5 scans on it, `DeleteSpareLeg`,
+   allocating RPC through the §6.5 scans on it (`CreateStoragePool` through
+   its own copy of that gate, run just before its scans), `DeleteSpareLeg`,
    `FinishMigration` and `CancelMigration` through `newDnLedger`'s gate on it
    — twelve cases for the cluster's conf, `GrowSlice` reaching it through a
    gate of its own (both confs, after its snapshot and before the meta
    ladder) as well as through the scan — and `GrowSlice` and
-   `CreateThinDevice` on the SP's; per-SP id and `dev_id` sequences;
+   `CreateThinDevice` on the SP's; the §7 geometry rules on the MERGED
+   `bdev_conf` (`TestCreateStoragePoolJudgesTheMergedGeometry`: over a cluster
+   with a 2 MiB block, a 1 MiB stripe and a one-block md-raid1 chunk, SPs of
+   1024 and of 3 chunk blocks and a 512 KiB-block SP, each under a name of
+   its own, are `INVALID_ARGUMENT` with nothing written and a message
+   prefixed `bdev_conf merged over the cluster's:`, and so is the
+   1024-chunk-block request sent again with one cntlr more than the cluster
+   has CNs, which a scan would have answered `RESOURCE_EXHAUSTED`; a
+   16 MiB-block SP, legal only through the inherited chunk count, is
+   created, an illegal merge sent under its name is still
+   `INVALID_ARGUMENT`, not `ALREADY_EXISTS`, and with the cluster's stored
+   chunk count zeroed a request that would inherit it is `ABORTED` with
+   `model`'s message, never judged against the constant the merge would
+   resolve in its place); per-SP id and `dev_id` sequences;
    `CreateThinDevice` refusing a snapshot of a clone's destination —
    `FAILED_PRECONDITION` naming that clone (listed between two unrelated
    ones), nothing written — while the clone hydrates and while it drains,

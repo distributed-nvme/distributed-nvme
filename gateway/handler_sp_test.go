@@ -737,7 +737,7 @@ func TestCreateStoragePoolWriteSet(t *testing.T) {
 // and then CreateDiskNode/CreateControllerNode against fake agents — rather
 // than through sptNewEnv's hand-written ClusterConf.
 //
-// The two bdev_conf tests below need the whole write path, because §7 resolves
+// The bdev_conf tests below need the whole write path, because §7 resolves
 // twice along it: CreateCluster makes the CLUSTER's bdev_conf concrete, and
 // CreateStoragePool merges the request over that result and resolves whatever
 // neither side named. A fixture that wrote the ClusterConf itself would pin
@@ -895,6 +895,185 @@ func TestCreateStoragePoolBdevConfMergeRungs(t *testing.T) {
 				tc.field, tc.got, tc.want, tc.rung)
 		}
 	}
+}
+
+// TestCreateStoragePoolJudgesTheMergedGeometry pins §7's geometry rules on
+// the bdev_conf an SP STORES, not merely on the request. D-C's merge fills
+// every member the request omits from the cluster, or from the constants
+// where the cluster has none, so a request legal by itself can combine with
+// those into a pool md refuses to build or CreateClone refuses as a source.
+//
+// The cluster is legal as created — a 2 MiB block over a 1 MiB stripe, under
+// md-raid1 with a one-block bitmap chunk — and so is each refused request as
+// sent. Each refusal must be INVALID_ARGUMENT, say that it concerns the merged
+// conf, name the member to fix and write nothing. Each refused request has an
+// SP name of its own, so one that is wrongly accepted cannot turn the next
+// into an ALREADY_EXISTS that hides the next one's own rule. Two of them are
+// legal against the constants and break a rule only against the INHERITED
+// block or stripe, so a handler that judged an omitted member against the
+// constants would accept them. One asks for a cntlr more than the cluster has
+// CNs: the merge is judged before the scans, so that must still be
+// INVALID_ARGUMENT and not the CN scan's RESOURCE_EXHAUSTED.
+//
+// The created pool is the converse: a 16 MiB block would be a 2 GiB bitmap
+// chunk under the 128-block constant, above the 1 GiB ceiling, and is legal
+// only through the INHERITED one-block chunk, so a handler that judged against
+// the constants would refuse it. Then an illegal merge sent under the name
+// that pool now holds is still INVALID_ARGUMENT, not ALREADY_EXISTS: the
+// geometry is judged before the existence check. Last, with the cluster's
+// stored chunk count zeroed, a request that would inherit it is ABORTED with
+// model's message (§5.9): the stored conf is checked before the merge could
+// resolve that zero into a constant and blame the request for the result.
+func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
+	const kib = uint64(1024)
+	const mib = 1024 * kib
+	raid1 := func(cnt uint64) *pb.RedundConf {
+		return &pb.RedundConf{
+			RedunKind: &pb.RedundConf_RedundMdRaid1{
+				RedundMdRaid1: &pb.RedundMdRaid1{BitmapChunkBlockCnt: cnt},
+			},
+		}
+	}
+	none := &pb.RedundConf{
+		RedunKind: &pb.RedundConf_RedundNone{RedundNone: &pb.RedundNone{}},
+	}
+	env := sptNewLiveEnv(t, &pb.BdevConf{
+		DmPoolConf:  &pb.DmPoolConf{DataBlockSize: 2 * mib},
+		DmRaid0Conf: &pb.DmRaid0Conf{StripeSize: mib},
+		RedundConf:  raid1(1),
+	})
+	ctx := context.Background()
+	// dump is every key of this cluster, read the way sptEnv.dump reads it.
+	dump := func(t *testing.T) map[string][]byte {
+		t.Helper()
+		kvs, _, err := env.srv.cli.Range(ctx, common.DnvPrefix)
+		if err != nil {
+			t.Fatalf("Range: %v", err)
+		}
+		tag := fmt.Sprintf(common.IdKeyFmt, env.cid)
+		out := make(map[string][]byte, len(kvs))
+		for _, kv := range kvs {
+			if strings.Contains(kv.Key, tag) {
+				out[kv.Key] = kv.Value
+			}
+		}
+		return out
+	}
+	// refuse sends a request that is legal as sent and asserts the refusal of
+	// its merge.
+	refuse := func(
+		t *testing.T,
+		req *pb.CreateStoragePoolRequest,
+		field string,
+	) {
+		t.Helper()
+		if err := validateBdevConf(req.GetBdevConf()); err != nil {
+			t.Fatalf("the request must be legal as sent: %v", err)
+		}
+		before := dump(t)
+		_, err := env.srv.CreateStoragePool(ctx, req)
+		sptWantCode(t, err, codes.InvalidArgument)
+		msg := status.Convert(err).Message()
+		if !strings.HasPrefix(msg, "bdev_conf merged over the cluster's: ") {
+			t.Errorf("message %q does not say it concerns the merged conf",
+				msg)
+		}
+		if !strings.Contains(msg, field) {
+			t.Errorf("message %q does not name %q", msg, field)
+		}
+		if changed := sptChangedKeys(before, dump(t)); len(changed) != 0 {
+			t.Errorf("a refusal wrote %v", changed)
+		}
+	}
+	for idx, tc := range []struct {
+		name     string
+		bdev     *pb.BdevConf
+		cntlrCnt uint32
+		field    string
+	}{
+		{
+			"1024 chunk blocks x the inherited 2 MiB block = 2 GiB " +
+				"(x the 1 MiB constant it would be 1 GiB)",
+			&pb.BdevConf{RedundConf: raid1(1024)}, 0,
+			"bitmap_chunk_block_cnt",
+		},
+		{
+			"3 chunk blocks x the inherited 2 MiB block = 6 MiB",
+			&pb.BdevConf{RedundConf: raid1(3)}, 0,
+			"bitmap_chunk_block_cnt",
+		},
+		{
+			"a 512 KiB block under the inherited 1 MiB stripe " +
+				"(the 64 KiB constant would divide it)",
+			&pb.BdevConf{
+				DmPoolConf: &pb.DmPoolConf{DataBlockSize: 512 * kib},
+				RedundConf: none,
+			}, 0,
+			"stripe_size",
+		},
+		{
+			"one cntlr more than the cluster has CNs",
+			&pb.BdevConf{RedundConf: raid1(1024)}, sptCntlrCnt + 1,
+			"bitmap_chunk_block_cnt",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := sptDefaultSpec(fmt.Sprintf("bad%d", idx)).req(env.name)
+			req.BdevConf = tc.bdev
+			if tc.cntlrCnt != 0 {
+				req.CntlrCnt = tc.cntlrCnt
+			}
+			refuse(t, req, tc.field)
+		})
+	}
+	got := env.createSpBdev(t, &pb.BdevConf{
+		DmPoolConf: &pb.DmPoolConf{DataBlockSize: 16 * mib},
+		RedundConf: raid1(0),
+	})
+	if got.GetDmPoolConf().GetDataBlockSize() != 16*mib ||
+		got.GetDmRaid0Conf().GetStripeSize() != mib ||
+		got.GetRedundConf().GetRedundMdRaid1().GetBitmapChunkBlockCnt() != 1 {
+		t.Errorf("stored %v: want the request's 16 MiB block with the "+
+			"cluster's 1 MiB stripe and one-block chunk", got)
+	}
+	t.Run("an illegal merge under a name already taken", func(t *testing.T) {
+		req := sptDefaultSpec(sptSpName).req(env.name)
+		req.BdevConf = &pb.BdevConf{RedundConf: raid1(3)}
+		refuse(t, req, "bitmap_chunk_block_cnt")
+	})
+	// A stored conf that fails its own check is ABORTED before anything is
+	// judged against it (§5.9). With the cluster's chunk count zeroed, the
+	// merge would resolve the request's unset count to the 128-block
+	// constant, and the 2 GiB chunk that makes would blame the request.
+	t.Run("a stored conf with its chunk count zeroed", func(t *testing.T) {
+		key := model.ClusterConfKey(env.name)
+		cc := &pb.ClusterConf{}
+		found, err := env.srv.cli.Get(ctx, key, cc)
+		if err != nil || !found {
+			t.Fatalf("cluster_conf: found %v, err %v", found, err)
+		}
+		healthy := proto.Clone(cc).(*pb.ClusterConf)
+		cc.GetBdevConf().GetRedundConf().GetRedundMdRaid1().
+			BitmapChunkBlockCnt = 0
+		mustPut(t, env.srv.cli, key, cc)
+		defer mustPut(t, env.srv.cli, key, healthy)
+		req := sptDefaultSpec("sparse").req(env.name)
+		req.BdevConf = &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{DataBlockSize: 16 * mib},
+			RedundConf: raid1(0),
+		}
+		before := dump(t)
+		_, err = env.srv.CreateStoragePool(ctx, req)
+		sptWantCode(t, err, codes.Aborted)
+		const want = "invalid stored conf: bdev_conf.redund_conf." +
+			"redund_md_raid1.bitmap_chunk_block_cnt is zero"
+		if msg := status.Convert(err).Message(); msg != want {
+			t.Errorf("message %q, want %q", msg, want)
+		}
+		if changed := sptChangedKeys(before, dump(t)); len(changed) != 0 {
+			t.Errorf("a refusal wrote %v", changed)
+		}
+	})
 }
 
 // TestCreateStoragePoolNodeAccounting pins the §5.6 / §5.5 half of §8.4: every
