@@ -900,8 +900,8 @@ const (
 	// breakage itself never triggers. Age is the only evidence that tells an
 	// abandoned export from one in flight, so a young one is left alone this
 	// pass — not removed, not a leftover, not a failure — and judged again by
-	// each later pass, until it has either a namespace (and so an owner) or
-	// the age of an export nobody is building.
+	// each later pass, until it has either a namespace naming its owner's
+	// linear or the age of an export nobody is building.
 	exportYoung
 )
 
@@ -948,6 +948,17 @@ func (s *DnAgentServer) portLinksOf(
 // port links, and then to the subsystem directory's age, only when there is
 // no namespace to read. An export of ours also names the per-CN dm-linear its
 // namespace backs, which P0 has to have out of suspension before it goes.
+//
+// The namespace is read by its id, sideNsid — every side export has that one
+// namespace and no other — and the namespaces are listed only when it is
+// absent. On a kernel several dn agents share, the node-level pass attributes
+// every sibling's export of an sp this node hosts, on every pass; an `ls`
+// exec per export made the pass of each agent holding sides of an sp grow
+// with all the others' exports of it, where the read is one in-process file
+// read. Nothing of an attribution is kept for another pass: a pass
+// attributes an export at most once, and an owner remembered from a Check
+// round's verdict to the SyncupDn after it could be stale, the export
+// removed and built again in between.
 func (s *DnAgentServer) classifyExport(
 	ctx context.Context,
 	clusterId uint64,
@@ -956,6 +967,23 @@ func (s *DnAgentServer) classifyExport(
 	links *portLinks,
 	res *agent.SweepResult,
 ) (owner exportOwner, spId uint64, sideId uint64, linear string) {
+	path, present, err := s.nvmet.NsDevicePath(ctx, nqn, sideNsid)
+	if err != nil {
+		res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, sideNsid), err)
+		return exportForeign, 0, 0, ""
+	}
+	if present {
+		// One naming no device we can read an owner off is somebody
+		// else's, or a shape this build did not write — or a build
+		// abandoned between its namespace `mkdir` and its device_path
+		// write, which names nobody, so every agent reads it as foreign
+		// and no sweep removes it.
+		owner, spId, sideId, linear, _ = nsOwner(path, clusterId, dnId)
+		return owner, spId, sideId, linear
+	}
+	// No namespace sideNsid: removed between the listing and this read, not
+	// built yet, half removed, or a shape this build did not write. Only now
+	// is the directory listed.
 	nsids, found, err := s.nvmet.ListNamespaces(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet namespaces of "+nqn, err)
@@ -976,19 +1004,11 @@ func (s *DnAgentServer) classifyExport(
 		if !present {
 			continue
 		}
-		name := strings.TrimSpace(
-			strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/"))
-		dn, parsed := common.ParseDmName(name)
-		if !parsed || dn.Kind != common.DmKindDnLinear ||
-			dn.ClusterId != clusterId {
-			continue
+		var named bool
+		owner, spId, sideId, linear, named = nsOwner(path, clusterId, dnId)
+		if named {
+			return owner, spId, sideId, linear
 		}
-		if dn.NodeId != dnId {
-			// A per-CN linear of a SIBLING dn agent on this kernel. Its
-			// export is that agent's, and nothing here may touch it.
-			return exportForeign, 0, 0, ""
-		}
-		return exportOurs, dn.Ids[0], dn.Ids[1], name
 	}
 	if sawNs {
 		// It has namespaces, but none of them names a device we can read an
@@ -1022,6 +1042,29 @@ func (s *DnAgentServer) classifyExport(
 		return exportYoung, 0, 0, ""
 	}
 	return exportOrphan, 0, 0, ""
+}
+
+// nsOwner attributes an export by one of its namespaces' device_path. named is
+// false when the path is not a per-CN dm-linear of this cluster, which says
+// nothing about whose the export is.
+func nsOwner(
+	path string,
+	clusterId uint64,
+	dnId uint64,
+) (owner exportOwner, spId uint64, sideId uint64, linear string, named bool) {
+	name := strings.TrimSpace(
+		strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/"))
+	dn, parsed := common.ParseDmName(name)
+	if !parsed || dn.Kind != common.DmKindDnLinear ||
+		dn.ClusterId != clusterId {
+		return exportForeign, 0, 0, "", false
+	}
+	if dn.NodeId != dnId {
+		// A per-CN linear of a SIBLING dn agent on this kernel. Its export
+		// is that agent's, and nothing here may touch it.
+		return exportForeign, 0, 0, "", true
+	}
+	return exportOurs, dn.Ids[0], dn.Ids[1], name, true
 }
 
 // collectExports adds the unwanted nvmet subsystems of one side's scope to a
@@ -1352,7 +1395,10 @@ func (s *DnAgentServer) sweepDn(
 	// sides of a migrating leg export the same one ([D1]) — so without this
 	// an agent sharing a VM with others would read the namespaces of every
 	// one of THEIR exports on every pass, which on a lab node running
-	// dozens of dn agents is the whole configfs tree per round.
+	// dozens of dn agents is the whole configfs tree per round. It does not
+	// skip a sibling's export of an sp both agents hold sides of, which is
+	// why classifyExport attributes each of those that has its namespace
+	// with one in-process read.
 	//
 	// It loses nothing: an export this agent could have left behind belongs
 	// to a side whose devices are still there (the layers remove the export

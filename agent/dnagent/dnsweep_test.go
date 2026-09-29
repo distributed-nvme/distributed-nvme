@@ -655,6 +655,145 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// What the node-level pass pays for its siblings' exports
+// ---------------------------------------------------------------------------
+
+// TestNodeSweepCostIsLinearInOwnExports pins the cost of attributing a :2:
+// export on a kernel several dn agents share. The NQN names no dn, so the
+// node-level pass attributes every export of an sp this node hosts that no
+// stored side of its own claims — in the verdict of every Check round and in
+// every SyncupDn — and on a shared kernel nearly all of those are the
+// siblings': each side-holding agent exports its own leg of the sp, one
+// export per cn. Attributing each with an `ls` exec of its namespaces made
+// every side-holding agent's pass grow with everybody else's exports of the
+// sp, so the node ran about s·(s−1) execs per cn per round for s
+// side-holding agents: at 32 slices most of the roughly 617 execs a second
+// estimated for one disk-node VM.
+//
+// dnv builds every side export with one namespace, nsid 1, so its
+// device_path is read directly and the namespaces are listed only when there
+// is no namespace 1. The test runs both passes — a Check round's verdict and a
+// SyncupDn — over four sibling agents of one sp holding one export each, then
+// eight each, then thirty-two agents holding one each, and counts the execs:
+// the count may not move. The third run holds the number of exports of the
+// second and changes only the number of agents, each on its own port: a cost
+// per sibling AGENT (a port listing, say) is as quadratic on the node as one
+// per export, and the first two runs hold the agent count still. Each pass
+// also reads each sibling export's namespace 1 exactly once, which is what
+// makes a cache of the attribution pointless within a pass.
+func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+
+	// execs seeds `per` exports for each of `siblings` sibling agents, runs
+	// the two passes and returns the `ls` and the total exec count of each.
+	type cost struct{ verdictLs, verdictCmds, syncLs, syncCmds int }
+	execs := func(t *testing.T, siblings, per int) cost {
+		srv, node := newTestServer(t)
+		ctx := context.Background()
+		// A side of OUR own under testSp is what puts the sp in the
+		// pass's hosted set; without it no sibling export of it would be
+		// attributed at all, and the count would pin nothing.
+		ours := sweepSidePtr(testLeg, testSide)
+		if _, err := srv.SyncupDn(ctx, sweepDnReq(1, ours)); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+
+		var seeded []string
+		for i := 0; i < siblings; i++ {
+			for j := 0; j < per; j++ {
+				n := uint64(i*16 + j)
+				nqn := nf.SideToCnNqn(testCluster, testSp, siblingLeg+n,
+					testCn0)
+				seedExport(node, nqn, "/dev/mapper/"+nf.DnLinearName(
+					testCluster, siblingDn+uint64(i), testSp,
+					siblingSide+n, testCn0))
+				linkPort(node, siblingPort+i, nqn)
+				seeded = append(seeded, nqn)
+			}
+		}
+		// readsOnce checks that the pass just run attributed every sibling
+		// export by exactly one read of its namespace 1: none skipped, none
+		// read twice.
+		readsOnce := func(pass string) {
+			t.Helper()
+			for _, nqn := range seeded {
+				got := len(node.callsMatching("read " + agent.NvmetRoot +
+					"/subsystems/" + nqn + "/namespaces/1/device_path"))
+				if got != 1 {
+					t.Errorf("siblings=%d per=%d: the %s read %s's "+
+						"namespace 1 %d times, want 1", siblings, per, pass,
+						nqn, got)
+				}
+			}
+		}
+
+		var c cost
+		node.Reset()
+		reply, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+			ClusterId: testCluster, DnId: testDn,
+		}, nil)
+		if got := reply.GetAgentReply().GetCode(); got != 0 {
+			t.Fatalf("siblings=%d per=%d: CheckDn code = %d (%s), want 0",
+				siblings, per, got, reply.GetAgentReply().GetDetails())
+		}
+		c.verdictLs = len(node.callsMatching("cmd ls "))
+		c.verdictCmds = len(node.callsMatching("cmd "))
+		readsOnce("CheckDn verdict")
+
+		node.Reset()
+		syncReply, err := srv.SyncupDn(ctx, sweepDnReq(2, ours))
+		if err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		if got := syncReply.GetAgentReply().GetCode(); got != 0 {
+			t.Fatalf("siblings=%d per=%d: SyncupDn code = %d (%s), want 0",
+				siblings, per, got, syncReply.GetAgentReply().GetDetails())
+		}
+		c.syncLs = len(node.callsMatching("cmd ls "))
+		c.syncCmds = len(node.callsMatching("cmd "))
+		readsOnce("SyncupDn")
+
+		// Cheaper is only worth having if it is still right: every
+		// sibling export is attributed to its agent and left alone.
+		for _, nqn := range seeded {
+			if !subsysPresent(node, nqn) {
+				t.Errorf("siblings=%d per=%d: the sweep removed a "+
+					"sibling's export %s", siblings, per, nqn)
+			}
+		}
+		objectsOf(ours).assertAllKept(t, node)
+		return c
+	}
+
+	const siblings = 4
+	few, many := execs(t, siblings, 1), execs(t, siblings, 8)
+	// The same 32 exports held by 32 agents, each on its own port: a cost
+	// per sibling AGENT (a port listing, say) is as quadratic on the node
+	// as one per export, and the two runs above hold the agent count still.
+	agents := execs(t, siblings*8, 1)
+	t.Logf("execs with %d sibling exports: %+v; with %d: %+v; with %d "+
+		"agents holding one each: %+v",
+		siblings, few, siblings*8, many, siblings*8, agents)
+	if agents != few {
+		t.Errorf("execs grew with the number of sibling agents: %+v with "+
+			"%d of them, %+v with %d", few, siblings, agents, siblings*8)
+	}
+	if many.verdictLs != few.verdictLs || many.syncLs != few.syncLs {
+		t.Errorf("`ls` execs grew with the siblings' exports: the verdict "+
+			"ran %d with %d of them and %d with %d, the SyncupDn %d and %d",
+			few.verdictLs, siblings, many.verdictLs, siblings*8,
+			few.syncLs, many.syncLs)
+	}
+	if many.verdictCmds != few.verdictCmds || many.syncCmds != few.syncCmds {
+		t.Errorf("execs grew with the siblings' exports: the verdict ran "+
+			"%d with %d of them and %d with %d, the SyncupDn %d and %d",
+			few.verdictCmds, siblings, many.verdictCmds, siblings*8,
+			few.syncCmds, many.syncCmds)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // A conf fault must never destroy resources (§7)
 // ---------------------------------------------------------------------------
 

@@ -1295,11 +1295,31 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      ours belongs to the side in that name, and survives for as long as that
      side is in an authoritative list, which is what keeps a side that must
      be rebuilt from its record exporting (DN8) even though no stored side
-     claims it. An export holding no namespace at all is attributed by the
-     nvmet **port** it is linked to, each agent converging exactly one port
-     id: linked to a sibling's port, it is that sibling's. One linked to no
-     port, or only to ours, exports nothing and holds nothing open — but it
-     is not therefore nobody's (*amended 2026-09-28*). It is also the shape
+     claims it. The namespace is read by its id, `namespaces/1/device_path`
+     — every side export has that one namespace and no other (§4.6) — and
+     the namespaces are listed only when there is no namespace 1 (*amended
+     2026-09-29*); one whose namespace 1 names no per-CN linear of this
+     cluster is foreign, whatever else it holds. The cost is the reason.
+     Scope 1 attributes, on every pass — each Check round's verdict among
+     them — every export of an sp this agent holds a device or a known side
+     of that no stored side of its own claims, which includes every
+     sibling's export of that sp. Listing each one's namespaces cost an
+     `ls` apiece, so the pass of every agent holding sides of an sp grew
+     with all the other agents' exports of it: about s × (s − 1) × C
+     commands a round on a kernel whose s agents hold sides of one sp
+     exported to C controller nodes — at 32 slices most of the roughly 617
+     commands a second estimated for one disk-node VM. The read runs in
+     process, so attributing an export that has its namespace 1 costs a pass
+     no command at all. No attribution is kept from one pass to the next,
+     and none needs to be: one pass attributes an export at most once, and a
+     Check round's verdict and the `SyncupDn` after it each attribute it
+     afresh — an owner remembered between them could be stale, the export
+     removed and built again by another agent in between. An export holding
+     no namespace at all is attributed by the nvmet **port** it is linked
+     to, each agent converging exactly one port id: linked to a sibling's
+     port, it is that sibling's. One linked to no port, or only to ours,
+     exports nothing and holds nothing open — but it is not therefore
+     nobody's (*amended 2026-09-28*). It is also the shape
      of **every** export between its subsystem `mkdir` and its namespace
      `mkdir` — an export is built subsystem first, with its attributes and
      then its allowed hosts, then its namespace, then its port link — and
@@ -1317,8 +1337,13 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      which is the claim rule again. A younger one is left alone that pass:
      not removed, not a leftover, not a failure, so the reply code is
      unaffected; each later pass judges it again, until it either has a
-     namespace, and so an owner, or the age of an export nobody is
-     building. The age is read from the node, never remembered: the
+     namespace whose `device_path` names its owner's linear, or the age of
+     an export nobody is building. (A build abandoned between its namespace
+     `mkdir` and its `device_path` write leaves a namespace that names
+     nobody. Every agent's attribution reads that export as foreign, so no
+     sweep removes it; a later converge of the side it was built for
+     finishes it, but once no side wants it, it stays: a known gap.) The
+     age is read from the node, never remembered: the
      directory's mtime (`stat -c %Y`) against the agent's clock. A `stat`
      that fails makes the export foreign for that pass, as every other
      failed read of the attribution does: one that did not answer is named
@@ -1338,14 +1363,16 @@ DN6. **Removal is a sweep of actual minus desired, never a memory.**
      reads. A kernel that no longer stamps on an attribute lookup (7.3
      stamps the directory only when a directory or a link is created under
      it) reads the plain time since the `mkdir`, and there such a rebuild
-     reads old. Nothing a sweep does touches an export's attributes (it
-     lists the namespaces and the port links and stats the directory), so
-     an abandoned export ages, and the first sweep that finds it older than
-     the grace settles it: a Syncup's removes it, and a read-only Check
-     round's reports it as a leftover, which brings that Syncup. Anything
-     else that keeps reading its attributes keeps it young for as long as it
-     does. A `:3:` connection is attributed by its
-     controller's `hostnqn`
+     reads old. Nothing a sweep does looks up one of the subsystem's own
+     `attr_*` files (it reads namespace 1's `device_path`, which sits in the
+     namespace's directory and not the subsystem's, and which a
+     namespace-less export does not have; it lists the namespaces and the
+     port links and stats the directory), so an abandoned export ages, and
+     the first sweep that finds it older than the grace settles it: a
+     Syncup's removes it, and a read-only Check round's reports it as a
+     leftover, which brings that Syncup. Anything else that keeps looking up
+     those files keeps it young for as long as it does. A `:3:` connection
+     is attributed by its controller's `hostnqn`
      (`/sys/class/nvme/nvmeN/hostnqn`): the nvme host namespace is per
      kernel, and since the NQN names the **source** DN, the host NQN it was
      opened with is the only field that names the agent holding it.
@@ -2423,7 +2450,13 @@ able to fail.
    backing this agent's `d1` of a side in no list, one backing a
    sibling's — and issues not one call naming it, while the node-level
    pass that follows removes exactly the three it owns or can prove
-   abandoned.
+   abandoned. **The attribution's cost**
+   (`TestNodeSweepCostIsLinearInOwnExports`): four sibling agents of one
+   sp hold one export each, then eight each, then thirty-two agents hold
+   one each; a Check round's verdict and a `SyncupDn` over them run the
+   same number of commands, `ls` and all, every time, each reads every
+   sibling export's namespace 1 exactly once, and every sibling export
+   survives.
 5. **Side provisioning (zeroing) protocol** (DN9): the allocation slot write
    (a record whose `zeroed_bits` are all 0), the `dmsetup create` of
    `DnSideName` (stdin table form), then one

@@ -2833,7 +2833,12 @@ cannot forget in that way: while the device is there, the next enumeration finds
   The reads this costs are per object, so each is reached only after a cheap filter has
   failed to settle it (an sp this node holds a device for, a stored request that still
   names the object): a node running dozens of agents must not walk the whole configfs
-  tree once per agent per round.
+  tree once per agent per round. The filter cannot settle a sibling's `:2:` export of an
+  sp both agents hold sides of, so that read is kept to one in-process file read — the
+  export's one namespace, `nsid = 1`, read by its id — and the namespaces are listed
+  only when it is absent (*amended 2026-09-29*): an `ls` per export made the pass of
+  every agent holding sides of an sp grow with all its siblings' exports of that sp,
+  and at 32 slices those were most of the commands estimated for one disk-node VM.
 * **State is dropped at pointer removal; the parent's list is persisted first.** An
   object whose pointer has left the list loses its file, its chunk files, its memory
   entry and its object lock in the same pass, before anything of it is removed (§9.1).
