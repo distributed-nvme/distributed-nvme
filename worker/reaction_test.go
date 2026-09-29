@@ -577,9 +577,13 @@ func (h *reactHarness) pass() {
 	h.w.reactionPass(context.Background())
 }
 
-// setPrimaryInfo installs the CntlrInfo a cntlr's child last reported (AR1).
+// setPrimaryInfo installs the CntlrInfo a cntlr's child last reported (AR1),
+// on a child that drives the primary plan: the pass reads no other child's.
 func (h *reactHarness) setPrimaryInfo(cntlrId uint64, info *pb.CntlrInfo) {
-	h.w.cntlrs[cntlrId] = &cntlrChild{driver: &cntlrDriver{lastInfo: info}}
+	h.w.cntlrs[cntlrId] = &cntlrChild{
+		plan:   &cntlrPlan{cntlrId: cntlrId, primary: true},
+		driver: &cntlrDriver{lastInfo: info},
+	}
 }
 
 // setPool installs one slice's thin-pool row on the primary.

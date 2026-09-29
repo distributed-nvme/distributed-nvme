@@ -815,9 +815,10 @@ Success proves: both ctl binaries, both agents, pointer gating, the full
    `optimized`. Back to `readwrite` (CNREV2++): write succeeds again.
 
    **A promotion that outruns the sides' flip (`lateflip`; *added
-   2026-09-26*, `cnagent.md` CN10/CN12).** A failover fans `SyncupCntlr`
-   and the sides' `SyncupSide` out unordered (`architecture.md` [D16]), so
-   a promoted standby can read its legs before any side has flipped; a
+   2026-09-26*, `cnagent.md` CN10/CN12).** A failover's `SyncupCntlr` waits
+   for the sides' `SyncupSide` answers, but one `cntlr_interval` at most
+   (`architecture.md` [D16]), so a promoted standby can still read its legs
+   before any side has flipped; a
    `leg_list` member that is not available registers the agent's own CN10
    retry, and nothing else re-runs that converge. With host IO quiesced
    (the promotion moves CN1's namespace to `optimized` over the td's

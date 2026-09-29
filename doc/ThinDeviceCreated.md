@@ -219,7 +219,9 @@ until `created == true` before creating a snapshot of the td. Typical
 latency is one fan-out: the `SpRev` bump of `CreateThinDevice` sends
 `SyncupCntlr` to the primary, whose reply already reports every slice `OK`
 in the common case, so the flip lands in that same round (U3); worst case is
-one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7).
+one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7), and
+up to one more while a side of the SP has not accepted the bump
+(`architecture.md` §10.3's sides first).
 
 **U2-S4 Not gated (R7).** `CreateNamespace`/`UpdateNamespaceDev` on an
 uncreated td: allowed, and the agent needs no gate either — the cn agent's

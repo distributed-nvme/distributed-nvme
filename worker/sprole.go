@@ -65,6 +65,10 @@ const (
 	// msgSpSidesIdle is RW15's side_conf completeness gate: no side of the SP
 	// can be driven while the SP's cntlr set is not fully resolved.
 	msgSpSidesIdle = "sp sides idle"
+	// msgSpSidesUnsynced is RW14's sides-first barrier released by its timer:
+	// one cntlr_interval passed before every side child reported the
+	// fan-out's revision applied, and the cntlrs are sent it all the same.
+	msgSpSidesUnsynced = "sp sides unsynced"
 )
 
 // spConfRefusal is the memo that keeps a steady invalid stored conf to one
@@ -221,6 +225,9 @@ type sideChild struct {
 	handle *revWorker
 	driver *sideDriver
 	plan   *sidePlan
+	// synced is the highest revision the child reported its agent holds
+	// (spReport.synced): what RW14's sides-first barrier waits for.
+	synced uint64
 }
 
 // cntlrChild is one running cntlr child of the coordinator.
@@ -253,6 +260,20 @@ type spReport struct {
 	createdTdIds []uint64
 	// legRows are the primary cntlr's leg probe rows (HL2).
 	legRows []legRow
+	// cntlrId is the cntlr whose reply produced the report: its legRows are
+	// recorded only while the coordinator's latest plan for that cntlr makes
+	// it the primary (recordsLegRows).
+	cntlrId uint64
+	// synced is a side child's first accepted reply at a revision: the
+	// revision its agent now holds, which RW14's sides-first barrier waits
+	// for. nil on every other report.
+	synced *sideSynced
+}
+
+// sideSynced names one side and the revision its agent reported applied.
+type sideSynced struct {
+	key      sideKey
+	revision uint64
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +313,9 @@ type spWorker struct {
 	tdRefs    map[uint64]model.TdRef
 	fanWanted bool
 	idleCnt   int
+	// held is the cntlr half of a fan-out RW14's sides-first barrier is
+	// holding back; nil when nothing is held.
+	held *cntlrHold
 	// confRefusal memoizes the last stored-conf error the fan-out and the
 	// reaction pass each refused on, so a steady bad conf costs one Error
 	// record rather than one per tick.
@@ -359,12 +383,16 @@ func (w *spWorker) stop() {
 
 // run is the coordinator's loop (RW14, RW20). Unlike a per-object loop it
 // issues no RPC of its own: it fans out on every desired change, applies the
-// children's reports, and ticks once per cntlr_interval for the idle-child
-// re-resolution and the reaction pass (AR1).
+// children's reports — the sides' among them release the cntlr half a fan-out
+// holds back, as does that hold's own timer — and ticks once per
+// cntlr_interval for the idle-child re-resolution and the reaction pass (AR1).
 func (w *spWorker) run() {
 	defer close(w.done)
 	slog.InfoContext(w.ctx, msgRevisionWorkerStarted, w.attrs()...)
 	defer func() {
+		if w.held != nil {
+			w.held.timer.stop()
+		}
 		w.stopChildren()
 		// The stop ctx is done by now; the record still has to come out.
 		slog.InfoContext(
@@ -390,6 +418,11 @@ func (w *spWorker) run() {
 			w.fanOut()
 		case rep := <-w.reportCh:
 			w.handleReports(rep)
+		case <-w.heldC():
+			// RW14: the sides-first barrier's bound — one cntlr_interval
+			// after the cntlrs were first held, they go without waiting for
+			// the sides that have not reported.
+			w.expireHold(newTraceCtx(w.ctx, w.seed))
 		case <-w.drainCh:
 			// The drains' self-tick (SPD6, CLD12): one more pass, which
 			// re-derives the next step from what the last one left (SPD8 for
@@ -899,8 +932,12 @@ func (w *spWorker) buildCntlrPlans(
 			// its local chunk files for a later rebuild, while a deleting one
 			// must lose them — and the cn agent's removed-clone retire path
 			// drops them precisely when the clone id is absent from the plan.
-			// The bitmap pusher runs no fetches for an excluded clone, so no
-			// drain/push race exists either.
+			// The primary's child is handed this exclusion when the RW14
+			// sides-first hold the latch's fan-out lands in releases the
+			// cntlrs, and no push of the clone is submitted from then on.
+			// Until then it drives the pre-latch plan and can still push
+			// from it while a drain batch deletes chunk keys; a push that
+			// finds its chunk gone ends there, harmlessly (CLD5, BM6).
 			continue
 		}
 		clones = append(clones, clone)
@@ -969,9 +1006,116 @@ func (w *spWorker) buildCntlrPlans(
 	}
 }
 
+// cntlrHold is the cntlr half of a fan-out waiting for its sides (RW14): the
+// plans the cntlr children are to be handed, the revision every side child
+// must report applied first, and the timer that bounds the wait.
+type cntlrHold struct {
+	revision uint64
+	plans    map[uint64]*cntlrPlan
+	timer    *timerHandle
+}
+
+// holdCntlrs is RW14's sides-first barrier: the cntlr children are handed the
+// fan-out's requests only once every side child has reported its revision
+// applied, or one cntlr_interval after they were first held, whichever comes
+// first. A fan-out that finds a hold pending replaces its plans and keeps its
+// deadline, so a stream of bumps cannot hold the cntlrs past the bound. The
+// cntlr children a plan no longer names were stopped by the diff already.
+func (w *spWorker) holdCntlrs(plans map[uint64]*cntlrPlan) {
+	if w.held == nil {
+		w.held = &cntlrHold{timer: w.deps.clk.newTimer(w.tickPeriod())}
+	}
+	w.held.revision = w.desired.revision
+	w.held.plans = plans
+}
+
+// heldC is the barrier's timer, or nil — a channel that never fires — when
+// nothing is held.
+func (w *spWorker) heldC() <-chan time.Time {
+	if w.held == nil {
+		return nil
+	}
+	return w.held.timer.C
+}
+
+// releaseSynced releases the held cntlr half once every side child reports
+// the held revision applied.
+func (w *spWorker) releaseSynced() {
+	if w.held == nil {
+		return
+	}
+	for _, child := range w.sides {
+		if child.synced < w.held.revision {
+			return
+		}
+	}
+	w.releaseCntlrs()
+}
+
+// expireHold is the barrier's bound: one cntlr_interval after the cntlrs were
+// first held they go, whatever the sides reported, and the record counts the
+// side children that had not reported the revision.
+func (w *spWorker) expireHold(ctx context.Context) {
+	if w.held == nil {
+		return
+	}
+	unsynced := 0
+	for _, child := range w.sides {
+		if child.synced < w.held.revision {
+			unsynced++
+		}
+	}
+	slog.InfoContext(ctx, msgSpSidesUnsynced,
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+		slog.Uint64("revision", w.held.revision),
+		slog.Int("side_cnt", unsynced),
+	)
+	w.releaseCntlrs()
+}
+
+// releaseCntlrs is the cntlr half of RW14's child diff, which the barrier
+// deferred: every running cntlr child receives its new request as a desired
+// change (RW6), and every new one is started.
+func (w *spWorker) releaseCntlrs() {
+	held := w.held
+	w.held = nil
+	held.timer.stop()
+	for cntlrId, next := range held.plans {
+		if child, ok := w.cntlrs[cntlrId]; ok {
+			child.plan = next
+			child.driver.install(next)
+			child.handle.update(desiredState{
+				revision: next.req.GetRevision(),
+				handle:   next.addr,
+			})
+			continue
+		}
+		w.cntlrs[cntlrId] = w.startCntlrChild(next)
+	}
+}
+
+// recordsLegRows is HL2's "only the primary's leg rows are recorded", judged
+// by the plan the coordinator last decided for the cntlr: the held one while
+// RW14's barrier holds the cntlrs, else the one its child was handed. A
+// primary that a held plan demotes still runs the primary shape until the
+// release, over legs the sides have already reloaded onto dm-error, so its
+// rows describe that fence, not the legs. The reports travel over a buffered
+// channel, so rows it built before the release can be read after it, when its
+// child already holds the standby plan: they are dropped the same way.
+func (w *spWorker) recordsLegRows(cntlrId uint64) bool {
+	if w.held != nil {
+		next, ok := w.held.plans[cntlrId]
+		return ok && next.primary
+	}
+	child, ok := w.cntlrs[cntlrId]
+	return ok && child.plan.primary
+}
+
 // applyPlan is RW14's child diff: new => start; gone => stop (RW11); a child
 // whose ENDPOINT changed is restarted at the new one; every remaining child
-// receives its new request as a desired change (RW6, immediate syncup).
+// receives its new request as a desired change (RW6, immediate syncup) — a
+// side at once, a cntlr once the sides hold the revision (holdCntlrs).
 //
 // A re-resolution tick can also change a request without changing the SpRev
 // revision — a cntlr whose CnConf finally appeared changes every side's
@@ -1002,6 +1146,9 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 	}
 	stopSpChildren(stops)
 
+	// Held before any side is handed its request, so the bound runs from the
+	// fan-out and no side's Syncup* is ahead of the hold.
+	w.holdCntlrs(plan.cntlrs)
 	for key, next := range plan.sides {
 		if child, ok := w.sides[key]; ok {
 			child.plan = next
@@ -1014,18 +1161,9 @@ func (w *spWorker) applyPlan(plan *spPlan) {
 		}
 		w.sides[key] = w.startSideChild(next)
 	}
-	for cntlrId, next := range plan.cntlrs {
-		if child, ok := w.cntlrs[cntlrId]; ok {
-			child.plan = next
-			child.driver.install(next)
-			child.handle.update(desiredState{
-				revision: next.req.GetRevision(),
-				handle:   next.addr,
-			})
-			continue
-		}
-		w.cntlrs[cntlrId] = w.startCntlrChild(next)
-	}
+	// A re-fan whose sides all hold the revision already — a re-resolution
+	// tick's, say — releases the cntlrs here and now.
+	w.releaseSynced()
 
 	w.legSlice = plan.legSlice
 	w.tdRefs = plan.tdRefs
@@ -1181,7 +1319,10 @@ func (w *spWorker) logUnresolved(
 // handleReports drains everything the children reported and applies it. The
 // drain is RW18's collection window: several sides reported within one round
 // share one FlipProvisioned STM, and every td completed by the replies of that
-// moment shares one FlipCreated.
+// moment shares one FlipCreated. A side's synced revision goes to RW14's
+// barrier, which the last side to report releases ahead of those STMs, and a
+// cntlr's leg rows are recorded only while it is the primary of the plan the
+// coordinator last decided (recordsLegRows).
 func (w *spWorker) handleReports(first spReport) {
 	ctx := newTraceCtx(w.ctx, w.seed)
 	reports := []spReport{first}
@@ -1199,8 +1340,10 @@ func (w *spWorker) handleReports(first spReport) {
 	var tds []model.TdRef
 	seenTd := make(map[uint64]bool)
 	for _, rep := range reports {
-		for _, row := range rep.legRows {
-			w.observeLeg(ctx, row)
+		if w.recordsLegRows(rep.cntlrId) {
+			for _, row := range rep.legRows {
+				w.observeLeg(ctx, row)
+			}
 		}
 		if ref := rep.provisioned; ref != nil {
 			key := sideKey{legId: ref.LegId, sideId: ref.SideId}
@@ -1219,7 +1362,14 @@ func (w *spWorker) handleReports(first spReport) {
 			seenTd[tdId] = true
 			tds = append(tds, ref)
 		}
+		if synced := rep.synced; synced != nil {
+			child, ok := w.sides[synced.key]
+			if ok && synced.revision > child.synced {
+				child.synced = synced.revision
+			}
+		}
 	}
+	w.releaseSynced()
 	w.applyProvisionedFlip(ctx, sides)
 	w.applyCreatedFlip(ctx, tds)
 }
@@ -1438,6 +1588,9 @@ type sideDriver struct {
 	plan   *sidePlan
 	health *healthMonitor
 	pusher *bmPusher
+	// synced is the last revision reportSynced handed the coordinator, so a
+	// standing reply does not report every round.
+	synced uint64
 }
 
 // storeInfo remembers the latest SideInfo (HL5); info returns it. A Check
@@ -1655,13 +1808,14 @@ func (d *sideDriver) diffBitmap(
 }
 
 // observe folds one CheckSide/SyncupSide reply into the side's health (HL2,
-// HL4) and the RW18 flip report. A failed push is not re-armed here: it is
-// logged and left to the next Syncup* reply, which re-plans the diff from the
-// agent's own acknowledged set.
+// HL4), the RW18 flip report and RW14's barrier. A failed push is not re-armed
+// here: it is logged and left to the next Syncup* reply, which re-plans the
+// diff from the agent's own acknowledged set.
 func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	obs, res := sideObservation(r.code, d.info())
 	d.health.observe(ctx, obs, res)
 	d.reportProvisioned(ctx, r, d.current())
+	d.reportSynced(ctx, r)
 }
 
 // reportProvisioned is RW18: a side whose request carried provisioned == false
@@ -1689,6 +1843,22 @@ func (d *sideDriver) reportProvisioned(
 	}
 	ref := plan.ref
 	d.send(ctx, spReport{provisioned: &ref})
+}
+
+// reportSynced hands the coordinator the revision this side's agent reports
+// applied, once per revision: RW14's barrier holds the cntlrs until every
+// side has. Any accepted reply counts, a Check round's as much as a
+// SyncupSide's, because an agent that already holds the revision — after a
+// handoff, say — is sent no Syncup* at all (RW4 step 5).
+func (d *sideDriver) reportSynced(ctx context.Context, r *replyState) {
+	if !accepted(r.code) || r.revision <= d.synced {
+		return
+	}
+	d.synced = r.revision
+	d.send(ctx, spReport{synced: &sideSynced{
+		key:      sideKey{legId: d.ptr.GetLegId(), sideId: d.ptr.GetSideId()},
+		revision: r.revision,
+	}})
 }
 
 // send hands one report to the coordinator. It blocks only until the child is
@@ -2096,7 +2266,10 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		// td. A leftover reply is accepted and evaluated like code 0.
 		return
 	}
-	rep := spReport{createdTdIds: completedTds(info, plan.sliceIds)}
+	rep := spReport{
+		cntlrId:      d.ptr.GetCntlrId(),
+		createdTdIds: completedTds(info, plan.sliceIds),
+	}
 	if plan.primary {
 		rep.legRows = d.legRows(info)
 	} else {

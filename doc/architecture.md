@@ -1681,7 +1681,9 @@ which surfaces as `ABORTED` like any other agent RPC failure (§5.9).
 every RPC short). Typical latency is one fan-out — the `SpRev` bump of
 `CreateThinDevice` sends `SyncupCntlr` to the primary, whose reply already reports
 every slice `OK` in the common case, so the flip lands in the same round; worst
-case is one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7).
+case is one `health_check_conf.cntlr_interval` later through `CheckCntlr` (§9.7),
+and up to one more while a side of the SP has not accepted the bump (§10.3's sides
+first).
 
 *Interaction with `SpLevel` and provisioning.* At an `sp_level` that suppresses
 pools the thin rows read `RES_STATUS_MISSING` / `"sp_level"` (`cnagent.md` CN19),
@@ -2830,7 +2832,15 @@ value `revision` + `sp_name` (the `SpConf` key suffix — no `sp_id_to_name` loo
 on this path). On a bump: load the SP (SpConf, cntlrs,
 slices, tds, subsystems, clones, xfers, migrs, bitmaps) and fan out `SyncupSide` to
 **every side** of the SP and `SyncupCntlr` to **every cntlr**, with the new revision —
-each request always carries the full desired state (§9.1). Resolve each side's DN and
+each request always carries the full desired state (§9.1). **Sides first**
+(`dnv-worker.md` RW14): the cntlrs' requests — a failover's demotion as much as its
+promotion (§11.1) — are held until every side the worker drives has reported the new
+revision applied (an idle side is not waited for), or for one `cntlr_interval` at most
+when a side does not accept it: a side on a dead disk node — a leg AR8 parked there
+keeps one, so every hold of that SP lasts the whole interval until the disk node returns
+or the leg is deleted — or a new side its disk node refuses until the dn role's
+`SyncupDn` has introduced it. The order mitigates three races and is no correctness
+dependency ([D16]). Resolve each side's DN and
 each cntlr's CN by reading `DnConf`/`CnConf` at the record's endpoint
 (`Side.addr_port` / `Cntlr.addr_port` — those keys are endpoint-addressed, §5.3):
 that yields the `dn_id`/`cn_id` the `Syncup*` requests and the
@@ -3024,8 +3034,9 @@ everything it has seen):
 1. Make sure all groups are available (§11.1.1). A group whose member is not yet
    available is retried by the agent (`cnagent.md` CN10) until it is; the worker is
    not involved (*amended 2026-09-26*, the failover ping-pong: the unordered fan-out
-   of [D16] regularly lands this `SyncupCntlr` before the sides' ANA flips have
-   reached the new primary, and nothing re-sent it).
+   of [D16] regularly landed this `SyncupCntlr` before the sides' ANA flips had
+   reached the new primary, and nothing re-sent it; §10.3's sides-first order makes
+   that rarer, not impossible).
 2. Create the pools, thin volumes and raid0 devices (§3.3 steps 3-5).
 3. Reload every td's `CnNsDevName` from `CnErrorName` onto its raid0 (or dm-clone,
    for an in-flight clone — after the §11.5 recovery if the clone state was lost).
@@ -3058,7 +3069,15 @@ Its md arrays then fail, and the errors nvmet returns on the
 still-`optimized` path are target-internal (DNR), not path errors — host
 multipath does **not** retry them on the new primary's path, so applications
 can see IO errors until the old primary reconnects to the CP and applies its
-demotion, or is stopped. Accepted for v1 and recorded in [D16].
+demotion, or is stopped. Since §10.3's sides-first order (*amended 2026-09-28*), a
+CP-reachable old primary that is still serving goes through the same state: its
+demoting `SyncupCntlr` is held until the sides, whose converge of the failover
+fences it, have reported that revision applied, so host IO on its path fails from
+the fence until it has applied **old_primary** step 1 above: the hold — about the
+sides' round trip, and up to one `cntlr_interval` while a side does not report
+(`dnv-worker.md` RW14) — then that request's delivery, its wait for the cntlr's
+object lock (`cnagent.md` CN1) and its converge up to step 1. Accepted for v1 and
+recorded in [D16].
 
 #### 11.1.1 "Make sure all groups are available"
 
@@ -4020,19 +4039,31 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   one queued `SyncupDn` writer would freeze the whole DN agent. Two things this finally
   funds honestly: §11.1.1's `--assume-clean` and the fresh-thin-pool metadata assumption.
 * **[D16] Failover fencing has no epoch; safety = per-side atomic flip + md
-  arbitration.** A failover's only cross-node coordination is the revisioned,
-  unordered fan-out of §10.3. Correctness rests on two things (§11.1.1): each
+  arbitration.** A failover's only cross-node coordination is the revisioned
+  fan-out of §10.3, unordered among the sides. Its sides-first order — the
+  cntlrs' requests held until every side the worker drives has reported the
+  revision applied, for one `cntlr_interval` at most — mitigates three races:
+  a promotion outrunning the sides' ANA flips, a cntlr's connect outrunning a
+  new side's export, and a leg removal's disconnect on a CN overlapping the
+  disk node's unlink of that side's export. It is no correctness dependency:
+  at the bound the cntlrs go whether every side has reported or not, and
+  nothing below relies on it. Correctness rests on two things (§11.1.1): each
   DN converges its side's old-primary→dm-error and new-primary→side-device
   reloads in one pass, so one leg never has two writers; and mdadm's assembly
   rules arbitrate across legs — a stale leg whose superblock claims a clean
   full array will not start degraded alone, and event counts plus resync
   direction repair divergence once both legs return. md behavior is therefore
   a load-bearing dependency, pinned by the integration suite. The accepted
-  cost is the alive-but-CP-partitioned old primary of §11.1: fenced at the
+  cost is an old primary that is alive but not yet demoted: fenced at the
   DNs but still advertising `optimized`, it returns DNR internal errors that
-  host multipath does not fail over from, so applications can see EIO until
-  it re-syncs or is stopped. A v2 that wants to close both edges adds a
-  fencing epoch checked on the data path (NVMe reservations, or a
+  host multipath does not fail over from, so applications can see EIO — at a
+  failover of a primary still serving, until it applies its demotion, which
+  waits in the sides-first hold with the other cntlrs' requests (the hold
+  lasts about the sides' round trip, up to one `cntlr_interval` while a side
+  does not report, and the demotion's delivery and its converge up to the
+  ANA move come on top), and, for the CP-partitioned old primary of §11.1,
+  until it re-syncs or is stopped. A v2 that wants to close both edges adds
+  a fencing epoch checked on the data path (NVMe reservations, or a
   per-revision gate at the side exports) — not more ordering in the worker,
   which cannot reach a partitioned node anyway.
 * **[D10] Id-keyed revision keys.** `DnRev`/`CnRev`/`SpRev` are keyed by

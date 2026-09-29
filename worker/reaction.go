@@ -660,14 +660,25 @@ func failoverEligible(cntlr *pb.Cntlr) bool {
 // primaryInfo is the latest CntlrInfo the PRIMARY cntlr's child reported
 // (AR1). AR6 reads the pool usage out of it and AR8 the spare readiness; a
 // cntlr whose child has not reported yet — or that has no child at all,
-// because its CN could not be resolved (RW14) — yields nil, and both
-// reactions then wait rather than guess.
+// because its CN could not be resolved or RW14's sides-first hold has not
+// started it yet, or whose child still drives the standby plan because that
+// hold has not handed it the promotion yet — yields nil, and both reactions
+// then wait rather than guess.
+//
+// The plan test keeps a held promotion out of the pass. The snapshot the pass
+// loads names the new primary as soon as the failover commits, while that
+// cntlr's child drives its standby plan until RW14's release, and a standby's
+// leg row is transport liveness and ana_state, not the §3.6 block probe AR8
+// step 1 reads as a spare's readiness. The test is on the plan the child
+// drives, not on its info: from the hand-over until the reply to the
+// promotion, the info is still the standby's last report — the promotion's
+// own round trip, as it was before the hold.
 //
 // It is a snapshot, not the live message: the child keeps folding replies into
 // its info on its own goroutine while the pass runs on the coordinator's.
 func (w *spWorker) primaryInfo(cntlrId uint64) *pb.CntlrInfo {
 	child, ok := w.cntlrs[cntlrId]
-	if !ok || child.driver == nil {
+	if !ok || child.driver == nil || child.plan == nil || !child.plan.primary {
 		return nil
 	}
 	return child.driver.infoSnapshot()
@@ -720,8 +731,10 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	// AR5 has two triggers. A `disabled` primary is one in its own right
 	// (architecture.md §8.6: "disabling the current primary triggers the
 	// §10.4 primary re-election") and fires immediately — disabling is
-	// explicit operator intent and the disabled primary has already stopped
-	// serving — so no threshold is waited out. Only an enabled primary has
+	// explicit operator intent, and the disabled primary has normally stopped
+	// serving by then (its disable request is handed over one RW14 sides-first
+	// hold after the bump; a pass inside that hold fails it over before it
+	// has) — so no threshold is waited out. Only an enabled primary has
 	// to have been unhealthy for a threshold: primary_unhealthy, or, while it
 	// is settling, the longer of that and cntlr_unhealthy (below). The
 	// candidate rule is unchanged (failoverEligible): a disabled cntlr is

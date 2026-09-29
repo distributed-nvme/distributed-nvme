@@ -2941,13 +2941,14 @@ case_redund() {
 
 	stage lateflip "a promotion that outruns the sides' flip completes on the retry"
 	# CN12 as amended 2026-09-26, link 1 of the failover ping-pong: a
-	# failover fans SyncupCntlr and the sides' SyncupSide out unordered
-	# ([D16]), so a promoted standby can read its legs before any side has
-	# flipped. Every path is then live but still non-optimized, no leg is
-	# available, and both groups report "no available leg". Nothing re-drives
-	# that converge — the worker re-syncs on a revision or a reply code, never
-	# on a row — so the agent's CN10 retry, registered for the late members,
-	# must finish it. This stage promotes CN1 BEFORE it flips any side, then
+	# failover's SyncupCntlr waits for the sides' SyncupSide answers, but one
+	# cntlr_interval at most ([D16]), so a promoted standby can still read its
+	# legs before any side has flipped. Every path is then live but still
+	# non-optimized, no leg is available, and both groups report "no available
+	# leg". Nothing re-drives that converge — the worker re-syncs on a
+	# revision or a reply code, never on a row — so the agent's CN10 retry,
+	# registered for the late members, must finish it. This stage promotes
+	# CN1 BEFORE it flips any side, then
 	# flips them all: the arrays must be assembled by a retry attempt, under a
 	# trace id of its own, and CN1 must see no second SyncupCntlr. CN1
 	# assembles from the members' superblocks, where the data array's DN1

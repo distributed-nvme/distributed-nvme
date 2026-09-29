@@ -1975,6 +1975,579 @@ func TestSpFanOutWaitsForItsRevision(t *testing.T) {
 	}
 }
 
+// TestSidesAreSyncedBeforeCntlrs checks RW14's sides-first order: every
+// SyncupSide at a revision is answered before any SyncupCntlr at that revision
+// is sent, which mitigates the races between a cntlr's converge and its
+// sides' ([D16]). The fake clock never moves here, so the barrier's timer is
+// never what releases the cntlrs: the sides' reports are.
+//
+// At the start's fan-out every child is new, and dn3 already holds N, as after
+// a handoff: it answers its first Check at N and is sent no SyncupSide at all,
+// so that Check reply has to count, or the cntlrs would wait out the timer. At
+// the bump every child is kept, and dn1 holds its answer back: the cntlrs must
+// wait for it, and go as soon as it comes.
+func TestSidesAreSyncedBeforeCntlrs(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	const bump = testSpRev + 1
+	// One counter stamps every SyncupSide as it is answered and every
+	// SyncupCntlr as it arrives, so their order is total across the agents.
+	// Both maps are revision -> side_id / cntlr_id -> stamps.
+	var (
+		mu     sync.Mutex
+		seq    int64
+		sides  = make(map[uint64]map[uint64][]int64)
+		cntlrs = make(map[uint64]map[uint64][]int64)
+	)
+	stamp := func(byRev map[uint64]map[uint64][]int64, rev, id uint64) {
+		mu.Lock()
+		defer mu.Unlock()
+		seq++
+		if byRev[rev] == nil {
+			byRev[rev] = make(map[uint64][]int64)
+		}
+		byRev[rev][id] = append(byRev[rev][id], seq)
+	}
+	count := func(byRev map[uint64]map[uint64][]int64, rev uint64) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(byRev[rev])
+	}
+	h.sides[spDnD].checkReply = func(*pb.CheckSideRequest) *pb.CheckSideReply {
+		return &pb.CheckSideReply{Revision: testSpRev}
+	}
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	for addr, stub := range h.sides {
+		held := addr == spDnB
+		stub.syncupReply = func(req *pb.SyncupSideRequest) *pb.SyncupSideReply {
+			if held && req.GetRevision() == bump {
+				<-gate
+			}
+			stamp(sides, req.GetRevision(), req.GetSidePointer().GetSideId())
+			return &pb.SyncupSideReply{Revision: req.GetRevision()}
+		}
+	}
+	for _, stub := range h.cntlrs {
+		stub.syncupReply = func(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrReply {
+			stamp(cntlrs, req.GetRevision(), req.GetCntlrPointer().GetCntlrId())
+			return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+		}
+	}
+	w := h.start()
+	// Registered after start, so it runs before the coordinator's stop, which
+	// would otherwise wait for the held SyncupSide to time out.
+	t.Cleanup(release)
+
+	waitFor(t, "the cntlrs synced at N", func() bool {
+		return count(cntlrs, testSpRev) == 3
+	})
+	next := spFixture()
+	next.SpRevision = bump
+	h.ops.setState(next)
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "four sides answered at N+1, the fifth held", func() bool {
+		held := false
+		for _, req := range h.sides[spDnB].syncups() {
+			held = held || req.GetRevision() == bump
+		}
+		return held && count(sides, bump) == 4
+	})
+	// The window in which a cntlr would be sent the bump without the
+	// barrier: nothing but the held answer may end it.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && count(cntlrs, bump) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	waitFor(t, "every side and every cntlr synced at N+1", func() bool {
+		return count(sides, bump) == 5 && count(cntlrs, bump) == 3
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := len(sides[testSpRev][spSideSpare]); got != 0 {
+		t.Fatalf("the side whose agent held N already was sent %d SyncupSide "+
+			"at N, want none", got)
+	}
+	for _, want := range []struct {
+		rev   uint64
+		sides int
+	}{{bump, 5}, {testSpRev, 4}} {
+		if got := len(sides[want.rev]); got != want.sides {
+			t.Fatalf("%d sides synced at %d, want %d", got, want.rev, want.sides)
+		}
+		var lastSide uint64
+		var lastStamp int64
+		for _, sideId := range sortedKeys(sides[want.rev]) {
+			stamps := sides[want.rev][sideId]
+			if len(stamps) != 1 {
+				t.Fatalf("side %d was sent %d SyncupSide at %d, want 1",
+					sideId, len(stamps), want.rev)
+			}
+			if stamps[0] > lastStamp {
+				lastSide, lastStamp = sideId, stamps[0]
+			}
+		}
+		for _, cntlrId := range sortedKeys(cntlrs[want.rev]) {
+			stamps := cntlrs[want.rev][cntlrId]
+			if len(stamps) != 1 {
+				t.Fatalf("cntlr %d was sent %d SyncupCntlr at %d, want 1",
+					cntlrId, len(stamps), want.rev)
+			}
+			if stamps[0] < lastStamp {
+				t.Fatalf("SyncupCntlr at %d reached cntlr %d as event #%d, "+
+					"before side %d answered its SyncupSide at %d (#%d)",
+					want.rev, cntlrId, stamps[0], lastSide, want.rev, lastStamp)
+			}
+		}
+	}
+}
+
+// TestSidesFirstBarrierIsBounded checks RW14's bound on the sides-first order:
+// a side whose DN never answers holds the cntlrs for one cntlr_interval from
+// the fan-out that first held them, and no longer. A bump inside that
+// interval replaces what is held — the cntlrs are sent the newer revision
+// only, never the superseded one — without moving the deadline, so a stream
+// of bumps cannot hold them past one interval either. The side children keep
+// being driven meanwhile: the bump reaches every live DN at once.
+func TestSidesFirstBarrierIsBounded(t *testing.T) {
+	h := newSpHarness(t)
+	// The spare's DN is down: nothing answers at spDnD.
+	for _, addr := range []string{spDnA, spDnB, spDnC} {
+		h.addSide(addr)
+	}
+	for _, addr := range []string{spCnA, spCnB, spCnC} {
+		h.addCntlr(addr)
+	}
+	const bump = testSpRev + 1
+	// sent stamps every SyncupCntlr with its revision and the fake time since
+	// the start's fan-out, per cntlr_id.
+	type stamp struct {
+		revision uint64
+		after    time.Duration
+	}
+	start := h.clk.now()
+	var mu sync.Mutex
+	sent := make(map[uint64][]stamp)
+	for _, stub := range h.cntlrs {
+		stub.syncupReply = func(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrReply {
+			mu.Lock()
+			defer mu.Unlock()
+			id := req.GetCntlrPointer().GetCntlrId()
+			sent[id] = append(sent[id], stamp{
+				revision: req.GetRevision(),
+				after:    h.clk.now().Sub(start),
+			})
+			return &pb.SyncupCntlrReply{Revision: req.GetRevision()}
+		}
+	}
+	snapshot := func() map[uint64][]stamp {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[uint64][]stamp, len(sent))
+		for id, stamps := range sent {
+			out[id] = append([]stamp(nil), stamps...)
+		}
+		return out
+	}
+	// live reports whether the four sides whose DNs answer have each been
+	// sent a SyncupSide at rev; dn0 hosts two of them.
+	live := func(rev uint64) bool {
+		for addr, want := range map[string]int{spDnA: 2, spDnB: 1, spDnC: 1} {
+			got := 0
+			for _, req := range h.sides[addr].syncups() {
+				if req.GetRevision() == rev {
+					got++
+				}
+			}
+			if got < want {
+				return false
+			}
+		}
+		return true
+	}
+	w := h.start()
+	waitFor(t, "the live sides synced at N", func() bool {
+		return live(testSpRev)
+	})
+
+	// Three seconds into the hold, the bump: the live sides are sent it at
+	// once, and what the cntlrs are held with is replaced.
+	h.clk.advance(3 * time.Second)
+	next := spFixture()
+	next.SpRevision = bump
+	h.ops.setState(next)
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the live sides synced at N+1", func() bool {
+		return live(bump)
+	})
+
+	// A second short of one cntlr_interval since the start's fan-out.
+	h.clk.advance(roundInterval - 3*time.Second - time.Second)
+	// An early release needs real time to reach a cntlr: a stamp is taken on
+	// arrival, so without this window a release one second early would only
+	// be seen after the next jump, stamped at the full interval.
+	settle := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(settle) && len(snapshot()) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	early := snapshot()
+	for _, cntlrId := range sortedKeys(early) {
+		first := early[cntlrId][0]
+		t.Fatalf("cntlr %d was sent a SyncupCntlr at %d %v after the fan-out "+
+			"while the spare's DN never answered, want none before one "+
+			"cntlr_interval (%v)",
+			cntlrId, first.revision, first.after, roundInterval)
+	}
+	h.clk.advance(time.Second)
+	waitFor(t, "every cntlr synced", func() bool {
+		return len(snapshot()) == 3
+	})
+	got := snapshot()
+	for _, cntlrId := range sortedKeys(got) {
+		stamps := got[cntlrId]
+		if len(stamps) != 1 {
+			t.Fatalf("cntlr %d was sent %d SyncupCntlr, want exactly one",
+				cntlrId, len(stamps))
+		}
+		if stamps[0].revision != bump || stamps[0].after != roundInterval {
+			t.Fatalf("cntlr %d was sent a SyncupCntlr at %d %v after the "+
+				"fan-out, want it at %d %v after: held for one cntlr_interval "+
+				"and no longer, with the superseded revision never sent",
+				cntlrId, stamps[0].revision, stamps[0].after,
+				bump, roundInterval)
+		}
+	}
+	recs := h.logs.withMsg(msgSpSidesUnsynced)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want the one release by the timer",
+			len(recs), msgSpSidesUnsynced)
+	}
+	if rev, _ := recs[0]["revision"].(float64); uint64(rev) != bump {
+		t.Fatalf("released at revision %v, want %d", recs[0]["revision"], bump)
+	}
+	// A live side's report can still be on its way to the coordinator when
+	// the fake clock jumps, so the count is bounded below only: the spare's
+	// side is always in it.
+	if cnt, _ := recs[0]["side_cnt"].(float64); cnt < 1 {
+		t.Fatalf("side_cnt = %v, want at least the spare's side",
+			recs[0]["side_cnt"])
+	}
+}
+
+// TestSidesFirstDropsTheDemotedPrimarysLegRows checks HL2 under RW14's
+// sides-first hold. A failover's sides reload the old primary's per-CN
+// dm-linear onto dm-error while its demotion is still held, so its agent,
+// still running the primary shape, probes every leg through that fence and
+// reports it ERROR. Those rows describe the fence, not the legs, and the
+// loaded state already names the new primary: none may set a leg's err_epoch.
+//
+// The spare's DN never answers the failover, and the fake clock stops short
+// of the hold's deadline, so the old primary's next Check round falls inside
+// the hold. Once any side has been told the new primary, that round reports
+// the meta leg ERROR and, in the same reply, the open td complete: RW19 takes
+// a completed td from any cntlr, so the td's flip marks the moment the
+// coordinator has processed the report that carried the ERROR row.
+func TestSidesFirstDropsTheDemotedPrimarysLegRows(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	const bump = testSpRev + 1
+	// fenced is set once any side has been sent the new primary's cn_id:
+	// from then on the old primary's probes run into dm-error.
+	var fenced atomic.Bool
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	for addr, stub := range h.sides {
+		held := addr == spDnD
+		stub.syncupReply = func(req *pb.SyncupSideRequest) *pb.SyncupSideReply {
+			if req.GetSideConf().GetPrimaryCnId() == spCnIdB {
+				fenced.Store(true)
+			}
+			if held && req.GetRevision() == bump {
+				<-gate
+			}
+			return &pb.SyncupSideReply{Revision: req.GetRevision()}
+		}
+	}
+	checks := make(chan struct{}, 64)
+	h.cntlrs[spCnA].checkReply = func(
+		req *pb.CheckCntlrRequest,
+	) *pb.CheckCntlrReply {
+		info := &pb.CntlrInfo{
+			LegIdToLeg: map[uint64]*pb.ResInfo{
+				spLegMeta: resOk("leg-meta"),
+			},
+		}
+		if fenced.Load() {
+			info.LegIdToLeg[spLegMeta] = resErr("leg-meta", "probe io error")
+			info.TdIdToThinInfo = map[uint64]*pb.CntlrInfo_ThinInfo{
+				spTdOpen: {SliceIdToDmThin: map[uint64]*pb.ResInfo{
+					spSliceA: resOk("thin-a"),
+					spSliceB: resOk("thin-b"),
+				}},
+			}
+		}
+		select {
+		case checks <- struct{}{}:
+		default:
+		}
+		return &pb.CheckCntlrReply{Revision: req.GetRevision(), CntlrInfo: info}
+	}
+	w := h.start()
+	// Registered after start, so it runs before the coordinator's stop, which
+	// would otherwise wait for the held SyncupSide to time out.
+	t.Cleanup(release)
+
+	// The old primary's agent answers its first Check at N, so it is sent no
+	// SyncupCntlr; the other two are. All three running means the start's
+	// hold is over.
+	waitFor(t, "every cntlr driven at N", func() bool {
+		return len(checks) > 0 &&
+			len(h.cntlrs[spCnB].syncups()) > 0 &&
+			len(h.cntlrs[spCnC].syncups()) > 0
+	})
+	waitFor(t, "the old primary's leg recorded healthy", func() bool {
+		for _, write := range h.hw.all() {
+			if write.record == healthRecordLeg && write.objId == spLegMeta {
+				return true
+			}
+		}
+		return false
+	})
+	// Its next round must come due before the hold's deadline, so its round
+	// timer has to be armed now, at the start. A child holds one fake timer
+	// at a time — the round timer between rounds, the reply timer inside one,
+	// none in a Syncup* — and the coordinator its ticker, so nine waiters
+	// (five sides, three cntlrs, the ticker) with the old primary past its
+	// first reply mean that timer is armed.
+	waitFor(t, "every child between rounds", func() bool {
+		return h.clk.waiterCount() == 9
+	})
+
+	// Three seconds in, the failover: cntlr 2 is the primary from N+1 on.
+	h.clk.advance(3 * time.Second)
+	next := spFixture()
+	next.SpRevision = bump
+	next.Cntlrs[spCntlrPrimary].Primary = false
+	next.Cntlrs[spCntlrStandby].Primary = true
+	h.ops.setState(next)
+	w.update(desiredState{revision: bump, handle: testSpName})
+	waitFor(t, "the old primary fenced, the spare's side held", func() bool {
+		held := false
+		for _, req := range h.sides[spDnD].syncups() {
+			held = held || req.GetRevision() == bump
+		}
+		return held && fenced.Load()
+	})
+
+	// The cntlrs' next round, two seconds later: one cntlr_interval after
+	// their first, and three seconds before the hold's deadline.
+	h.clk.advance(2 * time.Second)
+	waitFor(t, "the old primary's fenced report processed", func() bool {
+		return len(h.ops.createdCalls()) > 0
+	})
+	for _, stub := range h.cntlrs {
+		for _, req := range stub.syncups() {
+			if req.GetRevision() == bump {
+				t.Fatalf("cntlr %d was sent the failover before the hold's "+
+					"deadline, with the spare's side silent",
+					req.GetCntlrPointer().GetCntlrId())
+			}
+		}
+	}
+	for _, write := range h.hw.all() {
+		if write.record == healthRecordLeg && write.epoch != 0 {
+			t.Fatalf("a leg row of the primary the held failover demotes "+
+				"was recorded: %+v", write)
+		}
+	}
+}
+
+// TestSpLegRowsFollowTheLatestPlan pins which cntlr's leg rows the coordinator
+// records (HL2): only a cntlr's that the plan it last decided makes the
+// primary — the held plan while RW14's barrier holds the cntlrs, else the plan
+// the child was handed. The reports travel over a buffered channel, so rows
+// the old primary built during a hold can be read after the release that
+// handed it the standby plan; they are dropped then as well.
+func TestSpLegRowsFollowTheLatestPlan(t *testing.T) {
+	type holdCase int
+	const (
+		noHold holdCase = iota
+		heldPrimary
+		heldStandby
+		heldAbsent
+	)
+	cases := []struct {
+		name string
+		// child is a running cntlr child, handed a primary plan or not.
+		child  bool
+		handed bool
+		held   holdCase
+		want   bool
+	}{
+		{"the handed primary, nothing held", true, true, noHold, true},
+		{"read after the release handed it the standby plan",
+			true, false, noHold, false},
+		{"its child stopped, nothing held", false, false, noHold, false},
+		{"a primary the held plan keeps", true, true, heldPrimary, true},
+		{"a primary the held plan demotes", true, true, heldStandby, false},
+		{"a primary the held plan no longer names, its child stopped",
+			false, false, heldAbsent, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captureLogs(t)
+			d := newTestDeps(
+				testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+			)
+			hw := &fakeHealthWriter{}
+			d.health = hw
+			w := spTestWorker(d)
+			w.legSlice[spLegMeta] = spSliceA
+			if tc.child {
+				w.cntlrs[spCntlrPrimary] = &cntlrChild{
+					plan: settlePlan(tc.handed, false),
+				}
+			}
+			if tc.held != noHold {
+				plans := make(map[uint64]*cntlrPlan)
+				if tc.held != heldAbsent {
+					plans[spCntlrPrimary] = settlePlan(tc.held == heldPrimary, false)
+				}
+				w.held = &cntlrHold{revision: testSpRev + 1, plans: plans}
+				// A side short of the held revision keeps the hold pending
+				// through handleReports' own release check.
+				key := sideKey{legId: spLegMeta, sideId: spSideMeta}
+				w.sides[key] = &sideChild{synced: testSpRev}
+			}
+			w.handleReports(spReport{
+				cntlrId: spCntlrPrimary,
+				legRows: []legRow{{
+					legId:   spLegMeta,
+					obs:     healthErrorRow,
+					resName: "leg-meta",
+				}},
+			})
+			recorded := false
+			for _, write := range hw.all() {
+				recorded = recorded || (write.record == healthRecordLeg &&
+					write.objId == spLegMeta && write.epoch != 0)
+			}
+			if recorded != tc.want {
+				t.Fatalf("the ERROR row set the leg's err_epoch: %v, want %v",
+					recorded, tc.want)
+			}
+		})
+	}
+}
+
+// TestSidesFirstIdleSidesHoldNothing checks RW14's "a side left idle is not
+// waited for, and with every side idle the cntlrs go at once": a standby whose
+// CnConf is absent leaves every side idle (RW15), and the resolved cntlrs are
+// driven with the fake clock never moving, so the barrier's timer cannot be
+// what releases them. No child exists yet to report, so only the fan-out's own
+// release can: the case fails without it.
+func TestSidesFirstIdleSidesHoldNothing(t *testing.T) {
+	h := newSpHarness(t)
+	h.addFixtureAgents()
+	state := spFixture()
+	delete(state.CnByAddr, spCnB)
+	h.ops.setState(state)
+	h.start()
+	waitFor(t, "the resolved cntlrs synced with every side idle", func() bool {
+		return len(h.cntlrs[spCnA].syncups()) > 0 &&
+			len(h.cntlrs[spCnC].syncups()) > 0
+	})
+	for _, addr := range []string{spDnA, spDnB, spDnC, spDnD} {
+		if n := len(h.sides[addr].syncups()); n != 0 {
+			t.Fatalf("%s was sent %d SyncupSide with the cntlr set unresolved",
+				addr, n)
+		}
+	}
+	if recs := h.logs.withMsg(msgSpSidesUnsynced); len(recs) != 0 {
+		t.Fatalf("%d %q records, want none", len(recs), msgSpSidesUnsynced)
+	}
+}
+
+// TestSidesFirstHeldPromotionHasNoPrimaryInfo checks AR1 under RW14's
+// sides-first hold. A failover's promotion is held with the other cntlrs'
+// requests, so the pass's snapshot already names the new primary while that
+// cntlr's child still drives the standby plan, and the child's info is a
+// standby's report: its leg rows are transport liveness and ana_state, not
+// the §3.6 block probe AR8 step 1 needs. Inside the hold the pass must read no
+// primary info, so AR8 waits for the spare rather than switching it in on the
+// standby's row; once the release has handed the child the primary plan, the
+// pass reads its info again and the spare is switched in.
+func TestSidesFirstHeldPromotionHasNoPrimaryInfo(t *testing.T) {
+	const spareLegId = uint64(700)
+	state := reactFixture(t)
+	state.Cntlrs[reactCntlrA].Primary = false
+	state.Cntlrs[reactCntlrB].Primary = true
+	h := newReactHarness(t, state)
+	h.legOf(reactDataLegA).ErrEpoch = h.ago(9000)
+	h.dataGrp().SpareLegList = append(h.dataGrp().SpareLegList, &pb.Leg{
+		LegId:  spareLegId,
+		LegIdx: 2,
+		SideList: []*pb.Side{{
+			SideId:      800,
+			AddrPort:    reactDnC,
+			Provisioned: true,
+		}},
+	})
+	h.dnCands(reactDnD)
+	spareOk := func() *pb.CntlrInfo {
+		return &pb.CntlrInfo{LegIdToLeg: map[uint64]*pb.ResInfo{
+			spareLegId: {ResName: "leg", Status: pb.ResStatus_RES_STATUS_OK},
+		}}
+	}
+	// The old primary still drives the primary plan, and the promoted
+	// standby's last report reads its live path to the spare OK.
+	demoted := &cntlrChild{
+		plan:   &cntlrPlan{cntlrId: reactCntlrA, primary: true},
+		driver: &cntlrDriver{lastInfo: &pb.CntlrInfo{}},
+	}
+	promoted := &cntlrChild{
+		plan:   &cntlrPlan{cntlrId: reactCntlrB},
+		driver: &cntlrDriver{lastInfo: spareOk()},
+	}
+	h.w.cntlrs[reactCntlrA] = demoted
+	h.w.cntlrs[reactCntlrB] = promoted
+	h.w.held = &cntlrHold{
+		revision: reactSpRevision + 1,
+		plans: map[uint64]*cntlrPlan{
+			reactCntlrA: {cntlrId: reactCntlrA},
+			reactCntlrB: {cntlrId: reactCntlrB, primary: true},
+		},
+	}
+
+	p := h.w.newPass(h.state, reactClusterConf())
+	if p.primaryId != reactCntlrB {
+		t.Fatalf("the pass's primary is cntlr %d, want %d", p.primaryId,
+			reactCntlrB)
+	}
+	if p.info != nil {
+		t.Fatalf("inside the hold the pass read cntlr %d's standby report "+
+			"as the primary's info: %v", reactCntlrB, p.info)
+	}
+	h.pass()
+	h.wantOps()
+	h.wantSkipped(reactionSpareSwitch, reasonSparePending)
+
+	// The release hands both children their new plans, and the promotion's
+	// reply reports the new primary's probe of the spare.
+	h.w.held = nil
+	demoted.plan = &cntlrPlan{cntlrId: reactCntlrA}
+	promoted.plan = &cntlrPlan{cntlrId: reactCntlrB, primary: true}
+	promoted.driver.lastInfo = spareOk()
+	h.pass()
+	calls := h.wantOps("switch_spare")
+	if calls[0].spareLegId != spareLegId ||
+		calls[0].targetLegId != reactDataLegA {
+		t.Fatalf("switch = %+v", calls[0])
+	}
+}
+
 // TestSpProvisionedFlipReported checks RW18 end to end: a side whose request
 // carried provisioned == false and whose agent reports zeroed == total > 0 is
 // reported to the coordinator, which runs the flip; a provisioned side and a
