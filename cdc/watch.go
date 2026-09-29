@@ -101,9 +101,11 @@ func (w *watcher) wait(ctx context.Context) bool {
 }
 
 // scan is WV1/WV2: range the whole discovery prefix, keep the owned entries,
-// install them and log `cdc scan complete`. The rescan DIFFS — replace runs
-// every change through the DS6 impact pass — so AENs are not lost across a
-// watch gap (WV4). It reports the revision the scan was served at.
+// install them and log `cdc scan complete`. The rescan DIFFS — replace
+// re-renders every active host against the new map and impacts, by the DS6
+// rule, the ones whose bytes moved from what the held state renders — so
+// AENs are not lost across a watch gap (WV4). It reports the revision the
+// scan was served at.
 func (w *watcher) scan(ctx context.Context, prefix string) (int64, bool) {
 	kvs, rev, err := w.deps.store.Range(ctx, prefix)
 	if err != nil {

@@ -689,7 +689,8 @@ func TestWatchRescanDiffsMissedChange(t *testing.T) {
 // once per Config.rescanInterval on the fake clock and never in a hot loop —
 // exactly one timer armed, exactly one Range per interval, none in between —
 // while the registry keeps serving the state it held when etcd went away, and
-// the recovery rescan diffs that held state through DS6.
+// the recovery rescan diffs against that held state, impacting the host by
+// the DS6 rule.
 func TestWatchRetriesFailedScan(t *testing.T) {
 	h := newWatchHarness(t, 0x0)
 	keyA := testKey(0x01, 0x1, 0xa)

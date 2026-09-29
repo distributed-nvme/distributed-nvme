@@ -153,6 +153,14 @@ func (f *vwFixture) view(hostNqn string) (uint64, uint64, []byte) {
 	return f.reg.snapshot(hostNqn)
 }
 
+// renders is how many host views the registry has rendered so far.
+func (f *vwFixture) renders() int {
+	f.t.Helper()
+	f.reg.mu.Lock()
+	defer f.reg.mu.Unlock()
+	return f.reg.renders
+}
+
 // ---------------------------------------------------------------------------
 // DS3 — skip and serve
 // ---------------------------------------------------------------------------
@@ -784,6 +792,159 @@ func TestRegistryGenCtrBumpsOnlyOnImpact(t *testing.T) {
 	}
 }
 
+// TestRegistryRendersAViewOnlyWhenItIsRead proves DS6's cost rule: an event
+// renders no view, however many hosts it impacts — it marks each impacted
+// host's view dirty, and its `view changed` record already carries the NUMREC
+// the view now has — and the host's next snapshot renders a dirty view once,
+// however many events moved it. A snapshot of a view nothing moved since its
+// last render renders nothing, and an event leaves the view of a host it did
+// not impact as it was rendered.
+func TestRegistryRendersAViewOnlyWhenItIsRead(t *testing.T) {
+	logs := captureLogs(t)
+	f := vwNew(t)
+	confA := tcpConf(vwAddr1, vwSvcId1)
+	confA2 := tcpConf(vwAddr1, vwSvcId2)
+	confB := tcpConf(vwAddr2, vwSvcId1)
+	hosts := []string{vwHost1, vwHost2, vwHost3}
+	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA))
+	for _, host := range hosts {
+		f.attach(host, 1)
+	}
+	base := f.renders()
+
+	// Three events on entries every host sees, each impacting all three
+	// hosts: A gains a second record, B appears, A goes. Not one view is
+	// rendered, and every host is still told, each time with the NUMREC its
+	// view then has.
+	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA, confA2))
+	f.put(vwKeyB, cdcEntry(vwNqnB, nil, confB))
+	f.del(vwKeyA)
+	if got := f.renders() - base; got != 0 {
+		t.Fatalf("three events rendered %d views, want 0", got)
+	}
+	wantNumRecs := []uint64{2, 3, 1}
+	for _, host := range hosts {
+		if got := f.pokes(host); got != 1 {
+			t.Errorf("%s: %d connections poked, want 1", host, got)
+		}
+		var numRecs []uint64
+		for _, rec := range logs.find(msgViewChanged) {
+			if rec["hostnqn"] == host {
+				numRec, _ := rec["numrec"].(uint64)
+				numRecs = append(numRecs, numRec)
+			}
+		}
+		if !slices.Equal(numRecs, wantNumRecs) {
+			t.Errorf("%s: %q numrecs %v, want %v",
+				host, msgViewChanged, numRecs, wantNumRecs)
+		}
+	}
+
+	// Host 1 reads: one render, of the current state.
+	genCtr, numRec, body := f.view(vwHost1)
+	if got := f.renders() - base; got != 1 {
+		t.Fatalf("host 1's read took the renders to %d, want 1", got)
+	}
+	if genCtr != 4 || numRec != 1 {
+		t.Errorf("host 1 = (%d, %d), want (4, 1)", genCtr, numRec)
+	}
+	if !bytes.Equal(body, vwRecord(t, vwNqnB, confB)) {
+		t.Error("host 1 was not served the current view")
+	}
+
+	// Reading again with nothing moved renders nothing.
+	f.view(vwHost1)
+	if got := f.renders() - base; got != 1 {
+		t.Fatalf("host 1's second read took the renders to %d, want 1", got)
+	}
+
+	// An entry only host 3 sees: host 1's view stays as it was rendered,
+	// and host 2's and host 3's dirty views are rendered once each, when
+	// read.
+	f.put(vwKeyE, cdcEntry(vwNqnE, []string{vwHost3}, confA))
+	f.view(vwHost1)
+	if got := f.renders() - base; got != 1 {
+		t.Fatalf("an event that did not impact host 1, and host 1's read, "+
+			"took the renders to %d, want 1", got)
+	}
+	want := map[string]struct {
+		genCtr uint64
+		body   []byte
+	}{
+		vwHost2: {genCtr: 4, body: vwRecord(t, vwNqnB, confB)},
+		vwHost3: {genCtr: 5, body: append(
+			vwRecord(t, vwNqnB, confB), vwRecord(t, vwNqnE, confA)...,
+		)},
+	}
+	for i, host := range []string{vwHost2, vwHost3} {
+		genCtr, numRec, body := f.view(host)
+		if got := f.renders() - base; got != 2+i {
+			t.Fatalf("%s's read took the renders to %d, want %d",
+				host, got, 2+i)
+		}
+		wantNumRec := uint64(len(want[host].body) / common.CdcDiscLogEntrySize)
+		if genCtr != want[host].genCtr || numRec != wantNumRec {
+			t.Errorf("%s = (%d, %d), want (%d, %d)",
+				host, genCtr, numRec, want[host].genCtr, wantNumRec)
+		}
+		if !bytes.Equal(body, want[host].body) {
+			t.Errorf("%s was not served the current view", host)
+		}
+	}
+}
+
+// BenchmarkViewEventFanout measures DS6's cost rule with 200 active hosts
+// that all see the same 2000 records (2000 KiB of view each) and a watch
+// event on an entry every one of them sees, the widest fan-out one event can
+// have. "event" is that event applied, which the watcher does holding the
+// registry lock, and delivered; "event+reads" adds the Get Log Page snapshot
+// every impacted host then takes, which is where a view's render is paid.
+func BenchmarkViewEventFanout(b *testing.B) {
+	const hostCnt = 200
+	const recordCnt = 2000
+	for _, bc := range []struct {
+		name  string
+		reads bool
+	}{
+		{name: "event"},
+		{name: "event+reads", reads: true},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			ctx := context.Background()
+			reg := newRegistry()
+			for i := 0; i < recordCnt; i++ {
+				reg.apply(ctx, vwKey(0x10, uint64(i), 1), stressEntry(i, nil))
+			}
+			hosts := make([]string, hostCnt)
+			for i := range hosts {
+				hosts[i] = fmt.Sprintf("%s%08x-0000-0000-0000-000000000000",
+					vwHostPrefix, i)
+				reg.attach(hosts[i], stubConn())
+			}
+			// The event flips the first entry's transport between two ports,
+			// neither of them its initial one, so every event moves every
+			// host's view.
+			k := vwKey(0x10, 0, 1)
+			const nqn = "nqn.2024-01.dnv:ss0"
+			flip := [2]*entry{
+				newEntry(cdcEntry(nqn, nil, tcpConf(vwAddr1, vwSvcId1))),
+				newEntry(cdcEntry(nqn, nil, tcpConf(vwAddr1, vwSvcId2))),
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				deliver(reg.apply(ctx, k, flip[i%2]))
+				if !bc.reads {
+					continue
+				}
+				for _, host := range hosts {
+					reg.snapshot(host)
+				}
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DS7 — host state lifecycle
 // ---------------------------------------------------------------------------
@@ -1053,18 +1214,78 @@ func TestRegistryReplaceLeavesUnimpactedHostsAlone(t *testing.T) {
 	}
 }
 
+// TestRegistryReplaceDiffsADirtyView proves the WV4 diff is against what the
+// held state renders, also for a host whose view an event left dirty (DS6):
+// host 1's view moves, and host 1 has not read it yet when a rescan brings
+// back exactly the record its body still holds, the one rendered before the
+// event. That is a second move, as the same two changes arriving as events
+// would be: GENCTR moves again, both connections are poked again, and the
+// rescanned record is served. The rescan renders the dirty view twice (the
+// held state, then the new map) and host 2's clean one once, and leaves host
+// 2 alone.
+func TestRegistryReplaceDiffsADirtyView(t *testing.T) {
+	f := vwNew(t)
+	confA := tcpConf(vwAddr1, vwSvcId1)
+	confA2 := tcpConf(vwAddr1, vwSvcId2)
+	confB := tcpConf(vwAddr2, vwSvcId1)
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1}, confA))
+	f.put(vwKeyB, cdcEntry(vwNqnB, []string{vwHost2}, confB))
+	f.attach(vwHost1, 2)
+	f.attach(vwHost2, 1)
+
+	f.put(vwKeyA, cdcEntry(vwNqnA, []string{vwHost1}, confA2))
+	if got := f.pokes(vwHost1); got != 2 {
+		t.Fatalf("the event poked %d connections, want 2", got)
+	}
+	base := f.renders()
+
+	ds := f.reg.replace(f.ctx, map[entryKey]*entry{
+		vwKeyA: newEntry(cdcEntry(vwNqnA, []string{vwHost1}, confA)),
+		vwKeyB: newEntry(cdcEntry(vwNqnB, []string{vwHost2}, confB)),
+	})
+	deliver(ds)
+	if got := f.renders() - base; got != 3 {
+		t.Errorf("the rescan rendered %d views, want 3", got)
+	}
+	if len(ds) != 2 {
+		t.Errorf("%d deliveries, want 2", len(ds))
+	}
+	for _, d := range ds {
+		if host := f.owner[d.c]; host != vwHost1 {
+			t.Errorf("the rescan delivered to %q, want host 1 only", host)
+		}
+	}
+	if got := f.pokes(vwHost1); got != 2 {
+		t.Errorf("host 1: the rescan poked %d connections, want 2", got)
+	}
+	genOne, numOne, bodyOne := f.view(vwHost1)
+	if genOne != 3 || numOne != 1 {
+		t.Errorf("host 1 = (%d, %d), want (3, 1)", genOne, numOne)
+	}
+	if !bytes.Equal(bodyOne, vwRecord(t, vwNqnA, confA)) {
+		t.Error("host 1 was not served the rescanned record")
+	}
+	if got := f.pokes(vwHost2); got != 0 {
+		t.Errorf("host 2: %d connections poked, want 0", got)
+	}
+	if genTwo, _, _ := f.view(vwHost2); genTwo != 1 {
+		t.Errorf("host 2: genctr = %d, want 1", genTwo)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DS9 — snapshot isolation
 // ---------------------------------------------------------------------------
 
 // TestSnapshotIsolation proves the DS9 snapshot promise: the
 // (genctr, records) a Get Log Page command took at receipt is not mutated by
-// a later apply, so a paged read stays self-consistent even while the watcher
-// works.
+// a later apply, nor by the render a later command's snapshot does (DS6), so
+// a paged read stays self-consistent even while the watcher works.
 //
-// The first change deliberately keeps the record COUNT the same: a view
-// re-rendered into the slice it already owns would scribble on exactly this
-// snapshot, and only an equal-length change catches that.
+// The first change deliberately keeps the record COUNT the same, and a second
+// command's snapshot renders it: a view re-rendered into the slice it already
+// owns would scribble on exactly this snapshot, and only an equal-length
+// change catches that.
 func TestSnapshotIsolation(t *testing.T) {
 	f := vwNew(t)
 	confA := tcpConf(vwAddr1, vwSvcId1)
@@ -1082,13 +1303,17 @@ func TestSnapshotIsolation(t *testing.T) {
 	keep := append([]byte(nil), body...)
 	firstPage := logPageBytes(genCtr, numRec, body, 0, 3072)
 
-	// An equal-length change, then a growing one, both while the command is
-	// still paging through the snapshot it took.
+	// An equal-length change and a second command's snapshot of it, then a
+	// growing change, all while the command is still paging through the
+	// snapshot it took.
 	f.put(vwKeyA, cdcEntry(vwNqnA, nil, confA2))
+	if midGen, _, _ := f.reg.snapshot(vwHost1); midGen != 2 {
+		t.Fatalf("the second command's snapshot genctr = %d, want 2", midGen)
+	}
 	f.put(vwKeyE, cdcEntry(vwNqnE, nil, confC))
 
 	if !bytes.Equal(body, keep) {
-		t.Error("a later apply mutated a taken snapshot's body")
+		t.Error("a later apply or render mutated a taken snapshot's body")
 	}
 	if genCtr != 1 || numRec != 2 {
 		t.Error("a later apply mutated a taken snapshot's counters")

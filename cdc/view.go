@@ -18,8 +18,9 @@ import (
 // the §4 serialization invariant — no served state is ever mutated
 // concurrently — expressed the way Go expresses it: the watcher goroutine
 // mutates the entries and runs the impact pass, the connection goroutines
-// attach and detach their host state under the same lock, and no reader ever
-// observes a half-applied change. Delivery is deliberately NOT done under the
+// attach and detach their host state and render the dirty views their
+// snapshots find (DS6), all under the same lock, and no reader ever observes
+// a half-applied change. Delivery is deliberately NOT done under the
 // lock — impact returns the list of connections to poke, deliver only sets
 // each connection's pending bit and wakes its AEN goroutine, and that
 // goroutine does the socket write, so a host that has stopped reading can
@@ -114,6 +115,16 @@ func (e *entry) visibleTo(hostNqn string) bool {
 	return ok
 }
 
+// contribution is what the entry puts into one host's view (DS5): its
+// rendered records and their count when it is visible to the host, nothing
+// when it is not.
+func (e *entry) contribution(hostNqn string) ([]byte, uint64) {
+	if !e.visibleTo(hostNqn) {
+		return nil, 0
+	}
+	return e.records, e.numRec
+}
+
 // sameAs reports whether two renderings of one key are indistinguishable to
 // every host: same rendered records AND same visibility. It is what makes a
 // re-put of an unchanged value a no-op.
@@ -149,7 +160,12 @@ type hostState struct {
 	genCtr  uint64
 	numRec  uint64
 	body    []byte
-	conns   map[*conn]struct{}
+	// dirty says body may no longer be what the held state renders: an
+	// event moved the view since its last render, and genCtr and numRec
+	// already say so (DS6). The host's next snapshot renders it, or a
+	// rescan does first (WV4).
+	dirty bool
+	conns map[*conn]struct{}
 }
 
 // delivery is one connection that must be told its view moved (DS6 -> NP11).
@@ -171,6 +187,9 @@ type registry struct {
 	entries map[entryKey]*entry
 	order   []entryKey
 	hosts   map[string]*hostState
+	// renders counts the views rendered, for the §8 tests: DS6's cost rule
+	// is stated in renders.
+	renders int
 }
 
 func newRegistry() *registry {
@@ -210,6 +229,7 @@ func (r *registry) removeOrder(k entryKey) {
 // renderLocked builds one host's view (DS5): the rendered records of its
 // visible owned entries, concatenated in the deterministic order.
 func (r *registry) renderLocked(hostNqn string) ([]byte, uint64) {
+	r.renders++
 	var body []byte
 	var numRec uint64
 	for _, k := range r.order {
@@ -223,9 +243,40 @@ func (r *registry) renderLocked(hostNqn string) ([]byte, uint64) {
 	return body, numRec
 }
 
+// freshenLocked renders a view an event left dirty (DS6), against the held
+// state.
+func (r *registry) freshenLocked(h *hostState) {
+	if !h.dirty {
+		return
+	}
+	h.body, h.numRec = r.renderLocked(h.hostNqn)
+	h.dirty = false
+}
+
+// impactLocked is what one impacted host gets (DS6): GENCTR moves, `view
+// changed` is logged, and each of its connections is owed a delivery, which
+// is appended to out.
+func impactLocked(
+	ctx context.Context,
+	h *hostState,
+	out []delivery,
+) []delivery {
+	h.genCtr++
+	slog.InfoContext(ctx, msgViewChanged,
+		slog.String("hostnqn", h.hostNqn),
+		slog.Uint64("genctr", h.genCtr),
+		slog.Uint64("numrec", h.numRec),
+	)
+	for c := range h.conns {
+		out = append(out, delivery{c: c, genCtr: h.genCtr})
+	}
+	return out
+}
+
 // refreshLocked re-renders the given host states and returns the deliveries
 // the ones that actually moved earn (DS6). A host whose rendered bytes are
-// unchanged gets nothing at all — not an AEN, and not a GENCTR bump.
+// unchanged gets nothing at all — not an AEN, and not a GENCTR bump. The
+// compare is against each host's body, so none of them may be dirty.
 func (r *registry) refreshLocked(
 	ctx context.Context,
 	cands []*hostState,
@@ -238,34 +289,22 @@ func (r *registry) refreshLocked(
 		}
 		h.body = body
 		h.numRec = numRec
-		h.genCtr++
-		slog.InfoContext(ctx, msgViewChanged,
-			slog.String("hostnqn", h.hostNqn),
-			slog.Uint64("genctr", h.genCtr),
-			slog.Uint64("numrec", h.numRec),
-		)
-		for c := range h.conns {
-			out = append(out, delivery{c: c, genCtr: h.genCtr})
-		}
+		out = impactLocked(ctx, h, out)
 	}
 	return out
 }
 
-// candidatesLocked are the active hosts one entry change can possibly matter
-// to (DS6): those the entry was visible to before, or is visible to after. A
-// host on neither side is skipped without so much as a render.
-func (r *registry) candidatesLocked(before *entry, after *entry) []*hostState {
-	var cands []*hostState
-	for _, h := range r.hosts {
-		if before.visibleTo(h.hostNqn) || after.visibleTo(h.hostNqn) {
-			cands = append(cands, h)
-		}
-	}
-	return cands
-}
-
 // apply folds one watched event into the served state and returns the
 // deliveries it caused (WV3 -> DS6). A nil after deletes the key.
+//
+// No view is rendered here. A view is its visible entries' records laid end
+// to end in the DS5 order, and the event changes one entry, whose place in
+// that order its key fixes: what comes before and after it in a host's view
+// stays as it was, so the view moves exactly when the entry's own
+// contribution to it does. Deciding that takes, per active host, the entry's
+// visibility on both sides and at most a compare of the entry's own records,
+// never of a whole view. An impacted host's NUMREC moves by the difference
+// and its view is marked dirty, for its next snapshot to render.
 func (r *registry) apply(
 	ctx context.Context,
 	k entryKey,
@@ -275,10 +314,9 @@ func (r *registry) apply(
 	defer r.mu.Unlock()
 	before := r.entries[k]
 	if before.sameAs(after) {
-		// A put that changes nothing visible: no render, no GENCTR move.
+		// A put that changes nothing visible: no impact, no GENCTR move.
 		return nil
 	}
-	cands := r.candidatesLocked(before, after)
 	switch {
 	case after == nil:
 		delete(r.entries, k)
@@ -289,7 +327,20 @@ func (r *registry) apply(
 	default:
 		r.entries[k] = after
 	}
-	return r.refreshLocked(ctx, cands)
+	var out []delivery
+	for _, h := range r.hosts {
+		was, wasNum := before.contribution(h.hostNqn)
+		is, isNum := after.contribution(h.hostNqn)
+		if bytes.Equal(was, is) {
+			// Not visible on either side, or the same records on both:
+			// the host's view is byte for byte what it was.
+			continue
+		}
+		h.numRec = h.numRec - wasNum + isNum
+		h.dirty = true
+		out = impactLocked(ctx, h, out)
+	}
+	return out
 }
 
 // replace installs a whole new owned entry map, as a (re)scan produces it, and
@@ -299,13 +350,18 @@ func (r *registry) apply(
 // would name: the answer is identical (DS6 impact is defined on rendered
 // bytes), and a rescan is rare enough that the cost is irrelevant next to
 // getting the "changes missed across the watch gap still AEN" rule exactly
-// right.
+// right. The diff is against what the held state renders, which a dirty
+// view's body may no longer say, so a dirty view is first rendered against
+// the held state.
 func (r *registry) replace(
 	ctx context.Context,
 	entries map[entryKey]*entry,
 ) []delivery {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, h := range r.hosts {
+		r.freshenLocked(h)
+	}
 	r.entries = entries
 	r.order = make([]entryKey, 0, len(entries))
 	for k := range entries {
@@ -356,9 +412,11 @@ func (r *registry) detach(hostNqn string, c *conn) {
 }
 
 // snapshot takes the (genctr, records) pair one Get Log Page command serves
-// (DS9). The returned body is never mutated afterwards — refreshLocked
-// replaces the slice rather than writing into it — so the command can page
-// through it without holding anything.
+// (DS9), rendering the view first when an event left it dirty (DS6): a render
+// is paid here, once per read of a moved view, not once per event. The
+// returned body is never mutated afterwards — a render builds a new slice
+// rather than writing into the old one — so the command can page through it
+// without holding anything.
 func (r *registry) snapshot(hostNqn string) (uint64, uint64, []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -370,6 +428,7 @@ func (r *registry) snapshot(hostNqn string) (uint64, uint64, []byte) {
 		// tracks".
 		return 0, 0, nil
 	}
+	r.freshenLocked(h)
 	return h.genCtr, h.numRec, h.body
 }
 

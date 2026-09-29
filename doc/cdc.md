@@ -219,16 +219,30 @@ and its key schema already exist.
 * **DS5 — view.** A host's view is the rendered records of its visible owned
   entries in the deterministic order (`cluster_id`, `shard_code`, `sp_id`,
   `ss_id`, tr-conf index). NUMREC = record count; GENCTR from DS7. Views are
-  materialized only for **active** hosts (DS7) and re-rendered on events.
+  materialized only for **active** hosts (DS7), and re-rendered when read
+  after an event moved them (DS6) or by a rescan (WV4).
 * **DS6 — impact.** Applying one watched event (put or delete of an owned
   entry, WV3): for every active host where the entry was visible before
-  **or** is visible after, re-render the view; if the rendered content
-  differs, that host is *impacted*: `genctr++`, log `view changed`, set the
-  pending bit on **each** of the host's connections, and attempt delivery on
-  each (NP11). Not visible on either side ⇒ nothing, including no GENCTR
-  move — note `allowed_hosts` edits that keep the host's membership do not
-  change rendered bytes and therefore do not impact it (the suite asserts
-  this, §9.12).
+  **or** is visible after, if its view's rendered content differs, that
+  host is *impacted*: `genctr++`, log `view changed`, set the pending bit on
+  **each** of the host's connections, and attempt delivery on each (NP11).
+  Not visible on either side ⇒ nothing, including no GENCTR move — note
+  `allowed_hosts` edits that keep the host's membership do not change
+  rendered bytes and therefore do not impact it (the suite asserts this,
+  §9.12). The decision renders no view: the event changes one entry, whose
+  place in the DS5 order its key fixes, so a view differs exactly when the
+  records the entry puts into it (all of its records for a host it is
+  visible to, none for one it is not) differ between before and after. An
+  impacted host's view is marked *dirty* instead of re-rendered — its NUMREC
+  moves by the difference, so `view changed` carries the new count — and is
+  rendered by the host's next snapshot (DS9), or by a rescan that comes
+  first (WV4). **Cost:** under the registry mutex an event costs, per
+  active host, a visibility test on each side and at most one compare of
+  the entry's own records, plus a `view changed` record per impacted host,
+  and never a render. A render copies every record the host sees (1 KiB
+  each), under the same mutex; a view is rendered once per read that finds
+  it moved, however many events moved it since its last render
+  (`BenchmarkViewEventFanout`, §8).
 * **DS7 — host state.** Created at a hostnqn's first live connection
   (GENCTR = 1, no pending, view rendered), shared by all its connections on
   this instance, dropped at its last disconnect. Hosts without a connection
@@ -245,11 +259,12 @@ and its key schema already exist.
   command receipt; reads beyond the end return zeros.
 * **DS10 — staleness.** Through etcd outages dnv-cdc keeps serving its last
   known state (WV5): stale-but-consistent beats unavailable for an advisory
-  service. Recovery rescans diff against the held state through the same
-  DS6 path, so changes missed during the outage still AEN. A last known
-  state exists only once the first scan has landed: before it the registry
-  is empty, which is not the same as "no subsystems", so nothing is served
-  from it — the accept loop starts only after that scan (CM4).
+  service. Recovery rescans diff against the held state — each re-renders
+  every active host and impacts, by the DS6 rule, the hosts whose view moved
+  (WV4) — so changes missed during the outage still AEN. A last known state
+  exists only once the first scan has landed: before it the registry is
+  empty, which is not the same as "no subsystems", so nothing is served from
+  it — the accept loop starts only after that scan (CM4).
 * **DS11 — restart.** Nothing persists. Every connection drops; hosts
   reconnect, host states are rebuilt, GENCTRs restart (§0 #6).
 
@@ -261,8 +276,9 @@ The `shard.go` skeleton of `dnv-worker.md` §7, minus per-key workers: one
 goroutine owns the entry map, and the view registry is serialized under one
 mutex — entry mutations and impact fan-out run on the watcher goroutine,
 while host-state attach/detach (a connection materializing or dropping its
-view) runs on connection goroutines under that same mutex (`view.go` states
-the rule as Go expresses it). The serialization invariant is what matters:
+view) and the render of a dirty view (a Get Log Page's snapshot, DS6) run on
+connection goroutines under that same mutex (`view.go` states the rule as Go
+expresses it). The serialization invariant is what matters:
 no served state is ever mutated concurrently.
 
 * **WV1 — scan then watch.** `Range(CdcEntryPrefix())` → build the owned
@@ -279,7 +295,9 @@ no served state is ever mutated concurrently.
   logs `cdc watch restarting` and returns to WV1. The rescan does not walk
   the two maps key by key: it installs the freshly scanned map wholesale and
   re-renders **every** active host (`cdc/view.go`, `registry.replace`),
-  impacting the hosts whose rendered bytes moved. The impacted set is
+  impacting the hosts whose rendered bytes moved. The diff is against what
+  the held state renders, so a view an event left dirty (DS6) is rendered
+  against the held state first, then against the new map. The impacted set is
   exactly the one a per-key diff would name — DS6 impact is defined on
   rendered content, not on which key changed — so changes missed across the
   gap still AEN. GENCTR is where the two differ: one `replace` bumps an
@@ -287,7 +305,8 @@ no served state is ever mutated concurrently.
   N watch events would have bumped it N times. Hosts compare GENCTR between
   reads rather than counting its steps (§0 #6), so that difference is not
   one they can act on, and a rescan is rare enough that re-rendering every
-  host costs far less than getting a per-key diff subtly wrong.
+  host (a dirty one twice) costs far less than getting a per-key diff
+  subtly wrong.
 * **WV5 — scan failure ⇒ retry.** A failed Range retries every
   `DefaultCdcRescanInterval` seconds; the server keeps answering from the
   held state meanwhile (DS10) — or, while the first scan has not landed,
@@ -524,8 +543,14 @@ exercises either.
   ordering; DS6 impact rows: gain, loss by `allowed_hosts` removal, tr-conf
   change on a visible entry, invisible-both-sides no-op, the
   membership-preserving `allowed_hosts` edit no-op, empty-`allowed_hosts`
-  fan-out; GENCTR bumps exactly on impact; DS9 paging math (aligned and
-  odd offsets, zero fill past the end) and snapshot isolation.
+  fan-out; GENCTR bumps exactly on impact; DS6's cost counted in renders:
+  an event renders no view yet its `view changed` carries the new NUMREC, a
+  moved view is rendered once, by its host's next snapshot, however many
+  events moved it, and a rescan renders a dirty view against the held state
+  before it diffs; `BenchmarkViewEventFanout` times one event, and the reads
+  it causes, at 200 hosts × 2000 records; DS9 paging math (aligned and odd
+  offsets, zero fill past the end) and snapshot isolation, against a later
+  event and a later snapshot's render alike.
 * **watch.go** — scan builds the owned map (foreign shards silently out,
   malformed logged out); put/delete events flow to impacts; the WV4 rescan's
   wholesale replace still emits impacts for changes missed across the gap;
