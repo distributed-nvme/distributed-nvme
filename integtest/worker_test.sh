@@ -301,26 +301,58 @@ recsr() { # <path> <filter> [jq args…]  — raw output
 	rlog "$path" | "$JQ" -rR "$@" "fromjson? // empty | $filter"
 }
 
-count_recs() { recs "$@" | wc -l | tr -d ' \n'; }
+# count_recs prints how many records of one log match a filter — or NOTHING,
+# with a non-zero status, when the read failed (the ssh, the cat or the jq).
+# `wc -l` counts an empty stream as 0 either way, so a failure printed as a
+# count would read as "no such record" and satisfy every negative built on
+# it; pipefail carries rlog's and jq's status through the pipe, and it is
+# checked here. A `die` here would end only the caller's `$( )` subshell,
+# so the callers check the status instead: every comparison goes through
+# count_ge/count_gt below, a count sampled into a variable in a case's body
+# stops the run under `set -e`, and one compared in place (`assert_eq
+# "$(reqs …)" 0`) fails on its empty output.
+count_recs() { # <path> <filter> [jq args…]
+	local n
+	n=$(recs "$@" | wc -l | tr -d ' \n') || return 1
+	printf '%s' "$n"
+}
 
 # wcount counts matching records over EVERY worker log that holds records for
 # the current case (the logs are truncated by each fleet restart, so this is
-# per-case by construction).
+# per-case by construction). A failed read of any one log fails the count.
 wcount() { # <filter> [jq args…]
 	local filter=$1
 	shift
 	local w total=0 n
 	for w in "${SEEN_WORKERS[@]}"; do
-		n=$(count_recs "$(wpath "$w")" "$filter" "$@")
+		n=$(count_recs "$(wpath "$w")" "$filter" "$@") || return 1
 		total=$((total + n))
 	done
 	printf '%s' "$total"
 }
 
+# count_ge / count_gt compare what one of the counters prints with a bound,
+# and are where a FAILED read becomes a failure: the counter's status is
+# checked in the predicate's own shell, and a failure dies there. Compared as
+# it stands, the empty output would merely be "false" — which wait_until polls
+# through, but which assert_none_for takes for "nothing happened", passing a
+# negative on a dropped ssh. Every predicate that compares such a count is
+# built on them.
+count_cmp() { # <-ge|-gt> <n> <counter> [args…]
+	local op=$1 n=$2 cnt
+	shift 2
+	cnt=$("$@") ||
+		die "a count could not be read ($(printf '%s' "$*" | tr -s ' \t\n' ' ')): a read that failed is not a count of 0"
+	[ "$cnt" "$op" "$n" ]
+}
+
+count_ge() { count_cmp -ge "$@"; }
+count_gt() { count_cmp -gt "$@"; }
+
 wcount_ge() { # <n> <filter> [jq args…]
 	local n=$1
 	shift
-	[ "$(wcount "$@")" -ge "$n" ]
+	count_ge "$n" wcount "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -496,19 +528,19 @@ replies() { # <agent> <method> [<filter over .data>] [jq args…]
 req_ge() { # <n> <agent> <method> [<filter>] [jq args…]
 	local n=$1
 	shift
-	[ "$(reqs "$@")" -ge "$n" ]
+	count_ge "$n" reqs "$@"
 }
 
 reply_ge() { # <n> <agent> <method> [<filter>] [jq args…]
 	local n=$1
 	shift
-	[ "$(replies "$@")" -ge "$n" ]
+	count_ge "$n" replies "$@"
 }
 
 reply_gt() { # <n> <agent> <method> [<filter>] [jq args…]
 	local n=$1
 	shift
-	[ "$(replies "$@")" -gt "$n" ]
+	count_gt "$n" replies "$@"
 }
 
 # stream_closes counts `grpc server stream close` records for one method.
@@ -534,6 +566,9 @@ ts_epoch() { date -u -d "$1" +%s.%N; }
 # timestamp comes from. A "within N s of the trigger" assertion anchors on this
 # and on the records' own stamps, never on the driver's wall clock and never on
 # the moment a POLL happened to observe something (each poll costs a full ssh).
+# Take it in a statement of its own (`t=$(server_now)`), never inside another
+# command's argument: there a failed read is an empty stamp, which ts_epoch
+# turns into midnight today, and nothing stops the run.
 server_now() { sshw "date -u +%Y-%m-%dT%H:%M:%S.%NZ"; }
 
 ts_delta() { # <later> <earlier> -> seconds, one decimal
@@ -711,8 +746,7 @@ wait_registered() { # <w>
 # captured just before the signal — for the same reason wait_registered is
 # baseline-relative.
 worker_stopped_since() { # <w> <records held before the signal>
-	[ "$(count_recs "$(wpath "$1")" \
-		'select(.msg == "worker stopping")')" -gt "$2" ]
+	count_gt "$2" count_recs "$(wpath "$1")" 'select(.msg == "worker stopping")'
 }
 
 # stop_worker is the CM5 graceful stop: SIGTERM, then wait for BOTH the
@@ -1212,6 +1246,17 @@ td_created() { # <sp> <td name>
 	[ "$got" = true ]
 }
 
+# td_created_or_die is td_created for a NEGATIVE. td_created answers "not
+# created" to a failed read, which keeps a wait_until polling but would let
+# assert_none_for pass on a dropped ssh; this one dies on it, as count_cmp
+# does for the counts.
+td_created_or_die() { # <sp> <td name>
+	local got
+	got=$(ctl get-td --sp "$1" --name "$2" | "$JQ" -r .created) ||
+		die "td $2 of sp $1 could not be read: a read that failed is not \"not created\""
+	[ "$got" = true ]
+}
+
 # first_side_provisioned prints the `provisioned` of the FIRST SyncupSide
 # request one fake ever received for a side. It is the race-free evidence that
 # etcd held provisioned = false when the side was created ([D15]): the side
@@ -1235,7 +1280,7 @@ reaction_skip_cnt() { # <kind> <reason>
 }
 
 reaction_ge() { # <n> <kind>
-	[ "$(reaction_cnt "$2")" -ge "$1" ]
+	count_ge "$1" reaction_cnt "$2"
 }
 
 # reaction_epochs prints the server-clock epoch of every `reaction applied`
@@ -1271,12 +1316,19 @@ flip_records() { # <sp_id>
 		recsr "$(wpath "$w")" \
 			'select(.msg == "flip applied") | select(.kind == "provisioned")
 			 | select((.sp_id | tostring) == $sp)
-			 | "\(.side_id) \(.revision)"' --arg sp "$1"
+			 | "\(.side_id) \(.revision)"' --arg sp "$1" || return 1
 	done
 }
 
+# flip_record_cnt counts flip_records' lines, and fails when any read did.
+flip_record_cnt() { # <sp_id>
+	local out
+	out=$(flip_records "$1") || return 1
+	printf '%s' "$out" | grep -c . || true
+}
+
 flip_records_gt() { # <n> <sp_id>
-	[ "$(flip_records "$2" | wc -l | tr -d ' ')" -gt "$1" ]
+	count_gt "$1" flip_record_cnt "$2"
 }
 
 health_changed_cnt() { # <record> <reason>
@@ -1338,18 +1390,21 @@ case_smoke() {
 	wait_until "$WAIT_SHORT" "cn1: SyncupCn revision 1" \
 		req_ge 1 cn1 SyncupCn '(.revision | tostring) == "1"'
 
-	local before after tail_true
+	local before after show_infos tail_true
 	before=$(reqs dn0 CheckDn)
 	log "  counting CheckDn rounds on dn0 over 5s (now $before)"
 	sleep 5
 	after=$(reqs dn0 CheckDn)
 	assert_ge $((after - before)) 3 "dn0: CheckDn rounds in 5s"
 	# RW4 sends show_info = false; only a first round may ask for the info.
-	tail_true=$(recsr "$(apath dn0)" \
+	# The read is a statement of its own, so a failed read stops the run:
+	# piped straight into `grep -c … || true`, it would count 0 and pass
+	# this negative on a dropped ssh.
+	show_infos=$(recsr "$(apath dn0)" \
 		'select(.msg == "grpc server recv")
 		 | select((.method | split("/") | last) == "CheckDn")
-		 | select(has("data")) | (.data.show_info // false) | tostring' |
-		tail -n +2 | grep -c true || true)
+		 | select(has("data")) | (.data.show_info // false) | tostring')
+	tail_true=$(printf '%s\n' "$show_infos" | tail -n +2 | grep -c true || true)
 	assert_eq "$tail_true" 0 "dn0: CheckDn rounds after the first with show_info true"
 
 	stage 3 "put-sp sp0 with a meta and a data group, a td and a subsystem"
@@ -1423,7 +1478,7 @@ case_smoke() {
 {"objects": {"cntlr 1:1": {"thin_ok": true, "thin_missing_slices": [1]}}}
 EOF
 	assert_none_for 3 "td0 created while a slice is missing from thin_info" \
-		td_created sp0 td0
+		td_created_or_die sp0 td0
 	rev=$(sp_rev 1)
 	set_behavior cn0 <<'EOF'
 {"objects": {"cntlr 1:1": {"thin_ok": true}}}
@@ -1588,8 +1643,8 @@ EOF
 	stage 6 "bump-rev on an SP re-fans every child"
 	# dn 1's rev key is gone and its DnConf still owns dn1's endpoint, so the
 	# SP's side goes on a THIRD node: dn 3 at the fake dn2, which keeps the
-	# §14.5 dn_id <-> fake mapping intact (the doc's "put-dn 2 dn2" would
-	# either break that mapping or overwrite the DnConf at dn1's endpoint).
+	# §14.5 dn_id <-> fake mapping intact (a DN 2 would have to go either on
+	# dn2, breaking that mapping, or on dn1, whose endpoint dn 1's DnConf owns).
 	put_dn 3 8
 	ctl put-sp --name sp0 --id 1 --shard 00 --slots 0,1 --level 0 \
 		--thresholds "$THRESHOLDS" --lwm "$LWM" \
@@ -1614,19 +1669,19 @@ EOF
 }
 
 stream_closed_since() { # <agent> <method> <count before>
-	[ "$(stream_closes "$1" "$2")" -gt "$3" ]
+	count_gt "$3" stream_closes "$1" "$2"
 }
 
 wcount_gt() { # <n> <filter> [jq args…]
 	local n=$1
 	shift
-	[ "$(wcount "$@")" -gt "$n" ]
+	count_gt "$n" wcount "$@"
 }
 
 reqs_gt() { # <n> <agent> <method> [<filter>] [jq args…]
 	local n=$1
 	shift
-	[ "$(reqs "$@")" -gt "$n" ]
+	count_gt "$n" reqs "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -1906,34 +1961,23 @@ EOF
 	# below, so the two directions of the same branch are both pinned.
 	assert_eq "$("$JQ" -r 'has("bm_cnt")' <<<"$clone_put")" false \
 		"a clone put-bitmap must emit no bm_cnt"
-	# The migration chunks go in LAST, and only once the fixture has gone
-	# quiet: step 2 asserts that the chunk-1 push carries EXACTLY the SpRev of
-	# the put that introduced it (BM3's `revision = synced`), which holds only
-	# while nothing else bumps SpRev behind it. put-migr appends the
-	# destination side S3 with `provisioned = false`, so RW18 flips it a round
-	# later; that is waited out and SpRev is then required to sit still. The
-	# clone pushes cannot be in flight here — the lever above holds them.
-	wait_until "$WAIT_SYNCUP" "the migration's destination side provisioned" \
-		all_provisioned sp0 1
+	# The lever must really hold the clone pushes back: seeded in this order
+	# and pushed as they appeared, the three chunks would reach cn0 in the
+	# lexicographic order too, and stage 3's order check would pass on the
+	# WRITE order.
 	assert_none_for 3 "clone pushes while cn0's applied set is forced" \
 		reqs_gt 0 cn0 PushCloneBitmap
-	local quiet_rev
-	quiet_rev=$(sp_rev 1)
-	assert_none_for 2 "an SpRev bump before the migration chunks are written" \
-		sp_rev_changed 1 "$quiet_rev"
 	local migr0_out
 	migr0_out=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 0 --hex aa00ff)
 	# A MIGRATION's parent does carry the counter, and put-bitmap raises it
 	# (§14.8) — the other direction of the clone assert above.
 	assert_eq "$("$JQ" -r '.bm_cnt' <<<"$migr0_out")" 1 \
 		"a migr put-bitmap emits the parent's raised bm_cnt"
-	local migr1_rev
-	migr1_rev=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee |
-		"$JQ" -r .sp_rev)
+	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 1 --hex bb11ee
 	# --src-slice-idx addresses a CLONE chunk; a migration's chunks name no
 	# source slice, so a non-zero one with --kind migr is a driver usage
 	# error (§14.8) and writes nothing — it is refused on the flags alone,
-	# before etcd is opened, so it cannot disturb the SpRev step 2 pins.
+	# before etcd is opened, so it cannot disturb the pushes step 2 counts.
 	if ctl put-bitmap --sp sp0 --kind migr --name m0 --src-slice-idx 1 \
 		--bm-idx 9 --hex ff >/dev/null 2>&1; then
 		die "put-bitmap --kind migr --src-slice-idx 1: want a usage error"
@@ -1949,19 +1993,16 @@ EOF
 	t_reply0=$(push_reply_time dn1 PushMigrBitmap 1)
 	ts_ge "$(ts_epoch "$t_req1")" "$(ts_epoch "$t_reply0")" ||
 		die "chunk 1's request ($t_req1) is not after chunk 0's reply ($t_reply0): BM3 wants one push in flight"
-	# BM3's `revision = synced`. Step 1 quiesced the fixture before writing
-	# the two migration chunks and nothing bumps SpRev behind them, so the
-	# chunk-1 push must carry EXACTLY the revision of the put that made the
-	# chunk visible — the equality step 4 pins for chunk 2, here too.
-	local rev push1_rev
-	push1_rev=$(last_req dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "1"' |
-		"$JQ" -r '.revision')
-	assert_eq "$push1_rev" "$migr1_rev" \
-		"the chunk-1 push carries the SpRev of the put that introduced it"
+	# BM3: a push carries no revision at all — the field is gone from both
+	# push requests (pb/schema.proto) — so no request dn1 has logged may hold
+	# one. The two waits above are what make this count of 0 evidence: both
+	# chunks' requests are in the log.
+	assert_eq "$(reqs dn1 PushMigrBitmap 'has("revision")')" 0 \
+		"dn1: migration push requests carrying a revision field (BM3: none)"
 	# `bm_info` rides ONLY on a SyncupSideReply (the proto gives CheckSideReply
-	# no such field), and BM6 asks for a re-sync only when a push FAILS — so
-	# after a clean push sequence nothing bumps SpRev and no further SyncupSide
-	# is issued. Force one re-fan, which is what makes BM2's diff observable:
+	# no such field), and a push arms no re-sync of its own (BM6) — so after a
+	# clean push sequence nothing bumps SpRev and no further SyncupSide is
+	# issued. Force one re-fan, which is what makes BM2's diff observable:
 	# the reply must now report the COMPLETE set [0,1], and the worker must
 	# push nothing more because the diff is empty. That is a stronger check
 	# than merely seeing the set appear on its own.
@@ -2031,16 +2072,13 @@ EOF
 	assert_none_for 3 "further clone pushes once the set matches" \
 		reqs_gt "$clone_pushes" cn0 PushCloneBitmap
 
-	stage 4 "a new migration chunk is pushed exactly once, at that revision"
+	stage 4 "a new migration chunk is pushed exactly once, carrying no revision"
 	pushes=$(reqs dn1 PushMigrBitmap)
-	local migr2_rev
-	migr2_rev=$(ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 2 --hex cc22dd |
-		"$JQ" -r .sp_rev)
+	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 2 --hex cc22dd
 	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 2" \
 		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "2"'
-	assert_eq "$(last_req dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "2"' |
-		"$JQ" -r '.revision')" "$migr2_rev" \
-		"the chunk-2 push carries the SpRev of the put that introduced it"
+	assert_eq "$(reqs dn1 PushMigrBitmap 'has("revision")')" 0 \
+		"dn1: migration push requests carrying a revision field, chunk 2's included (BM3: none)"
 	sleep 3
 	assert_eq "$(reqs dn1 PushMigrBitmap)" $((pushes + 1)) \
 		"dn1: exactly one new migration push"
@@ -2066,11 +2104,12 @@ EOF
 	assert_eq "$(reqs cn0 PushCloneBitmap "$(clone_pair 1 0)")" "$clone10" \
 		"cn0: chunk (1,0) — the same bm_idx on another slice — was not re-pushed"
 
-	stage 6 "a rejected push arms an equal-revision re-sync (BM6)"
+	stage 6 "a rejected SyncupSide is re-driven by the CheckSide reply's code (RW4 step 5)"
 	set_behavior dn1 <<'EOF'
 {"objects": {"side 1:1:3": {"reply_code": 1}}}
 EOF
 	ctl put-bitmap --sp sp0 --kind migr --name m0 --bm-idx 3 --hex dd33cc
+	local rev
 	rev=$(sp_rev 1)
 	wait_until "$WAIT_SHORT" "dn1: two syncup results at the same revision" \
 		wcount_ge 2 'select(.msg == "syncup result")
@@ -2079,8 +2118,8 @@ EOF
 	clear_behavior dn1
 	wait_until "$WAIT_SHORT" "dn1: PushMigrBitmap bm_idx 3" \
 		req_ge 1 dn1 PushMigrBitmap '(.bm_idx // 0 | tostring) == "3"'
-	# As in step 2: bm_info rides only on a SyncupSideReply, and once the
-	# re-pushed chunk lands nothing bumps SpRev, so the worker correctly issues
+	# As in step 2: bm_info rides only on a SyncupSideReply, and once chunk
+	# 3's push lands nothing bumps SpRev, so the worker correctly issues
 	# no further SyncupSide. Force one re-fan to make the completed set
 	# observable, and require that the now-empty diff pushes nothing more.
 	local pushes_after_retry
@@ -2138,7 +2177,7 @@ settled_cnt() { # <sp id> <cntlr id>
 }
 
 settled_ge() { # <sp id> <cntlr id> <n>
-	[ "$(settled_cnt "$1" "$2")" -ge "$3" ]
+	count_ge "$3" settled_cnt "$1" "$2"
 }
 
 # cntlr_gone is §14.11 D3's "C1 gone from cntlr_id_list". It reads the LIST
@@ -2284,14 +2323,30 @@ EOF
 {"objects": {"cntlr 1:1": {"thin_ok": true, "rows": {"ss_id_to_subsystem.$((SS_ID))":
   {"status": "ERROR", "details": "subsystem gone"}}}}}
 EOF
-	# The negative runs from the instant the row lands: err_epoch is stamped a
-	# round later and the threshold is 2s after THAT, so one second in there
-	# can be no failover yet, with room to spare.
-	assert_none_for 1 "a failover before the 2s primary threshold" \
-		reaction_ge $((failovers + 1)) failover
 	wait_until "$WAIT_SHORT" "C1 err_epoch set" cntlr_epoch_set sp0 1
+	# A failed read meets that wait too (an empty read is not 0), so this
+	# read can be the first one that answered, before the worker stamped the
+	# epoch. A 0 would put the threshold below in 1970 and pass any failover,
+	# so it dies here like a read that is not a number at all.
+	local c1_epoch
+	c1_epoch=$(cntlr_field sp0 1 err_epoch)
+	case "$c1_epoch" in
+	'' | 0 | *[!0-9]*) die "C1's err_epoch read back as '$c1_epoch'" ;;
+	esac
 	wait_until $((2 + WAIT_SHORT)) "reaction applied kind=failover" \
 		reaction_ge $((failovers + 1)) failover
+	# "Not before the 2s primary threshold" is asserted against the epoch the
+	# worker itself stamped, not by a live negative: err_epoch is whole
+	# seconds, so a correct failover can land as early as 1s after the row
+	# does, while a worker that ignored the threshold would fail over only a
+	# round or two after it — no window timed from the row's landing tells
+	# the two apart. AR5 fires once now - err_epoch >= primary_unhealthy on
+	# the server's clock, the clock the record's own stamp comes from.
+	local failover_at
+	failover_at=$(reaction_epochs failover | sed -n "$((failovers + 1))p")
+	[ -n "$failover_at" ] || die "no failover record to time"
+	ts_ge "$failover_at" $((c1_epoch + 2)) ||
+		die "the failover ran at $failover_at, before C1's err_epoch $c1_epoch + the 2s primary threshold"
 	wait_until "$WAIT_SHORT" "C2 primary true" cntlr_is_primary sp0 2
 	# C1 is no longer primary. The replacement above hangs off the same
 	# err_epoch, cntlr_unhealthy - primary_unhealthy = 2 s after the
@@ -2569,6 +2624,11 @@ EOF
 	wait_until "$WAIT_SHORT" "L3 err_epoch set" leg_epoch_set sp0 1 3
 	local l3_epoch
 	l3_epoch=$(leg_epoch sp0 1 3)
+	# As in step 2: the wait is met by a failed read too, and an unstamped 0
+	# would pass the compare below for any spare_create.
+	case "$l3_epoch" in
+	'' | 0 | *[!0-9]*) die "L3's err_epoch read back as '$l3_epoch'" ;;
+	esac
 	# The live negative is short BECAUSE it is timed from when this poll saw
 	# the epoch, not from when the worker stamped it: every poll costs a full
 	# ssh (SSH_OPTS has no ControlMaster), so the observation can lag a second
@@ -2608,8 +2668,14 @@ EOF
 		"the spare sits at L3's POSITION in leg_list (MD6 SwitchSpareLeg swaps list slots; the stored leg_idx is assigned at creation and is deliberately not renumbered)"
 	assert_eq "$(spare_legs sp0 1 data 2 | awk '{ print $1 }')" 3 \
 		"L3 is parked in spare_leg_list"
-	assert_ne "$(spare_legs sp0 1 data 2 | awk '{ print $4 }')" 0 \
-		"the parked L3 keeps its err_epoch"
+	# Sampled into a variable, so that a failed read stops the run under
+	# `set -e`: compared in place, the substitution is an argument, whose
+	# status nothing checks, and the empty output of a dropped ssh is not 0.
+	local l3_parked_epoch
+	l3_parked_epoch=$(spare_legs sp0 1 data 2 | awk '$1 == 3 { print $4 }')
+	case "$l3_parked_epoch" in
+	'' | 0 | *[!0-9]*) die "the parked L3 keeps its err_epoch: got '$l3_parked_epoch'" ;;
+	esac
 	wait_until "$WAIT_SHORT" "SyncupSide for the spare's side carries primary_cn_id" \
 		req_ge 1 "$spare_dir" SyncupSide \
 		'(.side_pointer.side_id | tostring) == $s and (.side_conf.primary_cn_id | tostring) != "0"' \
@@ -2898,6 +2964,11 @@ EOF
 	wait_until "$WAIT_SHORT" "sp2 C2 err_epoch set by its first primary-shape reply" \
 		cntlr_epoch_set sp2 2
 	c2_epoch=$(cntlr_field sp2 2 err_epoch)
+	# As in step 2: the wait is met by a failed read too, and an unstamped 0
+	# would skip the hold below and pass 12.5's compare for any fail-back.
+	case "$c2_epoch" in
+	'' | 0 | *[!0-9]*) die "sp2 C2's err_epoch read back as '$c2_epoch'" ;;
+	esac
 	clear_behavior cn0
 	wait_until "$WAIT_SHORT" "sp2 C1 err_epoch cleared" cntlr_epoch_clear sp2 1
 
@@ -2907,7 +2978,14 @@ EOF
 	# until 2 s short of C2's err_epoch + 15 s on the SERVER's clock — a fixed
 	# length would have to guess how long the polls above took — and the
 	# fail-back's own record is checked against the same epoch in 12.5.
-	hold=$(awk -v e="$c2_epoch" -v n="$(ts_epoch "$(server_now)")" \
+	# The clock is read in a statement of its own, so a failed read stops the
+	# run. Read inside an argument, a failed read would be an empty stamp,
+	# which `date -u -d ""` takes for midnight today, and the hold would sleep
+	# for about as many seconds as the day had run.
+	local now_at now_epoch
+	now_at=$(server_now)
+	now_epoch=$(ts_epoch "$now_at")
+	hold=$(awk -v e="$c2_epoch" -v n="$now_epoch" \
 		'BEGIN { printf "%d", e + 15 - n - 2 }')
 	if [ "$hold" -ge 1 ]; then
 		assert_none_for "$hold" \
@@ -2944,15 +3022,15 @@ EOF
 }
 
 reaction_skip_ge() { # <n> <kind> <reason>
-	[ "$(reaction_skip_cnt "$2" "$3")" -ge "$1" ]
+	count_ge "$1" reaction_skip_cnt "$2" "$3"
 }
 
 # g2_repair_progressed reports whether ANY further AR8 step ran on sp0's data
 # group G2 — another switch, another allocation, or another parked leg. §14.11
 # case D step 7's "no further repair of L3" is all three.
 g2_repair_progressed() { # <spare_switch cnt> <spare_create cnt> <spare cnt>
-	if [ "$(reaction_cnt spare_switch)" -gt "$1" ]; then return 0; fi
-	if [ "$(reaction_cnt spare_create)" -gt "$2" ]; then return 0; fi
+	if count_gt "$1" reaction_cnt spare_switch; then return 0; fi
+	if count_gt "$2" reaction_cnt spare_create; then return 0; fi
 	if [ "$(spare_count sp0 1 data 2)" != "$3" ]; then return 0; fi
 	return 1
 }
@@ -2977,10 +3055,10 @@ leg_in_list() { # <sp> <slice> <meta|data> <grp id> <leg id>
 
 membership_committed() { # <w> <seed> <state> [role]
 	local role=${4:-dn}
-	[ "$(count_recs "$(wpath "$1")" \
+	count_ge 1 count_recs "$(wpath "$1")" \
 		'select(.msg == "membership committed")
 		 | select(.seed == $s and .state == $st and .role == $r)' \
-		--arg s "$2" --arg st "$3" --arg r "$role")" -ge 1 ]
+		--arg s "$2" --arg st "$3" --arg r "$role"
 }
 
 membership_committed_all_roles() { # <w> <seed> <state>
@@ -2992,10 +3070,10 @@ membership_committed_all_roles() { # <w> <seed> <state>
 }
 
 membership_observed() { # <w> <seed> <state>
-	[ "$(count_recs "$(wpath "$1")" \
+	count_ge 1 count_recs "$(wpath "$1")" \
 		'select(.msg == "membership observed")
 		 | select(.seed == $s and .state == $st)' \
-		--arg s "$2" --arg st "$3")" -ge 1 ]
+		--arg s "$2" --arg st "$3"
 }
 
 # max_member_cnt_is checks that, for EVERY role, the largest member_cnt this
@@ -3015,11 +3093,11 @@ max_member_cnt_is() { # <w> <cnt>
 }
 
 member_cnt_seen() { # <w> <seed> <cnt>
-	[ "$(count_recs "$(wpath "$1")" \
+	count_ge 1 count_recs "$(wpath "$1")" \
 		'select(.msg == "membership committed")
 		 | select(.seed == $s and .state == "member")
 		 | select((.member_cnt | tostring) == $c)' \
-		--arg s "$2" --arg c "$3")" -ge 1 ]
+		--arg s "$2" --arg c "$3"
 }
 
 # worker_seeds prints the seeds `list-workers` reports and FAILS if the read
@@ -3499,9 +3577,15 @@ case_vote() {
 			# The handoff evidence is therefore the Check stream, which the
 			# per-DN loop below asserts for every DN: after settling, the
 			# rounds of the last 3 s must carry the CURRENT owner's seed8 and
-			# nobody else's. Here we only pin the old owner's syncup.
+			# nobody else's. Here we pin the old owner's syncup and the new
+			# owner's rounds, and that none of those rounds led to a SyncupDn.
+			# The handover is seconds old by now — step 3 waited for the
+			# ownership table to settle — so a re-sync that followed the new
+			# owner's first reply would already be in the log.
 			wait_until "$WAIT_MEMBERSHIP" "$dir: CheckDn rounds from the new owner $new" \
 				trace_req_ge 1 "$dir" CheckDn "$new8"
+			assert_eq "$(trace_reqs "$dir" SyncupDn "$new8")" 0 \
+				"$dir: SyncupDn requests from the new owner $new (RW4 step 5: none)"
 		fi
 		local revs
 		revs=$(recsr "$(apath "$dir")" \
@@ -3512,9 +3596,14 @@ case_vote() {
 		assert_eq "$revs" "1," "$dir: every SyncupDn carried the same revision"
 	done
 	# Whether or not a DN's shard moved, every round in the last three seconds
-	# must come from the shard's CURRENT owner and nobody else.
-	local cutoff
-	cutoff=$(ts_epoch "$(server_now)")
+	# must come from the shard's CURRENT owner and nobody else. The clock is
+	# read in a statement of its own, as in case D step 12: read inside an
+	# argument, a failed read would be an empty stamp, midnight today to
+	# `date`, and the check would take in every one of the last 20 rounds
+	# recent_seeds reads, not only those of the last three seconds.
+	local now_at cutoff
+	now_at=$(server_now)
+	cutoff=$(ts_epoch "$now_at")
 	sleep 3
 	for i in 1 2 3 4; do
 		dshard=${shards[$((i - 1))]}
@@ -3709,10 +3798,10 @@ owners_settled() { # <min> <worker…>
 }
 
 fenced_since() { # <w> <old seed>
-	[ "$(count_recs "$(wpath "$1")" \
+	count_ge 1 count_recs "$(wpath "$1")" \
 		'select(.msg == "worker fenced")
 		 | select(.old_seed == $s and .reason == "heartbeat_stalled")' \
-		--arg s "$2")" -ge 1 ]
+		--arg s "$2"
 }
 
 trace_reqs() { # <agent> <method> <seed8>
@@ -3723,7 +3812,7 @@ trace_reqs() { # <agent> <method> <seed8>
 }
 
 trace_req_ge() { # <n> <agent> <method> <seed8>
-	[ "$(trace_reqs "$2" "$3" "$4")" -ge "$1" ]
+	count_ge "$1" trace_reqs "$2" "$3" "$4"
 }
 
 # recent_seeds prints the distinct seed8 prefixes of one method's records that
@@ -3780,9 +3869,14 @@ case_handoff() {
 	# `synced` advances from the clean Check reply (RW2). "Re-driven at the
 	# same revision" is therefore proven by the Check rounds below plus the
 	# revision check here, which still pins that no syncup ever carried a
-	# revision other than 1.
+	# revision other than 1 — and none of those rounds may lead to a SyncupDn
+	# from the new owner. This is the deterministic twin of case E step 4's
+	# moved-shard branch; a re-sync issued on the new owner's first reply
+	# follows it at once, well before the read below, which costs a full ssh.
 	wait_until "$WAIT_MEMBERSHIP" "dn0: CheckDn rounds from the new owner" \
 		trace_req_ge 1 dn0 CheckDn "$new8"
+	assert_eq "$(trace_reqs dn0 SyncupDn "$new8")" 0 \
+		"dn0: SyncupDn requests from the new owner $new_owner (RW4 step 5: none)"
 	assert_eq "$(recsr "$(apath dn0)" \
 		'select(.msg == "grpc server request")
 		 | select((.method | split("/") | last) == "SyncupDn")
@@ -3939,7 +4033,7 @@ shard_owner_changed() { # <role> <shard> <old owner>
 }
 
 flip_gt() { # <n> <kind>
-	[ "$(flip_cnt "$2")" -gt "$1" ]
+	count_gt "$1" flip_cnt "$2"
 }
 
 # ---------------------------------------------------------------------------

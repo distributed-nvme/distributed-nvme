@@ -2739,13 +2739,15 @@ failure the worker is specified to handle; error paths of etcd itself
 | B | `health` | `err_epoch` set/cleared with the capacity keys; hang, kill, `PROVISIONING`, the sp-object table |
 | C | `bitmap` | ordered one-in-flight pushes, targets, append, grown clone chunk, a rejected syncup that blocks the diff, arms nothing, and is re-driven only by the `Check*` reply's own code, primary change |
 | D | `reaction` | failover (unhealthy and disabled primary alike), cntlr replacement (incl. sole-primary), data and meta auto-grow with the pending rule, leg repair cases 1 and 2, `spare_list_full`, suppression, the settle and a settling primary held to `cntlr_unhealthy` (*added 2026-09-26*) |
-| G | `drain` | the §11.6 sp drain by the real coordinator: D1 once, one D2 batch per slice, D3, every ledger restored; resume after a fleet restart from `SpConf` alone; the `MaxDelGrpPerTxn` batch bound (the data-before-meta pop order itself is a §13 unit test, `TestDrainSpSliceBatchSizeAndOrder`); the §11.7 clone drain in two batches, CLD5's exclusion seen from the CN, resume from the surviving chunk keys |
+| G | `drain` | the §11.6 sp drain by the real coordinator: D1 once, one D2 batch per slice, D3, every ledger restored; resume after an in-case stop and restart of `w1`-`w3` (no etcd wipe, unlike the §14.10 fleet restart) from `SpConf` alone; the `MaxDelGrpPerTxn` batch bound (the data-before-meta pop order itself is a §13 unit test, `TestDrainSpSliceBatchSizeAndOrder`); the §11.7 clone drain in two batches, CLD5's exclusion seen from the CN, resume from the surviving chunk keys |
 | E | `vote` | exact single ownership, join (~¼ moves, the rest stable), `SIGKILL`, `SIGTERM`, `SIGSTOP`/`SIGCONT` with the self-fence, attribution by trace id |
 | F | `handoff` | a killed owner's shards are re-driven at the same revision; a flip mid-handoff happens once |
 
 Cases run in that order, fail-fast, each in its own cluster (`cluster_name =
-it-<case>`) and each after a restart of the worker fleet (§14.10), so
-membership state never leaks between cases.
+it-<case>`) and each after a restart of the worker fleet (§14.10) that also
+deletes every dnv key from etcd, resets every fake and truncates every
+worker and fake log, so neither membership state nor an earlier case's
+objects leak between cases.
 
 ### 14.2 Deliverables and usage contract
 
@@ -3133,15 +3135,48 @@ sent it (RW10). Rules:
   against `trace_id | split("-")[0]` in the fakes' logs.
 * **Request counters**: `reqs <agent> <method> [<jq filter>]` counts `grpc
   server request` records (unary) or `grpc server recv` (streams) for a
-  method; `last_req` prints the newest one's `data`.
+  method; `last_req` prints the newest one's `data`. Every counting helper
+  — `reqs` and the worker-log `wcount` alike — prints nothing and fails
+  when its read failed (the ssh, the `cat` or the `jq`), and every
+  comparison built on one (`req_ge`, `reqs_gt`, `wcount_gt`,
+  `reaction_ge`, …) dies on that failure: a failed read counted as 0 would
+  pass every `assert_none_for` negative built on it. Case S step 2's
+  `show_info` count is taken inline instead, by `grep -c … || true`
+  (`grep -c` exits 1 when it counts 0), and that `|| true` would swallow a
+  failed read too, so the step reads the log in a statement of its own
+  first: a failed read stops the run before anything is counted. Case S
+  step 6's `td0 created` negative is not a count but has the same trap —
+  `td_created` answers "not created" to a failed read, which is right for
+  its waits — so it uses `td_created_or_die`, which dies on one.
+* **Epoch reads**: the `…_epoch_set` predicates compare what they read
+  with 0, so a failed read, which prints nothing, meets their waits too.
+  An `err_epoch` read back after such a wait to time a record against —
+  that of `C1` in case D step 2, of `L3` in step 7 and of `sp2`'s `C2` in
+  step 12 — must therefore be a non-zero whole number, or the step dies:
+  read back as 0 before the worker stamped it, the compare would pass for
+  any record. The parked `L3`'s `err_epoch` in step 7 must be one too.
+* **Server clock**: `server_now` reads the server's clock, which stamps
+  every log record, and every step that reads it does so in a statement of
+  its own, so a failed read stops the run. Read inside another command's
+  argument, a failed read would be an empty stamp, which `date -u -d ""`
+  takes for midnight today (UTC): case D step 12's hold would then last up
+  to a day, and case E step 4's last-3-s check would take in older rounds.
 * **Revisions**: the script caches none; a step that needs one re-reads it
   through the `get-rev` helpers `sp_rev`/`dn_rev`/`cn_rev` (`ctl get-rev …
   --id`; `workerctl` prints every new revision too, but nothing is kept).
 * **Stages** mint `it-<case>-<step>` trace ids for `workerctl`; the worker
   mints its own (RW10), so worker-side correlation is by key and time.
 * **Fleet restart before every case**: `SIGTERM` the workers, wait for
-  `worker stopping` and exit, start them again, wait `VOTE_GRACE + 2` s,
-  assert the ownership table. Each case then creates its own cluster.
+  `worker stopping` and exit; with the fleet down, reset every fake
+  (`behavior.json` back to `{}`, `state.json` emptied), delete every dnv
+  key from etcd (`etcdctl del --prefix 'dnv '`) and truncate every worker
+  and fake log; start `w1`..`w3` again, wait `VOTE_GRACE + 2` s, assert
+  the ownership table. Each case then creates its own cluster, which alone
+  would not isolate the cases: an earlier case's cluster left in etcd
+  would stay driven on the shards this case's workers own and keep writing
+  its records into this case's logs, and a fake still holding an earlier
+  case's revision would reject this case's first syncup as stale (the
+  revision gate is per object, not per cluster).
 
 ### 14.11 Cases
 
@@ -3288,7 +3323,10 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    step 5. Clear ⇒ the next reply is accepted and the push succeeds.
 7. `set-cntlr --sp 1 --id 1 --primary=false`, `--id 2 --primary=true` ⇒
    within `WAIT_SHORT` cn1 receives all three pairs; cn0 none after the
-   change.
+   change beyond the one push that may already have been in flight when
+   the role moved (BM3's one per clone) — counted from a baseline taken
+   before the two `set-cntlr` calls — and `assert_none_for 3` no further
+   one.
 
 **D — `reaction`** (thresholds 2/4/3/6, step 12's `sp2` 2/15/3/6; `lwm` set per step)
 
@@ -3316,7 +3354,12 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    replacement follows the failover by 2 s and can land before this read
    (*amended 2026-09-26*); `reaction applied kind=failover`;
    `SyncupSide primary_cn_id 2` at both DNs; `SyncupCntlr cntlr.primary`
-   true at cn1. Before the threshold (`assert_none_for 1`) nothing flips.
+   true at cn1. Not before the threshold: the failover's `reaction applied`
+   record is stamped no earlier than `C1`'s `err_epoch` + 2 s, both stamps
+   taken from the server's clock. A live `assert_none_for` timed from the row's
+   landing cannot show it: `err_epoch` is whole seconds, so a correct
+   failover can land as early as 1 s after the row — inside the window in
+   which a worker that ignored the threshold would fail over.
 3. **Replacement.** Keep `C1` unhealthy (cn 1 itself is healthy and
    allocatable since step 2 — the black list is what must exclude it);
    within `4 + WAIT_SHORT` s: `C1` gone from `cntlr_id_list`; a new cntlr
@@ -3363,10 +3406,12 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    ⇒ `assert_none_for 3` no grow at any usage (`30000/31232`, `300/375`).
 7. **Leg repair, case 1.** Reset free extents so exactly one DN not in `G2`
    is eligible. The primary reports `leg_id_to_leg.<L3> ERROR` (side rows
-   stay OK) ⇒ `Leg.err_epoch` on `L3`; `assert_none_for 4` no spare (below
-   6 s); within `6 + WAIT_SHORT`: `G2.spare_leg_list` has a new leg with
-   one side on the eligible DN, `provisioned false`, `reaction applied
-   kind=spare_create`; the fake zeroes instantly ⇒ RW18 flips it; the
+   stay OK) ⇒ `Leg.err_epoch` on `L3`; `assert_none_for 3` no spare (timed
+   from the poll that saw the epoch, which can lag the stamp by a second or
+   more, hence well below 6 s); within `6 + WAIT_SHORT`: `G2.spare_leg_list`
+   has a new leg with one side on the eligible DN, `provisioned false`,
+   `reaction applied kind=spare_create` stamped no earlier than `L3`'s
+   `err_epoch` + 6 s; the fake zeroes instantly ⇒ RW18 flips it; the
    primary's default rows report the new spare `OK` ⇒ within `WAIT_SHORT`
    `kind=spare_switch`: the new leg in `leg_list` at `L3`'s position, `L3`
    in `spare_leg_list` with its `err_epoch` intact; `SyncupSide` for the
@@ -3568,7 +3613,9 @@ in with `wctl drain-sp`, this case owns the real coordinator)
 
 ### 14.12 Teardown and cleanup (`cleanup()`, also `--cleanup-only`)
 
-Signal every recorded PID (`SIGTERM`, then `SIGKILL` after 5 s), the three
+Signal every recorded PID (`SIGCONT` first, so that a worker left
+`SIGSTOP`ped — case E stops one — acts on the `SIGTERM` instead of waiting
+for the `SIGKILL`; then `SIGTERM`, then `SIGKILL` after 5 s), the three
 `pkill -f` fallbacks, `rm -rf $WORK`. On success it runs at the end; at the
 start it always runs. Nothing outside `$WORK` is touched — the suite leaves
 no kernel state, no packages, no users.
@@ -3592,7 +3639,8 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | RW1-RW12 | S, A, B; RW10 by E/F attribution; RW11 by every fleet restart |
 | RW13-RW21 | S (builders), A (moved endpoint), C (migration confs), D (grow, spare confs) |
 | HL1-HL6 | B; HL2's settle by D steps 2, 4 and 12 (*added 2026-09-26*) |
-| BM1-BM6 | C |
+| BM1-BM5 | C |
+| BM6 | unit tests only (§13, `TestPushFailureIsLoggedOnly`): case C step 6's forced code rejects the `SyncupSide` itself, so no push is attempted there, let alone failed |
 | AR1-AR9 | D |
 | SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
 | CLD1-CLD12 | G steps 5-6; CLD1/CLD3's gateway halves and CLD2's guards are unit tests (§13), and the gateway suite owns the latch (gateway.md §10.11 step 13) |
