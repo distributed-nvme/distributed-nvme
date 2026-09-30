@@ -1254,12 +1254,14 @@ partition_rules() {
 # writer_loop <dev> — the body start_writer detaches. It writes through the
 # suite's own write_probe, which is where the §4 dd rule lives: no iflag=, no
 # oflag=, and a refused write reported as a word instead of as an exit status.
-# Every write here is EXPECTED to fail once the teardown starts, so nothing in
-# the loop may read a failure as a reason to stop. Only the flag file and the
-# iteration cap end it — the cap because a stage that died between start and
-# stop takes the flag file's removal with it, and a writer left running would
-# hold a namespace open across the next case. Each word lands in $WRITER_RES,
-# one per line, which is what S3 counts (wait_writer).
+# Every write here is EXPECTED to fail, or to hang queued at the host's
+# multipath head, once the teardown starts, so nothing in the loop may read a
+# failure as a reason to stop. Only the flag file and the iteration cap end it
+# — the cap because a stage that died between start and stop takes the flag
+# file's removal with it, and a writer left running would hold a namespace
+# open across the next case — and a hanging write holds it at that write until
+# stop_writer kills it. Each word lands in $WRITER_RES, one per line, which is
+# what S3 counts (writer_counts).
 writer_loop() {
 	local i
 	# Its own pid, for stop_writer, and for pin_dev's reason: `$!` in the
@@ -1304,7 +1306,15 @@ start_writer() {
 
 # stop_writer takes the flag away, which is how the loop ends on its own at its
 # next check, and signals the recorded pid as the backstop for a loop sitting
-# between two checks.
+# between two checks — including one whose dd is queued at the multipath head.
+# The recorded pid is the loop's shell, which waits for its dd interruptibly,
+# so the SIGKILL ends the LOOP at once: no further write starts. It does not
+# end that dd. The dd is never signalled, and no signal would end it while it
+# sleeps uninterruptibly; it keeps its queued write until host_disconnect
+# deletes the host's controllers, which fails the write and lets it exit (S3
+# checks that it does, wait_writer_gone). Its standard descriptors are the
+# results file and /dev/null, never the ssh pipe, so it does not hold this
+# function's `$(…)` open either.
 #
 # It never WAITS for the writer to die, and it signals by PID and never by
 # pattern. Both are deliberate. A write still queued against a namespace whose
@@ -1325,32 +1335,153 @@ stop_writer() {
 	echo stopped
 }
 
-# writer_counts — the writer's results so far, as `ok=<n> eio=<m>`.
+# writer_counts — the writer's results so far, as `ok=<n> eio=<m>`. A results
+# file that cannot be read FAILS the call instead of reading as zeros: S3
+# compares these counts across the teardown, and an `ok=0` from a file that
+# is not there would satisfy "no write succeeded since" by seeing nothing.
 writer_counts() {
-	local ok eio
-	ok=$(grep -cx ok "$WRITER_RES" 2>/dev/null) || true
-	eio=$(grep -cx eio "$WRITER_RES" 2>/dev/null) || true
-	echo "ok=${ok:-0} eio=${eio:-0}"
+	local res ok eio
+	if ! res=$(cat "$WRITER_RES" 2>/dev/null); then
+		echo "the writer's results ($WRITER_RES) cannot be read" >&2
+		return 1
+	fi
+	ok=$(printf '%s\n' "$res" | grep -cx ok) || true
+	eio=$(printf '%s\n' "$res" | grep -cx eio) || true
+	echo "ok=$ok eio=$eio"
 }
 
 # wait_writer <ok|eio> <min> <secs> — polls until the writer has reported at
 # least <min> writes of that result, then prints writer_counts. S3 reads it
-# twice, because a writer is only an instrument once it is seen to work: an
-# `ok` before the sides go (a writer whose every write failed — a node that is
-# not the namespace, a dd refusing its arguments — would reduce the stage to
-# S1 with a loop beside it), and one more `eio` after, which is a write that
-# met the dying stack. Each read is local to this VM: one ssh round trip.
+# once, for an `ok` before the sides go, because a writer is only an
+# instrument once it is seen to work: one whose every write failed — a node
+# that is not the namespace, a dd refusing its arguments — would reduce the
+# stage to S1 with a loop beside it. A read that fails ends the wait at once
+# (writer_counts). Each read is local to this VM: one ssh round trip.
 wait_writer() {
-	local got i
+	local got n i
 	for ((i = 0; i < $3 * 5; i++)); do
-		got=$(grep -cx "$1" "$WRITER_RES" 2>/dev/null) || true
-		if [ "${got:-0}" -ge "$2" ]; then
-			writer_counts
+		got=$(writer_counts) || return 1
+		n=${got#*"$1="}
+		n=${n%% *}
+		if [ "$n" -ge "$2" ]; then
+			echo "$got"
 			return 0
 		fi
 		sleep 0.2
 	done
-	echo "the writer reported $(writer_counts) after $3s, want $1 >= $2" >&2
+	echo "the writer reported $got after $3s, want $1 >= $2" >&2
+	return 1
+}
+
+# writer_in_flight <dev> <okmax> <eio0> <age> <secs> — S3's closing read of
+# the writer, taken once both CNs are clean, against the counts S3 read as the
+# sides went. It asks two things, polling for up to <secs>:
+#
+#   * No write SUCCEEDED since: `ok` above <okmax> fails at once, exit 2. S3's
+#     comment says why the bound it passes is one above what it read.
+#   * One write FAILED since (`eio` above <eio0>) or is still OUTSTANDING: the
+#     writer's own current dd to <dev>, in uninterruptible sleep and running
+#     for at least <age> seconds. With both CNs clean nothing below the host
+#     can complete that write any more — it is queued at the host's multipath
+#     head, which keeps IO without a path while any controller of it is
+#     still reconnecting, and host_disconnect is what will fail it. The age
+#     keeps a dd seen in D for the instant every write spends there from
+#     counting: it must have gone unanswered for seconds, which no answered
+#     write does.
+#
+# Prints the evidence it found and exits 0; exits 1 when neither shows within
+# <secs>; exits 3 when a read fails — the counts, the writer's pid, the
+# process listing — because a read that fails must not pass for "nothing
+# happened". The dd is the writer's child (the loop's shell forks each dd of
+# write_probe directly, and $WRITER_PID is that shell), named `dd` in its argv
+# and carrying its own `of=<dev>`, as wait_write_blocked matches it.
+writer_in_flight() {
+	local dev=$1 okmax=$2 eio0=$3 age=$4 secs=$5
+	local got ok eio wpid procs dd kind n i
+	for n in "$okmax" "$eio0" "$age" "$secs"; do
+		case "$n" in
+		'' | *[!0-9]*)
+			echo "writer_in_flight: '$n' is not a count" >&2
+			return 3
+			;;
+		esac
+	done
+	for ((i = 0; i < secs * 5; i++)); do
+		got=$(writer_counts) || return 3
+		ok=${got#ok=}
+		ok=${ok%% *}
+		eio=${got##*eio=}
+		if [ "$ok" -gt "$okmax" ]; then
+			# What the node is, for the report: dd creates its output, so a
+			# write after the host lost the namespace's node goes to a regular
+			# file in its place and reports `ok` without reaching any stack.
+			kind="NOT a block device"
+			[ ! -b "$dev" ] || kind="a block device"
+			echo "a write succeeded after the sides went: $got, want ok <=" \
+				"$okmax ($dev is $kind)" >&2
+			return 2
+		fi
+		if [ "$eio" -gt "$eio0" ]; then
+			echo "failed: $got"
+			return 0
+		fi
+		wpid=$(cat "$WRITER_PID" 2>/dev/null) || wpid=
+		case "$wpid" in
+		'' | *[!0-9]*)
+			echo "the writer's pid ($WRITER_PID) cannot be read: '$wpid'" >&2
+			return 3
+			;;
+		esac
+		procs=$(ps -eo pid=,ppid=,stat=,etimes=,wchan:32=,args= 2>/dev/null)
+		if [ -z "$procs" ]; then
+			echo "the process listing cannot be read" >&2
+			return 3
+		fi
+		dd=$(printf '%s\n' "$procs" |
+			awk -v p="$wpid" -v a="$age" -v w="of=$dev" '
+			    $2 == p && $3 ~ /^D/ && $4 >= a && $6 == "dd" && index($0, w) {
+			        print "pid " $1 ", " $3 " for " $4 "s in " $5; exit }')
+		if [ -n "$dd" ]; then
+			echo "outstanding: dd $dd; $got"
+			return 0
+		fi
+		sleep 0.2
+	done
+	echo "no write failed and none is outstanding after ${secs}s: $got;" \
+		"writer $wpid $(kill -0 "$wpid" 2>/dev/null && echo running ||
+			echo gone), its children:" \
+		"$(printf '%s\n' "$procs" | awk -v p="$wpid" '$2 == p' |
+			tr '\n' ';')" >&2
+	return 1
+}
+
+# wait_writer_gone <dev> <secs> — polls until no dd writing to <dev> is left
+# on this VM, and prints `gone`. S3 reads it after host_disconnect, because
+# stop_writer ends only the loop: a dd whose write is queued at the multipath
+# head outlives it, and deleting the host's controllers is what fails that
+# write and lets the dd exit. A dd still there after <secs> is a write the
+# disconnect did not end, still holding the namespace open, and fails the
+# call; so does a process listing that cannot be read. It matches the dd as
+# writer_in_flight does — `dd` in its argv, its own `of=<dev>` — but by no
+# pid: stop_writer has removed the pid file, and the dd, orphaned, is no
+# longer the loop's child anyway.
+wait_writer_gone() {
+	local procs left i
+	for ((i = 0; i < $2 * 5; i++)); do
+		procs=$(ps -eo pid=,stat=,etimes=,args= 2>/dev/null)
+		if [ -z "$procs" ]; then
+			echo "the process listing cannot be read" >&2
+			return 1
+		fi
+		left=$(printf '%s\n' "$procs" | awk -v w="of=$1" \
+			'$2 !~ /^Z/ && $4 == "dd" && index($0, w)')
+		if [ -z "$left" ]; then
+			echo gone
+			return 0
+		fi
+		sleep 0.2
+	done
+	echo "a write to $1 is still running $2s after the disconnect: $left" >&2
 	return 1
 }
 
@@ -3525,8 +3656,9 @@ s2_paths_long_dead() {
 # to complete against, and each of them is on the removal path. What the stage
 # pins is that they complete anyway.
 s3_io_in_flight() {
-	local sp=${T_SP[3]} uuid=${T_UUID[3]} hv=2 dev got eio
+	local sp=${T_SP[3]} uuid=${T_UUID[3]} hv=2 dev got ok eio snap rc
 	local nqn="$NQN_IT_PREFIX:t:s3"
+	local atdrop="$WORK/s3-writer-at-drop"
 	local req1="$WORK/req-teardown-s3-cn1.json"
 	local req2="$WORK/req-teardown-s3-cn2.json"
 	DIAG_CNTLRS=()
@@ -3539,38 +3671,91 @@ s3_io_in_flight() {
 	stage s3 "S3: the sides go and the CN tears down under live host writes"
 	dev=$(host_dev "$uuid")
 	# The writer is detached on the host VM and runs from before the sides go
-	# until after the CN is clean. Its writes are EXPECTED to fail from the
-	# moment the sides are dropped, and no failure stops it: write_probe
+	# until after the CN is clean. From the moment the sides are dropped its
+	# writes are EXPECTED to fail or to hang, and neither stops it: write_probe
 	# reports a refused write as a word and never as an exit status, so nothing
-	# a failing write does can end the loop. It writes the first 4 MiB in a
+	# a failing write does can end the loop, and a hanging one holds it only
+	# until stop_writer. It writes the first 4 MiB in a
 	# cycle, which is enough to keep the pool allocating and the arrays
 	# writing without turning the stage into a throughput test.
 	assert_eq "$(helper "$hv" "start_writer '$dev'")" started \
 		"s3: the background writer did not start"
-	# Counted, not assumed (wait_writer says why twice): a write lands before
-	# the sides go, and one fails after — IO in flight when they went, or
-	# issued since, and so what the park, the nvmet disable and the pool
-	# commit had to finish against.
+	# Counted, not assumed: a write lands before the sides go (wait_writer
+	# says why), and the closing read below finds one that met the dying
+	# stack after they went.
 	got=$(helper "$hv" "wait_writer ok 1 20") ||
 		die "s3: no write of the background writer succeeded before the sides went"
 	log "s3: the writer before the sides go: $got"
-	eio=${got##*eio=}
-	case "$eio" in
-	'' | *[!0-9]*) die "s3: unreadable writer counts '$got'" ;;
-	esac
 	dn_drop 1
 	dn_drop 2
+	# The counts as the sides went, which the closing read is judged against.
+	# The read runs in the background so that the CN is still told at once,
+	# as in S1: an ssh round trip in between would move the CN teardown later
+	# in the legs' failfast window than the stage has always put it.
+	helper "$hv" writer_counts >"$atdrop" &
+	snap=$!
 	cn_drop_until_clean 1 60
 	cn_drop 2
-	got=$(helper "$hv" "wait_writer eio $((eio + 1)) 20") ||
-		die "s3: no write of the background writer failed after the sides went" \
-			"— nothing was in flight across the teardown"
+	wait "$snap" ||
+		die "s3: the background writer's counts could not be read as the sides went"
+	got=$(cat "$atdrop")
+	[[ $got =~ ^ok=([0-9]+)\ eio=([0-9]+)$ ]] ||
+		die "s3: unreadable writer counts '$got'"
+	ok=${BASH_REMATCH[1]}
+	eio=${BASH_REMATCH[2]}
+	log "s3: the writer as the sides went: $got"
+	# The closing read (writer_in_flight), with both CNs clean. It asks two
+	# things.
+	#
+	# No write succeeds after the sides went, and the bound is ONE above the
+	# `ok` read as they went. From dn_drop 2's return no side is left to
+	# complete a write. The writer runs one dd at a time and appends a write's
+	# word after its dd exits and before the next one starts, so when that count
+	# was read at most one write was still to report — and that one may have
+	# been issued before the second side went and been completed by it. Every dd
+	# after it started with both sides gone. The count itself lands an ssh round
+	# trip after the drop, so a success inside that round trip would go unseen;
+	# no read from here can be taken closer.
+	#
+	# And one write met the dying stack: it FAILED since that read, or it is
+	# still OUTSTANDING — the writer's dd, running for 5 s or more and in
+	# uninterruptible sleep with both CNs already clean, which leaves it queued
+	# on the host. Both are legitimate, and which one a run sees is a race
+	# inside the CN teardown. The write in flight as the sides went sits on the
+	# legs until their 5 s failfast expires, and the park's flushing suspend
+	# waits for it. If it fails while the subsystem is still on the host-facing
+	# port, the host gets EIO. If the park is killed at its command timeout
+	# first, the teardown unlinks the subsystem from the port with the write
+	# still in flight, the host loses its path, and it queues the write: a
+	# multipath head keeps IO while any controller of it is still reconnecting,
+	# and host_connect leaves their loss timeout at the default 600 s. A lab run
+	# met the second, and the earlier form of this check, one `eio` within 20 s,
+	# failed on it.
+	rc=0
+	got=$(helper "$hv" "writer_in_flight '$dev' $((ok + 1)) $eio 5 20") ||
+		rc=$?
+	case "$rc" in
+	0) ;;
+	1) die "s3: no write of the background writer failed after the sides" \
+		"went and none is outstanding — nothing was in flight across the" \
+		"teardown" ;;
+	2) die "s3: a write of the background writer succeeded after the sides went" ;;
+	*) die "s3: the background writer's state could not be read (rc $rc)" ;;
+	esac
 	log "s3: the writer after the teardown: $got"
 	assert_eq "$(helper "$hv" stop_writer)" stopped \
 		"s3: the background writer did not stop"
-	# Only now: the writer needs the host connected, and host_disconnect is
-	# what takes its device node away.
+	# Only now, and in this order. The writer needs the host connected, and
+	# host_disconnect is what takes its device node away: a loop still
+	# running then would open a path that no longer names the namespace, and
+	# dd creates its output, so it would write a regular file into /dev and
+	# report `ok`. stop_writer ends the loop, not a write queued at the
+	# multipath head; deleting the host's controllers is what fails that one,
+	# and wait_writer_gone checks that its dd did exit — a write the
+	# disconnect left running would hold the namespace open into S4.
 	host_disconnect "$hv" "$nqn"
+	helper "$hv" "wait_writer_gone '$dev' 20" >/dev/null ||
+		die "s3: a write of the background writer outlived the host's disconnect"
 	teardown_assert_clean "$sp" "s3_io_in_flight"
 }
 

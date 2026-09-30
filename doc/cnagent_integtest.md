@@ -1368,19 +1368,43 @@ the other side of the lock.
    afterwards.
 3. **S3 — IO in flight.** The same again under a detached host writer
    running from before the sides go until after the CN is clean. Its writes
-   are *expected* to fail from the moment the sides drop and those failures
-   are ignored — a refused write is reported as a word, never as an exit
-   status, so nothing a failing write does can end the loop. The words are
-   counted, though (`wait_writer`, ≤ 20 s each): one `ok` before the sides
-   go, since a writer whose every write failed would leave the stage S1
-   with a loop beside it, and one more `eio` once the CN is clean — a write
-   in flight when the sides went, or issued since, that met the dying
-   stack. What the stage
+   are *expected* to fail or to hang from the moment the sides drop, and
+   neither ends the loop — a refused write is reported as a word, never as
+   an exit status, and a hanging one holds the loop only until
+   `stop_writer`. The words are counted, though, and a count that cannot be
+   read fails the stage rather than reading as zero. One `ok` must land
+   before the sides go (`wait_writer`, ≤ 20 s), since a writer whose every
+   write failed would leave the stage S1 with a loop beside it. The counts
+   are read again as the sides went — in the background, so that the CN is
+   still told at once — and once both CNs are clean the closing read
+   (`writer_in_flight`, ≤ 20 s) asks two things of them. No write may
+   succeed after the sides went: at most one more `ok`, because the writer
+   runs one `dd` at a time and appends each word before starting the next,
+   so at that read at most one write was still to report, and it may have
+   been issued before the second side went and completed there. And one
+   write must have met the dying stack: either it failed since (`eio`
+   grew) or it is still outstanding — the writer's own `dd`, running for at
+   least 5 s and in `D` state with both CNs already clean, i.e. queued on
+   the host. Both are legitimate outcomes of one race inside the CN
+   teardown. The write in flight as the sides went sits on the legs until
+   their 5 s failfast expires, and the park's flushing suspend waits for
+   it: if it fails while the subsystem is still on the host-facing port the
+   host gets EIO, but if the park is killed at its command timeout first,
+   the subsystem is unlinked from the port with the write still in flight,
+   and the host queues it for as long as a controller of the namespace is
+   reconnecting (the default 600 s loss timeout; `host_connect` sets none).
+   A lab run met the queued ending, which the earlier form of the check —
+   one `eio` within 20 s — wrongly failed. What the stage
    pins is that the flushing park of an ns-dev, the uncancellable nvmet
    `enable = 0` above it and the thin pool's postsuspend metadata commit all
    complete anyway, each with host IO through thin → md → leg to finish
-   against. The host is disconnected only after the CN is clean, since the
-   writer needs its device node.
+   against. The host is disconnected only after the CN is clean and the
+   loop is stopped, since the writer needs its device node and a loop
+   still running once the node is gone would have `dd` create a regular
+   file in its place and report `ok`. Stopping the loop does not end a
+   queued write; the disconnect does, by deleting the host's controllers,
+   and the stage checks that the writer's `dd` has exited after it
+   (`wait_writer_gone`, ≤ 20 s).
 4. **S4 — partitioned DN.** The one stage whose remote is unreachable
    rather than removed: the sides, their exports and their extents all still
    exist and the loss has to be discovered by a keep-alive rather than
