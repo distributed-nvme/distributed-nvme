@@ -73,9 +73,11 @@ T4. Minting trace ids is the entry points' job, not the §3 interceptors'
     also mints one at startup, for its startup and other process-lifetime
     records; `dnv-agent` mints one per attempt of a background task
     (`dnagent.md` SH27: each background re-converge of a side or a cntlr,
-    each zeroing batch, each leg probe round), and `dnv-cdc` one per accepted
-    host connection, one per scan attempt (the watch it opens included) and
-    one per applied watch event. The §3
+    each zeroing batch, each leg probe round) — all but one: the cn sweep's
+    background `nvme disconnect` (`cnagent.md` CN10) runs under the id of
+    the pass that set it going, and mints one only when that pass had none —
+    and `dnv-cdc` one per accepted host connection, one per scan attempt
+    (the watch it opens included) and one per applied watch event. The §3
     interceptors themselves never mint. The generator, `common.NewTraceId` in
     `common/log.go`, in outline:
 
@@ -505,7 +507,9 @@ etcd client) uses the chain options of §4 — today five of them:
 dnvctl's connection to the gateway; a manual end-to-end run shows one
 `trace_id` value flowing dnvctl → gateway → agent across
 `grpc client request`, `grpc server request`, `os command` and `etcd put`
-records.
+records. `TestRefListingsVerbatim` (`common/doclisting_test.go`, run by
+`go test ./common/...`) holds §3's listing byte-identical to
+`common/interceptor.go`, so the listing and the file are edited together.
 
 The `integtest/` drivers are scoped out of that grep on purpose; what they do
 instead is recorded here, so that the one carve-out left does not live only in

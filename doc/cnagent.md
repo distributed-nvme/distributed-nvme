@@ -4097,8 +4097,8 @@ between `Recv` and the round (SH24).
    its one, the exported `common.WriteBlockAt` /
    `common.ReadBlockDirectAt` helpers with **no** `ReadBlockDirect` on
    `OsClient` or `FakeOsClient`, `DisconnectDevice` on `NvmeHost`, and
-   `ParseDmName`/`ParseNqn`/`IsDnvNqn` in `common/name_parse.go` — the one
-   file `common` holds beyond `layout.md` §2's six.
+   `ParseDmName`/`ParseNqn`/`IsDnvNqn` in `common/name_parse.go` — one of
+   the seven `common` files `layout.md` §2 lists, and the one §2.1 adds.
 4. A repo-wide grep finds no `WriteFile(` call whose path argument is under
    `/sys/kernel/config` (SH18), no `ana_state` write outside `EnsurePort`,
    and no `io.max`/cgroup write anywhere (CN6).

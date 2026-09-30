@@ -588,8 +588,10 @@ exercises either.
   enable, AEN after); AER arm → impact → completion value, impact → arm →
   immediate completion, coalescing, AERL exceeded; keep-alive reset and
   expiry (KATO > 0 and the zero-KATO idle cutoff) on the fake clock; SQHD
-  with and without disable-sqflow; C2HTermReq on garbage; NP13 unregister
-  dropping the host state at last disconnect.
+  with and without disable-sqflow; C2HTermReq on garbage, an H2CTermReq
+  carrying error data at PDO 0 among it, while one with its data at PDO 24
+  decodes (NP2); NP13 unregister dropping the host state at last
+  disconnect.
 * **cdc.go** — CM4's start order through the socket, on the fake store and
   clock: a connecting host gets no answer at all (never a successful
   NUMREC 0 page) and the listener's `Accept` is never called, both while the

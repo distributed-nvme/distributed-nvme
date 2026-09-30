@@ -94,6 +94,17 @@ func TestReadPduDecodesAcceptedTypes(t *testing.T) {
 			wantHlen: termReqHdrLen,
 		},
 		{
+			// Error data placed where PDO says, right after the header.
+			name: "h2c term req with error data at pdo 24",
+			frame: pduFrame(
+				pduH2CTermReq, 0, termReqHdrLen, termReqHdrLen,
+				termReqHdrLen+capsuleCmdHdrLen,
+			),
+			wantTyp:  pduH2CTermReq,
+			wantHlen: termReqHdrLen,
+			wantData: capsuleCmdHdrLen,
+		},
+		{
 			name: "capsule cmd without data",
 			frame: pduFrame(
 				pduCapsuleCmd, 0, capsuleCmdHdrLen, 0, capsuleCmdHdrLen,
@@ -225,6 +236,18 @@ func TestReadPduRejectsMalformed(t *testing.T) {
 			name: "pdo past the end of the pdu",
 			frame: pduFrame(
 				pduCapsuleCmd, 0, capsuleCmdHdrLen, 200, capsuleCmdHdrLen+8,
+			),
+			fes: fesInvalidPduHdr,
+			fei: 3,
+		},
+		{
+			// An H2CTermReq carrying the header of the PDU in error with PDO
+			// 0 is framed like any other PDU, so it fails here before the
+			// terminate handling ever sees it: a PDU error, not a `closed`.
+			name: "h2c term req carrying error data at pdo 0",
+			frame: pduFrame(
+				pduH2CTermReq, 0, termReqHdrLen, 0,
+				termReqHdrLen+capsuleCmdHdrLen,
 			),
 			fes: fesInvalidPduHdr,
 			fei: 3,

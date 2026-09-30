@@ -68,9 +68,10 @@ type entry struct {
 	skips []string
 }
 
-// newEntry renders one CdcEntry value (DS3). skipped counts the transport
-// configurations dropped for a foreign tr_type or address family, which the
-// caller logs once per entry.
+// newEntry renders one CdcEntry value (DS3). A transport configuration with
+// a foreign tr_type or address family is dropped, and its reason is kept once
+// in e.skips (addSkip), so the caller (watcher.render) logs `cdc entry
+// skipped` once per distinct reason, not once per dropped element.
 func newEntry(msg *pb.CdcEntry) *entry {
 	e := &entry{nqn: msg.GetNqn()}
 	if hosts := msg.GetAllowedHosts(); len(hosts) > 0 {

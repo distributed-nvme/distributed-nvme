@@ -258,9 +258,15 @@ const (
 	AnaGrpIdNonOptimized = 2
 	AnaGrpIdInaccessible = 3
 
-	// AgentReply.code values (dnagent.md §2.5). 0 = OK. Callers only ever
-	// branch on code != 0; the specific values exist for details/log
-	// readability and tests.
+	// AgentReply.code values (dnagent.md §2.5). 0 = OK. Codes 1-3 are
+	// rejections: the request was not applied, so the worker reads no
+	// verdict from the reply's rows. ReplyCodeLeftover (4) is accepted: the
+	// worker reads the rows exactly as for 0 (worker/health.go accepted).
+	// Any code != 0 in a Check* reply makes the worker issue a Syncup*
+	// (dnv-worker.md RW4 step 5), and in a Push*Bitmap reply ends that push
+	// plan. Among the rejections the specific value only sets the level of
+	// the worker's `syncup rejected` record (a stale revision logs at Error)
+	// and otherwise serves details and tests.
 	ReplyCodeStaleRevision = 1
 	ReplyCodeUnknownObject = 2
 	// ReplyCodeInvalidConf refuses a request whose conf carries a value the

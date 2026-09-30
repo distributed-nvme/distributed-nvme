@@ -1387,9 +1387,12 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 }
 
 // TestHostTerminateRequestEndsTheConnection proves the other half of NP2's
-// terminate handling: an H2CTermReq is the HOST's decision, so the connection
-// ends without an answer and without a `pdu error` record, and NP13 files it
-// under `closed` like any other client-side close.
+// terminate handling: a well-framed H2CTermReq (here a data-less one, PLEN =
+// HLEN = 24) is the HOST's decision, so the connection ends without an answer
+// and without a `pdu error` record, and NP13 files it under `closed` like any
+// other client-side close. One that carries error data with PDO 0 fails
+// readPdu's PDO check first and is a PDU error like any other malformed PDU
+// (a C2HTermReq, reason `pdu_error`; TestReadPduRejectsMalformed).
 func TestHostTerminateRequestEndsTheConnection(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)

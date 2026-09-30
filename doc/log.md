@@ -67,12 +67,16 @@ R5. The trace id is carried in the context under an unexported key and injected
     the gateway's mint, which writes it straight into the incoming metadata
     (`gateway/traceid.go`), and `gatewayctl`, `dnagentctl` and `cnagentctl`,
     which put it into their outgoing metadata themselves because they dial
-    without the client interceptors (`grpc.md` §6) — and the `Check*`
-    streams, whose requests carry each round's id in a `trace_id` field that
-    the worker fills and the agent adopts (`grpc.md` T3). On a logger
-    derived with `WithGroup` the
-    attribute is nested inside that group rather than at the top level — see
-    R12 — so a consumer that greps `trace_id` positionally must account for it.
+    without the client interceptors (`grpc.md` §6) — and two places that
+    move an id they were handed: the `Check*` streams, whose requests carry
+    each round's id in a `trace_id` field that the worker fills and the
+    agent adopts (`grpc.md` T3), and the cn sweep's background
+    `nvme disconnect`, which puts the id of the pass that set it going onto
+    the agent's lifetime ctx (`rootCtx`) and mints one only if that pass had
+    none (`dnagent.md` SH27, `cnagent.md` CN10). On a logger derived with
+    `WithGroup` the attribute is nested inside that group rather than at the
+    top level — see R12 — so a consumer that greps `trace_id` positionally
+    must account for it.
 
 R6. Log levels per binary:
 
@@ -538,7 +542,9 @@ dnv's, which is R2; `TestStderrStaysOneJsonRecordPerLine`
 binary as a child that drives the etcd client: the child's stdout must come
 back empty, and every line it writes to stderr must parse as one JSON record,
 dnv's own `etcd get` among them. No dnv record comes from anything but
-`log/slog`.
+`log/slog`. `TestRefListingsVerbatim` (`common/doclisting_test.go`, run by
+`go test ./common/...`) holds §4's listing byte-identical to
+`common/log.go`, so the listing and the file are edited together.
 
 ## 8. Amendments applied to this document
 
