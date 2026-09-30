@@ -486,9 +486,10 @@ func (s *DnAgentServer) reconvergeSide(
 	if s.getSide(key) != st {
 		return
 	}
-	dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+	req := st.req.Load()
+	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 	if dn == nil {
 		return
 	}
-	s.convergeSide(attemptCtx, st, dn.req.GetExtentSize())
+	s.convergeSide(attemptCtx, st, dn.req.Load().GetExtentSize())
 }

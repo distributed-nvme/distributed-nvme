@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -69,8 +70,10 @@ type DnAgentServer struct {
 	// `blkdiscard --zeroout` ever outlives the agent (§9.4, SH27).
 	bg sync.WaitGroup
 
-	// mu guards the in-memory mirrors of the local store below. It is a
-	// leaf lock: never held across an OS call.
+	// mu guards the in-memory mirrors of the local store below: which DNs
+	// and sides this agent holds. The request each of them holds is an
+	// atomic pointer of its own (dnState.req, sideState.req). It is a leaf
+	// lock: never held across an OS call.
 	mu    sync.Mutex
 	dns   map[string]*dnState
 	sides map[string]*sideState
@@ -93,8 +96,18 @@ func (s *DnAgentServer) WaitBackground() {
 // dnState is one synced DN: its last fully applied request plus the ResInfo
 // history of its node-level resources.
 type dnState struct {
-	req     *pb.SyncupDnRequest
+	// req is replaced only under the node write lock (SyncupDn), which
+	// orders it against every reader, since each holds the node lock. It is
+	// an atomic pointer all the same, like a side's, so that no read of it
+	// depends on which lock its caller happens to hold.
+	req     atomic.Pointer[pb.SyncupDnRequest]
 	tracker *agent.ResTracker
+}
+
+func newDnState(req *pb.SyncupDnRequest) *dnState {
+	st := &dnState{tracker: agent.NewResTracker()}
+	st.req.Store(req)
+	return st
 }
 
 // sideState is one synced side. chunks mirrors the migr-bm-* files this
@@ -102,7 +115,17 @@ type dnState struct {
 // truth for the applied set (SH21); a side rebuilt after DN2's reload skipped
 // its files starts empty over them until the worker pushes them again.
 type sideState struct {
-	req     *pb.SyncupSideRequest
+	// req is the side's current request. Its SyncupSide replaces it under
+	// the node read lock and this side's object lock, and passes that do
+	// not hold that object lock read it: another side's converge or Check
+	// round, and a CheckDn round, read every held side's request — for the
+	// claims and for the sides this node may host — under the node read
+	// lock, which the replacement shares. So it is an atomic pointer, and
+	// each of them loads a whole request, the old one or the new one.
+	// Nothing else a SyncupSide changes is read that way: the chunk set and
+	// the tracker stay under this side's object lock, and the retry,
+	// zeroing and fence fields under s.mu.
+	req     atomic.Pointer[pb.SyncupSideRequest]
 	tracker *agent.ResTracker
 	chunks  *agent.ChunkSet
 	// chunkMigrId identifies the migration the chunks belong to, so chunks
@@ -240,7 +263,8 @@ func (s *DnAgentServer) sideKeysOf(clusterId, dnId uint64) []string {
 	defer s.mu.Unlock()
 	var keys []string
 	for key, st := range s.sides {
-		if st.req.GetClusterId() == clusterId && st.req.GetDnId() == dnId {
+		req := st.req.Load()
+		if req.GetClusterId() == clusterId && req.GetDnId() == dnId {
 			keys = append(keys, key)
 		}
 	}
@@ -332,7 +356,7 @@ func (s *DnAgentServer) GetDnInfo(
 	info := s.probeDn(ctx, st)
 	return &pb.GetDnInfoReply{
 		AgentReply: s.dnVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.req.Load().GetRevision(),
 		DnInfo:     info,
 	}, nil
 }
@@ -363,7 +387,7 @@ func (s *DnAgentServer) GetSideInfo(
 	}
 	return &pb.GetSideInfoReply{
 		AgentReply: s.sideVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.req.Load().GetRevision(),
 		SideInfo:   s.probeSide(ctx, st),
 	}, nil
 }

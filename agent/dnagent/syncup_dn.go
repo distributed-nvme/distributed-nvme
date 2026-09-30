@@ -68,10 +68,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// them (DN2). A conf fault must not destroy the desired state, so the
 		// record is kept exactly as the restart found it and convergeDn is the
 		// single place that reports it, once per pass.
-		s.putDn(dnKey(req.GetClusterId(), req.GetDnId()), &dnState{
-			req:     req,
-			tracker: agent.NewResTracker(),
-		})
+		s.putDn(dnKey(req.GetClusterId(), req.GetDnId()), newDnState(req))
 	}
 	// unreadParent reports whether a side or a chunk of the DN (clusterId,
 	// dnId) goes with a dn-* file that did not load: its DN is not loaded
@@ -154,7 +151,8 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// unread, see above), which reads as a list that names no side.
 		if st == nil && unreadSide {
 			dn := s.getDn(dnKey(chunk.GetClusterId(), chunk.GetDnId()))
-			if dn != nil && pointerKnown(dn.req, chunk.GetSidePointer()) {
+			if dn != nil &&
+				pointerKnown(dn.req.Load(), chunk.GetSidePointer()) {
 				slog.WarnContext(ctx,
 					"skipping bitmap chunk file of an unloaded side",
 					slog.String("path", path),
@@ -164,7 +162,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 				continue
 			}
 		}
-		if st == nil || st.req.GetMigrDstConf().GetMigrId() !=
+		if st == nil || st.req.Load().GetMigrDstConf().GetMigrId() !=
 			chunk.GetMigrId() {
 			orphans[path] = struct{}{}
 			continue
@@ -197,14 +195,15 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	// (unreadParent).
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
-		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
-		if dn == nil || !pointerKnown(dn.req, st.req.GetSidePointer()) {
+		req := st.req.Load()
+		dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
+		if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
 			s.dropSideState(ctx, key, st)
 		}
 	}
 	for _, key := range s.dnKeys() {
 		st := s.getDn(key)
-		if agent.ValidateExtentSize(st.req.GetExtentSize()) != nil {
+		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
 			// §7: a dn whose stored conf is unusable converges nothing and
 			// sweeps nothing. A conf fault must not destroy resources.
 			continue
@@ -213,11 +212,13 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	}
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
-		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+		req := st.req.Load()
+		dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 		if dn == nil {
 			continue
 		}
-		if agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
+		extentSize := dn.req.Load().GetExtentSize()
+		if agent.ValidateExtentSize(extentSize) != nil {
 			// §7: the parent's conf is unusable, which is NOT the same thing
 			// as this side having left its parent's list. Every run of this
 			// side is carved out of that extent size, so nothing here may be
@@ -225,22 +226,24 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 			// already recorded the refusal for this DN.
 			continue
 		}
-		s.convergeSide(ctx, st, dn.req.GetExtentSize())
+		s.convergeSide(ctx, st, extentSize)
 	}
 	// DN2: the dm-clone may have survived the restart, so re-apply every
 	// chunk once here rather than only on (re)creation.
 	for _, key := range s.allSideKeys() {
 		st := s.getSide(key)
-		dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
+		req := st.req.Load()
+		dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 		if dn == nil {
 			continue
 		}
-		if agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
+		extentSize := dn.req.Load().GetExtentSize()
+		if agent.ValidateExtentSize(extentSize) != nil {
 			// §7, as in the converge loop above: a chunk's offset is computed
 			// from the extent size, so an unusable one applies nothing.
 			continue
 		}
-		s.applyMigrBitmaps(ctx, st, dn.req.GetExtentSize())
+		s.applyMigrBitmaps(ctx, st, extentSize)
 	}
 	return nil
 }
@@ -407,12 +410,12 @@ func (s *DnAgentServer) knownSides() (
 	known := make(map[[2]uint64]struct{})
 	haveState := make(map[[2]uint64]struct{})
 	for _, dn := range s.dns {
-		for _, ptr := range dn.req.GetSidePointerList() {
+		for _, ptr := range dn.req.Load().GetSidePointerList() {
 			known[[2]uint64{ptr.GetSpId(), ptr.GetSideId()}] = struct{}{}
 		}
 	}
 	for _, st := range s.sides {
-		ptr := st.req.GetSidePointer()
+		ptr := st.req.Load().GetSidePointer()
 		key := [2]uint64{ptr.GetSpId(), ptr.GetSideId()}
 		known[key] = struct{}{}
 		haveState[key] = struct{}{}
@@ -421,19 +424,21 @@ func (s *DnAgentServer) knownSides() (
 }
 
 // claimedMigrs lists the (sp_id, migr_id) pairs a live destination role owns.
-// The REQUEST alone decides: it is stored (putSide) before any converge
-// builds a thing, so no role this process started can use a metadata slot
-// whose claim is not visible here; one whose request a lost store took is
-// what spFullyKnown, both callers' other half, waits out. The "last applied
-// conf" this used to also consult was memory of a past converge — the very
-// thing that let a role whose teardown failed keep its slot claimed for ever.
+// The REQUEST alone decides: it is stored (sideState.req, an atomic store)
+// before any converge builds a thing, so no role this process started can use
+// a metadata slot whose claim is not visible here; one whose request a lost
+// store took is what spFullyKnown, both callers' other half, waits out. The
+// "last applied conf" this used to also consult was memory of a past
+// converge — the very thing that let a role whose teardown failed keep its
+// slot claimed for ever.
 func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make(map[[2]uint64]struct{})
 	for _, st := range s.sides {
-		spId := st.req.GetSidePointer().GetSpId()
-		if dst := st.req.GetMigrDstConf(); dst != nil {
+		req := st.req.Load()
+		spId := req.GetSidePointer().GetSpId()
+		if dst := req.GetMigrDstConf(); dst != nil {
 			out[[2]uint64{spId, dst.GetMigrId()}] = struct{}{}
 		}
 	}
@@ -479,11 +484,12 @@ func (s *DnAgentServer) allSideKeys() []string {
 }
 
 func newSideState(req *pb.SyncupSideRequest) *sideState {
-	return &sideState{
-		req:     req,
+	st := &sideState{
 		tracker: agent.NewResTracker(),
 		chunks:  agent.NewChunkSet(),
 	}
+	st.req.Store(req)
+	return st
 }
 
 // pointerKnown reports whether a side pointer is in the DN's authoritative
@@ -513,7 +519,7 @@ func (s *DnAgentServer) syncupDn(
 	st := s.getDn(key)
 	var stored uint64
 	if st != nil {
-		stored = st.req.GetRevision()
+		stored = st.req.Load().GetRevision()
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupDnReply{AgentReply: reject, Revision: stored}
@@ -524,8 +530,8 @@ func (s *DnAgentServer) syncupDn(
 	// This is the last point with literally zero side effects: the request
 	// has not become the desired state, nothing has been converged, no dm
 	// device removed, no volume-table block written and no local-store file
-	// touched. Putting it after st.req = req would persist the zero and let
-	// the next Reconcile converge it.
+	// touched. Putting it after the request is stored below would persist
+	// the zero and let the next Reconcile converge it.
 	if err := agent.ValidateExtentSize(req.GetExtentSize()); err != nil {
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
 			slog.Uint64("cluster_id", req.GetClusterId()),
@@ -539,7 +545,7 @@ func (s *DnAgentServer) syncupDn(
 	if st == nil {
 		st = &dnState{tracker: agent.NewResTracker()}
 	}
-	st.req = req
+	st.req.Store(req)
 	s.putDn(key, st)
 
 	// The dn file is persisted BEFORE the sweep, not after it. The
@@ -573,7 +579,7 @@ func (s *DnAgentServer) convergeDn(
 	ctx context.Context,
 	st *dnState,
 ) *pb.DnInfo {
-	req := st.req
+	req := st.req.Load()
 	t := st.tracker
 	info := &pb.DnInfo{}
 
@@ -754,7 +760,7 @@ func (s *DnAgentServer) dropRemovedSides(
 ) {
 	for _, key := range s.sideKeysOf(req.GetClusterId(), req.GetDnId()) {
 		st := s.getSide(key)
-		if st == nil || pointerKnown(req, st.req.GetSidePointer()) {
+		if st == nil || pointerKnown(req, st.req.Load().GetSidePointer()) {
 			continue
 		}
 		s.dropSideState(ctx, key, st)
@@ -777,9 +783,10 @@ func (s *DnAgentServer) dropSideState(
 	s.stopMigrRetry(st)
 	s.stopZeroing(st)
 	s.clearFence(st)
-	ptr := st.req.GetSidePointer()
+	req := st.req.Load()
+	ptr := req.GetSidePointer()
 	paths := []string{s.nf.LocalSidePath(
-		st.req.GetClusterId(), st.req.GetDnId(),
+		req.GetClusterId(), req.GetDnId(),
 		ptr.GetSpId(), ptr.GetSideId())}
 	paths = append(paths, s.chunkPaths(st)...)
 	if err := s.store.Remove(ctx, paths...); err != nil {

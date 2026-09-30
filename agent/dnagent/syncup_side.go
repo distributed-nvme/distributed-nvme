@@ -20,7 +20,7 @@ func (s *DnAgentServer) syncupSide(
 ) *pb.SyncupSideReply {
 	// DN8 gating: SyncupDn introduces the pointer first (§9.2).
 	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
-	if dn == nil || !pointerKnown(dn.req, req.GetSidePointer()) {
+	if dn == nil || !pointerKnown(dn.req.Load(), req.GetSidePointer()) {
 		return &pb.SyncupSideReply{
 			AgentReply: agent.UnknownObjectReply(
 				"side pointer %s not in the dn's list",
@@ -30,18 +30,22 @@ func (s *DnAgentServer) syncupSide(
 	st := s.getSide(key)
 	var stored uint64
 	if st != nil {
-		stored = st.req.GetRevision()
+		stored = st.req.Load().GetRevision()
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupSideReply{AgentReply: reject, Revision: stored}
 	}
+	// Stored before the converge builds anything, so no claim of this
+	// request can be missing from another side's pass that sees what the
+	// converge builds (collectClaims). The store is atomic because those
+	// passes do not hold this side's object lock.
 	if st == nil {
 		st = newSideState(req)
 	}
-	st.req = req
+	st.req.Store(req)
 	s.putSide(key, st)
 
-	info, sweep := s.convergeSide(ctx, st, dn.req.GetExtentSize())
+	info, sweep := s.convergeSide(ctx, st, dn.req.Load().GetExtentSize())
 
 	path := s.nf.LocalSidePath(req.GetClusterId(), req.GetDnId(),
 		req.GetSidePointer().GetSpId(), req.GetSidePointer().GetSideId())
@@ -68,7 +72,7 @@ func (s *DnAgentServer) convergeSide(
 	st *sideState,
 	extentSize uint64,
 ) (*pb.SideInfo, *agent.SweepResult) {
-	plan := newSidePlan(s.nf, st.req, extentSize)
+	plan := newSidePlan(s.nf, st.req.Load(), extentSize)
 	info := &pb.SideInfo{}
 
 	// The sweep replaced teardownForbidden and retireMigrDst, and with them

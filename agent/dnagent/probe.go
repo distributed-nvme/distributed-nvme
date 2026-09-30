@@ -18,7 +18,7 @@ func (s *DnAgentServer) probeDn(
 	ctx context.Context,
 	st *dnState,
 ) *pb.DnInfo {
-	req := st.req
+	req := st.req.Load()
 	t := st.tracker
 	info := &pb.DnInfo{}
 
@@ -65,12 +65,13 @@ func (s *DnAgentServer) probeSide(
 	ctx context.Context,
 	st *sideState,
 ) *pb.SideInfo {
+	req := st.req.Load()
 	var extentSize uint64
 	if dn := s.getDn(
-		dnKey(st.req.GetClusterId(), st.req.GetDnId())); dn != nil {
-		extentSize = dn.req.GetExtentSize()
+		dnKey(req.GetClusterId(), req.GetDnId())); dn != nil {
+		extentSize = dn.req.Load().GetExtentSize()
 	}
-	plan := newSidePlan(s.nf, st.req, extentSize)
+	plan := newSidePlan(s.nf, req, extentSize)
 	info := &pb.SideInfo{}
 	state := s.probeSideDev(ctx, st, plan, info)
 	if !plan.wantDm {

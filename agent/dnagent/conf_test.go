@@ -208,10 +208,10 @@ func TestSyncupDnRefusesAZeroExtentSize(t *testing.T) {
 	if st == nil {
 		t.Fatalf("the dn state vanished")
 	}
-	if st.req.GetRevision() != 2 ||
-		st.req.GetExtentSize() != testExtentSize {
+	if req := st.req.Load(); req.GetRevision() != 2 ||
+		req.GetExtentSize() != testExtentSize {
 		t.Errorf("the refused request became desired state: revision %d, "+
-			"extent_size %d", st.req.GetRevision(), st.req.GetExtentSize())
+			"extent_size %d", req.GetRevision(), req.GetExtentSize())
 	}
 	assertRefusalRecord(t, capture, "cluster_id", "dn_id")
 }
@@ -263,9 +263,8 @@ func TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown(
 		t.Fatalf("the dn record was dropped; its sides are now parentless " +
 			"and the next pass would tear them down")
 	}
-	if st.req.GetExtentSize() != 0 {
-		t.Errorf("extent_size %d, want the stored 0 kept as read",
-			st.req.GetExtentSize())
+	if got := st.req.Load().GetExtentSize(); got != 0 {
+		t.Errorf("extent_size %d, want the stored 0 kept as read", got)
 	}
 	// Refused: nothing converged, nothing removed, nothing written.
 	if mutations := node.Mutations(); len(mutations) != 0 {

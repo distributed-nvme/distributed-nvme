@@ -146,15 +146,15 @@ type sideClaims struct {
 }
 
 // collectClaims walks every side this agent holds state for. A side's request
-// is stored (putSide) before its converge builds anything, so nothing can be
-// exported or connected by a side whose claim is not already visible here —
-// which is what makes it safe to run this outside the node write lock. That
-// holds for what THIS process builds. What a side built before a restart
-// that lost the local store has no claim here until that side's request
-// comes back, which is why both scopes judge a migration object only once
-// every side of its sp this node may host is held. Both read that set
-// (knownSides) before the claims: a side stored in between is then either
-// still missing from it, which keeps the gate shut, or visible here.
+// is stored (sideState.req, an atomic store) before its converge builds
+// anything, so nothing can be exported or connected by a side whose claim is
+// not already visible here — which is what makes it safe to run this outside
+// the node write lock. That holds for what THIS process builds. What a side
+// built before a restart that lost the local store has no claim here until
+// that side's request comes back, which is why both scopes judge a migration
+// object only once every side of its sp this node may host is held. Both read
+// that set (knownSides) before the claims: a side stored in between is then
+// either still missing from it, which keeps the gate shut, or visible here.
 func (s *DnAgentServer) collectClaims(
 	clusterId uint64,
 	dnId uint64,
@@ -172,7 +172,7 @@ func (s *DnAgentServer) collectClaims(
 		}
 		// extentSize is irrelevant: only names and gates are read here, and
 		// both are pure functions of the request.
-		plan := newSidePlan(s.nf, st.req, 0)
+		plan := newSidePlan(s.nf, st.req.Load(), 0)
 		if plan.wantExport {
 			for _, cnId := range plan.cnIds {
 				claims.exports[plan.sideNqn(cnId)] = struct{}{}
@@ -1305,8 +1305,9 @@ func (s *DnAgentServer) sweepDn(
 	remove bool,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
-	clusterId := st.req.GetClusterId()
-	dnId := st.req.GetDnId()
+	req := st.req.Load()
+	clusterId := req.GetClusterId()
+	dnId := req.GetDnId()
 	actual := s.enumerateDn(ctx, clusterId, dnId, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
 	// below is "actual minus desired", and with the listing unanswered
@@ -1544,7 +1545,7 @@ func (s *DnAgentServer) dnVerdict(
 	ctx context.Context,
 	st *dnState,
 ) *agent.SweepResult {
-	if agent.ValidateExtentSize(st.req.GetExtentSize()) != nil {
+	if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
 		return &agent.SweepResult{}
 	}
 	return s.sweepDn(ctx, st, false)
@@ -1557,12 +1558,16 @@ func (s *DnAgentServer) sideVerdict(
 	ctx context.Context,
 	st *sideState,
 ) *agent.SweepResult {
-	dn := s.getDn(dnKey(st.req.GetClusterId(), st.req.GetDnId()))
-	if dn == nil ||
-		agent.ValidateExtentSize(dn.req.GetExtentSize()) != nil {
+	req := st.req.Load()
+	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
+	if dn == nil {
 		return &agent.SweepResult{}
 	}
-	plan := newSidePlan(s.nf, st.req, dn.req.GetExtentSize())
+	extentSize := dn.req.Load().GetExtentSize()
+	if agent.ValidateExtentSize(extentSize) != nil {
+		return &agent.SweepResult{}
+	}
+	plan := newSidePlan(s.nf, req, extentSize)
 	return s.sweepSide(ctx, st, plan, false)
 }
 

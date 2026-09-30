@@ -72,7 +72,7 @@ func (s *DnAgentServer) checkDnRound(
 	// until the next SyncupDn sweeps it away.
 	reply := &pb.CheckDnReply{
 		AgentReply: s.dnVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.req.Load().GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil
@@ -136,7 +136,7 @@ func (s *DnAgentServer) checkSideRound(
 		// The side-level verdict. A dn's own Check reports node-level
 		// leftovers only; each object drives its own Syncup*.
 		AgentReply: s.sideVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.req.Load().GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil

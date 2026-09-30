@@ -1564,7 +1564,7 @@ func TestMigrationSourceFence(t *testing.T) {
 			node.dms[linName].table)
 	}
 	if got := srv.getSide(sideKey(testCluster, testDn, testSp, testSide)).
-		req; got.GetMigrSrcConf() == nil {
+		req.Load(); got.GetMigrSrcConf() == nil {
 		t.Error("the source role vanished")
 	}
 }

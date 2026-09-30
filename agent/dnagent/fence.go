@@ -250,7 +250,7 @@ func (s *DnAgentServer) endFence(st *sideState) {
 func (s *DnAgentServer) adoptFence(ctx context.Context, st *sideState) {
 	// extentSize is irrelevant here: only the per-CN linear names are needed,
 	// and those are pure functions of the side's ids.
-	plan := newSidePlan(s.nf, st.req, 0)
+	plan := newSidePlan(s.nf, st.req.Load(), 0)
 	suspended := false
 	for _, cnId := range plan.cnIds {
 		dev, err := s.dm.Info(ctx, plan.linearName(cnId))

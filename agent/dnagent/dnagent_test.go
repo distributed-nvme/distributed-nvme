@@ -3968,7 +3968,7 @@ func TestProbeSideDevBindsTheZeroingErrorOnce(t *testing.T) {
 		t.Fatal("the side state vanished")
 	}
 	// The parked batch publishes nothing, so this test is the only writer.
-	plan := newSidePlan(srv.nf, st.req, testExtentSize)
+	plan := newSidePlan(srv.nf, st.req.Load(), testExtentSize)
 
 	stop := make(chan struct{})
 	flipped := make(chan struct{})

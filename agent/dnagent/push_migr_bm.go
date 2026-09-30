@@ -24,7 +24,7 @@ func (s *DnAgentServer) pushMigrBitmap(
 	}
 	// Only a destination side accepts chunks, and only for its own
 	// migration.
-	dst := st.req.GetMigrDstConf()
+	dst := st.req.Load().GetMigrDstConf()
 	if dst == nil || dst.GetMigrId() != req.GetMigrId() {
 		return &pb.PushMigrBitmapReply{
 			AgentReply: agent.UnknownObjectReply(
@@ -47,7 +47,7 @@ func (s *DnAgentServer) pushMigrBitmap(
 
 	dn := s.getDn(dnKey(req.GetClusterId(), req.GetDnId()))
 	if dn != nil {
-		s.applyMigrBitmaps(ctx, st, dn.req.GetExtentSize())
+		s.applyMigrBitmaps(ctx, st, dn.req.Load().GetExtentSize())
 	}
 	return &pb.PushMigrBitmapReply{AgentReply: agent.OkReply()}
 }
@@ -61,10 +61,11 @@ func (s *DnAgentServer) applyMigrBitmaps(
 	st *sideState,
 	extentSize uint64,
 ) {
-	if st.req.GetMigrDstConf() == nil || st.chunks.Len() == 0 {
+	req := st.req.Load()
+	if req.GetMigrDstConf() == nil || st.chunks.Len() == 0 {
 		return
 	}
-	s.applyChunks(ctx, st, newSidePlan(s.nf, st.req, extentSize))
+	s.applyChunks(ctx, st, newSidePlan(s.nf, req, extentSize))
 }
 
 func (s *DnAgentServer) applyChunks(
@@ -105,7 +106,7 @@ func (s *DnAgentServer) applyChunks(
 // DN2's reload skipped, so the set survives an agent restart, and a skipped
 // chunk is pushed again.
 func (s *DnAgentServer) bitmapInfo(st *sideState) *pb.BitmapInfo {
-	dst := st.req.GetMigrDstConf()
+	dst := st.req.Load().GetMigrDstConf()
 	if dst == nil {
 		return nil
 	}
@@ -120,11 +121,12 @@ func (s *DnAgentServer) chunkPaths(st *sideState) []string {
 	if st.chunks.Len() == 0 {
 		return nil
 	}
-	ptr := st.req.GetSidePointer()
+	req := st.req.Load()
+	ptr := req.GetSidePointer()
 	paths := make([]string, 0, st.chunks.Len())
 	for _, bmIdx := range st.chunks.Indexes() {
 		paths = append(paths, s.nf.LocalMigrBmPath(
-			st.req.GetClusterId(), st.req.GetDnId(), ptr.GetSpId(),
+			req.GetClusterId(), req.GetDnId(), ptr.GetSpId(),
 			st.chunkMigrId, bmIdx))
 	}
 	return paths
