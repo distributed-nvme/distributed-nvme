@@ -113,7 +113,10 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// process; DN12 retires it at once rather than opening a second
 		// grace window — provided adoptFence finds one of them suspended. If
 		// none of its probes answers it finds nothing, which is DN12 rule 1's
-		// known limit.
+		// known limit, and so is a side this loop never gets here with — its
+		// file missing or unreadable, or skipped above with its dn file — or
+		// one the pointer-absent branch below drops, mark and all, for want
+		// of a loaded DN. Nothing adopts its fence later (beginFence).
 		s.adoptFence(ctx, st)
 		s.putSide(key, st)
 	}

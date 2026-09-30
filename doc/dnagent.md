@@ -1721,11 +1721,16 @@ DN8. **Gating.** The pointer MUST be present in the stored
      After a lost `--local-store`, the first `SyncupSide` of each listed
      side meets no stored request: there is no revision to gate it against,
      and its converge adopts, probe-first, what the node still holds for it
-     (*amended 2026-09-29*). The `SyncupDn` that brought the list back left
-     the side's devices and the exports attributed to it in place (DN6's
-     Scope 1), and the migration objects of its sp as well: both of DN6's
-     scopes judge a migration object only once every side of its sp this
-     node may host is held, so neither that pass nor the first
+     (*amended 2026-09-29*) — all but a migration source's fence: with no
+     request to probe its linears by, the restart adopted no window, so the
+     source's first converge that builds its per-CN stacks opens a whole
+     new one, over the linears still suspended on their pre-fence tables
+     when the store was lost inside the window and over their dm-errors
+     when after it (DN12 rule 1's known limit). The `SyncupDn` that brought
+     the list back left the side's devices and the exports attributed to it
+     in place (DN6's Scope 1), and the migration objects of its sp as well:
+     both of DN6's scopes judge a migration object only once every side of
+     its sp this node may host is held, so neither that pass nor the first
      `SyncupSide` of another listed side of the same sp takes a migration
      source's `DnMigrSrcName` and `MigrSrcNqn` export, or a destination's
      dm-clone, wrapper and `:3:` connection, from under a live migration
@@ -2002,18 +2007,33 @@ DN12. **Migration source** (`migr_src_conf` set): the §11.2 sequence in
         window expects the pre-fence table, reports the primary's linear
         `RES_STATUS_ERROR` until phase 2 runs again. A restart inside the
         window whose probes of the linears all go unanswered does not find
-        them suspended either, so it treats no window as elapsed: the
-        linears stay suspended on their pre-fence tables with no window
-        running and no timer armed, and no verdict names them, since they
-        are wanted. At an exporting level, with the role still standing, a
+        them suspended either, and one that ends up holding no state for the
+        side keeps nothing of what it found (*known limit, 2026-09-29*):
+        after a lost `--local-store`, with the side's `side-*` file missing
+        or not loading, or with its `dn-*` file not loading (DN2 skips the
+        side) or missing (DN2 drops the side as one whose pointer left the
+        list). A found suspension is marked on the side's in-memory state,
+        which such a restart does not keep; nothing else touches the side's
+        linears before its `SyncupSide` arrives — the node-level sweep keeps
+        those of a side its DN's list names (DN6), and a DN not loaded is
+        not swept at all — and that side's first converge finds no window
+        this process knows of. Either way the process treats no window as
+        elapsed: the linears stay suspended on their pre-fence tables with
+        no window running and no timer armed, and no verdict names them:
+        they are wanted, their side's pointer is listed, or their DN is not
+        loaded. At an exporting level, with the role still standing, a
         converge that stops at the DN9 gate leaves them so — rule 4 acts
         only on a window the process knows of — and, unless a pass at a
         level with no export layer has marked the window over and retired
-        them before it (rule 3), the first one that builds the side's
-        per-CN stacks opens a second window over them, which phase 2 ends
+        them before it (rule 3), the first one that builds the side's per-CN
+        stacks opens a second window over them, which phase 2 ends
         `SuspendSeconds` later, however long that converge was in coming.
         While they sit so, a probe that gets past the side device expects
-        the dm-error and reports the primary's linear `RES_STATUS_ERROR`.
+        the dm-error and reports the primary's linear `RES_STATUS_ERROR`; a
+        side the restart does not hold has no probe, and answers its Check
+        rounds `ReplyCodeUnknownObject` until that `SyncupSide` arrives
+        (`TestFenceRestartThatHoldsNoSideOpensAWholeWindow` pins this for
+        every store loss named above).
       * The role ending clears the window and returns the linears to their
         normal targets, resumed. The condition is a **state**, not an event:
         every converge of a side whose *effective* `migr_src_conf` is absent
@@ -2560,6 +2580,15 @@ Recorded for traceability; the edits are already applied.
   closed that gap, wrapping `agent/nvmehost.go` `readTrimmed` through
   `cmdCtx` and the `agent/cnagent/leg.go` sysfs walk through the newly
   exported `agent.CmdCtx`.
+* `architecture.md` §11.2 step 2 + [D12] (2026-09-29) — DN12 rule 1's
+  known limit names its second cause beside a restart whose probes of the
+  linears all go unanswered: a restart inside the window that is left
+  holding no state for the side — a lost `--local-store`, a `side-*` file
+  missing or unreadable, a `dn-*` file missing or unreadable (DN2) — keeps
+  nothing of what it found, and while the role stands at an exporting
+  level the side's first converge that builds its per-CN stacks opens a
+  second, whole window over linears still suspended on their pre-fence
+  tables. Both carriers had named the unanswered probes only.
 
 ## 6. Tests
 
@@ -2841,11 +2870,18 @@ able to fail.
     of them survive, and both the reply and the read-only verdict are
     clean. The side's `SyncupSide` then finds everything in place and
     issues no mutating call but its own store write, with the migration
-    rows `OK` — the §11.2 window off, as `startTestServer` leaves it; with
-    it on, the source's pass would also open a second window over the
-    dm-errors, DN12 rule 1's known limit. The destination case is what pins
-    the connection's gate: with only the dm-clone kept out of the chain, L3
-    disconnects the source under it. The startup twin
+    rows `OK` — the §11.2 window off, as `startTestServer` leaves it. With
+    it on, the source's pass would also open a second window, DN12 rule
+    1's known limit: over the dm-errors had the first window closed before
+    the restart, and over the linears still suspended on their pre-fence
+    tables had the restart fallen inside it, which
+    `TestFenceRestartThatHoldsNoSideOpensAWholeWindow` pins for a lost
+    store, a lost `side-*` file and a lost or unreadable `dn-*` file: after
+    the restart no `dmsetup reload` or `resume` names the primary's linear,
+    and the side's `SyncupSide` leaves it suspended on the side device with
+    a window running and its timer armed. The destination case is what
+    pins the connection's gate: with only the dm-clone kept out of the
+    chain, L3 disconnects the source under it. The startup twin
     (`TestReconcileKeepsAMigrationSourceWhoseSideFileIsLost`) keeps the dn
     file and loses only the source side's, so the startup reconcile's own
     removing sweep meets that side by its pointer alone: no mutating call

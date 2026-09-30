@@ -131,8 +131,9 @@ type sideState struct {
 	// has no recorded start, and DN12 treats a side in which the restart
 	// finds one as "the window is over" rather than starting a second one (a
 	// restart whose probes of the side's linears all went unanswered finds
-	// none: DN12's known limit) — the whole point of the bound is that no dnv
-	// device stays suspended indefinitely.
+	// none, and one that ends up holding no state for the side keeps
+	// nothing of what it found: DN12 rule 1's known limit) — the whole point
+	// of the bound is that no dnv device stays suspended indefinitely.
 	fenceAt    time.Time
 	fenceTimer *time.Timer
 	// fenceRestarted marks a side reloaded from the local store whose per-CN

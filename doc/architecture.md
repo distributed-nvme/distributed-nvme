@@ -3575,20 +3575,24 @@ goroutine and waits for it before the dm devices are removed (§9.4).
    beyond it, including across an agent restart that finds it suspended, because a
    suspended dm target queues IO forever and wedges any block-device scanner that
    touches it. A restart inside the window whose probes of the linears all go
-   unanswered does not find them suspended, and their suspension can then outlast
-   the window (`dnagent.md` DN12 rule 1's known limit). So can a (b) whose load
-   fails: a reload fails closed (*decided 2026-09-29*, `dnagent.md` §2.8), which
-   leaves the linear suspended on its pre-fence table, queueing its IO, until a
-   later converge's reload of it succeeds or the end of the source role resumes it
-   (`dnagent.md` DN12). The floor gives way wherever the export above a suspended linear is
-   removed — the side torn down, a CN dropped from the side's list, a level with no
-   export layer (`SP_LEVEL_NO_SIDE` and above) — because disabling an nvmet namespace
-   waits for every request in flight on it, and one whose IO a suspended device holds
-   never completes: (b) retires the linear first, never a bare resume, which would
-   replay the absorbed IO, and such a level ends the window rather than pausing it
-   (`dnagent.md` DN6, DN12). Only a request that also ends the source role resumes
-   the linears onto their pre-fence tables first, which is that role ending's own
-   rule.
+   unanswered does not find them suspended, and one left holding no state for the
+   side — a lost `--local-store`, or a side or DN file of the store missing or
+   unreadable (`dnagent.md` DN2) — keeps nothing of what it found. Either way their
+   suspension can then outlast the window, and while the role stands at an
+   exporting level the first converge that builds the side's per-CN stacks opens a
+   second, whole window over them (`dnagent.md` DN12 rule 1's known limit). So can
+   a (b) whose load fails: a reload fails closed (*decided 2026-09-29*, `dnagent.md`
+   §2.8), which leaves the linear suspended on its pre-fence table, queueing its IO,
+   until a later converge's reload of it succeeds or the end of the source role
+   resumes it (`dnagent.md` DN12). The floor gives way wherever the export above a
+   suspended linear is removed — the side torn down, a CN dropped from the side's
+   list, a level with no export layer (`SP_LEVEL_NO_SIDE` and above) — because
+   disabling an nvmet namespace waits for every request in flight on it, and one
+   whose IO a suspended device holds never completes: (b) retires the linear first,
+   never a bare resume, which would replay the absorbed IO, and such a level ends
+   the window rather than pausing it (`dnagent.md` DN6, DN12). Only a request that
+   also ends the source role resumes the linears onto their pre-fence tables first,
+   which is that role ending's own rule.
 3. Build `DnMigrSrcName` (linear on the side device) and export it via `MigrSrcNqn`,
    `allowed_hosts = [DnHostNqn(cluster, migr_src_conf.dst_dn_id)]`.
 
@@ -4286,8 +4290,10 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   except this one window; never lets a device outlive it short of a `dmsetup` command
   that fails, including across an agent restart that finds it suspended (a linear
   found suspended with no recorded start is retired at once rather than starting a
-  second window; a restart whose probes of a side's linears
-  all go unanswered finds none so — `dnagent.md` DN12 rule 1's known limit); and, before
+  second window; a restart whose probes of a side's linears all go unanswered finds
+  none so, and one left holding no state for the side — a lost `--local-store`, a
+  side or DN file missing or unreadable — keeps nothing of what it found:
+  `dnagent.md` DN12 rule 1's known limit); and, before
   any teardown step runs over a fenced linear — the removal of its export included, all
   that `SP_LEVEL_NO_SIDE` takes — retires it onto its dm-error, §11.2's step 2b brought
   forward, rather than resuming it onto the table it was suspended with and replaying
@@ -4699,6 +4705,25 @@ own amendment sections are the surviving record.
   uninterruptible D state, and `dmsetup remove` and the nvmet disable above it work on
   it without a resume first. No record, request or flag changes; an upgraded agent
   converges an ns-dev an older build left suspended on its first pass.
+* **A reload fails closed (2026-09-29)** — `Dm.Reload` and `Dm.ReloadMulti`
+  (`agent/dm.go`) swap a table by suspend, load and resume and return at the first
+  command that fails, so a load the kernel refuses leaves the device suspended on its
+  old table, queueing its IO until a later reload or resume of it succeeds. That is now
+  the decided behaviour, not a defect to fix: resuming the old table after a refused
+  load would make every fencing reload fail open — a primary flip's swap of the old
+  primary's per-CN linear onto its dm-error would leave that linear live on the side
+  device beside the new primary's, and the cutover's phase 2 would replay onto the
+  side's data the IO its window absorbed. What the text promised unconditionally — no
+  device left suspended past its window or across a converge pass, one leg never with
+  two writers — now holds only as far as the reloads succeed: §8.7 (the snapshot
+  quiesce), §11.1 (the fan-out's per-side flip, the **sides** sequence and its new
+  known limit: a later converge of the side resumes a linear that a failed flip reload
+  left suspended, releasing the old primary's queued IO onto the side's data), §11.2
+  step 2, §11.6, [D12] (its dn paragraph and its park paragraph), [D16], the 2026-09-16
+  park entry above and Appendix D (new entry) follow, as do `dnagent.md` §2.8, DN10 and
+  DN12, `cnagent.md` CN16 and its known limits, and the comments on the two reloads
+  and on the dn fence. The wrappers themselves did not change — they already behaved
+  so; the sentences claiming the opposite were what was wrong.
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 

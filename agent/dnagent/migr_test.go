@@ -2639,6 +2639,139 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	}
 }
 
+// DN12 rule 1's known limit, second cause. The mark adoptFence leaves lives
+// on a held side's state, so a restart inside the window that ends up holding
+// no state for the side keeps nothing of what it found: a lost --local-store,
+// a side file that is gone, or a dn file that is gone or does not decode
+// (DN2 — a side whose dn file is gone is loaded, marked and then dropped as
+// one whose pointer left the list). Nothing else touches its linears either:
+// the node-level sweep keeps the linears of a side its DN's list names. They
+// stay suspended on their pre-fence tables with no window running until the
+// side's SyncupSide, and that pass, finding no window, opens a whole new one
+// over them. This pins the limit as it stands; a fix that adopts the fence at
+// the SyncupSide is meant to turn it red.
+func TestFenceRestartThatHoldsNoSideOpensAWholeWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lose func(node *fakeNode, nf *common.NameFmt)
+	}{
+		{"lost store", func(node *fakeNode, _ *common.NameFmt) {
+			node.protos = map[string][]byte{}
+		}},
+		{"side file lost", func(node *fakeNode, nf *common.NameFmt) {
+			delete(node.protos,
+				nf.LocalSidePath(testCluster, testDn, testSp, testSide))
+		}},
+		{"dn file lost", func(node *fakeNode, nf *common.NameFmt) {
+			// The side's request loads, and is dropped for want of its DN
+			// before any converge.
+			delete(node.protos, nf.LocalDnPath(testCluster, testDn))
+		}},
+		{"dn file unreadable", func(node *fakeNode, nf *common.NameFmt) {
+			// A varint cut off after one byte, as in
+			// TestReconcileKeepsTheSidesOfAnUnreadableDnFile.
+			node.protos[nf.LocalDnPath(testCluster, testDn)] = []byte{0xff}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+			ctx := context.Background()
+			key := sideKey(testCluster, testDn, testSp, testSide)
+			syncupBoth(t, srv, 1, testSide)
+			linName := nf.DnLinearName(
+				testCluster, testDn, testSp, testSide, testCn0)
+			sideNo := node.devNo[nf.DmPath(
+				nf.DnSideName(testCluster, testDn, testSp, testSide))]
+
+			srv.fenceWait = time.Hour
+			if _, err := srv.SyncupSide(ctx, migrSrcReq(2)); err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if !node.dms[linName].suspended {
+				t.Fatal("the cutover did not suspend the primary's dm-linear")
+			}
+
+			// The process exits inside the window, its timer with it; the
+			// kernel state survives, the side's state does not.
+			stopTestServer(t, srv)
+			srv.clearFence(srv.getSide(key))
+			node.mu.Lock()
+			tc.lose(node, nf)
+			node.mu.Unlock()
+			node.Reset()
+			restarted := startTestServer(t, node)
+			restarted.fenceWait = time.Hour
+			if restarted.getSide(key) != nil {
+				t.Fatal("fixture is wrong: the restart holds the side")
+			}
+
+			// The worker re-syncs the DN, then the side.
+			if reply, err := restarted.SyncupDn(ctx,
+				dnReq(1, testSide)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			} else if got := reply.GetAgentReply().GetCode(); got != 0 {
+				t.Fatalf("SyncupDn code = %d (%s), want 0",
+					got, reply.GetAgentReply().GetDetails())
+			}
+			node.mu.Lock()
+			suspended := node.dms[linName].suspended
+			node.mu.Unlock()
+			if !suspended {
+				t.Fatal("the linear left suspension before the side's " +
+					"SyncupSide: the limit this pins is gone")
+			}
+			reply, err := restarted.SyncupSide(ctx, migrSrcReq(2))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+
+			node.mu.Lock()
+			suspended = node.dms[linName].suspended
+			table := node.dms[linName].table
+			released := len(node.releasedOnto[linName])
+			node.mu.Unlock()
+			if !suspended {
+				t.Errorf("%s is not suspended after the side's SyncupSide",
+					linName)
+			}
+			if !strings.Contains(table, sideNo) {
+				t.Errorf("%s left its pre-fence table: %q", linName, table)
+			}
+			for _, verb := range []string{"reload", "resume"} {
+				if n := len(node.callsMatching(
+					"cmd dmsetup " + verb + " " + linName)); n != 0 {
+					t.Errorf("dmsetup %s %s ran %d times after the restart",
+						verb, linName, n)
+				}
+			}
+			if released != 0 {
+				t.Errorf("%s released its deferred IO %d times", linName,
+					released)
+			}
+			if got := reply.GetSideInfo().GetCnIdToDmLinear()[testCn0].
+				GetDetails(); got != fenceSuspendedDetails {
+				t.Errorf("primary's dm_linear details = %q, want %q",
+					got, fenceSuspendedDetails)
+			}
+			st := restarted.getSide(key)
+			restarted.mu.Lock()
+			adopted := st.fenceRestarted
+			timer := st.fenceTimer != nil
+			restarted.mu.Unlock()
+			if adopted {
+				t.Error("the SyncupSide adopted the fence: the limit this " +
+					"pins is gone")
+			}
+			if !restarted.inFence(st) || !timer {
+				t.Errorf("no window is running (timer armed = %v): the "+
+					"SyncupSide did not open a new one", timer)
+			}
+			restarted.clearFence(st)
+		})
+	}
+}
+
 // TestMigrationConnectSucceedsFromTheRetryLoop pins the DN8 loop's one
 // non-obvious property: the converge that finally connects must survive its
 // own call to stopMigrRetry.

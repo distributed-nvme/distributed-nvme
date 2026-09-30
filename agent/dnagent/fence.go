@@ -57,11 +57,18 @@ import (
 // suspension: the invariant is that no dnv device stays suspended for more
 // than the window plus one converge. DN12 rule 1's known limit breaks it: a
 // restart whose probes of the side's linears all went unanswered adopts
-// nothing, and then — unless the role ends first (clearFence), or a level
-// with no export layer ends the window (endFence) — a converge that stops at
-// the DN9 gate finds no window to settle (fenceStarted), and the first one
-// that gets here starts a fresh window over linears still suspended. A
-// phase-2 reload whose load fails breaks it too: a reload fails closed
+// nothing, and one that ends up holding no state for the side keeps nothing
+// of what it found: a lost --local-store, a side file missing or unreadable,
+// or a dn file unreadable (DN2 skips its sides) or missing (DN2 drops its
+// sides as ones whose pointer left the list). adoptFence runs only in
+// Reconcile, its mark lives on the sideState, and the SyncupSide that brings
+// the side back builds a new one with none. Then — unless the role ends
+// first (clearFence), or a level with no export layer ends the window
+// (endFence) — a converge that stops at the DN9 gate finds no window to
+// settle (fenceStarted), and the first one that gets here starts a fresh
+// window over linears still suspended
+// (TestFenceRestartThatHoldsNoSideOpensAWholeWindow). A phase-2 reload
+// whose load fails breaks it too: a reload fails closed
 // (dnagent.md §2.8), so the linear stays suspended on its pre-fence table
 // until a later converge's reload of it succeeds or the role's end resumes
 // it (unfenceLinears).
