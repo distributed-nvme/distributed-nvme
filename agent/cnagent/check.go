@@ -64,15 +64,17 @@ func (s *CnAgentServer) checkCnRound(
 				"unknown cn %d", req.GetCnId()),
 		}, nil
 	}
-	info := s.probeCn(ctx, st)
+	info, redrive := s.probeCn(ctx, st)
 	// The verdict: the same enumeration and the same comparison the sweep
-	// makes, with nothing touched (CN23). It is recomputed every round and
-	// stored nowhere, so a leftover that has since gone stops being reported
-	// on its own, and one that is still there keeps driving the worker's
-	// re-sync until it goes: a background disconnect finishing, or the next
-	// SyncupCn sweeping it away.
+	// makes, with nothing touched (CN23), plus what of the base state this
+	// round's probe read wrong in a way a SyncupCn would cure (probeCn). It
+	// is recomputed every round and stored nowhere, so a leftover that has
+	// since gone stops being reported on its own, and one that is still
+	// there keeps driving the worker's re-sync until it goes: a background
+	// disconnect finishing, or the next SyncupCn sweeping it away or
+	// building or rewriting what the probe read wrong.
 	reply := &pb.CheckCnReply{
-		AgentReply: s.sweepCn(ctx, st, false).Reply(),
+		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
 		Revision:   st.req.GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {

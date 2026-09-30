@@ -41,7 +41,10 @@ const (
 const MsgSweepLeftover = "sweep leftover"
 
 // SweepResult is what one pass found: the objects still present that nothing
-// wants, and the enumerations that did not answer.
+// wants, and the failures — each enumeration or read that did not answer,
+// each removal that failed, and each condition an agent reports the same way
+// so that the worker re-sends the Syncup* whose converge acts on it
+// (LeftoverReply).
 type SweepResult struct {
 	leftovers []string
 	failures  []string
@@ -58,8 +61,9 @@ func (r *SweepResult) Add(kind string, name string) {
 	r.leftovers = append(r.leftovers, kind+":"+name)
 }
 
-// Fail records an enumeration that did not answer. what names the
-// enumeration, not the object — there may be no object to name.
+// Fail records one failure. what names what failed: an enumeration, where
+// there may be no object to name, or the object that a read, a removal or a
+// condition is about.
 func (r *SweepResult) Fail(what string, err error) {
 	r.failures = append(r.failures, what+": "+err.Error())
 }

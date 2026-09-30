@@ -3066,7 +3066,12 @@ cannot forget in that way: while the device is there, the next enumeration finds
   clean. The dn agent reports two more conditions the same way, so that the worker
   re-sends the `Syncup*` whose converge acts on them: a disk whose identity it has not
   confirmed, and a side whose record still has extents to zero with no zeroing goroutine
-  running (`dnagent.md` DN6, DN16). The agent log carries the full list once per pass, so
+  running (`dnagent.md` DN6, DN16). The cn agent reports two more in its `CheckCn`
+  rounds and `GetCnInfo`, both of which a `SyncupCn` would cure: a piece of the §3.2
+  base state — the clone-metadata arena's tmpfs, file or loop device, or the agent's
+  port or one of its ANA groups — that the call's probe read absent, and an ANA group
+  it read in a state other than its fixed one while the port's transport attributes
+  match (`cnagent.md` CN30). The agent log carries the full list once per pass, so
   a lingering leftover is visible every round rather than once.
 
 ---

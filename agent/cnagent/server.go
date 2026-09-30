@@ -363,10 +363,11 @@ func (s *CnAgentServer) GetCnInfo(
 				"unknown cn %d", req.GetCnId()),
 		}, nil
 	}
+	info, redrive := s.probeCn(ctx, st)
 	return &pb.GetCnInfoReply{
-		AgentReply: s.sweepCn(ctx, st, false).Reply(),
+		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
 		Revision:   st.req.GetRevision(),
-		CnInfo:     s.probeCn(ctx, st),
+		CnInfo:     info,
 	}, nil
 }
 

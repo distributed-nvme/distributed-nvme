@@ -280,7 +280,14 @@ const (
 	// node still holds objects the desired state does not want, or an
 	// enumeration of what exists did not answer. It is the one thing that
 	// travels in agent_reply rather than in the *Info rows, because a
-	// leftover by definition has no row — nothing wanted names it.
+	// leftover by definition has no row — nothing wanted names it. An agent
+	// also reports a few conditions this way so that the worker re-sends the
+	// Syncup* whose converge acts on them (architecture.md §9.8): on a dn a
+	// disk identity not yet confirmed or a side with extents to zero and
+	// nothing zeroing it, on a cn a piece of the node's base state that a
+	// CheckCn round's or GetCnInfo's probe read absent, or an ANA group it
+	// read in a state other than its fixed one on a port whose transport
+	// attributes match.
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
 	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)

@@ -250,7 +250,9 @@ pressure while leaving ample parallelism.
   `osBase.readAttrStrict` over §4.3's `ReadFile`: only `fs.ErrNotExist` is
   "absent", every other error propagates, which is what keeps a stalled
   sysfs or configfs read (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, the
-  `enable` reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`) from
+  `enable` reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, and since
+  2026-09-30 the attribute reads of `Nvmet.ProbePortState`, the port read
+  of `cnagent.md` CN30's verdict) from
   making a live object read as an absent one.
 
 ### 4.3 ReadFile / WriteFile / WriteFileDirect

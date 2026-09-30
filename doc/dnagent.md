@@ -142,7 +142,14 @@ authoritative for comment text, wrapping and order (unlike `log.md` §4 /
 	// node still holds objects the desired state does not want, or an
 	// enumeration of what exists did not answer. It is the one thing that
 	// travels in agent_reply rather than in the *Info rows, because a
-	// leftover by definition has no row — nothing wanted names it.
+	// leftover by definition has no row — nothing wanted names it. An agent
+	// also reports a few conditions this way so that the worker re-sends the
+	// Syncup* whose converge acts on them (architecture.md §9.8): on a dn a
+	// disk identity not yet confirmed or a side with extents to zero and
+	// nothing zeroing it, on a cn a piece of the node's base state that a
+	// CheckCn round's or GetCnInfo's probe read absent, or an ANA group it
+	// read in a state other than its fixed one on a port whose transport
+	// attributes match.
 	//
 	// It is not a rejection: the worker evaluates the reply's rows exactly as
 	// for code 0 and re-issues the Syncup* every round (RW12, no backoff)
@@ -721,7 +728,11 @@ SH15. Every wrapper call wraps its ctx with
       for that pass and named as a failed enumeration), the
       `enable` reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
       "absent" would skip the `enable = 0` write and `rmdir` a namespace
-      the kernel still has enabled) and, through `Cmd.ReadAttr`, the md
+      the kernel still has enabled), the attribute reads of
+      `Nvmet.ProbePortState` (`cnagent.md` CN30, since 2026-09-30: a group
+      whose state read did not answer, read as absent, would make a
+      `CheckCn` verdict re-send a `SyncupCn` for a port that is there)
+      and, through `Cmd.ReadAttr`, the md
       sysfs reads of `Md.ListArrays` and `Md.Gone` (`cnagent.md` CN12: an
       array read as absent, or as gone, would let the sweep disconnect a
       leg under a live array).
@@ -3186,7 +3197,9 @@ able to fail.
     `readAttrStrict`, which calls absence only on `fs.ErrNotExist`;
     `CloneMeta.LoopDevices` takes every failure of `losetup --associated`
     as an error; and `Md.Detail` with the `Md.Walk` it reads from, the
-    sysfs md read since 2026-09-26 (`cnagent.md` CN12), goes through both —
+    sysfs md read since 2026-09-26 (`cnagent.md` CN12), and
+    `Nvmet.ProbePortState`, the port read of `cnagent.md` CN30's verdict
+    since 2026-09-30, go through both —
     `listDir` for the listings, `readAttrStrict` for the attributes. None of
     them turns a non-nil error into a nil-and-not-found.
 

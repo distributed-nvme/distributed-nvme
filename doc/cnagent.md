@@ -639,10 +639,11 @@ CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
        converge's `mount` would hide that file and bring the cascade above:
        a fresh file, a second loop device, and every clone built on the
        first loop rebuilt. As after a failed `mount`, the arena then waits
-       for the CN's next `SyncupCn` or the agent's next start: a check round
-       reads what is absent `MISSING`, and the `CheckCn` verdict (CN30),
-       which is the sweep's alone, stays clean for it, so it does not make
-       the worker re-send `SyncupCn` — an open issue (§7, known limits).
+       for a later converge: a check round whose probes answer reads what is
+       absent `MISSING` and names it in the `CheckCn` verdict (CN30), so the
+       worker re-sends `SyncupCn` every round until a converge has built it;
+       a round whose `findmnt` does not answer reads `tmpfs_info` `ERROR`
+       and names nothing of the arena.
      * **backing file** `CnTmpFilePath`: probe `stat --format %s`; absent ⇒
        `truncate --size {CnCloneMetaAreaSize} {path}` (sparse — tmpfs pages
        materialize only as clone metadata is written, and CN18's hole-punch
@@ -653,8 +654,9 @@ CN5. Converge the once-per-CN base state of `architecture.md` §3.2,
        "absent" either: the converge asks once more in the same pass, and
        when that does not answer either, `tmp_file_info` is an `ERROR`
        naming it and nothing is truncated — a file that really is absent
-       then waits, as the tmpfs does, for the CN's next `SyncupCn` or the
-       agent's next start.
+       then waits, as the tmpfs does, for a check round that reads it
+       absent and names it (CN30), and the `SyncupCn` that round makes the
+       worker re-send.
      * **loop device**: probe `losetup --associated {CnTmpFilePath}` (the
        loop path is re-learned from this probe on every converge **and every
        probe pass** — it is kernel-assigned state, never persisted, and a
@@ -2599,7 +2601,10 @@ CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
 CN24. Instantiate the SH24-SH26 loop with the §4.12 probes; one round takes
       the CN1 locks of the corresponding `Get*Info`, and its `agent_reply`
       is the same read-only verdict (CN30) — which is what drives the
-      worker's re-sync while a leftover is still there. Like every SH24
+      worker's re-sync while a leftover is still there, and, on `CheckCn`,
+      while a piece of the base state that a `SyncupCn` would build reads
+      absent or an ANA group that it would rewrite reads in the wrong
+      state. Like every SH24
       round it runs under its request's `trace_id` (the stream's id when
       that is empty).
 
@@ -2775,7 +2780,15 @@ CN29. Error capture (§9.1): a failed command marks that resource
       teardown's per-resource failures had rows until the teardown dropped
       exactly the keys that would have carried them, after which nothing
       reported the object at all. `ReplyCodeLeftover` is where that outcome
-      goes (CN20, CN30).
+      goes (CN20, CN30). A piece of the CN's base state that a `CheckCn`
+      round or a `GetCnInfo` reads absent, and that a `SyncupCn` would
+      build, travels in both: its row reads `MISSING` (`ERROR` for the
+      port), and the verdict names it too (CN30), because the worker
+      re-syncs on a reply's code and never on its rows. So does an ANA
+      group that the round reads in a state other than its fixed one while
+      the port's transport attributes match, which a `SyncupCn` would
+      rewrite: the port row reads `ERROR` with the probe's words, and the
+      verdict names it.
 
 ### 4.13 The read-only verdict
 
@@ -2785,6 +2798,46 @@ CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
       enumeration, the same attribution, the same comparison against the same
       wanted set, and **nothing touched** (CN23 — a probe never mutates).
       Details and log record are CN20's.
+
+      The node-level verdict of a `CheckCn` round and of a `GetCnInfo` also
+      names what of the CN's base state the call's own probe read wrong in
+      a way a `SyncupCn` would cure (CN5). That is each piece it read
+      absent: an absent tmpfs; an absent arena file or loop device, while
+      the same probe read the tmpfs there or absent, since the converge
+      creates them only on a tmpfs it found or mounted; and a missing port
+      directory or ANA group. And it is an ANA group whose `ana_state` the
+      probe read as other than the group's fixed one on a port whose
+      transport attributes all match: nvmet takes an `ana_state` write
+      whatever is linked to the port, and `EnsurePort` rewrites a state
+      that differs. Each is rendered the way CN20 renders an enumeration
+      that did not answer — `enumeration failed: {what}: absent`, the
+      port's with the probe's own words after it, such as `port directory
+      missing`, and a group's state `enumeration failed: nvmet port {id}:
+      differs: ana group {g} is "…", want "…"` — and the log record lists
+      it among its `failures`. Nothing else re-drives them — the worker
+      re-syncs on a reply's code, never on a row — and a check round cannot
+      build or rewrite them itself (CN23). A probe that did not answer names
+      nothing, and the next round asks again. Nor does anything else that
+      is there but not as wanted, which its row alone reports: a filesystem
+      of another type at the arena's path — and with it an absent arena
+      file or loop device, which the converge would not create on it — an
+      arena file of another size and more than one loop device, all of
+      which the converge reports and leaves as they are, so a re-sent
+      `SyncupCn` could not cure them; and a port transport attribute that
+      differs: nvmet refuses every `addr_*` write while a subsystem is
+      linked to the port (`EACCES`), so while one is every re-send would
+      fail on that attribute the same way, and `EnsurePort` stops at it,
+      before the groups. The probe, which reads the attributes first, does
+      not read the groups of such a port either, so a group state that
+      differs beside it is not named. The port is read with strict reads
+      for this (`agent.Nvmet.ProbePortState`), so a group or an attribute
+      whose read did not answer is an `ERROR` naming the read, not a
+      missing group or a mismatch. The `SyncupCn` reply does not carry any
+      of them: its converge has just tried to build the base state, and its
+      rows say how that went. So a node whose base state can never be built
+      — a `mount` that is refused every time, say — is re-sent its
+      `SyncupCn` every round, and each attempt is logged, as a disk node
+      whose disk identity stays unconfirmed is (`dnagent.md` DN16).
 
       It is recomputed every round and stored nowhere. That is the whole
       retry mechanism for a leftover and it is deliberately the only one: a
@@ -2808,7 +2861,8 @@ CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
 
       **Each scope answers for its own leftovers.** A `cn`'s verdict is the
       node-level one — the sps whose pointer has left its list, plus the
-      unowned objects and the arena — and a `cntlr`'s is that cntlr's sp
+      unowned objects, the arena's wrappers and the base state above that a
+      `SyncupCn` would build or rewrite — and a `cntlr`'s is that cntlr's sp
       alone, apart from the sp-less clone-source connections below. Neither
       reports the other's **sp chain**, because each drives
       its own `Syncup*`: reporting a cntlr's chain leftover on `CheckCn`
@@ -3135,6 +3189,21 @@ contradicts them.
   unloaded, which are in no applied set until a push rewrites them or a
   later restart loads them, adds CN2's skips while a `cn-*` or `cntlr-*`
   file does not load.
+* `architecture.md` §9.8, `dnv-worker.md` RW5, `log.md` §5.4, `dnagent.md`
+  §2.2 + §2.8 SH15 + §7 item 12, `osclient.md` §4.2 (2026-09-30) — the
+  node-level verdict of a `CheckCn` round and of a `GetCnInfo` names each
+  piece of the base state its probe read absent and a `SyncupCn` would
+  build, and an ANA group it read in a state other than its fixed one on a
+  port whose transport attributes match (CN30), so that the worker
+  re-sends the `SyncupCn`. §9.8 names both beside the dn's two conditions;
+  RW5 now says that of those conditions a `Syncup*` reply carries only the
+  dn's unconfirmed disk, the rest riding on `Check*` and `Get*Info`
+  replies alone; `log.md`'s `sweep leftover` record lists both among its
+  `failures`; and §2.2's copy of the `ReplyCodeLeftover` comment names
+  them. The verdict reads the port through `Nvmet.ProbePortState`, whose
+  attribute reads are strict: SH15 and `osclient.md` §4.2 add them to the
+  `readAttrStrict` readers, and item 12 to the reads that go through both
+  `listDir` and `readAttrStrict`.
 
 ## 6. Tests
 
@@ -3196,6 +3265,39 @@ between `Recv` and the round (SH24).
    next `SyncupCn`, whose commands answer, mounts, truncates and attaches
    exactly once each. A failed `losetup --associated` is
    `TestFailedLosetupNeverAttachesASecondLoop`.
+1c. **A base state a `SyncupCn` would cure re-drives it** (CN30).
+   `TestAnAbsentBaseStateReDrivesTheSyncupCn`: after a reboot whose
+   `mount` is refused every time, the startup reconcile's one `mount` is
+   refused, and a check round reads the tmpfs, file and loop rows
+   `MISSING` and answers `ReplyCodeLeftover` naming all three absent, as
+   does a `GetCnInfo`; a re-sent `SyncupCn` that meets the same refusal
+   tries the mount exactly once and replies 0 naming nothing absent, and
+   the next round re-drives again; once the mount answers, a re-sent
+   `SyncupCn` mounts, truncates and attaches exactly once each and the
+   next round replies 0. An arena file and its loop device taken away
+   under a live tmpfs are named absent, the tmpfs not, and a re-sent
+   `SyncupCn` mounts nothing, truncates and attaches exactly once each,
+   and the next round replies 0. The port's directory, and its ANA group
+   2, taken away under a converged CN, are the same: the round names the
+   port absent with the probe's words, a re-sent `SyncupCn` makes the
+   missing directory exactly once, and the next round replies 0.
+   `TestAWrongAnaGroupStateReDrivesTheSyncupCn`: ANA group 2's
+   `ana_state` read as `optimized` on a port whose transport attributes
+   match makes the round answer `ReplyCodeLeftover` naming the group's
+   state and read the port `ERROR` with it; a re-sent `SyncupCn` writes
+   that `ana_state` exactly once, and no other, and the next round replies
+   0. With the port's `addr_traddr` differing as well, the round replies 0
+   and reads the port `ERROR` naming the attribute.
+   `TestAnUnansweredBaseStateProbeDoesNotReDrive` is the other side: after
+   a reboot with every `findmnt` of the arena killed, the round reads the
+   tmpfs `ERROR` and the file and loop `MISSING` and replies 0, the
+   converge creating neither on an unconfirmed tmpfs; a killed listing of
+   the port's directory, a cut-off read of an ANA group's state and a
+   cut-off read of the port's `addr_trtype` read the port `ERROR` naming
+   it and reply 0; and so do a port whose `addr_traddr` differs, an arena
+   file of another size and a second loop device, each reading `ERROR` on
+   its row, and a filesystem of another type at the arena's path, with no
+   arena file and no loop device on it.
 2. **Revision gate**: lower ⇒ `ReplyCodeStaleRevision` and zero mutating
    calls; equal ⇒ full idempotent pass; higher ⇒ apply + persist. Same for
    `SyncupCntlr`; `SyncupCntlr` for a pointer `SyncupCn` has not introduced
@@ -4484,20 +4586,29 @@ between `Recv` and the round (SH24).
   The window runs from that read to the registration; while the disconnect
   ran inline under the lock, it lasted the whole disconnect as well. Not
   closed here.
-* **An absent clone-metadata arena waits for the next `SyncupCn`**
-  (2026-09-29): a tmpfs that really is absent — after a reboot, or on a new
-  CN — whose `findmnt` goes unanswered on both askings of a converge is not
-  mounted by that pass, and the arena file and loop device are not created
-  without it (CN5); an absent arena file whose `stat` goes unanswered on
-  both askings is not created either. A refused `mount`, `truncate` or
-  `losetup --find` leaves the arena short the same way. The error is a row,
-  which nothing re-drives by itself: a check round reads what is absent
-  `MISSING`, and the `CheckCn` verdict, the sweep's alone, stays clean
-  (CN30). The arena then waits for the CN's next `SyncupCn` or the agent's
-  next start, and until then CN18 has no loop device to allocate clone
-  metadata from, so no clone on the CN can be built. The follow-up is a
-  `CheckCn` verdict that is not clean while a base-state row reads
-  `MISSING`, which needs a decision.
+* **A base state that cannot be built is re-sent every round**
+  (2026-09-30): a check round that reads absent a piece of the CN's base
+  state that a `SyncupCn` would build, or an ANA group in a state other
+  than its fixed one on a port whose transport attributes match, names it
+  in its verdict (CN30), so while a `mount`, `truncate`, `losetup --find`,
+  port `mkdir` or `ana_state` write keeps being refused, the worker
+  re-sends the `SyncupCn` every round and each attempt is logged — the
+  agent's `sweep leftover` record of each round names what the round read,
+  and each refused command or write is logged as it fails — as for a disk
+  node whose disk identity stays unconfirmed. Until the arena is built
+  CN18 has no loop device to allocate clone metadata from, so no clone on
+  the CN can be built. The verdict does not re-drive the rest of what is
+  there but not as wanted (CN30): its row reads `ERROR`. The arena's — a
+  filesystem of another type at its path, a file of another size or a
+  second loop device — wait for an operator, since the converge leaves
+  them as they are, and so does a port transport attribute that differs
+  while a subsystem is linked to the port, since nvmet refuses every
+  `addr_*` write then; one that differs while none is linked, which a
+  re-sent `SyncupCn` would rewrite, is not re-driven either and waits for
+  the CN's next `SyncupCn` for another reason or the agent's next start. Each
+  re-sent `SyncupCn` holds the node write lock for its converge and its
+  removing node-level sweep (CN1), so every cntlr's Check round and
+  converge on the CN waits it out once a round.
 
 ### Integration-run fixes (first on-hardware run of the amended tree)
 

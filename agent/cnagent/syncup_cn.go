@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -183,7 +184,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// stored REQUESTS, not from what happens to exist: a clone this pass is
 	// about to (re)build is named by its cntlr's clone_list already.
 	for _, key := range s.cnKeys() {
-		s.sweepCn(ctx, s.getCn(key), true)
+		s.sweepCn(ctx, s.getCn(key), true, nil)
 	}
 	for _, key := range s.allCntlrKeys() {
 		s.convergeCntlr(ctx, s.getCntlr(key))
@@ -226,7 +227,7 @@ func (s *CnAgentServer) syncupCn(
 	}
 	info := s.convergeCn(ctx, st)
 	s.dropRemovedCntlrs(ctx, req)
-	sweep := s.sweepCn(ctx, st, true)
+	sweep := s.sweepCn(ctx, st, true, nil)
 
 	return &pb.SyncupCnReply{
 		AgentReply: sweep.Reply(),
@@ -459,28 +460,72 @@ func (s *CnAgentServer) dropCntlrState(
 // CN28 — the node-level probe map
 // ---------------------------------------------------------------------------
 
+// errBaseStateAbsent and errAnaStateDiffers are the failures the node-level
+// verdict records for what the round's probe read of the base state that a
+// SyncupCn would cure (CN30): a piece of it absent, or an ANA group of the
+// port in a state other than its fixed one.
+var (
+	errBaseStateAbsent = errors.New("absent")
+	errAnaStateDiffers = errors.New("differs")
+)
+
+// baseRedrive is one piece of the §3.2 base state that a probe read absent,
+// or an ANA group it read in a state other than its fixed one, in the words
+// the node-level verdict reports it with (sweepCn).
+type baseRedrive struct {
+	what string
+	err  error
+}
+
+// probeCn reads the §3.2 base state into its rows, and also returns what of
+// it the probe read wrong in a way a SyncupCn's converge would cure (CN30):
+// an absent tmpfs, which convergeCn mounts; an absent arena file or loop
+// device, which it creates only on a tmpfs it found or mounted, so only
+// while this probe read the tmpfs either there or absent; an absent port
+// directory or ANA group, which EnsurePort makes; and an ANA group in a
+// state other than its fixed one on a port whose transport attributes all
+// match, which EnsurePort rewrites, since nvmet takes an ana_state write
+// whatever is linked to the port. A probe that did not answer proves
+// nothing, and the next round asks again. The rest of what is there but not
+// as wanted is left to its row: a filesystem of another type at the path
+// (and with it the arena file and loop device the converge would not create
+// on it), a file of another size and more than one loop device, which the
+// converge reports and leaves as they are, so a re-sent SyncupCn could not
+// cure them; and a transport attribute of the port that differs, which nvmet
+// refuses to rewrite while a subsystem is linked to the port (EACCES), so
+// that while one is every re-send would fail on it the same way. None of
+// those is returned.
 func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,
-) *pb.CnInfo {
+) (*pb.CnInfo, []baseRedrive) {
 	req := st.req
 	t := st.tracker
 	info := &pb.CnInfo{}
+	var redrive []baseRedrive
 	clusterId := req.GetClusterId()
 	cnId := req.GetCnId()
 
 	tmpfsPath := s.nf.CnTmpfsPath(clusterId, cnId)
+	// arenaWanted is the converge's tmpfsOk as this probe can foresee it:
+	// the file and the loop device are created on a tmpfs the converge
+	// found, or on one it mounts where none was (CN5).
+	arenaWanted := false
 	mounted, fsType, err := s.cmeta.Mounted(ctx, tmpfsPath)
 	switch {
 	case err != nil:
 		info.TmpfsInfo = t.Err(resKeyTmpfs, tmpfsPath, err.Error())
 	case !mounted:
 		info.TmpfsInfo = t.Missing(resKeyTmpfs, tmpfsPath, "")
+		redrive = append(redrive,
+			baseRedrive{"tmpfs " + tmpfsPath, errBaseStateAbsent})
+		arenaWanted = true
 	case fsType != "tmpfs":
 		info.TmpfsInfo = t.Err(resKeyTmpfs, tmpfsPath,
 			fmt.Sprintf("filesystem is %s, want tmpfs", fsType))
 	default:
 		info.TmpfsInfo = t.Ok(resKeyTmpfs, tmpfsPath, "")
+		arenaWanted = true
 	}
 
 	filePath := s.nf.CnTmpFilePath(clusterId, cnId)
@@ -490,6 +535,11 @@ func (s *CnAgentServer) probeCn(
 		info.TmpFileInfo = t.Err(resKeyTmpFile, filePath, err.Error())
 	case !exists:
 		info.TmpFileInfo = t.Missing(resKeyTmpFile, filePath, "")
+		if arenaWanted {
+			redrive = append(redrive, baseRedrive{
+				"clone metadata arena file " + filePath,
+				errBaseStateAbsent})
+		}
 	case size != common.CnCloneMetaAreaSize:
 		info.TmpFileInfo = t.Err(resKeyTmpFile, filePath,
 			fmt.Sprintf("size is %d, want %d",
@@ -504,6 +554,10 @@ func (s *CnAgentServer) probeCn(
 		info.LoopDevInfo = t.Err(resKeyLoopDev, filePath, err.Error())
 	case len(devs) == 0:
 		info.LoopDevInfo = t.Missing(resKeyLoopDev, filePath, "")
+		if arenaWanted {
+			redrive = append(redrive, baseRedrive{
+				"loop device of " + filePath, errBaseStateAbsent})
+		}
 	case len(devs) != 1:
 		info.LoopDevInfo = t.Err(resKeyLoopDev, filePath,
 			fmt.Sprintf("%d loop devices, want 1", len(devs)))
@@ -512,14 +566,25 @@ func (s *CnAgentServer) probeCn(
 	}
 
 	portName := fmt.Sprintf("%d", s.port.PortId)
-	ok, details, err := s.nvmet.ProbePort(ctx, s.port.PortId, s.port)
+	portState, details, err := s.nvmet.ProbePortState(
+		ctx, s.port.PortId, s.port)
 	switch {
 	case err != nil:
 		info.PortInfo = t.Err(resKeyPort, portName, err.Error())
-	case !ok:
+	case portState == agent.PortAbsent:
+		info.PortInfo = t.Err(resKeyPort, portName, details)
+		redrive = append(redrive, baseRedrive{"nvmet port " + portName,
+			fmt.Errorf("%w: %s", errBaseStateAbsent, details)})
+	case portState == agent.PortAnaStateMismatch:
+		info.PortInfo = t.Err(resKeyPort, portName, details)
+		redrive = append(redrive, baseRedrive{"nvmet port " + portName,
+			fmt.Errorf("%w: %s", errAnaStateDiffers, details)})
+	case portState != agent.PortOk:
+		// A transport attribute that differs (PortAttrMismatch): not
+		// re-driven, see above.
 		info.PortInfo = t.Err(resKeyPort, portName, details)
 	default:
 		info.PortInfo = t.Ok(resKeyPort, portName, "")
 	}
-	return info
+	return info, redrive
 }

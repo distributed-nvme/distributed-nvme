@@ -42,7 +42,15 @@ func OkReply() *pb.AgentReply {
 // stored and every wanted object converged, but the node still holds objects
 // the desired state does not want — or an enumeration of what exists did not
 // answer, which is the same thing as far as the caller is concerned, because
-// an unanswered enumeration cannot prove the node is clean.
+// an unanswered enumeration cannot prove the node is clean. The agents also
+// report a few conditions through it so that the worker re-sends the Syncup*
+// whose converge acts on them (architecture.md §9.8): on a dn a disk identity
+// not yet confirmed or a side with extents to zero and nothing zeroing it, on
+// a cn a piece of the node's base state that a CheckCn round's or
+// GetCnInfo's probe read absent, or an ANA group it read in a state other
+// than its fixed one on a port whose transport attributes match. Each
+// arrives among the failures, rendered like an enumeration that did not
+// answer.
 //
 // A leftover is the one per-resource outcome that cannot ride in the *Info
 // rows (SH14, CN29, DN19): the rows are keyed by the ids of WANTED objects,

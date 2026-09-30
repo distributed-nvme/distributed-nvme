@@ -1725,10 +1725,21 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // no cntlr file: CN8 introduces the pointer before the SyncupCntlr, and after
 // a lost --local-store the resources exist and must be re-adopted probe-first
 // by that syncup rather than swept.
+//
+// redrive is what of the base state the caller's own probe read wrong in a
+// way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an
+// ANA group in a state other than its fixed one. The read-only verdict of a
+// CheckCn round or a GetCnInfo reports each as a failure, so the verdict is
+// not clean and the worker re-sends the SyncupCn whose converge builds or
+// rewrites it (CN30); nothing else would, since the worker re-syncs on a
+// reply's code and never on its rows. The removing passes pass none: their
+// converge has just tried to build the base state, and its rows say how that
+// went.
 func (s *CnAgentServer) sweepCn(
 	ctx context.Context,
 	st *cnState,
 	remove bool,
+	redrive []baseRedrive,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	clusterId := st.req.GetClusterId()
@@ -1840,6 +1851,9 @@ func (s *CnAgentServer) sweepCn(
 			}
 		}
 		res.Add(agent.LeftoverKindDm, name)
+	}
+	for _, piece := range redrive {
+		res.Fail(piece.what, piece.err)
 	}
 	res.Log(ctx,
 		slog.Uint64("cluster_id", clusterId),

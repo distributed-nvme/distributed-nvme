@@ -1113,10 +1113,10 @@ func TestKilledStatDoesNotTruncateTheArenaFile(t *testing.T) {
 // TestAskingAgainBuildsAnAbsentArena is the other side of the same asking
 // (CN5): the base state a probe asked about may really be absent, and the
 // converge that learns nothing from a kill must still build it once a second
-// asking answers. A check round would not bring it back: it reads the absent
-// object MISSING, and the CheckCn verdict, the sweep's alone, re-sends no
-// SyncupCn for that — so a converge that stopped at the first kill would
-// leave the CN without a clone-metadata arena until its next converge.
+// asking answers. A check round that reads the absent object names it in its
+// verdict, and the worker re-sends the SyncupCn (CN30), but only a round
+// later — so a converge that stopped at the first kill would leave the CN
+// without a clone-metadata arena until then.
 //
 // After a reboot the tmpfs is gone while the cn file survives: the startup
 // reconcile whose first `findmnt` is killed mounts the tmpfs exactly once,
@@ -1304,6 +1304,398 @@ func TestUnconfirmedTmpfsCreatesNoArena(t *testing.T) {
 		}
 		assertBuiltOnce(t, node, reply)
 		loopDev(t, srv, node)
+	})
+}
+
+// checkCnOnce runs one CheckCn round of the fixture CN at revision 2.
+func checkCnOnce(t *testing.T, srv *CnAgentServer) *pb.CheckCnReply {
+	t.Helper()
+	reply, _ := srv.checkCnRound(context.Background(), &pb.CheckCnRequest{
+		ClusterId: testCluster, CnId: testCn, Revision: 2}, nil)
+	return reply
+}
+
+// assertMissing checks one ResInfo reads RES_STATUS_MISSING.
+func assertMissing(t *testing.T, info *pb.ResInfo, label string) {
+	t.Helper()
+	if info.GetStatus() != pb.ResStatus_RES_STATUS_MISSING {
+		t.Fatalf("%s: status %v, details %q, want MISSING",
+			label, info.GetStatus(), info.GetDetails())
+	}
+}
+
+// assertReDriven checks a node-level reply is the leftover code that makes
+// the worker re-send the SyncupCn, naming every one of names.
+func assertReDriven(
+	t *testing.T,
+	reply *pb.AgentReply,
+	label string,
+	names ...string,
+) {
+	t.Helper()
+	if reply.GetCode() != common.ReplyCodeLeftover {
+		t.Fatalf("%s: code %d (%q), want %d: nothing would re-send the "+
+			"SyncupCn that builds what is absent", label, reply.GetCode(),
+			reply.GetDetails(), common.ReplyCodeLeftover)
+	}
+	for _, name := range names {
+		if !strings.Contains(reply.GetDetails(), name+": absent") {
+			t.Errorf("%s: details %q do not name %q as absent",
+				label, reply.GetDetails(), name)
+		}
+	}
+}
+
+// TestAnAbsentBaseStateReDrivesTheSyncupCn pins the node-level half of CN30:
+// a CheckCn round that reads a piece of the CN's base state absent — the
+// clone-metadata arena's tmpfs, its file or its loop device, or the agent's
+// nvmet port or one of its ANA groups — answers a verdict that is not clean,
+// naming each, because only the converge of a SyncupCn builds them and the
+// worker re-sends a SyncupCn on a Check reply's code, never on its rows
+// (dnv-worker.md RW4). The rows alone read MISSING or ERROR, and a verdict
+// that stayed clean left the CN without the piece until its next SyncupCn
+// for some other reason or the agent's next start: after a reboot whose
+// mount was refused, no clone could be built on the CN meanwhile. Each
+// re-sent SyncupCn tries again, and the round after the one that builds the
+// piece is clean.
+func TestAnAbsentBaseStateReDrivesTheSyncupCn(t *testing.T) {
+	t.Run("the arena after a reboot whose mount is refused",
+		func(t *testing.T) {
+			node := newFakeNode()
+			node.dirs[agent.NvmetRoot] = true
+			srv := newCnServer(node)
+			if err := node.writeProto(context.Background(),
+				srv.nf.LocalCnPath(testCluster, testCn),
+				cnReq(2, false)); err != nil {
+				t.Fatalf("seeding the cn file: %v", err)
+			}
+			tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
+			file := srv.nf.CnTmpFilePath(testCluster, testCn)
+			absent := []string{"tmpfs " + tmpfs,
+				"clone metadata arena file " + file,
+				"loop device of " + file}
+			node.failCmdAlways["mount -t tmpfs"] =
+				"mount: cannot allocate memory"
+			reconcileForTest(t, srv)
+			if n := callCnt(node, "cmd mount "); n != 1 {
+				t.Fatalf("%d mounts at the startup reconcile, want 1", n)
+			}
+
+			check := checkCnOnce(t, srv)
+			assertReDriven(t, check.GetAgentReply(), "check round",
+				absent...)
+			info := check.GetCnInfo()
+			assertMissing(t, info.GetTmpfsInfo(), "tmpfs")
+			assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
+			assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
+			got, err := srv.GetCnInfo(context.Background(),
+				&pb.GetCnInfoRequest{ClusterId: testCluster, CnId: testCn})
+			if err != nil {
+				t.Fatalf("GetCnInfo: %v", err)
+			}
+			assertReDriven(t, got.GetAgentReply(), "GetCnInfo", absent...)
+
+			// The re-sent SyncupCn meets the same refusal. Nothing is left
+			// that remembers the failure: the next round reads the arena
+			// absent again and re-drives again. The SyncupCn's own reply
+			// names nothing absent: its converge has just tried to build
+			// the arena, and its rows say how that went.
+			node.Reset()
+			reply, err := srv.SyncupCn(context.Background(), cnReq(2, false))
+			if err != nil {
+				t.Fatalf("SyncupCn: %v", err)
+			}
+			if got := reply.GetAgentReply(); got.GetCode() != 0 ||
+				strings.Contains(got.GetDetails(), ": absent") {
+				t.Errorf("the re-sent SyncupCn replied %v, want code 0 "+
+					"naming nothing absent", got)
+			}
+			if n := callCnt(node, "cmd mount "); n != 1 {
+				t.Fatalf("the re-sent SyncupCn mounted %d times, want 1", n)
+			}
+			assertReDriven(t, checkCnOnce(t, srv).GetAgentReply(),
+				"check round after a refused re-send", absent...)
+
+			// Once the mount answers, the re-sent SyncupCn builds the arena
+			// and the next round is clean.
+			delete(node.failCmdAlways, "mount -t tmpfs")
+			node.Reset()
+			if _, err := srv.SyncupCn(context.Background(),
+				cnReq(2, false)); err != nil {
+				t.Fatalf("SyncupCn: %v", err)
+			}
+			for _, verb := range []string{
+				"cmd mount ", "cmd truncate ", "cmd losetup --find",
+			} {
+				if n := callCnt(node, verb); n != 1 {
+					t.Errorf("%q ran %d times, want exactly 1", verb, n)
+				}
+			}
+			if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() !=
+				0 {
+				t.Errorf("check round after the build = %v, want code 0",
+					got)
+			}
+		})
+
+	// The file and the loop device are created on a tmpfs the converge
+	// finds as well as on one it mounts: under a live tmpfs they are
+	// re-driven alone, and the re-sent SyncupCn mounts nothing.
+	t.Run("the arena file and its loop device under a live tmpfs",
+		func(t *testing.T) {
+			srv, node := newTestServer(t)
+			cnSyncup(t, srv, 2, false)
+			file := srv.nf.CnTmpFilePath(testCluster, testCn)
+			node.mu.Lock()
+			delete(node.plain, file)
+			delete(node.loops, file)
+			node.mu.Unlock()
+
+			check := checkCnOnce(t, srv)
+			assertReDriven(t, check.GetAgentReply(), "check round",
+				"clone metadata arena file "+file, "loop device of "+file)
+			if details := check.GetAgentReply().GetDetails(); strings.Contains(
+				details, "tmpfs ") {
+				t.Errorf("details %q name the live tmpfs", details)
+			}
+
+			node.Reset()
+			cnSyncup(t, srv, 2, false)
+			for verb, want := range map[string]int{
+				"cmd mount ": 0, "cmd truncate ": 1, "cmd losetup --find": 1,
+			} {
+				if n := callCnt(node, verb); n != want {
+					t.Errorf("%q ran %d times, want %d", verb, n, want)
+				}
+			}
+			if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() !=
+				0 {
+				t.Errorf("check round after the build = %v, want code 0",
+					got)
+			}
+		})
+
+	for _, tc := range []struct {
+		name string
+		// dir is the configfs directory taken away, under the port.
+		dir string
+		// details is what the port row and the verdict say is missing.
+		details string
+	}{
+		{"the port", "", "port directory missing"},
+		{"an ana group of the port", "/ana_groups/2", "ana group 2 missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			cnSyncup(t, srv, 2, false)
+			portPath := agent.NvmetRoot + "/ports/1"
+			node.mu.Lock()
+			node.cmdRmdir([]string{portPath + tc.dir})
+			node.mu.Unlock()
+
+			check := checkCnOnce(t, srv)
+			assertReDriven(t, check.GetAgentReply(), "check round")
+			if details := check.GetAgentReply().GetDetails(); !strings.Contains(
+				details, "nvmet port 1: absent: "+tc.details) {
+				t.Errorf("details %q do not name the port as absent", details)
+			}
+			assertErrorDetails(t, check.GetCnInfo().GetPortInfo(),
+				tc.details, "port")
+
+			node.Reset()
+			cnSyncup(t, srv, 2, false)
+			if n := countCalls(node, "cmd mkdir -p "+portPath+tc.dir); n != 1 {
+				t.Errorf("the re-sent SyncupCn made %s %d times, want 1",
+					portPath+tc.dir, n)
+			}
+			if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() !=
+				0 {
+				t.Errorf("check round after the rebuild = %v, want code 0",
+					got)
+			}
+		})
+	}
+}
+
+// TestAnUnansweredBaseStateProbeDoesNotReDrive bounds the verdict above. A
+// probe that did not answer proves nothing absent, and the next round asks
+// again; a re-sent SyncupCn would not act on it either, since the converge
+// creates nothing on an unanswered probe (CN5). So an unanswered `findmnt`
+// after a reboot — the arena file and the loop device then read absent, but
+// the converge creates them only on a tmpfs it found or mounted — and a port
+// whose directory listing, ANA group read or transport attribute read was
+// cut off read ERROR and leave the verdict clean. So does a mismatch the
+// verdict leaves to its row: a transport attribute of the port that differs,
+// which nvmet refuses to rewrite while a subsystem is linked to the port;
+// and an arena file of another size, a second loop device, and a filesystem
+// of another type mounted at the arena's path, with no arena file and no
+// loop device on it, which the converge leaves as they are.
+func TestAnUnansweredBaseStateProbeDoesNotReDrive(t *testing.T) {
+	t.Run("every findmnt of the arena killed after a reboot",
+		func(t *testing.T) {
+			node := newFakeNode()
+			node.dirs[agent.NvmetRoot] = true
+			srv := newCnServer(node)
+			if err := node.writeProto(context.Background(),
+				srv.nf.LocalCnPath(testCluster, testCn),
+				cnReq(2, false)); err != nil {
+				t.Fatalf("seeding the cn file: %v", err)
+			}
+			probe := "findmnt --noheadings --output FSTYPE --target " +
+				srv.nf.CnTmpfsPath(testCluster, testCn)
+			node.killCmdAlways[probe] = true
+			reconcileForTest(t, srv)
+
+			check := checkCnOnce(t, srv)
+			if got := check.GetAgentReply(); got.GetCode() != 0 {
+				t.Errorf("check round = %v, want code 0", got)
+			}
+			info := check.GetCnInfo()
+			assertErrorDetails(t, info.GetTmpfsInfo(), probe, "tmpfs")
+			assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
+			assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
+		})
+
+	portPath := agent.NvmetRoot + "/ports/1"
+	file := common.NewNameFmt(common.DefaultLocalStorPrefix).CnTmpFilePath(
+		testCluster, testCn)
+	portRow := (*pb.CnInfo).GetPortInfo
+	for _, tc := range []struct {
+		name string
+		arm  func(node *fakeNode)
+		// row is the CnInfo row that must read ERROR containing want.
+		row  func(*pb.CnInfo) *pb.ResInfo
+		want string
+	}{
+		{"the port listing killed", func(node *fakeNode) {
+			node.killCmdAlways["ls -1 "+portPath] = true
+		}, portRow, "ls -1 " + portPath},
+		{"an ana group read cut off", func(node *fakeNode) {
+			node.killReadAlways[portPath+"/ana_groups/2/ana_state"] = true
+		}, portRow, portPath + "/ana_groups/2/ana_state"},
+		{"a port transport attribute read cut off", func(node *fakeNode) {
+			node.killReadAlways[portPath+"/addr_trtype"] = true
+		}, portRow, portPath + "/addr_trtype"},
+		// The mismatches the verdict leaves to their rows: nvmet refuses an
+		// addr_* write while a subsystem is linked to the port, and the
+		// converge reports an arena file of another size, or a second loop
+		// device, and leaves it as it is.
+		{"a port transport attribute that differs", func(node *fakeNode) {
+			node.files[portPath+"/addr_traddr"] = "192.168.10.99"
+		}, portRow, `addr_traddr is "192.168.10.99"`},
+		{"an arena file of another size", func(node *fakeNode) {
+			node.plain[file] = 4096
+		}, (*pb.CnInfo).GetTmpFileInfo, "size is 4096"},
+		{"a second loop device", func(node *fakeNode) {
+			node.loops[file] = append(node.loops[file], "/dev/loop99")
+		}, (*pb.CnInfo).GetLoopDevInfo, "2 loop devices"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			cnSyncup(t, srv, 2, false)
+			node.mu.Lock()
+			tc.arm(node)
+			node.mu.Unlock()
+
+			check := checkCnOnce(t, srv)
+			if got := check.GetAgentReply(); got.GetCode() != 0 {
+				t.Errorf("check round = %v, want code 0", got)
+			}
+			assertErrorDetails(t, tc.row(check.GetCnInfo()), tc.want,
+				tc.name)
+		})
+	}
+
+	t.Run("a tmpfs of another type", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		cnSyncup(t, srv, 2, false)
+		tmpfs := srv.nf.CnTmpfsPath(testCluster, testCn)
+		file := srv.nf.CnTmpFilePath(testCluster, testCn)
+		node.mu.Lock()
+		node.mounts[tmpfs] = "ext4"
+		delete(node.plain, file)
+		delete(node.loops, file)
+		node.mu.Unlock()
+
+		check := checkCnOnce(t, srv)
+		if got := check.GetAgentReply(); got.GetCode() != 0 {
+			t.Errorf("check round = %v, want code 0", got)
+		}
+		info := check.GetCnInfo()
+		assertErrorDetails(t, info.GetTmpfsInfo(), "ext4", "tmpfs")
+		assertMissing(t, info.GetTmpFileInfo(), "tmp_file")
+		assertMissing(t, info.GetLoopDevInfo(), "loop_dev")
+	})
+}
+
+// TestAWrongAnaGroupStateReDrivesTheSyncupCn pins the one piece of the base
+// state that the node-level verdict re-drives although it is there (CN30): an
+// ANA group of the port in a state other than its fixed one, on a port whose
+// transport attributes all match. nvmet takes an ana_state write whatever is
+// linked to the port, and EnsurePort rewrites a differing state once the
+// attributes match, so a re-sent SyncupCn cures it — and while the verdict
+// stayed clean the worker re-sent none: the group stayed in the wrong state,
+// which its namespaces report to the hosts, until the CN's next SyncupCn for
+// some other reason or the agent's next start. A transport
+// attribute that differs is not re-driven, not even beside a wrong group
+// state: nvmet refuses every addr_* write while a subsystem is linked to the
+// port (EACCES), when every re-send would fail on it the same way, and the
+// probe, which reads the attributes first, never gets to the groups.
+func TestAWrongAnaGroupStateReDrivesTheSyncupCn(t *testing.T) {
+	portPath := agent.NvmetRoot + "/ports/1"
+	statePath := portPath + "/ana_groups/2/ana_state"
+	details := fmt.Sprintf("ana group 2 is %q, want %q",
+		agent.AnaStateOptimized, agent.AnaStateNonOptimized)
+
+	t.Run("its port's attributes match", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		cnSyncup(t, srv, 2, false)
+		node.mu.Lock()
+		node.files[statePath] = agent.AnaStateOptimized
+		node.mu.Unlock()
+
+		check := checkCnOnce(t, srv)
+		reply := check.GetAgentReply()
+		if reply.GetCode() != common.ReplyCodeLeftover ||
+			!strings.Contains(reply.GetDetails(),
+				"nvmet port 1: differs: "+details) {
+			t.Fatalf("check round code %d (%q), want %d naming %q: "+
+				"nothing would re-send the SyncupCn that rewrites it",
+				reply.GetCode(), reply.GetDetails(),
+				common.ReplyCodeLeftover, details)
+		}
+		assertErrorDetails(t, check.GetCnInfo().GetPortInfo(), details,
+			"port")
+
+		node.Reset()
+		cnSyncup(t, srv, 2, false)
+		if n := countCalls(node, "writedirect "+statePath+"="+
+			agent.AnaStateNonOptimized); n != 1 {
+			t.Errorf("the re-sent SyncupCn wrote %s %d times, want 1",
+				statePath, n)
+		}
+		if got := node.callsMatching("/ana_state="); len(got) != 1 {
+			t.Errorf("ana_state writes %q, want the one above", got)
+		}
+		if got := checkCnOnce(t, srv).GetAgentReply(); got.GetCode() != 0 {
+			t.Errorf("check round after the rewrite = %v, want code 0", got)
+		}
+	})
+
+	t.Run("a transport attribute differs too", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		cnSyncup(t, srv, 2, false)
+		node.mu.Lock()
+		node.files[statePath] = agent.AnaStateOptimized
+		node.files[portPath+"/addr_traddr"] = "192.168.10.99"
+		node.mu.Unlock()
+
+		check := checkCnOnce(t, srv)
+		if got := check.GetAgentReply(); got.GetCode() != 0 {
+			t.Errorf("check round = %v, want code 0", got)
+		}
+		assertErrorDetails(t, check.GetCnInfo().GetPortInfo(),
+			`addr_traddr is "192.168.10.99"`, "port")
 	})
 }
 

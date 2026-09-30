@@ -168,43 +168,97 @@ func (n *Nvmet) ProbePort(
 	portId int,
 	conf PortConf,
 ) (bool, string, error) {
+	state, details, err := n.probePort(ctx, portId, conf, n.readAttr)
+	return state == PortOk, details, err
+}
+
+// PortState is what ProbePortState found of a port.
+type PortState int
+
+const (
+	// PortOk is a port that matches: its directory, the desired transport
+	// attributes, and the three fixed ANA groups in their fixed states.
+	PortOk PortState = iota + 1
+	// PortAbsent is a port whose directory, or the directory of one of its
+	// fixed ANA groups, is not there: what EnsurePort creates.
+	PortAbsent
+	// PortAttrMismatch is a port that is there with a transport attribute
+	// other than the desired one; the probe does not read its groups. nvmet
+	// refuses every addr_* write while a subsystem is linked to the port
+	// (EACCES), and EnsurePort stops at the write that fails, before the
+	// groups.
+	PortAttrMismatch
+	// PortAnaStateMismatch is a port whose transport attributes all match
+	// and one of whose fixed ANA groups is not in its fixed state. nvmet
+	// takes an ana_state write whatever is linked to the port, and
+	// EnsurePort rewrites a differing state once the attributes match.
+	PortAnaStateMismatch
+)
+
+// ProbePortState is ProbePort for a caller that must tell a port that is
+// absent from one that does not match — and a transport attribute that
+// differs from a group state that does — and all of them from a probe that
+// did not answer (cnagent.md CN28): every read goes through the strict probe
+// (SH15), so err is set whenever a listing or a read did not answer, and
+// PortAbsent is reported only on an answer that the port's directory or a
+// group's is not there. ProbePort reads the attributes loosely instead, so
+// there a group whose state read failed for any reason reads missing. The
+// state is meaningless when err is set.
+func (n *Nvmet) ProbePortState(
+	ctx context.Context,
+	portId int,
+	conf PortConf,
+) (PortState, string, error) {
+	return n.probePort(ctx, portId, conf, n.readAttrStrict)
+}
+
+func (n *Nvmet) probePort(
+	ctx context.Context,
+	portId int,
+	conf PortConf,
+	read func(context.Context, string) (string, bool, error),
+) (PortState, string, error) {
 	portPath := n.PortPath(portId)
 	exists, err := n.dirExists(ctx, portPath)
 	if err != nil {
-		return false, "", err
+		return 0, "", err
 	}
 	if !exists {
-		return false, "port directory missing", nil
+		return PortAbsent, "port directory missing", nil
 	}
 	for _, attr := range n.portAttrs(conf) {
 		if attr[1] == "" {
 			continue
 		}
-		cur, ok, err := n.readAttr(ctx, portPath+"/"+attr[0])
+		cur, ok, err := read(ctx, portPath+"/"+attr[0])
 		if err != nil {
-			return false, "", err
+			return 0, "", err
 		}
+		// An attribute is never absent from a port directory that exists;
+		// one that reads absent went with its port between the listing
+		// and the read, and the next probe finds the port missing.
 		if !ok || cur != strings.TrimSpace(attr[1]) {
-			return false, fmt.Sprintf(
+			return PortAttrMismatch, fmt.Sprintf(
 				"%s is %q, want %q", attr[0], cur, attr[1]), nil
 		}
 	}
 	for _, grpId := range fixedAnaGrpIds {
-		cur, ok, err := n.readAttr(
+		cur, ok, err := read(
 			ctx, n.AnaGroupPath(portId, grpId)+"/ana_state")
 		if err != nil {
-			return false, "", err
+			return 0, "", err
 		}
 		if !ok {
-			return false, fmt.Sprintf("ana group %d missing", grpId), nil
+			return PortAbsent, fmt.Sprintf("ana group %d missing", grpId),
+				nil
 		}
 		if cur != AnaStateOf(grpId) {
-			return false, fmt.Sprintf(
+			return PortAnaStateMismatch, fmt.Sprintf(
 				"ana group %d is %q, want %q",
 				grpId, cur, AnaStateOf(grpId)), nil
 		}
 	}
-	return true, "", nil
+	return PortOk, "", nil
 }
 
 // ---------------------------------------------------------------------------
