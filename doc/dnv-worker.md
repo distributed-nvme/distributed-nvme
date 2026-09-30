@@ -2681,7 +2681,14 @@ each run in a `testing/synctest` bubble and wait on state — every
 goroutine of the case durably blocked (`synctest.Wait`), or the state they
 assert next — never for a quiet interval: under `-race` a fired timer, a
 heartbeat tick or a watch event can still be on its way to the vote loop
-after one.
+after one. So does every case of the revision loop and of the sp
+coordinator that steps the fake clock through `advanceUntil`: the
+condition is read, and the clock moved, only once every other goroutine
+of the case is durably blocked, so a step never lands inside a round
+whose reply is still on its way. A step taken on a timer can: it fires
+that round's timeout (RW4 step 3), the answered round is given up and the
+object reported unreachable, and a count of the rounds the agent answered
+runs ahead of the `Syncup*` calls they drove.
 
 * **vote.go** — appear/disappear/reappear with the grace commit and the
   cancel-on-transition rule; a flapping key never commits; symmetric
@@ -2783,8 +2790,9 @@ after one.
   `ReplyCodeLeftover` reply the same verdict as a `code == 0` one and still
   none for the three rejection codes, and end to end through a cntlr child
   at a MATCHING revision a leftover reply plans its pushes, completes its
-  td, records its leg row, logs no `syncup rejected`, and re-syncs every
-  round (HL1, HL2, RW19, RW4 step 5);
+  td, records its leg row, logs no `syncup rejected`, and re-syncs once
+  every round, one `SyncupCntlr` per round the agent answered (HL1, HL2,
+  RW19, RW4 step 5);
   `TestSpCloneBitmapWiringCarriesThePair` — the clone `fetch` reads the key
   of the whole pair and `deliver` sets `src_slice_idx` as well as `bm_idx`,
   the applied set is read from `chunk_id_list`, and a `bm_idx_list` set on a

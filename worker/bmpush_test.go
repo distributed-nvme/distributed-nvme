@@ -528,7 +528,7 @@ func TestPushFailureIsLoggedOnly(t *testing.T) {
 	// plans the push — and every later round matches. The desired state never
 	// changes here either (RW3/RW6 are the only other source of a Syncup*), so
 	// a second one could only be something the push path re-armed.
-	t.Run("no re-sync follows", func(t *testing.T) {
+	t.Run("no re-sync follows", inBubble(func(t *testing.T) {
 		h := newSpHarness(t)
 		h.addFixtureAgents()
 		for _, chunk := range spCloneChunks {
@@ -573,7 +573,7 @@ func TestPushFailureIsLoggedOnly(t *testing.T) {
 		if got := len(h.cntlrs[spCnA].pushes()); got != 1 {
 			t.Fatalf("%d pushes, want the rest of the plan abandoned", got)
 		}
-	})
+	}))
 }
 
 // TestBmPushRecordsCarryATraceId checks RW10 for §10: every push runs under

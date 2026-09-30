@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc"
@@ -1665,20 +1666,15 @@ func (h *spHarness) start() *spWorker {
 }
 
 // advanceUntil steps the fake clock by one round period at a time until cond
-// holds (see revHarness.advanceUntil).
+// holds, in a testing/synctest bubble (see revHarness.advanceUntil). The
+// coordinator and its children share the clock, so a step is taken only once
+// each of them has finished what the last step set off, or waits for an agent
+// that does not answer.
 func (h *spHarness) advanceUntil(
 	what string, step time.Duration, cond func() bool,
 ) {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		h.clk.advance(step)
-		time.Sleep(2 * time.Millisecond)
-	}
-	h.t.Fatalf("timed out waiting for %s", what)
+	advanceClockUntil(h.t, h.clk, what, step, cond)
 }
 
 // TestSpFanOutStartsOneChildPerObject checks RW14: one child per side — spare
@@ -1810,7 +1806,7 @@ func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 		})
 	})
 
-	t.Run("recovers on the ticker", func(t *testing.T) {
+	t.Run("recovers on the ticker", inBubble(func(t *testing.T) {
 		h, _ := spRefusedFanOut(t)
 		// Ticks under the STILL-bad conf. The coordinator's two §7 gates
 		// refuse it once each — the fan-out's and the reaction pass's, which
@@ -1838,7 +1834,7 @@ func TestSpFanOutRefusesAnInvalidSpConf(t *testing.T) {
 				return len(h.sides[spDnA].syncups()) > 0 &&
 					len(h.cntlrs[spCnA].syncups()) > 0
 			})
-	})
+	}))
 }
 
 // TestSpChildRestartedOnEndpointChange checks RW14: a child whose endpoint
@@ -2159,6 +2155,10 @@ func TestSpCoordinatorWaitsForItsPredecessor(t *testing.T) {
 // whose first Check the agent answers at N with a clean standby shape: the
 // promoted cntlr would settle without ever being sent the primary request.
 func TestSpFanOutWaitsForItsRevision(t *testing.T) {
+	synctest.Test(t, testSpFanOutWaitsForItsRevision)
+}
+
+func testSpFanOutWaitsForItsRevision(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	// The spare's DN has no DnConf: one idle side, so every tick re-fans.
@@ -2881,6 +2881,10 @@ func TestSpProvisionedFlipReported(t *testing.T) {
 // for a show_info round would leave the td uncreated — and every snapshot of
 // it refused — until some unrelated resource happened to move.
 func TestSpCreatedFlipFromACheckRound(t *testing.T) {
+	synctest.Test(t, testSpCreatedFlipFromACheckRound)
+}
+
+func testSpCreatedFlipFromACheckRound(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	var mu sync.Mutex
@@ -3344,6 +3348,10 @@ func epochWrites(
 // object is a transition and clears its epoch — before a third pass has run
 // — and no pass acts on any of them.
 func TestOrphanedEpochIsClearedByTheOwner(t *testing.T) {
+	synctest.Test(t, testOrphanedEpochIsClearedByTheOwner)
+}
+
+func testOrphanedEpochIsClearedByTheOwner(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	var primaryChecks atomic.Int64
@@ -3381,12 +3389,12 @@ func TestOrphanedEpochIsClearedByTheOwner(t *testing.T) {
 	h.reactWith(h.start(), rops)
 
 	// round lets one more pass and one more round of the primary run. The
-	// clock moves a second at a time, so that a round's reply is read long
-	// before the round's own timeout can fire (RW4 step 3); and the
-	// primary's agent sees a Check only once the previous round's reply has
-	// been observed, while the coordinator runs one pass at a time, so every
-	// earlier pass and every earlier round of the primary has finished once
-	// both counts moved.
+	// clock moves a second at a time, and only once every round before has
+	// been answered and observed (advanceUntil), so no round's own timeout
+	// fires (RW4 step 3); and the primary's agent sees a Check only once the
+	// previous round's reply has been observed, while the coordinator runs
+	// one pass at a time, so every earlier pass and every earlier round of
+	// the primary has finished once both counts moved.
 	round := func() {
 		t.Helper()
 		loads, checks := h.ops.loadCnt(), primaryChecks.Load()
@@ -4021,6 +4029,10 @@ func TestSpCloneBitmapWiringCarriesThePair(t *testing.T) {
 // TestSpLoadFailureRetriesOnTick checks RW14/RW12: a transient LoadSp failure
 // is retried on the coordinator's own ticker, with no backoff of its own.
 func TestSpLoadFailureRetriesOnTick(t *testing.T) {
+	synctest.Test(t, testSpLoadFailureRetriesOnTick)
+}
+
+func testSpLoadFailureRetriesOnTick(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	h.ops.setErr(errors.New("etcd unavailable"))
@@ -4128,7 +4140,9 @@ func TestLeftoverCodeIsAccepted(t *testing.T) {
 	// (b), (c) and (d) end to end through a real cntlr child: the reply's
 	// revision MATCHES, so the code alone is what re-syncs, and nothing here
 	// depends on a revision mismatch.
-	t.Run("pushes, td completion, leg rows and the re-sync", func(t *testing.T) {
+	t.Run("pushes, td completion, leg rows and the re-sync", inBubble(func(
+		t *testing.T,
+	) {
 		h := newSpHarness(t)
 		h.addFixtureAgents()
 		for _, chunk := range spCloneChunks {
@@ -4205,11 +4219,13 @@ func TestLeftoverCodeIsAccepted(t *testing.T) {
 			}
 			return false
 		})
-		// (d) and the code re-syncs every round although the revision matches.
+		// (d) and the code re-syncs every round although the revision matches,
+		// once per round: advanceUntil reads the counts only once every round
+		// the agent answered has been observed and its Syncup* has landed.
 		h.advanceUntil("three more check rounds", roundInterval, func() bool {
 			return rounds.Load() >= 4
 		})
-		if got := len(h.cntlrs[spCnA].syncups()); got < 3 {
+		if got := len(h.cntlrs[spCnA].syncups()); int64(got) != rounds.Load() {
 			t.Fatalf("%d SyncupCntlr calls over %d rounds, want one per "+
 				"round while the leftover lasts",
 				got, rounds.Load())
@@ -4221,5 +4237,5 @@ func TestLeftoverCodeIsAccepted(t *testing.T) {
 		waitFor(t, "the leftover record", func() bool {
 			return len(h.logs.withMsg(msgSyncupLeftover)) > 0
 		})
-	})
+	}))
 }

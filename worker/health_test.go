@@ -820,7 +820,7 @@ func TestOrphanedNodeEpochIsClearedByTheOwner(t *testing.T) {
 		{"dn", model.DnConfKey(testCid, testAddr), startOrphanDn},
 		{"cn", model.CnConfKey(testCid, testCnAddr), startOrphanCn},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, inBubble(func(t *testing.T) {
 			h := newRevHarness(t)
 			h.defaultConf()
 			reads := &recordReads{etcdStore: h.store, clk: h.clk, key: tc.key}
@@ -849,10 +849,11 @@ func TestOrphanedNodeEpochIsClearedByTheOwner(t *testing.T) {
 				return got
 			}
 			// round lets one more Check round reach the agent, the clock
-			// moving a second at a time so that a round's reply is read long
-			// before the round's own timeout can fire (RW4 step 3). The agent
-			// sees a Check only once the loop has observed everything before
-			// it — the previous round and any syncup since.
+			// moving a second at a time and only once every round before has
+			// been answered and observed (advanceUntil), so no round's own
+			// timeout fires (RW4 step 3). The agent sees a Check only once the
+			// loop has observed everything before it — the previous round and
+			// any syncup since.
 			round := func() {
 				t.Helper()
 				checks := node.checks()
@@ -972,7 +973,7 @@ func TestOrphanedNodeEpochIsClearedByTheOwner(t *testing.T) {
 					"re-wrote the set", got)
 			}
 			wantReads("the second syncup", 4)
-		})
+		}))
 	}
 }
 

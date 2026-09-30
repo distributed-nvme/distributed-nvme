@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 
 	"google.golang.org/protobuf/proto"
 
@@ -105,6 +106,10 @@ func TestDnRoleSyncupReadsDnConfPerSyncup(t *testing.T) {
 // TestDnRoleMissingDnConfSkipsSyncup checks RW13: a missing DnConf is logged
 // and skipped, and the round retries next time.
 func TestDnRoleMissingDnConfSkipsSyncup(t *testing.T) {
+	synctest.Test(t, testDnRoleMissingDnConfSkipsSyncup)
+}
+
+func testDnRoleMissingDnConfSkipsSyncup(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{
 		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
@@ -138,6 +143,10 @@ func TestDnRoleMissingDnConfSkipsSyncup(t *testing.T) {
 // drops the stream and the connection reference and continues there, and no
 // delete ever reaches the agent.
 func TestDnRoleEndpointChangeRestartsAtNewAddress(t *testing.T) {
+	synctest.Test(t, testDnRoleEndpointChangeRestartsAtNewAddress)
+}
+
+func testDnRoleEndpointChangeRestartsAtNewAddress(t *testing.T) {
 	h := newRevHarness(t)
 	const movedAddr = "dn9:9520"
 	echo := func(req *pb.CheckDnRequest) *pb.CheckDnReply {
@@ -185,6 +194,10 @@ func TestDnRoleEndpointChangeRestartsAtNewAddress(t *testing.T) {
 // row in a Check reply's DnInfo sets err_epoch, and a later clean reply — even
 // one carrying no info at all — clears it.
 func TestDnRoleHealthFromInfo(t *testing.T) {
+	synctest.Test(t, testDnRoleHealthFromInfo)
+}
+
+func testDnRoleHealthFromInfo(t *testing.T) {
 	h := newRevHarness(t)
 	bad := true
 	stub := &stubDnAgent{}
@@ -287,6 +300,10 @@ func TestDnDriverInfoIsRaceFree(t *testing.T) {
 // reaches no health verdict — a moved node was never unreachable (HL1). No
 // delete ever reaches either agent (§10.2, [D10]).
 func TestDnRoleEndpointChangeDuringRoundMovesConnection(t *testing.T) {
+	synctest.Test(t, testDnRoleEndpointChangeDuringRoundMovesConnection)
+}
+
+func testDnRoleEndpointChangeDuringRoundMovesConnection(t *testing.T) {
 	h := newRevHarness(t)
 	const movedAddr = "dn9:9520"
 	// The old agent never answers: only a desired change can end this round.

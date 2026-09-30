@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc"
@@ -323,19 +324,58 @@ func (h *revHarness) defaultConf() {
 // holds. It exists because a round's timers are armed by the loop goroutine
 // AFTER the stimulus a test observes, so a single advance can land before the
 // timer it is meant to fire.
+//
+// It waits on state, never on time, so its test runs in a testing/synctest
+// bubble (inBubble): cond is read, and the clock moved, only once every other
+// goroutine of the test is durably blocked (synctest.Wait). Every round the
+// last step started has then either had its reply read and observed, the
+// Syncup* that reply called for included, or is waiting for an agent that
+// does not answer. A step taken every few milliseconds instead can land while
+// an answered round's reply is still on its way: it fires that round's timer
+// (RW4 step 3), the round is given up and the object reported unreachable,
+// and a count of the rounds the agent answered no longer matches what the
+// worker did with them.
 func (h *revHarness) advanceUntil(
 	what string, step time.Duration, cond func() bool,
 ) {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	advanceClockUntil(h.t, h.clk, what, step, cond)
+}
+
+// maxAdvanceSteps bounds advanceClockUntil: far more clock steps than any
+// test needs for its condition, so reaching it means the condition never
+// came.
+const maxAdvanceSteps = 1000
+
+// advanceClockUntil is advanceUntil for both harnesses. It must run inside a
+// synctest bubble.
+func advanceClockUntil(
+	t *testing.T,
+	clk *fakeClock,
+	what string,
+	step time.Duration,
+	cond func() bool,
+) {
+	t.Helper()
+	for i := 0; i < maxAdvanceSteps; i++ {
+		synctest.Wait()
 		if cond() {
 			return
 		}
-		h.clk.advance(step)
-		time.Sleep(2 * time.Millisecond)
+		clk.advance(step)
 	}
-	h.t.Fatalf("timed out waiting for %s", what)
+	t.Fatalf("still waiting for %s after %d steps of %v",
+		what, maxAdvanceSteps, step)
+}
+
+// inBubble runs a subtest's body in a testing/synctest bubble, which
+// advanceUntil needs; a top-level test calls synctest.Test itself. Inside
+// one, waitFor's sleeps and a test's own time.Sleep return only once every
+// other goroutine of the test is durably blocked.
+func inBubble(body func(t *testing.T)) func(t *testing.T) {
+	return func(t *testing.T) {
+		synctest.Test(t, body)
+	}
 }
 
 // seedDnConf writes the DnConf a SyncupDn is built from (RW13).
@@ -374,6 +414,10 @@ const roundInterval = common.DefaultHealthCheckInterval * time.Second
 // object unreachable (HL1) and makes the next round open a FRESH stream, so a
 // late reply can never be read as the next round's.
 func TestRevisionRoundTimeoutMarksUnreachable(t *testing.T) {
+	synctest.Test(t, testRevisionRoundTimeoutMarksUnreachable)
+}
+
+func testRevisionRoundTimeoutMarksUnreachable(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{
 		checkReply: func(*pb.CheckDnRequest) *pb.CheckDnReply { return nil },
@@ -649,6 +693,10 @@ func TestRevisionWorkerWaitsForItsPredecessor(t *testing.T) {
 // cache makes the loop idle — no stream, no syncup — with exactly one
 // "cluster conf missing" record per idle period.
 func TestRevisionIdleWithoutClusterConf(t *testing.T) {
+	synctest.Test(t, testRevisionIdleWithoutClusterConf)
+}
+
+func testRevisionIdleWithoutClusterConf(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{}
 	h.fleet.addDn(t, testAddr, stub)
@@ -700,6 +748,10 @@ func TestRevisionIdleWithoutClusterConf(t *testing.T) {
 // the absent-cluster case, and an operator who sees it goes looking for a
 // deleted cluster instead of the field that is wrong.
 func TestRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
+	synctest.Test(t, testRevisionIdlesOnAnInvalidClusterConf)
+}
+
+func testRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{}
 	h.fleet.addDn(t, testAddr, stub)
@@ -769,6 +821,10 @@ func TestRevisionIdlesOnAnInvalidClusterConf(t *testing.T) {
 // "refs == 0" and "the handler returned" afterwards are statements about
 // refuseConf's quiesce() rather than about a worker that never dialled.
 func TestRevisionQuiescesWhenARunningConfGoesBad(t *testing.T) {
+	synctest.Test(t, testRevisionQuiescesWhenARunningConfGoesBad)
+}
+
+func testRevisionQuiescesWhenARunningConfGoesBad(t *testing.T) {
 	h := newRevHarness(t)
 	// An agent that answers every round, holding a revision the worker did
 	// not ask for: the round completes and ends in RW4 step 5's SyncupDn.
@@ -1121,6 +1177,10 @@ func TestEveryCheckStreamSendsTheRoundTraceId(t *testing.T) {
 // switch (AR8) would otherwise reach a mid-round agent about a minute late,
 // preceded by one request built from the superseded revision.
 func TestRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
+	synctest.Test(t, testRevisionDesiredChangeDuringRoundSyncsAtOnce)
+}
+
+func testRevisionDesiredChangeDuringRoundSyncsAtOnce(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubDnAgent{
 		// The agent never answers this round.

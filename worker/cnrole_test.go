@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -143,6 +144,10 @@ func TestCnRoleMissingCnConfSkipsSyncup(t *testing.T) {
 // TestCnRoleUsesCnInterval checks RW9: the cn round period comes from
 // health_check_conf.cn_interval, not from the dn one.
 func TestCnRoleUsesCnInterval(t *testing.T) {
+	synctest.Test(t, testCnRoleUsesCnInterval)
+}
+
+func testCnRoleUsesCnInterval(t *testing.T) {
 	h := newRevHarness(t)
 	stub := &stubCnAgent{
 		checkReply: func(req *pb.CheckCnRequest) *pb.CheckCnReply {
