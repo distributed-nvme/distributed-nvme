@@ -937,9 +937,14 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       asked for** (*amended 2026-09-28*: an e2e react run's automatic grow
       failed a settled primary over because the primary's connect to a new
       side reached the disk node 18–26 ms before its export was linked into
-      the port — the worker fans the side's `SyncupSide` and the primary's
-      `SyncupCntlr` out unordered, [D16] — and the single re-read after a
-      connect can equally come before the kernel has added the head). Each
+      the port — the worker then fanned the side's `SyncupSide` and the
+      primary's `SyncupCntlr` out unordered, [D16]; `dnv-worker.md` RW14's
+      sides-first hold now sends the sides first, which makes that rarer,
+      not impossible: the hold lasts one `cntlr_interval` at most, and a new
+      side whose disk node refuses its first `SyncupSide` (`dnagent.md` DN8)
+      usually reports only after that, so the cntlrs go without it — and
+      the single re-read after a connect can equally come before the kernel
+      has added the head). Each
       converge pass — one `convergeCntlr`, whether a `SyncupCntlr`, the
       startup reconcile or an attempt of the background retry below runs it
       — gets **one wait budget**, `CnConnectPassBudget` (1 s), made at the
@@ -1196,11 +1201,14 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
         its wrapper; the reconciliation below leaves such a member held) —
         registers the cntlr for the CN10 background retry, as a failed
         connect does
-        (*amended 2026-09-26*, the failover ping-pong: the worker fans a
+        (*amended 2026-09-26*, the failover ping-pong: the worker fanned a
         promotion's `SyncupCntlr` and the sides' `SyncupSide` out unordered,
-        [D16], so the new primary's first converge regularly reads its paths
-        before the sides' ANA flips have reached them, and the worker
-        re-syncs on a revision or a reply code, never on a row). Only
+        [D16], so the new primary's first converge could read its paths
+        before the sides' ANA flips had reached them — rarer since
+        `dnv-worker.md` RW14's sides-first hold, not impossible, since the
+        hold is bounded and releases the cntlrs whether or not every side
+        has reported — and the worker re-syncs on a revision or a reply
+        code, never on a row). Only
         availability counts, and only for a wanted group's members: a
         standby wants no group, nor does a primary whose `sp_level`
         suppresses its groups (CN19); a deferred group (below) never
@@ -3029,14 +3037,15 @@ contradicts them.
   "Host-visible errors" paragraph (2026-09-26, the failover ping-pong) — a
   group whose member is not yet available is retried by the agent until it
   is (CN10/CN12), and the worker is not involved: the promotion's first
-  converge regularly runs before the sides' ANA flips have reached the new
-  primary's sysfs ([D16]'s unordered fan-out), and the worker re-syncs on
-  a revision or a reply code, never on a row. Step 4 does not wait for
-  steps 1-3: when the late members kept the stack from being built, that
-  first converge moves the namespaces to `optimized` over the td's
-  `CnErrorName` all the same (CN16's ANA rule), so a dead-CN failover
-  whose promotion outruns the sides' flip is not clean from the host's
-  side until the retry has built the stack (§7, known limits).
+  converge can run before the sides' ANA flips have reached the new
+  primary's sysfs ([D16]'s fan-out, unordered when this was written; rarer
+  since `dnv-worker.md` RW14's sides-first hold, which is bounded), and the
+  worker re-syncs on a revision or a reply code, never on a row. Step 4
+  does not wait for steps 1-3: when the late members kept the stack from
+  being built, that first converge moves the namespaces to `optimized`
+  over the td's `CnErrorName` all the same (CN16's ANA rule), so a dead-CN
+  failover whose promotion outruns the sides' flip is not clean from the
+  host's side until the retry has built the stack (§7, known limits).
 * `dnagent.md` §2.8 SH20 + §2.3 above (2026-09-28) — a controller whose
   `address` did not answer is never selected as a dead side's: it is
   unknown, never unwanted (CN10); nor is one whose `address` is absent,

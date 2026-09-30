@@ -4487,13 +4487,16 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   a fresh worker drives nothing for its
   first grace window; ownership changes overlap or gap by a few seconds across workers
   (safe because every `Syncup*` is idempotent under the agents' revision gate and every
-  etcd reaction is STM-guarded; an `err_epoch` the overlap leaves stale is corrected by
-  the owner's first verdict after it next loads the record — within a pass and a round
-  for a side, a leg or a cntlr, within a minute and a round for a DN or a CN — though
-  at the default thresholds a pass can fail a primary over on it first, `dnv-worker.md`
-  HL3 and Appendix B); and dead keys are garbage-collected by their observers instead
-  of expiring — which is also what lets a worker detect that the fleet has given up on
-  it (it sees its own key deleted) and rejoin as a fresh identity.
+  etcd reaction is STM-guarded, save a second owner's spare create that lands after the
+  worker has flipped the first owner's spare `provisioned`, which can leave its group a
+  spare no failure asked for, `dnv-worker.md` RW18 and AR2; an `err_epoch` the overlap
+  leaves stale is corrected by the owner's first verdict after it next loads the
+  record — within a pass and a round for a side, a leg or a cntlr, within a minute and
+  a round for a DN or a CN — though at the default thresholds a pass can fail a
+  primary over on it first, `dnv-worker.md` HL3 and Appendix B); and dead keys are
+  garbage-collected by their observers instead of expiring — which is also what lets a
+  worker detect that the fleet has given up on it (it sees its own key deleted) and
+  rejoin as a fresh identity.
 
 ## Appendix C — Amendments
 
@@ -4856,7 +4859,8 @@ exists.
   succeed sees that peer go stale and, after the grace window, claims its shards;
   correct peers see nothing wrong. The double-driving is bounded — the victim sees
   its key deleted, fences and rejoins as a fresh identity, and every agent-side effect
-  is idempotent — but not prevented ([D17], `dnv-worker.md` Appendix B). A health
+  is idempotent — but not prevented ([D17], `dnv-worker.md` Appendix B). It can leave
+  a group a spare no failure asked for (the spare bullet below). A health
   epoch one driver leaves stale is corrected by the owner's first verdict after it
   next loads the record (`dnv-worker.md` HL3): within a pass and a round for a side, a
   leg or a cntlr — though at the default thresholds a pass can fail a healthy primary
@@ -4877,6 +4881,12 @@ exists.
   group: it leaves a failed leg there in place — unless another spare of the group is
   or becomes ready to switch in — until that DN comes back and finishes zeroing the
   spare or an operator runs `DeleteSpareLeg` (`dnv-worker.md` AR8 step 3, Appendix B).
+  The same refusal stops a second sp-worker owner's create for one repair only until
+  the worker flips the first owner's spare `provisioned`. Nothing records which repair
+  a spare was made for, so an ownership overlap whose second create lands after that
+  flip — on a group that held no spare before the first create, and on a DN other than
+  the first owner's — leaves the group a spare no failure asked for (`dnv-worker.md`
+  AR2, Appendix B).
 * **A slice's data space is capped when its SP is created.** Every data grow — the
   worker's or a user's — appends a group of the slice's first data group's size, which
   is `init_ext_cnt` extents (§6.5, §8.5), and a slice's data list holds at most

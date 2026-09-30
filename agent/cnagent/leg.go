@@ -411,9 +411,10 @@ const sideNsid = 1
 // has not linked the export into its port yet answers — refused at TCP by a
 // port that does not listen yet, rejected by one that does ("failed to write
 // to nvme-fabrics device") — for as long as its SyncupSide takes after the
-// worker's unordered fan-out ([D16]), and what a permanently rejected export
-// or a dead disk node answers; only the first goes away within a pass, and
-// the budget is what caps how often the other two are retried. The last
+// worker's fan-out ([D16]: the sides-first hold is bounded, so a SyncupCntlr
+// can still come before the side's export), and what a permanently rejected
+// export or a dead disk node answers; only the first goes away within a pass,
+// and the budget is what caps how often the other two are retried. The last
 // attempt's error is the one returned, so a leg that stays unconnected reads
 // exactly as it did before the retry existed.
 func (s *CnAgentServer) connectWithin(

@@ -272,10 +272,11 @@ func (s *CnAgentServer) build(
 		// CN12 as amended 2026-09-26: a group's leg_list member that is not
 		// available this pass is the same class of transient as a connect
 		// that failed — the side's ANA flip has not reached this CN's sysfs
-		// yet (a promotion fans out SyncupCntlr and SyncupSide unordered,
-		// [D16]), its DN is rebooting, its path is mid-reconnect — and
-		// nothing else re-drives the converge that would assemble it, add it
-		// or build the pool over it: the worker re-syncs on a revision or a
+		// yet (the worker's sides-first hold is bounded, so a promotion's
+		// SyncupCntlr can still come before the sides' flips, [D16]), its
+		// DN is rebooting, its path is mid-reconnect — and nothing else
+		// re-drives the converge that would assemble it, add it or build
+		// the pool over it: the worker re-syncs on a revision or a
 		// reply code, never on a row. So it registers the CN10 retry, which
 		// re-runs the whole converge until every such member is available.
 		// There is no record of its own: the rows already report it — an md

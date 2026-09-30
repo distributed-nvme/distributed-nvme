@@ -111,8 +111,8 @@ func errorRows(info *pb.CntlrInfo) []string {
 // growReq is the shape of the e2e react case's automatic grow: the fixture's
 // primary with a second data group appended to its slice, the new group's one
 // leg on testIp2:testSvcId2 and already provisioned — the pass right after the
-// worker flips the new sides, which fans SyncupSide and SyncupCntlr out
-// unordered, so the primary's connect can beat the disk node's export.
+// worker flips the new sides. The worker's sides-first hold is bounded, so the
+// primary's connect can still beat the disk node's export.
 func growReq(revision uint64) *pb.SyncupCntlrRequest {
 	req := cntlrReq(reqOpts{revision: revision, primary: true})
 	grownDataGrp(req, true)

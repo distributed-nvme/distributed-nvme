@@ -3038,11 +3038,11 @@ func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 }
 
 // TestLateMembersRegisterTheRetry is link 1 of the failover ping-pong (CN12
-// as amended 2026-09-26). A failover fans SyncupCntlr and the sides'
-// SyncupSide out unordered ([D16]), so a promoted standby regularly reads its
-// legs before the sides' ANA flips have reached its sysfs: the paths are live
-// but still non-optimized, those legs are not available, and a group left
-// with no available leg reports "no available leg" with no mdadm run.
+// as amended 2026-09-26). The worker's sides-first hold is bounded ([D16]),
+// so a promoted standby can still read its legs before the sides' ANA flips
+// have reached its sysfs: the paths are live but still non-optimized, those
+// legs are not available, and a group left with no available leg reports "no
+// available leg" with no mdadm run.
 // Nothing re-drives that converge — the worker re-syncs on a revision or a
 // reply code, never on a row — so it registers the CN10 retry itself. A late
 // member in any group registers it, not just one in the last group the pass
