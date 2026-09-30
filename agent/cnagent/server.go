@@ -97,9 +97,12 @@ type cntlrState struct {
 	req     *pb.SyncupCntlrRequest
 	tracker *agent.ResTracker
 
-	// chunks mirrors this cntlr's clone-bm-* files, one CloneChunkSet per
-	// clone keyed by the pair (src_slice_idx, bm_idx); the files stay the
-	// source of truth for the applied set (SH21).
+	// chunks mirrors the clone-bm-* files of this cntlr that this process
+	// loaded at startup or received since, one CloneChunkSet per clone keyed
+	// by the pair (src_slice_idx, bm_idx); the files stay the source of
+	// truth for the applied set (SH21). A cntlr rebuilt after CN2's reload
+	// skipped its files starts empty over them until the worker pushes them
+	// again.
 	chunks map[uint64]*agent.CloneChunkSet
 
 	// pendingSweep marks slices whose pool device THIS incarnation created

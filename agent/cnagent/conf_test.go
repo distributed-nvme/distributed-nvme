@@ -1,9 +1,12 @@
 package cnagent
 
 import (
+	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -335,5 +338,416 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 			t.Fatalf("the fixture did not install the zeroed request")
 		}
 		assertRefusalRecord(t, capture, msgNoWaterMark)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// §6.33 — an unreadable cn file deletes nothing it might own (CN2)
+// ---------------------------------------------------------------------------
+
+// seedCntlrFiles writes the fixture cntlr's state file — a primary with one
+// clone — and one bitmap chunk of that clone into the store of a node that
+// holds nothing else: what a restart finds of a cntlr whose clone has
+// received a push, with none of it loaded yet. It returns the two paths.
+func seedCntlrFiles(
+	t *testing.T,
+	node *fakeNode,
+	nf *common.NameFmt,
+) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	cntlrPath := nf.LocalCntlrPath(testCluster, testCn, testSp, testCntlr)
+	chunkPath := nf.LocalCloneBmPath(
+		testCluster, testCn, testSp, testClone, 0, 0)
+	if err := node.writeProto(ctx, cntlrPath, cntlrReq(reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()},
+	})); err != nil {
+		t.Fatalf("seeding the cntlr state file: %v", err)
+	}
+	if err := node.writeProto(ctx, chunkPath, &pb.PushCloneBitmapRequest{
+		ClusterId:    testCluster,
+		CnId:         testCn,
+		CntlrPointer: cntlrPtr(),
+		CloneId:      testClone,
+		Bitmap:       []byte{0x05},
+	}); err != nil {
+		t.Fatalf("seeding the bitmap chunk file: %v", err)
+	}
+	return cntlrPath, chunkPath
+}
+
+// seedUndecodable puts a store file at path that does not decode as msg: a
+// varint cut off after one byte.
+func seedUndecodable(
+	t *testing.T,
+	node *fakeNode,
+	path string,
+	msg proto.Message,
+) {
+	t.Helper()
+	node.mu.Lock()
+	node.protos[path] = []byte{0xff}
+	node.mu.Unlock()
+	if proto.Unmarshal([]byte{0xff}, msg) == nil {
+		t.Fatalf("the fixture's %s decodes", path)
+	}
+}
+
+// storedFiles copies the fake's local store, so a test can compare it byte
+// for byte after a restart.
+func storedFiles(node *fakeNode) map[string][]byte {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	out := make(map[string][]byte, len(node.protos))
+	for path, raw := range node.protos {
+		out[path] = append([]byte(nil), raw...)
+	}
+	return out
+}
+
+// rmCallsNaming counts the `rm -f` commands whose arguments name path.
+func rmCallsNaming(node *fakeNode, path string) int {
+	n := 0
+	for _, call := range node.callsMatching("cmd rm -f ") {
+		if slices.Contains(strings.Fields(call), path) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile pins the cn-* file CN2
+// cannot use because it does not decode. There is no request to load, so the
+// CN is skipped — and the skip used to send every cntlr of it down the
+// pointer-absent branch, which deleted each cntlr's state file and its clone
+// bitmap chunks for want of a list that could not be read. Now the cntlrs
+// are skipped with their CN: neither loaded nor deleted, and nothing of them
+// converged, the node left exactly as the restart found it. Nor are they left
+// looking healthy: the CN and the cntlr are unknown to the Check rounds — the
+// cntlr still after the re-sent SyncupCn — and an unknown object is what the
+// worker re-sends its Syncup* for (dnv-worker.md RW4). The re-sent
+// SyncupCntlr then rebuilds the cntlr from the request it carries, and its
+// reply acknowledges no chunk, so the worker pushes the chunk again.
+func TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile(t *testing.T) {
+	ctx := context.Background()
+	node := newFakeNode()
+	node.dirs[agent.NvmetRoot] = true
+	srv := newCnServer(node)
+	// The rebuild below starts the primary's leg probers; none of their
+	// rounds is wanted inside the test.
+	srv.probeInterval = time.Hour
+	cnPath := srv.nf.LocalCnPath(testCluster, testCn)
+	cntlrPath, chunkPath := seedCntlrFiles(t, node, srv.nf)
+	seedUndecodable(t, node, cnPath, &pb.SyncupCnRequest{})
+	seeded := storedFiles(node)
+	node.Reset()
+
+	reconcileForTest(t, srv)
+
+	// Nothing but reads. This is the regression guard: the skip used to
+	// `rm -f` the cntlr's state file and its chunk right here.
+	if mutations := node.Mutations(); len(mutations) != 0 {
+		t.Fatalf("a cn state file that did not load tore its cntlrs' "+
+			"state down:\n%s", strings.Join(mutations, "\n"))
+	}
+	for path, raw := range seeded {
+		if got, ok := storedFiles(node)[path]; !ok {
+			t.Errorf("%s was removed", path)
+		} else if !bytes.Equal(got, raw) {
+			t.Errorf("%s was rewritten", path)
+		}
+	}
+
+	// Unknown, not healthy: the reply the worker answers with a re-sync.
+	checkCntlr := func() *pb.AgentReply {
+		reply, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+		return reply.GetAgentReply()
+	}
+	cnReply, _ := srv.checkCnRound(ctx, &pb.CheckCnRequest{
+		ClusterId: testCluster, CnId: testCn, Revision: 2,
+	}, nil)
+	if got := cnReply.GetAgentReply().GetCode(); got !=
+		common.ReplyCodeUnknownObject {
+		t.Errorf("CheckCn code %d, want %d", got,
+			common.ReplyCodeUnknownObject)
+	}
+	if got := checkCntlr().GetCode(); got != common.ReplyCodeUnknownObject {
+		t.Errorf("CheckCntlr code %d, want %d", got,
+			common.ReplyCodeUnknownObject)
+	}
+
+	// The re-sent SyncupCn is accepted and rewrites the file, which decodes
+	// again. The cntlr is still unknown after it: nothing loaded it, so its
+	// own Check round keeps asking for the SyncupCntlr that rebuilds its
+	// state.
+	reply, err := srv.SyncupCn(ctx, cnReq(2, true))
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	if reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupCn rejected: %v", reply.GetAgentReply())
+	}
+	stored := &pb.SyncupCnRequest{}
+	if err := proto.Unmarshal(storedFiles(node)[cnPath], stored); err != nil {
+		t.Fatalf("the re-sent SyncupCn left the cn state file "+
+			"unreadable: %v", err)
+	}
+	if stored.GetRevision() != 2 {
+		t.Errorf("cn state file revision %d, want 2", stored.GetRevision())
+	}
+	if got := checkCntlr().GetCode(); got != common.ReplyCodeUnknownObject {
+		t.Errorf("CheckCntlr code after the SyncupCn %d, want %d", got,
+			common.ReplyCodeUnknownObject)
+	}
+	for _, path := range []string{cntlrPath, chunkPath} {
+		if got, ok := storedFiles(node)[path]; !ok ||
+			!bytes.Equal(got, seeded[path]) {
+			t.Errorf("%s did not survive the re-sent SyncupCn", path)
+		}
+	}
+
+	// The re-sent SyncupCntlr rebuilds the cntlr from the request it carries
+	// and rewrites its file. The chunk file the reload skipped stays on
+	// disk, neither loaded nor deleted, so the reply acknowledges no chunk
+	// of the clone and the worker pushes it again.
+	node.Reset()
+	cntlrReply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()},
+	}))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if cntlrReply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupCntlr rejected: %v", cntlrReply.GetAgentReply())
+	}
+	bmInfo := cntlrReply.GetBmInfoList()
+	if len(bmInfo) != 1 || bmInfo[0].GetResId() != testClone {
+		t.Fatalf("bm_info_list %v, want one entry for clone %d",
+			bmInfo, testClone)
+	}
+	if got := chunkIds(bmInfo[0]); len(got) != 0 {
+		t.Errorf("the rebuilt cntlr acknowledged chunks %v the reload "+
+			"never loaded", got)
+	}
+	if !node.hasCall("writeproto " + cntlrPath) {
+		t.Errorf("the rebuild did not rewrite the cntlr state file")
+	}
+	if got := storedProto(t, node, cntlrPath).GetRevision(); got != 2 {
+		t.Errorf("cntlr state file revision %d, want 2", got)
+	}
+	if got, ok := storedFiles(node)[chunkPath]; !ok ||
+		!bytes.Equal(got, seeded[chunkPath]) {
+		t.Errorf("%s did not survive the rebuild", chunkPath)
+	}
+	if got := checkCntlr(); got.GetCode() != 0 {
+		t.Errorf("CheckCntlr after the rebuild = %v, want code 0", got)
+	}
+}
+
+// seedStore is a node holding nothing but the store: the cntlr and chunk
+// files of seedCntlrFiles, the cn file cnReq(2, listed) unless cnFile is
+// false, and an undecodable file of a second CN when stray is set. It returns
+// the cntlr and chunk paths beside the server and the node.
+func seedStore(
+	t *testing.T, cnFile bool, listed bool, stray bool,
+) (*CnAgentServer, *fakeNode, string, string) {
+	t.Helper()
+	node := newFakeNode()
+	node.dirs[agent.NvmetRoot] = true
+	srv := newCnServer(node)
+	cntlrPath, chunkPath := seedCntlrFiles(t, node, srv.nf)
+	if cnFile {
+		if err := node.writeProto(context.Background(),
+			srv.nf.LocalCnPath(testCluster, testCn),
+			cnReq(2, listed)); err != nil {
+			t.Fatalf("seeding the cn state file: %v", err)
+		}
+	}
+	if stray {
+		seedUndecodable(t, node, strayCnPath(srv), &pb.SyncupCnRequest{})
+	}
+	node.Reset()
+	return srv, node, cntlrPath, chunkPath
+}
+
+// strayCnPath is the file of the second CN that seedStore leaves undecodable.
+func strayCnPath(srv *CnAgentServer) string {
+	return srv.nf.LocalCnPath(testCluster, testCn2)
+}
+
+// assertStrayRead fails unless the reload read the undecodable file of the
+// second CN: a case that means to run beside it proves nothing about it
+// otherwise.
+func assertStrayRead(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+	t.Helper()
+	if stray := strayCnPath(srv); !node.hasCall("readproto " + stray) {
+		t.Fatalf("the undecodable file %s was never read:\n%s", stray,
+			strings.Join(node.Calls(), "\n"))
+	}
+}
+
+// TestReconcileSkipsOnlyTheCntlrsOfAnUnloadedCn bounds the skip above from
+// both sides. A cn-* file that does not load names no CN, so it keeps out
+// only the cntlrs and chunks whose CN is not loaded: beside it, a CN whose
+// own file loads has its cntlrs loaded and converged as on any restart, and a
+// cntlr whose pointer has left that CN's list is dropped as ever. With no
+// cn-* file left unread there is nothing to skip for: a CN with no file at
+// all reads as a list that names no cntlr, so a cntlr of it has its request
+// and its chunks deleted on the spot — a skip that outlived its reason would
+// keep them on disk for ever.
+func TestReconcileSkipsOnlyTheCntlrsOfAnUnloadedCn(t *testing.T) {
+	t.Run("an undecodable file of another cn", func(t *testing.T) {
+		ctx := context.Background()
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2})
+		seedUndecodable(t, node, strayCnPath(srv), &pb.SyncupCnRequest{})
+		node.Reset()
+
+		restarted := newCnServer(node)
+		reconcileForTest(t, restarted)
+
+		assertStrayRead(t, restarted, node)
+		if restarted.getCntlr(cntlrKey(
+			testCluster, testCn, testSp, testCntlr)) == nil {
+			t.Fatalf("a cn file that did not load skipped a cntlr of a " +
+				"loaded cn")
+		}
+		reply, _ := restarted.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+		if got := reply.GetAgentReply(); got.GetCode() != 0 ||
+			reply.GetRevision() != 2 {
+			t.Errorf("CheckCntlr after the restart = %v at revision %d, "+
+				"want 0 at 2", got, reply.GetRevision())
+		}
+	})
+
+	t.Run("no cn file at all", func(t *testing.T) {
+		srv, node, cntlrPath, chunkPath := seedStore(t, false, false, false)
+
+		reconcileForTest(t, srv)
+
+		if got := node.callsMatching("cmd rm -f "); len(got) != 1 ||
+			rmCallsNaming(node, cntlrPath) != 1 ||
+			rmCallsNaming(node, chunkPath) != 1 {
+			t.Errorf("rm calls = %q, want one naming the cntlr's state "+
+				"file and its chunk", got)
+		}
+		for _, path := range []string{cntlrPath, chunkPath} {
+			if _, ok := storedFiles(node)[path]; ok {
+				t.Errorf("%s survived a restart that found no cn file",
+					path)
+			}
+		}
+	})
+
+	t.Run("a pointer that left a loaded cn's list", func(t *testing.T) {
+		srv, node, cntlrPath, chunkPath := seedStore(t, true, false, true)
+
+		reconcileForTest(t, srv)
+
+		assertStrayRead(t, srv, node)
+		for _, path := range []string{cntlrPath, chunkPath} {
+			if n := rmCallsNaming(node, path); n != 1 {
+				t.Errorf("%s was deleted %d times, want 1", path, n)
+			}
+			if _, ok := storedFiles(node)[path]; ok {
+				t.Errorf("%s of a cntlr its loaded cn no longer lists "+
+					"survived the restart", path)
+			}
+		}
+	})
+}
+
+// TestReconcileKeepsTheChunksOfAnUnreadableCntlrFile is the same rule one
+// level down, the disk node's rule for a side-* file (dnagent.md DN2). A
+// cntlr-* file that does not decode names no cntlr, so a chunk whose cntlr
+// did not load may be that file's — and while the chunk's loaded CN still
+// names its cntlr, nothing read here proves the cntlr gone: the chunk is
+// skipped, neither loaded nor deleted, and the cntlr, which nothing loaded,
+// is unknown to its Check round, which is what the worker re-sends its
+// SyncupCntlr for. It used to be deleted as an orphan, so a read failure of
+// one file destroyed another; here that runs beside an undecodable file of
+// another CN, which keeps out only that CN's cntlrs and chunks. The skip is
+// bounded both ways: a chunk whose loaded CN no longer names its cntlr is an
+// orphan whatever cntlr-* file failed to decode, and with no cntlr-* file
+// left unread a chunk whose cntlr has no state file is an orphan as before.
+func TestReconcileKeepsTheChunksOfAnUnreadableCntlrFile(t *testing.T) {
+	t.Run("its cn still names the cntlr", func(t *testing.T) {
+		ctx := context.Background()
+		srv, node, cntlrPath, chunkPath := seedStore(t, true, true, true)
+		// The cntlr's own file does not decode; its CN's does and lists it.
+		seedUndecodable(t, node, cntlrPath, &pb.SyncupCntlrRequest{})
+		seeded := storedFiles(node)[chunkPath]
+		node.Reset()
+
+		reconcileForTest(t, srv)
+
+		assertStrayRead(t, srv, node)
+		if n := rmCallsNaming(node, chunkPath); n != 0 {
+			t.Errorf("the chunk was deleted %d times beside a cntlr file "+
+				"that did not decode:\n%s", n,
+				strings.Join(node.callsMatching("cmd rm -f "), "\n"))
+		}
+		if got, ok := storedFiles(node)[chunkPath]; !ok ||
+			!bytes.Equal(got, seeded) {
+			t.Errorf("%s did not survive the restart byte for byte",
+				chunkPath)
+		}
+		if got := storedFiles(node)[cntlrPath]; !bytes.Equal(got,
+			[]byte{0xff}) {
+			t.Errorf("the undecodable cntlr state file was touched")
+		}
+		// Not hidden either: the cntlr is unknown to its Check round.
+		reply, _ := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), Revision: 2,
+		}, nil)
+		if got := reply.GetAgentReply().GetCode(); got !=
+			common.ReplyCodeUnknownObject {
+			t.Errorf("CheckCntlr code %d, want %d", got,
+				common.ReplyCodeUnknownObject)
+		}
+	})
+
+	t.Run("its cn no longer names the cntlr", func(t *testing.T) {
+		srv, node, cntlrPath, chunkPath := seedStore(t, true, false, false)
+		seedUndecodable(t, node, cntlrPath, &pb.SyncupCntlrRequest{})
+		node.Reset()
+
+		reconcileForTest(t, srv)
+
+		if !node.hasCall("readproto " + cntlrPath) {
+			t.Fatalf("the undecodable cntlr state file was never read")
+		}
+		if n := rmCallsNaming(node, chunkPath); n != 1 {
+			t.Errorf("the orphan chunk was deleted %d times, want 1", n)
+		}
+		if _, ok := storedFiles(node)[chunkPath]; ok {
+			t.Errorf("the chunk of a cntlr its cn no longer names " +
+				"survived the restart")
+		}
+	})
+
+	t.Run("no cntlr file left unread", func(t *testing.T) {
+		srv, node, cntlrPath, chunkPath := seedStore(t, true, true, false)
+		// Its CN lists the cntlr, which has no state file at all.
+		node.mu.Lock()
+		delete(node.protos, cntlrPath)
+		node.mu.Unlock()
+
+		reconcileForTest(t, srv)
+
+		if n := rmCallsNaming(node, chunkPath); n != 1 {
+			t.Errorf("the orphan chunk was deleted %d times, want 1", n)
+		}
+		if _, ok := storedFiles(node)[chunkPath]; ok {
+			t.Errorf("the chunk of a cntlr with no state file survived " +
+				"the restart")
+		}
 	})
 }

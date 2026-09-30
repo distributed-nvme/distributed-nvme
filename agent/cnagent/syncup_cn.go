@@ -10,9 +10,13 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// Reconcile is the SH1 startup pass (CN2): load the local store, converge
-// every stored CN's §3.2 base state, tear down cntlrs whose pointer left their
-// CN's list, converge the rest — which, per CN18, runs the §11.5 recovery for
+// Reconcile is the SH1 startup pass (CN2): load the local store — while a
+// cn-* file does not load, no cntlr or chunk whose CN is not loaded is loaded
+// or deleted, and while a cntlr-* file does not load, neither is a chunk
+// whose cntlr is not loaded but whose loaded CN still names that cntlr —
+// converge every loaded CN's §3.2 base state, tear down cntlrs
+// whose pointer left their CN's list, converge the rest — which, per CN18,
+// runs the §11.5 recovery for
 // any clone whose metadata wrapper is gone or mismatched, whose dm-clone has
 // vanished, or whose dm-clone does not show hydration enabled (after a CN
 // reboot the tmpfs arena and the dm state are both empty; after a plain agent
@@ -34,12 +38,18 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		return err
 	}
 
+	// unreadCn is set when a cn-* file did not load. Such a file names no CN
+	// — the ids come from the decoded request, never from the file name
+	// (SH6) — so any cntlr whose CN is not loaded may be one its list still
+	// names, and nothing read here proves that it left that list.
+	unreadCn := false
 	for _, path := range files[agent.StoreKindCn] {
 		req := &pb.SyncupCnRequest{}
 		if err := s.store.Load(ctx, path, req); err != nil {
 			slog.ErrorContext(ctx, "skipping unreadable cn state file",
 				slog.String("path", path),
 				slog.String("error", err.Error()))
+			unreadCn = true
 			continue
 		}
 		s.putCn(cnKey(req.GetClusterId(), req.GetCnId()), &cnState{
@@ -47,12 +57,38 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			tracker: agent.NewResTracker(),
 		})
 	}
+	// unreadParent reports whether a cntlr or a chunk of the CN (clusterId,
+	// cnId) goes with a cn-* file that did not load: its CN is not loaded
+	// while such a file exists. Those are skipped with their CN — neither
+	// loaded nor deleted, so nothing of them is converged, swept or applied.
+	// Loading them would hand them to the pointer-absent branch below, which
+	// reads a missing CN as "this cntlr left its parent's list" and deletes
+	// the cntlr's request and chunks for want of a list that could not be
+	// read. Out of memory, the CN and each such cntlr answer their Check
+	// rounds with UnknownObject, so the worker re-sends the SyncupCn, which
+	// rewrites the file, and then each SyncupCntlr, which CN8 admits once
+	// that SyncupCn has put its pointer back.
+	unreadParent := func(clusterId, cnId uint64) bool {
+		return unreadCn && s.getCn(cnKey(clusterId, cnId)) == nil
+	}
+	// unreadCntlr is unreadCn one level down: set when a cntlr-* file did not
+	// load, which names no cntlr either.
+	unreadCntlr := false
 	for _, path := range files[agent.StoreKindCntlr] {
 		req := &pb.SyncupCntlrRequest{}
 		if err := s.store.Load(ctx, path, req); err != nil {
 			slog.ErrorContext(ctx, "skipping unreadable cntlr state file",
 				slog.String("path", path),
 				slog.String("error", err.Error()))
+			unreadCntlr = true
+			continue
+		}
+		if unreadParent(req.GetClusterId(), req.GetCnId()) {
+			slog.WarnContext(ctx,
+				"skipping cntlr state file of an unloaded cn",
+				slog.String("path", path),
+				slog.Uint64("cluster_id", req.GetClusterId()),
+				slog.Uint64("cn_id", req.GetCnId()))
 			continue
 		}
 		ptr := req.GetCntlrPointer()
@@ -65,6 +101,9 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// persisted request — the file name is only an address, the content is
 	// authoritative. They are loaded **before** the converge, which is what
 	// lets a (re)built dm-clone re-apply them in the same pass (CN18 step 4).
+	// A chunk whose cntlr is not loaded is an orphan unless it goes with a
+	// cn-* file that did not load (unreadParent), or with a cntlr-* file that
+	// did not load while its loaded CN still names its cntlr (below).
 	var orphans []string
 	for _, path := range files[agent.StoreKindCloneBm] {
 		chunk := &pb.PushCloneBitmapRequest{}
@@ -74,9 +113,37 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 				slog.String("error", err.Error()))
 			continue
 		}
+		// Not an orphan: nothing read here proves its cntlr gone.
+		if unreadParent(chunk.GetClusterId(), chunk.GetCnId()) {
+			slog.WarnContext(ctx,
+				"skipping bitmap chunk file of an unloaded cn",
+				slog.String("path", path),
+				slog.Uint64("cluster_id", chunk.GetClusterId()),
+				slog.Uint64("cn_id", chunk.GetCnId()))
+			continue
+		}
 		ptr := chunk.GetCntlrPointer()
 		st := s.getCntlr(cntlrKey(chunk.GetClusterId(), chunk.GetCnId(),
 			ptr.GetSpId(), ptr.GetCntlrId()))
+		// Nor, while a cntlr-* file did not load, is a chunk whose cntlr is
+		// not loaded but whose loaded CN still names that cntlr: the file may
+		// be this cntlr's, so nothing read here proves the cntlr gone. A
+		// chunk whose CN no longer names its cntlr is an orphan whatever
+		// cntlr-* file failed to decode — the cntlr left the list, and its
+		// chunks go with it (SH7) — and so is one whose CN is not loaded
+		// (with no cn-* file unread, see above), which reads as a list that
+		// names no cntlr.
+		if st == nil && unreadCntlr {
+			cn := s.getCn(cnKey(chunk.GetClusterId(), chunk.GetCnId()))
+			if cn != nil && pointerKnown(cn.req, ptr) {
+				slog.WarnContext(ctx,
+					"skipping bitmap chunk file of an unloaded cntlr",
+					slog.String("path", path),
+					slog.Uint64("sp_id", ptr.GetSpId()),
+					slog.Uint64("cntlr_id", ptr.GetCntlrId()))
+				continue
+			}
+		}
 		if st == nil || findClone(st.req, chunk.GetCloneId()) == nil {
 			orphans = append(orphans, path)
 			continue
@@ -101,7 +168,9 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// remove its resources. That is safe because the node-level sweep below
 	// finds those resources by name, and it is better than the teardown this
 	// replaced: a teardown that failed still deleted the file, and nothing
-	// ever looked again.
+	// ever looked again. A missing CN reads as a list that names no cntlr —
+	// unless a cn-* file did not load, and then its cntlrs never got this
+	// far (unreadParent).
 	for _, key := range s.allCntlrKeys() {
 		st := s.getCntlr(key)
 		cn := s.getCn(cnKey(st.req.GetClusterId(), st.req.GetCnId()))

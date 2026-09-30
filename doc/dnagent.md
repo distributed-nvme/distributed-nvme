@@ -835,8 +835,9 @@ SH21. Implements the agent side of §9.6: persist the received
       `(src_slice_idx, bm_idx)` pair that addresses the chunk. The file name
       carries that pair too, but only as an address: the persisted request's
       CONTENT is what the startup reload decodes it from. A file that reload
-      leaves unloaded — one that does not decode, and DN2's skips while a
-      `dn-*` or `side-*` file does not load — is in no applied set until a
+      leaves unloaded — one that does not decode, DN2's skips while a
+      `dn-*` or `side-*` file does not load, and `cnagent.md` CN2's while a
+      `cn-*` or `cntlr-*` file does not — is in no applied set until a
       push rewrites it or a later restart loads it.
 
 SH22. The §11.4 math skeleton lives here: chunk placement (concatenated —

@@ -2349,19 +2349,18 @@ concatenation (§9.6, §11.4).
   revision record exists. On start the agent loads every other file of its role's
   kinds under its prefix,
   reconciles the system to it (full idempotent re-apply, §11.5 for clones), then
-  serves — except that a dn agent skips, neither loading nor deleting them, the files
-  that may belong under a file it cannot load: while a `dn-*` file does not load, the
-  `side-*` and `migr-bm-*` files of every DN it did not load; while a `side-*` file
-  does not load, each `migr-bm-*` chunk of a side it did not load that a loaded DN
-  still names. A file that did not load names no object, so it proves no owner gone
-  (`dnagent.md` DN2). The cn agent makes no such exception: the files under a `cn-*`
-  or `cntlr-*` file it cannot load are deleted as though that file's object were gone
-  (`cnagent.md` CN2).
+  serves — except that an agent skips, neither loading nor deleting them, the files
+  that may belong under a file it cannot load: while a `dn-*` or `cn-*` file does not
+  load, the `side-*` and `migr-bm-*` files of every DN, or the `cntlr-*` and
+  `clone-bm-*` files of every CN, it did not load; and, while a `side-*` or `cntlr-*`
+  file does not load, each `migr-bm-*` or `clone-bm-*` chunk of a side or cntlr it did
+  not load that a loaded DN or CN still names. A file that did not load names no
+  object, so it proves no owner gone (`dnagent.md` DN2, `cnagent.md` CN2).
   When an object disappears from its parent's pointer list, the agent drops its
   file(s), its chunk files, its in-memory entry and its object lock in that same pass,
   **before** anything of it is removed — save a file a restart left unloaded that no
-  memory entry has named since (on either role a file that did not load; on a dn agent
-  also a file skipped as above): the §9.8 sweep removes its object's resources by name
+  memory entry has named since (a file that did not load, or one skipped as above):
+  the §9.8 sweep removes its object's resources by name
   in that pass, and the file stays until a later restart decodes it and finds
   the pointer absent (`dnagent.md` DN2, `cnagent.md` CN2).
   It keeps no record of the object afterwards
@@ -2764,8 +2763,8 @@ and the paged readers, not because bitmaps are inherently huge.)
    disk, they survive restarts and the worker otherwise never re-pushes what the node
    already holds.
    The files are deleted together with their object, by the same §9.8 sweep that
-   removes its devices — except a chunk a restart left unloaded (on a cn agent, only
-   one whose own file did not load) and no push has rewritten since, which waits for a
+   removes its devices — except a chunk a restart left unloaded and no push has
+   rewritten since, which waits for a
    later restart that decodes it (§9.1, `dnagent.md` DN2, `cnagent.md` CN2): the local
    store is swept against the STORED REQUEST, so a clone
    that has left `clone_list` (§8.9) and a side that is no longer the destination of the

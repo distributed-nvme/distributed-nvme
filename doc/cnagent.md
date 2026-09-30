@@ -439,7 +439,8 @@ CN1. Lock mapping (instantiates SH10-SH13): `SyncupCn` and the startup
 ### 4.3 Startup reconcile
 
 CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
-     load every `cn-*` and `cntlr-*` request into memory first. Then reload
+     load every `cn-*` and `cntlr-*` request into memory first, save the
+     `cntlr-*` files skipped with their CN (below). Then reload
      every `clone-bm-*` chunk into the owning cntlr's `agent.CloneChunkSet`s
      (SH21), keyed by the `(src_slice_idx, bm_idx)` pair the chunk is
      addressed by — **before** any converge runs, so that a dm-clone the
@@ -494,10 +495,43 @@ CN2. Enumerate the store (SH6; cn kinds `cn-`, `cntlr-`, `clone-bm-`) and
      loaded `cntlr-*` requests, or whose `clone_id` is absent from that cntlr's
      stored `clone_list`, is an orphan — its cntlr or clone was deleted
      while the chunk file survived (SH7) — and is deleted here, because
-     it names an owner no later pass will ever look for. Then, for each
+     it names an owner no later pass will ever look for, unless it is
+     skipped (below). A chunk whose cntlr is not loaded is no orphan while a
+     `cntlr-*` file does not load and the chunk's loaded CN still names its
+     cntlr: that file names no cntlr, so it may be this cntlr's, and the
+     chunk is skipped like the files of a CN that did not load — neither
+     loaded nor deleted — until that cntlr's `SyncupCntlr` rewrites its file
+     and the worker pushes the chunk again (CN20). A chunk whose loaded CN
+     no longer names its cntlr is an orphan whatever `cntlr-*` file failed
+     to decode. A `cn-*` file that does not load — its read
+     fails or it does not decode — is skipped, and while one is unread, so
+     is every `cntlr-*` file and `clone-bm-*` chunk whose CN is not loaded:
+     a file that did not load names no CN (SH6), so any of those cntlrs may
+     be one its list still names, and a list that could not be read proves
+     nothing about which cntlrs left it. Skipped is neither loaded nor
+     deleted: none of them is converged, swept or applied, and every one of
+     those files stays on disk exactly as the restart found it — loaded,
+     each cntlr would reach the pointer-absent branch below, which would
+     delete its request and its chunks for want of a list that could not be
+     read. Nor is anything hidden: with none of it in memory, the CN and
+     each of those cntlrs answer their Check rounds
+     `ReplyCodeUnknownObject` (SH25), and the worker re-sends each
+     `Syncup*` (`dnv-worker.md` RW4). The `SyncupCn` rewrites the file, and
+     from there each skipped cntlr the list still names is where a lost
+     `--local-store` leaves one — known by its pointer alone (CN21) — until
+     its `SyncupCntlr`, which CN8 admits only after that `SyncupCn`,
+     converges from the request it carries and rewrites its file; that
+     reply's `bm_info_list` acknowledges no chunk, so the worker pushes each
+     chunk of its clones again (CN20). A skipped cntlr the re-sent list no
+     longer names is in no list and not loaded, so the node-level sweep
+     removes its resources by name (CN21); its files wait for a later
+     restart, whose pass finds its pointer absent and drops them (SH7).
+     Then, for each
      `cn-*` request: re-run the SyncupCn converge (§4.5 step CN5). Then
      each `cntlr-*` request: if its pointer is absent from the stored
-     `SyncupCnRequest.cntlr_pointer_list`, the cntlr is **dropped** — its
+     `SyncupCnRequest.cntlr_pointer_list` — a CN with no request loaded
+     reads as a list that names no cntlr, and its cntlrs get this far only
+     while no `cn-*` file is unread — the cntlr is **dropped** — its
      `cntlr-*` and `clone-bm-*` files, its memory entry, its object lock and
      its goroutines go, and **nothing of its is removed from the node here**.
      Its resources are found afterwards, by name, by the node-level sweep
@@ -706,7 +740,9 @@ CN7. **Persist first, then drop, then sweep.** The request is written to
 CN8. **Gating.** The pointer MUST be present in the stored
      `SyncupCnRequest.cntlr_pointer_list` — else `ReplyCodeUnknownObject`
      (`SyncupCn` introduces pointers first, §9.1). Then the SH8 revision
-     gate against the stored `SyncupCntlrRequest`. Then, last and still
+     gate against the `SyncupCntlrRequest` this process holds — 0 while it
+     holds none, as for a cntlr whose file CN2's reload did not load or
+     skipped, whatever revision that file carries. Then, last and still
      with **zero** side effects, the `architecture.md` §7 **conf gate**:
      `agent.ValidateBdevConf(req.bdev_conf)` (`dnagent.md` §2.1) refuses a
      request whose `dm_pool_conf.data_block_size`,
@@ -2014,7 +2050,8 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          `dm_clone_conf`, one per non-zero member the probed status does
          not already show (probe-first, SH16; a zero leaves the target's
          own default in place, `architecture.md` §7).
-      4. Apply every locally present bitmap chunk — the CN22 fold over the
+      4. Apply every bitmap chunk of the applied set (SH21) — the CN22 fold
+         over the
          `(src_slice_idx, bm_idx)`-addressed chunks this node holds, read in
          place — and, when
          this build is a **§11.5 recovery** (the dm-clone's metadata is
@@ -2200,7 +2237,8 @@ CN20. Persist (SH5); reply `agent_reply`, `revision`, `cntlr_info`,
 
       `bm_info_list` is one `BitmapInfo{res_id = clone_id}` per `clone_list`
       entry of the (now-stored) request, its `chunk_id_list` derived from the
-      `clone-bm-*` files present (SH21): one `BmChunkId{src_slice_idx,
+      `clone-bm-*` files present, save those CN2's reload left unloaded
+      (SH21): one `BmChunkId{src_slice_idx,
       bm_idx}` per chunk this node holds for that clone, ascending by the
       pair. `bm_idx_list` is left **unset** — that field is the migration
       applied set (`SyncupSideReply.bm_info`), and a flat index cannot name a
@@ -2549,8 +2587,11 @@ CN22. Gate: the cntlr file must exist and its stored `clone_list` must
 ### 4.9 `GetCnInfo` / `GetCntlrInfo`
 
 CN23. Read-only: probe fresh under the CN1 locks and reply `agent_reply`,
-      `revision`, the info. An unknown CN (no `cn-*` file) or cntlr pointer
-      ⇒ `ReplyCodeUnknownObject` with `revision = 0`. For a known object the
+      `revision`, the info. An unknown CN or cntlr pointer — one this
+      process holds no request for, as when none was ever applied, or when
+      the startup reload could not load or skipped its file (CN2) and none
+      has been applied since — ⇒ `ReplyCodeUnknownObject` with
+      `revision = 0`. For a known object the
       `agent_reply` is the read-only verdict of CN30. Never mutates.
 
 ### 4.10 `CheckCn` / `CheckCntlr`
@@ -3075,6 +3116,25 @@ contradicts them.
   `osclient.md` §4.2 adds `dirMtime` and `Mounted` / `FileSize` to the
   `runProbe` users, `LoopDevices` beside `Dm.List`, and `NsDevicePath` to
   the strict readers.
+* `architecture.md` §9.1 + §9.6 step 4, `dnagent.md` §2.9 SH21
+  (2026-09-30) — the cn agent's startup reload skips, neither loading nor
+  deleting them, the files that may belong under a `cn-*` or `cntlr-*`
+  file it cannot load, as the dn agent's already did under a `dn-*` or
+  `side-*` file (CN2, `dnagent.md` DN2): while a `cn-*` file does not
+  load, the `cntlr-*` and `clone-bm-*` files of every CN it did not load,
+  and, while a `cntlr-*` file does not load, each `clone-bm-*` chunk of a
+  cntlr it did not load that a loaded CN still names. §9.1's local-store
+  rule, which said the cn agent made no such exception and deleted those
+  files as though the unloaded file's object were gone, states the skip
+  for both roles, and its exception to dropping the files of an object
+  that has left its parent's list — a file a restart left unloaded that
+  no memory entry has named since — now counts a skipped file on either
+  role, not on a dn agent alone; §9.6 step 4 no longer confines the
+  chunks that wait for a later restart, on a cn agent, to those whose own
+  file did not load; and SH21's list of the files a reload leaves
+  unloaded, which are in no applied set until a push rewrites them or a
+  later restart loads them, adds CN2's skips while a `cn-*` or `cntlr-*`
+  file does not load.
 
 ## 6. Tests
 
@@ -4075,6 +4135,32 @@ between `Recv` and the round (SH24).
     spent the budget, the source's refused connect is made once and the
     clone reports its step-1 failure: `clone_id_to_target` `ERROR` with the
     refusal, `clone_id_to_dm_clone` `MISSING` `source not connected`.
+33. **An unreadable cn or cntlr file deletes nothing it might own** (CN2;
+    `agent/cnagent/conf_test.go`). A `Reconcile` over a `cn-*` file that
+    does not decode, beside a primary's `cntlr-*` file and a `clone-bm-*`
+    chunk of its clone on a node holding nothing else
+    (`TestReconcileKeepsTheCntlrsOfAnUnreadableCnFile`), mutates nothing:
+    all three files stay byte for byte, and the CN and the cntlr reply
+    `ReplyCodeUnknownObject` to their Check rounds — the cntlr still after
+    the re-sent `SyncupCn`, whose save makes the file decode again. The
+    re-sent `SyncupCntlr` then rebuilds the cntlr and rewrites its file, its
+    reply acknowledges no chunk of the clone, the chunk file is still there
+    byte for byte, and the next `CheckCntlr` round replies 0. The skip
+    covers only a CN not loaded, and only while a `cn-*` file did not load
+    (`TestReconcileSkipsOnlyTheCntlrsOfAnUnloadedCn`): beside an undecodable
+    file of another CN, which the reload is shown to read, a loaded CN's
+    cntlr is loaded and its first `CheckCntlr` round is clean, and a cntlr
+    whose pointer has left that loaded CN's list has its state file and its
+    chunk deleted, each in exactly one `rm`; with no `cn-*` file at all the
+    cntlr's state file and its chunk go in one `rm`. One level down
+    (`TestReconcileKeepsTheChunksOfAnUnreadableCntlrFile`), the chunk of a
+    cntlr whose own file does not decode, of a loaded CN that lists it,
+    beside that undecodable file of another CN, stays byte for byte with no
+    `rm` naming it, the undecodable file stays too, and the cntlr replies
+    `ReplyCodeUnknownObject` to its `CheckCntlr` round; the chunk is
+    deleted in exactly one `rm` once its loaded CN no longer lists the
+    cntlr, whose file still does not decode, and once no `cntlr-*` file
+    fails to load and the cntlr has none at all.
 
 ## 7. Acceptance checklist
 
