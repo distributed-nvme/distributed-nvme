@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -155,7 +156,8 @@ func (s *voteHookStore) Delete(ctx context.Context, key string) error {
 // voteHarness runs a real vote worker over the in-memory registry and the
 // fake clock. Registrations are delivered the way production delivers them —
 // a store Put or Delete, which the store's watch turns into an event — so the
-// tests exercise the scan, the watch pump and the state machines together.
+// tests exercise the scan, the watch pump and the state machines together. It
+// is built inside a testing/synctest bubble, which settle waits on.
 type voteHarness struct {
 	t     *testing.T
 	clk   *fakeClock
@@ -242,25 +244,25 @@ func newVoteHarnessDeps(
 	return h
 }
 
-// settle waits until the vote loop has drained everything the last stimulus
-// produced.
+// settle waits until everything the last stimulus set off has run as far as
+// it can: every other goroutine of the case — the vote loop, its heartbeat,
+// watch pumps, scan, timer and delete helpers, the store's watches, the shard
+// workers — is durably blocked (testing/synctest), waiting for input on a
+// channel, on the fake clock or on a hook the case holds. A tick the heartbeat
+// has taken, an event a pump has taken from the store and a fired timer on its
+// way to the loop each keep a goroutine runnable until the loop has them, so
+// none is left behind when this returns unless the loop, or the goroutine
+// carrying it, is held on a hook the case holds (staleOwnKey's gated put keeps
+// its tick from the loop, for one). A few quiet milliseconds cannot prove
+// that: under -race a fired timer's helper can stay unscheduled through them,
+// so the assertion that follows misses its commit, or a tick or its echo falls
+// a whole clock step behind and a later step fences the worker as
+// heartbeat_stalled or watch_stalled. Every case that builds a harness
+// therefore runs in a bubble: TestVoteX is synctest.Test around its body
+// testVoteX.
 func (h *voteHarness) settle() {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	stable := 0
-	for time.Now().Before(deadline) {
-		before := h.vote.processed.Load()
-		time.Sleep(time.Millisecond)
-		if h.store.drained() && h.vote.processed.Load() == before {
-			stable++
-			if stable >= 3 {
-				return
-			}
-			continue
-		}
-		stable = 0
-	}
-	h.t.Fatal("vote loop did not settle")
+	synctest.Wait()
 }
 
 // advance moves the fake clock forward in steps of at most one vote interval,
@@ -491,6 +493,10 @@ func TestVoteOwnershipMovesOnlyToJoiner(t *testing.T) {
 // the worker's own key enters through an appear transition at scan time, and
 // nothing is owned until one full grace window later.
 func TestVoteSymmetricStartup(t *testing.T) {
+	synctest.Test(t, testVoteSymmetricStartup)
+}
+
+func testVoteSymmetricStartup(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	own := h.vote.currentSeed()
 
@@ -523,6 +529,10 @@ func TestVoteSymmetricStartup(t *testing.T) {
 // garbage-collected all the same, which is the stated purpose of the disappear
 // timer VW7 arms for it.
 func TestVoteDeadAtScanNeverEffective(t *testing.T) {
+	synctest.Test(t, testVoteDeadAtScanNeverEffective)
+}
+
+func testVoteDeadAtScanNeverEffective(t *testing.T) {
 	store := newVoteHookStore()
 	dead := seedOf(9)
 	key := workerRegKey(common.WorkerRoleDn, dead)
@@ -574,6 +584,10 @@ func TestVoteDeadAtScanNeverEffective(t *testing.T) {
 // threshold, commit nonmember with the garbage-collecting Delete, and reappear
 // as a fresh entry afterwards.
 func TestVoteAppearCommitDisappearGC(t *testing.T) {
+	synctest.Test(t, testVoteAppearCommitDisappearGC)
+}
+
+func testVoteAppearCommitDisappearGC(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	peer := seedOf(7)
 	key := workerRegKey(common.WorkerRoleDn, peer)
@@ -632,6 +646,10 @@ func TestVoteAppearCommitDisappearGC(t *testing.T) {
 // TestVoteFlappingNeverCommits checks VW5: a registration that flaps faster
 // than the grace time never changes anybody's effective membership.
 func TestVoteFlappingNeverCommits(t *testing.T) {
+	synctest.Test(t, testVoteFlappingNeverCommits)
+}
+
+func testVoteFlappingNeverCommits(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	peer := seedOf(5)
 	key := workerRegKey(common.WorkerRoleDn, peer)
@@ -664,6 +682,10 @@ func TestVoteFlappingNeverCommits(t *testing.T) {
 // because its target already equals the committed state, so no second
 // "membership committed" record for the peer is ever emitted.
 func TestVoteReappearCancelsPendingCommit(t *testing.T) {
+	synctest.Test(t, testVoteReappearCancelsPendingCommit)
+}
+
+func testVoteReappearCancelsPendingCommit(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	peer := seedOf(6)
 
@@ -685,6 +707,10 @@ func TestVoteReappearCancelsPendingCommit(t *testing.T) {
 // TestVoteRoleIndependence checks VW10: each role has its own registry,
 // entries, timers, effective set and shard workers.
 func TestVoteRoleIndependence(t *testing.T) {
+	synctest.Test(t, testVoteRoleIndependence)
+}
+
+func testVoteRoleIndependence(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn, common.WorkerRoleCn)
 	peer := seedOf(8)
 
@@ -747,6 +773,10 @@ func TestVoteRoleIndependence(t *testing.T) {
 // VW6's Delete, because without a lease nothing else ever removes the key and
 // every observer would keep a tracking entry for it forever.
 func TestVoteNeverEffectiveKeyIsCollected(t *testing.T) {
+	synctest.Test(t, testVoteNeverEffectiveKeyIsCollected)
+}
+
+func testVoteNeverEffectiveKeyIsCollected(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	peer := seedOf(4)
 	key := workerRegKey(common.WorkerRoleDn, peer)
@@ -798,6 +828,10 @@ func TestVoteNeverEffectiveKeyIsCollected(t *testing.T) {
 // peer into a disappear, commit it nonmember, delete its registration and so
 // fence it through VW8(c) over a field nobody reads.
 func TestVoteScanKeepsUndecodableValueLive(t *testing.T) {
+	synctest.Test(t, testVoteScanKeepsUndecodableValueLive)
+}
+
+func testVoteScanKeepsUndecodableValueLive(t *testing.T) {
 	// Field 1, varint, no payload: proto cannot decode it as a WorkerReg.
 	corrupt := []byte{0x08}
 	store := newVoteHookStore()
@@ -842,6 +876,10 @@ func TestVoteScanKeepsUndecodableValueLive(t *testing.T) {
 // shards stay with it for every observer. The live peer's puts are the ones
 // only the rescans see.
 func TestVoteRescanRefreshesOnlyReputKeys(t *testing.T) {
+	synctest.Test(t, testVoteRescanRefreshesOnlyReputKeys)
+}
+
+func testVoteRescanRefreshesOnlyReputKeys(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	dead := seedOf(7)
 	live := seedOf(8)
@@ -891,6 +929,10 @@ func TestVoteRescanRefreshesOnlyReputKeys(t *testing.T) {
 // mod_revision and re-arm nothing, so the peer is observed dead at the dead
 // threshold after the first scan and never revived.
 func TestVoteRescanKeepsTheDeadlineOfAScannedKey(t *testing.T) {
+	synctest.Test(t, testVoteRescanKeepsTheDeadlineOfAScannedKey)
+}
+
+func testVoteRescanKeepsTheDeadlineOfAScannedKey(t *testing.T) {
 	store := newVoteHookStore()
 	dead := seedOf(9)
 	store.seed(t, workerRegKey(common.WorkerRoleDn, dead), &pb.WorkerReg{})
@@ -941,6 +983,10 @@ func fenceRecord(t *testing.T, h *voteHarness) map[string]any {
 // TestVoteFenceHeartbeatStalled is VW8 (a): the heartbeat has not reached etcd
 // for the dead threshold.
 func TestVoteFenceHeartbeatStalled(t *testing.T) {
+	synctest.Test(t, testVoteFenceHeartbeatStalled)
+}
+
+func testVoteFenceHeartbeatStalled(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	h.store.setPutErr(errors.New("etcd down"))
@@ -972,6 +1018,10 @@ func TestVoteFenceHeartbeatStalled(t *testing.T) {
 // in; and the reason is heartbeat_stalled — the cause — not the stale watch
 // the freeze also left behind (§14.11 case E step 7).
 func TestVoteFenceHeartbeatStalledAfterFreeze(t *testing.T) {
+	synctest.Test(t, testVoteFenceHeartbeatStalledAfterFreeze)
+}
+
+func testVoteFenceHeartbeatStalledAfterFreeze(t *testing.T) {
 	store := newVoteHookStore()
 	h := newVoteHarnessOn(t, store, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
@@ -1016,6 +1066,10 @@ func TestVoteFenceHeartbeatStalledAfterFreeze(t *testing.T) {
 // this worker drives itself — must not refresh it, or a watch that has stopped
 // delivering would be masked by every compaction rescan.
 func TestVoteRescanIsNotAWatchEcho(t *testing.T) {
+	synctest.Test(t, testVoteRescanIsNotAWatchEcho)
+}
+
+func testVoteRescanIsNotAWatchEcho(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	interval := h.deps.cfg.VoteInterval
 
@@ -1046,6 +1100,10 @@ func TestVoteRescanIsNotAWatchEcho(t *testing.T) {
 // TestVoteFenceWatchStalled is VW8 (b): the worker's own puts succeed but its
 // own watch stops echoing them.
 func TestVoteFenceWatchStalled(t *testing.T) {
+	synctest.Test(t, testVoteFenceWatchStalled)
+}
+
+func testVoteFenceWatchStalled(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	h.store.setMuteEvents(true)
@@ -1068,6 +1126,10 @@ func TestVoteFenceWatchStalled(t *testing.T) {
 // can select again, so no bookkeeping of self-issued deletes is kept
 // (vote.go).
 func TestVoteFenceKeyDeleted(t *testing.T) {
+	synctest.Test(t, testVoteFenceKeyDeleted)
+}
+
+func testVoteFenceKeyDeleted(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	err := h.store.Delete(
@@ -1161,6 +1223,10 @@ func staleOwnKey(t *testing.T) (*voteHarness, string) {
 // key — a delete and an appear for a seed that never stopped running — with no
 // "worker fenced" record, which is what §12 and §14 read a departure from.
 func TestVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
+	synctest.Test(t, testVoteOwnKeyIsNeverSelfCollected)
+}
+
+func testVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
 	h, own := staleOwnKey(t)
 
 	waitFor(t, "fence", func() bool {
@@ -1205,6 +1271,10 @@ func TestVoteOwnKeyIsNeverSelfCollected(t *testing.T) {
 // with a fresh identity, and a missed (c) leaves two workers driving the same
 // shards under seeds both of them believe are live.
 func TestVoteOwnKeyDeleteAlwaysFences(t *testing.T) {
+	synctest.Test(t, testVoteOwnKeyDeleteAlwaysFences)
+}
+
+func testVoteOwnKeyDeleteAlwaysFences(t *testing.T) {
 	h, _ := staleOwnKey(t)
 
 	// The watch comes back. A peer registration is the probe: once it has been
@@ -1305,6 +1375,10 @@ func TestVoteDeferredFenceIsRetried(t *testing.T) {
 // is being closed, so this is a -race test — un-muted, and with two roles, so
 // two watches tear down against the rejoin's two puts.
 func TestVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
+	synctest.Test(t, testVoteFenceRejoinsWhileWatchesTearDown)
+}
+
+func testVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 	store := newVoteHookStore()
 	h := newVoteHarnessOn(t, store, common.WorkerRoleDn, common.WorkerRoleCn)
 	old := h.vote.currentSeed()
@@ -1337,6 +1411,10 @@ func TestVoteFenceRejoinsWhileWatchesTearDown(t *testing.T) {
 // worker logs "shard released" for every shard it held BEFORE anything runs
 // under the new seed.
 func TestVoteFenceReleasesShardsBeforeRejoin(t *testing.T) {
+	synctest.Test(t, testVoteFenceReleasesShardsBeforeRejoin)
+}
+
+func testVoteFenceReleasesShardsBeforeRejoin(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn)
 	old := h.vote.currentSeed()
 	// Own everything first.
@@ -1391,6 +1469,10 @@ func TestVoteFenceReleasesShardsBeforeRejoin(t *testing.T) {
 // flight re-creates a key the fence has just deleted, and the peers see an
 // appear for a seed that no longer exists.
 func TestVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
+	synctest.Test(t, testVoteFenceStopsHeartbeatBeforeDeletingRegs)
+}
+
+func testVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 	store := newVoteHookStore()
 	h := newVoteHarnessOn(t, store, common.WorkerRoleDn, common.WorkerRoleCn)
 	old := h.vote.currentSeed()
@@ -1466,6 +1548,10 @@ func TestVoteFenceStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 // a VW8(a) fence; shard workers not yet told to stop would go on driving
 // behind it.
 func TestVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
+	synctest.Test(t, testVoteFenceDeletesRegsBeforeDrainingShards)
+}
+
+func testVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
 	rec := newRevRecorder()
 	store := newVoteHookStore()
 	// One DnRev key, on a shard this worker will own, driven by a recording
@@ -1559,6 +1645,10 @@ func TestVoteFenceDeletesRegsBeforeDrainingShards(t *testing.T) {
 // every other shard of the role would go on driving rounds and syncups behind
 // the deletes, for a worker that has given up its membership.
 func TestVoteFenceStopsShardsDuringAHandoff(t *testing.T) {
+	synctest.Test(t, testVoteFenceStopsShardsDuringAHandoff)
+}
+
+func testVoteFenceStopsShardsDuringAHandoff(t *testing.T) {
 	role := common.WorkerRoleDn
 	// The harness starts under seedOf(1). Find a peer whose ticket beats it on
 	// one shard (X, handed off) and loses on another (Y, kept).
@@ -1687,6 +1777,10 @@ func TestVoteFenceStopsShardsDuringAHandoff(t *testing.T) {
 // TestVoteShutdownDeletesOwnRegistrations is CM5: a graceful stop deletes the
 // worker's own registrations so peers start their grace windows at once.
 func TestVoteShutdownDeletesOwnRegistrations(t *testing.T) {
+	synctest.Test(t, testVoteShutdownDeletesOwnRegistrations)
+}
+
+func testVoteShutdownDeletesOwnRegistrations(t *testing.T) {
 	h := newVoteHarness(t, common.WorkerRoleDn, common.WorkerRoleCn)
 	seed := h.vote.currentSeed()
 	h.cancel()

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -340,12 +339,6 @@ type voteWorker struct {
 	nextGen uint64
 	inc     *incarnation
 
-	// processed counts the messages the loop has handled. It is an
-	// observation point for the §13 vote tests, which must know a stimulus
-	// has been applied before they advance the fake clock; nothing in
-	// production reads it.
-	processed atomic.Uint64
-
 	mu   sync.Mutex
 	seed string
 }
@@ -399,7 +392,6 @@ func (v *voteWorker) run(ctx context.Context) {
 		case msg := <-v.timerCh:
 			v.onTimer(msg)
 		}
-		v.processed.Add(1)
 	}
 }
 

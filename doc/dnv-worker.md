@@ -2637,7 +2637,12 @@ Colocated `_test.go` files; the etcd-backed ones follow EU7 (real `etcd`
 binary or skip). Fakes: an in-memory registry/watch source for the vote
 worker, a fake clock for every timer, `bufconn` agents built from the
 generated servers for the revision loop (as `common/interceptor_test.go`
-does).
+does). The vote cases that run the vote loop over the in-memory registry
+each run in a `testing/synctest` bubble and wait on state — every
+goroutine of the case durably blocked (`synctest.Wait`), or the state they
+assert next — never for a quiet interval: under `-race` a fired timer, a
+heartbeat tick or a watch event can still be on its way to the vote loop
+after one.
 
 * **vote.go** — appear/disappear/reappear with the grace commit and the
   cancel-on-transition rule; a flapping key never commits; symmetric

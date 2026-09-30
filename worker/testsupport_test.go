@@ -425,18 +425,6 @@ func (s *fakeStore) setMuteEvents(mute bool) {
 	s.mu.Unlock()
 }
 
-// drained reports whether every open watch has handed over its queued events.
-func (s *fakeStore) drained() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, w := range s.watchers {
-		if !w.isClosed() && len(w.evCh) > 0 {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *fakeStore) setRangeErr(err error) {
 	s.mu.Lock()
 	s.rangeErr = err

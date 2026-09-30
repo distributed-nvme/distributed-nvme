@@ -195,7 +195,12 @@ func TestCnRoleHealthFromInfo(t *testing.T) {
 	h.store.seed(t, model.CnConfKey(testCid, testCnAddr), cnTestConf())
 	h.startCn(testCnAddr, 1)
 
-	waitFor(t, "unhealthy", func() bool { return len(h.hw.all()) == 1 })
+	// The record is logged after the write has landed, so wait for both: the
+	// write alone leaves the record possibly still to come.
+	waitFor(t, "unhealthy", func() bool {
+		return len(h.hw.all()) == 1 &&
+			len(h.logs.withMsg(msgHealthChanged)) >= 1
+	})
 	write := h.hw.all()[0]
 	if write.record != healthRecordCn || write.addr != testCnAddr ||
 		write.epoch == 0 {
