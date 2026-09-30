@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -72,8 +73,14 @@ func (s *CnAgentServer) ensureClone(
 	if err != nil {
 		info.CloneIdToTarget[cp.cloneId] = st.tracker.Err(
 			tgtKey, cp.clone.GetSrcNqn(), err.Error())
+		// A walk that did not answer leaves the source unknown, not
+		// unconnected (CN10), and the row must not say otherwise.
+		details := "source not connected"
+		if errors.Is(err, errSubsysUnknown) {
+			details = "source unknown: " + err.Error()
+		}
 		info.CloneIdToDmClone[cp.cloneId] = st.tracker.Missing(
-			dmKey, cp.finalName, "source not connected")
+			dmKey, cp.finalName, details)
 		info.CloneIdToMeta[cp.cloneId] = s.cloneMetaInfo(
 			ctx, st, plan, cp, metaKey)
 		s.startConnectRetry(st, plan)

@@ -735,7 +735,10 @@ SH15. Every wrapper call wraps its ctx with
       and, through `Cmd.ReadAttr`, the md
       sysfs reads of `Md.ListArrays` and `Md.Gone` (`cnagent.md` CN12: an
       array read as absent, or as gone, would let the sweep disconnect a
-      leg under a live array).
+      leg under a live array) and the cn leg walk's `subsysnqn` read
+      (`cnagent.md` CN10, since 2026-09-30: a subsystem whose read failed,
+      passed over as another NQN's, would send the connect step after
+      sides whose controllers are live).
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
       state and mutates only differences; an equal-revision re-apply on a
@@ -3179,12 +3182,10 @@ able to fail.
     on its listener-failure and reconcile-failure return paths — no Go test
     drives a zeroing goroutine or a `blkdiscard` child through `Serve`
     (§6 test 19).
-12. None of the probes below reads "did not answer" as "absent" (SH15);
-    the cn leg walk still does, which is open: `readSubsys`
-    (`agent/cnagent/leg.go`) reads a failed `ls` of
-    `/sys/class/nvme-subsystem` as "no subsystem" and passes over a
-    subsystem whose `subsysnqn` read failed. `Dm.Info`,
-    `osBase.listDir`, `osBase.dirMtime`, `Md.HasSuperblock`,
+12. None of the probes below reads "did not answer" as "absent" (SH15).
+    `Dm.Info`, `osBase.listDir` (through `Cmd.ListDir`, the cn leg walk's
+    listing of `/sys/class/nvme-subsystem` since 2026-09-30, `cnagent.md`
+    CN10), `osBase.dirMtime`, `Md.HasSuperblock`,
     `Md.NameInUse` (the `lsblk` of CN12's case-1 guard, since 2026-09-26)
     and `CloneMeta.Mounted` / `CloneMeta.FileSize` (`cnagent.md` CN5's
     `findmnt` and `stat`, since 2026-09-29) take their answer from
@@ -3193,7 +3194,8 @@ able to fail.
     `Dm.BlkZeroout`, is not a probe: it hands the verdict to DN9's zeroing
     loop as `answered`); `NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, the
     `enable` reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` and,
-    through `Cmd.ReadAttr`, `Md.ListArrays` and `Md.Gone` read through
+    through `Cmd.ReadAttr`, `Md.ListArrays`, `Md.Gone` and the cn leg
+    walk's `subsysnqn` read (since 2026-09-30) read through
     `readAttrStrict`, which calls absence only on `fs.ErrNotExist`;
     `CloneMeta.LoopDevices` takes every failure of `losetup --associated`
     as an error; and `Md.Detail` with the `Md.Walk` it reads from, the

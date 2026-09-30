@@ -214,7 +214,9 @@ pressure while leaving ample parallelism.
   `/dev/md/<name>` whose "not in use" lets `cnagent.md` CN12's case 1 run
   `mdadm --create`; since 2026-09-26), `Dm.Info`, `osBase.listDir` /
   `dirExists` (hence `Nvmet`'s existence checks and `NvmeHost`'s sysfs
-  listings) all probe through it, each returning "absent" only for a
+  listings, and since 2026-09-30 the cn leg walk's listing of
+  `/sys/class/nvme-subsystem`, through `Cmd.ListDir`) all probe through
+  it, each returning "absent" only for a
   reported non-zero exit and an error otherwise. `osBase.dirMtime`, the
   `stat -c %Y` age of a subsystem directory (`dnagent.md` DN6), probes
   through it the same way, and an answer that is not a number is an error
@@ -252,7 +254,8 @@ pressure while leaving ample parallelism.
   sysfs or configfs read (`NvmeHost.readTrimmed`, `Nvmet.NsDevicePath`, the
   `enable` reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, and since
   2026-09-30 the attribute reads of `Nvmet.ProbePortState`, the port read
-  of `cnagent.md` CN30's verdict) from
+  of `cnagent.md` CN30's verdict, and the cn leg walk's `subsysnqn` read,
+  through `Cmd.ReadAttr`) from
   making a live object read as an absent one.
 
 ### 4.3 ReadFile / WriteFile / WriteFileDirect

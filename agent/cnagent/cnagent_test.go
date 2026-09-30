@@ -4372,6 +4372,314 @@ func TestAbsentAddressIsAGoneController(t *testing.T) {
 	}
 }
 
+// subsysDirOf is the sysfs directory of the subsystem the fake holds for
+// nqn.
+func subsysDirOf(t *testing.T, node *fakeNode, nqn string) string {
+	t.Helper()
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	subsys := node.subsystems[nqn]
+	if subsys == nil {
+		t.Fatalf("the node holds no subsystem %s", nqn)
+	}
+	return fmt.Sprintf("%s/nvme-subsys%d", sysfsNvmeSubsysDir, subsys.idx)
+}
+
+// subsysnqnPath is the sysfs subsysnqn attribute of the subsystem the fake
+// holds for nqn.
+func subsysnqnPath(t *testing.T, node *fakeNode, nqn string) string {
+	t.Helper()
+	return subsysDirOf(t, node, nqn) + "/subsysnqn"
+}
+
+// TestUnansweredSubsystemWalkKeepsTheConnections pins CN10's sysfs walk
+// from its top. The leg walk finds a leg's subsystem by listing
+// /sys/class/nvme-subsystem and reading each entry's subsysnqn, and a
+// listing that did not answer, or a subsysnqn read that failed, used to
+// read as "not connected": the listing's failure as no subsystem at all,
+// the read's as some other subsystem's. The connect step then asked for
+// every side of the leg again beside its live controllers — duplicates the
+// host refuses (EALREADY, and so does the fake), which spent the pass's
+// connect budget — the clone source step did the same, and a standby's
+// probe row said the leg had no controller. Now the walk is unknown for
+// the pass, as an unanswered address read is: the leg's (or the source's)
+// converge fails naming the read, connects nothing and registers the
+// retry, whose next attempt, the walk answering, finds the controllers
+// where they were. A match still wins beside a subsysnqn read that failed
+// elsewhere: every controller of one NQN sits in the one subsystem the
+// host keeps for it, so the leg whose own entry answered converges. A
+// failed listing of the matching entry's own directory, which finds its
+// controllers and namespace, always failed the lookup, but the clone's
+// dm-clone row read it, like every failure of the source step, as a source
+// not connected; it is unknown too.
+//
+// The reconnected case is the re-read after a connect of the pass: the
+// data leg's controller was lost, the pass connects its side, and the
+// listing stops answering while that connect runs.
+func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
+	listing := "ls -1 " + sysfsNvmeSubsysDir
+	for _, tc := range []struct {
+		name string
+		opts reqOpts
+		// arm makes the walk fail for the rest of the pass and returns
+		// what the failed rows must name. It takes the fake's lock itself.
+		arm func(t *testing.T, srv *CnAgentServer, node *fakeNode) string
+		// reconnect loses the data leg's controller first, and arms the
+		// failure while the pass reconnects it.
+		reconnect bool
+		// failed are the legs the pass must fail; every other leg converges.
+		failed []uint64
+		// clone checks the clone source step instead of the legs.
+		clone bool
+		// settled is a leg's row once the walk answers: the standby's
+		// transport verdict, or the primary's prober outcome, PENDING
+		// because no test waits a CnLegProbeInterval.
+		settled func(t *testing.T, info *pb.ResInfo, label string)
+	}{
+		{name: "standby, the listing killed", opts: reqOpts{revision: 2},
+			arm: func(t *testing.T, _ *CnAgentServer, node *fakeNode) string {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killCmdAlways[listing] = true
+				return listing
+			},
+			failed:  []uint64{testMetaLeg, testDataLeg},
+			settled: assertOk},
+		{name: "primary, the listing killed",
+			opts: reqOpts{revision: 2, primary: true, raid1: true},
+			arm: func(t *testing.T, _ *CnAgentServer, node *fakeNode) string {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killCmdAlways[listing] = true
+				return listing
+			},
+			failed:  []uint64{testMetaLeg, testDataLeg},
+			settled: assertPending},
+		{name: "standby, its subsysnqn refused", opts: reqOpts{revision: 2},
+			arm: func(t *testing.T, srv *CnAgentServer, node *fakeNode) string {
+				path := subsysnqnPath(t, node, legNqn(srv, testDataLeg))
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.failReadAlways[path] = true
+				return path
+			},
+			failed: []uint64{testDataLeg}, settled: assertOk},
+		{name: "primary, another leg's subsysnqn cut off",
+			opts: reqOpts{revision: 2, primary: true, raid1: true},
+			arm: func(t *testing.T, srv *CnAgentServer, node *fakeNode) string {
+				path := subsysnqnPath(t, node, legNqn(srv, testMetaLeg))
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killReadAlways[path] = true
+				return path
+			},
+			failed: []uint64{testMetaLeg}, settled: assertPending},
+		{name: "standby reconnected, the listing killed after the connect",
+			opts: reqOpts{revision: 2}, reconnect: true,
+			arm: func(t *testing.T, srv *CnAgentServer, node *fakeNode) string {
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				// The hook runs under the fake's lock.
+				node.duringConnect[connectKey(legNqn(srv, testDataLeg),
+					testIp, testSvcId)] = func() {
+					node.killCmdAlways[listing] = true
+				}
+				return listing
+			},
+			failed: []uint64{testDataLeg}, settled: assertOk},
+		{name: "a clone source, its subsysnqn cut off",
+			opts: reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			arm: func(t *testing.T, _ *CnAgentServer, node *fakeNode) string {
+				path := subsysnqnPath(t, node, testSrcNqn)
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killReadAlways[path] = true
+				return path
+			},
+			clone: true},
+		{name: "a clone source, its own subsystem's listing killed",
+			opts: reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			arm: func(t *testing.T, _ *CnAgentServer, node *fakeNode) string {
+				dir := subsysDirOf(t, node, testSrcNqn)
+				node.mu.Lock()
+				defer node.mu.Unlock()
+				node.killCmdAlways["ls -1 "+dir] = true
+				return "listing " + dir
+			},
+			clone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			srv.probeInterval = time.Hour
+			syncupBoth(t, srv, tc.opts)
+			connects := 0
+			if tc.reconnect {
+				node.mu.Lock()
+				ctrl := node.subsystems[legNqn(srv, testDataLeg)].ctrls[0]
+				node.nvmeDisconnect([]string{
+					"disconnect", "--device", ctrl.name})
+				node.mu.Unlock()
+				connects = 1
+			}
+			want := tc.arm(t, srv, node)
+
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(tc.opts))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if code := reply.GetAgentReply().GetCode(); code != 0 &&
+				code != common.ReplyCodeLeftover {
+				t.Fatalf("rejected: %v", reply.GetAgentReply())
+			}
+			if got := node.callsMatching("cmd nvme connect"); len(got) !=
+				connects {
+				t.Fatalf("the pass made %d connects, want %d: a walk "+
+					"that did not answer read as not connected: %q",
+					len(got), connects, got)
+			}
+			for _, verb := range []string{
+				"cmd nvme disconnect", "cmd mdadm"} {
+				assertNoCall(t, node, verb)
+			}
+			info := reply.GetCntlrInfo()
+			if tc.clone {
+				assertErrorDetails(t,
+					info.GetCloneIdToTarget()[testClone], want,
+					"clone target, its walk unanswered")
+				// Nor does the dm-clone row say the source is not
+				// connected: the pass does not know whether it is.
+				dmRow := info.GetCloneIdToDmClone()[testClone]
+				if dmRow.GetStatus() != pb.ResStatus_RES_STATUS_MISSING ||
+					!strings.HasPrefix(dmRow.GetDetails(), "source unknown: ") ||
+					!strings.Contains(dmRow.GetDetails(), want) {
+					t.Fatalf("clone dm row %v %q, want MISSING "+
+						"\"source unknown: …\" naming %q",
+						dmRow.GetStatus(), dmRow.GetDetails(), want)
+				}
+			}
+			for _, lp := range []uint64{testMetaLeg, testDataLeg} {
+				row := info.GetLegIdToLeg()[lp]
+				if slices.Contains(tc.failed, lp) {
+					assertErrorDetails(t, row, want, fmt.Sprintf(
+						"leg %#x, its walk unanswered", lp))
+				} else if row.GetStatus() == pb.ResStatus_RES_STATUS_ERROR {
+					t.Fatalf("leg %#x read ERROR %q beside a walk that "+
+						"failed on another subsystem", lp, row.GetDetails())
+				}
+			}
+			if !retrying(t, srv) {
+				t.Fatalf("a walk that did not answer registered no " +
+					"retry: nothing else would re-run the converge")
+			}
+			// A check round in between reads the same where its row comes
+			// from the walk: a standby's legs, a clone's source.
+			if !tc.opts.primary || tc.clone {
+				_, probed := srv.checkCntlrRound(context.Background(),
+					&pb.CheckCntlrRequest{ClusterId: testCluster,
+						CnId: testCn, CntlrPointer: cntlrPtr(),
+						Revision: tc.opts.revision}, nil)
+				if tc.clone {
+					assertErrorDetails(t,
+						probed.GetCloneIdToTarget()[testClone], want,
+						"checked clone target")
+				}
+				for _, lp := range tc.failed {
+					assertErrorDetails(t, probed.GetLegIdToLeg()[lp], want,
+						fmt.Sprintf("checked leg %#x", lp))
+				}
+			}
+
+			node.mu.Lock()
+			for _, hooks := range []map[string]bool{node.killCmdAlways,
+				node.failReadAlways, node.killReadAlways} {
+				for key := range hooks {
+					delete(hooks, key)
+				}
+			}
+			for key := range node.duringConnect {
+				delete(node.duringConnect, key)
+			}
+			node.mu.Unlock()
+			node.Reset()
+			retryAttempt(t, srv)
+			for _, verb := range []string{
+				"cmd nvme connect", "cmd nvme disconnect", "cmd mdadm"} {
+				assertNoCall(t, node, verb)
+			}
+			if retrying(t, srv) {
+				t.Fatalf("the retry outlived the unanswered walk")
+			}
+			probed := probedCntlrInfo(t, srv)
+			if tc.clone {
+				assertOk(t, probed.GetCloneIdToTarget()[testClone],
+					"clone target, its walk answering")
+				return
+			}
+			for _, lp := range tc.failed {
+				tc.settled(t, probed.GetLegIdToLeg()[lp], fmt.Sprintf(
+					"leg %#x, its walk answering", lp))
+			}
+		})
+	}
+}
+
+// TestAbsentSubsystemClassIsNoSubsystem is the other side of the walk's
+// rule: an answer that something is absent is an answer.
+// /sys/class/nvme-subsystem does not exist on a host that has not loaded
+// nvme-core, which holds no fabrics controller either, and a listing that
+// answers "no such directory" is "no subsystem at all", not a walk that did
+// not answer. Nor is an entry whose subsysnqn read answers ENOENT: that is a
+// subsystem gone between the listing and the read, some other NQN's, and it
+// is passed over. A first converge on either host connects every side once
+// and builds its legs.
+func TestAbsentSubsystemClassIsNoSubsystem(t *testing.T) {
+	gone := sysfsNvmeSubsysDir + "/nvme-subsys9"
+	for _, tc := range []struct {
+		name string
+		arm  func(node *fakeNode)
+		// read is a read the walk must have made, if any.
+		read string
+	}{
+		{name: "no subsystem class at all", arm: func(node *fakeNode) {
+			delete(node.dirs, sysfsNvmeSubsysDir)
+			delete(node.dirs, sysfsNvmeCtrlDir)
+		}},
+		// Listed, with no subsysnqn: the fake answers its read ENOENT.
+		{name: "an entry gone since the listing", arm: func(node *fakeNode) {
+			node.dirs[gone] = true
+		}, read: "read " + gone + "/subsysnqn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			node.mu.Lock()
+			tc.arm(node)
+			node.mu.Unlock()
+
+			reply := syncupBoth(t, srv, reqOpts{revision: 2})
+			if tc.read != "" && !node.hasCall(tc.read) {
+				t.Fatalf("the walk never made %q", tc.read)
+			}
+			for _, lp := range []uint64{testMetaLeg, testDataLeg} {
+				assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[lp],
+					fmt.Sprintf("leg %#x", lp))
+				if n := callCnt(node, "--nqn "+legNqn(srv, lp)+" "); n != 1 {
+					t.Errorf("leg %#x was connected %d times, want 1", lp, n)
+				}
+			}
+			if retrying(t, srv) {
+				t.Fatalf("an answer that the subsystem is absent " +
+					"registered the retry")
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // §6.8 — namespace states (CN16)
 // ---------------------------------------------------------------------------

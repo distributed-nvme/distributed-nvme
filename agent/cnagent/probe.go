@@ -259,7 +259,8 @@ func (s *CnAgentServer) probeCntlr(
 		// the converge reports as ERROR on both rows (ensureClone). The step 1
 		// gate is what makes that comparison honest: a converge whose source
 		// connection fails never reaches step 2 — it reports
-		// `clone_id_to_dm_clone` MISSING "source not connected" and leaves the
+		// `clone_id_to_dm_clone` MISSING "source not connected" ("source
+		// unknown: …" when the walk did not answer) and leaves the
 		// meta row to cloneMetaInfo, the very helper this loop falls through
 		// to below, so that row already agrees without this branch.
 		if s.cloneSourceConnected(view, cp) {

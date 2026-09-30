@@ -882,13 +882,14 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // td's raid0 row reads ERROR while its thins are absent; a leg row reads the
 // CN11 prober, which fails on a path still non-optimized). Every other MISSING
 // the cn agent reports is likewise a device not built, or a clone whose
-// source is not connected (CN18), so a primary showing one stays settling,
-// held to cntlr_unhealthy, until it clears — for as long as a clone's source
-// stays unconnected. Leg rows are left out: a spare whose side is still
-// zeroing reads PROVISIONING there for as long as it zeroes. So are group
-// rows, for a grow: its new groups are appended to their lists and stay out
-// of the live concat while their sides zero (CN9's prefix cut), so their
-// group rows alone read PROVISIONING, beside a serving pool, for minutes.
+// source is not connected or could not be read this pass (CN18), so a
+// primary showing one stays settling, held to cntlr_unhealthy, until it
+// clears — for as long as a clone's source stays unconnected or unread. Leg
+// rows are left out: a spare whose side is still zeroing reads PROVISIONING
+// there for as long as it zeroes. So are group rows, for a grow: its new
+// groups are appended to their lists and stay out of the live concat while
+// their sides zero (CN9's prefix cut), so their group rows alone read
+// PROVISIONING, beside a serving pool, for minutes.
 // Nothing else needs them: a new SP has one group per list (the gateway's
 // planSpGroups), so a group of its that is still provisioning defers its
 // whole slice, whose pool rows say so, and a group a converge could not

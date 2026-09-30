@@ -1057,7 +1057,24 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       the device was deleted, until the last reference to it drops. Such a
       controller is **gone**, no side's path: it is not unknown and never
       retired as a dead path, and a side it alone served reads unconnected
-      and is connected again.
+      and is connected again. The walk that finds the subsystem is read the
+      same way. An `ls` of `/sys/class/nvme-subsystem` that did not answer,
+      or a `subsysnqn` read that failed — any error but ENOENT — on an entry
+      while no other entry names the leg's NQN, leaves the pass not knowing
+      whether the leg is connected, and an `ls` of the matching entry's own
+      directory that fails, whatever the failure, leaves its controllers and
+      namespace unread: the lookup fails naming the read, and the leg's
+      converge fails with it for the pass — `RES_STATUS_ERROR` naming the
+      read, which registers the retry — connecting nothing on that answer.
+      A `/sys/class/nvme-subsystem` that answers absent is an answer, no
+      subsystem at all (nvme-core creates it when it loads, and a host holds
+      no fabrics controller before it has), and so is an absent
+      `subsysnqn`, a subsystem gone since the listing. An entry whose
+      `subsysnqn` names the leg's NQN is the answer even beside one whose
+      read failed: the host keeps every controller of one NQN in the one
+      subsystem ([D1]). CN18's source step reads its source through the same
+      lookup, and the CN28 rows that come from it — a standby's leg, a
+      clone's target — read `ERROR` naming the read too.
       **The disconnect registry.** The CN21 sweep's `nvme disconnect --nqn` —
       L10's legs, L5's clone sources and the node-level pass's unowned sources
       — is never run inline: when the target vanishes mid-delete the kernel
@@ -1947,7 +1964,14 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
          entry it alone serves reads unconnected and is connected again — a
          duplicate the host refuses while that controller lives, which
          fails step 1 once the budget is spent — and nothing is
-         disconnected, since step 1 retires no path. A source whose
+         disconnected, since step 1 retires no path. CN10's rule for a walk
+         that did not answer is applied: a listing of
+         `/sys/class/nvme-subsystem` or a `subsysnqn` read that did not
+         answer, with no other entry naming `src_nqn`, or a failed listing
+         of the matching entry's own directory, fails step 1 naming the
+         read, and nothing is connected on it; `clone_id_to_dm_clone`
+         then reads `MISSING` `source unknown: …` naming the read, where
+         step 1's other failures read `source not connected`. A source whose
          disconnect a sweep has set going is neither adopted nor connected
          while that disconnect runs (*amended 2026-09-29*): step 1 fails
          naming it, and the retry reads the source afresh once the
@@ -2739,9 +2763,9 @@ CN28. Probe map (SH17 conventions plus the cn probes fixed here: `findmnt`
 | `slice_id_to_dm_pool[slice]` | `CnPoolFinalName` | `dmsetup status`; `details` = the **raw status line** — the worker parses data and metadata used/total out of it for the §10.4 auto-grow. The serving pool stays `RES_STATUS_OK` with that raw line even while a deferred group waits to be grown in (CN13): `PROVISIONING` never marks the serving pool, because it would switch auto-grow off |
 | `slice_id_to_meta[slice]` / `slice_id_to_data[slice]` | `CnPoolMetaName` / `CnPoolDataName` | multi-target `dmsetup table` matches the group concat; the comparison is against the **effective** concat (the list's leading run of non-deferred groups, CN9/CN13), so a not-yet-grown concat is `OK`, not a mismatch. A **deferred** slice's rows are `RES_STATUS_PROVISIONING` — deferred meaning either of its two group lists is non-empty and has no effective group left (CN9), not that every group is deferred |
 | `grp_id_to_md_raid[grp]` | `/dev/md/{CnMdDevName}` or `CnGrpName` | RedundMdRaid1: the array holding the group's `leg_list` wrappers, read from `/sys/block/mdN/md/` — `array_state`, and for a running array `degraded`, `sync_action` and `sync_completed`, plus `dev-*/{state,block/dev,block/dm/name}` — never `mdadm --detail`, which opens a member and can block on a dead one for ~13 s (CN12; *amended 2026-09-26*, the failover ping-pong: the killed probe read `ERROR` for a leg's fault). A running array (degraded included) ⇒ OK with `details` = `array_state`, then `degraded` while `md/degraded` is non-zero, then the word of a sync that is running (`recovering`, `resyncing`, `checking`, `repairing`, `reshaping`; none while `sync_completed` reads `none`) followed by its `(<done> / <total>)` sectors — e.g. `clean, degraded, recovering (32768 / 2093056)`. The words follow mdadm's State line, which the suites grep, and `repairing` is ours; the state and the sectors are sysfs's (mdadm prints its progress as a separate `Rebuild Status` line). No answering array holds the group's legs (none matched, or the match stopped between the walk and its read) and no array of the walk is unanswered, or `array_state` `clear` ⇒ `RES_STATUS_MISSING`; an array that is not running (`inactive`, `broken`, …) ⇒ `RES_STATUS_ERROR` with the state as `details`; a foreign member of the matched array, two answering arrays holding the group's legs, a `/sys/block` listing or a read of the matched array that did not answer, or no match — or a match that stopped since the walk — while another array of the walk did not answer (it may be the group's own; `details` name it) ⇒ `RES_STATUS_ERROR`. Beside a match, an array of the walk that did not answer is ignored and the row reads the match (CN12, *amended 2026-09-26*: a read of another sp's array that did not answer must not turn this row `ERROR`). RedundNone: `dmsetup table`. A deferred group (CN9) reports `RES_STATUS_PROVISIONING` and no mdadm command runs |
-| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed. A leg whose subsystem's sweep disconnect is still in flight (CN10's disconnect registry) reports `RES_STATUS_ERROR` with the converge's own details and is not probed |
+| `leg_id_to_leg[leg]` | `CnLegName` | wrapper table + the CN11 prober outcome (primary; `RES_STATUS_PENDING` `"health probe pending"` until its prober's first completed round — a fresh wrapper, a promotion and an agent restart each start a fresh prober, CN11; *amended 2026-09-26*, was `RES_STATUS_OK`) / transport per desired side, from sysfs, plus `ana_state` in {`optimized`, `non-optimized`} on single-sided legs — two-sided legs liveness only (CN11) (standby; §5). A provisioning leg (non-empty `side_list`, every side `provisioned = false`, CN9) reports `RES_STATUS_PROVISIONING` and is neither connected, wrapped nor probed. A leg whose subsystem's sweep disconnect is still in flight (CN10's disconnect registry) reports `RES_STATUS_ERROR` with the converge's own details and is not probed. On a standby, a walk that did not answer (CN10) reads `RES_STATUS_ERROR` naming the read |
 | `xfer_id_to_dm_linear[x]` / `xfer_id_to_subsystem[x]` / `xfer_id_to_namespace[x]` | `CnXferFinalName` / the `XferNqn` / `"{XferNqn}/{ori_ns_idx}"` | `dmsetup table` / configfs, per CN17; a deferred transfer's three rows are `RES_STATUS_PROVISIONING` |
-| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here. While a sweep's disconnect of `src_nqn` is in flight (CN10's disconnect registry) it is `RES_STATUS_ERROR` with the converge's own details, whatever the walk shows |
+| `clone_id_to_target[c]` | the clone `src_nqn` | the §5 **sysfs walk** shows a live controller per `src_tr_conf_list` entry (match `/sys/class/nvme-subsystem/nvme-subsys*/subsysnqn` to `src_nqn`, then `/sys/class/nvme/{ctrl}/state`) — **not** `nvme list-subsys -o json`, which §5 already ruled out for CN12 and which the code never used here. While a sweep's disconnect of `src_nqn` is in flight (CN10's disconnect registry) it is `RES_STATUS_ERROR` with the converge's own details, whatever the walk shows; otherwise a walk that did not answer (CN10) makes it `RES_STATUS_ERROR` naming the read, never `MISSING` |
 | `clone_id_to_dm_clone[c]` | `CnCloneFinalName` | `dmsetup status`; `details` carries the raw status line (§9.5 — hydration progress; `DeleteClone`'s force check reads it). `RES_STATUS_ERROR` `"metadata wrapper missing"` when the arena could not supply the slot (CN18 step 2) |
 | `clone_id_to_meta[c]` | `CnCloneMetaDmName` | `dmsetup table` of the kind-`cb` wrapper: present, length = the CN18-computed unit count × `CnCloneMetaUnit` / 512 sectors, and the table's backing device equals the **currently probed** loop path; any mismatch (e.g. a tmpfs remounted under a live agent) ⇒ `RES_STATUS_ERROR`, whose repair path is the §11.5 clone rebuild (CN18 step 2) |
 
@@ -3166,7 +3190,8 @@ contradicts them.
   reads of `RemoveNamespace` / `RemoveSubsystem`, and `Md.ListArrays` /
   `Md.Gone`; item 12 names `NsDevicePath` beside `NvmeHost.readTrimmed` as
   a `readAttrStrict` reader, and records the cn leg walk's `readSubsys` as
-  still reading a failed listing as "no subsystem", which is open.
+  still reading a failed listing as "no subsystem", then open (closed
+  2026-09-30, CN10).
   `osclient.md` §4.2 adds `dirMtime` and `Mounted` / `FileSize` to the
   `runProbe` users, `LoopDevices` beside `Dm.List`, and `NsDevicePath` to
   the strict readers.
@@ -3204,6 +3229,14 @@ contradicts them.
   attribute reads are strict: SH15 and `osclient.md` §4.2 add them to the
   `readAttrStrict` readers, and item 12 to the reads that go through both
   `listDir` and `readAttrStrict`.
+* `dnagent.md` §2.8 SH15 + §7 item 12, `osclient.md` §4.2 (2026-09-30) —
+  the cn leg walk (CN10) lists `/sys/class/nvme-subsystem` through
+  `Cmd.ListDir` and reads each `subsysnqn` through `Cmd.ReadAttr`, so a
+  listing or a read that did not answer is an error, never "no
+  subsystem"; SH15 names the read among `readAttrStrict`'s readers, item
+  12 names both and no longer records the walk as open, and `osclient.md`
+  §4.2 adds the listing to the `runProbe` users and the read to the strict
+  readers.
 
 ## 6. Tests
 
@@ -4203,6 +4236,36 @@ between `Recv` and the round (SH24).
     mdadm, reads the leg `OK` (standby) or `PENDING` (primary) and
     registers no retry; the next pass, the link still listed, connects
     and disconnects nothing.
+31d. **A subsystem walk that did not answer keeps the connections**
+    (CN10, CN18, *added 2026-09-30*; `agent/cnagent/cnagent_test.go`,
+    `TestUnansweredSubsystemWalkKeepsTheConnections`). For the rest of an
+    equal-revision pass, the `ls` of `/sys/class/nvme-subsystem` is
+    killed, one subsystem's `subsysnqn` read is refused or cut off, or the
+    `ls` of the clone source's own subsystem directory is killed. A
+    standby and an md-raid1 primary with the listing killed, and a standby
+    with its data leg's `subsysnqn` refused, run no `nvme connect`, no
+    `nvme disconnect` and no mdadm, read each leg whose lookup failed
+    `RES_STATUS_ERROR` naming the read, and register the retry; with the
+    meta leg's `subsysnqn` cut off on a primary, only the meta leg fails,
+    and the data leg's lookup, which meets that read before its own entry,
+    converges. A standby that lost its data leg's controller connects it
+    once and then meets the killed listing on the re-read after that
+    connect, and ends the same way. A primary whose clone source's
+    `subsysnqn` is cut off, and one whose clone source's own subsystem
+    directory listing is killed, connect nothing and read the clone's
+    target `ERROR` naming the read and its dm-clone `MISSING`
+    `source unknown: …` naming it. A check round in between reads a standby's
+    failed legs, and the clone's target, `ERROR` naming the read too. In
+    each case the retry's next attempt, the walk answering, runs no
+    `nvme connect`, no `nvme disconnect` and no mdadm, stops the retry,
+    and reads the failed legs `OK` (standby) or `PENDING` (primary) and the
+    clone's target `OK`. `TestAbsentSubsystemClassIsNoSubsystem`: on a host
+    with no `/sys/class/nvme-subsystem` at all, and on one whose listing
+    shows an entry whose `subsysnqn` read answers ENOENT — a subsystem gone
+    since the listing, which the walk is shown to read — a first standby
+    converge connects each leg exactly once, reads both legs `OK` and
+    registers no retry; the fake creates the directory with its first
+    connect, as loading nvme-core, which a connect needs, does.
 32. **The connect step's pass budget** (CN10/CN18, *added 2026-09-28*;
     `agent/cnagent/connstep_test.go`). Every test runs the pass on a fake
     clock through the server's `now`/`sleep` seams (`withPassClock`): a

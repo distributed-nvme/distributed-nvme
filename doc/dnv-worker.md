@@ -1579,14 +1579,15 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      raid0 row reads `ERROR` while its thins are absent; a leg row reads
      the CN11 prober, which fails on a path still `non-optimized`). Every
      other `MISSING` the cn agent reports is likewise a device not built,
-     or a clone whose source is not connected (CN18), so a primary showing
-     one stays settling, held to the longer threshold, until it clears —
-     for as long as a clone's source stays unconnected. Leg rows do not
-     count: a spare still zeroing reads `PROVISIONING` there for as long as
-     it zeroes. Nor do group rows, for a grow's sake: a grow appends its new
-     groups to their lists, and while their sides zero they stay out of the
-     live concat (CN9's prefix cut), so their group rows alone read
-     `PROVISIONING`, beside a serving pool, for minutes. Nothing else needs
+     or a clone whose source is not connected or could not be read this
+     pass (CN18), so a primary showing one stays settling, held to the
+     longer threshold, until it clears — for as long as a clone's source
+     stays unconnected or unread. Leg rows do not count: a spare still
+     zeroing reads `PROVISIONING` there for as long as it zeroes. Nor do
+     group rows, for a grow's sake: a grow appends its new groups to their
+     lists, and while their sides zero they stay out of the live concat
+     (CN9's prefix cut), so their group rows alone read `PROVISIONING`,
+     beside a serving pool, for minutes. Nothing else needs
      them: an SP is created with one group per list (`architecture.md`
      §8.4), so a group of a new SP that is still provisioning defers its
      whole slice, whose pool rows say so, and a group a converge could not

@@ -136,10 +136,10 @@ var (
 )
 
 // listSysfs lists a directory of the nvme sysfs tree. An absent directory is
-// "no entries" — the whole /sys/class/nvme-subsystem tree is missing until
-// the host holds its first fabrics controller — but a listing that did not
-// answer is an error, so a caller enumerating connections cannot read a
-// killed `ls` as "this host holds nothing".
+// "no entries" — /sys/class/nvme-subsystem is missing until nvme-core loads,
+// and a host holds no fabrics controller before it has — but a listing that
+// did not answer is an error, so a caller enumerating connections cannot
+// read a killed `ls` as "this host holds nothing".
 func (h *NvmeHost) listSysfs(
 	ctx context.Context,
 	path string,

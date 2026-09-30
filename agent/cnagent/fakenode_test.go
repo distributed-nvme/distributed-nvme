@@ -2323,6 +2323,11 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 		f.dispatchStderr = "could not add new controller: connection refused"
 		return "", 1
 	}
+	// nvme-core registers both classes when it loads, which a fabrics
+	// connect needs: a host that never loaded it has neither directory, and
+	// the first connect finds them there.
+	f.dirs[sysfsNvmeSubsysDir] = true
+	f.dirs[sysfsNvmeCtrlDir] = true
 	subsys, ok := f.subsystems[nqn]
 	if !ok {
 		subsys = &fakeSubsys{idx: f.nextSubsys, nqn: nqn}

@@ -131,28 +131,62 @@ func (v *subsysView) available() bool {
 	return false
 }
 
+// errSubsysUnknown marks every failure of readSubsys (CN10), so a caller can
+// tell "this pass does not know whether the NQN is connected" from its
+// step's other failures, such as a refused connect. Its text is the middle
+// of that failure's: "subsystem <nqn> is unknown: <the read's error>".
+var errSubsysUnknown = errors.New("is unknown")
+
 // readSubsys walks sysfs for one subsystem NQN. An absent subsystem is "not
-// connected", never an error.
+// connected", never an error — and so is an absent /sys/class/nvme-subsystem,
+// which nvme-core creates when it loads: a host holds no fabrics controller
+// before it has. A walk that did not answer is not "not connected" (CN10): a
+// listing of that directory that did not answer, or a subsysnqn read that
+// failed where no other subsystem matched, leaves the pass not knowing
+// whether this NQN is connected, and each caller acts on "not connected" —
+// the connect steps ask for every side again beside the live controllers,
+// which the host refuses, and the probe rows read the connection missing.
+// So the lookup fails for the pass, naming the read, and its caller fails
+// the leg or the clone source as it fails any other step of it, which
+// registers the retry. So does a listing of the matching subsystem's own
+// directory that fails, whatever the failure: its controllers and
+// namespace are unread. A match is the answer even beside a subsysnqn read
+// that failed: the host joins every controller of one NQN to the one
+// subsystem it keeps for it ([D1]), so the entry that did not answer is not
+// this NQN's.
 func (s *CnAgentServer) readSubsys(
 	ctx context.Context,
 	nqn string,
 	nsIdx uint32,
 ) (*subsysView, error) {
-	entries, err := s.listDir(ctx, sysfsNvmeSubsysDir)
+	entries, present, err := s.cmd.ListDir(ctx, sysfsNvmeSubsysDir)
 	if err != nil {
+		return nil, fmt.Errorf("subsystem %s %w: %w",
+			nqn, errSubsysUnknown, err)
+	}
+	if !present {
 		// No nvme subsystem at all yet.
 		return &subsysView{}, nil
 	}
+	var unread error
 	for _, entry := range entries {
 		dir := sysfsNvmeSubsysDir + "/" + entry
-		data, readErr := s.readSysfs(ctx, dir+"/subsysnqn")
-		if readErr != nil || strings.TrimSpace(data) != nqn {
+		data, ok, readErr := s.cmd.ReadAttr(ctx, dir+"/subsysnqn")
+		if readErr != nil {
+			if unread == nil {
+				unread = readErr
+			}
+			continue
+		}
+		// !ok: the subsystem went away between the listing and the read.
+		if !ok || data != nqn {
 			continue
 		}
 		view := &subsysView{found: true}
 		inner, listErr := s.listDir(ctx, dir)
 		if listErr != nil {
-			return nil, fmt.Errorf("listing %s: %w", dir, listErr)
+			return nil, fmt.Errorf("subsystem %s %w: listing %s: %w",
+				nqn, errSubsysUnknown, dir, listErr)
 		}
 		for _, name := range inner {
 			switch {
@@ -168,6 +202,10 @@ func (s *CnAgentServer) readSubsys(
 			}
 		}
 		return view, nil
+	}
+	if unread != nil {
+		return nil, fmt.Errorf("subsystem %s %w: %w",
+			nqn, errSubsysUnknown, unread)
 	}
 	return &subsysView{}, nil
 }
@@ -230,7 +268,9 @@ func (s *CnAgentServer) readCtrl(
 	return ctrl
 }
 
-// listDir lists a directory; a failure means "absent".
+// listDir lists a directory. Every failure is an error, a missing directory
+// included: readSubsys fails its lookup on one, and readCtrl leaves the
+// controller's ANA state unread.
 func (s *CnAgentServer) listDir(
 	ctx context.Context,
 	path string,
