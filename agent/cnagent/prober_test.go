@@ -180,7 +180,7 @@ func TestLegProberWritesTheHealthBlock(t *testing.T) {
 func planLeg(t *testing.T, srv *CnAgentServer, legId uint64) *legPlan {
 	t.Helper()
 	st := legState(t, srv)
-	plan := newCntlrPlan(srv.nf, st.req)
+	plan := newCntlrPlan(srv.nf, st.loadReq())
 	lp := plan.legById[legId]
 	if lp == nil {
 		t.Fatalf("no leg %d in the plan", legId)

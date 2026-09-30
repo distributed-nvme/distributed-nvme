@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -39,8 +40,11 @@ type CnAgentServer struct {
 	capacity uint64
 	port     agent.PortConf
 
-	// mu guards the in-memory mirrors of the local store below, and the CN10
-	// disconnect registry, which mirrors nothing. It is a leaf lock: never
+	// mu guards the in-memory mirrors of the local store below — the two
+	// maps — and three registries that mirror nothing: in each cntlr's state
+	// the connect-retry and prober registries, and the CN10 disconnect
+	// registry. It does not guard the request each state holds, which is an
+	// atomic pointer (cnState.req, cntlrState.req). It is a leaf lock: never
 	// held across an OS call.
 	mu     sync.Mutex
 	cns    map[string]*cnState
@@ -88,13 +92,50 @@ type CnAgentServer struct {
 // (CN5, [D14]) — a cached path would only be as fresh as the last SyncupCn,
 // which a SyncupCntlr does not run.
 type cnState struct {
-	req     *pb.SyncupCnRequest
+	// req is read and written through loadReq and storeReq only. It is
+	// stored only under the node write lock, and every reader today holds
+	// at least the node lock's read half, so the lock alone would do; it is
+	// an atomic pointer all the same, like cntlrState.req, so that a reader
+	// added off the node lock cannot race it.
+	req     atomic.Pointer[pb.SyncupCnRequest]
 	tracker *agent.ResTracker
+}
+
+func newCnState(req *pb.SyncupCnRequest) *cnState {
+	st := &cnState{tracker: agent.NewResTracker()}
+	st.storeReq(req)
+	return st
+}
+
+// loadReq is the CN's current request. A request is never modified once
+// stored, so a caller may read it for as long as it likes; one that needs
+// the request to stay the same across several reads loads it once.
+func (st *cnState) loadReq() *pb.SyncupCnRequest {
+	return st.req.Load()
+}
+
+func (st *cnState) storeReq(req *pb.SyncupCnRequest) {
+	st.req.Store(req)
 }
 
 // cntlrState is one synced cntlr.
 type cntlrState struct {
-	req     *pb.SyncupCntlrRequest
+	// req is the cntlr's current desired state, read and written through
+	// loadReq and storeReq only. A SyncupCntlr stores it under the node read
+	// lock and this cntlr's object lock, while other goroutines read it
+	// holding neither that object lock nor the node write lock: every other
+	// cntlr's converge and check round asks every cntlr of the CN whether its
+	// request still claims a host-facing subsystem or a clone source
+	// (hostFacingClaim, srcNqnsInUse), and the node-level verdict of a
+	// CheckCn round or a GetCnInfo reads every cntlr's host-facing
+	// subsystems and clone list (hostFacingClaim, orphanCloneMetaNames) —
+	// cntlrKeysOf reads every cntlr's ids too. So it is an atomic pointer: a
+	// lock-free read cannot race the store, and taking no lock for it adds no
+	// lock order. A request is never modified once stored. reqFromRpc, which
+	// changes with it, needs none of that: only this cntlr's own converges
+	// read it, and each holds this cntlr's object lock or the node write
+	// lock, either of which orders it after the store.
+	req     atomic.Pointer[pb.SyncupCntlrRequest]
 	tracker *agent.ResTracker
 
 	// chunks mirrors the clone-bm-* files of this cntlr that this process
@@ -112,7 +153,7 @@ type cntlrState struct {
 	// startup Reconcile's Create branch arms it too; running additionally
 	// requires reqFromRpc.
 	pendingSweep map[uint64]bool
-	// reqFromRpc is true once st.req was delivered by a revision-gated
+	// reqFromRpc is true once req was delivered by a revision-gated
 	// SyncupCntlr in THIS incarnation. The startup Reconcile converges from
 	// the persisted copy, which converge-then-persist (syncupCntlr saves
 	// after convergeCntlr and only logs a failed Save) lets lag the pool's
@@ -253,8 +294,8 @@ func (s *CnAgentServer) cntlrKeysOf(clusterId, cnId uint64) []string {
 	defer s.mu.Unlock()
 	var keys []string
 	for key, st := range s.cntlrs {
-		if st.req.GetClusterId() == clusterId &&
-			st.req.GetCnId() == cnId {
+		req := st.loadReq()
+		if req.GetClusterId() == clusterId && req.GetCnId() == cnId {
 			keys = append(keys, key)
 		}
 	}
@@ -265,13 +306,24 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 	// reqFromRpc stays false: a state born here may equally well come from
 	// the startup Reconcile's persisted copy, and only syncupCntlr knows
 	// otherwise.
-	return &cntlrState{
-		req:          req,
+	st := &cntlrState{
 		tracker:      agent.NewResTracker(),
 		chunks:       make(map[uint64]*agent.CloneChunkSet),
 		pendingSweep: make(map[uint64]bool),
 		probers:      make(map[uint64]*legProber),
 	}
+	st.storeReq(req)
+	return st
+}
+
+// loadReq is the cntlr's current request; see cntlrState.req. A caller that
+// needs the request to stay the same across several reads loads it once.
+func (st *cntlrState) loadReq() *pb.SyncupCntlrRequest {
+	return st.req.Load()
+}
+
+func (st *cntlrState) storeReq(req *pb.SyncupCntlrRequest) {
+	st.req.Store(req)
 }
 
 // chunkSet returns (creating on first use) the CloneChunkSet of one clone.
@@ -366,7 +418,7 @@ func (s *CnAgentServer) GetCnInfo(
 	info, redrive := s.probeCn(ctx, st)
 	return &pb.GetCnInfoReply{
 		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.loadReq().GetRevision(),
 		CnInfo:     info,
 	}, nil
 }
@@ -397,7 +449,7 @@ func (s *CnAgentServer) GetCntlrInfo(
 	}
 	return &pb.GetCntlrInfoReply{
 		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.loadReq().GetRevision(),
 		CntlrInfo:  s.probeCntlr(ctx, st),
 	}, nil
 }

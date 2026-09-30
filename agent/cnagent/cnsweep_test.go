@@ -674,8 +674,9 @@ func TestDisableLevelSweepsEverything(t *testing.T) {
 	if st == nil {
 		t.Fatalf("SP_LEVEL_DISABLE dropped the in-memory desired state")
 	}
-	if st.req.GetSpLevel() != pb.SpLevel_SP_LEVEL_DISABLE {
-		t.Fatalf("the stored level is %v", st.req.GetSpLevel())
+	if level := st.loadReq().GetSpLevel(); level !=
+		pb.SpLevel_SP_LEVEL_DISABLE {
+		t.Fatalf("the stored level is %v", level)
 	}
 }
 

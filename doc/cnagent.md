@@ -402,13 +402,20 @@ type CnAgentServer struct {
 	locks    *agent.LockSet   // object key = LocalCntlrPath id tuple
 	capacity uint64           // --capacity
 	port     agent.PortConf   // --tr-* + --nvmet-port-id
-	// in-memory mirrors of the local store: cn requests, cntlr states
-	// (applied request, ResInfo tracker, a per-clone agent.CloneChunkSet
-	// keyed by (src_slice_idx, bm_idx), connect
-	// retry registry, leg-prober registry), guarded by a leaf mutex, which
-	// also guards the CN10 disconnect registry — in memory only, never
-	// persisted. A buffered channel of disconnectConcurrency slots caps how
-	// many of the registry's disconnects run at once.
+	// A leaf mutex guards the in-memory mirrors of the local store — two
+	// maps: cn requests, and cntlr states (applied request, ResInfo
+	// tracker, a per-clone agent.CloneChunkSet keyed by (src_slice_idx,
+	// bm_idx)) — and three registries that mirror nothing: in each cntlr's
+	// state the connect-retry and prober registries, and the CN10
+	// disconnect registry, in memory only, never persisted. Each state's
+	// applied request is an atomic pointer, stored and loaded without that
+	// mutex: other cntlrs' passes and the node-level verdict read every
+	// cntlr's request holding none of its object lock, and a request is
+	// never modified once stored. The tracker has its own lock; the chunk
+	// sets are touched only under the cntlr's object lock, or under the node
+	// write lock, which excludes it. A buffered channel of
+	// disconnectConcurrency slots caps how many of the disconnect registry's
+	// disconnects run at once.
 	// rootCtx anchors the CN10/CN18 retry loops, the CN10 background
 	// disconnects and the CN11 probers.
 	// cloneMetaMu serializes the CN18 allocator (CN5): the registry is the
@@ -3739,6 +3746,13 @@ between `Recv` and the round (SH24).
     one is issued and the other waits, registered — the re-sync issues no
     disconnect — and once they are released each subsystem is disconnected
     exactly once and the next re-sync replies 0.
+    `TestAConvergeDoesNotRaceAnotherCntlrsReads` (§4.2, under `-race`):
+    three hundred `SyncupCntlr`s of one cntlr run beside loops of the other
+    cntlr's `CheckCntlr` round and `SyncupCntlr`, a `CheckCn` round and a
+    `GetCnInfo`, each of which reads every cntlr's request, and the race
+    detector reports nothing; while the request was a plain pointer every
+    measured run reported the store racing those reads. Built without
+    `-race` it skips, since it proves nothing there.
 14. **Thin bitmaps** (CN25-CN27): scripted `thin_dump` XML drives: reserve
     → dump → release ordering, release also on a scripted dump failure and
     after an "already reserved" retry; the wire inversion (mapped ⇒ 0);

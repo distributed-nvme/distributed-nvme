@@ -25,7 +25,8 @@ func (s *CnAgentServer) pushCloneBitmap(
 				cntlrPointerText(req.GetCntlrPointer())),
 		}
 	}
-	clone := findClone(st.req, req.GetCloneId())
+	current := st.loadReq()
+	clone := findClone(current, req.GetCloneId())
 	if clone == nil {
 		return &pb.PushCloneBitmapReply{
 			AgentReply: agent.UnknownObjectReply(
@@ -76,7 +77,7 @@ func (s *CnAgentServer) pushCloneBitmap(
 	// A chunk whose dm-clone does not currently exist (standby, not built
 	// yet, level-suppressed) still counts as applied; chunks are re-applied
 	// whenever the dm-clone is (re)created (CN18 step 4).
-	plan := newCntlrPlan(s.nf, st.req)
+	plan := newCntlrPlan(s.nf, current)
 	if cp := plan.cloneById[req.GetCloneId()]; cp != nil {
 		if dev, err := s.dm.Info(ctx, cp.finalName); err == nil &&
 			dev != nil {
@@ -102,7 +103,7 @@ func findClone(req *pb.SyncupCntlrRequest, cloneId uint64) *pb.Clone {
 // only — bm_idx_list is a migration field, and a flat index cannot name a
 // chunk the pair (src_slice_idx, bm_idx) addresses.
 func (s *CnAgentServer) bitmapInfoList(st *cntlrState) []*pb.BitmapInfo {
-	clones := st.req.GetCloneList()
+	clones := st.loadReq().GetCloneList()
 	if len(clones) == 0 {
 		return nil
 	}

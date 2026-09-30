@@ -748,8 +748,9 @@ func (s *CnAgentServer) reconcileCloneMeta(
 		if st == nil {
 			continue
 		}
-		spId := st.req.GetCntlrPointer().GetSpId()
-		for _, clone := range st.req.GetCloneList() {
+		req := st.loadReq()
+		spId := req.GetCntlrPointer().GetSpId()
+		for _, clone := range req.GetCloneList() {
 			wanted[s.nf.CnCloneMetaDmName(
 				clusterId, cnId, spId, clone.GetCloneId())] = struct{}{}
 		}

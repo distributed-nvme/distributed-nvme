@@ -310,9 +310,9 @@ func (s *CnAgentServer) nvmetOwner(
 // in its own right — and the only evidence there is for a subsystem that
 // currently has no namespace at all.
 //
-// A cntlr's request is stored (putCntlr) before its converge creates
-// anything, so a subsystem cannot be built by a pass whose claim is not
-// already visible here.
+// A cntlr's request is stored (storeReq, and putCntlr for a new cntlr)
+// before its converge creates anything, so a subsystem cannot be built by a
+// pass whose claim is not already visible here.
 func (s *CnAgentServer) hostFacingClaim(
 	clusterId uint64,
 	cnId uint64,
@@ -323,8 +323,9 @@ func (s *CnAgentServer) hostFacingClaim(
 		if st == nil {
 			continue
 		}
-		if _, named := st.req.GetNqnToSubsystem()[nqn]; named {
-			return st.req.GetCntlrPointer().GetSpId(), true
+		req := st.loadReq()
+		if _, named := req.GetNqnToSubsystem()[nqn]; named {
+			return req.GetCntlrPointer().GetSpId(), true
 		}
 	}
 	return 0, false
@@ -1184,16 +1185,17 @@ func (s *CnAgentServer) sweepCloneChunks(
 	res *agent.SweepResult,
 	converge bool,
 ) {
-	ptr := st.req.GetCntlrPointer()
+	req := st.loadReq()
+	ptr := req.GetCntlrPointer()
 	var gone []uint64
 	var paths []string
 	for cloneId := range st.chunks {
-		if findClone(st.req, cloneId) != nil {
+		if findClone(req, cloneId) != nil {
 			continue
 		}
 		gone = append(gone, cloneId)
 		paths = append(paths, s.cloneChunkPathsOf(st,
-			st.req.GetClusterId(), st.req.GetCnId(),
+			req.GetClusterId(), req.GetCnId(),
 			ptr.GetSpId(), cloneId)...)
 	}
 	sort.Strings(paths)
@@ -1224,14 +1226,14 @@ func (s *CnAgentServer) sweepCloneChunks(
 // attribute it by — "somebody here still wants it" is the only test there is.
 //
 // The stored-request half is what makes this safe to run outside the node
-// write lock: a cntlr's request is stored (putCntlr) before its converge
-// issues any `nvme connect`, so a source cannot be connected by a build whose
-// request is not yet visible here. The disconnect of a source found unused
-// can land after the pass's locks are released (startDisconnect), and a build
-// that finds it still in flight neither adopts nor connects that source
-// (disconnectInFlight). A build whose request is stored after this read, and
-// whose step 1 runs before the disconnect is registered, still adopts the
-// source (cnagent.md Known limits).
+// write lock: a cntlr's request is stored (storeReq, and putCntlr for a new
+// cntlr) before its converge issues any `nvme connect`, so a source cannot be
+// connected by a build whose request is not yet visible here. The disconnect
+// of a source found unused can land after the pass's locks are released
+// (startDisconnect), and a build that finds it still in flight neither adopts
+// nor connects that source (disconnectInFlight). A build whose request is
+// stored after this read, and whose step 1 runs before the disconnect is
+// registered, still adopts the source (cnagent.md Known limits).
 func (s *CnAgentServer) srcNqnsInUse(
 	ctx context.Context,
 	clusterId uint64,
@@ -1245,7 +1247,7 @@ func (s *CnAgentServer) srcNqnsInUse(
 		if st == nil {
 			continue
 		}
-		for _, clone := range st.req.GetCloneList() {
+		for _, clone := range st.loadReq().GetCloneList() {
 			if nqn := clone.GetSrcNqn(); nqn != "" {
 				inUse[nqn] = struct{}{}
 			}
@@ -1364,8 +1366,9 @@ func (s *CnAgentServer) orphanCloneMetaNames(
 		if st == nil {
 			continue
 		}
-		spId := st.req.GetCntlrPointer().GetSpId()
-		for _, clone := range st.req.GetCloneList() {
+		req := st.loadReq()
+		spId := req.GetCntlrPointer().GetSpId()
+		for _, clone := range req.GetCloneList() {
 			wanted[s.nf.CnCloneMetaDmName(
 				clusterId, cnId, spId, clone.GetCloneId())] = struct{}{}
 		}
@@ -1742,8 +1745,9 @@ func (s *CnAgentServer) sweepCn(
 	redrive []baseRedrive,
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
-	clusterId := st.req.GetClusterId()
-	cnId := st.req.GetCnId()
+	req := st.loadReq()
+	clusterId := req.GetClusterId()
+	cnId := req.GetCnId()
 	actual := s.enumerateCn(ctx, clusterId, cnId, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
 	// below is "actual minus desired", and with a listing unanswered its
@@ -1762,7 +1766,7 @@ func (s *CnAgentServer) sweepCn(
 	}
 
 	known := make(map[uint64]struct{})
-	for _, ptr := range st.req.GetCntlrPointerList() {
+	for _, ptr := range req.GetCntlrPointerList() {
 		known[ptr.GetSpId()] = struct{}{}
 	}
 	unwantedSps := make(map[uint64]struct{})
@@ -1870,8 +1874,9 @@ func (s *CnAgentServer) cntlrVerdict(
 	ctx context.Context,
 	st *cntlrState,
 ) *agent.SweepResult {
-	if agent.ValidateBdevConf(st.req.GetBdevConf()) != nil {
+	req := st.loadReq()
+	if agent.ValidateBdevConf(req.GetBdevConf()) != nil {
 		return &agent.SweepResult{}
 	}
-	return s.sweepCntlr(ctx, st, newCntlrPlan(s.nf, st.req), false)
+	return s.sweepCntlr(ctx, st, newCntlrPlan(s.nf, req), false)
 }

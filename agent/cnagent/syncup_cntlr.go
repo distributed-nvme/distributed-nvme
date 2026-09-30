@@ -24,7 +24,7 @@ func (s *CnAgentServer) syncupCntlr(
 ) *pb.SyncupCntlrReply {
 	// CN8 gating: SyncupCn introduces the pointer first (§9.1).
 	cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
-	if cn == nil || !pointerKnown(cn.req, req.GetCntlrPointer()) {
+	if cn == nil || !pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
 		return &pb.SyncupCntlrReply{
 			AgentReply: agent.UnknownObjectReply(
 				"cntlr pointer %s not in the cn's list",
@@ -34,7 +34,7 @@ func (s *CnAgentServer) syncupCntlr(
 	st := s.getCntlr(key)
 	var stored uint64
 	if st != nil {
-		stored = st.req.GetRevision()
+		stored = st.loadReq().GetRevision()
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupCntlrReply{AgentReply: reject, Revision: stored}
@@ -65,11 +65,15 @@ func (s *CnAgentServer) syncupCntlr(
 	if st == nil {
 		st = newCntlrState(req)
 	}
-	st.req = req
+	// Other goroutines read the request without this cntlr's object lock
+	// (cntlrState.req): the store is atomic, and what it replaces is never
+	// modified.
+	st.storeReq(req)
 	// This request came through the revision gate, so GateRevision makes
 	// it the newest desired state this cntlr has ever accepted and its
 	// td_list is authoritative — the one copy the activation sweep may
-	// delete against (CN14).
+	// delete against (CN14). Only this cntlr's converges read it, each under
+	// the object lock held here or the node write lock.
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
 
@@ -117,11 +121,12 @@ func (s *CnAgentServer) convergeCntlr(
 	// retry, which re-enters with the request it already holds. Refusing
 	// before newCntlrPlan touches nothing at all: the sweep is name-driven
 	// and needs no plan of this cntlr to find its objects later.
-	if err := agent.ValidateBdevConf(st.req.GetBdevConf()); err != nil {
-		ptr := st.req.GetCntlrPointer()
+	req := st.loadReq()
+	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+		ptr := req.GetCntlrPointer()
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
-			slog.Uint64("cluster_id", st.req.GetClusterId()),
-			slog.Uint64("cn_id", st.req.GetCnId()),
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("cn_id", req.GetCnId()),
 			slog.Uint64("sp_id", ptr.GetSpId()),
 			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
 			slog.String("error", err.Error()))
@@ -129,7 +134,7 @@ func (s *CnAgentServer) convergeCntlr(
 		// verdict to give: the reply's code is the §7 refusal, not this.
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
-	plan := newCntlrPlan(s.nf, st.req)
+	plan := newCntlrPlan(s.nf, req)
 	info := newCntlrInfo()
 	// CN10: the pass's one wait budget, made here and nowhere else, so every
 	// entrance — the RPC, the startup reconcile, a background retry attempt

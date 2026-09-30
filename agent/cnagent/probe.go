@@ -26,17 +26,18 @@ func (s *CnAgentServer) probeCntlr(
 	// report a correctly-built pool as needing a reload, which is a worse
 	// answer than refusing. Read-only either way (CN23, SH25): an empty
 	// CntlrInfo is what a cntlr with nothing provable looks like.
-	if err := agent.ValidateBdevConf(st.req.GetBdevConf()); err != nil {
-		ptr := st.req.GetCntlrPointer()
+	req := st.loadReq()
+	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+		ptr := req.GetCntlrPointer()
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
-			slog.Uint64("cluster_id", st.req.GetClusterId()),
-			slog.Uint64("cn_id", st.req.GetCnId()),
+			slog.Uint64("cluster_id", req.GetClusterId()),
+			slog.Uint64("cn_id", req.GetCnId()),
 			slog.Uint64("sp_id", ptr.GetSpId()),
 			slog.Uint64("cntlr_id", ptr.GetCntlrId()),
 			slog.String("error", err.Error()))
 		return newCntlrInfo()
 	}
-	plan := newCntlrPlan(s.nf, st.req)
+	plan := newCntlrPlan(s.nf, req)
 	t := st.tracker
 	info := newCntlrInfo()
 

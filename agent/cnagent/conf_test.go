@@ -123,7 +123,7 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 			if st == nil {
 				t.Fatalf("the fixture converge left no cntlr state")
 			}
-			reqBefore := st.req
+			reqBefore := st.loadReq()
 			path := srv.nf.LocalCntlrPath(testCluster, testCn, testSp,
 				testCntlr)
 			storedBefore := node.protos[path]
@@ -192,7 +192,8 @@ func TestSyncupCntlrRefusesAZeroConfMember(t *testing.T) {
 			if st == nil {
 				t.Fatalf("the cntlr state vanished")
 			}
-			if st.req != reqBefore || st.req.GetRevision() != 2 {
+			if req := st.loadReq(); req != reqBefore ||
+				req.GetRevision() != 2 {
 				t.Errorf("the refused request became desired state")
 			}
 			assertRefusalRecord(t, capture, tc.want)
@@ -321,11 +322,11 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 		if st == nil {
 			t.Fatalf("the fixture converge left no cntlr state")
 		}
-		reqBefore := st.req
+		reqBefore := st.loadReq()
 		// What a Reconcile-loaded zero, or a request the agent kept across a
 		// downgrade, leaves in the state the retry loop re-enters with.
-		st.req = zeroConfReq(reqOpts{revision: 2, primary: true},
-			func(conf *pb.BdevConf) { conf.DmPoolConf.LowWaterMarkPct = 0 })
+		st.storeReq(zeroConfReq(reqOpts{revision: 2, primary: true},
+			func(conf *pb.BdevConf) { conf.DmPoolConf.LowWaterMarkPct = 0 }))
 		node.Reset()
 
 		srv.reconvergeCntlr(context.Background(), key, st)
@@ -334,7 +335,7 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 			t.Fatalf("a refused reconverge mutated:\n%s",
 				strings.Join(mutations, "\n"))
 		}
-		if st.req == reqBefore {
+		if st.loadReq() == reqBefore {
 			t.Fatalf("the fixture did not install the zeroed request")
 		}
 		assertRefusalRecord(t, capture, msgNoWaterMark)

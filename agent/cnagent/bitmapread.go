@@ -29,7 +29,7 @@ func (s *CnAgentServer) primaryPlanFor(
 		return nil, status.Errorf(codes.Internal,
 			"unknown cntlr (sp %d, cntlr %d)", spId, cntlrId)
 	}
-	plan := newCntlrPlan(s.nf, st.req)
+	plan := newCntlrPlan(s.nf, st.loadReq())
 	if !plan.primary {
 		return nil, status.Errorf(codes.Internal,
 			"cntlr (sp %d, cntlr %d) is not primary", spId, cntlrId)

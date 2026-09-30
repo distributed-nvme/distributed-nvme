@@ -75,7 +75,7 @@ func (s *CnAgentServer) checkCnRound(
 	// building or rewriting what the probe read wrong.
 	reply := &pb.CheckCnReply{
 		AgentReply: s.sweepCn(ctx, st, false, redrive).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.loadReq().GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil
@@ -139,7 +139,7 @@ func (s *CnAgentServer) checkCntlrRound(
 		// The cntlr-level verdict. A cn's own Check reports node-level
 		// leftovers only; each object drives its own Syncup*.
 		AgentReply: s.cntlrVerdict(ctx, st).Reply(),
-		Revision:   st.req.GetRevision(),
+		Revision:   st.loadReq().GetRevision(),
 	}
 	if !req.GetShowInfo() && lastSent != nil && proto.Equal(info, lastSent) {
 		return reply, nil

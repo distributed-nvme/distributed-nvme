@@ -53,10 +53,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			unreadCn = true
 			continue
 		}
-		s.putCn(cnKey(req.GetClusterId(), req.GetCnId()), &cnState{
-			req:     req,
-			tracker: agent.NewResTracker(),
-		})
+		s.putCn(cnKey(req.GetClusterId(), req.GetCnId()), newCnState(req))
 	}
 	// unreadParent reports whether a cntlr or a chunk of the CN (clusterId,
 	// cnId) goes with a cn-* file that did not load: its CN is not loaded
@@ -136,7 +133,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		// names no cntlr.
 		if st == nil && unreadCntlr {
 			cn := s.getCn(cnKey(chunk.GetClusterId(), chunk.GetCnId()))
-			if cn != nil && pointerKnown(cn.req, ptr) {
+			if cn != nil && pointerKnown(cn.loadReq(), ptr) {
 				slog.WarnContext(ctx,
 					"skipping bitmap chunk file of an unloaded cntlr",
 					slog.String("path", path),
@@ -145,7 +142,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 				continue
 			}
 		}
-		if st == nil || findClone(st.req, chunk.GetCloneId()) == nil {
+		if st == nil || findClone(st.loadReq(), chunk.GetCloneId()) == nil {
 			orphans = append(orphans, path)
 			continue
 		}
@@ -174,8 +171,10 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// far (unreadParent).
 	for _, key := range s.allCntlrKeys() {
 		st := s.getCntlr(key)
-		cn := s.getCn(cnKey(st.req.GetClusterId(), st.req.GetCnId()))
-		if cn == nil || !pointerKnown(cn.req, st.req.GetCntlrPointer()) {
+		req := st.loadReq()
+		cn := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
+		if cn == nil ||
+			!pointerKnown(cn.loadReq(), req.GetCntlrPointer()) {
 			s.dropCntlrState(ctx, key, st)
 		}
 	}
@@ -201,15 +200,16 @@ func (s *CnAgentServer) syncupCn(
 	st := s.getCn(key)
 	var stored uint64
 	if st != nil {
-		stored = st.req.GetRevision()
+		stored = st.loadReq().GetRevision()
 	}
 	if reject := agent.GateRevision(stored, req.GetRevision()); reject != nil {
 		return &pb.SyncupCnReply{AgentReply: reject, Revision: stored}
 	}
 	if st == nil {
-		st = &cnState{tracker: agent.NewResTracker()}
+		st = newCnState(req)
+	} else {
+		st.storeReq(req)
 	}
-	st.req = req
 	s.putCn(key, st)
 
 	// The cn file is persisted BEFORE the sweep, not after it. The
@@ -249,7 +249,7 @@ func (s *CnAgentServer) convergeCn(
 	ctx context.Context,
 	st *cnState,
 ) *pb.CnInfo {
-	req := st.req
+	req := st.loadReq()
 	t := st.tracker
 	info := &pb.CnInfo{}
 	clusterId := req.GetClusterId()
@@ -426,7 +426,7 @@ func (s *CnAgentServer) dropRemovedCntlrs(
 ) {
 	for _, key := range s.cntlrKeysOf(req.GetClusterId(), req.GetCnId()) {
 		st := s.getCntlr(key)
-		if st == nil || pointerKnown(req, st.req.GetCntlrPointer()) {
+		if st == nil || pointerKnown(req, st.loadReq().GetCntlrPointer()) {
 			continue
 		}
 		s.dropCntlrState(ctx, key, st)
@@ -442,12 +442,13 @@ func (s *CnAgentServer) dropCntlrState(
 ) {
 	s.stopConnectRetry(st)
 	s.stopLegProbers(st, nil)
-	ptr := st.req.GetCntlrPointer()
+	req := st.loadReq()
+	ptr := req.GetCntlrPointer()
 	paths := []string{s.nf.LocalCntlrPath(
-		st.req.GetClusterId(), st.req.GetCnId(),
+		req.GetClusterId(), req.GetCnId(),
 		ptr.GetSpId(), ptr.GetCntlrId())}
 	paths = append(paths, s.allChunkPathsOf(st,
-		st.req.GetClusterId(), st.req.GetCnId(), ptr.GetSpId())...)
+		req.GetClusterId(), req.GetCnId(), ptr.GetSpId())...)
 	if err := s.store.Remove(ctx, paths...); err != nil {
 		slog.ErrorContext(ctx, "removing cntlr state files failed",
 			slog.String("error", err.Error()))
@@ -499,7 +500,7 @@ func (s *CnAgentServer) probeCn(
 	ctx context.Context,
 	st *cnState,
 ) (*pb.CnInfo, []baseRedrive) {
-	req := st.req
+	req := st.loadReq()
 	t := st.tracker
 	info := &pb.CnInfo{}
 	var redrive []baseRedrive

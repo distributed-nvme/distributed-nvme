@@ -959,3 +959,97 @@ func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
 			"rm naming both temp files", strings.Join(mutations, "\n"))
 	}
 }
+
+// TestAConvergeDoesNotRaceAnotherCntlrsReads pins the request pointers
+// against the reads other goroutines make of them. A SyncupCntlr stores the
+// cntlr's new request under the node read lock and that cntlr's object lock,
+// and the claim reads of every other pass read it holding neither that
+// object lock nor the node write lock: another cntlr's converge or check
+// round attributes each host-facing subsystem by asking every cntlr of the
+// CN whether its request still names it, and the node-level verdict of a
+// CheckCn round or a GetCnInfo reads every cntlr's clone list too. Run
+// beside one another they must not race, which is what the race detector
+// checks here; without it the test proves nothing. The detector reports a
+// pair only when the two accesses happen to interleave between the locks
+// both sides take, so one converge rarely shows it: three hundred beside
+// four reader loops made every measured run report it while the request was
+// a plain pointer.
+func TestAConvergeDoesNotRaceAnotherCntlrsReads(t *testing.T) {
+	if !raceEnabled {
+		t.Skip("proves nothing without -race")
+	}
+	srv, _ := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.SyncupCn(ctx, cnReq2(2)); err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	for _, req := range []*pb.SyncupCntlrRequest{
+		cntlrReq(reqOpts{revision: 2}), cntlrReq2(2),
+	} {
+		reply, err := srv.SyncupCntlr(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
+		}
+	}
+
+	const rounds = 300
+	done := make(chan struct{})
+	writer := make(chan struct{})
+	go func() {
+		defer close(writer)
+		for i := uint64(0); i < rounds; i++ {
+			if _, err := srv.SyncupCntlr(ctx,
+				cntlrReq(reqOpts{revision: 3 + i})); err != nil {
+				t.Errorf("SyncupCntlr: %v", err)
+				return
+			}
+		}
+	}()
+	readers := []func(){
+		func() {
+			srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr2(), Revision: 2,
+			}, nil)
+		},
+		func() {
+			srv.checkCnRound(ctx, &pb.CheckCnRequest{
+				ClusterId: testCluster, CnId: testCn, Revision: 2,
+			}, nil)
+		},
+		func() {
+			if _, err := srv.GetCnInfo(ctx, &pb.GetCnInfoRequest{
+				ClusterId: testCluster, CnId: testCn,
+			}); err != nil {
+				t.Errorf("GetCnInfo: %v", err)
+			}
+		},
+		func() {
+			if _, err := srv.SyncupCntlr(ctx, cntlrReq2(2)); err != nil {
+				t.Errorf("SyncupCntlr of the other cntlr: %v", err)
+			}
+		},
+	}
+	finished := make(chan struct{}, len(readers))
+	for _, read := range readers {
+		go func() {
+			defer func() { finished <- struct{}{} }()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				read()
+			}
+		}()
+	}
+	<-writer
+	close(done)
+	for range readers {
+		<-finished
+	}
+}
