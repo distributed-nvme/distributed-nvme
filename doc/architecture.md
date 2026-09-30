@@ -1166,8 +1166,14 @@ cntlr of the same SP.
 * **CreateCntlr**: one CN, `CandExtCnt` = sum of all group `ext_cnt`s of the SP; the CNs
   of the SP's cntlrs are excluded (§6.4) and their `location`s form tier 1's exclusion,
   with the same two tiers as CreateStoragePool's CNs. The locations are read before the
-  STM, which is sound because `location` is immutable (§8.3), and the in-STM
-  re-validation of the pick stays address-based.
+  STM, which is sound because `location` is immutable (§8.3) and because the STM drops
+  the pick when the SP, as the STM reads it, has a cntlr on a CN the read the scan was
+  planned from did not hold (the scan + STM then re-run from a fresh read of the SP's
+  cntlrs, §8.6): a cntlr committed meanwhile is the only way the set of CNs and domains
+  to exclude can grow, and without the check the pick could land in its domain, or on
+  its very CN when the scan ran after its charge. The sp-worker's cntlr replacement
+  (§10.4) holds the SP's surviving cntlrs to the plan of its own scan the same way. That
+  re-check, like the in-STM re-validation of the pick itself, stays address-based.
 
 Free-extent bookkeeping in the same STM as the pick: each leg's DN
 `free_ext_cnt -= group.ext_cnt`; each cntlr's CN `free_ext_cnt -= Σ group.ext_cnt`;
@@ -1701,7 +1707,11 @@ Errors: `RESOURCE_EXHAUSTED` `len(cntlr_id_list) ≥ MaxCntlrCntPerSp` or no eli
 (§6.4/§6.5 — capacity-key presence already implies healthy, enabled and not full);
 `INVALID_ARGUMENT` `cntlid_slot` not in `SpConf.cntlid_slot_list` or already used by
 another **cntlr** of the SP (§11.8).
-Action: pick a CN (§6.5); STM: new `Cntlr` (`primary = false`, `disabled = false`),
+Action: pick a CN (§6.5); STM: a pick is dropped when the SP, as this STM reads it, has
+a cntlr on a CN the scan's read of its cntlrs did not hold, and the scan + STM re-run as
+a unit from a fresh read (the scan's CN exclusion and tier-1 locations come from that
+earlier read, so a cntlr committed since could have the pick land in its failure domain
+or on its CN); new `Cntlr` (`primary = false`, `disabled = false`),
 append id, CN bookkeeping + `CnRev`, append the CN's `nvme_tr_conf` to every `CdcEntry`
 of the SP, bump `SpRev`. A subsystem whose `CdcEntry` is missing gets it back here,
 rebuilt as §8.8's CreateSubsystem writes it and then changed like the rest; DeleteCntlr

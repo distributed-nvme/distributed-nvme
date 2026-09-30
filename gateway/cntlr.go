@@ -63,7 +63,9 @@ func resolveCntlr(
 // cntlrPlan is what CreateCntlr prepares outside its STM (GW8): the cluster
 // the scan runs in, the number of extents one cntlr of this SP reserves on
 // its CN, the CNs that are already excluded from the draw, and their
-// locations, which tier 1 of the draw excludes as well (§6.5).
+// locations, which tier 1 of the draw excludes as well (§6.5). The STM holds
+// the pool's cntlrs as it reads them against SpCnAddrs: one on a CN the plan
+// did not hold sends the round back to be planned again.
 type cntlrPlan struct {
 	Cid       uint64
 	Cc        *pb.ClusterConf
@@ -170,13 +172,15 @@ func planCreateCntlr(
 // tracked in a separate list: the Cntlr records are the only place a slot is
 // stored, so they cannot disagree with anything (§11.8).
 //
-// The exclusion list the scan was given cannot go stale in a way that matters
-// for a TOKEN-CARRYING caller: two such CreateCntlrs on the same SP are
-// serialized by GW6 and the loser is ABORTED before it can put a second cntlr
-// of the SP on one CN. GW6 is presence-based (§0 #7), so two token-LESS
-// CreateCntlrs are not serialized by the token; the anti-affinity they get is
-// only what the in-STM slot/placement checks below enforce. Omitting the token
-// is opting out of the optimistic-concurrency gate, here as everywhere.
+// The CN exclusion and the tier-1 locations the scan was given come from the
+// pool's cntlrs as the plan read them, and a cntlr committed after that read
+// would make both stale. A TOKEN-CARRYING caller never gets that far: whatever
+// committed that cntlr — another CreateCntlr, the worker's AR7 replacement —
+// bumped SpRev, which fails the token at openSp (GW6). GW6 is presence-based
+// (§0 #7), so a token-LESS CreateCntlr is not serialized by it; the STM
+// therefore compares the cntlrs it reads with the plan and re-plans on one
+// the plan did not see (below), which keeps §6.4 and §6.5's tier 1 whole for
+// every caller.
 func (s *Server) CreateCntlr(
 	ctx context.Context,
 	req *pb.CreateCntlrRequest,
@@ -255,6 +259,27 @@ func (s *Server) CreateCntlr(
 						"cntlid_slot %d is already used by another cntlr "+
 							"of storage pool %q",
 						slot, req.GetSpName())
+				}
+			}
+			// The pick was scanned against the pool's cntlrs as the round's
+			// plan read them: their CNs for §6.4 and their locations for
+			// §6.5's tier 1. A cntlr committed since — by another
+			// CreateCntlr, or the worker's AR7 replacement — is missing from
+			// that plan, so the pick may sit in its failure domain behind a
+			// capacity key verifyPick still finds, or on its very CN, when
+			// the scan ran after that cntlr's charge. Only the cntlrs this
+			// transaction reads can tell, so a cntlr on a CN the plan did
+			// not hold makes the round a changed candidate (GW9) and the
+			// next round plans from the pool as it now stands. Only a gain
+			// is checked: a cntlr that has left since the plan frees room the
+			// round did not count on, which GW9 never re-scans for. Only a
+			// token-less request gets here with a gained cntlr: the gain's
+			// SpRev bump fails a sent token at openSp above. The check runs
+			// after the slot checks, so a request that can never commit is
+			// refused rather than re-planned.
+			for _, cntlr := range cntlrs {
+				if !containsName(plan.SpCnAddrs, cntlr.GetAddrPort()) {
+					return errCandidateChanged
 				}
 			}
 			slices, err := loadSlices(stm, sc.Cid, conf)

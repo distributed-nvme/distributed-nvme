@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -3632,6 +3634,275 @@ func TestCntlrsSpreadAcrossLocations(t *testing.T) {
 			}
 		}
 	})
+}
+
+// sptHookKey marks the ctx of the one request an sptRecordHook watches.
+type sptHookKey struct{}
+
+// sptRecordHook is volReadHook for any etcdutil record, not only a point read:
+// it runs a second actor inside the watched request's first record that
+// trigger accepts, and counts the records of that request that count accepts.
+// etcdutil logs a range once the range is fetched and before its caller sees
+// it, and a point read likewise, so the actor runs strictly between the
+// request's read and what the request does with it.
+type sptRecordHook struct {
+	slog.Handler
+	trigger func(rec slog.Record) bool
+	count   func(rec slog.Record) bool
+	actor   func()
+	fired   atomic.Bool
+	counted atomic.Int64
+}
+
+// Handle runs the actor on the watched request's first triggering record and
+// counts, then hands the record on to the handler it wraps.
+func (h *sptRecordHook) Handle(ctx context.Context, rec slog.Record) error {
+	if ctx.Value(sptHookKey{}) != nil {
+		if h.count(rec) {
+			h.counted.Add(1)
+		}
+		if h.trigger(rec) && h.fired.CompareAndSwap(false, true) {
+			h.actor()
+		}
+	}
+	return h.Handler.Handle(ctx, rec)
+}
+
+// sptIsCnScan accepts the "etcd range" record of a CN candidate scan.
+func sptIsCnScan(env *sptEnv) func(rec slog.Record) bool {
+	prefix := model.CnCapacityPrefix(env.cid)
+	return func(rec slog.Record) bool {
+		return rec.Message == "etcd range" &&
+			sptRecordAttr(rec, "prefix") == prefix
+	}
+}
+
+// sptRecordAttr is one string attribute of an etcdutil record.
+func sptRecordAttr(rec slog.Record, name string) string {
+	value := ""
+	rec.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != name {
+			return true
+		}
+		value = attr.Value.String()
+		return false
+	})
+	return value
+}
+
+// setCnFree moves one CN to freeExt free extents, capacity key included,
+// keeping the location it has.
+func (e *sptEnv) setCnFree(addrPort string, freeExt uint64) {
+	e.t.Helper()
+	cn := e.cnConf(addrPort)
+	oldKey := model.CnCapacityKey(e.cid, cn.GetFreeExtCnt(), addrPort)
+	if err := e.cli.Delete(e.ctx, oldKey); err != nil {
+		e.t.Fatalf("Delete %s: %v", oldKey, err)
+	}
+	cn.FreeExtCnt = freeExt
+	mustPut(e.t, e.cli, model.CnConfKey(e.cid, addrPort), cn)
+	mustPut(
+		e.t, e.cli,
+		model.CnCapacityKey(e.cid, freeExt, addrPort),
+		&pb.CnCapacity{Location: cn.GetLocation()},
+	)
+}
+
+// setCnBatchSize stores a cn_batch_size in the cluster's conf. At 1 every CN
+// scan returns only the fullest eligible CN, so every pick is forced.
+func (e *sptEnv) setCnBatchSize(size uint32) {
+	e.t.Helper()
+	e.cc.AllocConf.CnBatchSize = size
+	mustPut(e.t, e.cli, model.ClusterConfKey(e.name), e.cc)
+}
+
+// TestCreateCntlrReplansAroundACntlrItDidNotSee pins the deciding STM's own
+// check of the round's plan against the pool's cntlrs (§6.5, GW9). A round
+// takes its CN exclusion and its tier-1 locations from the cntlrs its plan
+// read, outside the transaction, and the transaction re-checks only the pick's
+// capacity key. A cntlr another request commits after that read is missing
+// from the plan, so without the check the pick can land in that cntlr's
+// location while another location has room, or on that cntlr's very CN,
+// behind a capacity key the scan read after the other request charged it.
+// Only a token-less request gets that far: the other request's SpRev bump
+// fails a sent token at openSp. The check makes such a round a changed
+// candidate, and the next round plans from the pool as it now stands.
+//
+// cn_batch_size is 1 and every CN holds a different free count, so every scan
+// offers the fullest eligible CN alone and every draw is forced. The pool's
+// first cntlr lands on cn-00, the fullest. Request A is a token-less
+// CreateCntlr; request B, another one, runs inside A at one exact point:
+//
+//   - location: B runs once A's scan has read the index, and white-lists
+//     cn-03, the rack-mate of the CN that scan offers A (cn-02). A's pick is
+//     untouched, so its capacity key still verifies; only the pool as A's
+//     transaction reads it shows that rack-1 is taken now.
+//   - controller node: B runs inside A's plan, before A's scan, and takes
+//     cn-01, the fullest CN A's plan does not exclude. A's scan then offers
+//     cn-01 at its new free count, which verifies too.
+//
+// Each case asserts where every cntlr lands, that A scanned exactly twice (the
+// round the check refused and the one that committed), and that every CN was
+// charged once.
+func TestCreateCntlrReplansAroundACntlrItDidNotSee(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// build returns the env; frees are the CN free counts it then gets.
+		build func(t *testing.T) *sptEnv
+		frees map[string]uint64
+		// trigger picks the record of request A that request B runs inside.
+		trigger func(env *sptEnv) func(rec slog.Record) bool
+		// actorSelector is request B's CnSelector.
+		actorSelector *pb.NodeSelector
+		// wantAddrs is where the cntlrs land, in cntlr_id order: the pool's
+		// first, B's, then A's.
+		wantAddrs []string
+	}{
+		{
+			name: "location",
+			build: func(t *testing.T) *sptEnv {
+				return sptRackEnv(t, 3)
+			},
+			frees: map[string]uint64{
+				"cn-00:9000": 600, "cn-01:9000": 400,
+				"cn-02:9000": 550, "cn-03:9000": 540,
+				"cn-04:9000": 500, "cn-05:9000": 490,
+			},
+			trigger: sptIsCnScan,
+			actorSelector: &pb.NodeSelector{
+				WhiteList: []string{"cn-03:9000"},
+			},
+			wantAddrs: []string{"cn-00:9000", "cn-03:9000", "cn-04:9000"},
+		},
+		{
+			name: "controller node",
+			build: func(t *testing.T) *sptEnv {
+				return sptNewEnv(t, sptDnCnt, 3, sptRackCnFree)
+			},
+			frees: map[string]uint64{
+				"cn-00:9000": 600, "cn-01:9000": 550, "cn-02:9000": 500,
+			},
+			trigger: func(env *sptEnv) func(rec slog.Record) bool {
+				key := model.CnConfKey(env.cid, "cn-00:9000")
+				return func(rec slog.Record) bool {
+					return rec.Message == "etcd get" &&
+						sptRecordAttr(rec, "key") == key
+				}
+			},
+			wantAddrs: []string{"cn-00:9000", "cn-01:9000", "cn-02:9000"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := tc.build(t)
+			env.setCnBatchSize(1)
+			for addrPort, freeExt := range tc.frees {
+				env.setCnFree(addrPort, freeExt)
+			}
+			spId := env.createSp(sptSpec{
+				name:     "p",
+				cntlrCnt: 1,
+				sliceCnt: 1,
+				initExt:  1,
+			})
+			addrs, _ := env.cntlrPlaces("p")
+			if len(addrs) != 1 || addrs[0] != tc.wantAddrs[0] {
+				t.Fatalf("the pool's first cntlr on %v, want [%s]: the "+
+					"fixture no longer forces the draws", addrs,
+					tc.wantAddrs[0])
+			}
+			footprint := tc.frees[addrs[0]] -
+				env.cnConf(addrs[0]).GetFreeExtCnt()
+			freeBefore := make(map[string]uint64)
+			revBefore := make(map[string]uint64)
+			for _, addrPort := range env.cnAddrs {
+				freeBefore[addrPort] = env.cnConf(addrPort).GetFreeExtCnt()
+				revBefore[addrPort] = env.cnRev(addrPort)
+			}
+
+			var actorErr error
+			prev := slog.Default()
+			hook := &sptRecordHook{
+				Handler: prev.Handler(),
+				trigger: tc.trigger(env),
+				count:   sptIsCnScan(env),
+				actor: func() {
+					_, actorErr = env.srv.CreateCntlr(
+						env.ctx, &pb.CreateCntlrRequest{
+							ClusterName: env.name,
+							SpName:      "p",
+							CntlidSlot:  2,
+							CnSelector:  tc.actorSelector,
+						})
+				},
+			}
+			slog.SetDefault(slog.New(hook))
+			// Bounded, so that a unit that never settles fails as ABORTED
+			// instead of hanging the package: GW9 retries until ctx ends.
+			ctx, cancel := context.WithTimeout(
+				context.WithValue(env.ctx, sptHookKey{}, true),
+				30*time.Second)
+			_, err := env.srv.CreateCntlr(ctx, &pb.CreateCntlrRequest{
+				ClusterName: env.name,
+				SpName:      "p",
+				CntlidSlot:  1,
+			})
+			cancel()
+			slog.SetDefault(prev)
+			if !hook.fired.Load() {
+				t.Fatalf("request A never reached the hooked record: " +
+					"nothing was raced")
+			}
+			if actorErr != nil {
+				t.Fatalf("request B: %v", actorErr)
+			}
+			if err != nil {
+				t.Fatalf("request A: %v", err)
+			}
+
+			addrs, locs := env.cntlrPlaces("p")
+			if fmt.Sprint(addrs) != fmt.Sprint(tc.wantAddrs) {
+				t.Errorf("cntlrs on %v in %v, want %v", addrs, locs,
+					tc.wantAddrs)
+			}
+			if sptDistinctCnt(addrs) != len(addrs) {
+				t.Errorf("two cntlrs of one pool on one CN: %v", addrs)
+			}
+			if sptDistinctCnt(locs) != len(locs) {
+				t.Errorf("cntlrs in %d locations of %d although every "+
+					"location had room: %v", sptDistinctCnt(locs),
+					len(locs), locs)
+			}
+			if got := hook.counted.Load(); got != 2 {
+				t.Errorf("request A scanned %d times, want 2: the "+
+					"round the pool refused and the one that committed",
+					got)
+			}
+			hosts := make(map[string]bool)
+			for _, addrPort := range addrs[1:] {
+				hosts[addrPort] = true
+			}
+			for _, addrPort := range env.cnAddrs {
+				wantFree, wantRev := freeBefore[addrPort], revBefore[addrPort]
+				if hosts[addrPort] {
+					wantFree -= footprint
+					wantRev++
+				}
+				if got := env.cnConf(addrPort).GetFreeExtCnt(); got !=
+					wantFree {
+					t.Errorf("%s: free_ext_cnt %d, want %d", addrPort,
+						got, wantFree)
+				}
+				if got := env.cnRev(addrPort); got != wantRev {
+					t.Errorf("%s: revision %d, want %d", addrPort, got,
+						wantRev)
+				}
+			}
+			if got := env.spRev(0, spId); got != 3 {
+				t.Errorf("sp_rev: got %d, want 3 (one bump per create)",
+					got)
+			}
+		})
+	}
 }
 
 // TestDeleteCntlr pins §8.6's DeleteCntlr: it refuses the primary and refuses

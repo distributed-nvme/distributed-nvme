@@ -209,7 +209,9 @@ type reactionOps interface {
 		cc *pb.ClusterConf,
 		legs []model.Cand,
 	) (uint64, error)
-	// replaceCntlr is AR7; it returns the new cntlr_id.
+	// replaceCntlr is AR7; it returns the new cntlr_id. spCnAddrs is the
+	// exclusion the scan that found newCn was given, which the op holds the
+	// SP's surviving cntlrs against.
 	replaceCntlr(
 		ctx context.Context,
 		cid uint64,
@@ -218,6 +220,7 @@ type reactionOps interface {
 		spName string,
 		oldId uint64,
 		newCn model.Cand,
+		spCnAddrs []string,
 		asPrimary bool,
 		now uint64,
 	) (uint64, error)
@@ -386,11 +389,13 @@ func (o *modelReactionOps) replaceCntlr(
 	spName string,
 	oldId uint64,
 	newCn model.Cand,
+	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
 ) (uint64, error) {
 	return model.ReplaceCntlr(
-		ctx, o.cli, cid, shard, spId, spName, oldId, newCn, asPrimary, now,
+		ctx, o.cli, cid, shard, spId, spName, oldId, newCn, spCnAddrs,
+		asPrimary, now,
 	)
 }
 
@@ -1226,10 +1231,14 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	// AR7: the old CN is black-listed even when the node itself is healthy —
 	// its cntlr is what failed. The SP's other cntlrs' CNs are excluded by
 	// the §6.4 rule instead, which is spCnAddrs, and their locations by
-	// §6.5's tier 1.
+	// §6.5's tier 1. Both come from this pass's snapshot, so the same
+	// spCnAddrs goes to model.ReplaceCntlr, which refuses the pick as
+	// `candidate changed` when the SP has gained a cntlr the snapshot did not
+	// hold; the next pass plans from a snapshot that holds it.
+	spCnAddrs := otherCntlrAddrs(p, oldId)
 	cands, err := w.reactor().ops.findCnCandidates(
 		ctx, w.cid, footprint, batch,
-		[]string{old.GetAddrPort()}, otherCntlrAddrs(p, oldId),
+		[]string{old.GetAddrPort()}, spCnAddrs,
 		otherCntlrLocations(p, oldId),
 	)
 	if err != nil {
@@ -1243,7 +1252,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	}
 	newId, err := w.reactor().ops.replaceCntlr(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		oldId, picks[0], old.GetPrimary(), p.now,
+		oldId, picks[0], spCnAddrs, old.GetPrimary(), p.now,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, reactionReplaceCntlr, err, ids...)

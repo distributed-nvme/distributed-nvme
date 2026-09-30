@@ -223,6 +223,8 @@ type reactionCall struct {
 	// The clone drain's target, for the CLD7 derivation assertions.
 	cloneName string
 	cloneId   uint64
+	// The plan a replacement was scanned against (AR7's spCnAddrs).
+	spCn []string
 }
 
 // candQuery is one allocator scan a pass ran.
@@ -368,12 +370,13 @@ func (o *fakeReactionOps) replaceCntlr(
 	spName string,
 	oldId uint64,
 	newCn model.Cand,
+	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
 ) (uint64, error) {
 	err := o.record(reactionCall{
 		op: "replace", oldId: oldId, asPrimary: asPrimary, now: now,
-		legs: []model.Cand{newCn},
+		legs: []model.Cand{newCn}, spCn: spCnAddrs,
 	})
 	return 555, err
 }
@@ -2100,6 +2103,12 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 	}
 	if len(query.spCn) != 1 || query.spCn[0] != reactCnA {
 		t.Fatalf("spCnAddrs = %v, want the other cntlr's cn", query.spCn)
+	}
+	// The op is handed the very plan the scan ran against, which it holds
+	// the SP's surviving cntlrs to inside its STM.
+	if fmt.Sprint(calls[0].spCn) != fmt.Sprint(query.spCn) {
+		t.Fatalf("replace spCnAddrs = %v, want the scan's %v",
+			calls[0].spCn, query.spCn)
 	}
 	h.wantApplied(reactionReplaceCntlr)
 }

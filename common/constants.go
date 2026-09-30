@@ -451,19 +451,23 @@ const (
 	// arithmetic from them. The headroom is thin in the DN dimension: one
 	// more key read or written per DN inside that STM costs 128 compares.
 	//
-	// The sp drain's D2 batch is the SECOND bounded transaction this number
-	// has to cover, and no longer the one that sizes it:
+	// Other bounded transactions exceed etcd's default 128 too, without
+	// sizing this number. The sp drain's D2 batch is one:
 	// 6 + 6·MaxDelGrpPerTxn·(MaxAllocLegPerGrp + MaxSpareLegPerGrp) = 486
 	// COMPARES at the maximum shape — SPD13's arithmetic, asserted at the
 	// named constants by gateway/txnbudget_test.go's SPD14 tripwire and
 	// committed against a real etcd by model/drain_test.go's
-	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6).
+	// TestDrainSpSliceAtTheCeiling (dnv-worker.md §11.6). The created flip's
+	// transaction is another, 2 x MaxFlipCreatedPerTxn + 2 = 514 COMPARES
+	// (RW19, dnv-worker.md §8.4; TestFlipCreatedTxnBudget,
+	// TestFlipCreatedAtTheTdCeiling; see MaxFlipCreatedPerTxn below).
 	//
-	// DeleteThinDevice stays below both, whatever the td count: its deciding
-	// STM commits having read the fixed resolution and token keys, the target
-	// td and one key per subsystem and per clone of the SP, so with its three
-	// writes it is 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the
-	// ceilings (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
+	// DeleteThinDevice stays below all three — the create, D2 and the flip —
+	// whatever the td count: its deciding STM commits having read the fixed
+	// resolution and token keys, the target td and one key per subsystem and
+	// per clone of the SP, so with its three writes it is
+	// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 COMPARES at the ceilings
+	// (gateway/txnbudget_test.go's TestDeleteThinDeviceBudget). The
 	// walk over every td for uncreated snapshots is a read-only plan outside
 	// the transaction, verified inside it by the pool's identity and revision
 	// (architecture.md §8.7), and TestDeleteThinDeviceAtTheTdCeiling commits a

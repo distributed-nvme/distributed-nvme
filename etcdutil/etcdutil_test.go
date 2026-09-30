@@ -107,7 +107,8 @@ func startEtcd(bin string) (string, func(), error) {
 		// every etcd it runs against; the server's own default is 128, below
 		// CreateStoragePool's 967-compare maximum shape, which is what SIZES
 		// the requirement (gateway.md §2.1), and below the 486 compares the
-		// sp drain's maximum-shape D2 batch reaches (§11.6, SPD13).
+		// sp drain's maximum-shape D2 batch reaches (§11.6, SPD13) and the
+		// 514 of one created-flip transaction (RW19, MaxFlipCreatedPerTxn).
 		// DeleteClone's rectangle sweep — then 256 keys, at the 16-slice
 		// ceiling of the time — was this flag's founding justification and is
 		// gone: the clone drain's 68-op batches fit the default (CLD11).

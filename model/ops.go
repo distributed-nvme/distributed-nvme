@@ -63,8 +63,10 @@ const (
 )
 
 // ReasonCandidateChanged is the one reason string MD5 pins: a pick whose
-// capacity key is no longer the one the scan saw. The caller rescans and
-// retries the scan + STM as one unit (architecture.md §8.4 step 2).
+// capacity key is no longer the one the scan saw, or, for ReplaceCntlr, a
+// pick scanned against a plan the SP has moved past — a surviving cntlr the
+// plan did not hold. The caller rescans and retries the scan + STM as one
+// unit (architecture.md §8.4 step 2).
 //
 // It is exported for the same reason ReasonStaleRevision is: the gateway calls
 // GrowSlice and CreateSpareLeg from inside its own candidate unit (gateway.md
@@ -1507,6 +1509,16 @@ func chargeSpCns(
 // SP without one), and it may not be true while another cntlr still holds the
 // role.
 //
+// spCnAddrs is the plan the pick was scanned against: the CNs of the SP's
+// other cntlrs as the caller's snapshot held them, which it handed the scan as
+// the §6.4 exclusion and whose locations it handed it as §6.5's tier 1. A
+// surviving cntlr on a CN outside that list was committed after the snapshot,
+// by the gateway's CreateCntlr, so the pick may sit in its failure domain or
+// on its very CN, and the op fails with ReasonCandidateChanged: the caller's next pass plans from
+// a snapshot that holds it. Only a gain is checked, as the gateway's
+// CreateCntlr checks it: a cntlr that has left since frees room the scan did
+// not count on.
+//
 // Effects: the old Cntlr key is deleted and, if its CN record still exists,
 // that CN gets its pointer removed, the SP footprint back, its capacity key
 // maintained and its CnRev bumped; the new Cntlr is written with
@@ -1524,9 +1536,14 @@ func ReplaceCntlr(
 	spName string,
 	oldId uint64,
 	newCn Cand,
+	spCnAddrs []string,
 	asPrimary bool,
 	now uint64,
 ) (uint64, error) {
+	planned := make(map[string]struct{}, len(spCnAddrs))
+	for _, addrPort := range spCnAddrs {
+		planned[addrPort] = struct{}{}
+	}
 	newId := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		newId = 0
@@ -1564,13 +1581,21 @@ func ReplaceCntlr(
 				return fail(opReplaceCntlr, "failover candidate exists")
 			}
 		}
-		// Reading every surviving cntlr once answers both the "is the CN
-		// already hosting one of this SP's cntlrs" rule (§6.4) and the
-		// "exactly one primary" invariant.
+		// Reading every surviving cntlr once answers the "was the pick
+		// planned against this cntlr" check (spCnAddrs above), the "is the
+		// CN already hosting one of this SP's cntlrs" rule (§6.4) and the
+		// "exactly one primary" invariant. The plan comes first: a cntlr
+		// committed on the pick's own CN since the snapshot is a stale plan,
+		// which the next pass re-plans, not a refusal.
 		for _, cntlrId := range conf.GetCntlrIdList() {
 			cntlr := &pb.Cntlr{}
 			if !s.Get(CntlrKey(cid, spId, cntlrId), cntlr) {
 				return fail(opReplaceCntlr, "cntlr not found")
+			}
+			if cntlrId != oldId {
+				if _, ok := planned[cntlr.GetAddrPort()]; !ok {
+					return fail(opReplaceCntlr, ReasonCandidateChanged)
+				}
 			}
 			if cntlr.GetAddrPort() == newCn.AddrPort {
 				return fail(opReplaceCntlr, "cn already hosts a cntlr")

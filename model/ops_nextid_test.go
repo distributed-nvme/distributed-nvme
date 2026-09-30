@@ -91,7 +91,7 @@ func TestReplaceCntlrNeverMintsIdZero(t *testing.T) {
 
 	newId, err := ReplaceCntlr(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
-		opsCntlrB, env.cnCand(opsCnC), false, now,
+		opsCntlrB, env.cnCand(opsCnC), []string{opsCnA}, false, now,
 	)
 	if err != nil {
 		t.Fatalf("ReplaceCntlr: %v", err)

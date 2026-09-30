@@ -63,6 +63,9 @@ const (
 	opsCnA = "cn-a:9000"
 	opsCnB = "cn-b:9000"
 	opsCnC = "cn-c:9000"
+	// opsCnD is a fourth CN, outside the fixture: only the ReplaceCntlr
+	// cases that gain a cntlr on a CN of its own write it.
+	opsCnD = "cn-d:9000"
 
 	opsExtSize    = uint64(1) << 30
 	opsBlockSize  = uint64(1) << 20
@@ -416,6 +419,37 @@ func (e *opsEnv) cnCand(addrPort string) Cand {
 		Location: cn.GetLocation(),
 		FreeExt:  cn.GetFreeExtCnt(),
 	}
+}
+
+// otherCntlrAddrs is the CN of every cntlr of the fixture SP but oldId, in
+// cntlr_id_list order: the plan a caller replacing oldId scans against.
+func (e *opsEnv) otherCntlrAddrs(oldId uint64) []string {
+	e.t.Helper()
+	var addrs []string
+	for _, cntlrId := range e.spConf().GetCntlrIdList() {
+		if cntlrId != oldId {
+			addrs = append(addrs, e.cntlr(cntlrId).GetAddrPort())
+		}
+	}
+	return addrs
+}
+
+// gainCntlr commits one more standby of the fixture SP on addrPort, as a
+// gateway CreateCntlr would, id from next_id: the cntlr a snapshot taken
+// before it does not hold. Only the records ReplaceCntlr reads are written.
+func (e *opsEnv) gainCntlr(addrPort string) uint64 {
+	e.t.Helper()
+	conf := e.spConf()
+	cntlrId := SpNextId(conf)
+	conf.NextId = cntlrId + 1
+	conf.CntlrIdList = append(conf.GetCntlrIdList(), cntlrId)
+	mustPut(e.t, e.cli, CntlrKey(e.cid, opsSpId, cntlrId), &pb.Cntlr{
+		AddrPort:   addrPort,
+		NvmeTrConf: opsTrConf(addrPort),
+		CntlidSlot: 2,
+	})
+	mustPut(e.t, e.cli, SpConfKey(e.cid, opsSpName), conf)
+	return cntlrId
 }
 
 // setDeleting marks the fixture SP as being deleted (AR3 suppression).
@@ -2359,7 +2393,7 @@ func TestReplaceCntlr(t *testing.T) {
 	}
 	newId, err := ReplaceCntlr(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
-		opsCntlrB, newCn, false, now,
+		opsCntlrB, newCn, []string{opsCnA}, false, now,
 	)
 	if err != nil {
 		t.Fatalf("ReplaceCntlr: %v", err)
@@ -2463,7 +2497,7 @@ func TestReplaceCntlrSolePrimary(t *testing.T) {
 	now := uint64(1000 + common.DefaultCntlrUnhealthy)
 	newId, err := ReplaceCntlr(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
-		opsCntlrA, env.cnCand(opsCnC), true, now,
+		opsCntlrA, env.cnCand(opsCnC), nil, true, now,
 	)
 	if err != nil {
 		t.Fatalf("ReplaceCntlr: %v", err)
@@ -2579,6 +2613,36 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			reason: ReasonCandidateChanged,
 		},
 		{
+			// A cntlr the gateway committed after the snapshot the pick was
+			// planned from, on a CN of its own: the pick may share its
+			// failure domain, which only the plan's list can tell.
+			name: "a cntlr the plan did not hold",
+			setup: func(env *opsEnv) Cand {
+				env.setCntlrErr(opsCntlrB, 1000)
+				env.putCn(opsCnD, 803, 3, opsCnFree)
+				env.gainCntlr(opsCnD)
+				return env.cnCand(opsCnC)
+			},
+			oldId:  opsCntlrB,
+			now:    now,
+			reason: ReasonCandidateChanged,
+		},
+		{
+			// The same gain on the pick's own CN is a stale plan too, and
+			// the plan check precedes the §6.4 one, so the next pass
+			// re-plans instead of reading a refusal.
+			name: "a cntlr the plan did not hold on the pick's cn",
+			setup: func(env *opsEnv) Cand {
+				env.setCntlrErr(opsCntlrB, 1000)
+				cand := env.cnCand(opsCnC)
+				env.gainCntlr(opsCnC)
+				return cand
+			},
+			oldId:  opsCntlrB,
+			now:    now,
+			reason: ReasonCandidateChanged,
+		},
+		{
 			name: "cn free_ext_cnt too low",
 			setup: func(env *opsEnv) Cand {
 				env.setCntlrErr(opsCntlrB, 1000)
@@ -2617,11 +2681,15 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newOpsEnv(t)
+			// The plan is the SP's other cntlrs as the fixture holds them,
+			// read before setup: what a caller's snapshot would have held.
+			plan := env.otherCntlrAddrs(tc.oldId)
 			cand := tc.setup(env)
 			revBefore := env.spRev()
+			nextBefore := env.spConf().GetNextId()
 			_, err := ReplaceCntlr(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
-				tc.oldId, cand, tc.asPrimary, tc.now,
+				tc.oldId, cand, plan, tc.asPrimary, tc.now,
 			)
 			precondition := wantPrecondition(t, err, opReplaceCntlr)
 			if precondition.Reason != tc.reason {
@@ -2633,13 +2701,35 @@ func TestReplaceCntlrPreconditions(t *testing.T) {
 			if !env.exists(CntlrKey(env.cid, opsSpId, tc.oldId)) {
 				t.Errorf("the old cntlr must still be there")
 			}
-			if got := env.spConf().GetNextId(); got != opsNextId {
-				t.Errorf("next_id: got %d, want %d", got, opsNextId)
+			if got := env.spConf().GetNextId(); got != nextBefore {
+				t.Errorf("next_id: got %d, want %d", got, nextBefore)
 			}
 			if got := env.spRev(); got != revBefore {
 				t.Errorf("SpRev: got %d, want %d", got, revBefore)
 			}
 		})
+	}
+}
+
+// TestReplaceCntlrChecksOnlyAGain is the other half of the plan check: a
+// cntlr the plan held that has left since is no reason to re-plan. The pick is
+// still off every CN and out of every location the SP's cntlrs hold, which
+// were all in the plan, and the room the departure freed is a candidate the
+// scan did not count on, like a CN that joins after it.
+func TestReplaceCntlrChecksOnlyAGain(t *testing.T) {
+	env := newOpsEnv(t)
+	env.setCntlrErr(opsCntlrB, 1000)
+	now := uint64(1000 + common.DefaultCntlrUnhealthy)
+	// The plan names cn-d, whose cntlr the SP no longer lists.
+	newId, err := ReplaceCntlr(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
+		opsCntlrB, env.cnCand(opsCnC), []string{opsCnA, opsCnD}, false, now,
+	)
+	if err != nil {
+		t.Fatalf("ReplaceCntlr: %v", err)
+	}
+	if got := env.cntlr(newId).GetAddrPort(); got != opsCnC {
+		t.Errorf("addr_port: got %q, want %q", got, opsCnC)
 	}
 }
 

@@ -262,12 +262,15 @@ CloneBmChunkBytes = 1 << 20
 // counts, so every factor of that shape is a ceiling constant and it IS
 // tripwirable: gateway/txnbudget_test.go's TestCreateStoragePoolBudget
 // asserts the arithmetic from them. The headroom is thin in the DN
-// dimension — one more key read or written per DN costs 128 compares. The
-// sp drain's D2 batch, 486 compares at the maximum shape (dnv-worker.md
-// §11.6), is the SECOND bounded transaction this number has to cover and no
-// longer the one that sizes it. DeleteThinDevice stays below both whatever
-// the td count, 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 compares at the
-// ceilings (TestDeleteThinDeviceBudget): its deciding STM commits having
+// dimension — one more key read or written per DN costs 128 compares.
+// Other bounded transactions exceed etcd's default 128 too, without sizing
+// this number: the sp drain's D2 batch, 486 compares at the maximum shape
+// (dnv-worker.md §11.6), and the created flip's,
+// 2 x MaxFlipCreatedPerTxn + 2 = 514 compares (dnv-worker.md RW19,
+// TestFlipCreatedTxnBudget). DeleteThinDevice stays below all three — the
+// create, D2 and the flip — whatever the td count,
+// 7 + MaxSsCntPerSp + MaxCloneCntPerSp = 75 compares at the ceilings
+// (TestDeleteThinDeviceBudget): its deciding STM commits having
 // read no td but its target, because the walk for uncreated snapshots is a
 // read-only plan outside it, verified by the pool's identity and revision
 // (§5.6). While the walk sat inside it a full pool's delete cost at least
@@ -565,8 +568,10 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   each pick's exact capacity key (`Cand.BinIdx/FreeExt/AddrPort`) and fails
   `ErrPrecondition{"candidate changed"}` when one is gone — CreateStoragePool's
   STM also when its `cluster_id` or leg count no longer matches the scan's
-  (§5.4), CreateMigration's when the group, as it reads it, has gained a DN
-  since the read its scan was planned from (§5.10); on that error — and only
+  (§5.4), CreateCntlr's when the SP, as it reads it, has a cntlr on a CN the
+  read its scan was planned from did not hold (§5.5), CreateMigration's when
+  the group, as it reads it, has gained a DN since the read its scan was
+  planned from (§5.10); on that error — and only
   that error — re-scan and retry until `ctx` ends (then `ABORTED`).
   `DeleteThinDevice` runs the same loop without allocating: its scan is the
   plan's walk for uncreated snapshots, and its STM fails candidate-changed
@@ -900,9 +905,20 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
   cntlrs (§6.4) and, at §6.5's tier 1, their `location`s, which the plain
   pre-reads that plan each round take from those CNs' `CnConf`s —
   `cnLocations`, sound outside the STM because a location never changes
-  (§8.3); tier 2 drops the location exclusion when tier 1 finds no CN).
+  (§8.3) and because the STM re-checks the plan's cntlrs, below; tier 2
+  drops the location exclusion when tier 1 finds no CN).
   STM: resolve; token; slot in
-  `cntlid_slot_list` and unused ⇒ else `INVALID_ARGUMENT`; mint `cntlr_id`;
+  `cntlid_slot_list` and unused ⇒ else `INVALID_ARGUMENT`; the SP as this
+  STM reads it has a cntlr on a CN the round's plan did not hold ⇒
+  candidate changed (GW9: the round planned its CN exclusion and tier-1
+  locations from the cntlrs as it read them, and a cntlr committed since —
+  by another `CreateCntlr`, or the worker's AR7 replacement — was not
+  among them, so the pick may sit in its failure domain behind a capacity
+  key that still verifies, or on its very CN when the scan ran after its
+  charge; the next round plans from the SP with that cntlr in it; only a
+  gain is checked, and only a token-less request meets one here, since the
+  gain's `SpRev` bump fails a sent token first); re-verify the pick's
+  capacity key; mint `cntlr_id`;
   put `Cntlr{addr_port, nvme_tr_conf (the CN's), cntlid_slot,
   primary: false, disabled: false}`; append `cntlr_id_list`; CN bookkeeping +
   `BumpCnRev`; append the CN's `nvme_tr_conf` to **every** `CdcEntry` of the
@@ -1498,6 +1514,14 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    the scan then offers through another DN, the next round leaves that
    domain; the first round's pick is a draw between that other DN and one in
    a domain of its own, so the case repeats against fresh fixtures.
+   CreateCntlr's re-check of its round's plan against the SP's cntlrs is
+   pinned the same way, with a second token-less `CreateCntlr` run inside a
+   token-less one: once its scan has read the index, on the rack-mate of the
+   CN that scan offers it, and once inside its plan, on the CN its scan then
+   offers. `cn_batch_size` is 1 and every CN holds a different free count,
+   so every draw is forced; in both cases the first request scans exactly
+   twice and lands on a CN, and in a location, of its own, and each CN is
+   charged once.
    Clone bitmaps get three of their own, all on the
    PAIR addressing of §5.8: the appends `(slice 5, bm 0)`, `(slice 0, bm 3)`
    and `(slice 2, bm 1)` land in three chunk keys holding exactly the bytes

@@ -603,11 +603,15 @@ func grpDnLocations(
 // exclusion of CreateCntlr (§6.5), which keeps a new cntlr out of the
 // LOCATIONS the SP's cntlrs occupy and not merely off their CNs.
 //
-// grpDnLocations' CN twin, and sound before the transaction for the same
-// reason: `location` is immutable in v1 — CreateControllerNode defaults it to
-// addr_port and UpdateControllerNodeDisabled is the only later CN mutator
-// (§8.3) — so the pick's in-STM re-validation stays address-based. A CN whose
-// conf is gone contributes no location: it is excluded by address anyway.
+// grpDnLocations' CN twin. Reading it before the transaction is sound for two
+// reasons together. `location` is immutable in v1 — CreateControllerNode
+// defaults it to addr_port and UpdateControllerNodeDisabled is the only later
+// CN mutator (§8.3) — so no location read here goes stale. And CreateCntlr's
+// STM drops the pick when the SP, as it reads it, has a cntlr on a CN outside
+// addrs: a cntlr committed after this read is the only way the set of domains
+// to exclude can grow, and immutability alone says nothing about that. Both
+// checks are therefore address-based. A CN whose conf is gone contributes no
+// location: it is excluded by address anyway.
 func cnLocations(
 	ctx context.Context,
 	cli *etcdutil.Client,

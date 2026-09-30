@@ -555,6 +555,9 @@ MD5. **Allocator** (`architecture.md` §6.3/§6.4 verbatim). `FindDnCandidates(c
      `Get`-ing the exact capacity key the scan saw (`Cand.FreeExt`): gone ⇒
      `ErrPrecondition{"candidate changed"}` ⇒ the caller rescans and retries
      the scan + STM as one unit (`architecture.md` §8.4 step 2).
+     `ReplaceCntlr` fails with the same reason when the plan the scan ran
+     against has moved: a surviving cntlr of the SP sits on a CN outside the
+     `spCnAddrs` it is handed (MD6).
 
 MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one
      per `MaxFlipCreatedPerTxn` candidates, RW19), re-validates every
@@ -580,7 +583,7 @@ MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one
      | `FlipCreated(cid, shard, spId, cands []TdRef{Name, TdId}) (written []TdRef)` | — | per §10.3, one STM per `MaxFlipCreatedPerTxn` candidates in list order (RW19): skip a candidate whose key is absent, whose `td_id` differs, or already `created`; set the rest; each STM bumps once iff it wrote; the return lists the tds actually flipped, as above — on an error, those of the STMs that committed before the failing one, which the sp worker does not log (RW19) |
      | `Failover(cid, shard, spId, spName, oldId, newId, now)` | SP not `deleting`, `sp_level < NO_THINPOOL`; `old.primary`; and, unless `old.disabled` (a disabled primary is the AR5 trigger on its own, §8.6, and waits out no threshold), `old.err_epoch != 0` (`ErrPrecondition` "old cntlr is healthy and enabled") and `now − old.err_epoch ≥` (`old.settling && cntlr_unhealthy > primary_unhealthy ? cntlr_unhealthy : primary_unhealthy`) — "primary_unhealthy not reached" resp. "cntlr_unhealthy not reached for a settling primary" (AR5, *amended 2026-09-26*); `new` is `!primary && !disabled && err_epoch == 0` **and** has the smallest `cntlr_id` among all such cntlrs | flip both `primary` booleans; set `new.settling`, clear `old.settling` (HL2); bump `SpRev` (§10.4) |
      | `GrowSlice(cid, shard, spId, spName, expectRev, sliceId, isMeta, poolTotal, cc, legs []Cand) (grpId)` | SP checks as above; `expectRev` as in the preamble; the SP's `bdev_conf` and `cc` both valid (`architecture.md` §7 — the two checks sit at the top of the STM, ahead of its first `Put`, so a refusal aborts with `ErrPrecondition` and commits nothing); slice exists; the slice's list of that kind below `common.MaxGrpCntPerSlice` groups (`GrpListFull`, reason `grp_list_full` — `architecture.md` §4.3/§8.5; checked ahead of the sizing, so it holds for a meta grow whatever the ladder says); meta ladder not at the 16 GiB cap; no grow of that kind pending — AR6's rule re-applied in-STM, judged against `poolTotal` (the worker passes the primary's reported total; the gateway passes `math.MaxUint64`, so a user-driven grow is never "pending" — architecture.md §8.5, gateway.md §5.4); every picked DN allocatable, `free ≥ ext_cnt`, capacity key unchanged; every cntlr's CN `free ≥ ext_cnt` | `ext_cnt` = first data group's (`is_meta = false`) or the ladder value (`architecture.md` §8.5); `meta_blocks`/`data_blocks` per §3.6 with the SP's `block_size`/`bitmap_chunk_block_cnt` and `cc.extent_size`, each used as stored; ids from `SpConf.next_id`; new `Group` with one `Leg`+`Side` per pick (`leg_idx` 0…, `cntlid_slot = cntlid_slot_list[0]`, `provisioned = false`, `addr_port`/`nvme_tr_conf` from the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, `CnRev` bump each); `Slice`, `SpConf`; bump `SpRev` |
-     | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every existing `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in — a missing one is skipped, not rebuilt as the gateway's `CreateCntlr` and `DeleteCntlr` rebuild it (`architecture.md` §8.6); `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
+     | `ReplaceCntlr(cid, shard, spId, spName, oldId, newCn Cand, spCnAddrs, asPrimary, now) (newId)` | SP checks; `old.err_epoch != 0`, `now − old.err_epoch ≥ cntlr_unhealthy`, `!old.disabled`; if `old.primary`: `asPrimary` and no failover candidate exists; every cntlr of the SP but `old` on a CN in `spCnAddrs`, the plan the pick was scanned against (else "candidate changed", MD5: a cntlr committed after the caller's snapshot, whose CN and domain the scan could not exclude; only a gain is checked, and ahead of "not hosting a cntlr of this SP"); `newCn` allocatable, `free ≥` SP footprint (Σ `ext_cnt` over all groups), not hosting a cntlr of this SP, capacity key unchanged | delete old `Cntlr` (its CN, if the record still exists: pointer out, footprint back, capacity, `CnRev`); new `Cntlr{cntlid_slot = old's, primary = asPrimary, disabled = false, settling = asPrimary}` (`settling` *amended 2026-09-26*, HL2) with `cntlr_id = next_id++` (new CN: pointer in, footprint out, capacity, `CnRev`); every existing `CdcEntry` of the SP (`ss_id` via each `Subsystem` in `nqn_list`): old `nvme_tr_conf` out, new in — a missing one is skipped, not rebuilt as the gateway's `CreateCntlr` and `DeleteCntlr` rebuild it (`architecture.md` §8.6); `SpConf`; bump `SpRev` (§8.6 ×2 in one STM) |
      | `CreateSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, dn Cand, cc) (legId)` | SP checks; `expectRev` as in the preamble; group exists and is `RedundMdRaid1`; `len(spare_leg_list) < MaxSpareLegPerGrp`; no spare of the group has a side still `provisioned == false` — AR8 step 3's hold re-applied in-STM, which fails a second owner's create for one repair while the first owner's spare is still unprovisioned (AR2; `ErrPrecondition` "spare_unprovisioned"); `dn` hosts no leg/spare of the group, allocatable, `free ≥ group.ext_cnt`, capacity key unchanged | `Leg{leg_id, leg_idx = 1 + max idx over both lists, Side{provisioned = false, cntlid_slot = cntlid_slot_list[0], …}}` appended to `spare_leg_list`; DN bookkeeping + `DnRev`; `Slice`, `SpConf`; bump `SpRev` (§8.12) |
      | `SwitchSpareLeg(cid, shard, spId, spName, expectRev, sliceId, grpId, spareLegId, targetLegId)` | SP checks; `expectRev` as in the preamble; spare in `spare_leg_list`, target in `leg_list`; each has exactly one side ("spare leg has no single side" / "target leg has no single side": a second side is a migration's destination, and a migrating leg is neither promoted nor parked, `architecture.md` §8.12); the spare's side `provisioned == true` | the spare takes the target's position in `leg_list`; the target is appended to `spare_leg_list`; bump `SpRev` (§8.12) |
      | `DrainSpCntlrs(cid, shard, spId, spName) (removed int)` | the DRAIN checks of §11.6 (SPD2: `SpConf` exists, `sp_id` unchanged, `deleting == true` — `sp_level` is deliberately not consulted); every listed `Cntlr` key exists | delete every `Cntlr`; per DISTINCT CN the SP footprint back, pointer out, capacity, one `CnRev` bump (a CN whose record is gone is skipped, as in `ReplaceCntlr`); `SpConf` with an empty `cntlr_id_list`; bump `SpRev`. An already-empty list is a no-op that writes and bumps nothing |
@@ -2079,15 +2082,20 @@ AR7. When a cntlr has `err_epoch != 0`, `now − err_epoch ≥ cntlr_unhealthy`,
      domain), and
      `architecture.md` §6.5's tier 2 rescanning without them when tier 1
      finds no CN; pick one; internal
-     `ReplaceCntlr(old, pick, asPrimary = old.primary)` — same `cntlid_slot`,
-     `primary = true` and `settling = true` only in the sole-primary
-     variant, `disabled = false`, `err_epoch = 0` (`settling` *amended
-     2026-09-26*, HL2: a primary replacement is created settling, as a
+     `ReplaceCntlr(old, pick, spCnAddrs, asPrimary = old.primary)` — same
+     `cntlid_slot`, `primary = true` and `settling = true` only in the
+     sole-primary variant, `disabled = false`, `err_epoch = 0` (`settling`
+     *amended 2026-09-26*, HL2: a primary replacement is created settling, as a
      promoted primary is, and AR5 judges it by the settling threshold until
      it reports its stack built and clean as primary — the failover
      ping-pong). The old CN is
      black-listed even when the node itself is healthy: its cntlr is what
-     failed. None ⇒ `reaction skipped`.
+     failed. None ⇒ `reaction skipped`. The op is handed the `spCnAddrs`
+     the scan was, and its STM refuses the pick as `candidate changed` (MD5,
+     MD6) when the SP holds a cntlr on a CN outside it — one the gateway's
+     `CreateCntlr` committed after the pass's snapshot, whose CN and domain
+     the scan could not exclude: `reaction skipped` (`candidate changed`),
+     and the next pass plans from a snapshot that holds it.
 
      The sole-primary variant takes AR5's first refusal: a primary whose
      latest report has `ERROR` rows of HL2's shared-state class alone is
@@ -2985,7 +2993,11 @@ after one.
   seam, the production adapter handing that exclusion to `model`'s two-tier
   scan over the real etcd (`TestReactionCnScanThroughModel`, `etcd_test.go`:
   tier 1 skips the survivor's rack-mate, and tier 2 still places when both
-  racks hold a survivor); AR7's refusal
+  racks hold a survivor); AR7's plan handed to the op whole — the
+  `spCnAddrs` the scan was given (`TestReactionReplaceCntlrBlackList`), and
+  in `model` `ReplaceCntlr` refusing the pick as `candidate changed` when
+  the SP holds a cntlr the plan did not, on a CN of its own or on the
+  pick's, and replacing when a cntlr the plan held has left; AR7's refusal
   (`TestReactionSharedStateErrorIsNotReplaced`: a primary with no failover
   candidate, due for replacement, whose report fails only in the stack of
   a created td whose thin id the pool no longer holds is not replaced and
