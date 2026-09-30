@@ -111,7 +111,8 @@ Appendix B carries the cross-component one as **[D17]**.
     at most one DRAIN step per pass instead, at any level (§11.6).
 16. **Sole-cntlr SPs are repaired** (AR7): a primary with no failover
     candidate is replaced by a new primary on a fresh CN with the same
-    `cntlid_slot`.
+    `cntlid_slot` — unless its report is HL2's shared state, which a
+    replacement would read alike.
 17. **Spare-list-full is an operator event** (AR8): the worker never deletes
     a parked leg.
 18. **Trace ids carry the worker's identity** (RW10): `"{seed[:8]}-{NewTraceId()}"`,
@@ -1515,12 +1516,15 @@ HL2. **SP objects (sp role).** Written through `SetCntlrErrEpoch` /
      brings the td back: an operator does (`architecture.md` Appendix D).
      Every other `ERROR` row is the cntlr's **own**. Both classes set
      `Cntlr.err_epoch` as the table says — the row stays visible and the
-     epoch set — and the class steers AR5 alone: a report whose `ERROR` rows
-     are all shared-state is no failover trigger. Only a converge's report
-     names the id. A Check round's probe finds the volume absent and reads
-     it `MISSING` `""`, while the raid0 over it still reads `ERROR`, so its
-     report of the same loss holds own rows only, and it is AR5's second
-     refusal that keeps the role from moving back and forth over them.
+     epoch set — and the class steers AR5 and AR7 alone: a report whose
+     `ERROR` rows are all shared-state is no failover trigger, nor a
+     replacement one for a primary with no failover candidate. Only a
+     converge's report names the id. A Check round's probe finds the volume
+     absent and reads it `MISSING` `""`, while the raid0 over it still reads
+     `ERROR`, so its report of the same loss holds own rows only, and it is
+     AR5's second refusal that keeps the role from moving back and forth
+     over them; AR7 has no such refusal, and replaces a primary with no
+     failover candidate over them (Appendix B).
 
      **The settle** (*added 2026-09-26*, §0 item 20). `Cntlr.settling` is
      set by the op that makes the cntlr primary (`Failover`, a primary
@@ -1797,9 +1801,10 @@ AR1. **Cadence and inputs.** The coordinator runs one pass per SP every
      `SnapshotRev` (EU4) of `SpConf`, every `Cntlr` and every `Slice` of the
      SP — the records the reactions read, and the ones this worker itself
      writes the `err_epoch`s into — and the sub-objects `SpConf` lists
-     (AR5's row classes attribute rows through its tds, subsystems,
-     transfers and clones), plus the in-memory latest `CntlrInfo` of the
-     **primary** cntlr (pool usage, spare readiness, AR5's rows), `now`
+     (AR5's and AR7's row classes attribute rows through its tds,
+     subsystems, transfers and clones), plus the in-memory latest
+     `CntlrInfo` of the **primary** cntlr (pool usage, spare readiness,
+     AR5's and AR7's rows), `now`
      (unix seconds) and the one record kept from an earlier pass that a
      pass decides by: the coordinator's record of the last failover it
      applied (AR5's second refusal). The snapshot re-seeds the SP's health
@@ -1863,7 +1868,8 @@ AR2. **One action per SP per pass** — "action" meaning a *reaction*
      operator's intervention, for a lost thin id; AR6's `grow_pending`,
      `grp_list_full`, `meta_ladder_cap` and `no_data_group` (each can hold
      indefinitely — a grow deferred on the CN, an `architecture.md` §8.5 ceiling — and must not disable
-     AR7/AR8 for the duration); and AR8's `leg_has_two_sides`,
+     AR7/AR8 for the duration); AR7's `shared_state`, which holds as long
+     as AR5's and moves the scan to the next cntlr; and AR8's `leg_has_two_sides`,
      `spare_list_full`, step 3's `spare_unprovisioned` and step 2's wait for
      a pending spare (`spare_pending`), which move the scan to the next
      candidate leg — a spare that cannot be connected stays pending until its
@@ -1956,23 +1962,24 @@ AR5. When the primary cntlr is `disabled`, or has `err_epoch != 0` and `now −
      reads the flag. A settling primary with no candidate reaches the
      no-candidate skip only at the longer of the two thresholds, and AR7's
      sole-primary variant, which waits `cntlr_unhealthy` either way,
-     replaces it; the replacement is created settling in turn.
+     replaces it unless the first refusal below holds it; the replacement
+     is created settling in turn.
 
      A primary unhealthy past its threshold is not failed over where a
      failover cannot help, or is presumed not to (the second refusal
      compares rows, not causes) — its `err_epoch` stays set, and every pass
      logs why and goes on (AR2), as AR8 does for what only an operator can
-     repair; a primary with no candidate is still replaced by AR7's
-     sole-primary variant at `cntlr_unhealthy`, in a pass that logs the
-     refusal (Appendix B):
+     repair; a primary with no candidate is replaced by AR7's sole-primary
+     variant at `cntlr_unhealthy`, except over a report the first refusal
+     holds (AR7, Appendix B):
 
      * **Shared state.** Every `ERROR` row of its latest report that HL2
        judges it by (every map but `leg_id_to_leg`) is of HL2's
        shared-state class: `reaction skipped` (`shared_state`, with the
        primary's `cntlr_id` and the smallest such `td_id`), judged ahead of
        the candidate, so a primary with none logs this rather than
-       `no candidate`. AR7 still replaces such a primary at
-       `cntlr_unhealthy` (Appendix B). The next primary would read the same
+       `no candidate`; nor does AR7 replace such a primary once it is
+       due for replacement (AR7). The next primary would read the same
        rows from the same pool. Failing over moved the host paths and
        nothing else, and the promoted cntlr, never settling, lost the role
        again at `cntlr_unhealthy` — to the peer whose standby report had
@@ -2081,6 +2088,30 @@ AR7. When a cntlr has `err_epoch != 0`, `now − err_epoch ≥ cntlr_unhealthy`,
      ping-pong). The old CN is
      black-listed even when the node itself is healthy: its cntlr is what
      failed. None ⇒ `reaction skipped`.
+
+     The sole-primary variant takes AR5's first refusal: a primary whose
+     latest report has `ERROR` rows of HL2's shared-state class alone is
+     not replaced — `reaction skipped` (`shared_state`, with its
+     `old_cntlr_id` and the smallest such `td_id`), judged once AR7's
+     threshold has run out, whether or not AR5's has, on the report AR5
+     judges, the info the pass holds for the primary (AR1, HL5). The
+     replacement would read the same rows from the same pool and be
+     replaced in turn once per `cntlr_unhealthy`, for as long as the td
+     stayed lost. The skip moves the scan to the next cntlr,
+     so a standby due for replacement is still replaced, and with none the
+     pass goes on (AR2). The report names the lost id only while it is a
+     converge's (HL2). A Check reply carries an info when the probe's view
+     changed since its stream last sent one, and always on a fresh stream's
+     first probe (HL5, `architecture.md` §9.7), so a converge's report
+     stays the one held only until that view changes or the stream is
+     replaced, as by a round timeout, a broken stream, a desired change
+     that overtakes a round (RW6), or a worker restart or shard handoff. A
+     primary whose held report is a probe's, whose rows a dead stream has
+     marked `UNKNOWN` (HL1), or whose child holds no report yet is replaced
+     (Appendix B). A standby's report is not read here, and carries no thin
+     row (`cnagent.md` CN14), so its `ERROR` rows are its own. Like AR5's
+     refusals this one reads a report, which no STM sees, so
+     `model.ReplaceCntlr` does not re-validate it.
 
 ### 11.5 Leg repair
 
@@ -2830,7 +2861,19 @@ after one.
   the role moves at most once, the primary's `err_epoch` stays set and
   at least one pass past its threshold logs `shared_state` or
   `same_error`, where the role used to go back and forth once per window,
-  the promoted cntlr never settling.
+  the promoted cntlr never settling; `TestASharedErrorDoesNotReplaceTheCntlr`
+  (AR7, HL2) — on a live coordinator whose primary has no failover
+  candidate and whose pool has lost a created td's thin id, the primary's
+  cn agent answers its first Check round a revision behind, its probe
+  reading the volume `MISSING`, the re-sync's converge names the id, and
+  every later probe, unchanged, comes back without an info (HL5), so the
+  converge's report is the one held: across three windows of
+  `cntlr_unhealthy` the primary is never replaced (no reaction op at all),
+  no `SyncupCntlr` follows the one re-sync, its `err_epoch` stays set and
+  a pass logs `replace_cntlr` / `shared_state` with its id and the td's,
+  where it used to be replaced on every pass past the threshold; with an
+  own row beside the lost td's it is replaced as primary, and not before
+  `cntlr_unhealthy`.
 * **health.go** — the HL1/HL2 tables row by row; transitions-only writes;
   standby leg rows ignored; the DN `err_epoch` write failing on a missing
   and on an invalid cluster conf alike; `TestHealthSettle` (*added
@@ -2942,7 +2985,21 @@ after one.
   seam, the production adapter handing that exclusion to `model`'s two-tier
   scan over the real etcd (`TestReactionCnScanThroughModel`, `etcd_test.go`:
   tier 1 skips the survivor's rack-mate, and tier 2 still places when both
-  racks hold a survivor); AR8 cases 1 and 2, the
+  racks hold a survivor); AR7's refusal
+  (`TestReactionSharedStateErrorIsNotReplaced`: a primary with no failover
+  candidate, due for replacement, whose report fails only in the stack of
+  a created td whose thin id the pool no longer holds is not replaced and
+  logs `shared_state` with its id and the td's, the pass going on to AR8,
+  or the scan to a standby due for replacement, which is replaced; short
+  of `cntlr_unhealthy` AR7 logs nothing, nor for a primary that has a
+  failover candidate, whose pass logs AR5's `shared_state` alone, nor for
+  a disabled one with none, whose pass logs AR5's `no candidate` alone; an
+  own row beside the stack, a probe's report, a primary read unreachable
+  after the converge's report and one whose child has reported nothing each
+  get it replaced as primary; the refusal, its primary-only scope, its
+  place after the disabled check, its place after the candidate check and
+  the scan going on each mutation-tested);
+  AR8 cases 1 and 2, the
   readiness and pending-spare rules, two-sides skip, `RedundNone` skip,
   `spare_list_full`, the `spare_unprovisioned` hold (no scan, its own group
   only) and a second owner's in-STM refusal logged under the same reason
@@ -3936,7 +3993,7 @@ the pull hint `jq 'select(.trace_id=="…")'` per log. Debris stays.
 | HL1-HL6 | B; HL2's settle by D steps 2, 4 and 12 (*added 2026-09-26*) |
 | BM1-BM5 | C |
 | BM6 | unit tests only (§13, `TestPushFailureIsLoggedOnly`): case C step 6's forced code rejects the `SyncupSide` itself, so no push is attempted there, let alone failed |
-| AR1-AR9 | D; AR5's two refusals (HL2's row classes) are unit tests only (§13): case D step 12 only keeps clear of the second |
+| AR1-AR9 | D; AR5's two refusals and AR7's refusal (HL2's row classes) are unit tests only (§13): case D step 12 only keeps clear of AR5's second, and case D step 4 fails its sole primary on a row of its own |
 | SPD1-SPD14 | G; SPD1/SPD14's tripwires and SPD2's guards are unit tests (§13) |
 | CLD1-CLD12 | G steps 5-6; CLD1/CLD3's gateway halves and CLD2's guards are unit tests (§13), and the gateway suite owns the latch (gateway.md §10.11 step 13) |
 | MD2-MD6 (through the worker and `workerctl`) | every case; MD6 ops by D |
@@ -4220,9 +4277,25 @@ durable, so nothing is lost — convergence is delayed, not skipped
   not causes: a new primary whose own fault fails only rows the old primary
   failed on is held as well, for as long as that fault lasts or until an
   operator moves the role, every pass logging why. AR7's sole-primary
-  variant takes neither refusal: the primary of an SP with no failover
-  candidate that reports a lost thin id is replaced at `cntlr_unhealthy`, by
-  a cntlr that reads the same rows and is replaced in turn.
+  variant takes the first refusal alone, judged on the same report (AR7).
+  It holds the primary of an SP with no failover candidate only while the
+  report the coordinator holds for it is a converge's that names the lost
+  id, which lasts until a Check reply carries an info — as one does as
+  soon as the probe's view differs from the last one its stream sent, and
+  on a fresh stream's first probe (HL5, `architecture.md` §9.7) — or a
+  dead stream marks its rows `UNKNOWN` (HL1): after a re-sync over a view
+  the stream had already sent — as when an agent restart left it a
+  revision behind — it lasts until that view changes or the stream is
+  replaced, as by a round timeout, a broken stream, a desired change that
+  overtakes a round (RW6), or a worker restart or shard handoff, whose new
+  child holds no report until a reply carries one. It does not break the
+  loop it is meant for: a replacement's first probe after its converge
+  goes out on a stream that has sent no info yet, so the report held for
+  it is a probe's, which names no id,
+  and unless a later re-sync puts a converge's back in its place it is
+  replaced at `cntlr_unhealthy` by a cntlr that reads the same rows and is
+  replaced in turn, once per window. AR7 has no counterpart of the second
+  refusal.
 * **`RedundNone` legs have no automatic repair**: no spare can exist, and
   the migration that could have moved a readable-but-sick side is an
   operator's tool (`CreateMigration`), not a reaction (§0 item 12).
@@ -4268,4 +4341,6 @@ durable, so nothing is lost — convergence is delayed, not skipped
   own, once per pass rather than per object — AR5's `reaction skipped` /
   `no candidate`, say, for as long as a primary due for failover has no
   eligible candidate, or `shared_state` / `same_error` for as long as the
-  error that holds one lasts.
+  error that holds one lasts, and AR7's `shared_state` once the primary it
+  holds is due for replacement — beside AR5's, or alone while a
+  `primary_unhealthy` longer than `cntlr_unhealthy` has not yet run out.

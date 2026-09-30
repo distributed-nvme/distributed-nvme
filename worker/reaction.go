@@ -31,7 +31,10 @@
 //     no_data_group (AR6 scopes pending to "no grow OF THAT KIND", and all
 //     four can hold indefinitely — a grow deferred on the CN, a §8.5
 //     ceiling — so ending the pass would disable AR7 and AR8 for as long as
-//     they do); and AR8's leg_has_two_sides, spare_list_full,
+//     they do); AR7's shared_state, a primary it declines to replace, which
+//     lasts as long as AR5's and moves the scan to the next cntlr (an
+//     unhealthy standby is still replaced, and AR8 still runs); and AR8's
+//     leg_has_two_sides, spare_list_full,
 //     spare_unprovisioned and step 2's "wait for the pending spare", which
 //     move the scan to the next candidate leg (a migration lasts hours, only
 //     an operator frees a spare slot, §0 item 17, a spare whose DN failed
@@ -84,8 +87,9 @@ const (
 const (
 	// reasonNoCandidate is AR5's and the allocator's "nothing to pick".
 	reasonNoCandidate = "no candidate"
-	// reasonSharedState is AR5's first refusal: the primary's every ERROR
-	// row is HL2's shared-state class, which a failover cannot escape.
+	// reasonSharedState is AR5's first refusal, and AR7's: the primary's
+	// every ERROR row is HL2's shared-state class, which neither a failover
+	// nor a replacement can escape.
 	reasonSharedState = "shared_state"
 	// reasonSameError is AR5's second refusal: the primary fails only on rows
 	// the candidate failed on when the last failover took the role from it.
@@ -541,7 +545,8 @@ type spPass struct {
 	primaryId uint64
 	primary   *pb.Cntlr
 	// info is the primary's latest CntlrInfo (pool usage for AR6, spare
-	// readiness for AR8); nil when its child has never reported one.
+	// readiness for AR8, HL2's row classes for AR5 and AR7); nil when its
+	// child has never reported one.
 	info *pb.CntlrInfo
 	// failoverCand is AR5's election, computed once because AR7's
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
@@ -805,8 +810,8 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		// clean — once per window, for as long as the td stayed lost. The
 		// err_epoch stays set, and every pass says why AR5 moves nothing, as
 		// AR8 does for what only an operator can repair, and goes on (AR2) —
-		// to AR7, which still replaces a primary with no candidate at
-		// cntlr_unhealthy (dnv-worker.md Appendix B).
+		// to AR7, which declines to replace a primary with no candidate on
+		// the same report (replaceTarget).
 		if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
 			w.reactionSkipped(ctx, reactionFailover, reasonSharedState,
 				slog.Uint64("cntlr_id", p.primaryId),
@@ -1204,8 +1209,11 @@ func growExtCnt(
 // ---------------------------------------------------------------------------
 
 // tryReplaceCntlr is AR7. It reports whether the pass ends here.
+//
+// A primary its shared_state holds (replaceTarget) does NOT end the pass:
+// see the file comment, ambiguity (1).
 func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
-	oldId, old := replaceTarget(p)
+	oldId, old := w.replaceTarget(ctx, p)
 	if old == nil {
 		return false
 	}
@@ -1253,8 +1261,13 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 // replaceTarget is AR7's trigger: the cntlr with the smallest cntlr_id that
 // has been unhealthy for cntlr_unhealthy, is not disabled (AR3), and is
 // either not the primary or is the primary of an SP with no failover
-// candidate — the sole-cntlr SP of §0 item 16.
-func replaceTarget(p *spPass) (uint64, *pb.Cntlr) {
+// candidate — the sole-cntlr SP of §0 item 16 — unless its report is HL2's
+// shared state (below): that primary is recorded and passed over, and the
+// scan goes on.
+func (w *spWorker) replaceTarget(
+	ctx context.Context,
+	p *spPass,
+) (uint64, *pb.Cntlr) {
 	for _, cntlrId := range sortedIds(p.state.Conf.GetCntlrIdList()) {
 		cntlr, ok := p.state.Cntlrs[cntlrId]
 		if !ok {
@@ -1272,6 +1285,24 @@ func replaceTarget(p *spPass) (uint64, *pb.Cntlr) {
 			// same_error); replacing it as primary would fail
 			// model.ReplaceCntlr's own precondition anyway.
 			continue
+		}
+		// AR7's refusal, judged as AR5's first (sharedStateTds): a primary
+		// whose every ERROR row belongs to the stack of a created td whose
+		// thin id the pool no longer holds is not replaced. The replacement
+		// would read the same rows from the same pool and be replaced in turn
+		// once per cntlr_unhealthy, for as long as the td stayed lost. The
+		// report is the one the pass holds, the primary's latest (AR1), which
+		// names the id only while it is a converge's (dnv-worker.md Appendix
+		// B); no standby's is read, and none carries a thin row (cnagent.md
+		// CN14), so a standby's ERROR rows are its own.
+		if cntlrId == p.primaryId {
+			if tdIds := sharedStateTds(p.info, p.state); len(tdIds) != 0 {
+				w.reactionSkipped(ctx, reactionReplaceCntlr, reasonSharedState,
+					slog.Uint64("old_cntlr_id", cntlrId),
+					slog.Uint64("td_id", tdIds[0]),
+				)
+				continue
+			}
 		}
 		return cntlrId, cntlr
 	}

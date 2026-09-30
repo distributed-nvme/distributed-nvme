@@ -702,8 +702,8 @@ const thinMapLabel = "slice_id_to_dm_thin"
 // cntlrObservation applies the HL2 cntlr row to one CheckCntlr/SyncupCntlr
 // reply: any RES_STATUS_ERROR row of the latest known CntlrInfo OTHER than
 // leg_id_to_leg, whose rows belong to the legs (below). A row of either of
-// HL2's classes counts (sharedStateTds): the class steers AR5, not the
-// verdict, so the row stays visible and the epoch set.
+// HL2's classes counts (sharedStateTds): the class steers AR5 and AR7, not
+// the verdict, so the row stays visible and the epoch set.
 func cntlrObservation(code uint32, info *pb.CntlrInfo) (healthObs, string) {
 	if !accepted(code) {
 		return healthNone, ""
@@ -768,12 +768,13 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // ns-dev and the nvmet namespace of each of its namespaces, the three rows of
 // a transfer out of one of them, the three of a clone onto it. The pool lives
 // on the SP's legs, so whichever cntlr holds the primary role reads the same
-// rows, and no failover brings the td, or anything over it, back: an operator
-// does (architecture.md Appendix D). Every other ERROR row is the cntlr's own.
+// rows, and no failover or replacement brings the td, or anything over it,
+// back: an operator does (architecture.md Appendix D). Every other ERROR row
+// is the cntlr's own.
 // It returns those tds, ascending, when the info carries ERROR rows and every
 // one of them is of the shared-state class, and nil when one is the cntlr's
 // own or there is none. Both classes set Cntlr.err_epoch alike
-// (cntlrObservation): the class steers AR5 alone.
+// (cntlrObservation): the class steers AR5 and AR7 alone.
 func sharedStateTds(info *pb.CntlrInfo, state *model.SpState) []uint64 {
 	lost := make(map[uint64]bool)
 	for _, td := range state.Tds {

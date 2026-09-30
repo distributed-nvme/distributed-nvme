@@ -3248,7 +3248,10 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
 * `cntlr_unhealthy` (600 s): a cntlr stays unhealthy — a non-primary one, or the
   primary of an SP with no failover candidate (the sole-cntlr SP, or every other cntlr
   unhealthy or disabled; otherwise AR5 moves the role away first, or holds it where a
-  failover cannot help or is presumed not to) ⇒ replace it:
+  failover cannot help or is presumed not to), unless its report — a converge's, which
+  names the lost id — fails only in the stack of a created td whose thin id the pool
+  no longer holds, rows a replacement would read alike (`dnv-worker.md` AR7) ⇒
+  replace it:
   internal `DeleteCntlr` (skipping the enabled check) + internal
   `CreateCntlr` on a fresh CN — never the old cntlr's CN nor one hosting another cntlr
   of the SP, and at §6.5's tier 1 outside the `location`s of the SP's other cntlrs (the
@@ -4766,9 +4769,13 @@ exists.
   Appendix B: one failover in an SP of two cntlrs, one more after a restart or shard
   handoff of the worker that drives the SP or each time a new primary also fails a
   row of its own, and in a larger SP the role can first move on to a cntlr that has
-  not held it). An SP with no failover candidate still has its primary replaced over
-  it once per `cntlr_unhealthy`, each replacement reading the same rows (AR7's
-  sole-primary variant, `dnv-worker.md` Appendix B).
+  not held it). An SP with no failover candidate does not have its primary replaced
+  over a converge's report failing only in the td's stack either (`dnv-worker.md`
+  AR7), but only while that report is the latest the worker holds: once a Check
+  round's, which names no id, has taken its place — at the first Check round after a
+  replacement's converge, always — the primary is replaced once per `cntlr_unhealthy`,
+  each replacement reading the same rows, unless a later re-sync over a view its stream
+  had already sent puts a converge's back in its place (`dnv-worker.md` Appendix B).
 * **Worker membership tolerates, but does not repair, a partitioned observer.** A
   worker whose registry watch drops a peer's events while its own heartbeats still
   succeed sees that peer go stale and, after the grace window, claims its shards;

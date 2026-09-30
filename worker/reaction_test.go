@@ -2211,6 +2211,170 @@ func TestReactionReplaceSolePrimary(t *testing.T) {
 	}
 }
 
+// TestReactionSharedStateErrorIsNotReplaced pins AR7's refusal, judged by
+// AR5's first (HL2's row classes): the primary of an SP with no failover
+// candidate, unhealthy for cntlr_unhealthy, whose latest report fails only in
+// the stack of a created td whose thin id the pool no longer holds is not
+// replaced — the replacement would read the same rows from the same pool —
+// and the pass records why and goes on: to a standby that is AR7's target in
+// its own right, or, with none, to AR8. Short of cntlr_unhealthy AR7 records
+// nothing, nor for a primary that has a failover candidate, which is AR5's
+// alone, nor for a disabled primary, which is never AR7's target. The report
+// judged is the one the pass holds, the primary's latest (AR1), so each other
+// case gets the primary replaced: an own row beside the stack, a probe's
+// report, which names no id, a primary read unreachable after the converge's
+// report, and a primary whose child has reported nothing.
+func TestReactionSharedStateErrorIsNotReplaced(t *testing.T) {
+	// sole is sharedStateFixture with the standby disabled, so AR5 has no
+	// candidate, and the primary unhealthy for cntlr_unhealthy.
+	sole := func(t *testing.T) *reactHarness {
+		t.Helper()
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrB].Disabled = true
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.cnCands(reactCnC)
+		return h
+	}
+	wantPrimaryReplaced := func(t *testing.T, h *reactHarness) {
+		t.Helper()
+		calls := h.wantOps("replace")
+		if calls[0].oldId != reactCntlrA || !calls[0].asPrimary {
+			t.Fatalf("replace = %+v, want the primary replaced as primary",
+				calls[0])
+		}
+		h.wantApplied(reactionReplaceCntlr)
+	}
+
+	t.Run("the lost td's stack alone", func(t *testing.T) {
+		h := sole(t)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		// AR8 is armed so that the pass going on is observable.
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.dnCands(reactDnC)
+		h.pass()
+		h.wantOps("create_spare")
+		h.wantApplied(reactionSpareCreate)
+		var recs []map[string]any
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr {
+				recs = append(recs, rec)
+			}
+		}
+		if len(recs) != 1 || recs[0]["reason"] != "shared_state" {
+			t.Fatalf("replace_cntlr skips = %v, want shared_state once", recs)
+		}
+		for attr, want := range map[string]uint64{
+			"old_cntlr_id": reactCntlrA,
+			"td_id":        reactLostTd,
+		} {
+			if got, _ := recs[0][attr].(float64); uint64(got) != want {
+				t.Fatalf("%s = %v, want %d", attr, recs[0][attr], want)
+			}
+		}
+		h.wantSkipped(reactionFailover, "shared_state")
+	})
+
+	t.Run("a standby past its threshold", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		// Unhealthy, the standby is no failover candidate either.
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		h.cnCands(reactCnC)
+		h.pass()
+		calls := h.wantOps("replace")
+		if calls[0].oldId != reactCntlrB || calls[0].asPrimary {
+			t.Fatalf("replace = %+v, want the standby replaced", calls[0])
+		}
+		h.wantApplied(reactionReplaceCntlr)
+		h.wantSkipped(reactionReplaceCntlr, "shared_state")
+	})
+
+	t.Run("below the threshold", func(t *testing.T) {
+		h := sole(t)
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy - 1)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		h.pass()
+		h.wantOps()
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr {
+				t.Fatalf("replace_cntlr skip below the threshold: %v", rec)
+			}
+		}
+	})
+
+	// A primary with a failover candidate is AR5's, past cntlr_unhealthy
+	// too: AR7 passes it over before judging its report, so only AR5's
+	// shared_state is recorded, not AR7's beside it.
+	t.Run("a primary with a candidate", func(t *testing.T) {
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		h.cnCands(reactCnC)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionFailover, "shared_state")
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr {
+				t.Fatalf("replace_cntlr skip for a primary AR5 can move: %v",
+					rec)
+			}
+		}
+	})
+
+	// A disabled cntlr is never AR7's target (AR3), so its report is not
+	// judged: the refusal comes after the disabled check, and a disabled
+	// primary with no candidate gets AR5's `no candidate` alone, not AR7's
+	// shared_state beside it.
+	t.Run("a disabled primary", func(t *testing.T) {
+		h := sole(t)
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(true))
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionFailover, reasonNoCandidate)
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr {
+				t.Fatalf("replace_cntlr skip for a disabled primary: %v", rec)
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		info func() *pb.CntlrInfo
+	}{
+		{"an own row beside it", func() *pb.CntlrInfo {
+			info := lostStackInfo(true)
+			info.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+			return info
+		}},
+		{"a probe's report", func() *pb.CntlrInfo {
+			return lostStackInfo(false)
+		}},
+		{"an unreachable primary", func() *pb.CntlrInfo {
+			info := lostStackInfo(true)
+			markCntlrUnknown(info)
+			return info
+		}},
+		{"no report", func() *pb.CntlrInfo { return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := sole(t)
+			if info := tc.info(); info != nil {
+				h.setPrimaryInfo(reactCntlrA, info)
+			}
+			h.pass()
+			wantPrimaryReplaced(t, h)
+		})
+	}
+}
+
 // TestReactionPrimaryWithCandidateIsNotReplaced checks the other side of AR7:
 // while a failover candidate exists the unhealthy primary is failed over, not
 // replaced, however long it has been unhealthy.

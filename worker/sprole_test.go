@@ -1393,6 +1393,10 @@ type stubCntlrAgent struct {
 
 	syncupReply func(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrReply
 	checkReply  func(req *pb.CheckCntlrRequest) *pb.CheckCntlrReply
+	// omitUnchangedInfo answers CheckCntlr as the cn agent does: a reply
+	// whose CntlrInfo equals the one its stream last sent carries none,
+	// unless the request asks for show_info (agent/cnagent/check.go).
+	omitUnchangedInfo bool
 	// pushCode is the AgentReply code every PushCloneBitmap answers with, the
 	// cn twin of stubSideAgent.pushCode.
 	pushCode uint32
@@ -1414,6 +1418,7 @@ func (s *stubCntlrAgent) SyncupCntlr(
 func (s *stubCntlrAgent) CheckCntlr(
 	stream grpc.BidiStreamingServer[pb.CheckCntlrRequest, pb.CheckCntlrReply],
 ) error {
+	var lastSent *pb.CntlrInfo
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -1424,6 +1429,7 @@ func (s *stubCntlrAgent) CheckCntlr(
 		}
 		s.mu.Lock()
 		build := s.checkReply
+		omit := s.omitUnchangedInfo
 		s.mu.Unlock()
 		if build == nil {
 			if err := stream.Send(&pb.CheckCntlrReply{}); err != nil {
@@ -1432,6 +1438,14 @@ func (s *stubCntlrAgent) CheckCntlr(
 			continue
 		}
 		if reply := build(req); reply != nil {
+			if info := reply.GetCntlrInfo(); omit && info != nil {
+				if !req.GetShowInfo() && lastSent != nil &&
+					proto.Equal(info, lastSent) {
+					reply.CntlrInfo = nil
+				} else {
+					lastSent = info
+				}
+			}
 			if err := stream.Send(reply); err != nil {
 				return err
 			}
@@ -3721,6 +3735,175 @@ func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 		t.Fatalf("no pass said why the primary past its threshold stayed: %v",
 			h.logs.withMsg(msgReactionSkipped))
 	}
+}
+
+// TestASharedErrorDoesNotReplaceTheCntlr pins AR7's refusal end to end, on a
+// live coordinator with the fake clock. The pool of one slice has lost a
+// created td's thin id, and the primary has no failover candidate — the
+// fixture's standby is disabled too — so AR7 is what would act on it. The old
+// code replaced it once its err_epoch was cntlr_unhealthy old, and again on
+// every pass after, though a replacement reads the same rows from the same
+// pool. The refusal reads the report the coordinator holds, the primary's
+// latest (AR1), which names the id only when it is a converge's: here the cn
+// agent answers as it does once its stream has already sent the probe's view
+// — its first Check, one revision behind as after an agent restart while the
+// SP moved on, reads the volume MISSING, the re-sync's converge names the id,
+// and every later probe, unchanged, carries no CntlrInfo (omitUnchangedInfo)
+// — so the converge's report stays the one held. Across three windows of
+// cntlr_unhealthy the primary is not replaced, its err_epoch stays set, and
+// a pass says why. An own row beside the lost td's still gets it replaced, at
+// cntlr_unhealthy and not before; so does a probe's report held instead
+// (TestReactionSharedStateErrorIsNotReplaced), which is AR7's residual.
+func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
+	// run drives the SP for windows of cntlr_unhealthy past the primary's
+	// first error and returns the harness, the recorded reaction ops and the
+	// primary's err_epoch.
+	run := func(
+		t *testing.T,
+		own bool,
+		windows uint64,
+	) (*spHarness, *fakeReactionOps, uint64) {
+		t.Helper()
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		setCachedConf(h.deps, testCid, testClusterConf(
+			func(cc *pb.ClusterConf) {
+				cc.HealthCheckConf.CntlrInterval = pingPongInterval
+				cc.HealthCheckConf.SideInterval = pingPongInterval
+			}))
+		state := spFixture()
+		state.Conf.EventThreshold = &pb.EventThreshold{
+			CntlrUnhealthy: pingPongCntlrUnhealthy,
+		}
+		state.Subsystems["nqn.2024-01.io.dnv:sp0"].NsList = []*pb.Namespace{{
+			NsId: pingPongNs, NsIdx: 1, TdId: spTdDone,
+		}}
+		state.Cntlrs[spCntlrStandby].Disabled = true
+		h.ops.setState(state)
+		h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
+		report := func(converge bool) *pb.CntlrInfo {
+			info := lostThinInfo(converge)
+			if own {
+				info.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+			}
+			return info
+		}
+		stub := h.cntlrs[spCnA]
+		stub.omitUnchangedInfo = true
+		stub.syncupReply = func(
+			req *pb.SyncupCntlrRequest,
+		) *pb.SyncupCntlrReply {
+			return &pb.SyncupCntlrReply{
+				Revision: req.GetRevision(), CntlrInfo: report(true),
+			}
+		}
+		stub.checkReply = func(req *pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+			revision := req.GetRevision() - 1
+			if reqs := stub.syncups(); len(reqs) != 0 {
+				revision = reqs[len(reqs)-1].GetRevision()
+			}
+			return &pb.CheckCntlrReply{
+				Revision: revision, CntlrInfo: report(false),
+			}
+		}
+		for _, side := range h.sides {
+			side.checkReply = func(
+				req *pb.CheckSideRequest,
+			) *pb.CheckSideReply {
+				return &pb.CheckSideReply{Revision: req.GetRevision()}
+			}
+		}
+		w := h.start()
+		rops := &fakeReactionOps{
+			cnCands: []model.Cand{{AddrPort: "rcn9:9620", FreeExt: 64}},
+		}
+		h.reactWith(w, rops)
+		waitFor(t, "the converge's report", func() bool {
+			return len(stub.syncups()) == 1 &&
+				h.ops.cntlrErrEpoch(spCntlrPrimary) != 0
+		})
+		epoch := h.ops.cntlrErrEpoch(spCntlrPrimary)
+		end := epoch + windows*pingPongCntlrUnhealthy + pingPongInterval
+		for h.clk.nowUnix() < end {
+			h.clk.advance(5 * time.Second)
+			time.Sleep(5 * time.Millisecond)
+		}
+		return h, rops, epoch
+	}
+	skips := func(h *spHarness) []map[string]any {
+		var out []map[string]any
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr &&
+				rec["reason"] == "shared_state" {
+				out = append(out, rec)
+			}
+		}
+		return out
+	}
+
+	t.Run("the lost td's stack alone", func(t *testing.T) {
+		h, rops, epoch := run(t, false, 3)
+		replaces := 0
+		for _, call := range rops.allCalls() {
+			if call.op == "replace" {
+				replaces++
+			}
+		}
+		if replaces != 0 {
+			t.Fatalf("%d cntlr replacements in three windows of "+
+				"cntlr_unhealthy, want none: %+v", replaces, rops.allCalls())
+		}
+		if calls := rops.allCalls(); len(calls) != 0 {
+			t.Fatalf("reaction ops = %+v, want none", calls)
+		}
+		if recs := h.logs.withMsg(msgReactionApplied); len(recs) != 0 {
+			t.Fatalf("reaction applied = %v, want none", kindsOf(recs))
+		}
+		// The report held stayed the converge's: nothing re-synced it.
+		if n := len(h.cntlrs[spCnA].syncups()); n != 1 {
+			t.Fatalf("%d SyncupCntlr on the primary, want the one re-sync", n)
+		}
+		if got := h.ops.cntlrErrEpoch(spCntlrPrimary); got != epoch {
+			t.Fatalf("the primary's err_epoch = %d, want %d kept: the lost "+
+				"td is still reported", got, epoch)
+		}
+		recs := skips(h)
+		if len(recs) == 0 {
+			t.Fatalf("no pass said why the primary past cntlr_unhealthy "+
+				"stayed: %v", h.logs.withMsg(msgReactionSkipped))
+		}
+		for attr, want := range map[string]uint64{
+			"old_cntlr_id": spCntlrPrimary,
+			"td_id":        spTdDone,
+		} {
+			if got, _ := recs[0][attr].(float64); uint64(got) != want {
+				t.Fatalf("%s = %v, want %d", attr, recs[0][attr], want)
+			}
+		}
+	})
+
+	t.Run("an own row beside it", func(t *testing.T) {
+		h, rops, epoch := run(t, true, 1)
+		calls := rops.allCalls()
+		if len(calls) == 0 {
+			t.Fatalf("the primary failing on a row of its own was not " +
+				"replaced")
+		}
+		for _, call := range calls {
+			if call.op != "replace" || call.oldId != spCntlrPrimary ||
+				!call.asPrimary {
+				t.Fatalf("reaction ops = %+v, want the primary replaced "+
+					"as primary", calls)
+			}
+			if call.now < epoch+pingPongCntlrUnhealthy {
+				t.Fatalf("replaced at %d, before cntlr_unhealthy past its "+
+					"err_epoch %d", call.now, epoch)
+			}
+		}
+		if recs := skips(h); len(recs) != 0 {
+			t.Fatalf("shared_state skips = %v, want none", recs)
+		}
+	})
 }
 
 // TestSpDeletingKeepsChildren checks RW14: model.ErrNotFound means the SP is

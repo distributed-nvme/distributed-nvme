@@ -663,10 +663,15 @@ below is what shows the bare creates attached the existing ids).
   of its own, and in a pool of more the role can first move on to a cntlr
   that has not held it. The oscillation — the role handed back and forth
   once per `cntlr_unhealthy` for as long as the id stayed lost — is closed.
-  AR7's sole-primary replacement is not: a primary with no failover
-  candidate that reports the lost id is replaced at `cntlr_unhealthy` by a
-  cntlr that reads the same rows, and is replaced in turn (`dnv-worker.md`
-  Appendix B). The intervention remains.
+  The replacement loop of AR7's sole-primary variant is not: that variant
+  declines on such a converge's report as AR5 does, but only while it is
+  the report the worker holds (`dnv-worker.md` AR7), and a replacement's first
+  Check round after its converge puts the probe's in its place, which names
+  no id, so a primary with no failover candidate is still replaced at
+  `cntlr_unhealthy` by a cntlr that reads the same rows, and is replaced in
+  turn, unless a later re-sync over a view its stream had already sent puts
+  a converge's report back (`dnv-worker.md` Appendix B). The intervention
+  remains.
 * **One more fan-out per td creation.** Every flip bumps `SpRev` (R5), so
   creating a td costs two full fan-outs of the SP instead of one; per-reply
   batching (R6) keeps bulk creation at one extra fan-out per reply, or per
