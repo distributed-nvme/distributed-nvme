@@ -663,15 +663,25 @@ below is what shows the bare creates attached the existing ids).
   of its own, and in a pool of more the role can first move on to a cntlr
   that has not held it. The oscillation — the role handed back and forth
   once per `cntlr_unhealthy` for as long as the id stayed lost — is closed.
-  The replacement loop of AR7's sole-primary variant is not: that variant
-  declines on such a converge's report as AR5 does, but only while it is
-  the report the worker holds (`dnv-worker.md` AR7), and a replacement's first
-  Check round after its converge puts the probe's in its place, which names
-  no id, so a primary with no failover candidate is still replaced at
-  `cntlr_unhealthy` by a cntlr that reads the same rows, and is replaced in
-  turn, unless a later re-sync over a view its stream had already sent puts
-  a converge's report back (`dnv-worker.md` Appendix B). The intervention
-  remains.
+  The replacement loop of AR7's sole-primary variant is bounded the same
+  way. That variant declines on such a converge's report as AR5 does, but
+  only while it is the report the worker holds (`dnv-worker.md` AR7), which a
+  Check round's report, naming no id, replaces — at a replacement's first
+  Check round after its converge, always — so it can let a primary with no
+  failover candidate be replaced at `cntlr_unhealthy`. The replacement reads
+  the same rows, and is not replaced in turn while it fails only on rows the
+  primary it replaced failed on, from an error set within `cntlr_unhealthy`
+  of that replacement (`dnv-worker.md` AR7, Appendix B): one replacement,
+  where it used to be one per `cntlr_unhealthy`, each moving the whole stack
+  of a pool with one cntlr to another controller node; one more after a
+  restart or shard handoff of the worker, or each time a replacement also
+  fails a row of its own. A failover or a replacement made over a report
+  with no error row — the primary read unreachable, or not yet reported, as
+  a restarted worker's first pass can find it — leaves a record that holds
+  nothing, so the next is not held either: a replacement read unreachable
+  costs two more, a restart or handoff can cost two where it costs one, and
+  after such a failover the role can be handed back once more. The
+  intervention remains.
 * **One more fan-out per td creation.** Every flip bumps `SpRev` (R5), so
   creating a td costs two full fan-outs of the SP instead of one; per-reply
   batching (R6) keeps bulk creation at one extra fan-out per reply, or per

@@ -262,6 +262,9 @@ type fakeReactionOps struct {
 	// in one pass, which the sp drain never does.
 	cloneChunks   [][]model.BmChunk
 	cloneDrainErr error
+	// newCntlrIds are the cntlr_ids replaceCntlr hands out, one per call in
+	// order; 555 once they run out.
+	newCntlrIds []uint64
 }
 
 func (o *fakeReactionOps) record(call reactionCall) error {
@@ -378,7 +381,13 @@ func (o *fakeReactionOps) replaceCntlr(
 		op: "replace", oldId: oldId, asPrimary: asPrimary, now: now,
 		legs: []model.Cand{newCn}, spCn: spCnAddrs,
 	})
-	return 555, err
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	newId := uint64(555)
+	if len(o.newCntlrIds) != 0 {
+		newId, o.newCntlrIds = o.newCntlrIds[0], o.newCntlrIds[1:]
+	}
+	return newId, err
 }
 
 func (o *fakeReactionOps) createSpareLeg(
@@ -2220,8 +2229,8 @@ func TestReactionReplaceSolePrimary(t *testing.T) {
 	}
 }
 
-// TestReactionSharedStateErrorIsNotReplaced pins AR7's refusal, judged by
-// AR5's first (HL2's row classes): the primary of an SP with no failover
+// TestReactionSharedStateErrorIsNotReplaced pins AR7's first refusal, judged
+// by AR5's first (HL2's row classes): the primary of an SP with no failover
 // candidate, unhealthy for cntlr_unhealthy, whose latest report fails only in
 // the stack of a created td whose thin id the pool no longer holds is not
 // replaced — the replacement would read the same rows from the same pool —
@@ -2382,6 +2391,267 @@ func TestReactionSharedStateErrorIsNotReplaced(t *testing.T) {
 			wantPrimaryReplaced(t, h)
 		})
 	}
+}
+
+// The ids of TestReactionReplacementNotReplacedOverTheSameError: the cntlrs
+// the fake's replaceCntlr hands out in turn, and a standby whose id puts it
+// after the first of them in AR7's scan.
+const (
+	reactFreshA   = uint64(1000)
+	reactFreshB   = uint64(1001)
+	reactFreshC   = uint64(1002)
+	reactStandbyD = uint64(1100)
+	reactCnD      = "rcn3:9620"
+)
+
+// TestReactionReplacementNotReplacedOverTheSameError pins AR7's second
+// refusal. The sole primary of an SP with no failover candidate is replaced
+// over a probe's report of the lost td — no refusal of the first kind, the
+// report naming no id — and the replacement reads the same rows from the same
+// pool: it is not replaced while every ERROR row of its report is one the
+// primary it replaced failed on, from an error set within cntlr_unhealthy of
+// that replacement. The error is presumed to have followed the replacement.
+// Each pass records why, and the scan goes on, to a standby due for
+// replacement, whose replacement leaves the record as it was. The replacement
+// is replaced on anything else: a row of its own beside those rows — after
+// which that replacement's record holds the next one — a report with no ERROR
+// row, an error set cntlr_unhealthy after the replacement, and a coordinator
+// that holds no record, as after a restart or a shard handoff. The record
+// names that replacement alone: another primary failing on the same rows is
+// replaced.
+func TestReactionReplacementNotReplacedOverTheSameError(t *testing.T) {
+	// commit applies what model.ReplaceCntlr commits for a primary: oldId
+	// leaves, fresh takes the role, settling, on a CN of its own, and its
+	// child reports rows. Its first report fails at once, as a converge over
+	// the lost td does.
+	commit := func(
+		h *reactHarness,
+		oldId uint64,
+		fresh uint64,
+		rows *pb.CntlrInfo,
+	) {
+		ids := []uint64{}
+		for _, id := range h.state.Conf.CntlrIdList {
+			if id != oldId {
+				ids = append(ids, id)
+			}
+		}
+		h.state.Conf.CntlrIdList = append(ids, fresh)
+		delete(h.state.Cntlrs, oldId)
+		delete(h.w.cntlrs, oldId)
+		h.state.Cntlrs[fresh] = &pb.Cntlr{
+			AddrPort: reactCnC, Primary: true, Settling: true,
+			ErrEpoch: h.now(),
+		}
+		h.setPrimaryInfo(fresh, rows)
+	}
+	// replaced runs the pass that replaces the sole primary A — the standby
+	// is disabled — over a probe's report and commits the replacement,
+	// reactFreshA, whose report holds rows.
+	replaced := func(t *testing.T, rows *pb.CntlrInfo) *reactHarness {
+		t.Helper()
+		h := newReactHarness(t, sharedStateFixture(t))
+		h.rops.newCntlrIds = []uint64{reactFreshA, reactFreshB, reactFreshC}
+		h.state.Cntlrs[reactCntlrB].Disabled = true
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+			common.DefaultCntlrUnhealthy)
+		h.setPrimaryInfo(reactCntlrA, lostStackInfo(false))
+		h.cnCands(reactCnC)
+		h.pass()
+		calls := h.wantOps("replace")
+		if calls[0].oldId != reactCntlrA || !calls[0].asPrimary {
+			t.Fatalf("replace = %+v, want the primary replaced as primary",
+				calls[0])
+		}
+		commit(h, reactCntlrA, reactFreshA, rows)
+		return h
+	}
+	advance := func(h *reactHarness, seconds uint64) {
+		h.clk.advance(time.Duration(seconds) * time.Second)
+	}
+	// refusals are the pass records of AR7's second refusal.
+	refusals := func(h *reactHarness) []map[string]any {
+		var out []map[string]any
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["kind"] == reactionReplaceCntlr &&
+				rec["reason"] == "same_error" {
+				out = append(out, rec)
+			}
+		}
+		return out
+	}
+	wantRefused := func(t *testing.T, h *reactHarness, cntlrId uint64, n int) {
+		t.Helper()
+		recs := refusals(h)
+		if len(recs) != n {
+			t.Fatalf("replace_cntlr same_error skips = %v, want %d", recs, n)
+		}
+		for _, rec := range recs {
+			if got, _ := rec["old_cntlr_id"].(float64); uint64(got) != cntlrId {
+				t.Fatalf("skip = %v, want old_cntlr_id %d", rec, cntlrId)
+			}
+		}
+	}
+
+	t.Run("the same rows", func(t *testing.T) {
+		h := replaced(t, lostStackInfo(false))
+		advance(h, common.DefaultCntlrUnhealthy)
+		// AR8 is armed so that the pass going on is observable.
+		h.legOf(reactDataLegA).ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.dnCands(reactDnC)
+		h.pass()
+		h.pass()
+		h.wantOps("replace", "create_spare", "create_spare")
+		wantRefused(t, h, reactFreshA, 2)
+	})
+
+	// A standby due for replacement comes after the replacement in the scan:
+	// the scan goes on to it, and its replacement, a standby's, touches no
+	// record, so the next pass refuses the primary's replacement again.
+	t.Run("a standby replaced meanwhile", func(t *testing.T) {
+		h := replaced(t, lostStackInfo(false))
+		h.state.Conf.CntlrIdList = append(h.state.Conf.CntlrIdList,
+			reactStandbyD)
+		h.state.Cntlrs[reactStandbyD] = &pb.Cntlr{
+			AddrPort: reactCnD, ErrEpoch: h.now(),
+		}
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactStandbyD || calls[1].asPrimary {
+			t.Fatalf("replace = %+v, want the standby replaced", calls[1])
+		}
+		wantRefused(t, h, reactFreshA, 1)
+		// The fake commits nothing, so the standby is still due.
+		h.pass()
+		calls = h.wantOps("replace", "replace", "replace")
+		if calls[2].oldId != reactStandbyD {
+			t.Fatalf("replace = %+v, want the standby replaced again",
+				calls[2])
+		}
+		wantRefused(t, h, reactFreshA, 2)
+	})
+
+	// A row of the replacement's own gets it replaced, and that replacement
+	// records the rows in turn: the next one, failing on the lost td's rows
+	// alone, is held.
+	t.Run("a row of its own", func(t *testing.T) {
+		rows := lostStackInfo(false)
+		rows.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+		h := replaced(t, rows)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactFreshA || !calls[1].asPrimary {
+			t.Fatalf("replace = %+v, want the replacement replaced as "+
+				"primary", calls[1])
+		}
+		wantRefused(t, h, 0, 0)
+		commit(h, reactFreshA, reactFreshB, lostStackInfo(false))
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		h.wantOps("replace", "replace")
+		wantRefused(t, h, reactFreshB, 1)
+	})
+
+	// A replacement read unreachable has every row UNKNOWN: no row is one
+	// the primary it replaced failed on.
+	t.Run("no ERROR row", func(t *testing.T) {
+		rows := lostStackInfo(false)
+		markCntlrUnknown(rows)
+		h := replaced(t, rows)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactFreshA {
+			t.Fatalf("replace = %+v, want the replacement replaced", calls[1])
+		}
+	})
+
+	// A replacement whose error was set within cntlr_unhealthy of its
+	// replacement is held; one set later is a new error, judged as any.
+	for _, tc := range []struct {
+		after uint64
+		want  []string
+	}{
+		{common.DefaultCntlrUnhealthy - 1, []string{"replace"}},
+		{common.DefaultCntlrUnhealthy, []string{"replace", "replace"}},
+	} {
+		t.Run(fmt.Sprintf("failing %d s after", tc.after), func(t *testing.T) {
+			h := replaced(t, lostStackInfo(false))
+			fresh := h.state.Cntlrs[reactFreshA]
+			fresh.ErrEpoch = 0
+			advance(h, tc.after)
+			fresh.ErrEpoch = h.now()
+			advance(h, common.DefaultCntlrUnhealthy)
+			h.pass()
+			h.wantOps(tc.want...)
+		})
+	}
+
+	// The record goes with the coordinator: one restarted, or handed the
+	// shard, replaces the replacement once more.
+	t.Run("no record", func(t *testing.T) {
+		h := replaced(t, lostStackInfo(false))
+		h.w.react = newReactor(h.rops)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactFreshA || !calls[1].asPrimary {
+			t.Fatalf("replace = %+v, want the replacement replaced as "+
+				"primary", calls[1])
+		}
+		wantRefused(t, h, 0, 0)
+	})
+
+	// The record names the replacement: a primary the role has moved to
+	// since, failing on the same rows with no failover candidate — the
+	// replacement disabled — is replaced.
+	t.Run("another primary", func(t *testing.T) {
+		h := replaced(t, lostStackInfo(false))
+		fresh := h.state.Cntlrs[reactFreshA]
+		fresh.Primary, fresh.Settling, fresh.Disabled = false, false, true
+		delete(h.w.cntlrs, reactFreshA)
+		h.state.Conf.CntlrIdList = append(h.state.Conf.CntlrIdList,
+			reactCntlrC)
+		h.state.Cntlrs[reactCntlrC] = &pb.Cntlr{
+			AddrPort: reactCnD, Primary: true, ErrEpoch: h.now(),
+		}
+		h.setPrimaryInfo(reactCntlrC, lostStackInfo(false))
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactCntlrC || !calls[1].asPrimary {
+			t.Fatalf("replace = %+v, want the new primary replaced",
+				calls[1])
+		}
+	})
+
+	// The refusal judges the primary alone, on the report the pass holds for
+	// it: a replacement that has lost the role since — to a primary that
+	// reads the same rows and is not yet due for replacement — is judged as
+	// any standby, and replaced.
+	t.Run("a demoted replacement", func(t *testing.T) {
+		h := replaced(t, lostStackInfo(false))
+		fresh := h.state.Cntlrs[reactFreshA]
+		fresh.Primary, fresh.Settling = false, false
+		delete(h.w.cntlrs, reactFreshA)
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.state.Conf.CntlrIdList = append(h.state.Conf.CntlrIdList,
+			reactCntlrC)
+		h.state.Cntlrs[reactCntlrC] = &pb.Cntlr{
+			AddrPort: reactCnD, Primary: true, Settling: true,
+			ErrEpoch: h.now(),
+		}
+		h.setPrimaryInfo(reactCntlrC, lostStackInfo(false))
+		h.pass()
+		calls := h.wantOps("replace", "replace")
+		if calls[1].oldId != reactFreshA || calls[1].asPrimary {
+			t.Fatalf("replace = %+v, want the demoted replacement replaced "+
+				"as a standby", calls[1])
+		}
+		wantRefused(t, h, 0, 0)
+	})
 }
 
 // TestReactionPrimaryWithCandidateIsNotReplaced checks the other side of AR7:

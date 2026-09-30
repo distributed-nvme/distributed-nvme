@@ -12034,8 +12034,11 @@ case_copy() {
 #  been unhealthy for cntlr_unhealthy, is not disabled, and is either not the
 #  primary or is the primary of an SP with no failover candidate — unless
 #  the report the pass holds for that primary is HL2 shared state (a lost
-#  thin id's stack alone, dnv-worker.md AR7), which no case here plants
-#  (replaceTarget in worker/reaction.go).
+#  thin id's stack alone), or that primary is the replacement the worker
+#  last made for a primary and fails, since less than cntlr_unhealthy after
+#  that replacement, only on rows the primary it replaced failed on
+#  (dnv-worker.md AR7's two refusals), neither of which any case here
+#  plants (replaceTarget in worker/reaction.go).
 #  THAT IS THE CHAIN §9's risk note names: with
 #  a healthy standby present, AR7 refuses to touch the primary until AR5 has
 #  moved the role away — and model.ReplaceCntlr refuses it a second time inside

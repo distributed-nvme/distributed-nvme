@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3273,6 +3274,54 @@ func (o *fakeSpOps) commitFailover(oldId uint64, newId uint64) uint64 {
 	return next.SpRevision
 }
 
+// commitReplace applies what model.ReplaceCntlr commits to the stored state,
+// copy-on-write as putCntlrErrEpoch does: oldId leaves cntlr_id_list and its
+// record goes, a new cntlr numbered by the SP's next_id takes its cntlid_slot
+// on the CN at addrPort — primary and settling iff asPrimary, with no
+// err_epoch — the CN's record joins the ones the SP's load reads (MD3), and
+// SpRev bumps. It returns the new cntlr_id and the new revision.
+func (o *fakeSpOps) commitReplace(
+	oldId uint64,
+	addrPort string,
+	cnId uint64,
+	asPrimary bool,
+) (uint64, uint64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	next := *o.state
+	conf := proto.Clone(o.state.Conf).(*pb.SpConf)
+	newId := model.SpNextId(conf)
+	conf.NextId = newId + 1
+	ids := make([]uint64, 0, len(conf.GetCntlrIdList()))
+	for _, id := range conf.GetCntlrIdList() {
+		if id != oldId {
+			ids = append(ids, id)
+		}
+	}
+	conf.CntlrIdList = append(ids, newId)
+	next.Conf = conf
+	next.Cntlrs = make(map[uint64]*pb.Cntlr, len(o.state.Cntlrs))
+	for id, cntlr := range o.state.Cntlrs {
+		if id != oldId {
+			next.Cntlrs[id] = cntlr
+		}
+	}
+	next.Cntlrs[newId] = &pb.Cntlr{
+		AddrPort:   addrPort,
+		CntlidSlot: o.state.Cntlrs[oldId].GetCntlidSlot(),
+		Primary:    asPrimary,
+		Settling:   asPrimary,
+	}
+	next.CnByAddr = make(map[string]*pb.CnConf, len(o.state.CnByAddr)+1)
+	for addr, cn := range o.state.CnByAddr {
+		next.CnByAddr[addr] = cn
+	}
+	next.CnByAddr[addrPort] = &pb.CnConf{CnId: cnId}
+	next.SpRevision++
+	o.state = &next
+	return newId, next.SpRevision
+}
+
 // reactWith gives a running coordinator a reactor over a recording model
 // surface: the production one holds the harness's nil etcd client, which any
 // reaction would dereference. It is safe until the clock first advances — a
@@ -3315,6 +3364,71 @@ func (o *failoverCommitter) failover(
 		handle:   spName,
 	})
 	return nil
+}
+
+// replaceCommitter is the model surface of a live replacement test. Its CN
+// scan offers the first of cns that the scan neither black-lists nor finds
+// hosting another cntlr of the SP, as model's allocator leaves both out; its
+// replaceCntlr commits into the harness's stored SpState what
+// model.ReplaceCntlr commits (commitReplace) and hands the coordinator the new
+// revision, as the SpRev watch does. Every other op is fakeReactionOps'.
+type replaceCommitter struct {
+	*fakeReactionOps
+	ops *fakeSpOps
+	w   *spWorker
+	// cns are the CNs a scan can offer, in the order it offers them, with
+	// the cn_id of each.
+	cns   []string
+	cnIds map[string]uint64
+}
+
+func (o *replaceCommitter) findCnCandidates(
+	ctx context.Context,
+	cid uint64,
+	candExt uint64,
+	candCnt int,
+	black []string,
+	spCnAddrs []string,
+	excludeLocs []string,
+) ([]model.Cand, error) {
+	_, err := o.fakeReactionOps.findCnCandidates(
+		ctx, cid, candExt, candCnt, black, spCnAddrs, excludeLocs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range o.cns {
+		if !slices.Contains(black, addr) && !slices.Contains(spCnAddrs, addr) {
+			return []model.Cand{{AddrPort: addr, FreeExt: 64}}, nil
+		}
+	}
+	return nil, nil
+}
+
+func (o *replaceCommitter) replaceCntlr(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	oldId uint64,
+	newCn model.Cand,
+	spCnAddrs []string,
+	asPrimary bool,
+	now uint64,
+) (uint64, error) {
+	_, err := o.fakeReactionOps.replaceCntlr(
+		ctx, cid, shard, spId, spName, oldId, newCn, spCnAddrs, asPrimary,
+		now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	newId, revision := o.ops.commitReplace(
+		oldId, newCn.AddrPort, o.cnIds[newCn.AddrPort], asPrimary,
+	)
+	o.w.update(desiredState{revision: revision, handle: spName})
+	return newId, nil
 }
 
 // epochWrites is the err_epoch of every health write of one record, in order.
@@ -3542,15 +3656,17 @@ func testOrphanedEpochIsClearedByTheOwner(t *testing.T) {
 	}
 }
 
-// The shape of TestASharedErrorDoesNotPingPongTheRole. Three windows of
-// pingPongCntlrUnhealthy are what it runs: a primary that took the role never
-// settles (HL2), its report never being clean, so the old code handed the role
-// back once per window. pingPongInterval is its cntlr_interval and
-// side_interval, long against the clock's 5 s step, so that no round outlives
-// its own timeout while the test moves the clock (RW4 step 3): a missed round
-// marks the primary's rows UNKNOWN, and a primary read unreachable is failed
-// over whatever its rows said before. pingPongNs is the namespace on the td
-// the pool has lost.
+// The shape of TestASharedErrorDoesNotPingPongTheRole, which the other live
+// lost-thin-id tests share. Three windows of pingPongCntlrUnhealthy are what
+// it runs: a primary that took the role never settles (HL2), its report never
+// being clean, so the old code handed the role back once per window.
+// pingPongInterval is its cntlr_interval and side_interval. Each test runs in
+// a testing/synctest bubble and moves the clock 5 s at a time through
+// advanceUntil, only once every round the last step started has had its reply
+// read, so no round the agent answered outlives its own timeout (RW4 step 3):
+// a missed round marks the primary's rows UNKNOWN, and a primary read
+// unreachable is failed over, or replaced, whatever its rows said before.
+// pingPongNs is the namespace on the td the pool has lost.
 const (
 	pingPongCntlrUnhealthy = 180
 	pingPongInterval       = 60
@@ -3620,6 +3736,10 @@ func lostThinInfo(converge bool) *pb.CntlrInfo {
 // Across three windows there is at most that one failover, the primary's
 // err_epoch stays set, and a pass past its threshold says why nothing moves.
 func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
+	synctest.Test(t, testASharedErrorDoesNotPingPongTheRole)
+}
+
+func testASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	h := newSpHarness(t)
 	h.addFixtureAgents()
 	setCachedConf(h.deps, testCid, testClusterConf(func(cc *pb.ClusterConf) {
@@ -3699,8 +3819,10 @@ func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	end := h.clk.nowUnix() + 3*pingPongCntlrUnhealthy + pingPongInterval
 	moved := 0
 	for h.clk.nowUnix() < end {
-		h.clk.advance(5 * time.Second)
-		time.Sleep(5 * time.Millisecond)
+		h.advanceUntil("a failover or three windows of cntlr_unhealthy",
+			5*time.Second, func() bool {
+				return len(failovers()) != moved || h.clk.nowUnix() >= end
+			})
 		calls := failovers()
 		if len(calls) == moved {
 			continue
@@ -3745,8 +3867,8 @@ func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 	}
 }
 
-// TestASharedErrorDoesNotReplaceTheCntlr pins AR7's refusal end to end, on a
-// live coordinator with the fake clock. The pool of one slice has lost a
+// TestASharedErrorDoesNotReplaceTheCntlr pins AR7's first refusal end to end,
+// on a live coordinator with the fake clock. The pool of one slice has lost a
 // created td's thin id, and the primary has no failover candidate — the
 // fixture's standby is disabled too — so AR7 is what would act on it. The old
 // code replaced it once its err_epoch was cntlr_unhealthy old, and again on
@@ -3761,11 +3883,12 @@ func TestASharedErrorDoesNotPingPongTheRole(t *testing.T) {
 // cntlr_unhealthy the primary is not replaced, its err_epoch stays set, and
 // a pass says why. An own row beside the lost td's still gets it replaced, at
 // cntlr_unhealthy and not before; so does a probe's report held instead
-// (TestReactionSharedStateErrorIsNotReplaced), which is AR7's residual.
+// (TestReactionSharedStateErrorIsNotReplaced), after which AR7's second
+// refusal holds the replacement (TestASharedErrorDoesNotReplaceTheReplacement).
 func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 	// run drives the SP for windows of cntlr_unhealthy past the primary's
 	// first error and returns the harness, the recorded reaction ops and the
-	// primary's err_epoch.
+	// primary's err_epoch. It runs in a testing/synctest bubble.
 	run := func(
 		t *testing.T,
 		own bool,
@@ -3832,10 +3955,8 @@ func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 		})
 		epoch := h.ops.cntlrErrEpoch(spCntlrPrimary)
 		end := epoch + windows*pingPongCntlrUnhealthy + pingPongInterval
-		for h.clk.nowUnix() < end {
-			h.clk.advance(5 * time.Second)
-			time.Sleep(5 * time.Millisecond)
-		}
+		h.advanceUntil("windows of cntlr_unhealthy", 5*time.Second,
+			func() bool { return h.clk.nowUnix() >= end })
 		return h, rops, epoch
 	}
 	skips := func(h *spHarness) []map[string]any {
@@ -3849,7 +3970,7 @@ func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 		return out
 	}
 
-	t.Run("the lost td's stack alone", func(t *testing.T) {
+	t.Run("the lost td's stack alone", inBubble(func(t *testing.T) {
 		h, rops, epoch := run(t, false, 3)
 		replaces := 0
 		for _, call := range rops.allCalls() {
@@ -3888,9 +4009,9 @@ func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 				t.Fatalf("%s = %v, want %d", attr, recs[0][attr], want)
 			}
 		}
-	})
+	}))
 
-	t.Run("an own row beside it", func(t *testing.T) {
+	t.Run("an own row beside it", inBubble(func(t *testing.T) {
 		h, rops, epoch := run(t, true, 1)
 		calls := rops.allCalls()
 		if len(calls) == 0 {
@@ -3911,7 +4032,216 @@ func TestASharedErrorDoesNotReplaceTheCntlr(t *testing.T) {
 		if recs := skips(h); len(recs) != 0 {
 			t.Fatalf("shared_state skips = %v, want none", recs)
 		}
-	})
+	}))
+}
+
+// The CNs a replacement of TestASharedErrorDoesNotReplaceTheReplacement can
+// land on, in the order its scan offers them, and the first cntlr_id the SP
+// hands out: past every id of the fixture.
+const (
+	replCnA     = "spcn3:9620"
+	replCnB     = "spcn4:9620"
+	replCnIdA   = uint64(0xc3)
+	replCnIdB   = uint64(0xc4)
+	replFirstId = uint64(3000)
+)
+
+// answerLostThinId makes a cn agent stub answer for every cntlr as the cn
+// agent does once the pool of spSliceB no longer holds the created td's thin
+// id (lostThinInfo): a Check for a cntlr it has had no SyncupCntlr for is
+// refused as an unknown object, with no info (checkCntlrRound); a SyncupCntlr
+// is answered with the converge's report, which names the id; and every Check
+// after it with the probe's, which reads the volume MISSING and names none,
+// left out when unchanged since the stream last sent it (omitUnchangedInfo).
+// The lost td's rows are reported only while the cntlr's last request says
+// primary and enabled. With own, the cntlr also fails a row of its own.
+func answerLostThinId(stub *stubCntlrAgent, own bool) {
+	report := func(req *pb.SyncupCntlrRequest, converge bool) *pb.CntlrInfo {
+		if !req.GetCntlr().GetPrimary() || req.GetCntlr().GetDisabled() {
+			return &pb.CntlrInfo{}
+		}
+		info := lostThinInfo(converge)
+		if own {
+			info.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
+		}
+		return info
+	}
+	stub.omitUnchangedInfo = true
+	stub.syncupReply = func(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrReply {
+		return &pb.SyncupCntlrReply{
+			Revision: req.GetRevision(), CntlrInfo: report(req, true),
+		}
+	}
+	stub.checkReply = func(req *pb.CheckCntlrRequest) *pb.CheckCntlrReply {
+		var last *pb.SyncupCntlrRequest
+		for _, sync := range stub.syncups() {
+			if sync.GetCntlrPointer().GetCntlrId() ==
+				req.GetCntlrPointer().GetCntlrId() {
+				last = sync
+			}
+		}
+		if last == nil {
+			return &pb.CheckCntlrReply{AgentReply: &pb.AgentReply{
+				Code:    common.ReplyCodeUnknownObject,
+				Details: "unknown cntlr",
+			}}
+		}
+		return &pb.CheckCntlrReply{
+			Revision: last.GetRevision(), CntlrInfo: report(last, false),
+		}
+	}
+}
+
+// TestASharedErrorDoesNotReplaceTheReplacement pins AR7's second refusal end
+// to end, on a live coordinator with the fake clock: the residual
+// TestASharedErrorDoesNotReplaceTheCntlr leaves. The SP has one cntlr, so AR7
+// is what acts on its primary, and the pool of one slice has lost a created
+// td's thin id. Every cntlr of the SP answers as the cn agent does
+// (answerLostThinId): its converge names the id, and the Check round after it
+// already carries the probe's report, which names none, so at
+// cntlr_unhealthy the report the coordinator holds is the probe's and AR7's
+// first refusal cannot hold it. The primary is replaced, and the replacement
+// builds over the same pool and reads the same rows. The old code replaced
+// it in turn, once per cntlr_unhealthy, for as long as the td stayed lost;
+// now the coordinator keeps the rows of the primary it replaced, and across
+// three windows of cntlr_unhealthy there is that one replacement, the
+// replacement's err_epoch stays set, and a pass says why it stays. A
+// replacement that fails on a row of its own beside the lost td's is still
+// replaced, not before cntlr_unhealthy, and its own replacement, failing on
+// the lost td's rows alone, is held by that second replacement's record.
+func TestASharedErrorDoesNotReplaceTheReplacement(t *testing.T) {
+	// run drives a one-cntlr SP for three windows of cntlr_unhealthy past its
+	// primary's first error, and returns the harness, the replacements the
+	// passes applied and that error's err_epoch. A replacement lands on the
+	// first of replCnA and replCnB its scan does not black-list, and the
+	// cntlr on ownOn also fails a row of its own ("" for none).
+	run := func(
+		t *testing.T,
+		ownOn string,
+	) (*spHarness, []reactionCall, uint64) {
+		t.Helper()
+		h := newSpHarness(t)
+		h.addFixtureAgents()
+		h.addCntlr(replCnA)
+		h.addCntlr(replCnB)
+		setCachedConf(h.deps, testCid, testClusterConf(
+			func(cc *pb.ClusterConf) {
+				cc.HealthCheckConf.CntlrInterval = pingPongInterval
+				cc.HealthCheckConf.SideInterval = pingPongInterval
+			}))
+		state := spFixture()
+		state.Conf.EventThreshold = &pb.EventThreshold{
+			CntlrUnhealthy: pingPongCntlrUnhealthy,
+		}
+		state.Conf.NextId = replFirstId
+		state.Conf.CntlrIdList = []uint64{spCntlrPrimary}
+		delete(state.Cntlrs, spCntlrStandby)
+		delete(state.Cntlrs, spCntlrDisabled)
+		state.Subsystems["nqn.2024-01.io.dnv:sp0"].NsList = []*pb.Namespace{{
+			NsId: pingPongNs, NsIdx: 1, TdId: spTdDone,
+		}}
+		h.ops.setState(state)
+		h.deps.health = &spStateHealthWriter{fakeHealthWriter: h.hw, ops: h.ops}
+		for _, addr := range []string{spCnA, replCnA, replCnB} {
+			answerLostThinId(h.cntlrs[addr], addr == ownOn)
+		}
+		for _, side := range h.sides {
+			side.checkReply = func(
+				req *pb.CheckSideRequest,
+			) *pb.CheckSideReply {
+				return &pb.CheckSideReply{Revision: req.GetRevision()}
+			}
+		}
+		w := h.start()
+		// As reactWith: safe until the clock first advances.
+		rops := &replaceCommitter{
+			fakeReactionOps: &fakeReactionOps{}, ops: h.ops, w: w,
+			cns: []string{replCnA, replCnB},
+			cnIds: map[string]uint64{
+				replCnA: replCnIdA,
+				replCnB: replCnIdB,
+			},
+		}
+		w.react = newReactor(rops)
+		waitFor(t, "the primary's converge", func() bool {
+			return h.ops.cntlrErrEpoch(spCntlrPrimary) != 0
+		})
+		epoch := h.ops.cntlrErrEpoch(spCntlrPrimary)
+		end := epoch + 3*pingPongCntlrUnhealthy + pingPongInterval
+		h.advanceUntil("three windows of cntlr_unhealthy", 5*time.Second,
+			func() bool { return h.clk.nowUnix() >= end })
+		var replaces []reactionCall
+		for _, call := range rops.allCalls() {
+			if call.op == "replace" {
+				replaces = append(replaces, call)
+			}
+		}
+		if len(replaces) == 0 || replaces[0].oldId != spCntlrPrimary ||
+			!replaces[0].asPrimary ||
+			replaces[0].now < epoch+pingPongCntlrUnhealthy {
+			t.Fatalf("replacements = %+v, want the first primary's first, "+
+				"as primary, cntlr_unhealthy past its err_epoch %d",
+				replaces, epoch)
+		}
+		return h, replaces, epoch
+	}
+	// refusals are the passes' records of AR7's second refusal of cntlrId.
+	refusals := func(h *spHarness, cntlrId uint64) int {
+		n := 0
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			id, _ := rec["old_cntlr_id"].(float64)
+			if rec["kind"] == reactionReplaceCntlr &&
+				rec["reason"] == "same_error" && uint64(id) == cntlrId {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("the lost td's stack alone", inBubble(func(t *testing.T) {
+		h, replaces, _ := run(t, "")
+		if len(replaces) != 1 {
+			t.Fatalf("%d cntlr replacements in three windows of "+
+				"cntlr_unhealthy, want the first primary's alone: %+v",
+				len(replaces), replaces)
+		}
+		if got := h.ops.cntlrErrEpoch(replFirstId); got == 0 {
+			t.Fatalf("the replacement's err_epoch was cleared: the lost td " +
+				"is still reported")
+		}
+		if refusals(h, replFirstId) == 0 {
+			t.Fatalf("no pass said why the replacement past cntlr_unhealthy "+
+				"stayed: %v", h.logs.withMsg(msgReactionSkipped))
+		}
+	}))
+
+	t.Run("a row of the replacement's own", inBubble(func(t *testing.T) {
+		h, replaces, _ := run(t, replCnA)
+		if len(replaces) != 2 {
+			t.Fatalf("%d cntlr replacements in three windows of "+
+				"cntlr_unhealthy, want the first primary's and its "+
+				"replacement's: %+v", len(replaces), replaces)
+		}
+		first, second := replaces[0], replaces[1]
+		if second.oldId != replFirstId || !second.asPrimary {
+			t.Fatalf("replacement = %+v, want the first replacement, "+
+				"failing on a row of its own, replaced as primary", second)
+		}
+		if second.now < first.now+pingPongCntlrUnhealthy {
+			t.Fatalf("the replacement was replaced at %d, before "+
+				"cntlr_unhealthy past its own replacement at %d",
+				second.now, first.now)
+		}
+		if n := refusals(h, replFirstId); n != 0 {
+			t.Fatalf("%d same_error skips of the replacement failing on a "+
+				"row of its own, want none", n)
+		}
+		if refusals(h, replFirstId+1) == 0 {
+			t.Fatalf("no pass said why the second replacement past "+
+				"cntlr_unhealthy stayed: %v",
+				h.logs.withMsg(msgReactionSkipped))
+		}
+	}))
 }
 
 // TestSpDeletingKeepsChildren checks RW14: model.ErrNotFound means the SP is

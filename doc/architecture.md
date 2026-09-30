@@ -3274,8 +3274,11 @@ or repaired, but a disabled *primary* is itself the AR5 failover trigger (§8.6)
   unhealthy or disabled; otherwise AR5 moves the role away first, or holds it where a
   failover cannot help or is presumed not to), unless its report — a converge's, which
   names the lost id — fails only in the stack of a created td whose thin id the pool
-  no longer holds, rows a replacement would read alike (`dnv-worker.md` AR7) ⇒
-  replace it:
+  no longer holds, rows a replacement would read alike (`dnv-worker.md` AR7), or it is
+  the primary the SP's worker last put in by a replacement and fails, since less than
+  `cntlr_unhealthy` after that replacement, only on rows the primary it replaced failed
+  on then (a worker restart or shard handoff forgets that replacement and can cost one
+  more) ⇒ replace it:
   internal `DeleteCntlr` (skipping the enabled check) + internal
   `CreateCntlr` on a fresh CN — never the old cntlr's CN nor one hosting another cntlr
   of the SP, and at §6.5's tier 1 outside the `location`s of the SP's other cntlrs (the
@@ -4855,11 +4858,22 @@ exists.
   row of its own, and in a larger SP the role can first move on to a cntlr that has
   not held it). An SP with no failover candidate does not have its primary replaced
   over a converge's report failing only in the td's stack either (`dnv-worker.md`
-  AR7), but only while that report is the latest the worker holds: once a Check
-  round's, which names no id, has taken its place — at the first Check round after a
-  replacement's converge, always — the primary is replaced once per `cntlr_unhealthy`,
-  each replacement reading the same rows, unless a later re-sync over a view its stream
-  had already sent puts a converge's back in its place (`dnv-worker.md` Appendix B).
+  AR7), but only while that report is the latest the worker holds; once a Check
+  round's, which names no id, has taken its place, the primary is replaced at
+  `cntlr_unhealthy`. Its replacement reads the same rows, and its first Check round
+  after its converge always puts a Check round's report in place of the converge's,
+  but it is not replaced in turn while it fails only on rows the primary it replaced
+  failed on, from an error set within `cntlr_unhealthy` of that replacement
+  (`dnv-worker.md` AR7, Appendix B): one replacement, where it used to be one per
+  `cntlr_unhealthy`, each moving the whole stack of an SP with one cntlr to another CN;
+  one more after a restart or shard handoff of the worker that drives the SP, whose
+  record of that replacement is in memory only, or each time a replacement also fails
+  a row of its own. A failover or a replacement made over a report with no error row
+  — the primary read unreachable, or not yet reported, as a restarted worker's first
+  pass can find it — leaves a record that holds nothing, so the next is not held
+  either: a replacement read unreachable costs two more, a restart or handoff can cost
+  two where it costs one, and after such a failover the role can be handed back once
+  more.
 * **Worker membership tolerates, but does not repair, a partitioned observer.** A
   worker whose registry watch drops a peer's events while its own heartbeats still
   succeed sees that peer go stale and, after the grace window, claims its shards;

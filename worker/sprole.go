@@ -330,8 +330,9 @@ type spWorker struct {
 	// record rather than one per tick.
 	confRefusal spConfRefusal
 	// react is the §11 half of the coordinator: the model surface of the
-	// automatic reactions, the little memo their log records need, and AR5's
-	// record of the last failover it applied (reaction.go).
+	// automatic reactions, the little memo their log records need, and the
+	// records AR5 and AR7 decide by, of the last failover and the last
+	// replacement of a primary it applied (reaction.go).
 	react *reactor
 }
 
