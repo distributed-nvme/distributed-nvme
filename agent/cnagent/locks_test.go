@@ -877,3 +877,85 @@ func TestReconcileDropsOrphanChunks(t *testing.T) {
 		t.Fatalf("the orphan chunk file was not removed")
 	}
 }
+
+// TestReconcileNeverLoadsAnInterruptedWrite: at a restart the committed cn
+// and cntlr files are the only truth (dnagent.md SH6). A save whose process
+// died between writing its temp file and renaming it leaves
+// `{name}.tmp-{random}` behind, which holds an OLDER request once later saves
+// have renamed newer ones over the name, and it sorts right after the
+// committed file. Loaded, the older cn request here, which lacks the cntlr's
+// pointer, would drop the cntlr — its file deleted, its devices swept — and
+// the older cntlr request would replace the newer one. Neither temp file is
+// read, both go in one rm, and that rm is the only change the restart makes.
+func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	ctx := context.Background()
+	cnPath := srv.nf.LocalCnPath(testCluster, testCn)
+	cntlrPath := srv.nf.LocalCntlrPath(testCluster, testCn, testSp, testCntlr)
+	cnStray := cnPath + common.AtomicWriteTmpInfix + "1234567890"
+	cntlrStray := cntlrPath + common.AtomicWriteTmpInfix + "987654321"
+	if err := node.writeProto(ctx, cnStray, cnReq(1, false)); err != nil {
+		t.Fatalf("planting the cn temp file: %v", err)
+	}
+	if err := node.writeProto(ctx, cntlrStray,
+		cntlrReq(reqOpts{revision: 1})); err != nil {
+		t.Fatalf("planting the cntlr temp file: %v", err)
+	}
+	node.mu.Lock()
+	committed := map[string]string{
+		cnPath:    string(node.protos[cnPath]),
+		cntlrPath: string(node.protos[cntlrPath]),
+	}
+	node.mu.Unlock()
+	node.Reset()
+
+	fresh := newCnServer(node)
+	reconcileForTest(t, fresh)
+
+	cnReply, _ := fresh.checkCnRound(ctx, &pb.CheckCnRequest{
+		ClusterId: testCluster, CnId: testCn, Revision: 2,
+	}, nil)
+	if got := cnReply.GetRevision(); got != 2 {
+		t.Errorf("the cn came back at revision %d, want the committed 2",
+			got)
+	}
+	cntlrReply, _ := fresh.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+		ClusterId: testCluster, CnId: testCn, CntlrPointer: cntlrPtr(),
+		Revision: 2,
+	}, nil)
+	if got := cntlrReply.GetAgentReply(); got.GetCode() != 0 ||
+		cntlrReply.GetRevision() != 2 {
+		t.Errorf("CheckCntlr after the restart = %v at revision %d, want "+
+			"0 at the committed 2", got, cntlrReply.GetRevision())
+	}
+	node.mu.Lock()
+	after := make(map[string]string, len(node.protos))
+	for path, raw := range node.protos {
+		after[path] = string(raw)
+	}
+	node.mu.Unlock()
+	for path, raw := range committed {
+		if got, ok := after[path]; !ok {
+			t.Errorf("%s was deleted", path)
+		} else if got != raw {
+			t.Errorf("%s was rewritten", path)
+		}
+	}
+	for _, stray := range []string{cnStray, cntlrStray} {
+		if node.hasCall("readproto " + stray) {
+			t.Errorf("%s was read", stray)
+		}
+		if _, ok := after[stray]; ok {
+			t.Errorf("%s survived the restart", stray)
+		}
+	}
+	mutations := node.Mutations()
+	if len(mutations) != 1 ||
+		!strings.HasPrefix(mutations[0], "cmd rm -f ") ||
+		!strings.Contains(mutations[0], " "+cnStray) ||
+		!strings.Contains(mutations[0], " "+cntlrStray) {
+		t.Errorf("the restart changed the node by\n%s\nwant exactly one "+
+			"rm naming both temp files", strings.Join(mutations, "\n"))
+	}
+}

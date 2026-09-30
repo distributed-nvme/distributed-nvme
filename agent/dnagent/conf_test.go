@@ -330,7 +330,7 @@ func TestSyncupDnAcceptsAConcreteExtentSize(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// §6.24 — an unreadable store file deletes nothing it might own (DN2)
+// §6.25 — an unreadable store file deletes nothing it might own (DN2)
 // ---------------------------------------------------------------------------
 
 // newDiskNode is a fake node holding the --disk device and the nvmet root and
@@ -454,12 +454,13 @@ func TestReconcileKeepsTheSidesOfAnUnreadableDnFile(t *testing.T) {
 
 // TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn bounds the skip above from
 // both sides. A dn-* file that does not load keeps out only the sides whose DN
-// is not loaded: the store's listing also returns the `.tmp-*` file an atomic
-// replace leaves behind when the process dies before its rename — under the
-// dn- prefix and, when half written, possibly undecodable. Beside such a file
-// the real one loads, and that DN's sides must be loaded and converged as on
-// any restart; skipping them too would take every side of a healthy DN off
-// the agent's books until the worker re-sent it. And with no dn-* file left
+// is not loaded. The `.tmp-*` file an atomic replace leaves behind when the
+// process dies before its rename sits under the dn- prefix and, half written,
+// may not decode, but it is no dn-* file that did not load: the store's
+// listing never returns it and deletes it unread (SH6). Beside it the real
+// one loads, and that DN's sides must be loaded and converged as on any
+// restart; skipping them too would take every side of a healthy DN off the
+// agent's books until the worker re-sent it. And with no dn-* file left
 // unread there is nothing to skip for: a DN with no file at all reads as a
 // list that names no side, so a side of it has its request and its chunks
 // deleted on the spot as before — a skip that outlived its reason would keep
@@ -471,7 +472,7 @@ func TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn(t *testing.T) {
 			ctx := context.Background()
 			syncupBoth(t, srv, 1, testSide)
 			stray := srv.nf.LocalDnPath(testCluster, testDn) +
-				".tmp-1234567890"
+				common.AtomicWriteTmpInfix + "1234567890"
 			node.mu.Lock()
 			node.protos[stray] = []byte{0xff}
 			node.mu.Unlock()
@@ -479,14 +480,17 @@ func TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn(t *testing.T) {
 
 			restarted := startTestServer(t, node)
 
-			if !node.hasCall("readproto " + stray) {
-				t.Fatalf("the stray file was never read:\n%s",
+			if node.hasCall("readproto " + stray) {
+				t.Fatalf("the temporary file was read:\n%s",
 					strings.Join(node.Calls(), "\n"))
+			}
+			if _, ok := node.protos[stray]; ok {
+				t.Errorf("the temporary file survived the restart")
 			}
 			if restarted.getSide(
 				sideKey(testCluster, testDn, testSp, testSide)) == nil {
-				t.Fatalf("a stray dn file that did not load skipped a " +
-					"side of a loaded dn")
+				t.Fatalf("a temporary dn file skipped a side of a " +
+					"loaded dn")
 			}
 			reply, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
 				ClusterId: testCluster, DnId: testDn,
@@ -669,12 +673,13 @@ func TestReconcileKeepsTheChunksOfAnUnreadableSideFile(t *testing.T) {
 		}
 	})
 
-	// The stray an interrupted atomic write leaves beside a side file sorts
-	// under the side- prefix and, half written, does not decode. It names no
-	// side, but the side it sits beside is loaded, and that side's chunk is
-	// loaded with it: skipping it would take it out of the applied set, and
-	// the worker would push the whole migration again after every restart
-	// for as long as the stray is there.
+	// The temp file an interrupted atomic write leaves beside a side file
+	// sits under the side- prefix and, half written, does not decode. It is
+	// no side-* file that did not load: the store's listing never returns it
+	// and deletes it unread (SH6). The side it sits beside is loaded, and
+	// that side's chunk is loaded with it: skipping the chunk would take it
+	// out of the applied set, and the worker would push the whole migration
+	// again after the restart.
 	t.Run("a temporary side file beside a loaded side", func(t *testing.T) {
 		ctx := context.Background()
 		node := seed(t, false, testSide)
@@ -682,20 +687,23 @@ func TestReconcileKeepsTheChunksOfAnUnreadableSideFile(t *testing.T) {
 			migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 			t.Fatalf("seeding the side state file: %v", err)
 		}
-		stray := sidePath + ".tmp-1234567890"
+		stray := sidePath + common.AtomicWriteTmpInfix + "1234567890"
 		node.protos[stray] = []byte{0xff}
 		node.Reset()
 
 		srv := startTestServer(t, node)
 
-		if !node.hasCall("readproto " + stray) {
-			t.Fatalf("the stray file was never read:\n%s",
+		if node.hasCall("readproto " + stray) {
+			t.Fatalf("the temporary file was read:\n%s",
 				strings.Join(node.Calls(), "\n"))
+		}
+		if _, ok := node.protos[stray]; ok {
+			t.Errorf("the temporary file survived the restart")
 		}
 		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 		if st == nil {
-			t.Fatalf("a stray side file that did not load skipped the " +
-				"side it sits beside")
+			t.Fatalf("a temporary side file skipped the side it sits " +
+				"beside")
 		}
 		if n := st.chunks.Len(); n != 1 {
 			t.Errorf("chunk set has %d chunks after the restart, want 1", n)
@@ -708,4 +716,111 @@ func TestReconcileKeepsTheChunksOfAnUnreadableSideFile(t *testing.T) {
 			t.Errorf("the chunk of a loaded side was deleted %d times", n)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// §6.26 — an interrupted write is never loaded (SH6, DN2)
+// ---------------------------------------------------------------------------
+
+// TestReconcileNeverLoadsAnInterruptedWrite: a restart keeps the committed
+// requests whatever an interrupted write left beside them. A save whose
+// process died between writing its temp file and renaming it leaves
+// `{name}.tmp-{random}` behind. Kept past the restart that followed — nothing
+// removed it before, and a removal that fails still keeps it — it holds an
+// OLDER request than the committed file once later saves have renamed newer
+// ones over the name, and it sorts right after that file, so a reload that
+// decoded it would let it win. Here the older dn request no longer names the
+// second side, which a reload that believed it would drop: its state file
+// deleted, its devices swept and its extents freed while the worker still
+// wants it. The older side request would put the first side back on its old
+// primary. Neither temp file is read, both go in one rm, and that rm is the
+// only change the restart makes.
+func TestReconcileNeverLoadsAnInterruptedWrite(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	// The second side sits in another leg: two sides of one leg on one DN
+	// would share the leg's per-CN exports.
+	side2Ptr := &pb.SidePointer{
+		SpId: testSp, LegId: testLeg + 1, SideId: testSide2}
+	dn := dnReq(2, testSide)
+	dn.SidePointerList = append(dn.SidePointerList, side2Ptr)
+	if _, err := srv.SyncupDn(ctx, dn); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	syncupSideTwoPhase(t, srv, sideReq(2, testSide, testCn0,
+		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_READWRITE))
+	side2 := sideReq(2, testSide2, testCn0, []uint64{testCn1},
+		pb.SpLevel_SP_LEVEL_READWRITE)
+	side2.SidePointer = side2Ptr
+	syncupSideTwoPhase(t, srv, side2)
+	dnPath := srv.nf.LocalDnPath(testCluster, testDn)
+	side1Path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide)
+	side2Path := srv.nf.LocalSidePath(testCluster, testDn, testSp, testSide2)
+	dnStray := dnPath + common.AtomicWriteTmpInfix + "1234567890"
+	sideStray := side1Path + common.AtomicWriteTmpInfix + "987654321"
+	if err := node.writeProto(ctx, dnStray, dnReq(1, testSide)); err != nil {
+		t.Fatalf("planting the dn temp file: %v", err)
+	}
+	if err := node.writeProto(ctx, sideStray, sideReq(1, testSide, testCn1,
+		[]uint64{testCn0}, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("planting the side temp file: %v", err)
+	}
+	committed := make(map[string][]byte)
+	node.mu.Lock()
+	for _, path := range []string{dnPath, side1Path, side2Path} {
+		committed[path] = node.protos[path]
+	}
+	node.mu.Unlock()
+	node.Reset()
+
+	restarted := startTestServer(t, node)
+
+	dnReply, _ := restarted.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 2,
+	}, nil)
+	if got := dnReply.GetRevision(); got != 2 {
+		t.Errorf("the dn came back at revision %d, want the committed 2",
+			got)
+	}
+	for _, ptr := range []*pb.SidePointer{sidePtr(testSide), side2Ptr} {
+		reply, _ := restarted.checkSideRound(ctx, &pb.CheckSideRequest{
+			ClusterId: testCluster, DnId: testDn,
+			SidePointer: ptr, Revision: 2,
+		}, nil)
+		if got := reply.GetAgentReply(); got.GetCode() != 0 ||
+			reply.GetRevision() != 2 {
+			t.Errorf("CheckSide of side %#x after the restart = %v at "+
+				"revision %d, want 0 at the committed 2",
+				ptr.GetSideId(), got, reply.GetRevision())
+		}
+	}
+	node.mu.Lock()
+	after := make(map[string][]byte, len(node.protos))
+	for path, raw := range node.protos {
+		after[path] = raw
+	}
+	node.mu.Unlock()
+	for path, raw := range committed {
+		if got, ok := after[path]; !ok {
+			t.Errorf("%s was deleted", path)
+		} else if !bytes.Equal(got, raw) {
+			t.Errorf("%s was rewritten", path)
+		}
+	}
+	for _, stray := range []string{dnStray, sideStray} {
+		if node.hasCall("readproto " + stray) {
+			t.Errorf("%s was read", stray)
+		}
+		if _, ok := after[stray]; ok {
+			t.Errorf("%s survived the restart", stray)
+		}
+	}
+	mutations := node.Mutations()
+	if len(mutations) != 1 ||
+		!strings.HasPrefix(mutations[0], "cmd rm -f ") ||
+		!strings.Contains(mutations[0], " "+dnStray) ||
+		!strings.Contains(mutations[0], " "+sideStray) {
+		t.Errorf("the restart changed the node by\n%s\nwant exactly one "+
+			"rm naming both temp files", strings.Join(mutations, "\n"))
+	}
 }

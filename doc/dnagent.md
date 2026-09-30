@@ -437,6 +437,27 @@ SH6. Enumeration on startup: `RunCommand(ctx, "ls", []string{"-1", prefix},
      role's `Local*Path` kind prefixes (dn: `dn-`, `side-`, `migr-bm-`; cn:
      `cn-`, `cntlr-`, `clone-bm-`). File names are used only for discovery;
      the ids come from the decoded protos.
+     The committed file is the only truth. A name of one of those kinds
+     that carries `.tmp-` (`common.AtomicWriteTmpInfix`) is no store file
+     but the temp file of a `WriteProto` that did not succeed — one whose
+     process died before its rename, for instance; `osclient.md` §4.3
+     lists every way one is left behind. The enumeration never returns
+     one, so nothing reads it: nothing tells a whole one from a
+     half-written one, which can decode with its tail missing, and what it
+     holds was never committed (a save that fails is only logged), so the
+     restarted agent reports only what was committed, and the worker sends
+     again whatever that lacks. It sorts right after the file it
+     was meant to replace, so a reload that decoded it would let it win —
+     and, left on disk, win again at every later restart, long after later
+     saves had overtaken it. So the enumeration also deletes every such
+     file of the role's kinds, before anything is loaded, in one `rm -f`
+     under the same bound as the `ls`. A delete that fails is logged and
+     never fails the reconcile; the next startup's enumeration finds the
+     file again. The other role's kinds are left alone: a dn and a cn agent
+     may share one prefix (§3), and the other agent's temp file may be a
+     write in flight. A temp file of the role's own kinds never is: the
+     enumeration runs before the agent saves anything, and two agents of
+     one role must not share a prefix (§3).
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
      **at that moment** and nothing of it is removed from the node yet: its
@@ -3053,8 +3074,10 @@ able to fail.
     assertions together are what keep the two copies of the rule in step
     (§2.1).
 24. **Store commands are bounded** (SH6, SH7, SH15; `agent`'s
-    `TestStoreCommandsCarryTheSoftTimeout`): one `List` and one `Remove`
-    issue exactly one `ls` and one `rm`, each on a ctx whose deadline is at
+    `TestStoreCommandsCarryTheSoftTimeout`): one `List` over a store
+    holding an interrupted write and one `Remove` issue exactly one `ls`
+    and two `rm`s — the listing's own, which deletes the temp file (SH6),
+    and the `Remove`'s — each on a ctx whose deadline is at
     most `common.CmdSoftTimeout` away. The store calls the `OsClient`
     directly, not through an OS wrapper, so the bound is its own to apply
     (`osclient.md` §4.2).
@@ -3066,7 +3089,8 @@ able to fail.
     side still after the re-sent `SyncupDn`, whose save makes the file
     decode again. The skip covers only a DN not loaded, and only while a
     `dn-*` file did not load (`TestReconcileSkipsOnlyTheSidesOfAnUnloadedDn`):
-    an undecodable `.tmp-*` file beside a readable `dn-*` file skips none of
+    an undecodable `.tmp-*` file beside a readable `dn-*` file is never read
+    and is gone after the restart (SH6), and it skips none of
     that DN's sides — the side is loaded and its first `CheckSide` round is
     clean — and with no `dn-*` file at all the side's state file and its
     chunk go in one `rm`. One level down
@@ -3077,8 +3101,28 @@ able to fail.
     exactly one `rm`, when its DN no longer names its side, when its
     side has no state file and no `side-*` file failed to load, and when
     its DN has no file and no `dn-*` file failed to load; and an
-    undecodable `.tmp-*` file beside a loaded side's `side-*` file leaves
-    that side's chunk loaded, in its applied set, with no `rm` naming it.
+    undecodable `.tmp-*` file beside a loaded side's `side-*` file, never
+    read and gone after the restart as well, leaves
+    that side's chunk loaded, in its applied set, with no `rm` naming the
+    chunk.
+26. **An interrupted write is never loaded** (SH6): `agent`'s
+    `TestStoreListNeverReturnsAnInterruptedWrite` runs the store over a real
+    directory. Beside the committed `dn-*` and `side-*` files, a `.tmp-*`
+    file that decodes to an older request and one that does not decode are
+    neither returned nor left on disk, the committed `dn-*` file still
+    decodes to its own revision, and a `cn-*` temp file, a kind the listing
+    did not ask for, survives it. In
+    `TestStoreListRetriesAFailedLeftoverRemoval` an `rm` that fails fails
+    neither of two listings, neither returns the temp file, and each issues
+    exactly one `rm` naming it. Per role,
+    `TestReconcileNeverLoadsAnInterruptedWrite` (here and its twin in
+    `agent/cnagent`) restarts a converged node beside temp files holding
+    older requests: a `dn-*` one whose list lacks the second side and a
+    `side-*` one naming the old primary, on the cn a `cn-*` one whose list
+    lacks the cntlr and a `cntlr-*` one that makes it a standby. The node
+    comes back at the committed revisions with every committed file byte
+    for byte, no temp file is read, and one `rm` naming both is the
+    restart's only change.
 
 ## 7. Acceptance checklist
 

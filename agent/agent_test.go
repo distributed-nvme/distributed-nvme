@@ -6,12 +6,14 @@ import (
 	"fmt"
 	// Aliased: the fakeSysfs methods below bind `fs` to their receiver.
 	iofs "io/fs"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -342,6 +344,11 @@ func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
 				common.CmdSoftTimeout*time.Second {
 				unbounded = append(unbounded, name)
 			}
+			// An interrupted write, so the listing's own rm (SH6) is
+			// bounded here too.
+			if name == "ls" {
+				return "dn-1" + common.AtomicWriteTmpInfix + "7\n", "", 0, nil
+			}
 			return "", "", 0, nil
 		},
 	}
@@ -353,12 +360,138 @@ func TestStoreCommandsCarryTheSoftTimeout(t *testing.T) {
 		context.Background(), "/store/dn-1", "/store/side-2"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if got := strings.Join(cmds, " "); got != "ls rm" {
-		t.Fatalf("commands = %q, want exactly one ls and one rm", got)
+	if got := strings.Join(cmds, " "); got != "ls rm rm" {
+		t.Fatalf("commands = %q, want exactly one ls and the listing's "+
+			"rm, then the Remove's rm", got)
 	}
 	if len(unbounded) != 0 {
 		t.Errorf("store commands without the SH15 soft timeout: %v",
 			unbounded)
+	}
+}
+
+// TestStoreListNeverReturnsAnInterruptedWrite runs the store over a real
+// directory and the production OsClient. Save replaces a file by writing
+// `{name}.tmp-{random}` beside it and renaming that over the name, and a
+// failed write removes its own temp file, so what leaves one behind is a save
+// that did not succeed — a process that died between the two, say. It sorts
+// right after the file it was
+// meant to replace, and a reload that decoded it would let it replace the
+// committed request: the dn one here decodes to an OLDER request — what a
+// leftover holds once later saves have renamed newer ones over the name — and
+// the side one is half written and does not decode. The committed file is the
+// only truth (SH6), so the listing returns neither, removes both, and the
+// committed file still decodes to the request it held. A leftover of a kind
+// the caller did not ask for stays: a dn and a cn agent may share one prefix,
+// and the other role's temp file may be a write in flight.
+func TestStoreListNeverReturnsAnInterruptedWrite(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := NewStore(common.NewLimitedOsClient(0), dir)
+	nf := common.NewNameFmt(dir)
+	dnPath := nf.LocalDnPath(1, 3)
+	sidePath := nf.LocalSidePath(1, 3, 0x11, 0x16)
+	if err := store.Save(ctx, dnPath, &pb.SyncupDnRequest{
+		ClusterId: 1, DnId: 3, Revision: 2}); err != nil {
+		t.Fatalf("saving the dn request: %v", err)
+	}
+	if err := store.Save(ctx, sidePath, &pb.SyncupSideRequest{
+		ClusterId: 1, DnId: 3, Revision: 2}); err != nil {
+		t.Fatalf("saving the side request: %v", err)
+	}
+	older, err := proto.Marshal(&pb.SyncupDnRequest{
+		ClusterId: 1, DnId: 3, Revision: 1})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dnLeftover := dnPath + common.AtomicWriteTmpInfix + "1234567890"
+	sideLeftover := sidePath + common.AtomicWriteTmpInfix + "987654321"
+	cnLeftover := nf.LocalCnPath(1, 5) + common.AtomicWriteTmpInfix + "42"
+	for path, data := range map[string][]byte{
+		dnLeftover:   older,
+		sideLeftover: {0xff},
+		cnLeftover:   {0xff},
+	} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("planting %s: %v", path, err)
+		}
+	}
+
+	files, err := store.List(ctx, StoreKindDn, StoreKindSide, StoreKindMigrBm)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := files[StoreKindDn]; len(got) != 1 || got[0] != dnPath {
+		t.Errorf("dn files = %q, want only the committed %s", got, dnPath)
+	}
+	if got := files[StoreKindSide]; len(got) != 1 || got[0] != sidePath {
+		t.Errorf("side files = %q, want only the committed %s",
+			got, sidePath)
+	}
+	for _, path := range []string{dnLeftover, sideLeftover} {
+		if _, err := os.Stat(path); !errors.Is(err, iofs.ErrNotExist) {
+			t.Errorf("%s survived the listing (stat: %v)", path, err)
+		}
+	}
+	if _, err := os.Stat(cnLeftover); err != nil {
+		t.Errorf("a listing of the dn kinds removed the cn kind's %s: %v",
+			cnLeftover, err)
+	}
+	stored := &pb.SyncupDnRequest{}
+	if err := store.Load(ctx, dnPath, stored); err != nil {
+		t.Fatalf("loading the committed dn request: %v", err)
+	}
+	if got := stored.GetRevision(); got != 2 {
+		t.Errorf("the committed dn request decodes at revision %d, want 2",
+			got)
+	}
+}
+
+// TestStoreListRetriesAFailedLeftoverRemoval: an interrupted write whose rm
+// fails does not fail the listing — a file the reload never reads must not
+// stop the reload — and is still not returned. Nothing remembers the failure:
+// the next listing, the next startup's, finds the file again and issues the
+// same rm again.
+func TestStoreListRetriesAFailedLeftoverRemoval(t *testing.T) {
+	committed := "dn-0000000000000001-0000000000000003"
+	leftover := committed + common.AtomicWriteTmpInfix + "1234567890"
+	var rms []string
+	oc := &common.FakeOsClient{
+		RunCommandFn: func(
+			ctx context.Context, name string, args []string, stdin string,
+		) (string, string, int, error) {
+			switch name {
+			case "ls":
+				return committed + "\n" + leftover + "\n", "", 0, nil
+			case "rm":
+				rms = append(rms, strings.Join(args, " "))
+				return "", "rm: cannot remove: Read-only file system", 1,
+					errors.New("exit status 1")
+			}
+			t.Errorf("unexpected command %s %v", name, args)
+			return "", "", 127, errors.New("unexpected command")
+		},
+	}
+	store := NewStore(oc, "/store")
+	for listing := 1; listing <= 2; listing++ {
+		files, err := store.List(context.Background(), StoreKindDn)
+		if err != nil {
+			t.Fatalf("listing %d failed over a leftover it could not "+
+				"remove: %v", listing, err)
+		}
+		if got := files[StoreKindDn]; len(got) != 1 ||
+			got[0] != "/store/"+committed {
+			t.Errorf("listing %d: dn files = %q, want only the committed "+
+				"file", listing, got)
+		}
+		if len(rms) != listing {
+			t.Fatalf("after listing %d: %d rm calls, want %d",
+				listing, len(rms), listing)
+		}
+		if want := "-f /store/" + leftover; rms[listing-1] != want {
+			t.Errorf("listing %d: rm %s, want rm %s",
+				listing, rms[listing-1], want)
+		}
 	}
 }
 

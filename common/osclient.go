@@ -507,6 +507,16 @@ var syncDir = func(dir string) error {
 	return d.Close()
 }
 
+// AtomicWriteTmpInfix is what atomicWrite puts between the name of the file it
+// replaces and the random suffix of the temp file it writes beside it:
+// `{name}.tmp-{random}`. Every failure path of atomicWrite removes that file,
+// the removal's own error aside, so what leaves one behind is a removal that
+// fails, a process that dies between creating it and renaming it, or a
+// machine crash that undoes a rename or a removal not yet durable. The
+// agents' local store never reads such a leftover: it deletes it at startup
+// (dnagent.md SH6).
+const AtomicWriteTmpInfix = ".tmp-"
+
 // atomicWrite implements the temp-file + fsync + rename + directory-fsync
 // protocol of architecture.md §9.1: readers never observe a partial file, and
 // a write that returned nil survives a crash. The rename is a change to the
@@ -516,7 +526,7 @@ var syncDir = func(dir string) error {
 // write, with the new file already in place at path.
 func atomicWrite(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+AtomicWriteTmpInfix+"*")
 	if err != nil {
 		return err
 	}

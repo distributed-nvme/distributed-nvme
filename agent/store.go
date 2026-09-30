@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -46,6 +47,28 @@ func (s *Store) Prefix() string {
 // List enumerates the store and returns, per requested kind prefix, the full
 // paths of the matching files in ascending name order (SH6). A failure to
 // read the prefix is the one fatal startup condition of SH3.
+//
+// The committed file is the only truth. A name of a requested kind that
+// carries common.AtomicWriteTmpInfix is the temp file of a Save that did not
+// succeed — one whose process died before its rename, for instance; the
+// constant's comment lists every way one is left behind — and List never
+// returns it, whatever it holds: nothing tells a whole one from a
+// half-written one, which can decode with its tail missing, and what it holds
+// was never committed (a Save that fails is only logged), so the restarted
+// agent reports only what was committed and the worker sends again whatever
+// that lacks. It sorts right after the file it was meant to replace, so a
+// reload that decoded it would let it win — and, left in place, win again at
+// every later restart, long after later saves had overtaken it. List removes
+// those leftovers before it returns, with Remove's bounded rm. A removal that
+// fails is logged and does not fail the listing; the next startup's listing
+// finds the files again.
+//
+// Only the requested kinds are touched: a dn and a cn agent may share one
+// prefix, and a temp file of the other role's kinds may be a write in flight.
+// One of the requested kinds never is, and only because List belongs to the
+// startup reload: it runs before this process saves anything, and two agents
+// of one role must not share a prefix (dnagent.md CM2). Called beside a Save
+// of a requested kind, it could delete that Save's temp file and fail it.
 func (s *Store) List(
 	ctx context.Context,
 	kinds ...string,
@@ -62,20 +85,39 @@ func (s *Store) List(
 	for _, kind := range kinds {
 		out[kind] = nil
 	}
+	var leftovers []string
 	for _, line := range strings.Split(stdout, "\n") {
 		name := strings.TrimSpace(line)
 		if name == "" {
 			continue
 		}
 		for _, kind := range kinds {
-			if strings.HasPrefix(name, kind) {
-				out[kind] = append(out[kind], s.prefix+"/"+name)
-				break
+			if !strings.HasPrefix(name, kind) {
+				continue
 			}
+			path := s.prefix + "/" + name
+			if strings.Contains(name, common.AtomicWriteTmpInfix) {
+				leftovers = append(leftovers, path)
+			} else {
+				out[kind] = append(out[kind], path)
+			}
+			break
 		}
 	}
 	for _, kind := range kinds {
 		sort.Strings(out[kind])
+	}
+	if len(leftovers) > 0 {
+		sort.Strings(leftovers)
+		for _, path := range leftovers {
+			slog.WarnContext(ctx, "removing an interrupted local store write",
+				slog.String("path", path))
+		}
+		if err := s.Remove(ctx, leftovers...); err != nil {
+			slog.ErrorContext(ctx,
+				"removing interrupted local store writes failed",
+				slog.String("error", err.Error()))
+		}
 	}
 	return out, nil
 }

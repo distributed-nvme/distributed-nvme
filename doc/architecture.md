@@ -2340,8 +2340,14 @@ concatenation (§9.6, §11.4).
   `SyncupCntlrRequest` at `LocalCntlrPath` — plus one file per received bitmap chunk at
   `LocalMigrBmPath`/`LocalCloneBmPath` (§4.6, §9.6). Every write goes to a temp file in
   the same dir, fsync, rename, fsync the dir (until then a crash can undo the rename).
+  A write that does not succeed can leave its temp file behind, as one whose process
+  dies between the write and the rename does (`osclient.md` §4.3 lists every way).
+  The committed file is the only truth: the next start deletes such a file unread
+  (`dnagent.md` SH6), since what it held was never committed and the worker sends
+  again whatever the committed files lack.
   The stored request contains the revision, so no separate
-  revision record exists. On start the agent loads every file under its prefix,
+  revision record exists. On start the agent loads every other file of its role's
+  kinds under its prefix,
   reconciles the system to it (full idempotent re-apply, §11.5 for clones), then
   serves — except that a dn agent skips, neither loading nor deleting them, the files
   that may belong under a file it cannot load: while a `dn-*` file does not load, the
