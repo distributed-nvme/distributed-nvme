@@ -221,19 +221,28 @@ nothing is absent there, a present device lacks a capability):
     `SYSTEMD_READY` — the Appendix A mask the harness installs (§7) works
     by setting that env, so its absence means udev would race the agent's
     md assembly; fail preflight rather than debug that later.
-  - `df /var/tmp` ≥ 3 GiB free; punch-hole probe (`fallocate -p`) — the CN
-    clone-metadata allocator hole-punches every recycled unit range on the
-    tmpfs-backed arena file (CN18: plain `blkdiscard`, never
-    `--zeroout`), DN side provisioning writes zeros through the loop
-    (§9.4) and the case C never-copied verification all rely on
-    discard/Write-Zeroes reaching the backing file; `MemAvailable` ≥ 1.5 GiB
-    (the 2 GiB tmpfs mount is lazily allocated and the 1 GiB
-    `CnCloneMetaAreaSize` arena file is sparse, so real usage is a few MiB —
-    the floor just keeps a swap-thrashing VM out of the suite). The arena
-    loop must honor `blkdiscard` for the allocator's recycled-unit guard to
-    hole-punch: it is a **lab prerequisite**, not an agent gate — the agent
-    has no CN-side preflight for it and simply reports the clone
-    `RES_STATUS_ERROR` with the `blkdiscard` output if the kernel refuses.
+  - `df /var/tmp` ≥ 3 GiB free; punch-hole probe (`fallocate -p` on a
+    scratch file under `/var/tmp`, the same probe the dn agent and e2e
+    suites make); `MemAvailable` ≥ 1.5 GiB (the 2 GiB tmpfs mount is lazily
+    allocated and the 1 GiB `CnCloneMetaAreaSize` arena file is sparse, so
+    real usage is a few MiB — the floor just keeps a swap-thrashing VM out of
+    the suite). The probe checks `/var/tmp` only, and neither of the two
+    things this suite zeroes or discards through a loop device rests on it:
+    - The CN clone-metadata allocator hole-punches every recycled unit range
+      of the arena with plain `blkdiscard` (CN18: never `--zeroout`), which
+      the loop driver turns into `FALLOC_FL_PUNCH_HOLE` on the arena file.
+      That file sits on the tmpfs under `/tmp/dnv-tmpfs` (§5), not on
+      `/var/tmp`, and tmpfs always supports punching holes. The arena loop
+      must honor `blkdiscard` for the allocator's recycled-unit guard to
+      hole-punch: it is a **lab prerequisite**, not an agent gate — the
+      agent has no CN-side preflight for it and simply reports the clone
+      `RES_STATUS_ERROR` with the `blkdiscard` output if the kernel refuses.
+    - DN side provisioning (`blkdiscard --zeroout`, §9.4), whose zeros the
+      case C never-copied verification reads back, asks the DN loop for
+      Write Zeroes without unmap. The loop driver runs that as
+      `FALLOC_FL_ZERO_RANGE` on the backing file, which allocates the range
+      (unwritten extents) rather than punching it. The check that matters
+      for it is the next bullet's.
   - Write Zeroes on the DN backing loop: once §7 step 3 has created it,
     assert `/sys/class/block/<loop>/queue/write_zeroes_max_bytes` is
     non-zero — `/sys/class/block`, not `/sys/block`, because that is the
@@ -243,9 +252,9 @@ nothing is absent there, a present device lacks a capability):
     fast-Write-Zeroes assumption cannot hold and DN5 fails the node fast
     (`meta_info = RES_STATUS_ERROR "disk lacks Write Zeroes"`), which would
     surface as a confusing §7 step 6 failure instead of a clear preflight
-    message. This is the same underlying capability the punch-hole probe
-    tests (loop maps WRITE_ZEROES onto `fallocate` on the backing file),
-    asserted directly on the device the dn agent reads.
+    message. It is asserted directly on the device the dn agent reads; the
+    punch-hole probe above is not a stand-in for it, since side zeroing
+    never punches a hole.
   - ports 29528, 29529 and 4200 not listening (`ss -ltn`).
 
 One lab prerequisite is deliberately **not** checked here: `iptables` — on
@@ -1173,15 +1182,25 @@ xfer removed, ns `suspended: true` (= `DeleteTransfer(force=false)`
 semantics — the source stays retired). Assert on VM1: "retired" is now a
 **parked** device, not a suspended one — the same two asserts and the same
 bounded open as stages 1 and 2. `syncup-cntlr` CN2 (CNREV2++):
-clone removed, ns `suspended: false` (= `DeleteClone`). The reply is
-`ReplyCodeLeftover` naming the `:4:` connection, whose disconnect runs off
-the sweep's locks (`cnagent.md` CN21), and the same request re-sent replies
-code 0 once that disconnect has returned. Assert on VM2:
-ns-dev back on the raid0; the dm-clone and its kind-`cb` metadata wrapper are
-both gone (`dmsetup ls | grep -- '-cb-'` empty for this CN, which is also the
+clone removed, ns `suspended: false` (= `DeleteClone`). While CN2 still
+holds a controller of the `:4:` connection, the reply is
+`ReplyCodeLeftover` naming it, because its disconnect runs off the sweep's
+locks (`cnagent.md` CN21), and the same request re-sent replies code 0 once
+that disconnect has returned. The controller need not still be there: CN1's
+retirement unlinked the `:4:` subsystem from a port that keeps listening
+(sp1's subsystem is still on it), so CN2's controller lost its connection,
+and about 11 s later its first reconnect, after the kernel's default 10 s
+reconnect delay, is refused with DNR and the controller deletes itself
+(Appendix A). A finalize that lands after that finds no controller, issues
+no disconnect and replies code 0 at once, so the stage accepts 0 or 4 on
+the first send and branches on it. Assert on VM2: ns-dev back on the
+raid0; the dm-clone and its kind-`cb` metadata wrapper are both gone
+(`dmsetup ls | grep -- '-cb-'` empty for this CN, which is also the
 allocator's proof that the units are free again — the tables are the
-registry); the `:4:` connection disconnected — in the CN18 order (ns-dev
-reload → clone remove → kind-`cb` wrapper remove → disconnect, from the log).
+registry); no controller of the `:4:` connection left; and the CN18 order
+from the log — ns-dev reload → clone remove → kind-`cb` wrapper remove,
+then the disconnect when the first reply was the leftover, and no
+disconnect at all when it was code 0.
 
 **Stage 9 — verification via the host** (only the sp2 path serves): drop
 caches; first 32 MiB sha == `sha256(pattern-c.bin)`; second 32 MiB reads

@@ -215,14 +215,17 @@ is only meaningful once a crashed prior run's agents are gone:
   - `/sys/module/nvme_core/parameters/multipath` == `Y` (case A's standby
     assertions and the migration multipath merge depend on it).
   - `df /var/tmp` ≥ 3 GiB free; `/var/tmp` filesystem supports punch-hole
-    (probe: `fallocate -p` on a scratch file) — side provisioning
-    (`blkdiscard --zeroout`, §9.4) and the case C zeros-verify
-    both need the loop device's Write Zeroes to reach the backing file, and
-    loop implements it with `fallocate`. The 3 GiB floor is unchanged and
-    still ample: `--zeroout` on a loop materializes at most ~1 GiB of backing
-    pages per DN, and here not even that, since `backing.img` is
-    `fallocate -l 2G`-preallocated and the worst per-case draw is 4 extents =
-    256 MiB per VM.
+    (probe: `fallocate -p` on a scratch file, the same probe the cn agent
+    and e2e suites make). Side provisioning (`blkdiscard --zeroout`, §9.4)
+    and the case C zeros-verify do not rest on that probe: `--zeroout` asks
+    the loop device for Write Zeroes without unmap, and the loop driver runs
+    that as `FALLOC_FL_ZERO_RANGE` on the backing file, which allocates the
+    range (unwritten extents) rather than punching it. The check that
+    matters for zeroing is the Write Zeroes bullet below. The 3 GiB floor is
+    unchanged and still ample: `--zeroout` on a loop materializes at most
+    ~1 GiB of backing pages per DN, and here not even that, since
+    `backing.img` is `fallocate -l 2G`-preallocated and the worst per-case
+    draw is 4 extents = 256 MiB per VM.
   - Write Zeroes on the loop device: once §7 step 3 has created it, assert
     `/sys/class/block/<loop>/queue/write_zeroes_max_bytes` is non-zero. `0`
     means the kernel would fall back to writing zero pages at bulk speed,
@@ -816,8 +819,10 @@ The four assertion layers:
    discards the side device and loop devices punch holes", which was never a
    hardware guarantee; that is exactly the multi-tenancy hole the zeroing
    protocol closes.
-   Preflight still verifies punch-hole/Write-Zeroes support, since loop
-   implements both through `fallocate`.)
+   Preflight verifies Write Zeroes on the loop device
+   (`write_zeroes_max_bytes`); its punch-hole probe is a separate `/var/tmp`
+   check that side zeroing does not rest on, since the loop runs `--zeroout`
+   as an allocating `FALLOC_FL_ZERO_RANGE`, never a hole punch.)
 2. **API**: step 8 `bm_info.res_id == M`, `bm_idx_list == [0,1]`; both
    `push-migr-bm` replies code 0.
 3. **Hydration counter**: the first status sample after enable must already

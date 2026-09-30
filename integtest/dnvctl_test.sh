@@ -10,11 +10,13 @@
 #
 #   bash integtest/dnvctl_test.sh [--only <case>] [--cleanup-only] user@ip
 #
-# Cases (§7.9-§7.13), in order, each against a RESTARTED fake with an empty
-# behavior.json and an empty state.json: smoke, sweep, behavior, errors,
-# transport. Cleanup runs unconditionally at the start and, on success only, at
-# the end: a failing run leaves $WORK, the fake's log and both JSON files in
-# place and dumps the §7.15 diagnostics.
+# Cases (§7.9-§7.13), in order, each against a RESTARTED fake whose
+# behavior.json was reset to `{}` and whose state.json holds only case_reset's
+# own readiness probe (a ListClusters under trace it-<case>-reset), so counters
+# are read only as deltas: smoke, sweep, behavior, errors, transport. Cleanup
+# runs unconditionally at the start and, on success only, at the end: a
+# failing run leaves $WORK, the fake's log and both JSON files in place and
+# dumps the §7.15 diagnostics.
 #
 # NO SUDO anywhere: nothing in this suite needs root, and no Go toolchain is
 # needed on the VM — both binaries are built here and scp'd.
@@ -575,10 +577,13 @@ stop_fgw() {
 }
 
 # case_reset is §7.7's per-case reset: stop the fake, blank both JSON files,
-# truncate the log, restore the argv levers and start it again. Restarting
-# rather than only rewriting state.json is what guarantees a clean counter map
-# — the fake is stateless beyond those two files, so this is purely about
-# isolating the CASES from each other.
+# truncate the log, restore the argv levers and start it again. Blanking
+# state.json is what zeroes the counters: a started fake loads both files and
+# keeps counting from them. The restart makes the fresh process load the
+# blanked file at start rather than relying on the fake's mtime guard. The
+# readiness probe below is itself recorded (ListClusters, trace
+# it-<case>-reset), so no case starts from an empty state.json; assert counts
+# only as deltas (assert_count_delta).
 case_reset() { # <case name>
 	CASE=$1
 	stage reset "per-case reset before case $1 (§7.7)"

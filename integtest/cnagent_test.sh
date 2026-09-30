@@ -3953,6 +3953,7 @@ case_clone_xfer() {
 	local req2="$WORK/req-clone_xfer-cn2.json"
 	local out dev want got seq rev1 rev2 xnqn clonedm metadm nsdev1 ctrl sample
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd dump at upto from rsv rel deadline
+	local code details
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -4336,34 +4337,65 @@ case_clone_xfer() {
 		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
-	# The source's disconnect runs off the sweep's locks (CN21), so this pass
-	# names the :4: connection as a leftover; the worker's re-send of the same
-	# request is clean once the disconnect has returned.
-	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4)
+	# The source's disconnect runs off the sweep's locks (CN21), so a pass
+	# that still finds a controller of the :4: connection names it as a
+	# leftover (code 4), and the worker's re-send of the same request is clean
+	# once the disconnect has returned. It may find none: CN1's pass above
+	# unlinked the :4: subsystem from a port that keeps listening — it still
+	# carries sp1's subsystem — so cn2's controller lost its connection there,
+	# and its first reconnect, after the kernel's default 10 s reconnect delay,
+	# is refused with DNR and deletes the controller (Appendix A), about 11 s
+	# after that unlink. A pass that lands later finds no controller, issues
+	# no disconnect and replies 0. Both endings are CN21's, and the stage
+	# takes whichever the timing gives it: --expect-code 4 names the usual
+	# one, and `|| true` keeps the printed reply of the other.
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
+	[ -n "$out" ] ||
+		die "clone_xfer: the finalize printed no reply — the call never reached the agent"
+	code=$(jq_of "$out" '.agent_reply.code // 0')
+	details=$(jq_of "$out" '.agent_reply.details // ""')
 	assert_map_ok "$out" td_id_to_raid0 "$S_TD" "clone_xfer finalized"
 	assert_map_ok "$out" ns_id_to_dm_linear "$S_NS" "clone_xfer finalized"
-	case "$(jq_of "$out" '.agent_reply.details // ""')" in
-	*"$NQN_PREFIX:4:"*) ;;
-	*) die "clone_xfer: the finalize leftover is not the source connection" ;;
+	case "$code" in
+	4)
+		case "$details" in
+		*"$NQN_PREFIX:4:"*) ;;
+		*) die "clone_xfer: the finalize leftover is not the source connection: $details" ;;
+		esac
+		deadline=$((SECONDS + 30))
+		until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
+			[ "$SECONDS" -lt "$deadline" ] ||
+				die "clone_xfer: the source connection outlived 30 s"
+			sleep 2
+		done
+		;;
+	0)
+		log "clone_xfer: cn2's :4: controller was already gone — CN1's unlink" \
+			"dropped it and its reconnect was refused with DNR — so the" \
+			"finalize had no disconnect to issue"
+		;;
+	*) die "clone_xfer: the finalize replied code $code ($details), want 0 or 4" ;;
 	esac
-	deadline=$((SECONDS + 30))
-	until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
-		[ "$SECONDS" -lt "$deadline" ] ||
-			die "clone_xfer: the source connection outlived 30 s"
-		sleep 2
-	done
+	assert_eq "$(helper 2 "ctrl_of '$xnqn' '${IP[1]}'")" none \
+		"clone_xfer: cn2 holds no controller of the source connection"
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
 	# CN18 teardown order: the dm-clone goes first,
 	# then its metadata wrapper — whose removal is what frees the arena units
-	# again — and only then the source connection.
+	# again — and only then the source connection, when there was one left to
+	# disconnect.
 	assert_before "$seq" "^dmsetup remove $clonedm\$" \
 		"^dmsetup remove $metadm\$" \
 		"clone_xfer: the metadata wrapper goes after the dm-clone"
-	assert_before "$seq" "^dmsetup remove $metadm\$" \
-		"^nvme disconnect .*$NQN_PREFIX:4:" \
-		"clone_xfer: the source connection dies last"
+	if [ "$code" = 4 ]; then
+		assert_before "$seq" "^dmsetup remove $metadm\$" \
+			"^nvme disconnect .*$NQN_PREFIX:4:" \
+			"clone_xfer: the source connection dies last"
+	else
+		assert_absent "$seq" "^nvme disconnect .*$NQN_PREFIX:4:" \
+			"clone_xfer: no disconnect of a source connection that was already gone"
+	fi
 	# CN16 rule 6: with the clone gone the ns-dev sits on the raid0 again.
 	assert_eq "$(helper 2 "dm_backing $nsdev2")" \
 		"$(helper 2 "dm_devno $(cn_dm_name c4 2 "$sp2" "$S_TD")")" \

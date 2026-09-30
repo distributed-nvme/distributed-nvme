@@ -3673,7 +3673,9 @@ case: `w2`/`w3` are `SIGTERM`ed first and restarted after)
    `bm_info_list[].chunk_id_list` = `[(0,0), (0,1), (1,0)]` with
    `bm_idx_list` UNSET (it is migration-only), and `assert_none_for 3` no
    further pushes.
-4. `put-bitmap migr m0 2 <hex>` ⇒ exactly one new push at dn1, `bm_idx 2`.
+4. `put-bitmap migr m0 2 <hex>` ⇒ exactly one new push at dn1, `bm_idx 2`,
+   and no `PushMigrBitmap` request dn1 has logged, chunk 2's included,
+   carries a `revision` field (BM3).
 5. `put-bitmap clone c0 --src-slice-idx 0 --bm-idx 0 <longer hex>` ⇒ a
    second `PushCloneBitmap` at the SAME pair `(0,0)` at cn0 carrying the new
    length (the `mod_revision` memo, BM5), and no push of `(0,1)` or `(1,0)`.

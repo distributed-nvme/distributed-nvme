@@ -9641,11 +9641,21 @@ ops_inspect() {
 # is why setup_assert_standby asserts emptiness there and this asserts
 # MISSING here.)
 #
-# READONLY is the one rung with no CntlrInfo signature at all: CN16 rule 7
-# reloads each user-facing ns-dev onto a dm-flakey `error_writes` table over
-# its NORMAL backing, which probeNsDev compares as the expected table, so every
-# row stays OK. What changes is only what the HOST sees, so that is what the
-# rung asserts.
+# READONLY's rows look exactly like READWRITE's (so do NO_CLONE's, in a case
+# with no clone): CN16 rule 7 reloads each user-facing ns-dev onto a dm-flakey
+# `error_writes` table over its NORMAL backing, which probeNsDev compares as
+# the expected table, so every row stays OK. A wait on the statuses alone
+# therefore returns on its first poll, and that poll can come before the
+# primary has even received the level: the worker holds a cntlr's request
+# back until every side of the pool has reported the new revision applied,
+# or for one cntlr_interval (RW14's sides-first hold). So every rung also
+# waits for the primary's applied_revision to reach the SpRev the set-level
+# produced. InspectCntlr reads the agent's GetCntlrInfo, which takes the same
+# per-cntlr lock SyncupCntlr holds across its whole converge, so a reply at
+# that revision comes after the converge that applied the level, and its rows
+# are judged against the plan of that level: at READONLY an OK ns-dev row is
+# the flakey table. What that cannot see is a plan that never asked for
+# flakey at all, so the rung still asserts what the HOST sees.
 #
 # Two consequences of the DISABLE rung that the steps below depend on:
 #  - the host-facing subsystem goes with everything else, on BOTH cntlrs:
@@ -9729,10 +9739,24 @@ ops_level_want() { # <level, without the SP_LEVEL_ prefix>
 # back with a null cntlr_info, and `null | length` is 0 in jq — the one shape in
 # which "the level has been applied" and "the agent has never heard of this
 # controller" would look identical.
-cntlr_level_ready() { # <cntlr id>
-	local spec map want total hit sig="" ok=1
+#
+# With a second argument it is also false until the cntlr's applied_revision
+# has reached that revision, which is how ops_set_level knows the rows it reads
+# are the new level's and not the old one's (the note above ops_level_want).
+# Without one the rows alone decide, as for the caller that only waits for a
+# fresh primary's READWRITE build.
+cntlr_level_ready() { # <cntlr id> [min applied revision]
+	local spec map want total hit rev sig="" ok=1
 	if ! ctl_try cntlr inspect --id "$1"; then
 		return 1
+	fi
+	if [ $# -ge 2 ]; then
+		rev=$(jq_of "$CTL_OUT" '.applied_revision')
+		sig=" applied_revision $rev (want >= $2)"
+		case "$rev" in
+		'' | *[!0-9]*) ok=0 ;;
+		*) [ "$rev" -ge "$2" ] || ok=0 ;;
+		esac
 	fi
 	for spec in "${LEVEL_WANT[@]}"; do
 		map=${spec%%:*}
@@ -9754,13 +9778,22 @@ cntlr_level_ready() { # <cntlr id>
 }
 
 ops_set_level() { # <level, without the SP_LEVEL_ prefix>
-	local lvl=$1 spec map want total
+	local lvl=$1 spec map want total rev
 	log ""
 	log "  --- sp_level $lvl"
 	ctl_ok sp set-level --level "$lvl"
 	sp_refresh
 	assert_field "$SP_JSON" '.sp_conf.sp_level' "SP_LEVEL_$lvl" \
 		"the stored sp_level after \`sp set-level --level $lvl\`"
+	# The SpRev the set-level bumped to (or a later one: any revision at or
+	# above it carries the level). The wait below takes it, because a rung's
+	# row statuses can already match before the primary has applied the
+	# level: READWRITE, READONLY and NO_CLONE all demand OK everywhere, so a
+	# step between two of them changes no status at all.
+	rev=$(sp_field '.sp_rev.revision')
+	case "$rev" in
+	'' | *[!0-9]* | 0) die "\`sp get\` reports sp_rev.revision '$rev'" ;;
+	esac
 	ops_level_want "$lvl"
 	LEVEL_LAST=""
 	# WAIT_BUILD, not WAIT_PROVISION: this ladder walks all the way down to
@@ -9769,10 +9802,11 @@ ops_set_level() { # <level, without the SP_LEVEL_ prefix>
 	# stack down; the step back up rebuilds all $SLICE_CNT pools and every md
 	# array from nothing, which is the same piece of work setup pays for, at the
 	# 8m45s / 126,657-spawn scale of the WAIT_BUILD comment. One budget for every rung,
-	# because the cheap rungs return on their first poll and cost nothing.
+	# because the cheap rungs return as soon as the primary has applied them
+	# and cost nothing more.
 	wait_until "$WAIT_BUILD" \
-		"the primary cntlr $PRIMARY_CNTLR_ID to reach CN19's shape for SP_LEVEL_$lvl" \
-		cntlr_level_ready "$PRIMARY_CNTLR_ID"
+		"the primary cntlr $PRIMARY_CNTLR_ID to apply revision $rev and reach CN19's shape for SP_LEVEL_$lvl" \
+		cntlr_level_ready "$PRIMARY_CNTLR_ID" "$rev"
 	# The predicate ran in this shell, so its last reply is still in $CTL_OUT.
 	for spec in "${LEVEL_WANT[@]}"; do
 		map=${spec%%:*}
@@ -9815,11 +9849,13 @@ ops_levels() {
 		"host0 still READS its data at SP_LEVEL_READONLY"
 
 	# AND THE OTHER HALF. Reads being served is not what distinguishes
-	# READONLY from READWRITE — a regression that simply stopped reloading the
+	# READONLY from READWRITE — a regression that simply stopped asking for the
 	# dm-flakey table would pass the assertion above, and no other rung of this
-	# ladder covers it either: cntlr_level_ready has no CntlrInfo signature at
-	# READONLY (the note at the top of this step), so the host is the only
-	# place the level is visible at all.
+	# ladder covers it either: READONLY's rows read exactly like READWRITE's
+	# (the note above ops_level_want), and a plan without flakey is probed
+	# against itself, so the host is the only place the level is visible at
+	# all. ops_set_level has already waited for the primary to apply the
+	# level's revision, so this write does not race the reload onto flakey.
 	#
 	# The write is /dev/zero and not PATTERN0 on purpose: it must be bytes the
 	# device does NOT already hold, or "the media did not change" would prove
