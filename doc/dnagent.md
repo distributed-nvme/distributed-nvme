@@ -572,8 +572,9 @@ SH15. Every wrapper call wraps its ctx with
       §4.2 handles SIGTERM/SIGKILL). This covers the raw-device
       `ReadBlock`/`WriteBlock` calls of the [D13] metadata path too. A role
       package that calls the `OsClient` directly instead of through a
-      wrapper — the `cnagent.md` CN12 sysfs leg walk — takes the same bound
-      from the exported `agent.CmdCtx`. The bound holds in full only for a
+      wrapper — the `cnagent.md` CN12 sysfs leg walk, and CN25's read of
+      the `thin_dump` file — takes the same bound from the exported
+      `agent.CmdCtx`. The bound holds in full only for a
       child the signals end. An in-process `OsClient` call — a file, proto
       or block read or write — is bounded only until its syscall starts:
       its ctx is checked once, before it (`osclient.md` §4.3). A child

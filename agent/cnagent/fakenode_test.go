@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,6 +150,11 @@ type fakeNode struct {
 	// really prints — the EBUSY of a second reserve_metadata_snap is what
 	// CN25's release-and-retry-once branches on.
 	dispatchStderr string
+	// stdouts is the stdout every dispatched command answered with, per
+	// tool, in call order: what the production client logs in full as the
+	// `os command` record's stdout (log.md), so a test can bound what a
+	// command puts there.
+	stdouts map[string][]string
 
 	// failCmd fails the first matching command; failCmdAlways every one.
 	// Both model "the tool ran and answered no": exit code 1, a non-nil
@@ -203,6 +209,18 @@ type fakeNode struct {
 	// traceOf records, per recorded command line, the trace id its ctx
 	// carried ("" for none). nil leaves it off.
 	traceOf map[string]string
+	// cancelCmd models a caller whose ctx is cancelled while a matching
+	// command runs — a client that went away, a gateway deadline. The first
+	// match calls its cancel func; the command has dispatched, as killCmd's
+	// does, and answers what exec answers for a child killed on a done ctx:
+	// exit code -1 with ctx.Err(). Everything the caller runs afterwards on
+	// that ctx fails runCommand's ctx check, as it does in the production
+	// client.
+	cancelCmd map[string]context.CancelFunc
+	// dirStat scripts the `stat --format "%u %a %F"` answer per path —
+	// owner uid, octal mode, file type. A directory the fake holds without
+	// one answers as a private directory of the agent's own user.
+	dirStat map[string]string
 }
 
 type fakeDm struct {
@@ -320,8 +338,10 @@ func newFakeNode() *fakeNode {
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
 
-		gate:     make(map[string]chan struct{}),
-		hardGate: make(map[string]chan struct{}),
+		gate:      make(map[string]chan struct{}),
+		hardGate:  make(map[string]chan struct{}),
+		cancelCmd: make(map[string]context.CancelFunc),
+		dirStat:   make(map[string]string),
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
@@ -449,6 +469,7 @@ func (f *fakeNode) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = nil
+	f.stdouts = nil
 }
 
 // SysfsNoDeadline is the SH15 evidence: the sysfs paths read on a
@@ -815,6 +836,14 @@ func (f *fakeNode) runCommand(
 	if !killedNoEffect {
 		killed = takeKill(f.killCmd, f.killCmdAlways, line) || killedNth
 	}
+	var cancel context.CancelFunc
+	for key, fn := range f.cancelCmd {
+		if strings.Contains(line, key) {
+			delete(f.cancelCmd, key)
+			cancel = fn
+			break
+		}
+	}
 	f.mu.Unlock()
 	if killedNoEffect {
 		return killedCmdResult()
@@ -836,6 +865,14 @@ func (f *fakeNode) runCommand(
 	defer f.mu.Unlock()
 	f.dispatchStderr = ""
 	stdout, code := f.dispatch(name, args, stdin)
+	if f.stdouts == nil {
+		f.stdouts = make(map[string][]string)
+	}
+	f.stdouts[name] = append(f.stdouts[name], stdout)
+	if cancel != nil {
+		cancel()
+		return "", "signal: killed", -1, ctx.Err()
+	}
 	if killed {
 		// The tool was killed, but the ioctl it had already issued ran to
 		// completion in the kernel: the node changed and the agent was told
@@ -2138,6 +2175,15 @@ func (f *fakeNode) cmdFindmnt(args []string) (string, int) {
 
 func (f *fakeNode) cmdStat(args []string) (string, int) {
 	path := args[len(args)-1]
+	if contains(args, "%u %a %F") {
+		if answer, ok := f.dirStat[path]; ok {
+			return answer + "\n", 0
+		}
+		if f.dirs[path] {
+			return fmt.Sprintf("%d 700 directory\n", os.Geteuid()), 0
+		}
+		return "", 1
+	}
 	size, ok := f.plain[path]
 	if !ok {
 		return "", 1
@@ -2180,10 +2226,31 @@ func (f *fakeNode) cmdLosetup(args []string) (string, int) {
 	return "", 1
 }
 
+// cmdThinDump answers with the scripted document, or a synthesized one. With
+// `-o FILE` the document goes to that file and nothing to stdout, as
+// thin-provisioning-tools writes it.
 func (f *fakeNode) cmdThinDump(args []string) (string, int) {
-	path := args[len(args)-1]
+	var path, out string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-o" && i+1 < len(args):
+			i++
+			out = args[i]
+		case !strings.HasPrefix(args[i], "-"):
+			path = args[i]
+		}
+	}
+	dump := f.thinDumpDoc(path)
+	if out != "" {
+		f.files[out] = dump
+		return "", 0
+	}
+	return dump, 0
+}
+
+func (f *fakeNode) thinDumpDoc(path string) string {
 	if dump, ok := f.thinDumps[path]; ok {
-		return dump, 0
+		return dump
 	}
 	// A pool whose thin devices exist but have never been written: every
 	// device is present in the metadata with no mappings at all.
@@ -2204,7 +2271,7 @@ func (f *fakeNode) cmdThinDump(args []string) (string, int) {
 		}
 	}
 	sb.WriteString("</superblock>\n")
-	return sb.String(), 0
+	return sb.String()
 }
 
 // ---------------------------------------------------------------------------

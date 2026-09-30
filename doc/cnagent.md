@@ -881,6 +881,15 @@ CN9. **Role and pass structure.** The effective role is **primary** iff
         reload's own flushing suspend is what completes the in-flight host
         IO — §11.1 old_primary steps 2-3 — and without it the removal below
         fails EBUSY behind a live ns-dev.
+        The park creates its error device when it is missing, so it does
+        not run at `SP_LEVEL_DISABLE`: the wanted set holds no `c5` there,
+        and one created after the sweep's enumeration would be in no chain
+        — the pass would remove the ns-dev parked on it, reply clean, and
+        leave an unwanted device for the next round to find. Nothing is
+        lost by skipping it: the wanted set holds no ns-dev at that level
+        either, so P0 parks every one by its own live table (CN21), which
+        needs no `c5` — where the td's is missing, it reloads the device
+        onto an error table of its own size.
      3. **Demote of an unserved transfer.** A `c8` device this cntlr no
         longer serves (`plan.xferServed` false) is reloaded onto an error
         table of its own size, so that it lets go of the origin td's raid0
@@ -1751,15 +1760,13 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       is empty, else host links exactly per the list; per `Namespace` an
       nvmet namespace `nsid = ns_idx`, `device_path` = its own ns-dev,
       `uuid`/`nguid` from the record. A namespace that has left `ns_list`
-      under a subsystem that stays is normally gone before the build gets
-      there, taken by CN21's L1 after P0 has parked or resumed the ns-dev
-      under it. When the build still finds one after a sweep whose listings
-      answered — L1's removal did not go, or the sweep's own listing of that
-      subsystem's namespaces did not answer — it removes it, moving it to
-      `AnaGrpIdInaccessible` first as L1 does. After a sweep an unanswered
-      listing stopped it leaves it alone (CN21): P0 has not run, and
-      disabling the namespace closes its ns-dev, which does not complete on
-      one still dm-suspended.
+      under a subsystem that stays is not the build's to remove: CN21's L1
+      alone removes it, `AnaGrpIdInaccessible` first, after P0 has parked
+      or resumed the ns-dev under it, and only from an enumeration that
+      answered. A pass in which one did not — one of the four listings, or
+      the sweep's own listing of that subsystem's namespaces — leaves it
+      where it is with a non-OK verdict, and the next pass whose listings
+      answer removes it.
       **ANA**: `AnaGrpIdOptimized` iff
       primary ∧ not disabled ∧ not effectively suspended **∧ its backing
       chain is not provisioning-deferred** (CN9); else
@@ -1792,7 +1799,8 @@ CN17. **Transfers** (`xfer.go`; both roles, fig. `100Transfer`). Per
       retirement is CN16's effective-suspend rule. A cntlr that keeps the
       transfer device but stops serving it — demoted to standby, or
       `SP_LEVEL_NO_THINPOOL ≤ sp_level < SP_LEVEL_DISABLE`, or the origin td
-      provisioning-deferred — reloads the live `CnXferFinalName` onto an
+      provisioning-deferred, or, on a primary too, an origin that no longer
+      resolves (CN29) — reloads the live `CnXferFinalName` onto an
       error table of its own size, as CN9's pre-step 3, before any layer
       touches what is under it: a linear still mapping the origin td's raid0
       holds it open and the raid0's removal would fail EBUSY (CN19's
@@ -1809,7 +1817,16 @@ CN17. **Transfers** (`xfer.go`; both roles, fig. `100Transfer`). Per
       it at all, or it is but its td left `td_list` in the same request,
       which leaves the namespace's size unknown — the size is summed from the
       device's **own live table** instead; without that fallback the
-      demotion would be skipped and the departing raid0 never released. The
+      demotion would be skipped and the departing raid0 never released. A
+      primary is no exception: an unresolved origin makes `plan.xferServed`
+      false there as well, so the primary demotes the device like a standby
+      and the transfer no longer holds the departed raid0 against L6 — a
+      linear left serving would keep that raid0's `dmsetup remove` failing
+      EBUSY on every pass while the transfer stays in the request. Its
+      namespace stays `AnaGrpIdOptimized` all the same, as it does at
+      `SP_LEVEL_NO_THINPOOL`: the transfer's ANA group follows the role, the
+      level and deferral only, so the destination is handed IO errors from
+      the error table, not a queue. The
       live table is deliberately not the *previously applied* plan the old
       retire phase read it from: it is the same answer, from the kernel, with
       nothing remembered. A transfer whose origin td is
@@ -2207,12 +2224,12 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       is no reason for them to wait. The third, ahead of the sweep, is the
       trim of the CN11 probers (below), which decides from the plan alone
       and removes nothing from the node. The build phase of such a converge in
-      turn holds back the two things that are safe only after a step the
+      turn holds back the one thing that is safe only after a step the
       stopped sweep skipped: while a dm-clone the plan does not want may
       still be live it puts no ns-dev onto a td's raid0 it is not on
-      already — that waits for L3 to remove the dm-clone (CN18) — and it
-      leaves a namespace that has left `ns_list` to the next pass's P0 and
-      L1 (CN16).
+      already — that waits for L3 to remove the dm-clone (CN18). A
+      namespace that has left `ns_list` it never touches, stopped sweep or
+      not: that is L1's alone (below), after P0 (CN16).
       The snapshot is thrown away at the end of the pass: it decides
       only what to *attempt*, and every removal re-probes its own object.
 
@@ -2277,7 +2294,10 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       **Layers, strictly top-down.** Within one sp's chain:
       * **L1** — nvmet. Each unwanted namespace under a surviving subsystem
         goes `AnaGrpIdInaccessible` and is then removed (a host still holding
-        a path is told to stop using it rather than losing it under IO);
+        a path is told to stop using it rather than losing it under IO) —
+        by this layer alone: the build phase's `ensureSubsystem` converges
+        the wanted namespaces and removes none, so a pass whose enumeration
+        did not answer removes none either;
         then the unwanted subsystems whole (port link, ns disable, rmdir ns,
         allowed-hosts unlink, rmdir subsystem). First because nvmet must
         release the dm devices below before anything can remove them.
@@ -2477,11 +2497,55 @@ CN25. Both serve the §8.13 gateway reads from a **dm-thin metadata
       status naming the step. Under the CN1 locks (node read + object —
       the snapshot must not race a converge):
       `dmsetup message {CnPoolFinalName} 0 reserve_metadata_snap`, then
-      `thin_dump --metadata-snap {DmPath(CnPoolMetaName)}` (the
-      `thin-provisioning-tools` reader; XML on stdout), then **always**
+      `thin_dump --metadata-snap {DmPath(CnPoolMetaName)} -o {file}` (the
+      `thin-provisioning-tools` reader), then **always**
       `release_metadata_snap` — on the success path and on every error
-      path, because a leaked reservation blocks the next reserve; a
-      reserve that fails "already reserved" is released and retried once.
+      path, on a context the caller's cancellation does not reach (still
+      under the soft timeout), because a leaked reservation blocks the next
+      reserve and pins the pool's metadata blocks; on the caller's own
+      context, a caller that went away before the release, such as one
+      whose client gave up in the middle of the dump, would take the
+      release with it and leave the reservation held until some later
+      reserve on that pool met it. A reserve that fails "already reserved"
+      — a reservation an earlier reserve made and nothing released, such
+      as one whose reserve was killed after its message ran — is released
+      and retried once.
+      The XML goes to `{file}`, never to stdout: the `os command` record
+      logs a command's stdout in full (`log.md`), and a dump is one element
+      per mapped run — tens of MB on a fragmented slice, once per slice per
+      read — while the `os read file` record of reading it back carries a
+      truncated excerpt. `{file}` is `{CnPoolMetaName}.thin_dump.xml` in
+      the private directory `/run/dnv-thin-dump`. Before the reserve,
+      every dump runs `mkdir -p -m 0700` of that directory and
+      checks with `stat --format "%u %a %F"` that it is the agent's own
+      user's, mode `700`, a directory — `stat` reads the entry itself, so a
+      symlink answers as one — and anything else fails the dump before the
+      pool is touched. The agent writes the dump as root, and `thin_dump`
+      opens its output with a plain create-and-truncate: under a fixed name
+      in a world-writable directory, another local user could create the
+      file first, own it through the dump and rewrite it before it is read
+      back, and a forged destination bitmap (CN18 step 4) discards regions
+      of a dm-clone that were never copied. Nobody else can create an entry
+      in a `0700` directory, and only root can create, replace or rename an
+      entry of `/run` (root's, mode `0755`). The directory's parent is
+      `/run`, not a world-writable temp directory such as `/tmp`, because
+      nothing repairs an entry that fails the check: `mkdir -p` leaves an
+      existing directory's owner and mode as they are. A local user who
+      created the name first in `/tmp` would then fail every dump on the
+      node until an operator removed it — the bitmap reads, the CN14
+      activation sweep, and CN18 step 4's recovery, which fails closed. In
+      `/run` only root can have made such an entry. `/run` is a tmpfs, so
+      until its `rm` the file holds as much memory as the document, which
+      the command timeouts bound. The file is read back under the soft
+      timeout, and once `thin_dump` has run an `rm -f` of it follows
+      whatever the outcome, before the release and, like it, on a context
+      the caller's cancellation does not reach — a dump that did not
+      answer included, whether the soft timeout killed it or the caller
+      went away, since a killed `thin_dump` may already have written it.
+      Only an `rm` that fails, or an agent that dies between the dump and
+      the `rm`, leaves the file behind; the name is fixed, so the pool's
+      next dump overwrites it, and one whose pool is gone stays until a
+      reboot clears `/run`.
       The `architecture.md` §7 command timeouts bound the dump; a pool whose metadata
       outgrows what `thin_dump` emits inside `CmdSoftTimeout` fails the
       RPC, and the caller falls back to a full copy — bitmaps are an
@@ -3021,7 +3085,18 @@ between `Recv` and the round (SH24).
    `mdadm --detail` is recorded at all** — the assertion that pins CN12's
    "no sweep reads a member device". Re-sync back to primary rebuilds via
    `mdadm --assemble` (superblocks present — CN12 case 2), never
-   `--create`.
+   `--create`. The transfer demotion of CN9's pre-step 3 holds on a cntlr
+   that stays primary too (`TestPrimaryTransferLetsGoOfADepartedOrigin`),
+   for both shapes of an origin that no longer resolves. When the origin
+   namespace and td leave the request together, the converge replies code
+   0, reloads the transfer device exactly once, onto an error table the
+   size of its own live table, before the departed raid0's `dmsetup
+   remove`, and the raid0 is gone. When only the td leaves, the transfer
+   device is reloaded exactly once onto that error table all the same;
+   the still-wanted ns-dev, which has no td to park onto, keeps the raid0
+   open itself there, so that case asserts neither a clean reply nor the
+   raid0's removal. In both, an equal-revision re-sync reloads the
+   transfer device no more (CN17).
 7. **§11.1.1 / member reconciliation**: scripted `--examine` outcomes and
    the fake's sysfs view of the array drive: no superblocks ⇒
    create+assume-clean; one ⇒ assemble + add; both-with-one-left-out ⇒
@@ -3218,17 +3293,23 @@ between `Recv` and the round (SH24).
     only after that reload.
     `TestUnansweredListingLeavesADroppedNamespaceToTheSweep` — the only
     namespace leaves `ns_list`, its ns-dev left dm-suspended over the
-    raid0 by an older build: no `enable = 0` and no `rmdir` of it on the
+    raid0 by an older build and its `ana_grpid` already `3`: no
+    `ana_grpid` write, no `enable = 0` and no `rmdir` of it on the
     stopped pass, whose reply names it beside the failed enumeration (the
     enumeration alone when the nvmet listing is the one killed); the next
-    pass reloads and resumes the ns-dev before the `enable = 0`, the
-    `rmdir` and the `dmsetup remove`.
+    pass reloads and resumes the ns-dev before the `enable = 0`, its one
+    `rmdir` and the `dmsetup remove`, and writes its `ana_grpid` nothing
+    but `3`.
     With the four listings answering,
-    `TestBuildDropsANamespaceInaccessibleFirst` — nsid 2 leaves `ns_list`
-    under a subsystem that stays while the sweep's own listing of that
-    subsystem's namespaces is killed once: exactly one `ana_grpid` write
-    for it, to `3`, before the build's `enable = 0` and `rmdir`, and no
-    write for nsid 1. And `TestUnremovedChunkFileIsRedriven` — the `rm -f`
+    `TestUnansweredNamespaceListingRemovesNoNamespace` — nsid 2 leaves
+    `ns_list` under a subsystem that stays while the sweep's own listing
+    of that subsystem's namespaces is killed once: a Leftover naming
+    `enumeration failed: nvmet namespaces of {nqn}`, no `ana_grpid`
+    write, `enable = 0` or `rmdir` for nsid 2, and no `ana_grpid` write
+    for nsid 1; the next pass, the listing answering, replies 0 with
+    nsid 2 gone — exactly one `ana_grpid` write for it, to `3`, before
+    its `enable = 0` and its one `rmdir` — and still no write for nsid 1.
+    And `TestUnremovedChunkFileIsRedriven` — the `rm -f`
     of a dropped clone's chunk file killed before it acted, once with the
     listings answering and once with `dmsetup ls` killed as well: the pass
     and the next check round name `record:{path}`, and the re-drive issues
@@ -3292,7 +3373,14 @@ between `Recv` and the round (SH24).
     `NO_THINPOOL` keeps namespaces exported on error backing;
     `NO_MIGRATION` is a no-op relative to `NO_REDUND`; `NO_SIDE` drops leg
     connections; `DISABLE` leaves only base state and keeps the store
-    files; lowering rebuilds. `TestSuppressedCloneReportsSpLevel` (*added
+    files; lowering rebuilds. `TestDisableCreatesNoParkTarget`: over an
+    ns-dev whose td dm-error an earlier build could not create, the
+    `DISABLE` converge names only the legs' connections as leftovers
+    (their disconnects run off the pass, CN10) and leaves no dm device,
+    and the re-sync once they have returned replies code 0; neither
+    attempts a create of that `c5`, and the ns-dev is reloaded exactly
+    once, onto an error table, before its removal (P0's park by live
+    table; CN9 pre-step 2). `TestSuppressedCloneReportsSpLevel` (*added
     2026-09-26*, the failover ping-pong): a clone in `clone_list` reads its
     three rows `MISSING` `"sp_level"` at `NO_CLONE` and at `DISABLE`, on
     the converge and on the probe alike — rows the worker's settle
@@ -3351,6 +3439,20 @@ between `Recv` and the round (SH24).
     after an "already reserved" retry; the wire inversion (mapped ⇒ 0);
     paging windows; the meta-group all-zero rule; the data-group span
     arithmetic on the fixture's single data group (`TestLegBitmap`).
+    `TestThinDumpGoesThroughAFile`: one bitmap read runs `thin_dump` once,
+    with `-o {file}` in the private `/run/dnv-thin-dump` directory, and its
+    answer carries no stdout — the fake records each command's stdout, the
+    attribute the `os command` record logs in full — then reads the file
+    exactly once and `rm -f`s it before the release, leaving no file; a
+    `thin_dump` the soft timeout killed fails the RPC, reads nothing and
+    still leaves no file; and one whose caller's ctx is cancelled while it
+    runs, after writing the file, fails the RPC, reads nothing, and is
+    followed by exactly one `rm -f` of the file, which is gone, and then
+    by exactly one `release_metadata_snap` (CN25).
+    `TestThinDumpDirIsPrivate`: a read runs `mkdir -p -m 0700` and `stat`
+    of `/run/dnv-thin-dump` before its `reserve_metadata_snap`; with the
+    `stat` answering another user's directory, a mode-`777` one, or a
+    symlink, the RPC fails with no reserve and no `thin_dump` (CN25).
 15. **Leg prober** (CN11): registry logic under a fake clock with a **fake
     `LegProbeIO`** (§2.2 — the prober never touches the server's `oc`: a
     round records no `writeblock`/`readblockdirect` `OsClient` call at all),
@@ -3547,6 +3649,12 @@ between `Recv` and the round (SH24).
     and asserts the same park-first order around `RemoveSubsystem`. A third
     is the steady state: an already parked namespace is removed with **no**
     reload, suspend or resume of its ns-dev at all.
+    `TestNamespaceRemovalIsTheChainsAlone`: the same drop from `ns_list`
+    under a surviving subsystem, in a converge whose `dmsetup ls` does not
+    answer, replies `ReplyCodeLeftover` and leaves the nvmet namespace in
+    place with no `rmdir` of it — the build phase removes none — and the
+    next converge, whose listing answers, removes it through L1: its
+    `ana_grpid = 3` write before its one `rmdir` (CN21).
 27. **A zero conf member is refused** (CN8, `dnagent.md` §2.1): a
     `SyncupCntlr` whose `bdev_conf` carries a zero `data_block_size`,
     `low_water_mark_pct` or `stripe_size`, or a zero

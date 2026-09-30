@@ -331,18 +331,9 @@ func (s *CnAgentServer) ensureNamespaceObject(
 }
 
 // ensureSubsystem converges one host-facing subsystem, its namespaces and its
-// port link, and drops namespaces that left `ns_list` while the subsystem
-// itself stays. Such a namespace is normally gone already, taken by the
-// sweep's L1 after P0 has parked or resumed the ns-dev under it. One still
-// here after a sweep whose listings answered — L1's removal did not go, or
-// the sweep's own listing of this subsystem's namespaces did not answer — is
-// dropped the way L1 drops one: moved to the inaccessible group first.
-// After a sweep an unanswered listing stopped (CN21) the build leaves it
-// alone: with no P0 the ns-dev under it may still be dm-suspended, and
-// disabling the namespace closes that backing device, which does not
-// complete on a suspended device. The verdict stays non-OK — it names the
-// namespace, or the listing that did not answer — and the next pass whose
-// listings answer takes it through P0 and L1.
+// port link. A namespace that left `ns_list` while the subsystem stays is not
+// its business: CN21's L1 removes it, inaccessible first, and only from an
+// enumeration that answered.
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,
@@ -356,30 +347,6 @@ func (s *CnAgentServer) ensureSubsystem(
 		info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
 			ssKey, sp.nqn, err.Error())
 		return
-	}
-	wanted := make(map[int]struct{}, len(sp.namespaces))
-	for _, np := range sp.namespaces {
-		wanted[np.nsIdx] = struct{}{}
-	}
-	// None is dropped after a sweep an unanswered listing stopped (above).
-	var drop []int
-	if !plan.sweepStopped {
-		if nsids, ok, err := s.nvmet.ListNamespaces(
-			ctx, sp.nqn); err == nil && ok {
-			for _, nsid := range nsids {
-				if _, keep := wanted[nsid]; !keep {
-					drop = append(drop, nsid)
-				}
-			}
-		}
-	}
-	for _, nsid := range drop {
-		s.setAnaLogged(ctx, sp.nqn, nsid)
-		if err := s.nvmet.RemoveNamespace(ctx, sp.nqn, nsid); err != nil {
-			info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
-				ssKey, sp.nqn, err.Error())
-			return
-		}
 	}
 	for _, np := range sp.namespaces {
 		nsKey := resKeyOf(resKeyNamespaceFmt, np.nsId)

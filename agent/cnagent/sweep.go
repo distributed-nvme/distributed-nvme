@@ -1432,18 +1432,14 @@ func (s *CnAgentServer) sweepCntlr(
 	}
 	if converge && !remove {
 		// The build phase after a stopped sweep must not act on the
-		// strength of steps that did not run. With no P0, a namespace that
-		// left ns_list is still enabled over an ns-dev that may be
-		// dm-suspended, so the build leaves it to the next pass's P0 and L1
-		// (ensureSubsystem). With no L3, a dm-clone the plan does not want
-		// may still be live and hydrating into its destination raid0 —
-		// certainly when the dm listing names one, possibly when that
-		// listing did not answer — and a host writing that raid0 directly
-		// could have its write overwritten by a region the clone had not
-		// copied yet, so the build puts no ns-dev onto a raid0 it is not
-		// already on (ensureNsDev). Both facts are this pass's, read off
-		// this snapshot; the next pass learns its own.
-		plan.sweepStopped = true
+		// strength of steps that did not run. With no L3, a dm-clone the
+		// plan does not want may still be live and hydrating into its
+		// destination raid0 — certainly when the dm listing names one,
+		// possibly when that listing did not answer — and a host writing
+		// that raid0 directly could have its write overwritten by a region
+		// the clone had not copied yet, so the build puts no ns-dev onto a
+		// raid0 it is not already on (ensureNsDev). The fact is this
+		// pass's, read off this snapshot; the next pass learns its own.
 		plan.cloneMayLinger = !actual.dmListed || len(chain.clones) > 0
 	}
 	// The local store follows the same rule as the devices: a clone's chunk
@@ -1570,20 +1566,27 @@ func (s *CnAgentServer) cntlrPreSteps(
 	wanted *cnWanted,
 ) {
 	// P2, park: an ns-dev OF THE PLAN whose LIVE table still maps something
-	// this pass is about to remove is reloaded onto its td's dm-error first.
-	// Of the plan, not of the wanted set: the loop below is over
-	// plan.namespaces, and at SP_LEVEL_DISABLE the plan names every ns-dev
-	// while the wanted set holds none of them — which is exactly the level
-	// at which everything under them is about to be removed. The
-	// reload's own flushing suspend is what completes the in-flight host IO,
-	// and without it the removal below would fail EBUSY behind the ns-dev.
+	// this pass is about to remove is reloaded onto its td's dm-error first,
+	// which the park creates when it is missing. Of the plan, not of the
+	// wanted set: below SP_LEVEL_DISABLE an ns-dev the desired state still
+	// wants can map a device it no longer does — a raid0 at
+	// SP_LEVEL_NO_THINPOOL, a dm-clone the level suppresses — and P0 parks
+	// only unwanted ns-devs. The reload's own flushing suspend is what
+	// completes the in-flight host IO, and without it the removal below
+	// would fail EBUSY behind the ns-dev.
+	//
+	// Not at SP_LEVEL_DISABLE. The wanted set holds no ns-dev there, so P0
+	// parks every one of them by its own live table; and the park target
+	// would be an unwanted `c5` created after the sweep's enumeration, in no
+	// chain — the pass would remove the ns-dev parked on it, reply clean, and
+	// leave that device for the next round to find.
 	//
 	// The old retire phase computed this from the previous plan ("does this
 	// namespace's OLD td still exist?"). The live table is the same answer
 	// without the memory — and it is also right for a device an interrupted
 	// pass left pointing somewhere the plan never described.
 	for _, np := range plan.namespaces {
-		if np.td == nil {
+		if np.td == nil || !plan.wantAny {
 			continue
 		}
 		if np.backingName == np.td.errorName ||

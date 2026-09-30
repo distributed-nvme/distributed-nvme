@@ -65,6 +65,93 @@ func TestFailoverWithTransferReleasesTheStack(t *testing.T) {
 	}
 }
 
+// TestPrimaryTransferLetsGoOfADepartedOrigin is CN17's live-table size
+// fallback on a cntlr that stays primary. The transfer's origin no longer
+// resolves (CN29) in either of its two shapes — its namespace and td left the
+// request together, or only its td left while the namespace stayed — so the
+// plan can size nothing, but the transfer device still maps the departed td's
+// raid0. Unless the primary demotes it too, the linear holds that raid0 open:
+// in the first shape L6's `dmsetup remove` of it fails EBUSY on every pass,
+// and the leftover re-drive never ends while the transfer stays in the
+// request.
+func TestPrimaryTransferLetsGoOfADepartedOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// subsys is the request's subsystem map: nil keeps the default,
+		// whose namespace still names the departed td.
+		subsys map[string]*pb.Subsystem
+		// released: nothing else holds the raid0, so the pass removes it
+		// and replies clean. With the namespace kept, its still-wanted
+		// ns-dev holds the raid0 open itself (it has no td to park onto),
+		// so only the transfer's demotion is this test's business.
+		released bool
+	}{
+		{name: "namespace and td gone",
+			subsys: map[string]*pb.Subsystem{}, released: true},
+		{name: "td gone, namespace kept"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			xfers := []*pb.Transfer{{
+				XferId:   testXfer,
+				OriNqn:   testNqn,
+				OriNsIdx: 1,
+			}}
+			syncupBoth(t, srv,
+				reqOpts{revision: 2, primary: true, xfers: xfers})
+			xfer := xferName(srv, testXfer)
+			raid0 := raid0Name(srv, testTd)
+			raid0No := node.devNo["/dev/mapper/"+raid0]
+			if !strings.Contains(node.dms[xfer].table, "linear "+raid0No) {
+				t.Fatalf("the fixture transfer does not map the raid0: %q",
+					node.dms[xfer].table)
+			}
+			sectors := testTdSize / 512
+
+			departed := reqOpts{revision: 3, primary: true, xfers: xfers,
+				tds: []*pb.ThinDevice{}, subsys: tc.subsys}
+			node.Reset()
+			reply, err := srv.SyncupCntlr(
+				context.Background(), cntlrReq(departed))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			want := fmt.Sprintf("0 %d error", sectors)
+			if got := node.dms[xfer].table; got != want {
+				t.Fatalf("the transfer device is %q, want %q", got, want)
+			}
+			if n := len(node.callsMatching(
+				"cmd dmsetup reload " + xfer)); n != 1 {
+				t.Fatalf("the transfer device was reloaded %d times, "+
+					"want 1", n)
+			}
+			if tc.released {
+				if code := reply.GetAgentReply().GetCode(); code != 0 {
+					t.Fatalf("code %d (%q): the departed raid0 was not "+
+						"released", code, reply.GetAgentReply().GetDetails())
+				}
+				if _, ok := node.dms[raid0]; ok {
+					t.Fatalf("the departed td's raid0 %s survived", raid0)
+				}
+				assertOrder(t, node,
+					"cmd dmsetup reload "+xfer,
+					"cmd dmsetup remove "+raid0,
+				)
+			}
+
+			// Nothing is remembered: the next pass reads the device's own
+			// error table, finds it already the demoted shape, and reloads
+			// nothing.
+			node.Reset()
+			if _, err := srv.SyncupCntlr(
+				context.Background(), cntlrReq(departed)); err != nil {
+				t.Fatalf("re-sync: %v", err)
+			}
+			assertNoCall(t, node, "cmd dmsetup reload "+xfer)
+		})
+	}
+}
+
 // CN22/CN19: a clone the role or the level merely suppresses keeps its chunk
 // files. Deleting them made the worker re-push forever and left a promoted
 // standby's §11.5 rebuild nothing to skip with.

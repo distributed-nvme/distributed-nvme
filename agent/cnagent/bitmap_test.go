@@ -3,6 +3,10 @@ package cnagent
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -105,6 +109,159 @@ func TestThinDeviceBitmap(t *testing.T) {
 	)
 	if node.dms[pool].heldRoot {
 		t.Fatalf("the metadata snapshot leaked")
+	}
+}
+
+// TestThinDumpGoesThroughAFile: the dump's XML never reaches stdout. The
+// production client logs a command's stdout in full in its `os command`
+// record (log.md), and a dump is one element per mapped run — tens of MB on a
+// fragmented slice, once per slice per bitmap read. thin_dump writes it to a
+// file instead (`-o`), whose read logs a truncated excerpt, and the file is
+// removed after the read — and on both paths where the dump did not answer
+// too, since a thin_dump that was killed may already have written it: one the
+// soft timeout killed, and one killed because the caller's ctx was cancelled,
+// whose `rm` must not ride that dead ctx. Nor may that caller's metadata
+// snapshot release: a reservation left held pins the pool's metadata blocks
+// until some later reserve on the pool meets it, which may never come.
+func TestThinDumpGoesThroughAFile(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	scriptDump(srv, node, caseBDump)
+
+	node.Reset()
+	if got := tdBm(t, srv, 0, 0); got != "1effffffffffffff" {
+		t.Fatalf("full td bitmap is %q, want 1effffffffffffff", got)
+	}
+	outs := node.stdouts["thin_dump"]
+	if len(outs) != 1 {
+		t.Fatalf("thin_dump ran %d times, want 1", len(outs))
+	}
+	if outs[0] != "" {
+		t.Fatalf("thin_dump's os command record carries %d bytes of stdout, "+
+			"want none", len(outs[0]))
+	}
+	dumps := node.callsMatching("cmd thin_dump --metadata-snap ")
+	args := strings.Fields(dumps[0])
+	if len(args) != 6 || args[4] != "-o" {
+		t.Fatalf("thin_dump does not write to a file: %q", dumps[0])
+	}
+	file := args[5]
+	if dir := "/run/dnv-thin-dump"; filepath.Dir(file) != dir {
+		t.Fatalf("the dump file %s is not in the private directory %s",
+			file, dir)
+	}
+	pool := poolName(srv)
+	assertOrder(t, node,
+		"cmd thin_dump --metadata-snap ",
+		"read "+file,
+		"cmd rm -f "+file,
+		"cmd dmsetup message "+pool+" 0 release_metadata_snap",
+	)
+	if n := len(node.callsMatching("read " + file)); n != 1 {
+		t.Fatalf("the dump file was read %d times, want 1", n)
+	}
+	if _, ok := node.files[file]; ok {
+		t.Fatalf("the dump file %s was left behind", file)
+	}
+
+	node.Reset()
+	node.killCmd["thin_dump"] = true
+	if _, err := srv.GetThinDeviceBm(context.Background(),
+		&pb.GetThinDeviceBmRequest{
+			ClusterId: testCluster, CnId: testCn, SpId: testSp,
+			CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
+		}); err == nil {
+		t.Fatalf("a dump that did not answer must fail the RPC")
+	}
+	assertNoCall(t, node, "read "+file)
+	if _, ok := node.files[file]; ok {
+		t.Fatalf("a killed dump left its file %s behind", file)
+	}
+
+	// The caller goes away while thin_dump runs (a client that gave up, a
+	// gateway deadline): exec kills the dump, which has written the file.
+	node.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node.cancelCmd["cmd thin_dump "] = cancel
+	if _, err := srv.GetThinDeviceBm(ctx,
+		&pb.GetThinDeviceBmRequest{
+			ClusterId: testCluster, CnId: testCn, SpId: testSp,
+			CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
+		}); err == nil {
+		t.Fatalf("a dump whose caller went away must fail the RPC")
+	}
+	assertNoCall(t, node, "read "+file)
+	if n := len(node.callsMatching("cmd rm -f " + file)); n != 1 {
+		t.Fatalf("the dump file was removed %d times after a cancelled "+
+			"dump, want 1", n)
+	}
+	release := "cmd dmsetup message " + pool + " 0 release_metadata_snap"
+	if n := len(node.callsMatching(release)); n != 1 {
+		t.Fatalf("the metadata snapshot was released %d times after a "+
+			"cancelled dump, want 1", n)
+	}
+	assertOrder(t, node, "cmd rm -f "+file, release)
+	if _, ok := node.files[file]; ok {
+		t.Fatalf("a dump whose caller went away left its file %s behind",
+			file)
+	}
+}
+
+// TestThinDumpDirIsPrivate: the agent writes the dump as root, through a
+// thin_dump that opens its output with a plain create-and-truncate. Under a
+// fixed name in a world-writable directory another local user could create
+// that file first, own it through the dump, and rewrite the document before
+// the agent reads it back — and a destination bitmap read from a forged
+// document discards regions of a dm-clone that were never copied. So the file
+// lives in a directory the agent owns with mode 0700, checked before every
+// dump: one that is anything else — another user's directory, one others can
+// write, a symlink — fails the read before the pool is touched. That
+// directory sits in /run, which only root can write, not in the temp
+// directory: in /tmp any local user could create the name first, and the
+// check would then fail every dump on the node, a clone recovery's included,
+// until an operator removed it.
+func TestThinDumpDirIsPrivate(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	scriptDump(srv, node, caseBDump)
+	dir := "/run/dnv-thin-dump"
+	pool := poolName(srv)
+
+	node.Reset()
+	if got := tdBm(t, srv, 0, 0); got != "1effffffffffffff" {
+		t.Fatalf("full td bitmap is %q, want 1effffffffffffff", got)
+	}
+	assertOrder(t, node,
+		"cmd mkdir -p -m 0700 "+dir,
+		"cmd stat --format %u %a %F "+dir,
+		"cmd dmsetup message "+pool+" 0 reserve_metadata_snap",
+		"cmd thin_dump --metadata-snap ",
+	)
+
+	euid := os.Geteuid()
+	for _, tc := range []struct {
+		name string
+		stat string
+	}{
+		{"another user's directory", fmt.Sprintf("%d 700 directory", euid+1)},
+		{"a directory others can write", fmt.Sprintf("%d 777 directory", euid)},
+		{"a symlink", fmt.Sprintf("%d 777 symbolic link", euid+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node.Reset()
+			node.dirStat[dir] = tc.stat
+			defer delete(node.dirStat, dir)
+			if _, err := srv.GetThinDeviceBm(context.Background(),
+				&pb.GetThinDeviceBmRequest{
+					ClusterId: testCluster, CnId: testCn, SpId: testSp,
+					CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
+				}); err == nil {
+				t.Fatalf("a dump into %s (%s) must fail the RPC", dir, tc.stat)
+			}
+			assertNoCall(t, node, "cmd thin_dump ")
+			assertNoCall(t, node, "reserve_metadata_snap")
+		})
 	}
 }
 

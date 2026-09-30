@@ -5,6 +5,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -108,9 +110,9 @@ func (d *thinDevice) extents(defs map[string][]thinExtent) []thinExtent {
 	return out
 }
 
-func parseThinDump(stdout string) (*thinSuperblock, error) {
+func parseThinDump(doc string) (*thinSuperblock, error) {
 	sb := &thinSuperblock{}
-	if err := xml.Unmarshal([]byte(stdout), sb); err != nil {
+	if err := xml.Unmarshal([]byte(doc), sb); err != nil {
 		return nil, fmt.Errorf("thin_dump xml: %w", err)
 	}
 	return sb, nil
@@ -121,26 +123,47 @@ func parseThinDump(stdout string) (*thinSuperblock, error) {
 // ---------------------------------------------------------------------------
 
 // dumpThinMetadata reserves a dm-thin metadata snapshot, dumps it and
-// **always** releases — on the success path and on every error path, because a
-// leaked reservation blocks the next reserve and pins metadata blocks. A
-// reserve that fails because one is already held is released and retried once.
+// **always** releases — on the success path and on every error path, on a ctx
+// the caller's cancellation does not reach, because a leaked reservation
+// blocks the next reserve and pins metadata blocks, and a caller that went
+// away before the release must not take the release with it. A reserve that
+// fails because one is already held is released and retried once.
+//
+// The document goes to a file (`-o`), never to stdout: the `os command` record
+// logs a command's stdout in full (log.md), and a dump is one element per
+// mapped run — tens of MB on a fragmented slice, once per slice per read —
+// while the file read's record carries a truncated excerpt. The file lives in
+// the agent's private directory (thinDumpDir), checked before the pool is
+// touched. Once the dump has run, an `rm -f` of the file follows on every
+// path, before the release and on the same kind of ctx: a dump that did not
+// answer — killed at the soft timeout, or because the caller went away — may
+// have written it. Both still run under the soft timeout.
 func (s *CnAgentServer) dumpThinMetadata(
 	ctx context.Context,
 	sp *slicePlan,
 ) (*thinSuperblock, error) {
+	if err := s.ensureThinDumpDir(ctx); err != nil {
+		return nil, err
+	}
 	if err := s.reserveMetadataSnap(ctx, sp); err != nil {
 		return nil, err
 	}
-	defer s.releaseMetadataSnap(ctx, sp)
+	defer s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
 
 	metaPath := s.nf.DmPath(sp.poolMetaName)
+	dumpPath := thinDumpPath(sp)
+	defer s.removeThinDump(context.WithoutCancel(ctx), dumpPath)
 	stdout, stderr, _, err := s.cmd.Run(ctx, "thin_dump",
-		"--metadata-snap", metaPath)
+		"--metadata-snap", metaPath, "-o", dumpPath)
 	if err != nil {
 		return nil, fmt.Errorf("thin_dump %s: %s", metaPath,
 			firstNonEmpty(stderr, stdout, err.Error()))
 	}
-	sb, err := parseThinDump(stdout)
+	doc, err := s.readThinDump(ctx, dumpPath)
+	if err != nil {
+		return nil, fmt.Errorf("thin_dump %s: %w", metaPath, err)
+	}
+	sb, err := parseThinDump(doc)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +183,77 @@ func (s *CnAgentServer) dumpThinMetadata(
 		}
 	}
 	return sb, nil
+}
+
+// thinDumpDir is the directory every dump is written into. It sits in /run,
+// root's own directory (mode 0755), and not in a world-writable temp
+// directory such as /tmp: there any local user could create the name first,
+// and ensureThinDumpDir, which checks and never repairs, would then fail every
+// dump on the node until an operator removed it — a clone recovery's
+// destination bitmaps included, which fail closed (CN18 step 4).
+const thinDumpDir = "/run/dnv-thin-dump"
+
+// thinDumpPath is where one pool's dump is written: the private directory,
+// under the name of the pool's metadata device — a dm name, so unique on the
+// node — and a pool is dumped by one caller at a time, under its cntlr's object
+// lock (CN25), so two dumps never share the file. The name is fixed, so the
+// pool's next dump overwrites a file that a failed `rm` or a crash left
+// behind.
+func thinDumpPath(sp *slicePlan) string {
+	return filepath.Join(thinDumpDir, sp.poolMetaName+".thin_dump.xml")
+}
+
+// ensureThinDumpDir makes sure, before every dump, that the directory the dump
+// goes to is a directory of the agent's own user with mode 0700. thin_dump
+// opens its output with a plain create-and-truncate, so under a fixed name in
+// a world-writable directory another local user could create the file first,
+// own it through the dump and rewrite the document before it is read back —
+// and a forged destination bitmap discards regions of a dm-clone that were
+// never copied. Nobody else can create or replace an entry of a 0700
+// directory, and only root can create, replace or rename an entry of /run,
+// its parent. `stat` reads the entry itself, not what a symlink names.
+// Anything else fails the dump: another user's directory, one others can
+// write, a symlink, a file. Nothing repairs such an entry — `mkdir -p` leaves
+// an existing directory's owner and mode as they are — and in /run only root
+// can have made it.
+func (s *CnAgentServer) ensureThinDumpDir(ctx context.Context) error {
+	dir := thinDumpDir
+	if err := s.cmd.RunOk(ctx, "mkdir", "-p", "-m", "0700", dir); err != nil {
+		return fmt.Errorf("thin_dump directory: %w", err)
+	}
+	stdout, ok, err := s.cmd.RunProbe(ctx, "stat", "--format", "%u %a %F", dir)
+	if err != nil {
+		return fmt.Errorf("thin_dump directory: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("thin_dump directory %s: absent after mkdir", dir)
+	}
+	want := fmt.Sprintf("%d 700 directory", os.Geteuid())
+	if got := strings.TrimSpace(stdout); got != want {
+		return fmt.Errorf(
+			"thin_dump directory %s is %q, want %q (uid mode type)",
+			dir, got, want)
+	}
+	return nil
+}
+
+// readThinDump reads the dump back under the SH15 soft timeout.
+func (s *CnAgentServer) readThinDump(
+	ctx context.Context,
+	path string,
+) (string, error) {
+	rctx, cancel := agent.CmdCtx(ctx)
+	defer cancel()
+	return s.oc.ReadFile(rctx, path)
+}
+
+func (s *CnAgentServer) removeThinDump(ctx context.Context, path string) {
+	if err := s.cmd.RunOk(ctx, "rm", "-f", path); err != nil {
+		// The pool's next dump overwrites and removes it: a record only.
+		slog.WarnContext(ctx, "removing the thin_dump file failed",
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+	}
 }
 
 func (s *CnAgentServer) reserveMetadataSnap(

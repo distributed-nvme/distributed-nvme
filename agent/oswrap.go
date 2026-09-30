@@ -27,7 +27,8 @@ func cmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 
 // CmdCtx bounds one OS touch by the §7 soft timeout (SH15). The unexported
 // cmdCtx stays; this is the same thing for role packages that call the
-// OsClient directly (the cn sysfs walk of leg.go).
+// OsClient directly (the cn sysfs walk of leg.go, the thin_dump file read of
+// thinbm.go).
 func CmdCtx(ctx context.Context) (context.Context, context.CancelFunc) {
 	return cmdCtx(ctx)
 }

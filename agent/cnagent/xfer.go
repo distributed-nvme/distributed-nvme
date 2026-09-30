@@ -16,16 +16,25 @@ import (
 // xferServed reports whether this cntlr backs the transfer device with real
 // data. A standby exports a plain dm-error table of the same size, and so does
 // a primary once the level suppresses thin pools — or, per [D15], one whose origin
-// td is still provisioning-deferred and therefore has no raid0 to map.
+// td is still provisioning-deferred and therefore has no raid0 to map — or one
+// whose origin no longer resolves in this request (CN29): the plan cannot say
+// what it maps, and a linear still mapping a td that left the request would
+// hold that td's raid0 open against L6's removal. The CN9 pre-step then sizes
+// the error table from the device's own live table (demoteXfer).
 func (p *cntlrPlan) xferServed(xp *xferPlan) bool {
 	return p.primary && p.level < pb.SpLevel_SP_LEVEL_NO_THINPOOL &&
-		!xp.deferred
+		!xp.deferred && xp.ori != nil && xp.ori.td != nil
 }
 
-// xferAnaGrpId is optimized on the serving primary and inaccessible
-// everywhere else — the transfer has no suspend state of its own. A deferred
-// transfer stays inaccessible for the CN16 reason ([D15]): promoting a path over
-// an error table would hand the destination IO errors instead of a queue.
+// xferAnaGrpId is optimized on a primary below SP_LEVEL_DISABLE whose transfer
+// is not deferred — whether or not that primary serves data — and inaccessible
+// everywhere else; the transfer has no suspend state of its own. So where such
+// a primary does not serve it (SP_LEVEL_NO_THINPOOL ≤ level < SP_LEVEL_DISABLE,
+// or an origin that no longer resolves, CN29), the transfer namespace stays
+// optimized over an error table and the destination reads IO errors. A
+// deferred transfer is the one held inaccessible, for the CN16 reason ([D15]):
+// its data is still to come, and promoting a path over an error table would
+// hand the destination IO errors instead of a queue.
 func (p *cntlrPlan) xferAnaGrpId(xp *xferPlan) int {
 	if p.primary && p.wantAny && !xp.deferred {
 		return common.AnaGrpIdOptimized

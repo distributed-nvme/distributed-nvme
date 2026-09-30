@@ -1204,14 +1204,16 @@ capacity keys maintained per §5.6; reverse on delete.
   (next bullet); only a transfer can no longer be built on it. The rule does not change
   how the cn agent judges such a subsystem, though (§9.8). Unless its NQN decodes as a
   `:4:` of this cluster, no sweep of the cn agent ever removes it or a namespace in it,
-  and only the converge of a cntlr that still wants the subsystem drops a namespace
-  that left `ns_list`. So once a CN's cntlr stops wanting it — after `DeleteSubsystem`,
-  at `SP_LEVEL_DISABLE` (§11.7), or when that cntlr leaves the CN — the cn agent leaves
-  its nvmet subsystem there, still linked to that CN's port and holding every namespace
-  that CN had not dropped. Each such namespace the CN had enabled keeps its ns-dev
-  open, so that SP's sweep on that CN stops at the ns-dev layer on every pass and leaves
-  the SP's unwanted objects in every lower layer in place (§9.8); once that cntlr or the
-  SP is deleted, that is the rest of that SP's stack on that CN. And one that decodes
+  and nothing else removes a namespace that left `ns_list`: the sweep is the only
+  remover of one (`cnagent.md` CN21). So a namespace `DeleteNamespace` takes out of
+  such a subsystem stays enabled on every CN that had it, and once a CN's cntlr stops
+  wanting the subsystem — after `DeleteSubsystem`, at `SP_LEVEL_DISABLE` (§11.7), or
+  when that cntlr leaves the CN — the cn agent leaves its nvmet subsystem there too,
+  still linked to that CN's port and holding every namespace that CN had enabled in
+  it. Each such namespace keeps its ns-dev open, so that SP's sweep on that CN stops
+  at the ns-dev layer on every pass and leaves the SP's unwanted objects in every lower
+  layer in place (§9.8); once that cntlr or the SP is deleted, that is the rest of that
+  SP's stack on that CN. And one that decodes
   as a `:4:` of this cluster naming another SP is still swept as that SP's transfer
   export while a host uses it.
 * `DeleteNamespace.nqn` and `DeleteSubsystem.nqn` take neither rule, only the length

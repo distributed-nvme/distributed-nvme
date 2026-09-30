@@ -164,24 +164,22 @@ type cntlrPlan struct {
 	// arena / arenaErr / arenaDone cache this pass's clone-metadata arena
 	// view ([D14], CN18 step 2): the loop device is re-learned from `losetup
 	// --associated` once per converge or probe pass and never persisted, so a
-	// cntlr with N clones still issues one enumeration. They and the two
-	// sweep facts below are the only fields here that are not a pure
-	// function of the request; these three are filled lazily by planArena.
+	// cntlr with N clones still issues one enumeration. They and the sweep
+	// fact below are the only fields here that are not a pure function of
+	// the request; these three are filled lazily by planArena.
 	arena     *cloneMetaArena
 	arenaErr  error
 	arenaDone bool
 
-	// sweepStopped and cloneMayLinger are what this pass's sweep tells the
-	// build phase that follows it (CN21). sweepCntlr sets them on a converge
-	// and nothing else does; the plan is built afresh for every pass, so
-	// neither outlives the pass that learned it.
-	//
-	// sweepStopped: an unanswered listing stopped the sweep, so neither the
-	// chain nor CN9's pre-steps 2 and 3 ran. cloneMayLinger: on such a pass,
-	// a dm-clone the plan does not want may still be live — the dm listing
-	// did not answer, or it named one — and one whose hydration is on goes
-	// on copying into its destination raid0 until L3 removes it.
-	sweepStopped   bool
+	// cloneMayLinger is what this pass's sweep tells the build phase that
+	// follows it (CN21). sweepCntlr sets it on a converge and nothing else
+	// does; the plan is built afresh for every pass, so it never outlives
+	// the pass that learned it. Set, it says that an unanswered listing
+	// stopped the sweep, so neither the chain nor CN9's pre-steps 2 and 3
+	// ran, and that a dm-clone the plan does not want may still be live —
+	// the dm listing did not answer, or it named one — and one whose
+	// hydration is on goes on copying into its destination raid0 until L3
+	// removes it.
 	cloneMayLinger bool
 }
 

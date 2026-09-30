@@ -679,6 +679,59 @@ func TestDisableLevelSweepsEverything(t *testing.T) {
 	}
 }
 
+// TestDisableCreatesNoParkTarget: at SP_LEVEL_DISABLE nothing parks a planned
+// ns-dev onto its td's dm-error — which here does not exist, because the build
+// that made the ns-dev had that create refused. The CN9 pre-step park would
+// create it, after the sweep's enumeration, so in no chain: the pass would
+// remove the ns-dev parked on it, reply clean, and leave an unwanted device
+// for the next round to find. The wanted set holds no ns-dev at that level, so
+// P0 parks every one by its own live table, onto an error table of its own
+// size, and nothing is created.
+func TestDisableCreatesNoParkTarget(t *testing.T) {
+	srv, node := newTestServer(t)
+	c5 := errorName(srv, testTd)
+	nsDev := nsDevName(srv, testNs)
+	node.failCmd["dmsetup create "+c5] = "device-mapper: create ioctl failed"
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	if _, ok := node.dms[c5]; ok {
+		t.Fatalf("fixture is wrong: %s exists", c5)
+	}
+	if _, ok := node.dms[nsDev]; !ok {
+		t.Fatalf("fixture is wrong: the ns-dev was not built")
+	}
+
+	disabled := reqOpts{revision: 3, primary: true,
+		level: pb.SpLevel_SP_LEVEL_DISABLE}
+
+	node.Reset()
+	// The legs' disconnects run off the pass (CN10), so the pass names them
+	// and nothing else, and it is the re-drive after they return that
+	// replies clean.
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(disabled))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	cnSweepOnlyDisconnects(t, reply.GetAgentReply(), "SP_LEVEL_DISABLE")
+	cnSweepNoDmLeft(t, node)
+	awaitDisconnects(t, srv)
+	syncupCntlrAt(t, srv, disabled)
+
+	cnSweepNoDmLeft(t, node)
+	assertNoCall(t, node, "cmd dmsetup create "+c5)
+	reloads := node.callsMatching("cmd dmsetup reload " + nsDev)
+	if len(reloads) != 1 {
+		t.Fatalf("the ns-dev was parked %d times, want 1", len(reloads))
+	}
+	if !strings.HasSuffix(reloads[0], " error") {
+		t.Fatalf("the ns-dev was not parked on an error table: %q",
+			reloads[0])
+	}
+	assertOrder(t, node,
+		"cmd dmsetup reload "+nsDev,
+		"cmd dmsetup remove "+nsDev,
+	)
+}
+
 // TestStandbyKeepsOnlyStandbyObjects pins the failover half of §11.1: the
 // sweep is the whole implementation of "the desired set shrank to the standby
 // shape", with no retire step naming any object by hand.
@@ -1292,6 +1345,55 @@ func TestUnansweredEnumerationRemovesNothing(t *testing.T) {
 	}
 }
 
+// TestNamespaceRemovalIsTheChainsAlone: a namespace that left `ns_list`
+// while its subsystem stays is removed by CN21's L1 and by nothing else. The
+// build phase used to drop it too, from its own listing, which put a second
+// removal beside the chain: one that ran when the pass's enumeration had not
+// answered — the pass that must touch nothing — and that skipped L1's move to
+// inaccessible, so a host holding the path lost it under IO instead of being
+// told to stop using it.
+func TestNamespaceRemovalIsTheChainsAlone(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
+	if !node.dirs[nsPath] {
+		t.Fatalf("fixture is wrong: no nvmet namespace at %s", nsPath)
+	}
+	subsys := defaultSubsys(false)
+	subsys[testNqn].NsList = nil
+	left := reqOpts{revision: 3, primary: true, subsys: subsys}
+
+	node.Reset()
+	node.killCmdAlways["dmsetup ls"] = true
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(left))
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	cnSweepAssertCode(t, reply.GetAgentReply(), common.ReplyCodeLeftover,
+		"the pass whose enumeration did not answer")
+	if !node.dirs[nsPath] {
+		t.Fatalf("the namespace was removed by a pass whose enumeration " +
+			"did not answer")
+	}
+	assertNoCall(t, node, "cmd rmdir "+nsPath)
+
+	// The next pass sees the node, and L1 removes the namespace — moved to
+	// inaccessible first, and exactly once.
+	delete(node.killCmdAlways, "dmsetup ls")
+	node.Reset()
+	syncupCntlrAt(t, srv, left)
+	if node.dirs[nsPath] {
+		t.Fatalf("the namespace that left ns_list survived")
+	}
+	assertOrder(t, node,
+		"writedirect "+nsPath+"/ana_grpid=3",
+		"cmd rmdir "+nsPath,
+	)
+	if n := len(node.callsMatching("cmd rmdir " + nsPath)); n != 1 {
+		t.Fatalf("the namespace was removed %d times, want 1", n)
+	}
+}
+
 // TestUnansweredMdListingStopsTheDescent pins the same rule on the listing
 // whose silence costs the most: the md arrays.
 //
@@ -1633,18 +1735,17 @@ func TestUnansweredListingStillSweepsCloneChunks(t *testing.T) {
 	}
 }
 
-// TestBuildDropsANamespaceInaccessibleFirst pins a removal the build phase
-// makes on its own. A namespace that left ns_list under a subsystem that
-// stays is normally L1's, which moves it to the inaccessible group and then
-// removes it. When the sweep's own listing of that subsystem's namespaces
-// does not answer — a failure that stops no pass, the four listings having
-// answered — L1 never learns of the namespace, and the build's pass over the
-// subsystem, which lists the namespaces itself, removes it instead: the same
-// move has to come first there, or a host loses the path under IO instead of
-// being told to stop using it. (After a sweep one of the four listings
-// stopped, the build leaves such a namespace alone:
-// TestUnansweredListingLeavesADroppedNamespaceToTheSweep.)
-func TestBuildDropsANamespaceInaccessibleFirst(t *testing.T) {
+// TestUnansweredNamespaceListingRemovesNoNamespace pins the rule on the one
+// listing the four do not cover: the sweep's own listing of the namespaces
+// under a subsystem that stays. When it does not answer — a failure that
+// stops no pass, the four listings having answered — L1 never learns of a
+// namespace that left ns_list, and nothing else removes one: the build has
+// no removal of its own (TestNamespaceRemovalIsTheChainsAlone). So that pass
+// leaves the namespace as it is — no move to the inaccessible group, no
+// disable, no rmdir — and its reply names the listing, which keeps the
+// worker driving passes. The next pass whose listing answers finds the
+// namespace, and L1 removes it, moved to inaccessible first, and once.
+func TestUnansweredNamespaceListingRemovesNoNamespace(t *testing.T) {
 	const secondNs = uint64(0x1b)
 	twoNs := defaultSubsys(false)
 	twoNs[testNqn].NsList = append(twoNs[testNqn].NsList, &pb.Namespace{
@@ -1654,27 +1755,31 @@ func TestBuildDropsANamespaceInaccessibleFirst(t *testing.T) {
 		DevUuid:  "22222222-2222-4222-8222-222222222222",
 		DevNguid: "22222222222242228222222222222222",
 	})
+	ctx := context.Background()
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, raid1: true, subsys: twoNs})
 	if got := node.files[anaPath(testNqn, 2)]; got != "1" {
 		t.Fatalf("fixture: nsid 2's ana_grpid is %q, want 1", got)
 	}
+	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/2"
+	ana := "writedirect " + anaPath(testNqn, 2) + "="
+	req := cntlrReq(reqOpts{revision: 3, primary: true, raid1: true})
 
 	node.Reset()
-	// One-shot: the sweep's listing of the subsystem's namespaces is the
-	// pass's first, and the build's own, later, answers.
+	// One-shot: the pass's first listing of the subsystem's namespaces is
+	// the sweep's.
 	node.killCmd["ls -1 "+agent.NvmetRoot+"/subsystems/"+testNqn+
 		"/namespaces"] = true
-	reply, err := srv.SyncupCntlr(context.Background(),
-		cntlrReq(reqOpts{revision: 3, primary: true, raid1: true}))
+	reply, err := srv.SyncupCntlr(ctx, req)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
 	cnSweepAssertCode(t, reply.GetAgentReply(), common.ReplyCodeLeftover,
 		"the pass over an unanswered namespace listing")
 	cnSweepAssertDetails(t, reply.GetAgentReply(),
-		"nvmet namespaces of "+testNqn, "the failure details")
+		"enumeration failed: nvmet namespaces of "+testNqn,
+		"the failure details")
 	for _, listing := range cnSweepListings {
 		if strings.Contains(reply.GetAgentReply().GetDetails(),
 			"enumeration failed: "+listing.name+":") {
@@ -1682,8 +1787,30 @@ func TestBuildDropsANamespaceInaccessibleFirst(t *testing.T) {
 				"was stopped", listing.name)
 		}
 	}
-	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/2"
-	ana := "writedirect " + anaPath(testNqn, 2) + "="
+	assertNoCall(t, node, ana)
+	assertNoCall(t, node, "writedirect "+nsPath+"/enable=0")
+	assertNoCall(t, node, "cmd rmdir "+nsPath)
+	if !node.dirs[nsPath] {
+		t.Fatalf("nsid 2 was removed by a pass that could not list it")
+	}
+	// The namespace that stays is left alone.
+	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
+
+	// The next pass, its listing answering: L1 finds nsid 2, with nothing
+	// remembered from the pass that could not see it.
+	node.Reset()
+	reply, err = srv.SyncupCntlr(ctx, req)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	cnSweepAssertCode(t, reply.GetAgentReply(), 0,
+		"the pass whose listing answered")
+	if node.dirs[nsPath] {
+		t.Fatalf("nsid 2 survived the pass whose listing answered")
+	}
+	// Exactly one write, to 3, ahead of the removal: an ordering assertion
+	// stops at its first match, so only the count shows that nothing moved
+	// the group back later on.
 	if moves := node.callsMatching(ana); len(moves) != 1 ||
 		moves[0] != ana+"3" {
 		t.Fatalf("nsid 2 ana_grpid writes %q, want exactly one, to 3", moves)
@@ -1691,20 +1818,22 @@ func TestBuildDropsANamespaceInaccessibleFirst(t *testing.T) {
 	assertOrder(t, node, ana+"3",
 		"writedirect "+nsPath+"/enable=0",
 		"cmd rmdir "+nsPath)
-	// The namespace that stays is left alone.
+	if n := len(node.callsMatching("cmd rmdir " + nsPath)); n != 1 {
+		t.Fatalf("nsid 2 was removed %d times, want 1", n)
+	}
 	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
 }
 
-// TestUnansweredListingLeavesADroppedNamespaceToTheSweep pins what the build
-// leaves alone after a stopped sweep: a namespace that has left ns_list under
-// a subsystem that stays. Its removal is L1's, and P0 comes first because
+// TestUnansweredListingLeavesADroppedNamespaceToTheSweep pins what a stopped
+// sweep leaves alone: a namespace that has left ns_list under a subsystem
+// that stays. Its removal is L1's and nothing else's
+// (TestNamespaceRemovalIsTheChainsAlone), and P0 comes first because
 // disabling the namespace closes the ns-dev under it, which does not complete
 // on a dm-suspended device — the state an older build's leftover is in here.
-// A stopped pass runs no P0, so a drop by the build would disable the
-// namespace over that device. The build leaves it instead, the reply names it
-// — or, when that is the listing that did not answer, the nvmet listing — and
-// the next pass whose listings answer parks the ns-dev before it removes the
-// namespace.
+// A stopped pass runs neither, so nothing touches the namespace: the reply
+// names it — or, when that is the listing that did not answer, the nvmet
+// listing — and the next pass whose listings answer parks the ns-dev before
+// it removes the namespace, once.
 func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
 	for _, listing := range cnSweepListings {
@@ -1719,6 +1848,13 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 			nsDev.table = agent.LinearTable(testTdSize/512,
 				node.devNo["/dev/mapper/"+raid0Name(srv, testTd)], 0)
 			nsDev.suspended = true
+			// Inaccessible already, as the suspend left it: L1's move
+			// finds nothing to write, and none of the passes below may
+			// move it anywhere else.
+			if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+				t.Fatalf("fixture: ana_grpid is %q, want 3", got)
+			}
+			ana := "writedirect " + anaPath(testNqn, 1) + "="
 			noNs := defaultSubsys(false)
 			noNs[testNqn].NsList = nil
 			req := cntlrReq(reqOpts{revision: 3, primary: true, subsys: noNs})
@@ -1739,6 +1875,7 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 					agent.LeftoverKindNvmetNs+":"+testNqn+"/1",
 					"the leftover")
 			}
+			assertNoCall(t, node, ana)
 			assertNoCall(t, node, "writedirect "+nsPath+"/enable=0")
 			assertNoCall(t, node, "cmd rmdir "+nsPath)
 			if !node.dirs[nsPath] {
@@ -1757,6 +1894,15 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 				"cmd rmdir "+nsPath,
 				"cmd dmsetup remove "+nsDevName(srv, testNs),
 			)
+			for _, move := range node.callsMatching(ana) {
+				if move != ana+"3" {
+					t.Fatalf("ana_grpid moved by %q before the removal",
+						move)
+				}
+			}
+			if n := len(node.callsMatching("cmd rmdir " + nsPath)); n != 1 {
+				t.Fatalf("the namespace was removed %d times, want 1", n)
+			}
 		})
 	}
 }
