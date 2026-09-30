@@ -42,10 +42,15 @@ const (
 // detailsParked is the expected state of an effectively suspended ns-dev
 // (CN28): **live**, its table a dm-linear over the td's dm-error (§11.6).
 // detailsSuspended is what the generic single-device probes report for a device
-// they find dm-suspended. A converge and a probe of one cntlr take the same
-// lock, so CN14's quiesce bracket is never observable from outside; what makes
-// the state reachable is an interrupted pass or an agent killed inside that
-// bracket. No ns-dev is ever expected in it. None of the three is a fault.
+// they find dm-suspended on the table they want. A converge and a probe of one
+// cntlr take the same lock, so CN14's quiesce bracket is never observable from
+// outside; what makes the state reachable is an interrupted pass, an agent
+// killed inside that bracket, or a dmsetup command on the device that failed:
+// a resume, or a suspend killed after it took effect. A reload whose load
+// fails leaves its device suspended too (Dm.Reload fails closed), but on its
+// old table, which these probes report as a table mismatch before they read
+// the suspend bit — unless the reload was only clearing a read-only flag. No
+// ns-dev is ever expected in it. None of the three details is a fault.
 const (
 	detailsSpLevel   = common.ResDetailsSpLevel
 	detailsParked    = "parked"

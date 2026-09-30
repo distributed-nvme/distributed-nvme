@@ -62,8 +62,8 @@ Concretely, a green run is the following five statements taken together.
 5. **The lab is left as it was found.** After every case: every disk node's
    `free_ext_cnt` is back to `total_ext_cnt` with an empty `side_ptr_list`, no
    `dnv-*` dm device, no dnv md array and no tree-minted nvmet subsystem
-   survives on any of its dn or cn guests, no backing file has materialised
-   beyond 256 MiB, and the whole run's allocation on all ten guests is under
+   survives on any of its dn or cn guests, no backing file allocates more
+   than 256 MiB, and the whole run's allocation on all ten guests is under
    the §4.6 run cap derived from its shape (12 GiB at the default one).
 
 ### 1.1 What it does not prove
@@ -628,9 +628,11 @@ Two facts about the ids themselves, both verified rather than assumed:
   `DNS_PER_VM` cannot reach `sp create` and fail there as
   `RESOURCE_EXHAUSTED`. The triple gate exists because the dn agent only
   *tags* a disk whose Write Zeroes is 0 and never refuses it, so side zeroing
-  would fall back to writing real zero pages and materialise every sparse
-  backing file on that guest. The per-file and whole-run caps are asserted
-  after every case (§4.6).
+  would fall back to writing real zero pages over every side it provisions, at
+  bulk speed. It is not a space gate: the loop device's Write Zeroes allocates
+  the zeroed range as well, so a sparse backing file takes the same space
+  either way. The per-file and whole-run caps are asserted after every case
+  (§4.6).
 
 * **E2E6 — cleanup runs unconditionally at start, and only on success at end.**
   **HOLDS, and since the second run the start sweep has a verdict of its own.**
@@ -772,9 +774,17 @@ Four cases, run in this order, each from a freshly built storage pool:
 gets all four, with a full teardown and rebuild between them — and each build
 carries its own case's `event_threshold` set (§2.3), which is why the sp
 `setup` builds is the *first* case's and not a neutral one. Every stage sets a stage
-name and a trace id `it-<case>-<nn>`, which the gateway, the worker and every
-agent OS command carry, so one `jq 'select(.trace_id=="…")'` over any log pulls
-the whole stage.
+name and a trace id `it-<case>-<nn>`, which every dnvctl call of the stage
+sends. The gateway's records carry it, and so do an agent's records of the
+reads the gateway makes of it for such a call — a node create's size probe,
+an `inspect`, `td get-bm` and `td get-leg-bm`, and the hydration check of an
+unforced `migr finish` or `clone delete`: the gRPC request and reply, and any
+OS command the read runs. The worker never sees it: the converge a stage
+sets off runs under the worker's own per-round trace ids, which each
+Syncup and each Check round hands to its agent, and under the ids an agent
+mints for its own background work, such as each side-zeroing attempt. So one
+`jq 'select(.trace_id=="…")'` over the logs pulls the stage's requests and the
+gateway's handling of them, not the converge they set off.
 
 Reading the tables: the left column is the dnvctl invocation (or the act, where
 it is not one), the right column what is asserted *after* it. Every wait on a
@@ -1212,7 +1222,7 @@ assertion.
 |---|---|---|
 | 00 | `sp get` | the snapshot above: the numbers are recorded, logged, and shouted about when they are not the fresh-sp shape. The one thing it asserts is that slice 0 reports at least one data group, which no `sp create` can violate — every slice is created with exactly one |
 | 01 | `td create --name a0 --size 2 GiB`, `ns create --idx 2 --td a0 --uuid …8c02` | `slice_list[0].slice_idx == 0` (the stripe every strided write lands in); slice 0's data-group count is **still the one stage 00 recorded** — not the literal 1, so a build that grew slice 0 by itself does not fail the case here, and stage 00 has already shouted if it did; `stripe_size == data_block_size == 1 MiB`, so one strided 1 MiB write is exactly one new thin block; `low_water_mark_pct` in 1..100 — a 0 is refused by the pass gate and anything above 100 switches AR6 off; then the export gate on the primary's `ns_id_to_namespace` row for ns 2, although nothing connects here — host0 already holds the controller and the kernel picks the namespace up on the AEN, but `ns create` returning is still only the gateway's answer, and without the gate a slow converge would spend `WAIT_HOST` reporting an ANA state for a namespace the CN has not made; the device appears for host0 |
-| 02 | strided 1 MiB writes at every `SLICE_CNT × 1 MiB` of the device | **the chunk count is computed, not the design's literal 40**: `floor(lwm × total / 100) + 1 − used + 4`, from the primary's own pool `used/total` pair, because that is the pair the worker compares. Three guards: the chunks must fit in `a0`'s per-slice thin volume, must stay *inside* the pool (filling it would put dm-thin into out-of-space mode instead of tripping AR6), and must stay under a sanity cap, since every chunk is 1 MiB on **every leg** of the group |
+| 02 | strided 1 MiB writes at every `SLICE_CNT × 1 MiB` of the device | **the chunk count is computed, not the design's literal 40**: `floor(lwm × total / 100) + 1 − used + 4`, from the primary's own pool `used/total` pair, because that is the pair the worker compares. Three guards: the chunks must fit in `a0`'s per-slice thin volume, must stay *inside* the pool (filling it would put dm-thin into out-of-space mode instead of tripping AR6), and must stay under a sanity cap, `REACT_MAX_CHUNKS` (128), which bounds the write's length and so its watchdog (§2.3). The cap is not a space bound: every chunk is 1 MiB on **every leg** of the group, but it lands in side extents their disk nodes' zeroing has already allocated in full (§4.6), so it adds nothing to a backing file |
 | 02 | wait for AR6 | slice 0 gained **exactly one** data group and the sp gained exactly one group, both against readings this step takes for itself just before the write — with `sp_read_roles` among them, because the role may have moved since stage 01 and inspecting a controller that is now a standby would find no pool row to read a `used/total` ratio out of. `data_grp_list[0]` is still the group setup created (a grow appends), so the appended group's index is the count *before* the grow rather than the literal `[1]`; the new group's `ext_cnt` is the first data group's; `LEGS` legs, one side each, on `LEGS` distinct DNs on `LEGS` different VMs. It is deliberately **not** asserted that the new group avoids the DNs the slice already occupies — the design says it does and the worker's own comment says the opposite: the grow passes a nil black list. **The stage's three grow waits fail fast when the primary role moves** (*added 2026-09-28*): each poll of AR6's append, of the new sides' provisioning and of the pool's growth below first re-reads the roles as setup's waits do, and if the primary is no longer the controller the stage started with, the run dies at once, naming both controllers, that AR5 fired during the grow, and the `jq` filter that pulls the worker's `reaction applied` record of `kind` `failover` out of its log. Unlike setup's waits it does not follow the new primary: a failover of a healthy primary during a grow is the fault this stage exists to expose — the grow's first converge can race the new sides' disk nodes and report the pool `ERROR` for one round — and following the role would turn it into a silent pass, while staying on the demoted controller turned it into a 600 s `WAIT_PROVISION` timeout on a misleading "want a total above" message. The read-back waits on host0 after them are not guarded |
 | 02 | wait for the device | the pool's data **total** grows: dm-thin reports it in its own status line, so a bigger total is the CN having reloaded the pool over the wider concat — proof the grow reached the device and not only etcd. And the grown pool is back under the mark, so slice 0 is not grown a second time |
 | 02 | read back | every strided chunk after a cache drop; `SHA0` for ns 1 too |
@@ -1278,11 +1288,21 @@ the sp.
 **Stage 92 — the space guard.** Two caps, measuring different things:
 
 * `DN_CAP_BYTES` (256 MiB) — **allocated** bytes of one backing file, via
-  `stat -c '%b %B'`. The whole space argument of this suite is that a sparse
-  file stays sparse because side zeroing is `blkdiscard --zeroout` and the loop
-  device turns WRITE ZEROES into a hole punch; a file that has materialised has
-  exactly one cause, and this is the check that names it. A `stat` that could
-  not be read is reported as `unknown` and fails, never as a silent 0.
+  `stat -c '%b %B'`. A backing file starts sparse, and side zeroing does not
+  keep it so: `blkdiscard --zeroout` asks the loop device for Write Zeroes
+  without unmap, and the loop driver turns that into an `fallocate` on the
+  backing file that allocates the range without writing data — not a hole
+  punch (measured 2026-09-29 on the lab's 7.0 guests: `stat %b` grows by the
+  zeroed length). So every extent a disk node zeroes for a side costs
+  `EXTENT_SIZE` in its file whether or not anything writes it, and nothing in
+  the dn agent discards a freed side's extents. The cap, four 64 MiB extents,
+  therefore bounds, in effect, how many distinct extents one disk node has
+  zeroed since its backing file was created (a fresh one per case), not what
+  the case wrote: four of them and the agent's own on-disk metadata are
+  already over it. Nor can it see a `write_zeroes_max_bytes` of 0, whose
+  zero-page fallback allocates the same ranges; that is E2E5's triple gate's
+  to catch. A `stat` that could not be read is reported as `unknown` and
+  fails, never as a silent 0.
 * `RUN_CAP_BYTES` — everything the run wrote on all ten guests, `$WORK`
   **plus** `/tmp/dnv-tmpfs`, counted separately because the tmpfs is not under
   `$WORK` and a guard that looked only there would miss a CN's whole
@@ -1298,15 +1318,16 @@ the sp.
   §7.8 of the design built it out of the incremental writes — clone hydration,
   migration, the spare switch, AR6, host patterns, thin metadata — and never
   counted the storage pool's own data. Every one of the `LEGS x GRP_CNT` sides
-  is `INIT_EXT_CNT` extents of `EXTENT_SIZE`, and a raid1 leg's initial resync
-  writes its whole data area, so those extents materialise however sparse the
-  backing file started. At the default shape that is 2 x 64 x 1 x 64 MiB =
-  8 GiB exactly — the cap equalled the floor, and run 5 failed the guard at
-  9204092928 bytes against 8589934592 with every per-file allocation well
-  inside its own cap. The 4 GiB of slack covers what run 5 measured above the
-  sides (586 MiB after the smoke case: 296 MiB of etcd and daemon logs on cp,
-  79 MiB on cn0, the rest agent logs and host patterns) with room for the copy
-  and react cases, which write more.
+  is `INIT_EXT_CNT` extents of `EXTENT_SIZE`, and its disk node zeroes each
+  side whole before exporting it, which allocates those extents however sparse
+  the backing file started (the bullet above). At the default shape that is
+  2 x 64 x 1 x 64 MiB = 8 GiB exactly — the cap equalled the floor, and run 5
+  failed the guard at 9204092928 bytes against 8589934592 with every per-file
+  allocation well inside its own cap. The 4 GiB of slack covers what run 5
+  measured above the sides (586 MiB after the smoke case: 296 MiB of etcd and
+  daemon logs on cp, 79 MiB on cn0, the rest agent logs and host patterns)
+  with room for the copy and react cases, which write more and add sides of
+  their own, each costing its full extents the same way.
 
 Free space is re-asserted against **preflight's own floors** rather than a
 separate number, so that the statement is "the run left the guest as usable as
@@ -1387,9 +1408,10 @@ the stray arrays straight back. The two readings are not the same statement.
 On a CN `/proc/mdstat` is a capability the agent needs; on a DN it is the
 hazard itself, the proof that this guest *can* assemble an array out of the
 superblocks the CN writes through the side export (§8 item 15). Then a
-`fallocate -p` punch-hole probe on `/var/tmp`, which is
-what turns the agent's `blkdiscard --zeroout` into a hole punch and what the
-whole space argument rests on; `MemAvailable ≥ 2 GiB`; free space under
+`fallocate -p` punch-hole probe on `/var/tmp`, the same probe the dn and cn
+agent suites make — side zeroing does not rest on it, since the loop device
+turns the agent's `blkdiscard --zeroout` into an allocating `fallocate`, never
+a hole punch (§4.6); `MemAvailable ≥ 2 GiB`; free space under
 `/var/tmp` ≥ 4 GiB on a CN and 4 GiB + `DNS_PER_VM × 64 MiB` on a DN; none of
 this run's ports listening; and **no conflicting nvmet port**.
 
@@ -1858,8 +1880,9 @@ gets there first: `connect_verdict` dies at the connect, naming the CN agent
 log to read and the nvmet objects to look for, so the `dmesg` is the
 confirmation rather than the discovery.
 
-Stage names and trace ids are the index into all of it: the failure line ends
-with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
+Stage names and trace ids are the index into it: the failure line ends with the
+exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run, which pulls the
+stage's own requests (§4 says which records carry the id).
 
 ---
 
@@ -3474,3 +3497,30 @@ with the exact `jq 'select(.trace_id=="it-<case>-<nn>")'` to run.
   slices, and the entry above records `97443d0` itself; §8 item 19's
   allocator sentence had the scan's order reversed; and §8 item 20 records
   that the grow race is absorbed, not removed.
+
+* **2026-09-29 — the space argument, and what a stage's trace id reaches.**
+  Corrections to this document and to the suite's comments and messages; no
+  suite logic changed. Side zeroing does not punch holes: on the lab's 7.0
+  guests the loop device turns `blkdiscard --zeroout` into an `fallocate` that
+  allocates the zeroed range (`stat %b` grows by its length; no data is
+  written). E2E5 and §4.6 said the opposite — that a backing file stays
+  sparse, and that a file which had materialised had one cause, a
+  `write_zeroes_max_bytes` of 0 — and §5 said the punch-hole probe was what
+  the space argument rests on. They now state that every zeroed side costs its
+  full extents, that the per-file cap bounds how many extents one disk node
+  has zeroed rather than what was written, and that the write-zeroes gates are
+  about speed, not space; §4.6 also puts the `RUN_CAP_BYTES` floor down to the
+  zeroing rather than to an initial raid1 resync, which a fresh group's
+  `--assume-clean` array never runs, and the §4.5 stage 02 row says what its
+  sanity cap bounds. §4 said every stage's trace id reaches the worker and
+  every agent OS command; it reaches the gateway and the agent reads the
+  gateway makes for the stage, while the converge runs under the worker's
+  per-round ids and the agents' own. In the suite, the comments on the pool
+  geometry state the gateway's 1 MiB stripe ceiling, the geometry, threshold
+  and grow comments that cited `gateway/validate.go` line numbers name
+  functions instead, and one assert message names `validateCloneGeometry`
+  instead of a line range; the messages of `dn_up`'s and
+  `preflight_loop_devices`' write-zeroes gates, of the per-file cap and of the
+  react sanity cap no longer state the old space argument, and the run
+  slack's inventory no longer lists the thin metadata and md bitmaps, which
+  live in zeroed side extents.

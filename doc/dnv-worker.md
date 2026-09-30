@@ -1022,10 +1022,31 @@ RW5. **Syncup.** Build the request from the current inputs (RW13–RW16), send
      re-sent (`architecture.md` §9.8).
      It is logged as `syncup leftover` (`revision`, the agent's `details`)
      at `Info`, beside the ordinary `syncup result`: nothing agent-side
-     re-drives the sweep, it runs again on the re-sync RW4 step 5 issues, so
-     a leftover is a normal state for as long as a dead remote's failfast
-     window lasts, and the record is what makes one that does NOT go away
-     visible in the log.
+     re-drives the sweep for a leftover (the agents' own background
+     converges, `cnagent.md` CN10's connect retry and `dnagent.md` DN13's
+     connect retry and DN12's fence timer, sweep only while one is
+     registered or armed for a reason of its own); it runs again on the
+     re-sync RW4 step 5 issues, so a leftover is a normal state for as long
+     as a dead remote's failfast window lasts, and the record is what makes
+     one the re-sync keeps finding visible in the log. A cn teardown's reply
+     carries the code routinely: the cn agent's sweep sets every
+     `nvme disconnect` it issues — of a leg or a clone source — going off
+     its pass (`cnagent.md` CN10) and names the connection as a leftover
+     (`nvme:<nqn>`) until a later pass finds it gone (a removing pass once
+     it has no controller; a Check round once its sysfs subsystem directory,
+     which can outlive the last controller, is gone), so a `SyncupCntlr` or
+     `SyncupCn` whose sweep disconnects anything is answered
+     `ReplyCodeLeftover` however fast the disconnect turns out to be. The
+     disconnect needs no re-sync to finish, and the first Check round that
+     no longer finds the connection, with nothing else left, answers code 0,
+     after which RW4 step 5 issues nothing more; a round before it re-issues
+     the `Syncup*`, whose pass sets no second disconnect of that subsystem
+     going while the first still runs. While all that is left is a subsystem
+     directory whose last controller is gone, the re-issued `Syncup*`'s
+     removing pass counts the connection gone and answers code 0, so the
+     worker re-syncs every round and logs a `syncup result` with no
+     `syncup leftover`; what names the connection then is the agent's own
+     `sweep leftover` record of each Check verdict (`log.md`).
 
      The rejection handling does not enumerate the codes: only
      `ReplyCodeStaleRevision` raises the record to `Error`, every other
@@ -1171,19 +1192,24 @@ RW14. The SP revision worker is a **coordinator**. On every desired change
       sides before cntlrs (below). `ErrNotFound` from `LoadSp` means the SP is
       being deleted: log, keep the children until the `SpRev` delete arrives
       (the agents tear down through the pointer lists). An endpoint without a
-      `DnConf`/`CnConf` leaves that child idle; the coordinator re-resolves
-      idle children every `cntlr_interval` seconds. When the object that
-      cannot be resolved is a **cntlr** — its `Cntlr` record is missing (MD3)
-      or its `CnConf` is absent — **every side child** of the SP is left
-      idle, not just that cntlr's own: RW15's `primary_cn_id` /
-      `standby_id_list` must name every cntlr of the SP, and a `side_conf`
-      built from a shrunken set makes every DN of the SP tear the missing
-      CN's dm-error, dm-linear, subsystem and namespace down
-      (`worker/sprole.go`). The **other** cntlr children are unaffected —
-      RW16's request carries no peer's `cn_id`, so on the cntlr side the
-      effect stays confined to that cntlr's own child, left idle by the rule
-      above — and the primary's leg rows are still placed on their slice
-      (HL2).
+      `DnConf`/`CnConf` leaves that child **idle**: the fan-out builds no
+      request for it, so the diff treats it as gone — a running child is
+      stopped (RW11) and none is started. While the last fan-out left anything
+      unresolved — such an endpoint, or a cntlr's missing record (below) — the
+      coordinator re-resolves every `cntlr_interval` seconds, and the fan-out
+      that resolves one starts a new child for it — a cntlr's with the
+      sides-first release below — which drives nothing until an old one's
+      stop, if still running, has returned (RW1). When the object that cannot
+      be resolved is a **cntlr** — its `Cntlr` record is missing (MD3) or its
+      `CnConf` is absent — **every side child** of the SP is left idle, not
+      just that cntlr's own: RW15's `primary_cn_id` / `standby_id_list` must
+      name every cntlr of the SP, and a `side_conf` built from a shrunken set
+      makes every DN of the SP tear the missing CN's dm-error, dm-linear,
+      subsystem and namespace down (`worker/sprole.go`). The **other** cntlr
+      children are unaffected — RW16's request carries no peer's `cn_id`, so
+      on the cntlr side the effect stays confined to that cntlr's own child,
+      left idle by the rule above — and the primary's leg rows are still
+      placed on their slice (HL2).
 
       **Sides first.** The side half of the diff is applied at once. The cntlr
       half — every running cntlr child's new request, and every cntlr child to
@@ -1347,9 +1373,9 @@ RW18. **Provisioned flip** (§10.3). On an ACCEPTED `SyncupSide`/`CheckSide`
       true`. Nothing is remembered across a handoff: the new owner's first
       round carries the full `*Info` and flips whatever is still `false`.
 
-RW19. **Created flip** (§10.3, `ThinDeviceCreated.md` U3, verbatim). Every
-      `SyncupCntlrReply` and `CheckCntlrReply` with an accepted code (RW18)
-      is scanned:
+RW19. **Created flip** (§10.3, `ThinDeviceCreated.md` U3). Every
+      `SyncupCntlrReply` and `CheckCntlrReply` with an accepted code (RW18:
+      `code == 0` or `ReplyCodeLeftover`) is scanned:
       a td `X` of the loaded state with `created == false` is a candidate
       when `cntlr_info.td_id_to_thin_info[X.td_id]` exists, its
       `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
@@ -1419,7 +1445,7 @@ HL1. **Nodes (dn/cn roles).** Evaluated per round and per syncup reply on
      | stream cannot be opened, breaks, or no reply within the round timeout | set to `now` if 0; the in-memory info is marked `RES_STATUS_UNKNOWN` (what the worker records itself while the stream is dead, §9.5 — never written to etcd) |
      | any `RES_STATUS_ERROR` row in `DnInfo` (`disk_info`, `meta_info`, `port_info`) or `CnInfo` (`port_info`, `tmpfs_info`, `tmp_file_info`, `loop_dev_info`) | set to `now` if 0 — including `meta_info` `"disk lacks Write Zeroes"` (§9.4), which is a plain `ERROR` |
      | a clean round: reply in time, an accepted `code` (0 or `ReplyCodeLeftover`), no `ERROR` row in the latest known info | cleared to 0 |
-     | `RES_STATUS_PROVISIONING`, `MISSING` | neither set nor clear ([D15]) |
+     | `RES_STATUS_PROVISIONING`, `MISSING` | never set it ([D15]); neither is an `ERROR` row, so a reply that carries them and no `ERROR` row is the clean round above and clears it. Legs are the exception: HL2's `Leg.err_epoch` clears on the primary's `RES_STATUS_OK` alone, so a `PROVISIONING` or `MISSING` leg row neither sets nor clears it |
      | a rejection code (stale revision, unknown object, invalid conf, or one this worker does not know) | neither set nor clear; triggers a re-sync (RW4 step 5) |
      | `agent_reply.code == ReplyCodeLeftover` | evaluated exactly as `code == 0` — the rows above set it, clear it or do neither — and the re-sync of RW4 step 5 still runs. The request WAS applied, so the `*Info` is a full probe of every WANTED object; a leftover is by definition an object nothing wants, so it has no row of its own to be judged by. Reading the code as a rejection would freeze health — and the pushes of §10, and the RW18/RW19 flips — for as long as one leftover survived |
 
@@ -2245,13 +2271,14 @@ SPD6. **Entry and cadence.** AR3 splits: a pass over an SP with `deleting ==
 SPD7. **Fan-out tolerance.** The drain's first step leaves an SP with NO
       cntlr, a shape `CreateStoragePool` can never produce. `buildCntlrPlans`
       yields an empty plan set for it, and `buildSidePlans` leaves every side
-      child IDLE with `sp sides idle reason="no cntlr"` — not RW15's
-      `primary_cn_id = 0`, which `agent/dnagent`'s export list would read as a
-      real CN id and build a dm-error, a dm-linear, a subsystem and a
-      namespace for the CN numbered 0. (An SP that merely has no PRIMARY among
-      cntlrs that do exist keeps RW15's documented behaviour.) The sides are
-      removed by each DN agent's own sweep as the batches empty the DN
-      pointer lists, not through these children.
+      child IDLE (RW14: stopped, none started, and no re-resolution armed,
+      since nothing is unresolved) with `sp sides idle reason="no cntlr"` —
+      not RW15's `primary_cn_id = 0`, which `agent/dnagent`'s export list
+      would read as a real CN id and build a dm-error, a dm-linear, a
+      subsystem and a namespace for the CN numbered 0. (An SP that merely
+      has no PRIMARY among cntlrs that do exist keeps RW15's documented
+      behaviour.) The sides are removed by each DN agent's own sweep as the
+      batches empty the DN pointer lists, not through these children.
 
 SPD8. **Step selection.** From the freshly loaded `SpConf` ALONE, first match
       wins: `cntlr_id_list` non-empty ⇒ **D1** `DrainSpCntlrs`; else
@@ -2447,9 +2474,16 @@ CLD5. **Exclusion is the teardown.** From the first post-latch fan-out the
       wrapper to key it off. That sweep, and the build phase that follows it
       in the same converge, are the whole physical teardown — the ns-dev
       parked and then put back on its ordinary backing, dm-clone and metadata
-      wrapper removed, arena units freed, source disconnected, local chunk
-      files dropped — so there are ZERO agent changes: to an agent this is
-      indistinguishable from the old post-delete syncup. No push of the
+      wrapper removed, arena units freed, the source's disconnect set going
+      unless another clone on the node may still use that source, local
+      chunk files dropped — so there are ZERO agent changes: to an agent
+      this is indistinguishable from the old post-delete syncup. The
+      disconnect runs off the pass (`cnagent.md` CN10), so the pass that
+      sets it going answers `ReplyCodeLeftover` with the source among its
+      leftovers (RW5), the sweep's layers under the source wait for a pass
+      that finds it gone (`cnagent.md` CN21), and the first Check round that
+      no longer finds it (its sysfs subsystem directory gone, RW5), with
+      nothing else left, answers code 0. No push of the
       clone is submitted once the exclusion has reached the primary's child,
       which is when the RW14 sides-first hold the latch's fan-out lands in
       releases the cntlrs. Until then that child drives the pre-latch plan,
@@ -2572,7 +2606,7 @@ parses them.
 | `invalid stored conf` | `Error`. From a revision worker: `role`, `shard`, `cluster_id`, `id` (+ `side_pointer`/`cntlr_pointer` for sp children), `error`. From the sp coordinator (both its gates): `cluster_id`, `sp_id`, `sp_name`, `error` | RW9 (the loop's conf gate), RW14 (the fan-out's `bdev_conf` gate), AR1 (the pass gate) — once per distinct error, never once per round |
 | `syncup result` | ids, `revision`, `code`, `error?` | every `Syncup*` reply or failure (RW5) |
 | `syncup rejected` | ids, `revision`, `code`, `details` (`Error` for stale revision) | RW5 |
-| `syncup leftover` | ids, `revision`, `details` (the agent's leftover names, `leftover(n): kind:name, … [+k more]` and/or `enumeration failed: …`) | RW5, on an accepted reply carrying `ReplyCodeLeftover` — one record per `Syncup*`, so a leftover that does not go away is in the log every round |
+| `syncup leftover` | ids, `revision`, `details` (the agent's leftover names, `leftover(n): kind:name, … [+k more]` and/or `enumeration failed: …`) | RW5, on an accepted reply carrying `ReplyCodeLeftover` — one record per `Syncup*`, so a leftover the re-issued `Syncup*` keeps finding is in the log every round (one only the `Check*` verdict still names is not) |
 | `health changed` | `role`, `cluster_id`, ids, `record` (`dn`/`cn`/`cntlr`/`leg`/`side`), `err_epoch` (0 or now), `reason` (`unreachable`/`error_row`/`recovered`), `res_name?` | HL1/HL2 transitions, judged against the memo HL3 re-seeds from the record — the correction of an epoch another observer wrote or cleared included |
 | `cntlr settled` | `role` (`sp`), `cluster_id`, `sp_id`, `cn_id`, `cntlr_pointer`, `revision` (the reply's, which the settle requires to be the one the child drives) | *added 2026-09-26:* HL2's settle written — at most once per acquisition of the primary role, the re-enable of a primary counting as one (none when the cntlr is demoted before it settles), plus a repeat for a plan loaded before the write landed (HL2) or for a second owner in an overlap (§0 item 4) |
 | `flip applied` | `kind` (`provisioned`/`created`), `cluster_id`, `sp_id`, ids, `revision` (the new `SpRev`) | RW18/RW19 |
@@ -2922,7 +2956,8 @@ does).
   failover; a failed step logging `sp drain failed` with the phase and the
   `ErrPrecondition`'s reason and being retried unchanged on the next pass; the
   self-tick armed by a step that PROGRESSED, not armed by an idempotent no-op,
-  and coalesced; SPD7's cntlr-less fan-out leaving every side child idle.
+  and coalesced; SPD7's cntlr-less fan-out building no side request (every
+  side child idle, RW14) and counting nothing unresolved.
   In `model`: the batch size and the tail-pop order (data before meta, tail
   not head); the slice-final STM removing the key and the id list entry
   together and never separately; per-node accounting (one write, one capacity
@@ -4217,7 +4252,9 @@ durable, so nothing is lost — convergence is delayed, not skipped
   stream open failed`, `check stream send failed` or `check round failed`
   (the revision loop's, not §12 records); the `syncup result` of each
   `Syncup*` that RW4 step 5 re-issues, paired with a `syncup leftover` or a
-  `syncup rejected` while the leftover or the rejection persists (RW5) — a
+  `syncup rejected` while its reply still carries the leftover or the
+  rejection (RW5; a leftover only the `Check*` verdict still names is
+  paired with neither) — a
   stale revision after an etcd restore repeats its `syncup rejected` at
   `Error` every round until the revision in etcd reaches the agent's; a
   `dn conf missing` / `cn conf missing` while the node's `DnConf` /

@@ -49,7 +49,7 @@ decision, not an assumption.
 | R1 | Field name `created`, `bool created = 5` on `ThinDevice`. | The next free field number; `ThinDevice` already rides in `td_list` and `name_to_td`, so no other message changes. |
 | R2 | `created` is **monotonic**: set once by the sp-worker, never cleared. | A pool holds a thin id until a `delete {dev_id}` reaches it — sent by the td's own deletion or, when CN14's pool-presence gate skipped that fan-out's message (a demotion or pool suppression coalesced with the delete), by the CN14 activation sweep at the pool device's next re-creation; a later bad row is a health event (`err_epoch`), not evidence the id is gone. |
 | R3 | A td deleted and recreated under the same name is a **different td**: new `td_id` (from `next_id`), new `dev_id` (from `next_dev_id`), `created = false`. | ids are never reused (§8.7); the key is rewritten, not updated. |
-| R4 | Flip predicate: `agent_reply.code == 0`, and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
+| R4 | Flip predicate: the reply was **accepted** — `agent_reply.code` 0 or `ReplyCodeLeftover` — and the td's `slice_id_to_dm_thin` holds **exactly** the SP's slice ids, all `RES_STATUS_OK`. No revision match. | A leftover reply is an accepted request with residue — the node still holds something the desired state does not want, or an enumeration did not answer (`architecture.md` §9.8) — so its rows are read exactly as code 0's; the three rejection codes mean the request was not applied and carry no trustworthy info. Standbys report no thin rows at all, so "every row OK" over an empty map is vacuously true; the coverage clause closes that. Thin ids are monotonic facts, so a reply against an older revision that shows every slice OK is still true. |
 | R5 | The flip STM **bumps `SpRev`** once. | §5.5: any STM that changes agent-visible desired state bumps the revision once; `created` rides in `td_list` and the agent consumes it (R9). |
 | R6 | One STM and one bump **per reply** for up to `MaxFlipCreatedPerTxn` (256) completed tds (batching allowed); a reply that completes n > 256 costs ⌈n / `MaxFlipCreatedPerTxn`⌉ STMs and at most as many bumps, in list order (U3-S3 step 4). | One `CheckCntlr` reply carries every td of the primary; per-td bumps would fan the identical state out once per td. Same allowance §10.3 gives the `provisioned` flips. |
 | R7 | Gating scope: **snapshot creation only**. `CreateNamespace`, `UpdateNamespaceDev`, `CreateClone`, `GetThinDeviceBitmap` are not gated. | `create_snap` is the one operation with a kernel-level dependency on the origin id being in the pool; an ns-dev needs no gate — CN16's backing rules never read `created`, so an uncreated td's ns-dev takes whatever backing CN16 picks: its raid0 in the converge that builds it, unless a clone targets the td or the namespace is parked (U2-S4) — and clone destinations are empty tds ([D3]). |
@@ -314,8 +314,8 @@ gateway's `Inspect*` path) are not a source.
 **U3-S1 Complete predicate.** For a reply `R` from any cntlr of SP `S`
 (R12) and a td `X` of `S`:
 
-1. `R.agent_reply.code == 0` (a rejected request carries no trustworthy
-   info);
+1. `R.agent_reply` was **accepted**: `code` 0 or `ReplyCodeLeftover`
+   (R4; a rejected request carries no trustworthy info);
 2. `R.cntlr_info.td_id_to_thin_info[X.td_id]` exists;
 3. the key set of its `slice_id_to_dm_thin` equals the set of `S`'s slice
    ids (the worker's loaded `SpConf.slice_id_list` — every slice, no extra,
@@ -406,14 +406,15 @@ stream is consumed in `worker/revision.go`; no `worker/check.go` exists.)**
 * **U3-T1** A reply with `agent_reply.code == 0` whose `ThinInfo` for td
   `X` holds every slice id `OK` ⇒ one STM: `X.created = true`, `SpRev`
   bumped exactly once; the fan-out that follows carries `created = true` in
-  `td_list`.
+  `td_list`. The same reply with `ReplyCodeLeftover` flips `X` too
+  (`TestLeftoverCodeIsAccepted`).
 * **U3-T2** Two tds complete in one reply ⇒ both flipped in one STM, one
   bump. A second identical reply ⇒ no write, no bump.
 * **U3-T3** No flip, no write, no bump for each of: a standby's reply (no
   `td_id_to_thin_info` entry); a map missing one slice; a map with an extra
   slice id; one row `PROVISIONING`; one row `MISSING` with details
-  `"sp_level"`; one row `ERROR`; `agent_reply.code != 0` with otherwise
-  perfect rows.
+  `"sp_level"`; one row `ERROR`; a rejection code (stale revision, unknown
+  object, invalid conf) with otherwise perfect rows.
 * **U3-T4** Identity guard: the td is deleted between the reply and the
   STM ⇒ skipped, no bump; the td is deleted and recreated under the same
   name (new `td_id`) ⇒ skipped, the new record stays `false`; the record is

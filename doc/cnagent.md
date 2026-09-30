@@ -61,7 +61,15 @@ agent's outbound connections are still only `nvme connect` — never gRPC.
 
 The following enter the existing files `common/constants.go` and
 `common/name_fmt.go`; the name **parser** below is the one file `common`
-gains, `common/name_parse.go`:
+gains, `common/name_parse.go`. The const listing is a condensed quote rather
+than a byte-for-byte one: `CnCloneMetaAreaSize` and `CnCloneMetaUnit` sit
+apart from the rest in `common/constants.go`'s single `const` block, the rest
+following one another there in the listing's order, and some comments are
+condensed or wrapped differently — the connect budget's, for one, leaves out
+the limits the file's states. The names, the values and the rules the
+comments state are the committed ones, and `common/constants.go` is
+authoritative for comment text, wrapping and order (as `dnagent.md` §2.2 says
+of its own listing):
 
 ```go
 	// CN base state (architecture.md §3.2): the tmpfs that carries the
@@ -1153,8 +1161,10 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
            refusal needs a stale node of this very name — which, short of
            the case the guard exists for, a group whose legs carry no
            superblock has never had an array to leave.
-           `--assume-clean` is **always** correct here: a side is never
-           exported before the §9.4 **provisioning** protocol has zeroed it
+           `--assume-clean` is **always** correct here, short of the
+           failed-read answer below (a member whose read failed answers as
+           superblock-free without being so): a side is never exported
+           before the §9.4 **provisioning** protocol has zeroed it
            whole (`blkdiscard --zeroout` per batch of extents, tracked in the
            volume table's `zeroed_bits` and gated by `Side.provisioned`), and
            ids are never reused — so a superblock-free leg can only be a
@@ -1386,6 +1396,22 @@ CN12. **Groups** (`md.go`; primary only — a standby has none, §3.4).
       precisely what let the old teardown skip `mdadm --stop` and leave a
       live array pinning its two leg wrappers for ever. It now reads sysfs,
       under the same rule.
+      `--examine` has a second unsafe answer, one this rule does not catch
+      (measured 2026-09-27): once the path's failfast has expired — ~13 s
+      after the side died, the timing measured below — the read fails with
+      an IO error instead of waiting, and mdadm answers exactly as it does
+      for a member with no superblock, `No md superblock detected` with
+      exit status 1. `HasSuperblock` reads that as "no superblock", and
+      nothing in the answer tells the two apart. Only a leg that read
+      **available** earlier in the same pass is probed, and a path past its
+      failfast is no longer `live`, so the answer needs the failfast to
+      expire between that read and the probe's answer. With a superblock
+      on another member the assembly takes case 2 without this one. Case 1
+      needs no member to answer with one — every `leg_list` member
+      available, each fresh or answering so — and its `--create
+      --assume-clean` then writes to the member whose read failed: into
+      the same failing IO or, if a path has reconnected in between, over
+      its live data (§7, known limits).
 
       **Nothing in the agent runs `mdadm --detail`** (CN21, CN28;
       *amended 2026-09-26*: no sweep ever did, and `ensureGroup` and
@@ -1495,7 +1521,8 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       volume device is live, the agent suspends it across the message and
       resumes immediately after — a second deliberate, bounded suspension
       beyond [D12]'s window, held only for the duration of one
-      `dmsetup message`.
+      `dmsetup message`, short of a `dmsetup` command on it that fails
+      (CN16).
 
       **Three cases, decided per td by two request fields**
       (`ThinDeviceCreated.md` U4-S1):
@@ -1535,7 +1562,8 @@ CN14. **Thin volumes** (`pool.go`; primary only). Per td × slice:
       suspends that raid0 first, issues every needed slice's `create_snap`
       (each under its own per-slice origin-thin suspend — dm-thin's own
       requirement, unchanged), and resumes the raid0 afterwards, on the
-      error paths too, so no device outlives the sequence suspended ([D12]).
+      error paths too, so no device outlives the sequence suspended ([D12])
+      short of a `dmsetup` command on it that fails (CN16).
       Only the messages sit inside the window — the snapshots' own thin
       *devices* are created after the resume, since the content is fixed at
       message time. The window is bounded by `slice_cnt` messages under the
@@ -1733,10 +1761,20 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       dm-clone the plan does not want may still be live: the namespace then
       stays parked, in the ANA group it has, until a pass whose listings
       answer (CN18).
-      No path of a pass leaves a CN device suspended. A device found
-      suspended is one an older build, an interrupted `Reload`, or an agent
-      killed inside CN14's quiesce bracket left, and every path that meets it
-      resumes it — by a reload or by a bare resume, never by leaving it. An
+      No path of a pass leaves a CN device suspended unless a `dmsetup`
+      command on it fails, and one such failure leaves it so on purpose: a
+      reload **fails closed** (*decided 2026-09-29*, `dnagent.md` §2.8). A
+      reload whose load fails returns the error with the device still
+      suspended on its old table — any reload, since the rule is
+      `Dm.Reload`'s own: for a park, resuming that table would put the
+      ns-dev back onto the backing it retires and replay onto it the IO the
+      suspend absorbed. A resume that fails can leave a device suspended too.
+      A device found suspended is one that such a failure, an older build,
+      an interrupted `Reload`, or an agent killed inside CN14's quiesce
+      bracket left, and every path that meets it resumes it — by a reload
+      or by a bare resume, never by leaving it; one whose reload keeps
+      failing its load stays suspended, queueing its IO, until a reload or
+      a resume of it succeeds. An
       unwanted one that no path of a pass meets — below a layer the chain
       stopped at, or anywhere on a pass whose sweep an unanswered listing
       stopped (CN21) — is met by the first pass whose chain reaches it.
@@ -1761,9 +1799,12 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       nvmet namespace `nsid = ns_idx`, `device_path` = its own ns-dev,
       `uuid`/`nguid` from the record. A namespace that has left `ns_list`
       under a subsystem that stays is not the build's to remove: CN21's L1
-      alone removes it, `AnaGrpIdInaccessible` first, after P0 has parked
-      or resumed the ns-dev under it, and only from an enumeration that
-      answered. A pass in which one did not — one of the four listings, or
+      alone removes it (and so nothing does under a subsystem whose NQN
+      carries the dnv prefix but decodes to nothing, which the sweep never
+      attributes, §2.1; `architecture.md` §7), `AnaGrpIdInaccessible`
+      first, after P0 has parked
+      or resumed the ns-dev under it — or failed to, which does not stop L1
+      (CN21) — and only from an enumeration that answered. A pass in which one did not — one of the four listings, or
       the sweep's own listing of that subsystem's namespaces — leaves it
       where it is with a non-OK verdict, and the next pass whose listings
       answer removes it.
@@ -2276,8 +2317,9 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       co-hosted dn agent is fine, because its NQNs are all dnv-format kinds
       `2` and `3`, which never reach that arm.
 
-      **P0, before every layer**: every **unwanted** ns-dev is parked. It has
-      no plan — nothing wanted names it, and its td may be leaving in the
+      **P0, before every layer**: every **unwanted** ns-dev is parked,
+      unless the park fails (below). It has no plan — nothing wanted names
+      it, and its td may be leaving in the
       same pass — so the park is derived from the device's **own live
       table**. Only one backing names a td: a kind-`c4` raid0, whose ids are
       also its td's kind-`c5` dm-error's, so there the target is CN16's own.
@@ -2290,9 +2332,14 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       does not complete on a suspended dm device; and the reload's own
       flushing suspend is what completes the in-flight host IO instead of
       replaying it at resume onto a stack that is about to go.
+      A park that fails does not stop the chain: L1 still runs on that pass,
+      and an ns-dev whose load failed is still suspended on its old table
+      (the reload fails closed, CN16) — the suspended device the first half
+      is there to keep from L1 (Known limits).
 
       **Layers, strictly top-down.** Within one sp's chain:
       * **L1** — nvmet. Each unwanted namespace under a surviving subsystem
+        attributed to the sp (above)
         goes `AnaGrpIdInaccessible` and is then removed (a host still holding
         a path is told to stop using it rather than losing it under IO) —
         by this layer alone: the build phase's `ensureSubsystem` converges
@@ -2336,7 +2383,9 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
         that a later pass's probe finds gone.
       No `delete` message is ever sent for a thin volume whose pool is itself
       going (CN14: this is deactivation, the metadata on the legs is the next
-      CN's to find), and nothing in any layer runs `mdadm --detail` (CN12).
+      CN's to find, and a created td's volumes are re-attached there without
+      any message — `ThinDeviceCreated.md` U4), and nothing in any layer runs
+      `mdadm --detail` (CN12).
 
       **"Gone" is probed, never inferred from an exit status**: `dmsetup
       info` for a dm device, `array_state` for an array, a configfs read for
@@ -2926,10 +2975,11 @@ contradicts them.
   restated — the grace window it floated is unnecessary, because ANA
   `inaccessible` is written before the device is touched and nvmet refuses IO
   to an inaccessible namespace at the target. The CN holds no suspension
-  across a converge pass any more; `keepSuspended` is gone from
+  across a converge pass any more, short of a `dmsetup` command that fails
+  (a reload fails closed, CN16); `keepSuspended` is gone from
   `ensureDmSingle`, and the resumes left in `ensureNsDev`, `parkNsDev`,
   `removeDm` and CN21 are guards for a device an older build or an
-  interrupted reload left suspended.
+  interrupted or failed reload left suspended.
 * `dnagent.md` §2.7 SH14 + `architecture.md` §9.5 / §10.3 + `dnv-worker.md`
   HL2 / AR8 / §14.9 (2026-09-26) — `ResStatus` gains
   `RES_STATUS_PENDING = 5` for the CN11 row of a primary's leg whose
@@ -3521,7 +3571,8 @@ between `Recv` and the round (SH24).
     `dmsetup resume {origin CnRaid0Name}`, and the snap thin devices'
     `dmsetup create` strictly after that resume. A scripted failure of the
     second slice's `create_snap` still records the raid0 resume: no path out
-    of the sequence leaves a device suspended ([D12]). An equal-revision
+    of the sequence leaves a device suspended ([D12]) short of a `dmsetup`
+    command on it that fails (CN16). An equal-revision
     re-apply with every snap thin device already present records no suspend
     and no message at all (SH16). A plain `create_thin` td never triggers a
     raid0 suspend at all. The **fresh-primary** shape (U4-T1): an origin
@@ -3628,10 +3679,10 @@ between `Recv` and the round (SH24).
     *parked*, live on the td's `CnErrorName` — then a converge that drops it
     from `ns_list`. Two sub-cases put the ns-dev back into the state a
     pre-2026-09-16 agent left it in (dm-suspended, still on the raid0) — one
-    of the three ways a sweep can still meet a suspended device, beside an
-    interrupted `Reload` and an agent killed inside CN14's quiesce bracket:
-    its reload
-    onto the td's `CnErrorName` and the
+    of the four ways a sweep can still meet a suspended device, beside an
+    interrupted `Reload`, an agent killed inside CN14's quiesce bracket and a
+    `dmsetup` command on it that failed (CN16's fail-closed reload): its
+    reload onto the td's `CnErrorName` and the
     resume inside it are recorded **before** that nsid's `enable = 0` and
     `rmdir`, which are recorded before the ns-dev's own `dmsetup remove`. The
     target is pinned as well as the order — the recorded `--table` must name
@@ -3684,8 +3735,9 @@ between `Recv` and the round (SH24).
     probe **and** from the converge reply, which are two different code paths
     and each need their own pin. The same device dm-suspended is
     `RES_STATUS_ERROR "unexpectedly suspended"` whether or not the plan says
-    suspended: nothing this build produces leaves an ns-dev suspended, so
-    finding one is a fault and not a steady state.
+    suspended: this build leaves an ns-dev suspended only when a `dmsetup`
+    command on it failed (CN16's fail-closed reload) or the agent died
+    inside a reload, so finding one is a fault and not a steady state.
 29. **A suspended ns-dev from an older build converges on the first pass**
     (CN16, §11.6, `TestSuspendedNsDevFromAnOlderBuildIsResumed`): the three
     shapes an upgrade can meet. Effectively suspended and still holding the
@@ -4092,6 +4144,39 @@ between `Recv` and the round (SH24).
   of CN12 does not reliably cover it: it runs only while some `leg_list`
   member of the cntlr is not available, and the group's own legs, like
   every other leg, may all be available.
+* **A failed `--examine` read answers "no superblock"** (2026-09-29):
+  `Md.HasSuperblock` keeps a killed `mdadm --examine` apart from a member
+  without a superblock, but not one that answered after its path's
+  failfast expired — the read's IO error comes back as `No md superblock
+  detected`, exit status 1, the fresh-leg answer (CN12). It needs that
+  failfast to expire between the leg's availability read and the probe's
+  answer in one pass, and it reaches case 1 only when no member of the
+  group answers with a superblock; that `--create --assume-clean` lands
+  over live data only if a path of that leg reconnects before it runs.
+  Nothing tells the two answers apart yet.
+* **A park whose load fails can wedge the cntlr** (2026-09-29): a reload
+  fails closed (CN16) and P0 only logs a park that fails (CN21), so an
+  unwanted ns-dev that was still serving stays dm-suspended on its old
+  table while L1 runs over it. A namespace CN9's pre-step 1 has not moved
+  — its loop is over the plan, so one dropped from `ns_list`, one under a
+  subsystem that left the request, or any of an sp no longer in the
+  `cntlr_pointer_list` — is still in the ANA group it had when the park's
+  suspend lands, and if that is `AnaGrpIdOptimized`, host IO that arrives
+  after the suspend queues in dm. L1's `enable = 0` (or the one inside a
+  whole subsystem's removal) then waits in the kernel for that IO: a
+  configfs write returns only when the kernel does (`osclient.md` §4.3),
+  and the pass holds its CN1 locks — the cntlr's object lock, or the node
+  write lock at node level and at startup (CN21) — so no later pass
+  reaches the reload that would release it. A namespace no host IO reaches
+  after the suspend is not exposed; today only a reload or resume of the
+  ns-dev from outside the agent ends it.
+* **A namespace dropped from a legacy dnv-prefixed subsystem stays
+  enabled** (2026-09-29): the sweep is the only remover of a namespace
+  (CN21), and it never attributes a subsystem whose NQN carries the dnv
+  prefix but decodes to nothing — neither to an sp nor as unowned (§2.1)
+  — so a namespace `DeleteNamespace` takes out of one stays enabled on
+  every CN that had it, and that sp's chain stops at the ns-dev layer on
+  every pass (`architecture.md` §7).
 * **A member that stays unavailable costs a converge every 5 s, under the
   lock every Check round needs** (2026-09-26): the late-member retry
   (CN10/CN12) runs the whole converge

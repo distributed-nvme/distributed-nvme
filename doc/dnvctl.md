@@ -292,7 +292,8 @@ Presence semantics — dnvctl sends exactly what was typed:
 * `--rev` **not given** ⇒ the token field is **absent** (nil message).
 * `--rev N` (base-0: `7`, `0x1f`) ⇒ the token message is present with
   `revision = N` and nothing else set (the gateway ignores the token's echo
-  fields; only `revision` participates — `gateway/common.go:307-312`).
+  fields; only `revision` participates — `gateway/common.go`'s three
+  `check*Token` helpers compare it alone).
 * `--rev 0` ⇒ the message is present with revision 0 — proto3 message presence
   keeps this distinguishable from omission — and stays the deliberate
   always-stale probe the gateway suite's B4 stage relies on.
@@ -714,8 +715,17 @@ Trace ids `it-<case>-<step>` via the house `stage()`.
   whole `jq -e` object equality, and `assert_count_delta` brackets the call
   with the two snapshots' counters; **uint64 fields compare as strings**
   (`.sp_rev.revision == "7"`), protojson's doing.
-* `set_behavior` writes behavior.json via the atomic tmp+`mv` ssh idiom;
-  every case starts by resetting it to `{}` (`case_reset`).
+* `set_behavior` writes behavior.json via the atomic tmp+`mv` ssh idiom.
+  Every case starts with `case_reset`, which restarts the fake rather than
+  only rewriting its files: it stops the fake (`TERM` by its recorded pid,
+  then up to 10 s for it to exit), resets behavior.json to `{}` and
+  state.json to `{"methods":{}}`, truncates `fakegateway.log`, restores the
+  §7.6 prefix (`--gateway-address` back on 29840, `--cluster` and
+  `--trace-id` back in, no `DNVCTL_*` assignment in front), starts the fake
+  again and waits up to 15 s for a `cluster list` to answer. That readiness
+  probe is itself a request the fake records, under trace id
+  `it-<case>-reset`, so no case starts from an empty state.json; counters
+  are read only as deltas (`assert_count_delta`).
 * dnvctl stdout must satisfy `jq -e .` (parse) on every `ctl_ok`; goldens
   compare byte-exact after the fact.
 
@@ -847,9 +857,12 @@ trace id):
 
 `cleanup_script` heredoc over `ssh bash -s`, the house shape: gather
 `$WORK/*/pid`, `CONT` → `TERM` → poll 20×0.25 s → `KILL`, then
-`pkill -f 'bin/fakegateway'`, `rm -rf $WORK`, `echo cleaned`. Run at start
+`pkill -f 'bin/fakegateway'` and `pkill -f 'bin/dnvctl'` (dnvctl runs in the
+foreground of each invocation's ssh and has no pid file, so a straggler is
+found by name), a 0.5 s pause, `rm -rf $WORK`, `echo cleaned`. Run at start
 always, at end on success, alone under `--cleanup-only`. After it, 29840/29841
-are free and `$WORK` is absent.
+are free and `$WORK` is absent; on the `--cleanup-only` path `verify_clean`
+asserts both.
 
 ### 7.15 Failure diagnostics
 
@@ -944,10 +957,11 @@ which gained the `dnvctl_test.sh` and `fakegateway/` rows.
    and `$WORK` absent.
 7. The §8 amendments are present in the five companion files (spot-grep:
    `rg -l 'dnvctl.md' README.md doc/` hits all five, plus this file and
-   four that cite it on their own account: `doc/log.md` (R2, CT7),
+   five that cite it on their own account: `doc/log.md` (R2, CT7),
    `doc/grpc.md` (§6's fakegateway bullet), `doc/dnagent.md` (CM1's
-   `ctl/` pointer) and `doc/dependencies.md` (the pflag bullet, §5.0's
-   flag helpers) — ten files).
+   `ctl/` pointer), `doc/dependencies.md` (the pflag bullet, §5.0's
+   flag helpers) and `doc/e2e_integtest.md` (its required background, and
+   its §9 changelog's note on §7.3's port inventory) — eleven files).
 8. Against a *real* gateway (manual step, not in the suite): `dnvctl sp get`
    then a mutator with the returned `--rev` succeeds; the same mutator
    **without** `--rev` also succeeds, because GW6 is presence-based; and the

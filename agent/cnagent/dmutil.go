@@ -67,9 +67,11 @@ func dmTable(targetType string, sectors uint64, args []string) string {
 		sectors, targetType, strings.Join(args, " "))
 }
 
-// ensureDmSingle converges one single-target device. No dnv device is ever
-// left suspended ([D12]): the reload path resumes on its own, and a device
-// found suspended with the table it wants is resumed here.
+// ensureDmSingle converges one single-target device. The reload path resumes
+// on its own when its load succeeds; a load that fails leaves the device
+// suspended on its old table (Dm.Reload fails closed, cnagent.md CN16) for a
+// later pass to converge again. A device found suspended with the table it
+// wants is resumed here.
 func (s *CnAgentServer) ensureDmSingle(
 	ctx context.Context,
 	name string,
@@ -349,8 +351,8 @@ func (s *CnAgentServer) probeDmConcat(
 // afterwards. A suspended device is resumed first: `dmsetup remove` does not
 // succeed on one. Nothing dnv builds is suspended in steady state any more —
 // an effectively suspended ns-dev is parked, live (CN16, §11.6) — so the
-// resume is a guard for a device an older build or an interrupted reload left
-// behind.
+// resume is a guard for a device an older build, or a reload that was
+// interrupted or failed (Dm.Reload fails closed), left behind.
 func (s *CnAgentServer) removeDm(ctx context.Context, name string) bool {
 	dev, err := s.dm.Info(ctx, name)
 	if err != nil {

@@ -211,8 +211,10 @@ type spPlan struct {
 	// tdRefs are the tds whose created flag is still false, keyed by td_id:
 	// the only candidates RW19 may flip.
 	tdRefs map[uint64]model.TdRef
-	// unresolved counts the children an absent DnConf/CnConf left idle
-	// (RW14); a nonzero count makes the coordinator re-resolve on its ticker.
+	// unresolved counts what the snapshot could not resolve — an endpoint
+	// with no DnConf/CnConf, a cntlr whose record is missing — each of which
+	// leaves a child idle: no request, so a running one is stopped (RW14). A
+	// nonzero count makes the coordinator re-resolve on its ticker.
 	unresolved int
 }
 
@@ -2450,8 +2452,9 @@ func cntlrCheckRequest(
 // ---------------------------------------------------------------------------
 
 // completedTds applies RW19's conditions (2), (3) and (4) — condition (1),
-// code == 0, is the caller's — to one CntlrInfo, and returns the td_ids the
-// reply COMPLETES (architecture.md §10.3): the thin info exists, its
+// an accepted code (0 or common.ReplyCodeLeftover, accepted), is the
+// caller's — to one CntlrInfo, and returns the td_ids the reply COMPLETES
+// (architecture.md §10.3): the thin info exists, its
 // slice_id_to_dm_thin key set equals the SP's slice ids exactly (every slice,
 // no extra, no missing) and every row is RES_STATUS_OK.
 //

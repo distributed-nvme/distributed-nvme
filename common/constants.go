@@ -45,14 +45,14 @@ const (
 	MinDmRaid0StripeSize       = 4 * 1024
 	DefaultDmRaid0StripeSize   = 64 * 1024
 
-	// Chunk and region have similar meaning.
-	// It is chunk in md, It is region in dm.
-	MinChunkBlockCnt      = 1
-	MaxChunkBlockCnt      = 1024
-	DefaultChunkBlockCnt  = 128
-	MinRegionBlockCnt     = 1
-	MaxRegionBlockCnt     = 1024
-	DefaultRegionBlockCnt = 128
+	// MinChunkBlockCnt, MaxChunkBlockCnt and DefaultChunkBlockCnt are the
+	// bounds and the default of redund_md_raid1.bitmap_chunk_block_cnt, the
+	// md bitmap chunk counted in pool data blocks (architecture.md §7). A
+	// dm-clone region has no parameter of its own: it is the data_block_size
+	// of the SP a clone copies into or whose side a migration moves.
+	MinChunkBlockCnt     = 1
+	MaxChunkBlockCnt     = 1024
+	DefaultChunkBlockCnt = 128
 
 	MaxDnCntPerCluster   = 1024
 	MaxCnCntPerCluster   = 1024
@@ -159,7 +159,7 @@ const (
 	// The CN clone-metadata arena ([D14], cnagent.md CN5/CN18): one sparse
 	// file (CnTmpFilePath) on the CN tmpfs, attached to a single loop
 	// device, carved into fixed units by the CN slot allocator whose
-	// registry is the kind-`b` wrapper dm tables themselves. No LVM
+	// registry is the kind-`cb` wrapper dm tables themselves. No LVM
 	// ([D14]).
 	// CnCloneMetaAreaSize is the `truncate` size of that file — and so the
 	// arena the slot allocator carves, 256 units. CnCloneMetaUnit is the

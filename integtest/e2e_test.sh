@@ -231,33 +231,36 @@ TRSVCID_MAX=$((DN_TRSVCID_BASE + MAX_DNS_PER_VM - 1))
 # deployment requirements rather than choices (EtcdMaxTxnOps, MaxAllocLegPerGrp).
 # ---------------------------------------------------------------------------
 
-# common.MaxSliceCntPerSp (common/constants.go:57) — the widest sp the gateway
-# accepts, enforced at gateway/storagepool.go:346-349 (create) and
-# gateway/validate.go:399-402 (clone geometry). It is the DEFAULT here because
-# the point of this suite is to prove every operation at the ceiling.
+# common.MaxSliceCntPerSp — the widest sp the gateway accepts, enforced by
+# CreateStoragePool (gateway/storagepool.go, the create) and by
+# validateCloneGeometry (gateway/validate.go, a clone's source). It is the
+# DEFAULT here because the point of this suite is to prove every operation at
+# the ceiling.
 SLICE_CNT_DEFAULT=32
 
-# common.MinDnExtSize (common/constants.go:16) — 64 MiB, the smallest extent
-# gateway/validate.go:180-185 accepts. Small extents are what keep the run's
+# common.MinDnExtSize — 64 MiB, the smallest extent validateDnBinConf
+# (gateway/validate.go) accepts. Small extents are what keep the run's
 # real allocation inside the §7.8 caps: a group costs one extent per leg.
 # Cluster-scoped and WRITE-ONCE (no UpdateCluster RPC), so it is only ever
 # applied by `cluster create --extent-size` against an EMPTY etcd.
 EXTENT_SIZE=67108864
 
 # The sp's dm-striped chunk. dm-striped maps chunk c of a td to slice
-# c mod slice_cnt (doc/architecture.md §11.4 at :3282-3283,
-# agent/cnagent/thinbm.go:406-413), and stripe index i is slice_idx i because
-# the plan sorts its slices by slice_idx (agent/cnagent/plan.go:485-490) and
-# raid0Args emits them in that order (agent/cnagent/td.go:17-19), so with a
+# c mod slice_cnt (doc/architecture.md §11.4, and regionSkippable's comment in
+# agent/cnagent/thinbm.go), and stripe index i is slice_idx i because the
+# plan sorts its slices by slice_idx (buildSlices, agent/cnagent/plan.go) and
+# raid0Args emits them in that order (agent/cnagent/td.go), so with a
 # 1 MiB stripe every offset k x (slice_cnt x 1 MiB) lands in slice 0 —
 # which is how the react case drives ONE slice's pool over its low-water mark
 # (D18).
 #
-# 1 MiB is also the hard ceiling for the COPY case, and that is the binding
-# limit, not the sp's: validateCloneGeometry refuses src_stripe_size above
-# 256 x 4 KiB = 1048576 (gateway/validate.go:403-410), while the sp itself
-# would accept up to common.MaxDmRaid0StripeSize = 64 MiB. Raising this value
-# creates the sp happily and then fails `clone create` with INVALID_ARGUMENT.
+# 1 MiB is also the ceiling, and the sp's own: validateBdevConf
+# (gateway/validate.go) refuses a stripe above common.MaxDmRaid0StripeSize =
+# 1 MiB or not a multiple of 4 KiB, and a data block size that is not a
+# multiple of the stripe. Those are the bounds validateCloneGeometry puts on a
+# clone's src_stripe_size (256 x 4 KiB = 1048576) and src_block_size, so a
+# stripe the sp accepts is one `clone create` accepts as its source, and
+# raising this value fails `sp create` itself with INVALID_ARGUMENT.
 STRIPE_SIZE=1048576
 
 # `sp create --init-ext-cnt`: extents per data group. 0 is refused by the
@@ -275,15 +278,15 @@ CNTLR_CNT=2
 # 0,1,2 before it creates a third cntlr in slot 2.
 SLOTS=0,1
 
-# event_threshold, in seconds (ctl/sp.go:213-219 declares the four flags;
+# event_threshold, in seconds (ctl/sp.go declares the four flags;
 # worker/reaction.go consumes them). TWO SETS, ONE PER KIND OF CASE, and
 # sp_thresholds picks between them before each sp is built.
 #
 # WHY THE CHOICE IS MADE AT CREATE TIME AND NOWHERE ELSE. There is no RPC that
 # changes a threshold after CreateStoragePool: the four flags exist only on
 # `sp create`, the handler stores the message verbatim
-# (gateway/storagepool.go:457, and model.ResolveEventThreshold is deliberately
-# exempt from resolve-at-write, model/ops.go:148-192), and the sp's whole life
+# (model.ResolveEventThreshold's comment says why event_threshold is
+# deliberately exempt from resolve-at-write), and the sp's whole life
 # runs on whatever that one call wrote. Every other sp-scoped mutator leaves
 # event_threshold alone. So the set a case needs has to be chosen before its sp
 # exists, which is why this is a parameter of setup_create_sp and not of a case.
@@ -300,8 +303,8 @@ SLOTS=0,1
 # failover 1->2, a spare_create, and failover 2->1, all inside setup.
 #
 # NOTE CAREFULLY, because it is what decides the shape of the fix:
-# common.DefaultPrimaryUnhealthy is ALSO 5 (common/constants.go:206), and
-# ResolveEventThreshold turns an absent flag into it (model/ops.go:179-181). So
+# common.DefaultPrimaryUnhealthy is ALSO 5, and model.ResolveEventThreshold
+# turns an absent flag into it. So
 # the failover loop is NOT caused by an aggressive suite value — omitting
 # --thr-primary would produce exactly the same five seconds. The only way out is
 # a LONG value, passed explicitly, at create.
@@ -313,10 +316,10 @@ SLOTS=0,1
 # threshold here is longer than any build can run. 1800 s is 3.4 x the 525 s
 # window the first run measured (see WAIT_BUILD for what that number is and is
 # not), on a shape that is already the widest this tree can build; leg is
-# doubled because gateway/validate.go:297-305 refuses leg_unhealthy <=
-# side_unhealthy after the defaults are resolved. Nothing caps them from above:
-# ResolveEventThreshold's own comment says "No upper bound applies: §7 only
-# requires each value to be >= 1" (model/ops.go:155-156).
+# doubled because validateEventThreshold (gateway/validate.go) refuses
+# leg_unhealthy <= side_unhealthy after the defaults are resolved. Nothing caps
+# them from above: ResolveEventThreshold's own comment (model/ops.go) says "No
+# upper bound applies: §7 only requires each value to be >= 1".
 THR_QUIET_PRIMARY=1800
 THR_QUIET_CNTLR=1800
 THR_QUIET_SIDE=1800
@@ -324,7 +327,8 @@ THR_QUIET_LEG=3600
 
 # THE REACTING SET — react alone. AR7 waits cntlr_unhealthy and AR8 waits
 # side_unhealthy/leg_unhealthy, and at the gateway defaults (600, 600, 1200 —
-# common/constants.go:207-209) neither is observable inside any bound this
+# common.DefaultCntlrUnhealthy, DefaultSideUnhealthy and DefaultLegUnhealthy)
+# neither is observable inside any bound this
 # suite could sanely wait out. react therefore keeps D17's short values and
 # pays for them: its OWN build can produce a failover and a spare before the
 # case starts, which is why every react assertion is written against a shape
@@ -366,12 +370,20 @@ THR=$THR_QUIET
 VOTE_INTERVAL=2
 VOTE_GRACE=6
 
-# Backing files (D15): sparse, `truncate -s`, NEVER `fallocate -l` — the whole
-# space argument of this suite rests on the file staying sparse while
-# blkdiscard --zeroout (agent/dm.go:304-314) punches holes through the loop
-# device instead of writing zeros. agent/dnagent/syncup_dn.go:553-565 only
-# TAGS a disk whose write_zeroes_max_bytes is 0; it does not refuse it, so
-# preflight must die on that itself, before the first sp create.
+# Backing files (D15): sparse, `truncate -s`, NEVER `fallocate -l` — a file
+# costs only what is allocated in it, and `fallocate -l` would allocate all of
+# it up front. Side zeroing DOES allocate. The agent's `blkdiscard --zeroout`
+# (Dm.BlkZeroout, agent/dm.go) is a BLKZEROOUT, which asks the loop device for
+# Write Zeroes without unmap, and the loop driver turns that into an fallocate
+# on the backing file that allocates the range without writing data — NOT a
+# hole punch (measured 2026-09-29 on the lab's 7.0 guests: `stat %b` grows by
+# the zeroed length). So every extent a disk node zeroes for a side costs
+# EXTENT_SIZE in its backing file whether or not anything writes it, and the
+# §7.8 caps below count it. A write_zeroes_max_bytes of 0 would not change
+# that allocation: the kernel would write real zero pages over the same
+# ranges instead, at bulk speed. checkWriteZeroes
+# (agent/dnagent/syncup_dn.go) only TAGS such a disk; it does not refuse it,
+# so preflight must die on that itself, before the first sp create.
 BACKING_SIZE=2G
 
 # Space guard (D16, E2E5), asserted after every case: allocated bytes of one
@@ -616,10 +628,17 @@ FRAME=@@e2e-frame@@
 
 log() { echo "$*" >&2; }
 
-# stage names the step for the failure report and mints the trace id: one id
-# shared by the dnvctl call, the gateway handler, the worker and every agent os
-# command it causes, so `jq 'select(.trace_id=="…")'` over any log pulls the
-# whole stage.
+# stage names the step for the failure report and mints the trace id. Every
+# dnvctl call of the stage sends it; the gateway's records carry it, and so do
+# an agent's records (the grpc request and reply, and any os command) of the
+# reads the gateway makes of it for such a call: a node create's size probe,
+# an inspect, a get-bm or get-leg-bm, the hydration check of an unforced migr
+# finish or clone delete. The worker never sees it: the converge a stage sets
+# off runs under the worker's own per-round ids, which each Syncup and each
+# Check round hands to its agent, and under ids an agent mints for its own
+# background work (each side-zeroing attempt, say). So
+# `jq 'select(.trace_id=="…")'` pulls the stage's requests and the gateway's
+# handling of them, not the converge they set off.
 stage() { # <nn> <text>
 	STAGE="$CASE: $2"
 	TRACE="it-$CASE-$1"
@@ -1250,7 +1269,7 @@ parse_args() {
 	case "$SLICE_CNT" in
 	'' | *[!0-9]*) usage ;;
 	esac
-	# gateway/storagepool.go:346-349 refuses slice_cnt outside
+	# CreateStoragePool (gateway/storagepool.go) refuses slice_cnt outside
 	# [1, common.MaxSliceCntPerSp]; SLICE_CNT_DEFAULT mirrors that ceiling, so
 	# an out-of-range value is caught here instead of 200 lines into setup.
 	{ [ "$SLICE_CNT" -ge 1 ] && [ "$SLICE_CNT" -le "$SLICE_CNT_DEFAULT" ]; } || usage
@@ -1325,15 +1344,21 @@ derive_params() {
 	# 8 GiB (see RUN_CAP_BYTES's comment for why that could never pass).
 	#
 	# SP_DATA_BYTES is the floor: every one of the LEGS*GRP_CNT sides is
-	# INIT_EXT_CNT extents of EXTENT_SIZE, and a raid1 leg's initial resync
-	# writes its whole data area, so those extents MATERIALISE in the backing
-	# file however sparse it started. That is not waste and not a leak — it is
-	# the storage pool.
+	# INIT_EXT_CNT extents of EXTENT_SIZE, and its disk node zeroes each side
+	# whole before exporting it, which ALLOCATES those extents in the backing
+	# file however sparse it started (the zeroing is not a hole punch — see
+	# BACKING_SIZE). That is not waste and not a leak — it is the storage pool.
+	# Every side a case adds after the create (a grow, a spare leg, a
+	# migration destination) costs its full extents the same way, out of the
+	# slack below.
 	#
 	# RUN_SLACK_BYTES is everything else on the ten guests: the cp's etcd and
-	# four daemon logs, 183 agent logs, the CN thin metadata and md bitmaps,
-	# the host pattern files, and each case's own writes, which §7.8 bounds at
-	# under 1 GiB. Run 5 measured 586 MiB of it after the smoke case, the
+	# four daemon logs, 183 agent logs and the agents' local stores, each dn
+	# agent's own on-disk metadata in its backing file, the host pattern
+	# files, the CN tmpfs arenas, and the sides a case adds after the create.
+	# The CN thin metadata, the md bitmaps and every host or hydration write
+	# into the sp cost nothing here: they land in side extents the zeroing has
+	# already allocated. Run 5 measured 586 MiB of it after the smoke case, the
 	# heaviest contributors being the cp at 296 MiB and cn0 at 79 MiB; 4 GiB
 	# leaves room for the copy and react cases, which write more, while still
 	# being a number a real leak would cross.
@@ -1577,7 +1602,7 @@ require_cluster_id() {
 # `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`
 # (common/constants.go:14), whose suffix set takes its letters, digits and
 # '-', so an NQN carrying it still passes the gateway's validateNqn
-# (gateway/validate.go:73-88) — src_nqn and allowed_hosts get no dnv-namespace
+# (gateway/validate.go) — src_nqn and allowed_hosts get no dnv-namespace
 # check — and only a bad id holding a character outside that set, or a "..",
 # would be refused there. What makes it findable is the log line naming the
 # caller plus a name that then matches nothing on any guest — which is still
@@ -2486,10 +2511,11 @@ mkwork() { # <subdir…>
 # --- space (§7.8) ------------------------------------------------------------
 
 # alloc prints "<allocated bytes> <path>" per argument — ALLOCATED, not
-# apparent: the whole space argument of this suite is that a sparse backing
-# file stays sparse because blkdiscard --zeroout punches holes
-# (agent/dm.go:304-314), and an apparent size would report 2 GiB for a file
-# that costs nothing. stat's %b is in %B-sized units.
+# apparent: a backing file is sparse and costs only what is allocated in it —
+# chiefly the extents its disk node has zeroed for sides, which the zeroing
+# allocates in full (it is not a hole punch; see BACKING_SIZE in the driver)
+# — while an apparent size would report 2 GiB for every one of them. stat's
+# %b is in %B-sized units.
 alloc() { # <path…>
 	local p out b bs
 	for p in "$@"; do
@@ -3244,9 +3270,10 @@ losetup_list() {
 
 # write_zeroes prints one device's write_zeroes_max_bytes, from the same sysfs
 # file agent.Dm reads. A 0 is fatal to this suite and not to the agent:
-# agent/dnagent/syncup_dn.go:551-565 only TAGS such a disk, so the zeroing
-# would fall back to writing real zero pages and materialise every sparse
-# backing file in full.
+# checkWriteZeroes (agent/dnagent/syncup_dn.go) only TAGS such a disk, so the
+# zeroing would fall back to writing real zero pages over every side it
+# provisions — the same ranges the loop device's Write Zeroes allocates, but
+# written in full, at bulk speed.
 write_zeroes() { # <device>
 	local n
 	n=$(cat "/sys/class/block/${1##*/}/queue/write_zeroes_max_bytes" \
@@ -3297,8 +3324,9 @@ dn_up() {
 		return 1
 	}
 
-	# truncate, NEVER fallocate -l (D15): the file must stay SPARSE, and
-	# fallocate would allocate all 2 GiB up front.
+	# truncate, NEVER fallocate -l (D15): the file must START sparse, so that
+	# it costs only what the agent allocates in it — chiefly the side extents
+	# it zeroes — and fallocate would allocate all 2 GiB up front.
 	[ -f "$backing" ] || truncate -s "$size" "$backing" || {
 		echo "dn_up: truncate -s $size $backing failed" >&2
 		return 1
@@ -3313,8 +3341,8 @@ dn_up() {
 	wz=$(write_zeroes "$dev")
 	if [ "$wz" = 0 ]; then
 		echo "dn_up: $dev reports write_zeroes_max_bytes=0;" \
-			"side zeroing would write real zero pages and" \
-			"materialise every sparse backing file on this guest" >&2
+			"side zeroing would write real zero pages over every" \
+			"side on it, at bulk speed" >&2
 		return 1
 	fi
 
@@ -4527,10 +4555,10 @@ stop_cp_daemons() {
 # nothing.
 #
 # The write_zeroes gate is dn_up's, not this function's — it must refuse
-# BEFORE the agent is launched, since an agent that formats a disk with no
-# fast Write Zeroes would materialise the whole sparse file (45 x 2 GiB on a
-# 80 GiB guest) and the dn agent itself only TAGS that case
-# (agent/dnagent/syncup_dn.go:551-565).
+# BEFORE the agent is launched, since an agent over a disk with no fast Write
+# Zeroes would zero every side it provisions by writing real zero pages, at
+# bulk speed, and the dn agent itself only TAGS that case (checkWriteZeroes,
+# agent/dnagent/syncup_dn.go).
 start_dn_instance() { # <v> <k>
 	local v=$1 k=$2 out kv dev="" wz="" pid=""
 	out=$(helper_dn "$v" dn_up \
@@ -4654,10 +4682,11 @@ MEM_MIN_BYTES=$((2 << 30))
 # This is a FLOOR, not a bound on what the run may write: §7.8's per-file cap
 # is DN_CAP_BYTES (256 MiB) x DNS_PER_VM, which at the default shape is 11 GiB
 # if every backing file ran to its cap. The lab's guests hold 56-67 GiB free,
-# and F13 is why the real figure is far below the cap — a sparse file over a
-# loop device turns the agent's `blkdiscard --zeroout` into a hole punch, so
-# only what hosts, md rebuilds and dm-clone hydration really write is
-# allocated.
+# and the real figure is far below the cap because a DN holds few sides, not
+# because they stay sparse: the agent's `blkdiscard --zeroout` allocates every
+# extent it zeroes for a side (see BACKING_SIZE), so a backing file costs
+# about EXTENT_SIZE per extent its DN has zeroed, and the create puts at most
+# one side of the sp on any DN.
 FREE_MIN_NODE=$((4 << 30))
 FREE_PER_DN=$((64 << 20))
 FREE_MIN_CP=$((2 << 30))
@@ -4778,10 +4807,11 @@ DIAG_MAX_DN_LOGS=6
 # will actually inherit.
 #
 # lsblk and blkdiscard are in the SHARED list because both roles really run
-# them: agent/dm.go's DevNo, WriteZeroesMaxBytes and DiskSize are `lsblk`
-# (:262, :336, :416), and blkdiscard has one caller per role —
-# agent/dnagent/zeroing.go:172 (BlkZeroout, §9.4 side provisioning) and
-# agent/cnagent/clonemeta.go:346 (BlkDiscardRange, the clone-metadata arena).
+# them: agent/dm.go's DevNo, WriteZeroesMaxBytes and DiskSize are `lsblk`,
+# and blkdiscard runs on both — agent/dnagent/zeroing.go (BlkZeroout, §9.4
+# side provisioning), agent/cnagent/clonemeta.go (BlkDiscardRange, the
+# clone-metadata arena), and ApplySkipRanges (agent/bitmap.go), which marks
+# regions of a dm-clone hydrated on either role.
 # fallocate is the punch-hole probe below, not anything the run does.
 #
 # THE STANDARD THESE FOUR LISTS ARE HELD TO, because it is the only way to keep
@@ -5180,10 +5210,12 @@ preflight_node() { # <role: dn|cn> <index>
 
 	# The punch-hole probe. `fallocate` is the right tool here and the D15 ban
 	# does not touch it: the ban is on `fallocate -l` for a BACKING file, which
-	# must stay sparse, while this probe's whole purpose is to prove that
-	# FALLOC_FL_PUNCH_HOLE works on /var/tmp — which is what turns the agent's
-	# `blkdiscard --zeroout` over a loop device into a hole punch (F13) and
-	# what the whole space argument of §7.8 rests on.
+	# must start sparse, while this probe proves that FALLOC_FL_PUNCH_HOLE
+	# works on /var/tmp — the same probe the dn and cn agent suites make. It is
+	# NOT what side zeroing needs: the agent's `blkdiscard --zeroout` over a
+	# loop device asks for Write Zeroes without unmap, which the loop driver
+	# turns into an allocating fallocate, never a hole punch (see
+	# BACKING_SIZE), so §7.8's caps do not rest on this probe.
 	got=$("$sshw" "$v" "f=/var/tmp/dnv-e2e-punch-probe;" \
 		"fallocate -l 8M \$f && fallocate -p -o 0 -l 4M \$f" \
 		"&& echo PUNCH_OK || echo PUNCH_NO; rm -f \$f") ||
@@ -5387,16 +5419,18 @@ preflight_guests() {
 #
 # A 0 is fatal to this suite and not to the agent: agent/dnagent/syncup_dn.go's
 # disk syncup only TAGS such a disk, so side zeroing would fall back to writing
-# real zero pages and materialise every sparse backing file on the guest.
+# real zero pages over every side it provisions, at bulk speed. (The space
+# those sides take would be the same either way: the loop device's Write
+# Zeroes allocates the zeroed range too — see BACKING_SIZE.)
 #
 # WHY EARLY AND NOT MERELY EVENTUALLY. ensureDiskMeta does return
 # `t.Err(resKeyMeta, s.disk, details)` for a tagged disk
-# (agent/dnagent/syncup_dn.go:538-539), so dn_node_ready's meta_info row would
+# (agent/dnagent/syncup_dn.go), so dn_node_ready's meta_info row would
 # never reach RES_STATUS_OK and setup WOULD fail at its own wait — after
 # WAIT_PROVISION per disk, with a message about a header rather than
 # about a kernel attribute, and with the agent free to have been writing real
 # zero pages the whole time (checkWriteZeroes "never gates converging", its own
-# comment at :550-553). This check turns that into one named line.
+# comment). This check turns that into one named line.
 preflight_loop_devices() {
 	local v k key dev devs out kv n
 	assert_eq "${#DN_LOOP[@]}" "$DN_TOTAL" \
@@ -5429,8 +5463,8 @@ preflight_loop_devices() {
 			esac
 			[ "$n" -gt 0 ] ||
 				die "dn$v: $dev reports write_zeroes_max_bytes=0, so side" \
-					"zeroing would write real zero pages and materialise" \
-					"every sparse backing file on this guest"
+					"zeroing would write real zero pages over every side" \
+					"on it, at bulk speed"
 		done
 	done
 	log "  write_zeroes_max_bytes > 0 on all $DN_TOTAL loop devices"
@@ -6575,7 +6609,8 @@ ctl_create_try() { # <args…>
 #   meta_info  ProbeHeader accepted the 4 KiB header for THIS cluster_id,
 #              dn_id and extent_size, and checkWriteZeroes did not find a
 #              PRESENT write_zeroes_max_bytes reading 0 (an absent attribute
-#              or a failed read pass, agent/dnagent/syncup_dn.go:553-565 —
+#              or a failed read pass, checkWriteZeroes in
+#              agent/dnagent/syncup_dn.go —
 #              which is why preflight_loop_devices gates the number itself)
 #   port_info  ProbePort found ports/<--nvmet-port-id> carrying the four
 #              addr_* attributes this agent was launched with AND the three
@@ -7165,10 +7200,9 @@ setup_infra() {
 	done
 	# §7.3's deferred item, and it must run BEFORE the first `sp create`: a
 	# loop device with write_zeroes_max_bytes = 0 is only TAGGED by the agent
-	# (checkWriteZeroes, agent/dnagent/syncup_dn.go:553-565, whose own comment
-	# at :550-552 says it "never gates converging"), so side zeroing would
-	# fall back to writing real zero pages and materialise every sparse
-	# backing file on the guest.
+	# (checkWriteZeroes in agent/dnagent/syncup_dn.go, whose own comment says
+	# it "never gates converging"), so side zeroing would fall back to
+	# writing real zero pages over every side it provisions, at bulk speed.
 	preflight_loop_devices
 }
 
@@ -8450,15 +8484,21 @@ read_space() { # <helper wrapper> <index|""> <label>
 #
 # Two caps, and they measure different things:
 #
-#   DN_CAP_BYTES  ALLOCATED bytes of ONE backing file. The whole space argument
-#                 of this suite is that a `truncate`d sparse file stays sparse
-#                 because side zeroing is `blkdiscard --zeroout`
-#                 (agent/dm.go:304-314) and the loop device turns WRITE_ZEROES
-#                 into a hole punch. A file that has materialised is the
-#                 symptom of exactly one thing — write_zeroes_max_bytes gone to
-#                 0 on that loop device, which the agent only TAGS and never
-#                 refuses (agent/dnagent/syncup_dn.go:553-565) — so the per-file
-#                 cap is the check that names it.
+#   DN_CAP_BYTES  ALLOCATED bytes of ONE backing file. A `truncate`d file
+#                 starts sparse, and side zeroing does NOT keep it so: the
+#                 loop device turns the agent's `blkdiscard --zeroout` into an
+#                 allocating fallocate (see BACKING_SIZE), so every extent a
+#                 DN zeroes for a side costs EXTENT_SIZE whether or not
+#                 anything writes it, and nothing in the dn agent discards a
+#                 freed side's extents. The cap — four 64 MiB extents — thus
+#                 bounds, in effect, how many distinct extents one DN has
+#                 zeroed since its backing file was created (a fresh one per
+#                 case), not what the case wrote: four of them and the
+#                 agent's own on-disk metadata are already over it. Nor can
+#                 it see a write_zeroes_max_bytes of 0, whose zero-page
+#                 fallback allocates the same ranges; that is for the three
+#                 write_zeroes gates (dn_up, start_dn_instance,
+#                 preflight_loop_devices) to catch.
 #   RUN_CAP_BYTES everything this run wrote on all ten guests, $WORK plus
 #                 $TMPFS_DIR. The tmpfs is counted separately because it is NOT
 #                 under $WORK: CnTmpfsPath is fixed at common.DefaultTmpfsPrefix
@@ -8496,7 +8536,7 @@ case_space_guard() {
 				;;
 			esac
 			assert_le "$bytes" "$DN_CAP_BYTES" \
-				"dn$v: allocated bytes of $path (a sparse file that materialised)"
+				"dn$v: allocated bytes of $path (its zeroed extents plus metadata)"
 			[ "$bytes" -le "$worst" ] || worst=$bytes
 		done < <(printf '%s\n' "$out")
 		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES)"
@@ -9146,21 +9186,21 @@ ops_reads() {
 #
 #   --meta        appends a meta group of MetaLadderExtCnt(current total),
 #                 i.e. the slice's CURRENT meta total, so 1 → 2 → 4 …
-#                 (model/ops.go:276-306). --ext must be absent: the gateway
+#                 (model.MetaLadderExtCnt). --ext must be absent: the gateway
 #                 refuses `--meta` with a non-zero ext_cnt outright
-#                 (validateGrowExclusivity, gateway/validate.go:437-447).
+#                 (validateGrowExclusivity, gateway/validate.go).
 #   --ext N       appends a DATA group — and N is NOT the size. The handler
 #                 recomputes the size as the slice's FIRST data group's ext_cnt
-#                 and says so (gateway/storagepool.go:1108-1110 "A data grow
-#                 adds the slice's original allocation unit, not the caller's
-#                 ext_cnt"); ext_cnt is only the exclusivity signal, and a zero
-#                 is refused by the same validator.
+#                 and says so (GrowSlice in gateway/storagepool.go: "A data
+#                 grow adds the slice's original allocation unit, not the
+#                 caller's ext_cnt"); ext_cnt is only the exclusivity signal,
+#                 and a zero is refused by the same validator.
 #
 # WHAT MUST NOT BE ASSERTED HERE: that every side of the sp is still on a
 # DISTINCT DN. That is a CREATE property — CreateStoragePool grows its black
 # list with every pick (F2) — and GrowSlice deliberately passes a `nil` black
-# list and a nil ExcludeLocs (gateway/storagepool.go:1138-1145, with the D-F
-# comment at :1128-1137), so a grown group MAY land on a DN that already carries
+# list and a nil ExcludeLocs (its pickDns call, under the D-F comment in
+# gateway/storagepool.go), so a grown group MAY land on a DN that already carries
 # another group's side. What does still hold, and is asserted, is the
 # per-group rule: one scan keeps at most one candidate per location
 # (model/alloc.go:137-141), so the LEGS legs of the new group are on LEGS
@@ -11291,10 +11331,12 @@ copy_clone() {
 	stage 02 "clone create into $TD_CLONE from the transfer, hydrate, then delete it"
 
 	# The geometry the source describes, read back from the sp rather than
-	# assumed. STRIPE_SIZE is asserted rather than merely read because
-	# validateCloneGeometry's ceiling for src_stripe_size is 256 x 4 KiB =
-	# 1 MiB (gateway/validate.go:403-410) while the sp itself would accept
-	# 64 MiB: a larger stripe creates the sp happily and fails here.
+	# assumed. On the self branch (copy_src_self) the stored stripe is what
+	# the clone sends as src_stripe_size, and validateCloneGeometry's ceiling
+	# for that is 256 x 4 KiB = 1 MiB. validateBdevConf holds the sp's own
+	# stripe to the same 1 MiB (common.MaxDmRaid0StripeSize), so a larger
+	# STRIPE_SIZE fails at `sp create` and never reaches this stage; the
+	# assert_le states the clone's bound where the clone is made.
 	sp_refresh
 	sp_read_roles
 	SP_STRIPE_SIZE=$(sp_field '.sp_conf.bdev_conf.dm_raid0_conf.stripe_size')
@@ -11305,7 +11347,7 @@ copy_clone() {
 	assert_eq "$SP_STRIPE_SIZE" "$STRIPE_SIZE" \
 		"the sp's stored stripe_size is what --stripe-size asked for"
 	assert_le "$SP_STRIPE_SIZE" 1048576 \
-		"src_stripe_size may not exceed 256 x 4 KiB (gateway/validate.go:403-410)"
+		"src_stripe_size may not exceed 256 x 4 KiB (validateCloneGeometry)"
 
 	copy_make_clone_td
 
@@ -12214,10 +12256,12 @@ REACT_GRP1=""
 
 # A sanity cap on the AR6 write. The number of chunks is computed from the
 # pool, so this only catches a shape whose pool is so large that filling it to
-# the low-water mark would blow the §7.8 per-file cap ($DN_CAP_BYTES, 256 MiB):
-# every chunk is 1 MiB on EVERY leg of the group, so 128 chunks is 128 MiB per
-# backing file — half the cap, with the md bitmap and thin metadata still to
-# come.
+# the low-water mark would take more than 128 strided writes; it bounds the
+# write's length, and with it the write's watchdog (WAIT_HOST plus a second
+# per chunk, react_chunk_write). It does NOT guard the §7.8 per-file cap
+# ($DN_CAP_BYTES): the chunks land in side extents their disk nodes zeroed,
+# and so allocated in full, before the sides were exported (see
+# BACKING_SIZE), so a chunk adds nothing to any backing file's allocation.
 REACT_MAX_CHUNKS=128
 
 # ---------------------------------------------------------------------------
@@ -12228,7 +12272,7 @@ REACT_MAX_CHUNKS=128
 # builds rather than from §7.5: raid0Args emits one dm-striped stripe per
 # slice, in slice_idx order, with a chunk size of
 # dm_raid0_conf.stripe_size / 512 sectors (agent/cnagent/td.go:19-39, over
-# plan.slices which cntlrPlan sorts by slice_idx, agent/cnagent/plan.go:485-490).
+# plan.slices which buildSlices sorts by slice_idx, agent/cnagent/plan.go).
 # dm-striped sends chunk c of the device to stripe c mod N, so with N =
 # $SLICE_CNT stripes the td offsets k x ($SLICE_CNT x stripe) are chunks
 # k x $SLICE_CNT and every one of them is stripe index 0 — the slice with
@@ -12955,8 +12999,8 @@ react_grow() {
 	msg="the write must stay INSIDE the pool: filling it would put dm-thin into"
 	msg="$msg out-of-space mode instead of tripping AR6"
 	assert_le "$((REACT_POOL_USED + REACT_CHUNKS))" "$((total0 - 1))" "$msg"
-	msg="crossing the low water mark would write $REACT_CHUNKS MiB to EVERY leg"
-	msg="$msg of the group, and §7.8 caps one backing file at $DN_CAP_BYTES bytes"
+	msg="crossing the low water mark would take $REACT_CHUNKS strided 1 MiB"
+	msg="$msg writes; REACT_MAX_CHUNKS bounds the write's length and its watchdog"
 	assert_le "$REACT_CHUNKS" "$REACT_MAX_CHUNKS" "$msg"
 	log "  slice 0's pool holds $REACT_POOL_USED of $total0 data blocks;" \
 		"$REACT_CHUNKS x 1 MiB at every ${REACT_STRIDE_MIB} MiB of $dev takes" \

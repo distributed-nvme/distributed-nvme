@@ -353,8 +353,9 @@ func (m *healthMonitor) observeSettle(
 	case healthClean:
 		unhealthy, reason = false, reasonRecovered
 	default:
-		// HL1/HL2: PROVISIONING, MISSING and a rejected code neither set nor
-		// clear.
+		// HL1/HL2 (healthNone): a rejected code, and a leg row that is
+		// neither ERROR nor OK or is absent (legObservation), neither set
+		// nor clear.
 		return false
 	}
 	m.refresh(ctx)

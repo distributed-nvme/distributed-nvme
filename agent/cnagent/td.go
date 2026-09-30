@@ -213,7 +213,10 @@ func (s *CnAgentServer) ensureNsDev(
 				held = true
 			} else {
 				// Reload is suspend, load, resume: it leaves the device
-				// live, so the guard below needs no case for this branch.
+				// live, or fails and returns here before the guard below —
+				// a failed load leaving the device suspended on purpose
+				// (Dm.Reload fails closed) — so the guard needs no case
+				// for this branch.
 				if err := s.dm.Reload(ctx, np.devName, table); err != nil {
 					return false, err
 				}
@@ -221,11 +224,12 @@ func (s *CnAgentServer) ensureNsDev(
 			}
 		}
 	}
-	// Nothing here ever suspends. A device found suspended and not reloaded
-	// — its table already the one this pass wants, or held — is one an
-	// **older build** deliberately held suspended for §11.6, or one an
-	// interrupted reload left behind; either way it is resumed, which is the
-	// whole of the upgrade path.
+	// Nothing here suspends the ns-dev but the Reload above, and it leaves the
+	// device suspended only when one of its commands fails. A device found
+	// suspended and not reloaded — its table already the one this pass wants,
+	// or held — is one an **older build** deliberately held suspended for
+	// §11.6, or one a reload that was interrupted or failed left behind;
+	// either way it is resumed, which is the whole of the upgrade path.
 	if dev.Suspended {
 		return held, s.dm.Resume(ctx, np.devName)
 	}
@@ -245,8 +249,10 @@ func onDevice(targets []agent.DmTarget, devNo string) bool {
 // stop mapping whatever is about to be removed under it, and the reload's own
 // flushing suspend is what completes the in-flight IO on the old table. The
 // reload also resumes a device an **older build** left deliberately suspended
-// (or an interrupted reload left behind), which that device's own removal and
-// the nvmet disable above it require.
+// (or a reload that was interrupted or failed left behind), which that
+// device's own removal and the nvmet disable above it require — when its own
+// commands succeed: one whose load fails leaves the device suspended
+// (Dm.Reload fails closed).
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -333,7 +339,9 @@ func (s *CnAgentServer) ensureNamespaceObject(
 // ensureSubsystem converges one host-facing subsystem, its namespaces and its
 // port link. A namespace that left `ns_list` while the subsystem stays is not
 // its business: CN21's L1 removes it, inaccessible first, and only from an
-// enumeration that answered.
+// enumeration that answered — and nothing does under a subsystem whose NQN
+// carries the dnv prefix but decodes to nothing, which the sweep never
+// attributes (cnagent.md CN16).
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,

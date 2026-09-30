@@ -637,6 +637,13 @@ func mdStateLine(d *MdDetail) string {
 // that happened to every member of an available group,
 // assembleGroup would take the answer as case 1 and `mdadm --create
 // --assume-clean` over live data.
+//
+// An answer is not always the truth either: once the path's failfast has
+// expired the read fails with an IO error, and mdadm answers that exactly as
+// it answers a member without a superblock ("No md superblock detected", exit
+// status 1), which reads here as false. Only a leg that read available earlier
+// in the pass is probed, so it takes a failfast expiring between that read and
+// this answer (cnagent.md CN12, §7 known limits).
 func (m *Md) HasSuperblock(ctx context.Context, dev string) (bool, error) {
 	_, ok, err := m.cmd.RunProbe(ctx, "mdadm", "--examine", "--export", dev)
 	if err != nil {
@@ -828,12 +835,13 @@ func (s *CnAgentServer) assembleGroup(
 		// has written zeros over all of it and its `provisioned` gate has
 		// opened ([D15]), the effective desired state defers any group whose
 		// legs are still provisioning ([D15]), and ids are never reused — so a
-		// superblock-free leg can only be a freshly zeroed side. But that
-		// argument covers the legs actually examined. An unavailable member
-		// may be the one carrying the group's data (its DN rebooting, its
-		// path mid-ANA-move), and creating over the survivors would resync
-		// the data away. §11.1.1 puts "one leg available" in case 2, never in
-		// case 1.
+		// superblock-free leg can only be a freshly zeroed side — short of a
+		// read that failed after the path's failfast, which mdadm answers the
+		// same way (HasSuperblock). But that argument covers the legs
+		// actually examined. An unavailable member may be the one carrying
+		// the group's data (its DN rebooting, its path mid-ANA-move), and
+		// creating over the survivors would resync the data away. §11.1.1
+		// puts "one leg available" in case 2, never in case 1.
 		if len(members) != len(gp.legs) {
 			return fmt.Errorf(
 				"only %d of %d legs available and none carries a superblock",

@@ -331,7 +331,9 @@ func (s *DnAgentServer) ensureDmClone(
 		targets[0].Args[0] == metaNo && targets[0].Args[1] == destNo &&
 		targets[0].Args[2] == srcNo &&
 		targets[0].Args[3] == fmt.Sprintf("%d", regionSectors) {
-		// No dnv device is ever left suspended ([D12]).
+		// Suspended on the table it wants — an interrupted reload, or a
+		// failed one whose old table is wanted again, since a reload fails
+		// closed (dnagent.md §2.8) — it is resumed ([D12]).
 		if dev.Suspended {
 			return false, s.dm.Resume(ctx, name)
 		}

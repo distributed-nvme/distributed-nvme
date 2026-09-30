@@ -237,7 +237,8 @@ func (s *CnAgentServer) createThinId(
 // origin: when the origin's per-slice thin volume device is live the agent
 // suspends it across the message and resumes immediately after. That is a
 // second deliberate, bounded suspension beyond [D12]'s window, held only for
-// the duration of one `dmsetup message`, and it stays nested *inside* the
+// the duration of one `dmsetup message` short of a dmsetup command on the
+// origin that fails (cnagent.md CN16), and it stays nested *inside* the
 // origin raid0 quiesce (CN14) wraps around the whole per-slice sequence.
 func (s *CnAgentServer) createSnapId(
 	ctx context.Context,

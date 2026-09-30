@@ -182,14 +182,25 @@ func (d *Dm) LoadTable(
 	return d.runOk(ctx, "dmsetup", "reload", name, "--table", table)
 }
 
-// Reload swaps a live device's table: suspend, load, resume (Appendix A).
-// The device is always resumed: a reload never leaves it suspended ([D12]).
-// No dnv suspension outlives the operation that took it: the dn's §11.2 cutover
-// window is bounded by `SuspendSeconds` and ends in a reload — which is what
-// errors the deferred IO instead of replaying it — and the cn's only remaining
-// one is CN14's snapshot quiesce, resumed inside the same converge pass. The
-// §11.6 namespace suspension that used to be unbounded is now a *park*: a
-// reload onto the td's dm-error, live (cnagent.md CN16).
+// Reload swaps a live device's table: suspend, load, resume (Appendix A),
+// returning at the first command that fails. It fails CLOSED (decided
+// 2026-09-29, dnagent.md §2.8): a load that fails returns its error with the
+// device still suspended on its old table, and nothing here resumes it. After a
+// refused load a resume would reinstate that old table, and where the reload
+// retires it — a fence or a park onto a dm-error ([D12]) — the device would
+// serve it again and replay onto it the IO the suspend absorbed. A resume that
+// fails can leave the device suspended as well (one killed at the SH15 timeout
+// may also have completed), and so can a suspend killed after it took effect.
+// The device then queues its IO until a later reload or resume of it succeeds;
+// the kernel treats a suspend of an already suspended device as a no-op, so
+// running Reload again retries just the load and the resume.
+// Short of a failed command or a restarted agent, no dnv suspension outlives
+// the operation that took it: the dn's §11.2 cutover window is bounded by
+// `SuspendSeconds` and ends in a reload — which is what errors the deferred IO
+// instead of replaying it — and the cn's only remaining one is CN14's snapshot
+// quiesce, resumed inside the same converge pass. The §11.6 namespace
+// suspension that used to be unbounded is now a *park*: a reload onto the td's
+// dm-error, live (cnagent.md CN16).
 func (d *Dm) Reload(
 	ctx context.Context,
 	name string,
@@ -217,7 +228,8 @@ func (d *Dm) CreateMulti(
 }
 
 // ReloadMulti is the multi-target Reload: suspend, load from stdin, resume.
-// Like Reload it always resumes — no dnv device is left suspended ([D12]).
+// It fails closed exactly as Reload does: a load that fails returns its error
+// with the device still suspended on its old table.
 func (d *Dm) ReloadMulti(
 	ctx context.Context,
 	name string,

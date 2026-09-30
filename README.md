@@ -14,7 +14,7 @@ Module: `github.com/distributed-nvme/distributed-nvme`.
 | path | contents |
 |---|---|
 | `pb/` | `schema.proto` plus the committed generated code |
-| `common/` | leaf package: constants, name formats, logging, `OsClient`, gRPC interceptors |
+| `common/` | leaf package: constants, name formats and their parsers, logging, `OsClient`, gRPC interceptors |
 | `etcdutil/` | central etcd helpers (proto (un)marshal + logging) |
 | `model/` | the architecture §5 etcd data model as Go: keys, capacity, candidate scans, the mutations gateway and worker share |
 | `gateway/`, `worker/`, `agent/`, `cdc/`, `ctl/` | the service implementations |
@@ -45,7 +45,11 @@ files are committed, so an ordinary build or test never requires protoc.
   `/DiskNodeAgent/…`, `/ControllerNodeAgent/…`.
 * `common/` — complete per its specs: `constants.go` and `name_fmt.go` (the
   architecture §4/§7 constants and the deterministic dm/md/NQN/local-store
-  name formats, `DnNsIdentity`, `NvmeHostId`), `log.go` (`log/slog` JSON
+  name formats, `DnNsIdentity`, `NvmeHostId`), `name_parse.go`
+  (`ParseDmName` and `ParseNqn`, the strict inverses of the dm-name and NQN
+  formats, and `IsDnvNqn`, the dnv-namespace test: the agents attribute the
+  names they read back from the kernel with them, and the gateway keeps user
+  NQNs out of dnv's namespace with the last), `log.go` (`log/slog` JSON
   logging on stderr, trace ids on the context, `PbToLogValue`,
   `TruncForLog`), `osclient.go`/`osclient_fake.go` (the single path for OS
   commands and file/proto/block I/O plus the `osclient.md` §4.5.1 raw probe
@@ -105,8 +109,12 @@ files are committed, so an ordinary build or test never requires protoc.
   stderr at Warn.
 * `integtest/` — the integration suites of `dnagent_integtest.md`,
   `cnagent_integtest.md`, `dnv-worker.md` §14, `cdc.md` §9, `gateway.md`
-  §10 and `dnvctl.md` §7 (`dnagent_test.sh`, `cnagent_test.sh`,
-  `worker_test.sh`, `cdc_test.sh`, `gateway_test.sh`, `dnvctl_test.sh` and
+  §10, `dnvctl.md` §7 and `e2e_integtest.md` (`dnagent_test.sh`,
+  `cnagent_test.sh`, `worker_test.sh`, `cdc_test.sh`, `gateway_test.sh`,
+  `dnvctl_test.sh`, `e2e_test.sh` and
   their drivers `dnagentctl`, `cnagentctl`, `workerctl`, `cdcctl`,
   `gatewayctl`, plus the `fakeagent` the worker and gateway suites drive and
-  the `fakegateway` the dnvctl suite drives).
+  the `fakegateway` the dnvctl suite drives). The end-to-end suite brings no
+  driver of its own: it runs the five binaries with no fakes on lab guests,
+  with two kernel NVMe hosts on its namespaces, and makes every control-plane
+  call through the shipped `dnvctl`.

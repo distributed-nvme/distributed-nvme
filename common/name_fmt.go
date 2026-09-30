@@ -506,7 +506,7 @@ func (nf *NameFmt) CnCloneMetaDmName(
 
 // CnCloneMetaDmPrefix is the `dmsetup ls` filter that enumerates this CN's
 // clone-metadata wrappers. Because the dm tables ARE the allocator's registry
-// (CN18), rebuilding the used-unit map means listing every kind-`b`
+// (CN18), rebuilding the used-unit map means listing every kind-`cb`
 // device of this cluster and cn — so the prefix has to be built from the same
 // nf.dmPrefix and the same kind constant as CnCloneMetaDmName, never from an
 // ad-hoc literal in the role package.

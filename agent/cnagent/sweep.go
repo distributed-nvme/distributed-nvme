@@ -700,7 +700,9 @@ func (s *CnAgentServer) runChain(
 	// namespace above it in L1 closes its backing device, which does not
 	// complete on a SUSPENDED dm device; and the reload's own flushing
 	// suspend is what completes the in-flight host IO instead of replaying it
-	// at resume onto a stack that is about to be removed.
+	// at resume onto a stack that is about to be removed. A park that fails
+	// does not stop the chain: L1 below still runs, and an ns-dev whose load
+	// failed is still suspended on its old table (Dm.Reload fails closed).
 	//
 	// The size comes from the device's own live table, so this needs neither
 	// the td that used to back it — which may be leaving in the same pass —

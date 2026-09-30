@@ -70,6 +70,7 @@ distributed-nvme/                      # repo root = module root
 ├── common/                            # the shared leaf package (package common)
 │   ├── constants.go                   # from the design inputs + LogStrDataLimit, DefaultOsClientLimit
 │   ├── name_fmt.go                    # NameFmt helpers; architecture.md §4 is normative where the input file differs
+│   ├── name_parse.go                  # ParseDmName/ParseNqn, the strict inverses of the dm-name and NQN formats, + the IsDnvNqn namespace test (cnagent.md §2.1)
 │   ├── log.go                         # per log.md
 │   ├── osclient.go                    # per osclient.md (+ the exported raw block helpers of §4.5.1)
 │   ├── osclient_fake.go               # per osclient.md §6
@@ -125,6 +126,8 @@ distributed-nvme/                      # repo root = module root
 │   ├── locks.go                       # node/object lock hierarchy (dnagent.md §2.6)
 │   ├── resinfo.go                     # ResInfo/status-epoch tracker (§9.5)
 │   ├── bitmap.go                      # §9.6 chunk store + §11.4 math skeleton
+│   ├── sweep.go                       # §9.8 teardown by sweep, the part both roles share: leftover kinds, SweepResult, its record and reply
+│   ├── waitbudget.go                  # WaitBudget, one pass's bounded wait (cnagent.md CN10, dnagent.md DN13)
 │   ├── oswrap.go                      # the shared command/configfs plumbing under the three wrappers below
 │   ├── dm.go                          # dmsetup wrapper + table builders, blkdiscard, lsblk
 │   ├── nvmet.go                       # nvmet configfs wrapper, fixed ANA groups [D4]
@@ -135,7 +138,8 @@ distributed-nvme/                      # repo root = module root
 │   │                                  # plan: resource keys, dm/nvmet names, ANA groups),
 │   │                                  # fence.go (the [D12] bounded src-cutover fence of §11.2),
 │   │                                  # push_migr_bm.go, check.go (§9.7), migr.go, probe.go,
-│   │                                  # zeroing.go (§9.4 background side zeroing)
+│   │                                  # zeroing.go (§9.4 background side zeroing),
+│   │                                  # sweep.go (the DN6 teardown sweep of §9.8)
 │   └── cnagent/                       # ControllerNodeAgent policy (§9.3, cnagent.md §4): server.go,
 │                                      # plan.go, syncup_cn.go, syncup_cntlr.go, push_clone_bm.go,
 │                                      # check.go (§9.7), leg.go, healthcheck.go (the CN11 probers
@@ -146,7 +150,8 @@ distributed-nvme/                      # repo root = module root
 │                                      # dmutil.go (the shared dm ensure/probe helpers),
 │                                      # thinbm.go (the thin-metadata reader and the §11.4
 │                                      # bitmap math), bitmapread.go (the GetThinDeviceBm /
-│                                      # GetLegBm RPCs), probe.go
+│                                      # GetLegBm RPCs), probe.go,
+│                                      # sweep.go (the CN21 teardown sweep of §9.8)
 ├── cdc/                               # §12 discovery controller (cdc.md §1)
 │   ├── cdc.go                         # Run, the dependencies, the process wiring
 │   ├── watch.go                       # the WV etcd watcher: scan + watch of {p} cdc
@@ -160,8 +165,10 @@ distributed-nvme/                      # repo root = module root
 │   └── cluster.go, dn.go, cn.go, sp.go, cntlr.go, td.go, ss.go, ns.go, clone.go, xfer.go, migr.go, spare.go
 │                                      # one noun group each (dnvctl.md §5); the §11.4 copier is future work outside dnvctl
 ├── integtest/                         # integration suites, driven over ssh against remote hosts (the agent suites need passwordless sudo for real dm/md/nvmet/nvme-tcp over loop devices, the cdc suite for real nvmet/nvme-tcp over dm-zero, the e2e suite for both — dm/md/nvmet/nvme-tcp over loop devices on its dn and cn guests, `nvme connect` and the autoconnector mask on its two hosts; the worker, gateway and dnvctl suites need no root, and neither does the e2e suite's control-plane guest, which is where its etcd, gateway, worker, cdc and dnvctl all run): dnagent_integtest.md, cnagent_integtest.md, dnv-worker.md §14, cdc.md §9, gateway.md §10, dnvctl.md §7, e2e_integtest.md
-│   ├── dnagent_test.sh, dnagentctl/   # dn agent suite + its gRPC driver
-│   ├── cnagent_test.sh, cnagentctl/   # cn agent suite + its gRPC driver
+│   ├── dnagent_test.sh                # dn agent suite
+│   ├── dnagentctl/main.go             # the dn agent suite's gRPC driver
+│   ├── cnagent_test.sh                # cn agent suite
+│   ├── cnagentctl/main.go             # the cn agent suite's gRPC driver
 │   ├── worker_test.sh                 # worker suite (one server, real etcd, fake agents)
 │   ├── workerctl/main.go              # the etcd driver that plays the gateway (+ the six gateway.md §2.4 stand-ins: the two worker flips and the two worker drains, plus the two gateway delete latches the worker suite uses in place of DeleteStoragePool/DeleteClone)
 │   ├── fakeagent/main.go              # fake dn/cn agents driven by a behavior file
@@ -188,6 +195,13 @@ File lists inside `gateway/`, `worker/`, `agent/*`, `ctl/` are the
 recommended split (they mirror the section structure of `architecture.md`);
 implementers MAY split differently but MUST keep the package boundaries.
 Unit tests are colocated `_test.go` files inside each package.
+
+Whatever the split, the tree names every non-test `.go` file of the repository
+and no other, so a file that arrives, leaves or moves changes the tree in the
+same commit: §7 item 7's lint fails on a Go file the tree does not name and on
+one it names that does not exist. A directory's Go files are named under it, in
+its comment (`agent/dnagent/`) or through a path (`dnagentctl/main.go`), never
+by the directory alone: a directory entry that names no file claims none.
 
 `log.md` §5.3 allows the central etcd helpers to live either in
 `common/etcdutil.go` or in a dedicated kv layer; this layout picks the second
@@ -290,7 +304,8 @@ Each step compiles and passes its tests before the next begins:
 
 1. `go.mod`, `pb/schema.proto` (+ `go_package`), `make gen` → `pb/` builds.
 2. `common/constants.go`, `common/name_fmt.go` (fix the input file's syntax
-   errors; where it disagrees with `architecture.md` §4, §4 wins), then
+   errors; where it disagrees with `architecture.md` §4, §4 wins) and
+   `common/name_parse.go` (the inverse of its dm-name and NQN formats), then
    `common/log.go`, `common/osclient.go` + `osclient_fake.go`,
    `common/interceptor.go` per their specs, with the spec test lists.
 3. `etcdutil/` and `model/` (`dnv-worker.md` §3-§4; their tests run against a real
@@ -317,10 +332,13 @@ Each step compiles and passes its tests before the next begins:
 4. Imports obey §3 — in particular
    `go list -deps ./cmd/dnv-agent ./cmd/dnvctl | grep etcd` finds nothing, and
    `model` imports none of `gateway`, `worker`, `agent`, `cdc`, `ctl`.
-5. `common/` contains exactly the six files of §2 (plus tests), package name
+5. `common/` contains exactly the seven files of §2 (plus tests), package name
    `common`.
 6. All five binaries build into `bin/` via `make build`, and `bin/` is listed
    in `.gitignore`.
+7. The §2 tree names every non-test `.go` file of the repository and no
+   other: `TestLayoutTreeMatchesGoFiles` (`ctl/layoutlint_test.go`) diffs the
+   two both ways.
 
 ## 8. Amendments applied to this document
 
@@ -347,7 +365,8 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   gained the exported raw helpers `WriteBlockAt`/`ReadBlockDirectAt` inside the
   existing `osclient.go` (`osclient.md` §4.5.1), and §5's `cmd/` wiring records
   that the probers bypass the process's single `LimitedOsClient`. The `common/`
-  file count of §7 item 5 is therefore unchanged.
+  file count of §7 item 5 was therefore unchanged by it (`name_parse.go` later
+  made it seven, below).
 * `cdc.md` §10 — `dnv-cdc` arrived: the §2 `cdc/` entry became that document's
   §1 file split (`cdc.go`, `watch.go`, `view.go`, `logpage.go`, `server.go`,
   `conn.go`, `pdu.go`), the §2 `doc/` tree gained `cdc.md`, the §2 `integtest/`
@@ -424,3 +443,14 @@ from `cnagent.md`, `dnagent.md` and this file itself.
   it runs, and `host-id`, which no step of the suite calls today). So the §3
   `integtest/*` import row, the §5 `cmd/` wiring and the
   §7 checklist are unchanged.
+* Housekeeping (2026-09-29, from the 2026-09-28 doc/code review): the §2 tree
+  caught up with the Go files that had arrived without it —
+  `common/name_parse.go`, `agent/sweep.go` and the `sweep.go` of both role
+  packages (teardown by sweep, 2026-09-18), and `agent/waitbudget.go` (the
+  per-pass wait budget, 2026-09-28) — so §6 step 2 builds `name_parse.go`
+  beside `name_fmt.go`, §7 item 5 counts seven `common/`
+  files, and the two agent drivers are written as `dnagentctl/main.go` and
+  `cnagentctl/main.go`. So that the tree cannot go stale unnoticed again, §2
+  now states that it names every non-test Go file of the repository, and §7
+  gained item 7, the lint (`ctl/layoutlint_test.go`) that diffs the tree
+  against the repository both ways. No package boundary or path changed.

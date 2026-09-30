@@ -642,12 +642,12 @@ func TestMigrationSourceSequence(t *testing.T) {
 // rebuilds every side its DN's pointer list names from what is there (DN8),
 // and the SyncupDn that brings the list back comes before any side's own
 // request. Its node-level sweep judged the migration objects by the claim
-// rule alone, which reads stored requests — and none is stored yet. A
+// rule alone, which reads held sides' requests — and none is held yet. A
 // source's `d2` linear and its `:3:` export are claimed by nothing but that
 // side's request, so the sweep took both out from under the destination's
 // dm-clone: every read of a region not yet hydrated failed on the leg the host
 // was using. A migration object names its sp, not a side, so while a side of
-// that sp is known only by its pointer "no stored side claims it" proves
+// that sp is known only by its pointer "no held side claims it" proves
 // nothing, and the object waits for a pass that can prove it — the rule the
 // clone-metadata record already follows (DN6).
 func TestLostStoreKeepsAMigrationSourceUntilItsSideIsKnown(t *testing.T) {
@@ -1660,7 +1660,8 @@ func breakSideDev(node *fakeNode, sideDevName string) {
 
 // The window has to end even when the converge that ends it cannot get past
 // the side device: [D12] promises no dnv device stays suspended for more than
-// the window plus one converge (DN12 rule 1's known limit aside), and a
+// the window plus one converge (DN12 rule 1's known limit aside, and a reload
+// whose load fails, which fails closed: dnagent.md §2.8), and a
 // suspended dm target queues bios with no timeout, so the promise is the
 // safety property — not a best effort that a transient `dmsetup info` failure
 // of the side device may drop.

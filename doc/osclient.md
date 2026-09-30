@@ -476,7 +476,8 @@ Notes:
 Semantically complete: every declaration below exists in the committed file
 with the same signature and behavior. The file is authoritative for comment
 text and declaration order, which have drifted cosmetically from this
-listing (unlike `grpc.md` §3 / `log.md` §4, whose byte-identity is pinned).
+listing (unlike `grpc.md` §3 / `log.md` §4, whose byte-identity
+`TestRefListingsVerbatim` in `common/doclisting_test.go` pins).
 
 ```go
 package common

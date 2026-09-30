@@ -98,8 +98,9 @@ func (s *DnAgentServer) convergeSide(
 		// opened by an earlier pass is a suspension already in place, and
 		// [D12] bounds it at the window plus one converge whatever the side
 		// device is doing. That holds for every window this process opened,
-		// adopted or ended; DN12 rule 1's known limit is a suspension it
-		// knows nothing of, which settleFence cannot settle.
+		// adopted or ended, as far as phase 2's reload succeeds (a reload
+		// fails closed, dnagent.md §2.8); DN12 rule 1's known limit is a
+		// suspension it knows nothing of, which settleFence cannot settle.
 		s.settleFence(ctx, st, plan)
 		s.reportAboveSideDeferred(st, plan, info)
 		return info, sweep
@@ -412,7 +413,11 @@ func (s *DnAgentServer) ensureCnDm(
 // unfenceLinears resumes every per-CN dm-linear this side left suspended.
 // The queued IO drains against whatever table is live — for a fenced linear
 // its pre-fence one — which is the same thing the end of the window would
-// have done, only without the dm-error swap the side no longer needs.
+// have done, only without the dm-error swap the side no longer needs. A
+// linear that a primary flip's failed reload left suspended on its old
+// table still needs that swap, and resuming it here releases the old
+// primary's queued IO onto the side's data ahead of any retry of the
+// reload: a known limit (a reload fails closed, dnagent.md §2.8).
 //
 // The set of devices comes from the ENUMERATION, not from a remembered cn
 // list: a linear built for a CN that has since left standby_id_list is
@@ -513,7 +518,9 @@ func (s *DnAgentServer) ensureDmError(
 		targets[0].Length != sectors {
 		return s.dm.Reload(ctx, name, table)
 	}
-	// No dnv device is ever left suspended ([D12]).
+	// Suspended on the table it wants — an interrupted reload, or a failed
+	// one whose old table is wanted again, since a reload fails closed
+	// (dnagent.md §2.8) — it is resumed ([D12]).
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}
@@ -557,8 +564,10 @@ func (s *DnAgentServer) ensureDmLinear(
 	if !converged || dev.ReadOnly {
 		return s.dm.Reload(ctx, name, table)
 	}
-	// A device an older (pre-[D12]) build left suspended, or one a crash
-	// caught mid-reload, must converge back to resumed.
+	// A device an older (pre-[D12]) build left suspended, one a crash
+	// caught mid-reload, or one a failed reload left suspended on the table
+	// that is wanted again (a reload fails closed, dnagent.md §2.8) must
+	// converge back to resumed.
 	if dev.Suspended {
 		return s.dm.Resume(ctx, name)
 	}

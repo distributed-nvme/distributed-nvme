@@ -204,11 +204,14 @@ and its key schema already exist.
 * **DS3 — record rendering.** One `CdcEntry` renders to one discovery log
   entry **per element** of `nvme_tr_conf_list`:
   * TRTYPE/ADRFAM from `tr_type`/`adr_fam` (`tcp`→TCP, `ipv4`/`ipv6`); an
-    element with any other `tr_type` is skipped with `cdc entry skipped`,
-    reason `foreign_tr_type` (§0 #2), and one with any other `adr_fam` the
-    same way with reason `foreign_adr_fam` — an address family this
-    controller cannot name has no byte to put in the record. Either way the
-    rest of the entry still serves.
+    element with any other `tr_type` is skipped, reason `foreign_tr_type`
+    (§0 #2), and a `tcp` element with any other `adr_fam` is skipped with
+    reason `foreign_adr_fam` — an address family this controller cannot
+    name has no byte to put in the record. Either way the rest of the entry
+    still serves. These skips log `cdc entry skipped` once per distinct
+    reason each time the entry is rendered (by a scan, or by a put event
+    carrying it), not once per skipped element: eight elements on a foreign
+    transport are one record.
   * TRADDR/TRSVCID verbatim from `tr_addr`/`tr_svc_id`; SUBNQN = `nqn`.
   * SUBTYPE = NVM subsystem; TREQ = not specified; CNTLID = `0xffff`
     (dynamic); ASQSZ = `CdcMaxAdminSqSize`; EFLAGS = 0; TSAS = TCP, sectype
@@ -321,8 +324,16 @@ no served state is ever mutated concurrently.
 ## 5. The NVMe/TCP discovery service [NP]
 
 * **NP1 — listener.** One TCP listener on `(--tr-addr, --tr-svc-id)`. Per
-  accepted connection: one reader goroutine and one connection state owned
-  by it. No connection cap in v1 (the KATO/idle reaping of NP10 bounds
+  accepted connection: one connection state behind the connection's lock,
+  and three goroutines of its own — the reader, which runs the NP3
+  handshake and every command and writes every response but an AEN; the AEN
+  writer, the only goroutine that completes an AER with an AEN (NP11), so
+  an impact just sets the pending bit (taking that lock) and wakes it, and
+  the watcher never writes to a socket (DS6); and the NP10 keep-alive
+  reaper, armed at accept on the zero-KATO budget until Connect names a
+  KATO. A second lock serializes socket writes, so an AEN never interleaves
+  with a response inside one PDU.
+  No connection cap in v1 (the KATO/idle reaping of NP10 bounds
   leakage). An `Accept` error that is not the shutdown logs `cdc accept
   failed` and pauses 100 ms (`acceptRetryDelay` in `cdc/server.go`) before
   accepting again, so a transient failure (a file-descriptor shortage, say)
@@ -336,9 +347,19 @@ no served state is ever mutated concurrently.
 * **NP2 — PDU subset.** Implemented: ICReq, ICResp, H2CTermReq, C2HTermReq,
   CapsuleCmd (Connect is the only command whose in-capsule data is *read*),
   CapsuleResp, C2HData. Never sent: R2T (no host data is ever solicited).
-  Anything malformed — unknown PDU type, bad HLEN/PLEN, a PDU longer than
-  `CdcMaxH2CData` plus its header — answers C2HTermReq with the fitting FES
-  and closes (log `pdu error`).
+  Anything malformed — unknown PDU type, bad HLEN/PLEN, a PDU carrying data
+  whose PDO lies outside `[HLEN, PLEN]`, a PLEN over `CdcMaxH2CData` plus
+  the 72-byte CapsuleCmd header (the one cap for every PDU type) — answers
+  C2HTermReq with the fitting FES and closes (log `pdu error`).
+
+  An H2CTermReq after the ICReq ends the connection the way a closed socket
+  does — no C2HTermReq, `reason = closed` (NP13) — only if it passes the
+  framing checks above like any other PDU. One that carries the header of
+  the PDU in error (the error data the specs define) with PDO 0 fails the
+  PDO check and is itself a PDU error today: `pdu error`, a C2HTermReq,
+  `reason = pdu_error`. Only a data-less one (PLEN = HLEN = 24), or one
+  whose PDO lies in `[24, PLEN]`, ends as `closed`. The connection ends
+  either way; only the C2HTermReq and the records differ.
 
   In-capsule data on any *other* command is accepted and **discarded**, and
   the command is then answered on its own merits (NP12: an unsupported opcode
@@ -348,12 +369,15 @@ no served state is ever mutated concurrently.
   every discovery controller it connects to, so the earlier "in-capsule data
   on a non-Connect command is a terminal PDU error" reading put the production
   host stack in a permanent connect/reset loop. The framing cap NP2 exists to
-  enforce is unaffected: a PDU past `CdcMaxH2CData` is still refused before a
-  byte of it is buffered.
-* **NP3 — connection establishment.** ICReq must carry PFV 0 (else
-  C2HTermReq). ICResp: PFV 0, CPDA 0, both digests disabled regardless of
-  what the host requested (a controller enables only what both sides
-  support), MAXH2CDATA = `CdcMaxH2CData`.
+  enforce is unaffected: a PDU past that cap is still refused on its 8-byte
+  common header, before the rest of it is read.
+* **NP3 — connection establishment.** ICReq must carry PFV 0 and HPDA 0,
+  else C2HTermReq with FES unsupported parameter and FEI the field's byte
+  offset (8 for PFV, 10 for HPDA): this controller pads no PDU data, so a
+  host that demands alignment is refused, not ignored (nvmet refuses a
+  non-zero HPDA too). ICResp: PFV 0, CPDA 0, both digests disabled
+  regardless of what the host requested (a controller enables only what
+  both sides support), MAXH2CDATA = `CdcMaxH2CData`.
 * **NP4 — one admin queue.** The first capsule MUST be Fabrics Connect with
   QID 0; SQSIZE is honored up to `CdcMaxAdminSqSize`. A Connect with QID ≠ 0
   is refused (connect invalid parameters — there are no I/O queues). The
@@ -557,7 +581,7 @@ exercises either.
   malformed logged out); put/delete events flow to impacts; the WV4 rescan's
   wholesale replace still emits impacts for changes missed across the gap;
   WV5 retry cadence on a fake clock.
-* **server.go / conn.go / pdu.go** — handshake (PFV, digests off,
+* **server.go / conn.go / pdu.go** — handshake (PFV, HPDA, digests off,
   MAXH2CDATA); Connect happy path and each NP5 reject; property dance to
   RDY; Identify fields (CNTRLTYPE, OAES, AERL, KAS); Get Log Page paged
   reads against an injected view; features 0Bh gating (no AEN before

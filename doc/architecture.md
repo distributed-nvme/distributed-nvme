@@ -143,6 +143,8 @@ ClusterConf
 | `CloneBmChunkBytes` (one clone chunk's capacity AND positioning quantum) | 1 MiB | `EtcdMaxTxnOps` (required `--max-txn-ops` on every etcd serving dnv; SIZED by `CreateStoragePool`'s widest shape, 967 compares — §8.4/§13, tripwired by `gateway/txnbudget_test.go`'s `TestCreateStoragePoolBudget`; the sp drain's 486-compare batch and the created flip's 514-compare transaction are bounded ones over etcd's default too, dnv-worker.md §11.6 / RW19) | 1024 |
 | `MaxDelGrpPerTxn` (groups one sp-drain batch removes, dnv-worker.md §11.6) | 20 | `MaxAllocLegPerGrp` (the allocator's real per-group leg count, vs the unenforced `MaxLegPerGrp`) | 2 |
 | `MaxDelBmPerTxn` (clone bitmap chunk keys one clone-drain batch deletes, dnv-worker.md §11.7) | 64 | `MaxFlipCreatedPerTxn` (tds one created-flip transaction carries, 514 compares at most with no `provisioned` flip folded in, §10.3 / dnv-worker.md RW19) | 256 |
+| `CnCntlidSlotCnt` / `DnCntlidSlotCnt` (slots of the §11.8 cntlid partition; the gateway refuses a `cntlid_slot` or `cntlid_slot_list` value at or above `CnCntlidSlotCnt`) | 8 / 8 | `MinChunkBlockCnt` / `MaxChunkBlockCnt` / `DefaultChunkBlockCnt` (`redund_md_raid1.bitmap_chunk_block_cnt`, §7) | 1 / 1024 / 128 |
+| `MinAllocDnBatchSize` / `MaxAllocDnBatchSize` / `DefaultAllocDnBatchSize` (`alloc_conf.dn_batch_size`, §6.5 / §7) | 1 / 1024 / 16 | `MinAllocCnBatchSize` / `MaxAllocCnBatchSize` / `DefaultAllocCnBatchSize` (`alloc_conf.cn_batch_size`, §6.5 / §7) | 1 / 1024 / 16 |
 | `ShardBucketSize` | 256 | `MaxListCnt` / `DefaultListCnt` | 1024 / 64 |
 
 ---
@@ -1242,7 +1244,6 @@ capacity keys maintained per §5.6; reverse on delete.
 | `dm_pool_conf.low_water_mark_pct` | — | — | 50 (`DefaultPoolLowWatermarkPct`; `0` selects it). Never rejected: values > 100 are accepted and switch the §10.4 auto-grow **off** (`schema.proto`); the agent then passes `low_water_mark = 0` to the thin-pool table — no dm events |
 | `dm_raid0_conf.stripe_size` (a multiple of 4 KiB) | 4 KiB | 1 MiB | 64 KiB |
 | `redund_md_raid1.bitmap_chunk_block_cnt` | 1 | 1024 | 128 |
-| (dm region block cnt, same meaning) | 1 | 1024 | 128 |
 | `DmCloneConf.hydration_threshold` (clone) | 1 | 8 | 1 |
 | `DmCloneConf.hydration_batch_size` (clone) | 1 | 4 | 1 |
 | `DmCloneConf.hydration_threshold` (migr) | 1 | 8 | 1 |
@@ -3654,15 +3655,19 @@ rules meets them too, §7 and §8.4, so any such SP can be a clone source):
 chunk `c = off / stripe_size`, slice `= c mod slice_cnt`, slice-local offset
 `= (c div slice_cnt) × stripe_size + (off mod stripe_size)`.
 
-Worked example (`slice_cnt = 4`, `stripe_size = 16 KiB`, `block_size = 1 MiB`; here the
-16 KiB chunks are drawn as 4 × 4 KiB rows for compactness): writing the 1st, 3rd, 7th
-and 8th 4 KiB units of the logical device sets, in *written = 1* convention, bit 0 of
-slice 0's bitmap, bits 0-1 of slice 2's, bit 1 of slice 3's, and nothing in slice 1's.
+Worked example (`slice_cnt = 4`, `stripe_size = 16 KiB`, `block_size = 1 MiB`): the 1st,
+3rd, 7th and 8th 4 KiB units of the logical device sit at offsets 0, 8, 24 and 28 KiB,
+in chunks 0, 0, 1 and 1, so the first two land on slice 0 at slice-local offsets 0 and
+8 KiB and the last two on slice 1 at 8 and 12 KiB. Writing them sets, in *written = 1*
+convention, bit 0 of slice 0's bitmap and bit 0 of slice 1's, and nothing in slice 2's
+or slice 3's: each 1 MiB block of a slice holds 64 of its 16 KiB chunks, so bit 1 of
+any slice starts at slice-local offset 1 MiB, which the logical device first reaches at
+offset 4 MiB (chunk 256, on slice 0).
 
 **Skip-bitmap function.** Given source geometry `A` (`slice_cnt_A`, `stripe_size_A`,
 `block_size_A`, per-slice bitmaps, *written = 1*) and destination geometry `B`
 (idem, bitmaps *copied = 1*, all-zero on first run), with the extra constraint that the
-larger of the two stripe sizes is an integer multiple (`m > 1`) of the smaller, define
+larger of the two stripe sizes is an integer multiple (`m ≥ 1`) of the smaller, define
 `region_size = min(stripe_size_A, stripe_size_B)` — so any region is contiguous inside
 one chunk on **both** sides — and `region_cnt = min(size_A, size_B) / region_size`.
 Output: a bitmap of `region_cnt` bits where bit `r` = 1 ⇔ region `r` need **not** be

@@ -25,7 +25,8 @@ import (
 
 // TestHealthDnTable walks the HL1 table for a DN: an ERROR row in disk_info,
 // meta_info or port_info sets; a clean reply clears; PROVISIONING and MISSING
-// neither set nor clear; agent_reply.code != 0 neither sets nor clears.
+// never set, and a reply with them and no ERROR row is a clean one; a
+// rejection code neither sets nor clears.
 func TestHealthDnTable(t *testing.T) {
 	cases := []struct {
 		name    string

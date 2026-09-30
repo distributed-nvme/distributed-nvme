@@ -40,7 +40,12 @@ import (
 // reboot. Nothing in the dn agent scans block
 // devices any more ([D13] removed the LVM commands that did), so the exposure
 // is external tooling during the window. Keeping the window bounded, and
-// never letting a device outlive it, is what makes the trade acceptable.
+// never letting a device outlive it, is what makes the trade acceptable. The
+// bound does not hold across DN12 rule 1's known limit (beginFence), nor
+// past a command that fails: a phase-2 reload whose load fails leaves the
+// linear suspended rather than resume it onto its pre-fence table and replay
+// the window's IO onto the side's data (a reload fails closed, dnagent.md
+// §2.8).
 
 // beginFence reports whether this side is still inside the grace window, and
 // starts the clock the first time it is asked. The caller holds the side's
@@ -55,7 +60,11 @@ import (
 // nothing, and then — unless the role ends first (clearFence), or a level
 // with no export layer ends the window (endFence) — a converge that stops at
 // the DN9 gate finds no window to settle (fenceStarted), and the first one
-// that gets here starts a fresh window over linears still suspended.
+// that gets here starts a fresh window over linears still suspended. A
+// phase-2 reload whose load fails breaks it too: a reload fails closed
+// (dnagent.md §2.8), so the linear stays suspended on its pre-fence table
+// until a later converge's reload of it succeeds or the role's end resumes
+// it (unfenceLinears).
 func (s *DnAgentServer) beginFence(st *sideState) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

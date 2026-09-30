@@ -661,7 +661,7 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // TestNodeSweepCostIsLinearInOwnExports pins the cost of attributing a :2:
 // export on a kernel several dn agents share. The NQN names no dn, so the
 // node-level pass attributes every export of an sp this node hosts that no
-// stored side of its own claims — in the verdict of every Check round and in
+// held side of its own claims — in the verdict of every Check round and in
 // every SyncupDn — and on a shared kernel nearly all of those are the
 // siblings': each side-holding agent exports its own leg of the sp, one
 // export per cn. Attributing each with an `ls` exec of its namespaces made
@@ -1125,7 +1125,7 @@ func TestCheckDnReportsLeftover(t *testing.T) {
 
 // TestCloneMetaRecordFreedUnderTheProof pins the second half of §9.8's
 // probe-verified "gone", the one a device probe alone cannot supply: a clone-metadata slot is released
-// only when no stored side claims its migration AND every side of that sp
+// only when no held side claims its migration AND every side of that sp
 // this node may host is a side whose local state the agent actually holds.
 //
 // The second condition is the one that looks redundant and is not. A side

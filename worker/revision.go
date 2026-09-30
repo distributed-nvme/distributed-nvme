@@ -492,7 +492,8 @@ func (w *revWorker) syncup(ctx context.Context, cc *pb.ClusterConf) {
 		// the wanted objects converged, but the node still holds objects it
 		// does not want, or an enumeration did not answer. RW4 step 5 re-
 		// issues the Syncup* every round while the code persists, so the
-		// record is what makes a lingering leftover visible in the worker log.
+		// record is what makes a leftover each re-sync still finds visible
+		// in the worker log (logSyncupLeftover).
 		w.logSyncupLeftover(ctx, revision, reply)
 	}
 	w.driver.observe(ctx, reply)
@@ -747,9 +748,27 @@ func (w *revWorker) logSyncupRejected(
 
 // logSyncupLeftover emits the §12 "syncup leftover" record: the request was
 // accepted and stored, and the agent's details name what the node still holds
-// that the desired state does not want. It is Info, not Error — the agent
-// re-sweeps every round on its own, and a leftover is normal for as long as a
-// dead remote's failfast window lasts.
+// that the desired state does not want, or what kept the agent from proving
+// the node clean (an enumeration that did not answer, say). It is Info, not
+// Error: a leftover is normal for as long as a dead remote's failfast window
+// lasts, and on the pass of a cn teardown whose sweep disconnects anything —
+// the cn agent's sweep sets each `nvme disconnect` it issues, of a leg or a
+// clone source, going off its pass and names the connection a leftover until
+// a later pass finds it gone (a removing pass once it has no controller, a
+// Check round once its sysfs subsystem directory, which can outlive the last
+// controller, is gone), so that pass's SyncupCntlr/SyncupCn reply carries the
+// code, and the first Check round that no longer finds the connection, with
+// nothing else left, answers code 0 and ends the re-sync.
+// A Check round only recomputes the verdict and removes nothing, and the
+// agent registers nothing for a leftover: its background converges (the cn's
+// connect retry, the dn's connect retry and fence timer) sweep only while one
+// is registered or armed for a reason of its own. So the sweep a leftover
+// brings back is the one in the re-sync RW4 step 5 issues on that verdict,
+// and a leftover that re-sync still finds is logged every round. One only
+// the Check verdict names (a subsystem directory whose last controller is
+// gone, above) is not: the re-sync's removing pass counts it gone, so its
+// reply does not carry it, and what names it every round is the agent's own
+// `sweep leftover` record of each Check verdict.
 func (w *revWorker) logSyncupLeftover(
 	ctx context.Context,
 	revision uint64,

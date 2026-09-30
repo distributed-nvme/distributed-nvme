@@ -152,7 +152,7 @@ type sideClaims struct {
 // holds for what THIS process builds. What a side built before a restart
 // that lost the local store has no claim here until that side's request
 // comes back, which is why both scopes judge a migration object only once
-// every side of its sp this node may host is stored. Both read that set
+// every side of its sp this node may host is held. Both read that set
 // (knownSides) before the claims: a side stored in between is then either
 // still missing from it, which keeps the gate shut, or visible here.
 func (s *DnAgentServer) collectClaims(
@@ -793,7 +793,7 @@ func sideIdAttrs(plan *sidePlan) []any {
 // That makes them any side's to judge, not only the migrating side's: a node
 // may host two sides of one sp. So they are judged only when spKnown, the
 // proof sweepDn waits for too — every side of the sp this node may host is
-// stored. Short of it, the sp's migration devices, its :3: exports and its
+// held. Short of it, the sp's migration devices, its :3: exports and its
 // :3: connections are left out of the chain, neither removed nor named: a
 // side known by its pointer alone may be the one playing the migration, its
 // claim taken by a lost store, and taking a source's d2 and :3: export
@@ -1123,7 +1123,7 @@ func (s *DnAgentServer) collectExports(
 				chain.exportLinears = append(chain.exportLinears, linear)
 			case exportOrphan:
 				// No namespace names it and it is older than the grace, so
-				// it belongs to no side this pass can judge — but a stored
+				// it belongs to no side this pass can judge — but a held
 				// side of ours may still want it, and that side's request is
 				// the one thing that says so.
 				if _, held := claims.exports[nqn]; held {
@@ -1217,7 +1217,10 @@ func (s *DnAgentServer) sidePreSteps(
 		// must be resumed, or it stays suspended until something else happens
 		// to converge it — and a suspended dm target queues bios with no
 		// timeout ([D12]). The set comes from the enumeration, not from a
-		// remembered cn list.
+		// remembered cn list. It also resumes a linear that a primary flip's
+		// failed reload left suspended, which releases the old primary's
+		// queued IO onto the side's data: a known limit (unfenceLinears,
+		// dnagent.md §2.8).
 		s.unfenceLinears(ctx, plan, actual)
 	} else if !plan.wantExport {
 		// A source whose level has no export layer ENDS its window: nothing
@@ -1233,8 +1236,12 @@ func (s *DnAgentServer) sidePreSteps(
 	// clone's removal fails EBUSY under the linear and the whole chain waits
 	// a round for the build phase to repoint it.
 	//
-	// A fenced (suspended) wanted linear is left alone: that suspension is
-	// deliberate, and ending it is the fence's own job.
+	// A suspended wanted linear is left alone. On a migration source that is
+	// the fence's suspension, deliberate, and ending it is the fence's own
+	// job; on any other side unfenceLinears, just above, has tried to end it
+	// (a failed reload can leave a device suspended: a reload fails closed,
+	// dnagent.md §2.8), and one still suspended — its probe or its resume
+	// failed — is the build phase's to reload or resume.
 	if !plan.wantDm {
 		return
 	}
@@ -1290,8 +1297,8 @@ func (s *DnAgentServer) dmMapsUnwanted(
 // even when its side file is absent: after a lost --local-store the side must
 // be REBUILT from its record, and sweeping it would free the extents and send
 // the next SyncupSide through the §9.4 provisioning protocol again, zeroing
-// live data. Nor, while that side has no stored request, is a migration
-// object of its sp (fullyKnown below).
+// live data. Nor, while that side is not held, is a migration object of its
+// sp (fullyKnown below).
 func (s *DnAgentServer) sweepDn(
 	ctx context.Context,
 	st *dnState,
@@ -1334,13 +1341,13 @@ func (s *DnAgentServer) sweepDn(
 	claims := s.collectClaims(clusterId, dnId)
 	// fullyKnown gates every migration object: the d2 linear and its :3:
 	// export, the d3 dm-clone, its d5 wrapper and its :3: connection. They
-	// name (sp, migr) and no side, and the claim rule reads stored requests
-	// only, so while a side of their sp is known by its pointer alone — the
-	// first SyncupDn after a lost --local-store, ahead of that side's own
-	// SyncupSide — "no stored side claims it" proves nothing: that side may
-	// be the one playing the migration, and taking a source's d2 and :3:
-	// export strands the destination's dm-clone. Such an object is neither
-	// removed nor named until every side of its sp in `known` is stored —
+	// name (sp, migr) and no side, and the claim rule reads held sides'
+	// requests only, so while a side of their sp is known by its pointer
+	// alone — the first SyncupDn after a lost --local-store, ahead of that
+	// side's own SyncupSide — "no held side claims it" proves nothing: that
+	// side may be the one playing the migration, and taking a source's d2
+	// and :3: export strands the destination's dm-clone. Such an object is
+	// neither removed nor named until every side of its sp in `known` is held —
 	// the proof the clone-metadata record waits for too (cloneMetaGate), and
 	// the one the side-level pass waits for (buildSideChain) — and the wait
 	// ends by itself: that side's Check round answers "unknown side" until

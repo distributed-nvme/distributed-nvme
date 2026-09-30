@@ -17,8 +17,9 @@ import (
 // all and forward none to the agents the gateway calls.
 //
 // The mint lives here, gateway-local, and not in common/interceptor.go
-// because that file is a byte-for-byte copy of grpc.md §3's reference listing
-// pinned by tests. Run installs it FIRST in both chains (server.go
+// because that file is a byte-for-byte copy of grpc.md §3's reference
+// listing, pinned by TestRefListingsVerbatim (common/doclisting_test.go).
+// Run installs it FIRST in both chains (server.go
 // serverOptions), so it is upstream of the shared chain and the shared
 // chain's own request/reply records carry the id.
 

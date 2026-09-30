@@ -3607,11 +3607,12 @@ func TestABlankHeaderIsNotFormattedUnderAnotherNodesDevice(t *testing.T) {
 	}
 }
 
-// [D12]: outside the bounded §11.2 cutover window, no dnv device stays
-// suspended. Whatever left one that way — a crash inside a reload's
-// suspend/load/resume, or an older build — the next converge must resume it,
-// for every dm kind the dn agent owns. (This side has no migr_src_conf, so no
-// window applies.)
+// [D12]: outside the bounded §11.2 cutover window, a dnv device found
+// suspended on the table it wants does not stay so. Whatever left one that
+// way — a crash or a failed command inside a reload's suspend/load/resume (a
+// reload fails closed, dnagent.md §2.8), or an older build — the next
+// converge must resume it, for every dm kind the dn agent owns. (This side
+// has no migr_src_conf, so no window applies.)
 func TestConvergeResumesSuspendedDevices(t *testing.T) {
 	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)

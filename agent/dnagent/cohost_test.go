@@ -208,7 +208,7 @@ func TestSiblingExportNotSweptByOurAgent(t *testing.T) {
 // an unhydrated region from the source it can no longer reach.
 func TestSiblingMigrConnNotDisconnected(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
-	// Not the destination of any stored side: claims.migrDst must not be
+	// Not the destination of any held side: claims.migrDst must not be
 	// what keeps it, or the host-NQN arm is again untested.
 	strayConn := nf.MigrSrcNqn(testCluster, testSrcDn, testSp, testMigrId+0x40)
 
