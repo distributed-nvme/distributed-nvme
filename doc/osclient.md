@@ -1003,7 +1003,7 @@ func (f *FakeOsClient) WriteProto(ctx context.Context, path string, msg proto.Me
 {"time":"2026-08-28T10:00:02.140Z","level":"INFO","msg":"os write block","path":"/dev/loop0","offset":4194304,"length":4096,"trace_id":"a1b2c3d4e5f60718"}
 ```
 
-One CN11 probe attempt against a kind-`9` leg wrapper — emitted by the prober
+One CN11 probe attempt against a kind-`c9` leg wrapper — emitted by the prober
 itself, not by an `OsClient` (§4.5.1). Both halves carry the *same* trace id,
 the fresh per-attempt id of `cnagent.md` CN2:
 

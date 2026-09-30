@@ -1781,7 +1781,8 @@ raid0 (flushing every in-flight write), then per slice suspend the origin's
 thin volume, send `create_snap`, resume the thin volume (the per-slice suspend
 is dm-thin's own documented requirement and stays), and resume the raid0 only
 after the last slice's message — on every error path too, so no device
-outlives the sequence suspended ([D12]). The window is bounded by `slice_cnt`
+outlives the sequence suspended ([D12]) short of a `dmsetup` command on it that
+fails (`cnagent.md` CN16). The window is bounded by `slice_cnt`
 dmsetup messages under the §7 timeouts. Residual: a primary crash *between*
 two slices' messages still yields a torn snapshot (the per-slice snaps date
 from different instants); a snapshot whose creation raced a primary crash
@@ -2975,8 +2976,9 @@ cannot forget in that way: while the device is there, the next enumeration finds
   agent's own goroutines, not objects on the node (`cnagent.md` CN11, CN21). The
   build phase, for its part, holds back what is safe only after a step the stopped
   sweep skipped: it puts no ns-dev onto a raid0 that a dm-clone the desired state
-  no longer wants may still be hydrating into, and it leaves a namespace that has
-  left its subsystem to the next pass. The rule applies per object too: a live
+  no longer wants may still be hydrating into (nor after a pass whose chain left
+  that dm-clone in place), and it leaves a namespace that has left its subsystem to
+  the next pass. The rule applies per object too: a live
   dm-clone that will not say what it maps makes EVERY clone-source connection
   in-use for that pass, because recording a failure is not the same as acting on
   one — nothing downstream reads the failure list before removing. The dn applies
@@ -3035,9 +3037,15 @@ cannot forget in that way: while the device is there, the next enumeration finds
   code means **accepted with residue** — the desired state is stored and every wanted
   object converged — and is not a rejection: the worker reads the reply's rows exactly
   as for code 0 and re-issues the object's `Syncup*` every round (`dnv-worker.md` RW12,
-  no backoff) until the code changes. That is the whole of the retry machinery — no
-  agent-side retry loop re-drives a sweep, and the startup case needs no recovery step
-  because the first `Check*` after a restart reports whatever the node still holds.
+  no backoff) until the code changes. That is the whole of the retry machinery for a
+  leftover — nothing on the agent re-drives a sweep because something is left. The
+  agents' own background converges do sweep, each as part of a whole converge, but
+  only while one is registered or armed for a reason of its own: the cn connect retry
+  (`cnagent.md` CN10), and the dn migration connect retry and fence timer
+  (`dnagent.md` DN13, DN12). A cn sweep's `nvme disconnect` finishes in its own
+  goroutine, off the pass, and the next probe finds it gone (`cnagent.md` CN10). The
+  startup case needs no recovery step because the first `Check*` after a restart
+  reports whatever the node still holds.
   `details` names the leftovers, at most eight of them, and reports an enumeration that
   did not answer the same way — an answer the agent cannot trust cannot prove the node
   clean. The dn agent reports two more conditions the same way, so that the worker
@@ -3395,7 +3403,10 @@ bitmap/failfast/data-offset options):
       **neither leg carries an md superblock**, which after the §9.4 zeroing is exactly
       the freshly-provisioned case — the old wording said "freshly trimmed", a claim
       `blkdiscard` never funded because discard does not imply zeros; the zeroout does,
-      and the superblock check is the evidence the CN actually has, [D15]).
+      and the superblock check is the evidence the CN actually has, [D15]). The check
+      is that evidence short of one known gap: an `--examine` read that fails after its
+      path's failfast expired answers "no superblock", exactly as a fresh leg does
+      (`cnagent.md` CN12 and its known limits).
    2. Exactly one has a superblock ⇒ `mdadm --assemble` with that leg, then
       `mdadm --add` the other.
    3. Both have superblocks ⇒ `mdadm --assemble` with both, then read the array's
@@ -3422,7 +3433,8 @@ new primary already owns another. Two mechanisms make that harmless, and both
 are load-bearing: (a) each side's flip is **atomic within one DN converge** —
 the old primary's dm-linear reloads onto dm-error in the same pass that puts
 the new primary's onto the side device — so a single leg never has two
-writers; and (b) across the legs of a group, **md's own arbitration**
+writers, short of a reload whose load fails (the known limit under **sides**
+below); and (b) across the legs of a group, **md's own arbitration**
 decides: a leg whose superblock still claims a clean full array cannot be
 started degraded on its own (case 2's assemble-without-`--run` refuses when
 the survivor's Array State does not account for the missing members), and
@@ -3432,7 +3444,8 @@ is an explicit dependency on mdadm semantics; the integration suite MUST
 re-cover it whenever the deployed mdadm version changes.
 
 **sides** — on a `SyncupSide` (highest revision) showing a changed primary. One
-converge pass, no waits and no suspensions ([D12]):
+converge pass, no waits and no suspensions ([D12]) as far as its reloads succeed
+(the known limit below):
 
 1. Move the old primary CN's subsystem from `optimized` to `non-optimized`.
 2. Reload the old primary CN's dm-linear onto its dm-error device.
@@ -3447,6 +3460,16 @@ the old path errors briefly instead of being demoted first, which the CN's
 multipath layer handles as a failed path. Demoting before fencing would be a
 strict improvement and is the intended eventual order — it is listed above for
 that reason — but the reordering is not part of this change.
+
+A reload fails closed (*decided 2026-09-29*, `dnagent.md` §2.8): one whose load
+fails leaves the device suspended on its old table, queueing its IO. For step 2 that
+is a fence failing safe only for the moment (*known limit, 2026-09-29*, `dnagent.md`
+DN10): the old primary's linear serves and writes nothing while suspended, but a
+later converge of the side resumes every per-CN linear it finds suspended, on
+whatever table is live (`dnagent.md` DN12 rule 2), which releases the IO the old
+primary's linear queued onto the side's data — and leaves that linear live on the
+side device beside the new primary's — ahead of any retry of the reload in that
+converge's build phase.
 
 ### 11.2 Migration (side → side; fig. `080Migration`)
 
@@ -3548,12 +3571,16 @@ goroutine and waits for it before the dm devices are removed (§9.4).
       destination after hydration had already copied the region.
    The window is a floor, not a schedule: (b) runs on the first converge at or
    after the deadline, which a timer arranges so no RPC waits for it. It is also a
-   hard bound — a device is never left suspended beyond it, including across an
-   agent restart that finds it suspended, because a suspended dm target queues IO
-   forever and wedges any block-device scanner that touches it. A restart inside the
-   window whose probes of the linears all go unanswered does not find them suspended,
-   and their suspension can then outlast the window (`dnagent.md` DN12 rule 1's known
-   limit). The floor gives way wherever the export above a suspended linear is
+   hard bound, as far as the reloads succeed — a device is never left suspended
+   beyond it, including across an agent restart that finds it suspended, because a
+   suspended dm target queues IO forever and wedges any block-device scanner that
+   touches it. A restart inside the window whose probes of the linears all go
+   unanswered does not find them suspended, and their suspension can then outlast
+   the window (`dnagent.md` DN12 rule 1's known limit). So can a (b) whose load
+   fails: a reload fails closed (*decided 2026-09-29*, `dnagent.md` §2.8), which
+   leaves the linear suspended on its pre-fence table, queueing its IO, until a
+   later converge's reload of it succeeds or the end of the source role resumes it
+   (`dnagent.md` DN12). The floor gives way wherever the export above a suspended linear is
    removed — the side torn down, a CN dropped from the side's list, a level with no
    export layer (`SP_LEVEL_NO_SIDE` and above) — because disabling an nvmet namespace
    waits for every request in flight on it, and one whose IO a suspended device holds
@@ -3756,9 +3783,10 @@ live, its table a dm-linear over the td's dm-error — with the ns in the `inacc
 ANA group; a namespace that is not effectively suspended gets normal §3.3/§3.4
 behavior. Set by users
 (`CreateNamespace.suspended`, `UpdateNamespaceSuspended`) and by the transfer/clone
-finalization (§8.9/§8.10). Nothing is dm-suspended: hosts queue against the ANA state,
-which nvmet enforces at the target, and a local opener of a parked ns-dev gets EIO
-rather than blocking ([D12]).
+finalization (§8.9/§8.10). Nothing is dm-suspended, short of a park whose load fails
+and leaves the ns-dev suspended on its old table (`cnagent.md` CN16): hosts queue
+against the ANA state, which nvmet enforces at the target, and a local opener of a
+parked ns-dev gets EIO rather than blocking ([D12]).
 
 *Parked*, of an ns-dev, is this device state and nothing else. It is unrelated to a
 **parked spare leg** (§10.4), which is an etcd-record state — a replaced leg retained
@@ -4255,21 +4283,27 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   uninterruptible D state — `exit_aio` then makes that task unkillable and the node
   needs a reboot — and (b) `dmsetup remove` on it does not succeed —
   both measured on the lab kernel. The **dn** agent therefore: never suspends anywhere
-  except this one window; never lets a device outlive it, including across an agent restart
-  that finds it suspended (a linear found suspended with no recorded start is retired at
-  once rather than starting a second window; a restart whose probes of a side's linears
+  except this one window; never lets a device outlive it short of a `dmsetup` command
+  that fails, including across an agent restart that finds it suspended (a linear
+  found suspended with no recorded start is retired at once rather than starting a
+  second window; a restart whose probes of a side's linears
   all go unanswered finds none so — `dnagent.md` DN12 rule 1's known limit); and, before
   any teardown step runs over a fenced linear — the removal of its export included, all
   that `SP_LEVEL_NO_SIDE` takes — retires it onto its dm-error, §11.2's step 2b brought
   forward, rather than resuming it onto the table it was suspended with and replaying
   what the window absorbed; only a request that also ends the source role resumes it
   onto its pre-fence table first, which is that role ending's own rule (`dnagent.md`
-  DN6, DN12). The §11.1 side failover has no window at all — it reloads onto dm-error
-  directly, and its old 300 s grace sleep is deleted with the suspension it protected.
+  DN6, DN12). A reload fails closed (*decided 2026-09-29*, `dnagent.md` §2.8,
+  `cnagent.md` CN16): one whose load fails leaves the device suspended on its old
+  table, queueing its IO until a later reload or resume of it succeeds, so the bound
+  holds only as far as the reloads succeed. The §11.1 side failover has no window at
+  all — it reloads onto dm-error directly (a reload of it whose load fails is §11.1's
+  known limit), and its old 300 s grace sleep is deleted with the suspension it
+  protected.
   The residual exposure is external tooling — udev, `blkid`, an operator's `lsblk` —
-  reading a source's linears during those 60 s, or longer under that known limit; no
-  dnv agent scans block devices any more ([D13] removed the dn agent's LVM commands and
-  [D14] the cn agent's).
+  reading a source's linears during those 60 s, or longer under DN12 rule 1's known
+  limit or after a reload whose load failed; no dnv agent scans block devices any
+  more ([D13] removed the dn agent's LVM commands and [D14] the cn agent's).
 
   The transfer origin's ns-dev (§8.10, §11.3), and every §11.6-suspended namespace,
   used to be held dm-suspended for the life of the suspension — unbounded, with no
@@ -4289,11 +4323,13 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   fail-fast rather than an unkillable wedge, and the next converge re-writes the group;
   and the §11.5 clone rebuild parks a *serving* namespace's ns-dev from the build phase
   with no ANA move at all, which is that recovery's own documented window and not this
-  one. With the park, the CN holds no suspension **across** a converge pass at all:
-  what is left there is CN14's snapshot quiesce, a `dmsetup suspend` bracketed around
-  one per-slice `create_snap` sequence and resumed before the pass returns
-  (`cnagent.md` CN14, CN16) — bounded by construction, unlike the §11.6 suspension it
-  replaces.
+  one. With the park, the CN holds no suspension **across** a converge pass at all,
+  short of a `dmsetup` command that fails (a park whose load fails leaves its ns-dev
+  suspended on its old table: `cnagent.md` CN16 and its known limit "A park whose load
+  fails can wedge the cntlr"). What is left there is CN14's snapshot quiesce, a
+  `dmsetup suspend` bracketed around one per-slice `create_snap` sequence and resumed
+  before the pass returns unless that resume fails (`cnagent.md` CN14, CN16) —
+  otherwise bounded by construction, unlike the §11.6 suspension it replaces.
 * **[D13] The DN carries a self-describing dnv disk format; LVM is gone from the dn
   agent.** LVM left for three measured reasons. (a) Its label scan reads every block
   device on the node, so any dnv device in a bad state takes the whole node's LVM down
@@ -4380,7 +4416,10 @@ func getShortId(clusterId, nodeId uint64) uint32 {
   at the bound the cntlrs go whether every side has reported or not, and
   nothing below relies on it. Correctness rests on two things (§11.1.1): each
   DN converges its side's old-primary→dm-error and new-primary→side-device
-  reloads in one pass, so one leg never has two writers; and mdadm's assembly
+  reloads in one pass, so one leg never has two writers — short of a reload of
+  the old primary's linear whose load fails, which a later converge of the side
+  resumes on the side device before it retries the reload (§11.1's known limit,
+  `dnagent.md` DN10); and mdadm's assembly
   rules arbitrate across legs — a stale leg whose superblock claims a clean
   full array will not start degraded alone, and event counts plus resync
   direction repair divergence once both legs return. md behavior is therefore
@@ -4650,7 +4689,8 @@ own amendment sections are the surviving record.
   §11.6 no longer means a held `dmsetup suspend` of the namespace's `CnNsDevName`. It
   means the ns-dev's table is a dm-linear over its td's dm-error and the device is
   **live**, with the namespace in the `inaccessible` ANA group as before; the CN holds
-  no suspension across a converge pass any more. §2 step 5/6, §8.8
+  no suspension across a converge pass any more, short of a `dmsetup` command that
+  fails (a reload fails closed, `cnagent.md` CN16). §2 step 5/6, §8.8
   (`UpdateNamespaceSuspended`), §8.10 and fig. `100Transfer`, §11.3, §11.5 step 1,
   §11.6, [D12] (last paragraph) and [D14] follow, as do `cnagent.md` CN16 and its
   probe row and `cnagent_integtest.md`. Host-visible behavior is unchanged — a host
@@ -4811,3 +4851,13 @@ exists.
   (`grp_list_full`) instead of growing (`dnv-worker.md` AR6, Appendix B), so the pool
   can run out of space as §10.4 describes. Nothing frees the ceiling: an SP expected to
   grow large wants a larger `init_ext_cnt` or more slices.
+* **A reload fails closed (decided 2026-09-29).** A dm reload whose load fails
+  leaves its device suspended on its old table, queueing its IO with no timeout until
+  a later reload or resume of it succeeds (`dnagent.md` §2.8, `cnagent.md` CN16), so
+  [D12]'s bound on a suspension holds only as far as the reloads succeed. On a
+  fencing reload that keeps the data safe at the cost of liveness — a CN park whose
+  load fails can wedge the cntlr (`cnagent.md` known limits) — with one exception: a
+  side flip whose reload of the old primary's linear fails its load leaves that
+  linear suspended over the side device only until the side's next converge resumes
+  it there, releasing the IO it queued onto the side's data before the reload is
+  retried (§11.1, `dnagent.md` DN10).

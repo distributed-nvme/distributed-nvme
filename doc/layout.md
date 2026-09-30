@@ -351,7 +351,7 @@ from `cnagent.md`, `dnagent.md` and this file itself.
 * [D14] LVM removal (suite amendment U3-T5, `cnagent_integtest.md` §20) — LVM is gone from the CN as well as the DN, so the
   §2 `agent/cnagent/` list loses `lvm.go` ("the clone VG — the one LVM user
   left") and gains `clonemeta.go`: the CN base-state wrappers plus the
-  clone-metadata slot allocator over the single loop device, whose kind-`b`
+  clone-metadata slot allocator over the single loop device, whose kind-`cb`
   wrapper dm-linears are their own allocation registry (`cnagent.md` §4.1,
   `architecture.md` [D14]).
 * [D15] side provisioning (suite amendment U4-T6 of both integtest specs, §20) — the §2 `agent/dnagent/` list gains `zeroing.go`,

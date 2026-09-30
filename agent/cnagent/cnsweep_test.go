@@ -1924,7 +1924,10 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 // pass each stays off the raid0 and none is moved to the optimized group —
 // the first serves on through the dm-clone, the other two are parked on the
 // td's dm-error — and the pass after it, its listings answering, removes
-// the dm-clone before any reload onto the raid0.
+// the dm-clone before any reload onto the raid0. A held ns-dev is not where
+// its plan wants it, so the pass reports its row ERROR, in the words the
+// Check probe uses for it, and registers the CN10 retry: the worker re-syncs
+// on a revision or a reply code, never on a row.
 func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 	const newNs = uint64(0x1b)
 	parkedClone := cloneOf()
@@ -1981,6 +1984,7 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 			t.Run(shape.name+"/"+listing.name, func(t *testing.T) {
 				ctx := context.Background()
 				srv, node := newTestServer(t)
+				srv.retryInterval = time.Hour
 				syncupBoth(t, srv, shape.from)
 				if shape.suspended {
 					node.dms[nsDevName(srv, testNs)].suspended = true
@@ -2033,6 +2037,15 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 					}
 					assertNoCall(t, node,
 						"writedirect "+anaPath(testNqn, ns.nsIdx)+"=1")
+					assertErrorDetails(t,
+						reply.GetCntlrInfo().GetNsIdToDmLinear()[ns.nsId],
+						detailsNsDevNotDesired, "the held ns-dev's row")
+					assertErrorDetails(t,
+						probedCntlrInfo(t, srv).GetNsIdToDmLinear()[ns.nsId],
+						detailsNsDevNotDesired, "the held ns-dev's probe")
+				}
+				if !retrying(t, srv) {
+					t.Fatalf("a pass that held an ns-dev registered no retry")
 				}
 
 				// The next pass, its listings answering: the dm-clone goes
@@ -2072,6 +2085,12 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 						t.Fatalf("nsid %d's ana_grpid is %q after the "+
 							"pass, want 1", ns.nsIdx, got)
 					}
+					assertOk(t,
+						reply.GetCntlrInfo().GetNsIdToDmLinear()[ns.nsId],
+						"the ns-dev's row after the pass")
+				}
+				if retrying(t, srv) {
+					t.Fatalf("the pass that held nothing kept the retry")
 				}
 				awaitDisconnects(t, srv)
 				reply, err = srv.SyncupCntlr(ctx, cntlrReq(shape.to))
@@ -2138,6 +2157,261 @@ func TestUnansweredListingDoesNotParkAServingNamespace(t *testing.T) {
 					"is %s)", got, want, errNo)
 			}
 			assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
+		})
+	}
+}
+
+// TestALeftDmCloneKeepsTheNsDevOffItsRaid0 is the hold of
+// TestUnansweredListingKeepsTheNsDevOffALeavingClone on a pass whose listings
+// all answer: what keeps an ns-dev off the raid0 is a dm-clone the plan does
+// not want that is still live after the chain, not how the pass learned it.
+// Three routes leave it live: P2's park of the ns-dev over it fails its load
+// (the ns-dev stays suspended on the dm-clone's table, so L3's remove fails
+// EBUSY), L3's remove is killed before it acts, and the descent stops above
+// L3 — here at L2, on a sibling namespace dropped in the same revision whose
+// ns-dev will not go. On each the pass reloads nothing onto the raid0 and
+// moves nothing to the optimized group. The ns-dev P2 did not park serves on
+// through the dm-clone, still optimized; one it parked stays parked and goes
+// inaccessible, so a host queues its IO rather than take errors on an
+// optimized path. Its row reads ERROR, as the Check probe reads it, and the
+// pass registers the CN10 retry. The pass after the fault, the dm-clone
+// removed, puts the ns-dev on the raid0 and only then moves it optimized.
+func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
+	const sibling = uint64(0x1b)
+	withSibling := defaultSubsys(false)
+	withSibling[testNqn].NsList = append(withSibling[testNqn].NsList,
+		&pb.Namespace{
+			NsId:     sibling,
+			NsIdx:    2,
+			TdId:     testTd,
+			DevUuid:  "22222222-2222-4222-8222-222222222222",
+			DevNguid: "22222222222242228222222222222222",
+		})
+	linear := func(devNo string) string {
+		return agent.LinearTable(testTdSize/512, devNo, 0)
+	}
+	for _, route := range []struct {
+		name string
+		from reqOpts
+		// fault arms the fault and returns what disarms it.
+		fault func(srv *CnAgentServer, node *fakeNode) func()
+		// on is where the pass leaves the ns-dev ("clone" or "error"), and
+		// ana its ana_grpid.
+		on  string
+		ana string
+	}{
+		{"the park's load fails",
+			reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			func(srv *CnAgentServer, node *fakeNode) func() {
+				errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+				node.failCmd["dmsetup reload "+nsDevName(srv, testNs)+
+					" --table "+linear(errNo)] = "device busy"
+				return func() {}
+			},
+			"clone", "1"},
+		{"the dm-clone's remove is killed before it acts",
+			reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}},
+			func(srv *CnAgentServer, node *fakeNode) func() {
+				key := "dmsetup remove " + cloneName(srv, testClone)
+				node.killCmdNoEffectAlways[key] = true
+				return func() { delete(node.killCmdNoEffectAlways, key) }
+			},
+			"error", "3"},
+		{"the descent stops above the dm-clone",
+			reqOpts{revision: 2, primary: true, subsys: withSibling,
+				clones: []*pb.Clone{cloneOf()}},
+			func(srv *CnAgentServer, node *fakeNode) func() {
+				key := "dmsetup remove " + nsDevName(srv, sibling)
+				node.failCmdAlways[key] = "device busy"
+				return func() { delete(node.failCmdAlways, key) }
+			},
+			"error", "3"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			syncupBoth(t, srv, route.from)
+			clone := cloneName(srv, testClone)
+			if dm := node.dms[clone]; dm == nil || dm.noHydration {
+				t.Fatalf("fixture: no dm-clone with its hydration on")
+			}
+			devNoOf := func(name string) string {
+				return node.devNo["/dev/mapper/"+name]
+			}
+			raid0No := devNoOf(raid0Name(srv, testTd))
+			on := map[string]string{
+				"clone": devNoOf(clone),
+				"error": devNoOf(errorName(srv, testTd)),
+			}
+			nsDev := nsDevName(srv, testNs)
+			toRaid0 := "cmd dmsetup reload " + nsDev + " --table " +
+				linear(raid0No)
+			ana := anaPath(testNqn, 1)
+			req := cntlrReq(reqOpts{revision: 3, primary: true})
+
+			node.Reset()
+			disarm := route.fault(srv, node)
+			reply, err := srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass the dm-clone outlives")
+			cnSweepAssertDetails(t, reply.GetAgentReply(),
+				agent.LeftoverKindDm+":"+clone, "the leftover details")
+			if dm := node.dms[clone]; dm == nil || dm.noHydration {
+				t.Fatalf("the route is vacuous: the dm-clone is gone or "+
+					"not hydrating (%v)", dm)
+			}
+			if n := len(node.callsMatching(toRaid0)); n != 0 {
+				t.Fatalf("the ns-dev was reloaded onto the raid0 %d times "+
+					"under a live dm-clone, want 0", n)
+			}
+			dev := node.dms[nsDev]
+			if dev == nil || dev.table != linear(on[route.on]) ||
+				dev.suspended {
+				t.Fatalf("the ns-dev is %+v, want it live on the %s: %q",
+					dev, route.on, linear(on[route.on]))
+			}
+			if got := node.files[ana]; got != route.ana {
+				t.Fatalf("ana_grpid is %q, want %q", got, route.ana)
+			}
+			assertNoCall(t, node, "writedirect "+ana+"=1")
+			assertErrorDetails(t,
+				reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
+				detailsNsDevNotDesired, "the held ns-dev's row")
+			assertErrorDetails(t,
+				probedCntlrInfo(t, srv).GetNsIdToDmLinear()[testNs],
+				detailsNsDevNotDesired, "the held ns-dev's probe")
+			if !retrying(t, srv) {
+				t.Fatalf("a pass that held an ns-dev registered no retry")
+			}
+
+			// The fault gone: the dm-clone goes first, the reload onto the
+			// raid0 follows it, and the optimized move comes last.
+			disarm()
+			node.Reset()
+			reply, err = srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepOnlyDisconnects(t, reply.GetAgentReply(),
+				"the pass after the fault")
+			if route.on == "clone" {
+				assertOrder(t, node, "cmd dmsetup reload "+nsDev+
+					" --table "+linear(on["error"]),
+					"cmd dmsetup remove "+clone, toRaid0)
+				assertNoCall(t, node, "writedirect "+ana+"=")
+			} else {
+				assertOrder(t, node, "cmd dmsetup remove "+clone, toRaid0,
+					"writedirect "+ana+"=1")
+			}
+			if n := len(node.callsMatching(toRaid0)); n != 1 {
+				t.Fatalf("the ns-dev was reloaded onto the raid0 %d times, "+
+					"want 1", n)
+			}
+			if got := node.dms[nsDev].table; got != linear(raid0No) {
+				t.Fatalf("the ns-dev is %q after the pass, want it on the "+
+					"raid0", got)
+			}
+			if got := node.files[ana]; got != "1" {
+				t.Fatalf("ana_grpid is %q after the pass, want 1", got)
+			}
+			assertOk(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
+				"the ns-dev's row after the pass")
+			if retrying(t, srv) {
+				t.Fatalf("the pass that held nothing kept the retry")
+			}
+		})
+	}
+}
+
+// TestAHeldNsDevIsRedrivenWithoutARevision pins the other half of the hold:
+// with no dm-clone at all, an unanswered `dmsetup ls` holds an ns-dev off
+// its raid0 too — nothing can rule out a dm-clone hydrating into it — and
+// here nothing is left for the Check verdict to report once the listing
+// answers again. A standby promoted to primary, and a namespace resumed, each
+// keep their ns-dev parked and inaccessible on that pass. The worker re-syncs
+// on a revision or a reply code, never on a row, so without the CN10 retry
+// the namespace would stay unserved until the next revision. The pass reports
+// the ns-dev's row ERROR, as the probe does, and registers the retry, whose
+// one attempt puts the ns-dev on the raid0 and moves it optimized, each
+// exactly once, and then stops.
+func TestAHeldNsDevIsRedrivenWithoutARevision(t *testing.T) {
+	linear := func(devNo string) string {
+		return agent.LinearTable(testTdSize/512, devNo, 0)
+	}
+	for _, shape := range []struct {
+		name string
+		from reqOpts
+	}{
+		{"a standby promoted", reqOpts{revision: 2, primary: false}},
+		{"a namespace resumed",
+			reqOpts{revision: 2, primary: true, suspended: true}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, node := newTestServer(t)
+			srv.retryInterval = time.Hour
+			syncupBoth(t, srv, shape.from)
+			nsDev := nsDevName(srv, testNs)
+			ana := anaPath(testNqn, 1)
+
+			node.Reset()
+			node.killCmd["dmsetup ls"] = true
+			reply, err := srv.SyncupCntlr(ctx,
+				cntlrReq(reqOpts{revision: 3, primary: true}))
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			cnSweepAssertCode(t, reply.GetAgentReply(),
+				common.ReplyCodeLeftover, "the pass over an unanswered "+
+					"listing")
+			errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
+			raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
+			if raid0No == "" {
+				t.Fatalf("the pass built no raid0")
+			}
+			if got := node.dms[nsDev].table; got != linear(errNo) {
+				t.Fatalf("the ns-dev is %q, want it held on the dm-error",
+					got)
+			}
+			if got := node.files[ana]; got != "3" {
+				t.Fatalf("ana_grpid is %q, want 3", got)
+			}
+			assertErrorDetails(t,
+				reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
+				detailsNsDevNotDesired, "the held ns-dev's row")
+			assertErrorDetails(t,
+				probedCntlrInfo(t, srv).GetNsIdToDmLinear()[testNs],
+				detailsNsDevNotDesired, "the held ns-dev's probe")
+			if !retrying(t, srv) {
+				t.Fatalf("a pass that held an ns-dev registered no retry")
+			}
+
+			node.Reset()
+			retryAttempt(t, srv)
+			toRaid0 := node.callsMatching("cmd dmsetup reload " + nsDev +
+				" --table " + linear(raid0No))
+			optimized := node.callsMatching("writedirect " + ana + "=1")
+			if len(toRaid0) != 1 || len(optimized) != 1 {
+				t.Fatalf("the retry made %d reloads onto the raid0 and %d "+
+					"optimized moves, want 1 and 1", len(toRaid0),
+					len(optimized))
+			}
+			assertOrder(t, node, toRaid0[0], optimized[0])
+			if got := node.files[ana]; got != "1" {
+				t.Fatalf("ana_grpid is %q after the retry, want 1", got)
+			}
+			assertOk(t,
+				probedCntlrInfo(t, srv).GetNsIdToDmLinear()[testNs],
+				"the ns-dev's probe after the retry")
+			if retrying(t, srv) {
+				t.Fatalf("the attempt that held nothing kept the retry")
+			}
 		})
 	}
 }

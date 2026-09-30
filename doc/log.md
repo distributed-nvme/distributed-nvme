@@ -468,12 +468,17 @@ chasing a leaked device greps both logs for the same thing.
 Both are Info: a leftover is a normal state for as long as a dead remote's
 failfast window lasts, on the pass of a cn teardown that sets
 `nvme disconnect`s going (they run off the pass, `cnagent.md` CN10), and for
-as long as such a delete waits out the kernel's admin timeout; a later
-`Syncup*` sweeps it away. Nothing on the
-agent re-drives that sweep by itself — a `Check*` round recomputes the
-verdict and removes nothing — so what brings the removal back is the worker
-seeing the leftover code again and re-issuing the syncup (`dnv-worker.md`
-RW4 step 5). Both are emitted once per pass — the agent's on every sweep and
+as long as such a delete waits out the kernel's admin timeout. A disconnect
+still running goes when it completes, and the next `Check*` verdict or
+`Syncup*` probe finds it gone; a later `Syncup*` sweeps away any other
+leftover and issues again a disconnect that failed. Nothing on the agent
+re-drives that sweep because of a leftover — a `Check*` round recomputes the
+verdict and removes nothing, and the agents' own background converges
+(`cnagent.md` CN10's connect retry, `dnagent.md` DN13's connect retry and
+DN12's fence timer) sweep only while one is registered or armed for a reason
+of its own — so what brings the removal back is the worker seeing the
+leftover code again and re-issuing the syncup (`dnv-worker.md` RW4 step 5).
+Both are emitted once per pass — the agent's on every sweep and
 every verdict that was not clean, the worker's on every such reply — so a
 leftover that does NOT go away is in both logs every round, which is exactly
 what distinguishes it from one the next pass removed. A clean pass emits

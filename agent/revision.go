@@ -49,7 +49,7 @@ func OkReply() *pb.AgentReply {
 // and a leftover is by definition something nothing wanted names. It is never
 // stored anywhere — the agent recomputes it by enumerating the node on every
 // Syncup* and every Check*, so the worker's ordinary "re-sync while the code
-// is non-zero" rule is the whole retry machinery.
+// is non-zero" rule is the whole retry machinery for a leftover.
 //
 // details names at most maxLeftoverNames objects so one stuck object cannot
 // produce an unbounded reply; the agent log carries the full list every pass.

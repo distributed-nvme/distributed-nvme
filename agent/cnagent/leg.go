@@ -736,14 +736,15 @@ func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 // startConnectRetry registers a cntlr for the CN10 background retry: a leg or
 // a clone source failed to converge (CN10/CN18), a clone recovery's
 // destination bitmaps were not applied or another later step of a clone
-// failed (CN18 says which), or a group's leg_list holds a member that is not
-// available (CN12). A goroutine re-runs the whole converge every
-// CnConnectRetryInterval seconds under the CN1 locks until a pass registers
-// none of these (build's stopConnectRetry) or the cntlr is torn down. The
-// RPC itself retries a connect, or waits for its namespace head, only as far
-// as the pass's CnConnectPassBudget allows: an in-pass retry, or a step of
-// that wait, starts only while the budget still covers its pause
-// (connectWithin, awaitNsHead).
+// failed (CN18 says which), a group's leg_list holds a member that is not
+// available (CN12), or the build held an ns-dev off its td's raid0 while a
+// dm-clone the plan does not want may still be live (CN18). A goroutine
+// re-runs the whole converge every CnConnectRetryInterval seconds under the
+// CN1 locks until a pass registers none of these (build's stopConnectRetry)
+// or the cntlr is torn down. The RPC itself retries a connect, or waits for
+// its namespace head, only as far as the pass's CnConnectPassBudget allows:
+// an in-pass retry, or a step of that wait, starts only while the budget
+// still covers its pause (connectWithin, awaitNsHead).
 func (s *CnAgentServer) startConnectRetry(
 	st *cntlrState,
 	plan *cntlrPlan,

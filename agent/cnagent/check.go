@@ -69,7 +69,8 @@ func (s *CnAgentServer) checkCnRound(
 	// makes, with nothing touched (CN23). It is recomputed every round and
 	// stored nowhere, so a leftover that has since gone stops being reported
 	// on its own, and one that is still there keeps driving the worker's
-	// re-sync until the next SyncupCn sweeps it away.
+	// re-sync until it goes: a background disconnect finishing, or the next
+	// SyncupCn sweeping it away.
 	reply := &pb.CheckCnReply{
 		AgentReply: s.sweepCn(ctx, st, false).Reply(),
 		Revision:   st.req.GetRevision(),

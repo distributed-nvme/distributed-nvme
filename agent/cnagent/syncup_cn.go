@@ -18,7 +18,7 @@ import (
 // reboot the tmpfs arena and the dm state are both empty; after a plain agent
 // restart both survive, and the converge re-applies a clone whose build had
 // enabled hydration as a no-op and recovers one the dead agent left short of
-// that) — and finally sweeps the kind-`b` wrappers no stored cntlr
+// that) — and finally sweeps the kind-`cb` wrappers no stored cntlr
 // wants any more ([D14]). It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
 // unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a
@@ -201,7 +201,7 @@ func (s *CnAgentServer) convergeCn(
 		s.ensureTmpFile(ctx, filePath, tmpfsPath, tmpfsOk))
 
 	// The loop device is the whole of the clone-metadata arena: CN18 carves it
-	// into kind-`b` wrapper linears and needs no volume manager on top
+	// into kind-`cb` wrapper linears and needs no volume manager on top
 	// ([D14]).
 	loopDev, loopErr := s.ensureLoopDev(ctx, filePath, tmpfsPath, tmpfsOk)
 	info.LoopDevInfo = t.FromErr(resKeyLoopDev, filePath, loopDev, loopErr)

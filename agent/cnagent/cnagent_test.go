@@ -660,7 +660,7 @@ func cloneName(srv *CnAgentServer, cloneId uint64) string {
 		testCluster, testCn, testSp, cloneId)
 }
 
-// cloneMetaName is the kind-`b` wrapper over one clone's slot in the
+// cloneMetaName is the kind-`cb` wrapper over one clone's slot in the
 // clone-metadata arena ([D14]).
 func cloneMetaName(srv *CnAgentServer, cloneId uint64) string {
 	return names(srv).CnCloneMetaDmName(
@@ -4867,7 +4867,7 @@ func TestDeclarativeCntlrTeardown(t *testing.T) {
 	}
 	// The base state outlives every cntlr: the tmpfs mount and its single
 	// loop device stay, and the loop above already showed that every dm
-	// device — the kind-`b` wrappers included — is gone.
+	// device — the kind-`cb` wrappers included — is gone.
 	if got := node.mounts[srv.nf.CnTmpfsPath(testCluster, testCn)]; got !=
 		"tmpfs" {
 		t.Fatalf("the teardown unmounted the tmpfs (%q)", got)

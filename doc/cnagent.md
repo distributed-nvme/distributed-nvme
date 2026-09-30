@@ -980,7 +980,7 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       `CnConnectRetryInterval` seconds under the CN1 locks until a pass
       registers it no more, or teardown (the DN13 pattern); the RPC itself
       retries a connect, or waits for its head, only as far as the pass's
-      budget allows. Four things register it: a leg that failed to converge
+      budget allows. Five things register it: a leg that failed to converge
       — its connect, its multipath namespace or its wrapper (above), an
       unknown controller or a disconnect of its subsystem still in flight
       (below) — a clone source whose connection failed, or whose disconnect
@@ -992,9 +992,11 @@ CN10. **Legs** (`leg.go`; every leg of every group of every slice in
       converge read its legs before the sides' ANA flips had reached this
       CN's sysfs left its md groups unassembled — and a RedundNone SP's
       pools unbuilt — until the next revision bump, because nothing re-ran
-      that converge). Every attempt mints its own
+      that converge), and an ns-dev the build held off its td's raid0
+      while a dm-clone the plan does not want may still be live (CN18).
+      Every attempt mints its own
       trace id (CN2) and is a whole converge, which decides afresh whether
-      any of the four still holds; the first converge that finds none stops
+      any of the five still holds; the first converge that finds none stops
       the retry. **Dead paths**: a controller of the leg
       NQN whose `traddr`/`trsvcid` matches no desired side (the src side
       after `FinishMigration` — its controller died with DNR and will never
@@ -1757,10 +1759,10 @@ CN16. **Namespaces and host-facing nvmet** (`td.go`, `plan.go`). Per
       same reload itself, still after pre-step 1. Unparking: the reload
       onto the backing the remaining
       rules select first, then ANA per the rule below — except onto the
-      td's raid0 on a pass whose sweep an unanswered listing stopped while a
-      dm-clone the plan does not want may still be live: the namespace then
-      stays parked, in the ANA group it has, until a pass whose listings
-      answer (CN18).
+      td's raid0 while a dm-clone the plan does not want may still be live
+      (the pass's L3 did not run, or left one): the namespace then stays
+      parked and `inaccessible`, its ns-dev row `ERROR`, until a pass that
+      leaves no such dm-clone live (CN18).
       No path of a pass leaves a CN device suspended unless a `dmsetup`
       command on it fails, and one such failure leaves it so on purpose: a
       reload **fails closed** (*decided 2026-09-29*, `dnagent.md` §2.8). A
@@ -1857,8 +1859,11 @@ CN17. **Transfers** (`xfer.go`; both roles, fig. `100Transfer`). Per
       When the plan cannot size that table — the origin namespace is not in
       it at all, or it is but its td left `td_list` in the same request,
       which leaves the namespace's size unknown — the size is summed from the
-      device's **own live table** instead; without that fallback the
-      demotion would be skipped and the departing raid0 never released. A
+      device's **own live table** instead, by pre-step 3 and, on a pass
+      whose sweep an unanswered listing stopped, by the build's converge of
+      the transfer, which records the origin error rows after it; without
+      that fallback the demotion would be skipped and the departing raid0
+      never released. A
       primary is no exception: an unresolved origin makes `plan.xferServed`
       false there as well, so the primary demotes the device like a standby
       and the transfer no longer holds the departed raid0 against L6 — a
@@ -2092,14 +2097,25 @@ CN18. **Clones** (`clone.go`; primary only, fig. `090Clone`,
         hydration is on and not finished goes on copying into the raid0
         whether or not anything has it open: its copy of a region not yet
         hydrated would overwrite a write a host made to that region of the
-        raid0 directly. So on such a pass, while a dm-clone
-        the plan does not want may still be live — the dm listing did not
-        answer, or it names one — the build puts no ns-dev onto a td's raid0
-        it is not on already: one over the dm-clone stays there and serves
-        on through it, a parked one stays parked, a new one is created
-        parked, and none of them is moved to `optimized` on that pass. The
-        next pass whose listings answer takes the order above — the park of
-        one still over the dm-clone, L3, then the reload.
+        raid0 directly. A pass whose listings answer can leave it loaded
+        too: L3's remove fails or is killed — behind an ns-dev whose park
+        failed its load, say, which stays suspended over the dm-clone
+        (CN16) — or the descent stops above L3. So while a dm-clone the
+        plan does not want may still be live — L3 did not run or left one;
+        on a stopped pass, the dm listing did not answer or names one — the
+        build puts no ns-dev onto a td's raid0 it is not on already. One
+        over the dm-clone stays there and serves on through it, in the ANA
+        group it has. One parked stays parked and goes `inaccessible`:
+        pre-step 2 may have parked it on this very pass while it was
+        optimized, and its hosts should queue rather than take IO errors. A
+        new one is created parked. None of them is moved to `optimized` on
+        that pass; each reports its ns-dev row `ERROR` in the probe's words
+        (`table is not the desired namespace backing`), and the hold
+        registers the CN10 retry, because a hold that an unanswered
+        `dmsetup ls` alone caused leaves nothing for the Check verdict to
+        name once the listing answers again. The first pass whose L3
+        removes the dm-clone takes the order above — the park of one still
+        over the dm-clone, L3, then the reload.
       * **L3** removes the dm-clone, **before** its source connection dies —
         dm-clone flushes through the source on removal and blocks without it.
       * **L4** removes the metadata wrapper `CnCloneMetaDmName` under
@@ -2268,7 +2284,8 @@ CN21. **Two scopes, one chain.** The principle — removal is actual minus
       turn holds back the one thing that is safe only after a step the
       stopped sweep skipped: while a dm-clone the plan does not want may
       still be live it puts no ns-dev onto a td's raid0 it is not on
-      already — that waits for L3 to remove the dm-clone (CN18). A
+      already — that waits for L3 to remove the dm-clone (CN18), as it does
+      after a chain whose L3 did not run or left one. A
       namespace that has left `ns_list` it never touches, stopped sweep or
       not: that is L1's alone (below), after P0 (CN16).
       The snapshot is thrown away at the end of the pass: it decides
@@ -2721,13 +2738,18 @@ CN30. `CheckCn`, `CheckCntlr`, `GetCnInfo` and `GetCntlrInfo` reply
       Details and log record are CN20's.
 
       It is recomputed every round and stored nowhere. That is the whole
-      retry mechanism and it is deliberately the only one: a leftover that
-      has since gone stops being reported by itself, one that is still there
-      keeps the code non-zero, and the worker's existing "re-sync while the
-      code is non-zero" rule (RW4 step 5) re-issues the `Syncup*` that sweeps
-      again. No agent-side retry loop exists, because a second retrier for
-      something the worker already re-drives would be invisible to the
-      control plane. A restart is covered by the same path: whatever the
+      retry mechanism for a leftover and it is deliberately the only one: a
+      leftover that has since gone stops being reported by itself, one that
+      is still there keeps the code non-zero, and the worker's existing
+      "re-sync while the code is non-zero" rule (RW4 step 5) re-issues the
+      `Syncup*` that sweeps again. No agent-side loop exists for leftovers,
+      because a second retrier for something the worker already re-drives
+      would be invisible to the control plane. CN10's connect retry sweeps
+      only as part of a converge it re-runs for a reason of its own, and a
+      sweep's `nvme disconnect` completes off the pass (CN10's disconnect
+      registry), where the next probe finds it gone; one that failed is
+      issued again by the next pass that still finds the controller. A
+      restart is covered by the same path: whatever the
       startup reconcile could not remove surfaces on the first `Check*` of
       the object that owns it (CN2). On the `Get*Info` side the code is
       carried but read by nobody — the gateway's Inspect passes those replies
@@ -3146,7 +3168,14 @@ between `Recv` and the round (SH24).
    the still-wanted ns-dev, which has no td to park onto, keeps the raid0
    open itself there, so that case asserts neither a clean reply nor the
    raid0's removal. In both, an equal-revision re-sync reloads the
-   transfer device no more (CN17).
+   transfer device no more (CN17). On a pass whose sweep an unanswered
+   listing stopped, which runs no pre-step 3, the build makes that one
+   reload itself (`TestStoppedPassDemotesATransferWithADepartedOrigin`):
+   each of the four listings killed once, for both shapes and for a
+   cntlr demoted to standby in the same revision, the pass replies the
+   Leftover code and reloads the transfer device exactly once onto the
+   error table of its live size, and the next pass, its listings
+   answering, reloads it no more.
 7. **§11.1.1 / member reconciliation**: scripted `--examine` outcomes and
    the fake's sysfs view of the array drive: no superblocks ⇒
    create+assume-clean; one ⇒ assemble + add; both-with-one-left-out ⇒
@@ -3337,10 +3366,19 @@ between `Recv` and the round (SH24).
     while it is parked and the delete's latch resumes it, or while a new
     namespace joins the same td: after the stopped pass the dm-clone is
     still there, each ns-dev is live over the dm-clone or parked on the
-    td's dm-error, and no `ana_grpid` is written `1`; the next pass
-    removes the dm-clone before any reload onto the raid0 — parking one
-    still over it first — and writes a parked namespace's `ana_grpid` `1`
-    only after that reload.
+    td's dm-error, and no `ana_grpid` is written `1`; each held ns-dev's
+    row reads `ERROR` in the reply and in `GetCntlrInfo` alike, and the
+    CN10 retry is registered; the next pass removes the dm-clone before
+    any reload onto the raid0 — parking one still over it first — writes
+    a parked namespace's `ana_grpid` `1` only after that reload, reads
+    the row `OK` and stops the retry.
+    `TestAHeldNsDevIsRedrivenWithoutARevision` — with no dm-clone at all,
+    a standby promoted and a namespace resumed, each with `dmsetup ls`
+    killed once: the ns-dev stays on the td's dm-error with `ana_grpid`
+    `3`, its row `ERROR` in the reply and in `GetCntlrInfo`, and the CN10
+    retry is registered; one retry attempt, at the same revision, makes
+    exactly one reload onto the raid0 and one `ana_grpid` write of `1`,
+    in that order, and stops the retry.
     `TestUnansweredListingLeavesADroppedNamespaceToTheSweep` — the only
     namespace leaves `ns_list`, its ns-dev left dm-suspended over the
     raid0 by an older build and its `ana_grpid` already `3`: no
@@ -3351,6 +3389,19 @@ between `Recv` and the round (SH24).
     `rmdir` and the `dmsetup remove`, and writes its `ana_grpid` nothing
     but `3`.
     With the four listings answering,
+    `TestALeftDmCloneKeepsTheNsDevOffItsRaid0` — the hold on a pass
+    whose chain leaves the dm-clone, by three routes: the park of the
+    ns-dev over it fails its load, its `dmsetup remove` is killed before
+    it acts, and a sibling namespace dropped in the same revision whose
+    ns-dev will not go stops the descent at L2. On that pass no reload
+    onto the raid0 and no `ana_grpid` write of `1`: the ns-dev whose park
+    failed serves on through the dm-clone, still `1`; a parked one stays
+    on the td's dm-error and goes `3`; the row reads `ERROR` in the reply
+    and in `GetCntlrInfo`, and the CN10 retry is registered. The pass
+    after the fault removes the dm-clone — parking first the ns-dev still
+    over it — before the one reload onto the raid0, writes a parked
+    namespace's `ana_grpid` `1` only after that reload, and stops the
+    retry.
     `TestUnansweredNamespaceListingRemovesNoNamespace` — nsid 2 leaves
     `ns_list` under a subsystem that stays while the sweep's own listing
     of that subsystem's namespaces is killed once: a Leftover naming

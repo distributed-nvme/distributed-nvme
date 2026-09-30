@@ -63,6 +63,11 @@ const (
 	// changed every round would defeat the proto.Equal suppression of the CN24
 	// check stream.
 	detailsProvisioning = "provisioning"
+	// detailsNsDevNotDesired is an ns-dev whose live table is not the CN16
+	// backing its plan wants. The probe reports it, and so does the converge
+	// for an ns-dev it held off its td's raid0 (ensureNsDev), so the two
+	// channels do not flip the row against each other.
+	detailsNsDevNotDesired = "table is not the desired namespace backing"
 )
 
 // xferModel is the attr_model every transfer subsystem presents: the [D2]
@@ -179,12 +184,12 @@ type cntlrPlan struct {
 	// cloneMayLinger is what this pass's sweep tells the build phase that
 	// follows it (CN21). sweepCntlr sets it on a converge and nothing else
 	// does; the plan is built afresh for every pass, so it never outlives
-	// the pass that learned it. Set, it says that an unanswered listing
-	// stopped the sweep, so neither the chain nor CN9's pre-steps 2 and 3
-	// ran, and that a dm-clone the plan does not want may still be live —
-	// the dm listing did not answer, or it named one — and one whose
-	// hydration is on goes on copying into its destination raid0 until L3
-	// removes it.
+	// the pass that learned it. Set, it says that a dm-clone the plan does
+	// not want may still be live after the sweep — on a pass that removes,
+	// because L3 did not run (the descent stopped above it) or left one; on
+	// one an unanswered listing stopped, because the dm listing did not
+	// answer or named one — and one whose hydration is on goes on copying
+	// into its destination raid0 until L3 removes it.
 	cloneMayLinger bool
 }
 

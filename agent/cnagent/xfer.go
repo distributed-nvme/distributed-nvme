@@ -77,7 +77,9 @@ func (s *CnAgentServer) xferNsConf(
 
 // ensureXfer converges one transfer's device and its nvmet export. An origin
 // that resolves to nothing in this request leaves the xfer's own resources in
-// error and the pass continues (CN29).
+// error and the pass continues (CN29) — with the device still demoted onto an
+// error table of its own live size, so that it lets go of the departed td's
+// raid0 on a pass whose sweep an unanswered listing stopped too (CN17).
 func (s *CnAgentServer) ensureXfer(
 	ctx context.Context,
 	st *cntlrState,
@@ -89,6 +91,11 @@ func (s *CnAgentServer) ensureXfer(
 	ssKey := resKeyOf(resKeyXferSsFmt, xp.xferId)
 	nsKey := resKeyOf(resKeyXferNsFmt, xp.xferId)
 	if xp.ori == nil || xp.ori.td == nil {
+		// The build's copy of pre-step 3, which a stopped sweep does not
+		// run: the plan cannot size the device, so demoteXfer sizes it from
+		// its live table. After a pre-step 3 that ran it finds the device
+		// demoted already and reloads nothing.
+		s.demoteXfer(ctx, xp)
 		details := fmt.Sprintf("origin namespace %s/%d not found",
 			xp.xfer.GetOriNqn(), xp.xfer.GetOriNsIdx())
 		info.XferIdToDmLinear[xp.xferId] = st.tracker.Err(

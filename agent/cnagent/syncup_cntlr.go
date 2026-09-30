@@ -433,11 +433,21 @@ func (s *CnAgentServer) build(
 	if plan.wantAny {
 		// held: the namespaces whose ns-dev ensureNsDev kept off a raid0 a
 		// dm-clone the plan does not want may still be hydrating into.
-		held := make(map[uint64]bool)
+		held := make(map[uint64]nsDevHold)
 		for _, np := range plan.namespaces {
 			nsHeld, err := s.ensureNsDev(ctx, np, plan.cloneMayLinger)
-			if nsHeld {
-				held[np.nsId] = true
+			if nsHeld != nsDevConverged {
+				held[np.nsId] = nsHeld
+				// A held ns-dev is not where its plan wants it, and nothing
+				// else is sure to re-drive the pass that puts it there: a
+				// hold that an unanswered `dmsetup ls` alone caused leaves
+				// the Check verdict clean once the listing answers, and the
+				// worker re-syncs on a revision or a reply code, never on a
+				// row. So the hold registers the CN10 retry, whose next
+				// attempt lists afresh and, with no dm-clone left to wait
+				// for, reloads the ns-dev.
+				s.startConnectRetry(st, plan)
+				retryNeeded = true
 			}
 			if err != nil && cloneBuiltThisPass(info, np) {
 				// Rule 5 after a build this pass finished: hydration is on,
@@ -451,12 +461,19 @@ func (s *CnAgentServer) build(
 				s.startConnectRetry(st, plan)
 				retryNeeded = true
 			}
+			key := resKeyOf(resKeyNsDevFmt, np.nsId)
+			if err == nil && nsHeld != nsDevConverged {
+				// In the probe's words, so the converge and the Check
+				// round report the held ns-dev alike.
+				info.NsIdToDmLinear[np.nsId] = st.tracker.Err(
+					key, np.devName, detailsNsDevNotDesired)
+				continue
+			}
 			// A deferred namespace is built exactly as the effective plan
 			// wants it — on the td's dm-error — but nothing under it can
 			// serve, so it reports PROVISIONING rather than OK ([D15]).
 			info.NsIdToDmLinear[np.nsId] = deferredFromErr(
-				st.tracker, np.deferred,
-				resKeyOf(resKeyNsDevFmt, np.nsId), np.devName,
+				st.tracker, np.deferred, key, np.devName,
 				nsDevDetails(np), err)
 		}
 		for _, ssp := range plan.subsystems {
@@ -464,15 +481,25 @@ func (s *CnAgentServer) build(
 		}
 
 		// ANA rewrites to optimized last — §11.1 new_primary step 4. A held
-		// namespace keeps the group it has: a parked one stays inaccessible
-		// rather than go optimized over the dm-error, and one that serves
-		// goes on serving from the table it keeps.
+		// namespace that serves keeps the group it has and goes on serving
+		// from the table it keeps. A held one that is parked goes
+		// inaccessible rather than optimized over the dm-error: it may have
+		// been optimized until this pass's P2 parked it for an L3 that then
+		// left the dm-clone, and a host should queue, not take IO errors.
 		for _, np := range plan.namespaces {
-			if np.anaGrpId == common.AnaGrpIdInaccessible || held[np.nsId] {
+			grpId := np.anaGrpId
+			switch held[np.nsId] {
+			case nsDevHeldServing:
 				continue
+			case nsDevHeldParked:
+				grpId = common.AnaGrpIdInaccessible
+			default:
+				if grpId == common.AnaGrpIdInaccessible {
+					continue
+				}
 			}
 			if err := s.setAna(
-				ctx, np.ss.nqn, np.nsIdx, np.anaGrpId); err != nil {
+				ctx, np.ss.nqn, np.nsIdx, grpId); err != nil {
 				slog.ErrorContext(ctx, "ana transition failed",
 					slog.String("nqn", np.ss.nqn),
 					slog.String("error", err.Error()))

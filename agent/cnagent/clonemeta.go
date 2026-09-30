@@ -23,7 +23,7 @@ import (
 // effectively suspended namespace is parked, live, on the td's dm-error
 // (§11.6, [D12]). The scan is gone regardless.)
 //
-// The allocator's registry is the kernel's own dm tables: every kind-`b`
+// The allocator's registry is the kernel's own dm tables: every kind-`cb`
 // wrapper's `0 {len} linear {loopdev} {offset}` line records its own
 // allocation, and the arena and the dm state are volatile *together* (a reboot
 // clears both, an agent restart preserves both), so none of diskmeta.go's
@@ -225,7 +225,7 @@ func cloneMetaUnits(regionCnt uint64) uint64 {
 	return (bytes + common.CnCloneMetaUnit - 1) / common.CnCloneMetaUnit
 }
 
-// cloneMetaSlot is one kind-`b` wrapper as read back out of its own dm table —
+// cloneMetaSlot is one kind-`cb` wrapper as read back out of its own dm table —
 // the allocator's registry record. unitCount == 0 marks a wrapper whose table
 // is not a single linear target over the arena: it holds its name but claims
 // no units, and its clone reports RES_STATUS_ERROR.
@@ -245,7 +245,7 @@ type cloneMetaSlot struct {
 }
 
 // cloneMetaArena is one pass's view of the arena: the loop device it currently
-// lives on and every kind-`b` wrapper of this CN. It is re-probed once per
+// lives on and every kind-`cb` wrapper of this CN. It is re-probed once per
 // converge or probe pass and never persisted — loop names
 // are kernel-assigned and a tmpfs remount can change them under a live agent.
 type cloneMetaArena struct {
@@ -254,7 +254,7 @@ type cloneMetaArena struct {
 	slots     map[string]cloneMetaSlot
 }
 
-// Wrappers enumerates the kind-`b` wrappers of one CN and the unit range each
+// Wrappers enumerates the kind-`cb` wrappers of one CN and the unit range each
 // holds. `dmsetup ls` prints the literal "No devices found" and still exits 0
 // on an empty node, which the prefix filter drops by construction; a non-zero
 // exit really is a failure. Only the name is taken from `ls` — its device
@@ -476,7 +476,7 @@ func cloneMetaFreeRuns(
 
 // cloneMetaArena probes the arena: the single loop device behind
 // CnTmpFilePath (CN5's `losetup --associated`, never persisted) plus the
-// registry read back out of the kind-`b` dm tables.
+// registry read back out of the kind-`cb` dm tables.
 func (s *CnAgentServer) cloneMetaArena(
 	ctx context.Context,
 	clusterId uint64,
@@ -636,7 +636,7 @@ func (s *CnAgentServer) ensureCloneMeta(
 	return nil
 }
 
-// removeCloneMetaDm removes one kind-`b` wrapper under cloneMetaMu. Removal is
+// removeCloneMetaDm removes one kind-`cb` wrapper under cloneMetaMu. Removal is
 // a *mutation of the registry* — the registry being the kernel's dm table set
 // itself — so it belongs in the same critical section as the
 // enumerate → discard → create of ensureCloneMeta (CN18): two cntlrs of

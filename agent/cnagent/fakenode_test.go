@@ -83,7 +83,7 @@ type fakeNode struct {
 	assembleDrop map[string]bool
 
 	// the §3.2 base state: the clone-metadata arena is a plain file on a
-	// tmpfs mount behind one loop device, carved by kind-`b` dm wrappers
+	// tmpfs mount behind one loop device, carved by kind-`cb` dm wrappers
 	// ([D14]) — no LVM state of any kind.
 	mounts   map[string]string
 	loops    map[string][]string // backing file → loop devices

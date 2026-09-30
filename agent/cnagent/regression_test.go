@@ -152,6 +152,79 @@ func TestPrimaryTransferLetsGoOfADepartedOrigin(t *testing.T) {
 	}
 }
 
+// TestStoppedPassDemotesATransferWithADepartedOrigin is the same demotion on
+// a pass whose sweep an unanswered listing stopped. Such a pass runs no
+// pre-step 3, so the build's own converge of the transfer device is the one
+// that makes it let go of the departed td's raid0 — and for an origin that
+// no longer resolves the build has no plan size to converge it to. Left
+// alone, the transfer goes on serving the departed td's data, over an
+// optimized path on a primary, until a pass whose listings answer. Each of
+// the four listings is killed once on the departing pass, for the two shapes
+// of a primary and for a cntlr demoted to standby in the same revision: the
+// pass reloads the transfer device once, onto an error table of its own
+// live size, and the next pass, its listings answering, reloads it no more.
+func TestStoppedPassDemotesATransferWithADepartedOrigin(t *testing.T) {
+	xfers := []*pb.Transfer{{
+		XferId:   testXfer,
+		OriNqn:   testNqn,
+		OriNsIdx: 1,
+	}}
+	for _, shape := range []struct {
+		name    string
+		primary bool
+		subsys  map[string]*pb.Subsystem
+	}{
+		{"namespace and td gone", true, map[string]*pb.Subsystem{}},
+		{"td gone, namespace kept", true, nil},
+		{"demoted to standby, namespace and td gone", false,
+			map[string]*pb.Subsystem{}},
+	} {
+		for _, listing := range cnSweepListings {
+			t.Run(shape.name+"/"+listing.name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				syncupBoth(t, srv,
+					reqOpts{revision: 2, primary: true, xfers: xfers})
+				xfer := xferName(srv, testXfer)
+				raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
+				if !strings.Contains(node.dms[xfer].table,
+					"linear "+raid0No) {
+					t.Fatalf("the fixture transfer does not map the "+
+						"raid0: %q", node.dms[xfer].table)
+				}
+				departed := cntlrReq(reqOpts{revision: 3,
+					primary: shape.primary, xfers: xfers,
+					tds: []*pb.ThinDevice{}, subsys: shape.subsys})
+
+				node.Reset()
+				node.killCmd[listing.kill] = true
+				reply, err := srv.SyncupCntlr(context.Background(), departed)
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				cnSweepAssertCode(t, reply.GetAgentReply(),
+					common.ReplyCodeLeftover, "the stopped pass")
+				want := fmt.Sprintf("0 %d error", testTdSize/512)
+				if got := node.dms[xfer].table; got != want {
+					t.Fatalf("the transfer device is %q after the stopped "+
+						"pass, want %q", got, want)
+				}
+				if n := len(node.callsMatching(
+					"cmd dmsetup reload " + xfer)); n != 1 {
+					t.Fatalf("the stopped pass reloaded the transfer "+
+						"device %d times, want 1", n)
+				}
+
+				node.Reset()
+				if _, err := srv.SyncupCntlr(
+					context.Background(), departed); err != nil {
+					t.Fatalf("re-sync: %v", err)
+				}
+				assertNoCall(t, node, "cmd dmsetup reload "+xfer)
+			})
+		}
+	}
+}
+
 // CN22/CN19: a clone the role or the level merely suppresses keeps its chunk
 // files. Deleting them made the worker re-push forever and left a promoted
 // standby's §11.5 rebuild nothing to skip with.

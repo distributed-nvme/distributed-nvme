@@ -681,12 +681,16 @@ func (s *CnAgentServer) removeExportVerified(
 	return !exists
 }
 
-// runChain removes one sp's unwanted objects top-down and returns what is
-// left. The layers are CN21's order; the `stuck` check between them is the
-// stop rule: a layer that left anything behind ends the descent, and the layers
-// below report their objects as leftovers WITHOUT touching them. Removing a
-// leg out from under a live array would strand a migration's md superblocks,
-// and a pass that simply re-runs next round costs nothing.
+// runChain removes one sp's unwanted objects top-down and reports what is
+// left in res. The layers are CN21's order; the `stuck` check between them is
+// the stop rule: a layer that left anything behind ends the descent, and the
+// layers below report their objects as leftovers WITHOUT touching them.
+// Removing a leg out from under a live array would strand a migration's md
+// superblocks, and a pass that simply re-runs next round costs nothing.
+//
+// It returns whether a dm-clone of the chain may still be live: L3 did not
+// run, because the descent stopped above it, or it left one. That is what a
+// cntlr's build phase holds its ns-devs off their raid0 for (CN18).
 func (s *CnAgentServer) runChain(
 	ctx context.Context,
 	st *cntlrState,
@@ -694,7 +698,7 @@ func (s *CnAgentServer) runChain(
 	actual *cnActual,
 	wanted *cnWanted,
 	res *agent.SweepResult,
-) {
+) (clonesMayLinger bool) {
 	// P0, before every layer: an unwanted ns-dev is reloaded onto an error
 	// table of its own size. Two things need that. Disabling the nvmet
 	// namespace above it in L1 closes its backing device, which does not
@@ -711,6 +715,9 @@ func (s *CnAgentServer) runChain(
 		s.parkByTable(ctx, name, actual)
 	}
 	stuck := false
+	// clonesGone is set by L3 alone, and only when it verified every
+	// dm-clone of the chain gone.
+	clonesGone := false
 	// Every layer's own leftovers are collected here, so a stuck layer can
 	// report the layers below it untouched.
 	layers := []struct {
@@ -764,7 +771,11 @@ func (s *CnAgentServer) runChain(
 		},
 		{ // L3 — dm-clones, before their source connections die: dm-clone
 			// flushes through the source on removal.
-			run:    func() bool { return s.removeDms(ctx, res, chain.clones) },
+			run: func() bool {
+				left := s.removeDms(ctx, res, chain.clones)
+				clonesGone = !left
+				return left
+			},
 			report: func() { s.reportDms(res, chain.clones) },
 		},
 		{ // L4 — clone-metadata wrappers. The chunk FILES of a clone that
@@ -907,6 +918,7 @@ func (s *CnAgentServer) runChain(
 			stuck = true
 		}
 	}
+	return len(chain.clones) > 0 && !clonesGone
 }
 
 // parkByTable stops an UNWANTED ns-dev serving, deriving everything it needs
@@ -1426,22 +1438,24 @@ func (s *CnAgentServer) sweepCntlr(
 		// left to remove has no leftover to make the worker drive one.
 		s.cntlrAnaPreStep(ctx, plan)
 	}
+	// The build phase after the sweep must not act on the strength of a
+	// removal that did not happen. While a dm-clone the plan does not want
+	// is live, it may be hydrating into its destination raid0, and a host
+	// writing that raid0 directly could have its write overwritten by a
+	// region the clone had not copied yet, so the build puts no ns-dev onto
+	// a raid0 it is not already on (ensureNsDev). On a pass that removes,
+	// the chain says whether one may be left: L3 did not run, or it left
+	// one. On a stopped sweep no L3 runs: one is left certainly when the dm
+	// listing names one, possibly when that listing did not answer. The
+	// fact is this pass's, read off this snapshot and this chain; the next
+	// pass learns its own.
 	if remove {
 		s.cntlrPreSteps(ctx, plan, actual, wanted)
-		s.runChain(ctx, st, chain, actual, wanted, res)
+		plan.cloneMayLinger = s.runChain(ctx, st, chain, actual, wanted, res)
 	} else {
 		s.reportChain(chain, res)
 	}
 	if converge && !remove {
-		// The build phase after a stopped sweep must not act on the
-		// strength of steps that did not run. With no L3, a dm-clone the
-		// plan does not want may still be live and hydrating into its
-		// destination raid0 — certainly when the dm listing names one,
-		// possibly when that listing did not answer — and a host writing
-		// that raid0 directly could have its write overwritten by a region
-		// the clone had not copied yet, so the build puts no ns-dev onto a
-		// raid0 it is not already on (ensureNsDev). The fact is this
-		// pass's, read off this snapshot; the next pass learns its own.
 		plan.cloneMayLinger = !actual.dmListed || len(chain.clones) > 0
 	}
 	// The local store follows the same rule as the devices: a clone's chunk

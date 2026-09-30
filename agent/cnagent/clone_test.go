@@ -938,7 +938,7 @@ func twoTds() []*pb.ThinDevice {
 	}
 }
 
-// wrapperTable is the kind-`b` table one clone's slot must carry: a single
+// wrapperTable is the kind-`cb` table one clone's slot must carry: a single
 // linear over the arena's loop device at its own unit offset.
 func wrapperTable(node *fakeNode, loop string, unitStart uint64) string {
 	return fmt.Sprintf("0 %d linear %s %d",
@@ -1159,7 +1159,7 @@ func TestCloneMetaExhaustedArenaWithDisconnectedSourceProbesMissing(
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	loop := loopDev(t, srv, node)
 
-	// The same filler as TestCloneMetaArenaExhaustion: one kind-`b` wrapper
+	// The same filler as TestCloneMetaArenaExhaustion: one kind-`cb` wrapper
 	// claiming every unit, so the arena genuinely has no run left.
 	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
 	node.dms[filler] = &fakeDm{
@@ -1313,7 +1313,7 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 		wrapperTable(node, loop, 0); got != want {
 		t.Fatalf("the clone's wrapper table is %q, want %q", got, want)
 	}
-	// ...and a kind-`b` stranger claims every unit after it, so the arena has
+	// ...and a kind-`cb` stranger claims every unit after it, so the arena has
 	// no free run left at all.
 	filler := srv.nf.CnCloneMetaDmName(testCluster, testCn, testSp, 0x999)
 	node.dms[filler] = &fakeDm{
@@ -1376,7 +1376,7 @@ func TestCloneMetaPresentWrapperInFullArenaProbesOk(t *testing.T) {
 	}
 }
 
-// TestCloneMetaOrphanWrapperSwept is the CN2 reconcile bullet: a kind-`b`
+// TestCloneMetaOrphanWrapperSwept is the CN2 reconcile bullet: a kind-`cb`
 // wrapper no stored cntlr's clone_list names is an orphan and its units go
 // back to the arena. The sweep runs from the two passes that hold the node
 // write lock, so a live clone's wrapper is never mistaken for one.
@@ -1694,7 +1694,7 @@ func TestPushCloneBitmapWithoutDmClone(t *testing.T) {
 	}
 }
 
-// TestWrapperEnumerationSurvivesAVanishedWrapper: the kind-`b` name list comes
+// TestWrapperEnumerationSurvivesAVanishedWrapper: the kind-`cb` name list comes
 // from a `dmsetup ls` snapshot that is stale the instant it is printed —
 // SyncupCntlr holds only the node *read* lock, so another cntlr's retire or
 // SP_LEVEL_DISABLE teardown can remove a wrapper between the `ls` and the
@@ -1764,7 +1764,7 @@ func TestWrapperEnumerationFailsOnALiveWrapper(t *testing.T) {
 	}
 }
 
-// TestCloneWrapperRemovalTakesTheArenaLock: removing a kind-`b` wrapper is a
+// TestCloneWrapperRemovalTakesTheArenaLock: removing a kind-`cb` wrapper is a
 // mutation of the allocator's registry — the dm table set itself — so it
 // belongs inside cloneMetaMu with the enumerate → discard → create section it
 // races (CN18). Without it a retire on one cntlr can delete a wrapper

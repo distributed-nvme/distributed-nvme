@@ -2339,8 +2339,10 @@ DN17. Instantiate the SH24-SH26 loop with the §4.10 probes; one round takes
       `ReplyCodeLeftover`, the worker re-issues the `Syncup*` that owns them
       (`dnv-worker.md` RW4), and the sweep inside it tries again — including
       after a restart, where the first Check round is what reports what the
-      startup sweep could not remove. No agent-side retry loop exists,
-      because the one the worker already runs is enough.
+      startup sweep could not remove. No agent-side loop exists for
+      leftovers, because the one the worker already runs is enough; DN13's
+      migration connect retry and DN12's fence timer sweep only as part of
+      a converge they re-run for a reason of their own.
 
 ### 4.10 Probing and error capture — `probe.go`
 
