@@ -74,9 +74,9 @@ type cntlrPlan struct {
 	SpCnLocs  []string
 }
 
-// planCreateCntlr is CreateCntlr's "plain pre-reads for planning"
-// (gateway.md §5.4): the candidate scan needs a size and an exclusion list,
-// and neither can be computed without reading the SP.
+// planCreateCntlr is CreateCntlr's planning read (gateway.md §5.5): the
+// candidate scan needs a size and an exclusion list, and neither can be
+// computed without reading the SP.
 //
 // The size is the SP's footprint — Σ ext_cnt over every group of every slice
 // (§8.4) — which is what one cntlr's CN reserves, so the slices must be read
@@ -84,73 +84,64 @@ type cntlrPlan struct {
 // that already hosts a cntlr of this SP (§6.4), and the location of each of
 // those CNs is the §6.5 tier-1 exclusion (cnLocations).
 //
-// These are plain reads, not a transaction: they only shape the scan, and the
-// STM re-reads all of it authoritatively (§5.8). They can therefore observe a
-// torn world — an SpConf read before a concurrent DeleteStoragePool and a
-// slice key read after it — which is why a listed key that is not there is
-// ABORTED here too: the RPC cannot size a scan against half an SP, and the
-// caller's retry will find the SP gone and hear NOT_FOUND.
+// The SP is read in one read-only Snapshot opened with openSp, not
+// openSpRead: this is a MUTATOR's planning read, so GW5's deleting gate and
+// then GW6's token, when one was sent, are checked here, before the scan this
+// read feeds. Left to the deciding STM, both would come after the scan: with
+// no CN left to draw, a stale client would hear RESOURCE_EXHAUSTED, computed
+// against cntlrs it has not read, and hear it again after refreshing its
+// token, and a pool whose deletion has begun would answer RESOURCE_EXHAUSTED
+// rather than "is being deleted". The deciding STM checks both again (AG4);
+// this read only fixes which refusal such a caller is given.
+//
+// The snapshot serves every read at one store revision, so a slice or cntlr
+// its SpConf lists and the store lacks is a lost invariant key, never a torn
+// read, and loadSlices and loadCntlrs answer it ABORTED. The locations are
+// read after the snapshot, outside it, for the reasons cnLocations gives. The
+// plan only shapes the scan: the STM resolves the SP again (§5.8), recomputes
+// the footprint from the slices it reads and re-checks the plan's cntlrs.
 func planCreateCntlr(
 	ctx context.Context,
 	cli *etcdutil.Client,
-	clusterName string,
-	spName string,
+	req *pb.CreateCntlrRequest,
 ) (cntlrPlan, error) {
-	name := clusterNameOf(clusterName)
-	cc := &pb.ClusterConf{}
-	found, err := cli.Get(ctx, model.ClusterConfKey(name), cc)
-	if err != nil {
-		return cntlrPlan{}, errAborted("%v", err)
-	}
-	if !found {
-		return cntlrPlan{}, errNotFound("cluster %q not found", name)
-	}
-	cid := model.ClusterId(name, cc.GetCreationEpoch())
-	conf := &pb.SpConf{}
-	found, err = cli.Get(ctx, model.SpConfKey(cid, spName), conf)
-	if err != nil {
-		return cntlrPlan{}, errAborted("%v", err)
-	}
-	if !found {
-		return cntlrPlan{}, errNotFound("storage pool %q not found", spName)
-	}
-	slices := make([]*pb.Slice, 0, len(conf.GetSliceIdList()))
-	for _, sliceId := range conf.GetSliceIdList() {
-		key := model.SliceKey(cid, conf.GetSpId(), sliceId)
-		slice := &pb.Slice{}
-		found, err := cli.Get(ctx, key, slice)
+	var plan cntlrPlan
+	err := cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		plan = cntlrPlan{}
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
 		if err != nil {
-			return cntlrPlan{}, errAborted("%v", err)
+			return err
 		}
-		if !found {
-			return cntlrPlan{}, errAborted("slice key %q is missing", key)
-		}
-		slices = append(slices, slice)
-	}
-	addrs := make([]string, 0, len(conf.GetCntlrIdList()))
-	for _, cntlrId := range conf.GetCntlrIdList() {
-		key := model.CntlrKey(cid, conf.GetSpId(), cntlrId)
-		cntlr := &pb.Cntlr{}
-		found, err := cli.Get(ctx, key, cntlr)
+		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
 		if err != nil {
-			return cntlrPlan{}, errAborted("%v", err)
+			return err
 		}
-		if !found {
-			return cntlrPlan{}, errAborted("cntlr key %q is missing", key)
+		cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return err
 		}
-		addrs = append(addrs, cntlr.GetAddrPort())
+		addrs := make([]string, 0, len(cntlrs))
+		for _, cntlr := range cntlrs {
+			addrs = append(addrs, cntlr.GetAddrPort())
+		}
+		plan = cntlrPlan{
+			Cid:       sc.Cid,
+			Cc:        sc.Cc,
+			ExtCnt:    spFootprint(slices),
+			SpCnAddrs: addrs,
+		}
+		return nil
+	})
+	if err != nil {
+		return cntlrPlan{}, mapStmErr(err)
 	}
-	locs, err := cnLocations(ctx, cli, cid, addrs)
+	locs, err := cnLocations(ctx, cli, plan.Cid, plan.SpCnAddrs)
 	if err != nil {
 		return cntlrPlan{}, err
 	}
-	return cntlrPlan{
-		Cid:       cid,
-		Cc:        cc,
-		ExtCnt:    spFootprint(slices),
-		SpCnAddrs: addrs,
-		SpCnLocs:  locs,
-	}, nil
+	plan.SpCnLocs = locs
+	return plan, nil
 }
 
 // CreateCntlr is architecture.md §8.6's CreateCntlr: it adds one standby
@@ -162,11 +153,13 @@ func planCreateCntlr(
 // It allocates, so it is a candidate unit (GW9): the CN scan runs outside the
 // transaction and the transaction re-validates the pick. The scan needs a
 // size, and a cntlr reserves the SP's whole footprint on its CN, so one round
-// is pre-read → scan → commit. Nothing the pre-read produced is trusted: the
-// STM recomputes the footprint from the slices IT reads and hands it to
-// cnLedger.verifyPick, so a pick that no longer covers the current footprint —
-// because the SP grew, or because the CN was charged by someone else — fails
-// the unit as errCandidateChanged and the whole round runs again (§0 #8).
+// is planning read → scan → commit. The planning read opens the pool as the
+// STM does, so a deleting pool and a stale token are refused before the scan
+// (planCreateCntlr). Nothing else it produced is trusted: the STM recomputes
+// the footprint from the slices IT reads and hands it to cnLedger.verifyPick,
+// so a pick that no longer covers the current footprint — because the SP
+// grew, or because the CN was charged by someone else — fails the unit as
+// errCandidateChanged and the whole round runs again (§0 #8).
 //
 // The already-used cntlid slots are read from the SP's own cntlrs rather than
 // tracked in a separate list: the Cntlr records are the only place a slot is
@@ -176,11 +169,11 @@ func planCreateCntlr(
 // pool's cntlrs as the plan read them, and a cntlr committed after that read
 // would make both stale. A TOKEN-CARRYING caller never gets that far: whatever
 // committed that cntlr — another CreateCntlr, the worker's AR7 replacement —
-// bumped SpRev, which fails the token at openSp (GW6). GW6 is presence-based
-// (§0 #7), so a token-LESS CreateCntlr is not serialized by it; the STM
-// therefore compares the cntlrs it reads with the plan and re-plans on one
-// the plan did not see (below), which keeps §6.4 and §6.5's tier 1 whole for
-// every caller.
+// bumped SpRev, which fails the token at the STM's openSp (GW6). GW6 is
+// presence-based (§0 #7), so a token-LESS CreateCntlr is not serialized by it;
+// the STM therefore compares the cntlrs it reads with the plan and re-plans on
+// one the plan did not see (below), which keeps §6.4 and §6.5's tier 1 whole
+// for every caller.
 func (s *Server) CreateCntlr(
 	ctx context.Context,
 	req *pb.CreateCntlrRequest,
@@ -204,8 +197,7 @@ func (s *Server) CreateCntlr(
 	}
 	var cntlrId uint64
 	err := candidateUnit(ctx, func() error {
-		plan, err := planCreateCntlr(
-			ctx, s.cli, req.GetClusterName(), req.GetSpName())
+		plan, err := planCreateCntlr(ctx, s.cli, req)
 		if err != nil {
 			return err
 		}

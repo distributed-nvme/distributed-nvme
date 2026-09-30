@@ -514,7 +514,21 @@ Every handler is the same seven-step shape; per-RPC deviations are in §5.
   `ABORTED`. Checking the token first means a client that sent a stale one
   always sees `ABORTED`, never a misleading precondition error computed
   against state it has not read; a client that sent none has waived that
-  ordering and meets its other preconditions directly. The echoed `addr_port`/`sp_name` inside the token message is
+  ordering and meets its other preconditions directly. A token-carrying
+  mutator that reads before its deciding STM makes the check in the first
+  of those reads — its planning snapshot, or phase 1 of a two-phase RPC —
+  right after resolution, so a token already stale there is `ABORTED`
+  before any later check, a candidate scan or an agent call included, can
+  answer; the deciding STM checks it again, which catches a token that goes
+  stale after that read unless a check in between has answered first.
+  That first read resolves through `openSp`, GW5's `deleting` gate
+  included, so a deleting SP is `FAILED_PRECONDITION` there with any token
+  or none — except in `DeleteClone`, whose phase 1 resolves through
+  `openSpRead`, which has no `deleting` gate, before its `checkSpToken`:
+  only its deciding STM applies the gate, so a stale token's `ABORTED`,
+  phase 1's other answers — `NOT_FOUND` for an unknown clone among them —
+  and the hydration check's agent call all come ahead of it (§5.8).
+  The echoed `addr_port`/`sp_name` inside the token message is
   ignored (`architecture.md` §5.5). Every mutation that changes agent-visible desired state
   bumps the matching revision exactly once in the same STM
   (`model.BumpSpRev`/`BumpDnRev`/`BumpCnRev`); `Update*Disabled` and
@@ -902,11 +916,18 @@ occupancy precondition is `cntlr_ptr_list`; `InspectControllerNode` calls
 
 * **CreateCntlr** — validate slot; candidate unit for one CN
   (`CandExtCnt = Σ` all groups' ext; the scan excludes the CNs of the SP's
-  cntlrs (§6.4) and, at §6.5's tier 1, their `location`s, which the plain
-  pre-reads that plan each round take from those CNs' `CnConf`s —
-  `cnLocations`, sound outside the STM because a location never changes
-  (§8.3) and because the STM re-checks the plan's cntlrs, below; tier 2
-  drops the location exclusion when tier 1 finds no CN).
+  cntlrs (§6.4) and, at §6.5's tier 1, their `location`s; tier 2 drops the
+  location exclusion when tier 1 finds no CN). Each round plans from one
+  read-only `Snapshot` opened with `openSp`, as CreateMigration's planning
+  read is: resolve, the `deleting` gate included, then token (GW6), so a
+  deleting SP is `FAILED_PRECONDITION` and a stale token `ABORTED` before
+  the scan can answer `RESOURCE_EXHAUSTED` for want of an eligible CN — to
+  a stale client, an answer computed against cntlrs it has not read; then
+  the SP's slices, which size the scan, and its cntlrs, whose CNs the scan
+  excludes. The locations are read after the snapshot, from those CNs'
+  `CnConf`s — `cnLocations`, sound outside every transaction because a
+  location never changes (§8.3) and because the STM re-checks the plan's
+  cntlrs, below.
   STM: resolve; token; slot in
   `cntlid_slot_list` and unused ⇒ else `INVALID_ARGUMENT`; the SP as this
   STM reads it has a cntlr on a CN the round's plan did not hold ⇒
@@ -1046,15 +1067,17 @@ All pure etcd; every mutator: resolve, token, mutate, `BumpSpRev`.
   documented-unverifiable [D3]; the per-CN clone budget is untracked, §0
   #16.)
 * **DeleteClone** — *amended 2026-09-16: it LATCHES, and the sp-worker drains
-  (dnv-worker.md §11.7).* Two-phase (AG4). Phase 1 STM (read-only): resolve;
-  clone (`NOT_FOUND`); **if `deleting` is already true, return OK here** — with
-  no writes, no bump and NO agent call — after running GW6's token check
-  explicitly, because phase 1 is the decision on that path and `openSpRead`
-  skips the check (a stale token must still ABORT ahead of the `deleting`
-  row). The short-circuit sits before the agent call and not in phase 2 for a
-  reason that is not an optimization: after the latch the CN has retired the
-  stack, so `GetCntlrInfo` no longer reports the dm-clone and a hydration check
-  would wedge every repeat delete in `FAILED_PRECONDITION` for ever. Otherwise,
+  (dnv-worker.md §11.7).* Two-phase (AG4). Phase 1 STM (read-only): resolve,
+  through `openSpRead` and so without the SP's `deleting` gate, which only
+  phase 2 applies (GW6); token, checked explicitly because phase 1 is the
+  decision on the path below and `openSpRead` skips the check (a stale token
+  must still ABORT ahead of the clone's `deleting` row); clone (`NOT_FOUND`);
+  **if the clone's `deleting` is already true, return OK here** — with no
+  writes, no bump and NO agent call. The short-circuit sits before the agent
+  call and not in phase 2 for a reason that is not an optimization: after the
+  latch the CN has retired the stack, so `GetCntlrInfo` no longer reports the
+  dm-clone and a hydration check would wedge every repeat delete in
+  `FAILED_PRECONDITION` for ever. Otherwise,
   when `force == false`, also resolve the **primary** cntlr's `addr_port` +
   `cn_id` — an SP with no primary cntlr ⇒ `FAILED_PRECONDITION`, since there is
   nobody to prove hydration with and a promotion makes the retry succeed
@@ -1522,6 +1545,16 @@ No other `service Gateway` RPC leaves etcd — the matrix above is complete.
    so every draw is forced; in both cases the first request scans exactly
    twice and lands on a CN, and in a location, of its own, and each CN is
    charged once.
+   CreateCntlr's planning read is pinned ahead of its scan, the CN capacity
+   scans counted from the request's own `etcd range` records: once another
+   client's `CreateCntlr` has taken the last CN the SP did not use, the
+   first client's now-stale token is `ABORTED` "stale revision" without a
+   scan, and the fresh one scans and is `RESOURCE_EXHAUSTED`; on an SP
+   marked deleting with no CN left to draw, a stale, a fresh and an absent
+   token are each `FAILED_PRECONDITION` "is being deleted" without a scan,
+   the stale one pinning that the gate comes before the token. Nothing is
+   written in any case, and the scan counts are what catch a check that
+   gives the same codes but only after the scan.
    Clone bitmaps get three of their own, all on the
    PAIR addressing of §5.8: the appends `(slice 5, bm 0)`, `(slice 0, bm 3)`
    and `(slice 2, bm 1)` land in three chunk keys holding exactly the bytes

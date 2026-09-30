@@ -56,11 +56,11 @@ interview, #15 on 2026-09-28.
    `BumpSpRev`), a deliberate always-stale probe.
 10. **No hidden RPCs, no client-side validation.** dnvctl never issues an RPC
     the operator did not type: no token auto-fetch, and no pre-read for the
-    "disabling the last enabled cntlr" warning that `gateway/cntlr.go:402-405`
-    and architecture.md §8.6 anticipated — that warning is deferred until the
-    gateway itself carries the hint in a reply. dnvctl also does not
-    second-guess values; the gateway's §7 validation is the only validator
-    (CT8).
+    "disabling the last enabled cntlr" warning that `gateway/cntlr.go`'s
+    `UpdateCntlrEnabled` and architecture.md §8.6 anticipated — that warning
+    is deferred until the gateway itself carries the hint in a reply. dnvctl
+    also does not second-guess values; the gateway's §7 validation is the
+    only validator (CT8).
 11. **dnvctl-side flag defaults are kept where a spec or §5 row names them:**
     `sp create` defaults the redundancy to `redund_md_raid1` (architecture.md
     §8.4 "dnvctl defaults it to `redund_md_raid1` on the CLI"), the `--tr-*`

@@ -3404,6 +3404,175 @@ func TestCreateCntlrWithoutAToken(t *testing.T) {
 	sptWantStale(t, err)
 }
 
+// createCntlrScans runs one CreateCntlr and counts the CN capacity scans it
+// made, from the "etcd range" records logged under its own context: how a
+// test tells a refusal that came before the scan from one the scan gave.
+func (e *sptEnv) createCntlrScans(req *pb.CreateCntlrRequest) (int64, error) {
+	prev := slog.Default()
+	hook := &sptRecordHook{
+		Handler: prev.Handler(),
+		trigger: func(slog.Record) bool { return false },
+		count:   sptIsCnScan(e),
+		actor:   func() {},
+	}
+	slog.SetDefault(slog.New(hook))
+	defer slog.SetDefault(prev)
+	_, err := e.srv.CreateCntlr(
+		context.WithValue(e.ctx, sptHookKey{}, true), req)
+	return hook.counted.Load(), err
+}
+
+// TestCreateCntlrChecksTheTokenBeforeItsScan pins GW6's order on CreateCntlr's
+// candidate unit: a token that was sent is compared in the round's planning
+// read, before the CN scan, and not only in the deciding STM. With the check
+// in the STM alone the scan answered first, so a client whose token another
+// request had made stale heard the scan's RESOURCE_EXHAUSTED, computed
+// against cntlrs it had not read, and nothing in that answer told it to
+// refresh its token.
+//
+// The other request is the one that leaves the scan nothing: a second
+// client's CreateCntlr takes the one controller node the pool did not use, so
+// every CN now hosts a cntlr of the pool (§6.4), and its bump moves the pool
+// past the first client's token. That token is ABORTED "stale revision"
+// without a scan; the fresh one then scans and meets the scan's own refusal,
+// which shows that the stale request was refused ahead of a scan that really
+// comes up empty, and that the scan counter counts. Neither writes anything.
+func TestCreateCntlrChecksTheTokenBeforeItsScan(t *testing.T) {
+	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt+1, sptCnFree)
+	spId := env.createSp(sptSpec{
+		name:     sptSpName,
+		cntlrCnt: sptCntlrCnt,
+		sliceCnt: 1,
+		initExt:  1,
+	})
+	stale := &pb.SpRev{Revision: env.spRev(0, spId)}
+	if _, err := env.srv.CreateCntlr(env.ctx, &pb.CreateCntlrRequest{
+		ClusterName: env.name,
+		SpName:      sptSpName,
+		SpRev:       stale,
+		CntlidSlot:  2,
+	}); err != nil {
+		t.Fatalf("the other client's CreateCntlr: %v", err)
+	}
+	fresh := env.spRev(0, spId)
+	if fresh == stale.GetRevision() {
+		t.Fatalf("sp_rev stayed at %d: the first client's token is not stale",
+			fresh)
+	}
+	before := env.dump()
+	req := func(tok *pb.SpRev) *pb.CreateCntlrRequest {
+		return &pb.CreateCntlrRequest{
+			ClusterName: env.name,
+			SpName:      sptSpName,
+			SpRev:       tok,
+			CntlidSlot:  3,
+		}
+	}
+
+	scans, err := env.createCntlrScans(req(stale))
+	sptWantStale(t, err)
+	if scans != 0 {
+		t.Errorf("a stale token reached the CN scan: %d scans, want 0", scans)
+	}
+
+	scans, err = env.createCntlrScans(req(&pb.SpRev{Revision: fresh}))
+	sptWantCode(t, err, codes.ResourceExhausted)
+	if msg := status.Convert(err).Message(); !strings.Contains(
+		msg, "no controller node",
+	) {
+		t.Errorf("message: got %q, want the CN scan's refusal", msg)
+	}
+	if scans == 0 {
+		t.Errorf("the fresh token never reached the CN scan")
+	}
+
+	after := env.dump()
+	if len(before) != len(after) {
+		t.Fatalf("a refusal changed the key set: %d -> %d",
+			len(before), len(after))
+	}
+	for key, value := range before {
+		if !bytes.Equal(value, after[key]) {
+			t.Errorf("a refusal rewrote %q", key)
+		}
+	}
+	if got := env.spRev(0, spId); got != fresh {
+		t.Errorf("a refusal moved sp_rev from %d to %d", fresh, got)
+	}
+}
+
+// TestCreateCntlrRefusesADeletingPoolBeforeItsScan pins the rest of the
+// planning read's opening: resolution includes the deleting gate (GW5) and
+// the token check comes after it, so on a pool whose deletion has begun
+// CreateCntlr answers FAILED_PRECONDITION "is being deleted" before its scan,
+// whatever token it carries, and not only where the scan would find room
+// (TestDeletingStoragePoolRefusesOtherMutators). The plan used to read the
+// pool without the gate, so a pool with no controller node left to draw
+// answered RESOURCE_EXHAUSTED: only the deciding STM applied the gate, and
+// the scan refused first.
+//
+// The flag is written directly, as in
+// TestDeletingStoragePoolRefusesOtherMutators, so the stored revision stays
+// 1: revision 1 is a fresh token and 99 a stale one, which pins the order of
+// the two checks — a plan that checked the token before the flag would
+// answer the stale one ABORTED and get the other two right, while a plan
+// that skipped the flag would also let the fresh one and the absent one
+// reach the scan.
+func TestCreateCntlrRefusesADeletingPoolBeforeItsScan(t *testing.T) {
+	// As many controller nodes as the pool has cntlrs: §6.4 leaves the scan
+	// nothing to draw.
+	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, sptCnFree)
+	spId := env.createSp(sptSpec{
+		name:     sptSpName,
+		cntlrCnt: sptCntlrCnt,
+		sliceCnt: 1,
+		initExt:  1,
+	})
+	conf := env.spConf(sptSpName)
+	conf.Deleting = true
+	mustPut(t, env.cli, model.SpConfKey(env.cid, sptSpName), conf)
+	before := env.dump()
+	want := fmt.Sprintf("storage pool %q is being deleted", sptSpName)
+	for _, tc := range []struct {
+		name string
+		tok  *pb.SpRev
+	}{
+		{"stale token", &pb.SpRev{Revision: 99}},
+		{"fresh token", &pb.SpRev{Revision: 1}},
+		{"no token", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scans, err := env.createCntlrScans(&pb.CreateCntlrRequest{
+				ClusterName: env.name,
+				SpName:      sptSpName,
+				SpRev:       tc.tok,
+				CntlidSlot:  3,
+			})
+			sptWantCode(t, err, codes.FailedPrecondition)
+			if msg := status.Convert(err).Message(); msg != want {
+				t.Errorf("message: got %q, want %q", msg, want)
+			}
+			if scans != 0 {
+				t.Errorf("a deleting pool reached the CN scan: %d scans, "+
+					"want 0", scans)
+			}
+		})
+	}
+	after := env.dump()
+	if len(before) != len(after) {
+		t.Fatalf("a refusal changed the key set: %d -> %d",
+			len(before), len(after))
+	}
+	for key, value := range before {
+		if !bytes.Equal(value, after[key]) {
+			t.Errorf("a refusal rewrote %q", key)
+		}
+	}
+	if got := env.spRev(0, spId); got != 1 {
+		t.Errorf("a refusal bumped sp_rev to %d", got)
+	}
+}
+
 // sptRackCnFree is what sptRackEnv gives every controller node: fifty pools
 // each reserve a two-extent footprint on every CN that hosts one of their
 // cntlrs, and a CN the draws kept landing on must still have room, or a test

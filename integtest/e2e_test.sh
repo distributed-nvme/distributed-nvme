@@ -6394,8 +6394,8 @@ SP_UNPROV_CNT="[$SP_ANY_SIDE_PATH | select(.provisioned | not)] | length"
 # when the CN agent does not know the controller yet: the agent answers
 # UnknownObjectReply with a nil CntlrInfo (agent/cnagent/server.go:362-370)
 # and the gateway copies the reply's revision and cntlr_info across without
-# reading its agent_reply (gateway/cntlr.go:546-556). `null[]` is a jq ERROR,
-# not an empty iteration — so without the guard every poll before
+# reading its agent_reply (gateway/cntlr.go's InspectCntlr). `null[]` is a jq
+# ERROR, not an empty iteration — so without the guard every poll before
 # the CN has accepted its first SyncupCntlr would print a jq error to stderr.
 # With it the count is simply 0 and the poll goes round again.
 CNTLR_OK_TAIL=' | select(.status == "RES_STATUS_OK")] | length'
@@ -8798,7 +8798,7 @@ cntlr_full_ready() { # <cntlr id>
 # them. GetStoragePool answers out of one `Snapshot`, so the whole reply is a
 # single store revision (gateway/storagepool.go:720-765); every writer of the
 # `primary` flag leaves exactly one primary in that revision (`idx == 0` at
-# create, gateway/storagepool.go:574; false at CreateCntlr, gateway/cntlr.go:271;
+# create, gateway/storagepool.go:574; false at gateway/cntlr.go's CreateCntlr;
 # the old cntlr's own flag at model.ReplaceCntlr, which deletes the old key in
 # the same STM; and model.Failover flips both primary booleans in one STM); and
 # loadCntlrs walks cntlr_id_list and returns ABORTED
@@ -9347,7 +9347,7 @@ ops_slots() {
 	assert_jq "$SP_JSON" \
 		"[.cntlr_list[] | select(.addr_port == \"$spareaddr\" and .primary)]
 		 | length == 0" \
-		"a cntlr is created as a standby, never primary (gateway/cntlr.go:263-270)"
+		"a cntlr is created as a standby, never primary (gateway/cntlr.go's CreateCntlr)"
 	assert_jq "$SP_JSON" \
 		"[.cntlr_list[] | select(.addr_port == \"$spareaddr\" and .disabled)]
 		 | length == 0" \
@@ -9430,7 +9430,7 @@ ops_slots() {
 	# §10.4 re-election and takes the controller's namespaces
 	# ANA-inaccessible, so requiring the disable first means a failover has
 	# already happened by the time the record disappears"
-	# (gateway/cntlr.go:300-350). That refusal is worth one call.
+	# (gateway/cntlr.go's DeleteCntlr). That refusal is worth one call.
 	ctl_fail_grep FAILED_PRECONDITION "is enabled; disable it first" \
 		cntlr delete --id "$c3"
 
@@ -10722,9 +10722,9 @@ side_hydrated() { # <side id>
 # window between the RPC returning and the CN converging the array is still
 # the old, whole pair and reports "clean". A bare md-state test would pass
 # there and prove nothing. InspectCntlr's applied_revision is the agent's last
-# fully applied SyncupCntlr revision (gateway/cntlr.go:546-556 copies the
-# agent's own GetCntlrInfo reply revision), and the worker builds that request
-# with the SP's current SpRev (worker/sprole.go:948, carried into the
+# fully applied SyncupCntlr revision (gateway/cntlr.go's InspectCntlr copies
+# the agent's own GetCntlrInfo reply revision), and the worker builds that
+# request with the SP's current SpRev (worker/sprole.go:948, carried into the
 # cntlr child at :1072-1075). So "applied_revision >= the SpRev the switch
 # bumped to" is the proof that the array being read is the NEW one.
 grp_md_clean() { # <cntlr id> <grp id> <min applied revision>
