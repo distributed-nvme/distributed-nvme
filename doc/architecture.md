@@ -4750,6 +4750,169 @@ own amendment sections are the surviving record.
   DN12, `cnagent.md` CN16 and its known limits, and the comments on the two reloads
   and on the dn fence. The wrappers themselves did not change — they already behaved
   so; the sentences claiming the opposite were what was wrong.
+* **The review-fix pass (2026-09-30)** — the fixes of the full doc/code review of
+  2026-09-28, made on `97443d0` and ending at `a1df743`, with the suite hardening that
+  went with them, a doc pass, a cross-item review of the merged tree and the follow-ups
+  found on the way. Two findings were settled by decision rather than code: a reload
+  whose load fails keeps its device suspended (the entry above), and the window in
+  which an object request has been converged but not yet saved (`dnagent.md` SH5)
+  stays open. By component:
+  - **Gateway.** User NQNs (§7, §8.8, §8.10): `CreateSubsystem.nqn` and
+    `CreateTransfer.ori_nqn` refuse one in dnv's own namespace, and every NQN but the
+    one `DeleteNamespace` and `DeleteSubsystem` look up must match the tightened
+    `ValidNqnPattern` (no `/`, no whitespace) and carry no `..`; those two check the
+    length alone, so a subsystem stored under a name the rules now refuse can still be
+    emptied and deleted. Pool geometry (§7, §8.1, §8.4, §11.4): a power-of-two
+    `data_block_size`; a `stripe_size` that is a multiple of 4 KiB, at most 1 MiB (it
+    was 64 MiB) and a divisor of the block; and under md-raid1 a power-of-two bitmap
+    chunk of at most 1 GiB — judged on the request and again on the conf that is
+    stored, so every SP created under them can be a clone source; an SP created before
+    keeps its geometry. Placement (§3.2, §6.4, §6.5, §8.6, §8.11): each cntlr pick
+    after the first leaves out, at tier 1, the `location`s of the SP's other cntlrs —
+    in `CreateStoragePool`, `CreateCntlr` and the sp-worker's replacement alike — and
+    the deciding STMs of `CreateCntlr` and `CreateMigration` send the round back to be
+    planned again when the SP gained a cntlr, or the group a DN, that the plan did not
+    see. `CreateCntlr`'s planning read and `FinishMigration`'s first phase refuse a
+    deleting SP and a stale token before their scan or agent call (`gateway.md` GW6,
+    §5.5, §5.10). `DeleteThinDevice` plans its read of the SP's tds outside its
+    transaction and verifies the SP's identity and revision inside, so it no longer
+    outgrows `EtcdMaxTxnOps` at the td ceiling, and a snapshot of a clone's destination
+    is refused while the `Clone` key exists (§8.7, §8.9). `DeleteSpareLeg` and
+    `SwitchSpareLeg` refuse a leg under migration, `CreateSpareLeg` refuses while a
+    spare of the group is not yet `provisioned` (§8.12), and `GrowSlice` refuses a group
+    list already holding `MaxGrpCntPerSlice` = 255 groups (§2.1, §4.3, §8.5). The RPCs
+    that rewrite a `CdcEntry` rebuild a missing one, where the sp-worker's replacement
+    still skips it (§8.6, §8.8), and §5.8 names the three RPCs that read `ClusterConf`
+    in a planning snapshot.
+  - **Worker.** The sp role sends a pool's sides their update before its cntlrs (§10.3,
+    §11.1, [D16]; `dnv-worker.md` RW14): the cntlrs' requests wait until every side it
+    drives has reported the revision applied, one `cntlr_interval` at most. An error
+    time the worker holds is a cache of the stored record (`dnv-worker.md` HL3, [D17]),
+    so one that another owner left on a healthy object is cleared by the owner's first
+    clean verdict after it next loads the record. A lost thin id (§10.4, Appendix D;
+    `dnv-worker.md` AR5, AR7): a primary whose converge report fails only in the stack
+    of a created td whose id the pool lost is neither failed over nor replaced while
+    that report is the one the worker holds; and by AR5's and AR7's second refusals the
+    role is not handed back, nor a replacement replaced, while the new primary fails
+    only on the rows the last failover or replacement was made on, from an error that
+    began within `cntlr_unhealthy` of it — a memory of the SP's coordinator that a
+    restart or a shard handoff loses. The created flip commits at most
+    `MaxFlipCreatedPerTxn` = 256 tds per transaction (§2.1, §10.3, §13). Each Check
+    round's trace id travels in its request (§9.2, §9.3, §9.7). Children stop in the
+    background, a fence deletes its registrations before it waits for its loops, and a
+    rescan counts a peer as refreshed only when its key's mod revision moved ([D17];
+    `dnv-worker.md` SW3, VW3, VW8). The vote and round tests run in `testing/synctest`
+    bubbles, which ended the flakes they showed under the race detector.
+  - **Disk-node agent.** A level raise to `NO_SIDE` inside a migration source's cutover
+    window retires the fenced linears onto their dm-errors before any export goes, and
+    ends the window (§9.8, §11.2, [D12]; `dnagent.md` DN6, DN12). After a lost local
+    store a migration's objects are left alone until every side of their SP the node
+    may host is held with its request (§9.8; DN6). The node-level sweep reads the one
+    namespace of a sibling agent's export, listing its namespaces only when that one is
+    absent (§9.8). The disk's identity is confirmed from the header the volume table was
+    read under, a probe that finds another header drops the table, and a blank header
+    is formatted only while no device maps the disk (DN5, DN9). At most
+    `DnZeroConcurrency` = 2 zeroing batches run per agent, and a killed batch halves the
+    next (§9.4, Appendix A; DN9).
+  - **Controller-node agent.** A dm-clone whose hydration is still off is an
+    unfinished recovery, run again from step 1, and no ns-dev goes onto a dm-clone
+    before its status shows hydration on (§11.5; `cnagent.md` CN16, CN18). The sweep's
+    `nvme disconnect` runs off its locks, at most eight at once, and no converge adopts
+    a connection whose disconnect is in flight (§7, §9.8; CN10, CN21). The teardown
+    removes nothing unless all four of its listings answered, and the build holds
+    ns-devs off a raid0 while a dm-clone the request dropped may still be live (§9.8;
+    CN21). A controller `address` read, the subsystem walk and the arena's probes read
+    as unknown when they did not answer, never as absent (CN5, CN10), and a Check round
+    that reads a piece of the CN's base state absent re-drives the `SyncupCn` (§9.8;
+    CN30). Leg probers are trimmed on every pass (CN11), `thin_dump` writes into the
+    private `/run/dnv-thin-dump` (CN25), the sweep is the only remover of a namespace
+    (CN21), and a transfer whose origin no longer resolves is demoted on a primary
+    too, its namespace left optimized so the destination gets IO errors (CN17).
+  - **Both agents.** A cntlid slot ends one id short of the next, and a subsystem
+    converges from any slot to any other (§11.8, Appendix A). A store file that cannot
+    be loaded no longer costs the files that may belong under it, on the cn as on the
+    dn (§9.1, §9.6, [D7]; `dnagent.md` DN2, `cnagent.md` CN2). An interrupted store
+    write is deleted at startup, never loaded, a store rename is made durable by a
+    directory fsync, and the store's commands carry the soft timeout (§9.1;
+    `dnagent.md` SH6). Each object's and node's request is an atomic pointer, so
+    another object's pass reads it whole beside the converge that replaces it.
+  - **dnv-cdc.** An instance answers no host before its first etcd scan has landed
+    (§12; `cdc.md` CM4), and a host's discovery view is rendered at its next read, not
+    at every change (`cdc.md` DS6, WV4).
+  - **dnvctl.** Only the global flags keep their environment and config-file
+    carriers, so a `DNVCTL_<flag>` variable no longer stands in for a command's own
+    flag; `--rev` on a command whose request carries no token is a usage error;
+    `sp create` gains `--low-water-mark-pct`; and a test holds `dnvctl.md`'s command
+    tables to the ones the code is checked against.
+  - **Shared.** A child blocked in an uninterruptible kernel wait is not bounded by
+    the command timeouts (§7; `osclient.md` §4.2), the leg probe's direct read opens
+    close-on-exec (`osclient.md` §4.5.1), `layout.md`'s tree is checked against the
+    repository, and the reference listings in `log.md` and `grpc.md` are held byte for
+    byte to their Go files (`osclient.md`'s, which only claims to be semantically
+    complete, is not).
+  - **Suites.** The worker, gateway, cn-agent, dn-agent, e2e and cdc suites now stop on
+    a read or a tool that did not answer instead of reading it as absence or zero; the
+    worker suite's stale bitmap revision check is replaced, the gateway suite arms its
+    kill on the server, the e2e suite runs its host reads and writes under a watchdog,
+    and the cn-agent suite's teardown S3 stage accepts a queued write
+    (`cnagent_integtest.md`'s integration-run fixes).
+  - **Kept by decision.** The pool drain keeps its race between a CN's disconnect and
+    a DN's export removal (`cnagent.md` Known limits); a restart inside a cutover window
+    that holds no state for the source side can open a second window over linears
+    still suspended (§11.2, [D12]; `dnagent.md` DN12); a transfer whose origin no longer
+    resolves serves IO errors rather than moving inaccessible (`cnagent.md` CN17); and a
+    subsystem stored in dnv's namespace before this pass is a documented limit (§7), the
+    second operator note below.
+  - **Operator notes.** (a) The agents' default `--local-store` is `/var/lib/dnv`, no
+    longer `/var/tmp` (§4, §4.6, §13), where the stock tmpfiles rule of some
+    distributions deletes files nothing has touched for 30 days. The agent does not
+    create the directory, and one it cannot read stops it at startup (`dnagent.md`
+    SH3), so before upgrading a node whose agents ran on the default, create
+    `/var/lib/dnv` and move their store files there, or pass the old directory with
+    `--local-store`. (b) A user subsystem's NQN may no longer lie in dnv's own
+    namespace (§7), and one stored under such an NQN before this pass must be recreated
+    under a legal NQN before upgrading. The cn agent judges such a subsystem by its
+    NQN, as one dnv minted, and the sweep is now the only remover of a namespace, so an
+    upgraded agent no longer removes a namespace deleted from it: the namespace stays
+    enabled on every CN that had it, and that SP's sweep on the CN stops at the ns-dev
+    layer (§7, `cnagent.md` Known limits). One whose NQN reads as another SP's transfer
+    export of this cluster is swept as that export, as before (§7). A subsystem stored
+    under an NQN the tightened pattern refuses — an upper-case domain, or a `+` or `@`
+    in the suffix — keeps serving, but an upgraded gateway can only empty and delete
+    it: every other RPC that names it is refused, so one whose hosts or namespaces must
+    change wants recreating under a legal NQN too, and a host list may no longer name a
+    host NQN the pattern refuses (§7).
+  - **Lab.** Every integration suite passed on the pass's trees: the worker, dn-agent,
+    gateway and dnvctl suites twice, the second time on `c28e784` — the worker suite
+    in full both times, 73 stages, its first full passes since 2026-09-18 (a stale
+    bitmap revision check had stopped it at its bitmap case); the cdc suite twice, the
+    second time on `a1df743`; the cn-agent suite on `a1df743`, after the lab showed its
+    new teardown S3 check too strong; and the e2e suite on `a1df743` at slice counts 1,
+    2, 4 and 1 again, whose measurements `e2e_integtest.md` §9 records.
+  - **Carriers.** In this file: §2.1, §3.2, §4, §4.3, §4.6, §5.8, §6.4, §6.5, §7, §8,
+    §8.1, §8.4-§8.12, §9.1-§9.4, §9.6-§9.8, §10.3, §10.4, §11.1, §11.1.1, §11.2,
+    §11.4-§11.6, §11.8, §12, §13, Appendix A, [D7], [D12], [D16] and [D17], the
+    2026-09-16 park entry and the fail-closed entry above, and Appendix D (four new
+    bullets; the head-of-line, created-td and partitioned-observer ones amended). In the
+    companions: `cnagent.md` §2.1-§2.3, §3, §4.2, CN1, CN2, CN5, CN8-CN12, CN14,
+    CN16-CN18, CN20, CN21, CN23-CN25, CN28-CN30, §5, §6, §7 and its Known limits;
+    `dnagent.md` §2.1, §2.2, §2.8, SH1, SH6-SH8, SH13, SH15, SH20, SH21, SH23, SH24,
+    SH27, §3 (CM2, CM4), §4.2, DN2, DN5, DN6, DN8-DN10, DN12, DN13, DN15-DN19, §5, §6
+    and §7; `dnv-worker.md` §0, §2.1, EU2, EU3, EU7, MD5-MD7, MD9, VW3, VW8, SW3-SW5,
+    RW1, RW2, RW4-RW6, RW10, RW11, RW13, RW14, RW17, RW19, HL1-HL3, AR1, AR2, AR5-AR8,
+    §11.6's preamble, SPD7, SPD13, CLD5, CLD8, CLD11, §12, §13, §14.1, §14.2, §14.4,
+    §14.6, §14.8, §14.10-§14.12, §14.14, §15 and Appendix B; `gateway.md` its preamble,
+    §2.1, GW4-GW7, GW9, GW11, §5.1, §5.4-§5.11, §9, §10.4, §10.10, §10.11, §10.14,
+    §10.15 and §11; `cdc.md` §1, DS3, DS5, DS6, DS10, §4 (WV4, WV5), NP1-NP3, CM4, §7,
+    §8, §9.4, §9.8 and §9.14; `dnvctl.md` §0, §2.1 (CT9), §3.2, §4, §5.0 (CT1, CT8),
+    §5.1, §5.4, §5.6, §5.9, §6, §7.7, §7.10-§7.12, §7.14, §7.16 and §9;
+    `ThinDeviceCreated.md` §0 (R4, R6, R8, R13), §3 (U2), §4 (U3), §7, §8 and §9;
+    `grpc.md` T3, T4, §5 and §6; `log.md` R5, §4, §5.4 and §7; `osclient.md` its
+    preamble, §4.2-§4.4, §4.5.1, §5, §7 and §8; `layout.md` §2, §3 and §6-§8;
+    `cnagent_integtest.md` §4, §8-§11, §13, §15, §17, Appendix A and its integration-run
+    fixes; `dnagent_integtest.md` §2-§4, §6, §8, §9, §12, §14, §16, §18, §20 and
+    Appendix A; `e2e_integtest.md` §1, §2.1, §2.3, §2.5, §3, §4, §4.3, §4.5, §4.6, §5,
+    §7, §8 and §9.
 
 ### Integration-run fixes (first on-hardware run of the U1-U5 tree)
 
@@ -4808,7 +4971,13 @@ exists.
   kernel wait is not (§7), nor is an in-process sysfs, configfs or device access
   once its syscall has started (`dnagent.md` SH15), and the cn sweep's
   `nvme disconnect`, whose delete can wait out the kernel's 60 s admin timeout, runs
-  off the locks for that reason (`cnagent.md` CN21). On a node where many commands
+  off the locks for that reason (`cnagent.md` CN21). Two other disconnects still run
+  under their locks — the cn build's of a migration's retired side and the dn sweep's
+  of a migration destination's `:3:` source connection. In the e2e runs of 2026-09-30
+  the cn sweep's met the same wait in three pool drains, holding no lock, and a
+  migration destination's `SyncupSide` ran past the worker's 60 s deadline once, which
+  the dn sweep's `:3:` disconnect explains, though no disk node's log was kept
+  (`cnagent.md` Known limits). On a node where many commands
   run to their timeouts, one sick object can delay every other object's converge and
   Check round by up to a whole converge pass. Accepted: object locks keep steady-state
   concurrency, and the §9.4 zeroing loop's try-acquire rule keeps the one

@@ -4634,10 +4634,20 @@ between `Recv` and the round (SH24).
   worker's `SyncupCntlr` past its deadline; the connection reads as a
   leftover until the kernel lets go, and the child keeps one of the node's
   `DefaultOsClientLimit` `OsClient` slots for the whole wait
-  (`osclient.md` §4.2). The pool drain keeps its cross-role race for now —
-  it deletes an sp's cntlrs and then its slices and waits on no agent
-  (`dnv-worker.md` SPD13) — and how often it hits the stall is to be
-  measured. A drain that catches many deletes in the kernel at once holds
+  (`osclient.md` §4.2). The pool drain keeps its cross-role race
+  (*decided 2026-09-30*) — it deletes an sp's cntlrs and then its slices and
+  waits on no agent (`dnv-worker.md` SPD13) — and the e2e runs of 2026-09-30
+  measured what that costs: the logs of four runs (the first run's kept for
+  its last case only) show three stalls in the thirteen pool-delete drains
+  they cover, each at a case teardown, where the `SyncupCn` that had dropped
+  the cntlr from its pointer list set the leg disconnects going in the
+  background and was answered at once with `ReplyCodeLeftover` while the
+  disk nodes took the exports away. Two ran the 61 s out, one of them in two
+  disconnects at once; the third was still in flight 32 s after its drain,
+  when the run's closing cleanup stopped the agent, which does not wait for
+  it (`dnagent.md` SH27), so only the leftover every later reply named
+  records it. Both runs that had them passed.
+  A drain that catches many deletes in the kernel at once holds
   at most `disconnectConcurrency` (8) of those slots (CN10), and the rest
   of its disconnects wait for one: their connections stay leftovers, and a
   converge that wants one of them back waits as well, about a minute for
@@ -4646,10 +4656,18 @@ between `Recv` and the round (SH24).
   locks: the build's dead-path `nvme disconnect --device` of a migration's
   retired side (CN10) — the source after `FinishMigration`, the
   destination after `CancelMigration` — whose disk node tears that side's
-  export down in the same fan-out, and the dn sweep's disconnect of a `:3:`
+  export down on the same change, and the dn sweep's disconnect of a `:3:`
   migration-source connection (`dnagent.md` DN6), whose source disk node
-  drops the migration export in the same fan-out. Neither is moved off its
-  locks yet.
+  drops the migration export on the same change. One end of each pair is a
+  disk node's `SyncupDn`, which the sides-first hold does not order
+  (`dnv-worker.md` RW14). Neither is moved off its locks yet, and the
+  second has cost a deadline: in the same logs a migration destination's
+  `SyncupSide` at `FinishMigration` ran into the worker's 60 s deadline
+  once. It was sent 2 ms after the source disk node's `SyncupDn`, and a
+  stall of its sweep's disconnect of the `:3:` connection, as that node
+  took the migration export away, is what the timing points to; no disk
+  node's log was kept. The worker's next `SyncupSide` of the side was
+  answered and the run passed.
 * **A clone source judged unused can be adopted before its disconnect is
   registered** (2026-09-29): a cntlr-level L5 reads the stored requests and
   the live dm-clone tables, probes the source, and only then sets its

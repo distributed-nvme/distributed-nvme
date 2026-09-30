@@ -4353,7 +4353,17 @@ durable, so nothing is lost — convergence is delayed, not skipped
   `DeleteSpareLeg` removes the leg; a failed-over primary that is still
   serving is fenced before its demotion is sent (`architecture.md` §11.1,
   [D16]); and the leg-removal disconnect/unlink race is narrowed, not
-  closed, because the unlink rides the dn role's `SyncupDn`.
+  closed, because the unlink rides the dn role's `SyncupDn`. What the race
+  still costs is measured in `cnagent.md` Known limits, from the logs of
+  the e2e runs of 2026-09-30: the cn agent runs that disconnect off its
+  locks, and no `SyncupCntlr` missed its deadline; the pool drain's twin
+  of the race, which no hold orders because the drain waits on no agent
+  (SPD13), is kept by decision and stalled background disconnects that
+  held no lock in three of the thirteen drains the logs cover; and a
+  migration destination's `SyncupSide` at `FinishMigration`, whose `:3:`
+  disconnect the dn sweep still runs under the side's lock while the
+  source disk node's `SyncupDn`, which no hold orders either, takes that
+  export away, missed its deadline once.
 * **A lost thin id costs a failover or a replacement, and the second
   refusals that bound them are a memory.** A report names a created td's
   lost thin id only when it is a converge's; a Check round's probe reads the

@@ -654,7 +654,11 @@ SH15. Every wrapper call wraps its ctx with
       target vanishes mid-delete waits out the kernel's 60 s admin timeout;
       `cnagent.md` CN21 runs the cn sweep's off the locks, while the cn
       build's dead-path disconnect and the dn sweep's `:3:` one still run
-      under them — `cnagent.md` Known limits).
+      under them — `cnagent.md` Known limits, which records what they cost
+      in the e2e runs of 2026-09-30: the cn sweep's met that wait in three
+      pool drains, holding no lock, and a migration destination's
+      `SyncupSide` ran past the worker's 60 s deadline once, which the dn
+      sweep's `:3:` one explains, though no disk node's log was kept).
 
       **A command that was killed did not answer, and "did not answer" is not
       "absent".** `OsClient.RunCommand` returns `exitCode == -1` with a

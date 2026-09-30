@@ -448,6 +448,15 @@ arena is at `/tmp/dnv-tmpfs` (`common.DefaultTmpfsPrefix`; no flag moves it),
 which is outside `$WORK` — so both the space guard and cleanup look there
 explicitly.
 
+Every daemon log is under `$WORK` too — each agent's beside its store, the four
+cp daemons' in `$WORK/{etcd,gateway,worker,cdc}` — and `cleanup_all` removes
+`$WORK` between cases (E2E11) and at the end of a run that passed (E2E6). So
+each case's logs replace the previous case's, and a run that passes leaves none
+behind: anyone who copies logs off the guests while a run is up must keep one
+copy per case, because a copy refreshed into one file per daemon ends up holding
+the last case's alone (*added 2026-09-30*: that is how the first run of §9's
+2026-09-30 entry lost three cases' logs).
+
 Each dn agent needs its own `addr_trsvcid` (two nvmet ports cannot share one
 ip:port) and therefore its own configfs port, which is what
 `dnv-agent --nvmet-port-id` buys; ANA groups nest under the port, so distinct
@@ -3553,3 +3562,56 @@ stage's own requests (§4 says which records carry the id).
   names the sides-first hold as the grow race's first line of defence, ahead
   of the cn agent's in-pass retry, and says where the hold leaves the race
   open.
+
+* **2026-09-30 — the review-fix pass, green at `--slice-cnt` 1, 2 and 4, and
+  what the runs measured.** The tree is `a1df743`, the end of the pass that
+  fixed the findings of the full doc/code review of 2026-09-28
+  (`architecture.md` Appendix C records it); this suite's own changes in the
+  pass are the three entries above that follow `97443d0`'s, besides comments,
+  one assertion label and §2.3's `STRIPE_SIZE` row brought in step with the
+  tree. Four runs, one after another and alone in the lab, at `--slice-cnt`
+  1, 2, 4 and 1 again, each passed all four cases in 15 to 17 minutes.
+  32 slices was not run.
+
+  What the runs measured comes from the worker's and the three cn agents'
+  logs, copied off the guests while each run was up, and item 5 from the
+  suite's own output. No disk node's log was kept, so what a disk node did in
+  items 2 and 3 is read from the worker's requests to it and their timing.
+  The first run's copies hold its `react` case alone: the between-cases
+  rebuild removes every daemon log, which §2.5 now says, and those copies
+  were refreshed into one file per daemon; the three later runs kept one copy
+  per case.
+
+  1. **No `SyncupCntlr` ran into the worker's deadline.** The runs of
+     2026-09-28 hit the stall behind that three times in four (`cnagent.md`
+     Known limits): a leg's `nvme disconnect` whose target vanished
+     mid-delete held the cntlr's lock for the kernel's 60 s admin timeout.
+     The cn sweep now issues it off its locks (`cnagent.md` CN10).
+  2. **The stall itself came three times**, each in a pool delete's drain at
+     a case teardown — the first run's `react` and the slice-2 run's `smoke`
+     and `react`, three of the thirteen drains the logs cover. Each time the
+     `SyncupCn` that dropped the cntlr set its disconnects going in the
+     background and was answered with a leftover in 0.2 to 0.3 s, while the
+     disk nodes removed the exports; both runs passed. Two stalls ran the 61 s
+     out, the slice-2 `smoke` one in two disconnects at once; the slice-2
+     `react` one was still in flight 32 s after its drain, when the run's
+     closing cleanup stopped the agent, which does not wait for a background
+     disconnect (`dnagent.md` SH27) and so logged no end for it. Measured as
+     an `nvme disconnect` record logged at least 10 s after the reply of the
+     pass that set it going, since a disconnect off the pass leaves no gap
+     after its own record, and as a disconnect every reply still lists as a
+     leftover when its agent's log ends. The drain keeps that race by
+     decision (`cnagent.md` Known limits).
+  3. **One `SyncupSide` ran into the deadline**, in the last run's `copy`
+     case: a migration destination's at `migr finish`, whose dn sweep still
+     disconnects its `:3:` source connection under the side's lock, while the
+     source disk node, sent its own `SyncupDn` 2 ms before, removed the
+     migration export (`cnagent.md` Known limits). The worker's next
+     `SyncupSide` of that side was answered about 3 s later, and the run
+     passed.
+  4. **Each `react` case applied exactly one reaction of each kind** —
+     `grow_data`, `failover`, `replace_cntlr`, `spare_create` and
+     `spare_switch` — and in the three runs whose every case was kept, no
+     other case applied any.
+  5. **No `MOVED` line**: no wait saw the primary role, the standby role or
+     the sp's shape move under it.

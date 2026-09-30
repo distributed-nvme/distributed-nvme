@@ -1926,3 +1926,22 @@ another document or the harness cites can shift.
   gateway's `created` on the origin at the snapshot step (§12 step 6) and
   gained the drop/rebuild stages (§12 step 9); the former step 9 is now step
   10.
+
+### Integration-run fixes (the review-fix pass, 2026-09-29/30)
+
+- **IR-T2 (S3 accepts a queued write)** — the §15 step 3 check added on
+  2026-09-28, that a write of the background writer fails (`eio`) within
+  20 s once both CNs are clean, was stronger than the stage. The lab run of
+  2026-09-29 failed there with `ok=8 eio=0` and nothing wrong: the host had
+  queued the write in flight when the sides went — it sat on the legs until
+  their failfast expired, the park's flushing suspend waited for it and was
+  killed at its 3 s command timeout, and the subsystem left the host-facing
+  port with the write still in flight. Once both CNs are clean the stage
+  now requires that no write succeeded after the sides went (at most one
+  more `ok` than the count read as they went) and that one write failed
+  since or is still outstanding, which the host VM sees as the writer's own
+  `dd` running for at least 5 s in `D` state; and it checks that the `dd`
+  has exited after the host disconnect. The run of 2026-09-30, on
+  `a1df743`, passed on the queued ending: `s3: the writer after the
+  teardown: outstanding: dd pid 827153, Dl for 11s in
+  folio_wait_bit_common; ok=8 eio=0`.
